@@ -13,7 +13,9 @@ export async function packWithExamSourceMappings(tx: TransactionSql, sprintId: s
 /** A receipt confirms the write, but its result still has to pass current access checks. */
 export async function readCommittedExamReceipt<T>(read: () => Promise<T>): Promise<T> {
   try { return await read(); } catch (error) {
-    if (error instanceof Error && "code" in error) Object.assign(error, { examReceiptCommitted: true });
+    if (error instanceof Error && "code" in error && !("businessCode" in error && typeof error.businessCode === "string")) {
+      Object.assign(error, { examReceiptCommitted: true });
+    }
     throw error;
   }
 }

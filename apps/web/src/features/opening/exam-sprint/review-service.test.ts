@@ -52,6 +52,17 @@ describe("exam photo review is a durable proposal", () => {
     expect(call).not.toHaveBeenCalled();
     expect(images).not.toHaveBeenCalled();
   });
+  it("does not charge again when a reused secondary client key replays after completion", async () => {
+    const ready: ExamWorkReview = { ...stored, status: "ready", proposal, modelLabel: "vision-model" };
+    repository.begin
+      .mockResolvedValueOnce({ review: { ...stored }, input, privacyEpoch: 2, referencePage: 3, questionLabel: "题1", reusedUnresolved: true })
+      .mockResolvedValueOnce({ review: ready, input, privacyEpoch: 2, referencePage: 3, questionLabel: "题1" });
+    const secondary = { ...input, clientKey: "secondary-tab-key" };
+    expect(await service.review(scope, secondary)).toEqual(stored);
+    expect(await service.review(scope, secondary)).toEqual(ready);
+    expect(call).not.toHaveBeenCalled();
+    expect(images).not.toHaveBeenCalled();
+  });
   it("abstains when the model cannot match the question", async () => {
     call.mockImplementation(async (_scope, _task, options: Options) => {
       await options.beforeSend?.();

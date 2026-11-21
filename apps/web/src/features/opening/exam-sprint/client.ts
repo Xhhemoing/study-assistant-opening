@@ -13,7 +13,7 @@ type Pending = { target: Target; path: string; method: "POST" | "PATCH"; body: {
 const BASE = "/api/opening/exam-sprint";
 
 class HttpError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  constructor(readonly status: number, message: string, readonly businessCode?: string) { super(message); }
 }
 function errorMessage(body: unknown, status: number): string {
   if (body && typeof body === "object" && "error" in body) {
@@ -22,6 +22,15 @@ function errorMessage(body: unknown, status: number): string {
     if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
   }
   return status === 401 ? "登录已过期，请重新登录。" : `请求失败（${status}），请稍后重试。`;
+}
+function errorBusinessCode(body: unknown): string | undefined {
+  if (body && typeof body === "object" && "error" in body) {
+    const error = body.error;
+    if (error && typeof error === "object" && "businessCode" in error && typeof error.businessCode === "string") {
+      return error.businessCode;
+    }
+  }
+  return undefined;
 }
 export function createExamSprintClientKey(): string {
   if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
@@ -81,6 +90,12 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
   }
   const isCurrent = (operation: { generation: number }) => active?.generation === operation.generation;
   function finish(operation: { generation: number }) { if (isCurrent(operation)) { active = null; publish({ busy: false }); } }
+  function forgetReviewKey(fp: string, clientKey: string) {
+    recovery?.confirm(fp, clientKey);
+    for (const [id, receipt] of unresolvedReviews) {
+      if (receipt.fingerprint === fp && receipt.clientKey === clientKey) unresolvedReviews.delete(id);
+    }
+  }
   async function request(signal: AbortSignal, target: Target, path: string, command?: Pending): Promise<Partial<ExamSprintSnapshot>> {
     const response = await fetcher(path, { method: command?.method ?? "GET", credentials: "same-origin", cache: "no-store", signal,
       ...(command ? { headers: { "content-type": "application/json" }, body: JSON.stringify(command.body) } : {}),
@@ -90,14 +105,14 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
       if (!response.ok) throw new HttpError(response.status, errorMessage(null, response.status));
       throw new Error("服务器返回了无法识别的数据，请重新读取学习进度。");
     }
-    if (!response.ok || (command && response.status !== 200)) throw new HttpError(response.status, errorMessage(body, response.status));
+    if (!response.ok || (command && response.status !== 200)) throw new HttpError(response.status, errorMessage(body, response.status), errorBusinessCode(body));
     if (target === "overview") { const parsed = overviewSchema.safeParse(body); if (parsed.success) return { overview: parsed.data }; }
     if (target === "integration") { const parsed = integrationSchema.safeParse(body); if (parsed.success) return { integration: parsed.data }; }
     if (target === "forecast") { const parsed = forecastSchema.safeParse(body); if (parsed.success) return { forecast: parsed.data }; }
     if (target === "review") { const parsed = reviewSchema.safeParse(body); if (parsed.success) return { review: parsed.data }; }
     throw new Error("服务器返回的学习进度不完整，请重新读取。");
   }
-  async function loadTarget(target: Target, path: string) {
+  async function loadTarget(target: Target, path: string, reviewId?: string) {
     if (active?.writing) return;
     const operation = begin(false);
     try {
@@ -111,7 +126,20 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
         }
       }
       publish({ ...result, error: pending ? uncertainMessage : null });
-    } catch (error) { if (isCurrent(operation)) publish({ error: describeError(error) }); }
+    } catch (error) {
+      if (isCurrent(operation)) {
+        const expiredReview = target === "review" && reviewId !== undefined
+          && error instanceof HttpError && error.businessCode === "EXAM_REVIEW_EPOCH_EXPIRED";
+        if (expiredReview) {
+          const receipt = unresolvedReviews.get(reviewId);
+          if (receipt) forgetReviewKey(receipt.fingerprint, receipt.clientKey);
+        }
+        publish({
+          ...(expiredReview && snapshot.review?.id === reviewId ? { review: null } : {}),
+          error: describeError(error),
+        });
+      }
+    }
     finally { finish(operation); }
   }
   async function write(command: Pending, recovering: boolean, operation = begin(true)) {
@@ -148,9 +176,15 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
         return;
       }
 
+      const epochExpired = error.businessCode === "EXAM_REVIEW_EPOCH_EXPIRED";
+      const keepKey = !epochExpired && (
+        error.businessCode === "EXAM_RECEIPT_COMMITTED"
+        || (recovering && (error.status === 404 || error.status === 409) && error.businessCode === undefined)
+      );
+      if (!keepKey) forgetReviewKey(fingerprint, command.body.clientKey);
       pending = null;
       const message = describeError(error);
-      publish({ error: message, uncertain: false });
+      publish({ ...(epochExpired && command.target === "review" ? { review: null } : {}), error: message, uncertain: false });
       if (recovering && (error.status === 404 || error.status === 409)) {
         // Another tab can finish the run between the recovery read and the replay.
         try {
@@ -192,7 +226,7 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
     load: () => loadTarget("overview", BASE),
     loadIntegration: () => loadTarget("integration", `${BASE}/integration`),
     loadForecast: (teacher = "") => loadTarget("forecast", `${BASE}/forecast${teacher.trim() ? `?teacher=${encodeURIComponent(teacher.trim())}` : ""}`),
-    loadReview: (id: string) => loadTarget("review", `${BASE}/reviews?id=${encodeURIComponent(id)}`),
+    loadReview: (id: string) => loadTarget("review", `${BASE}/reviews?id=${encodeURIComponent(id)}`, id),
     async send(intent: ExamSprintIntent) {
       const result = await enqueue(clientKey => {
         const body = examSprintCommandSchema.parse({ ...intent, clientKey });

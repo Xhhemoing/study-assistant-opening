@@ -276,4 +276,104 @@ describe("exam photo review repository integration", () => {
       { id: fresh.review.id, status: "pending", privacyEpoch: fresh.privacyEpoch },
     ]);
   });
+
+  it("persists secondary reused keys so a lost Tab B retry replays A's ready receipt without double billing, rejects intent mismatch, and expires on privacy_epoch bump", async () => {
+    type Options = Parameters<ModelGateway["call"]>[2];
+    const output = { text: JSON.stringify(proposal), inputTokens: 10, outputTokens: 20, citedChunkIds: [], candidates: [], requestId: null };
+    let releaseGateway!: () => void;
+    let enteredGateway!: () => void;
+    const gatewayEntered = new Promise<void>(resolve => { enteredGateway = resolve; });
+    const gatewayGate = new Promise<void>(resolve => { releaseGateway = resolve; });
+    const call = vi.fn(async (_scope: Scope, _task: string, options: Options) => {
+      await options.beforeSend?.();
+      enteredGateway();
+      await gatewayGate;
+      await options.persistResult?.(output, { reservationId: randomUUID(), settledCents: 1 });
+      return output;
+    });
+    const service = createExamPhotoReviewService({ repository, gateway: { call },
+      images: async () => [{ mediaType: "image/png", data: "data:image/png;base64,AAAA" }],
+      budget: () => ({} as Options["budget"]) });
+
+    const keyA = randomUUID(), keyB = randomUUID();
+    const intentA = input({ clientKey: keyA, answerText: "My explanation" });
+    const intentB = input({ clientKey: keyB, answerText: "  My explanation  " });
+
+    // Tab A starts review (pending, in-flight in gateway).
+    const tabAPromise = service.review(f.scope, intentA);
+    await gatewayEntered;
+    const [rowA] = await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`;
+    expect(rowA).toBeDefined();
+
+    // Tab B submits same intent with keyB while A is pending -> reuses A, persists alias, no second charge.
+    const tabBFirst = await service.review(f.scope, intentB);
+    expect(tabBFirst).toMatchObject({ id: rowA!.id, status: "pending" });
+    expect(call).toHaveBeenCalledTimes(1);
+
+    // Tab B loses response and retries keyB while A is STILL pending -> still reuses A, no second charge.
+    const tabBPendingReplay = await service.review(f.scope, intentB);
+    expect(tabBPendingReplay).toMatchObject({ id: rowA!.id, status: "pending" });
+    expect(call).toHaveBeenCalledTimes(1);
+
+    // Tab A finishes -> row A becomes ready.
+    releaseGateway();
+    const tabAResult = await tabAPromise;
+    expect(tabAResult).toMatchObject({ id: rowA!.id, status: "ready", proposal });
+
+    // Tab B retries keyB AFTER A completed -> returns A's ready receipt, ZERO new row, ZERO second gateway.call!
+    const tabBReadyReplay = await service.review(f.scope, intentB);
+    expect(tabBReadyReplay).toMatchObject({ id: rowA!.id, status: "ready", proposal });
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: rowA!.id }]);
+
+    // Mismatched intent on keyB must conflict just like primary client_key.
+    await expect(repository.begin(f.scope, { ...intentB, answerText: "Different answer" })).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // Course archive blocks keyB replay with EXAM_RECEIPT_COMMITTED; restoring lets keyB replay without double billing.
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${binding.courseId}`;
+    const archivedResponse = await examSprintResponse(() => service.review(f.scope, intentB));
+    expect(archivedResponse.status).toBe(409);
+    expect(await archivedResponse.json()).toMatchObject({ error: { businessCode: "EXAM_RECEIPT_COMMITTED" } });
+    await f.sql`UPDATE courses SET archived_at=NULL WHERE id=${binding.courseId}`;
+    expect(await service.review(f.scope, intentB)).toMatchObject({ id: rowA!.id, status: "ready", proposal });
+    expect(call).toHaveBeenCalledTimes(1);
+
+    // Privacy epoch bump invalidates keyB replay with EXAM_REVIEW_EPOCH_EXPIRED; client resets key and fresh submit succeeds.
+    const unrelated = await source();
+    await createOpeningPrivacyRepository(f.sql).recordExclusions(f.sql, f.scope, {
+      sourceIds: [unrelated], memoryId: randomUUID(), deletedAt: new Date(),
+    });
+    const expiredResponse = await examSprintResponse(() => service.review(f.scope, intentB));
+    expect(expiredResponse.status).toBe(409);
+    expect(await expiredResponse.json()).toMatchObject({ error: { businessCode: "EXAM_REVIEW_EPOCH_EXPIRED" } });
+
+    const sprint = createOpeningExamSprintRepository(f.sql, pack);
+    const immediateCall = vi.fn(async (_scope: Scope, _task: string, options: Options) => {
+      await options.beforeSend?.();
+      await options.persistResult?.(output, { reservationId: randomUUID(), settledCents: 1 });
+      return output;
+    });
+    const freshService = createExamPhotoReviewService({ repository, gateway: { call: immediateCall },
+      images: async () => [{ mediaType: "image/png", data: "data:image/png;base64,AAAA" }],
+      budget: () => ({} as Options["budget"]) });
+    const postedKeys: string[] = [];
+    const clientFetcher: typeof fetch = async (_url, init) => {
+      if (init?.method === "GET") return Response.json(await sprint.read(f.scope));
+      const body = JSON.parse(String(init?.body)) as ExamWorkReviewInput;
+      postedKeys.push(body.clientKey);
+      return examSprintResponse(() => freshService.review(f.scope, body));
+    };
+    const keyC = randomUUID();
+    const clientKeys = vi.fn().mockReturnValueOnce(keyB).mockReturnValueOnce(keyC);
+    const client = createExamSprintClient({ fetcher: clientFetcher, keyFactory: clientKeys });
+    const { clientKey: _unused, ...photo } = intentA;
+    await client.sendIntegration({ action: "review", input: photo });
+    expect(client.getSnapshot()).toMatchObject({ uncertain: false, review: null });
+    expect(immediateCall).not.toHaveBeenCalled();
+    await client.sendIntegration({ action: "review", input: photo });
+    expect(postedKeys).toEqual([keyB, keyC]);
+    expect(client.getSnapshot().review).toMatchObject({ status: "ready", proposal });
+    expect(client.getSnapshot().review?.id).not.toBe(rowA!.id);
+    expect(immediateCall).toHaveBeenCalledOnce();
+  });
 });

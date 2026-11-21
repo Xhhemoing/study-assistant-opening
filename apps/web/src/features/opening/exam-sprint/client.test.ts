@@ -540,6 +540,92 @@ describe("exam integration shares mutation recovery", () => {
     expect(client.getSnapshot().review?.id).toBe(review.id);
   });
 
+  it("resets an expired privacy-epoch photo review key on direct 409, recovery 409, and review reload, while retaining committed 409 receipts", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("window", { sessionStorage: {
+      getItem: (name: string) => storage.get(name) ?? null,
+      setItem: (name: string, value: string) => { storage.set(name, value); },
+      removeItem: (name: string) => { storage.delete(name); },
+    } });
+    try {
+      const epochConflict = () => Response.json(
+        { error: { code: "CONFLICT", message: "材料隐私设置已变化，请重新选择材料", businessCode: "EXAM_REVIEW_EPOCH_EXPIRED" } },
+        { status: 409 },
+      );
+      const committedConflict = () => Response.json(
+        { error: { code: "CONFLICT", message: "课程已归档，请先恢复课程再评阅", businessCode: "EXAM_RECEIPT_COMMITTED" } },
+        { status: 409 },
+      );
+      const command = { action: "review", input: reviewInput } as const;
+
+      // 1) Direct retry after epoch bump clears stored key (including sessionStorage) and stale review, then fresh submit uses a new key.
+      const directFetcher = vi.fn<Fetcher>()
+        .mockResolvedValueOnce(Response.json(review))
+        .mockResolvedValueOnce(epochConflict())
+        .mockResolvedValueOnce(Response.json({ ...review, id: "55555555-5555-4555-8555-555555555555" }));
+      const directKeys = vi.fn().mockReturnValueOnce("epoch-old-key").mockReturnValueOnce("epoch-fresh-key");
+      const directClient = createExamSprintClient({ workspaceId: "ws-epoch-1", courseId: "c-1", fetcher: directFetcher, keyFactory: directKeys });
+      await directClient.sendIntegration(command);
+      expect(storage.size).toBe(1);
+      await directClient.sendIntegration(command);
+      expect(directClient.getSnapshot()).toMatchObject({ uncertain: false, review: null, error: "材料隐私设置已变化，请重新选择材料" });
+      expect(storage.size).toBe(0);
+      await directClient.sendIntegration(command);
+      expect(directFetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).clientKey))
+        .toEqual(["epoch-old-key", "epoch-old-key", "epoch-fresh-key"]);
+
+      // 2) Recovery retry after lost response + epoch bump also clears the expired key.
+      const recoverFetcher = vi.fn<Fetcher>()
+        .mockRejectedValueOnce(new TypeError("lost response before epoch bump"))
+        .mockResolvedValueOnce(Response.json(overview()))
+        .mockResolvedValueOnce(epochConflict())
+        .mockResolvedValueOnce(Response.json(overview()))
+        .mockResolvedValueOnce(Response.json({ ...review, id: "66666666-6666-4666-8666-666666666666" }));
+      const recoverKeys = vi.fn().mockReturnValueOnce("recover-old-key").mockReturnValueOnce("recover-fresh-key");
+      const recoverClient = createExamSprintClient({ workspaceId: "ws-epoch-2", courseId: "c-2", fetcher: recoverFetcher, keyFactory: recoverKeys });
+      await recoverClient.sendIntegration(command);
+      await recoverClient.recover();
+      expect(recoverClient.getSnapshot()).toMatchObject({ uncertain: false, review: null, error: "材料隐私设置已变化，请重新选择材料" });
+      await recoverClient.sendIntegration(command);
+      const recoverPosts = recoverFetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+      expect(recoverPosts.map(([, init]) => JSON.parse(String(init?.body)).clientKey))
+        .toEqual(["recover-old-key", "recover-old-key", "recover-fresh-key"]);
+
+      // 3) Reloading an expired pending review clears its stored key and stale review immediately.
+      const reloadFetcher = vi.fn<Fetcher>()
+        .mockResolvedValueOnce(Response.json(review))
+        .mockResolvedValueOnce(epochConflict())
+        .mockResolvedValueOnce(Response.json({ ...review, id: "77777777-7777-4777-8777-777777777777" }));
+      const reloadKeys = vi.fn().mockReturnValueOnce("reload-old-key").mockReturnValueOnce("reload-fresh-key");
+      const reloadClient = createExamSprintClient({ workspaceId: "ws-epoch-3", courseId: "c-3", fetcher: reloadFetcher, keyFactory: reloadKeys });
+      await reloadClient.sendIntegration(command);
+      await reloadClient.loadReview(review.id);
+      expect(reloadClient.getSnapshot()).toMatchObject({ review: null, error: "材料隐私设置已变化，请重新选择材料" });
+      await reloadClient.sendIntegration(command);
+      const reloadPosts = reloadFetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+      expect(reloadPosts.map(([, init]) => JSON.parse(String(init?.body)).clientKey))
+        .toEqual(["reload-old-key", "reload-fresh-key"]);
+
+      // 4) Non-committed 409 clears key on fresh submit, while EXAM_RECEIPT_COMMITTED retains key for replay.
+      const mixedFetcher = vi.fn<Fetcher>()
+        .mockResolvedValueOnce(Response.json({ error: { code: "CONFLICT", message: "请先绑定课程" } }, { status: 409 }))
+        .mockResolvedValueOnce(Response.json(review))
+        .mockResolvedValueOnce(committedConflict())
+        .mockResolvedValueOnce(Response.json({ ...review, status: "ready", proposal: { transcription: "x=2", questionMatch: true, outcome: "correct",
+          steps: [{ label: "计算", verdict: "correct", feedback: "正确" }], summary: "正确", errorCause: null } }));
+      const mixedKeys = vi.fn().mockReturnValueOnce("uncommitted-key").mockReturnValueOnce("committed-key");
+      const mixedClient = createExamSprintClient({ workspaceId: "ws-epoch-4", courseId: "c-4", fetcher: mixedFetcher, keyFactory: mixedKeys });
+      await mixedClient.sendIntegration(command);
+      await mixedClient.sendIntegration(command);
+      await mixedClient.sendIntegration(command);
+      await mixedClient.sendIntegration(command);
+      expect(mixedFetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).clientKey))
+        .toEqual(["uncommitted-key", "committed-key", "committed-key", "committed-key"]);
+      expect(mixedKeys).toHaveBeenCalledTimes(2);
+      expect(mixedClient.getSnapshot().review?.status).toBe("ready");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("reuses the original image-review request when no review id was received", async () => {
     const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost review receipt"))
       .mockResolvedValueOnce(Response.json(overview())).mockResolvedValueOnce(Response.json(review))
