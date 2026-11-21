@@ -173,6 +173,178 @@ export async function runWithSyncDeadline<T>(
   }
 }
 
+export const DISCOVERY_UID_WINDOW_SIZE = 5_000;
+export const MAX_DISCOVERY_WINDOWS_PER_SYNC = 10;
+
+async function resolveMaxMailboxUid(
+  opened: { uidValidity: bigint; uidNext?: unknown; exists?: unknown },
+  client: ImapClient,
+  withDeadline: <T>(phase: string, operation: () => Promise<T>) => Promise<T>,
+): Promise<number | undefined> {
+  if (typeof opened.uidNext === "number" && Number.isSafeInteger(opened.uidNext) && opened.uidNext >= 1) {
+    return opened.uidNext - 1;
+  }
+  if (typeof opened.exists === "number" && Number.isSafeInteger(opened.exists) && opened.exists >= 0) {
+    if (opened.exists === 0) return 0;
+    const highest = await withDeadline("discovery", () => runGuardedImapFetch(
+      client,
+      { maxBytes: MAX_IMAP_PROBE_COMMAND_BYTES, maxFetchResponses: 1 },
+      () => client.fetchOne("*", { uid: true }, { uid: true }),
+    ));
+    if (highest === false) return 0;
+    if (!highest || !Number.isSafeInteger(highest.uid) || highest.uid <= 0) {
+      throw new Error("IMAP mailbox UID probe returned an invalid UID");
+    }
+    return highest.uid;
+  }
+  return undefined;
+}
+
+async function scanDiscoveryWindow(input: {
+  client: ImapClient;
+  windowStart: number;
+  windowEnd: number;
+  since: Date;
+  teardownWaitMs: number;
+  eligibleUids: Set<number>;
+  sizeByUid: Map<number, number>;
+  withDeadline: <T>(phase: string, operation: () => Promise<T>) => Promise<T>;
+  assertWithinBudget: (phase: string) => void;
+}): Promise<{ observedCount: number; maxObservedUid: number }> {
+  const {
+    client,
+    windowStart,
+    windowEnd,
+    since,
+    teardownWaitMs,
+    eligibleUids,
+    sizeByUid,
+    withDeadline,
+    assertWithinBudget,
+  } = input;
+  const range = windowStart === windowEnd ? String(windowStart) : `${windowStart}:${windowEnd}`;
+  const stream = client.fetch(
+    { uid: range },
+    { uid: true, internalDate: true, size: true },
+  );
+  const iterator = stream[Symbol.asyncIterator]();
+  let discoveryFinished = false;
+  let observedCount = 0;
+  let maxObservedUid = 0;
+  try {
+    while (true) {
+      const step = await withDeadline("discovery", () => iterator.next());
+      if (step.done) {
+        discoveryFinished = true;
+        break;
+      }
+      const message = step.value;
+      assertWithinBudget("discovery");
+      if (
+        !Number.isSafeInteger(message.uid)
+        || message.uid < windowStart
+        || message.uid > windowEnd
+      ) {
+        continue;
+      }
+      observedCount += 1;
+      maxObservedUid = Math.max(maxObservedUid, message.uid);
+      if (message.internalDate && message.internalDate < since) continue;
+      if (eligibleUids.has(message.uid)) continue;
+      if (eligibleUids.size === IMAP_BATCH_SIZE) {
+        let highest = -1;
+        for (const uid of eligibleUids) highest = Math.max(highest, uid);
+        if (message.uid >= highest) continue;
+        eligibleUids.delete(highest);
+        sizeByUid.delete(highest);
+      }
+      eligibleUids.add(message.uid);
+      if (typeof message.size === "number" && Number.isFinite(message.size)) {
+        sizeByUid.set(message.uid, message.size);
+      }
+    }
+  } finally {
+    if (!discoveryFinished && typeof iterator.return === "function") {
+      const returnPromise = Promise.resolve(iterator.return(undefined)).catch(() => undefined);
+      let teardownTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<void>((resolve) => {
+          teardownTimer = setTimeout(resolve, teardownWaitMs);
+          teardownTimer.unref?.();
+        });
+        await Promise.race([returnPromise, timeout]);
+      } finally {
+        if (teardownTimer !== undefined) clearTimeout(teardownTimer);
+      }
+    }
+  }
+  return { observedCount, maxObservedUid };
+}
+
+async function discoverUidBatch(input: {
+  client: ImapClient;
+  startAfterUid: number;
+  maxMailboxUid: number | undefined;
+  since: Date;
+  teardownWaitMs: number;
+  withDeadline: <T>(phase: string, operation: () => Promise<T>) => Promise<T>;
+  assertWithinBudget: (phase: string) => void;
+}): Promise<{ uids: number[]; sizeByUid: Map<number, number>; scannedThroughUid: number }> {
+  const {
+    client,
+    startAfterUid,
+    maxMailboxUid,
+    since,
+    teardownWaitMs,
+    withDeadline,
+    assertWithinBudget,
+  } = input;
+  const eligibleUids = new Set<number>();
+  const sizeByUid = new Map<number, number>();
+  const baseUid = Math.max(0, startAfterUid);
+  let windowStart = baseUid + 1;
+  let windowsScanned = 0;
+  let lastWindowEnd = baseUid;
+  let maxObservedInRangeUid = baseUid;
+
+  while (
+    windowsScanned < MAX_DISCOVERY_WINDOWS_PER_SYNC
+    && (maxMailboxUid === undefined || windowStart <= maxMailboxUid)
+  ) {
+    assertWithinBudget("discovery");
+    const rawWindowEnd = windowStart + DISCOVERY_UID_WINDOW_SIZE - 1;
+    const windowEnd = maxMailboxUid === undefined ? rawWindowEnd : Math.min(maxMailboxUid, rawWindowEnd);
+    const { observedCount, maxObservedUid } = await scanDiscoveryWindow({
+      client,
+      windowStart,
+      windowEnd,
+      since,
+      teardownWaitMs,
+      eligibleUids,
+      sizeByUid,
+      withDeadline,
+      assertWithinBudget,
+    });
+    windowsScanned += 1;
+    lastWindowEnd = windowEnd;
+    maxObservedInRangeUid = Math.max(maxObservedInRangeUid, maxObservedUid);
+    if (eligibleUids.size >= IMAP_BATCH_SIZE) break;
+    if (maxMailboxUid === undefined && observedCount === 0) break;
+    windowStart = windowEnd + 1;
+  }
+
+  // The server can return UIDs in any order. Sorting the bounded set keeps
+  // publication and cursor advancement ascending without an unbounded array.
+  const uids = [...eligibleUids].sort((a, b) => a - b).slice(0, IMAP_BATCH_SIZE);
+  const batchHitCap = uids.length >= IMAP_BATCH_SIZE;
+  const scannedThroughUid = batchHitCap
+    ? uids[uids.length - 1]!
+    : maxMailboxUid !== undefined
+      ? lastWindowEnd
+      : maxObservedInRangeUid;
+  return { uids, sizeByUid, scannedThroughUid };
+}
+
 /** Bounded read-only IMAP adapter. Cursor advances only after commit succeeds. */
 export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   imported: number;
@@ -227,62 +399,20 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   let cursor = expectedCursor?.uidValidity === uidValidity
     ? expectedCursor : { folder: deps.folder, uidValidity, lastUid: 0 };
 
-  // Keep only the lowest batch-size distinct UIDs while the discovery stream
-  // is consumed. A mailbox can contain millions of eligible messages, so do
-  // not retain and sort the entire discovery result in memory.
-  const eligibleUids = new Set<number>();
-  const sizeByUid = new Map<number, number>();
-  const stream = deps.client.fetch(
-    { uid: `${cursor.lastUid + 1}:*` },
-    { uid: true, internalDate: true, size: true },
-  );
-  const iterator = stream[Symbol.asyncIterator]();
-  let discoveryFinished = false;
-  try {
-    while (true) {
-      const step = await withDeadline("discovery", () => iterator.next());
-      if (step.done) {
-        discoveryFinished = true;
-        break;
-      }
-      const message = step.value;
-      assertWithinBudget("discovery");
-      if (!Number.isSafeInteger(message.uid) || message.uid <= cursor.lastUid
-        || (message.internalDate && message.internalDate < deps.since)) continue;
-      if (eligibleUids.has(message.uid)) continue;
-      if (eligibleUids.size === IMAP_BATCH_SIZE) {
-        let highest = -1;
-        for (const uid of eligibleUids) highest = Math.max(highest, uid);
-        if (message.uid >= highest) continue;
-        eligibleUids.delete(highest);
-        sizeByUid.delete(highest);
-      }
-      eligibleUids.add(message.uid);
-      if (typeof message.size === "number" && Number.isFinite(message.size)) {
-        sizeByUid.set(message.uid, message.size);
-      }
-    }
-  } finally {
-    if (!discoveryFinished && typeof iterator.return === "function") {
-      const returnPromise = Promise.resolve(iterator.return(undefined)).catch(() => undefined);
-      let teardownTimer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const timeout = new Promise<void>((resolve) => {
-          teardownTimer = setTimeout(resolve, teardownWaitMs);
-          teardownTimer.unref?.();
-        });
-        await Promise.race([returnPromise, timeout]);
-      } finally {
-        if (teardownTimer !== undefined) clearTimeout(teardownTimer);
-      }
-    }
-  }
-  // The server can return UIDs in any order. Sorting the bounded set keeps
-  // publication and cursor advancement ascending without an unbounded array.
-  const uids = [...eligibleUids].sort((a, b) => a - b).slice(0, IMAP_BATCH_SIZE);
+  const maxMailboxUid = await resolveMaxMailboxUid(opened, deps.client, withDeadline);
+  const { uids, sizeByUid, scannedThroughUid } = await discoverUidBatch({
+    client: deps.client,
+    startAfterUid: cursor.lastUid,
+    maxMailboxUid,
+    since: deps.since,
+    teardownWaitMs,
+    withDeadline,
+    assertWithinBudget,
+  });
 
   let imported = 0;
   let skipped = 0;
+  let hadExpunged = false;
   for (const uid of uids) {
     assertWithinBudget("fetch");
     const knownSize = sizeByUid.get(uid);
@@ -306,6 +436,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
     ));
     if (fetched === false) {
       // The message was expunged after discovery.
+      hadExpunged = true;
       skipped += 1;
       continue;
     }
@@ -355,6 +486,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       ));
       if (probe === false) {
         // The message was expunged after the initial fetch.
+        hadExpunged = true;
         skipped += 1;
         continue;
       }
@@ -374,7 +506,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       skipHtmlToText: true,
     });
     const prepared = mailToImportInput({ mail: parsed });
-    const next = nextImapCursor(cursor, uid);
+    const next = hadExpunged ? cursor : nextImapCursor(cursor, uid);
     const receipt = await publishConnectorSource(deps.imports, deps.storage, deps.scope, {
       connectionVersion: deps.connectionVersion,
       identity,
@@ -388,7 +520,14 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
     else imported += 1;
   }
 
-  if (expectedCursor?.uidValidity !== uidValidity) {
+  if (skipped === 0 && !hadExpunged && scannedThroughUid > cursor.lastUid) {
+    cursor = nextImapCursor(cursor, scannedThroughUid);
+  }
+
+  const cursorChanged = expectedCursor === null
+    || expectedCursor.uidValidity !== cursor.uidValidity
+    || expectedCursor.lastUid !== cursor.lastUid;
+  if (cursorChanged) {
     await deps.imports.advanceImapCursor(deps.scope, {
       connectionId: deps.connectionId, connectionVersion: deps.connectionVersion,
       cursor: { expected: expectedCursor, next: cursor },

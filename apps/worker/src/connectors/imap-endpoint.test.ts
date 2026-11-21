@@ -609,4 +609,97 @@ describe("approved IMAP dialer", () => {
       await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
     }
   });
+
+  it("syncs a >10,000-message mailbox over real ImapFlow using windowed discovery without hitting the 10,000-response guard", { timeout: 15_000 }, async () => {
+    const totalMessages = 12_005;
+    const requestedDiscoveryRanges: string[] = [];
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer(socket => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      socket.on("error", () => undefined);
+      socket.write("* OK ready\r\n");
+      let buffered = "";
+      socket.on("data", chunk => {
+        buffered += chunk.toString("utf8");
+        for (let end = buffered.indexOf("\r\n"); end >= 0; end = buffered.indexOf("\r\n")) {
+          const line = buffered.slice(0, end);
+          buffered = buffered.slice(end + 2);
+          const space = line.indexOf(" ");
+          const tag = space < 0 ? line : line.slice(0, space);
+          const rest = space < 0 ? "" : line.slice(space + 1);
+          const verb = (rest.split(" ")[0] ?? "").toUpperCase();
+          if (verb === "CAPABILITY") socket.write(`* CAPABILITY IMAP4rev1 UIDPLUS\r\n${tag} OK done\r\n`);
+          else if (verb === "NAMESPACE") socket.write(`* NAMESPACE (("" "/")) NIL NIL\r\n${tag} OK done\r\n`);
+          else if (verb === "LIST") socket.write(`* LIST () "/" "INBOX"\r\n${tag} OK done\r\n`);
+          else if (verb === "EXAMINE" || verb === "SELECT") {
+            socket.write(`* ${totalMessages} EXISTS\r\n* OK [UIDVALIDITY 42] ok\r\n* OK [UIDNEXT ${totalMessages + 1}] ok\r\n${tag} OK [READ-ONLY] done\r\n`);
+          } else if (verb === "UID" && /^FETCH\b/i.test(rest.slice(4))) {
+            const fetchArgs = rest.slice(4).replace(/^FETCH\s+/i, "");
+            const match = /^(\d+)(?::(\d+|\*))?\s+\((.*)\)\s*$/i.exec(fetchArgs);
+            if (!match) {
+              socket.write(`${tag} BAD syntax\r\n`);
+              continue;
+            }
+            const start = Number(match[1]);
+            const rangeEnd = match[2] === "*" ? totalMessages : match[2] ? Number(match[2]) : start;
+            const fields = match[3] ?? "";
+            if (/BODY(?:\.PEEK)?\[\]/i.test(fields)) {
+              const source = Buffer.from(`Subject: UID ${start}\r\n\r\nmessage ${start}`, "utf8");
+              socket.write(Buffer.concat([
+                Buffer.from(`* ${start} FETCH (UID ${start} RFC822.SIZE ${source.byteLength} BODY[]<0> {${source.byteLength}}\r\n`, "utf8"),
+                source,
+                Buffer.from(`)\r\n${tag} OK done\r\n`, "utf8"),
+              ]));
+            } else {
+              requestedDiscoveryRanges.push(`${start}:${rangeEnd}`);
+              const lines: string[] = [];
+              const hi = Math.min(totalMessages, rangeEnd);
+              for (let uid = start; uid <= hi; uid += 1) {
+                const dateStr = uid >= 12_001 ? "02-Jul-2026 03:04:05 +0000" : "02-Jan-2026 03:04:05 +0000";
+                lines.push(`* ${uid} FETCH (UID ${uid} INTERNALDATE "${dateStr}" RFC822.SIZE 64)\r\n`);
+              }
+              lines.push(`${tag} OK done\r\n`);
+              socket.write(lines.join(""));
+            }
+          } else if (verb === "LOGOUT") {
+            socket.write(`* BYE bye\r\n${tag} OK done\r\n`);
+            socket.end();
+          } else {
+            socket.write(`${tag} OK done\r\n`);
+          }
+        }
+      });
+    });
+
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const client = installImapCommandGuard(
+      new ImapFlow({ host: "127.0.0.1", port, secure: false, logger: false, auth }),
+    );
+    try {
+      await client.connect();
+      const result = await syncMailbox({
+        scope: { workspaceId: "workspace", ownerUserId: "owner" },
+        connectionId: "connection",
+        connectionVersion: 1,
+        folder: "INBOX",
+        cursor: null,
+        since: new Date("2026-06-01T00:00:00.000Z"),
+        client,
+        imports: { advanceImapCursor: vi.fn() },
+        storage: { upload: vi.fn(), remove: vi.fn() },
+      } as unknown as ImapSyncDeps);
+      expect(requestedDiscoveryRanges).toEqual(["1:5000", "5001:10000", "10001:12005"]);
+      expect(result).toMatchObject({
+        imported: 5,
+        skipped: 0,
+        cursor: { folder: "INBOX", uidValidity: "42", lastUid: 12_005 },
+      });
+    } finally {
+      client.close();
+      for (const s of sockets) s.destroy();
+      await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+    }
+  });
 });

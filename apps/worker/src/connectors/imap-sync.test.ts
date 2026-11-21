@@ -549,4 +549,229 @@ describe("imap sync cursor and parser guards", () => {
     await expect(syncMailbox(base.deps)).rejects.toBe(wireError);
     expect(client.close).toHaveBeenCalled();
   });
+
+  it("discovers mailboxes with >10,000 UIDs using bounded ascending windows without exceeding 10,000 responses and advances cursor past old UIDs", async () => {
+    const totalMessages = 12_005;
+    const since = new Date("2026-06-01T00:00:00.000Z");
+    const oldDate = new Date("2026-01-01T00:00:00.000Z");
+    const newDate = new Date("2026-07-01T00:00:00.000Z");
+    const published: number[] = [];
+    vi.mocked(publishConnectorSource).mockReset();
+    vi.mocked(publishConnectorSource).mockImplementation(async (_imports, _storage, _scope, input) => {
+      published.push(Number(input.identity.remoteId));
+      return { id: `receipt-${input.identity.remoteId}`, sourceIds: [`src-${input.identity.remoteId}`], duplicate: false, connectionVersion: 1 };
+    });
+
+    const requestedRanges: string[] = [];
+    const advanceImapCursor = vi.fn();
+    const fetchOne = vi.fn(async (uid: string) => {
+      const source = Buffer.from(`Subject: UID ${uid}\r\n\r\nmessage`);
+      return {
+        uid: Number(uid),
+        seq: Number(uid),
+        source,
+        bodyParts: new Map([[partialBodyOffsetKey(0), source]]),
+      };
+    });
+    const fetch = vi.fn(async function* (range: { uid?: string }) {
+      const uidRange = range.uid ?? "";
+      requestedRanges.push(uidRange);
+      const match = /^(\d+)(?::(\d+|\*))?$/.exec(uidRange);
+      expect(match).not.toBeNull();
+      const start = Number(match![1]);
+      const end = match![2] === "*"
+        ? totalMessages
+        : match![2]
+          ? Number(match![2])
+          : start;
+      // Fail loudly if a single discovery command could exceed MAX_IMAP_DISCOVERY_RESPONSES (10,000).
+      expect(end - start + 1).toBeLessThanOrEqual(5_000);
+      for (let uid = start; uid <= Math.min(end, totalMessages); uid += 1) {
+        yield {
+          uid,
+          internalDate: uid >= 12_001 ? newDate : oldDate,
+          size: Buffer.byteLength(`Subject: UID ${uid}\r\n\r\nmessage`),
+        };
+      }
+    });
+
+    const deps = {
+      scope: { workspaceId: "workspace", ownerUserId: "owner" },
+      connectionId: "connection",
+      connectionVersion: 1,
+      folder: "INBOX",
+      cursor: { folder: "INBOX", uidValidity: "42", lastUid: 0 },
+      since,
+      client: {
+        mailboxOpen: vi.fn(async () => ({ uidValidity: 42n, uidNext: totalMessages + 1, exists: totalMessages })),
+        fetch,
+        fetchOne,
+        logout: vi.fn(),
+      },
+      imports: { advanceImapCursor },
+      storage: {},
+    } as unknown as ImapSyncDeps;
+
+    const first = await syncMailbox(deps);
+    expect(first).toMatchObject({
+      imported: 5,
+      skipped: 0,
+      cursor: { folder: "INBOX", uidValidity: "42", lastUid: 12_005 },
+    });
+    expect(requestedRanges).toEqual(["1:5000", "5001:10000", "10001:12005"]);
+    expect(published).toEqual([12_001, 12_002, 12_003, 12_004, 12_005]);
+    expect(fetchOne).toHaveBeenCalledTimes(5);
+    expect(advanceImapCursor).not.toHaveBeenCalled();
+
+    requestedRanges.length = 0;
+    const replay = await syncMailbox({ ...deps, cursor: first.cursor });
+    expect(replay).toMatchObject({ imported: 0, skipped: 0, cursor: first.cursor });
+    expect(requestedRanges).toEqual([]);
+    expect(advanceImapCursor).not.toHaveBeenCalled();
+  });
+
+  it("stops scanning windows on batch cap without skipping unselected UIDs across a 12,005-message mailbox", async () => {
+    const totalMessages = 12_005;
+    const published: number[] = [];
+    vi.mocked(publishConnectorSource).mockReset();
+    vi.mocked(publishConnectorSource).mockImplementation(async (_imports, _storage, _scope, input) => {
+      published.push(Number(input.identity.remoteId));
+      return { id: `receipt-${input.identity.remoteId}`, sourceIds: [`src-${input.identity.remoteId}`], duplicate: false, connectionVersion: 1 };
+    });
+
+    const requestedRanges: string[] = [];
+    const advanceImapCursor = vi.fn();
+    const fetchOne = vi.fn(async (uid: string) => {
+      const source = Buffer.from(`Subject: UID ${uid}\r\n\r\nmessage`);
+      return {
+        uid: Number(uid),
+        seq: Number(uid),
+        source,
+        bodyParts: new Map([[partialBodyOffsetKey(0), source]]),
+      };
+    });
+    const fetch = vi.fn(async function* (range: { uid?: string }) {
+      const uidRange = range.uid ?? "";
+      requestedRanges.push(uidRange);
+      const match = /^(\d+)(?::(\d+))?$/.exec(uidRange);
+      const start = Number(match![1]);
+      const end = Math.min(totalMessages, match![2] ? Number(match![2]) : start);
+      // Emit descending within the window to verify lowest-100 selection without skipping.
+      for (let uid = end; uid >= start; uid -= 1) {
+        if (uid <= 150 || uid >= 12_001) {
+          yield { uid, internalDate: new Date("2026-07-01T00:00:00.000Z"), size: 64 };
+        } else {
+          yield { uid, internalDate: new Date("2025-01-01T00:00:00.000Z"), size: 64 };
+        }
+      }
+    });
+
+    const deps = {
+      scope: { workspaceId: "workspace", ownerUserId: "owner" },
+      connectionId: "connection",
+      connectionVersion: 1,
+      folder: "INBOX",
+      cursor: null,
+      since: new Date("2026-06-01T00:00:00.000Z"),
+      client: {
+        mailboxOpen: vi.fn(async () => ({ uidValidity: 42n, uidNext: totalMessages + 1, exists: totalMessages })),
+        fetch,
+        fetchOne,
+        logout: vi.fn(),
+      },
+      imports: { advanceImapCursor },
+      storage: {},
+    } as unknown as ImapSyncDeps;
+
+    const run1 = await syncMailbox(deps);
+    expect(run1).toMatchObject({ imported: 100, skipped: 0, cursor: { lastUid: 100 } });
+    expect(requestedRanges).toEqual(["1:5000"]);
+    expect(published).toEqual(Array.from({ length: 100 }, (_, i) => i + 1));
+
+    requestedRanges.length = 0;
+    const run2 = await syncMailbox({ ...deps, cursor: run1.cursor });
+    expect(run2).toMatchObject({ imported: 55, skipped: 0, cursor: { lastUid: 12_005 } });
+    expect(requestedRanges).toEqual(["101:5100", "5101:10100", "10101:12005"]);
+    expect(published).toEqual([
+      ...Array.from({ length: 150 }, (_, i) => i + 1),
+      12_001,
+      12_002,
+      12_003,
+      12_004,
+      12_005,
+    ]);
+    expect(advanceImapCursor).not.toHaveBeenCalled();
+  });
+
+  it("persists cursor progress across MAX_DISCOVERY_WINDOWS_PER_SYNC old/empty UIDs and probes highest UID when uidNext is omitted", async () => {
+    const totalMessages = 60_005;
+    const since = new Date("2026-06-01T00:00:00.000Z");
+    const published: number[] = [];
+    vi.mocked(publishConnectorSource).mockReset();
+    vi.mocked(publishConnectorSource).mockImplementation(async (_imports, _storage, _scope, input) => {
+      published.push(Number(input.identity.remoteId));
+      return { id: `receipt-${input.identity.remoteId}`, sourceIds: [`src-${input.identity.remoteId}`], duplicate: false, connectionVersion: 1 };
+    });
+
+    const requestedRanges: string[] = [];
+    const advanceImapCursor = vi.fn();
+    const fetchOne = vi.fn(async (uid: string) => {
+      if (uid === "*") {
+        return { uid: totalMessages, seq: totalMessages };
+      }
+      const source = Buffer.from(`Subject: UID ${uid}\r\n\r\nmessage`);
+      return {
+        uid: Number(uid),
+        seq: Number(uid),
+        source,
+        bodyParts: new Map([[partialBodyOffsetKey(0), source]]),
+      };
+    });
+    const deps = {
+      scope: { workspaceId: "workspace", ownerUserId: "owner" },
+      connectionId: "connection",
+      connectionVersion: 1,
+      folder: "INBOX",
+      cursor: { folder: "INBOX", uidValidity: "42", lastUid: 0 },
+      since,
+      client: {
+        mailboxOpen: vi.fn(async () => ({ uidValidity: 42n, exists: totalMessages })),
+        fetch: vi.fn(async function* (range: { uid?: string }) {
+          const uidRange = range.uid ?? "";
+          requestedRanges.push(uidRange);
+          const match = /^(\d+)(?::(\d+))?$/.exec(uidRange);
+          const start = Number(match![1]);
+          const end = Math.min(totalMessages, match![2] ? Number(match![2]) : start);
+          for (let uid = start; uid <= end; uid += 1) {
+            if (uid >= 60_001) {
+              yield { uid, internalDate: new Date("2026-07-01T00:00:00.000Z"), size: 64 };
+            }
+          }
+        }),
+        fetchOne,
+        logout: vi.fn(),
+      },
+      imports: { advanceImapCursor },
+      storage: {},
+    } as unknown as ImapSyncDeps;
+
+    const run1 = await syncMailbox(deps);
+    expect(run1).toMatchObject({ imported: 0, skipped: 0, cursor: { folder: "INBOX", uidValidity: "42", lastUid: 50_000 } });
+    expect(fetchOne).toHaveBeenCalledWith("*", { uid: true }, { uid: true });
+    expect(requestedRanges).toHaveLength(10);
+    expect(advanceImapCursor).toHaveBeenCalledWith(deps.scope, {
+      connectionId: "connection",
+      connectionVersion: 1,
+      cursor: {
+        expected: { folder: "INBOX", uidValidity: "42", lastUid: 0 },
+        next: { folder: "INBOX", uidValidity: "42", lastUid: 50_000 },
+      },
+    });
+
+    requestedRanges.length = 0;
+    const run2 = await syncMailbox({ ...deps, cursor: run1.cursor });
+    expect(run2).toMatchObject({ imported: 5, skipped: 0, cursor: { folder: "INBOX", uidValidity: "42", lastUid: 60_005 } });
+    expect(requestedRanges).toEqual(["50001:55000", "55001:60000", "60001:60005"]);
+    expect(published).toEqual([60_001, 60_002, 60_003, 60_004, 60_005]);
+  });
 });
