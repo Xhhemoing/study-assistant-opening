@@ -424,12 +424,13 @@ describe("TutorGraph fast path", () => {
   });
 
   it("strips undeclared verifier fields, hides thrown verifier messages, and enforces log2(outcomes) with pure coarsening", () => {
-    const crashBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const crashBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 1.5, now: () => 1000 });
     const crashed = runTutorGraph({
       questionStem: "积分",
       submission: {},
       budget: crashBudget,
       attemptSubmitted: true,
+      assessmentMode: "practice",
       verifyCaps: {
         verify: () => {
           throw new Error("INTERNAL_DB_SECRET_SOLUTION_42");
@@ -445,6 +446,33 @@ describe("TutorGraph fast path", () => {
     expect(crashed.reason).toBe("verifier_execution_failed");
     expect(crashed.releaseApproved).toBe(false);
     expect(JSON.stringify(crashed)).not.toContain("INTERNAL_DB_SECRET_SOLUTION_42");
+
+    // Round-15 P1-1: pure-turn verifier exception maps to the same 1-bit conservative outcome with <= 2 total outcomes
+    const pureOracleOutcomes = new Set<string>();
+    for (const verdictFn of [
+      () => ({ steps: [{ id: "s1", text: "x", status: "valid" as const }] }),
+      () => ({ steps: [{ id: "s1", text: "x", status: "invalid" as const }] }),
+      () => ({ steps: [{ id: "s1", text: "x", status: "unknown" as const }] }),
+      () => {
+        throw new Error("INTERNAL_DB_SECRET_SOLUTION_42");
+      },
+    ]) {
+      const pureB = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const res = runTutorGraph({
+        questionStem: "积分",
+        submission: { steps: [{ id: "s1", text: "x" }] },
+        budget: pureB,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verdictFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+      });
+      expect(res.state).toBe("released");
+      expect(res.releaseApproved).toBe(true);
+      expect(pureB.leakageBits).toBe(1);
+      expect(JSON.stringify(res)).not.toContain("INTERNAL_DB_SECRET_SOLUTION_42");
+      pureOracleOutcomes.add(JSON.stringify(res));
+    }
+    expect(pureOracleOutcomes.size).toBe(2);
 
     const leakBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
     const stripped = runTutorGraph({

@@ -734,6 +734,75 @@ describe("bounded symbolic equivalence", () => {
         nonCommutativeVars: ["A", "B"],
       }).status,
     ).toBe("equivalent");
+
+    // Round-15 P1-2: mixed rational + transcendental matrix expressions with shared irrational domain holes
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "A / (x^2 - 2) + sin(x) * C + B",
+        "A / (x^2 - 2) + sin(x) * C + ((x^2 - 2) / (x^2 - 2)) * B",
+        {
+          variable: "x",
+          nonCommutativeVars: ["A", "B", "C"],
+          intervals: [{ left: 1, right: 2 }],
+        },
+      ).status,
+    ).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "A / (x^2 - 2) + sin(x) * C + B",
+        "A / (x^2 - 2) + sin(x) * C + 2 * B",
+        {
+          variable: "x",
+          nonCommutativeVars: ["A", "B", "C"],
+          intervals: [{ left: 1, right: 2 }],
+        },
+      ).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "A / (x^2 - 2) + sin(x) * C + B",
+        "sin(x) * C + B",
+        {
+          variable: "x",
+          nonCommutativeVars: ["A", "B", "C"],
+          intervals: [{ left: 1, right: 2 }],
+        },
+      ),
+    ).toMatchObject({ status: "inequivalent", reason: "natural_domain_mismatch" });
+    const sharedIrrationalTranscendental = verifyMatrixExpressionEquivalence(
+      "A / (x^2 - 2) + sin(x) * B",
+      "A / (x^2 - 2) + sin(x) * ((x^2 - 2) / (x^2 - 2)) * B",
+      {
+        variable: "x",
+        nonCommutativeVars: ["A", "B"],
+        intervals: [{ left: 1, right: 2 }],
+      },
+    );
+    expect(["equivalent", "unverified"]).toContain(sharedIrrationalTranscendental.status);
+
+    // Round-15 P1-3: deep nesting/recursion depth cap prevents stack overflow (RangeError)
+    const tDeepNestStart = performance.now();
+    const deepParens = `${"(".repeat(20_000)}x${")".repeat(20_000)}`;
+    const deepMatrixParens = `${"(".repeat(20_000)}A${")".repeat(20_000)}`;
+    const deepLeftParens = `${"\\left(".repeat(20_000)}x${"\\right)".repeat(20_000)}`;
+    const deepBraces = `${"{".repeat(20_000)}x${"}".repeat(20_000)}`;
+    const deepUnary = `${"-".repeat(20_000)}x`;
+    expect(verifyScalarEquivalence(deepParens, "x")).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(verifyScalarEquivalence(deepUnary, "x")).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(verifyMatrixExpressionEquivalence(deepMatrixParens, "A")).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(parseScalarExpr(deepParens)).toBeNull();
+    expect(parseScalarExpr(deepLeftParens)).toBeNull();
+    expect(normalizeLatexExpr(deepBraces)).toBeNull();
+    expect(performance.now() - tDeepNestStart).toBeLessThan(200);
   });
 });
 

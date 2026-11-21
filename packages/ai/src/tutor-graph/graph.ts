@@ -388,16 +388,19 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   try {
     verification = input.verifyCaps.verify(input.submission);
   } catch {
-    return {
-      state: "unverified",
-      providerCalls: 0,
-      verification: { steps: [] },
-      leakageBits: budget.leakageBits,
-      helpState: budget.state,
-      cooldownUntilMs: budget.cooldownUntilMs,
-      releaseApproved: false,
-      reason: "verifier_execution_failed",
-    };
+    if (!isPureTurn) {
+      return {
+        state: "unverified",
+        providerCalls: 0,
+        verification: { steps: [] },
+        leakageBits: budget.leakageBits,
+        helpState: budget.state,
+        cooldownUntilMs: budget.cooldownUntilMs,
+        releaseApproved: false,
+        reason: "verifier_execution_failed",
+      };
+    }
+    verification = { steps: [] };
   }
 
   if (isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
