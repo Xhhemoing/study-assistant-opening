@@ -186,6 +186,12 @@ that can replace either parameter reports a violation. The scan follows aliases 
 `module` and statically named `require` bindings taken from it. Passing, returning
 or exporting the module object or its loader reports a violation, as does accessing
 an unknown module member. Normal `module.exports` assignments remain supported.
+For TypeScript in a CommonJS-default package, the scan accounts for both type
+stripping and CommonJS compilation of runtime imports and exports. In the CommonJS
+wrapper, `arguments[1]` supplies `require` and `arguments[2]` supplies `module`.
+The scan follows these slots through local aliases and arrows. Other slot access,
+mutation or escape of the arguments object fails the check. Ordinary functions
+and methods have their own arguments object, including in parameter initializers.
 JSDoc type imports contribute declaration edges at the comment line, including
 inline references. Malformed and nonliteral JSDoc imports fail the check. Triple-slash path
 references resolve relative to the declaring file. Ambient type directives resolve

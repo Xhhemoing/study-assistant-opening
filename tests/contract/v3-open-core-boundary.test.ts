@@ -188,7 +188,7 @@ function unwrapParens(expr: ts.Expression): ts.Expression {
 }
 
 function mentionsLoader(node: ts.Node): true | undefined {
-  if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && ["require", "module", "createRequire"].includes(node.text)) return true;
+  if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && ["require", "module", "arguments", "createRequire"].includes(node.text)) return true;
   return ts.forEachChild(node, mentionsLoader);
 }
 
@@ -208,12 +208,12 @@ function nodeModuleAPI(expr: ts.Expression | undefined): boolean {
   return !!name && ts.isStringLiteralLike(name) && (name.text === "node:module" || name.text === "module");
 }
 
-type LoaderBinding = "require" | "factory" | "module-api" | "commonjs-module";
+type LoaderBinding = "require" | "factory" | "module-api" | "commonjs-module" | "wrapper-arguments";
 type LoaderContext = { checker: ts.TypeChecker; hasWrapper: () => boolean };
 
 function literalKey(expr: ts.Expression): string | undefined {
   const key = unwrapParens(expr);
-  return ts.isStringLiteralLike(key) ? key.text : undefined;
+  return ts.isStringLiteralLike(key) || ts.isNumericLiteral(key) ? key.text : undefined;
 }
 
 function memberName(access: ts.PropertyAccessExpression | ts.ElementAccessExpression): string | undefined {
@@ -228,7 +228,7 @@ function destructuredKey(element: ts.BindingElement): string | undefined {
 
 function wrapperParameter(decl: ts.Declaration, context: LoaderContext): boolean {
   if ((!ts.isVariableDeclaration(decl) && !ts.isBindingElement(decl)) || !ts.isIdentifier(decl.name) ||
-      (decl.name.text !== "require" && decl.name.text !== "module")) return false;
+      !["require", "module", "arguments"].includes(decl.name.text)) return false;
   let owner: ts.Node = decl;
   while (ts.isBindingElement(owner)) owner = owner.parent.parent;
   if (!ts.isVariableDeclaration(owner) || !ts.isVariableDeclarationList(owner.parent) ||
@@ -238,11 +238,31 @@ function wrapperParameter(decl: ts.Declaration, context: LoaderContext): boolean
   return !!scope && ts.isSourceFile(scope) && context.hasWrapper();
 }
 
+function loaderDeclaration(id: ts.Identifier, checker: ts.TypeChecker): ts.Declaration | "local-arguments" | undefined {
+  const lookup = (at: ts.Node) => checker.resolveName(id.text, at, ts.SymbolFlags.Value | ts.SymbolFlags.Alias, false)
+    ?.declarations?.find(d => !(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) &&
+      !ts.isTypeOnlyImportOrExportDeclaration(d) && !(id.text === "arguments" && ts.isIdentifier(d)));
+  let decl = lookup(id);
+  if (id.text !== "arguments") return decl;
+  // The checker synthesizes arguments in arrows too. Resolve their inherited binding outside the arrow.
+  for (let child: ts.Node = id; !decl && child.parent; child = child.parent) {
+    const owner = child.parent;
+    if (!ts.isFunctionLike(owner)) continue;
+    if (!ts.isArrowFunction(owner) && (ts.isParameter(child) || ts.isBlock(child))) return "local-arguments";
+    // A computed method name is evaluated outside the method's parameter and body scopes.
+    decl = lookup(owner.parent);
+  }
+  return decl;
+}
+
 function loaderBinding(expr: ts.Expression, context?: LoaderContext, seen = new Set<ts.Declaration>()): LoaderBinding | undefined {
   if (!context) return undefined;
   const value = unwrapParens(expr);
   if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
     const name = memberName(value);
+    if ((name === "1" || name === "2") && loaderBinding(value.expression, context, seen) === "wrapper-arguments") {
+      return name === "1" ? "require" : "commonjs-module";
+    }
     if (name === "require" && loaderBinding(value.expression, context, seen) === "commonjs-module") return "require";
     if (name === "createRequire" && loaderBinding(value.expression, context, seen) === "module-api") return "factory";
   }
@@ -252,13 +272,13 @@ function loaderBinding(expr: ts.Expression, context?: LoaderContext, seen = new 
     if (binding === "require" && nodeModuleAPI(value.arguments[0])) return "module-api";
   }
   if (!ts.isIdentifier(value)) return undefined;
-  const symbol = context.checker.resolveName(value.text, value, ts.SymbolFlags.Value | ts.SymbolFlags.Alias, false);
-  const decl = symbol?.declarations?.find(d => !(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) &&
-    !ts.isTypeOnlyImportOrExportDeclaration(d));
+  const decl = loaderDeclaration(value, context.checker);
+  if (decl === "local-arguments") return undefined;
   // In a .cjs file TypeScript can synthesize an Identifier declaration for the host module.
   if (!decl || (value.text === "module" && ts.isIdentifier(decl)) || wrapperParameter(decl, context)) {
     if (value.text === "module") return "commonjs-module";
     if (value.text === "require") return "require";
+    if (value.text === "arguments" && context.hasWrapper()) return "wrapper-arguments";
     return value.text === "createRequire" ? "factory" : undefined;
   }
   if (seen.has(decl)) return undefined;
@@ -293,11 +313,21 @@ function escapingLoader(node: ts.Expression, context: LoaderContext): boolean {
     if (!(ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Export)) return false;
   } else if (!ts.isShorthandPropertyAssignment(parent) &&
       ((parent as ts.NamedDeclaration).name === node || ("propertyName" in parent && parent.propertyName === node))) return false;
-  if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) {
-    if (!(ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Export)) return false;
-  }
   if (ts.isTypeOfExpression(parent) || ts.isVoidExpression(parent)) return false;
   const binding = loaderBinding(node, context);
+  if (!binding) return false;
+  if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name) &&
+      !(ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Export)) {
+    // A local alias is safe only when later references resolve to that binding.
+    return loaderBinding(parent.name, context) !== binding;
+  }
+  if (binding === "wrapper-arguments") {
+    if (ts.isElementAccessExpression(parent) && parent.expression === node) {
+      const key = memberName(parent);
+      return key !== "1" && key !== "2";
+    }
+    return true;
+  }
   if (binding === "require") return !(ts.isCallExpression(parent) && parent.expression === node);
   if (binding !== "commonjs-module") return false;
   if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) {
@@ -371,13 +401,13 @@ function jsDocEdges(source: ts.SourceFile): Edge[] {
   return edges;
 }
 
-function parseEdges(file: string, text: string, hasWrapper: (esmSyntax: boolean) => boolean): Edge[] {
+function parseEdges(file: string, text: string, hasWrapper: (source: ts.SourceFile) => boolean): Edge[] {
   // TypeScript infers ScriptKind from the filename, including TSX and JS variants.
   const source = ts.createSourceFile(file, text, {
     languageVersion: ts.ScriptTarget.Latest, jsDocParsingMode: ts.JSDocParsingMode.ParseAll,
   }, true);
   const context = mentionsLoader(source) ? {
-    checker: localBindingChecker(source), hasWrapper: () => hasWrapper(ts.isExternalModule(source)),
+    checker: localBindingChecker(source), hasWrapper: () => hasWrapper(source),
   } : undefined;
   const edges = jsDocEdges(source);
   for (const ref of source.referencedFiles) {
@@ -630,13 +660,15 @@ class ModuleGraph {
     return undefined;
   }
 
-  hasCommonJsWrapper(file: string, esmSyntax: boolean): boolean {
+  hasCommonJsWrapper(file: string, source: ts.SourceFile): boolean {
     const ext = path.extname(file);
     if (ext === ".cjs" || ext === ".cts") return true;
     if (ext === ".mjs" || ext === ".mts") return false;
     const owner = this.findPackageRoot(file);
     const format = owner && this.loadManifest(owner)?.type;
-    return format === "commonjs" || (format !== "module" && !esmSyntax);
+    if (format === "module") return false;
+    // Type-only imports/exports disappear under stripping. Runtime TS exports can also be compiled to CommonJS.
+    return format === "commonjs" || ext === ".ts" || ext === ".tsx" || !ts.isExternalModule(source);
   }
 
   // An exact artifact wins before extension substitution. Inspect metadata only.
@@ -1039,8 +1071,8 @@ function scanEntries(graph: ModuleGraph, entries: readonly string[], checkLicens
         module = graph.readSource(current.file, checkLicense);
         if (!module) throw new BlockedPath(graph.label(current.file));
         const { source, text } = module;
-        edges = parseEdges(source, text, esmSyntax => graph.hasCommonJsWrapper(source, esmSyntax) ||
-          (source !== current.file && graph.hasCommonJsWrapper(current.file, esmSyntax)));
+        edges = parseEdges(source, text, ast => graph.hasCommonJsWrapper(source, ast) ||
+          (source !== current.file && graph.hasCommonJsWrapper(current.file, ast)));
       } catch (error) {
         if (!(error instanceof BlockedPath)) throw error;
         violations.push({ entry: entryLabel, target: error.message, chain: current.chain });
@@ -1709,6 +1741,68 @@ describe("v3 Open-Core public candidate boundary", () => {
     const result = virtualAnalyze({ [file]: 'if (enabled) { var require; } require("pg");',
       "package.json": '{"type":"commonjs"}' }, file);
     expect(result.violations.map(v => v.target)).toEqual(["pg"]);
+  });
+
+  it.each([
+    ['export type Portable = string;', 'var require; const load = require; module.exports = load("pg");'],
+    ['import type { T } from "./types";', 'var module; module.require("pg");'],
+    ['export interface Portable {}', 'var require; require("pg");'],
+    ['export declare const portable: string;', 'var module; module.require("pg");'],
+    ['export const value = 1;', 'var require; require("pg");'],
+  ])("checks possible CommonJS execution of a default-package TS file with %s", (prefix, code) => {
+    const result = virtualAnalyze({
+      "package.json": "{}", "entry.ts": 'import "./public.ts";', "public.ts": prefix + "\n" + code,
+      "types.d.ts": "export type T = string;",
+    }, "entry.ts");
+    expect(result.violations.map(v => v.target)).toEqual(["pg"]);
+  });
+
+  it.each([
+    ["public.cjs", 'const m = arguments[2]; module.exports = m.require("pg");', "pg"],
+    ["public.cjs", 'arguments[1]("pg");', "pg"],
+    ["public.ts", 'export type T = string; const args = arguments; args["1"]("pg");', "pg"],
+    ["public.cjs", '(() => arguments[2].require("pg"))();', "pg"],
+    ["public.cjs", 'const f = (r = arguments[1]) => r("pg");', "<escaping-loader>"],
+    ["public.ts", 'const f = (x = arguments[1]("pg")) => x;', "pg"],
+    ["public.cjs", 'const args = arguments; const f = () => args[1](name);', "<dynamic-non-literal>"],
+    ["public.cjs", 'const obj = { [arguments[1]("pg")]() {} };', "pg"],
+    ["public.cjs", 'var arguments; (() => arguments[1]("pg"))();', "pg"],
+  ])("checks wrapper slots in %s through %s", (file, code, target) => {
+    const result = virtualAnalyze({ "entry.ts": `import "./${file}";`, [file]: code }, "entry.ts");
+    expect(result.violations.map(v => v.target)).toEqual([target]);
+  });
+
+  it.each([
+    'const args = arguments; consume(args);', 'const f = () => arguments;',
+    'module.exports = arguments;', 'consume(...arguments);', 'const { ...rest } = arguments;',
+    'const args = arguments; args[key]("pg");', 'const args = arguments; args[1] = other;',
+    'arguments.extra = other;', 'arguments = other;', 'let args = arguments; args = other;',
+    'const args = arguments; delete args[2];', 'const args = arguments; export { args };',
+    'var args; var args = arguments; args[1]("pg");',
+  ])("rejects an escaping or mutated wrapper arguments object in %s", code => {
+    expect(virtualAnalyze({ "public.cjs": code }, "public.cjs").violations.map(v => v.target)).toContain("<escaping-loader>");
+  });
+
+  it("respects inner functions' own arguments, default parameters and lexical shadows in arrows", () => {
+    const code = [
+      'function helper(x) { return arguments[0]; }',
+      'function own(x = arguments[1]("pg")) { return () => arguments[2].require("pg"); }',
+      'const fn = function () { return arguments; };',
+      'class C { constructor(x = arguments[1]("pg")) {} method() { return arguments; } get x() { return arguments[2]; } set x(v) { use(arguments); } }',
+      '{ const arguments = local; (() => arguments[1]("pg"))(); }',
+      'const shadow = (arguments) => arguments[1]("pg");',
+    ].join("\n");
+    expect(virtualAnalyze({ "public.cjs": code }, "public.cjs").violations).toEqual([]);
+  });
+
+  it.each(["public.mts", "public.ts", "public.js"])("does not supply wrapper arguments in an explicit ES module %s", file => {
+    expect(virtualAnalyze({ "package.json": '{"type":"module"}', [file]: 'export const read = () => arguments[1]("pg");' }, file)
+      .violations).toEqual([]);
+  });
+
+  it("keeps runtime ES module syntax authoritative for JavaScript in a default package", () => {
+    expect(virtualAnalyze({ "package.json": "{}", "public.js": 'export const read = () => arguments[1]("pg");' }, "public.js")
+      .violations).toEqual([]);
   });
 
   it("keeps host loader bindings when TypeScript declarations disappear at runtime", () => {
