@@ -1851,6 +1851,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "1(a) Speed change: (m/s) −4 2(b) Let m = 6 and s = 2.",
     "Let m = 6 and s = 2, (b) Speed change: (m/s) −4.",
     "Speed change: (m/s) −4, (b) let m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b) m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (i) m := 6, m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (ii) $m = 6$ and s = 2.",
     "Let m = 6 and s = 2 (b) speed change: (m/s) −4.",
     "Speed change: (m/s) −4, Exercise 2 Let m = 6 and s = 2.",
     "(m/s) −4. In the next exercise, m = 6 and s = 2.",
@@ -1925,6 +1928,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "1(a) Let m = 6 and s = 2, (m/s) −4.",
     "1(a) Previous question, 2(b) (m/s) −4, where m = 6 and s = (2).",
     "(m/s) −4, where m = 2(x) and s = 3.",
+    "(m/s) −4, where m = 2(b) = 8 and s = 2.",
+    "(m/s) −4, where m = (a) + (b) and s = 2.",
     "(m/s) −4, where m = approx. +.6 and s = 2.",
     "(m/s) −4, where m = approx. 5.2 and s = 2.",
     "(m/s) −4, e.g. m = 6 and s = 2.",
@@ -1946,9 +1951,15 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     ["variant stem", '["B","D"]'],
     ["variant stem", '[ "B", "D" ]'],
     ["variant stem", "B, D"],
+    ["variant stem", '"B, D"'],
+    ["variant stem", "'B , D'"],
+    ["variant stem", "[B, D]"],
     ["sibling card", '["B","D"]'],
     ["sibling card", '["B", "D"]'],
     ["sibling card", "B , D"],
+    ["sibling card", '"B , D"'],
+    ["sibling card", "'B, D'"],
+    ["sibling card", "[B, D]"],
   ] as const)("rejects a sealed array in a %s (%s)", (surface, sequence) => {
     const leakedText = `Use the sequence ${sequence}.`;
     const variant = makeMissVariantCandidate({
@@ -1968,14 +1979,14 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
   });
 
-  it("allows a different sequence in a stem", () => {
+  it.each(['["D", "B"]', '"AB , D"', '"B, Delta"'])("allows a different sequence in a stem (%s)", sequence => {
     expect(issueOfflineFlashcardLease({
       leaseId: "lease-array-decoy",
       workspaceId: "ws-1",
       learnerId: "learner-1",
       issuedAtMs: T0,
       candidates: [makeMissVariantCandidate({
-        freshVariantStem: 'Compare the sequence ["D", "B"] with your result.',
+        freshVariantStem: `Compare the sequence ${sequence} with your result.`,
         sealedPayload: { order: ["B", "D"] },
       })],
     })).toMatchObject({ ok: true });
@@ -2029,6 +2040,97 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       expect(getterCalled).toBe(false);
     },
   );
+
+  it.each(["candidate list", "nested payload"] as const)(
+    "rejects a named array getter on the %s without invoking it",
+    surface => {
+      const nested: unknown[] = ["violet"];
+      const candidates = [makeMissVariantCandidate({ sealedPayload: { nested } })];
+      const array = surface === "candidate list" ? candidates : nested;
+      let getterCalled = false;
+      Object.defineProperty(array, "answerKey", {
+        get() {
+          getterCalled = true;
+          return "violet";
+        },
+      });
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-array-own-getter",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+      expect(getterCalled).toBe(false);
+    },
+  );
+
+  it.each([
+    ["candidate list", "01"],
+    ["candidate list", Symbol("extra")],
+    ["nested payload", "01"],
+    ["nested payload", Symbol("extra")],
+  ] as const)("rejects non-index array data on the %s at %s", (surface, key) => {
+    const nested = ["violet"];
+    const candidates = [makeMissVariantCandidate({ sealedPayload: { nested } })];
+    Object.defineProperty(surface === "candidate list" ? candidates : nested, key, { value: "extra" });
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-array-extra-data",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates,
+    })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+  });
+
+  it.each(["candidate list", "nested payload"] as const)(
+    "rejects an Array.prototype protected getter on the %s without invoking it",
+    surface => {
+      const candidates = [makeMissVariantCandidate({ sealedPayload: { nested: ["violet"] } })];
+      if (surface === "nested payload") Object.setPrototypeOf(candidates, null);
+      let getterCalled = false;
+      Object.defineProperty(Array.prototype, "answerKey", {
+        configurable: true,
+        get() {
+          getterCalled = true;
+          return "violet";
+        },
+      });
+      let result: ReturnType<typeof issueOfflineFlashcardLease>;
+      try {
+        result = issueOfflineFlashcardLease({
+          leaseId: "lease-array-inherited-getter",
+          workspaceId: "ws-1",
+          learnerId: "learner-1",
+          issuedAtMs: T0,
+          candidates,
+        });
+      } finally {
+        Reflect.deleteProperty(Array.prototype, "answerKey");
+      }
+      expect(result).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+      expect(getterCalled).toBe(false);
+    },
+  );
+
+  it("rejects an Object.prototype protected data field inherited by the candidate array", () => {
+    const input = {
+      leaseId: "lease-array-inherited-data",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [makeMissVariantCandidate()],
+    };
+    Object.setPrototypeOf(input, null);
+    Object.defineProperty(Object.prototype, "answerKey", { configurable: true, value: "violet" });
+    let result: ReturnType<typeof issueOfflineFlashcardLease>;
+    try {
+      result = issueOfflineFlashcardLease(input);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, "answerKey");
+    }
+    expect(result).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+  });
 
   it("accepts plain records with null prototypes at issuance", () => {
     const candidate = makeMissVariantCandidate();

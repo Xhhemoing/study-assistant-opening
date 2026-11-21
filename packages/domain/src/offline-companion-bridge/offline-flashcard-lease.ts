@@ -516,10 +516,11 @@ const ITEM_MARKER_AFTER_ABBREVIATION_RE = new RegExp(
   `^\\s*(?:${NUMBERED_ITEM_MARKER}|${BRACKETED_ITEM_MARKER})`,
 );
 const ITEM_MARKER_FOLLOW = "(?=$|[\\s:：\\p{L}])";
+const SPACED_ITEM_START = String.raw`\s+(?:\p{L}{2}|[A-Za-z]\s*(?::=|=(?![=>])|∈|\\in\b)|\$[^$\r\n]+\$)`;
 const ITEM_MARKER_WITHIN_SENTENCE_RE = new RegExp(
   `(?<=^|[\\s,，、:：])(?<![=+*/^−-]\\s*)(?:${NUMBERED_ITEM_MARKER}|(?:[Ee]xercise|[Pp]roblem|[Qq]uestion|[Pp]art|[Ii]tem)\\s+\\d+)${ITEM_MARKER_FOLLOW}|` +
     `(?<=(?:^|[,，、:：])\\s*)${BRACKETED_ITEM_MARKER}${ITEM_MARKER_FOLLOW}|` +
-    `(?<=\\s)(?<![=+*/^−-]\\s*)${BRACKETED_ITEM_MARKER}(?=\\s+\\p{L}{2})`,
+    `(?<=\\s)(?<![=+*/^−-]\\s*)${BRACKETED_ITEM_MARKER}(?=${SPACED_ITEM_START})`,
   "gu",
 );
 const POSTFIX_APPROXIMATION_RE = /\d\s+approx$/i;
@@ -1276,9 +1277,11 @@ function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecr
   if (compactStem.includes(compactJsonPunctuation(normalizedSecret))) return true;
 
   // Complete letter-choice sequences can also be disclosed without JSON quotes.
-  return values.length >= 2 &&
-    values.every((value: unknown) => typeof value === "string" && /^[a-z]$/i.test(value)) &&
-    containsUnicodeWordBoundedToken(compactStem, values.join(","));
+  if (values.length < 2 || !values.every((value: unknown) => typeof value === "string" && /^[a-z]$/i.test(value))) {
+    return false;
+  }
+  const sequence = values.join("\\s*,\\s*");
+  return new RegExp(`(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`, "iu").test(stem);
 }
 
 /**
@@ -1523,12 +1526,19 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
       throw new TypeError("Protected payload contains unsupported or cyclic data");
     }
 
-    const arrayLength = Array.isArray(current) ? current.length : null;
-    const prototype: unknown = Object.getPrototypeOf(current);
-    if (prototype !== null && prototype !== (arrayLength === null ? Object.prototype : Array.prototype)) {
-      throw new TypeError("Protected payload must contain plain records and arrays");
-    }
     const keys = Reflect.ownKeys(current);
+    let arrayLength: number | null = null;
+    if (Array.isArray(current)) {
+      if (!isPlainLeaseArray(current, keys)) {
+        throw new TypeError("Protected payload arrays must contain only indexed data");
+      }
+      arrayLength = current.length;
+    } else {
+      const prototype: unknown = Object.getPrototypeOf(current);
+      if (prototype !== null && prototype !== Object.prototype) {
+        throw new TypeError("Protected payload must contain plain records");
+      }
+    }
     if ((arrayLength ?? 0) > remainingNodes || keys.length - (arrayLength === null ? 0 : 1) > remainingNodes) {
       throw new RangeError("Protected payload exceeds inspection bounds");
     }
@@ -1539,17 +1549,14 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
     for (const key of keys) {
       if (arrayLength !== null && key === "length") continue;
       const property = Object.getOwnPropertyDescriptor(current, key);
-      if (!property || !("value" in property)) {
+      if (!property || !Object.hasOwn(property, "value")) {
         throw new TypeError("Protected payload properties must be inspectable data");
       }
       const json = inspect(property.value, depth + 1);
       if (typeof key !== "string") continue;
       if (arrayLength !== null) {
-        const index = Number(key);
-        if (Number.isInteger(index) && index >= 0 && index < arrayLength && String(index) === key) {
-          parts[index] = json ?? "null";
-          indexedChildren += 1;
-        }
+        parts[Number(key)] = json ?? "null";
+        indexedChildren += 1;
       } else if (property.enumerable && json !== undefined) {
         parts.push(`${JSON.stringify(key)}:${json}`);
       }
@@ -2099,10 +2106,22 @@ function isPlainLeaseRecord(value: unknown, knownFields: readonly string[], insp
   return true;
 }
 
-function isPlainLeaseArray(value: unknown): value is readonly unknown[] {
+function isPlainLeaseArray(value: unknown, ownKeys?: readonly PropertyKey[]): value is readonly unknown[] {
   if (!Array.isArray(value)) return false;
   const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Array.prototype || prototype === null;
+  if (prototype !== Array.prototype && prototype !== null) return false;
+  if (prototype !== null && FORBIDDEN_MISS_VARIANT_FIELDS.some(field =>
+    Object.getOwnPropertyDescriptor(Array.prototype, field) !== undefined ||
+    Object.getOwnPropertyDescriptor(Object.prototype, field) !== undefined,
+  )) return false;
+
+  const length = value.length;
+  return (ownKeys ?? Reflect.ownKeys(value)).every(key => {
+    if (key === "length") return true;
+    if (typeof key !== "string") return false;
+    const index = Number(key);
+    return Number.isInteger(index) && index >= 0 && index < length && String(index) === key;
+  });
 }
 
 function inspectLeaseCards<Card>(cards: readonly Card[]): Card[] | null {
