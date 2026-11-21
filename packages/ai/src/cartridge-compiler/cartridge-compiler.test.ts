@@ -1672,4 +1672,118 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       expect.arrayContaining([expect.stringContaining("invalid_t7_status:unknown")]),
     );
   });
+
+  it("allows valid UUIDs with 11-digit tails and alphanumeric IDs while still catching unformatted phones (Round-7 P1-1)", () => {
+    // Valid UUID ending in a12345678901 and alphanumeric/underscore token id_1234567890 MUST NOT false-positive.
+    expect(() =>
+      assertNoRawPiiInText(
+        "trace=550e8400-e29b-41d4-a716-a12345678901 ref=id_1234567890 hex=a12345678901",
+        "uuid_and_alnum",
+      ),
+    ).not.toThrow();
+
+    // Real unformatted phones in standalone/key=val/tel: contexts ARE still caught.
+    for (const sample of [
+      "4155550199",
+      "13800138000",
+      "contact=4155550199",
+      "tel:4155550199",
+    ]) {
+      expect(() => assertNoRawPiiInText(sample, "phone_check")).toThrow(
+        CartridgePiiViolationError,
+      );
+    }
+  });
+
+  it("rejects non-string numeric PII in t7.reason / l.telemetryIssues and redacts non-string raw fields on vetoed receipts (Round-7 P1-2)", () => {
+    const clean = buildMatureCohort("cand_num_pii_base", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+
+    // Numeric phone 4155550199 smuggled into t7.reason -> throws CartridgePiiViolationError!
+    const numericPhoneReason: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_numeric_phone_reason",
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: 4155550199 as unknown as string,
+      },
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([numericPhoneReason], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Numeric phone smuggled inside l.telemetryIssues -> throws CartridgePiiViolationError!
+    const numericPhoneIssue: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_numeric_phone_issue",
+      l: {
+        ...clean.l,
+        telemetryIssues: [13800138000 as unknown as string],
+      },
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([numericPhoneIssue], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Non-PII non-string value (e.g., 42) in t7.reason is vetoed AND redacted (never echoed raw in returned metrics).
+    const nonStringReason: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_non_string_reason",
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: 42 as unknown as string,
+      },
+    };
+    const vetoRes = evaluateParetoFrontierAndPromotion([nonStringReason], {
+      baseline: { cRate: 0.8, t7Rate: 0.72 },
+    });
+    expect(vetoRes.vetoedCandidateIds).toEqual(["cand_non_string_reason"]);
+    const vetoedEntry = vetoRes.results[0]!;
+    expect(vetoedEntry.status).toBe("vetoed_invalid_telemetry");
+    expect(vetoedEntry.metrics.t7.status).toBe("pending");
+    if (vetoedEntry.metrics.t7.status === "pending") {
+      expect(typeof vetoedEntry.metrics.t7.reason).toBe("string");
+      expect(vetoedEntry.metrics.t7.reason).toBe("redacted_invalid_reason");
+    }
+  });
+
+  it("rejects non-finite or out-of-range Pareto promotion option thresholds fail-closed (Round-7 P1-3)", () => {
+    const safe = buildMatureCohort("cand_opts_check", {
+      learnerCount: 25,
+      repairedCount: 22,
+      t7PassedCount: 24,
+    });
+
+    const invalidOptionCases = [
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, minT7Gain: Number.NEGATIVE_INFINITY },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, minT7Gain: Number.NaN },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, minT7Gain: -0.05 },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, nonInferiorityMargin: Number.POSITIVE_INFINITY },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, nonInferiorityMargin: Number.NaN },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, nonInferiorityMargin: -0.01 },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, nonInferiorityMargin: 1.5 },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, maxAllowedLeakageRate: Number.NaN },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, minClusterCount: 0 },
+      { baseline: { cRate: 0.8, t7Rate: 0.72 }, minClusterCount: Number.POSITIVE_INFINITY },
+      { baseline: { cRate: Number.NaN, t7Rate: 0.72 } },
+      { baseline: { cRate: 0.8, t7Rate: 1.2 } },
+    ];
+
+    for (const opts of invalidOptionCases) {
+      expect(() => evaluateParetoFrontierAndPromotion([safe], opts)).toThrow(RangeError);
+    }
+  });
 });

@@ -477,8 +477,19 @@ function validateLeakageTelemetryFailClosed(
   const vetoReasons: string[] = [];
   const l = candidate.l;
 
-  if (l.telemetryIssues && l.telemetryIssues.length > 0) {
-    vetoReasons.push(...l.telemetryIssues.map((issue) => `telemetry_integrity:${issue}`));
+  if (l.telemetryIssues !== undefined) {
+    if (!Array.isArray(l.telemetryIssues)) {
+      vetoReasons.push("telemetry_integrity:telemetryIssues_must_be_string_array");
+    } else {
+      for (let i = 0; i < l.telemetryIssues.length; i += 1) {
+        const issue = l.telemetryIssues[i];
+        if (typeof issue !== "string") {
+          vetoReasons.push(`telemetry_integrity:non_string_telemetryIssue[${i}]`);
+        } else {
+          vetoReasons.push(`telemetry_integrity:${issue}`);
+        }
+      }
+    }
   }
 
   const validTotal = isNonNegativeInteger(l.totalReleasedTurns) && l.totalReleasedTurns > 0;
@@ -832,15 +843,182 @@ function validateObjectiveTelemetryFailClosed(
   return { issues, matureCert };
 }
 
+function sanitizeMetricsForVeto(candidate: CartridgeCandidateMetrics): CartridgeCandidateMetrics {
+  const safeTelemetryIssues = Array.isArray(candidate.l.telemetryIssues)
+    ? candidate.l.telemetryIssues.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
+
+  const rawT7 = candidate.t7 as T7Metric | null | undefined;
+  let safeT7: T7Metric;
+  if (rawT7 && typeof rawT7 === "object" && rawT7.status === "mature") {
+    safeT7 = {
+      status: "mature",
+      rate: typeof rawT7.rate === "number" ? rawT7.rate : Number.NaN,
+      passedFreshTransferCount:
+        typeof rawT7.passedFreshTransferCount === "number"
+          ? rawT7.passedFreshTransferCount
+          : Number.NaN,
+      eligibleFollowupCohortCount:
+        typeof rawT7.eligibleFollowupCohortCount === "number"
+          ? rawT7.eligibleFollowupCohortCount
+          : Number.NaN,
+      learnerClusterCount:
+        typeof rawT7.learnerClusterCount === "number" ? rawT7.learnerClusterCount : Number.NaN,
+      learnerOutcomeCounts: Array.isArray(rawT7.learnerOutcomeCounts)
+        ? rawT7.learnerOutcomeCounts.filter(
+            (n): n is number => typeof n === "number" && Number.isFinite(n),
+          )
+        : [],
+      effectiveClusterSampleSize:
+        typeof rawT7.effectiveClusterSampleSize === "number"
+          ? rawT7.effectiveClusterSampleSize
+          : Number.NaN,
+      learnerClusterMean:
+        typeof rawT7.learnerClusterMean === "number" ? rawT7.learnerClusterMean : Number.NaN,
+      standardError: typeof rawT7.standardError === "number" ? rawT7.standardError : Number.NaN,
+      clopperPearsonLowerBound:
+        typeof rawT7.clopperPearsonLowerBound === "number"
+          ? rawT7.clopperPearsonLowerBound
+          : Number.NaN,
+      learnerClusterLowerBound:
+        typeof rawT7.learnerClusterLowerBound === "number"
+          ? rawT7.learnerClusterLowerBound
+          : Number.NaN,
+      ...(typeof rawT7.alpha === "number" ? { alpha: rawT7.alpha } : {}),
+    };
+  } else if (rawT7 && typeof rawT7 === "object" && rawT7.status === "pending") {
+    safeT7 = {
+      status: "pending",
+      passedFreshTransferCount:
+        typeof rawT7.passedFreshTransferCount === "number"
+          ? rawT7.passedFreshTransferCount
+          : Number.NaN,
+      eligibleFollowupCohortCount:
+        typeof rawT7.eligibleFollowupCohortCount === "number"
+          ? rawT7.eligibleFollowupCohortCount
+          : Number.NaN,
+      pendingCohortCount:
+        typeof rawT7.pendingCohortCount === "number" ? rawT7.pendingCohortCount : Number.NaN,
+      reason:
+        typeof rawT7.reason === "string" && rawT7.reason.trim().length > 0
+          ? rawT7.reason
+          : "redacted_invalid_reason",
+    };
+  } else {
+    safeT7 = {
+      status: "pending",
+      passedFreshTransferCount: 0,
+      eligibleFollowupCohortCount: 0,
+      pendingCohortCount: 0,
+      reason: "redacted_invalid_t7_status",
+    };
+  }
+
+  return {
+    candidateId: candidate.candidateId,
+    c: {
+      rate: typeof candidate.c.rate === "number" ? candidate.c.rate : Number.NaN,
+      repairedCount:
+        typeof candidate.c.repairedCount === "number" ? candidate.c.repairedCount : Number.NaN,
+      verifiableFirstErrorCount:
+        typeof candidate.c.verifiableFirstErrorCount === "number"
+          ? candidate.c.verifiableFirstErrorCount
+          : Number.NaN,
+      abandonedCount:
+        typeof candidate.c.abandonedCount === "number" ? candidate.c.abandonedCount : Number.NaN,
+      abandonmentRate:
+        typeof candidate.c.abandonmentRate === "number"
+          ? candidate.c.abandonmentRate
+          : Number.NaN,
+    },
+    l: {
+      rate: typeof candidate.l.rate === "number" ? candidate.l.rate : Number.NaN,
+      leakedReleasedTurns:
+        typeof candidate.l.leakedReleasedTurns === "number"
+          ? candidate.l.leakedReleasedTurns
+          : Number.NaN,
+      totalReleasedTurns:
+        typeof candidate.l.totalReleasedTurns === "number"
+          ? candidate.l.totalReleasedTurns
+          : Number.NaN,
+      severeLeakCount:
+        typeof candidate.l.severeLeakCount === "number" ? candidate.l.severeLeakCount : Number.NaN,
+      guardBlockedCount:
+        typeof candidate.l.guardBlockedCount === "number"
+          ? candidate.l.guardBlockedCount
+          : Number.NaN,
+      ...(safeTelemetryIssues && safeTelemetryIssues.length > 0
+        ? { telemetryIssues: safeTelemetryIssues }
+        : {}),
+    },
+    t7: safeT7,
+  };
+}
+
+function validateParetoEvaluationOptions(options: ParetoEvaluationOptions): {
+  readonly baselineCRate: number;
+  readonly baselineT7Rate: number;
+  readonly maxAllowedLeakageRate: number;
+  readonly minT7Gain: number;
+  readonly nonInferiorityMargin: number;
+  readonly minClusterCount: number;
+} {
+  if (!options || typeof options !== "object" || !options.baseline || typeof options.baseline !== "object") {
+    throw new RangeError("Pareto evaluation requires a valid baseline { cRate, t7Rate } object.");
+  }
+
+  const baselineCRate = options.baseline.cRate;
+  const baselineT7Rate = options.baseline.t7Rate;
+  const maxAllowedLeakageRate = options.maxAllowedLeakageRate ?? 0;
+  const minT7Gain = options.minT7Gain ?? 0.05;
+  const nonInferiorityMargin = options.nonInferiorityMargin ?? 0.02;
+  const minClusterCount = options.minClusterCount ?? 5;
+
+  for (const [name, value] of [
+    ["baseline.cRate", baselineCRate],
+    ["baseline.t7Rate", baselineT7Rate],
+    ["maxAllowedLeakageRate", maxAllowedLeakageRate],
+    ["minT7Gain", minT7Gain],
+    ["nonInferiorityMargin", nonInferiorityMargin],
+  ] as const) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+      throw new RangeError(
+        `${name} must be a finite number in [0, 1] (received ${String(value)}).`,
+      );
+    }
+  }
+
+  if (
+    typeof minClusterCount !== "number" ||
+    !Number.isFinite(minClusterCount) ||
+    !Number.isInteger(minClusterCount) ||
+    minClusterCount < 1
+  ) {
+    throw new RangeError(
+      `minClusterCount must be a positive integer >= 1 (received ${String(minClusterCount)}).`,
+    );
+  }
+
+  return {
+    baselineCRate,
+    baselineT7Rate,
+    maxAllowedLeakageRate,
+    minT7Gain,
+    nonInferiorityMargin,
+    minClusterCount,
+  };
+}
+
 /**
  * Runs:
- * 1) Canonicalization, PII check, and uniqueness enforcement on all `candidateId`s,
- * 2) Fail-closed Hard Pre-Pareto Veto on leakage telemetry AND objective (`C`, `T7`)
+ * 1) Fail-closed validation of all promotion thresholds & margins,
+ * 2) Canonicalization, PII check across entire receipts (including numeric PII), and uniqueness enforcement,
+ * 3) Fail-closed Hard Pre-Pareto Veto on leakage telemetry AND objective (`C`, `T7`)
  *    telemetry integrity BEFORE any Pareto dominance comparison so neither leakage
  *    nor malformed `C`/`T7` counts can ever enter the frontier or dominate a valid candidate,
- * 3) Exact non-dominated Pareto frontier ranking on `(C, -L, T7)` for mature candidates
+ * 4) Exact non-dominated Pareto frontier ranking on `(C, -L, T7)` for mature candidates
  *    and `(C, -L)` shadow ranking for pending-T7 candidates,
- * 4) Promotion gate requiring mature T7, independently certified Kish `n_eff` and
+ * 5) Promotion gate requiring mature T7, independently certified Kish `n_eff` and
  *    exact one-sided 95% (`alpha <= 0.05`) Clopper-Pearson LCB >= baselineT7 + minT7Gain,
  *    minimum cluster count, and C >= baselineC - nonInferiorityMargin.
  */
@@ -848,19 +1026,14 @@ export function evaluateParetoFrontierAndPromotion(
   candidates: readonly CartridgeCandidateMetrics[],
   options: ParetoEvaluationOptions,
 ): ParetoEvaluationResult {
-  const maxAllowedLeakageRate = options.maxAllowedLeakageRate ?? 0;
-  if (
-    !Number.isFinite(maxAllowedLeakageRate) ||
-    maxAllowedLeakageRate < 0 ||
-    maxAllowedLeakageRate > 1
-  ) {
-    throw new RangeError(
-      `maxAllowedLeakageRate must be a finite number in [0, 1] (received ${String(maxAllowedLeakageRate)}).`,
-    );
-  }
-  const minT7Gain = options.minT7Gain ?? 0.05;
-  const nonInferiorityMargin = options.nonInferiorityMargin ?? 0.02;
-  const minClusterCount = options.minClusterCount ?? 5;
+  const {
+    baselineCRate,
+    baselineT7Rate,
+    maxAllowedLeakageRate,
+    minT7Gain,
+    nonInferiorityMargin,
+    minClusterCount,
+  } = validateParetoEvaluationOptions(options);
 
   // Canonicalize, scan ENTIRE candidate receipt for raw PII, and enforce strict candidateId uniqueness upfront.
   const seenCandidateIds = new Set<string>();
@@ -952,7 +1125,7 @@ export function evaluateParetoFrontierAndPromotion(
     if (veto) {
       return {
         candidateId: candidate.candidateId,
-        metrics: candidate,
+        metrics: sanitizeMetricsForVeto(candidate),
         status: veto.status,
         onParetoFrontier: false,
         dominatedBy: [],
@@ -1019,13 +1192,13 @@ export function evaluateParetoFrontierAndPromotion(
       }
 
       const verifiedLcb = Math.min(t7.learnerClusterLowerBound, cert.certifiedCp95Lcb);
-      const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
+      const requiredT7Lcb = baselineT7Rate + minT7Gain;
       if (!(Number.isFinite(verifiedLcb) && verifiedLcb + EPSILON >= requiredT7Lcb)) {
         promotionBlockers.push(
           `t7_lcb_below_gain_threshold:${Number.isFinite(verifiedLcb) ? verifiedLcb.toFixed(4) : String(verifiedLcb)}<${requiredT7Lcb.toFixed(4)}`,
         );
       }
-      const minAllowedC = options.baseline.cRate - nonInferiorityMargin;
+      const minAllowedC = baselineCRate - nonInferiorityMargin;
       if (!(Number.isFinite(candidate.c.rate) && candidate.c.rate + EPSILON >= minAllowedC)) {
         promotionBlockers.push(
           `c_below_non_inferiority:${Number.isFinite(candidate.c.rate) ? candidate.c.rate.toFixed(4) : String(candidate.c.rate)}<${minAllowedC.toFixed(4)}`,

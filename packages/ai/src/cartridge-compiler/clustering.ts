@@ -12,13 +12,24 @@ import {
 } from "./types";
 
 const FORBIDDEN_PII_FIELD_SET: ReadonlySet<string> = new Set(FORBIDDEN_PII_FIELDS);
+const SAFE_NUMERIC_METADATA_KEYS: ReadonlySet<string> = new Set([
+  "evaluatedatms",
+  "timestampms",
+  "createdatms",
+  "updatedatms",
+  "lastdirectrecallatms",
+  "atms",
+  "seed",
+]);
+const UUID_PATTERN =
+  /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const PHONE_PATTERN =
   /(?<![\d.])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?![\d.])/;
 const INTL_PHONE_PATTERN =
   /(?<![\w.])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})(?![\d.])/;
 const UNFORMATTED_PHONE_PATTERN =
-  /(?<![\d.])(?<![0-9a-fA-F]{2})\d{10,11}(?!\d|\.\d|[0-9a-fA-F]{2})/;
+  /(?<![0-9A-Za-z_.])\d{10,11}(?![0-9A-Za-z_]|\.\d)/;
 const SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/;
 const TOKEN_URL_PATTERN =
   /https?:\/\/[^\s]*?(?:[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=|[^/\s@]+:[^/\s@]+@)/i;
@@ -75,23 +86,19 @@ export function canonicalizeIdentifier(
 }
 
 function detectRawPiiReasonsInText(text: string): string[] {
-  const forms = new Set<string>();
   const nfkc = text.normalize("NFKC");
-  forms.add(text);
-  forms.add(nfkc);
-  // Collapse whitespace around URL/assignment punctuation so spaced obfuscations cannot bypass detection.
-  forms.add(nfkc.replace(/\s*([!=<>+-/*(),:?&])\s*/g, "$1"));
+  // Mask canonical 8-4-4-4-12 UUIDs BEFORE phone/SSN scanning and punctuation collapsing so
+  // UUID tails like "-a12345678901" never false-positive as unformatted phone numbers.
+  const rawMasked = text.replace(UUID_PATTERN, "<UUID>");
+  const nfkcMasked = nfkc.replace(UUID_PATTERN, "<UUID>");
+  const collapsedMasked = nfkcMasked.replace(/\s*([!=<>+-/*(),:?&])\s*/g, "$1");
+
+  const phoneForms = new Set<string>([rawMasked, nfkcMasked]);
+  const allForms = new Set<string>([rawMasked, nfkcMasked, collapsedMasked]);
 
   const reasons = new Set<string>();
-  for (const form of forms) {
+  for (const form of allForms) {
     if (EMAIL_PATTERN.test(form)) reasons.add("email");
-    if (
-      PHONE_PATTERN.test(form) ||
-      INTL_PHONE_PATTERN.test(form) ||
-      UNFORMATTED_PHONE_PATTERN.test(form)
-    ) {
-      reasons.add("phone");
-    }
     if (SSN_PATTERN.test(form)) reasons.add("ssn");
     if (TOKEN_URL_PATTERN.test(form) || SPACED_TOKEN_URL_PATTERN.test(form)) {
       reasons.add("url_with_credentials_or_token");
@@ -102,6 +109,20 @@ function detectRawPiiReasonsInText(text: string): string[] {
     if (RAW_PII_ASSIGNMENT_PATTERN.test(form) || RAW_PII_PREFIX_PATTERN.test(form)) {
       reasons.add("raw_pii_identifier");
     }
+  }
+  for (const form of phoneForms) {
+    if (
+      PHONE_PATTERN.test(form) ||
+      INTL_PHONE_PATTERN.test(form) ||
+      UNFORMATTED_PHONE_PATTERN.test(form)
+    ) {
+      reasons.add("phone");
+    }
+  }
+  // Check formatted/international phone numbers on collapsed form as well, without running
+  // UNFORMATTED_PHONE_PATTERN on punctuation-collapsed strings.
+  if (PHONE_PATTERN.test(collapsedMasked) || INTL_PHONE_PATTERN.test(collapsedMasked)) {
+    reasons.add("phone");
   }
   return [...reasons];
 }
@@ -131,11 +152,30 @@ function collectRawPiiViolations(
   out: string[],
   seen: WeakSet<object>,
   skipKeys?: ReadonlySet<string>,
+  currentKeyName?: string,
 ): void {
   if (typeof value === "string") {
     const reasons = detectRawPiiReasonsInText(value);
     for (const reason of reasons) {
       out.push(`${pathLabel}:${reason}`);
+    }
+    return;
+  }
+  if (typeof value === "number" || typeof value === "bigint") {
+    const normalizedKey = currentKeyName ? normalizeFieldKey(currentKeyName) : "";
+    if (!SAFE_NUMERIC_METADATA_KEYS.has(normalizedKey)) {
+      const isInt = typeof value === "bigint" || (Number.isFinite(value) && Number.isInteger(value));
+      if (isInt) {
+        const absDigits =
+          typeof value === "bigint"
+            ? (value < 0n ? -value : value).toString()
+            : Math.abs(value).toString();
+        if (absDigits.length === 10 || absDigits.length === 11) {
+          out.push(`${pathLabel}:numeric_phone_pii`);
+        } else if (absDigits.length >= 15 && absDigits.length <= 18) {
+          out.push(`${pathLabel}:numeric_id_pii`);
+        }
+      }
     }
     return;
   }
@@ -145,7 +185,7 @@ function collectRawPiiViolations(
 
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i += 1) {
-      collectRawPiiViolations(value[i], `${pathLabel}[${i}]`, out, seen);
+      collectRawPiiViolations(value[i], `${pathLabel}[${i}]`, out, seen, undefined, currentKeyName);
     }
     return;
   }
@@ -165,6 +205,8 @@ function collectRawPiiViolations(
       `${pathLabel}.${key}`,
       out,
       seen,
+      undefined,
+      key,
     );
   }
 }
