@@ -13,9 +13,10 @@ import {
 
 const FORBIDDEN_PII_FIELD_SET: ReadonlySet<string> = new Set(FORBIDDEN_PII_FIELDS);
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
-const PHONE_PATTERN = /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b/;
+const PHONE_PATTERN =
+  /(?<![\d.])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?![\d.])/;
 const INTL_PHONE_PATTERN =
-  /(?:^|[^\w])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})\b/;
+  /(?<![\w.])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})(?![\d.])/;
 const SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/;
 const TOKEN_URL_PATTERN =
   /https?:\/\/[^\s]*?(?:[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=|[^/\s@]+:[^/\s@]+@)/i;
@@ -72,21 +73,29 @@ export function canonicalizeIdentifier(
 }
 
 function detectRawPiiReasonsInText(text: string): string[] {
-  const normalized = text.normalize("NFKC");
-  const reasons: string[] = [];
-  if (EMAIL_PATTERN.test(normalized)) reasons.push("email");
-  if (PHONE_PATTERN.test(normalized) || INTL_PHONE_PATTERN.test(normalized)) reasons.push("phone");
-  if (SSN_PATTERN.test(normalized)) reasons.push("ssn");
-  if (TOKEN_URL_PATTERN.test(normalized) || SPACED_TOKEN_URL_PATTERN.test(normalized)) {
-    reasons.push("url_with_credentials_or_token");
+  const forms = new Set<string>();
+  const nfkc = text.normalize("NFKC");
+  forms.add(text);
+  forms.add(nfkc);
+  // Collapse whitespace around URL/assignment punctuation so spaced obfuscations cannot bypass detection.
+  forms.add(nfkc.replace(/\s*([!=<>+-/*(),:?&])\s*/g, "$1"));
+
+  const reasons = new Set<string>();
+  for (const form of forms) {
+    if (EMAIL_PATTERN.test(form)) reasons.add("email");
+    if (PHONE_PATTERN.test(form) || INTL_PHONE_PATTERN.test(form)) reasons.add("phone");
+    if (SSN_PATTERN.test(form)) reasons.add("ssn");
+    if (TOKEN_URL_PATTERN.test(form) || SPACED_TOKEN_URL_PATTERN.test(form)) {
+      reasons.add("url_with_credentials_or_token");
+    }
+    if (JWT_PATTERN.test(form) || BEARER_TOKEN_PATTERN.test(form)) {
+      reasons.add("auth_token");
+    }
+    if (RAW_PII_ASSIGNMENT_PATTERN.test(form) || RAW_PII_PREFIX_PATTERN.test(form)) {
+      reasons.add("raw_pii_identifier");
+    }
   }
-  if (JWT_PATTERN.test(normalized) || BEARER_TOKEN_PATTERN.test(normalized)) {
-    reasons.push("auth_token");
-  }
-  if (RAW_PII_ASSIGNMENT_PATTERN.test(normalized) || RAW_PII_PREFIX_PATTERN.test(normalized)) {
-    reasons.push("raw_pii_identifier");
-  }
-  return reasons;
+  return [...reasons];
 }
 
 /**

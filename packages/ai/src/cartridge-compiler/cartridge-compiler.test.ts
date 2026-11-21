@@ -1039,11 +1039,11 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       minClusterCount: 5,
     });
     expect(promoCheck.promotedCandidateIds).toEqual([]);
-    expect(promoCheck.results[0]!.promotionBlockers).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("t7_lcb_exceeds_certified_cp95"),
-        expect.stringContaining("t7_lcb_below_gain_threshold"),
-      ]),
+    expect(promoCheck.vetoedCandidateIds).toEqual(["cand_forged_lcb"]);
+    expect(promoCheck.results[0]!.status).toBe("vetoed_invalid_telemetry");
+    expect(promoCheck.results[0]!.onParetoFrontier).toBe(false);
+    expect(promoCheck.results[0]!.vetoReasons).toEqual(
+      expect.arrayContaining([expect.stringContaining("t7_lcb_exceeds_certified_cp95")]),
     );
 
     // Even via runGepaOptimizationRound with a custom scoreCandidate returning inflated LCB or effectiveClusterSampleSize=50!
@@ -1437,5 +1437,148 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     const bogusT7Eval = result.results.find((r) => r.candidateId === "cand_bogus_t7_rate")!;
     expect(bogusT7Eval.status).toBe("vetoed_invalid_telemetry");
     expect(bogusT7Eval.onParetoFrontier).toBe(false);
+  });
+
+  it("scans entire scorer receipts and direct Pareto/metrics inputs for raw PII in t7.reason and l.telemetryIssues (Round-5 P1-2)", () => {
+    const clean = buildMatureCohort("cand_clean_r5", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+
+    // Direct caller smuggling PII inside t7.reason (pending receipt) -> throws CartridgePiiViolationError
+    const piiInPendingReason: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_pii_reason",
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: "Waiting on student alice@university.edu (https://x.test?token = abc12345)",
+      },
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([piiInPendingReason], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Direct caller smuggling PII inside l.telemetryIssues -> throws CartridgePiiViolationError
+    const piiInTelemetryIssues: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_pii_issues",
+      l: {
+        ...clean.l,
+        telemetryIssues: ["contact +1-555-234-5678 for audit details"],
+      },
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([piiInTelemetryIssues], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Scorer inside runGepaOptimizationRound smuggling PII inside t7.reason -> throws CartridgePiiViolationError
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `r5_pii_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_r5_c${comp}_u${i}`,
+            itemFamilyId: `fam_r5_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 555 });
+    expect(() =>
+      runGepaOptimizationRound({
+        basePolicy: makeBasePolicy(),
+        split,
+        clusteringOptions: { minSupport: 5 },
+        scoreCandidate: (cand) => ({
+          ...piiInPendingReason,
+          candidateId: cand.candidateId,
+        }),
+        paretoOptions: { baseline: { cRate: 0.8, t7Rate: 0.72 } },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Direct caller passing trajectory with raw PII into computeCandidateMetrics -> throws CartridgePiiViolationError
+    expect(() =>
+      computeCandidateMetrics("cand_direct_traj_pii", [
+        makeTrajectory({
+          trajectoryId: "traj_direct_pii",
+          snippet: "Reach me at bob@college.edu",
+        }),
+      ]),
+    ).toThrow(CartridgePiiViolationError);
+  });
+
+  it("vetoes invalid T7 alpha (> 0.05) and inflated LCB BEFORE Pareto dominance so invalid candidates cannot suppress valid promotable ones (Round-5 P1-3)", () => {
+    // Valid promotable candidate: C = 0.88 (22/25), L = 0, T7 = 0.96 (24/25, CP95 ≈ 0.8246 >= 0.77)
+    const validPromotable = buildMatureCohort("cand_valid_promotable", {
+      learnerCount: 25,
+      repairedCount: 22,
+      t7PassedCount: 24,
+    });
+
+    // Invalid alpha > 0.05 candidate with higher empirical C = 1.0 and T7 = 1.0 on 5/5!
+    // Would Pareto-dominate validPromotable if alpha integrity were checked only after Pareto!
+    const fiveOfFive = buildMatureCohort("cand_5_base", {
+      learnerCount: 5,
+      repairedCount: 5,
+      t7PassedCount: 5,
+    });
+    const invalidAlphaDominator: CartridgeCandidateMetrics = {
+      ...fiveOfFive,
+      candidateId: "cand_invalid_alpha_dominator",
+      t7:
+        fiveOfFive.t7.status === "mature"
+          ? {
+              ...fiveOfFive.t7,
+              alpha: 0.5,
+            }
+          : fiveOfFive.t7,
+    };
+
+    // Inflated LCB candidate (valid counts 5/5, alpha=0.05, C=1.0, T7=1.0, but forged LCB=0.95 > CP95=0.5493)
+    const inflatedLcbDominator: CartridgeCandidateMetrics = {
+      ...fiveOfFive,
+      candidateId: "cand_inflated_lcb_dominator",
+      t7:
+        fiveOfFive.t7.status === "mature"
+          ? {
+              ...fiveOfFive.t7,
+              learnerClusterLowerBound: 0.95,
+            }
+          : fiveOfFive.t7,
+    };
+
+    const result = evaluateParetoFrontierAndPromotion(
+      [invalidAlphaDominator, inflatedLcbDominator, validPromotable],
+      {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    );
+
+    expect(result.vetoedCandidateIds).toEqual([
+      "cand_invalid_alpha_dominator",
+      "cand_inflated_lcb_dominator",
+    ]);
+    expect(result.frontierCandidateIds).toEqual(["cand_valid_promotable"]);
+    expect(result.promotedCandidateIds).toEqual(["cand_valid_promotable"]);
+    expect(result.dominatedCandidateIds).toEqual([]);
+
+    for (const badId of ["cand_invalid_alpha_dominator", "cand_inflated_lcb_dominator"]) {
+      const entry = result.results.find((r) => r.candidateId === badId)!;
+      expect(entry.status).toBe("vetoed_invalid_telemetry");
+      expect(entry.onParetoFrontier).toBe(false);
+    }
   });
 });

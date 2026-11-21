@@ -1110,6 +1110,8 @@ export function runGepaOptimizationRound(
 
   const candidateMetrics = proposed.map((candidate) => {
     const receipt = input.scoreCandidate(candidate);
+    // Scan the ENTIRE scorer receipt (including t7.reason, l.telemetryIssues, nested strings) for raw PII.
+    assertNoRawPiiInValue(receipt, `scorer_receipt[${candidate.candidateId}]`);
     const canonicalReceiptId = canonicalizeIdentifier(receipt.candidateId, "receipt.candidateId");
     assertNoRawPiiInText(canonicalReceiptId, "receipt.candidateId");
     if (canonicalReceiptId !== candidate.candidateId) {

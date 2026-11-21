@@ -15,7 +15,87 @@ export const STAGE0_EXPECTED_EPISODE_COUNT =
 export const STAGE0_DEFAULT_MAX_TURNS = 4 as const;
 export const STAGE0_DEFAULT_SEED = 20261121 as const;
 
-export const STAGE0_SCENARIOS: readonly Stage0Scenario[] = Object.freeze([
+function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+    return value;
+  }
+  const obj = value as unknown as object;
+  if (seen.has(obj)) return value;
+  seen.add(obj);
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      deepFreeze(item, seen);
+    }
+  } else {
+    for (const key of Object.getOwnPropertyNames(obj)) {
+      if (
+        typeof value === "function" &&
+        (key === "caller" || key === "callee" || key === "arguments")
+      ) {
+        continue;
+      }
+      const desc = Object.getOwnPropertyDescriptor(obj, key);
+      if (desc && "value" in desc) {
+        deepFreeze(desc.value, seen);
+      }
+    }
+  }
+
+  if (!Object.isFrozen(obj)) {
+    Object.freeze(obj);
+  }
+  return value;
+}
+
+function cloneAndFreezeVariant(variant: Stage0VariantInstance): Stage0VariantInstance {
+  return deepFreeze({
+    variantIndex: variant.variantIndex,
+    prompt: variant.prompt,
+    masteredWork: variant.masteredWork,
+    misconceptionWork: variant.misconceptionWork,
+    ambiguousWork: variant.ambiguousWork,
+    clarifiedWork: variant.clarifiedWork,
+    slipWork: variant.slipWork,
+    repairedWork: variant.repairedWork,
+    wheelSpinWork: variant.wheelSpinWork,
+    protectedAnswerTokens: [...variant.protectedAnswerTokens],
+    protectedStepTokens: [...variant.protectedStepTokens],
+    analogCue: variant.analogCue,
+    freshTransferPrompt: variant.freshTransferPrompt,
+  });
+}
+
+function cloneAndFreezeScenario(scenario: Stage0Scenario): Stage0Scenario {
+  const originalBuildVariant = scenario.buildVariant;
+  const wrappedBuildVariant = Object.freeze((variantIndex: number): Stage0VariantInstance =>
+    cloneAndFreezeVariant(originalBuildVariant(variantIndex)),
+  );
+  return deepFreeze({
+    scenarioId: scenario.scenarioId,
+    domain: scenario.domain,
+    conceptId: scenario.conceptId,
+    itemFamilyId: scenario.itemFamilyId,
+    freshTransferFamilyId: scenario.freshTransferFamilyId,
+    title: scenario.title,
+    misconceptionId: scenario.misconceptionId,
+    misconceptionDescription: scenario.misconceptionDescription,
+    missingPremise: scenario.missingPremise,
+    canonicalErrorSignal: scenario.canonicalErrorSignal,
+    distractorMisconception: {
+      misconceptionId: scenario.distractorMisconception.misconceptionId,
+      missingPremise: scenario.distractorMisconception.missingPremise,
+      canonicalErrorSignal: scenario.distractorMisconception.canonicalErrorSignal,
+      description: scenario.distractorMisconception.description,
+    },
+    ambiguousNotationSignal: scenario.ambiguousNotationSignal,
+    clarificationCue: scenario.clarificationCue,
+    slipSignal: scenario.slipSignal,
+    buildVariant: wrappedBuildVariant,
+  });
+}
+
+const INTERNAL_STAGE0_SCENARIOS: readonly Stage0Scenario[] = deepFreeze([
   // 1. STEM Algebra — dividing by variable without checking zero root
   {
     scenarioId: "stem_alg_zero_root_division",
@@ -713,6 +793,10 @@ export const STAGE0_SCENARIOS: readonly Stage0Scenario[] = Object.freeze([
   },
 ]);
 
+export const STAGE0_SCENARIOS: readonly Stage0Scenario[] = deepFreeze(
+  INTERNAL_STAGE0_SCENARIOS.map((scenario) => cloneAndFreezeScenario(scenario)),
+);
+
 export function generateStage0Episodes(
   seed: number = STAGE0_DEFAULT_SEED,
   maxTurns: number = STAGE0_DEFAULT_MAX_TURNS,
@@ -720,48 +804,57 @@ export function generateStage0Episodes(
   const episodes: Stage0EpisodeSpec[] = [];
   let index = 0;
 
-  for (const scenario of STAGE0_SCENARIOS) {
-    const candidateMisconceptions = Object.freeze([
-      {
-        misconceptionId: scenario.misconceptionId,
-        missingPremise: scenario.missingPremise,
-        canonicalErrorSignal: scenario.canonicalErrorSignal,
-        description: scenario.misconceptionDescription,
-      },
-      scenario.distractorMisconception,
-    ]);
-
+  for (const canonicalScenario of INTERNAL_STAGE0_SCENARIOS) {
     for (const personaId of STAGE0_PERSONA_IDS) {
       const profile = STAGE0_PERSONAS[personaId];
       for (let variantIndex = 0; variantIndex < STAGE0_VARIANTS_PER_PAIR; variantIndex += 1) {
-        const variant = scenario.buildVariant(variantIndex);
-        const episodeId = `ep_${scenario.scenarioId}__${personaId}__v${variantIndex}`;
+        const variant = cloneAndFreezeVariant(canonicalScenario.buildVariant(variantIndex));
+        const scenarioClone = cloneAndFreezeScenario(canonicalScenario);
+        const candidateMisconceptions = deepFreeze([
+          {
+            misconceptionId: canonicalScenario.misconceptionId,
+            missingPremise: canonicalScenario.missingPremise,
+            canonicalErrorSignal: canonicalScenario.canonicalErrorSignal,
+            description: canonicalScenario.misconceptionDescription,
+          },
+          {
+            misconceptionId: canonicalScenario.distractorMisconception.misconceptionId,
+            missingPremise: canonicalScenario.distractorMisconception.missingPremise,
+            canonicalErrorSignal: canonicalScenario.distractorMisconception.canonicalErrorSignal,
+            description: canonicalScenario.distractorMisconception.description,
+          },
+        ]);
+        const episodeId = `ep_${canonicalScenario.scenarioId}__${personaId}__v${variantIndex}`;
         const episodeSeed = hashSeed32(`${seed >>> 0}:${episodeId}`);
 
-        episodes.push({
-          episodeId,
-          index,
-          seed: episodeSeed,
-          scenarioId: scenario.scenarioId,
-          domain: scenario.domain,
-          conceptId: scenario.conceptId,
-          itemFamilyId: scenario.itemFamilyId,
-          freshTransferFamilyId: scenario.freshTransferFamilyId,
-          personaId,
-          variantIndex,
-          prompt: variant.prompt,
-          groundTruthMisconceptionId: profile.hasPersistentMisconception ? scenario.misconceptionId : null,
-          missingPremise: scenario.missingPremise,
-          isCarelessSlip: personaId === "careless_transcription_slip",
-          isAmbiguousNotation: personaId === "ambiguous_notation",
-          remediationTarget: profile.remediationTarget,
-          candidateMisconceptions,
-          protectedAnswerTokens: variant.protectedAnswerTokens,
-          protectedStepTokens: variant.protectedStepTokens,
-          variant,
-          scenario,
-          maxTurns,
-        });
+        episodes.push(
+          deepFreeze({
+            episodeId,
+            index,
+            seed: episodeSeed,
+            scenarioId: canonicalScenario.scenarioId,
+            domain: canonicalScenario.domain,
+            conceptId: canonicalScenario.conceptId,
+            itemFamilyId: canonicalScenario.itemFamilyId,
+            freshTransferFamilyId: canonicalScenario.freshTransferFamilyId,
+            personaId,
+            variantIndex,
+            prompt: variant.prompt,
+            groundTruthMisconceptionId: profile.hasPersistentMisconception
+              ? canonicalScenario.misconceptionId
+              : null,
+            missingPremise: canonicalScenario.missingPremise,
+            isCarelessSlip: personaId === "careless_transcription_slip",
+            isAmbiguousNotation: personaId === "ambiguous_notation",
+            remediationTarget: profile.remediationTarget,
+            candidateMisconceptions,
+            protectedAnswerTokens: [...variant.protectedAnswerTokens],
+            protectedStepTokens: [...variant.protectedStepTokens],
+            variant,
+            scenario: scenarioClone,
+            maxTurns,
+          }),
+        );
         index += 1;
       }
     }

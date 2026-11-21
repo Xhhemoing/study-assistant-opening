@@ -1,4 +1,8 @@
-import { assertNoRawPiiInText, canonicalizeIdentifier } from "./clustering";
+import {
+  assertNoRawPiiInText,
+  assertNoRawPiiInValue,
+  canonicalizeIdentifier,
+} from "./clustering";
 import {
   CandidateIdentityError,
   type CartridgeCandidateMetrics,
@@ -184,6 +188,7 @@ export function computeCandidateMetrics(
 ): CartridgeCandidateMetrics {
   const canonicalCandidateId = canonicalizeIdentifier(candidateId, "candidateId");
   assertNoRawPiiInText(canonicalCandidateId, "candidateId");
+  assertNoRawPiiInValue(trajectories, `computeCandidateMetrics[${canonicalCandidateId}].trajectories`);
 
   const confidenceZ = options.confidenceZ ?? DEFAULT_ONE_SIDED_95_Z;
   if (!Number.isFinite(confidenceZ) || confidenceZ < DEFAULT_ONE_SIDED_95_Z - 1e-6) {
@@ -390,7 +395,7 @@ export function computeCandidateMetrics(
     };
   }
 
-  return {
+  const metrics: CartridgeCandidateMetrics = {
     candidateId: canonicalCandidateId,
     c: {
       rate: cRate,
@@ -409,6 +414,8 @@ export function computeCandidateMetrics(
     },
     t7,
   };
+  assertNoRawPiiInValue(metrics, `computeCandidateMetrics[${canonicalCandidateId}].output`);
+  return metrics;
 }
 
 export type ParetoObjectiveMode = "3d_c_neg_l_t7" | "2d_c_neg_l";
@@ -684,6 +691,16 @@ export function certifyMatureTransferLowerBound(
     );
   }
 
+  if (
+    t7.alpha !== undefined &&
+    (typeof t7.alpha !== "number" ||
+      !Number.isFinite(t7.alpha) ||
+      t7.alpha <= 0 ||
+      t7.alpha > MAX_PROMOTION_ALPHA + 1e-9)
+  ) {
+    telemetryIssues.push(`t7_alpha_exceeds_max_0_05:${String(t7.alpha)}>${MAX_PROMOTION_ALPHA}`);
+  }
+
   const boundedNEff =
     exactKishNEff > 0 &&
     Number.isFinite(t7.effectiveClusterSampleSize) &&
@@ -694,6 +711,30 @@ export function certifyMatureTransferLowerBound(
     Number.isFinite(exactRate) && boundedNEff > 0
       ? exactClopperPearsonLowerBound(exactRate * boundedNEff, boundedNEff, MAX_PROMOTION_ALPHA)
       : 0;
+
+  if (
+    Number.isFinite(exactRate) &&
+    boundedNEff > 0 &&
+    typeof t7.clopperPearsonLowerBound === "number" &&
+    Number.isFinite(t7.clopperPearsonLowerBound) &&
+    t7.clopperPearsonLowerBound > certifiedCp95Lcb + 1e-9
+  ) {
+    telemetryIssues.push(
+      `t7_cp_lcb_exceeds_certified_cp95:${t7.clopperPearsonLowerBound.toFixed(4)}>${certifiedCp95Lcb.toFixed(4)}`,
+    );
+  }
+
+  if (
+    Number.isFinite(exactRate) &&
+    boundedNEff > 0 &&
+    typeof t7.learnerClusterLowerBound === "number" &&
+    Number.isFinite(t7.learnerClusterLowerBound) &&
+    t7.learnerClusterLowerBound > certifiedCp95Lcb + 1e-9
+  ) {
+    telemetryIssues.push(
+      `t7_lcb_exceeds_certified_cp95:${t7.learnerClusterLowerBound.toFixed(4)}>${certifiedCp95Lcb.toFixed(4)}`,
+    );
+  }
 
   return {
     validTelemetry: telemetryIssues.length === 0,
@@ -810,11 +851,12 @@ export function evaluateParetoFrontierAndPromotion(
   const nonInferiorityMargin = options.nonInferiorityMargin ?? 0.02;
   const minClusterCount = options.minClusterCount ?? 5;
 
-  // Canonicalize, PII-scan, and enforce strict uniqueness across all candidateIds upfront.
+  // Canonicalize, scan ENTIRE candidate receipt for raw PII, and enforce strict candidateId uniqueness upfront.
   const seenCandidateIds = new Set<string>();
   const canonicalCandidates: CartridgeCandidateMetrics[] = candidates.map((candidate) => {
     const canonicalId = canonicalizeIdentifier(candidate.candidateId, "candidateId");
     assertNoRawPiiInText(canonicalId, "candidateId");
+    assertNoRawPiiInValue(candidate, `pareto_candidate[${canonicalId}]`);
     if (seenCandidateIds.has(canonicalId)) {
       throw new CandidateIdentityError(
         `Duplicate candidateId "${canonicalId}" in Pareto evaluation.`,
@@ -974,7 +1016,7 @@ export function evaluateParetoFrontierAndPromotion(
     };
   });
 
-  return {
+  const output: ParetoEvaluationResult = {
     results,
     frontierCandidateIds: results.filter((r) => r.onParetoFrontier).map((r) => r.candidateId),
     vetoedCandidateIds: results
@@ -990,4 +1032,6 @@ export function evaluateParetoFrontierAndPromotion(
       .filter((r) => r.status === "dominated")
       .map((r) => r.candidateId),
   };
+  assertNoRawPiiInValue(output, "pareto_evaluation_output");
+  return output;
 }

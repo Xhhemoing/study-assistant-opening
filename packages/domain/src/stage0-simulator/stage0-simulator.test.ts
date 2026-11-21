@@ -352,7 +352,12 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
 
   it("isolates & freezes protected-token audit snapshots and turnInput so policies cannot wipe tokens mid-evaluation (Round-4 P1-1)", () => {
     const base = createCompliantReferencePolicy();
-    const callerEpisodes = [...generateStage0Episodes(20261121)];
+    // Create caller-owned shallow copies with mutable protectedAnswerTokens arrays to test closure mutation isolation.
+    const callerEpisodes = generateStage0Episodes(20261121).map((ep) => ({
+      ...ep,
+      protectedAnswerTokens: [...ep.protectedAnswerTokens],
+      protectedStepTokens: [...ep.protectedStepTokens],
+    }));
 
     const mutatingLeakyPolicy: Stage0TutorPolicy = {
       policyId: "mutating_leaky_policy",
@@ -397,5 +402,47 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(report.failingWitnesses[0]!.episodeId).toBe(
       "ep_stem_alg_zero_root_division__adversarial_hint_prober__v0",
     );
+  });
+
+  it("deep-freezes canonical STAGE0_SCENARIOS and returned generateStage0Episodes structures (Round-5 P1-1)", () => {
+    expect(Object.isFrozen(STAGE0_SCENARIOS)).toBe(true);
+    const firstScenario = STAGE0_SCENARIOS[0]!;
+    expect(Object.isFrozen(firstScenario)).toBe(true);
+    expect(Object.isFrozen(firstScenario.distractorMisconception)).toBe(true);
+    expect(Object.isFrozen(firstScenario.buildVariant)).toBe(true);
+
+    // Mutating canonical scenario fields or variant builder throws TypeError.
+    expect(() => {
+      (firstScenario as { missingPremise: string }).missingPremise = "tampered";
+    }).toThrow(TypeError);
+    expect(() => {
+      (firstScenario.distractorMisconception as { misconceptionId: string }).misconceptionId =
+        "tampered";
+    }).toThrow(TypeError);
+    expect(() => {
+      (firstScenario as { buildVariant: unknown }).buildVariant = () => ({});
+    }).toThrow(TypeError);
+
+    const episodes = generateStage0Episodes(20261121);
+    const ep0 = episodes[0]!;
+    expect(Object.isFrozen(episodes)).toBe(true);
+    expect(Object.isFrozen(ep0)).toBe(true);
+    expect(Object.isFrozen(ep0.scenario)).toBe(true);
+    expect(Object.isFrozen(ep0.scenario.distractorMisconception)).toBe(true);
+    expect(Object.isFrozen(ep0.variant)).toBe(true);
+    expect(Object.isFrozen(ep0.variant.protectedAnswerTokens)).toBe(true);
+    expect(Object.isFrozen(ep0.protectedAnswerTokens)).toBe(true);
+    expect(Object.isFrozen(ep0.protectedStepTokens)).toBe(true);
+    expect(Object.isFrozen(ep0.candidateMisconceptions)).toBe(true);
+    expect(Object.isFrozen(ep0.candidateMisconceptions[0])).toBe(true);
+
+    // Returned episode scenario is isolated from exported STAGE0_SCENARIOS reference.
+    expect(ep0.scenario).not.toBe(firstScenario);
+    expect(() => {
+      (ep0.protectedAnswerTokens as string[]).length = 0;
+    }).toThrow(TypeError);
+    expect(() => {
+      (ep0.scenario as { title: string }).title = "mutated";
+    }).toThrow(TypeError);
   });
 });
