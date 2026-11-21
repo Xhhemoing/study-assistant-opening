@@ -1,24 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   evaluateSpeakingRetelling,
   getSpeakingEvaluationContext,
   getSpeakingTargets,
+  type IeltsRubricReceipt,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPart3Seed,
 } from "./domain-bridge";
-import { IELTS_WRITING_SPEAKING_FIXTURE } from "./ielts-fixtures";
+import {
+  IELTS_LEARNER_SPEAKING_SEED,
+  IELTS_WRITING_SPEAKING_FIXTURE,
+} from "./ielts-fixtures";
 import {
   EPISTEMIC_BADGE_META,
   SPEAKING_PACE_META,
   SPEAKING_SIGNAL_ORDER,
   SPEAKING_SIGNAL_RATING_META,
-  normalizeAssistedTextKey,
+  collectAssistedFingerprints,
+  matchesAssistedFingerprint,
 } from "./workbench-model";
 
 export type IeltsSpeakingTransferCardProps = {
   readonly seed?: IeltsSpeakingPart3Seed;
+  readonly verifiedWritingReceipt?: IeltsRubricReceipt;
   readonly initialTranscript?: string;
   readonly initialDurationSeconds?: number;
   readonly initialReceipt?: IeltsSpeakingFeedbackReceipt;
@@ -38,6 +44,7 @@ function snapshotReceipt(receipt: IeltsSpeakingFeedbackReceipt): string {
 
 export function IeltsSpeakingTransferCard({
   seed: providedSeed,
+  verifiedWritingReceipt: providedVerifiedWritingReceipt,
   initialTranscript,
   initialDurationSeconds,
   initialReceipt,
@@ -46,8 +53,18 @@ export function IeltsSpeakingTransferCard({
   onEvaluated,
 }: IeltsSpeakingTransferCardProps) {
   const demo = IELTS_WRITING_SPEAKING_FIXTURE;
-  const seed = providedSeed ?? demo.speakingSeed;
   const isDemoPreview = demoFixtureMode === true;
+  const defaultLearnerSeed: IeltsSpeakingPart3Seed = {
+    ...IELTS_LEARNER_SPEAKING_SEED,
+    verifiedWritingReceipt: providedVerifiedWritingReceipt,
+  };
+  const seed: IeltsSpeakingPart3Seed = providedSeed
+    ? providedVerifiedWritingReceipt !== undefined
+      ? { ...providedSeed, verifiedWritingReceipt: providedVerifiedWritingReceipt }
+      : providedSeed
+    : isDemoPreview
+      ? demo.speakingSeed
+      : defaultLearnerSeed;
   const useDemoFixture =
     isDemoPreview &&
     providedSeed === undefined &&
@@ -63,6 +80,10 @@ export function IeltsSpeakingTransferCard({
   const candidateReceipt = useDemoFixture ? demo.initialSpeakingReceipt : initialReceipt;
   const scaffoldSampleTranscript =
     sampleTranscript ?? (providedSeed === undefined ? demo.initialSpeakingTranscript : undefined);
+  const seedFixtureSamplesUpfront =
+    !isDemoPreview &&
+    ((providedSeed === undefined && initialTranscript === undefined && initialReceipt === undefined) ||
+      (sampleTranscript !== undefined && sampleTranscript !== startingTranscript));
   const attemptKey = JSON.stringify([
     isDemoPreview,
     seed.seedId,
@@ -76,6 +97,7 @@ export function IeltsSpeakingTransferCard({
       seed={seed}
       isDemoPreview={isDemoPreview}
       scaffoldSampleTranscript={scaffoldSampleTranscript}
+      seedFixtureSamplesUpfront={seedFixtureSamplesUpfront}
       startingTranscript={startingTranscript}
       seedReceipt={candidateReceipt?.seedId === seed.seedId ? candidateReceipt : null}
       external={{
@@ -98,6 +120,7 @@ function SpeakingAttempt({
   seed,
   isDemoPreview,
   scaffoldSampleTranscript,
+  seedFixtureSamplesUpfront,
   startingTranscript,
   seedReceipt,
   external,
@@ -106,11 +129,16 @@ function SpeakingAttempt({
   readonly seed: IeltsSpeakingPart3Seed;
   readonly isDemoPreview: boolean;
   readonly scaffoldSampleTranscript: string | undefined;
+  readonly seedFixtureSamplesUpfront: boolean;
   readonly startingTranscript: string;
   readonly seedReceipt: IeltsSpeakingFeedbackReceipt | null;
   readonly external: ExternalSpeakingInput;
   readonly onEvaluated: IeltsSpeakingTransferCardProps["onEvaluated"];
 }) {
+  const scaffoldSources = useMemo(
+    () => [scaffoldSampleTranscript ?? "", ...seed.argumentBridgeCues].filter((text) => text.trim().length > 0),
+    [scaffoldSampleTranscript, seed.argumentBridgeCues],
+  );
   const [editedAnswer, setEditedAnswer] = useState<{
     transcript: string;
     durationInput: string;
@@ -123,9 +151,8 @@ function SpeakingAttempt({
     receipt: IeltsSpeakingFeedbackReceipt;
   } | null>(null);
   const [hintsRevealed, setHintsRevealed] = useState(false);
-  const seedReceiptAssistedKey = seedReceipt?.assisted
-    ? normalizeAssistedTextKey(seedReceipt.sourceTranscript)
-    : "";
+  const [promptScaffoldRevealed, setPromptScaffoldRevealed] = useState(false);
+  const seedReceiptAssistedSource = seedReceipt?.assisted ? seedReceipt.sourceTranscript.trim() : "";
   const [attemptAssistedLatched, setAttemptAssistedLatched] = useState(
     () => Boolean(seedReceipt?.assisted),
   );
@@ -135,22 +162,34 @@ function SpeakingAttempt({
   const [clearedPersistedReceiptSnapshot, setClearedPersistedReceiptSnapshot] = useState<
     string | undefined
   >(undefined);
-  const [assistedTranscripts, setAssistedTranscripts] = useState<readonly string[]>(() =>
-    seedReceiptAssistedKey ? [seedReceiptAssistedKey] : [],
-  );
+  const [assistedSources, setAssistedSources] = useState<readonly string[]>(() => {
+    const initial: string[] = [];
+    if (seedFixtureSamplesUpfront) initial.push(...scaffoldSources);
+    if (seedReceiptAssistedSource) initial.push(seedReceiptAssistedSource);
+    return [...new Set(initial)];
+  });
 
   if (seedReceipt?.assisted && external.receiptSnapshot !== seenAssistedReceiptSnapshot) {
     setSeenAssistedReceiptSnapshot(external.receiptSnapshot);
     setAttemptAssistedLatched(true);
-    if (seedReceiptAssistedKey && !assistedTranscripts.includes(seedReceiptAssistedKey)) {
-      setAssistedTranscripts([...assistedTranscripts, seedReceiptAssistedKey]);
+    if (seedReceiptAssistedSource && !assistedSources.includes(seedReceiptAssistedSource)) {
+      setAssistedSources([...assistedSources, seedReceiptAssistedSource]);
     }
     if (editedAnswer && !editedAnswer.assisted) {
       setEditedAnswer({ ...editedAnswer, assisted: true });
     }
-  } else if (seedReceiptAssistedKey && !assistedTranscripts.includes(seedReceiptAssistedKey)) {
-    setAssistedTranscripts([...assistedTranscripts, seedReceiptAssistedKey]);
+  } else if (seedReceiptAssistedSource && !assistedSources.includes(seedReceiptAssistedSource)) {
+    setAssistedSources([...assistedSources, seedReceiptAssistedSource]);
   }
+
+  const assistedFingerprints = useMemo(
+    () =>
+      collectAssistedFingerprints([
+        ...assistedSources,
+        ...(seedReceiptAssistedSource ? [seedReceiptAssistedSource] : []),
+      ]),
+    [assistedSources, seedReceiptAssistedSource],
+  );
 
   const isPersistedReceiptCleared =
     clearedPersistedReceiptSnapshot !== undefined &&
@@ -162,12 +201,10 @@ function SpeakingAttempt({
       external.durationSeconds === seedReceipt.durationSeconds)
       ? seedReceipt
       : null;
-  const startingTranscriptKey = normalizeAssistedTextKey(startingTranscript);
   const isStartingStickyAssisted =
+    promptScaffoldRevealed ||
     attemptAssistedLatched ||
-    (startingTranscriptKey !== "" &&
-      (seedReceiptAssistedKey === startingTranscriptKey ||
-        assistedTranscripts.includes(startingTranscriptKey)));
+    matchesAssistedFingerprint(startingTranscript, assistedFingerprints);
   const answer = editedAnswer ?? {
     transcript: startingTranscript,
     durationInput: String(external.durationSeconds ?? matchingReceipt?.durationSeconds ?? ""),
@@ -177,11 +214,9 @@ function SpeakingAttempt({
   const parsedDuration = durationInput.trim() === "" ? Number.NaN : Number(durationInput);
   const receiptDuration =
     Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : null;
-  const transcriptKey = normalizeAssistedTextKey(transcript);
-  const isMatchingAssistedText =
-    transcriptKey !== "" &&
-    (seedReceiptAssistedKey === transcriptKey || assistedTranscripts.includes(transcriptKey));
-  const isStickyAssisted = attemptAssistedLatched || isMatchingAssistedText;
+  const isMatchingAssistedText = matchesAssistedFingerprint(transcript, assistedFingerprints);
+  const isStickyAssisted =
+    promptScaffoldRevealed || attemptAssistedLatched || isMatchingAssistedText;
   const assisted = answer.assisted || isStickyAssisted;
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
@@ -246,16 +281,20 @@ function SpeakingAttempt({
 
   function handleRevealScaffold() {
     setHintsRevealed(true);
+    setPromptScaffoldRevealed(true);
     setAttemptAssistedLatched(true);
+    if (scaffoldSources.length > 0) {
+      setAssistedSources((current) => [...new Set([...current, ...scaffoldSources])]);
+    }
     setEditedAnswer((current) => ({ ...(current ?? answer), assisted: true }));
     setLocalEvaluation(null);
   }
 
   function handleResetForFreshAttempt() {
-    setEditedAnswer({ transcript: "", durationInput: "", assisted: false });
+    setEditedAnswer({ transcript: "", durationInput: "", assisted: promptScaffoldRevealed });
     setLocalEvaluation(null);
     setHintsRevealed(false);
-    setAttemptAssistedLatched(false);
+    setAttemptAssistedLatched(promptScaffoldRevealed);
     setSeenAssistedReceiptSnapshot(seedReceipt?.assisted ? external.receiptSnapshot : undefined);
     setClearedPersistedReceiptSnapshot(external.receiptSnapshot);
   }
@@ -272,9 +311,10 @@ function SpeakingAttempt({
       setEditedAnswer((current) =>
         current && !current.assisted ? { ...current, assisted: true } : current,
       );
-      if (transcriptKey) {
-        setAssistedTranscripts((current) =>
-          current.includes(transcriptKey) ? current : [...current, transcriptKey],
+      const trimmedTranscript = transcript.trim();
+      if (trimmedTranscript) {
+        setAssistedSources((current) =>
+          current.includes(trimmedTranscript) ? current : [...current, trimmedTranscript],
         );
       }
     }
@@ -402,10 +442,10 @@ function SpeakingAttempt({
             value={transcript}
             onChange={(event) => {
               const nextTranscript = event.target.value;
-              const nextKey = normalizeAssistedTextKey(nextTranscript);
-              const matchedAssisted =
-                nextKey !== "" &&
-                (seedReceiptAssistedKey === nextKey || assistedTranscripts.includes(nextKey));
+              const matchedAssisted = matchesAssistedFingerprint(
+                nextTranscript,
+                assistedFingerprints,
+              );
               if (matchedAssisted) {
                 setAttemptAssistedLatched(true);
               }

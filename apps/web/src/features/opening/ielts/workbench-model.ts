@@ -222,6 +222,81 @@ export function normalizeAssistedTextKey(text: string): string {
   );
 }
 
+export type AssistedFingerprint = {
+  readonly key: string;
+  readonly tokens: readonly string[];
+  readonly tokenSet: ReadonlySet<string>;
+  readonly shingles: ReadonlySet<string>;
+};
+
+export function buildAssistedFingerprint(text: string): AssistedFingerprint | null {
+  const key = normalizeAssistedTextKey(text);
+  if (!key) return null;
+  const tokens = key.split(" ").filter(Boolean);
+  const tokenSet = new Set(tokens);
+  const shingles = new Set<string>();
+  const shingleSize = tokens.length >= 5 ? 5 : 4;
+  if (tokens.length >= shingleSize) {
+    for (let i = 0; i <= tokens.length - shingleSize; i += 1) {
+      shingles.add(tokens.slice(i, i + shingleSize).join(" "));
+    }
+  }
+  return { key, tokens, tokenSet, shingles };
+}
+
+export function collectAssistedFingerprints(texts: readonly string[]): AssistedFingerprint[] {
+  const byKey = new Map<string, AssistedFingerprint>();
+  for (const text of texts) {
+    const fp = buildAssistedFingerprint(text);
+    if (fp && !byKey.has(fp.key)) {
+      byKey.set(fp.key, fp);
+    }
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * Checks whether a candidate submission matches or closely copies any recorded
+ * assisted/sample fingerprint via exact normalized lexical equality, verbatim
+ * exemplar substring reuse (>= 8 words), high token Jaccard similarity (>= 0.55),
+ * or high contiguous shingle overlap (>= 0.40).
+ */
+export function matchesAssistedFingerprint(
+  candidateText: string,
+  fingerprints: readonly AssistedFingerprint[],
+): boolean {
+  if (fingerprints.length === 0) return false;
+  const candidate = buildAssistedFingerprint(candidateText);
+  if (!candidate) return false;
+
+  for (const fp of fingerprints) {
+    if (candidate.key === fp.key) return true;
+    if (fp.tokens.length >= 8 && candidate.key.includes(fp.key)) return true;
+
+    if (fp.tokens.length >= 12 && candidate.tokens.length >= 12) {
+      let intersection = 0;
+      for (const token of fp.tokenSet) {
+        if (candidate.tokenSet.has(token)) intersection += 1;
+      }
+      const union = fp.tokenSet.size + candidate.tokenSet.size - intersection;
+      if (union > 0 && intersection / union >= 0.55) return true;
+
+      if (fp.shingles.size >= 4 && candidate.shingles.size >= 4) {
+        let shingleHits = 0;
+        for (const shingle of fp.shingles) {
+          if (candidate.shingles.has(shingle)) shingleHits += 1;
+        }
+        const minShingles = Math.min(fp.shingles.size, candidate.shingles.size);
+        if (shingleHits / fp.shingles.size >= 0.4 || shingleHits / minShingles >= 0.55) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 export type ParagraphHighlightSegment =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "span"; readonly text: string; readonly span: IeltsSpanEvidence };

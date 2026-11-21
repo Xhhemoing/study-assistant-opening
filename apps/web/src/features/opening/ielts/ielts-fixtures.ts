@@ -304,9 +304,13 @@ const DRAFT_2_RECEIPT = mustValidateReceipt(
   DRAFT_2_ASSESSMENTS,
   TRANSFER_REPORT.summary.meetsCrossDraftVerification,
 );
-const SPEAKING_SEED: IeltsSpeakingPart3Seed = {
+export const IELTS_LEARNER_SPEAKING_SEED: IeltsSpeakingPart3Seed = {
   ...buildSpeakingPart3Seed(CORE_ARGUMENT, DRAFT_2.draftId),
   requiresVerifiedReceipt: true,
+};
+
+const SPEAKING_SEED: IeltsSpeakingPart3Seed = {
+  ...IELTS_LEARNER_SPEAKING_SEED,
   verifiedWritingReceipt: DRAFT_2_RECEIPT,
 };
 

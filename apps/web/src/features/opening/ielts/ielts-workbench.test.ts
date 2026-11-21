@@ -46,6 +46,19 @@ function writingButton(label: string): HTMLButtonElement {
   return [...host.querySelectorAll("button")].find((button) => button.textContent === label)!;
 }
 
+const GENUINE_ORIGINAL_WRITING_ESSAY = [
+  "City councils across fast-growing metropolitan regions must decide whether public capital belongs in rail transit systems or wider road corridors for private vehicles. Despite widespread household attachment to automobiles, directing capital toward modern electric trains offers stronger long-term fiscal viability and cleaner urban neighbourhoods than pouring concrete into extra highway lanes.",
+  "Modern underground and suburban rail corridors can transport tens of thousands of office workers and university students hourly without demolishing historic streets or paving over parks. Consequently, encouraging commuters to replace daily solo car trips with punctual train journeys helps alleviate chronic congestion while lowering per-capita emissions throughout dense residential zones. Reliable urban rail schedules also support downtown shops and cut repair bills on worn asphalt.",
+  "Admittedly, households settled in distant outer towns frequently lack nearby train platforms and rely on personal cars after dusk. While expanding motorways can ease journey delays for a brief season, induced traffic demand soon encourages fresh car trips onto every widened lane, which undermines those temporary speed improvements. Pairing regional rail stations with dependable feeder buses resolves outer-suburban gaps without repeating that cycle.",
+  "Ultimately, combining backbone rail transit with accessible feeder buses delivers durable mobility that extra road lanes never sustain. Policymakers should therefore focus public transport spending on modern rail networks rather than endless motorway widening.",
+].join("\n\n");
+
+const GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT =
+  "To be honest, elected mayors often struggle because commuters notice freshly paved lanes right before polling day, whereas major subway lines require years of digging and upfront funding. " +
+  "That said, backing urban trains helps cities alleviate chronic congestion and lower per-capita emissions across crowded residential districts. " +
+  "Admittedly, households in outer towns still rely on personal vehicles where stations sit miles away, so local planners should pair core lines with frequent feeder buses. " +
+  "In the long run, protecting long-term fiscal viability requires choosing efficient rail networks instead of endless asphalt projects that only trigger induced traffic demand.";
+
 describe("workbench-model helpers", () => {
   it("formats band scores and time-box labels cleanly", () => {
     expect(formatBandScore(7)).toBe("7.0");
@@ -141,7 +154,7 @@ describe("workbench-model helpers", () => {
 });
 
 describe("IeltsDraftCritiqueWorkbench", () => {
-  it("starts in default learner mode with empty draft, zero pre-submission exemplars, and zero verified mastery badge", async () => {
+  it("gates draft1, draft2, exemplars, and mastery before submission in default learner mode, and latches scaffold reveal across reset", async () => {
     const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
     const onRevisionEvaluated = vi.fn();
     await act(async () =>
@@ -158,49 +171,40 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.querySelector('[data-submission-state="unsubmitted"]')).not.toBeNull();
     expect(host.querySelectorAll("[data-exemplar-rewrite]")).toHaveLength(0);
     expect(host.textContent).not.toContain("long-term fiscal viability");
+    expect(host.textContent).not.toContain("With the rapid development of modern cities");
     expect(host.textContent).not.toContain(fixture.draft1Receipt.criteria.TR.evidenceSpans[0]!.upgradeRewrite);
     expect(host.textContent).not.toContain(fixture.draft2Receipt.criteria.LR.evidenceSpans[0]!.upgradeRewrite);
 
-    // Explicit scaffold reveal unlocks exemplar hints and irreversibly latches assistance.
-    const revealBtn = host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!;
-    expect(revealBtn).not.toBeNull();
-    await act(async () => revealBtn.click());
+    // Step-2 regression [P1-1]: opening the draft1 tab before submission MUST NOT expose
+    // the fixture's 4-paragraph draft1 sample essay and keeps the learner's attempt unassisted.
+    const draft1Tab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
+      (button) => button.textContent === "一稿",
+    )!;
+    await act(async () => draft1Tab.click());
+    expect(host.querySelector('[data-draft1-gated="true"]')).not.toBeNull();
+    expect(host.textContent).not.toContain("With the rapid development of modern cities");
+    expect(host.querySelector("[data-word-count]")?.textContent).toMatch(/^0 词/u);
+    const preRevealCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(preRevealCheckbox.checked).toBe(false);
+    expect(preRevealCheckbox.disabled).toBe(false);
 
-    expect(host.querySelector('[data-writing-scaffold="true"]')).not.toBeNull();
-    expect(host.querySelectorAll("[data-exemplar-rewrite]").length).toBeGreaterThan(0);
-    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    expect(checkbox.checked).toBe(true);
-    expect(checkbox.disabled).toBe(true);
+    // Pasting the built-in fixture draft2 directly into default learner mode is caught upfront by sample fingerprints.
+    await act(async () => setNativeInputValue(textarea!, fixture.draft2.paragraphs.join("\n\n")));
+    expect(preRevealCheckbox.checked).toBe(true);
+    expect(preRevealCheckbox.disabled).toBe(true);
 
-    // Submitting after viewing scaffold must stay assisted / practice_feedback.
-    const qualifyingEssay = fixture.draft2.paragraphs.join("\n\n");
-    await act(async () => setNativeInputValue(textarea!, qualifyingEssay));
+    // Explicit full reset (before scaffold reveal) lets a genuinely original independent essay earn mastery.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const independentTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const independentCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(independentTextarea.value).toBe("");
+    expect(independentCheckbox.checked).toBe(false);
+    expect(independentCheckbox.disabled).toBe(false);
+    await act(async () => setNativeInputValue(independentTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
+    expect(independentCheckbox.checked).toBe(false);
+    expect(independentCheckbox.disabled).toBe(false);
     await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
     expect(onRevisionEvaluated).toHaveBeenCalledTimes(1);
-    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
-      revisedDraft: expect.objectContaining({ assisted: true }),
-      receipt: expect.objectContaining({
-        epistemicStatus: "practice_feedback",
-        masteryQualified: false,
-        countsTowardMastery: false,
-      }),
-    });
-
-    // Explicit full reset clears to "" and hides scaffold for a genuinely fresh independent attempt.
-    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
-    const resetTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
-    const resetCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    expect(resetTextarea.value).toBe("");
-    expect(resetCheckbox.checked).toBe(false);
-    expect(resetCheckbox.disabled).toBe(false);
-    expect(host.querySelector('[data-writing-scaffold="true"]')).toBeNull();
-    expect(host.querySelectorAll("[data-exemplar-rewrite]")).toHaveLength(0);
-
-    // Writing a genuinely new independent essay after full reset can earn verified mastery.
-    const independentEssay = `${qualifyingEssay} Independent municipal audits also ensure rail corridors stay affordable for working households.`;
-    await act(async () => setNativeInputValue(resetTextarea, independentEssay));
-    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
-    expect(onRevisionEvaluated).toHaveBeenCalledTimes(2);
     expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
       revisedDraft: expect.objectContaining({ assisted: false }),
       receipt: expect.objectContaining({
@@ -210,6 +214,37 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       }),
     });
     expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+    // Starting a fresh default learner mount: clicking [data-reveal-scaffold] reveals draft1 + rewrites
+    // and irreversibly latches prompt assistance even across [data-reset-attempt].
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const revealBtn = host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!;
+    await act(async () => revealBtn.click());
+    expect(host.querySelector('[data-writing-scaffold="true"]')).not.toBeNull();
+    expect(host.querySelectorAll("[data-exemplar-rewrite]").length).toBeGreaterThan(0);
+    expect(host.querySelector('[data-draft1-gated="true"]')).toBeNull();
+    expect(host.textContent).toContain("With the rapid development of modern cities");
+    const latchedCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(latchedCheckbox.checked).toBe(true);
+    expect(latchedCheckbox.disabled).toBe(true);
+
+    // Even after clicking [data-reset-attempt], this prompt remains assisted because scaffold was revealed.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const afterRevealResetTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const afterRevealResetCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(afterRevealResetTextarea.value).toBe("");
+    expect(afterRevealResetCheckbox.checked).toBe(true);
+    expect(afterRevealResetCheckbox.disabled).toBe(true);
+    await act(async () => setNativeInputValue(afterRevealResetTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
   });
 
   it("allows opt-in demoFixtureMode preview without ever displaying verified learner mastery", async () => {
@@ -680,12 +715,11 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       }),
     });
 
-    // Explicit full reset followed by genuinely new independent prose earns verified mastery.
+    // Explicit full reset followed by genuinely original independent prose earns verified mastery.
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
     const freshTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
     const freshCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    const freshIndependentText = `${originalText} Dedicated public transit audits also stabilize multi-year operating costs across dense urban corridors.`;
-    await act(async () => setNativeInputValue(freshTextarea, freshIndependentText));
+    await act(async () => setNativeInputValue(freshTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
     expect(freshCheckbox.disabled).toBe(false);
     expect(freshCheckbox.checked).toBe(false);
     await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
@@ -844,16 +878,24 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(resetCheckbox.disabled).toBe(true);
     expect(resetCheckbox.checked).toBe(true);
 
-    // Explicit full reset followed by genuinely new independent text earns verified mastery.
+    // Explicit full reset followed by lightly editing the assisted draft STILL re-locks assistance via fingerprint overlap.
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
-    const freshTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
-    const freshCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const lightlyEditedTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const lightlyEditedCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     await act(async () =>
       setNativeInputValue(
-        freshTextarea,
+        lightlyEditedTextarea,
         `${originalText} Long-horizon public rail budgets also prevent disruptive fare spikes for urban commuters.`,
       ),
     );
+    expect(lightlyEditedCheckbox.disabled).toBe(true);
+    expect(lightlyEditedCheckbox.checked).toBe(true);
+
+    // Explicit full reset followed by genuinely original independent prose earns verified mastery.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const freshTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const freshCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => setNativeInputValue(freshTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
     expect(freshCheckbox.disabled).toBe(false);
     expect(freshCheckbox.checked).toBe(false);
     await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
@@ -907,7 +949,7 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
-  it("starts in default learner mode with empty transcript, zero preloaded receipt/exemplars, and latches scaffold reveal until explicit full reset", async () => {
+  it("strips demo verified Writing receipt on default learner mount and blocks reveal-copy-reset-paste bypass even with a real verified Writing receipt", async () => {
     const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
     const onEvaluated = vi.fn();
     await act(async () =>
@@ -930,20 +972,53 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(host.querySelector('[data-speaking-scaffold="true"]')).toBeNull();
     expect(host.textContent).not.toContain(fixture.speakingSeed.argumentBridgeCues[0]!);
 
-    // Explicit scaffold reveal exposes cues + sample transcript and irreversibly latches assistance.
+    // Step-2 regression [P1-2]: default learner mount MUST NOT inherit the demo's verified Writing receipt.
+    await act(async () => {
+      setNativeInputValue(textarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
+      setNativeInputValue(durationInput, "78");
+    });
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+    expect(onEvaluated.mock.lastCall?.[0]?.evaluationContext?.writingReceiptEligible).toBe(false);
+
+    // Now mount with a real learner verifiedWritingReceipt prop.
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "with-real-writing-receipt",
+          verifiedWritingReceipt: fixture.draft2Receipt,
+          onEvaluated,
+        }),
+      ),
+    );
+    const verifiedTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const verifiedDuration = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+
+    // Explicit scaffold reveal -> copy sample -> reset -> paste sample at 78s MUST stay assisted!
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!.click());
     expect(host.querySelector('[data-speaking-scaffold="true"]')).not.toBeNull();
-    expect(host.querySelector("[data-speaking-sample-transcript]")?.textContent).toContain(
-      "alleviate chronic congestion",
-    );
+    const revealedSample = host.querySelector("[data-speaking-sample-transcript]")!.textContent!;
+    expect(revealedSample).toContain("alleviate chronic congestion");
     const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     expect(checkbox.checked).toBe(true);
     expect(checkbox.disabled).toBe(true);
 
-    // Even a qualifying transcript stays assisted until explicit full reset.
+    // Click reset, paste revealed sample back at 78s -> stays assisted & practice_feedback!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    expect(verifiedTextarea.value).toBe("");
+    expect(verifiedDuration.value).toBe("");
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    expect(host.querySelector('[data-speaking-scaffold="true"]')).toBeNull();
+
     await act(async () => {
-      setNativeInputValue(textarea, fixture.initialSpeakingTranscript);
-      setNativeInputValue(durationInput, "78");
+      setNativeInputValue(verifiedTextarea, revealedSample);
+      setNativeInputValue(verifiedDuration, "78");
     });
     await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
     expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
@@ -953,20 +1028,34 @@ describe("IeltsSpeakingTransferCard", () => {
       countsTowardMastery: false,
     });
 
-    // Explicit full reset clears inputs, hides scaffold, and allows a fresh unassisted attempt.
-    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
-    expect(textarea.value).toBe("");
-    expect(durationInput.value).toBe("");
-    expect(checkbox.checked).toBe(false);
-    expect(checkbox.disabled).toBe(false);
-    expect(host.querySelector('[data-speaking-scaffold="true"]')).toBeNull();
-    expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
-
-    const independentTranscript = `${fixture.initialSpeakingTranscript} Dependable evening train timetables also encourage commuters to leave cars at home.`;
+    // Without revealing scaffold on a fresh prompt/seed with a real verifiedWritingReceipt:
+    // pasting the built-in sample transcript is blocked upfront, while genuinely original speech qualifies!
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "fresh-unrevealed-attempt",
+          verifiedWritingReceipt: fixture.draft2Receipt,
+          onEvaluated,
+        }),
+      ),
+    );
+    const freshTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const freshDuration = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const freshCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     await act(async () => {
-      setNativeInputValue(textarea, independentTranscript);
-      setNativeInputValue(durationInput, "76");
+      setNativeInputValue(freshTextarea, fixture.initialSpeakingTranscript);
+      setNativeInputValue(freshDuration, "78");
     });
+    expect(freshCheckbox.checked).toBe(true);
+    expect(freshCheckbox.disabled).toBe(true);
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => {
+      setNativeInputValue(freshTextarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
+      setNativeInputValue(freshDuration, "76");
+    });
+    expect(freshCheckbox.checked).toBe(false);
+    expect(freshCheckbox.disabled).toBe(false);
     await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
     expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
       assisted: false,
@@ -1379,18 +1468,17 @@ describe("IeltsSpeakingTransferCard", () => {
       countsTowardMastery: false,
     });
 
-    // After full reset, genuinely fresh independent speech earns verified mastery.
+    // After full reset, genuinely original independent speech earns verified mastery.
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
-    const freshSpeech = `${fixture.initialSpeakingTranscript} Consistent maintenance funding also keeps suburban bus connections dependable year-round.`;
     await act(async () => {
-      setNativeInputValue(textarea, freshSpeech);
+      setNativeInputValue(textarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
       setNativeInputValue(durationInput, "75");
     });
     expect(checkbox.disabled).toBe(false);
     expect(checkbox.checked).toBe(false);
     await act(async () => evaluateBtn().click());
     expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
-      sourceTranscript: freshSpeech,
+      sourceTranscript: GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT,
       durationSeconds: 75,
       assisted: false,
       epistemicStatus: "rubric_verified_evidence",
@@ -1546,7 +1634,7 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(checkbox.disabled).toBe(true);
     expect(checkbox.checked).toBe(true);
 
-    // Explicit full reset followed by genuinely new independent transcript earns verified mastery.
+    // Explicit full reset followed by lightly editing the assisted transcript STILL re-locks assistance.
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
     const durationInput = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
     await act(async () => {
@@ -1554,6 +1642,15 @@ describe("IeltsSpeakingTransferCard", () => {
         textarea,
         `${original} Long-term rail timetables also give suburban workers dependable evening transport.`,
       );
+      setNativeInputValue(durationInput, "76");
+    });
+    expect(checkbox.disabled).toBe(true);
+    expect(checkbox.checked).toBe(true);
+
+    // Explicit full reset followed by genuinely original independent speech earns verified mastery.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => {
+      setNativeInputValue(textarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
       setNativeInputValue(durationInput, "76");
     });
     expect(checkbox.disabled).toBe(false);

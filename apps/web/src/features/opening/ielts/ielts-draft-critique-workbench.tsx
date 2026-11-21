@@ -24,9 +24,10 @@ import {
   EPISTEMIC_BADGE_META,
   TRANSFER_STATUS_META,
   UPGRADE_CATEGORY_LABELS,
+  collectAssistedFingerprints,
   formatBandScore,
   formatTimeBox,
-  normalizeAssistedTextKey,
+  matchesAssistedFingerprint,
   segmentParagraphWithSpans,
   type DraftViewMode,
 } from "./workbench-model";
@@ -70,24 +71,36 @@ function draftEditorText(draft: IeltsEssayDraft): string {
   return draft.paragraphs.join("\n\n").replace(/\r\n?/gu, "\n");
 }
 
-function writingTextKey(paragraphs: readonly string[]): string {
-  return normalizeAssistedTextKey(paragraphs.join("\n"));
-}
-
-function collectAssistedWritingKeys(
+function collectAssistedWritingSources(
   draft: IeltsEssayDraft,
   receipt: IeltsRubricReceipt,
 ): string[] {
-  const keys = new Set<string>();
+  const sources: string[] = [];
   if (draft.assisted) {
-    const key = writingTextKey(draft.paragraphs);
-    if (key) keys.add(key);
+    const text = draftEditorText(draft).trim();
+    if (text) sources.push(text);
   }
   if (receipt.sourceDraft?.assisted) {
-    const key = writingTextKey(receipt.sourceDraft.paragraphs);
-    if (key) keys.add(key);
+    const text = receipt.sourceDraft.paragraphs.join("\n\n").trim();
+    if (text) sources.push(text);
   }
-  return [...keys];
+  return sources;
+}
+
+function collectFixtureSampleSources(fixture: IeltsWorkbenchFixture): string[] {
+  const sources: string[] = [];
+  const d1 = draftEditorText(fixture.draft1).trim();
+  const d2 = draftEditorText(fixture.draft2).trim();
+  if (d1) sources.push(d1);
+  if (d2) sources.push(d2);
+  for (const receipt of [fixture.draft1Receipt, fixture.draft2Receipt]) {
+    for (const code of IELTS_CRITERIA) {
+      for (const span of receipt.criteria[code].evidenceSpans) {
+        if (span.upgradeRewrite.trim()) sources.push(span.upgradeRewrite);
+      }
+    }
+  }
+  return sources;
 }
 
 function stableSerialize(value: unknown): string {
@@ -171,20 +184,27 @@ export function IeltsDraftCritiqueWorkbench({
   });
   const { draft2, draft2Receipt, transferReport: savedReport } = evaluation;
 
-  const authoritativeAssistedKeys = hasPreloadedSubmission
-    ? collectAssistedWritingKeys(fixture.draft2, fixture.draft2Receipt)
+  const authoritativeAssistedSources = hasPreloadedSubmission
+    ? collectAssistedWritingSources(fixture.draft2, fixture.draft2Receipt)
     : [];
-  const authoritativeDraft2Key = hasPreloadedSubmission
-    ? writingTextKey(fixture.draft2.paragraphs)
-    : "";
+  const fixtureSampleSources = !hasExternalFixture && !isDemoPreview
+    ? collectFixtureSampleSources(fixture)
+    : [];
+  const initialAssistedSources = [
+    ...fixtureSampleSources,
+    ...authoritativeAssistedSources,
+  ];
+  const initialAssistedFingerprints = collectAssistedFingerprints(initialAssistedSources);
+  const authoritativeDraft2Text = hasPreloadedSubmission ? draftEditorText(fixture.draft2) : "";
   const initiallyLatched =
     hasPreloadedSubmission &&
     (fixture.draft2.assisted ||
       Boolean(fixture.draft2Receipt.sourceDraft?.assisted) ||
-      (authoritativeDraft2Key !== "" && authoritativeAssistedKeys.includes(authoritativeDraft2Key)));
+      matchesAssistedFingerprint(authoritativeDraft2Text, initialAssistedFingerprints));
 
   const [hasSubmitted, setHasSubmitted] = useState(hasPreloadedSubmission);
   const [hintsRevealed, setHintsRevealed] = useState(false);
+  const [promptScaffoldRevealed, setPromptScaffoldRevealed] = useState(false);
   const [attemptAssistedLatched, setAttemptAssistedLatched] = useState(initiallyLatched);
   const [resetPastAuthorityFingerprint, setResetPastAuthorityFingerprint] = useState<string | null>(
     null,
@@ -197,8 +217,8 @@ export function IeltsDraftCritiqueWorkbench({
   const [composerNeedsText, setComposerNeedsText] = useState(false);
   const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
   const [revisionCount, setRevisionCount] = useState(0);
-  const [localAssistedTexts, setLocalAssistedTexts] = useState<readonly string[]>(
-    () => authoritativeAssistedKeys,
+  const [localAssistedSources, setLocalAssistedSources] = useState<readonly string[]>(
+    () => initialAssistedSources,
   );
 
   if (evaluation.authorityFingerprint !== authorityFingerprint) {
@@ -211,13 +231,16 @@ export function IeltsDraftCritiqueWorkbench({
         hasExternalFixture &&
         (fixture.draft2.draftId === evaluation.draft2.draftId ||
           fixture.draft2Receipt.receiptId === evaluation.draft2Receipt.receiptId);
-      const nextAssistedTexts = isOwnWriteBack
-        ? [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])]
-        : authoritativeAssistedKeys;
+      const nextAssistedSources = isOwnWriteBack
+        ? [...new Set([...localAssistedSources, ...authoritativeAssistedSources])]
+        : initialAssistedSources;
+      const nextFingerprints = collectAssistedFingerprints(nextAssistedSources);
+      const nextPromptScaffold = isOwnWriteBack ? promptScaffoldRevealed : false;
       const nextLatched = isOwnWriteBack
-        ? attemptAssistedLatched || initiallyLatched
+        ? attemptAssistedLatched || initiallyLatched || nextPromptScaffold
         : initiallyLatched;
-      setLocalAssistedTexts(nextAssistedTexts);
+      setLocalAssistedSources(nextAssistedSources);
+      setPromptScaffoldRevealed(nextPromptScaffold);
       setAttemptAssistedLatched(nextLatched);
       setHasSubmitted(hasPreloadedSubmission);
       if (!isOwnWriteBack) {
@@ -229,16 +252,16 @@ export function IeltsDraftCritiqueWorkbench({
       );
       setComposerAssisted(
         nextLatched ||
-          (authoritativeDraft2Key !== "" && nextAssistedTexts.includes(authoritativeDraft2Key)),
+          (hasPreloadedSubmission &&
+            matchesAssistedFingerprint(authoritativeDraft2Text, nextFingerprints)),
       );
       setViewMode(initialView);
       setCriterionFilter("ALL");
       setComposerOpen(!hasPreloadedSubmission);
       setRevisionCount(0);
     } else if (hasPreloadedSubmission && authorityFingerprint !== resetPastAuthorityFingerprint) {
-      if (authoritativeAssistedKeys.some((key) => !localAssistedTexts.includes(key))) {
-        const nextAssistedTexts = [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])];
-        setLocalAssistedTexts(nextAssistedTexts);
+      if (authoritativeAssistedSources.some((src) => !localAssistedSources.includes(src))) {
+        setLocalAssistedSources([...new Set([...localAssistedSources, ...authoritativeAssistedSources])]);
       }
       if (fixture.draft2.assisted || Boolean(fixture.draft2Receipt.sourceDraft?.assisted)) {
         setAttemptAssistedLatched(true);
@@ -247,21 +270,27 @@ export function IeltsDraftCritiqueWorkbench({
     }
   }
 
-  const stickyAssistedTexts = new Set([
-    ...localAssistedTexts,
-    ...authoritativeAssistedKeys,
-    ...(hasSubmitted ? collectAssistedWritingKeys(draft2, draft2Receipt) : []),
-  ]);
-  const draft2TextKey = hasSubmitted ? writingTextKey(draft2.paragraphs) : "";
+  const stickyAssistedFingerprints = useMemo(
+    () =>
+      collectAssistedFingerprints([
+        ...localAssistedSources,
+        ...authoritativeAssistedSources,
+        ...(hasSubmitted ? collectAssistedWritingSources(draft2, draft2Receipt) : []),
+      ]),
+    [localAssistedSources, authoritativeAssistedSources, hasSubmitted, draft2, draft2Receipt],
+  );
   const draft2EffectivelyAssisted =
+    promptScaffoldRevealed ||
     attemptAssistedLatched ||
     (hasSubmitted && draft2.assisted) ||
-    (draft2TextKey !== "" && stickyAssistedTexts.has(draft2TextKey));
-  const composerParagraphs = composerText.split(PARAGRAPH_BREAK);
-  const composerTextKey = writingTextKey(composerParagraphs);
-  const isComposerMatchingAssistedText =
-    composerTextKey !== "" && stickyAssistedTexts.has(composerTextKey);
-  const isComposerStickyAssisted = attemptAssistedLatched || isComposerMatchingAssistedText;
+    (hasSubmitted &&
+      matchesAssistedFingerprint(draftEditorText(draft2), stickyAssistedFingerprints));
+  const isComposerMatchingAssistedText = matchesAssistedFingerprint(
+    composerText,
+    stickyAssistedFingerprints,
+  );
+  const isComposerStickyAssisted =
+    promptScaffoldRevealed || attemptAssistedLatched || isComposerMatchingAssistedText;
   const effectiveComposerAssisted = composerAssisted || isComposerStickyAssisted;
 
   const draftSource = stableSerialize(getWritingDraftSource(draft2));
@@ -319,12 +348,12 @@ export function IeltsDraftCritiqueWorkbench({
 
   const activeWordCount = useMemo(() => {
     if (!hasSubmitted) {
-      return viewMode === "draft1"
+      return viewMode === "draft1" && hintsRevealed
         ? countDraftWords(fixture.draft1.paragraphs)
         : countDraftWords(composerText.split(PARAGRAPH_BREAK));
     }
     return countDraftWords(activeDraft.paragraphs);
-  }, [hasSubmitted, viewMode, fixture.draft1.paragraphs, composerText, activeDraft.paragraphs]);
+  }, [hasSubmitted, hintsRevealed, viewMode, fixture.draft1.paragraphs, composerText, activeDraft.paragraphs]);
 
   const visibleCriteria = useMemo(
     () =>
@@ -372,19 +401,24 @@ export function IeltsDraftCritiqueWorkbench({
   }
 
   function handleRevealScaffold() {
+    const sampleSources = collectFixtureSampleSources(fixture);
     setHintsRevealed(true);
+    setPromptScaffoldRevealed(true);
     setAttemptAssistedLatched(true);
     setComposerAssisted(true);
+    if (sampleSources.length > 0) {
+      setLocalAssistedSources((current) => [...new Set([...current, ...sampleSources])]);
+    }
   }
 
   function handleAnalyzeRevision() {
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
-    const nextTextKey = writingTextKey(paragraphs);
     const nextAssisted =
       isDemoPreview ||
       composerAssisted ||
+      promptScaffoldRevealed ||
       attemptAssistedLatched ||
-      (nextTextKey !== "" && stickyAssistedTexts.has(nextTextKey));
+      matchesAssistedFingerprint(composerText, stickyAssistedFingerprints);
     const baseDraft: IeltsEssayDraft = hasSubmitted
       ? draft2
       : {
@@ -435,9 +469,10 @@ export function IeltsDraftCritiqueWorkbench({
     if (updatedDraft.assisted) {
       setAttemptAssistedLatched(true);
       setComposerAssisted(true);
-      if (nextTextKey) {
-        setLocalAssistedTexts((current) =>
-          current.includes(nextTextKey) ? current : [...current, nextTextKey],
+      const trimmedSource = composerText.trim();
+      if (trimmedSource) {
+        setLocalAssistedSources((current) =>
+          current.includes(trimmedSource) ? current : [...current, trimmedSource],
         );
       }
     }
@@ -477,8 +512,8 @@ export function IeltsDraftCritiqueWorkbench({
     }
     setHasSubmitted(false);
     setHintsRevealed(false);
-    setAttemptAssistedLatched(false);
-    setComposerAssisted(false);
+    setAttemptAssistedLatched(promptScaffoldRevealed);
+    setComposerAssisted(promptScaffoldRevealed);
     setComposerText("");
     setComposerNeedsText(false);
     setSelectedSpanId(null);
@@ -674,7 +709,7 @@ export function IeltsDraftCritiqueWorkbench({
           {(["draft1", "draft2"] as const).map((sheetMode) => {
             const isActiveSheet = viewMode === sheetMode;
 
-            if (!hasSubmitted && sheetMode === "draft2") {
+            if (!hasSubmitted && !isDemoPreview && sheetMode === "draft2") {
               return (
                 <article
                   key={sheetMode}
@@ -688,6 +723,26 @@ export function IeltsDraftCritiqueWorkbench({
                   <p className="text-ui font-medium text-text">待独立提交二稿</p>
                   <p className="mt-1.5 text-meta text-text-2">
                     当前不预置完成版范文或升级改写示例。请在下方编辑区撰写你的二稿并点击「提交并评估改写」，系统将即时生成四维量规定位与跨稿迁移清单。
+                  </p>
+                </article>
+              );
+            }
+
+            if (!hasSubmitted && !isDemoPreview && !hintsRevealed && sheetMode === "draft1") {
+              return (
+                <article
+                  key={sheetMode}
+                  id={panelDomId(sheetMode)}
+                  role="tabpanel"
+                  aria-labelledby={tabDomId(sheetMode)}
+                  hidden={!isActiveSheet}
+                  tabIndex={isActiveSheet ? 0 : -1}
+                  data-draft1-gated="true"
+                  className="rounded-panel border border-dashed border-line-strong bg-surface p-6 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
+                >
+                  <p className="text-ui font-medium text-text">示范一稿已隐藏（独立作答阶段）</p>
+                  <p className="mt-1.5 text-meta text-text-2">
+                    完成首次提交前不展示示范一稿与范文改写。请先在下方编辑区独立撰写并提交，或点击「查看提示 / 改写范例（将标记本次作答为含辅助）」展开参考底稿与脚手架。
                   </p>
                 </article>
               );
@@ -892,8 +947,7 @@ export function IeltsDraftCritiqueWorkbench({
                     placeholder={`在此独立撰写你的二稿改写（空行分段，建议 ${fixture.targetWordCount}+ 词）...`}
                     onChange={(event) => {
                       const nextValue = event.target.value;
-                      const nextKey = writingTextKey(nextValue.split(PARAGRAPH_BREAK));
-                      if (nextKey !== "" && stickyAssistedTexts.has(nextKey)) {
+                      if (matchesAssistedFingerprint(nextValue, stickyAssistedFingerprints)) {
                         setAttemptAssistedLatched(true);
                         setComposerAssisted(true);
                       }

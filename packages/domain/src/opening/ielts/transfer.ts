@@ -36,6 +36,8 @@ const STOP_WORDS = new Set([
 const TOPIC_SCAFFOLD_STOP_WORDS = new Set([
   ...STOP_WORDS,
   "when", "where", "which", "who", "whom", "whose", "what", "why", "how",
+  "everyone", "everybody", "anyone", "anybody", "someone", "somebody",
+  "nobody", "nothing", "everything", "something",
   "per", "via", "upon", "either", "neither", "nor", "yet", "thus", "hence",
   "must", "might", "shall", "each", "any", "few", "own", "once", "soon",
   "people", "person", "believe", "think", "argue", "claim", "contend", "suggest",
@@ -104,49 +106,151 @@ function collectTopicStems(
   }
 }
 
-function extractPromptTopicKeywords(
+type PromptTopicSpec = {
+  readonly keywords: ReadonlySet<string>;
+  readonly contrastFacets: readonly [ReadonlySet<string>, ReadonlySet<string>] | null;
+  readonly fromPromptStatement: boolean;
+};
+
+const PROMPT_CONTRAST_SPLIT = /\b(?:instead\s+of|rather\s+than|versus|vs\.?)\b/iu;
+
+function extractPromptTopicSpec(
   promptStatement: string | undefined,
   promptId: string,
   targets: readonly IeltsUpgradeTarget[],
   baselineProse: readonly string[],
   samePrompt: boolean,
-): Set<string> {
-  const strict = new Set<string>();
-  const addAll = (stopWords: ReadonlySet<string>, targetSet: Set<string>) => {
-    if (promptStatement?.trim()) {
-      collectTopicStems(promptStatement, stopWords, 3, targetSet);
+): PromptTopicSpec {
+  const trimmedStatement = promptStatement?.trim() ?? "";
+  if (trimmedStatement) {
+    const keywords = new Set<string>();
+    collectTopicStems(trimmedStatement, TOPIC_SCAFFOLD_STOP_WORDS, 3, keywords);
+    collectTopicStems(promptId, TOPIC_SCAFFOLD_STOP_WORDS, 3, keywords);
+    if (keywords.size === 0) {
+      collectTopicStems(trimmedStatement, STOP_WORDS, 3, keywords);
+      collectTopicStems(promptId, STOP_WORDS, 3, keywords);
     }
-    collectTopicStems(promptId, stopWords, 3, targetSet);
-    for (const target of targets) {
-      for (const pattern of target.targetPatterns) {
-        collectTopicStems(pattern, stopWords, 3, targetSet);
+
+    let contrastFacets: readonly [ReadonlySet<string>, ReadonlySet<string>] | null = null;
+    const firstSentence = trimmedStatement.split(/[.?!]+/u)[0] ?? trimmedStatement;
+    const splitParts = firstSentence.split(PROMPT_CONTRAST_SPLIT);
+    if (splitParts.length >= 2) {
+      const left = new Set<string>();
+      const right = new Set<string>();
+      collectTopicStems(splitParts[0]!, TOPIC_SCAFFOLD_STOP_WORDS, 3, left);
+      collectTopicStems(splitParts.slice(1).join(" "), TOPIC_SCAFFOLD_STOP_WORDS, 3, right);
+      if (left.size > 0 && right.size > 0) {
+        contrastFacets = [left, right];
       }
     }
-    if (samePrompt) {
-      collectTopicStems(baselineProse.join(" "), stopWords, 4, targetSet);
-    }
-  };
 
-  addAll(TOPIC_SCAFFOLD_STOP_WORDS, strict);
-  if (strict.size > 0) return strict;
+    return { keywords, contrastFacets, fromPromptStatement: true };
+  }
+
+  // Without an explicit promptStatement, rely on promptId + topical targets first
+  // (never diluting with incidental baselineProse nouns unless promptId + targets are empty).
+  const strict = new Set<string>();
+  collectTopicStems(promptId, TOPIC_SCAFFOLD_STOP_WORDS, 3, strict);
+  for (const target of targets) {
+    for (const pattern of target.targetPatterns) {
+      collectTopicStems(pattern, TOPIC_SCAFFOLD_STOP_WORDS, 3, strict);
+    }
+  }
+  if (strict.size === 0 && samePrompt) {
+    collectTopicStems(baselineProse.join(" "), TOPIC_SCAFFOLD_STOP_WORDS, 4, strict);
+  }
+  if (strict.size > 0) {
+    return { keywords: strict, contrastFacets: null, fromPromptStatement: false };
+  }
 
   const fallback = new Set<string>();
-  addAll(STOP_WORDS, fallback);
-  return fallback;
+  collectTopicStems(promptId, STOP_WORDS, 3, fallback);
+  if (samePrompt) {
+    collectTopicStems(baselineProse.join(" "), STOP_WORDS, 4, fallback);
+  }
+  return { keywords: fallback, contrastFacets: null, fromPromptStatement: false };
 }
 
-function countTopicKeywordOverlap(
+type TopicRelevanceAssessment = {
+  readonly isOffTopic: boolean;
+  readonly isTangential: boolean;
+  readonly keywordCount: number;
+  readonly overlapCount: number;
+};
+
+function assessPromptTopicRelevance(
+  spec: PromptTopicSpec,
   revisedProse: readonly string[],
-  topicKeywords: ReadonlySet<string>,
-): number {
-  if (topicKeywords.size === 0) return 0;
+  revisedParagraphs: readonly (readonly GroundedSentence[])[],
+  revisedWordCount: number,
+  transferredCount: number,
+): TopicRelevanceAssessment {
+  const keywordCount = spec.keywords.size;
+  if (keywordCount === 0 || revisedWordCount === 0) {
+    return { isOffTopic: false, isTangential: false, keywordCount, overlapCount: 0 };
+  }
+
   const revisedStems = new Set<string>();
   collectTopicStems(revisedProse.join(" "), STOP_WORDS, 3, revisedStems);
-  let overlap = 0;
-  for (const keyword of topicKeywords) {
-    if (revisedStems.has(keyword)) overlap += 1;
+  let overlapCount = 0;
+  for (const keyword of spec.keywords) {
+    if (revisedStems.has(keyword)) overlapCount += 1;
   }
-  return overlap;
+
+  if (transferredCount > 0) {
+    return { isOffTopic: false, isTangential: false, keywordCount, overlapCount };
+  }
+
+  if (overlapCount === 0) {
+    return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
+  }
+
+  if (revisedWordCount < 160) {
+    return { isOffTopic: false, isTangential: false, keywordCount, overlapCount };
+  }
+
+  // Count how many paragraphs & sentences engage with prompt keywords to reject
+  // off-topic essays with a single tacked-on venue sentence.
+  let nonEmptyParagraphs = 0;
+  let paragraphsWithHit = 0;
+  let sentencesWithHit = 0;
+  for (const [pIndex, prose] of revisedProse.entries()) {
+    if (countProseWords(prose) === 0) continue;
+    nonEmptyParagraphs += 1;
+    const pStems = new Set<string>();
+    collectTopicStems(prose, STOP_WORDS, 3, pStems);
+    if ([...spec.keywords].some((kw) => pStems.has(kw))) {
+      paragraphsWithHit += 1;
+    }
+    for (const sentence of revisedParagraphs[pIndex] ?? []) {
+      const sStems = new Set<string>();
+      collectTopicStems(sentence.text, STOP_WORDS, 3, sStems);
+      if ([...spec.keywords].some((kw) => sStems.has(kw))) {
+        sentencesWithHit += 1;
+      }
+    }
+  }
+
+  const requiredMatches = spec.fromPromptStatement
+    ? Math.min(keywordCount, Math.max(3, Math.ceil(keywordCount * 0.35)))
+    : Math.min(keywordCount, keywordCount >= 5 ? 2 : 1);
+  const hasSufficientSpread =
+    nonEmptyParagraphs >= 2 ? paragraphsWithHit >= 2 : sentencesWithHit >= 2;
+
+  if (overlapCount < requiredMatches || !hasSufficientSpread) {
+    return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
+  }
+
+  if (spec.contrastFacets) {
+    const [leftFacet, rightFacet] = spec.contrastFacets;
+    const coversLeft = [...leftFacet].some((kw) => revisedStems.has(kw));
+    const coversRight = [...rightFacet].some((kw) => revisedStems.has(kw));
+    if (!coversLeft || !coversRight) {
+      return { isOffTopic: false, isTangential: true, keywordCount, overlapCount };
+    }
+  }
+
+  return { isOffTopic: false, isTangential: false, keywordCount, overlapCount };
 }
 
 const CLAUSE_VERB_CUE =
@@ -713,8 +817,7 @@ function analyzeTransfer(
 ): {
   report: TransferAnalysis;
   creditedOccurrences: ReadonlyMap<IeltsCriterion, WritingCandidate>;
-  topicKeywordCount: number;
-  topicOverlapCount: number;
+  topicRelevance: TopicRelevanceAssessment;
 } {
   const samePrompt = input.draft1.promptId === input.draft2.promptId;
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
@@ -922,20 +1025,20 @@ function analyzeTransfer(
   const totalTargets = items.length;
   const transferRate = totalTargets > 0 ? transferredCount / totalTargets : 0;
 
-  const topicKeywords = extractPromptTopicKeywords(
+  const topicSpec = extractPromptTopicSpec(
     input.promptStatement,
     input.draft2.promptId,
     targets,
     baselineProse,
     samePrompt,
   );
-  const topicKeywordCount = topicKeywords.size;
-  const topicOverlapCount = countTopicKeywordOverlap(revisedProse, topicKeywords);
-  const isOffTopic =
-    revisedWordCount > 0 &&
-    topicKeywordCount > 0 &&
-    topicOverlapCount === 0 &&
-    transferredCount === 0;
+  const topicRelevance = assessPromptTopicRelevance(
+    topicSpec,
+    revisedProse,
+    revisedParagraphs,
+    revisedWordCount,
+    transferredCount,
+  );
 
   let disqualificationReason: string | undefined;
   if (revisedWordCount === 0) {
@@ -948,8 +1051,8 @@ function analyzeTransfer(
       : "题目已更换，须完成独立新题迁移复核后才可计入正式掌握度。";
   } else if (totalTargets === 0) {
     disqualificationReason = "当前未配置目标迁移项，无法确认跨草稿迁移，暂作为练习诊断反馈。";
-  } else if (isOffTopic) {
-    disqualificationReason = "当前内容未覆盖题干核心主题词，疑似偏题，仅作练习诊断反馈，不计入正式掌握度。";
+  } else if (topicRelevance.isOffTopic || topicRelevance.isTangential) {
+    disqualificationReason = "当前内容未能实质性回应题干核心争议与政策维度，疑似偏题，仅作练习诊断反馈，不计入正式掌握度。";
   } else if (!hasSubstantiveRevision) {
     disqualificationReason = "修订稿相对初稿缺少实质性句法或内容改写，仅保留为练习诊断反馈，不计入正式掌握度。";
   } else if (hasLowEntropyStuffing) {
@@ -989,7 +1092,7 @@ function analyzeTransfer(
       disqualificationReason,
     },
   };
-  return { report, creditedOccurrences, topicKeywordCount, topicOverlapCount };
+  return { report, creditedOccurrences, topicRelevance };
 }
 
 type ParagraphEvidence = {
@@ -1029,8 +1132,7 @@ export function evaluateRevisedDraftDeterministically(
   const {
     report: transferReport,
     creditedOccurrences,
-    topicKeywordCount,
-    topicOverlapCount,
+    topicRelevance,
   } = analyzeTransfer({
     draft1: input.baselineDraft,
     draft2: input.revisedDraft,
@@ -1105,16 +1207,7 @@ export function evaluateRevisedDraftDeterministically(
       ? 1.0
       : 0;
 
-  const isOffTopic =
-    topicKeywordCount > 0 &&
-    topicOverlapCount === 0 &&
-    transferReport.summary.transferredCount === 0;
-  const isTangential =
-    !isOffTopic &&
-    wordCount >= 180 &&
-    topicKeywordCount >= 5 &&
-    topicOverlapCount <= 1 &&
-    transferReport.summary.transferredCount === 0;
+  const { isOffTopic, isTangential } = topicRelevance;
 
   const criterionTransfers = (criterion: IeltsCriterion) =>
     transferReport.items.filter((item) => item.criterion === criterion);
@@ -1145,7 +1238,7 @@ export function evaluateRevisedDraftDeterministically(
     if (isOffTopic) {
       capped = Math.min(capped, criterion === "TR" ? 4.0 : 4.5);
     } else if (isTangential) {
-      capped = Math.min(capped, criterion === "TR" ? 4.5 : 5.5);
+      capped = Math.min(capped, 4.5);
     }
     return clampToIeltsBand(capped);
   };

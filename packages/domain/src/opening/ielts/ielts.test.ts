@@ -1941,6 +1941,8 @@ describe("Writing topic-relevance band grounding", () => {
   });
 
   it("caps off-topic essays against an explicit promptStatement even when targets are empty", () => {
+    const museumPrompt =
+      "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?";
     const customPromptDraft: IeltsEssayDraft = {
       ...DRAFT_2,
       draftId: "draft-2-museum-off-topic",
@@ -1951,12 +1953,72 @@ describe("Writing topic-relevance band grounding", () => {
       baselineDraft: DRAFT_1,
       revisedDraft: customPromptDraft,
       targets: [],
-      promptStatement:
-        "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?",
+      promptStatement: museumPrompt,
       receiptId: "r-off-topic-custom-prompt",
     });
     expect(evaluated.receipt.criteria.TR.band).toBe(4);
     expect(evaluated.receipt.overallBand).toBeLessThanOrEqual(4.5);
+
+    // Step-2 regression: adding a single incidental venue sentence ("museum" + "entrance")
+    // without addressing fees/charges/free admission must STILL receive 0 lengthBonus and stay capped!
+    const incidentalVenueDraft: IeltsEssayDraft = {
+      ...customPromptDraft,
+      draftId: "draft-2-museum-incidental-venue",
+      paragraphs: [
+        ...offTopicParagraphs.slice(0, 3),
+        `${offTopicParagraphs[3]} I visited a museum where the entrance hall displayed antique instruments.`,
+      ],
+    };
+    const venueResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: incidentalVenueDraft,
+      targets: [],
+      promptStatement: museumPrompt,
+      receiptId: "r-off-topic-museum-incidental",
+    });
+    expect(venueResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(venueResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+
+    // Even multi-paragraph venue name-dropping with 0 policy/contrast facet coverage stays capped.
+    const multiParagraphVenueOnly: IeltsEssayDraft = {
+      ...customPromptDraft,
+      draftId: "draft-2-museum-venue-only",
+      paragraphs: [
+        `${offTopicParagraphs[0]} International visitors toured a museum gallery near the entrance hall.`,
+        `${offTopicParagraphs[1]} Curious international visitors admired antique orchids inside the museum entrance hall.`,
+        ...offTopicParagraphs.slice(2),
+      ],
+    };
+    const venueOnlyResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: multiParagraphVenueOnly,
+      targets: [],
+      promptStatement: museumPrompt,
+      receiptId: "r-off-topic-museum-venue-only",
+    });
+    expect(venueOnlyResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4.5);
+    expect(venueOnlyResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+
+    // Genuine on-topic essay debating museum entrance fees vs free admission passes cleanly.
+    const genuineMuseumEssay: IeltsEssayDraft = {
+      ...customPromptDraft,
+      draftId: "draft-2-museum-on-topic",
+      paragraphs: [
+        "Cultural ministries frequently debate whether national museums should charge entrance fees to international visitors instead of preserving free admission for everyone. While open access encourages broad cultural curiosity, modest ticket charges for overseas tourists represent a pragmatic balance between heritage preservation and civic equity.",
+        "Maintaining temperature-controlled galleries, conservation laboratories, and scholarly archives demands substantial annual budgets. Asking international visitors who already pay for flights and hotels to cover a modest entrance fee generates reliable revenue without raising domestic taxes on local households that already fund national museums through payroll contributions.",
+        "Admittedly, advocates of universal free admission warn that ticket barriers can deter young backpackers, visiting students, and low-income travellers from exploring world heritage collections. Museums can readily resolve this concern by waiving admission charges for students, children, and scheduled free evening hours while keeping standard entrance fees for adult foreign tourists.",
+        "Overall, selective entrance fees for international visitors protect the long-term maintenance of national museums while safeguarding free admission for residents and concession groups. Policymakers should therefore adopt tiered ticketing rather than relying solely on stretched cultural subsidies.",
+      ],
+    };
+    const onTopicMuseum = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: genuineMuseumEssay,
+      targets: [],
+      promptStatement: museumPrompt,
+      receiptId: "r-on-topic-museum",
+    });
+    expect(onTopicMuseum.receipt.criteria.TR.band).toBeGreaterThanOrEqual(6);
+    expect(onTopicMuseum.receipt.overallBand).toBeGreaterThanOrEqual(6);
   });
 
   it("does not apply an off-topic cap to a genuine 250-word on-topic essay even with zero exact target matches", () => {
