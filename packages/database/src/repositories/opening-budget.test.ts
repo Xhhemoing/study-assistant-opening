@@ -322,4 +322,118 @@ describe("media_usage_upper_bound to vendor_receipt reconciliation", () => {
 
     await expect(repo.settle(scope, reservationId, 3, { costBasis: "vendor_receipt" })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
+
+  it("audits cap_overrun against the reservation local day when next-day vendor_receipt exceeds the prior-day cap", async () => {
+    const day1CreatedAt = new Date("2026-11-20T05:00:00Z");
+    const day2Clock = new Date("2026-11-21T05:00:00Z");
+    let row: Record<string, unknown> = {
+      id: reservationId,
+      workspace_id: scope.workspaceId,
+      parent_interaction_id: null,
+      settlement_cost_basis: "media_usage_upper_bound",
+      purpose: "transcribe",
+      amount_cents: 20,
+      reserved_amount_cents: 60,
+      request_id: "transcribe:job:0",
+      state: "completed",
+      model_snapshot: null,
+      execution_claimed_at: day1CreatedAt,
+      outcome_unknown_at: null,
+      release_reason: null,
+      result_ref: "transcribe:job:0",
+      reconciled_at: null,
+      pending_reconcile_cents: 0,
+      created_at: day1CreatedAt,
+    };
+    const alerts: unknown[] = [];
+    const overrunRows: Array<{ cap_cents: number; usage_after_cents: number; reported_actual_cents: number }> = [];
+    const tag = async (strings: TemplateStringsArray, ...bindings: unknown[]): Promise<unknown[]> => {
+      const flat = (s: TemplateStringsArray, vals: unknown[]): { text: string; params: unknown[] } => {
+        let text = "";
+        const params: unknown[] = [];
+        for (let i = 0; i < s.length; i++) {
+          text += s[i]!;
+          if (i < vals.length) {
+            const v = vals[i];
+            if (v && typeof v === "object" && "__frag" in (v as Record<string, unknown>)) {
+              const inner = v as { text: string; params: unknown[] };
+              text += inner.text;
+              params.push(...inner.params);
+            } else {
+              text += "?";
+              params.push(v);
+            }
+          }
+        }
+        return { text, params };
+      };
+      const compiled = flat(strings, bindings);
+      const q = compiled.text;
+      if (!q.trim()) return [];
+      if (q.includes("FROM workspaces WHERE id")) return [{ id: scope.workspaceId }];
+      if (q.includes("clock_timestamp()")) return [{ instant: day2Clock }];
+      if (q.includes("SELECT * FROM opening_budget_reservations") && q.includes("FOR UPDATE")) return [row];
+      if (q.includes("INSERT INTO opening_budget_reconcile_events") && q.includes("'late_receipt'")) return [{ id: "evt-late" }];
+      if (q.includes("UPDATE opening_budget_reservations") && q.includes("settlement_cost_basis")) {
+        row = {
+          ...row,
+          amount_cents: compiled.params[0],
+          state: "completed",
+          pending_reconcile_cents: 0,
+          reconciled_at: compiled.params[1],
+          updated_at: compiled.params[1],
+          outcome_unknown_at: null,
+          settlement_cost_basis: compiled.params[4],
+        };
+        return [row];
+      }
+      if (q.includes("FROM workspace_preferences")) return [{ ai_settings: null, planning_settings: { timeZone: "UTC" } }];
+      if (q.includes("SELECT COALESCE(sum(amount_cents), 0) AS used")) {
+        const dayStart = compiled.params.find((p): p is Date => p instanceof Date);
+        // Day 1 has updated R1 (50) + Day 1 R2 (70) = 120; Day 2 has 0.
+        const isDay1 = dayStart?.toISOString().startsWith("2026-11-20");
+        return [{ used: isDay1 ? Number(row.amount_cents) + 70 : 0 }];
+      }
+      if (q.includes("INSERT INTO opening_budget_reconcile_events") && q.includes("'cap_overrun'")) {
+        const eventRow = {
+          id: "evt-overrun",
+          reservation_id: reservationId,
+          workspace_id: scope.workspaceId,
+          kind: "cap_overrun",
+          amount_before_cents: compiled.params[2],
+          amount_after_cents: compiled.params[3],
+          reported_actual_cents: compiled.params[4],
+          state_before: compiled.params[5],
+          cap_cents: compiled.params[6],
+          usage_after_cents: compiled.params[7],
+          created_at: compiled.params[8],
+        };
+        overrunRows.push({
+          cap_cents: Number(eventRow.cap_cents),
+          usage_after_cents: Number(eventRow.usage_after_cents),
+          reported_actual_cents: Number(eventRow.reported_actual_cents),
+        });
+        return [eventRow];
+      }
+      return [];
+    };
+    const sqlTag = ((strings: TemplateStringsArray, ...bindings: unknown[]) => {
+      if (strings[0]!.includes("ON CONFLICT") || strings[0]!.trimStart().startsWith("workspace_id")) {
+        return { __frag: true, text: strings.join("?"), params: bindings };
+      }
+      return tag(strings, ...bindings);
+    }) as unknown as Sql;
+    const sql = Object.assign(sqlTag, {
+      begin: async (run: (txArg: Sql) => Promise<unknown>) => run(sqlTag),
+    }) as unknown as Sql;
+    const repo = createOpeningBudgetRepository(sql, {
+      envCapCents: 100,
+      timeZone: "UTC",
+      onReconcileAlert: (event) => { alerts.push(event); },
+    });
+    const settled = await repo.settle(scope, reservationId, 50, { costBasis: "vendor_receipt" });
+    expect(settled).toMatchObject({ amountCents: 50, settlementCostBasis: "vendor_receipt" });
+    expect(overrunRows).toEqual([{ cap_cents: 100, usage_after_cents: 120, reported_actual_cents: 50 }]);
+    expect(alerts).toEqual([expect.objectContaining({ kind: "cap_overrun", capCents: 100, usageAfterCents: 120, reportedActualCents: 50 })]);
+  });
 });

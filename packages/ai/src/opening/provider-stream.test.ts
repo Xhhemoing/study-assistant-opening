@@ -84,11 +84,49 @@ describe("direct Markdown streaming", () => {
     expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: null, inputTokens: 24, outputTokens: 11, cachedInputTokens: null });
   });
 
-  it.each([0, undefined])("retains earlier usage through trailing text and a %s output count", async completionTokens => {
+  it.each([0, undefined])("leaves earlier interim usage unresolved when trailing text and a %s output count follow", async completionTokens => {
     const h = harness();
     h.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 1100 } })
       + delta("!") + stop + event({ choices: [], usage: { prompt_tokens: 0, completion_tokens: completionTokens } }) + done);
-    await expect(h.provider.complete(input)).resolves.toMatchObject({ text: "answer!", inputTokens: 24, outputTokens: 1100 });
+    await expect(h.provider.complete(input)).resolves.toMatchObject({
+      text: "answer!", inputTokens: null, outputTokens: null, cachedInputTokens: null,
+    });
+  });
+
+  it("leaves interim usage unresolved on normal completion when trailing text has no final usage", async () => {
+    const h = harness();
+    h.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 5 } })
+      + delta(" more") + stop + done);
+    await expect(h.provider.complete(input)).resolves.toMatchObject({
+      text: "answer more", inputTokens: null, outputTokens: null, cachedInputTokens: null,
+    });
+  });
+
+  it("leaves usage unresolved when a zero-output trailer follows non-empty streamed content", async () => {
+    const h = harness();
+    h.write(delta("answer") + stop + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 0 } }) + done);
+    await expect(h.provider.complete(input)).resolves.toMatchObject({
+      text: "answer", inputTokens: null, outputTokens: null, cachedInputTokens: null,
+    });
+  });
+
+  it("leaves usage unresolved when non-monotonic output counts follow trailing text", async () => {
+    const h = harness();
+    h.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 10 } })
+      + delta("!") + stop + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 5 } }) + done);
+    await expect(h.provider.complete(input)).resolves.toMatchObject({
+      text: "answer!", inputTokens: null, outputTokens: null, cachedInputTokens: null,
+    });
+  });
+
+  it("does not validate earlier partial usage on failure when a zero-count trailer follows more output", async () => {
+    const h = harness(), receipt = vi.fn();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    h.write(delta("partial") + event({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 1 } })
+      + delta(" more") + event({ choices: [{ index: 0, delta: {}, finish_reason: "length" }] })
+      + event({ choices: [], usage: { prompt_tokens: 0, completion_tokens: 0 } }) + done);
+    await expect(h.provider.complete(input, undefined, deliver)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+    expect(receipt).not.toHaveBeenCalled();
   });
 
   it.each(["one chunk", "two chunks"])("collects terminal usage after length (%s)", async chunks => {

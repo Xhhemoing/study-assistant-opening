@@ -242,6 +242,8 @@ describe("durable provider receipts", () => {
       body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":11}}\n\ndata: [DONE]\n\n' },
     { failure: "interim stream usage", format: "markdown", code: "PROVIDER_RESPONSE", billed: false,
       body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":3}}\n\ndata: {"choices":[{"index":0,"delta":{"content":" more"}}]}\n\n' },
+    { failure: "interim stream usage with zero trailer", format: "markdown", code: "PROVIDER_RESPONSE", billed: false,
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":3}}\n\ndata: {"choices":[{"index":0,"delta":{"content":" more"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}\n\ndata: [DONE]\n\n' },
     { failure: "HTTP refusal", format: "json", code: "PROVIDER_REFUSAL", billed: true,
       body: '{"choices":[{"message":{"refusal":"no"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
     { failure: "malformed HTTP task JSON", format: "json", code: "PROVIDER_RESPONSE", billed: true,
@@ -280,6 +282,21 @@ describe("durable provider receipts", () => {
       provider: { complete: async () => ({ ...output, inputTokens: null }) }, budget: b.api,
       persistResult: async (_, receipt) => { expect(receipt.settledCents).toBeNull(); },
     });
+    expect(b.repo.unknowns).toEqual(["res-1"]);
+    expect(b.repo.settled).toEqual([]);
+  });
+
+  it("leaves completed stream usage unresolved when more content follows an interim usage chunk", async () => {
+    const b = fakeBudget();
+    const body = streamFrame({ choices: [{ index: 0, delta: { content: "ans" } }] })
+      + streamFrame({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 2 } })
+      + streamFrame({ choices: [{ index: 0, delta: { content: "wer" } }] })
+      + streamChoice({}, "stop")
+      + done;
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const result = await runBudgetedCall({ ...options, input: streamInput, provider, budget: b.api });
+    expect(result).toMatchObject({ text: "answer", inputTokens: null, outputTokens: null });
     expect(b.repo.unknowns).toEqual(["res-1"]);
     expect(b.repo.settled).toEqual([]);
   });

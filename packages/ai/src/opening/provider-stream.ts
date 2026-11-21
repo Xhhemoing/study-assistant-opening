@@ -20,6 +20,12 @@ function hasGeneratedDelta(raw: unknown): boolean {
     key !== "role" && value != null && value !== "" && (!Array.isArray(value) || value.length > 0));
 }
 
+function hasGeneratedContent(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || !("delta" in raw) || !raw.delta || typeof raw.delta !== "object") return false;
+  const delta = raw.delta as Record<string, unknown>;
+  return typeof delta.content === "string" && delta.content.length > 0;
+}
+
 function maxReportedTokens(previous: number | null | undefined, next: number | null): number | null {
   return next === null ? previous ?? null : Math.max(previous ?? 0, next);
 }
@@ -46,7 +52,11 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
   let buffer = "", data: string[] = [], text = "", bytes = 0, done = false, stopped = false;
   let requestId: string | null = null;
   let highestUsage: ParsedProviderUsage | null = null;
-  let hasTerminalOutputUsage = false;
+  let outputAfterLastUsage = false;
+  let hasEmittedOutput = false;
+  let hasEmittedContent = false;
+  let hasValidUsage = false;
+  let invalidTrailer = false;
   let answerFailure: OpeningProviderStreamError | undefined;
   function invalid(message: string): never { throw new OpeningProviderStreamError("PROVIDER_RESPONSE", message); }
   const abort = () => { void reader.cancel(options.signal.reason).catch(() => undefined); };
@@ -59,10 +69,13 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     try { parsed = JSON.parse(payload); } catch { invalid("provider returned malformed stream JSON"); }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalid("invalid provider stream event");
     const value = parsed as Record<string, unknown>;
-    // A new delta invalidates terminal usage for a failed response, but the
-    // counts already reported remain a lower bound for the whole stream.
+    // A new delta invalidates prior interim usage unless a subsequent valid
+    // monotonic cumulative usage frame covers the newly emitted output.
     if (Array.isArray(value.choices) && value.choices.some(hasGeneratedDelta)) {
-      hasTerminalOutputUsage = false;
+      hasEmittedOutput = true;
+      if (value.choices.some(hasGeneratedContent)) hasEmittedContent = true;
+      outputAfterLastUsage = true;
+      hasValidUsage = false;
     }
     // Even an embedded rate-limit error follows a sent request; never release its reservation.
     if (value.error) invalid("provider stream failed");
@@ -78,12 +91,28 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
       // without emitting a finish reason.
       const trailer = value.choices.length === 0 && (stopped || answerFailure?.code === "PROVIDER_REFUSAL");
       if (!stopped || trailer) {
+        const prevOutput = highestUsage?.outputTokens ?? null;
+        const nextInput = maxReportedTokens(highestUsage?.inputTokens, parsedUsage.inputTokens);
+        const zeroOutputAfterEmittedOutput = hasEmittedOutput && parsedUsage.outputTokens === 0;
+        const nonMonotonicOutputAfterEmittedOutput = hasEmittedOutput
+          && prevOutput !== null && parsedUsage.outputTokens !== null
+          && parsedUsage.outputTokens < prevOutput;
+        if ((zeroOutputAfterEmittedOutput || nonMonotonicOutputAfterEmittedOutput)
+          && (hasEmittedContent || !hasValidUsage || outputAfterLastUsage)) {
+          invalidTrailer = true;
+        }
+        const monotonicOutput = parsedUsage.outputTokens !== null
+          && (prevOutput === null || parsedUsage.outputTokens >= prevOutput)
+          && (!hasEmittedOutput || parsedUsage.outputTokens > 0);
         highestUsage = {
-          inputTokens: maxReportedTokens(highestUsage?.inputTokens, parsedUsage.inputTokens),
-          outputTokens: maxReportedTokens(highestUsage?.outputTokens, parsedUsage.outputTokens),
+          inputTokens: nextInput,
+          outputTokens: maxReportedTokens(prevOutput, parsedUsage.outputTokens),
           cachedInputTokens: maxReportedTokens(highestUsage?.cachedInputTokens, parsedUsage.cachedInputTokens),
         };
-        if ((terminal || trailer) && parsedUsage.outputTokens !== null) hasTerminalOutputUsage = true;
+        if (!invalidTrailer && nextInput !== null && monotonicOutput) {
+          outputAfterLastUsage = false;
+          if (terminal || trailer) hasValidUsage = true;
+        }
       }
     }
     for (const raw of value.choices) {
@@ -142,6 +171,12 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     return { inputTokens, outputTokens, cachedInputTokens: cachedInputTokens === null || inputTokens === null
       ? cachedInputTokens : Math.min(cachedInputTokens, inputTokens) };
   }
+  function authoritativeUsage(): ParsedProviderUsage {
+    if (outputAfterLastUsage || invalidTrailer) {
+      return { inputTokens: null, outputTokens: null, cachedInputTokens: null };
+    }
+    return usageSnapshot();
+  }
   try {
     options.signal.throwIfAborted();
     while (!done) {
@@ -159,15 +194,15 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     if (!done) invalid("provider stream was interrupted");
     if (!text.trim()) invalid("provider returned an empty answer");
     const output = providerOutputSchema.safeParse({
-      text, citedChunkIds: [], candidates: [], requestId, ...usageSnapshot(),
+      text, citedChunkIds: [], candidates: [], requestId, ...authoritativeUsage(),
     });
     if (!output.success) invalid("invalid provider stream output");
     return output.data;
   } catch (error) {
     // The provider adapter classifies transport errors after parsing returns.
     // Deliver validated usage separately so the wrapping cannot lose it.
-    const { inputTokens, outputTokens, cachedInputTokens } = usageSnapshot();
-    if (hasTerminalOutputUsage && (answerFailure?.code !== "PROVIDER_REFUSAL" || done)
+    const { inputTokens, outputTokens, cachedInputTokens } = authoritativeUsage();
+    if (hasValidUsage && (answerFailure?.code !== "PROVIDER_REFUSAL" || done)
       && inputTokens !== null && outputTokens !== null) {
       options.onTextDelta?.[onFailedResponseUsage]?.({
         requestId: boundFailedRequestId(requestId),

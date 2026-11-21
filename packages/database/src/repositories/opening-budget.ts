@@ -839,8 +839,10 @@ export function createOpeningBudgetRepository(
         if (!current.length) {
           throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
         }
-        const row = mapReservation(current[0] as Record<string, unknown>);
+        const currentRow = current[0] as Record<string, unknown>;
+        const row = mapReservation(currentRow);
         const instant = await readBudgetClock(tx);
+        const createdAt = toDate(currentRow.created_at) ?? instant;
         // Zero only settles a zero-cost (free-tier) reservation; paid calls stay positive.
         if (actualCents === 0 && (row.reservedAmountCents ?? row.amountCents) !== 0) {
           throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
@@ -910,19 +912,29 @@ export function createOpeningBudgetRepository(
           RETURNING *
         `;
         // A late receipt is real spend that bypassed the reserve-time cap
-        // check. If it pushes local-day usage over the cap, record an audited
-        // cap_overrun event and raise the alert hook: never silent.
-        const { capCents, budgetDay, unlimited } = await capAndDay(tx, row.workspaceId, budgetOptions, instant);
-        const usage = await tx`
-          SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
-          WHERE ${chargedBudgetRows(tx, row.workspaceId, budgetDay)}
-        `;
+        // check. Evaluate against the reservation's local day (when created on
+        // an earlier day than receipt settlement) as well as today's active day
+        // window so prior-day cap overruns are always audited.
+        const currentDay = await capAndDay(tx, row.workspaceId, budgetOptions, instant);
+        const reservationDay = await capAndDay(tx, row.workspaceId, budgetOptions, createdAt);
+        const sameLocalDay = reservationDay.budgetDay.localDate === currentDay.budgetDay.localDate;
+        const usage = sameLocalDay
+          ? await tx`
+            SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
+            WHERE ${chargedBudgetRows(tx, row.workspaceId, currentDay.budgetDay)}
+          `
+          : await tx`
+            SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
+            WHERE workspace_id = ${row.workspaceId} AND state <> 'released'
+              AND created_at >= ${reservationDay.budgetDay.dayStart}
+              AND created_at < ${reservationDay.budgetDay.nextDayStart}
+          `;
         const usageAfter = Number(usage[0]?.used ?? 0);
-        if (!unlimited && usageAfter > capCents) {
+        if (!reservationDay.unlimited && usageAfter > reservationDay.capCents) {
           const overrun = await tx`
             INSERT INTO opening_budget_reconcile_events
               (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, usage_after_cents, created_at)
-            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${usageAfter - actualCents}, ${usageAfter}, ${actualCents}, ${row.state}, ${capCents}, ${usageAfter}, ${instant})
+            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${usageAfter - actualCents}, ${usageAfter}, ${actualCents}, ${row.state}, ${reservationDay.capCents}, ${usageAfter}, ${instant})
             ON CONFLICT (reservation_id, kind) DO NOTHING
             RETURNING *
           `;

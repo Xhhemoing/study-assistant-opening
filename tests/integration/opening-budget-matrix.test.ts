@@ -379,6 +379,21 @@ describe("PR-D follow-ups", () => {
     expect(await repo.listReconcileEvents(fixture.scope, { kind: "cap_overrun" })).toEqual([]);
     expect(alerts).toEqual([]);
   });
+
+  it("next-day vendor_receipt raising prior-day usage over cap writes cap_overrun against the reservation day", async () => {
+    const alerts: unknown[] = [];
+    const repo = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100, timeZone: "UTC", onReconcileAlert: (e) => { alerts.push(e); } });
+    const r1 = await repo.reserve(fixture.scope, { purpose: "transcribe", amountCents: 60, requestId: "day1-media" });
+    await repo.settle(fixture.scope, r1.id, 20, { costBasis: "media_usage_upper_bound" });
+    const r2 = await repo.reserve(fixture.scope, { purpose: "tutor", amountCents: 70, requestId: "day1-text" });
+    await repo.settle(fixture.scope, r2.id, 70);
+    await fixture.sql`UPDATE opening_budget_reservations SET created_at = created_at - interval '1 day' WHERE id IN (${r1.id}, ${r2.id})`;
+
+    await repo.settle(fixture.scope, r1.id, 50, { costBasis: "vendor_receipt" });
+    const over = await repo.listReconcileEvents(fixture.scope, { kind: "cap_overrun" });
+    expect(over).toMatchObject([{ reservationId: r1.id, capCents: 100, usageAfterCents: 120, reportedActualCents: 50 }]);
+    expect(alerts).toMatchObject([{ kind: "cap_overrun", capCents: 100, usageAfterCents: 120, reportedActualCents: 50 }]);
+  });
 });
 
 async function waitWaiting(pid: number) {
