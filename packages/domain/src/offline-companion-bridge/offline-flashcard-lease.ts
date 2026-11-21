@@ -1240,17 +1240,27 @@ const OPTION_SENTENCE_END =
   `${OPTION_END_PUNCTUATION}(?:${OPTION_SENTENCE_TERMINATOR_RE.source}(?=${OPTION_SENTENCE_BOUNDARY})|$)`;
 const END_AFTER_OPTION_RE = new RegExp(`^${OPTION_SENTENCE_END}`, "u");
 const BOUNDARY_AFTER_QUOTED_END_RE = new RegExp(`^${OPTION_SENTENCE_BOUNDARY}`, "u");
-const OPTION_CONNECTOR_TO_NEXT =
+const OPTION_SEQUENCE_CONNECTOR =
   `\\s*` +
-  `(?:[,，、](?:\\s*${OPTION_WORD_CONNECTOR})?|[;/&+→]|->|=>|${OPTION_WORD_CONNECTOR})` +
-  `\\s*(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
-const OPTION_SEQUENCE_SEPARATOR = `(?:${OPTION_CLOSING})?${OPTION_CONNECTOR_TO_NEXT}`;
+  `(?:[,，、](?:\\s*${OPTION_WORD_CONNECTOR})?|[;/÷∕⁄&+→]|[-−–—‐‑=]\\s*>|${OPTION_WORD_CONNECTOR})\\s*`;
+const OPTION_SEQUENCE_SEPARATOR =
+  `(?:${OPTION_CLOSING})?${OPTION_SEQUENCE_CONNECTOR}(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
+const OPTION_WORD_CHAR = /[\p{L}\p{N}_]/u.source;
+const OPTION_WORD_CONTINUATION = `(?:${OPTION_WORD_CHAR}|['’]${OPTION_WORD_CHAR})`;
+const WRAPPED_NEIGHBOR_OPTION =
+  `${OPTION_WRAPPER_OPEN}\\s*[a-z]${OPTION_CLOSING}(?!${OPTION_WORD_CONTINUATION})`;
+const BARE_NEIGHBOR_OPTION =
+  `(?<!${NON_CJK_WORD_CHAR}|${OPTION_WRAPPER_OPEN}\\s*)[a-z](?!${OPTION_WORD_CONTINUATION}|${OPTION_WRAPPER_CLOSE})`;
+const PRECEDING_OPTION_RE = new RegExp(
+  `(?:${WRAPPED_NEIGHBOR_OPTION}|${BARE_NEIGHBOR_OPTION})${OPTION_SEQUENCE_CONNECTOR}$`,
+  "iu",
+);
 const NEXT_OPTION_RE = new RegExp(
-  `^${OPTION_CONNECTOR_TO_NEXT}[a-z](?:${OPTION_CLOSING}|(?=${OPTION_SENTENCE_END}))`,
+  `^${OPTION_SEQUENCE_CONNECTOR}(?:${WRAPPED_NEIGHBOR_OPTION}|${BARE_NEIGHBOR_OPTION}(?=${OPTION_SENTENCE_END}))`,
   "iu",
 );
 
-function containsSingleChoiceReveal(syntax: string, normalizedText: string, choiceLetter: string): boolean {
+function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
   const option = `${OPTION_WRAPPER_OPEN}?\\s*${escaped}\\s*${OPTION_WRAPPER_CLOSE}?(?!${ALPHA_NUM_IDENT_CHAR})`;
   const patterns = [
@@ -1260,31 +1270,29 @@ function containsSingleChoiceReveal(syntax: string, normalizedText: string, choi
     ),
     new RegExp(`=\\s*${option}`, "iu"),
   ];
-  if (patterns.some(pattern => pattern.test(syntax))) return true;
+  if (patterns.some(pattern => pattern.test(optionText))) return true;
 
   const wrapped = new RegExp(
     `${OPTION_WRAPPER_OPEN}\\s*${escaped}(${OPTION_END_PUNCTUATION})${OPTION_WRAPPER_CLOSE}`,
     "giu",
   );
-  const precedingOption = new RegExp(
-    `(?<!${NON_CJK_WORD_CHAR})[a-z]${OPTION_SEQUENCE_SEPARATOR}${escaped}${OPTION_CLOSING}$`,
-    "iu",
-  );
-  const lines = LINE_BREAK_RE.test(syntax)
-    ? syntax.split(LINE_BREAK_RE).map(line => canonicalizeMathNotationPreserveCase(line))
-    : [normalizedText];
-  for (const line of lines) {
-    for (const match of line.matchAll(wrapped)) {
-      const end = match.index + match[0].length;
-      const remainder = line.slice(end);
-      const endsInsideWrapper = OPTION_SENTENCE_TERMINATOR_RE.test(match[1] ?? "") &&
-        BOUNDARY_AFTER_QUOTED_END_RE.test(remainder);
-      if (!endsInsideWrapper && !END_AFTER_OPTION_RE.test(remainder)) continue;
+  // Keep line breaks at the same offsets as the collapsed spaces. A wrapper can
+  // span a line break, but adjacent options must connect on the same line.
+  const lineBoundaries = LINE_BREAK_RE.test(syntax)
+    ? syntax.replace(/\s+/g, space => LINE_BREAK_RE.test(space) ? "\n" : " ")
+    : null;
+  for (const match of optionText.matchAll(wrapped)) {
+    const end = match.index + match[0].length;
+    const nextLineBreak = lineBoundaries?.indexOf("\n", end) ?? -1;
+    const remainder = optionText.slice(end, nextLineBreak < 0 ? undefined : nextLineBreak);
+    const endsInsideWrapper = OPTION_SENTENCE_TERMINATOR_RE.test(match[1] ?? "") &&
+      BOUNDARY_AFTER_QUOTED_END_RE.test(remainder);
+    if (!endsInsideWrapper && !END_AFTER_OPTION_RE.test(remainder)) continue;
 
-      // A semicolon or punctuation inside a quote can occur within an option list.
-      if (precedingOption.test(line.slice(0, end)) || NEXT_OPTION_RE.test(remainder)) continue;
-      return true;
-    }
+    const previousLineBreak = lineBoundaries?.lastIndexOf("\n", match.index - 1) ?? -1;
+    const prefix = optionText.slice(previousLineBreak + 1, match.index);
+    if (PRECEDING_OPTION_RE.test(prefix) || NEXT_OPTION_RE.test(remainder)) continue;
+    return true;
   }
   return false;
 }
@@ -1326,7 +1334,12 @@ function compactJsonPunctuation(text: string): string {
   );
 }
 
-function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecret: string): boolean {
+function containsArrayAnswerLeak(
+  optionText: string,
+  normalizedStem: string,
+  normalizedSecret: string,
+  rawSecret: string,
+): boolean {
   if (!normalizedSecret.startsWith("[")) return false;
   // Preserve JSON quoting and escapes when the protected value is already serialized.
   const serialized = rawSecret.trim();
@@ -1339,7 +1352,7 @@ function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecr
   }
   if (!Array.isArray(values) || values.length === 0) return false;
 
-  const compactStem = compactJsonPunctuation(stem);
+  const compactStem = compactJsonPunctuation(normalizedStem);
   if (compactStem.includes(compactJsonPunctuation(normalizedSecret))) return true;
 
   // Normalize each decoded label before building the ordered sequence.
@@ -1347,12 +1360,12 @@ function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecr
   const labels: string[] = [];
   for (const value of values) {
     if (typeof value !== "string") return false;
-    const label = normalizeComparableText(value);
+    const label = normalizeLeakSyntax(value).replace(/\s+/g, " ").trim();
     if (!label) return false;
     labels.push(WRAPPED_OPTION_LETTER_RE.exec(label)?.[1] ?? label);
   }
   const sequence = labels.map(escapeRegExp).join(OPTION_SEQUENCE_SEPARATOR);
-  return new RegExp(`(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`, "iu").test(stem);
+  return new RegExp(`(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`, "iu").test(optionText);
 }
 
 /**
@@ -1369,12 +1382,13 @@ export function containsAnswerLeak(
   options: { readonly includeShortTokens?: boolean } = {},
 ): boolean {
   const stemSyntax = normalizeLeakSyntax(rawText);
+  const optionText = stemSyntax.replace(/\s+/g, " ");
   const casedStem = canonicalizeMathNotationPreserveCase(stemSyntax);
   const normalizedStem = casedStem.toLowerCase();
   const normalizedSecret = normalizeComparableText(secretText);
   if (!normalizedStem || !normalizedSecret) return false;
   if (normalizedStem === normalizedSecret) return true;
-  if (containsArrayAnswerLeak(normalizedStem, normalizedSecret, secretText)) return true;
+  if (containsArrayAnswerLeak(optionText, normalizedStem, normalizedSecret, secretText)) return true;
 
   const compactStem = collapseBinaryAddSubWhitespace(normalizedStem);
   const compactSecret = collapseBinaryAddSubWhitespace(normalizedSecret);
@@ -1457,7 +1471,7 @@ export function containsAnswerLeak(
             return true;
           }
         } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
-          if (containsSingleChoiceReveal(stemSyntax, normalizedStem, segment)) {
+          if (containsSingleChoiceReveal(stemSyntax, optionText, segment)) {
             return true;
           }
         } else if (segment.length >= 2 && segment.length < 6 && /[\p{L}\p{N}]/u.test(segment)) {
