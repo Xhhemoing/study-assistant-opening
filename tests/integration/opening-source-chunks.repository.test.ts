@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository } from "@aistudy/database";
+import {
+  createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository,
+  runWithNestedTutorStreamFences, withOpeningTutorStreamFenceCommit,
+} from "@aistudy/database";
 import { knowledgeNodeDefinition } from "@aistudy/domain";
 import type { KnowledgeNode, SourceChunk } from "@aistudy/contracts";
 import { readOpeningSourceContent } from "../../packages/database/src/repositories/opening-source-content";
@@ -185,7 +188,7 @@ async function historyRace(privacy: boolean) {
   let holding: Promise<unknown> | undefined, parsing: Promise<unknown> | undefined;
   try {
     await Promise.all([holder.ready, parser.ready]);
-    holding = boundedTransactions(holder.sql).begin(async tx => {
+    holding = withOpeningTutorStreamFenceCommit(boundedTransactions(holder.sql), async tx => {
       await lockWorkspaceLearningHistory(tx, scope);
       held.release();
       await release.ready;
@@ -193,7 +196,8 @@ async function historyRace(privacy: boolean) {
         // The real privacy repository re-enters this transaction via a savepoint;
         // it takes history then workspace UPDATE and increments the epoch itself.
         const nested = new Proxy(holder.sql, { get(target, property) {
-          return property === 'begin' ? (callback: (inner: TransactionSql) => Promise<unknown>) => tx.savepoint(callback)
+          return property === 'begin'
+            ? (callback: (inner: TransactionSql) => Promise<unknown>) => tx.savepoint(inner => runWithNestedTutorStreamFences(tx, inner, callback))
             : Reflect.get(target, property);
         } });
         await createOpeningPrivacyRepository(tx).recordExclusions(nested, scope,

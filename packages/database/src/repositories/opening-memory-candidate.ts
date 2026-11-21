@@ -111,8 +111,9 @@ async function assertAdmitted(
   id: string,
   courseId: string | null,
   excluded: readonly string[],
+  nowIso: string,
 ): Promise<void> {
-  const visible = await listMemoriesForContext(tx, scope, courseId, excluded);
+  const visible = await listMemoriesForContext(tx, scope, courseId, excluded, nowIso);
   if (!visible.some((item) => item.id === id)) {
     throw new OpeningMemoryError("VALIDATION", "candidate source is excluded or not owned");
   }
@@ -176,7 +177,7 @@ export async function decideOwnedMemoryCandidate(
       WHERE id = ${input.id} AND workspace_id = ${scope.workspaceId} AND status = 'pending'
       RETURNING id`;
     if (!updated.length) throw new OpeningMemoryError("CONFLICT", "memory candidate decision raced");
-    if (input.action === "confirm") await assertAdmitted(tx, scope, input.id, candidate.courseId, excludedIds);
+    if (input.action === "confirm") await assertAdmitted(tx, scope, input.id, candidate.courseId, excludedIds, now().toISOString());
     return mapMemoryRow(inserted[0] as Record<string, unknown>);
   });
 }

@@ -4,6 +4,7 @@ import type { SourceActionInput, SourceDeletion, SourceImpact } from "@aistudy/c
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
+import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 type Keys = { stagingKey(id: string): string; finalKey(id: string, version: number): string };
 type StagingKeyProvider = Pick<Keys, "stagingKey">;
@@ -208,7 +209,7 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
       options?: { extraKeys?: readonly string[] },
     ): Promise<{ deleted: boolean; cleanup: Cleanup }> {
       const canonicalId = id.toLowerCase();
-      return sql.begin(async tx => {
+      return withOpeningTutorStreamFenceCommit(sql, async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
         await owner(tx, scope, true);
         const sourceRows = await tx`SELECT version, upload_url_expires_at FROM opening_sources
@@ -235,13 +236,14 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
         }
         await tx`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,deleted_at)
           VALUES(${randomUUID()},${scope.workspaceId},${canonicalId},${now}) ON CONFLICT(workspace_id,source_id) DO NOTHING`;
-        // Both first exclusion and later asset deletion fence in-flight model/writeback snapshots.
-        await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId}`;
         await tx`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb
           WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND source_versions ? ${canonicalId}`;
         await nextWorkspaceLearningHistoryRevision(tx, scope);
         await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [canonicalId] });
-        if (input.action === "exclude") return { deleted: false, cleanup: { keys: [], notBefore: null } };
+        if (input.action === "exclude") {
+          await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
+          return { deleted: false, cleanup: { keys: [], notBefore: null } };
+        }
 
         const versions = await tx`SELECT version FROM opening_source_versions WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
           UNION SELECT source_version AS version FROM opening_source_chunks WHERE source_id=${canonicalId}`;
@@ -290,6 +292,7 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
         await tx`DELETE FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId} AND asset_type='source' AND asset_id=${canonicalId}`;
         await tx`UPDATE opening_source_versions SET availability='unavailable' WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}`;
         await tx`DELETE FROM opening_sources WHERE workspace_id=${scope.workspaceId} AND id=${canonicalId}`;
+        await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
         return { deleted: true, cleanup: { keys: pending, notBefore: notBefore.toISOString() } };
       });
     },

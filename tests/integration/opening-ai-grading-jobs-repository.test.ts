@@ -4,6 +4,7 @@ import type { AiGradingProposal, LearningObservation, ObservationInput } from "@
 import { createOpeningAiGradingRepository, createOpeningJobRepository, openingJobScope, readOpeningCourseEvidence, type OpeningAutoGradePolicy } from "@aistudy/database";
 import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
 import { insertOpeningLearningObservationInTx } from "../../packages/database/src/repositories/opening-learning-observations";
+import { withOpeningTutorStreamFenceCommit } from "../../packages/database/src/repositories/opening-tutor-stream-fence";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
 import { createOpeningAiGradingService } from "../../packages/ai/src/opening/ai-grading-service";
 import type { OpeningAiGradingServiceDeps } from "../../packages/ai/src/opening/ai-grading-service";
@@ -79,7 +80,7 @@ it("rolls back the answer, attempt submission, job and outbox when the enclosing
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
   const input: ObservationInput = { attemptId: attempt.id, sessionId: f.sessionId, courseId: f.courseId, skillLabel: "fractions", sourceIds: [f.sourceId],
     answer: "1", outcome: "unverified", assistance: "independent", clientKey: randomUUID() };
-  await expect(fixture.sql.begin(async tx => {
+  await expect(withOpeningTutorStreamFenceCommit(fixture.sql, async tx => {
     const saved = await insertOpeningLearningObservationInTx(tx, fixture.scope, input, { autoGrade: autoGrade() });
     expect(await tx`SELECT id FROM opening_jobs WHERE payload->>'observationId'=${saved.id} AND kind='grade-observation'`).toHaveLength(1);
     expect(await tx`SELECT o.id FROM opening_outbox o JOIN opening_jobs j ON j.id=o.job_id WHERE j.payload->>'observationId'=${saved.id} AND j.kind='grade-observation'`).toHaveLength(1);

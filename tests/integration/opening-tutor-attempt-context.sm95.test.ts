@@ -1,24 +1,43 @@
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { createServer, type AddressInfo } from "node:net";
 import { Redis } from "ioredis";
-import { createTutorStreamReader, createTutorStreamWriter } from "../../apps/worker/src/runtime/tutor-stream";
+import { createTutorStreamReader, createTutorStreamWriter, type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
 import { createJobStreamResponse } from "../../apps/web/src/features/opening/server/job-stream";
 import { createTutorService } from "../../apps/web/src/features/opening/tutor/tutor-service";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createOpeningAiGradingRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
-  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, tutorAttemptFence,
+  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningStudyExposureRepository, createOpeningTutorJobsRepository,
+  tutorAttemptFence, tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, tutorStreamPreAnswerHeadKey,
 } from "@aistudy/database";
-import type { ProviderInput } from "@aistudy/contracts";
+import type { LearningAttempt, ProviderInput } from "@aistudy/contracts";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
-import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { closeRace, deferred, openRaceSession, openRedisTransport, track } from "./opening-race-helpers";
 
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
 beforeEach(async () => { await fixture.reset(); await fixture.sql`TRUNCATE opening_learning_sessions,opening_conversations CASCADE`; });
 afterAll(async () => { await fixture?.close(); });
+
+async function bindAttempt(f: Awaited<ReturnType<typeof learningAttemptFixture>>, attempt: LearningAttempt, mode: "hint" | "explain") {
+  const conversations = createOpeningConversationRepository(fixture.sql);
+  const conversation = await conversations.create(fixture.scope, { courseId: f.courseId, title: "sm95 native bound tutor" });
+  const saved = await conversations.appendSavedTurn({ scope: fixture.scope, conversationId: conversation.id,
+    text: mode === "hint" ? "请给一点提示" : "请讲解本次作答", mode, purpose: "answer", clientKey: randomUUID(), sourceIds: [],
+    learningSessionId: f.sessionId, attemptId: attempt.id, contextAnchor: { purpose: "learning_help", courseId: f.courseId, attemptId: attempt.id },
+    currentPage: null, chunkId: null });
+  const jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const claim = async () => {
+    const claimed = await jobs.claim(saved.jobId);
+    return { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken, executionId: claimed!.executionId };
+  };
+  return { conversations, conversation, saved, jobs, claim };
+}
 
 async function seed(photo = false) {
   const f = await learningAttemptFixture(fixture), attempt = await f.start();
@@ -35,36 +54,28 @@ async function seed(photo = false) {
   }, { outcome: "incorrect", questionMatch: true, confidence: 0.9, feedback: "sm95 feedback: the answer is wrong",
     criteria: [{ label: "sm95 criterion", verdict: "incorrect", feedback: "sm95 correction" }],
     ...(photo ? { transcription: "sm95 model transcription, not the question" } : {}) }, "sm95 fake grader");
-  const conversations = createOpeningConversationRepository(fixture.sql);
-  const conversation = await conversations.create(fixture.scope, { courseId: f.courseId, title: "sm95 native bound explanation" });
-  const saved = await conversations.appendSavedTurn({ scope: fixture.scope, conversationId: conversation.id,
-    text: "请讲解本次作答", mode: "explain", purpose: "answer", clientKey: randomUUID(), sourceIds: [],
-    learningSessionId: f.sessionId, attemptId: attempt.id, contextAnchor: { purpose: "learning_help", courseId: f.courseId, attemptId: attempt.id },
-    currentPage: null, chunkId: null });
-  const jobs = createOpeningTutorJobsRepository(fixture.sql);
-  const claim = async () => {
-    const claimed = await jobs.claim(saved.jobId);
-    return { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken };
-  };
-  const correct = () => reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
-    rootObservationId: original.id, revisesObservationId: graded.id, expectedHead: graded.id, revisionKind: "replace",
+  const binding = await bindAttempt(f, attempt, "explain");
+  const correct = (rootObservationId = original.id) => reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
+    rootObservationId, revisesObservationId: graded.id, expectedHead: graded.id, revisionKind: "replace",
     reason: "sm95 changed answer", clientKey: randomUUID(),
     replacement: { answer: "sm95 revised answer", outcome: "unverified", assistance: graded.assistance },
   });
-  return { ...f, attempt, original, graded, saved, jobs, claim, correct, conversations, conversation, workSource };
+  return { ...f, ...binding, attempt, original, graded, correct, workSource };
 }
 
-function handler(f: Awaited<ReturnType<typeof seed>>, hook?: () => Promise<void>) {
+function handler(f: Awaited<ReturnType<typeof seed>>, hook?: (onTextDelta?: (text: string) => Promise<void>) => Promise<void>,
+  stream?: TutorTurnDeps["stream"]) {
   const inputs: ProviderInput[] = [];
-  const provider = { complete: vi.fn(async (input: ProviderInput) => {
+  const provider = { complete: vi.fn(async (input: ProviderInput, _signal?: AbortSignal, onTextDelta?: (text: string) => Promise<void>) => {
     inputs.push(input);
-    await hook?.();
+    await hook?.(onTextDelta);
     return { text: "sm95 explanation", citedChunkIds: [], candidates: [], inputTokens: 10, outputTokens: 5, requestId: null };
   }) };
   const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100000 });
   const reserve = vi.spyOn(budget, "reserve"), claimExecution = vi.spyOn(budget, "claimExecution");
   return { inputs, provider, reserve, claimExecution, run: createTutorTurnHandler({ tutorJobs: f.jobs, chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget, provider, privacy: createOpeningPrivacyRepository(fixture.sql), retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    budget, provider, stream, streamExposures: createOpeningStudyExposureRepository(fixture.sql),
+    privacy: createOpeningPrivacyRepository(fixture.sql), retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
     config: { maxContextCharacters: 5000, reservedCents: 1, maxOutputTokens: 256, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } }) };
 }
 
@@ -97,17 +108,412 @@ describe("sm95 same-attempt explain context", () => {
     expect(h.provider.complete).toHaveBeenCalledOnce();
   });
 
+  it("rejects H1 Redis publication when H2 commits between the attempt check and publication", async () => {
+    const f = await seed(), target = await f.claim();
+    const snapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
+    const context = { privacyEpoch: snapshot.privacyEpoch, contextSourceRefs: snapshot.sourceRefs,
+      claimToken: target.claimToken, executionId: target.executionId, attemptContext: snapshot };
+    await f.jobs.assertAttemptContext(fixture.scope, target, snapshot);
+    const revised = await f.correct();
+    const publish = vi.fn(async () => {});
+
+    await expect(f.jobs.withStreamPublication(fixture.scope, f.saved.jobId, context, publish))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(publish).not.toHaveBeenCalled();
+
+    const latest = (await f.jobs.readAttemptContext(fixture.scope, target))!;
+    expect(latest.headObservationId).toBe(revised.headObservationId);
+    await f.jobs.withStreamPublication(fixture.scope, f.saved.jobId, { ...context, attemptContext: latest }, publish);
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
+  it.each(["revision", "first submission"] as const)("rejects in-flight bytes after the publishing backend dies and %s commits", async mutation => {
+    const submitted = mutation === "revision" ? await seed() : null;
+    const f = submitted ?? await learningAttemptFixture(fixture);
+    const attempt = submitted?.attempt ?? await f.start();
+    const binding = submitted ?? await bindAttempt(f, attempt, "hint");
+    const { jobs, saved } = binding;
+    // Legacy turns can carry their attempt binding only in the saved anchor.
+    if (!submitted) await fixture.sql`UPDATE opening_turns SET attempt_id=NULL WHERE id IN (${saved.turnId},${saved.assistantTurnId})`;
+    const target = await binding.claim();
+    const { scope, sql } = fixture;
+    const snapshot = (await jobs.readAttemptContext(scope, target))!;
+    expect(snapshot.headObservationId).toBe(submitted?.graded.id ?? null);
+    const context = { privacyEpoch: snapshot.privacyEpoch, contextSourceRefs: snapshot.sourceRefs, exposureReceiptId: null,
+      claimToken: target.claimToken, executionId: target.executionId, attemptFence: tutorAttemptFence(snapshot) };
+    const redisUrl = process.env.REDIS_URL!;
+    const redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 0, commandTimeout: 3_000 });
+    const transport = await openRedisTransport(redisUrl);
+    const appendRedis = redis.duplicate({ host: "127.0.0.1", port: transport.port });
+    const publication = openRaceSession();
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const key = tutorStreamKey(scope.workspaceId, saved.jobId);
+    let rootId = submitted?.original.id;
+    const checkpoint = deferred(), events: TutorStreamDelta[] = [];
+    let unsubscribe: (() => Promise<void>) | undefined;
+    try {
+      await Promise.all([publication.ready, redis.connect(), appendRedis.connect()]);
+      await writer.begin(scope.workspaceId, saved.jobId, context);
+      expect(await writer.append(scope.workspaceId, saved.jobId,
+        "Already published", target.executionId, snapshot.privacyEpoch, context.attemptFence)).toBe(1);
+      unsubscribe = await reader.subscribe(scope.workspaceId, saved.jobId, delta => {
+        if (delta.text === "checkpoint") checkpoint.resolve();
+        else events.push(delta);
+      });
+      const before = await reader.read(scope.workspaceId, saved.jobId);
+      expect(before).toMatchObject({ text: "Already published", sequence: 1 });
+      const stalled = transport.holdWrites();
+      let appendResult: Promise<number> | undefined;
+      const publishing = track(createOpeningTutorJobsRepository(publication.sql).withStreamPublication(scope, saved.jobId,
+        { ...context, attemptContext: snapshot }, async () => {
+          appendResult = createTutorStreamWriter(appendRedis).append(scope.workspaceId, saved.jobId,
+            "stale attempt bytes", target.executionId, snapshot.privacyEpoch, context.attemptFence);
+          await appendResult;
+        }));
+      try {
+        await Promise.race([stalled.received, publishing.then(() => { throw new Error("append settled before reaching TCP"); })]);
+        const [terminated] = await sql`SELECT pg_terminate_backend(${publication.pid}) AS terminated`;
+        expect(terminated?.terminated).toBe(true);
+        await expect(publishing).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+        // PostgreSQL accepts either UUID casing. The Redis fence must use the stored root identity.
+        const newHead = submitted ? (await submitted.correct(submitted.original.id.toUpperCase())).headObservationId
+          : (await f.submit(attempt)).id;
+        rootId ??= newHead;
+        const headKey = submitted
+          ? tutorStreamAttemptHeadKey(scope.workspaceId, submitted.original.id)
+          : tutorStreamPreAnswerHeadKey(scope.workspaceId, attempt.id);
+        await vi.waitFor(async () => {
+          expect(await redis.get(headKey)).toBe(newHead);
+        });
+        const latest = (await jobs.readAttemptContext(scope, target))!;
+        expect(latest.headObservationId).toBe(newHead);
+        const reply = stalled.nextReply();
+        stalled.release();
+        expect(await reply).toBe(":0\r\n");
+        expect(await appendResult).toBe(0);
+        await writer.begin(scope.workspaceId, saved.jobId, context);
+        expect(await reader.read(scope.workspaceId, saved.jobId)).toEqual(before);
+        await redis.publish(`${key}:events`, JSON.stringify({ text: "checkpoint", sequence: 2 }));
+        await checkpoint.promise;
+        expect(events).toEqual([]);
+        const currentFence = tutorAttemptFence(latest);
+        // The crashed executionId was sealed in Redis; a new execution with the updated attempt head succeeds.
+        const nextExecutionId = randomUUID();
+        await writer.begin(scope.workspaceId, saved.jobId, { ...context, executionId: nextExecutionId, attemptFence: currentFence });
+        expect(await writer.append(scope.workspaceId, saved.jobId, "late bytes after new head began",
+          target.executionId, snapshot.privacyEpoch, context.attemptFence)).toBe(0);
+        expect(await writer.append(scope.workspaceId, saved.jobId, "late bytes with stale head on new execution",
+          nextExecutionId, snapshot.privacyEpoch, context.attemptFence)).toBe(0);
+        expect(await writer.append(scope.workspaceId, saved.jobId, "current head bytes",
+          nextExecutionId, snapshot.privacyEpoch, currentFence)).toBe(1);
+        expect(await reader.read(scope.workspaceId, saved.jobId)).toMatchObject({ text: "current head bytes", sequence: 1 });
+      } finally {
+        stalled.release();
+        await publishing.catch(() => undefined);
+      }
+    } finally {
+      try {
+        await unsubscribe?.();
+        if (redis.status === "ready") await redis.del(key, tutorStreamEpochKey(scope.workspaceId),
+          tutorStreamPreAnswerHeadKey(scope.workspaceId, attempt.id),
+          `${tutorStreamPreAnswerHeadKey(scope.workspaceId, attempt.id)}:rev`,
+          ...(rootId ? [tutorStreamAttemptHeadKey(scope.workspaceId, rootId), `${tutorStreamAttemptHeadKey(scope.workspaceId, rootId)}:rev`] : []));
+      } finally {
+        redis.disconnect();
+        appendRedis.disconnect();
+        await Promise.all([transport.close(), closeRace(publication.sql)]);
+      }
+    }
+  }, 15_000);
+
+  it("commits learner revisions in PostgreSQL without blocking on Redis outages while still fencing stale streams", async () => {
+    const f = await seed(), target = await f.claim();
+    const beforeSnapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
+    const staleContext = {
+      privacyEpoch: beforeSnapshot.privacyEpoch, contextSourceRefs: beforeSnapshot.sourceRefs,
+      exposureReceiptId: null, claimToken: target.claimToken, executionId: target.executionId,
+      attemptFence: tutorAttemptFence(beforeSnapshot),
+    };
+    const sockets = new Set<import("node:net").Socket>();
+    const server = createServer(socket => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      // Blackholed Redis: revision commits immediately in PG and PG rejects stale stream snapshots.
+      vi.stubEnv("REDIS_URL", `redis://127.0.0.1:${(server.address() as AddressInfo).port}`);
+      const startedAt = performance.now();
+      const revised = await f.correct();
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(await f.jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: revised.headObservationId });
+      await expect(f.jobs.readStream(fixture.scope, f.saved.jobId, staleContext)).rejects.toThrow("stream attempt context changed");
+
+      // Completed/terminal Tutor job + missing REDIS_URL: subsequent revision succeeds cleanly.
+      vi.stubEnv("REDIS_URL", undefined);
+      await fixture.sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${f.saved.jobId}`;
+      const revisedAgain = await reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
+        rootObservationId: f.original.id, revisesObservationId: revised.headObservationId,
+        expectedHead: revised.headObservationId, revisionKind: "replace", reason: "修正步骤2",
+        clientKey: randomUUID(), replacement: { answer: "2x = 6, x = 3", outcome: "unverified", assistance: "independent" },
+      });
+      expect(await fixture.sql`SELECT effective_head_id FROM opening_learning_observations WHERE id=${f.original.id}`)
+        .toMatchObject([{ effective_head_id: revisedAgain.headObservationId }]);
+    } finally {
+      vi.unstubAllEnvs();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => { server.close(() => resolve()); });
+    }
+  });
+
+  it("supports Redis-free revision with a queued turn and no execution for the attempt", async () => {
+    const f = await seed();
+    vi.stubEnv("REDIS_URL", undefined);
+    try {
+      const revised = await f.correct();
+      const target = await f.claim();
+      expect(await f.jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: revised.headObservationId });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("commits the first submission in PostgreSQL when Redis is unavailable while PG still fences stale pre-answer streams", async () => {
+    const f = await learningAttemptFixture(fixture), attempt = await f.start();
+    const { jobs, saved, claim } = await bindAttempt(f, attempt, "hint");
+    const target = await claim();
+    const preAnswerSnapshot = (await jobs.readAttemptContext(fixture.scope, target))!;
+    const preAnswerContext = {
+      privacyEpoch: preAnswerSnapshot.privacyEpoch, contextSourceRefs: preAnswerSnapshot.sourceRefs,
+      exposureReceiptId: null, claimToken: target.claimToken, executionId: target.executionId,
+      attemptFence: tutorAttemptFence(preAnswerSnapshot),
+    };
+    vi.stubEnv("REDIS_URL", undefined);
+    try {
+      const submitted = await f.submit(attempt);
+      expect(await jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: submitted.id });
+      await expect(jobs.readStream(fixture.scope, saved.jobId, preAnswerContext)).rejects.toThrow("stream attempt context changed");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("advances Redis attempt-head on idle revision after a completed explanation so subsequent streaming on rev2 succeeds", async () => {
+    const f = await seed();
+    const { scope, sql } = fixture;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const headKey = tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id);
+    const keysToClean = [tutorStreamKey(scope.workspaceId, f.saved.jobId), tutorStreamEpochKey(scope.workspaceId), headKey, `${headKey}:rev`];
+    try {
+      // Complete a real streaming explanation on rev1 (f.graded.id), leaving attempt-head = rev1 in Redis and 0 running jobs.
+      const firstRun = handler(f, async emit => {
+        await emit!("rev1 explanation");
+      }, writer);
+      expect(await firstRun.run(f.saved.jobId)).toEqual({ skipped: false });
+      expect(await f.jobs.get(scope, f.saved.jobId)).toMatchObject({ status: "succeeded" });
+      expect(await redis.get(headKey)).toBe(f.graded.id);
+
+      // Revise the attempt to rev2 while zero Tutor jobs are running.
+      const revised = await f.correct();
+      await vi.waitFor(async () => {
+        expect(await redis.get(headKey)).toBe(revised.headObservationId);
+      });
+
+      // Start a new streaming explanation on rev2 and verify SSE deltas publish and read cleanly.
+      const secondTurn = await bindAttempt(f, f.attempt, "explain");
+      keysToClean.push(tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId));
+      const secondClaim = await secondTurn.claim();
+      const secondSnapshot = (await f.jobs.readAttemptContext(scope, secondClaim))!;
+      expect(secondSnapshot.headObservationId).toBe(revised.headObservationId);
+      const secondContext = {
+        privacyEpoch: secondSnapshot.privacyEpoch, contextSourceRefs: secondSnapshot.sourceRefs,
+        exposureReceiptId: null, claimToken: secondClaim.claimToken, executionId: secondClaim.executionId,
+        attemptFence: tutorAttemptFence(secondSnapshot),
+      };
+      await f.jobs.withStreamPublication(scope, secondTurn.saved.jobId, { ...secondContext, attemptContext: secondSnapshot }, async () => {
+        await writer.begin(scope.workspaceId, secondTurn.saved.jobId, secondContext);
+        expect(await writer.append(scope.workspaceId, secondTurn.saved.jobId, "rev2 explanation delta",
+          secondClaim.executionId, secondSnapshot.privacyEpoch, secondContext.attemptFence)).toBe(1);
+      });
+      const cached = (await reader.read(scope.workspaceId, secondTurn.saved.jobId))!;
+      expect(cached).toMatchObject({ text: "rev2 explanation delta", sequence: 1 });
+      expect(await f.jobs.readStream(scope, secondTurn.saved.jobId, cached)).toMatchObject({ status: "running" });
+      expect(await sql`SELECT status FROM opening_tutor_jobs WHERE id=${secondTurn.saved.jobId}`).toMatchObject([{ status: "running" }]);
+    } finally {
+      try { if (redis.status === "ready") await redis.del(...keysToClean); }
+      finally { redis.disconnect(); }
+    }
+  });
+
+  it("allows rev2 begin() to advance stale Redis attempt-head before delayed post-commit fence arrives", async () => {
+    const f = await seed();
+    const { scope } = fixture;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const headKey = tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id);
+    const keysToClean = [tutorStreamKey(scope.workspaceId, f.saved.jobId), tutorStreamEpochKey(scope.workspaceId), headKey, `${headKey}:rev`];
+    try {
+      // Seed Redis attempt-head at rev1 (simulating a prior completed turn on rev1).
+      const firstClaim = await f.claim();
+      const rev1Snapshot = (await f.jobs.readAttemptContext(scope, firstClaim))!;
+      const rev1Fence = tutorAttemptFence(rev1Snapshot);
+      expect(rev1Fence.headRevision).toBeGreaterThan(0);
+      await writer.begin(scope.workspaceId, f.saved.jobId, {
+        privacyEpoch: rev1Snapshot.privacyEpoch, contextSourceRefs: rev1Snapshot.sourceRefs,
+        exposureReceiptId: null, claimToken: firstClaim.claimToken, executionId: firstClaim.executionId,
+        attemptFence: rev1Fence,
+      });
+      expect(await redis.get(headKey)).toBe(f.graded.id);
+      expect(await redis.get(`${headKey}:rev`)).toBe(String(rev1Fence.headRevision));
+
+      // Commit rev2 WITHOUT letting its post-commit Redis fence reach Redis yet (simulating post-commit delay).
+      vi.stubEnv("REDIS_URL", undefined);
+      let revised: Awaited<ReturnType<typeof f.correct>>;
+      try {
+        revised = await f.correct();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      // Redis STILL holds rev1 head + rev1:rev when the fresh rev2 job begins!
+      expect(await redis.get(headKey)).toBe(f.graded.id);
+
+      const secondTurn = await bindAttempt(f, f.attempt, "explain");
+      keysToClean.push(tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId));
+      const secondClaim = await secondTurn.claim();
+      const rev2Snapshot = (await f.jobs.readAttemptContext(scope, secondClaim))!;
+      const rev2Fence = tutorAttemptFence(rev2Snapshot);
+      expect(rev2Snapshot.headObservationId).toBe(revised.headObservationId);
+      expect(rev2Fence.headRevision).toBeGreaterThan(rev1Fence.headRevision!);
+      const rev2Context = {
+        privacyEpoch: rev2Snapshot.privacyEpoch, contextSourceRefs: rev2Snapshot.sourceRefs,
+        exposureReceiptId: null, claimToken: secondClaim.claimToken, executionId: secondClaim.executionId,
+        attemptFence: rev2Fence,
+      };
+      await f.jobs.withStreamPublication(scope, secondTurn.saved.jobId, { ...rev2Context, attemptContext: rev2Snapshot }, async () => {
+        await writer.begin(scope.workspaceId, secondTurn.saved.jobId, rev2Context);
+        expect(await writer.append(scope.workspaceId, secondTurn.saved.jobId, "rev2 raced ahead cleanly",
+          secondClaim.executionId, rev2Snapshot.privacyEpoch, rev2Fence)).toBe(1);
+      });
+      expect(await redis.get(headKey)).toBe(revised.headObservationId);
+      expect(await redis.get(`${headKey}:rev`)).toBe(String(rev2Fence.headRevision));
+      expect(await reader.read(scope.workspaceId, secondTurn.saved.jobId)).toMatchObject({
+        text: "rev2 raced ahead cleanly", sequence: 1,
+      });
+      // Stale rev1 execution cannot publish or re-begin once rev2 has advanced Redis.
+      expect(await writer.append(scope.workspaceId, f.saved.jobId, "stale rev1",
+        firstClaim.executionId, rev1Snapshot.privacyEpoch, rev1Fence)).toBe(0);
+    } finally {
+      try { if (redis.status === "ready") await redis.del(...keysToClean); }
+      finally { redis.disconnect(); }
+    }
+  });
+
+  it("does not seal a pre-claimed Tutor job that binds rev2 after revision commits, while still sealing a rev1-bound job", async () => {
+    const f = await seed();
+    const { scope } = fixture;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const headKey = tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id);
+    const secondTurn = await bindAttempt(f, f.attempt, "explain");
+    const keysToClean = [
+      tutorStreamKey(scope.workspaceId, f.saved.jobId),
+      tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId),
+      tutorStreamEpochKey(scope.workspaceId), headKey, `${headKey}:rev`,
+    ];
+    try {
+      // Job 1 is claimed AND initialized on rev1 before the revision.
+      const j1 = await f.claim();
+      const j1Snap = (await f.jobs.readAttemptContext(scope, j1))!;
+      const j1Fence = tutorAttemptFence(j1Snap);
+      await writer.begin(scope.workspaceId, f.saved.jobId, {
+        privacyEpoch: j1Snap.privacyEpoch, contextSourceRefs: j1Snap.sourceRefs,
+        exposureReceiptId: null, claimToken: j1.claimToken, executionId: j1.executionId, attemptFence: j1Fence,
+      });
+      expect(await writer.append(scope.workspaceId, f.saved.jobId, "rev1 prefix", j1.executionId, j1Snap.privacyEpoch, j1Fence)).toBe(1);
+
+      // Job 2 is ALREADY claimed (status = 'running' with timing_execution_id != NULL) BEFORE rev2 commits,
+      // but has NOT read attempt context or called writer.begin() yet!
+      const j2 = await secondTurn.claim();
+      const revised = await f.correct();
+      await vi.waitFor(async () => {
+        expect(await redis.get(headKey)).toBe(revised.headObservationId);
+        expect(await redis.hget(tutorStreamKey(scope.workspaceId, f.saved.jobId), "sealed")).toBe("1");
+      });
+      // Job 1 (bound to rev1) was sealed and blocked; Job 2 (not yet initialized) was NOT tombstoned!
+      expect(await writer.append(scope.workspaceId, f.saved.jobId, "stale j1 tail", j1.executionId, j1Snap.privacyEpoch, j1Fence)).toBe(0);
+      expect(await redis.hget(tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId), "sealed")).toBeNull();
+
+      // Job 2 now reads rev2 from PostgreSQL, initializes Redis, and streams cleanly!
+      const j2Snap = (await f.jobs.readAttemptContext(scope, j2))!;
+      expect(j2Snap.headObservationId).toBe(revised.headObservationId);
+      const j2Fence = tutorAttemptFence(j2Snap);
+      const j2Context = {
+        privacyEpoch: j2Snap.privacyEpoch, contextSourceRefs: j2Snap.sourceRefs,
+        exposureReceiptId: null, claimToken: j2.claimToken, executionId: j2.executionId, attemptFence: j2Fence,
+      };
+      await f.jobs.withStreamPublication(scope, secondTurn.saved.jobId, { ...j2Context, attemptContext: j2Snap }, async () => {
+        await writer.begin(scope.workspaceId, secondTurn.saved.jobId, j2Context);
+        expect(await writer.append(scope.workspaceId, secondTurn.saved.jobId, "rev2 delta on pre-claimed job",
+          j2.executionId, j2Snap.privacyEpoch, j2Fence)).toBe(1);
+      });
+      const cached = (await reader.read(scope.workspaceId, secondTurn.saved.jobId))!;
+      expect(cached).toMatchObject({ text: "rev2 delta on pre-claimed job", sequence: 1 });
+      expect(await f.jobs.readStream(scope, secondTurn.saved.jobId, cached)).toMatchObject({ status: "running" });
+    } finally {
+      try { if (redis.status === "ready") await redis.del(...keysToClean); }
+      finally { redis.disconnect(); }
+    }
+  });
+
+  it("streams and saves an explanation pinned to available source v1 after it advances to v2", async () => {
+    const f = await seed();
+    const { scope, sql } = fixture;
+    await sql`UPDATE opening_sources SET version=2 WHERE id=${f.sourceId}`;
+    await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+      VALUES (${f.sourceId},0,${scope.workspaceId},'available') ON CONFLICT DO NOTHING`;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const reader = createTutorStreamReader(redis);
+    const h = handler(f, async emit => {
+      await emit!("sm95 explanation");
+      const snapshot = (await reader.read(scope.workspaceId, f.saved.jobId))!;
+      expect(snapshot).toMatchObject({ text: "sm95 explanation", sequence: 1,
+        contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }] });
+      expect(await f.jobs.readStream(scope, f.saved.jobId, snapshot)).toMatchObject({ status: "running" });
+      const extraRefs = [...snapshot.contextSourceRefs, { sourceId: f.sourceId, sourceVersion: 0 }];
+      const attemptContext = (await f.jobs.readAttemptContext(scope, {
+        jobId: f.saved.jobId, userTurnId: f.saved.turnId, claimToken: snapshot.claimToken,
+      }))!;
+      const publish = vi.fn();
+      await expect(f.jobs.withStreamPublication(scope, f.saved.jobId, { ...snapshot, attemptContext, contextSourceRefs: extraRefs }, publish))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+      expect(publish).not.toHaveBeenCalled();
+    }, createTutorStreamWriter(redis));
+    try {
+      expect(await h.run(f.saved.jobId)).toEqual({ skipped: false });
+      expect(h.provider.complete).toHaveBeenCalledOnce();
+      expect(await f.jobs.get(scope, f.saved.jobId)).toMatchObject({ status: "succeeded" });
+      expect(await sql`SELECT text,context_source_refs FROM opening_turns WHERE id=${f.saved.assistantTurnId}`)
+        .toMatchObject([{ text: "sm95 explanation", context_source_refs: [{ sourceId: f.sourceId, sourceVersion: 1 }] }]);
+    } finally {
+      try { await redis.del(tutorStreamKey(scope.workspaceId, f.saved.jobId), tutorStreamEpochKey(scope.workspaceId),
+        tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id),
+        `${tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id)}:rev`); }
+      finally { redis.disconnect(); }
+    }
+  });
+
   it("sm95 P1b denies H1 cached bytes after H2 edit on reconnect and delayed flush", async () => {
     const f = await seed(), target = await f.claim();
     const snapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
     const context = { privacyEpoch: snapshot.privacyEpoch, contextSourceRefs: snapshot.sourceRefs, exposureReceiptId: null, claimToken: target.claimToken,
-      attemptFence: tutorAttemptFence(snapshot) };
+      attemptFence: tutorAttemptFence(snapshot), executionId: target.executionId };
     const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
     const key = `opening:tutor-stream:${fixture.scope.workspaceId}:${f.saved.jobId}`;
     try {
       const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
       await writer.begin(fixture.scope.workspaceId, f.saved.jobId, context);
-      await writer.append(fixture.scope.workspaceId, f.saved.jobId, "sm95 H1 cached secret bytes");
+      expect(await writer.append(fixture.scope.workspaceId, f.saved.jobId, "sm95 H1 cached secret bytes",
+        context.executionId, snapshot.privacyEpoch, context.attemptFence)).toBe(1);
       const cached = (await reader.read(fixture.scope.workspaceId, f.saved.jobId))!;
       expect(cached.attemptFence).toEqual(context.attemptFence);
       const job = (await f.jobs.readStream(fixture.scope, f.saved.jobId, cached))!;
@@ -131,7 +537,10 @@ describe("sm95 same-attempt explain context", () => {
         expect(await response.text()).toBe("");
       }
       await expect(f.jobs.readStream(fixture.scope, f.saved.jobId, cached)).rejects.toThrow();
-    } finally { await redis.del(key); redis.disconnect(); }
+    } finally {
+      try { await redis.del(key, tutorStreamEpochKey(fixture.scope.workspaceId)); }
+      finally { redis.disconnect(); }
+    }
     const turns = await f.conversations.listTurns(fixture.scope, f.conversation.id);
     expect(turns.find(turn => turn.id===f.saved.assistantTurnId)?.text).not.toContain("sm95 H1 cached secret bytes");
     const continuity = await f.conversations.loadContinuityTurns(fixture.scope, f.conversation.id);

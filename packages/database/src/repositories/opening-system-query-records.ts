@@ -16,7 +16,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       FROM library_documents d LEFT JOIN opening_note_provenance np ON np.document_id=d.id
       WHERE d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND d.title ILIKE ${pattern}
         AND (np.document_id IS NULL OR (np.workspace_id=${scope.workspaceId}
-          AND ${contextSourceRefsIncluded(tx, scope.workspaceId, noteContextSourceRefs(tx, tx`np.context_source_refs`), false)}))
+          AND ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)}))
       ORDER BY d.updated_at DESC,d.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
     if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
     out.data = rows.slice(0, a.limit).map(row => {
@@ -33,7 +33,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       LEFT JOIN opening_note_provenance np ON np.document_id=c.source_document_id AND np.workspace_id=c.workspace_id
       WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} AND NOT c.archived
         AND ${a.courseId ? tx`c.course_id=${a.courseId}` : tx`TRUE`} AND ${cardReadable(tx, scope.workspaceId)}
-        AND (np.document_id IS NULL OR ${contextSourceRefsIncluded(tx, scope.workspaceId, noteContextSourceRefs(tx, tx`np.context_source_refs`), false)})
+        AND (np.document_id IS NULL OR ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})
       ORDER BY s.due_at NULLS LAST,c.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
     if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
     out.data = [];

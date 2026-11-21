@@ -101,7 +101,8 @@ describe("opening backup record lineage filters", () => {
     expect(turns).toMatch(/jsonb_typeof\(\s*t\.citations\s*\)/);
     expect(turns).toMatch(/jsonb_array_elements|sourceId|sourceVersion/);
     expect(turns).toMatch(/jsonb_typeof\(\s*t\.source_versions\s*\) = 'object'/);
-    expect(turns).toMatch(/jsonb_typeof\([^)]*\) <> 'number'/);
+    expect(turns).toMatch(/jsonb_typeof\(pin\.source_version\) IS DISTINCT FROM 'number'/);
+    expect(turns).toContain("t.context_anchor->>'sourceId'");
     expect(turns).not.toMatch(/NULLIF\(\s*t\.citations/);
   });
 

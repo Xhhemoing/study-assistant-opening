@@ -124,10 +124,12 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
       }
     }
     const createdTaskVersions: Record<string, number> = {};
+    const dependencyTurnIds: string[] = [];
     for (const item of selected) {
       if (draft.origin === "agent") {
         const created = await consumeOpeningConversationPlanCandidate(tx, scope, conversationPlan, item);
         createdTaskVersions[created.taskId] = created.version;
+        if (created.dependencyTurnId !== null) dependencyTurnIds.push(created.dependencyTurnId);
         continue;
       }
       if (parseSuggestionKey(item.key)?.date !== day) throw new OpeningPlanError("VALIDATION", "invalid suggestion identity");
@@ -165,6 +167,12 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
     await tx`INSERT INTO opening_plan_acceptances (workspace_id, client_key, draft_id, day, accepted_version, payload_hash, source, before_blocks, created_task_versions)
       VALUES (${scope.workspaceId}, ${input.clientKey}, ${input.draftId}, ${day}::date, ${nextVersion}, ${payloadHash},
         ${options.source ?? "learner"}, ${tx.json(state!.accepted_blocks ?? [])}, ${tx.json(createdTaskVersions)})`;
+    if (dependencyTurnIds.length) {
+      const { assertTaskCandidateMemoryDependencies } = await import("./opening-task-candidate-admission");
+      for (const dependencyTurnId of dependencyTurnIds) {
+        await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependencyTurnId);
+      }
+    }
     return updated!;
   });
 }

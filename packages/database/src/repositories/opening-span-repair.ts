@@ -67,7 +67,7 @@ async function readBasis(db: Db, scope: Scope, courseId: string, observationId: 
     || row.attempt_observation !== row.repair_root_id && row.attempt_observation !== observation.id
     || !isDeepStrictEqual(row.attempt_sources, observation.sourceVersions)
     || observation.sourceIds.some(id => !refs.some(ref => ref.sourceId === id && ref.sourceVersion === observation.sourceVersions?.[id]))) return null;
-  const [available] = await db`SELECT 1 AS ok WHERE ${contextSourceRefsIncluded(db, scope.workspaceId, db`${db.json([...refs])}`)}`;
+  const [available] = await db`SELECT 1 AS ok WHERE ${contextSourceRefsIncluded(db, scope.workspaceId, () => db`${db.json([...refs])}`)}`;
   if (!available) return null;
   const contexts = await readOpeningLearningEvidenceContexts(db, scope, [observation]);
   const context = contexts[observation.id];

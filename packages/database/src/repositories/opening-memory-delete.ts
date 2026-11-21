@@ -5,6 +5,7 @@ import { parseContextSourceRefs } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
+import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 export type MemoryDeletionReceipt = {
   memoryId: string;
@@ -20,7 +21,7 @@ export function deleteOwnedMemory(
   scope: OpeningScope,
   input: { id: string; expectedVersion: number; deleteSourceText: boolean; clientKey: string },
 ): Promise<MemoryDeletionReceipt> {
-  return sql.begin(async (tx) => {
+  return withOpeningTutorStreamFenceCommit(sql, async (tx) => {
     await lockWorkspaceLearningHistory(tx, scope);
     const owners = await tx`
       SELECT id, privacy_epoch FROM workspaces
@@ -81,10 +82,6 @@ export function deleteOwnedMemory(
           last_decision_client_key = ${input.clientKey}, updated_at = now()
       WHERE id = ${input.id} AND workspace_id = ${scope.workspaceId}
         AND version = ${input.expectedVersion}`;
-    const epochRows = await tx`
-      UPDATE workspaces SET privacy_epoch = privacy_epoch + 1, updated_at = now()
-      WHERE id = ${scope.workspaceId}
-      RETURNING privacy_epoch`;
     const uniqueSourceIds = [...new Set(sourceIds)];
     const existingExclusions = uniqueSourceIds.length ? await tx`SELECT source_id FROM opening_privacy_exclusions
       WHERE workspace_id=${scope.workspaceId} AND source_id IN ${tx(uniqueSourceIds)}` : [];
@@ -108,10 +105,11 @@ export function deleteOwnedMemory(
         await tx`UPDATE opening_turns SET text = '' WHERE workspace_id = ${scope.workspaceId} AND id = ${turnId}`;
       }
     }
+    const privacyEpoch = await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
     return {
       memoryId: input.id,
       workspaceId: scope.workspaceId,
-      privacyEpoch: Number((epochRows[0] as { privacy_epoch: number }).privacy_epoch),
+      privacyEpoch,
       excludedSourceIds,
       deletedAt: deletedAt.toISOString(),
     };

@@ -1,4 +1,4 @@
-import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences } from "@aistudy/domain";
+import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences, unavailableBackupMemoryLineage } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
 import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, projectOpeningBackupProvenance, readBackupLibrary, readBackupNoteProvenance } from "./opening-backup-library";
 import { readBackupCourseAssets } from "./opening-backup-course-assets";
@@ -94,7 +94,7 @@ export async function readOpeningBackupTableRows(
     SELECT p.problem_id, p.workspace_id, p.session_id, p.source_id, p.source_version, p.physical_page,
       p.chunk_id, p.stem_snapshot, p.artifact_kind, p.teaching_revision_id, p.teaching_block_id, p.updated_at
     FROM opening_problem_refs p
-    WHERE ${includedProblem(tx, id, userId, "p", tx`p.session_id`)}
+    WHERE ${includedProblem(tx, id, userId, "p")}
       AND NOT EXISTS (SELECT 1 FROM library_revisions r WHERE r.id=p.teaching_revision_id AND r.document_id=ANY(${privateExams}::uuid[]))
     ORDER BY p.problem_id`);
   tables.opening_help_exposures = asRows(await tx`
@@ -109,7 +109,7 @@ export async function readOpeningBackupTableRows(
       AND (h.activity_id IS NULL OR EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity
         WHERE backup_activity.id=h.activity_id AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}
           AND ${cleanUuidSources(tx,id,tx`backup_activity.source_ids`)}))
-      AND (h.problem_id IS NULL OR ${includedProblem(tx, id, userId, tx`h.problem_id`, tx`h.session_id`)})
+      AND (h.problem_id IS NULL OR ${includedProblem(tx, id, userId, () => tx`h.problem_id`, () => tx`h.session_id`)})
       AND (h.turn_id IS NULL OR ${includedTurn(tx, id, userId, tx`h.turn_id`)})
     ORDER BY h.id`).map(row => ({ ...row, workspace_history_revision: row.workspace_history_revision == null ? null : Number(row.workspace_history_revision) }));
   tables.opening_learning_observations = asRows(await tx`
@@ -143,7 +143,7 @@ export async function readOpeningBackupTableRows(
       AND NOT EXISTS (
         SELECT 1 FROM unnest(o.source_turn_ids) ref(turn_id) WHERE NOT ${includedTurn(tx, id, userId, tx`ref.turn_id`)}
       )
-      AND (o.problem_id IS NULL OR ${includedProblem(tx, id, userId, tx`o.problem_id`, tx`o.session_id`)})
+      AND (o.problem_id IS NULL OR ${includedProblem(tx, id, userId, () => tx`o.problem_id`, () => tx`o.session_id`)})
     ORDER BY o.id`)
     .map(row => ({ ...row, workspace_history_revision: Number(row.workspace_history_revision) }));
   tables.opening_skill_evidence = asRows(await tx`
@@ -255,7 +255,7 @@ export async function readOpeningBackupTableRows(
     FROM opening_learning_item_versions v WHERE v.workspace_id=${id} AND v.owner_user_id=${userId}
       AND NOT EXISTS (SELECT 1 FROM library_revisions r WHERE r.id=v.teaching_revision_id AND r.document_id=ANY(${privateExams}::uuid[]))
       AND (v.source_id IS NULL OR ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)})
-      AND ${includedProblem(tx,id,userId,tx`v.problem_id`,tx`(SELECT original.session_id FROM opening_problem_refs original
+      AND ${includedProblem(tx,id,userId,() => tx`v.problem_id`,() => tx`(SELECT original.session_id FROM opening_problem_refs original
         WHERE original.problem_id=v.problem_id AND original.workspace_id=v.workspace_id)`)}
       AND EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity WHERE backup_activity.id=v.activity_id
         AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}
@@ -273,6 +273,8 @@ export async function readOpeningBackupTableRows(
   const sourceIds = new Set(tables.opening_sources.map(row => typeof row.id === "string" ? row.id.toLowerCase() : row.id));
   const conversationsById = new Map(tables.opening_conversations.map(row => [row.id, row]));
   const initialUserTurnCourse = new Map<string, unknown>();
+  const memoryEvaluationTime = Date.now();
+  const canonicalId = (value: unknown) => typeof value === "string" ? value.toLowerCase() : value;
   for (const turn of tables.opening_turns) {
     const conv = conversationsById.get(turn.conversation_id);
     if (turn.role === "user" && typeof turn.id === "string" && conv && conv.workspace_id === id && conv.owner_user_id === userId) {
@@ -361,28 +363,35 @@ export async function readOpeningBackupTableRows(
     attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
     tables.opening_turns = tables.opening_turns.filter(row => (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.learning_session_id == null || sessionIds.has(row.learning_session_id)) && admittedAnchor(row));
-    turnIds = new Set(tables.opening_turns.map(row => row.id));
-    tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(row.turn_id))
+    turnIds = new Set(tables.opening_turns.map(row => canonicalId(row.id)));
+    tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(canonicalId(row.turn_id)))
       && (row.session_id == null || sessionIds.has(row.session_id)) && (row.activity_id == null || activityIds.has(row.activity_id))
       && (row.problem_id == null || problemIds.has(row.problem_id)) && admittedAnchor(row)
-      && (row.help_input_snapshot == null || turnIds.has((row.help_input_snapshot as { userTurnId: string }).userTurnId))
+      && (row.help_input_snapshot == null || turnIds.has(canonicalId((row.help_input_snapshot as { userTurnId: string }).userTurnId)))
       && (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.item_version_id == null || itemIds.has(row.item_version_id)));
     tables.opening_learning_observations = tables.opening_learning_observations.filter(row =>
       (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.item_version_id == null || itemIds.has(row.item_version_id))
       && Array.isArray(row.source_turn_ids)
-      && (row.source_turn_ids as string[]).every(turn => turnIds.has(turn)));
+      && (row.source_turn_ids as string[]).every(turn => turnIds.has(canonicalId(turn))));
     retainCompleteObservationChains(tables, lineage);
     attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
-    turnIds = new Set(tables.opening_turns.map(row => row.id));
+    turnIds = new Set(tables.opening_turns.map(row => canonicalId(row.id)));
     tables.opening_help_exposures = tables.opening_help_exposures.filter(row =>
-      (row.turn_id == null || turnIds.has(row.turn_id))
-      && (row.help_input_snapshot == null || turnIds.has((row.help_input_snapshot as { userTurnId: string }).userTurnId))
+      (row.turn_id == null || turnIds.has(canonicalId(row.turn_id)))
+      && (row.help_input_snapshot == null || turnIds.has(canonicalId((row.help_input_snapshot as { userTurnId: string }).userTurnId)))
       && (row.attempt_id == null || attemptIds.has(row.attempt_id)));
-    const turnIdsLower = new Set(
-      tables.opening_turns.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])),
+    const turnCountBeforeMemoryDeps = tables.opening_turns.length;
+    const unavailableLineage = unavailableBackupMemoryLineage(
+      tables.opening_turns, tables.opening_memories, memoryEvaluationTime,
     );
+    tables.opening_memories = tables.opening_memories.filter(row => !unavailableLineage.has(row));
+    tables.opening_turns = tables.opening_turns.filter(row => !unavailableLineage.has(row));
+    const droppedMemoryDependentTurns = tables.opening_turns.length < turnCountBeforeMemoryDeps;
+    const retainedTurnIds = droppedMemoryDependentTurns
+      ? new Set(tables.opening_turns.map(row => canonicalId(row.id)))
+      : turnIds;
     const droppedOriginTurnActivities = new Set(
       tables.opening_teaching_activities
         .filter(row => {
@@ -392,7 +401,7 @@ export async function readOpeningBackupTableRows(
             : undefined;
           if (typeof rawSourceTurnId !== "string") return false;
           const sourceTurnId = rawSourceTurnId.toLowerCase();
-          if (turnIdsLower.has(sourceTurnId)) return false;
+          if (retainedTurnIds.has(sourceTurnId)) return false;
           return initialUserTurnCourse.has(sourceTurnId)
             && initialUserTurnCourse.get(sourceTurnId) === (row.course_id ?? null);
         })
@@ -402,10 +411,13 @@ export async function readOpeningBackupTableRows(
       tables.opening_teaching_activities = tables.opening_teaching_activities.filter(row => !droppedOriginTurnActivities.has(row.id));
       continue;
     }
+    if (droppedMemoryDependentTurns) {
+      continue;
+    }
     break;
   }
-  const completeTurnIds = new Set(tables.opening_turns.map(row => row.id));
-  tables.opening_assistant_candidates = tables.opening_assistant_candidates.filter(row => completeTurnIds.has(row.source_turn_id));
+  const completeTurnIds = new Set(tables.opening_turns.map(row => canonicalId(row.id)));
+  tables.opening_assistant_candidates = tables.opening_assistant_candidates.filter(row => completeTurnIds.has(canonicalId(row.source_turn_id)));
   const includedCandidateIds = new Set(tables.opening_assistant_candidates
     .map(row => typeof row.id === "string" ? row.id.toLowerCase() : null)
     .filter((value): value is string => value !== null));
@@ -423,11 +435,9 @@ export async function readOpeningBackupTableRows(
       ? row.candidate_id
       : null,
   }));
-  tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
-    && (row.source_turn_ids as string[]).every(turn => completeTurnIds.has(turn)));
-  const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
-  const excludedObservations = new Set(lineage.filter(row => !completeObservationIds.has(row.id)).map(row => row.id));
-  tables.cards = tables.cards.filter(row => !excludedObservations.has(row.origin_observation_root_id));
+  const completeObservationIds = new Set(tables.opening_learning_observations.map(row => canonicalId(row.id)));
+  const excludedObservations = new Set(lineage.filter(row => !completeObservationIds.has(canonicalId(row.id))).map(row => canonicalId(row.id)));
+  tables.cards = tables.cards.filter(row => !excludedObservations.has(canonicalId(row.origin_observation_root_id)));
   tables.cards = projectOpeningBackupCardSources({ ...tables, ...libraryTables }, noteProvenance);
   const cardIds = new Set(tables.cards.map(row => row.id));
   tables.card_review_states = tables.card_review_states.filter(row => cardIds.has(row.card_id));
@@ -437,10 +447,11 @@ export async function readOpeningBackupTableRows(
   );
   // Privacy/source filtering may omit a protocol's baseline. Keep the task and
   // stable identity, but never export a dangling baseline or replay receipt.
+  const canonicalActivityIds = new Set([...activityIds].map(canonicalId));
   tables.opening_retest_activities = tables.opening_retest_activities.map(row => {
     const protocol = row.learning_protocol as { protocolId?: unknown; originActivityId?: unknown; baselineObservationId?: unknown; baselineRootId?: unknown } | null;
-    if (!protocol || completeObservationIds.has(protocol.baselineObservationId) && completeObservationIds.has(protocol.baselineRootId)
-      && (protocol.protocolId !== "course-route-delayed-v1" || activityIds.has(protocol.originActivityId))) return row;
+    if (!protocol || completeObservationIds.has(canonicalId(protocol.baselineObservationId)) && completeObservationIds.has(canonicalId(protocol.baselineRootId))
+      && (protocol.protocolId !== "course-route-delayed-v1" || canonicalActivityIds.has(canonicalId(protocol.originActivityId)))) return row;
     return { ...row, learning_protocol: null, accept_client_key: null,
       reason: [row.reason, "learning_protocol_baseline_unavailable"].filter(Boolean).join(";").slice(0, 200) };
   });

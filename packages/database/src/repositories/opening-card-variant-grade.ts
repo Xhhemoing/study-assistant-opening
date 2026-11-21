@@ -6,10 +6,11 @@ import { loadCard, loadReviewStateForUpdate, lockCardForUpdate } from "./cards-o
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { proposalTransactionClient } from "./opening-assistant-proposal-effects";
+import { withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 /** An accepted answer to the current new question is the only authority for this FSRS update. */
 export async function gradeCardVariant(sql: Sql, scope: Scope, cardId: string, observationId: string) {
-  return sql.begin(async tx => {
+  return withOpeningTutorStreamFenceCommit(sql, async tx => {
     await lockWorkspaceLearningHistory(tx, scope);
     await lockCardForUpdate(tx as Sql, scope.workspaceId, scope.ownerUserId, cardId);
     const card = await loadCard(tx as Sql, scope.workspaceId, cardId);

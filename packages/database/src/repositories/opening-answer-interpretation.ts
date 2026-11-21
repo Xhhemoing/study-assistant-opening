@@ -4,8 +4,9 @@ import { readOpeningAnswerInterpretationState } from "./opening-answer-interpret
 import { learningError,lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";
 import { reviseOpeningLearningObservation } from "./opening-observation-revisions";
+import { runWithNestedTutorStreamFences, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
-function transactionClient(tx:TransactionSql):Sql{return new Proxy(tx,{get(target,key,receiver){if(key==="begin")return (...args:unknown[])=>target.savepoint(nested=>(args.at(-1) as (db:TransactionSql)=>Promise<unknown>)(nested));return Reflect.get(target,key,receiver);}}) as unknown as Sql;}
+function transactionClient(tx:TransactionSql):Sql{return new Proxy(tx,{get(target,key,receiver){if(key==="begin")return (...args:unknown[])=>target.savepoint(nested=>runWithNestedTutorStreamFences(tx,nested,args.at(-1) as (db:TransactionSql)=>Promise<unknown>));return Reflect.get(target,key,receiver);}}) as unknown as Sql;}
 async function snapshot(db:Sql|TransactionSql,scope:Scope,id:string):Promise<AnswerInterpretationSnapshot>{
   const state=await readOpeningAnswerInterpretationState(db,scope,id);
   await qualifyObservationRevision(db,scope,state.head);
@@ -22,7 +23,7 @@ async function snapshot(db:Sql|TransactionSql,scope:Scope,id:string):Promise<Ans
 export function createOpeningAnswerInterpretationRepository(sql:Sql){return {
   read:(scope:Scope,id:string)=>sql.begin("isolation level repeatable read read only",tx=>snapshot(tx,scope,id)),
   async correct(scope:Scope,id:string,raw:AnswerInterpretationCorrection){const input=answerInterpretationCorrectionSchema.parse(raw);
-    return sql.begin(async tx=>{
+    return withOpeningTutorStreamFenceCommit(sql,async tx=>{
       await lockWorkspaceLearningHistory(tx,scope);
       const state=await readOpeningAnswerInterpretationState(tx,scope,id);
       const [replay]=await tx`SELECT submitted_intent FROM opening_learning_observations WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;

@@ -1,6 +1,6 @@
 import "server-only";
 import { loadEnv, loadOpeningJobStaleConfig } from "@aistudy/config";
-import { createOpeningTutorJobsRepository, type OpeningScope, type OpeningTutorJobRecord } from "@aistudy/database";
+import { createOpeningTutorJobsRepository, openingRedisEndpoint, type OpeningScope, type OpeningTutorJobRecord } from "@aistudy/database";
 import { Redis } from "ioredis";
 import type { Sql } from "postgres";
 import { createTutorStreamReader, type TutorStreamSnapshot } from "../../../../../worker/src/runtime/tutor-stream";
@@ -21,7 +21,11 @@ export async function createJobStreamResponse(input: {
   signal: AbortSignal;
   reader: StreamReader;
   getJob(): Promise<StreamJob | null>;
-  authorizeSnapshot(snapshot: TutorStreamSnapshot): Promise<StreamJob | null>;
+  authorizeSnapshot(
+    snapshot: TutorStreamSnapshot,
+    commitAuthorized?: (job: StreamJob) => void,
+    canDeliver?: () => boolean,
+  ): Promise<StreamJob | null>;
   close(): void;
 }): Promise<Response> {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -56,6 +60,21 @@ export async function createJobStreamResponse(input: {
     send("terminal", { status: job.status, assistantTurnId: job.assistantTurnId, conversationId: job.conversationId });
     close();
   };
+  const emitSnapshot = (job: StreamJob, snapshot: TutorStreamSnapshot | null) => {
+    const executionId = snapshot?.text ? snapshot.executionId : undefined;
+    const identity = { assistantTurnId: job.assistantTurnId, conversationId: job.conversationId, ...(executionId ? { executionId } : {}) };
+    const text = snapshot?.text ?? "";
+    const sequence = snapshot?.sequence ?? 0;
+    if (firstSnapshot || executionId !== sentExecutionId || sequence < sentSequence || sequence > sentSequence + 1 || !text.startsWith(sentText)) {
+      send("snapshot", { ...identity, text, sequence }, sequence);
+      firstSnapshot = false;
+    } else if (sequence > sentSequence && text.length > sentText.length) {
+      send("delta", { ...identity, text: text.slice(sentText.length), sequence }, sequence);
+    }
+    sentText = text;
+    sentSequence = sequence;
+    sentExecutionId = executionId;
+  };
   const flush = async () => {
     if (!controller || closed || busy) return;
     busy = true;
@@ -65,27 +84,30 @@ export async function createJobStreamResponse(input: {
         const snapshot = await input.reader.read();
         if (closed) break;
         // Empty snapshots never deliver help. Every nonempty batch is checked
-        // against live source/privacy facts before its bytes leave the server.
+        // against live source/privacy facts and enqueued synchronously before
+        // readStream releases its PostgreSQL locks.
+        let deliveredInTransaction = false;
+        const canDeliver = () => !closed && Boolean(controller);
+        const commitAuthorized = (authorizedJob: StreamJob) => {
+          if (!canDeliver()) throw new Error("stream closed before delivery");
+          if (snapshot?.temporaryMemoryExpiresAt) {
+            const expiresAt = Date.parse(snapshot.temporaryMemoryExpiresAt);
+            if (Number.isNaN(expiresAt) || expiresAt <= Date.now()) {
+              throw new Error("stream temporary memory expired before delivery");
+            }
+          }
+          if (authorizedJob.status !== "running" || deliveredInTransaction) return;
+          deliveredInTransaction = true;
+          emitSnapshot(authorizedJob, snapshot);
+        };
         const job = snapshot?.text
-          ? await input.authorizeSnapshot(snapshot)
+          ? await input.authorizeSnapshot(snapshot, commitAuthorized, canDeliver)
           : await input.getJob();
         if (closed) break;
         if (!job) { close(); break; }
         if (isTerminal(job)) { terminal(job); break; }
         if (snapshot?.text && job.status !== "running") break;
-        const executionId = snapshot?.text ? snapshot.executionId : undefined;
-        const identity = { assistantTurnId: job.assistantTurnId, conversationId: job.conversationId, ...(executionId ? { executionId } : {}) };
-        const text = snapshot?.text ?? "";
-        const sequence = snapshot?.sequence ?? 0;
-        if (firstSnapshot || executionId !== sentExecutionId || sequence < sentSequence || sequence > sentSequence + 1 || !text.startsWith(sentText)) {
-          send("snapshot", { ...identity, text, sequence }, sequence);
-          firstSnapshot = false;
-        } else if (sequence > sentSequence && text.length > sentText.length) {
-          send("delta", { ...identity, text: text.slice(sentText.length), sequence }, sequence);
-        }
-        sentText = text;
-        sentSequence = sequence;
-        sentExecutionId = executionId;
+        if (!deliveredInTransaction) emitSnapshot(job, snapshot);
       } while (pending && !closed);
     } catch {
       // The normal job endpoint remains the recovery path. In particular,
@@ -146,14 +168,14 @@ export async function openTutorJobStream(
       reader: { read: async () => null, subscribe: async () => async () => undefined },
       getJob: () => jobs.get(scope, job.id), authorizeSnapshot: async () => job, close: () => undefined });
   }
-  const redis = new Redis(loadEnv(process.env).redisUrl, {
-    lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0,
-    connectTimeout: 2_000, commandTimeout: 2_000, retryStrategy: () => null,
-  });
-  // ioredis errors can contain connection strings. Surface only the bounded
-  // transport failure; persisted job completion remains available by polling.
-  redis.on("error", () => undefined);
+  let client: Redis | undefined;
   try {
+    const redis = client = new Redis(openingRedisEndpoint(loadEnv(process.env).redisUrl).url, {
+      lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0,
+      connectTimeout: 2_000, commandTimeout: 2_000, retryStrategy: () => null,
+    });
+    // Surface a bounded failure without exposing the Redis URL.
+    redis.on("error", () => undefined);
     await redis.connect();
     const reader = createTutorStreamReader(redis);
     return await createJobStreamResponse({ job, signal,
@@ -162,11 +184,11 @@ export async function openTutorJobStream(
         subscribe: (onDelta, onUnavailable) => reader.subscribe(scope.workspaceId, job.id, onDelta, onUnavailable),
       },
       getJob: () => jobs.get(scope, job.id),
-      authorizeSnapshot: snapshot => jobs.readStream(scope, job.id, snapshot),
+      authorizeSnapshot: (snapshot, commitAuthorized, canDeliver) => jobs.readStream(scope, job.id, snapshot, commitAuthorized, canDeliver),
       close: () => redis.disconnect(),
     });
   } catch (error) {
-    redis.disconnect();
+    client?.disconnect();
     if (error instanceof ApiError) throw error;
     throw new ApiError("SERVICE_UNAVAILABLE", "实时回答暂不可用，请稍后查看完整回答。", 503);
   }

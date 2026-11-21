@@ -113,7 +113,11 @@ describe("createTodayResumeReader", () => {
   });
 
   it("surfaces combined assistant/retest read failures instead of an empty count", async () => {
-    const sql = Object.assign(vi.fn(async () => { throw new Error("database unavailable"); }), { json: (value: unknown) => value });
+    const query = vi.fn(async () => { throw new Error("database unavailable"); });
+    const sql = Object.assign(query, {
+      json: (value: unknown) => value,
+      begin: (_options: string, run: (tx: typeof query) => Promise<unknown>) => run(query),
+    });
     await expect(createTodayResumeReader(sql as never).pendingCandidateCount(scope)).rejects.toThrow("database unavailable");
   });
 });

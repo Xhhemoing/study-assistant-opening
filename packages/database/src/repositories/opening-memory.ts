@@ -111,6 +111,7 @@ export function createOpeningMemoryRepository(
             ${randomUUID()}, ${scope.workspaceId}, ${input.courseId ?? null}, ${kind},
             ${text}, ${tx.json(input.sourceTurnIds as never)}, 0, ${input.expiresAt}, 'active'
           ) RETURNING *`;
+        await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds);
         return mapMemoryRow(rows[0] as Record<string, unknown>);
       });
     },
@@ -121,7 +122,7 @@ export function createOpeningMemoryRepository(
       expectedVersion: number,
       clientKey: string,
     ): Promise<MemoryItem> {
-      return confirmOwnedMemory(sql, scope, id, expectedVersion, clientKey);
+      return confirmOwnedMemory(sql, scope, id, expectedVersion, clientKey, now);
     },
 
     async reject(

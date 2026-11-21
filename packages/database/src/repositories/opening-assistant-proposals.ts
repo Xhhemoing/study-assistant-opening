@@ -11,6 +11,7 @@ import { dailyDraftAdvisoryLockKeys } from "./opening-plans";
 import { proposeOpeningLocalPlan } from "./opening-local-replan";
 import { applyAssistantProposal, proposalTransactionClient } from "./opening-assistant-proposal-effects";
 import { countPendingAssistantProposals, listPendingAssistantProposals } from "./opening-assistant-proposal-pending";
+import { withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 const map = (row: Record<string, unknown>): AssistantProposalRecord => {
   const intent = assistantProposalCreateSchema.parse(row.intent);
@@ -40,7 +41,7 @@ async function admitSourceTurn(tx: TransactionSql, scope: Scope, id: string) {
   if (!turn) throw learningError("NOT_FOUND", "proposal requires a complete owned user turn");
   const refs = parseContextSourceRefs(turn.refs);
   if (!refs || refs.length > 64) throw learningError("CONFLICT", "proposal source provenance unavailable");
-  const [admission] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`)} AS included`;
+  const [admission] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`)} AS included`;
   if (!admission?.included) throw learningError("CONFLICT", "proposal sources changed or unavailable");
   return refs;
 }
@@ -91,18 +92,18 @@ export function createOpeningAssistantProposalsRepository(sql: Sql, options: { e
     async findByClientKey(scope: Scope, clientKey: string): Promise<AssistantProposalRecord | null> {
       const [row] = await sql`SELECT p.* FROM opening_assistant_proposals p JOIN workspaces w ON w.id=p.workspace_id AND w.owner_user_id=p.owner_user_id
         WHERE p.workspace_id=${scope.workspaceId} AND p.owner_user_id=${scope.ownerUserId} AND p.client_key=${clientKey} AND p.privacy_epoch=w.privacy_epoch
-          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, sql`p.context_source_refs`)}`;
+          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`p.context_source_refs`)}`;
       return row ? map(row) : null;
     },
     async list(scope: Scope): Promise<AssistantProposalRecord[]> {
       const rows = await sql`SELECT p.* FROM opening_assistant_proposals p JOIN workspaces w ON w.id=p.workspace_id AND w.owner_user_id=p.owner_user_id
         WHERE p.workspace_id=${scope.workspaceId} AND p.owner_user_id=${scope.ownerUserId} AND p.privacy_epoch=w.privacy_epoch
-          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, sql`p.context_source_refs`)} ORDER BY p.created_at DESC,p.id LIMIT 40`;
+          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`p.context_source_refs`)} ORDER BY p.created_at DESC,p.id LIMIT 40`;
       return rows.map(map);
     },
     async decide(scope: Scope, id: string, raw: AssistantProposalDecision): Promise<AssistantProposalRecord> {
       const input = controlledLearningTools.accept_proposal.input.parse(raw);
-      return sql.begin(async tx => {
+      return withOpeningTutorStreamFenceCommit(sql, async tx => {
         const [preview] = await tx`SELECT * FROM opening_assistant_proposals WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         if (!preview) throw learningError("NOT_FOUND", "proposal not found");
         const intent = assistantProposalCreateSchema.parse(preview.intent);
