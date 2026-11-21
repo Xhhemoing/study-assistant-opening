@@ -20,89 +20,13 @@ type TriageAwareQueueItem = ReviewQueueItem & {
   delayedCheckCovered?: boolean;
 };
 
-function sameCardIdSequence(a: readonly ReviewQueueItem[], b: readonly ReviewQueueItem[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    if (a[i]?.card.id !== b[i]?.card.id) return false;
-  }
-  return true;
-}
-
-function compareDueAtAsc(a: ReviewQueueItem, b: ReviewQueueItem): number {
-  const aMs = Date.parse(a.state.dueAt);
-  const bMs = Date.parse(b.state.dueAt);
-  if (Number.isFinite(aMs) && Number.isFinite(bMs) && aMs !== bMs) {
-    return aMs - bMs;
-  }
-  const dueCmp = a.state.dueAt.localeCompare(b.state.dueAt);
-  if (dueCmp !== 0) return dueCmp;
-  const priorityCmp = b.goalPriority - a.goalPriority;
-  if (priorityCmp !== 0) return priorityCmp;
-  return a.card.id.localeCompare(b.card.id);
-}
-
-function isStrictDueAtAscOrder(items: readonly ReviewQueueItem[]): boolean {
-  for (let i = 1; i < items.length; i += 1) {
-    if (compareDueAtAsc(items[i - 1]!, items[i]!) > 0) return false;
-  }
-  return true;
-}
-
-function courseScopedSkillKey(card: ReviewQueueItem["card"]): string | null {
-  const courseId = card.courseId?.trim();
-  const skill = card.skillLabel?.trim().toLowerCase();
-  if (!courseId || !skill) return null;
-  return `${courseId}::${skill}`;
-}
-
-/** Matches `deriveCardKnowledgeUnitKey` in `@aistudy/domain` (`packages/domain/src/srs/eligibility.ts`). */
-function deriveLocalCardKnowledgeUnitKey(card: ReviewQueueItem["card"]): string | undefined {
-  const syllabusPointId = card.syllabusPointId?.trim() || "";
-  const skillLabel = card.skillLabel?.trim().toLowerCase() || "";
-  if (!syllabusPointId && !skillLabel) return undefined;
-  const scope = card.courseId?.trim() || "workspace";
-  const unit = syllabusPointId ? `sp:${syllabusPointId}` : `sk:${skillLabel}`;
-  const tags = Array.isArray(card.tags) ? card.tags : [];
-  const dimension = card.originObservationRootId || tags.includes("review:question")
-    ? "question"
-    : tags.includes("review:concept")
-      ? "concept"
-      : "general";
-  return `${scope}:${unit}:${dimension}`;
-}
-
-/** Matches `deriveCardFamilyKey` in `@aistudy/domain` (`packages/domain/src/srs/eligibility.ts`). */
-function deriveLocalCardFamilyKey(card: ReviewQueueItem["card"]): string | undefined {
-  const originRoot = card.originObservationRootId?.trim() || "";
-  if (originRoot) return `obs:${originRoot}`;
-  const skillLabel = card.skillLabel?.trim().toLowerCase() || "";
-  if (skillLabel) return `${card.courseId?.trim() || "workspace"}:skill:${skillLabel}`;
-  const syllabusPointId = card.syllabusPointId?.trim() || "";
-  if (syllabusPointId) return `${card.courseId?.trim() || "workspace"}:sp:${syllabusPointId}`;
-  return undefined;
-}
-
-function resolveEntryKeys(entry: TriageAwareQueueItem): { ku: string | undefined; fam: string | undefined } {
-  const ku = entry.knowledgeUnitKey !== undefined
-    ? (entry.knowledgeUnitKey.trim() || undefined)
-    : deriveLocalCardKnowledgeUnitKey(entry.card);
-  const fam = entry.familyKey !== undefined
-    ? (entry.familyKey.trim() || undefined)
-    : deriveLocalCardFamilyKey(entry.card);
-  return { ku, fam };
-}
-
-function addWithCourseSkillPeers(
-  target: Set<string>,
-  card: ReviewQueueItem["card"],
-  peersByCourseSkill: ReadonlyMap<string, readonly string[]>,
-): void {
-  target.add(card.id);
-  const scopedKey = courseScopedSkillKey(card);
-  if (!scopedKey) return;
-  for (const peerId of peersByCourseSkill.get(scopedKey) ?? []) {
-    target.add(peerId);
-  }
+function hasExplicitClientTriageMetadata(item: TriageAwareQueueItem): boolean {
+  return (
+    item.delayedCheckCovered !== undefined
+    || item.syllabusWeight !== undefined
+    || item.knowledgeUnitKey !== undefined
+    || item.familyKey !== undefined
+  );
 }
 
 function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): ReviewQueueItem[] {
@@ -120,172 +44,23 @@ function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): Revie
     }
   }
   if (!triagable.length) return fallback;
-  const today = now.toISOString().slice(0, 10);
-  const strictDueAtAsc = isStrictDueAtAscOrder(triagable);
 
-  // Below the 200-card backlog threshold, preserve ordinary `dueAt ASC` order when already in it.
-  if (triagable.length < 200 && strictDueAtAsc) {
-    return [...triagable, ...fallback];
-  }
-
-  const baseline = buildReviewQueue(triagable, "free", now, today, { recoveryTriage: true });
-  if (baseline.length !== triagable.length) {
-    return [...baseline, ...fallback];
-  }
-  if (sameCardIdSequence(baseline, triagable)) {
-    return [...triagable, ...fallback];
-  }
-
-  // Raw dueAt-ASC backlog guard: any >= 200 queue arriving in strict dueAt-ASC order
-  // that differs from 5-band recovery triage is untriaged and must be triaged globally before slicing.
-  if (triagable.length >= 200 && strictDueAtAsc) {
-    return [...baseline, ...fallback];
-  }
-
-  // Exact monotone fixed-point solver: reconstructs whether `triagable` is a valid server
-  // `listCardQueue` output with server-side `delayedCheckCovered: true` Band-5 demotions.
-  const entryById = new Map<string, TriageAwareQueueItem>();
-  const peersByCourseSkill = new Map<string, string[]>();
-  const keysById = new Map<string, { ku: string | undefined; fam: string | undefined }>();
-  const triagableIndexById = new Map<string, number>();
-  for (let i = 0; i < triagable.length; i += 1) {
-    const entry = triagable[i]!;
-    entryById.set(entry.card.id, entry);
-    triagableIndexById.set(entry.card.id, i);
-    keysById.set(entry.card.id, resolveEntryKeys(entry));
-    const scopedKey = courseScopedSkillKey(entry.card);
-    if (!scopedKey) continue;
-    const list = peersByCourseSkill.get(scopedKey);
-    if (list) list.push(entry.card.id);
-    else peersByCourseSkill.set(scopedKey, [entry.card.id]);
-  }
-
-  // Compute `@aistudy/domain`'s exact intrinsic candidate order once using unique synthetic keys
-  // so blocker attribution mirrors `eligibility.ts`'s `seenKnowledgeUnits`/`seenFamilies` pass.
-  const intrinsicOrder = buildReviewQueue(
-    triagable.map((entry, idx) => ({
-      ...entry,
-      delayedCheckCovered: false,
-      knowledgeUnitKey: `__intr_ku_${idx}`,
-      familyKey: `__intr_fam_${idx}`,
-    })),
-    "free",
-    now,
-    today,
-    { recoveryTriage: true },
-  ).map((item) => entryById.get(item.card.id)!);
-  const intrinsicRankById = new Map(intrinsicOrder.map((entry, idx) => [entry.card.id, idx]));
-
-  const inferredDelayedIds = new Set<string>();
-  for (let step = 0; step <= triagable.length; step += 1) {
-    const candidate = step === 0
-      ? baseline
-      : buildReviewQueue(
-        triagable.map((entry) => (
-          entry.delayedCheckCovered === true || inferredDelayedIds.has(entry.card.id)
-            ? { ...entry, delayedCheckCovered: true }
-            : entry
-        )),
-        "free",
-        now,
-        today,
-        { recoveryTriage: true },
-      );
-    if (sameCardIdSequence(candidate, triagable)) {
-      // Verify SQL group consistency across all cards sharing non-null (courseId, skillLabel).
-      const groupConsistent = new Set(inferredDelayedIds);
-      for (const entry of triagable) {
-        if (entry.delayedCheckCovered === true || inferredDelayedIds.has(entry.card.id)) {
-          addWithCourseSkillPeers(groupConsistent, entry.card, peersByCourseSkill);
-        }
-      }
-      if (groupConsistent.size === inferredDelayedIds.size) {
-        return [...triagable, ...fallback];
-      }
-      const verified = buildReviewQueue(
-        triagable.map((entry) => (
-          entry.delayedCheckCovered === true || groupConsistent.has(entry.card.id)
-            ? { ...entry, delayedCheckCovered: true }
-            : entry
-        )),
-        "free",
-        now,
-        today,
-        { recoveryTriage: true },
-      );
-      return sameCardIdSequence(verified, triagable) ? [...triagable, ...fallback] : [...baseline, ...fallback];
-    }
-
-    let mismatchIndex = -1;
-    for (let i = 0; i < triagable.length; i += 1) {
-      if (candidate[i]?.card.id !== triagable[i]?.card.id) {
-        mismatchIndex = i;
-        break;
-      }
-    }
-    if (mismatchIndex < 0) break;
-
-    // Mirror `eligibility.ts`'s single-pass `seenKnowledgeUnits`/`seenFamilies` claim order over `intrinsicOrder`.
-    const kuOwnerByKey = new Map<string, TriageAwareQueueItem>();
-    const famFirstOwnerByKey = new Map<string, TriageAwareQueueItem>();
-    for (const intrEntry of intrinsicOrder) {
-      if (intrEntry.delayedCheckCovered === true || inferredDelayedIds.has(intrEntry.card.id)) continue;
-      const { ku, fam } = keysById.get(intrEntry.card.id) ?? { ku: undefined, fam: undefined };
-      if (ku !== undefined && kuOwnerByKey.has(ku)) continue;
-      if (ku === undefined && fam !== undefined && famFirstOwnerByKey.has(fam)) continue;
-      if (ku !== undefined) kuOwnerByKey.set(ku, intrEntry);
-      if (fam !== undefined && !famFirstOwnerByKey.has(fam)) famFirstOwnerByKey.set(fam, intrEntry);
-    }
-
-    const expected = triagable[mismatchIndex]!;
-    const expectedIntrRank = intrinsicRankById.get(expected.card.id) ?? Number.POSITIVE_INFINITY;
-    const expectedKeys = keysById.get(expected.card.id);
-    const isBlameable = (item: TriageAwareQueueItem | undefined): item is TriageAwareQueueItem => Boolean(
-      item
-      && item.delayedCheckCovered !== true
-      && !inferredDelayedIds.has(item.card.id)
-      && (triagableIndexById.get(item.card.id) ?? -1) > mismatchIndex
-      && item.card.skillLabel?.trim(),
+  // `cards.listDue("auto")` returns the authoritative server-triaged queue (incorporating
+  // PostgreSQL `delayedCheckCovered`, `syllabusWeight`, and concept/family dedup that are
+  // stripped from the public wire schema). Preserve server order verbatim on standard wire
+  // payloads, and only run client-side triage when >= 200 items carry explicit triage metadata.
+  if (triagable.length >= 200 && triagable.some(hasExplicitClientTriageMetadata)) {
+    const ordered = buildReviewQueue(
+      triagable,
+      "free",
+      now,
+      now.toISOString().slice(0, 10),
+      { recoveryTriage: true },
     );
-
-    let blamed: TriageAwareQueueItem | null = null;
-    // Tier 1: active knowledgeUnitKey owner that precedes `expected` in intrinsic order.
-    if (expectedKeys?.ku !== undefined) {
-      const kuOwner = kuOwnerByKey.get(expectedKeys.ku);
-      if (
-        kuOwner
-        && kuOwner.card.id !== expected.card.id
-        && (intrinsicRankById.get(kuOwner.card.id) ?? Number.POSITIVE_INFINITY) < expectedIntrRank
-        && isBlameable(kuOwner)
-      ) {
-        blamed = kuOwner;
-      }
-    }
-    // Tier 2: active familyKey primary owner that precedes `expected` in intrinsic order.
-    if (!blamed && expectedKeys?.fam !== undefined) {
-      const famOwner = famFirstOwnerByKey.get(expectedKeys.fam);
-      if (
-        famOwner
-        && famOwner.card.id !== expected.card.id
-        && (intrinsicRankById.get(famOwner.card.id) ?? Number.POSITIVE_INFINITY) < expectedIntrRank
-        && isBlameable(famOwner)
-      ) {
-        blamed = famOwner;
-      }
-    }
-    // Tier 3: candidate[mismatchIndex] itself was demoted by server `delayedCheckCovered`.
-    if (!blamed) {
-      const candidateAtMismatch = entryById.get(candidate[mismatchIndex]?.card.id ?? "");
-      if (isBlameable(candidateAtMismatch)) {
-        blamed = candidateAtMismatch;
-      }
-    }
-
-    if (!blamed) break;
-    addWithCourseSkillPeers(inferredDelayedIds, blamed.card, peersByCourseSkill);
+    return [...ordered, ...fallback];
   }
 
-  return [...baseline, ...fallback];
+  return [...triagable, ...fallback];
 }
 export function BudgetCardSession({ initialActivityId, client: suppliedClient, cardsClient: suppliedCards }: { initialActivityId?: string; client?: Pick<LearningManagementClient, "cardSessions" | "cardCommand">; cardsClient?: OpeningCardsClient }) {
   const client = useMemo(() => suppliedClient ?? createLearningManagementClient(), [suppliedClient]);

@@ -3,7 +3,7 @@ import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import type { LearningCardSession, ReviewCard, ReviewQueueItem, ReviewState } from "@aistudy/contracts";
-import { computeCardSessionRecoveryAllowance, writeLearningCardSession } from "@aistudy/database";
+import { computeCardSessionRecoveryAllowance, sumCardRecoveryMinutesForDay, writeLearningCardSession } from "@aistudy/database";
 import { buildReviewQueue } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { BudgetCardSession } from "./budget-card-session";
@@ -153,10 +153,10 @@ function queueItem(
   return { card, state, goalPriority: options.goalPriority };
 }
 
-it("triages an untriaged 201-card dueAt-sorted queue before the 200-card start cap so high-priority salvageable item #201 is placed first", async () => {
+it("triages a 201-card queue with explicit client triage metadata before the 200-card start cap so high-priority salvageable item #201 is placed first", async () => {
   const nowMs = Date.now();
   const makeUuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-  const dueItems: ReviewQueueItem[] = [];
+  const dueItems: Array<ReviewQueueItem & { syllabusWeight?: number }> = [];
   for (let i = 1; i <= 100; i += 1) {
     dueItems.push(queueItem(
       makeUuid(i),
@@ -172,11 +172,14 @@ it("triages an untriaged 201-card dueAt-sorted queue before the 200-card start c
     ));
   }
   const criticalId = makeUuid(201);
-  dueItems.push(queueItem(
-    criticalId,
-    { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 8 },
-    nowMs,
-  ));
+  dueItems.push({
+    ...queueItem(
+      criticalId,
+      { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 8 },
+      nowMs,
+    ),
+    syllabusWeight: 12,
+  });
 
   const value = clients();
   vi.mocked(value.cards.listDue).mockResolvedValue(dueItems);
@@ -392,27 +395,50 @@ it.each([
   },
 );
 
-it("triages a raw dueAt-ASC 201-card queue even when all 200 Band-4 items and item #201 carry skillLabels", async () => {
-  const nowMs = Date.now();
+it("preserves authoritative server order on a 201-card server-triaged queue that happens to be strictly dueAt-ASC", async () => {
+  const now = new Date();
+  const nowMs = now.getTime();
   const courseId = "99999999-9999-4999-8999-999999999999";
   const makeUuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-  const dueItems: ReviewQueueItem[] = [];
-  for (let i = 1; i <= 200; i += 1) {
-    dueItems.push(queueItem(
+  const cardA = makeUuid(1);
+  const cardB = makeUuid(201);
+
+  const rawServerInputs: Array<ReviewQueueItem & { delayedCheckCovered?: boolean }> = [
+    queueItem(
+      cardA,
+      { stability: 1.5, daysAgo: 10, dueAt: "2026-07-01T00:00:00.000Z", goalPriority: 2, courseId, skillLabel: "early-band1" },
+      nowMs,
+    ),
+  ];
+  for (let i = 2; i <= 200; i += 1) {
+    rawServerInputs.push(queueItem(
       makeUuid(i),
       { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: `high-ret-${i}` },
       nowMs,
     ));
   }
-  const criticalId = makeUuid(201);
-  dueItems.push(queueItem(
-    criticalId,
-    { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 8, courseId, skillLabel: "critical-skill" },
-    nowMs,
-  ));
+  // Server demotes B to Band 5 via delayedCheckCovered; wire payload is [A, 199 Band 4, B] (strictly dueAt-ASC).
+  rawServerInputs.push({
+    ...queueItem(
+      cardB,
+      { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 9, courseId, skillLabel: "late-high-band1" },
+      nowMs,
+    ),
+    delayedCheckCovered: true,
+  });
+
+  const serverTriagedPublic: ReviewQueueItem[] = buildReviewQueue(
+    rawServerInputs,
+    "auto",
+    now,
+    now.toISOString().slice(0, 10),
+    { recoveryTriage: true },
+  ).map(({ card, state, goalPriority }) => ({ card, state, goalPriority }));
+  expect(serverTriagedPublic[0]?.card.id).toBe(cardA);
+  expect(serverTriagedPublic[200]?.card.id).toBe(cardB);
 
   const value = clients();
-  vi.mocked(value.cards.listDue).mockResolvedValue(dueItems);
+  vi.mocked(value.cards.listDue).mockResolvedValue(serverTriagedPublic);
   vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
     ...session,
     cardIds: command.action === "start" ? command.cardIds : session.cardIds,
@@ -425,7 +451,9 @@ it("triages a raw dueAt-ASC 201-card queue even when all 200 Band-4 items and it
   expect(startCall?.action).toBe("start");
   if (startCall?.action === "start") {
     expect(startCall.cardIds).toHaveLength(200);
-    expect(startCall.cardIds[0]).toBe(criticalId);
+    expect(startCall.cardIds[0]).toBe(cardA);
+    expect(startCall.cardIds).not.toContain(cardB);
+    expect(startCall.cardIds).toEqual(serverTriagedPublic.slice(0, 200).map((item) => item.card.id));
   }
 });
 
@@ -479,7 +507,7 @@ it("freezes the load-time clock so waiting before clicking start does not drift 
   }
 });
 
-it("computes card-session recovery allowance with workspace 30% cap, non-backlog maintenance floor, and fail-closed guards", () => {
+it("computes card-session recovery allowance with workspace 30% cap, non-backlog maintenance floor, 0s repeat guard, and fail-closed guards", () => {
   expect(computeCardSessionRecoveryAllowance({
     dailyExecutableMinutes: 60,
     freeUnreservedMinutes: 60,
@@ -497,7 +525,16 @@ it("computes card-session recovery allowance with workspace 30% cap, non-backlog
     freeUnreservedMinutes: 30,
     usedOrReservedCardSessionMinutes: 0,
     isBacklogRecovery: false,
+    hasPriorCardSessionToday: false,
   })).toBe(10);
+  // After a 0-second pause/stop today, disable the second 10m maintenance exception (cap drops to 9m).
+  expect(computeCardSessionRecoveryAllowance({
+    dailyExecutableMinutes: 30,
+    freeUnreservedMinutes: 30,
+    usedOrReservedCardSessionMinutes: 0,
+    isBacklogRecovery: false,
+    hasPriorCardSessionToday: true,
+  })).toBe(9);
   expect(computeCardSessionRecoveryAllowance({
     dailyExecutableMinutes: 30,
     freeUnreservedMinutes: 30,
@@ -514,6 +551,74 @@ it("computes card-session recovery allowance with workspace 30% cap, non-backlog
   }
 });
 
+it("sums accepted review_cards plan blocks and deduplicates task-linked card sessions in sumCardRecoveryMinutesForDay", () => {
+  const day = {
+    localDate: "2026-11-02",
+    timeZone: "UTC",
+    bounds: {
+      dayStart: new Date("2026-11-02T00:00:00.000Z"),
+      nextDayStart: new Date("2026-11-03T00:00:00.000Z"),
+    },
+  };
+  const courseA = "aaaaaaaa-0000-4000-8000-000000000001";
+  const taskId = "bbbbbbbb-0000-4000-8000-000000000001";
+  const otherTaskId = "bbbbbbbb-0000-4000-8000-000000000002";
+  const reviewTask = {
+    id: taskId,
+    status: "pending",
+    origin: "planner",
+    client_key: `planner:2026-11-02:review_cards:${courseA}:long-term`,
+    minutes: 10,
+    due_at: null,
+  };
+  const nonCardTask = {
+    id: otherTaskId,
+    status: "pending",
+    origin: "planner",
+    client_key: `planner:2026-11-02:new_skill:${courseA}:req1`,
+    minutes: 20,
+    due_at: null,
+  };
+  const blocks = [
+    { taskId, start: "2026-11-02T09:00:00.000Z", end: "2026-11-02T09:10:00.000Z" },
+    { taskId: otherTaskId, start: "2026-11-02T10:00:00.000Z", end: "2026-11-02T10:20:00.000Z" },
+  ];
+
+  // Accepted 10m review_cards plan block counts toward workspace 30% card-recovery subtotal (non-card block excluded).
+  const usedFromPlan = sumCardRecoveryMinutesForDay({
+    ...day,
+    activities: [],
+    tasks: [reviewTask, nonCardTask],
+    blocks,
+  });
+  expect(usedFromPlan).toBe(10);
+  expect(computeCardSessionRecoveryAllowance({
+    dailyExecutableMinutes: 60,
+    freeUnreservedMinutes: 30,
+    usedOrReservedCardSessionMinutes: usedFromPlan,
+    isBacklogRecovery: true,
+  })).toBe(8);
+
+  // Activity linked via create_intent.taskId deduplicates with its review_cards task instead of double-charging.
+  const linkedActivity = {
+    id: "cccccccc-0000-4000-8000-000000000001",
+    course_id: courseA,
+    created_at: "2026-11-02T09:00:00.000Z",
+    create_intent: { protocol: "card-review-session-v1", taskId },
+    goal_json: {
+      cardReviewSession: { budgetMinutes: 8 },
+      learningBudget: { localDate: "2026-11-02", timeZone: "UTC", minutes: 8 },
+    },
+    checkpoint_json: { cardReviewSession: { elapsedSeconds: 0, stoppedAt: null } },
+  };
+  expect(sumCardRecoveryMinutesForDay({
+    ...day,
+    activities: [linkedActivity],
+    tasks: [reviewTask],
+    blocks,
+  })).toBe(10);
+});
+
 it("enforces the workspace-wide 30% daily card-recovery cap at runtime in writeLearningCardSession before inserting", async () => {
   const workspaceId = "11111111-1111-4111-8111-111111111111";
   const ownerUserId = "22222222-2222-4222-8222-222222222222";
@@ -524,6 +629,8 @@ it("enforces the workspace-wide 30% daily card-recovery cap at runtime in writeL
     dailyMinutes: number;
     bufferMinutes?: number;
     existingActivities?: Array<Record<string, unknown>>;
+    existingTasks?: Array<Record<string, unknown>>;
+    acceptedPlans?: Array<{ day: string; accepted_blocks: Array<Record<string, unknown>> }>;
     dueCardCount?: number;
   }) {
     let insertCount = 0;
@@ -583,12 +690,15 @@ it("enforces the workspace-wide 30% daily card-recovery cap at runtime in writeL
         if (query.startsWith("SELECT id FROM workspaces")) return [{ id: workspaceId }];
         if (query.includes("client_key=") && query.startsWith("SELECT * FROM opening_teaching_activities")) return [];
         if (query.includes("status='active' LIMIT 1")) return [];
+        if (query.startsWith("SELECT created_at,goal_json FROM opening_teaching_activities")) {
+          return options.existingActivities ?? [];
+        }
         if (query.startsWith("SELECT id,course_id,status,created_at,updated_at,create_intent,checkpoint_json,goal_json FROM opening_teaching_activities")) {
           return options.existingActivities ?? [];
         }
         if (query.includes("course-route-v1")) return [];
-        if (query.startsWith("SELECT t.*,r.id AS retest_id FROM opening_tasks")) return [];
-        if (query.startsWith("SELECT day, accepted_blocks FROM opening_plan_state")) return [];
+        if (query.startsWith("SELECT t.*,r.id AS retest_id")) return options.existingTasks ?? [];
+        if (query.startsWith("SELECT day, accepted_blocks FROM opening_plan_state")) return options.acceptedPlans ?? [];
         if (query.startsWith("SELECT id, version, input_snapshot FROM opening_plan_drafts")) return [];
         if (query.includes("INNER JOIN card_review_states s")) return dueRows;
         if (query.startsWith("SELECT c.* FROM cards c WHERE c.id =")) return [dueRows[0]];
@@ -685,6 +795,62 @@ it("enforces the workspace-wide 30% daily card-recovery cap at runtime in writeL
     await expect(writeLearningCardSession(thirtyBacklog.sql, scope, startCmd(10, `cap-test-30m-backlog-${dueCardCount}`), now)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(thirtyBacklog.getInsertCount()).toBe(0);
   }
+
+  // 60m day with an accepted 10m review_cards plan block for Course A -> only 8m remains for Course B.
+  const courseATaskId = "55555555-5555-4555-8555-555555555555";
+  const courseACardPlan = mockCardSessionSql({
+    dailyMinutes: 60,
+    existingTasks: [{
+      id: courseATaskId,
+      status: "pending",
+      origin: "planner",
+      client_key: "planner:2026-11-02:review_cards:aaaaaaaa-0000-4000-8000-000000000001:long-term",
+      minutes: 10,
+      due_at: null,
+      retest_id: null,
+    }],
+    acceptedPlans: [{
+      day: "2026-11-02",
+      accepted_blocks: [{
+        taskId: courseATaskId,
+        start: "2026-11-02T09:00:00.000Z",
+        end: "2026-11-02T09:10:00.000Z",
+        reason: "到期卡片复习（有界会话）",
+      }],
+    }],
+  });
+  await expect(writeLearningCardSession(courseACardPlan.sql, scope, startCmd(18, "cap-test-plan-18m"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(writeLearningCardSession(courseACardPlan.sql, scope, startCmd(9, "cap-test-plan-9m"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(courseACardPlan.getInsertCount()).toBe(0);
+  const courseBAllowed = await writeLearningCardSession(courseACardPlan.sql, scope, startCmd(8, "cap-test-plan-8m"), now);
+  expect(courseBAllowed.budgetMinutes).toBe(8);
+  expect(courseACardPlan.getInsertCount()).toBe(1);
+
+  // 30m day (< 200 due cards) after a 0-second pause/stop today: second 10m exception is disabled (9m max).
+  const thirtyAfterZeroStop = mockCardSessionSql({
+    dailyMinutes: 30,
+    dueCardCount: 1,
+    existingActivities: [{
+      id: "66666666-6666-4666-8666-666666666666",
+      course_id: null,
+      status: "paused",
+      created_at: "2026-11-02T08:00:00.000Z",
+      updated_at: "2026-11-02T08:00:00.000Z",
+      create_intent: { protocol: "card-review-session-v1" },
+      goal_json: {
+        cardReviewSession: { budgetMinutes: 10 },
+        learningBudget: { localDate: "2026-11-02", timeZone: "UTC", minutes: 10 },
+      },
+      checkpoint_json: {
+        cardReviewSession: { elapsedSeconds: 0, stoppedAt: "2026-11-02T08:00:00.000Z" },
+      },
+    }],
+  });
+  await expect(writeLearningCardSession(thirtyAfterZeroStop.sql, scope, startCmd(10, "cap-test-zero-stop-10m"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(thirtyAfterZeroStop.getInsertCount()).toBe(0);
+  const repeatNineAllowed = await writeLearningCardSession(thirtyAfterZeroStop.sql, scope, startCmd(9, "cap-test-zero-stop-9m"), now);
+  expect(repeatNineAllowed.budgetMinutes).toBe(9);
+  expect(thirtyAfterZeroStop.getInsertCount()).toBe(1);
 });
 
 it.each([
@@ -804,17 +970,20 @@ it.each([
   },
 );
 
-it("unconditionally triages a >= 200 strict dueAt-ASC raw queue even when the first 200 already contain Band-1 cards", async () => {
+it("triages a >= 200 client queue with explicit syllabusWeight metadata even when the first 200 already contain Band-1 cards", async () => {
   const nowMs = Date.now();
   const courseId = "99999999-9999-4999-8999-999999999999";
   const makeUuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-  const dueItems: ReviewQueueItem[] = [];
+  const dueItems: Array<ReviewQueueItem & { syllabusWeight?: number }> = [];
   // 1 lower-weight Band-1 card early in the dueAt-ASC head
-  dueItems.push(queueItem(
-    makeUuid(1),
-    { stability: 1.5, daysAgo: 10, dueAt: "2026-07-01T00:00:00.000Z", goalPriority: 2, courseId, skillLabel: "early-band1" },
-    nowMs,
-  ));
+  dueItems.push({
+    ...queueItem(
+      makeUuid(1),
+      { stability: 1.5, daysAgo: 10, dueAt: "2026-07-01T00:00:00.000Z", goalPriority: 2, courseId, skillLabel: "early-band1" },
+      nowMs,
+    ),
+    syllabusWeight: 2,
+  });
   // 199 Band-4 high-retention cards filling positions 1..199
   for (let i = 2; i <= 200; i += 1) {
     dueItems.push(queueItem(
@@ -823,13 +992,16 @@ it("unconditionally triages a >= 200 strict dueAt-ASC raw queue even when the fi
       nowMs,
     ));
   }
-  // Card #201: higher-weight Band-1 card sitting past index 199 in raw dueAt-ASC order
+  // Card #201: higher-weight Band-1 card with explicit syllabusWeight sitting past index 199
   const highWeightBand1Id = makeUuid(201);
-  dueItems.push(queueItem(
-    highWeightBand1Id,
-    { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 9, courseId, skillLabel: "late-high-band1" },
-    nowMs,
-  ));
+  dueItems.push({
+    ...queueItem(
+      highWeightBand1Id,
+      { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 9, courseId, skillLabel: "late-high-band1" },
+      nowMs,
+    ),
+    syllabusWeight: 9,
+  });
 
   const value = clients();
   vi.mocked(value.cards.listDue).mockResolvedValue(dueItems);

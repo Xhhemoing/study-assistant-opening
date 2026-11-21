@@ -7,22 +7,28 @@ import { createCardRepository } from "./cards";
 import { assertLearningGoalAction, readLearningGoal } from "./opening-learning-goals";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningLearningCapacity, reserveOpeningLearningActivityBudget } from "./opening-learning-capacity";
+import { plannerSuggestionKind } from "./opening-task-fields";
 
 type Row = Record<string, unknown>;
 const object = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
+const timestampMs = (value: unknown): number =>
+  value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : Number.NaN;
 
 export type CardSessionRecoveryAllowanceInput = {
   dailyExecutableMinutes: number;
   freeUnreservedMinutes: number;
   usedOrReservedCardSessionMinutes: number;
   isBacklogRecovery: boolean;
+  /** True when any card-review session activity already exists on this local day (including 0-second stops). */
+  hasPriorCardSessionToday?: boolean;
 };
 
 /**
  * Enforces the workspace-wide 30% daily card-recovery ceiling across all courses.
  * For non-backlog maintenance on tight daily budgets (`15 <= dailyExecutable < 34`) with zero
- * prior card usage today, permits one minimum 10-minute maintenance session; all backlog sessions,
- * repeat sessions, and budgets >= 34m enforce the strict `floor(0.30 * dailyExecutableMinutes)` cap.
+ * prior card sessions or recovery reservations today, permits one minimum 10-minute maintenance
+ * session; all backlog sessions, repeat sessions (even after 0s pause/stop), and budgets >= 34m
+ * enforce the strict `floor(0.30 * dailyExecutableMinutes)` cap.
  */
 export function computeCardSessionRecoveryAllowance(input: CardSessionRecoveryAllowanceInput): number {
   if (
@@ -35,8 +41,9 @@ export function computeCardSessionRecoveryAllowance(input: CardSessionRecoveryAl
   const dailyExecutable = Math.max(0, input.dailyExecutableMinutes);
   const freeUnreserved = Math.max(0, input.freeUnreservedMinutes);
   const usedCardMinutes = Math.max(0, input.usedOrReservedCardSessionMinutes);
+  const hasPriorToday = Boolean(input.hasPriorCardSessionToday) || usedCardMinutes > 0;
   const strictCap = Math.floor((dailyExecutable * 3) / 10);
-  const effectiveCap = !input.isBacklogRecovery && usedCardMinutes === 0 && dailyExecutable >= 15
+  const effectiveCap = !input.isBacklogRecovery && !hasPriorToday && dailyExecutable >= 15
     ? Math.max(Math.min(10, Math.floor(dailyExecutable)), strictCap)
     : strictCap;
   return Math.max(0, Math.min(freeUnreserved, effectiveCap - usedCardMinutes));
@@ -51,48 +58,148 @@ function overlapsCapacityDay(
   return a.dayStart < b.nextDayStart && b.dayStart < a.nextDayStart;
 }
 
-function sumCardSessionMinutesForDay(
-  activities: readonly Row[],
+function requirePositiveMinutes(value: unknown, message: string): number {
+  const minutes = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(minutes) || minutes <= 0) throw learningError("CONFLICT", message);
+  return minutes;
+}
+
+function isCardRecoveryTaskRow(task: Row): boolean {
+  return (
+    task.status !== "skipped"
+    && (
+      plannerSuggestionKind(task) === "review_cards"
+      || task.suggestion_kind === "review_cards"
+      || task.suggestionKind === "review_cards"
+    )
+  );
+}
+
+function cardSessionActivityBelongsToDay(
+  row: Row,
   day: { localDate: string; timeZone: string; bounds: { dayStart: Date; nextDayStart: Date } },
-): number {
-  let total = 0;
-  for (const row of activities) {
+): boolean {
+  const goal = object(row.goal_json);
+  if (goal.learningBudget != null) {
+    const savedBudget = learningActivityBudgetSchema.safeParse(goal.learningBudget);
+    if (!savedBudget.success) {
+      throw learningError("CONFLICT", "已有卡片活动的共同预算记录无法读取，请先核对活动。");
+    }
+    return overlapsCapacityDay(savedBudget.data, day);
+  }
+  const createdMs = timestampMs(row.created_at);
+  return (
+    Number.isFinite(createdMs)
+    && createdMs >= day.bounds.dayStart.getTime()
+    && createdMs < day.bounds.nextDayStart.getTime()
+  );
+}
+
+/**
+ * Sums all workspace-wide card-recovery commitments overlapping `day`:
+ * accepted `review_cards` plan blocks, due/completed `review_cards` tasks, and `card-review-session-v1`
+ * activities — deduplicating linked `task:${id}` / `activity:${id}` references via `Math.max`.
+ */
+export function sumCardRecoveryMinutesForDay(input: {
+  localDate: string;
+  timeZone: string;
+  bounds: { dayStart: Date; nextDayStart: Date };
+  activities: readonly Row[];
+  tasks?: readonly Row[];
+  blocks?: readonly Row[];
+}): number {
+  const dayStartMs = input.bounds.dayStart.getTime();
+  const nextDayStartMs = input.bounds.nextDayStart.getTime();
+  const inDay = (value: unknown): boolean => {
+    const ms = timestampMs(value);
+    return Number.isFinite(ms) && ms >= dayStartMs && ms < nextDayStartMs;
+  };
+
+  const usage = new Map<string, number>();
+  const charge = (key: string, minutes: number) => {
+    usage.set(key, Math.max(usage.get(key) ?? 0, minutes));
+  };
+
+  const intervalsByTask = new Map<string, Array<[number, number]>>();
+  for (const block of input.blocks ?? []) {
+    const rawStart = timestampMs(block.start);
+    const rawEnd = timestampMs(block.end);
+    if (!Number.isFinite(rawStart) || !Number.isFinite(rawEnd)) {
+      throw learningError("CONFLICT", "已接受安排的日期无法确认，请先核对今日安排。");
+    }
+    const start = Math.max(rawStart, dayStartMs);
+    const end = Math.min(rawEnd, nextDayStartMs);
+    if (end > start) {
+      const taskId = String(block.taskId);
+      const list = intervalsByTask.get(taskId);
+      if (list) list.push([start, end]);
+      else intervalsByTask.set(taskId, [[start, end]]);
+    }
+  }
+
+  const blockMinutes = new Map<string, number>();
+  for (const [taskId, ranges] of intervalsByTask) {
+    let previousEnd = -Infinity;
+    let minutes = 0;
+    for (const [start, end] of ranges.sort((a, b) => a[0] - b[0])) {
+      minutes += Math.max(0, end - Math.max(start, previousEnd)) / 60_000;
+      previousEnd = Math.max(previousEnd, end);
+    }
+    if (minutes > 0) blockMinutes.set(taskId, minutes);
+  }
+
+  for (const task of input.tasks ?? []) {
+    if (!isCardRecoveryTaskRow(task)) continue;
+    const taskId = String(task.id);
+    const scheduledMinutes = blockMinutes.get(taskId);
+    if (scheduledMinutes !== undefined) {
+      const taskMinutes = requirePositiveMinutes(task.minutes, "已有卡片恢复任务的学习时长无法确认，请先核对今日安排。");
+      charge(`task:${taskId}`, Math.max(taskMinutes, scheduledMinutes));
+    } else if (inDay(task.due_at) || (task.status === "done" && inDay(task.updated_at))) {
+      const taskMinutes = requirePositiveMinutes(task.minutes, "已有卡片恢复任务的学习时长无法确认，请先核对今日安排。");
+      charge(`task:${taskId}`, taskMinutes);
+    }
+  }
+
+  for (const row of input.activities) {
     const intent = object(row.create_intent);
     const goal = object(row.goal_json);
     if (intent.protocol !== "card-review-session-v1" && goal.cardReviewSession == null) continue;
     const savedBudget = goal.learningBudget != null
       ? learningActivityBudgetSchema.safeParse(goal.learningBudget)
       : null;
+    let minutes: number;
     if (savedBudget) {
       if (!savedBudget.success) {
         throw learningError("CONFLICT", "已有卡片活动的共同预算记录无法读取，请先核对活动。");
       }
-      if (!overlapsCapacityDay(savedBudget.data, day)) continue;
-      total += savedBudget.data.minutes;
-      continue;
+      if (!overlapsCapacityDay(savedBudget.data, input)) continue;
+      minutes = savedBudget.data.minutes;
+    } else {
+      if (!inDay(row.created_at)) continue;
+      const cardGoal = object(goal.cardReviewSession);
+      const cardCheckpoint = object(object(row.checkpoint_json).cardReviewSession);
+      const fallbackMinutes = cardCheckpoint.stoppedAt
+        ? Number(cardCheckpoint.elapsedSeconds) / 60
+        : Number(cardGoal.budgetMinutes);
+      if (!Number.isFinite(fallbackMinutes) || fallbackMinutes < 0) {
+        throw learningError("CONFLICT", "已有卡片活动的学习时长无法确认，请先核对活动。");
+      }
+      minutes = fallbackMinutes;
     }
-    const createdMs = row.created_at instanceof Date
-      ? row.created_at.getTime()
-      : typeof row.created_at === "string"
-        ? Date.parse(row.created_at)
-        : Number.NaN;
-    if (
-      !Number.isFinite(createdMs)
-      || createdMs < day.bounds.dayStart.getTime()
-      || createdMs >= day.bounds.nextDayStart.getTime()
-    ) {
-      continue;
-    }
-    const cardGoal = object(goal.cardReviewSession);
-    const cardCheckpoint = object(object(row.checkpoint_json).cardReviewSession);
-    const fallbackMinutes = cardCheckpoint.stoppedAt
-      ? Number(cardCheckpoint.elapsedSeconds) / 60
-      : Number(cardGoal.budgetMinutes);
-    if (!Number.isFinite(fallbackMinutes) || fallbackMinutes < 0) {
-      throw learningError("CONFLICT", "已有卡片活动的学习时长无法确认，请先核对活动。");
-    }
-    total += fallbackMinutes;
+    const linkedTask = intent.taskId;
+    const recoveryId = object(goal.recovery).activityId;
+    const original = recoveryId
+      ? input.activities.find((candidate) => candidate.id === recoveryId && candidate.course_id === row.course_id)
+      : undefined;
+    const key = linkedTask
+      ? `task:${String(linkedTask)}`
+      : `activity:${String(original?.id ?? row.id)}`;
+    charge(key, minutes);
   }
+
+  let total = 0;
+  for (const minutes of usage.values()) total += minutes;
   return total;
 }
 export function mapLearningCardSession(row: Row): LearningCardSession {
@@ -139,10 +246,18 @@ export async function writeLearningCardSession(sql: Sql, scope: Scope, raw: unkn
     const capacity = await readOpeningLearningCapacity(tx, scope, now);
     if (capacity.budget !== null) {
       const dailyExecutableMinutes = Math.max(0, capacity.budget.dailyMinutes - capacity.budget.bufferMinutes);
-      const usedOrReservedCardSessionMinutes = sumCardSessionMinutesForDay(capacity.activities, capacity);
+      const usedOrReservedCardSessionMinutes = sumCardRecoveryMinutesForDay(capacity);
+      let hasPriorCardSessionToday = usedOrReservedCardSessionMinutes > 0;
+      if (!hasPriorCardSessionToday) {
+        const priorCardRows = await tx`SELECT created_at,goal_json FROM opening_teaching_activities
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND (create_intent->>'protocol'='card-review-session-v1' OR goal_json ? 'cardReviewSession')
+            AND ((created_at>=${capacity.bounds.dayStart} AND created_at<${capacity.bounds.nextDayStart}) OR goal_json ? 'learningBudget')`;
+        hasPriorCardSessionToday = priorCardRows.some((row) => cardSessionActivityBelongsToDay(row as Row, capacity));
+      }
       const strictCap = Math.floor((dailyExecutableMinutes * 3) / 10);
       const isBacklogRecovery = dailyExecutableMinutes < 34
-        && usedOrReservedCardSessionMinutes === 0
+        && !hasPriorCardSessionToday
         && input.budgetMinutes > strictCap
         ? (await cards.listQueue({ ...scope, mode: "auto", now, timeZone: capacity.timeZone })).length >= 200
         : true;
@@ -152,6 +267,7 @@ export async function writeLearningCardSession(sql: Sql, scope: Scope, raw: unkn
         freeUnreservedMinutes,
         usedOrReservedCardSessionMinutes,
         isBacklogRecovery,
+        hasPriorCardSessionToday,
       });
       if (input.budgetMinutes > allowance) {
         const displayAllowance = Number.isInteger(allowance) ? allowance : Number(allowance.toFixed(2));
