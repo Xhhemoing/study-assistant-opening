@@ -4,6 +4,7 @@ import {
   MAX_OFFLINE_LEASE_CARDS,
   OFFLINE_LEASE_TTL_MS,
   canonicalizeIdentifier,
+  isSafeIdentifier,
   type IssueOfflineFlashcardLeaseInput,
   type IssueOfflineFlashcardLeaseResult,
   type OfflineEffectiveRating,
@@ -207,10 +208,13 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
   return patterns.some(pattern => pattern.test(rawText));
 }
 
-const COMPOUND_BINARY_ADD_SUB_RE = /(?<=[\p{N})]|(?<![\p{Script=Latin}\p{Script=Greek}_])[a-z]|\b(?:pi|theta|alpha|beta|gamma|delta|epsilon|zeta|eta|kappa|lambda|mu|nu|xi|rho|sigma|tau|phi|chi|psi|omega|inf|infty))\s*([+-])\s*(?=[\p{N}(]|[a-z](?![\p{Script=Latin}\p{Script=Greek}_])|(?:pi|theta|alpha|beta|gamma|delta|epsilon|zeta|eta|kappa|lambda|mu|nu|xi|rho|sigma|tau|phi|chi|psi|omega|inf|infty)\b|sqrt\()/giu;
+const COMPOUND_BINARY_ADD_SUB_RE =
+  /(?<=[0-9a-zA-Z\p{Script=Greek})\]!%])\s*([+-])\s*(?=[0-9a-zA-Z\p{Script=Greek}([\u221A\\])/gu;
+
+const MATH_EXPR_ATOM_CHARS = "[\\p{N}a-z\\p{Script=Greek}()\\[\\].,_!%\\\\\\u221A]";
 
 const COMPOUND_MATH_EXPR_RE = new RegExp(
-  `^(?:[+-]|\\+-|-\\+)?[\\p{N}a-z().]+(?:[+\\-*\\/^][\\p{N}a-z().]+)+$`,
+  `^(?:[+-]|\\+-|-\\+)?${MATH_EXPR_ATOM_CHARS}+(?:[+\\-*\\/^]${MATH_EXPR_ATOM_CHARS}+)+$`,
   "iu",
 );
 
@@ -226,7 +230,7 @@ const STANDALONE_SIGNED_LITERAL_RE = new RegExp(
 
 function collapseBinaryAddSubWhitespace(canonicalizedText: string): string {
   let current = canonicalizedText;
-  for (let pass = 0; pass < 4; pass += 1) {
+  while (true) {
     const next = current.replace(COMPOUND_BINARY_ADD_SUB_RE, "$1");
     if (next === current) break;
     current = next;
@@ -512,22 +516,44 @@ function cloneLedgerEntry(entry: OfflineOutboxLedgerEntry): OfflineOutboxLedgerE
   };
 }
 
+function createNullProtoRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
+function setOwnRecordProperty<T>(record: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(record, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function getOwnRecordProperty<T>(
+  record: Readonly<Record<string, T>>,
+  key: string,
+): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+}
+
 function toServerCardRecord(
   cards:
     | Readonly<Record<string, ServerFlashcardSnapshot>>
     | ReadonlyMap<string, ServerFlashcardSnapshot>,
 ): Record<string, ServerFlashcardSnapshot> {
-  const out: Record<string, ServerFlashcardSnapshot> = {};
+  const out = createNullProtoRecord<ServerFlashcardSnapshot>();
   if (cards instanceof Map) {
     for (const [cardId, snapshot] of cards.entries()) {
+      if (!isSafeIdentifier(cardId)) continue;
       const canonicalId = canonicalizeIdentifier(cardId);
-      out[canonicalId] = cloneServerSnapshot({ ...snapshot, cardId: canonicalId });
+      setOwnRecordProperty(out, canonicalId, cloneServerSnapshot({ ...snapshot, cardId: canonicalId }));
     }
     return out;
   }
   for (const [cardId, snapshot] of Object.entries(cards)) {
+    if (!isSafeIdentifier(cardId)) continue;
     const canonicalId = canonicalizeIdentifier(cardId);
-    out[canonicalId] = cloneServerSnapshot({ ...snapshot, cardId: canonicalId });
+    setOwnRecordProperty(out, canonicalId, cloneServerSnapshot({ ...snapshot, cardId: canonicalId }));
   }
   return out;
 }
@@ -538,18 +564,20 @@ function toLedgerRecord(
     | ReadonlyMap<string, OfflineOutboxLedgerEntry>
     | undefined,
 ): Record<string, OfflineOutboxLedgerEntry> {
-  const out: Record<string, OfflineOutboxLedgerEntry> = {};
+  const out = createNullProtoRecord<OfflineOutboxLedgerEntry>();
   if (!ledger) return out;
   if (ledger instanceof Map) {
     for (const [, entry] of ledger.entries()) {
+      if (!isSafeIdentifier(entry.leaseId)) continue;
       const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
-      out[canonicalKey] = cloneLedgerEntry(entry);
+      setOwnRecordProperty(out, canonicalKey, cloneLedgerEntry(entry));
     }
     return out;
   }
   for (const [, entry] of Object.entries(ledger)) {
+    if (!isSafeIdentifier(entry.leaseId)) continue;
     const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
-    out[canonicalKey] = cloneLedgerEntry(entry);
+    setOwnRecordProperty(out, canonicalKey, cloneLedgerEntry(entry));
   }
   return out;
 }
@@ -566,13 +594,13 @@ function sanitizeLeaseCandidate(
       readonly message: string;
       readonly cardId?: string;
     } {
-  const candidateCardId = isNonEmptyString(candidate.cardId) ? candidate.cardId : undefined;
+  const candidateCardId = isSafeIdentifier(candidate.cardId) ? candidate.cardId : undefined;
   if (!candidateCardId) {
     return {
       ok: false,
       code: "invalid_card_payload",
       httpStatus: 400,
-      message: "Lease card candidate must provide a non-empty cardId.",
+      message: "Lease card candidate must provide a safe non-empty cardId (reserved property keys like __proto__, constructor, and prototype are forbidden).",
     };
   }
   if (!isNonNegativeSafeInteger(candidate.cardRevision)) {
@@ -608,6 +636,7 @@ function sanitizeLeaseCandidate(
     // (`sealedPayload`, `answerKey`, `canonicalSolution`, `gradingRubric`, `referenceAnswer`).
     const rawCandidate = candidate as Record<string, unknown>;
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(rawCandidate, forbiddenField)) continue;
       const value = rawCandidate[forbiddenField];
       if (value !== undefined && value !== null) {
         return {
@@ -658,7 +687,16 @@ function sanitizeLeaseCandidate(
   }
 
   if (candidate.cardKind === "miss_variant") {
-    if (!isNonEmptyString(candidate.freshVariantId) || !isNonEmptyString(candidate.freshVariantStem)) {
+    if (!isSafeIdentifier(candidate.freshVariantId)) {
+      return {
+        ok: false,
+        code: isNonEmptyString(candidate.freshVariantId) ? "invalid_card_payload" : "miss_variant_stem_required",
+        httpStatus: isNonEmptyString(candidate.freshVariantId) ? 400 : 422,
+        cardId: candidateCardId,
+        message: `Miss variant card ${candidateCardId} must include a safe non-empty freshVariantId.`,
+      };
+    }
+    if (!isNonEmptyString(candidate.freshVariantStem)) {
       return {
         ok: false,
         code: "miss_variant_stem_required",
@@ -676,8 +714,10 @@ function sanitizeLeaseCandidate(
         message: `Miss variant card ${candidateCardId} refused: freshVariantStem contains solution/answer directive markup.`,
       };
     }
+    const rawMissCandidate = candidate as Record<string, unknown>;
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
-      const rawSecret = (candidate as Record<string, unknown>)[forbiddenField];
+      if (!Object.prototype.hasOwnProperty.call(rawMissCandidate, forbiddenField)) continue;
+      const rawSecret = rawMissCandidate[forbiddenField];
       const secretTexts = collectSecretTexts(rawSecret);
       for (const secretText of secretTexts) {
         if (containsAnswerLeak(candidate.freshVariantStem, secretText, { includeShortTokens: true })) {
@@ -742,6 +782,9 @@ export function createInitialOfflineFsrsSnapshot(
   nowMs: number,
   revision = 0,
 ): ServerFlashcardSnapshot {
+  if (!isSafeIdentifier(cardId)) {
+    throw new RangeError("cardId must be a safe non-empty identifier.");
+  }
   const canonicalCardId = canonicalizeIdentifier(cardId);
   const initialCard = createEmptyCard(new Date(nowMs));
   return {
@@ -780,15 +823,15 @@ export function issueOfflineFlashcardLease(
   input: IssueOfflineFlashcardLeaseInput,
 ): IssueOfflineFlashcardLeaseResult {
   if (
-    !isNonEmptyString(input.leaseId) ||
-    !isNonEmptyString(input.workspaceId) ||
-    !isNonEmptyString(input.learnerId)
+    !isSafeIdentifier(input.leaseId) ||
+    !isSafeIdentifier(input.workspaceId) ||
+    !isSafeIdentifier(input.learnerId)
   ) {
     return {
       ok: false,
       code: "invalid_lease_scope",
       httpStatus: 400,
-      message: "leaseId, workspaceId, and learnerId must be non-empty strings.",
+      message: "leaseId, workspaceId, and learnerId must be safe non-empty identifiers (reserved property keys are forbidden).",
     };
   }
   if (!isValidTimestamp(input.issuedAtMs)) {
@@ -861,6 +904,7 @@ export function issueOfflineFlashcardLease(
   for (const candidate of input.candidates) {
     const rawCandidate = candidate as Record<string, unknown>;
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(rawCandidate, forbiddenField)) continue;
       for (const secretText of collectSecretTexts(rawCandidate[forbiddenField])) {
         allProtectedSecretSet.add(secretText);
       }
@@ -1034,6 +1078,7 @@ function detectStrippedClientFlags(entry: OfflineOutboxEntryInput): ReadonlyArra
   const record = entry as Record<string, unknown>;
   const stripped: string[] = [];
   for (const flag of STRIPPABLE_CLIENT_PROMOTION_FLAGS) {
+    if (!Object.prototype.hasOwnProperty.call(record, flag)) continue;
     if (record[flag] !== undefined && record[flag] !== false && record[flag] !== null) {
       stripped.push(flag);
     }
@@ -1123,6 +1168,7 @@ export function reconcileOfflineLeaseOutbox(
   const canonicalLeaseId = canonicalizeIdentifier(lease.leaseId);
   const leasedCardById = new Map<string, OfflineLeaseCard>();
   for (const card of lease.cards) {
+    if (!isSafeIdentifier(card.cardId)) continue;
     leasedCardById.set(canonicalizeIdentifier(card.cardId), card);
   }
 
@@ -1150,12 +1196,19 @@ export function reconcileOfflineLeaseOutbox(
   let conflictCount = 0;
 
   for (const { entry } of orderedEntries) {
-    const canonicalEntryLeaseId = isNonEmptyString(entry.leaseId)
-      ? canonicalizeIdentifier(entry.leaseId)
-      : entry.leaseId;
-    const canonicalEntryCardId = isNonEmptyString(entry.cardId)
-      ? canonicalizeIdentifier(entry.cardId)
-      : entry.cardId;
+    if (!isSafeIdentifier(lease.leaseId) || !isSafeIdentifier(entry.leaseId)) {
+      results.push({
+        leaseId: entry.leaseId,
+        seq: entry.seq,
+        cardId: entry.cardId,
+        outcome: "invalid_entry",
+        httpStatus: 400,
+        reason: "Outbox leaseId must be a safe non-empty identifier.",
+      });
+      continue;
+    }
+
+    const canonicalEntryLeaseId = canonicalizeIdentifier(entry.leaseId);
 
     if (canonicalEntryLeaseId !== canonicalLeaseId) {
       conflictCount += 1;
@@ -1172,7 +1225,7 @@ export function reconcileOfflineLeaseOutbox(
 
     if (!Number.isSafeInteger(entry.seq) || entry.seq < 1) {
       results.push({
-        leaseId: entry.leaseId,
+        leaseId: canonicalLeaseId,
         seq: entry.seq,
         cardId: entry.cardId,
         outcome: "invalid_seq",
@@ -1182,10 +1235,24 @@ export function reconcileOfflineLeaseOutbox(
       continue;
     }
 
+    if (!isSafeIdentifier(entry.cardId)) {
+      results.push({
+        leaseId: canonicalLeaseId,
+        seq: entry.seq,
+        cardId: entry.cardId,
+        outcome: "invalid_entry",
+        httpStatus: 400,
+        reason: "Outbox cardId must be a safe non-empty identifier (reserved property keys are forbidden).",
+      });
+      continue;
+    }
+
+    const canonicalEntryCardId = canonicalizeIdentifier(entry.cardId);
+
     const payloadFingerprint = computeOfflineOutboxPayloadFingerprint(entry);
     const payloadSummary = buildPayloadSummary(entry);
     const idempotencyKey = offlineOutboxIdempotencyKey(canonicalLeaseId, entry.seq);
-    const existingLedgerEntry = workingLedger[idempotencyKey];
+    const existingLedgerEntry = getOwnRecordProperty(workingLedger, idempotencyKey);
 
     // Idempotency check runs BEFORE desktop race checks so retries of already-settled
     // `(leaseId, seq)` entries return the cached receipt ONLY when the full payload
@@ -1248,14 +1315,13 @@ export function reconcileOfflineLeaseOutbox(
     }
 
     if (
-      !isNonEmptyString(entry.cardId) ||
       !isNonNegativeSafeInteger(entry.expectedCardRevision) ||
       !VALID_RAW_RATINGS.has(entry.rating)
     ) {
       results.push({
         leaseId: canonicalLeaseId,
         seq: entry.seq,
-        cardId: entry.cardId,
+        cardId: canonicalEntryCardId,
         outcome: "invalid_entry",
         httpStatus: 400,
         reason: "Outbox entry requires valid cardId, non-negative expectedCardRevision, and valid rating.",
@@ -1276,7 +1342,7 @@ export function reconcileOfflineLeaseOutbox(
       continue;
     }
 
-    const serverCard = workingCards[canonicalEntryCardId];
+    const serverCard = getOwnRecordProperty(workingCards, canonicalEntryCardId);
     if (!serverCard) {
       results.push({
         leaseId: canonicalLeaseId,
@@ -1357,8 +1423,8 @@ export function reconcileOfflineLeaseOutbox(
       nextSnapshot,
     };
 
-    workingCards[canonicalEntryCardId] = nextSnapshot;
-    workingLedger[idempotencyKey] = {
+    setOwnRecordProperty(workingCards, canonicalEntryCardId, nextSnapshot);
+    setOwnRecordProperty(workingLedger, idempotencyKey, {
       leaseId: canonicalLeaseId,
       seq: entry.seq,
       payloadFingerprint,
@@ -1370,7 +1436,7 @@ export function reconcileOfflineLeaseOutbox(
         payloadSummary,
         receipt,
       }).receipt,
-    };
+    });
     settledCount += 1;
 
     results.push({

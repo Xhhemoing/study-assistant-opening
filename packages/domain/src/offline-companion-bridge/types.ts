@@ -9,6 +9,22 @@
 const CANONICAL_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export const RESERVED_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+/**
+ * Validates that an identifier is a non-empty string and NOT a reserved JS
+ * prototype-chain property key (`__proto__`, `constructor`, `prototype`).
+ */
+export function isSafeIdentifier(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && !RESERVED_PROPERTY_KEYS.has(trimmed);
+}
+
 /**
  * Canonicalizes identifiers by trimming whitespace and lowercasing RFC 4122 UUIDs
  * so mixed-case UUID representations cannot bypass revocation, deduplication, or scoping checks.

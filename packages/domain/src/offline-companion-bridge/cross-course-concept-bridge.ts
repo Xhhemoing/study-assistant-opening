@@ -7,6 +7,7 @@ import {
   MIN_BRIDGE_PRIOR_MEAN,
   MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE,
   canonicalizeIdentifier,
+  isSafeIdentifier,
   type AcceptedConceptBridgeEdge,
   type ComputeCrossCourseWeakPriorInput,
   type CrossCourseConceptEdge,
@@ -124,18 +125,23 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     targetInCourseState,
   } = input;
 
-  const canonicalTargetCourseId = canonicalizeIdentifier(targetCourseId);
-  const canonicalTargetConceptId = canonicalizeIdentifier(targetConceptId);
+  const targetIdsValid =
+    isSafeIdentifier(targetCourseId) && isSafeIdentifier(targetConceptId);
+  const canonicalTargetCourseId = targetIdsValid ? canonicalizeIdentifier(targetCourseId) : "";
+  const canonicalTargetConceptId = targetIdsValid ? canonicalizeIdentifier(targetConceptId) : "";
 
   // Normalize UUID/identifier casing across revocation sets and course lookup tables
-  // so mixed-case UUIDs can never bypass revocation, sharing, or privacy_epoch checks.
+  // so mixed-case UUIDs can never bypass revocation, sharing, or privacy_epoch checks,
+  // while ignoring reserved JS prototype-chain property keys.
   const canonicalRevokedSourceIds = new Set<string>();
   for (const revokedId of revokedSourceIds) {
+    if (!isSafeIdentifier(revokedId)) continue;
     canonicalRevokedSourceIds.add(canonicalizeIdentifier(revokedId));
   }
 
   const canonicalSharingEnabled = new Map<string, boolean>();
   for (const [courseId, enabled] of Object.entries(activeCourseSharingEnabled)) {
+    if (!isSafeIdentifier(courseId)) continue;
     const key = canonicalizeIdentifier(courseId);
     const existing = canonicalSharingEnabled.get(key);
     // Fail closed if conflicting mixed-case duplicate keys exist for the same course UUID.
@@ -144,6 +150,7 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
 
   const canonicalPrivacyEpochs = new Map<string, number | null>();
   for (const [courseId, epoch] of Object.entries(coursePrivacyEpochs)) {
+    if (!isSafeIdentifier(courseId)) continue;
     const key = canonicalizeIdentifier(courseId);
     const existing = canonicalPrivacyEpochs.get(key);
     if (existing === undefined) {
@@ -170,14 +177,27 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
 
   for (const edge of edges) {
     const edgeId = resolveEdgeId(edge);
-    const canonicalSourceCourseId = canonicalizeIdentifier(edge.sourceCourseId);
-    const canonicalSourceConceptId = canonicalizeIdentifier(edge.sourceConceptId);
-    const canonicalEdgeTargetCourseId = canonicalizeIdentifier(edge.targetCourseId);
-    const canonicalEdgeTargetConceptId = canonicalizeIdentifier(edge.targetConceptId);
+    const edgeTargetIdsValid =
+      isSafeIdentifier(edge.targetCourseId) && isSafeIdentifier(edge.targetConceptId);
+    const edgeSourceIdsValid =
+      isSafeIdentifier(edge.sourceCourseId) && isSafeIdentifier(edge.sourceConceptId);
+    const canonicalSourceCourseId = edgeSourceIdsValid
+      ? canonicalizeIdentifier(edge.sourceCourseId)
+      : "";
+    const canonicalSourceConceptId = edgeSourceIdsValid
+      ? canonicalizeIdentifier(edge.sourceConceptId)
+      : "";
+    const canonicalEdgeTargetCourseId = edgeTargetIdsValid
+      ? canonicalizeIdentifier(edge.targetCourseId)
+      : "";
+    const canonicalEdgeTargetConceptId = edgeTargetIdsValid
+      ? canonicalizeIdentifier(edge.targetConceptId)
+      : "";
 
     if (
       !canonicalTargetCourseId ||
       !canonicalTargetConceptId ||
+      !edgeTargetIdsValid ||
       canonicalEdgeTargetCourseId !== canonicalTargetCourseId ||
       canonicalEdgeTargetConceptId !== canonicalTargetConceptId
     ) {
@@ -192,7 +212,7 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
       continue;
     }
 
-    if (canonicalSourceCourseId === canonicalTargetCourseId) {
+    if (edgeSourceIdsValid && canonicalSourceCourseId === canonicalTargetCourseId) {
       ignoredNonDirectEdges.push({
         edgeId,
         sourceCourseId: edge.sourceCourseId,
@@ -206,7 +226,10 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
 
     const decoupleReasons: CrossCourseDecoupleReason[] = [];
 
-    if (!canonicalSourceCourseId || !canonicalSourceConceptId) {
+    if (
+      !edgeSourceIdsValid ||
+      edge.supportingSourceIds.some(sourceId => !isSafeIdentifier(sourceId))
+    ) {
       decoupleReasons.push("invalid_edge_parameters");
     }
 

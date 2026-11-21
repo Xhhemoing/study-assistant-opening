@@ -6,6 +6,7 @@ import {
   COMPANION_USER_CODE_ALPHABET,
   MAX_SCRATCHPAD_PAGE_BYTES,
   canonicalizeIdentifier,
+  isSafeIdentifier,
   type AppendCompanionScratchpadPageInput,
   type AppendCompanionScratchpadPageResult,
   type AuthorizeCompanionActionInput,
@@ -495,16 +496,16 @@ export function createCompanionPairingOffer(
   input: CreateCompanionPairingOfferInput,
 ): CreateCompanionPairingOfferResult {
   if (
-    !isNonEmptyString(input.offerId) ||
-    !isNonEmptyString(input.workspaceId) ||
-    !isNonEmptyString(input.learnerId) ||
-    !isNonEmptyString(input.attemptId)
+    !isSafeIdentifier(input.offerId) ||
+    !isSafeIdentifier(input.workspaceId) ||
+    !isSafeIdentifier(input.learnerId) ||
+    !isSafeIdentifier(input.attemptId)
   ) {
     return {
       ok: false,
       code: "invalid_pairing_scope",
       httpStatus: 400,
-      message: "offerId, workspaceId, learnerId, and attemptId must be non-empty strings.",
+      message: "offerId, workspaceId, learnerId, and attemptId must be safe non-empty identifiers (reserved property keys are forbidden).",
     };
   }
   if (!isValidTimestamp(input.issuedAtMs)) {
@@ -729,7 +730,7 @@ export function redeemCompanionPairingOffer(
     };
   }
 
-  if (!isNonEmptyString(input.sessionId)) {
+  if (!isSafeIdentifier(input.sessionId)) {
     return {
       ok: false,
       code: "invalid_session_id",
@@ -737,7 +738,7 @@ export function redeemCompanionPairingOffer(
       revokeIssuedSession: false,
       revokedSessionId: null,
       offer,
-      message: "sessionId must be a non-empty string.",
+      message: "sessionId must be a safe non-empty identifier (reserved property keys are forbidden).",
     };
   }
 
@@ -843,7 +844,14 @@ export function authorizeCompanionAction(
     };
   }
 
-  if (canonicalizeIdentifier(attemptId) !== canonicalizeIdentifier(session.scopedAttemptId)) {
+  if (
+    !isSafeIdentifier(attemptId) ||
+    !isSafeIdentifier(session.scopedAttemptId) ||
+    !isSafeIdentifier(session.sessionId) ||
+    !isSafeIdentifier(session.workspaceId) ||
+    !isSafeIdentifier(session.learnerId) ||
+    canonicalizeIdentifier(attemptId) !== canonicalizeIdentifier(session.scopedAttemptId)
+  ) {
     return {
       allowed: false,
       httpStatus: 403,
@@ -878,6 +886,13 @@ export function createCompanionScratchpadDraft(input: {
   readonly learnerId: string;
   readonly attemptId: string;
 }): CompanionScratchpadState {
+  if (
+    !isSafeIdentifier(input.workspaceId) ||
+    !isSafeIdentifier(input.learnerId) ||
+    !isSafeIdentifier(input.attemptId)
+  ) {
+    throw new RangeError("workspaceId, learnerId, and attemptId must be safe non-empty identifiers.");
+  }
   return {
     schemaVersion: 1,
     workspaceId: canonicalizeIdentifier(input.workspaceId),

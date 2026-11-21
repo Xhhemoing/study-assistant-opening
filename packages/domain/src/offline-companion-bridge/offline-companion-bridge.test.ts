@@ -21,6 +21,7 @@ import {
   canonicalizeIdentifier,
   canonicalizeMathNotation,
   computeCrossCourseWeakPrior,
+  computeOfflineOutboxPayloadFingerprint,
   containsAnswerLeak,
   createCompanionPairingOffer,
   createCompanionScratchpadDraft,
@@ -581,6 +582,135 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       ],
     });
     expect(benignSignedLiteral.ok).toBe(true);
+
+    // [Round-9 P1-1] Binary `+`/`-` spacing around function/identifier/LaTeX operands
+    // (`sin(x) + cos(x)` <-> `sin(x)+cos(x)`, `f(x) - g(x)` <-> `f(x)-g(x)`, `\alpha + \beta` <-> `\alpha+\beta`)
+    // MUST be caught in BOTH flashcard backSummary/prompt AND miss_variant stem!
+    expect(containsAnswerLeak("Remember sin(x)+cos(x) here.", "sin(x) + cos(x)")).toBe(true);
+    expect(containsAnswerLeak("Remember sin(x) + cos(x) here.", "sin(x)+cos(x)")).toBe(true);
+    expect(containsAnswerLeak("Check sin(x)+cos(x)-tan(x).", "sin(x) + cos(x) - tan(x)")).toBe(true);
+    expect(containsAnswerLeak("Check sin(x) + cos(x) - tan(x).", "sin(x)+cos(x)-tan(x)")).toBe(true);
+    expect(containsAnswerLeak("Evaluate f(x)-g(x) at zero.", "f(x) - g(x)")).toBe(true);
+    expect(containsAnswerLeak("Evaluate f(x) - g(x) at zero.", "f(x)-g(x)")).toBe(true);
+    expect(containsAnswerLeak("Sum equals \\alpha+\\beta.", "\\alpha + \\beta")).toBe(true);
+    expect(containsAnswerLeak("Sum equals \\alpha + \\beta.", "\\alpha+\\beta")).toBe(true);
+
+    for (const [idx, fnCase] of [
+      { answerKey: "sin(x) + cos(x)", stem: "Compute derivative yielding sin(x)+cos(x)." },
+      { answerKey: "sin(x)+cos(x)", stem: "Compute derivative yielding sin(x) + cos(x)." },
+      { answerKey: "f(x) - g(x)", stem: "Note that f(x)-g(x) vanishes." },
+      { answerKey: "f(x)-g(x)", stem: "Note that f(x) - g(x) vanishes." },
+    ].entries()) {
+      const fnMiss = issueOfflineFlashcardLease({
+        leaseId: `lease-r9-fn-miss-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: fnCase.answerKey,
+            freshVariantStem: fnCase.stem,
+          }),
+        ],
+      });
+      expect(fnMiss.ok).toBe(false);
+      if (!fnMiss.ok) {
+        expect(fnMiss.httpStatus).toBe(422);
+        expect(fnMiss.code).toBe("miss_variant_answer_leak");
+      }
+
+      const fnFlashcard = issueOfflineFlashcardLease({
+        leaseId: `lease-r9-fn-fc-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({ answerKey: fnCase.answerKey }),
+          {
+            ...makeFlashcardCandidate(500 + idx),
+            prompt: "Review trig sum identity.",
+            backSummary: fnCase.stem,
+          },
+        ],
+      });
+      expect(fnFlashcard.ok).toBe(false);
+      if (!fnFlashcard.ok) {
+        expect(fnFlashcard.httpStatus).toBe(422);
+        expect(fnFlashcard.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    // [Round-9 P1-2] Reserved JS prototype-chain property keys (`__proto__`, `constructor`, `prototype`)
+    // MUST fail closed on lease issuance, settlement, companion pairing, and cross-course bridge!
+    for (const reservedKey of ["__proto__", "constructor", "prototype"]) {
+      const badCardLease = issueOfflineFlashcardLease({
+        leaseId: "lease-r9-reserved-card",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [{ ...makeFlashcardCandidate(1), cardId: reservedKey }],
+      });
+      expect(badCardLease.ok).toBe(false);
+      if (!badCardLease.ok) {
+        expect(badCardLease.httpStatus).toBe(400);
+        expect(badCardLease.code).toBe("invalid_card_payload");
+      }
+
+      const badScopeLease = issueOfflineFlashcardLease({
+        leaseId: reservedKey,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [makeFlashcardCandidate(1)],
+      });
+      expect(badScopeLease.ok).toBe(false);
+      if (!badScopeLease.ok) {
+        expect(badScopeLease.httpStatus).toBe(400);
+        expect(badScopeLease.code).toBe("invalid_lease_scope");
+      }
+
+      const badPairOffer = createCompanionPairingOffer({
+        offerId: "offer-r9",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        attemptId: reservedKey,
+        primaryOrigin: "https://app.aistudy.example",
+        allowedCompanionOrigin: "https://companion.aistudy-sandbox.example",
+        issuedAtMs: T0,
+        deviceCode: "dev_code_9f8a7b6c5d4e3f2a1b0c",
+        userCode: "AB23-CD45",
+        fragmentSecret: "ephemeral_frag_secret_77aa88bb99cc",
+      });
+      expect(badPairOffer.ok).toBe(false);
+      if (!badPairOffer.ok) expect(badPairOffer.code).toBe("invalid_pairing_scope");
+    }
+
+    // Even if a tampered outbox attempts to settle cardId="__proto__" / "constructor" / "prototype",
+    // reconcileOfflineLeaseOutbox fails closed with 400 invalid_entry and never mutates Object.prototype!
+    const safeLease = issueOfflineFlashcardLease({
+      leaseId: "lease-r9-settle-guard",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [makeFlashcardCandidate(1)],
+    });
+    if (!safeLease.ok) throw new Error("expected safe lease");
+    const safeSettle = reconcileOfflineLeaseOutbox({
+      lease: safeLease.lease,
+      serverCards: { "card-1": createInitialOfflineFsrsSnapshot("card-1", T0 - 3_600_000, 1) },
+      serverReceiptAtMs: T0 + 60_000,
+      entries: [
+        { leaseId: "lease-r9-settle-guard", seq: 1, cardId: "__proto__", expectedCardRevision: 1, rating: "good" },
+        { leaseId: "lease-r9-settle-guard", seq: 2, cardId: "constructor", expectedCardRevision: 1, rating: "good" },
+        { leaseId: "lease-r9-settle-guard", seq: 3, cardId: "prototype", expectedCardRevision: 1, rating: "good" },
+      ],
+    });
+    expect(safeSettle.ok).toBe(true);
+    if (!safeSettle.ok) throw new Error("expected settle response");
+    expect(safeSettle.settledCount).toBe(0);
+    expect(safeSettle.results.every(r => r.outcome === "invalid_entry" && r.httpStatus === 400)).toBe(true);
+    expect(Object.getPrototypeOf(safeSettle.updatedServerCards)).toBeNull();
+    expect(Object.getPrototypeOf(safeSettle.nextProcessedLedger)).toBeNull();
 
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
@@ -2273,10 +2403,12 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     ]);
 
     // Also verify mixed-case UUID lease idempotency & supersession in offline-flashcard-lease.ts!
-    const leaseUuidLower = "22222222-3333-4444-8555-666666666666";
+    const leaseUuidLower = "22222222-3333-4444-8555-66666666aaaa";
     const leaseUuidUpper = leaseUuidLower.toUpperCase();
-    const cardUuidLower = "33333333-4444-4555-8666-777777777777";
+    const cardUuidLower = "33333333-4444-4555-8666-77777777bbbb";
     const cardUuidUpper = cardUuidLower.toUpperCase();
+    expect(leaseUuidUpper).not.toBe(leaseUuidLower);
+    expect(cardUuidUpper).not.toBe(cardUuidLower);
     const uuidLease = issueOfflineFlashcardLease({
       leaseId: leaseUuidUpper,
       workspaceId: courseAUuidUpper,
@@ -2328,13 +2460,15 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     expect(uuidReplay.replayedCount).toBe(1);
     expect(uuidReplay.settledCount).toBe(0);
 
-    // [Round-8 P2] Pre-Round-7 stored ledger entry whose payloadFingerprint was hashed from
-    // raw uppercase UUIDs MUST replay idempotently (both uppercase and lowercase retries),
+    // [Round-8 P2 / Round-9 P2] Pre-Round-7 stored ledger entry whose payloadFingerprint was hashed from
+    // raw uppercase hex-letter UUIDs MUST replay idempotently (both uppercase and lowercase retries),
     // while genuine payload mutations STILL return 409 seq_payload_mismatch!
-    const preR7LeaseUuidLower = "44444444-5555-4666-8777-888888888888";
+    const preR7LeaseUuidLower = "550e8400-e29b-41d4-a716-4466554400ab";
     const preR7LeaseUuidUpper = preR7LeaseUuidLower.toUpperCase();
-    const preR7CardUuidLower = "55555555-6666-4777-8888-999999999999";
+    const preR7CardUuidLower = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
     const preR7CardUuidUpper = preR7CardUuidLower.toUpperCase();
+    expect(preR7LeaseUuidUpper).not.toBe(preR7LeaseUuidLower);
+    expect(preR7CardUuidUpper).not.toBe(preR7CardUuidLower);
     const preR7EntryUpper = {
       leaseId: preR7LeaseUuidUpper,
       seq: 1,
@@ -2351,6 +2485,9 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     const preR7RawUppercaseFingerprint = [...preR7DigestBytes]
       .map(byte => byte.toString(16).padStart(2, "0"))
       .join("");
+    expect(preR7RawUppercaseFingerprint).not.toBe(
+      computeOfflineOutboxPayloadFingerprint(preR7EntryUpper),
+    );
 
     const preR7Lease = issueOfflineFlashcardLease({
       leaseId: preR7LeaseUuidUpper,
