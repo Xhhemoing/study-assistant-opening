@@ -455,6 +455,10 @@ function classifyQuarantineRecord(
     return "missing_source_lineage";
   }
 
+  if (!isWorkspaceMetadataExempt && !recordSourceKeyId) {
+    return "missing_source_key_lineage";
+  }
+
   if (recordSourceKeyId && shreddedSourceKeyIds.has(recordSourceKeyId)) {
     return "shredded_source_key";
   }
@@ -477,7 +481,7 @@ function classifyQuarantineRecord(
       return "revoked_or_deleted_source";
     }
     if (recordSourceKeyId && liveSource.sourceKeyId.trim() !== recordSourceKeyId) {
-      return "stale_source_key";
+      return "rotated_or_shredded_source_key";
     }
   } else if (recordSourceKeyId) {
     liveSource = sourceByKeyId.get(recordSourceKeyId);

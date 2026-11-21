@@ -320,8 +320,10 @@ export type QuarantineRejectReason =
   | "shredded_source_key"
   | "revoked_or_deleted_source"
   | "stale_source_key"
+  | "rotated_or_shredded_source_key"
   | "stale_privacy_epoch"
-  | "missing_source_lineage";
+  | "missing_source_lineage"
+  | "missing_source_key_lineage";
 
 export type QuarantinedRecordRejection = {
   recordId: string;
@@ -472,7 +474,10 @@ export type CommitFenceResult = {
 };
 
 export type EmergencyRollbackOptions = {
+  certifiedLeaseInventory?: boolean;
+  certifiedNewLeaseIssuanceFenced?: boolean;
   certifiedCompleteInventory?: boolean;
+  oldestWorkerSyncWatermarkMs?: number;
 };
 
 export type EmergencyRollbackResult = {

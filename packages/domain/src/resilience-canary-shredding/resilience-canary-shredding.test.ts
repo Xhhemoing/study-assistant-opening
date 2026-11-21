@@ -148,6 +148,46 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     expect(partialDecision.triggerLatencyMs).toBe(0);
     expect(partialDecision.waitedForWindowCompletion).toBe(false);
 
+    // Even when windowEndMs > evaluatedAtMs (unclosed window), sseAnswerMarkerLeak triggers 0ms break immediately
+    const unclosedLeakDecision = evaluateDriftCanarySentinel({
+      route: baseRoute,
+      thresholds: baseThresholds,
+      evaluatedAtMs: 120_000,
+      windows: [
+        makeWindow(0, { decisionCount: 40, sseAnswerMarkerLeak: true }),
+      ],
+    });
+    expect(unclosedLeakDecision.action).toBe("immediate_circuit_break");
+    expect(unclosedLeakDecision.triggerLatencyMs).toBe(0);
+
+    // Non-leak metric breaches MUST NOT count an unclosed window (windowEndMs > evaluatedAtMs) toward dual-window switchover
+    const unclosedBreachHeld = evaluateDriftCanarySentinel({
+      route: baseRoute,
+      thresholds: baseThresholds,
+      evaluatedAtMs: 540_000, // w1 [300_000..600_000] is still unclosed!
+      windows: [
+        makeWindow(0, { decisionCount: 140, errorRate: 0.25 }),
+        makeWindow(1, { decisionCount: 140, errorRate: 0.25 }),
+      ],
+    });
+    expect(unclosedBreachHeld.action).toBe("keep_primary");
+    if (unclosedBreachHeld.action === "keep_primary") {
+      expect(unclosedBreachHeld.reason).toBe("single_window_breach_not_confirmed");
+      expect(unclosedBreachHeld.evaluatedWindowCount).toBe(1);
+    }
+
+    // Once evaluatedAtMs reaches w1.windowEndMs (600_000), both windows are completed and switchover triggers
+    const closedBreachSwitched = evaluateDriftCanarySentinel({
+      route: baseRoute,
+      thresholds: baseThresholds,
+      evaluatedAtMs: 600_000,
+      windows: [
+        makeWindow(0, { decisionCount: 140, errorRate: 0.25 }),
+        makeWindow(1, { decisionCount: 140, errorRate: 0.25 }),
+      ],
+    });
+    expect(closedBreachSwitched.action).toBe("switch_task_to_cross_family_fallback");
+
     // Without sseAnswerMarkerLeak, statistical rate evaluation still requires full 5m windows
     expect(() =>
       evaluateDriftCanarySentinel({
@@ -783,15 +823,16 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
     expect(cleanOnly.status).toBe("approved_clean");
     expect(cleanOnly.liveApplyAllowed).toBe(true);
 
-    // Source-ID-only record (sourceKeyId omitted) still blocks when resolved sourceKeyId or workspaceKeyId is in shreddedKeyIds
-    const sourceIdOnlyWithShreddedKeyList = evaluateQuarantineRestoreBundle({
-      bundleId: "bundle-source-id-only-shredded-keys",
+    // Non-metadata source records omitting sourceKeyId fail closed even after same-epoch rotation,
+    // while explicit matching sourceKeyId succeeds and old shredded/rotated keys are rejected
+    const sourceKeyBinding = evaluateQuarantineRestoreBundle({
+      bundleId: "bundle-source-key-lineage",
       policy: "strip_shredded_lineage",
       liveKeyTree: initialTree,
       shreddedKeyIds: ["ks-b"],
       records: [
         {
-          recordId: "rec-source-id-only-resolved-shredded",
+          recordId: "rec-source-id-only-missing-key",
           recordType: "source_chunk",
           workspaceId: "ws-1",
           workspaceKeyId: "kw-1",
@@ -800,7 +841,44 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
           privacyEpoch: 1,
         },
         {
-          recordId: "rec-source-a-clean-against-ks-b-shred",
+          recordId: "rec-source-a-explicit-key-clean",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: "src-a",
+          sourceKeyId: "ks-a",
+          privacyEpoch: 1,
+        },
+      ],
+    });
+    expect(sourceKeyBinding.status).toBe("approved_after_filtering");
+    expect(sourceKeyBinding.approvedRecords.map((r) => r.recordId)).toEqual([
+      "rec-source-a-explicit-key-clean",
+    ]);
+    expect(sourceKeyBinding.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
+      ["rec-source-id-only-missing-key", "missing_source_key_lineage"],
+    ]);
+
+    // Same-epoch key rotation (ks-a -> ks-a-v2) with ks-a in shreddedKeyIds blocks sourceId-only and ks-a records
+    const rotatedSameEpochTree: WorkspaceKeyTree = {
+      ...initialTree,
+      sources: [
+        {
+          ...initialTree.sources[0]!,
+          sourceKeyId: "ks-a-v2",
+          privacyEpoch: 1,
+        },
+        initialTree.sources[1]!,
+      ],
+    };
+    const sameEpochRotationRestore = evaluateQuarantineRestoreBundle({
+      bundleId: "bundle-same-epoch-rotation",
+      policy: "strip_shredded_lineage",
+      liveKeyTree: rotatedSameEpochTree,
+      shreddedKeyIds: ["ks-a"],
+      records: [
+        {
+          recordId: "rec-source-id-only-post-rotation",
           recordType: "source_chunk",
           workspaceId: "ws-1",
           workspaceKeyId: "kw-1",
@@ -808,14 +886,32 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
           sourceKeyId: null,
           privacyEpoch: 1,
         },
+        {
+          recordId: "rec-old-shredded-key-post-rotation",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: "src-a",
+          sourceKeyId: "ks-a",
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-current-rotated-key",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: "src-a",
+          sourceKeyId: "ks-a-v2",
+          privacyEpoch: 1,
+        },
       ],
     });
-    expect(sourceIdOnlyWithShreddedKeyList.status).toBe("approved_after_filtering");
-    expect(sourceIdOnlyWithShreddedKeyList.approvedRecords.map((r) => r.recordId)).toEqual([
-      "rec-source-a-clean-against-ks-b-shred",
+    expect(sameEpochRotationRestore.approvedRecords.map((r) => r.recordId)).toEqual([
+      "rec-current-rotated-key",
     ]);
-    expect(sourceIdOnlyWithShreddedKeyList.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
-      ["rec-source-id-only-resolved-shredded", "shredded_source_key"],
+    expect(sameEpochRotationRestore.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
+      ["rec-source-id-only-post-rotation", "missing_source_key_lineage"],
+      ["rec-old-shredded-key-post-rotation", "shredded_source_key"],
     ]);
 
     const workspaceKeyShreddedEvidence = evaluateQuarantineRestoreBundle({
@@ -830,6 +926,7 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
           workspaceId: "ws-1",
           workspaceKeyId: "kw-1",
           sourceId: "src-a",
+          sourceKeyId: "ks-a",
           privacyEpoch: 1,
         },
       ],
@@ -953,7 +1050,7 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
       ["rec-revoked-source", "revoked_or_deleted_source"],
       ["rec-stale-source-epoch", "stale_privacy_epoch"],
       ["rec-rotated-key-only", "stale_source_key"],
-      ["rec-rotated-mismatched-with-source-id", "stale_source_key"],
+      ["rec-rotated-mismatched-with-source-id", "rotated_or_shredded_source_key"],
     ]);
 
     expect(() =>
@@ -1056,7 +1153,7 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     expect(routed.reason).toBe("expand_contract_incompatible");
   });
 
-  it("enforces 2s lease TTL, blocks stale partitioned renewals, clamps drain >= 0, and guarantees zero dirty writes within < 5s rollback SLA", () => {
+  it("enforces 2s lease TTL, mandates live authoritativeStoreState for issuance, accounts for un-fenced sync watermarks, and guarantees zero dirty writes within < 5s rollback SLA", () => {
     const initial = createCanaryRolloutState({
       rolloutId: "rollout-lease",
       schemaContractBackwardCompatible: true,
@@ -1065,20 +1162,27 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       synchronizedAtMs: 10_000,
     });
 
-    // Missing authoritative snapshot or stale sync fails closed
+    // Missing authoritativeStoreState or pre-cached authoritative snapshot (< nowMs) fails closed
     expect(
-      acquireCandidatePublishLease(
-        { ...initial, synchronizedAtMs: null },
-        "worker-no-sync",
-        10_000,
-      ),
+      acquireCandidatePublishLease(initial, "worker-no-auth", 10_000),
+    ).toEqual({
+      granted: false,
+      lease: null,
+      reason: "stale_authoritative_snapshot",
+    });
+    expect(
+      acquireCandidatePublishLease(initial, "worker-cached-auth", 11_500, {
+        authoritativeStoreState: initial, // synchronizedAtMs 10_000 < nowMs 11_500
+      }),
     ).toEqual({
       granted: false,
       lease: null,
       reason: "stale_authoritative_snapshot",
     });
 
-    const acquired = acquireCandidatePublishLease(initial, "worker-1", 10_000);
+    const acquired = acquireCandidatePublishLease(initial, "worker-1", 10_000, {
+      authoritativeStoreState: initial,
+    });
     expect(acquired.granted).toBe(true);
     if (!acquired.granted) return;
 
@@ -1123,13 +1227,13 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       EMERGENCY_ROLLBACK_SLA_MS,
     );
 
-    // Live authoritativeStoreState allows lease acquisition even when caller's local state.synchronizedAtMs OR stateSynchronizedAtMs hint is older than 2s
+    // Live authoritativeStoreState (>= nowMs) allows lease acquisition even when caller's local state.synchronizedAtMs OR stateSynchronizedAtMs hint is stale
     const liveStoreSnapshot = createCanaryRolloutState({
       rolloutId: "rollout-lease",
       schemaContractBackwardCompatible: true,
       stage: "10_percent",
       epoch: 3,
-      synchronizedAtMs: 14_500,
+      synchronizedAtMs: 15_000,
     });
     const liveAuthRenew = acquireCandidatePublishLease(
       { ...initial, synchronizedAtMs: 1_000 },
@@ -1143,10 +1247,10 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     expect(liveAuthRenew.granted).toBe(true);
     if (liveAuthRenew.granted) {
       expect(liveAuthRenew.lease.issuedAtMs).toBe(15_000);
-      expect(liveAuthRenew.lease.expiresAtMs).toBe(16_500);
+      expect(liveAuthRenew.lease.expiresAtMs).toBe(17_000);
     }
 
-    // Without explicit certifiedCompleteInventory, even empty/expired activeLeases preserves full 2s drain window for partitioned workers
+    // Without explicit certifiedLeaseInventory, even empty activeLeases preserves full 2s drain window
     const uncertifiedRollback = triggerEmergencyRollback(
       initial,
       "uncertified_partition_drain",
@@ -1157,6 +1261,26 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     expect(uncertifiedRollback.rollbackDeadlineAtMs).toBe(17_000);
     expect(uncertifiedRollback.withinRollbackSla).toBe(true);
 
+    // Worker-acknowledged revocation with certifiedLeaseInventory ONLY (new lease issuance NOT certified fenced)
+    // still includes remaining sync-TTL watermark drain window
+    const workerAckedRevokedLease = revokeCandidatePublishLease(acquired.lease, {
+      workerAcknowledged: true,
+      acknowledgedAtMs: 10_900,
+    });
+    const unfencedIssuanceDrain = triggerEmergencyRollback(
+      initial,
+      "unfenced_sync_watermark",
+      11_000,
+      [workerAckedRevokedLease],
+      {
+        certifiedLeaseInventory: true,
+        certifiedNewLeaseIssuanceFenced: false,
+        oldestWorkerSyncWatermarkMs: 10_000,
+      },
+    );
+    expect(unfencedIssuanceDrain.maxDrainWindowMs).toBe(1_000);
+    expect(unfencedIssuanceDrain.rollbackDeadlineAtMs).toBe(12_000);
+
     // Centrally revoked but NOT worker-acknowledged lease stays in certified drain until expiresAtMs
     const centrallyRevokedLease = revokeCandidatePublishLease(acquired.lease);
     const unackedRevokeDrain = triggerEmergencyRollback(
@@ -1164,33 +1288,57 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       "central_revoke_unacked",
       11_000,
       [centrallyRevokedLease],
-      { certifiedCompleteInventory: true },
+      {
+        certifiedLeaseInventory: true,
+        certifiedNewLeaseIssuanceFenced: true,
+      },
     );
     expect(unackedRevokeDrain.maxDrainWindowMs).toBe(1_000);
     expect(unackedRevokeDrain.rollbackDeadlineAtMs).toBe(12_000);
 
-    // Worker-acknowledged revocation at <= rollbackAtMs excludes the lease from certified drain
-    const workerAckedRevokedLease = revokeCandidatePublishLease(acquired.lease, {
-      workerAcknowledged: true,
-      acknowledgedAtMs: 10_900,
-    });
+    // Worker-acknowledged revocation at <= rollbackAtMs + BOTH inventory & issuance fenced => 0 ms drain,
+    // and post-rollback renewal at 11_500 fails closed (whether caller passes live post-rollback store or cached pre-rollback snapshot)
     const ackedRevokeDrain = triggerEmergencyRollback(
       initial,
-      "worker_acked_revoke",
+      "worker_acked_and_fenced",
       11_000,
       [workerAckedRevokedLease],
-      { certifiedCompleteInventory: true },
+      {
+        certifiedLeaseInventory: true,
+        certifiedNewLeaseIssuanceFenced: true,
+      },
     );
     expect(ackedRevokeDrain.maxDrainWindowMs).toBe(0);
     expect(ackedRevokeDrain.rollbackDeadlineAtMs).toBe(11_000);
+    expect(
+      acquireCandidatePublishLease(initial, "worker-1", 11_500, {
+        authoritativeStoreState: ackedRevokeDrain.nextState,
+      }),
+    ).toEqual({
+      granted: false,
+      lease: null,
+      reason: "emergency_rollback_active",
+    });
+    expect(
+      acquireCandidatePublishLease(initial, "worker-1", 11_500, {
+        authoritativeStoreState: initial,
+      }),
+    ).toEqual({
+      granted: false,
+      lease: null,
+      reason: "stale_authoritative_snapshot",
+    });
 
-    // Only when caller certifies complete authoritative inventory do already-expired activeLeases clamp maxDrainWindowMs = 0
+    // Only when BOTH certifiedLeaseInventory and certifiedNewLeaseIssuanceFenced are true do already-expired activeLeases clamp maxDrainWindowMs = 0
     const expiredDrainRollback = triggerEmergencyRollback(
       initial,
       "already_expired_leases",
       15_000,
       [acquired.lease],
-      { certifiedCompleteInventory: true },
+      {
+        certifiedLeaseInventory: true,
+        certifiedNewLeaseIssuanceFenced: true,
+      },
     );
     expect(expiredDrainRollback.maxDrainWindowMs).toBe(0);
     expect(expiredDrainRollback.rollbackDeadlineAtMs).toBe(15_000);
@@ -1221,33 +1369,6 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       leaseEpoch: 3,
     });
 
-    // Partitioned worker trying to renew against stale local state AFTER sync TTL (> 2_000 ms) is rejected
-    expect(
-      acquireCandidatePublishLease(initial, "worker-1", 12_500),
-    ).toEqual({
-      granted: false,
-      lease: null,
-      reason: "stale_authoritative_snapshot",
-    });
-
-    // Even if renewed slightly before sync TTL expiry (11_500, syncAt 10_000), lease expiry is bounded <= syncAt + 2_000 <= rollbackAt + 2_000
-    const earlyRenew = acquireCandidatePublishLease(initial, "worker-1", 11_500);
-    expect(earlyRenew.granted).toBe(true);
-    if (earlyRenew.granted) {
-      expect(earlyRenew.lease.expiresAtMs).toBeLessThanOrEqual(rollback.rollbackDeadlineAtMs);
-      expect(
-        validateCandidateCommitFence(
-          initial,
-          earlyRenew.lease,
-          rollback.rollbackDeadlineAtMs + 1,
-        ),
-      ).toMatchObject({
-        allowed: false,
-        dirtyWritePrevented: true,
-        reason: "lease_expired",
-      });
-    }
-
     // Even a network-partitioned worker evaluating against its STALE pre-rollback state
     // cannot commit past its 2s TTL (well before the 5s SLA deadline)
     expect(
@@ -1258,8 +1379,12 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       reason: "lease_expired",
     });
 
-    // Rollback refuses new lease acquisition
-    expect(acquireCandidatePublishLease(rollback.nextState, "worker-2", 11_500)).toEqual({
+    // Rollback refuses new lease acquisition even with live timestamp
+    expect(
+      acquireCandidatePublishLease(rollback.nextState, "worker-2", 11_500, {
+        authoritativeStoreState: { ...rollback.nextState, synchronizedAtMs: 11_500 },
+      }),
+    ).toEqual({
       granted: false,
       lease: null,
       reason: "emergency_rollback_active",

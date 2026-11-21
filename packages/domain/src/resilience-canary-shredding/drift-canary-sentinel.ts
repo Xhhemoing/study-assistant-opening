@@ -265,13 +265,18 @@ export function evaluateDriftCanarySentinel(
     }
   }
 
+  const completedWindows =
+    input.evaluatedAtMs !== undefined
+      ? scopedWindows.filter((window) => window.windowEndMs <= input.evaluatedAtMs!)
+      : scopedWindows;
+
   let sawSingleQualifiedBreach = false;
   let sawDisjointBreachPair = false;
   let sawNonConsecutiveBreach = false;
   let qualifiedBreachWindows = 0;
 
-  for (let i = 0; i < scopedWindows.length; i += 1) {
-    const curr = scopedWindows[i]!;
+  for (let i = 0; i < completedWindows.length; i += 1) {
+    const curr = completedWindows[i]!;
     if (curr.decisionCount < MIN_DECISIONS_PER_WINDOW) {
       continue;
     }
@@ -283,7 +288,7 @@ export function evaluateDriftCanarySentinel(
     }
 
     if (i === 0) continue;
-    const prev = scopedWindows[i - 1]!;
+    const prev = completedWindows[i - 1]!;
     if (
       prev.windowStartMs + DRIFT_WINDOW_MS !== curr.windowStartMs ||
       prev.windowEndMs !== curr.windowStartMs ||
@@ -331,7 +336,7 @@ export function evaluateDriftCanarySentinel(
     sawNonConsecutiveBreach = true;
   }
 
-  const qualifiedWindowCount = scopedWindows.filter(
+  const qualifiedWindowCount = completedWindows.filter(
     (window) => window.decisionCount >= MIN_DECISIONS_PER_WINDOW,
   ).length;
 
@@ -358,7 +363,7 @@ export function evaluateDriftCanarySentinel(
     isolatedRouteKey: null,
     breachedMetrics: [],
     qualifiedWindowCount,
-    evaluatedWindowCount: scopedWindows.length,
+    evaluatedWindowCount: completedWindows.length,
     reason,
   };
 }
