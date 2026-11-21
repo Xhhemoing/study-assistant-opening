@@ -137,10 +137,16 @@ it.each([
   "数学（1-4周）；（周7）",
   "高等数学 周次：待定",
   "高等数学 周：待定",
+  "高等数学 周次：1-?",
+  "高等数学 周次：1-",
+  "高等数学 周次：1~?",
+  "高等数学 周次：1,?",
   "大学英语 第TBD周",
   "大学英语 第 1-? 周",
   "大学英语 [TBD周]",
   "大学英语 (TBD周",
+  "大学英语（待定周）",
+  "大学英语（前四周）",
   "大学英语 单周",
 ])("warns and drops malformed inline week expression %s even when the dedicated weeks column is valid", title => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [
@@ -158,6 +164,12 @@ it.each([
   "唐诗宋词",
   "中国近代史（周恩来专题）",
   "第一周期信号分析",
+  "中国古代史（西周）",
+  "中国古代史（东周）",
+  "中国古代史（商周）",
+  "中国古代史（北周）",
+  "五代十国史（后周）",
+  "先秦史（先秦两周）",
 ])("accepts genuine course title %s with a dedicated weeks column", title => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [
     ["课程", "星期", "周次", "节次"],

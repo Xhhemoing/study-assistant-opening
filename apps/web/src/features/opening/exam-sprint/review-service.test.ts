@@ -61,6 +61,15 @@ describe("exam photo review is a durable proposal", () => {
     expect(call).not.toHaveBeenCalled();
     expect(repository.fail).not.toHaveBeenCalled();
   });
+  it("forwards the executionUpdatedAt lease timestamp to fail so a zombie attempt cannot clobber a reclaimed retry", async () => {
+    const lease = "2026-10-17T00:00:00.000Z";
+    repository.begin.mockResolvedValueOnce({
+      review: { ...stored }, input, privacyEpoch: 2, referencePage: 3, questionLabel: "题1", executionUpdatedAt: lease,
+    });
+    images.mockResolvedValueOnce([]);
+    expect((await service.review(scope, input)).status).toBe("failed");
+    expect(repository.fail).toHaveBeenCalledWith(scope, "review-1", "failed", lease);
+  });
   it("does not charge again when a reused secondary client key replays after completion", async () => {
     const ready: ExamWorkReview = { ...stored, status: "ready", proposal, modelLabel: "vision-model" };
     repository.begin

@@ -15,10 +15,13 @@ type Row = Record<string, unknown>;
 export type ExamReviewContext = {
   review: ExamWorkReview; input: ExamWorkReviewInput; privacyEpoch: number;
   referencePage: number; questionLabel: string; reusedUnresolved?: boolean;
+  executionUpdatedAt?: string;
 };
 // Exceeds the 200-char clientKey ceiling of bind/mapSource so review aliases cannot collide in opening_exam_integration_commands.
 const REVIEW_ALIAS_KEY_PREFIX = `exam-review-alias:v1:${"_".repeat(180)}:`;
 const reviewAliasKey = (clientKey: string) => `${REVIEW_ALIAS_KEY_PREFIX}${clientKey}`;
+const STALE_PENDING_LEASE_SECONDS = 60;
+const reviewOperationId = (workspaceId: string, reviewId: string) => `exam-review:${workspaceId}:${reviewId}`;
 const examReviewAliasSchema = z.object({
   reviewId: uuidSchema,
 }).strict();
@@ -90,6 +93,75 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
       referencePage: checked.referencePage, questionLabel: checked.questionLabel,
     };
   }
+  async function inspectReviewLedger(
+    tx: TransactionSql,
+    workspaceId: string,
+    reviewId: string,
+  ): Promise<"none" | "released_only" | "active_or_billed"> {
+    const operationId = reviewOperationId(workspaceId, reviewId);
+    const rows = await tx`SELECT state, release_reason, outcome_unknown_at, pending_reconcile_cents
+      FROM opening_budget_reservations
+      WHERE workspace_id=${workspaceId}
+        AND (
+          request_id=${operationId}
+          OR left(request_id, length(${operationId}) + 1)=${`${operationId}:`}
+          OR parent_interaction_id=${operationId}
+        )`;
+    if (!rows.length) return "none";
+    const allReleasedNotSent = rows.every(row =>
+      row.state === "released"
+      && (row.release_reason === "not_sent" || row.release_reason === "cancelled")
+      && row.outcome_unknown_at == null
+      && Number(row.pending_reconcile_cents ?? 0) === 0,
+    );
+    return allReleasedNotSent ? "released_only" : "active_or_billed";
+  }
+
+  async function reconcileExistingReview(
+    tx: TransactionSql,
+    scope: Scope,
+    row: Row,
+    options: { wrapCommittedReceipt: boolean; allowFreshOnReleasedStale?: boolean },
+  ): Promise<ExamReviewContext | null> {
+    const id = String(row.id);
+    const load = () => options.wrapCommittedReceipt
+      ? readCommittedExamReceipt(() => readContext(tx, scope, id))
+      : readContext(tx, scope, id);
+    if (row.status !== "pending") {
+      const context = await load();
+      return context.review.status === "unknown"
+        ? { ...context, reusedUnresolved: true }
+        : context;
+    }
+    if (!row.is_stale) {
+      const context = await load();
+      return { ...context, reusedUnresolved: true };
+    }
+    const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
+    if (ledger === "active_or_billed") {
+      await tx`UPDATE opening_exam_reviews SET status='unknown',updated_at=now()
+        WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+      const context = await load();
+      return { ...context, reusedUnresolved: true };
+    }
+    if (ledger === "released_only") {
+      await tx`UPDATE opening_exam_reviews SET status='failed',updated_at=now()
+        WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+      if (options.allowFreshOnReleasedStale) return null;
+      return await load();
+    }
+    // Stale pending with zero budget reservation: proven pre-send crash; validate before reclaiming lease.
+    const context = await load();
+    const [reclaimed] = await tx`UPDATE opening_exam_reviews
+      SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+      WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
+      RETURNING updated_at::text AS lease_updated_at`;
+    return {
+      ...context,
+      ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
+    };
+  }
+
   return {
     async begin(scope: Scope, raw: ExamWorkReviewInput): Promise<ExamReviewContext> {
       const input = examWorkReviewInputSchema.parse(raw);
@@ -101,14 +173,14 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
           if (!owner) throw learningError("NOT_FOUND", "工作区不存在");
           const workspacePrivacyEpoch = Number(owner.privacy_epoch);
-          const [existing] = await tx`SELECT * FROM opening_exam_reviews WHERE workspace_id=${scope.workspaceId}
-            AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
+          const [existing] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+            FROM opening_exam_reviews
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}
+            FOR UPDATE`;
           if (existing) {
             if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
-            const context = await readCommittedExamReceipt(() => readContext(tx, scope, String(existing.id)));
-            return context.review.status === "pending" || context.review.status === "unknown"
-              ? { ...context, reusedUnresolved: true }
-              : context;
+            if (Number(existing.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
+            return (await reconcileExistingReview(tx, scope, existing, { wrapCommittedReceipt: true }))!;
           }
           const [aliasRow] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
             JOIN opening_exam_sprints s ON s.id=c.sprint_id
@@ -117,9 +189,11 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           if (aliasRow) {
             const parsed = examReviewAliasSchema.safeParse(aliasRow.intent);
             if (!parsed.success) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
-            const [target] = await tx`SELECT * FROM opening_exam_reviews
+            const [target] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+              FROM opening_exam_reviews
               WHERE id=${parsed.data.reviewId} AND sprint_id=${aliasRow.sprint_id}
-                AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+                AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              FOR UPDATE`;
             if (!target) {
               staleAlias = {
                 id: String(aliasRow.id),
@@ -134,14 +208,12 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
                 throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
               }
               if (Number(target.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
-              const context = await readCommittedExamReceipt(() => readContext(tx, scope, String(target.id)));
-              return context.review.status === "pending" || context.review.status === "unknown"
-                ? { ...context, reusedUnresolved: true }
-                : context;
+              return (await reconcileExistingReview(tx, scope, target, { wrapCommittedReceipt: true }))!;
             }
           }
           const checked = await validate(tx, scope, input), id = randomUUID();
-          const [reusable] = await tx`SELECT * FROM opening_exam_reviews
+          const [reusable] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+            FROM opening_exam_reviews
             WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
               AND sprint_id=${checked.sprintId} AND source_item_id=${input.sourceItemId}
               AND work_source_id=${input.workSourceId} AND work_source_version=${input.workSourceVersion}
@@ -150,21 +222,29 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
               AND status IN ('pending', 'unknown', 'ready')
             ORDER BY CASE WHEN status='ready' THEN 0 ELSE 1 END, created_at, id LIMIT 1 FOR UPDATE`;
           if (reusable) {
-            const context = await readContext(tx, scope, String(reusable.id));
-            const alias: ExamReviewAlias = { reviewId: String(reusable.id) };
-            await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
-              VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
-            return context.review.status === "pending" || context.review.status === "unknown"
-              ? { ...context, reusedUnresolved: true }
-              : context;
+            const reconciled = await reconcileExistingReview(tx, scope, reusable, {
+              wrapCommittedReceipt: false,
+              allowFreshOnReleasedStale: true,
+            });
+            if (reconciled) {
+              const alias: ExamReviewAlias = { reviewId: String(reusable.id) };
+              await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
+                VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
+              return reconciled;
+            }
           }
-          await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
+          const [inserted] = await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
             work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
             client_key,intent,status,privacy_epoch)
             VALUES(${id},${checked.sprintId},${scope.workspaceId},${scope.ownerUserId},${input.sourceItemId},
             ${input.workSourceId},${input.workSourceVersion},${input.referenceSourceId},${input.referenceSourceVersion},
-            ${input.answerText},${input.clientKey},${tx.json(input)},'pending',${checked.privacyEpoch})`;
-          return readContext(tx, scope, id);
+            ${input.answerText},${input.clientKey},${tx.json(input)},'pending',${checked.privacyEpoch})
+            RETURNING updated_at::text AS lease_updated_at`;
+          const context = await readContext(tx, scope, id);
+          return {
+            ...context,
+            ...(typeof inserted?.lease_updated_at === "string" ? { executionUpdatedAt: inserted.lease_updated_at } : {}),
+          };
         });
       } catch (error) {
         if (staleAlias) {
@@ -201,9 +281,26 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status<>'ready'`;
       });
     },
-    async fail(scope: Scope, id: string, status: "unknown" | "failed"): Promise<void> {
+    async fail(scope: Scope, id: string, status: "unknown" | "failed", expectedUpdatedAt?: string): Promise<void> {
+      const operationId = reviewOperationId(scope.workspaceId, id);
       await sql`UPDATE opening_exam_reviews SET status=${status},updated_at=now() WHERE id=${id}
-        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
+        ${expectedUpdatedAt ? sql`AND updated_at=${expectedUpdatedAt}::timestamptz` : sql``}
+        ${status === "failed" ? sql`AND NOT EXISTS (
+          SELECT 1 FROM opening_budget_reservations b
+          WHERE b.workspace_id=${scope.workspaceId}
+            AND (
+              b.request_id=${operationId}
+              OR left(b.request_id, length(${operationId}) + 1)=${`${operationId}:`}
+              OR b.parent_interaction_id=${operationId}
+            )
+            AND NOT (
+              b.state='released'
+              AND b.release_reason IN ('not_sent','cancelled')
+              AND b.outcome_unknown_at IS NULL
+              AND COALESCE(b.pending_reconcile_cents,0)=0
+            )
+        )` : sql``}`;
     },
   };
 }

@@ -44,12 +44,13 @@ export function createExamPhotoReviewService(deps: {
         });
       } catch (error) {
         if (ownsExecution) {
+          const lease = context.executionUpdatedAt;
           if (isBudgetReplayError(error)) {
             if (error.disposition.kind !== "in_flight") {
-              await deps.repository.fail(scope, id, error.disposition.kind === "released" ? "failed" : "unknown");
+              await deps.repository.fail(scope, id, error.disposition.kind === "released" ? "failed" : "unknown", ...(lease ? [lease] : []));
             }
           } else {
-            await deps.repository.fail(scope, id, !sent || isNotSentFailure(error) ? "failed" : "unknown");
+            await deps.repository.fail(scope, id, !sent || isNotSentFailure(error) ? "failed" : "unknown", ...(lease ? [lease] : []));
           }
         }
       }

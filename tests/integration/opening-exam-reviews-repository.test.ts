@@ -165,10 +165,11 @@ describe("exam photo review repository integration", () => {
   it("serializes simultaneous retries by client key and rejects a changed intent", async () => {
     const intent = input();
     const [first, retry] = await Promise.all([repository.begin(f.scope, intent), repository.begin(f.scope, intent)]);
-    const { reusedUnresolved: firstReused, ...firstBase } = first;
-    const { reusedUnresolved: retryReused, ...retryBase } = retry;
+    const { reusedUnresolved: firstReused, executionUpdatedAt: firstLease, ...firstBase } = first;
+    const { reusedUnresolved: retryReused, executionUpdatedAt: retryLease, ...retryBase } = retry;
     expect(retryBase).toEqual(firstBase);
     expect([Boolean(firstReused), Boolean(retryReused)].sort()).toEqual([false, true]);
+    expect([Boolean(firstLease), Boolean(retryLease)].sort()).toEqual([false, true]);
     await expect(repository.begin(f.scope, { ...intent, answerText: "A different answer" })).rejects.toMatchObject({ code: "CONFLICT" });
     const rows = await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`;
     expect(rows.map(row => row.id)).toEqual([first.review.id]);
@@ -498,5 +499,59 @@ describe("exam photo review repository integration", () => {
     await repository.fail(f.scope, second.review.id, "unknown");
     await repository.fail(f.scope, second.review.id, "failed");
     expect(await rawReview(second.review.id)).toMatchObject({ status: "unknown" });
+  });
+
+  it("reclaims an abandoned pre-send pending review after lease expiry while keeping ledger-active reviews non-repayable", async () => {
+    // 1) Pre-send crash (no budget reservation) past lease -> reclaimed cleanly by same key, and old lease cannot clobber it.
+    const crashedIntent = input({ clientKey: randomUUID(), answerText: "Pre-send crash answer" });
+    const crashed = await repository.begin(f.scope, crashedIntent);
+    expect(crashed.reusedUnresolved).toBeUndefined();
+    expect(crashed.executionUpdatedAt).toBeDefined();
+    await f.sql`UPDATE opening_exam_reviews SET updated_at = now() - interval '61 seconds' WHERE id = ${crashed.review.id}`;
+
+    const reclaimed = await repository.begin(f.scope, crashedIntent);
+    expect(reclaimed.review.id).toBe(crashed.review.id);
+    expect(reclaimed.reusedUnresolved).toBeUndefined();
+    expect(reclaimed.executionUpdatedAt).toBeDefined();
+    expect(reclaimed.executionUpdatedAt).not.toBe(crashed.executionUpdatedAt);
+
+    // Stale zombie fail using the old lease must NOT clobber the reclaimed pending review.
+    await repository.fail(f.scope, crashed.review.id, "failed", crashed.executionUpdatedAt);
+    expect(await rawReview(crashed.review.id)).toMatchObject({ status: "pending" });
+
+    // Completing the reclaimed review succeeds cleanly.
+    await repository.complete(f.scope, crashed.review.id, proposal, "reclaimed-model");
+    expect(await rawReview(crashed.review.id)).toMatchObject({ status: "ready", proposal, model_label: "reclaimed-model" });
+
+    // 2) Stale pending review WITH an active/billed budget reservation -> transitions to unknown and NEVER reclaims execution.
+    const billedIntent = input({ clientKey: randomUUID(), answerText: "Ledger active answer" });
+    const billed = await repository.begin(f.scope, billedIntent);
+    const opId = `exam-review:${f.scope.workspaceId}:${billed.review.id}`;
+    await f.sql`INSERT INTO opening_budget_reservations(id, workspace_id, purpose, amount_cents, request_id, state, execution_claimed_at)
+      VALUES(${randomUUID()}, ${f.scope.workspaceId}, 'practice.grade-photo', 10, ${opId}, 'reserved', now())`;
+    // fail(..., 'failed') must be blocked while a non-released budget reservation exists.
+    await repository.fail(f.scope, billed.review.id, "failed", billed.executionUpdatedAt);
+    expect(await rawReview(billed.review.id)).toMatchObject({ status: "pending" });
+
+    await f.sql`UPDATE opening_exam_reviews SET updated_at = now() - interval '61 seconds' WHERE id = ${billed.review.id}`;
+    const afterStaleBilled = await repository.begin(f.scope, billedIntent);
+    expect(afterStaleBilled.review.id).toBe(billed.review.id);
+    expect(afterStaleBilled.review.status).toBe("unknown");
+    expect(afterStaleBilled.reusedUnresolved).toBe(true);
+    expect(afterStaleBilled.executionUpdatedAt).toBeUndefined();
+
+    // 3) Stale pending review with ONLY a confirmed released budget reservation -> marks failed and lets a fresh key create a new review.
+    const releasedIntent = input({ clientKey: randomUUID(), answerText: "Released ledger answer" });
+    const released = await repository.begin(f.scope, releasedIntent);
+    const releasedOpId = `exam-review:${f.scope.workspaceId}:${released.review.id}`;
+    await f.sql`INSERT INTO opening_budget_reservations(id, workspace_id, purpose, amount_cents, request_id, state, release_reason)
+      VALUES(${randomUUID()}, ${f.scope.workspaceId}, 'practice.grade-photo', 10, ${releasedOpId}, 'released', 'not_sent')`;
+    await f.sql`UPDATE opening_exam_reviews SET updated_at = now() - interval '61 seconds' WHERE id = ${released.review.id}`;
+
+    const freshAfterReleased = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "Released ledger answer" }));
+    expect(freshAfterReleased.review.id).not.toBe(released.review.id);
+    expect(freshAfterReleased.reusedUnresolved).toBeUndefined();
+    expect(freshAfterReleased.executionUpdatedAt).toBeDefined();
+    expect(await rawReview(released.review.id)).toMatchObject({ status: "failed" });
   });
 });

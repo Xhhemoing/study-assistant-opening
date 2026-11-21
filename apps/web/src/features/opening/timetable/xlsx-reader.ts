@@ -37,7 +37,14 @@ const wrappedPeriodPattern = /\s*(?:\(\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|
 const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
 const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
 const weekMarkerHint = /周次|第\s*(?:[^\s()（）[\]【】]{0,16}|[\d\s\-－至,，、?？]{1,24})\s*周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
-const bracketedWeekEnd = /周\s*[)）\]】]$/;
+const malformedWeekTail = /^\s*(?:[-－至~～—–/]|[,，、]\s*(?:[?？]|待定|暂定|另行|未定|TBD\b))/i;
+const bracketWeekIndicator = /(?:[0-9A-Za-z?？\-－至~～—–,，、;；:：/]|待定|暂定|另行|未定|全|(?:第|前|后)\s*[一二三四五六七八九十百零两]+)/;
+
+function looksLikeMalformedWeekBracket(segment: string): boolean {
+  if (weekMarkerHint.test(segment)) return true;
+  const match = /^[[（【(]\s*([\s\S]*?)周\s*[)）】\]]?$/.exec(segment.trim());
+  return match !== null && bracketWeekIndicator.test(match[1]!);
+}
 
 function text(value: CellValue): string {
   return value == null ? "" : String(value).trim();
@@ -156,7 +163,7 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
     if (!precededByDigit) {
       const token = matchInlineWeekToken(withoutPeriods, i);
       if (token) {
-        if (!addWeeks(weeks, token.list, token.parity)) {
+        if (!addWeeks(weeks, token.list, token.parity) || malformedWeekTail.test(withoutPeriods.slice(token.end))) {
           invalid = true;
         }
         matchedSpans.push({ start: i, end: token.end });
@@ -170,7 +177,7 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
     if (bracketStart < withoutPeriods.length && matchingClose[withoutPeriods[bracketStart]!]) {
       const closeIdx = findMatchingClose(withoutPeriods, bracketStart);
       if (closeIdx < 0) {
-        if (weekMarkerHint.test(withoutPeriods.slice(i)) || /周(?:\s|$)/.test(withoutPeriods.slice(i))) {
+        if (looksLikeMalformedWeekBracket(withoutPeriods.slice(i))) {
           invalid = true;
           break;
         }
@@ -189,7 +196,7 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
             }
           }
           matchedSpans.push({ start: i, end: closeIdx + 1 });
-        } else if (weekMarkerHint.test(segment) || bracketedWeekEnd.test(segment)) {
+        } else if (looksLikeMalformedWeekBracket(segment)) {
           invalid = true;
         }
       }
