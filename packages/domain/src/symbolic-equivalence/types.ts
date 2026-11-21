@@ -532,6 +532,13 @@ export function rationalForm(
   }
 }
 
+function mergeRationalUnsupported(a?: string, b?: string): string | undefined {
+  if (a === "polynomial_complexity_exceeded" || b === "polynomial_complexity_exceeded") {
+    return "polynomial_complexity_exceeded";
+  }
+  return a ?? b;
+}
+
 function rationalFormInner(
   expr: ScalarExpr,
   variable = "x",
@@ -565,7 +572,12 @@ function rationalFormInner(
       const left = rationalFormInner(expr.left, variable, budget);
       const right = rationalFormInner(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
-        return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
+        return {
+          numerator: new Map(),
+          denominator: new Map(),
+          domainDenominators: [],
+          unsupported: mergeRationalUnsupported(left.unsupported, right.unsupported),
+        };
       }
       const leftTerm = boundedPolyMultiply(left.numerator, right.denominator, budget);
       const rightTerm = boundedPolyMultiply(right.numerator, left.denominator, budget);
@@ -584,7 +596,12 @@ function rationalFormInner(
       const left = rationalFormInner(expr.left, variable, budget);
       const right = rationalFormInner(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
-        return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
+        return {
+          numerator: new Map(),
+          denominator: new Map(),
+          domainDenominators: [],
+          unsupported: mergeRationalUnsupported(left.unsupported, right.unsupported),
+        };
       }
       const numerator = boundedPolyMultiply(left.numerator, right.numerator, budget);
       const denominator = boundedPolyMultiply(left.denominator, right.denominator, budget);
@@ -600,7 +617,12 @@ function rationalFormInner(
       const left = rationalFormInner(expr.left, variable, budget);
       const right = rationalFormInner(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
-        return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
+        return {
+          numerator: new Map(),
+          denominator: new Map(),
+          domainDenominators: [],
+          unsupported: mergeRationalUnsupported(left.unsupported, right.unsupported),
+        };
       }
       const numerator = boundedPolyMultiply(left.numerator, right.denominator, budget);
       const denominator = boundedPolyMultiply(left.denominator, right.numerator, budget);
@@ -693,6 +715,7 @@ function evaluateConstantInt(expr: ScalarExpr): number | null {
     case "pow": {
       const b = evaluateConstantInt(expr.base);
       if (b === null || !Number.isInteger(expr.exponent) || expr.exponent < 0 || expr.exponent > 12) return null;
+      if (b === 0 && expr.exponent <= 0) return null;
       const out = b ** expr.exponent;
       return Number.isSafeInteger(out) ? out : null;
     }
@@ -701,13 +724,55 @@ function evaluateConstantInt(expr: ScalarExpr): number | null {
   }
 }
 
-const LATEX_FN_NAMES = new Set(["sqrt", "abs", "sin", "cos", "ln", "exp"]);
+export type NormalizeLatexOptions = {
+  preservedIdentifiers?: readonly string[];
+  matrixImplicitMul?: boolean;
+};
+
+const LATEX_FN_NAMES = new Set([
+  "sqrt",
+  "abs",
+  "ln",
+  "log",
+  "exp",
+  "sin",
+  "cos",
+  "tan",
+  "sec",
+  "csc",
+  "cot",
+  "asin",
+  "acos",
+  "atan",
+  "arcsin",
+  "arccos",
+  "arctan",
+  "sinh",
+  "cosh",
+  "tanh",
+  "det",
+  "tr",
+  "inv",
+]);
+
+const DEFAULT_PRESERVED_IDENTIFIERS = new Set([
+  "alpha",
+  "beta",
+  "gamma",
+  "delta",
+  "theta",
+  "lambda",
+  "mu",
+  "sigma",
+  "omega",
+  "pi",
+]);
 
 function readBalancedGroup(
   src: string,
   start: number,
-  openCh: "{" | "[",
-  closeCh: "}" | "]",
+  openCh: "{" | "[" | "(",
+  closeCh: "}" | "]" | ")",
 ): { content: string; nextIndex: number } | null {
   if (src[start] !== openCh) return null;
   let depth = 0;
@@ -727,130 +792,281 @@ function skipWs(src: string, idx: number): number {
   return i;
 }
 
-export function normalizeLatexExpr(input: string): string {
+export function normalizeLatexExpr(input: string, options?: NormalizeLatexOptions): string | null {
   let s = input.replaceAll("−", "-").trim();
   while (s.length >= 2 && s.startsWith("$") && s.endsWith("$")) {
     s = s.slice(1, -1).trim();
   }
   if (!s) return "";
 
-  const rewriteMacros = (src: string): string => {
+  const preservedSet = new Set(DEFAULT_PRESERVED_IDENTIFIERS);
+  for (const ident of options?.preservedIdentifiers ?? []) {
+    if (ident) preservedSet.add(ident);
+  }
+  const matrixMode = Boolean(options?.matrixImplicitMul);
+
+  const isSingleAtomId = (ident: string): boolean =>
+    ident.length === 1 ||
+    /^[A-Za-z]\d+$/.test(ident) ||
+    /^[A-Za-z]_[A-Za-z0-9]+$/.test(ident) ||
+    preservedSet.has(ident);
+
+  const readUnbracedAtom = (src: string, start: number): { text: string; nextIndex: number } | null => {
+    const tail = src.slice(start);
+    const numMatch = /^\d+(?:\.\d+)?/.exec(tail);
+    if (numMatch) {
+      const nextIndex = start + numMatch[0].length;
+      if (src[nextIndex] === ".") return null;
+      return { text: numMatch[0], nextIndex };
+    }
+    if (tail.startsWith("\\")) {
+      const greekMatch = /^\\([A-Za-z]+)/.exec(tail);
+      if (greekMatch && DEFAULT_PRESERVED_IDENTIFIERS.has(greekMatch[1]!)) {
+        let nextIndex = start + greekMatch[0].length;
+        let text = greekMatch[1]!;
+        const subStart = skipWs(src, nextIndex);
+        if (src[subStart] === "_") {
+          const subArgStart = skipWs(src, subStart + 1);
+          if (src[subArgStart] === "{") {
+            const grp = readBalancedGroup(src, subArgStart, "{", "}");
+            const sub = grp?.content.trim() ?? "";
+            if (!grp || !/^[A-Za-z0-9]+$/.test(sub)) return null;
+            text = `${text}_${sub}`;
+            nextIndex = grp.nextIndex;
+          } else if (/^[A-Za-z0-9]$/.test(src[subArgStart] ?? "")) {
+            text = `${text}_${src[subArgStart]}`;
+            nextIndex = subArgStart + 1;
+          } else {
+            return null;
+          }
+        }
+        return { text, nextIndex };
+      }
+      return null;
+    }
+    const idMatch = /^[A-Za-z][A-Za-z0-9_]*/.exec(tail);
+    if (idMatch) {
+      let text = idMatch[0];
+      let nextIndex = start + text.length;
+      if (!isSingleAtomId(text)) return null;
+      const subStart = skipWs(src, nextIndex);
+      if (src[subStart] === "_" && !text.includes("_")) {
+        const subArgStart = skipWs(src, subStart + 1);
+        if (src[subArgStart] === "{") {
+          const grp = readBalancedGroup(src, subArgStart, "{", "}");
+          const sub = grp?.content.trim() ?? "";
+          if (!grp || !/^[A-Za-z0-9]+$/.test(sub)) return null;
+          text = `${text}_${sub}`;
+          nextIndex = grp.nextIndex;
+        } else {
+          return null;
+        }
+      }
+      return { text, nextIndex };
+    }
+    return null;
+  };
+
+  const rewriteMacros = (src: string): string | null => {
     let out = "";
     let i = 0;
-    const readLatexArg = (pos: number): { content: string; nextIndex: number } | null => {
+    const readFracArg = (pos: number): { content: string; nextIndex: number } | null => {
       const p = skipWs(src, pos);
       if (src[p] === "{") return readBalancedGroup(src, p, "{", "}");
       if (/[A-Za-z0-9]/.test(src[p] ?? "")) return { content: src[p]!, nextIndex: p + 1 };
       return null;
     };
+    const needSpaceBeforeIdent = (): string => (out && /[A-Za-z0-9_]/.test(out[out.length - 1]!) ? " " : "");
+
     while (i < src.length) {
       const ch = src[i]!;
       if (ch === "\\") {
         const tail = src.slice(i + 1);
         const cmdMatch = /^([A-Za-z]+|[,;! ])/.exec(tail);
-        if (cmdMatch) {
-          const cmd = cmdMatch[1]!;
-          const afterCmd = i + 1 + cmd.length;
-          if (cmd === "," || cmd === ";" || cmd === "!" || cmd === " ") {
-            out += " ";
-            i = afterCmd;
-            continue;
-          }
-          if (cmd === "cdot" || cmd === "times") {
-            out += " * ";
-            i = afterCmd;
-            continue;
-          }
-          if (cmd === "div") {
-            out += " / ";
-            i = afterCmd;
-            continue;
-          }
-          if (cmd === "left" || cmd === "right") {
-            const nextPos = skipWs(src, afterCmd);
-            if (src[nextPos] === "|") {
-              out += cmd === "left" ? " abs(" : ") ";
-              i = nextPos + 1;
-              continue;
-            }
-            if (src.slice(nextPos, nextPos + 2) === "\\|") {
-              out += cmd === "left" ? " abs(" : ") ";
-              i = nextPos + 2;
-              continue;
-            }
-            i = afterCmd;
-            continue;
-          }
-          if (cmd === "frac") {
-            const num = readLatexArg(afterCmd);
-            const den = num ? readLatexArg(num.nextIndex) : null;
-            if (num && den) {
-              out += `((${rewriteMacros(num.content)})/(${rewriteMacros(den.content)}))`;
-              i = den.nextIndex;
-              continue;
-            }
-          }
-          if (cmd === "sqrt") {
-            let argStart = skipWs(src, afterCmd);
-            if (src[argStart] === "[") {
-              const opt = readBalancedGroup(src, argStart, "[", "]");
-              if (opt && opt.content.trim() === "2") argStart = skipWs(src, opt.nextIndex);
-              else {
-                out += ch;
-                i++;
-                continue;
-              }
-            }
-            const arg = readLatexArg(argStart);
-            if (arg) {
-              out += ` sqrt(${rewriteMacros(arg.content)})`;
-              i = arg.nextIndex;
-              continue;
-            }
-          }
-          if (LATEX_FN_NAMES.has(cmd)) {
-            const argStart = skipWs(src, afterCmd);
-            if (src[argStart] === "{") {
-              const grp = readBalancedGroup(src, argStart, "{", "}");
-              if (grp) {
-                out += ` ${cmd}(${rewriteMacros(grp.content)})`;
-                i = grp.nextIndex;
-                continue;
-              }
-            }
-            if (src[argStart] !== "(") {
-              const arg = readLatexArg(argStart);
-              if (arg) {
-                out += ` ${cmd}(${rewriteMacros(arg.content)})`;
-                i = arg.nextIndex;
-                continue;
-              }
-            }
-            out += ` ${cmd}`;
-            i = afterCmd;
-            continue;
-          }
+        if (!cmdMatch) return null;
+        const cmd = cmdMatch[1]!;
+        const afterCmd = i + 1 + cmd.length;
+        if (cmd === "," || cmd === ";" || cmd === "!" || cmd === " ") {
+          out += " ";
+          i = afterCmd;
+          continue;
         }
-      }
-      if ((ch === "^" || ch === "_") && skipWs(src, i + 1) < src.length) {
-        const argStart = skipWs(src, i + 1);
-        if (src[argStart] === "{") {
-          const grp = readBalancedGroup(src, argStart, "{", "}");
-          if (grp) {
-            out += `${ch}(${rewriteMacros(grp.content)})`;
+        if (cmd === "cdot" || cmd === "times") {
+          out += " * ";
+          i = afterCmd;
+          continue;
+        }
+        if (cmd === "div") {
+          out += " / ";
+          i = afterCmd;
+          continue;
+        }
+        if (cmd === "left" || cmd === "right") {
+          const nextPos = skipWs(src, afterCmd);
+          if (src[nextPos] === "|") {
+            out += cmd === "left" ? " abs(" : ") ";
+            i = nextPos + 1;
+            continue;
+          }
+          if (src.slice(nextPos, nextPos + 2) === "\\|") {
+            out += cmd === "left" ? " abs(" : ") ";
+            i = nextPos + 2;
+            continue;
+          }
+          i = afterCmd;
+          continue;
+        }
+        if (cmd === "frac") {
+          const num = readFracArg(afterCmd);
+          const den = num ? readFracArg(num.nextIndex) : null;
+          if (!num || !den) return null;
+          const rewrittenNum = rewriteMacros(num.content);
+          const rewrittenDen = rewriteMacros(den.content);
+          if (rewrittenNum === null || rewrittenDen === null) return null;
+          out += `((${rewrittenNum})/(${rewrittenDen}))`;
+          i = den.nextIndex;
+          continue;
+        }
+        if (cmd === "sqrt") {
+          let argStart = skipWs(src, afterCmd);
+          if (src[argStart] === "^") return null;
+          if (src[argStart] === "[") {
+            const opt = readBalancedGroup(src, argStart, "[", "]");
+            if (!opt || opt.content.trim() !== "2") return null;
+            argStart = skipWs(src, opt.nextIndex);
+          }
+          if (src[argStart] === "{" || src[argStart] === "(") {
+            const grp =
+              src[argStart] === "{"
+                ? readBalancedGroup(src, argStart, "{", "}")
+                : readBalancedGroup(src, argStart, "(", ")");
+            if (!grp) return null;
+            const inner = rewriteMacros(grp.content);
+            if (inner === null) return null;
+            out += `${needSpaceBeforeIdent()}sqrt(${inner})`;
             i = grp.nextIndex;
             continue;
           }
+          const atom = readUnbracedAtom(src, argStart);
+          if (!atom) return null;
+          const afterAtom = skipWs(src, atom.nextIndex);
+          if (
+            afterAtom < src.length &&
+            !/^[+\-*/=)},]$/.test(src[afterAtom]!) &&
+            !/^\\right(?![A-Za-z])/.test(src.slice(afterAtom))
+          ) {
+            return null;
+          }
+          out += `${needSpaceBeforeIdent()}sqrt(${atom.text})`;
+          i = atom.nextIndex;
+          continue;
         }
+        if (LATEX_FN_NAMES.has(cmd)) {
+          const argStart = skipWs(src, afterCmd);
+          if (src[argStart] === "^") {
+            const expStart = skipWs(src, argStart + 1);
+            let expText: string;
+            let afterExp: number;
+            if (src[expStart] === "{") {
+              const expGrp = readBalancedGroup(src, expStart, "{", "}");
+              if (!expGrp) return null;
+              expText = expGrp.content.trim();
+              afterExp = expGrp.nextIndex;
+            } else {
+              const intMatch = /^(-?\d+)/.exec(src.slice(expStart));
+              if (!intMatch) return null;
+              expText = intMatch[1]!;
+              afterExp = expStart + intMatch[0].length;
+            }
+            if (!/^[1-9]\d*$/.test(expText)) return null;
+            const fnArgPos = skipWs(src, afterExp);
+            if (src[fnArgPos] !== "{" && src[fnArgPos] !== "(") return null;
+            const fnGrp =
+              src[fnArgPos] === "{"
+                ? readBalancedGroup(src, fnArgPos, "{", "}")
+                : readBalancedGroup(src, fnArgPos, "(", ")");
+            if (!fnGrp) return null;
+            const inner = rewriteMacros(fnGrp.content);
+            if (inner === null) return null;
+            out += `${needSpaceBeforeIdent()}((${cmd}(${inner}))^(${expText}))`;
+            i = fnGrp.nextIndex;
+            continue;
+          }
+          if (src[argStart] === "{" || src[argStart] === "(") {
+            const grp =
+              src[argStart] === "{"
+                ? readBalancedGroup(src, argStart, "{", "}")
+                : readBalancedGroup(src, argStart, "(", ")");
+            if (!grp) return null;
+            const inner = rewriteMacros(grp.content);
+            if (inner === null) return null;
+            out += `${needSpaceBeforeIdent()}${cmd}(${inner})`;
+            i = grp.nextIndex;
+            continue;
+          }
+          const atom = readUnbracedAtom(src, argStart);
+          if (!atom) return null;
+          const afterAtom = skipWs(src, atom.nextIndex);
+          if (
+            afterAtom < src.length &&
+            !"+-=)},".includes(src[afterAtom]!) &&
+            !/^\\right(?![A-Za-z])/.test(src.slice(afterAtom))
+          ) {
+            return null;
+          }
+          out += `${needSpaceBeforeIdent()}${cmd}(${atom.text})`;
+          i = atom.nextIndex;
+          continue;
+        }
+        if (DEFAULT_PRESERVED_IDENTIFIERS.has(cmd)) {
+          out += `${needSpaceBeforeIdent()}${cmd}`;
+          if (src[afterCmd] === " ") out += " ";
+          i = afterCmd;
+          continue;
+        }
+        return null;
       }
-      if (ch === "{") {
-        const grp = readBalancedGroup(src, i, "{", "}");
-        if (grp) {
-          out += `(${rewriteMacros(grp.content)})`;
+      if (ch === "_") {
+        if (out.length === 0 || !/[A-Za-z0-9]/.test(out[out.length - 1]!)) return null;
+        const argStart = skipWs(src, i + 1);
+        if (argStart >= src.length) return null;
+        if (src[argStart] === "{") {
+          const grp = readBalancedGroup(src, argStart, "{", "}");
+          const sub = grp?.content.trim() ?? "";
+          if (!grp || !/^[A-Za-z0-9]+$/.test(sub)) return null;
+          out += `_${sub}`;
+          i = grp.nextIndex;
+          continue;
+        }
+        if (/^[A-Za-z0-9]$/.test(src[argStart]!)) {
+          out += `_${src[argStart]}`;
+          i = argStart + 1;
+          continue;
+        }
+        return null;
+      }
+      if (ch === "^" && skipWs(src, i + 1) < src.length) {
+        const argStart = skipWs(src, i + 1);
+        if (src[argStart] === "{") {
+          const grp = readBalancedGroup(src, argStart, "{", "}");
+          if (!grp) return null;
+          const inner = rewriteMacros(grp.content);
+          if (inner === null || !inner.trim()) return null;
+          out += `^(${inner})`;
           i = grp.nextIndex;
           continue;
         }
       }
+      if (ch === "{") {
+        const grp = readBalancedGroup(src, i, "{", "}");
+        if (!grp) return null;
+        const inner = rewriteMacros(grp.content);
+        if (inner === null) return null;
+        out += `(${inner})`;
+        i = grp.nextIndex;
+        continue;
+      }
+      if (ch === "}") return null;
       out += ch;
       i++;
     }
@@ -858,6 +1074,8 @@ export function normalizeLatexExpr(input: string): string {
   };
 
   const expanded = rewriteMacros(s);
+  if (expanded === null) return null;
+
   type TokKind = "num" | "id" | "fn" | "lparen" | "rparen" | "op";
   const tokens: Array<{ kind: TokKind; text: string }> = [];
   let p = 0;
@@ -877,7 +1095,7 @@ export function normalizeLatexExpr(input: string): string {
       p++;
       continue;
     }
-    if ("+-*/^_".includes(c)) {
+    if ("+-*/^".includes(c)) {
       tokens.push({ kind: "op", text: c });
       p++;
       continue;
@@ -888,26 +1106,31 @@ export function normalizeLatexExpr(input: string): string {
       p += numMatch[0].length;
       continue;
     }
-    const wordMatch = /^[A-Za-z][A-Za-z0-9]*/.exec(expanded.slice(p));
+    const wordMatch = /^[A-Za-z][A-Za-z0-9_]*/.exec(expanded.slice(p));
     if (wordMatch) {
       const word = wordMatch[0];
       p += word.length;
+      const afterWordWs = skipWs(expanded, p);
+      const isFunctionCall = expanded[afterWordWs] === "(";
       if (LATEX_FN_NAMES.has(word)) {
-        tokens.push({ kind: "fn", text: word });
+        tokens.push({ kind: isFunctionCall ? "fn" : "id", text: word });
+        continue;
+      }
+      if (isFunctionCall) {
+        if (!matrixMode || word.length >= 2 || preservedSet.has(word)) {
+          tokens.push({ kind: "fn", text: word });
+          continue;
+        }
+        tokens.push({ kind: "id", text: word });
+        continue;
+      }
+      if (preservedSet.has(word) || word.includes("_")) {
+        tokens.push({ kind: "id", text: word });
         continue;
       }
       let j = 0;
       while (j < word.length) {
         const rest = word.slice(j);
-        const afterWordWs = skipWs(expanded, p);
-        const fnPrefix = [...LATEX_FN_NAMES].find(
-          (fn) => rest.startsWith(fn) && rest.length === fn.length && expanded[afterWordWs] === "(",
-        );
-        if (fnPrefix) {
-          tokens.push({ kind: "fn", text: fnPrefix });
-          j += fnPrefix.length;
-          continue;
-        }
         const unitMatch = /^[A-Za-z]\d*/.exec(rest);
         if (unitMatch) {
           tokens.push({ kind: "id", text: unitMatch[0] });
@@ -939,10 +1162,15 @@ export function normalizeLatexExpr(input: string): string {
   return normalized;
 }
 
-export function parseScalarExpr(input: ScalarExpr | string | number): ScalarExpr | null {
-  if (typeof input === "number") return Number.isFinite(input) ? parseScalarExpr(String(input)) : null;
+export function parseScalarExpr(
+  input: ScalarExpr | string | number,
+  options?: NormalizeLatexOptions,
+): ScalarExpr | null {
+  if (typeof input === "number") return Number.isFinite(input) ? parseScalarExpr(String(input), options) : null;
   if (typeof input !== "string") return input;
-  const normalizedInput = /[\\{}]/.test(input) ? normalizeLatexExpr(input) : input;
+  const shouldNormalize = options?.matrixImplicitMul || /[\\{}]/.test(input);
+  const normalizedInput = shouldNormalize ? normalizeLatexExpr(input, options) : input;
+  if (normalizedInput === null) return null;
   const source = normalizedInput.replaceAll("−", "-").trim();
   if (!source) return null;
   let index = 0;
@@ -1163,9 +1391,12 @@ function radicalDivide(a: RadicalSum, b: RadicalSum): { ok: true; value: Radical
   const scalar = den.get(1n);
   if (!scalar || scalar.n === 0n) return { ok: false, reason: "natural_domain_denominator_zero" };
   const inv = divideRational(rational(1n), scalar);
+  checkPolyCoeffBound(inv);
   const out = new Map<bigint, SpanRational>();
   for (const [k, v] of num) {
+    checkPolyCoeffBound(v);
     const scaled = multiplyRational(v, inv);
+    checkPolyCoeffBound(scaled);
     if (scaled.n !== 0n) out.set(k, scaled);
   }
   return { ok: true, value: out };
@@ -1320,10 +1551,21 @@ function radicalSumToExpr(sum: RadicalSum): ScalarExpr {
 }
 
 export function simplifyRadical(expr: ScalarExpr): ScalarExpr {
+  try {
+    return simplifyRadicalInner(expr);
+  } catch (err) {
+    if (err instanceof PolyComplexityError || err instanceof MPolyOverflowError) {
+      return expr;
+    }
+    throw err;
+  }
+}
+
+function simplifyRadicalInner(expr: ScalarExpr): ScalarExpr {
   const evaluated = evaluateRadicalConst(expr);
   if (evaluated.ok) return radicalSumToExpr(evaluated.value);
   if (expr.kind === "sqrt") {
-    const inner = simplifyRadical(expr.value);
+    const inner = simplifyRadicalInner(expr.value);
     if (inner.kind === "pow" && inner.exponent === 2) return { kind: "abs", value: inner.base };
     if (inner.kind === "const") {
       const q = toRational(inner.value);
@@ -1338,8 +1580,8 @@ export function simplifyRadical(expr: ScalarExpr): ScalarExpr {
     return { kind: "sqrt", value: inner };
   }
   if (expr.kind === "mul") {
-    const left = simplifyRadical(expr.left);
-    const right = simplifyRadical(expr.right);
+    const left = simplifyRadicalInner(expr.left);
+    const right = simplifyRadicalInner(expr.right);
     if (left.kind === "sqrt" && right.kind === "sqrt" && left.value.kind === "const" && right.value.kind === "const") {
       const a = toRational(left.value.value);
       const b = toRational(right.value.value);
@@ -1353,12 +1595,12 @@ export function simplifyRadical(expr: ScalarExpr): ScalarExpr {
     return { kind: "mul", left, right };
   }
   if (expr.kind === "add" || expr.kind === "sub" || expr.kind === "div") {
-    return { ...expr, left: simplifyRadical(expr.left), right: simplifyRadical(expr.right) };
+    return { ...expr, left: simplifyRadicalInner(expr.left), right: simplifyRadicalInner(expr.right) };
   }
-  if (expr.kind === "neg") return { kind: "neg", value: simplifyRadical(expr.value) };
-  if (expr.kind === "pow") return { kind: "pow", base: simplifyRadical(expr.base), exponent: expr.exponent };
+  if (expr.kind === "neg") return { kind: "neg", value: simplifyRadicalInner(expr.value) };
+  if (expr.kind === "pow") return { kind: "pow", base: simplifyRadicalInner(expr.base), exponent: expr.exponent };
   if (expr.kind === "abs" || expr.kind === "ln" || expr.kind === "sin" || expr.kind === "cos" || expr.kind === "exp") {
-    return { kind: expr.kind, value: simplifyRadical(expr.value) };
+    return { kind: expr.kind, value: simplifyRadicalInner(expr.value) };
   }
   return expr;
 }
@@ -2117,19 +2359,25 @@ function evaluateExactRationalExt(
   switch (expr.kind) {
     case "const": {
       const v = toRational(expr.value);
-      return v ? { status: "value", value: v } : { status: "unsupported", reason: "non_rational_constant" };
+      if (!v) return { status: "unsupported", reason: "non_rational_constant" };
+      checkPolyCoeffBound(v);
+      return { status: "value", value: v };
     }
     case "variable":
       return expr.name === variable ? { status: "value", value: x } : { status: "unsupported", reason: "foreign_variable" };
     case "neg": {
       const inner = evaluateExactRationalExt(expr.value, x, variable);
-      return inner.status === "value" ? { status: "value", value: rational(-inner.value.n, inner.value.d) } : inner;
+      if (inner.status !== "value") return inner;
+      const out = rational(-inner.value.n, inner.value.d);
+      checkPolyCoeffBound(out);
+      return { status: "value", value: out };
     }
     case "abs": {
       const inner = evaluateExactRationalExt(expr.value, x, variable);
-      return inner.status === "value"
-        ? { status: "value", value: inner.value.n < 0n ? rational(-inner.value.n, inner.value.d) : inner.value }
-        : inner;
+      if (inner.status !== "value") return inner;
+      const out = inner.value.n < 0n ? rational(-inner.value.n, inner.value.d) : inner.value;
+      checkPolyCoeffBound(out);
+      return { status: "value", value: out };
     }
     case "sqrt": {
       const inner = evaluateExactRationalExt(expr.value, x, variable);
@@ -2137,7 +2385,10 @@ function evaluateExactRationalExt(
       if (inner.value.n < 0n) return { status: "undefined_domain", reason: "even_root_domain" };
       const n = integerSquareRoot(inner.value.n);
       const d = integerSquareRoot(inner.value.d);
-      return n !== null && d !== null ? { status: "value", value: rational(n, d) } : { status: "unsupported", reason: "irrational_radical" };
+      if (n === null || d === null) return { status: "unsupported", reason: "irrational_radical" };
+      const out = rational(n, d);
+      checkPolyCoeffBound(out);
+      return { status: "value", value: out };
     }
     case "ln": {
       const inner = evaluateExactRationalExt(expr.value, x, variable);
@@ -2173,10 +2424,16 @@ function evaluateExactRationalExt(
       }
       if (left.status !== "value") return left;
       if (right.status !== "value") return right;
-      if (expr.kind === "add") return { status: "value", value: addRational(left.value, right.value) };
-      if (expr.kind === "sub") return { status: "value", value: subtractRational(left.value, right.value) };
-      if (expr.kind === "mul") return { status: "value", value: multiplyRational(left.value, right.value) };
-      return { status: "value", value: divideRational(left.value, right.value) };
+      const out =
+        expr.kind === "add"
+          ? addRational(left.value, right.value)
+          : expr.kind === "sub"
+            ? subtractRational(left.value, right.value)
+            : expr.kind === "mul"
+              ? multiplyRational(left.value, right.value)
+              : divideRational(left.value, right.value);
+      checkPolyCoeffBound(out);
+      return { status: "value", value: out };
     }
     case "pow": {
       const base = evaluateExactRationalExt(expr.base, x, variable);
@@ -2188,14 +2445,10 @@ function evaluateExactRationalExt(
       if (expr.exponent <= 0 && base.value.n === 0n) return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
       let val = rational(1n);
       const step = expr.exponent >= 0 ? base.value : rational(base.value.d, base.value.n);
-      if (bigAbs(step.n) > MAX_POLY_COEFF_MAGNITUDE || step.d > MAX_POLY_COEFF_MAGNITUDE) {
-        return { status: "unsupported", reason: "polynomial_complexity_exceeded" };
-      }
+      checkPolyCoeffBound(step);
       for (let i = 0; i < Math.abs(expr.exponent); i++) {
         val = multiplyRational(val, step);
-        if (bigAbs(val.n) > MAX_POLY_COEFF_MAGNITUDE || val.d > MAX_POLY_COEFF_MAGNITUDE) {
-          return { status: "unsupported", reason: "polynomial_complexity_exceeded" };
-        }
+        checkPolyCoeffBound(val);
       }
       return { status: "value", value: val };
     }
@@ -2583,7 +2836,13 @@ function mpolyScale(p: MPoly, q: SpanRational): MPoly {
 function mpolyContent(p: MPoly): { gcdNum: bigint; lcmDen: bigint; primitive: MPoly } {
   if (p.size === 0) return { gcdNum: 0n, lcmDen: 1n, primitive: new Map() };
   let lcmDen = 1n;
-  for (const coeff of p.values()) lcmDen = bigLcm(lcmDen, coeff.d);
+  for (const coeff of p.values()) {
+    if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) {
+      throw new MPolyOverflowError();
+    }
+    lcmDen = bigLcm(lcmDen, coeff.d);
+    if (lcmDen > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
+  }
   let gcdNum = 0n;
   for (const coeff of p.values()) gcdNum = bigGcd(gcdNum, bigAbs(coeff.n) * (lcmDen / coeff.d));
   if (gcdNum === 0n) return { gcdNum: 0n, lcmDen: 1n, primitive: new Map() };
@@ -2880,7 +3139,6 @@ function ringNormalizeRational(
         if (!b) return null;
         if (node.exponent <= 0 && b.num.size === 0) return null;
         if (node.exponent === 0) return { num: mpolyConst(rational(1n)), den: mpolyConst(rational(1n)) };
-        if (node.exponent < 0 && b.num.size === 0) return null;
         const stepNum = node.exponent >= 0 ? b.num : b.den;
         const stepDen = node.exponent >= 0 ? b.den : b.num;
         const mpolyDeg = (p: MPoly): number => {
@@ -3101,34 +3359,36 @@ function canonicalizeUncheckedOps(
     const norm = ringNormalizeRational(op.expr, variable, validSites, reg, activeOpenIntervals);
     if (!norm || norm.den.size === 0) return null;
     let poly: MPoly;
+    let canonicalKey: string;
     try {
       poly = op.kind === "nonzero" ? norm.num : mpolyMultiply(norm.num, norm.den, reg);
+      const c = mpolyIsConst(poly);
+      if (c !== null) {
+        if (op.kind === "nonzero") {
+          if (c.n === 0n) return null;
+          continue;
+        }
+        if (op.kind === "ge0") {
+          if (c.n < 0n) return null;
+          continue;
+        }
+        if (c.n <= 0n) return null;
+        continue;
+      }
+      const { primitive } = mpolyContent(poly);
+      let canonical = primitive;
+      if (op.kind === "nonzero") {
+        const entries = [...primitive.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+        if (entries[0] && entries[0][1].n < 0n) {
+          canonical = mpolyScale(primitive, rational(-1n));
+        }
+      }
+      canonicalKey = `${op.kind}:${formatMPolyKey(canonical)}`;
     } catch (err) {
       if (err instanceof MPolyOverflowError) return null;
       throw err;
     }
-    const c = mpolyIsConst(poly);
-    if (c !== null) {
-      if (op.kind === "nonzero") {
-        if (c.n === 0n) return null;
-        continue;
-      }
-      if (op.kind === "ge0") {
-        if (c.n < 0n) return null;
-        continue;
-      }
-      if (c.n <= 0n) return null;
-      continue;
-    }
-    const { primitive } = mpolyContent(poly);
-    let canonical = primitive;
-    if (op.kind === "nonzero") {
-      const entries = [...primitive.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-      if (entries[0] && entries[0][1].n < 0n) {
-        canonical = mpolyScale(primitive, rational(-1n));
-      }
-    }
-    keys.add(`${op.kind}:${formatMPolyKey(canonical)}`);
+    keys.add(canonicalKey);
   }
   return keys;
 }
@@ -3144,6 +3404,9 @@ export function verifyScalarEquivalence(
     if (err instanceof PolyComplexityError) {
       return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
     }
+    if (err instanceof MPolyOverflowError) {
+      return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
+    }
     throw err;
   }
 }
@@ -3153,8 +3416,12 @@ function verifyScalarEquivalenceInner(
   referenceInput: ScalarExpr | string,
   domain?: DomainSpec,
 ): VerificationResult {
-  const student = parseScalarExpr(studentInput);
-  const reference = parseScalarExpr(referenceInput);
+  const preserved = [
+    ...(domain?.variable ? [domain.variable] : []),
+    ...(domain?.nonCommutativeVars ?? []),
+  ];
+  const student = parseScalarExpr(studentInput, { preservedIdentifiers: preserved });
+  const reference = parseScalarExpr(referenceInput, { preservedIdentifiers: preserved });
   if (!student || !reference) return { status: "unverified", reason: "parse_outside_decidable_fragment", domain };
   if (domain?.nonCommutativeVars && domain.nonCommutativeVars.length > 0) {
     return verifyNonCommutativeParsed(student, reference, domain, false);
@@ -3788,6 +4055,9 @@ function checkAntiderivativeDefinedOnIntegrandDomain(
     if (err instanceof PolyComplexityError) {
       return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
     }
+    if (err instanceof MPolyOverflowError) {
+      return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
+    }
     throw err;
   }
 }
@@ -3954,13 +4224,20 @@ export function verifyIndefiniteIntegral(input: IntegralVerificationInput): Veri
     if (err instanceof PolyComplexityError) {
       return { status: "unverified", reason: "polynomial_complexity_exceeded", domain: effectiveDomain };
     }
+    if (err instanceof MPolyOverflowError) {
+      return { status: "unverified", reason: "symbolic_complexity_exceeded", domain: effectiveDomain };
+    }
     throw err;
   }
 }
 
 function verifyIndefiniteIntegralInner(input: IntegralVerificationInput): VerificationResult {
-  const student = parseScalarExpr(input.student);
-  const integrand = parseScalarExpr(input.integrand);
+  const preservedVar = input.variable ?? input.domain?.variable;
+  const parseOpts: NormalizeLatexOptions | undefined = preservedVar
+    ? { preservedIdentifiers: [preservedVar] }
+    : undefined;
+  const student = parseScalarExpr(input.student, parseOpts);
+  const integrand = parseScalarExpr(input.integrand, parseOpts);
   if (!student || !integrand) return { status: "unverified", reason: "parse_outside_decidable_fragment" };
   if (input.variable && input.domain?.variable && input.variable !== input.domain.variable) {
     return { status: "unverified", reason: "variable_mismatch", domain: input.domain };
@@ -3970,8 +4247,8 @@ function verifyIndefiniteIntegralInner(input: IntegralVerificationInput): Verifi
 
   if (input.piecewise) {
     const split = toRational(input.piecewise.split);
-    const pwLeft = parseScalarExpr(input.piecewise.left);
-    const pwRight = parseScalarExpr(input.piecewise.right);
+    const pwLeft = parseScalarExpr(input.piecewise.left, parseOpts);
+    const pwRight = parseScalarExpr(input.piecewise.right, parseOpts);
     if (!split || !pwLeft || !pwRight) {
       return { status: "unverified", reason: "piecewise_outside_decidable_fragment", domain: effectiveDomain };
     }
@@ -4167,44 +4444,57 @@ export type SubstitutionBounds = {
 };
 
 export function verifySubstitutionBounds(input: SubstitutionBounds): VerificationResult {
-  const substitution = parseScalarExpr(input.substitution);
-  const lower = toRational(input.lower);
-  const upper = toRational(input.upper);
-  const expectedLower = parseScalarExpr(input.transformedLower);
-  const expectedUpper = parseScalarExpr(input.transformedUpper);
-  if (!substitution || !lower || !upper || !expectedLower || !expectedUpper) {
-    return { status: "unverified", reason: "bounds_outside_exact_fragment" };
-  }
-  const subVars = collectVariables(substitution);
-  const variable = input.variable ?? (subVars.size === 1 ? [...subVars][0]! : "x");
-  if (subVars.size > 1 || (subVars.size === 1 && !subVars.has(variable))) {
-    return { status: "unverified", reason: "bounds_outside_exact_fragment" };
-  }
+  try {
+    const parseOpts: NormalizeLatexOptions | undefined = input.variable
+      ? { preservedIdentifiers: [input.variable] }
+      : undefined;
+    const substitution = parseScalarExpr(input.substitution, parseOpts);
+    const lower = toRational(input.lower);
+    const upper = toRational(input.upper);
+    const expectedLower = parseScalarExpr(input.transformedLower, parseOpts);
+    const expectedUpper = parseScalarExpr(input.transformedUpper, parseOpts);
+    if (!substitution || !lower || !upper || !expectedLower || !expectedUpper) {
+      return { status: "unverified", reason: "bounds_outside_exact_fragment" };
+    }
+    const subVars = collectVariables(substitution);
+    const variable = input.variable ?? (subVars.size === 1 ? [...subVars][0]! : "x");
+    if (subVars.size > 1 || (subVars.size === 1 && !subVars.has(variable))) {
+      return { status: "unverified", reason: "bounds_outside_exact_fragment" };
+    }
 
-  const lowAt = substituteScalar(substitution, variable, { kind: "const", value: lower });
-  const highAt = substituteScalar(substitution, variable, { kind: "const", value: upper });
-  const lowCheck = verifyScalarEquivalence(lowAt, expectedLower);
-  const highCheck = verifyScalarEquivalence(highAt, expectedUpper);
+    const lowAt = substituteScalar(substitution, variable, { kind: "const", value: lower });
+    const highAt = substituteScalar(substitution, variable, { kind: "const", value: upper });
+    const lowCheck = verifyScalarEquivalence(lowAt, expectedLower);
+    const highCheck = verifyScalarEquivalence(highAt, expectedUpper);
 
-  if (lowCheck.status === "equivalent" && highCheck.status === "equivalent") {
-    return { status: "equivalent", reason: "ordered_transformed_bounds_verified" };
+    if (lowCheck.status === "equivalent" && highCheck.status === "equivalent") {
+      return { status: "equivalent", reason: "ordered_transformed_bounds_verified" };
+    }
+    if (lowCheck.status === "unverified" || highCheck.status === "unverified") {
+      return { status: "unverified", reason: lowCheck.status === "unverified" ? lowCheck.reason : highCheck.reason };
+    }
+    const lowExact = evaluateExactRationalExt(substitution, lower, variable);
+    const highExact = evaluateExactRationalExt(substitution, upper, variable);
+    const detail =
+      lowExact.status === "value" && highExact.status === "value"
+        ? `expected ${formatRational(lowExact.value)}..${formatRational(highExact.value)}`
+        : lowExact.status === "undefined_domain" || highExact.status === "undefined_domain"
+          ? "substitution undefined at bound"
+          : "transformed bounds do not match";
+    return {
+      status: "inequivalent",
+      reason: "transformed_bounds_mismatch",
+      witness: { input: `${formatRational(lower)}..${formatRational(upper)}`, detail },
+    };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded" };
+    }
+    if (err instanceof MPolyOverflowError) {
+      return { status: "unverified", reason: "symbolic_complexity_exceeded" };
+    }
+    throw err;
   }
-  if (lowCheck.status === "unverified" || highCheck.status === "unverified") {
-    return { status: "unverified", reason: lowCheck.status === "unverified" ? lowCheck.reason : highCheck.reason };
-  }
-  const lowExact = evaluateExactRationalExt(substitution, lower, variable);
-  const highExact = evaluateExactRationalExt(substitution, upper, variable);
-  const detail =
-    lowExact.status === "value" && highExact.status === "value"
-      ? `expected ${formatRational(lowExact.value)}..${formatRational(highExact.value)}`
-      : lowExact.status === "undefined_domain" || highExact.status === "undefined_domain"
-        ? "substitution undefined at bound"
-        : "transformed bounds do not match";
-  return {
-    status: "inequivalent",
-    reason: "transformed_bounds_mismatch",
-    witness: { input: `${formatRational(lower)}..${formatRational(upper)}`, detail },
-  };
 }
 
 type NcPoly = Map<string, SpanRational>;
@@ -4368,9 +4658,11 @@ function toNcPoly(
 function collapseCommutativeNcPoly(poly: NcPoly): NcPoly {
   const out = new Map<string, SpanRational>();
   for (const [key, coeff] of poly) {
+    checkPolyCoeffBound(coeff);
     const { scalar, nc } = splitNcKey(key);
     const collapsedKey = joinNcKey([...scalar, ...nc].sort(), []);
     const next = addRational(out.get(collapsedKey) ?? rational(0n), coeff);
+    checkPolyCoeffBound(next);
     if (next.n === 0n) out.delete(collapsedKey);
     else out.set(collapsedKey, next);
   }
@@ -4384,6 +4676,9 @@ function verifyNonCommutativeParsed(
   defaultAllNonCommutative: boolean,
 ): VerificationResult {
   try {
+    const parsedDomain = parseDomainSpec(domain);
+    if (!parsedDomain) return { status: "unverified", reason: "invalid_domain", domain };
+    if (parsedDomain.empty) return { status: "unverified", reason: "empty_domain", domain };
     const vars = new Set([...collectVariables(student), ...collectVariables(reference)]);
     const scalarVar = domain?.variable && !(domain.nonCommutativeVars ?? []).includes(domain.variable) ? domain.variable : null;
     const nonCommVars = new Set(
@@ -4428,6 +4723,9 @@ function verifyNonCommutativeParsed(
     if (err instanceof PolyComplexityError) {
       return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
     }
+    if (err instanceof MPolyOverflowError) {
+      return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
+    }
     throw err;
   }
 }
@@ -4437,13 +4735,19 @@ export function verifyMatrixExpressionEquivalence(
   referenceInput: ScalarExpr | string,
   domain?: DomainSpec,
 ): VerificationResult {
-  const parseMatrixSide = (input: ScalarExpr | string): ScalarExpr | null => {
-    const direct = parseScalarExpr(input);
-    if (direct) return direct;
-    return typeof input === "string" ? parseScalarExpr(normalizeLatexExpr(input)) : null;
+  const parsedDomain = parseDomainSpec(domain);
+  if (!parsedDomain) return { status: "unverified", reason: "invalid_domain", domain };
+  if (parsedDomain.empty) return { status: "unverified", reason: "empty_domain", domain };
+  const preserved = [
+    ...(domain?.variable ? [domain.variable] : []),
+    ...(domain?.nonCommutativeVars ?? []),
+  ];
+  const parseOpts: NormalizeLatexOptions = {
+    preservedIdentifiers: preserved,
+    matrixImplicitMul: true,
   };
-  const student = parseMatrixSide(studentInput);
-  const reference = parseMatrixSide(referenceInput);
+  const student = parseScalarExpr(studentInput, parseOpts);
+  const reference = parseScalarExpr(referenceInput, parseOpts);
   if (!student || !reference) return { status: "unverified", reason: "parse_outside_decidable_fragment", domain };
   return verifyNonCommutativeParsed(student, reference, domain, true);
 }

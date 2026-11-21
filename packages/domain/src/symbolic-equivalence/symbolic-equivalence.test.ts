@@ -454,17 +454,58 @@ describe("bounded symbolic equivalence", () => {
 
   it("normalizes LaTeX brace implicit multiplication and guards non-commutative matrix algebra", () => {
     expect(normalizeLatexExpr("x^{ab}")).toBe("x^(a*b)");
-    expect(normalizeLatexExpr("x_{ab}")).toBe("x_(a*b)");
+    expect(normalizeLatexExpr("x_{ab}")).toBe("x_ab");
+    expect(normalizeLatexExpr("x_{a+b}")).toBeNull();
     expect(normalizeLatexExpr("x^{2y}")).toBe("x^(2*y)");
     expect(normalizeLatexExpr("\\sqrt{2x}")).toBe("sqrt(2*x)");
+    expect(normalizeLatexExpr("\\sqrt[3]{x}")).toBeNull();
     expect(normalizeLatexExpr("\\frac{x^{2}-1}{x-1}")).toBe("((x^(2)-1)/(x-1))");
+    expect(normalizeLatexExpr("\\ln 0.5")).toBe("ln(0.5)");
+    expect(normalizeLatexExpr("\\sin^{2}(x)")).toBe("((sin(x))^(2))");
+    expect(normalizeLatexExpr("\\sin^{-1}(x)")).toBeNull();
+    expect(normalizeLatexExpr("\\sin^2 x")).toBeNull();
+    expect(normalizeLatexExpr("\\ln xy")).toBeNull();
+    expect(normalizeLatexExpr("\\sin 2x")).toBeNull();
+    expect(normalizeLatexExpr("\\sin x^2")).toBeNull();
+    expect(normalizeLatexExpr("asin(x)")).toBe("asin(x)");
+    expect(normalizeLatexExpr("det(A)")).toBe("det(A)");
+
     expect(
       verifyScalarEquivalence("\\frac{x^{2}-1}{x-1}", "x + 1", {
         excluded: [1],
       }).status,
     ).toBe("equivalent");
 
+    // Round-12 P1-1: unbraced multi-digit/multi-char LaTeX args must not turn into false products
+    expect(verifyScalarEquivalence("\\ln 10", "0").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("\\sqrt 16", "6").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("\\sin 2x", "x * sin(2)").status).toBe("unverified");
+    expect(verifyScalarEquivalence("\\sin^{2}(x)", "(sin(x))^2").status).toBe("equivalent");
+    expect(verifyScalarEquivalence("\\cos^2{x}", "(cos(x))^2").status).toBe("equivalent");
+
+    // Round-12 P1-2: preserve unknown function calls, multi-letter variables, subscripts, and symmetric matrix normalization
+    expect(verifyScalarEquivalence("det(A) + \\frac{0}{1}", "d*e*t*A").status).toBe("unverified");
+    expect(verifyScalarEquivalence("asin(x) + \\frac{0}{1}", "a*sin(x)").status).toBe("unverified");
+    expect(verifyScalarEquivalence("tan(x) + \\frac{0}{1}", "t*a*n*x").status).toBe("unverified");
+    expect(verifyScalarEquivalence("theta + \\frac{0}{1}", "t*h*e*t*a").status).toBe("unverified");
+    expect(verifyScalarEquivalence("\\theta + \\frac{\\theta}{2}", "3 * theta / 2", { variable: "theta" }).status).toBe(
+      "equivalent",
+    );
+    expect(verifyScalarEquivalence("x_{ab} + 1", "1 + x_ab", { variable: "x_ab" }).status).toBe("equivalent");
+
     expect(verifyMatrixExpressionEquivalence("A*(B - C)", "A*B - A*C").status).toBe("equivalent");
+    expect(verifyMatrixExpressionEquivalence("A(B + C)", "AB + AC").status).toBe("equivalent");
+    expect(verifyMatrixExpressionEquivalence("AB", "BA")).toMatchObject({
+      status: "inequivalent",
+      reason: "non_commutative_mismatch",
+    });
+    expect(verifyMatrixExpressionEquivalence("det(A)", "d*e*t*A").status).toBe("unverified");
+    expect(verifyMatrixExpressionEquivalence("tr(A*B)", "tr(B*A)").status).toBe("unverified");
+    expect(verifyMatrixExpressionEquivalence("A*B", "A*B", { intervals: [{ left: "bad" }] })).toMatchObject({
+      status: "unverified",
+      reason: "invalid_domain",
+    });
+
     const swapped = verifyMatrixExpressionEquivalence("A*(B - C)", "(B - C)*A");
     expect(swapped.status).toBe("inequivalent");
     expect(swapped.reason).toBe("non_commutative_mismatch");
@@ -479,6 +520,46 @@ describe("bounded symbolic equivalence", () => {
     expect(verifyMatrixExpressionEquivalence("(A + B)^2", "A^2 + 2*A*B + B^2").reason).toBe(
       "non_commutative_mismatch",
     );
+
+    // Round-12 P1-3 & P2: complete magnitude & overflow bounds, 0^0 exponent rejection
+    const bigB = "(((2^12)^12)^12)^3";
+    const sinZeroCancel = verifyScalarEquivalence(`sin(0) + ${bigB} - ${bigB}`, "0");
+    expect(sinZeroCancel.status).toBe("unverified");
+    expect(sinZeroCancel.reason).toBe("polynomial_complexity_exceeded");
+
+    const sinVarCancel = verifyScalarEquivalence(`sin(x) + ${bigB} - ${bigB}`, "sin(x)");
+    expect(sinVarCancel.status).toBe("unverified");
+    expect(sinVarCancel.reason).toBe("polynomial_complexity_exceeded");
+
+    const pow2_2100 = "(((2^12)^12)^12) * (((2^10)^6)^6) * (2^12)";
+    const pow3_1331 = "((3^11)^11)^11";
+    const bigDenLcm = verifyScalarEquivalence(
+      `ln((1 / (${pow2_2100})) * sin(x) + (1 / (${pow3_1331})) * cos(x))`,
+      `ln(sin(x))`,
+    );
+    expect(bigDenLcm.status).toBe("unverified");
+
+    const bigDiv = verifyScalarEquivalence(
+      {
+        kind: "div",
+        left: { kind: "const", value: rational(1n << 4096n) },
+        right: { kind: "const", value: rational(1n, 2n) },
+      },
+      "0",
+    );
+    expect(bigDiv.status).toBe("unverified");
+    expect(bigDiv.reason).toBe("polynomial_complexity_exceeded");
+
+    const simplifiedHuge = simplifyRadical({
+      kind: "div",
+      left: { kind: "const", value: rational(1n << 4096n) },
+      right: { kind: "const", value: rational(1n, 2n) },
+    });
+    expect(simplifiedHuge.kind).toBe("div");
+
+    const zeroPowZeroExp = verifyScalarEquivalence("x^(0^0)", "x");
+    expect(zeroPowZeroExp.status).toBe("unverified");
+    expect(zeroPowZeroExp.reason).toBe("parse_outside_decidable_fragment");
   });
 });
 
