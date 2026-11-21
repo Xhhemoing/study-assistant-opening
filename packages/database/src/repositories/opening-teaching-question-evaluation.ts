@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
-import { repairDecodedLatexInJson, teachingBlindSolveMatchesCurrent } from "@aistudy/domain/opening/ai-policy";
+import { repairDecodedLatexInJson } from "@aistudy/domain/opening/ai-policy";
+import { teachingBlindSolveMatchesCurrent } from "@aistudy/domain/opening/ai-policy/teaching-blind-solve";
 import type { Scope, TeachingBlockRef } from "@aistudy/contracts";
 import { teachingQuestionInteractionSchema, teachingBlindSolveReceiptSchema, type TeachingBlindSolveIdentity } from "@aistudy/contracts";
 import { compareCourseQuestionIdentity, evaluateTeachingAnswer } from "@aistudy/domain";

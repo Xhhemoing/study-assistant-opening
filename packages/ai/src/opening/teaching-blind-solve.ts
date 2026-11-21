@@ -2,7 +2,7 @@ import type { ProviderInput, TeachingQuestionInteraction, TeachingBlindSolveRece
 export type { TeachingBlindSolveReceipt, TeachingBlindSolveIdentity, TeachingModelIdentity } from "@aistudy/contracts";
 import { evaluateTeachingAnswer } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
-export { teachingBlindSolveMatchesCurrent } from "@aistudy/domain/opening/ai-policy";
+export { teachingBlindSolveMatchesCurrent } from "@aistudy/domain/opening/ai-policy/teaching-blind-solve";
 import type { ModelGateway, ModelGatewayCallOptions } from "./model-gateway";
 import { isBudgetReplayError } from "./budgeted-call";
 

@@ -42,6 +42,22 @@ describe("learner portability", () => {
     expect(() => importLearnerZip(corrupt)).toThrow(/checksum/u);
   });
 
+  it("neutralizes formula-active TSV cells and decodes learner text and literal escapes", () => {
+    const deck = { name: "Deck\t=1+1", cards: [
+      { id: "+guid", front: "=1+1", back: "+x", source: "-1", tags: ["@tag", "review"] },
+      { id: "plain", front: " \t\r=1+1", back: "\uFEFF@tag", source: "~aistudy~\"literal\"", tags: ["~aistudy~", "safe"] },
+    ] };
+    const tsv = exportAnkiTsv(deck);
+    const trigger = /^"?[\s\p{Cc}\p{Cf}]*[=+@-]/u;
+    for (const line of tsv.split("\n")) {
+      expect(line.split("\t").some(cell => trigger.test(cell))).toBe(false);
+    }
+    expect(importAnkiTsv(tsv)).toEqual(deck);
+    const legacy = ["#separator:Tab", "#html:false", "#deck:Deck", "#guid column:1", "#tags column:5",
+      "#columns:GUID\tFront\tBack\tSource\tTags", "guid\t~aistudy~legacy\tback\t\t"].join("\n");
+    expect(importAnkiTsv(legacy).cards[0]?.front).toBe("~aistudy~legacy");
+  });
+
   it("rejects private fields, reserved paths and inconsistent manifests", () => {
     const note = importMarkdown("public.md", "public");
     const bundle = createLearnerPackage({ notes: [note], decks: [], reviews: [] });
@@ -52,6 +68,34 @@ describe("learner portability", () => {
     expect(() => importMarkdown("public.md", "---\nsealed: true\n---\n")).toThrow();
     expect(() => importObsidianNote("../notes.md", "public")).toThrow();
     expect(() => exportLearnerZip({ ...bundle, manifest: { ...bundle.manifest, notes: 0 } })).toThrow();
+  });
+
+  it.each([
+    "{ sealed: true }",
+    '"sealed": true',
+    "'sealed': true",
+    'parent: {\n  "se\\u0061led": true,\n}',
+    "parent:\n  - public: true\n    sealed: true",
+    "{ public: [one, two }",
+    "title: first\ntitle: duplicate",
+    "alias: *unresolved",
+  ])("fails closed on private or malformed frontmatter (%s)", frontmatter => {
+    const markdown = `---\n${frontmatter}\n---\n# Note\n`;
+    expect(() => importMarkdown("note.md", markdown)).toThrow(/YAML frontmatter/u);
+    expect(() => importObsidianNote("note.md", markdown)).toThrow(/YAML frontmatter/u);
+    const bundle = createLearnerPackage({ notes: [importMarkdown("note.md", "# Note\n")], decks: [], reviews: [] });
+    bundle.notes[0]!.markdown = markdown;
+    expect(() => exportLearnerZip(bundle)).toThrow(/YAML frontmatter/u);
+  });
+
+  it("keeps valid flow and block frontmatter byte-for-byte through ZIP", () => {
+    const flow = '\uFEFF---\r\n{ "title": "Note", properties: { tags: [math, "algebra"] } }\r\n---\r\n# Matrix\r\n';
+    const block = "---\nitems:\n- title: 'Matrix'\n  tags:\n    - math\nsummary: |\n  sealed: true is an example, not a field.\n---\n# Matrix\n";
+    const notes = [importMarkdown("flow.md", flow), importObsidianNote("block.md", block)];
+    const bundle = createLearnerPackage({ notes, decks: [], reviews: [] });
+    expect(importLearnerZip(exportLearnerZip(bundle)).notes.map(exportMarkdown)).toEqual([flow, block]);
+    expect(() => importMarkdown("open.md", "---\ntitle: missing end\n")).toThrow(/YAML frontmatter/u);
+    expect(() => importMarkdown("inline.md", "--- { sealed: true }\n---\n")).toThrow(/YAML frontmatter/u);
   });
 });
 
@@ -81,6 +125,9 @@ describe("lite cartridges", () => {
     expect(validateCartridgeLite({ ...cartridge, level })).toEqual({ ok: false, code: "unsupported_level" });
     expect(queryCartridgeLiteCapability(level)).toEqual({ status: "unsupported_level" });
     expect(executeCartridgeLite({ ...cartridge, level }, {})).toEqual({ status: "unsupported_level" });
+    const advancedItem = { ...cartridge, items: [{ ...cartridge.items[0], level }, cartridge.items[1]] };
+    expect(validateCartridgeLite(advancedItem)).toEqual({ ok: false, code: "unsupported_level" });
+    expect(executeCartridgeLite(advancedItem, {})).toEqual({ status: "unsupported_level" });
     expect(executeCartridgeLite({ ...cartridge, capabilities: ["SeededRecipe"] }, {})).toEqual({ status: "unavailable" });
   });
 });

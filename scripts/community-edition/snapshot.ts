@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { posix } from "node:path";
 
 export const packageRoots = ["packages/contracts", "packages/domain", "packages/jingwei", "packages/ui"] as const;
+export const apacheLicensePath = "scripts/community-edition/apache-2.0.txt";
 export const sourceExtension = /\.(?:[cm]?[jt]s|[jt]sx)$/u;
 const sourceRoots = [
   "packages/contracts/src/", "packages/domain/src/portability/native/", "packages/domain/src/cartridge-sdk-lite/",
@@ -68,7 +69,7 @@ export class GitSnapshot {
     }
 
     const oids = [...new Set([...this.entries].filter(([file, entry]) => this.isRegular(entry) && (
-      workspaceManifests.has(file) || file === "package-lock.json" || file === "package.json"
+      workspaceManifests.has(file) || file === "package-lock.json" || file === "package.json" || file === apacheLicensePath
       || isPublicSource(file) || (sourceRoots.some(root => file.startsWith(root)) && posix.basename(file) === "package.json")
     )).map(([, entry]) => entry.oid))];
     if (oids.length === 0) return;

@@ -4,6 +4,11 @@ import { isRecord, packageRoots } from "./snapshot.ts";
 
 type Json = Record<string, unknown>;
 export const communityLicense = "Apache-2.0";
+const declarationDependencies: Partial<Record<string, readonly string[]>> = {
+  "@aistudy/domain": ["@types/node"],
+  "@aistudy/jingwei": ["@types/react", "@types/react-dom"],
+  "@aistudy/ui": ["@types/react", "@types/react-dom"],
+};
 
 function object(value: unknown, label: string): Json {
   if (!isRecord(value)) throw new Error(`Invalid ${label}`);
@@ -57,14 +62,7 @@ export function createPublicManifests(graph: CommunityGraph): { manifests: Map<s
   if (rootLock.lockfileVersion !== 3) throw new Error("Expected an npm v3 package lock");
   const locked = object(rootLock.packages, "lock packages");
   const publicNames = new Map<string, string>(packageRoots.map(directory => [`@aistudy/${posix.basename(directory)}`, directory]));
-  const root = {
-    name: "aistudy-community-edition", version: packageVersion(rootSource.version), private: true,
-    license: communityLicense, workspaces: [...packageRoots], engines: { node: ">=20" },
-  };
-  const manifests = new Map<string, Json>([["package.json", root]]);
-  const lockPackages = new Map<string, Json>([["", {
-    name: root.name, version: root.version, license: root.license, workspaces: root.workspaces, engines: root.engines,
-  }]]);
+  const lockPackages = new Map<string, Json>();
 
   function includeRegistry(name: string, directory: string, optional = false): Json | undefined {
     if (!/^(?:@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*$/u.test(name)
@@ -93,6 +91,15 @@ export function createPublicManifests(graph: CommunityGraph): { manifests: Map<s
     }
     return entry;
   }
+
+  const compiler = includeRegistry("typescript", "");
+  const root = {
+    name: "aistudy-community-edition", version: packageVersion(rootSource.version),
+    license: communityLicense, workspaces: [...packageRoots], engines: { node: ">=20" },
+    devDependencies: { typescript: packageVersion(compiler?.version) },
+  };
+  const manifests = new Map<string, Json>([["package.json", { ...root, private: true }]]);
+  lockPackages.set("", root);
 
   for (const [directory, projection] of [...graph.manifests].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
     const { source, legacy, exports, imports, versions } = projection;
@@ -129,6 +136,9 @@ export function createPublicManifests(graph: CommunityGraph): { manifests: Map<s
             if (optionalPeer(peerMeta, dep)) publicPeerMeta.set(dep, { optional: true });
           } else publicDirect.set(dep, registryRange(direct[dep] ?? external?.version));
         }
+      }
+      for (const name of declarationDependencies[expectedName] ?? []) {
+        publicDirect.set(name, packageVersion(includeRegistry(name, directory)?.version));
       }
       if (publicDirect.size) manifest.dependencies = Object.fromEntries(publicDirect);
       if (publicPeers.size) manifest.peerDependencies = Object.fromEntries(publicPeers);

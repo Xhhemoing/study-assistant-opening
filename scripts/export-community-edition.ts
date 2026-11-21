@@ -1,11 +1,12 @@
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { queryCartridgeLiteCapability } from "@aistudy/contracts/cartridge-lite";
 import { CommunityGraph } from "./community-edition/graph.ts";
 import { communityLicense, createPublicManifests } from "./community-edition/manifests.ts";
-import { GitSnapshot, isRecord, isSafeGitPath } from "./community-edition/snapshot.ts";
+import { apacheLicensePath, GitSnapshot, isRecord, isSafeGitPath } from "./community-edition/snapshot.ts";
 
 export { queryCartridgeLiteCapability };
 
@@ -27,11 +28,17 @@ These source packages are available under Apache-2.0. Use \`npm ci\` to install 
 - \`@aistudy/domain/cartridge-sdk-lite\` provides Markdown, Obsidian, Anki TSV, Store ZIP, FSRS, and introductory L1–L2 cartridge operations.
 `;
 
-function ensureNewOrEmpty(directory: string): boolean {
-  const existing = lstatSync(directory, { throwIfNoEntry: false });
-  if (!existing) return false;
-  if (!existing.isDirectory() || readdirSync(directory).length) throw new Error("Export target must be a new or empty directory");
-  return true;
+function requireAbsent(directory: string): void {
+  if (lstatSync(directory, { throwIfNoEntry: false })) throw new Error("Export target must not exist");
+}
+
+function readApacheLicense(snapshot: GitSnapshot): Buffer {
+  const license = snapshot.read(apacheLicensePath);
+  const digest = createHash("sha256").update(license).digest("hex");
+  if (digest !== "c04fe6d3351a2a25f4d9f918050a95c44c0685c3505ca36e5d3d916c7bf732c2") {
+    throw new Error("Committed Apache-2.0 license does not match the approved text");
+  }
+  return license;
 }
 
 function checkWrittenLicenses(directory: string, sources: Iterable<string>): void {
@@ -66,9 +73,8 @@ function installExport(target: string, files: Map<string, Uint8Array | string>, 
   if ([absolute, output].some(file => file.split(path.sep).some(segment => segment.toLowerCase() === ".git"))) {
     throw new Error("Export target cannot be inside Git metadata");
   }
-  ensureNewOrEmpty(output);
+  requireAbsent(output);
   const staging = mkdtempSync(path.join(parent, ".community-edition-"));
-  let removedEmptyTarget = false;
   try {
     for (const [file, content] of files) {
       const destination = path.join(staging, file);
@@ -76,14 +82,8 @@ function installExport(target: string, files: Map<string, Uint8Array | string>, 
       writeFileSync(destination, content, { flag: "wx" });
     }
     checkWrittenLicenses(staging, sources);
-    if (ensureNewOrEmpty(output)) {
-      rmdirSync(output);
-      removedEmptyTarget = true;
-    }
+    requireAbsent(output);
     renameSync(staging, output);
-  } catch (error) {
-    if (removedEmptyTarget && !lstatSync(output, { throwIfNoEntry: false })) mkdirSync(output);
-    throw error;
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
@@ -93,12 +93,13 @@ function installExport(target: string, files: Map<string, Uint8Array | string>, 
 export function exportCommunityEdition(options: CommunityExportOptions): { commit: string; files: string[] } {
   if (!options.dryRun && !options.targetDirectory) throw new Error("An export requires a target directory");
   const snapshot = new GitSnapshot(options.repository ?? process.cwd(), options.commit);
+  const license = readApacheLicense(snapshot);
   const graph = new CommunityGraph(snapshot);
   graph.scan();
   const { manifests, lock } = createPublicManifests(graph);
   const json = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
   const files = new Map<string, Uint8Array | string>();
-  files.set("LICENSE", readFileSync(new URL("./community-edition/apache-2.0.txt", import.meta.url)));
+  files.set("LICENSE", license);
   files.set("README.md", readme);
   files.set("package-lock.json", json(lock));
   for (const [file, manifest] of manifests) files.set(file, json(manifest));

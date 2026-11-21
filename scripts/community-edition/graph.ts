@@ -2,7 +2,7 @@ import { isBuiltin } from "node:module";
 import { posix } from "node:path";
 import ts from "typescript";
 import { readModuleEdges } from "./module-edges.ts";
-import { GitSnapshot, isPublicSource, isRecord, isSafeGitPath, sourceOwner } from "./snapshot.ts";
+import { GitSnapshot, isPublicSource, isRecord, isSafeGitPath, sourceExtension, sourceOwner } from "./snapshot.ts";
 
 type Profile = "browser-ui" | "portable-runtime";
 type Target = { path: string; typeOnly: boolean };
@@ -24,7 +24,8 @@ const portable = new Set(["zod", "ts-fsrs"]);
 const browser = new Set([...portable, "react", "react/jsx-runtime", "react-dom", "lucide-react",
   "@radix-ui/react-dialog", "@radix-ui/react-tabs", "@radix-ui/react-toast"]);
 const declarations = [".d.ts", ".d.mts", ".d.cts"];
-const implementations = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
+const extensionlessSources = [".ts", ".tsx", ".d.ts", ".js", ".jsx"];
+const opaqueExtensions = [".json", ".node", ".wasm"];
 const substitutes: Record<string, string[]> = {
   ".js": [".ts", ".tsx", ".d.ts"], ".jsx": [".tsx", ".d.ts"], ".mjs": [".mts", ".d.mts"], ".cjs": [".cts", ".d.cts"],
   ".ts": [".d.ts"], ".tsx": [".d.ts"], ".mts": [".d.mts"], ".cts": [".d.cts"],
@@ -210,10 +211,19 @@ export class CommunityGraph {
     this.visited.add(cacheKey);
     manifest.exports.set(key, expanded.map);
     for (const target of expanded.targets) {
-      this.local(mappedPath(owner, target.path), target.typeOnly, profile, chain);
+      this.packageExport(owner, target, profile, chain);
     }
     const legacy = key === "." ? this.legacyTargets(owner, manifest, profile, chain, new Set()) : [];
     this.versionTargets(owner, manifest, [...expanded.targets, ...legacy].map(target => target.path), profile, chain);
+  }
+
+  private packageExport(owner: string, target: Target, profile: Profile, chain: string[]): void {
+    const file = mappedPath(owner, target.path);
+    if (!sourceExtension.test(file) || this.snapshot.entries.get(file)?.type !== "blob") {
+      throw new Error(`Package export must name an exact source file with its extension: ${target.path}`);
+    }
+    if (!target.typeOnly && isDeclaration(file)) throw new Error(`Package export has no runtime source: ${target.path}`);
+    this.local(file, target.typeOnly, profile, chain);
   }
 
   private legacyTargets(directory: string, manifest: ManifestProjection, profile: Profile, chain: string[], dirs: Set<string>): Target[] {
@@ -239,13 +249,13 @@ export class CommunityGraph {
     if (exact && exact.type !== "tree") found.add(file);
     else {
       // Node may select opaque assets ahead of an index or a TypeScript substitution.
-      const fallback = [".js", ".json", ".node", ".wasm"].find(ext => this.snapshot.entries.has(file + ext));
+      const fallback = [".js", ...opaqueExtensions].find(ext => this.snapshot.entries.has(file + ext));
       if (fallback) found.add(file + fallback);
     }
     const ext = posix.extname(file);
     if (!isDeclaration(file)) {
       const extensionCandidates = substitutes[ext]?.map(replacement => file.slice(0, -ext.length) + replacement)
-        ?? [...implementations, ...declarations].map(replacement => file + replacement);
+        ?? extensionlessSources.map(replacement => file + replacement);
       for (const candidate of extensionCandidates) if (this.snapshot.entries.has(candidate)) found.add(candidate);
     }
     for (const target of found) this.walk(target, profile, chain);
@@ -259,7 +269,7 @@ export class CommunityGraph {
     const manifest = this.snapshot.entries.has(`${directory}/package.json`) ? this.manifest(directory) : undefined;
     const match = manifest && exportMapping(manifest.source, ".");
     const index = `${directory}/index`;
-    const hasIndex = [...implementations, ...declarations, ".json", ".node", ".wasm"]
+    const hasIndex = [...extensionlessSources, ...opaqueExtensions]
       .some(extension => this.snapshot.entries.has(index + extension));
     if (hasIndex) this.local(index, typeOnly, profile, chain, next);
     if (!manifest) return hasIndex;
@@ -269,7 +279,7 @@ export class CommunityGraph {
     if (expanded) {
       manifest.exports.set(".", expanded.map);
       for (const target of expanded.targets) {
-        this.local(mappedPath(directory, target.path), target.typeOnly, profile, chain, next);
+        this.packageExport(directory, target, profile, chain);
       }
     }
     const targets = [...(expanded?.targets ?? []), ...legacy];

@@ -55,10 +55,12 @@ export type CartridgeLiteLevel = z.infer<typeof cartridgeLiteLevelSchema>;
 export type CartridgeLiteValidation = { ok: true; cartridge: CartridgeLite }
   | { ok: false; code: "unsupported_level" | "unavailable" | "invalid_cartridge" };
 
+const isAdvancedLevel = (level: unknown) => level === "L3" || level === "L4";
+
 export function queryCartridgeLiteCapability(level: unknown, capability?: unknown): {
   status: "available" | "unsupported_level" | "unavailable";
 } {
-  if (level === "L3" || level === "L4") return { status: "unsupported_level" };
+  if (isAdvancedLevel(level)) return { status: "unsupported_level" };
   if (!cartridgeLiteLevelSchema.safeParse(level).success
     || (capability !== undefined && !cartridgeLiteCapabilitySchema.safeParse(capability).success)) return { status: "unavailable" };
   return { status: "available" };
@@ -67,7 +69,10 @@ export function queryCartridgeLiteCapability(level: unknown, capability?: unknow
 export function validateCartridgeLite(input: unknown): CartridgeLiteValidation {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, code: "invalid_cartridge" };
   const record = input as Record<string, unknown>;
-  if (record.level === "L3" || record.level === "L4") return { ok: false, code: "unsupported_level" };
+  if (isAdvancedLevel(record.level) || (Array.isArray(record.items) && record.items.some((item: unknown) =>
+    item !== null && typeof item === "object" && "level" in item && isAdvancedLevel(item.level)))) {
+    return { ok: false, code: "unsupported_level" };
+  }
   if (Object.keys(record).some(key => /^seeded[-_]?recipe$/iu.test(key))
     || (Array.isArray(record.capabilities) && record.capabilities.some(capability => !cartridgeLiteCapabilitySchema.safeParse(capability).success))) {
     return { ok: false, code: "unavailable" };

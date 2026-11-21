@@ -9,5 +9,4 @@ export * from "./model-routing-error";
 export * from "./parent-interaction-budget";
 export * from "./provider-request";
 export * from "./reservation-terms";
-export * from "./teaching-blind-solve";
 export * from "./usage";

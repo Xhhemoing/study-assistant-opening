@@ -1,3 +1,12 @@
+import type {} from "react";
+
+// The pinned Lucide declaration uses keyof ReactSVG for its SVG tag names.
+// React 19 removed the old factories. The extension also merges with React 18.
+declare module "react" {
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type -- declaration merging supplies the SVG tag keys.
+  interface ReactSVG extends Record<keyof SVGElementTagNameMap, unknown> {}
+}
+
 export const designTokens = {
   color: {
     bg: "var(--color-bg)",

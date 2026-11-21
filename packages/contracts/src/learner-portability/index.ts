@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { hasPortableFrontmatter } from "./frontmatter";
 
 export const LEARNER_PORTABILITY_VERSION = 1;
 
@@ -25,16 +26,10 @@ export const obsidianLinkSchema = z.strictObject({
   offset: count,
 }).refine(link => link.target !== "" || Boolean(link.fragment), "Expected a note or fragment target");
 
-const privateFrontmatterKey = /^[ \t]*(?:-[ \t]*)?(?:["']?(?:skill[_-]?belief(?:[_-]?v1)?|0109|sealed)["']?)[ \t]*:/imu;
-const optionalFrontmatter = /^(?:\uFEFF)?---[ \t]*\r?\n([\s\S]*?)^---[ \t]*(?:\r?\n|$)/mu;
-
 export const portableMarkdownNoteSchema = z.strictObject({
   path: portablePath,
   format: z.enum(["markdown", "obsidian"]),
-  markdown: z.string().refine(value => {
-    const frontmatter = optionalFrontmatter.exec(value);
-    return frontmatter?.index !== 0 || !privateFrontmatterKey.test(frontmatter[1] ?? "");
-  }, "Private frontmatter fields are excluded"),
+  markdown: z.string().refine(hasPortableFrontmatter, "Unrecognized or private YAML frontmatter"),
   links: z.array(obsidianLinkSchema),
 });
 

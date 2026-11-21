@@ -1,11 +1,17 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { exportCommunityEdition, queryCartridgeLiteCapability } from "../../scripts/export-community-edition";
 
 const repo = process.cwd();
 const localTemp = path.join(repo, ".local", "tmp");
+const licenseTemplate = "scripts/community-edition/apache-2.0.txt";
+
+vi.mock("node:fs", async importOriginal => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return { ...fs, readFileSync: vi.fn(fs.readFileSync), renameSync: vi.fn(fs.renameSync), rmdirSync: vi.fn(fs.rmdirSync) };
+});
 
 function git(cwd: string, ...args: string[]): Buffer {
   return execFileSync("git", ["-c", "user.name=Contract Test", "-c", "user.email=contract@example.invalid",
@@ -24,10 +30,39 @@ function inLocalTemp(run: (directory: string) => void): void {
 
 const print = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
 
-function write(root: string, file: string, content: string): void {
+function write(root: string, file: string, content: string | Buffer): void {
   const output = path.join(root, file);
   mkdirSync(path.dirname(output), { recursive: true });
   writeFileSync(output, content, "utf8");
+}
+
+const fixtureToolchain = ["typescript", "@types/node", "@types/react", "@types/react-dom", "undici-types", "csstype"];
+
+function compileIsolatedConsumer(directory: string): void {
+  const env = { ...process.env, TMP: localTemp, TEMP: localTemp, TMPDIR: localTemp, NODE_PATH: "", npm_config_prefix: directory,
+    npm_config_cache: path.join(repo, ".local", "npm-cache") };
+  const options = { cwd: directory, env, encoding: "utf8", timeout: 110_000, windowsHide: true } as const;
+  const npmArgs = ["ci", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund"];
+  if (process.env.npm_execpath) execFileSync(process.execPath, [process.env.npm_execpath, ...npmArgs], options);
+  else if (process.platform === "win32") execFileSync("pwsh", ["-NoProfile", "-Command", "npm", ...npmArgs], options);
+  else execFileSync("npm", npmArgs, options);
+
+  const entrypoints = ["@aistudy/contracts", "@aistudy/contracts/cartridge-lite", "@aistudy/contracts/learner-portability",
+    "@aistudy/domain/native", "@aistudy/domain/cartridge-sdk-lite", "@aistudy/jingwei", "@aistudy/jingwei/react", "@aistudy/ui"];
+  write(directory, "consumer.ts", entrypoints.map((spec, index) => `export * as entry${index} from ${JSON.stringify(spec)};`).join("\n"));
+  const compiler = spawnSync(process.execPath, [path.join(directory, "node_modules/typescript/bin/tsc"), "--noEmit", "--strict",
+    "--noUncheckedIndexedAccess", "--target", "ES2022", "--module", "ESNext", "--moduleResolution", "Bundler",
+    "--jsx", "react-jsx", "--types", "node,react,react-dom", "--typeRoots", "./node_modules/@types", "--pretty", "false",
+    "--listFiles", "consumer.ts"], options);
+  expect(compiler.error).toBeUndefined();
+  const paths = compiler.stdout.trim().split(/\r?\n/u);
+  const diagnostics = paths.filter(line => /\bTS\d+:/u.test(line));
+  expect(compiler.status, [...diagnostics, compiler.stderr].join("\n")).toBe(0);
+  expect(diagnostics).toEqual([]);
+  for (const file of paths) {
+    const relative = path.relative(directory, path.resolve(directory, file));
+    expect(relative.startsWith("..") || path.isAbsolute(relative), `Compiler read outside the export: ${file}`).toBe(false);
+  }
 }
 
 function fixture(root: string, extras: Record<string, string> = {}): string {
@@ -40,7 +75,10 @@ function fixture(root: string, extras: Record<string, string> = {}): string {
   mkdirSync(root);
   git(root, "init", "--quiet", "--template=");
   write(root, "package.json", print({ name: "private-fixture", license: "UNLICENSED", version: "0.0.0" }));
-  write(root, "package-lock.json", print({ lockfileVersion: 3, packages: {} }));
+  const privateLock = JSON.parse(git(repo, "show", "HEAD:package-lock.json").toString("utf8"));
+  const packages = Object.fromEntries(fixtureToolchain.map(name => [`node_modules/${name}`, privateLock.packages[`node_modules/${name}`]]));
+  write(root, "package-lock.json", print({ lockfileVersion: 3, packages }));
+  write(root, licenseTemplate, git(repo, "show", `HEAD:${licenseTemplate}`));
   for (const [pkg, exports] of Object.entries(entries)) {
     write(root, `packages/${pkg}/package.json`, print({ name: `@aistudy/${pkg}`, license: "UNLICENSED", version: "0.0.0", type: "module", exports }));
     for (const file of Object.values(exports)) write(root, `packages/${pkg}/${file}`, "export {};\n");
@@ -84,8 +122,10 @@ describe("Community Edition extraction", () => {
     expect(lock.packages[""].license).toBe("Apache-2.0");
     expect(lock.packages["node_modules/ts-fsrs"].integrity).toMatch(/^sha512-/u);
     expect(Object.keys(lock.packages)).not.toContain("node_modules/next");
-    expect(() => exportCommunityEdition({ commit, repository: repo, targetDirectory })).toThrow(/new or empty/u);
-  }), 30_000);
+    expect(Object.keys(lock.packages)).toEqual(expect.arrayContaining(fixtureToolchain.map(name => `node_modules/${name}`)));
+    expect(() => exportCommunityEdition({ commit, repository: repo, targetDirectory })).toThrow(/must not exist/u);
+    compileIsolatedConsumer(targetDirectory);
+  }), 120_000);
 
   it("uses committed bytes and ignores unlisted and modified working-tree files", () => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
@@ -93,26 +133,101 @@ describe("Community Edition extraction", () => {
     const candidate = "packages/domain/src/cartridge-sdk-lite/index.ts";
     const commit = fixture(repository, { "packages/domain/src/cartridge-sdk-lite/nonentry.ts": 'require("pg");\n' });
     write(repository, candidate, 'import "@aistudy/ai";\n');
-    mkdirSync(targetDirectory);
     const result = exportCommunityEdition({ commit, repository, targetDirectory });
     expect(result.files).not.toContain("packages/domain/src/cartridge-sdk-lite/nonentry.ts");
     expect(readFileSync(path.join(targetDirectory, candidate), "utf8")).toBe("export {};\n");
   }));
 
+  it("reads the committed Apache text even when its working copy is changed or absent", () => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository);
+    const committed = git(repository, "show", `${commit}:${licenseTemplate}`);
+    write(repository, licenseTemplate, "Changed working-tree license");
+    const reads = vi.mocked(readFileSync);
+    const original = reads.getMockImplementation()!;
+    reads.mockImplementation((file, options) => {
+      if (String(file).replaceAll("\\", "/").endsWith(licenseTemplate)) throw new Error("Working-tree license is unavailable");
+      return original(file, options);
+    });
+    try {
+      for (const name of ["changed", "absent"]) {
+        const targetDirectory = path.join(directory, name);
+        exportCommunityEdition({ commit, repository, targetDirectory });
+        expect(readFileSync(path.join(targetDirectory, "LICENSE"))).toEqual(committed);
+        if (name === "changed") unlinkSync(path.join(repository, licenseTemplate));
+      }
+    } finally {
+      reads.mockImplementation(original);
+    }
+  }));
+
+  it("rejects a candidate whose committed Apache license has been altered", () => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const targetDirectory = path.join(directory, "edition");
+    const commit = fixture(repository, { [licenseTemplate]: "Apache License\nVersion 2.0, January 2004\nAltered terms.\n" });
+    expect(() => exportCommunityEdition({ commit, repository, targetDirectory })).toThrow(/approved text/u);
+    expect(readdirSync(directory)).toEqual(["source"]);
+  }));
+
+  it("preserves existing empty directories and publishes to a new path with one rename", () => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository);
+    const targetDirectory = path.join(directory, "edition");
+    const empty = path.join(directory, "existing");
+    mkdirSync(empty);
+    const inode = lstatSync(empty).ino;
+    const renames = vi.mocked(renameSync);
+    const removals = vi.mocked(rmdirSync);
+    renames.mockClear();
+    removals.mockClear();
+    expect(() => exportCommunityEdition({ commit, repository, targetDirectory: empty })).toThrow(/must not exist/u);
+    expect(lstatSync(empty).ino).toBe(inode);
+    expect(readdirSync(empty)).toEqual([]);
+    expect(renames).not.toHaveBeenCalled();
+    expect(removals).not.toHaveBeenCalled();
+    expect(readdirSync(directory).sort()).toEqual(["existing", "source"]);
+
+    exportCommunityEdition({ commit, repository, targetDirectory });
+    expect(renames).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/\.community-edition-/u), targetDirectory);
+    expect(path.dirname(String(renames.mock.calls[0]?.[0]))).toBe(directory);
+    expect(removals).not.toHaveBeenCalled();
+    expect(existsSync(path.join(targetDirectory, "LICENSE"))).toBe(true);
+  }));
+
+  it("requires exact paths for all package export conditions", () => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository, { "packages/domain/package.json": print({
+      name: "@aistudy/domain", license: "UNLICENSED", version: "0.0.0", type: "module",
+      exports: { "./native": "./src/portability/native/index.ts", "./cartridge-sdk-lite": {
+        types: "./src/cartridge-sdk-lite/index.ts", default: "./src/cartridge-sdk-lite/index",
+      } },
+    }) });
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/exact source file with its extension/u);
+  }));
+
+  it.each(["cts", "mts"])("rejects extensionless relative lookups of .%s", extension => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository, {
+      "packages/domain/src/cartridge-sdk-lite/index.ts": 'export * from "./leaf";',
+      [`packages/domain/src/cartridge-sdk-lite/leaf.${extension}`]: "export const publicValue = 1;",
+    });
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Unresolved .*\/leaf/u);
+  }));
+
   it.each([
-    ['export * from "./edge";', 'export * from "@aistudy/ai";', /@aistudy\/ai/u],
-    ['export * from "./edge";', 'export type T = import("postgres").T;', /postgres/u],
-    ['export * from "./edge";', 'const get = (((arguments[2])["require"])); get("node:fs");', /node:fs/u],
-    ['export * from "./edge";', 'const entry = "pg"; import(entry);', /Nonliteral module/u],
-    ['export * from "./edge";', 'import transport = require("next/server"); export { transport };', /next\/server/u],
-    ['export * from "./edge";', 'import { createRequire as make } from "node:module"; make(import.meta.url)("pg");', /node:module/u],
-    ['export * from "./edge";', '/** @type {import("drizzle-orm").T} */\nexport const value = {};', /drizzle-orm/u],
-    ['export * from "./edge";', '/// <reference path="../../opening/cartridges/private.ts" />', /Closed or unlisted/u],
-  ] as const)("rejects a private or unresolved transitive edge (%s, %s)", (index, leaf, reason) => inLocalTemp(directory => {
+    ['export * from "@aistudy/ai";', /@aistudy\/ai/u],
+    ['export type T = import("postgres").T;', /postgres/u],
+    ['const get = (((arguments[2])["require"])); get("node:fs");', /node:fs/u],
+    ['const entry = "pg"; import(entry);', /Nonliteral module/u],
+    ['import transport = require("next/server"); export { transport };', /next\/server/u],
+    ['import { createRequire as make } from "node:module"; make(import.meta.url)("pg");', /node:module/u],
+    ['/** @type {import("drizzle-orm").T} */\nexport const value = {};', /drizzle-orm/u],
+    ['/// <reference path="../../opening/cartridges/private.ts" />', /Closed or unlisted/u],
+  ] as const)("rejects a private or unresolved transitive edge (%s)", (leaf, reason) => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
     const targetDirectory = path.join(directory, "edition");
     const commit = fixture(repository, {
-      "packages/domain/src/cartridge-sdk-lite/index.ts": index,
+      "packages/domain/src/cartridge-sdk-lite/index.ts": 'export * from "./edge.cjs";',
       "packages/domain/src/cartridge-sdk-lite/edge.cts": leaf,
       "packages/domain/opening/cartridges/private.ts": "export {};\n",
     });

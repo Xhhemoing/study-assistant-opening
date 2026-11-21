@@ -30,6 +30,10 @@
       "types": "./src/opening/ai-policy/index.ts",
       "default": "./src/opening/ai-policy/index.ts"
     },
+    "./opening/ai-policy/teaching-blind-solve": {
+      "types": "./src/opening/ai-policy/teaching-blind-solve.ts",
+      "default": "./src/opening/ai-policy/teaching-blind-solve.ts"
+    },
     "./exam-sprint-catalog": {
       "types": "./src/opening/exam-sprint/catalog.ts",
       "default": "./src/opening/exam-sprint/catalog.ts"
