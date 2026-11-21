@@ -9,10 +9,13 @@ const memoryId = randomUUID();
 const nextMemoryId = randomUUID();
 const sourceTurnId = randomUUID();
 
-function sqlStub(reusedKey = false, admitSources = true) {
+function sqlStub(reusedKey = false, admitSources = true, expireAtFence = false) {
   const calls: string[] = [];
   const admissionBindings: unknown[] = [];
   let inserted = false;
+  let superseded = false;
+  let epoch = 0;
+  let expired = false;
   const corrected = {
     id: nextMemoryId,
     workspace_id: workspaceId,
@@ -26,62 +29,81 @@ function sqlStub(reusedKey = false, admitSources = true) {
     created_at: new Date("2026-10-02T00:00:00Z"),
     updated_at: new Date("2026-10-02T00:00:00Z"),
   };
+  const execute = async (strings: TemplateStringsArray, values: unknown[]) => {
+    const text = strings.join(" ").replace(/\s+/g, " ").trim();
+    calls.push(text);
+    if (text.includes("FROM workspaces")) return [{ id: workspaceId }];
+    if (text.includes("opening_workspace_history_revisions")) return [];
+    if (text.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: ++epoch }];
+    if (text.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) {
+      await Promise.resolve();
+      expired = expireAtFence;
+      return [];
+    }
+    if (text.includes("SELECT t.id FROM opening_turns")) {
+      admissionBindings.push(...values);
+      return admitSources && !expired ? [{ id: sourceTurnId }] : [];
+    }
+    if (text.startsWith("UPDATE opening_memories")) {
+      superseded = true;
+      return [{ id: memoryId }];
+    }
+    if (text.includes("INSERT INTO opening_memories")) {
+      inserted = true;
+      return [corrected];
+    }
+    if (text.includes("last_decision_client_key") && text.includes("WHERE workspace_id")) {
+      if (inserted) return [{ id: memoryId, status: "superseded", kind: "confirmed", version: 3 }, corrected];
+      return reusedKey ? [{
+        id: memoryId,
+        workspace_id: workspaceId,
+        course_id: null,
+        kind: "confirmed",
+        text: "先看例题",
+        source_turn_ids: [sourceTurnId],
+        version: 2,
+        expires_at: null,
+        status: "active",
+        last_decision_client_key: "memory-replace-1",
+        created_at: new Date("2026-10-01T00:00:00Z"),
+        updated_at: new Date("2026-10-01T00:00:00Z"),
+      }] : [];
+    }
+    if (text.includes("FROM opening_memories") && text.includes("FOR UPDATE")) {
+      return [{
+        id: memoryId,
+        workspace_id: workspaceId,
+        course_id: null,
+        kind: "confirmed",
+        text: "先看例题",
+        source_turn_ids: [sourceTurnId],
+        version: 2,
+        expires_at: null,
+        status: "active",
+        created_at: new Date("2026-10-01T00:00:00Z"),
+        updated_at: new Date("2026-10-01T00:00:00Z"),
+      }];
+    }
+    throw new Error(`unexpected query: ${text}`);
+  };
   const tx = Object.assign(
-    async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const text = strings.join(" ").replace(/\s+/g, " ").trim();
-      calls.push(text);
-      if (text.includes("FROM workspaces")) return [{ id: workspaceId }];
-      if (text.includes("opening_workspace_history_revisions")) return [];
-      if (text.startsWith("NOT (") && text.includes("opening_privacy_exclusions")) return [];
-      if (text.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: 1 }];
-      if (text.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
-      if (text.includes("SELECT t.id FROM opening_turns")) {
-        admissionBindings.push(...values);
-        return admitSources ? [{ id: sourceTurnId }] : [];
-      }
-      if (text.startsWith("UPDATE opening_memories")) return [{ id: memoryId }];
-      if (text.includes("INSERT INTO opening_memories")) {
-        inserted = true;
-        return [corrected];
-      }
-      if (text.includes("last_decision_client_key") && text.includes("WHERE workspace_id")) {
-        if (inserted) return [{ id: memoryId, status: "superseded", kind: "confirmed", version: 3 }, corrected];
-        return reusedKey ? [{
-          id: memoryId,
-          workspace_id: workspaceId,
-          course_id: null,
-          kind: "confirmed",
-          text: "先看例题",
-          source_turn_ids: [sourceTurnId],
-          version: 2,
-          expires_at: null,
-          status: "active",
-          last_decision_client_key: "memory-replace-1",
-          created_at: new Date("2026-10-01T00:00:00Z"),
-          updated_at: new Date("2026-10-01T00:00:00Z"),
-        }] : [];
-      }
-      if (text.includes("FROM opening_memories") && text.includes("FOR UPDATE")) {
-        return [{
-          id: memoryId,
-          workspace_id: workspaceId,
-          course_id: null,
-          kind: "confirmed",
-          text: "先看例题",
-          source_turn_ids: [sourceTurnId],
-          version: 2,
-          expires_at: null,
-          status: "active",
-          created_at: new Date("2026-10-01T00:00:00Z"),
-          updated_at: new Date("2026-10-01T00:00:00Z"),
-        }];
-      }
-      throw new Error(`unexpected query: ${text}`);
-    },
+    (strings: TemplateStringsArray, ...values: unknown[]) => ({
+      then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
+        execute(strings, values).then(resolve, reject),
+    }),
     { json: (value: unknown) => value },
   );
-  const begin = vi.fn(async (run: (inner: TransactionSql) => Promise<unknown>) => run(tx as never));
-  return { sql: Object.assign(tx, { begin, json: tx.json }), calls, begin, admissionBindings };
+  const begin = vi.fn(async (run: (inner: TransactionSql) => Promise<unknown>) => {
+    const before = { inserted, superseded, epoch };
+    try {
+      return await run(tx as never);
+    } catch (error) {
+      ({ inserted, superseded, epoch } = before);
+      throw error;
+    }
+  });
+  return { sql: Object.assign(tx, { begin, json: tx.json }), calls, begin, admissionBindings,
+    state: () => ({ inserted, superseded, epoch }) };
 }
 
 describe("replaceOwnedMemory", () => {
@@ -130,6 +152,18 @@ describe("replaceOwnedMemory", () => {
     const replay = await replaceOwnedMemory(sql as never, { workspaceId, ownerUserId }, input);
     expect(replaced).toMatchObject({ id: nextMemoryId, kind: "confirmed", version: 3, status: "active" });
     expect(replay).toEqual(replaced);
+  });
+
+  it("rolls back both revisions and the privacy epoch if ancestry expires during the Tutor job lock", async () => {
+    const { sql, calls, state } = sqlStub(false, true, true);
+    await expect(replaceOwnedMemory(sql as never, { workspaceId, ownerUserId }, {
+      id: memoryId, expectedVersion: 2, text: "corrected", sourceTurnIds: [sourceTurnId],
+      clientKey: "memory-replace-expired-during-lock",
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+    const fence = calls.findIndex(query => query.startsWith("UPDATE opening_tutor_jobs j"));
+    expect(calls.findIndex(query => query.startsWith("INSERT INTO opening_memories"))).toBeLessThan(fence);
+    expect(calls.at(-1)).toMatch(/^SELECT t.id FROM opening_turns/);
+    expect(state()).toEqual({ inserted: false, superseded: false, epoch: 0 });
   });
 
   it("rejects a key already used to confirm the current memory", async () => {

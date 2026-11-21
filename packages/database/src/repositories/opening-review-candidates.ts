@@ -5,7 +5,7 @@ import { mapOpeningCandidateRow } from "./opening-candidates";
 import { lockLearningHistory } from "./opening-learning-facts";
 import { OpeningPlanError } from "./opening-plan-error";
 import { includedTurn } from "./opening-backup-record-predicates";
-import { turnTransitiveDependenciesActive } from "./opening-context-provenance";
+import { readTurnsWithActiveMemoryDependencies, turnHasMemoryDependencies } from "./opening-context-provenance";
 import { admitTaskCandidate } from "./opening-task-candidate-admission";
 
 type Db = Sql | TransactionSql;
@@ -28,7 +28,7 @@ function admittedRetest(db: Db, scope: OpeningScope) {
 export async function readOpeningAssistantReviewCandidates(sql: Sql, scope: OpeningScope) {
   return sql.begin("isolation level repeatable read, read only", async tx => {
     const candidates = await tx`
-      SELECT a.*, t.context_source_refs @? '$[*].memoryDependencyIds' AS has_memory_dependencies
+      SELECT a.*, ${turnHasMemoryDependencies(tx)} AS has_memory_dependencies
       FROM opening_assistant_candidates a
       JOIN opening_turns t ON t.id = a.source_turn_id AND t.conversation_id = a.conversation_id
         AND t.workspace_id = a.workspace_id AND t.status = 'complete'
@@ -39,11 +39,7 @@ export async function readOpeningAssistantReviewCandidates(sql: Sql, scope: Open
       ORDER BY a.created_at ASC`;
     const dependentTurns = [...new Set(candidates.filter(row => row.has_memory_dependencies).map(row => row.source_turn_id as string))];
     // Keep the recursive plan off ordinary review reads. Both phases share the owner-scoped snapshot.
-    const admitted = dependentTurns.length ? await tx`
-      SELECT t.id FROM opening_turns t
-      WHERE t.workspace_id = ${scope.workspaceId} AND t.id = ANY(${dependentTurns}::uuid[])
-        AND ${turnTransitiveDependenciesActive(tx, "t")}` : [];
-    const activeTurns = new Set(admitted.map(row => row.id as string));
+    const activeTurns = await readTurnsWithActiveMemoryDependencies(tx, scope.workspaceId, dependentTurns);
     return candidates.filter(row => (!row.has_memory_dependencies || activeTurns.has(row.source_turn_id as string))
       && assistantCandidateSchema.safeParse(row.payload).success).map(mapOpeningCandidateRow);
   });

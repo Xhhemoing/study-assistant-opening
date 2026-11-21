@@ -90,6 +90,7 @@ describe("confirmOwnedMemory transitive source_turn_ids and memoryDependencyIds 
     kind?: "candidate" | "temporary";
     expiresAt?: string | null;
     admittedRow?: { id: string; ancestor_temporary_expires_at: string | null } | null;
+    expiryAfterUpdate?: boolean;
   }) {
     const calls: string[] = [];
     const row = {
@@ -110,6 +111,7 @@ describe("confirmOwnedMemory transitive source_turn_ids and memoryDependencyIds 
       if (query.includes("UPDATE opening_memories")) {
         return [{ ...row, kind: "confirmed", expires_at: null, version: 1, last_decision_client_key: "confirm-sourced" }];
       }
+      if (query.includes("AS still_active")) return [{ still_active: !options.expiryAfterUpdate }];
       return [];
     };
     const begin = vi.fn(async (run: (db: typeof tx) => Promise<unknown>) => run(tx));
@@ -160,5 +162,16 @@ describe("confirmOwnedMemory transitive source_turn_ids and memoryDependencyIds 
     const checkIdx = calls.findIndex(q => q.includes("WITH RECURSIVE mem_deps(dep_id)"));
     const updateIdx = calls.findIndex(q => q.startsWith("UPDATE opening_memories"));
     expect(updateIdx).toBeGreaterThan(checkIdx);
+  });
+
+  it("aborts confirmation when the earliest temporary expiry elapses before commit", async () => {
+    const { sql, calls } = sourcedStub({
+      admittedRow: { id, ancestor_temporary_expires_at: "2099-01-01T00:00:00.000Z" },
+      expiryAfterUpdate: true,
+    });
+    await expect(confirmOwnedMemory(sql as never, scope, id, 0, "confirm-sourced"))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    const finalCheck = calls.findIndex(q => q.includes("AS still_active"));
+    expect(finalCheck).toBeGreaterThan(calls.findIndex(q => q.startsWith("UPDATE opening_memories")));
   });
 });

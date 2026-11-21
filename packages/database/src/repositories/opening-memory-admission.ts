@@ -1,5 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
+import { turnPinnedSourcesIncluded } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -84,7 +85,7 @@ export function turnSourceMaterialsActive(db: Db, workspaceId: string): ReturnTy
         )
       )
     )
-  )`;
+  ) AND ${turnPinnedSourcesIncluded(db, workspaceId, db`t.source_versions`, db`t.context_anchor`)}`;
 }
 
 /**

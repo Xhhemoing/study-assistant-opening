@@ -13,6 +13,7 @@ import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 import { taskCandidate } from "../opening-task-acceptance-fixture";
 import { backupRows } from "../opening-backup-records-fixture";
 import { seedReviewRetest } from "../opening-review-fixture";
+import { insertTurn } from "../opening-memory-candidate-fixture";
 import { createOpeningAssistantProposalsRepository } from "@aistudy/database";
 import { GET as reviewCount } from "../../../apps/web/src/app/api/opening/reviews/route";
 
@@ -81,15 +82,22 @@ it("requires authentication and hides foreign or currently excluded sources", as
   expect((await acceptRetest(request({ clientKey: randomUUID() }), params(retest.id))).status).toBe(404);
 });
 
-it("keeps ordinary review candidates visible and rechecks only the dependent turn as memory expires", async () => {
+it("hides and refuses to accept a task candidate when transitive memory ancestry expires", async () => {
   const ordinary = await taskCandidate(fixture);
   const dependent = await taskCandidate(fixture);
   const memoryId = randomUUID();
+  const intermediateMemoryId = randomUUID();
+  const intermediateTurnId = await insertTurn(fixture.sql, fixture.scope, dependent.conversationId);
   await fixture.sql`INSERT INTO opening_memories (id, workspace_id, kind, text, source_turn_ids, expires_at)
     VALUES (${memoryId}, ${fixture.scope.workspaceId}, 'temporary', 'help preference',
-      ${fixture.sql.json([ordinary.sourceTurnId.toUpperCase()])}, clock_timestamp() + interval '1 day')`;
+      ${fixture.sql.json([ordinary.sourceTurnId.toUpperCase()])}, clock_timestamp() + interval '1 day'),
+      (${intermediateMemoryId}, ${fixture.scope.workspaceId}, 'confirmed', 'derived preference',
+        ${fixture.sql.json([intermediateTurnId.toUpperCase()])}, NULL)`;
   await fixture.sql`UPDATE opening_turns
     SET context_source_refs = ${fixture.sql.json([{ memoryDependencyIds: [memoryId.toUpperCase()] }])}
+    WHERE id = ${intermediateTurnId}`;
+  await fixture.sql`UPDATE opening_turns
+    SET context_source_refs = ${fixture.sql.json([{ memoryDependencyIds: [intermediateMemoryId.toUpperCase()] }])}
     WHERE id = ${dependent.sourceTurnId}`;
   const visible = await assistantList(request());
   expect(visible.status).toBe(200);
@@ -98,6 +106,11 @@ it("keeps ordinary review candidates visible and rechecks only the dependent tur
   const expired = await assistantList(request());
   expect(expired.status).toBe(200);
   expect((await expired.json()).map((row: { id: string }) => row.id)).toEqual([ordinary.id]);
+  const stale = await createTask(request({
+    title: "Practice", minutes: 15, dueAt: null, priority: 1, candidateId: dependent.id, clientKey: randomUUID(),
+  }));
+  expect(stale.status).toBe(400);
+  expect(await fixture.sql`SELECT id FROM opening_tasks WHERE candidate_id = ${dependent.id}`).toHaveLength(0);
 });
 
 it("discards an assistant task idempotently but refuses memory, foreign, and mixed-origin targets", async () => {

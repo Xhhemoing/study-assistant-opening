@@ -92,6 +92,8 @@ export function replaceOwnedMemory(
       ) RETURNING *`;
     // Superseding a confirmed memory invalidates in-flight Tutor streams that injected it.
     await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
+    // The Tutor job row lock can outlast a temporary ancestor's eligibility.
+    await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id);
     return mapMemoryRow(inserted[0] as Record<string, unknown>);
   });
 }

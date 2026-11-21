@@ -138,20 +138,73 @@ export function contextSourceRefsIncluded(
     )`;
 }
 
+/** Version pins can exist independently of the turn's explicit source_ids. */
+export function turnPinnedSourceRefs(db: Db, versions: Fragment, anchor: Fragment): Fragment {
+  return db`
+    SELECT source_id, source_version, true AS version_required
+    FROM jsonb_each(CASE WHEN jsonb_typeof(${versions}) = 'object' THEN ${versions} ELSE '{}'::jsonb END)
+      AS pin(source_id, source_version)
+    UNION ALL
+    SELECT ${anchor}->>'sourceId', NULLIF(${anchor}->'sourceVersion', 'null'::jsonb), false
+    WHERE ${anchor}->>'sourceId' IS NOT NULL`;
+}
+
+export function turnPinnedSourcesIncluded(
+  db: Db, workspaceId: string, versions: Fragment, anchor: Fragment, historical = false,
+): Fragment {
+  return db`
+    COALESCE(jsonb_typeof(${versions}) = 'object', false)
+    AND NOT EXISTS (
+      SELECT 1 FROM (${turnPinnedSourceRefs(db, versions, anchor)}) pin
+      WHERE ((pin.version_required OR pin.source_version IS NOT NULL)
+          AND (jsonb_typeof(pin.source_version) IS DISTINCT FROM 'number'
+            OR (pin.source_version #>> '{}') !~ '^[0-9]+$'))
+        OR NOT EXISTS (
+          SELECT 1 FROM opening_sources s
+          WHERE s.id = ${lineageUuid(db, db`pin.source_id`)}
+            AND s.workspace_id = ${workspaceId} AND s.upload_state = 'uploaded'
+            AND (${historical} OR pin.source_version IS NULL OR s.version::text = pin.source_version #>> '{}')
+            AND (${historical} OR NOT EXISTS (
+              SELECT 1 FROM opening_source_versions sv
+              WHERE sv.workspace_id = s.workspace_id AND sv.source_id = s.id
+                AND sv.version::text = COALESCE(pin.source_version #>> '{}', s.version::text)
+                AND sv.availability = 'unavailable'
+            ))
+            AND NOT EXISTS (
+              SELECT 1 FROM opening_privacy_exclusions e
+              WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id
+            )
+        )
+    )`;
+}
+
 /** User turns are original leaves; assistant turns must carry their full consumed lineage. */
 export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fragment {
-  const column = (name: string) => db.unsafe(`${alias}.${name}`);
-  return db`CASE WHEN ${column("role")} = 'assistant' THEN ${column("context_source_refs")}
-    ELSE (
+  const column = (name: string): Fragment => db`${db.unsafe(`${alias}.${name}`)}`;
+  const versions = column("source_versions");
+  const context = column("context_source_refs");
+  const pins = turnPinnedSourceRefs(db, versions, column("context_anchor"));
+  return db`CASE
+    WHEN jsonb_typeof(${versions}) IS DISTINCT FROM 'object' THEN NULL
+    WHEN ${column("role")} = 'assistant' AND jsonb_typeof(${context}) IS DISTINCT FROM 'array' THEN ${context}
+    ELSE (CASE WHEN ${column("role")} = 'assistant' THEN ${context} ELSE (
       SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM (
-        SELECT jsonb_build_object('sourceId', sid.id, 'sourceVersion', ${column("source_versions")}->sid.id::text) AS ref
+        SELECT jsonb_build_object('sourceId', sid.id, 'sourceVersion', NULL) AS ref
         FROM unnest(${column("source_ids")}) sid(id)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM (${pins}) pin
+          WHERE lower(pin.source_id) = sid.id::text AND pin.source_version IS NOT NULL
+        )
         UNION ALL
         SELECT jsonb_build_object('sourceId', citation->'sourceId', 'sourceVersion', citation->'sourceVersion')
         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${column("citations")})='array'
           THEN ${column("citations")} ELSE '[null]'::jsonb END) citation
       ) direct_refs
-    ) END`;
+    ) END) || (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version)), '[]'::jsonb)
+      FROM (${pins}) pin
+    )
+  END`;
 }
 
 /** Cycle-safe recursive CTE walking a memory's source_turn_ids -> turn memoryDependencyIds -> ancestor memories. */
@@ -295,4 +348,20 @@ export function turnTransitiveDependenciesActive(db: Db, alias: "a" | "t"): Frag
         AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
     )
   )`;
+}
+
+export function turnHasMemoryDependencies(db: Db): Fragment {
+  return db`t.context_source_refs @? '$[*].memoryDependencyIds[*]'`;
+}
+
+/** Call only for turns with dependencies, so ordinary reads never plan a recursive query. */
+export async function readTurnsWithActiveMemoryDependencies(
+  db: Db, workspaceId: string, turnIds: string[],
+): Promise<Set<string>> {
+  if (!turnIds.length) return new Set();
+  const rows = await db<{ id: string }[]>`
+    SELECT t.id FROM opening_turns t
+    WHERE t.workspace_id = ${workspaceId} AND t.id = ANY(${turnIds}::uuid[])
+      AND ${turnTransitiveDependenciesActive(db, "t")}`;
+  return new Set(rows.map(row => row.id));
 }

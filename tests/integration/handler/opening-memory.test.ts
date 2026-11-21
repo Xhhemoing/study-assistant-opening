@@ -233,7 +233,13 @@ describe("opening memory handlers", () => {
     },
   );
 
-  it("rejects proposing or replacing memory from revoked assistant context", async () => {
+  it.each([
+    { reference: "assistant-context", action: "exclude" },
+    { reference: "source-versions", action: "exclude" },
+    { reference: "source-versions", action: "delete" },
+    { reference: "context-anchor", action: "exclude" },
+    { reference: "context-anchor", action: "delete" },
+  ])("rejects proposing, confirming and replacing memory after $action of $reference material", async ({ reference, action }) => {
     const conversationId = randomUUID();
     const sourceId = randomUUID();
     const turnId = randomUUID();
@@ -242,9 +248,17 @@ describe("opening memory handlers", () => {
       VALUES (${sourceId}, ${owner.workspaceId}, 'revoked.pdf', 'application/pdf', 1, ${"c".repeat(64)}, 0, 'uploaded', 'ready')`;
     await sql`INSERT INTO opening_conversations (id, workspace_id, owner_user_id, title)
       VALUES (${conversationId}, ${owner.workspaceId}, ${owner.userId}, 'revoked source')`;
-    await sql`INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status, context_source_refs)
-      VALUES (${turnId}, ${owner.workspaceId}, ${conversationId}, 'assistant', 'from revoked material', 'listen', 'complete',
-        ${sql.json([{ sourceId: sourceId.toUpperCase(), sourceVersion: 0 }])})`;
+    const material = { sourceId: sourceId.toUpperCase(), sourceVersion: 0 };
+    const assistant = reference === "assistant-context";
+    const anchor = reference === "context-anchor" ? sql.json({ ...material, purpose: "learning_help" }) : null;
+    const versions = reference === "source-versions" ? { [material.sourceId]: 0 } : {};
+    await sql`INSERT INTO opening_turns (
+        id, workspace_id, conversation_id, role, text, mode, status, source_versions, context_anchor, context_source_refs
+      ) VALUES (
+        ${turnId}, ${owner.workspaceId}, ${conversationId}, ${assistant ? "assistant" : "user"},
+        'from revoked material', 'listen', 'complete', ${sql.json(versions)}, ${anchor},
+        ${assistant ? sql.json([material]) : null}
+      )`;
     await sql`INSERT INTO opening_memories (id, workspace_id, kind, text)
       VALUES (${targetId}, ${owner.workspaceId}, 'confirmed', 'manual fact')`;
 
@@ -252,7 +266,11 @@ describe("opening memory handlers", () => {
     const proposed = await proposeMemory(req("/api/opening/memory", "POST", body));
     expect(proposed.status).toBe(201);
     const candidate = await proposed.json() as { id: string; version: number };
-    await sql`INSERT INTO opening_privacy_exclusions (workspace_id, source_id) VALUES (${owner.workspaceId}, ${sourceId})`;
+    if (action === "exclude") {
+      await sql`INSERT INTO opening_privacy_exclusions (workspace_id, source_id) VALUES (${owner.workspaceId}, ${sourceId})`;
+    } else {
+      await sql`DELETE FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${owner.workspaceId}`;
+    }
 
     expect((await proposeMemory(req("/api/opening/memory", "POST", body))).status).toBe(400);
     const confirmation = await decideMemory(req(`/api/opening/memory/${candidate.id}/decision`, "POST", {

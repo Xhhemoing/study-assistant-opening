@@ -48,6 +48,7 @@ export function confirmOwnedMemory(
     if (current.status !== "active" || current.kind === "confirmed") {
       throw new OpeningMemoryError("CONFLICT", "memory cannot be confirmed");
     }
+    let expiryBeforeCommit: string | null = null;
     if (current.kind === "temporary" || current.sourceTurnIds.length > 0) {
       const admitted = await tx`
         SELECT m.id, (
@@ -157,17 +158,15 @@ export function confirmOwnedMemory(
       if (!admitted.length) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
-      const nowMs = now().getTime();
-      if (current.kind === "temporary" && (current.expiresAt === null || Date.parse(current.expiresAt) <= nowMs)) {
+      const ancestorExpiry = admitted[0]?.ancestor_temporary_expires_at;
+      const expiry = Math.min(
+        current.kind === "temporary" ? Date.parse(current.expiresAt ?? "") : Infinity,
+        ancestorExpiry == null ? Infinity : new Date(ancestorExpiry as string | Date).getTime(),
+      );
+      if (Number.isNaN(expiry) || expiry <= now().getTime()) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
-      const ancestorExp = (admitted[0] as Record<string, unknown>).ancestor_temporary_expires_at;
-      if (ancestorExp != null) {
-        const parsedMs = new Date(ancestorExp as string | Date).getTime();
-        if (Number.isNaN(parsedMs) || parsedMs <= nowMs) {
-          throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
-        }
-      }
+      if (Number.isFinite(expiry)) expiryBeforeCommit = new Date(expiry).toISOString();
     }
     const updated = await tx`
       UPDATE opening_memories
@@ -177,6 +176,12 @@ export function confirmOwnedMemory(
         AND version = ${expectedVersion} AND status = 'active'
       RETURNING *`;
     if (!updated.length) throw new OpeningMemoryError("CONFLICT", "confirm raced");
+    if (expiryBeforeCommit !== null) {
+      const [expiry] = await tx`SELECT ${expiryBeforeCommit}::timestamptz > clock_timestamp() AS still_active`;
+      if (!expiry?.still_active) {
+        throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
+      }
+    }
     return mapMemoryRow(updated[0] as Record<string, unknown>);
   });
 }
