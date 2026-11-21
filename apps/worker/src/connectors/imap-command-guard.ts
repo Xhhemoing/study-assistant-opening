@@ -3,11 +3,15 @@ export const MAX_IMAP_LITERAL_BYTES = 26 * 1024 * 1024;
 export const MAX_IMAP_RESPONSE_BYTES = 28 * 1024 * 1024;
 export const MAX_IMAP_FETCH_COMMAND_BYTES = MAX_IMAP_RESPONSE_BYTES + 64 * 1024;
 export const MAX_IMAP_PROBE_COMMAND_BYTES = 64 * 1024;
+export const MAX_IMAP_DISCOVERY_COMMAND_BYTES = 8 * 1024 * 1024;
+export const MAX_IMAP_DISCOVERY_RESPONSES = 10_000;
 export const MAX_IMAP_CONTROL_COMMAND_BYTES = MAX_IMAP_RESPONSE_BYTES + 64 * 1024;
 
 export type ImapCommandGuardLimits = {
   maxFetchCommandBytes?: number;
   maxProbeCommandBytes?: number;
+  maxDiscoveryCommandBytes?: number;
+  maxDiscoveryResponses?: number;
   maxControlCommandBytes?: number;
 };
 
@@ -15,6 +19,7 @@ export type ImapFetchGuardSpec = {
   maxBytes: number;
   maxFetchResponses?: number;
   expectedUid?: number;
+  expectedStartOffset?: number;
   isProbe?: boolean;
 };
 
@@ -73,10 +78,25 @@ type CapturedBodySections = {
   parts: Map<string, Buffer>;
 };
 
+type FetchAttemptScope = {
+  maxBytes: number;
+  maxFetchResponses: number;
+  expectedUid?: number;
+  expectedStartOffset?: number;
+  isProbe: boolean;
+  cumulativeWireBytes: number;
+  cumulativeStreamBytes: number;
+  latestAttemptSections: CapturedBodySections | null;
+};
+
 type ActiveCommandGuard = {
   maxBytes: number;
   maxFetchResponses?: number;
   expectedUid?: number;
+  expectedStartOffset?: number;
+  isProbe: boolean;
+  isSingleMessageFetch: boolean;
+  fetchScope: FetchAttemptScope | null;
   wireBytes: number;
   streamBytes: number;
   untaggedFetchCount: number;
@@ -87,30 +107,11 @@ type ActiveCommandGuard = {
 type CommandGuardState = {
   limits: Required<ImapCommandGuardLimits>;
   activeGuard: ActiveCommandGuard | null;
-  pendingFetchSpec: ImapFetchGuardSpec | null;
-  lastFetchBodySections: CapturedBodySections | null;
+  activeFetchScope: FetchAttemptScope | null;
   meteredSocket: { removeListener?: (event: string, fn: (...args: unknown[]) => void) => unknown } | null;
 };
 
 const commandGuardStates = new WeakMap<object, CommandGuardState>();
-
-const BOUNDED_CONTROL_COMMANDS = new Set([
-  "SELECT",
-  "EXAMINE",
-  "SEARCH",
-  "UID SEARCH",
-  "LIST",
-  "LSUB",
-  "NAMESPACE",
-  "CAPABILITY",
-  "ID",
-  "ENABLE",
-  "LOGOUT",
-  "STATUS",
-  "STARTTLS",
-  "LOGIN",
-  "AUTHENTICATE",
-]);
 
 function chunkByteLength(chunk: unknown): number {
   if (Buffer.isBuffer(chunk) || ArrayBuffer.isView(chunk)) {
@@ -120,6 +121,18 @@ function chunkByteLength(chunk: unknown): number {
     return Buffer.byteLength(chunk, "utf8");
   }
   return 0;
+}
+
+function resolveExpectedStartOffset(query: unknown): number | undefined {
+  if (!query || typeof query !== "object") return undefined;
+  const src = (query as { source?: unknown }).source;
+  if (src === true) return 0;
+  if (src && typeof src === "object") {
+    const start = (src as { start?: unknown }).start;
+    if (start === undefined) return 0;
+    if (typeof start === "number" && Number.isSafeInteger(start) && start >= 0) return start;
+  }
+  return undefined;
 }
 
 type ParsedAttrNode = {
@@ -189,6 +202,18 @@ function inspectFetchUntagged(untagged: unknown): {
   return { uid, bodySections: { valid, parts } };
 }
 
+function hasValidOffsetMatch(
+  bodySections: CapturedBodySections,
+  expectedStartOffset: number,
+  isProbe: boolean,
+): boolean {
+  if (!bodySections.valid) return false;
+  if (expectedStartOffset === 0 && !isProbe) {
+    return bodySections.parts.has(partialBodyOffsetKey(0)) || bodySections.parts.has("BODY[]");
+  }
+  return bodySections.parts.has(partialBodyOffsetKey(expectedStartOffset));
+}
+
 function failActiveGuard(state: CommandGuardState, client: object, err: Error): void {
   const guard = state.activeGuard;
   if (guard && !guard.failed) {
@@ -226,7 +251,8 @@ type ImapFlowInternal = {
 
 /**
  * Install command-wide wire/stream byte caps, single-UID untagged FETCH caps,
- * and raw BODY[]<offset> capture on an ImapFlow instance. No-ops on minimal unit-test mocks.
+ * discovery response caps, and raw BODY[]<offset> capture on an ImapFlow instance.
+ * No-ops on minimal unit-test mocks without exec().
  */
 export function installImapCommandGuard<T extends object>(client: T, limits?: ImapCommandGuardLimits): T {
   attachImapClientErrorGuard(client);
@@ -238,6 +264,12 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
     if (limits?.maxProbeCommandBytes !== undefined) {
       existing.limits.maxProbeCommandBytes = Math.min(existing.limits.maxProbeCommandBytes, limits.maxProbeCommandBytes);
     }
+    if (limits?.maxDiscoveryCommandBytes !== undefined) {
+      existing.limits.maxDiscoveryCommandBytes = Math.min(existing.limits.maxDiscoveryCommandBytes, limits.maxDiscoveryCommandBytes);
+    }
+    if (limits?.maxDiscoveryResponses !== undefined) {
+      existing.limits.maxDiscoveryResponses = Math.min(existing.limits.maxDiscoveryResponses, limits.maxDiscoveryResponses);
+    }
     if (limits?.maxControlCommandBytes !== undefined) {
       existing.limits.maxControlCommandBytes = Math.min(existing.limits.maxControlCommandBytes, limits.maxControlCommandBytes);
     }
@@ -248,11 +280,12 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
     limits: {
       maxFetchCommandBytes: limits?.maxFetchCommandBytes ?? MAX_IMAP_FETCH_COMMAND_BYTES,
       maxProbeCommandBytes: limits?.maxProbeCommandBytes ?? MAX_IMAP_PROBE_COMMAND_BYTES,
+      maxDiscoveryCommandBytes: limits?.maxDiscoveryCommandBytes ?? MAX_IMAP_DISCOVERY_COMMAND_BYTES,
+      maxDiscoveryResponses: limits?.maxDiscoveryResponses ?? MAX_IMAP_DISCOVERY_RESPONSES,
       maxControlCommandBytes: limits?.maxControlCommandBytes ?? MAX_IMAP_CONTROL_COMMAND_BYTES,
     },
     activeGuard: null,
-    pendingFetchSpec: null,
-    lastFetchBodySections: null,
+    activeFetchScope: null,
     meteredSocket: null,
   };
   commandGuardStates.set(client, state);
@@ -265,8 +298,12 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
   const onSocketData = (chunk: unknown) => {
     const guard = state.activeGuard;
     if (!guard || guard.failed) return;
-    guard.wireBytes += chunkByteLength(chunk);
-    if (guard.wireBytes > guard.maxBytes) {
+    const len = chunkByteLength(chunk);
+    guard.wireBytes += len;
+    const totalWire = guard.fetchScope
+      ? (guard.fetchScope.cumulativeWireBytes += len)
+      : guard.wireBytes;
+    if (totalWire > guard.maxBytes) {
       failActiveGuard(state, client, new Error(`IMAP command wire response exceeded ${guard.maxBytes} bytes`));
     }
   };
@@ -311,8 +348,12 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
       const guard = state.activeGuard;
       if (guard) {
         if (guard.failed) return false;
-        guard.streamBytes += chunkByteLength(args[0]);
-        if (guard.streamBytes > guard.maxBytes) {
+        const len = chunkByteLength(args[0]);
+        guard.streamBytes += len;
+        const totalStream = guard.fetchScope
+          ? (guard.fetchScope.cumulativeStreamBytes += len)
+          : guard.streamBytes;
+        if (totalStream > guard.maxBytes) {
           failActiveGuard(state, client, new Error(`IMAP command decoded stream exceeded ${guard.maxBytes} bytes`));
           return false;
         }
@@ -325,15 +366,10 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
   flow.exec = async (command, attributes, options) => {
     const cmd = String(command ?? "").toUpperCase().trim();
     const isFetch = cmd === "FETCH" || cmd === "UID FETCH";
-    let spec: ImapFetchGuardSpec | null = null;
-    if (isFetch && state.pendingFetchSpec) {
-      spec = state.pendingFetchSpec;
-      state.pendingFetchSpec = null;
-    } else if (!isFetch && BOUNDED_CONTROL_COMMANDS.has(cmd)) {
-      spec = { maxBytes: state.limits.maxControlCommandBytes };
-    }
-    if (!spec) {
-      return await origExec(command, attributes, options);
+    const fetchScope = isFetch ? state.activeFetchScope : null;
+    if (fetchScope) {
+      // Clear any captured sections from an earlier throttled attempt before starting this attempt.
+      fetchScope.latestAttemptSections = null;
     }
 
     let rejectGuard!: (error: Error) => void;
@@ -342,16 +378,45 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
     });
     void guardAbortPromise.catch(() => undefined);
 
-    const guard: ActiveCommandGuard = {
-      maxBytes: spec.maxBytes,
-      maxFetchResponses: spec.maxFetchResponses,
-      expectedUid: spec.expectedUid,
-      wireBytes: 0,
-      streamBytes: 0,
-      untaggedFetchCount: 0,
-      failed: null,
-      reject: rejectGuard,
-    };
+    const guard: ActiveCommandGuard = isFetch
+      ? fetchScope
+        ? {
+            maxBytes: fetchScope.maxBytes,
+            maxFetchResponses: fetchScope.maxFetchResponses,
+            expectedUid: fetchScope.expectedUid,
+            expectedStartOffset: fetchScope.expectedStartOffset,
+            isProbe: fetchScope.isProbe,
+            isSingleMessageFetch: true,
+            fetchScope,
+            wireBytes: 0,
+            streamBytes: 0,
+            untaggedFetchCount: 0,
+            failed: null,
+            reject: rejectGuard,
+          }
+        : {
+            maxBytes: state.limits.maxDiscoveryCommandBytes,
+            maxFetchResponses: state.limits.maxDiscoveryResponses,
+            isProbe: false,
+            isSingleMessageFetch: false,
+            fetchScope: null,
+            wireBytes: 0,
+            streamBytes: 0,
+            untaggedFetchCount: 0,
+            failed: null,
+            reject: rejectGuard,
+          }
+      : {
+          maxBytes: state.limits.maxControlCommandBytes,
+          isProbe: false,
+          isSingleMessageFetch: false,
+          fetchScope: null,
+          wireBytes: 0,
+          streamBytes: 0,
+          untaggedFetchCount: 0,
+          failed: null,
+          reject: rejectGuard,
+        };
 
     const execOptions = options ?? {};
     const prevOnSend = execOptions.onSend;
@@ -376,20 +441,43 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
             failActiveGuard(
               state,
               client,
-              new Error("IMAP single-message fetch received unexpected multiple FETCH responses"),
+              new Error(
+                guard.isSingleMessageFetch
+                  ? "IMAP single-message fetch received unexpected multiple FETCH responses"
+                  : `IMAP discovery FETCH responses exceeded ${guard.maxFetchResponses}`,
+              ),
             );
             return;
           }
-          const inspected = inspectFetchUntagged(untagged);
-          if (guard.expectedUid !== undefined && inspected.uid !== guard.expectedUid) {
-            failActiveGuard(
-              state,
-              client,
-              new Error("IMAP body response did not match the requested UID"),
-            );
-            return;
+          if (guard.isSingleMessageFetch) {
+            const inspected = inspectFetchUntagged(untagged);
+            if (guard.expectedUid !== undefined && inspected.uid !== guard.expectedUid) {
+              failActiveGuard(
+                state,
+                client,
+                new Error("IMAP body response did not match the requested UID"),
+              );
+              return;
+            }
+            if (
+              guard.expectedStartOffset !== undefined
+              && !hasValidOffsetMatch(inspected.bodySections, guard.expectedStartOffset, guard.isProbe)
+            ) {
+              failActiveGuard(
+                state,
+                client,
+                new Error(
+                  guard.isProbe
+                    ? "IMAP message body was truncated before reaching reported size"
+                    : `IMAP message body offset did not match requested start ${guard.expectedStartOffset}`,
+                ),
+              );
+              return;
+            }
+            if (fetchScope) {
+              fetchScope.latestAttemptSections = inspected.bodySections;
+            }
           }
-          state.lastFetchBodySections = inspected.bodySections;
           await origUntaggedFetch(untagged);
         },
       };
@@ -412,20 +500,33 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
   if (typeof flow.fetchOne === "function") {
     const origFetchOne = flow.fetchOne.bind(client);
     flow.fetchOne = async (seq, query, options) => {
-      const explicitSpec = state.pendingFetchSpec;
-      const expectedUid = explicitSpec?.expectedUid ?? (
+      const existingScope = state.activeFetchScope;
+      const expectedUid = existingScope?.expectedUid ?? (
         options?.uid === true && /^\d{1,10}$/.test(String(seq)) ? Number(seq) : undefined
       );
-      const spec: ImapFetchGuardSpec = explicitSpec ?? {
-        maxBytes: state.limits.maxFetchCommandBytes,
-        maxFetchResponses: 1,
-        expectedUid,
-      };
-      state.pendingFetchSpec = spec;
-      state.lastFetchBodySections = null;
+      const expectedStartOffset = existingScope?.expectedStartOffset ?? resolveExpectedStartOffset(query);
+      const ownedScope: FetchAttemptScope | null = existingScope
+        ? null
+        : {
+            maxBytes: state.limits.maxFetchCommandBytes,
+            maxFetchResponses: 1,
+            expectedUid,
+            expectedStartOffset,
+            isProbe: false,
+            cumulativeWireBytes: 0,
+            cumulativeStreamBytes: 0,
+            latestAttemptSections: null,
+          };
+      const scope = existingScope ?? ownedScope!;
+      if (ownedScope) {
+        state.activeFetchScope = ownedScope;
+      } else if (existingScope && existingScope.expectedStartOffset === undefined) {
+        existingScope.expectedStartOffset = expectedStartOffset;
+      }
+      scope.latestAttemptSections = null;
       try {
         const result = await origFetchOne(seq, query, options);
-        const captured = state.lastFetchBodySections as CapturedBodySections | null;
+        const captured = scope.latestAttemptSections as CapturedBodySections | null;
         if (result && typeof result === "object" && captured?.valid && captured.parts.size > 0) {
           const message = result as { bodyParts?: Map<string, Buffer> };
           const merged = new Map<string, Buffer>(message.bodyParts ?? []);
@@ -436,8 +537,9 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
         }
         return result;
       } finally {
-        if (state.pendingFetchSpec === spec) state.pendingFetchSpec = null;
-        state.lastFetchBodySections = null;
+        if (ownedScope && state.activeFetchScope === ownedScope) {
+          state.activeFetchScope = null;
+        }
       }
     };
   }
@@ -445,7 +547,7 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
   return client;
 }
 
-/** Run a single-UID fetch or probe operation under an explicit command budget. */
+/** Run a single-UID fetch or probe operation under an explicit persistent retry-aware budget. */
 export async function runGuardedImapFetch<T>(
   client: object,
   spec: ImapFetchGuardSpec,
@@ -458,15 +560,23 @@ export async function runGuardedImapFetch<T>(
   const configuredMax = spec.isProbe
     ? state.limits.maxProbeCommandBytes
     : state.limits.maxFetchCommandBytes;
-  const effectiveSpec: ImapFetchGuardSpec = {
-    ...spec,
+  const scope: FetchAttemptScope = {
     maxBytes: Math.min(spec.maxBytes, configuredMax),
+    maxFetchResponses: spec.maxFetchResponses ?? 1,
+    expectedUid: spec.expectedUid,
+    expectedStartOffset: spec.expectedStartOffset,
+    isProbe: Boolean(spec.isProbe),
+    cumulativeWireBytes: 0,
+    cumulativeStreamBytes: 0,
+    latestAttemptSections: null,
   };
-  const previousSpec = state.pendingFetchSpec;
-  state.pendingFetchSpec = effectiveSpec;
+  const previousScope = state.activeFetchScope;
+  state.activeFetchScope = scope;
   try {
     return await operation();
   } finally {
-    state.pendingFetchSpec = previousSpec;
+    if (state.activeFetchScope === scope) {
+      state.activeFetchScope = previousScope;
+    }
   }
 }

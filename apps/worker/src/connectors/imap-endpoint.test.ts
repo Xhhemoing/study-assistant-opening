@@ -6,6 +6,8 @@ import {
   createApprovedImapClient,
   installImapCommandGuard,
   MAX_IMAP_CONTROL_COMMAND_BYTES,
+  MAX_IMAP_DISCOVERY_COMMAND_BYTES,
+  MAX_IMAP_DISCOVERY_RESPONSES,
   MAX_IMAP_FETCH_COMMAND_BYTES,
   MAX_IMAP_LINE_BYTES,
   MAX_IMAP_LITERAL_BYTES,
@@ -100,6 +102,8 @@ describe("approved IMAP dialer", () => {
     expect(MAX_IMAP_RESPONSE_BYTES).toBeGreaterThan(MAX_IMAP_LITERAL_BYTES);
     expect(MAX_IMAP_FETCH_COMMAND_BYTES).toBe(MAX_IMAP_RESPONSE_BYTES + 64 * 1024);
     expect(MAX_IMAP_CONTROL_COMMAND_BYTES).toBe(MAX_IMAP_RESPONSE_BYTES + 64 * 1024);
+    expect(MAX_IMAP_DISCOVERY_COMMAND_BYTES).toBe(8 * 1024 * 1024);
+    expect(MAX_IMAP_DISCOVERY_RESPONSES).toBe(10_000);
     expect(MAX_IMAP_PROBE_COMMAND_BYTES).toBe(64 * 1024);
     client.close();
   });
@@ -368,6 +372,241 @@ describe("approved IMAP dialer", () => {
         for (const s of sockets) s.destroy();
         await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
       }
+    }
+  });
+
+  it("bounds mailbox UID discovery against both wire-byte flood and untagged response-count flood without OK", async () => {
+    for (const mode of ["byte-cap", "count-cap"] as const) {
+      let serverSawClose = false;
+      const sockets = new Set<net.Socket>();
+      const server = net.createServer(socket => {
+        sockets.add(socket);
+        socket.once("close", () => {
+          serverSawClose = true;
+          sockets.delete(socket);
+        });
+        socket.on("error", () => undefined);
+        socket.write("* OK ready\r\n");
+        let buffered = "";
+        socket.on("data", chunk => {
+          buffered += chunk.toString("utf8");
+          for (let end = buffered.indexOf("\r\n"); end >= 0; end = buffered.indexOf("\r\n")) {
+            const line = buffered.slice(0, end);
+            buffered = buffered.slice(end + 2);
+            const space = line.indexOf(" ");
+            const tag = space < 0 ? line : line.slice(0, space);
+            const rest = space < 0 ? "" : line.slice(space + 1);
+            const verb = (rest.split(" ")[0] ?? "").toUpperCase();
+            if (verb === "CAPABILITY") socket.write(`* CAPABILITY IMAP4rev1 UIDPLUS\r\n${tag} OK done\r\n`);
+            else if (verb === "NAMESPACE") socket.write(`* NAMESPACE (("" "/")) NIL NIL\r\n${tag} OK done\r\n`);
+            else if (verb === "LIST") socket.write(`* LIST () "/" "INBOX"\r\n${tag} OK done\r\n`);
+            else if (verb === "EXAMINE" || verb === "SELECT") {
+              socket.write(`* 100 EXISTS\r\n* OK [UIDVALIDITY 42] ok\r\n* OK [UIDNEXT 101] ok\r\n${tag} OK [READ-ONLY] done\r\n`);
+            } else if (verb === "UID" && /^FETCH\b/i.test(rest.slice(4))) {
+              if (mode === "byte-cap") {
+                for (let i = 1; i <= 40; i += 1) {
+                  socket.write(`* ${i} FETCH (UID ${i} INTERNALDATE "02-Jan-2026 03:04:05 +0000" RFC822.SIZE 128)\r\n`);
+                }
+              } else {
+                for (let i = 1; i <= 10; i += 1) {
+                  socket.write(`* ${i} FETCH (UID ${i})\r\n`);
+                }
+              }
+            } else {
+              socket.write(`${tag} OK done\r\n`);
+            }
+          }
+        });
+      });
+
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const { port } = server.address() as AddressInfo;
+      const client = installImapCommandGuard(
+        new ImapFlow({ host: "127.0.0.1", port, secure: false, logger: false, auth }),
+        mode === "byte-cap" ? { maxDiscoveryCommandBytes: 1024 } : { maxDiscoveryResponses: 4 },
+      );
+      try {
+        await client.connect();
+        await expect(syncMailbox({
+          scope: { workspaceId: "workspace", ownerUserId: "owner" },
+          connectionId: "connection",
+          connectionVersion: 1,
+          folder: "INBOX",
+          cursor: null,
+          since: new Date(0),
+          client,
+          imports: { advanceImapCursor: vi.fn() },
+          storage: { upload: vi.fn(), remove: vi.fn() },
+        } as unknown as ImapSyncDeps)).rejects.toThrow(
+          mode === "byte-cap" ? /exceeded 1024 bytes/ : "IMAP discovery FETCH responses exceeded 4",
+        );
+        await new Promise(resolve => setTimeout(resolve, 25));
+        expect(serverSawClose).toBe(true);
+      } finally {
+        client.close();
+        for (const s of sockets) s.destroy();
+        await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+      }
+    }
+  });
+
+  it("preserves guard bounds, UID/offset validation, and clears stale sections across internal ETHROTTLE retries", { timeout: 15_000 }, async () => {
+    for (const scenario of ["clean-retry", "wrong-offset-retry", "cumulative-byte-retry"] as const) {
+      let fetchAttempts = 0;
+      const sockets = new Set<net.Socket>();
+      const server = net.createServer(socket => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+        socket.on("error", () => undefined);
+        socket.write("* OK ready\r\n");
+        let buffered = "";
+        socket.on("data", chunk => {
+          buffered += chunk.toString("utf8");
+          for (let end = buffered.indexOf("\r\n"); end >= 0; end = buffered.indexOf("\r\n")) {
+            const line = buffered.slice(0, end);
+            buffered = buffered.slice(end + 2);
+            const space = line.indexOf(" ");
+            const tag = space < 0 ? line : line.slice(0, space);
+            const rest = space < 0 ? "" : line.slice(space + 1);
+            const verb = (rest.split(" ")[0] ?? "").toUpperCase();
+            if (verb === "CAPABILITY") socket.write(`* CAPABILITY IMAP4rev1 UIDPLUS\r\n${tag} OK done\r\n`);
+            else if (verb === "NAMESPACE") socket.write(`* NAMESPACE (("" "/")) NIL NIL\r\n${tag} OK done\r\n`);
+            else if (verb === "LIST") socket.write(`* LIST () "/" "INBOX"\r\n${tag} OK done\r\n`);
+            else if (verb === "EXAMINE" || verb === "SELECT") {
+              socket.write(`* 1 EXISTS\r\n* OK [UIDVALIDITY 42] ok\r\n* OK [UIDNEXT 12] ok\r\n${tag} OK [READ-ONLY] done\r\n`);
+            } else if (verb === "UID" && /^FETCH\b/i.test(rest.slice(4))) {
+              fetchAttempts += 1;
+              if (fetchAttempts === 1) {
+                if (scenario === "cumulative-byte-retry") {
+                  const pad = "p".repeat(1200);
+                  socket.write(`* 1 FETCH (UID 11 BODY[]<0> {1200}\r\n${pad})\r\n${tag} BAD Request is throttled. Suggested Backoff Time: 1 milliseconds\r\n`);
+                } else {
+                  socket.write(`* 1 FETCH (UID 11 BODY[]<0> {10}\r\nSTALE_AT_1)\r\n${tag} BAD Request is throttled. Suggested Backoff Time: 1 milliseconds\r\n`);
+                }
+              } else if (scenario === "clean-retry") {
+                socket.write(`* 1 FETCH (UID 11 BODY[]<0> {12}\r\nCLEAN_RETRY!)\r\n${tag} OK done\r\n`);
+              } else if (scenario === "wrong-offset-retry") {
+                socket.write(`* 1 FETCH (UID 11 BODY[]<64> {12}\r\nBAD_OFFSET!!)\r\n${tag} OK done\r\n`);
+              } else {
+                const pad2 = "q".repeat(1200);
+                socket.write(`* 1 FETCH (UID 11 BODY[]<0> {1200}\r\n${pad2})\r\n${tag} OK done\r\n`);
+              }
+            } else if (verb === "LOGOUT") {
+              socket.write(`* BYE bye\r\n${tag} OK done\r\n`);
+              socket.end();
+            } else {
+              socket.write(`${tag} OK done\r\n`);
+            }
+          }
+        });
+      });
+
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const { port } = server.address() as AddressInfo;
+      const client = installImapCommandGuard(
+        new ImapFlow({ host: "127.0.0.1", port, secure: false, logger: false, auth }),
+        scenario === "cumulative-byte-retry" ? { maxFetchCommandBytes: 2048 } : undefined,
+      );
+      try {
+        await client.connect();
+        await client.mailboxOpen("INBOX", { readOnly: true });
+        if (scenario === "clean-retry") {
+          const msg = await client.fetchOne("11", { source: { start: 0, maxLength: 1024 } }, { uid: true });
+          expect(fetchAttempts).toBe(2);
+          expect(msg).toBeTruthy();
+          if (msg) {
+            expect(msg.source?.toString("utf8")).toBe("CLEAN_RETRY!");
+            expect(msg.bodyParts?.get(partialBodyOffsetKey(0))?.toString("utf8")).toBe("CLEAN_RETRY!");
+          }
+        } else if (scenario === "wrong-offset-retry") {
+          await expect(
+            client.fetchOne("11", { source: { start: 0, maxLength: 1024 } }, { uid: true }),
+          ).rejects.toThrow("IMAP message body offset did not match requested start 0");
+          expect(fetchAttempts).toBe(2);
+        } else {
+          await expect(
+            client.fetchOne("11", { source: { start: 0, maxLength: 4096 } }, { uid: true }),
+          ).rejects.toThrow(/exceeded 2048 bytes/);
+          expect(fetchAttempts).toBe(2);
+        }
+      } finally {
+        client.close();
+        for (const s of sockets) s.destroy();
+        await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+      }
+    }
+  });
+
+  it("rejects an initial body fetch whose response uses a non-zero offset BODY[]<64> even when byteLength matches reportedSize", async () => {
+    const body180 = Buffer.from("Subject: Shifted\r\n\r\n" + "x".repeat(160), "utf8");
+    expect(body180.byteLength).toBe(180);
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer(socket => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+      socket.on("error", () => undefined);
+      socket.write("* OK ready\r\n");
+      let buffered = "";
+      socket.on("data", chunk => {
+        buffered += chunk.toString("utf8");
+        for (let end = buffered.indexOf("\r\n"); end >= 0; end = buffered.indexOf("\r\n")) {
+          const line = buffered.slice(0, end);
+          buffered = buffered.slice(end + 2);
+          const space = line.indexOf(" ");
+          const tag = space < 0 ? line : line.slice(0, space);
+          const rest = space < 0 ? "" : line.slice(space + 1);
+          const verb = (rest.split(" ")[0] ?? "").toUpperCase();
+          if (verb === "CAPABILITY") socket.write(`* CAPABILITY IMAP4rev1 UIDPLUS\r\n${tag} OK done\r\n`);
+          else if (verb === "NAMESPACE") socket.write(`* NAMESPACE (("" "/")) NIL NIL\r\n${tag} OK done\r\n`);
+          else if (verb === "LIST") socket.write(`* LIST () "/" "INBOX"\r\n${tag} OK done\r\n`);
+          else if (verb === "EXAMINE" || verb === "SELECT") {
+            socket.write(`* 1 EXISTS\r\n* OK [UIDVALIDITY 42] ok\r\n* OK [UIDNEXT 12] ok\r\n${tag} OK [READ-ONLY] done\r\n`);
+          } else if (verb === "UID" && /^FETCH\b/i.test(rest.slice(4))) {
+            if (/BODY(?:\.PEEK)?\[\]<0\.26214401>/i.test(rest)) {
+              socket.write(Buffer.concat([
+                Buffer.from("* 1 FETCH (UID 11 RFC822.SIZE 180 BODY[]<64> {180}\r\n", "utf8"),
+                body180,
+                Buffer.from(`)\r\n${tag} OK done\r\n`, "utf8"),
+              ]));
+            } else {
+              socket.write(`* 1 FETCH (UID 11 INTERNALDATE "02-Jan-2026 03:04:05 +0000" RFC822.SIZE 180)\r\n${tag} OK done\r\n`);
+            }
+          } else if (verb === "LOGOUT") {
+            socket.write(`* BYE bye\r\n${tag} OK done\r\n`);
+            socket.end();
+          } else {
+            socket.write(`${tag} OK done\r\n`);
+          }
+        }
+      });
+    });
+
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const client = installImapCommandGuard(
+      new ImapFlow({ host: "127.0.0.1", port, secure: false, logger: false, auth }),
+    );
+    const upload = vi.fn();
+    const advanceImapCursor = vi.fn();
+    try {
+      await client.connect();
+      await expect(syncMailbox({
+        scope: { workspaceId: "workspace", ownerUserId: "owner" },
+        connectionId: "connection",
+        connectionVersion: 1,
+        folder: "INBOX",
+        cursor: null,
+        since: new Date(0),
+        client,
+        imports: { advanceImapCursor },
+        storage: { upload, remove: vi.fn() },
+      } as unknown as ImapSyncDeps)).rejects.toThrow("IMAP message body offset did not match requested start 0");
+      expect(upload).not.toHaveBeenCalled();
+      expect(advanceImapCursor).not.toHaveBeenCalled();
+    } finally {
+      client.close();
+      for (const s of sockets) s.destroy();
+      await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
     }
   });
 });

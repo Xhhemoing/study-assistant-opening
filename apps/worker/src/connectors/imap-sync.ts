@@ -297,7 +297,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
     };
     const fetched = await withDeadline("fetch", () => runGuardedImapFetch(
       deps.client,
-      { maxBytes: MAX_IMAP_FETCH_COMMAND_BYTES, maxFetchResponses: 1, expectedUid: uid },
+      { maxBytes: MAX_IMAP_FETCH_COMMAND_BYTES, maxFetchResponses: 1, expectedUid: uid, expectedStartOffset: 0 },
       () => deps.client.fetchOne(
         String(uid),
         { source: { start: 0, maxLength: MAX_MAIL_BYTES + 1 }, size: true },
@@ -315,6 +315,14 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       throw new Error("mail exceeds limit");
     }
     if (fetchedSource.byteLength > MAX_MAIL_BYTES) throw new Error("mail exceeds limit");
+    const initialBodySlice =
+      fetched.bodyParts?.get(partialBodyOffsetKey(0))
+      ?? fetched.bodyParts?.get("BODY[]");
+    const hasUnexpectedPartialKey = [...(fetched.bodyParts?.keys() ?? [])]
+      .some((key) => key.startsWith("BODY[]<") && key !== partialBodyOffsetKey(0));
+    if (!Buffer.isBuffer(initialBodySlice) || !initialBodySlice.equals(fetchedSource) || hasUnexpectedPartialKey) {
+      throw new Error("IMAP message body offset did not match requested start 0");
+    }
     const reportedSize = Math.max(
       typeof fetched.size === "number" && Number.isFinite(fetched.size) && fetched.size > 0 ? fetched.size : 0,
       knownSize !== undefined && Number.isFinite(knownSize) && knownSize > 0 ? knownSize : 0,
@@ -332,7 +340,13 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       const expectedOffsetKey = partialBodyOffsetKey(overlapStart);
       const probe = await withDeadline("fetch", () => runGuardedImapFetch(
         deps.client,
-        { maxBytes: MAX_IMAP_PROBE_COMMAND_BYTES, maxFetchResponses: 1, expectedUid: uid, isProbe: true },
+        {
+          maxBytes: MAX_IMAP_PROBE_COMMAND_BYTES,
+          maxFetchResponses: 1,
+          expectedUid: uid,
+          expectedStartOffset: overlapStart,
+          isProbe: true,
+        },
         () => deps.client.fetchOne(
           String(uid),
           { source: { start: overlapStart, maxLength: expectedOverlapLen + 1 } },

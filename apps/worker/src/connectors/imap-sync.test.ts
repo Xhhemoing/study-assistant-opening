@@ -13,9 +13,15 @@ function mailbox(discovered: number[], cursor: ImapCursor | null) {
     published.push(Number(input.identity.remoteId));
     return { id: "receipt", sourceIds: ["source"], duplicate: false, connectionVersion: 1 };
   });
-  const fetchOne = vi.fn(async (uid: string) => ({
-    uid: Number(uid), seq: Number(uid), source: Buffer.from(`Subject: UID ${uid}\r\n\r\nmessage`),
-  }));
+  const fetchOne = vi.fn(async (uid: string) => {
+    const source = Buffer.from(`Subject: UID ${uid}\r\n\r\nmessage`);
+    return {
+      uid: Number(uid),
+      seq: Number(uid),
+      source,
+      bodyParts: new Map([[partialBodyOffsetKey(0), source]]),
+    };
+  });
   const deps = {
     scope: { workspaceId: "workspace", ownerUserId: "owner" },
     connectionId: "connection",
@@ -174,12 +180,24 @@ describe("imap sync cursor and parser guards", () => {
       const advanceImapCursor = vi.fn();
       const fetchOne = vi.fn(async (uid: string, query: { source?: { start?: number; maxLength?: number } }) => {
         if (uid === "30") {
-          return { uid: 30, seq: 1, size: completeSource.byteLength, source: completeSource };
+          return {
+            uid: 30,
+            seq: 1,
+            size: completeSource.byteLength,
+            source: completeSource,
+            bodyParts: new Map([[partialBodyOffsetKey(0), completeSource]]),
+          };
         }
         if (query.source?.start === 116 && query.source?.maxLength === 65) {
           return probeResponse;
         }
-        return { uid: 31, seq: withUid30 ? 2 : 1, size: 4096, source: truncatedSource };
+        return {
+          uid: 31,
+          seq: withUid30 ? 2 : 1,
+          size: 4096,
+          source: truncatedSource,
+          bodyParts: new Map([[partialBodyOffsetKey(0), truncatedSource]]),
+        };
       });
       const deps = {
         scope: { workspaceId: "workspace", ownerUserId: "owner" },
@@ -229,7 +247,13 @@ describe("imap sync cursor and parser guards", () => {
     });
 
     // (f) 0-byte initial fetch fails immediately without issuing a probe
-    const emptyFetchOne = vi.fn(async () => ({ uid: 31, seq: 1, size: 4096, source: Buffer.alloc(0) }));
+    const emptyFetchOne = vi.fn(async () => ({
+      uid: 31,
+      seq: 1,
+      size: 4096,
+      source: Buffer.alloc(0),
+      bodyParts: new Map([[partialBodyOffsetKey(0), Buffer.alloc(0)]]),
+    }));
     await expect(syncMailbox({
       scope: { workspaceId: "workspace", ownerUserId: "owner" },
       connectionId: "connection",
@@ -275,11 +299,11 @@ describe("imap sync cursor and parser guards", () => {
       if (uid === "41") {
         return query.source?.start === 116 && query.source?.maxLength === 65
           ? { uid: 41, seq: 1, source: complete180.subarray(116, 180), bodyParts: new Map([[partialBodyOffsetKey(116), complete180.subarray(116, 180)]]) }
-          : { uid: 41, seq: 1, size: 220, source: complete180 };
+          : { uid: 41, seq: 1, size: 220, source: complete180, bodyParts: new Map([[partialBodyOffsetKey(0), complete180]]) };
       }
       return query.source?.start === 0 && query.source?.maxLength === 41
         ? { uid: 42, seq: 2, source: complete40, bodyParts: new Map([[partialBodyOffsetKey(0), complete40]]) }
-        : { uid: 42, seq: 2, size: 80, source: complete40 };
+        : { uid: 42, seq: 2, size: 80, source: complete40, bodyParts: new Map([[partialBodyOffsetKey(0), complete40]]) };
     });
     const deps = {
       scope: { workspaceId: "workspace", ownerUserId: "owner" },
@@ -335,7 +359,7 @@ describe("imap sync cursor and parser guards", () => {
         fetchOne: vi.fn(async (_uid: string, query: { source?: { start?: number; maxLength?: number } }) => (
           query.source?.start === 116 && query.source?.maxLength === 65
             ? false
-            : { uid: 51, seq: 1, size: 4096, source: body }
+            : { uid: 51, seq: 1, size: 4096, source: body, bodyParts: new Map([[partialBodyOffsetKey(0), body]]) }
         )),
         logout: vi.fn(),
       },
@@ -351,6 +375,55 @@ describe("imap sync cursor and parser guards", () => {
     expect(publishConnectorSource).not.toHaveBeenCalled();
     expect(upload).not.toHaveBeenCalled();
     expect(advanceImapCursor).not.toHaveBeenCalled();
+  });
+
+  it("rejects an initial body response with non-zero partial offset or missing offset metadata without publishing or advancing cursor", async () => {
+    const headerAndBody = "Subject: Offset Spoof\r\n\r\n";
+    const fullLengthBody = Buffer.from(
+      headerAndBody + "k".repeat(180 - Buffer.byteLength(headerAndBody)),
+      "utf8",
+    );
+    expect(fullLengthBody.byteLength).toBe(180);
+
+    for (const bodyParts of [
+      new Map([[partialBodyOffsetKey(64), fullLengthBody]]),
+      undefined,
+    ]) {
+      vi.mocked(publishConnectorSource).mockReset();
+      const upload = vi.fn(async () => undefined);
+      const advanceImapCursor = vi.fn();
+      const fetchOne = vi.fn(async () => ({
+        uid: 61,
+        seq: 1,
+        size: 180,
+        source: fullLengthBody,
+        ...(bodyParts ? { bodyParts } : {}),
+      }));
+      const deps = {
+        scope: { workspaceId: "workspace", ownerUserId: "owner" },
+        connectionId: "connection",
+        connectionVersion: 1,
+        folder: "INBOX",
+        cursor: { folder: "INBOX", uidValidity: "42", lastUid: 60 },
+        since: new Date(0),
+        client: {
+          mailboxOpen: vi.fn(async () => ({ uidValidity: 42n })),
+          async *fetch() {
+            yield { uid: 61, size: 180 };
+          },
+          fetchOne,
+          logout: vi.fn(),
+        },
+        imports: { advanceImapCursor },
+        storage: { upload, remove: vi.fn() },
+      } as unknown as ImapSyncDeps;
+
+      await expect(syncMailbox(deps)).rejects.toThrow("IMAP message body offset did not match requested start 0");
+      expect(fetchOne).toHaveBeenCalledTimes(1);
+      expect(publishConnectorSource).not.toHaveBeenCalled();
+      expect(upload).not.toHaveBeenCalled();
+      expect(advanceImapCursor).not.toHaveBeenCalled();
+    }
   });
 
   it("stops discovery cleanly when elapsed sync time budget or signal expires", async () => {
