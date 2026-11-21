@@ -20,6 +20,9 @@ export type ExamReviewContext = {
 // Exceeds the 200-char clientKey ceiling of bind/mapSource so review aliases cannot collide in opening_exam_integration_commands.
 const REVIEW_ALIAS_KEY_PREFIX = `exam-review-alias:v1:${"_".repeat(180)}:`;
 const reviewAliasKey = (clientKey: string) => `${REVIEW_ALIAS_KEY_PREFIX}${clientKey}`;
+// Exceeds the 100-char examWorkReviewInputSchema.clientKey ceiling so tombstones cannot collide with caller keys.
+const SUPERSEDED_REVIEW_KEY_PREFIX = `superseded-review:v1:${"_".repeat(80)}:`;
+const supersededReviewKey = (reviewId: string) => `${SUPERSEDED_REVIEW_KEY_PREFIX}${reviewId}`;
 const STALE_PENDING_LEASE_SECONDS = 60;
 const reviewOperationId = (workspaceId: string, reviewId: string) => `exam-review:${workspaceId}:${reviewId}`;
 const examReviewAliasSchema = z.object({
@@ -140,6 +143,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     const readyRows: Row[] = [];
     const blockingRows: Row[] = [];
     const reclaimableRows: Row[] = [];
+    const releasedStaleRows: Row[] = [];
     for (const row of rows) {
       const rowId = String(row.id);
       if (row.status === "ready") {
@@ -150,9 +154,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           // Only a positive released_only receipt proves zero spend. Missing ledger rows
           // (e.g. after Backup v2 restore, which omits opening_budget_reservations) MUST stay unknown.
           if (ledger === "released_only") {
-            await tx`UPDATE opening_exam_reviews
-              SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-              WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
+            releasedStaleRows.push(row);
             continue;
           }
         }
@@ -163,9 +165,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
         } else {
           const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
           if (ledger === "released_only") {
-            await tx`UPDATE opening_exam_reviews
-              SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-              WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+            releasedStaleRows.push(row);
             continue;
           }
           if (ledger === "active_or_billed") {
@@ -180,6 +180,31 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
         }
       }
     }
+    const supersedeRows = async (superseded: Row[], chosenId: string) => {
+      for (const row of superseded) {
+        const rowId = String(row.id);
+        if (rowId === chosenId) continue;
+        const originalClientKey = String(row.client_key);
+        const sprintId = String(row.sprint_id);
+        const alias: ExamReviewAlias = { reviewId: chosenId };
+        await tx`UPDATE opening_exam_reviews
+          SET status='failed',
+              client_key=${supersededReviewKey(rowId)},
+              updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+          WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND status IN ('pending', 'unknown')`;
+        if (!originalClientKey.startsWith(SUPERSEDED_REVIEW_KEY_PREFIX)) {
+          await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
+            VALUES(${randomUUID()},${sprintId},${reviewAliasKey(originalClientKey)},${tx.json(alias)},now())
+            ON CONFLICT (sprint_id,client_key) DO UPDATE SET intent=EXCLUDED.intent, recorded_at=now()`;
+        }
+        await tx`UPDATE opening_exam_integration_commands
+          SET intent=${tx.json(alias)}, recorded_at=now()
+          WHERE sprint_id=${sprintId}
+            AND left(client_key, length(${REVIEW_ALIAS_KEY_PREFIX}))=${REVIEW_ALIAS_KEY_PREFIX}
+            AND intent->>'reviewId'=${rowId}`;
+      }
+    };
     const pick = (bucket: Row[]) => {
       if (options.preferredRowId) {
         const preferred = bucket.find(row => String(row.id) === options.preferredRowId);
@@ -189,21 +214,20 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     };
     if (readyRows.length) {
       const chosenId = String(pick(readyRows).id);
-      return { context: await load(chosenId), chosenId };
+      const context = await load(chosenId);
+      await supersedeRows([...releasedStaleRows, ...reclaimableRows], chosenId);
+      return { context, chosenId };
     }
     if (blockingRows.length) {
       const chosenId = String(pick(blockingRows).id);
-      return { context: { ...(await load(chosenId)), reusedUnresolved: true }, chosenId };
+      const context = await load(chosenId);
+      await supersedeRows([...releasedStaleRows, ...reclaimableRows], chosenId);
+      return { context: { ...context, reusedUnresolved: true }, chosenId };
     }
     if (reclaimableRows.length) {
       const chosenId = String(pick(reclaimableRows).id);
       const context = await load(chosenId);
-      for (const extra of reclaimableRows) {
-        if (String(extra.id) === chosenId) continue;
-        await tx`UPDATE opening_exam_reviews
-          SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-          WHERE id=${String(extra.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
-      }
+      await supersedeRows([...releasedStaleRows, ...reclaimableRows], chosenId);
       const [reclaimed] = await tx`UPDATE opening_exam_reviews
         SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
         WHERE id=${chosenId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
@@ -215,6 +239,12 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
         },
       };
+    }
+    for (const row of releasedStaleRows) {
+      await tx`UPDATE opening_exam_reviews
+        SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+        WHERE id=${String(row.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          AND status IN ('pending', 'unknown')`;
     }
     return null;
   }
@@ -323,7 +353,8 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           if (reconciled) {
             const alias: ExamReviewAlias = { reviewId: reconciled.chosenId };
             await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
-              VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
+              VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())
+              ON CONFLICT (sprint_id,client_key) DO UPDATE SET intent=EXCLUDED.intent, recorded_at=now()`;
             return reconciled.context;
           }
           const [inserted] = await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,

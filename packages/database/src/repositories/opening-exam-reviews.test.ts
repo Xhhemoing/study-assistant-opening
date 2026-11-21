@@ -361,217 +361,407 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     const idA = "77777777-7777-4777-8777-777777777771";
     const idB = "77777777-7777-4777-8777-777777777772";
     const runScenario = async (siblingStatus: "unknown" | "ready") => {
-      const statuses: Record<string, string> = { [idA]: "pending", [idB]: siblingStatus };
-      const ledgerByOp: Record<string, Array<Record<string, unknown>>> = {
-        [`exam-review:${scope.workspaceId}:${idA}`]: [
-          { state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 },
+      const store = makeStatefulMultiRowSql({
+        rows: [
+          {
+            id: idA,
+            clientKey: `legacy-${idA}`,
+            status: "pending",
+            createdAt: "2026-10-17T00:00:00.000Z",
+            lease: "2026-10-17 00:00:00.000000+00",
+            isStale: true,
+            ledgerRows: [{ state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 }],
+          },
+          {
+            id: idB,
+            clientKey: `legacy-${idB}`,
+            status: siblingStatus,
+            createdAt: "2026-10-17T00:00:05.000Z",
+            lease: "2026-10-17 00:00:05.000000+00",
+            isStale: true,
+            ledgerRows: [{ state: "reserved", release_reason: null, outcome_unknown_at: new Date("2026-10-17T00:00:30Z"), pending_reconcile_cents: 0 }],
+          },
         ],
-        [`exam-review:${scope.workspaceId}:${idB}`]: [
-          { state: "reserved", release_reason: null, outcome_unknown_at: new Date("2026-10-17T00:00:30Z"), pending_reconcile_cents: 0 },
-        ],
-      };
-      const calls: Array<{ query: string; values: unknown[] }> = [];
-      let inserted = false;
-      const makeRow = (id: string, createdAt: string, isStale: boolean) => ({
-        id,
-        sprint_id: sprintId,
-        workspace_id: scope.workspaceId,
-        owner_user_id: scope.ownerUserId,
-        source_item_id: input.sourceItemId,
-        work_source_id: workId,
-        work_source_version: 1,
-        reference_source_id: referenceId,
-        reference_source_version: 1,
-        answer_text: input.answerText,
-        client_key: `legacy-${id}`,
-        intent: { ...input, clientKey: `legacy-${id}` },
-        status: statuses[id],
-        proposal: siblingStatus === "ready" && id === idB ? {
-          transcription: "x=1", questionMatch: true, outcome: "correct",
-          steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
-        } : null,
-        model_label: siblingStatus === "ready" && id === idB ? "vision-model" : null,
-        privacy_epoch: 1,
-        created_at: new Date(createdAt),
-        updated_at: new Date(createdAt),
-        is_stale: isStale,
       });
-      const exec = (strings: TemplateStringsArray, ...values: unknown[]) => {
-        const query = strings.join("?").replace(/\s+/g, " ").trim();
-        if (strings.length === 1 && query === "") return { __fragment: "" };
-        if (query.startsWith("AND ")) return { __fragment: query, values };
-        calls.push({ query, values });
-        if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId, privacy_epoch: 1 }]);
-        if (query.includes("FROM opening_exam_sprints s JOIN opening_exam_bindings")) {
-          return Promise.resolve([{ id: sprintId, pack_snapshot: pack, state, binding }]);
-        }
-        if (query.includes("FROM courses WHERE")) return Promise.resolve([{ id: courseId }]);
-        if (query.includes("FROM opening_sources s JOIN opening_source_versions")) return Promise.resolve([{ id: workId }]);
-        if (query.includes("SELECT version FROM opening_sources")) return Promise.resolve([{ version: 1 }]);
-        if (query.includes("SELECT mime FROM opening_sources")) return Promise.resolve([{ mime: "image/png" }]);
-        if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ "?column?": 1 }]);
-        if (query.includes("FROM opening_budget_reservations")) {
-          const opId = String(values[1]);
-          return Promise.resolve(ledgerByOp[opId] ?? []);
-        }
-        if (query.includes("UPDATE opening_exam_reviews SET status='failed'")) {
-          statuses[String(values[0])] = "failed";
-          return Promise.resolve([]);
-        }
-        if (query.includes("INSERT INTO opening_exam_reviews")) {
-          inserted = true;
-          return Promise.resolve([{ lease_updated_at: "2026-10-17 00:05:00.000000+00" }]);
-        }
-        if (query.includes("FROM opening_exam_reviews")) {
-          if (query.includes("AND client_key=?")) return Promise.resolve([]);
-          if (query.includes("WHERE id=?")) {
-            const targetId = String(values[0]);
-            return Promise.resolve([makeRow(targetId, targetId === idA ? "2026-10-17T00:00:00.000Z" : "2026-10-17T00:00:05.000Z", true)]);
-          }
-          // Multi-row candidate query: must NOT have LIMIT 1 and must lock ORDER BY id ASC FOR UPDATE.
-          expect(query).not.toContain("LIMIT 1");
-          expect(query).toContain("ORDER BY id ASC FOR UPDATE");
-          return Promise.resolve([
-            makeRow(idA, "2026-10-17T00:00:00.000Z", true),
-            makeRow(idB, "2026-10-17T00:00:05.000Z", true),
-          ]);
-        }
-        return Promise.resolve([]);
-      };
-      const sql = Object.assign(exec, {
-        json: (value: unknown) => value,
-        begin: async <T>(fn: (tx: unknown) => Promise<T>) => fn(sql),
-      }) as unknown as Sql;
-      const ctx = await createOpeningExamReviewsRepository(sql).begin(scope, { ...input, clientKey: `fresh-key-${siblingStatus}` });
-      expect(statuses[idA]).toBe("failed");
-      expect(statuses[idB]).toBe(siblingStatus);
-      expect(inserted).toBe(false);
+      const repo = createOpeningExamReviewsRepository(store.sql);
+      const ctx = await repo.begin(scope, { ...input, clientKey: `fresh-key-${siblingStatus}` });
+      expect(store.getRow(idA).status).toBe("failed");
+      expect(store.getRow(idA).clientKey).not.toBe(`legacy-${idA}`);
+      expect(store.getRow(idB).status).toBe(siblingStatus);
+      expect(store.insertedCount()).toBe(0);
       expect(ctx.review.id).toBe(idB);
       expect(ctx.review.status).toBe(siblingStatus);
       expect(ctx.executionUpdatedAt).toBeUndefined();
       expect(ctx.reusedUnresolved).toBe(siblingStatus === "unknown" ? true : undefined);
+      // Original key of superseded row A now resolves directly to B instead of failed A.
+      const followUp = await repo.begin(scope, { ...input, clientKey: `legacy-${idA}` });
+      expect(followUp.review.id).toBe(idB);
+      expect(followUp.review.status).toBe(siblingStatus);
     };
     await runScenario("unknown");
     await runScenario("ready");
   });
 
-  it("scans same-intent siblings before reclaiming stale row A on original clientKey or alias retry", async () => {
+  it("retires skipped stale rows (revoking their lease) and rebinds original + alias keys to chosen sibling B so repeated retries never regress to failed A", async () => {
     const idA = "77777777-7777-4777-8777-777777777781";
     const idB = "77777777-7777-4777-8777-777777777782";
     const keyA = "legacy-original-key-a";
     const aliasKeyA = "legacy-alias-key-a";
+    const secondaryAliasKeyA = "legacy-alias-key-a2";
+    const oldLeaseA = "2026-10-17 00:00:00.111111+00";
+
     const runRetry = async (
       entry: "original" | "alias",
       rowALedger: "none" | "released_only",
-      siblingStatus: "ready" | "unknown",
+      siblingKind: "ready" | "unknown" | "fresh_pending",
     ) => {
-      const statuses: Record<string, string> = { [idA]: "pending", [idB]: siblingStatus };
-      const ledgerByOp: Record<string, Array<Record<string, unknown>>> = {
-        [`exam-review:${scope.workspaceId}:${idA}`]: rowALedger === "released_only"
-          ? [{ state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 }]
-          : [],
-        [`exam-review:${scope.workspaceId}:${idB}`]: [
-          { state: "reserved", release_reason: null, outcome_unknown_at: new Date("2026-10-17T00:00:30Z"), pending_reconcile_cents: 0 },
+      const siblingStatus = siblingKind === "fresh_pending" ? "pending" : siblingKind;
+      const store = makeStatefulMultiRowSql({
+        rows: [
+          {
+            id: idA,
+            clientKey: keyA,
+            status: "pending",
+            createdAt: "2026-10-17T00:00:00.000Z",
+            lease: oldLeaseA,
+            isStale: true,
+            ledgerRows: rowALedger === "released_only"
+              ? [{ state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 }]
+              : [],
+          },
+          {
+            id: idB,
+            clientKey: "legacy-key-b",
+            status: siblingStatus,
+            createdAt: "2026-10-17T00:00:05.000Z",
+            lease: "2026-10-17 00:00:05.222222+00",
+            isStale: siblingKind !== "fresh_pending",
+            ledgerRows: siblingKind === "unknown"
+              ? [{ state: "reserved", release_reason: null, outcome_unknown_at: new Date("2026-10-17T00:00:30Z"), pending_reconcile_cents: 0 }]
+              : [],
+          },
         ],
-      };
-      let reclaimedAny = false;
-      let inserted = false;
-      const makeRow = (id: string, clientKey: string, createdAt: string) => ({
-        id,
-        sprint_id: sprintId,
-        workspace_id: scope.workspaceId,
-        owner_user_id: scope.ownerUserId,
-        source_item_id: input.sourceItemId,
-        work_source_id: workId,
-        work_source_version: 1,
-        reference_source_id: referenceId,
-        reference_source_version: 1,
-        answer_text: input.answerText,
-        client_key: clientKey,
-        intent: { ...input, clientKey },
-        status: statuses[id],
-        proposal: siblingStatus === "ready" && id === idB ? {
-          transcription: "x=1", questionMatch: true, outcome: "correct",
-          steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
-        } : null,
-        model_label: siblingStatus === "ready" && id === idB ? "vision-model" : null,
-        privacy_epoch: 1,
-        created_at: new Date(createdAt),
-        updated_at: new Date(createdAt),
-        is_stale: true,
+        aliases: [
+          { clientKey: aliasKeyA, reviewId: idA },
+          { clientKey: secondaryAliasKeyA, reviewId: idA },
+        ],
       });
-      const exec = (strings: TemplateStringsArray, ...values: unknown[]) => {
-        const query = strings.join("?").replace(/\s+/g, " ").trim();
-        if (strings.length === 1 && query === "") return { __fragment: "" };
-        if (query.startsWith("AND ") || query.startsWith("OR ")) return { __fragment: query, values };
-        if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId, privacy_epoch: 1 }]);
-        if (query.includes("FROM opening_exam_integration_commands")) {
-          return Promise.resolve(entry === "alias"
-            ? [{ id: "alias-cmd-1", sprint_id: sprintId, intent: { reviewId: idA } }]
-            : []);
-        }
-        if (query.includes("FROM opening_exam_sprints s JOIN opening_exam_bindings")) {
-          return Promise.resolve([{ id: sprintId, pack_snapshot: pack, state, binding }]);
-        }
-        if (query.includes("FROM courses WHERE")) return Promise.resolve([{ id: courseId }]);
-        if (query.includes("FROM opening_sources s JOIN opening_source_versions")) return Promise.resolve([{ id: workId }]);
-        if (query.includes("SELECT version FROM opening_sources")) return Promise.resolve([{ version: 1 }]);
-        if (query.includes("SELECT mime FROM opening_sources")) return Promise.resolve([{ mime: "image/png" }]);
-        if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ "?column?": 1 }]);
-        if (query.includes("FROM opening_budget_reservations")) {
-          const opId = String(values[1]);
-          return Promise.resolve(ledgerByOp[opId] ?? []);
-        }
-        if (query.includes("UPDATE opening_exam_reviews SET status='failed'")) {
-          statuses[String(values[0])] = "failed";
-          return Promise.resolve([]);
-        }
-        if (query.includes("UPDATE opening_exam_reviews SET updated_at=GREATEST")) {
-          reclaimedAny = true;
-          return Promise.resolve([{ lease_updated_at: "2026-10-17 00:05:00.000000+00" }]);
-        }
-        if (query.includes("INSERT INTO opening_exam_reviews")) {
-          inserted = true;
-          return Promise.resolve([{ lease_updated_at: "2026-10-17 00:05:00.000000+00" }]);
-        }
-        if (query.includes("FROM opening_exam_reviews")) {
-          if (query.includes("WHERE id=?")) {
-            const targetId = String(values[0]);
-            return Promise.resolve([
-              targetId === idA
-                ? makeRow(idA, keyA, "2026-10-17T00:00:00.000Z")
-                : makeRow(idB, "legacy-key-b", "2026-10-17T00:00:05.000Z"),
-            ]);
-          }
-          expect(query).toContain("ORDER BY id ASC FOR UPDATE");
-          return Promise.resolve([
-            makeRow(idA, keyA, "2026-10-17T00:00:00.000Z"),
-            makeRow(idB, "legacy-key-b", "2026-10-17T00:00:05.000Z"),
-          ]);
-        }
-        return Promise.resolve([]);
-      };
-      const sql = Object.assign(exec, {
-        json: (value: unknown) => value,
-        begin: async <T>(fn: (tx: unknown) => Promise<T>) => fn(sql),
-      }) as unknown as Sql;
+      const repo = createOpeningExamReviewsRepository(store.sql);
       const retryKey = entry === "original" ? keyA : aliasKeyA;
-      const ctx = await createOpeningExamReviewsRepository(sql).begin(scope, { ...input, clientKey: retryKey });
-      expect(reclaimedAny).toBe(false);
-      expect(inserted).toBe(false);
-      if (rowALedger === "released_only") expect(statuses[idA]).toBe("failed");
-      expect(ctx.review.id).toBe(idB);
-      expect(ctx.review.status).toBe(siblingStatus);
-      expect(ctx.executionUpdatedAt).toBeUndefined();
-      expect(ctx.reusedUnresolved).toBe(siblingStatus === "unknown" ? true : undefined);
+
+      // Retry #1 returns B, retires A (even when A had ledger='none'), revokes A's lease, and rebinds A's keys -> B.
+      const first = await repo.begin(scope, { ...input, clientKey: retryKey });
+      expect(store.reclaimedCount()).toBe(0);
+      expect(store.insertedCount()).toBe(0);
+      expect(store.getRow(idA).status).toBe("failed");
+      expect(store.getRow(idA).lease).not.toBe(oldLeaseA);
+      expect(store.getRow(idA).clientKey).not.toBe(keyA);
+      expect(first.review.id).toBe(idB);
+      expect(first.review.status).toBe(siblingStatus);
+      expect(first.executionUpdatedAt).toBeUndefined();
+      expect(first.reusedUnresolved).toBe(siblingKind === "ready" ? undefined : true);
+
+      // Paused worker for A MUST be fenced out by assertCurrent (both leased and unleased).
+      await expect(repo.assertCurrent(scope, idA, oldLeaseA)).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(repo.assertCurrent(scope, idA)).rejects.toMatchObject({ code: "CONFLICT" });
+
+      // Retry #2 (simulating lost HTTP response) with original keyA AND both aliases MUST STILL return B, never failed A.
+      for (const replayKey of [keyA, aliasKeyA, secondaryAliasKeyA]) {
+        const second = await repo.begin(scope, { ...input, clientKey: replayKey });
+        expect(second.review.id).toBe(idB);
+        expect(second.review.status).toBe(siblingStatus);
+        expect(second.executionUpdatedAt).toBeUndefined();
+        expect(second.reusedUnresolved).toBe(siblingKind === "ready" ? undefined : true);
+      }
+
+      // Mismatched intent on rebound keyA MUST still reject with CONFLICT.
+      await expect(repo.begin(scope, { ...input, clientKey: keyA, answerText: "Different answer" }))
+        .rejects.toMatchObject({ code: "CONFLICT" });
     };
-    await runRetry("original", "none", "ready");
-    await runRetry("original", "none", "unknown");
-    await runRetry("original", "released_only", "ready");
-    await runRetry("original", "released_only", "unknown");
-    await runRetry("alias", "none", "ready");
-    await runRetry("alias", "none", "unknown");
-    await runRetry("alias", "released_only", "ready");
-    await runRetry("alias", "released_only", "unknown");
+
+    for (const entry of ["original", "alias"] as const) {
+      for (const rowALedger of ["none", "released_only"] as const) {
+        for (const siblingKind of ["ready", "unknown", "fresh_pending"] as const) {
+          await runRetry(entry, rowALedger, siblingKind);
+        }
+      }
+    }
+  });
+
+  it("rebinds superseded stale rows to the reclaimed winner and leaves genuinely failed solo reviews under their own key", async () => {
+    const idA0 = "77777777-7777-4777-8777-777777777790";
+    const idA1 = "77777777-7777-4777-8777-777777777791";
+    const idA2 = "77777777-7777-4777-8777-777777777792";
+    const store = makeStatefulMultiRowSql({
+      rows: [
+        {
+          id: idA0,
+          clientKey: "multi-stale-key-0",
+          status: "unknown",
+          createdAt: "2026-10-17T00:00:00.000Z",
+          lease: "2026-10-17 00:00:00.000000+00",
+          isStale: true,
+          ledgerRows: [{ state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 }],
+        },
+        {
+          id: idA1,
+          clientKey: "multi-stale-key-1",
+          status: "pending",
+          createdAt: "2026-10-17T00:00:01.000Z",
+          lease: "2026-10-17 00:00:01.000000+00",
+          isStale: true,
+          ledgerRows: [],
+        },
+        {
+          id: idA2,
+          clientKey: "multi-stale-key-2",
+          status: "pending",
+          createdAt: "2026-10-17T00:00:02.000Z",
+          lease: "2026-10-17 00:00:02.000000+00",
+          isStale: true,
+          ledgerRows: [],
+        },
+      ],
+      aliases: [{ clientKey: "multi-stale-alias-2", reviewId: idA2 }],
+    });
+    const repo = createOpeningExamReviewsRepository(store.sql);
+
+    // Reclaiming via key-0 selects A1 (oldest reclaimable), retires A0 + A2, and rebinds their keys/aliases to A1.
+    const reclaimed = await repo.begin(scope, { ...input, clientKey: "multi-stale-key-0" });
+    expect(reclaimed.review.id).toBe(idA1);
+    expect(reclaimed.review.status).toBe("pending");
+    expect(reclaimed.executionUpdatedAt).toBeDefined();
+    expect(store.getRow(idA0).status).toBe("failed");
+    expect(store.getRow(idA2).status).toBe("failed");
+    await expect(repo.assertCurrent(scope, idA2, "2026-10-17 00:00:02.000000+00")).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.assertCurrent(scope, idA1, reclaimed.executionUpdatedAt)).resolves.toBeUndefined();
+
+    // Mark A1 ready, then verify retries with key-0, key-2, and alias-2 all replay ready A1.
+    await repo.complete(scope, idA1, {
+      transcription: "x=1", questionMatch: true, outcome: "correct",
+      steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
+    }, "vision-model");
+    for (const key of ["multi-stale-key-0", "multi-stale-key-2", "multi-stale-alias-2"]) {
+      const replay = await repo.begin(scope, { ...input, clientKey: key });
+      expect(replay.review.id).toBe(idA1);
+      expect(replay.review.status).toBe("ready");
+    }
+
+    // Solo genuinely failed review (no sibling B) keeps its original key and terminal failed receipt.
+    const soloStore = makeStatefulMultiRowSql({
+      rows: [
+        {
+          id: idA0,
+          clientKey: "solo-failed-key-1",
+          status: "failed",
+          createdAt: "2026-10-17T00:00:00.000Z",
+          lease: "2026-10-17 00:00:00.000000+00",
+          isStale: true,
+          ledgerRows: [],
+        },
+      ],
+    });
+    const soloRepo = createOpeningExamReviewsRepository(soloStore.sql);
+    const solo1 = await soloRepo.begin(scope, { ...input, clientKey: "solo-failed-key-1" });
+    const solo2 = await soloRepo.begin(scope, { ...input, clientKey: "solo-failed-key-1" });
+    expect(solo1.review).toMatchObject({ id: idA0, status: "failed" });
+    expect(solo2.review).toMatchObject({ id: idA0, status: "failed" });
+    expect(soloStore.getRow(idA0).clientKey).toBe("solo-failed-key-1");
   });
 });
+
+function makeStatefulMultiRowSql(options: {
+  rows: Array<{
+    id: string;
+    clientKey: string;
+    status: "pending" | "ready" | "unknown" | "failed";
+    createdAt: string;
+    lease: string;
+    isStale: boolean;
+    ledgerRows: Array<Record<string, unknown>>;
+  }>;
+  aliases?: Array<{ clientKey: string; reviewId: string }>;
+}) {
+  const aliasPrefix = `exam-review-alias:v1:${"_".repeat(180)}:`;
+  const readyProposal = {
+    transcription: "x=1", questionMatch: true, outcome: "correct" as const,
+    steps: [{ label: "Step 1", verdict: "correct" as const, feedback: "ok" }], summary: "ok", errorCause: null,
+  };
+  let leaseSeq = 1;
+  let reclaimed = 0;
+  let inserted = 0;
+  const rowsById = new Map(options.rows.map(row => [row.id, {
+    ...row,
+    originalIntentKey: row.clientKey,
+    proposal: row.status === "ready" ? readyProposal : null,
+    modelLabel: row.status === "ready" ? "vision-model" : null,
+  }]));
+  const aliasesByFullKey = new Map<string, { id: string; sprintId: string; reviewId: string }>(
+    (options.aliases ?? []).map((alias, idx) => [
+      `${aliasPrefix}${alias.clientKey}`,
+      { id: `alias-cmd-${idx + 1}`, sprintId, reviewId: alias.reviewId },
+    ]),
+  );
+  const toDbRow = (r: ReturnType<typeof rowsById.get> & object) => ({
+    id: r.id,
+    sprint_id: sprintId,
+    workspace_id: scope.workspaceId,
+    owner_user_id: scope.ownerUserId,
+    source_item_id: input.sourceItemId,
+    work_source_id: workId,
+    work_source_version: 1,
+    reference_source_id: referenceId,
+    reference_source_version: 1,
+    answer_text: input.answerText,
+    client_key: r.clientKey,
+    intent: { ...input, clientKey: r.originalIntentKey },
+    status: r.status,
+    proposal: r.proposal,
+    model_label: r.modelLabel,
+    privacy_epoch: 1,
+    created_at: new Date(r.createdAt),
+    updated_at: new Date(r.createdAt),
+    is_stale: r.isStale,
+  });
+  const nextLease = () => `2026-10-17 00:05:${String(leaseSeq++).padStart(2, "0")}.123456+00`;
+
+  const exec = (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const query = strings.join("?").replace(/\s+/g, " ").trim();
+    if (strings.length === 1 && query === "") return { __fragment: "" };
+    if (query.startsWith("AND ") || query.startsWith("OR ")) return { __fragment: query, values };
+    if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId, privacy_epoch: 1 }]);
+    if (query.includes("FROM opening_exam_integration_commands")) {
+      const fullKey = String(values[2]);
+      const hit = aliasesByFullKey.get(fullKey);
+      return Promise.resolve(hit ? [{ id: hit.id, sprint_id: hit.sprintId, intent: { reviewId: hit.reviewId } }] : []);
+    }
+    if (query.includes("INSERT INTO opening_exam_integration_commands")) {
+      const cmdId = String(values[0]);
+      const cmdSprintId = String(values[1]);
+      const fullKey = String(values[2]);
+      const aliasIntent = values[3] as { reviewId: string };
+      aliasesByFullKey.set(fullKey, { id: cmdId, sprintId: cmdSprintId, reviewId: aliasIntent.reviewId });
+      return Promise.resolve([]);
+    }
+    if (query.includes("UPDATE opening_exam_integration_commands")) {
+      const aliasIntent = values[0] as { reviewId: string };
+      const prefix = String(values[2]);
+      const oldReviewId = String(values[4]);
+      for (const [fullKey, entry] of aliasesByFullKey.entries()) {
+        if (fullKey.startsWith(prefix) && entry.reviewId === oldReviewId) {
+          aliasesByFullKey.set(fullKey, { ...entry, reviewId: aliasIntent.reviewId });
+        }
+      }
+      return Promise.resolve([]);
+    }
+    if (query.includes("FROM opening_exam_sprints s JOIN opening_exam_bindings")) {
+      return Promise.resolve([{ id: sprintId, pack_snapshot: pack, state, binding }]);
+    }
+    if (query.includes("FROM courses WHERE")) return Promise.resolve([{ id: courseId }]);
+    if (query.includes("FROM opening_sources s JOIN opening_source_versions")) return Promise.resolve([{ id: workId }]);
+    if (query.includes("SELECT version FROM opening_sources")) return Promise.resolve([{ version: 1 }]);
+    if (query.includes("SELECT mime FROM opening_sources")) return Promise.resolve([{ mime: "image/png" }]);
+    if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ "?column?": 1 }]);
+    if (query.includes("FROM opening_budget_reservations")) {
+      const opId = String(values[1]);
+      const ownerRow = [...rowsById.values()].find(r => `exam-review:${scope.workspaceId}:${r.id}` === opId);
+      return Promise.resolve(ownerRow?.ledgerRows ?? []);
+    }
+    if (query.includes("UPDATE opening_exam_reviews SET status='failed', client_key=?")) {
+      const newKey = String(values[0]);
+      const rowId = String(values[1]);
+      const row = rowsById.get(rowId);
+      if (row && (row.status === "pending" || row.status === "unknown")) {
+        row.status = "failed";
+        row.clientKey = newKey;
+        row.lease = nextLease();
+      }
+      return Promise.resolve([]);
+    }
+    if (query.includes("UPDATE opening_exam_reviews SET status='failed'")) {
+      const rowId = String(values[0]);
+      const row = rowsById.get(rowId);
+      if (row && (row.status === "pending" || row.status === "unknown")) {
+        row.status = "failed";
+        row.lease = nextLease();
+      }
+      return Promise.resolve([]);
+    }
+    if (query.includes("UPDATE opening_exam_reviews SET status='unknown'")) {
+      const rowId = String(values[0]);
+      const row = rowsById.get(rowId);
+      if (row && row.status === "pending") row.status = "unknown";
+      return Promise.resolve([]);
+    }
+    if (query.includes("UPDATE opening_exam_reviews SET status='ready'")) {
+      const proposalValue = values[0] as typeof readyProposal;
+      const modelLabel = values[1] as string | null;
+      const rowId = String(values[2]);
+      const row = rowsById.get(rowId);
+      if (row && (row.status === "pending" || row.status === "unknown")) {
+        row.status = "ready";
+        row.proposal = proposalValue;
+        row.modelLabel = modelLabel;
+        row.lease = nextLease();
+      }
+      return Promise.resolve([]);
+    }
+    if (query.includes("UPDATE opening_exam_reviews SET updated_at=GREATEST")) {
+      reclaimed++;
+      const rowId = String(values[0]);
+      const row = rowsById.get(rowId);
+      const lease = nextLease();
+      if (row && row.status === "pending") {
+        row.lease = lease;
+        row.isStale = false;
+        return Promise.resolve([{ lease_updated_at: lease }]);
+      }
+      return Promise.resolve([]);
+    }
+    if (query.includes("INSERT INTO opening_exam_reviews")) {
+      inserted++;
+      return Promise.resolve([{ lease_updated_at: nextLease() }]);
+    }
+    if (query.includes("SELECT id FROM opening_exam_reviews") && query.includes("AND status='pending'")) {
+      const rowId = String(values[0]);
+      const row = rowsById.get(rowId);
+      const leaseFrag = values.find((v): v is { __fragment: string; values?: unknown[] } =>
+        Boolean(v && typeof v === "object" && "__fragment" in v && String((v as { __fragment: string }).__fragment).includes("updated_at")));
+      const expectedLease = leaseFrag?.values?.[0];
+      const matches = Boolean(row && row.status === "pending" && (!expectedLease || expectedLease === row.lease));
+      return Promise.resolve(matches ? [{ id: rowId }] : []);
+    }
+    if (query.includes("FROM opening_exam_reviews")) {
+      if (query.includes("WHERE id=?")) {
+        const targetId = String(values[0]);
+        const row = rowsById.get(targetId);
+        return Promise.resolve(row ? [toDbRow(row)] : []);
+      }
+      expect(query).not.toContain("LIMIT 1");
+      expect(query).toContain("ORDER BY id ASC FOR UPDATE");
+      const reqClientKey = String(values[3]);
+      const aliasFrag = values[4] as { __fragment?: string; values?: unknown[] } | undefined;
+      const aliasReviewId = aliasFrag?.values?.[0] ? String(aliasFrag.values[0]) : null;
+      const reqAnswerText = String(values[11]);
+      const matched = [...rowsById.values()]
+        .filter(r =>
+          r.clientKey === reqClientKey
+          || (aliasReviewId !== null && r.id === aliasReviewId)
+          || (input.answerText === reqAnswerText && (r.status === "pending" || r.status === "unknown" || r.status === "ready")))
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .map(toDbRow);
+      return Promise.resolve(matched);
+    }
+    return Promise.resolve([]);
+  };
+  const sql = Object.assign(exec, {
+    json: (value: unknown) => value,
+    begin: async <T>(fn: (tx: unknown) => Promise<T>) => fn(sql),
+  }) as unknown as Sql;
+  return {
+    sql,
+    getRow: (id: string) => rowsById.get(id)!,
+    reclaimedCount: () => reclaimed,
+    insertedCount: () => inserted,
+  };
+}

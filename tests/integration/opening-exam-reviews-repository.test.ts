@@ -643,5 +643,42 @@ describe("exam photo review repository integration", () => {
     expect(multiRowRetry.executionUpdatedAt).toBeUndefined();
     const legacyRows = await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId} AND answer_text=${legacyAnswer}`;
     expect(legacyRows).toHaveLength(2);
+    // Repeated retry with superseded row A's original key must STILL return B (never regress to failed A).
+    const replaySupersededOriginal = await repository.begin(f.scope, rowA.input);
+    expect(replaySupersededOriginal.review.id).toBe(rowBId);
+    expect(replaySupersededOriginal.review.status).toBe("unknown");
+    expect(replaySupersededOriginal.reusedUnresolved).toBe(true);
+    await expect(repository.begin(f.scope, { ...rowA.input, answerText: "Different legacy answer" }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+
+    // 8) Stale none-ledger row A (with alias) + ready sibling B: retry retires A, revokes A's lease,
+    //    and rebinds both A's original clientKey and A's alias to B across repeated retries.
+    const supersededNoneAnswer = "Superseded stale none-ledger answer";
+    const staleNoneA = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: supersededNoneAnswer }));
+    const aliasKeyForA = randomUUID();
+    const aliasedA = await repository.begin(f.scope, input({ clientKey: aliasKeyForA, answerText: supersededNoneAnswer }));
+    expect(aliasedA.review.id).toBe(staleNoneA.review.id);
+    const readySiblingId = randomUUID();
+    const readySiblingInput = input({ clientKey: randomUUID(), answerText: supersededNoneAnswer });
+    const [staleNoneRecord] = await f.sql`SELECT sprint_id, privacy_epoch FROM opening_exam_reviews WHERE id = ${staleNoneA.review.id}`;
+    await f.sql`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
+      work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
+      client_key,intent,status,proposal,model_label,privacy_epoch)
+      VALUES(${readySiblingId},${staleNoneRecord!.sprint_id},${f.scope.workspaceId},${f.scope.ownerUserId},${readySiblingInput.sourceItemId},
+      ${readySiblingInput.workSourceId},${readySiblingInput.workSourceVersion},${readySiblingInput.referenceSourceId},${readySiblingInput.referenceSourceVersion},
+      ${supersededNoneAnswer},${readySiblingInput.clientKey},${f.sql.json(readySiblingInput)},'ready',${f.sql.json(proposal)},'vision-model',${staleNoneRecord!.privacy_epoch})`;
+    await f.sql`UPDATE opening_exam_reviews SET updated_at = now() - interval '61 seconds' WHERE id = ${staleNoneA.review.id}`;
+    const [staleNoneAged] = await f.sql`SELECT updated_at::text AS lease FROM opening_exam_reviews WHERE id = ${staleNoneA.review.id}`;
+
+    const firstOriginalRetry = await repository.begin(f.scope, staleNoneA.input);
+    expect(firstOriginalRetry.review).toMatchObject({ id: readySiblingId, status: "ready", proposal });
+    expect(await rawReview(staleNoneA.review.id)).toMatchObject({ status: "failed" });
+    await expect(repository.assertCurrent(f.scope, staleNoneA.review.id, String(staleNoneAged!.lease))).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repository.assertCurrent(f.scope, staleNoneA.review.id)).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const secondOriginalRetry = await repository.begin(f.scope, staleNoneA.input);
+    expect(secondOriginalRetry.review).toMatchObject({ id: readySiblingId, status: "ready", proposal });
+    const aliasRetryAfterSupersede = await repository.begin(f.scope, input({ clientKey: aliasKeyForA, answerText: supersededNoneAnswer }));
+    expect(aliasRetryAfterSupersede.review).toMatchObject({ id: readySiblingId, status: "ready", proposal });
   });
 });
