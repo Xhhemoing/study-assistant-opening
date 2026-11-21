@@ -123,6 +123,9 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
           const receipt = id && unresolvedReviews.get(id);
           if (receipt) forgetReviewKey(receipt.fingerprint, receipt.clientKey);
         }
+      } else if (result.review && reviewId && result.review.id !== reviewId) {
+        const receipt = unresolvedReviews.get(reviewId);
+        if (receipt) unresolvedReviews.set(result.review.id, receipt);
       }
       publish({ ...result, error: pending ? uncertainMessage : null });
     } catch (error) {

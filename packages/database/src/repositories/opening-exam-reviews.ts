@@ -439,7 +439,30 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
               AND source.owner_user_id=${scope.ownerUserId}
               AND sprint.workspace_id=${scope.workspaceId} AND sprint.owner_user_id=${scope.ownerUserId}
               AND c.client_key=${supersededReviewKey(current.review.id)} LIMIT 1`;
-          if (!pointer) return current.review;
+          if (!pointer) {
+            if (current.review.status !== "unknown") return current.review;
+            const candidates = await tx`SELECT target.id,target.intent,target.proposal FROM opening_exam_reviews target
+              JOIN opening_exam_reviews source ON source.id=${current.review.id}
+              JOIN opening_exam_sprints sprint ON sprint.id=source.sprint_id
+              WHERE source.workspace_id=${scope.workspaceId} AND source.owner_user_id=${scope.ownerUserId}
+                AND sprint.workspace_id=${scope.workspaceId} AND sprint.owner_user_id=${scope.ownerUserId}
+                AND target.workspace_id=source.workspace_id AND target.owner_user_id=source.owner_user_id
+                AND target.sprint_id=source.sprint_id AND target.privacy_epoch=source.privacy_epoch
+                AND target.source_item_id=source.source_item_id AND target.work_source_id=source.work_source_id
+                AND target.work_source_version=source.work_source_version
+                AND target.reference_source_id=source.reference_source_id
+                AND target.reference_source_version=source.reference_source_version
+                AND target.answer_text=source.answer_text AND target.status='ready' AND target.id<>source.id
+              ORDER BY target.created_at ASC,target.id ASC`;
+            for (const candidate of candidates) {
+              const intent = examWorkReviewInputSchema.safeParse(candidate.intent);
+              if (intent.success && isDeepStrictEqual(reviewIntentBody(intent.data), reviewIntentBody(original.input))
+                && candidate.proposal != null && examWorkReviewProposalSchema.safeParse(candidate.proposal).success) {
+                return (await readContext(tx, scope, String(candidate.id))).review;
+              }
+            }
+            return current.review;
+          }
           const parsed = examReviewAliasSchema.safeParse(pointer.intent);
           if (!parsed.success || visited.has(parsed.data.reviewId)) return original.review;
           const [target] = await tx`SELECT target.intent, target.privacy_epoch, target.proposal FROM opening_exam_reviews target

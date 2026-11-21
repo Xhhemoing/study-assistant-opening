@@ -33,8 +33,8 @@ const columnSegment = new RegExp(
 const matchingClose: Record<string, string> = { "(": ")", "（": "）", "[": "]", "【": "】" };
 const closeBracketChars = new Set(Object.values(matchingClose));
 const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
-const wrappedPeriodPattern = /\s*(?:\(\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|（\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*）|\[\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\]|【\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*】)/g;
-const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
+const wrappedPeriodPattern = /\s*(?:\(\s*第?\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|（\s*第?\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*）|\[\s*第?\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\]|【\s*第?\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*】)/g;
+const globalPeriodPattern = /(\s*[,，、;；]\s*)?(?:第\s*)?[0-9]+\s*[-－至]\s*[0-9]+\s*节(\s*[,，、;；]\s*)?/g;
 const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
 const weekMarkerHint = /周次|第\s*(?:[^\s()（）[\]【】]{0,16}|[\d\s\-－至,，、?？]{1,24})\s*周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
 const weekPlaceholder = /(?:[?？]|待定|暂定|另行|未定|TBD\b)/.source;
@@ -166,7 +166,14 @@ function matchInlineWeekToken(source: string, index: number) {
 function parseInlineCourseLine(line: string): { courseName: string; weeks: number[] | undefined; invalid: boolean } {
   const withoutPeriods = line
     .replace(wrappedPeriodPattern, "")
-    .replace(globalPeriodPattern, "");
+    .replace(globalPeriodPattern, (token, before: string | undefined, after: string | undefined, offset: number, source: string) => {
+      const prefix = source.slice(0, offset);
+      const suffix = source.slice(offset + token.length);
+      if (before && after) return before;
+      if (before && /^\s*[)）】\]]/.test(suffix)) return "";
+      if (after && /(?:\(|（|\[|【)\s*$/.test(prefix)) return "";
+      return before ?? after ?? "";
+    });
   const weeks = new Set<number>();
   const matchedSpans: Array<{ start: number; end: number }> = [];
   let invalid = false;

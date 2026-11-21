@@ -467,6 +467,23 @@ describe("exam integration shares mutation recovery", () => {
     expect(posts.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, key, "next-review-key"]);
   });
 
+  it("tracks an unresolved superseding review until it fails and mints a new key", async () => {
+    const pending = { ...review, id: "66666666-6666-4666-8666-666666666666", status: "pending" };
+    const failed = { ...pending, status: "failed" };
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(Response.json(review))
+      .mockResolvedValueOnce(Response.json(pending)).mockResolvedValueOnce(Response.json(failed))
+      .mockResolvedValueOnce(Response.json(review));
+    const keys = vi.fn().mockReturnValueOnce(key).mockReturnValueOnce("next-review-key");
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    const command = { action: "review", input: reviewInput } as const;
+    await client.sendIntegration(command);
+    await client.loadReview(review.id);
+    await client.loadReview(pending.id);
+    await client.sendIntegration(command);
+    const posts = fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, "next-review-key"]);
+  });
+
   it("clears the requested review key when refresh resolves to a superseding review", async () => {
     const ready = { ...review, id: "66666666-6666-4666-8666-666666666666", status: "ready", proposal: {
       transcription: "x=2", questionMatch: true, outcome: "correct",
