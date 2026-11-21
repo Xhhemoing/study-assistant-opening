@@ -27,10 +27,12 @@ def main():
                     raise ValueError('invalid page size')
                 bitmap = page.render(scale=min(2.0, 1600 / max(width, height)))
                 image = bitmap.to_pil()
-                output = io.BytesIO()
-                image.save(output, format='PNG')
-                image.close()
-                value = output.getvalue()
+                try:
+                    with io.BytesIO() as output:
+                        image.save(output, format='PNG')
+                        value = output.getvalue()
+                finally:
+                    image.close()
                 if len(value) > 2 * 1024 * 1024:
                     raise ValueError('page image exceeds limit')
                 images.append('data:image/png;base64,' + base64.b64encode(value).decode('ascii'))

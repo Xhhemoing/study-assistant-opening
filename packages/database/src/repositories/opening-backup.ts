@@ -15,6 +15,7 @@
  * Restore **apply** is fail-closed without confirm/empty-namespace; with confirm +
  * empty-namespace + sql executor deps, Opening-scoped transactional apply runs.
  */
+import { findForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import type { Sql } from "postgres";
@@ -76,7 +77,7 @@ export {
   evaluateOpeningRestoreEmptyNamespace,
   readOpeningRestoreNamespaceCounts,
   isOpeningRestoreNeverTable,
-  OPENING_RESTORE_NEVER_TABLES,
+  OPENING_RESTORE_NEVER_TABLES, BACKUP_FORBIDDEN_TABLES, EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES,
   type OpeningRestoreNamespaceCounts,
   type OpeningRestoreEmptyNamespaceResult,
 } from "./opening-backup-empty-namespace";
@@ -159,6 +160,9 @@ export async function publishOpeningBackupArchive(
   }
   if (!backup || backup.format !== "opening-backup" || backup.version !== 1 || !Array.isArray(backup.objects)) {
     errors.push("invalid opening backup draft");
+  }
+  if (findForbiddenBackupTable(backup)) {
+    throw new OpeningBackupExportError("FORBIDDEN_TABLE", ["Forbidden table in learner backup"]);
   }
   if (options.encryptDestination) {
     if (typeof options.encryptDestination !== "string" || options.encryptDestination.trim().length === 0) {

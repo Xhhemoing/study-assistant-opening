@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
-import { createSourceVisualRecognitionInput, parseSourceVisualRecognitionOutput, isBudgetReplayError, type ModelGateway } from "@aistudy/ai";
-import type { OpeningModelSnapshot, Scope } from "@aistudy/contracts";
+import { createSourceVisualRecognitionInput, parseSourceVisualRecognitionOutput, isBudgetReplayError, OpeningModelRoutingError, type ModelGateway } from "@aistudy/ai";
+import type { OpeningModelSnapshot, ProviderInput, Scope } from "@aistudy/contracts";
 import type { createOpeningSourceVisualRecognitionsRepository, SourceVisualRecord } from "@aistudy/database";
 import type { ParseSourceVisualPageInput, ParseSourceVisualPageResult } from "../jobs/parse-source";
-import { renderPdfPageImages } from "../parsers/pdf-page-images";
+import { MAX_PDF_RENDER_PAGES, renderPdfPageImages } from "../parsers/pdf-page-images";
 
 type Repository = ReturnType<typeof createOpeningSourceVisualRecognitionsRepository>;
 type CallOptions = Parameters<ModelGateway["call"]>[2];
@@ -18,7 +18,7 @@ async function callVisual(deps: { repository: Repository; gateway: Pick<ModelGat
   let operationId = base;
   const visited = new Set<string>();
   while (true) {
-    try { return await deps.gateway.call(scope, "materials.recognize-page", { ...options, budget, operationId }); }
+    try { return await deps.gateway.call(scope, "materials.recognize-page", { ...options, budget, operationId, requestFamily: base }); }
     catch (error) {
       if (!isBudgetReplayError(error) || error.disposition.kind !== "released"
         || !["not_sent", "cancelled"].includes(error.disposition.reason ?? "") || visited.has(error.disposition.reservationId)) throw error;
@@ -44,19 +44,18 @@ export function createSourceVisualRecognition(deps: {
   storage: { finalKey(id: string, version: number): string };
   renderPdf?: typeof renderPdfPageImages;
 }) {
-  return async (input: ParseSourceVisualPageInput): Promise<ParseSourceVisualPageResult> => {
+  const renderPdf = deps.renderPdf ?? renderPdfPageImages;
+
+  async function readCached({ scope, signal, sourceId, sourceVersion, physicalPage }: ParseSourceVisualPageInput) {
+    signal.throwIfAborted();
+    const cached = await deps.repository.read(scope, { sourceId, sourceVersion, physicalPage });
+    signal.throwIfAborted();
+    return cached;
+  }
+
+  async function recognize(input: ParseSourceVisualPageInput, imageParts: ProviderInput["imageParts"]) {
     const { scope, signal, sourceId, sourceVersion, physicalPage } = input;
     const identity = { sourceId, sourceVersion, physicalPage };
-    signal.throwIfAborted();
-    const cached = await deps.repository.read(scope, identity);
-    signal.throwIfAborted();
-    if (cached) return readableResult(cached);
-    const bytes = await readFile(input.localFilePath);
-    signal.throwIfAborted();
-    const imageParts = input.mime === "application/pdf"
-      ? await (deps.renderPdf ?? renderPdfPageImages)(bytes, [{ sourceId, physicalPage }])
-      : [{ sourceId, physicalPage, mediaType: input.mime as "image/jpeg" | "image/png" | "image/webp",
-        data: `data:${input.mime};base64,${bytes.toString("base64")}` }];
     signal.throwIfAborted();
     const operationId = `source-visual:v1:${scope.workspaceId}:${sourceId}:${sourceVersion}:${physicalPage}`;
     // Keep the original object plus its physical page. PDF images are rendered
@@ -90,5 +89,64 @@ export function createSourceVisualRecognition(deps: {
     await deps.repository.assertCurrent(scope, identity);
     if (!saved) throw new Error("visual recognition returned without a durable page result");
     return readableResult(saved);
-  };
+  }
+
+  async function recognizePage(input: ParseSourceVisualPageInput) {
+    const cached = await readCached(input);
+    if (cached) return readableResult(cached);
+    const { sourceId, physicalPage, signal } = input;
+    const bytes = await readFile(input.localFilePath);
+    signal.throwIfAborted();
+    const imageParts = input.mime === "application/pdf"
+      ? await renderPdf(bytes, [{ sourceId, physicalPage }])
+      : [{ sourceId, physicalPage, mediaType: input.mime as "image/jpeg" | "image/png" | "image/webp",
+        data: `data:${input.mime};base64,${bytes.toString("base64")}` }];
+    return recognize(input, imageParts);
+  }
+
+  async function* recognizePages(inputs: readonly ParseSourceVisualPageInput[], cacheOnly: boolean) {
+    for (let start = 0; start < inputs.length; start += MAX_PDF_RENDER_PAGES) {
+      const batch = inputs.slice(start, start + MAX_PDF_RENDER_PAGES);
+      const { localFilePath, signal } = batch[0]!;
+      const entries = [];
+      for (const input of batch) entries.push({ input, cached: await readCached(input) });
+      const requests = cacheOnly ? [] : entries.flatMap(({ input: { sourceId, physicalPage }, cached }) => cached ? [] : [{ sourceId, physicalPage }]);
+      const bytes = requests.length ? await readFile(localFilePath) : undefined;
+      signal.throwIfAborted();
+      let images: Awaited<ReturnType<typeof renderPdf>> | undefined;
+      if (bytes) {
+        try {
+          images = await renderPdf(bytes, requests);
+        } catch (error) {
+          signal.throwIfAborted();
+          if (requests.length === 1) throw error;
+          // A later page can break batch rendering. Render individually in order
+          // in that case so earlier pages can still save their durable results.
+        }
+      }
+      let nextImage = 0;
+      for (const { input, cached } of entries) {
+        signal.throwIfAborted();
+        if (cached) {
+          yield readableResult(cached);
+        } else if (cacheOnly) {
+          yield null;
+        } else {
+          const index = nextImage++;
+          const imageParts = images ? [images[index]!] : await renderPdf(bytes!, [requests[index]!]);
+          let result: ParseSourceVisualPageResult | null;
+          try {
+            result = await recognize(input, imageParts);
+          } catch (error) {
+            if (!(error instanceof OpeningModelRoutingError)) throw error;
+            cacheOnly = true;
+            result = null;
+          }
+          yield result;
+        }
+      }
+    }
+  }
+
+  return { recognizePage, recognizePages };
 }

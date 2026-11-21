@@ -20,9 +20,22 @@ File: `.github/workflows/ci.yml`
 
 Triggers:
 
-- `pull_request`
+- `pull_request` on `opened`, `synchronize`, `reopened`, and `ready_for_review`
 - `push` to `main` or `feat/opening-release`
 - `workflow_dispatch` (manual)
+
+The classifier sends allowlisted documentation-only changes to
+`documentation-light-check`, including on draft PRs. A draft PR with code
+changes runs `fast-draft-check` on Node 22. It installs npm dependencies,
+runs the CI scripts' Python tests, lint, typecheck, and the unit and contract
+suites. PDF image tests use the locked pypdfium2 and Pillow wheels. This job
+requires no service containers, Docling installation, or model downloads.
+
+Both required checks, `lint-typecheck-test-build` (`quality`) and
+`real-worker-pdf-browser-flow` (`worker-gate`), report failure on a code draft
+even when its fast check succeeds. Mark the PR **Ready for review** to trigger
+full CI on the same head. Subsequent code pushes to a ready PR, code pushes to
+the tracked branches, and manual runs also run the full suite.
 
 ## Gates
 
@@ -41,7 +54,7 @@ Triggers:
 
 Both jobs must succeed for the final PR head: `lint-typecheck-test-build`
 (`quality`, the gates above) and `real-worker-pdf-browser-flow`
-(`opening-worker-flow`, real PDF processing and persisted learning across Web/worker restarts).
+(`worker-gate`, which requires `opening-worker-flow` for real PDF processing and persisted learning across Web/worker restarts).
 After merge, the release branch's new SHA receives its own push CI; deployment
 uses that result rather than the previous PR head's result.
 

@@ -12,6 +12,8 @@ import {
   createOpeningKnowledgeRepository,
   createCardRepository,
   createBackupRestoreRepository,
+  hasForgedOrProtectedBlock,
+  PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
   CourseMembershipError,
   ExplorationRepositoryError,
   IdentityError,
@@ -155,6 +157,14 @@ export async function getRevisionProposalForPrincipal(runtime: AuthRuntime, prin
 export async function createRevisionProposalForPrincipal(runtime: AuthRuntime, principal: Principal, documentId: string, body: unknown) {
   const parsed = createRevisionProposalRequestSchema.parse(body);
   const document = await getDocumentForPrincipal(runtime, principal, documentId);
+  if (
+    body
+    && typeof body === "object"
+    && Array.isArray((body as { proposedBlocks?: unknown }).proposedBlocks)
+    && hasForgedOrProtectedBlock((body as { proposedBlocks: unknown[] }).proposedBlocks, new Set())
+  ) {
+    throw new ApiError("VALIDATION", PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE, 400);
+  }
   const provenance = {
     ...parsed.provenance,
     actorUserId: principal.userId,
@@ -604,11 +614,13 @@ export async function getDocumentForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
   documentId: string,
+  options: { redactAnswerKeys?: boolean } = {},
 ) {
   try {
     const doc = await runtime.library.getDocument({
       workspaceId: principal.workspaceId,
       documentId,
+      ...options,
     });
     assertAuthorized(principal, "document.read", {
       type: "document",
@@ -632,12 +644,13 @@ export async function getDocumentForPrincipal(
 export async function listDocumentsForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
+  options: { redactAnswerKeys?: boolean } = {},
 ) {
   assertAuthorized(principal, "document.read", {
     type: "document",
     workspaceId: principal.workspaceId,
   });
-  return runtime.library.listDocuments({ workspaceId: principal.workspaceId });
+  return runtime.library.listDocuments({ workspaceId: principal.workspaceId, ...options });
 }
 
 function summaryText(value: unknown): string | null {

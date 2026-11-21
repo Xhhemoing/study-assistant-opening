@@ -15,7 +15,7 @@ function summarizePages(ranges: PageRange[]): string {
 }
 
 /** Keep persisted PDF warnings within the API contract, regardless of page count. */
-export function createPdfPartialError(failedRanges: string[], lowQualityPages: number[]): ApiFailure {
+export function createPdfPartialError(failedRanges: string[], lowQualityPages: number[], cappedTextPages: number[] = []): ApiFailure {
   const failed = failedRanges.map(range => {
     const [first, last] = range.split("-");
     return { start: Number(first), end: Number(last ?? first) };
@@ -23,6 +23,7 @@ export function createPdfPartialError(failedRanges: string[], lowQualityPages: n
   const message = [
     failed.length ? `${summarizePages(failed)}未能识别，可以重新解析` : "",
     lowQualityPages.length ? `${summarizePages(lowQualityPages.map(page => ({ start: page, end: page })))}识别质量低` : "",
+    cappedTextPages.length ? `${summarizePages(cappedTextPages.map(page => ({ start: page, end: page })))}达到文本长度上限，已保留原文或截短` : "",
   ].filter(Boolean).join("；");
   return { code: "PARSE_PARTIAL", message: message.slice(0, 500), retryable: failedRanges.length > 0 };
 }

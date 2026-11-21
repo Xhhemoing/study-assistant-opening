@@ -8,12 +8,14 @@ import { ShellNavLink } from "./shell-nav-link";
 export function AppearanceControl() {
   const id = useId();
   const { preferences, hydrated, updatePreferences, persistenceError } = useAppearancePreferences();
-  return <div className="px-3 py-2">
-    <label htmlFor={id} className="mb-1 flex items-center gap-2 text-[13px] text-text-2"><Moon size={16} aria-hidden="true" />主题</label>
-    <select id={id} value={preferences.theme} disabled={!hydrated} onChange={event => updatePreferences({ theme: event.target.value as AppearancePreferences["theme"] })} className="min-h-11 w-full rounded-md border border-line bg-surface px-2 text-[13px] text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">
-      <option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option>
-    </select>
-    {persistenceError ? <p role="status" className="mt-1 text-xs text-warn">主题仅在本次使用中生效</p> : null}
+  return <div className="px-3.5 py-2.5">
+    <div className="flex min-h-9 items-center justify-between gap-3">
+      <label htmlFor={id} className="inline-flex items-center gap-2.5 text-sm text-text"><Moon size={16} aria-hidden="true" className="text-text-2" />主题</label>
+      <select id={id} value={preferences.theme} disabled={!hydrated} onChange={event => updatePreferences({ theme: event.target.value as AppearancePreferences["theme"] })} className="keycap min-h-9 rounded-lg px-2.5 text-xs font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:opacity-50">
+        <option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option>
+      </select>
+    </div>
+    {persistenceError ? <p role="status" className="mt-1.5 text-xs text-warn">主题仅在本次使用中生效</p> : null}
   </div>;
 }
 

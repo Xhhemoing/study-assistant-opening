@@ -1,4 +1,4 @@
-// Dependency-free smoke for Node 24+: executes the real TypeScript modules.
+// No-build smoke for Node 24+ with workspace dependencies: executes the real TypeScript modules.
 // Only module resolution is adapted. Does not replace Vitest/SQL/Docling tests.
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,9 @@ import assert from "node:assert/strict";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 registerHooks({ resolve(specifier, context, nextResolve) {
+  if (specifier === "@aistudy/config") {
+    return nextResolve(new URL("../../../packages/config/src/worker-startup.ts", import.meta.url).href, context);
+  }
   if (specifier === "@aistudy/database") {
     return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent([
       `export * from ${JSON.stringify(new URL("../../../packages/database/src/repositories/opening-parser-health.ts", import.meta.url).href)};`,
@@ -30,10 +33,12 @@ const { parserOcrReadinessItem } = await import("../../../apps/web/src/features/
 
 const cache = new Map();
 const calls = [];
+const pages = [];
 let fail = true;
 const input = {
   path: "/unit.pdf", sourceId: "source", sourceVersion: 0, scope: { workspaceId: "w", ownerUserId: "u" },
   signal: new AbortController().signal, parserProfile: "smoke-v1",
+  onPages: batch => { pages.push(...batch); },
   segments: { read: async (_scope, key) => cache.get(JSON.stringify(key)),
     save: async (_scope, key, value) => { cache.set(JSON.stringify(key), value); } },
   runner: async argv => {
@@ -44,13 +49,14 @@ const input = {
     return { exitCode: 0, stdout: JSON.stringify({ pages: Array.from({ length: end - start + 1 }, (_, i) => ({ page: start + i, text: `p${start + i}`, imagePath: null })) }) };
   },
 };
-await assert.rejects(parsePdfSegments(input), /11-20/);
-assert.deepEqual(calls, [[1, 10], [11, 20], [21, 23]]);
+assert.deepEqual(await parsePdfSegments(input), { pageCount: 13, failedRanges: ["11-20"] });
+assert.deepEqual(calls, [[1, 10], [11, 20], [11, 20], [21, 23]]);
 assert.deepEqual([...cache.values()].map(s => s.state), ["ready", "failed", "ready"]);
-fail = false; calls.length = 0;
-const result = await parsePdfSegments(input);
+assert.deepEqual(pages.map(p => p.page), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 21, 22, 23]);
+fail = false; calls.length = 0; pages.length = 0;
+assert.deepEqual(await parsePdfSegments(input), { pageCount: 23, failedRanges: [] });
 assert.deepEqual(calls, [[11, 20]]);
-assert.deepEqual(result.map(p => p.page), Array.from({ length: 23 }, (_, i) => i + 1));
+assert.deepEqual(pages.map(p => p.page), Array.from({ length: 23 }, (_, i) => i + 1));
 console.log("PASS actual segment implementation: 10-page bounds, physical pages, failed-only retry");
 assert.ok([...cache.keys()].every(key => JSON.parse(key).sourceVersion === 0));
 calls.length = 0;

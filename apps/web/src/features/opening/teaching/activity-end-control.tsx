@@ -14,10 +14,11 @@ export async function endTeachingActivity(api: Pick<OpeningApi, "getTeachingActi
   return api.patchTeachingActivityStatus(activityId, { status: "completed", expectedUpdatedAt: current.updatedAt });
 }
 
-export function ActivityEndControl({ activity, api, onActivityUpdated }: {
+export function ActivityEndControl({ activity, api, onActivityUpdated, originalConversationId }: {
   activity: TeachingActivity;
   api: OpeningApi;
   onActivityUpdated: (activity: TeachingActivity) => void;
+  originalConversationId?: string | null;
 }) {
   const [pending, setPending] = useState(false);
   const [uncertain, setUncertain] = useState(false);
@@ -39,7 +40,7 @@ export function ActivityEndControl({ activity, api, onActivityUpdated }: {
     catch (reason) { setError(userFacingMessage(reason, "无法读取学习状态")); }
     finally { inFlight.current = false; setPending(false); }
   }
-  if (activity.status === "completed") return <ActivitySummaryCard activityId={activity.id} api={api} />;
+  if (activity.status === "completed") return <ActivitySummaryCard activityId={activity.id} activity={activity} originalConversationId={originalConversationId} api={api} />;
   return <div className="space-y-2 border-t border-line pt-4">
     <button type="button" className={ui.secondary} disabled={pending || uncertain} onClick={() => { void end(); }}>{pending ? "正在确认状态…" : "结束本次学习"}</button>
     {error ? <p role="alert" className="text-xs text-danger">{error}</p> : null}

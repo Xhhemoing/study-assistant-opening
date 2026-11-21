@@ -129,7 +129,7 @@ describe("ephemeral privacy admission", () => {
     expect(f.budget.release).not.toHaveBeenCalled();
     expect(f.budget.markUnknown).not.toHaveBeenCalled();
     expect(f.provenance.record).toHaveBeenCalledWith(scope, {
-      requestId: "ephemeral-request", privacyEpoch: 2, contextSourceRefs: [{ sourceId: publicId, sourceVersion: 1 }],
+      reservationId: "reservation", requestId: "ephemeral-request", privacyEpoch: 2, contextSourceRefs: [{ sourceId: publicId, sourceVersion: 1 }],
     });
     expect(repositories.readMaterialPurposePin).toHaveBeenCalledTimes(1);
     expect(f.captures[0]?.sources[0]?.sourceVersion).toBe(1);

@@ -1,15 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
-import { activitySpecClientInitSchema, type TeachingActivityGenerateStatus } from "@aistudy/contracts";
+import { activitySpecClientInitSchema, learningObservationSchema, type TeachingActivityGenerateStatus } from "@aistudy/contracts";
+import { createMatrixExerciseSpec, type CourseEvidence } from "@aistudy/domain";
 import { createOpeningTeachingResumeService } from "./resume-service";
 
 const io = vi.hoisted(() => ({ owned: vi.fn(), reconcile: vi.fn(), init: vi.fn(), attempts: vi.fn(), help: vi.fn(), heads: vi.fn(), sources: vi.fn(),
-  activitiesFactory: vi.fn(), contentFactory: vi.fn(), attemptsFactory: vi.fn() }));
+  activitiesFactory: vi.fn(), contentFactory: vi.fn(), attemptsFactory: vi.fn(), summaryFacts: vi.fn(),
+  courseEvidence: vi.fn(), routeHead: vi.fn(), readyCourseSources: vi.fn() }));
 vi.mock("@aistudy/database", async () => {
   const actual = await import("../../../../../../packages/database/src/repositories/opening-teaching-content");
   return { assertOwnedActivity: io.owned, reconcileTeachingGenerate: io.reconcile, createOpeningTeachingActivitiesRepository: io.activitiesFactory,
     createOpeningTeachingContentRepository: io.contentFactory, createOpeningLearningAttemptRepository: io.attemptsFactory,
     listDeliveredHelpByActivity: io.help, listObservationHeadsByActivity: io.heads, probeLearningSourcesAvailability: io.sources,
+    readOpeningCourseEvidence: io.courseEvidence, readOpeningCourseRouteActivityObservationId: io.routeHead,
+    createOpeningCourseReadySourcesRepository: () => ({ admitSourceIds: io.readyCourseSources }),
     sanitizeCheckpointForRestore: actual.sanitizeCheckpointForRestore };
 });
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -22,12 +26,88 @@ function activity(status: TeachingActivityGenerateStatus = "queued", version = 1
   return { id: activityId, status: "active", generateStatus: status, contentVersion: version, pathVersion: 1, sourceIds: [sourceId], checkpointJson: {} };
 }
 beforeEach(() => {
-  vi.resetAllMocks(); io.activitiesFactory.mockReturnValue({}); io.contentFactory.mockReturnValue({ getClientInit: io.init });
+  vi.resetAllMocks(); io.activitiesFactory.mockReturnValue({ readSummaryFacts: io.summaryFacts }); io.contentFactory.mockReturnValue({ getClientInit: io.init });
   io.attemptsFactory.mockReturnValue({ listByActivity: io.attempts }); io.owned.mockResolvedValue(activity());
   io.reconcile.mockResolvedValue({ changed: false }); io.init.mockResolvedValue(init); io.attempts.mockResolvedValue([]);
   io.help.mockResolvedValue([]); io.heads.mockResolvedValue([]); io.sources.mockResolvedValue({ availableIds: [sourceId] });
+  io.summaryFacts.mockResolvedValue({ attempts: { total: 1, correct: 1, incorrect: 0, unverified: 0 }, openQuestions: [], taskId: null });
+  io.readyCourseSources.mockResolvedValue([sourceId]);
 });
 function service(staleMs = 42) { return createOpeningTeachingResumeService(sql, { generateStaleMs: staleMs }); }
+
+describe("completed activity summary actions", () => {
+  const courseId = id(13);
+  const requirementKey = "matrix:matrix-arithmetic-v1:addition";
+  const older = learningObservationSchema.parse({
+    id: id(14), attemptId: id(15), problemId: id(16), itemVersionId: id(17),
+    workspaceId: scope.workspaceId, courseId, sessionId: id(18), skillLabel: "矩阵加法",
+    sourceIds: [sourceId], sourceTurnIds: [], occurredAt: stamp, submittedAt: stamp,
+    answer: "[[1,2],[3,4]]", clientKey: "older-answer", outcome: "correct",
+    assistance: "hinted", verdictSource: "deterministic", referenceSourceId: null,
+  });
+  const newer = { ...older, id: id(19), attemptId: id(20), occurredAt: "2026-11-11T04:00:00.000Z", submittedAt: "2026-11-11T04:00:00.000Z",
+    outcome: "unverified" as const, verdictSource: "self_report" as const };
+  const verified: CourseEvidence["evidenceContexts"][string] = {
+    observation: { ...older, observationId: older.id, requirementKey, submittedAt: Date.parse(stamp) },
+    context: {
+      version: { applicability: "exact", currentItemVersionId: older.itemVersionId },
+      serverEvaluation: {
+        observationId: older.id, attemptId: id(15), problemId: id(16), itemVersionId: id(17),
+        requirementKey, decision: "correct", outcome: "correct",
+        evaluatorVersion: "matrix-exact-v1", specVersion: "matrix-arithmetic-v1", reasonCodes: [],
+      },
+    },
+  };
+  const attempt = { id: older.attemptId, requirementKey, contextAnchor: { contentVersion: 1, sourceId },
+    matrixExercise: createMatrixExerciseSpec("addition", 1) };
+
+  beforeEach(() => {
+    io.attempts.mockResolvedValue([attempt]);
+    io.courseEvidence.mockResolvedValue({ observations: [older], evidenceContexts: { [older.id]: verified } } satisfies CourseEvidence);
+    io.owned.mockResolvedValue({ ...activity("ready"), status: "completed", courseId });
+  });
+
+  it("offers the route action for its effective head and withholds it after a newer unusable answer", async () => {
+    io.owned.mockResolvedValue({ ...activity("ready"), status: "completed", courseId, routeManaged: true });
+    io.routeHead.mockResolvedValue(older.id);
+    await expect(service().getSummary(scope, activityId)).resolves.toMatchObject({
+      nextStep: { kind: "assisted_check", observationId: older.id },
+    });
+    io.attempts.mockResolvedValue([attempt, { ...attempt, id: newer.attemptId }]);
+    io.courseEvidence.mockResolvedValue({
+      observations: [older, newer],
+      evidenceContexts: {
+        [older.id]: verified,
+        [newer.id]: {
+          observation: { ...newer, observationId: newer.id, requirementKey, submittedAt: Date.parse(newer.submittedAt) },
+          context: { version: { applicability: "unavailable" } },
+        },
+      },
+    } satisfies CourseEvidence);
+    io.routeHead.mockResolvedValue(newer.id);
+    expect((await service().getSummary(scope, activityId))?.nextStep).toBeUndefined();
+  });
+
+  it("binds an ordinary assisted check to a different variant of the verified exercise on the same source", async () => {
+    io.owned.mockResolvedValue({ ...activity("ready", 0), status: "completed", courseId });
+    io.attempts.mockResolvedValue([{ ...attempt, contextAnchor: { contentVersion: null, sourceId } }]);
+    await expect(service().getSummary(scope, activityId)).resolves.toMatchObject({
+      nextStep: { kind: "assisted_check", observationId: older.id, matrixPractice: { sourceId, exerciseKey: "addition", variant: 2 } },
+    });
+    expect(io.readyCourseSources).toHaveBeenCalledExactlyOnceWith(scope, courseId, [sourceId], "practice");
+  });
+
+  it("leaves ordinary practice unbound when the source is no longer ready for the course", async () => {
+    io.readyCourseSources.mockResolvedValue([]);
+    expect((await service().getSummary(scope, activityId))?.nextStep).toEqual({ kind: "assisted_check", observationId: older.id });
+  });
+
+  it("leaves a requirement label and source without a concrete exercise on the manual path", async () => {
+    io.attempts.mockResolvedValue([{ ...attempt, matrixExercise: undefined }]);
+    expect((await service().getSummary(scope, activityId))?.nextStep).toEqual({ kind: "assisted_check", observationId: older.id });
+    expect(io.readyCourseSources).not.toHaveBeenCalled();
+  });
+});
 
 describe("resume factory reconciliation and fail-soft boundary", () => {
   it.each(["queued", "generating"] as const)("rereads a changed %s activity and assembles the refreshed version/status", async initial => {

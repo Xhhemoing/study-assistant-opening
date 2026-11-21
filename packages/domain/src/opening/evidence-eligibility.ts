@@ -1,5 +1,14 @@
 import { evaluateAssistance, evaluateDelayedCheck } from "./evidence-eligibility-timing";
 import { evaluateAiCorrectness } from "./ai-evaluation";
+import { isPlainCartridgeRecord, readCartridgeDataProperty } from "./cartridges/clone-cartridge-data";
+import {
+  malformedCartridgeEmission,
+  qualifyCartridgeEmission,
+  type CartridgeEvidenceObservationFacts,
+  type CartridgeEvidenceQualification,
+  type CartridgeObservationEmission,
+} from "./cartridges/evidence-gate";
+import type { CartridgeRegistry } from "./cartridges/registry";
 import type {
   EvidenceEligibility,
   EvidenceEligibilityContext,
@@ -207,4 +216,83 @@ export function evaluateEvidenceEligibility(
   );
   result.reasonCodes = [...reasons].sort();
   return result;
+}
+
+/** Server-assembled cartridge facts: the trusted registry plus raw emissions keyed by observation id. */
+export type CartridgeEvidenceInput = {
+  registry: CartridgeRegistry;
+  emissions: Readonly<Record<string, CartridgeObservationEmission>>;
+};
+
+/**
+ * Cartridge metadata can only withhold formal qualification, never grant it. An emission
+ * that is not from an L4 cartridge with a verified distinguishable probe stays honest
+ * practice/continuity feedback: correctness and delayed-check use become unknown.
+ */
+export function applyCartridgeEvidenceGate(
+  eligibility: EvidenceEligibility,
+  qualification: CartridgeEvidenceQualification | null | undefined,
+): EvidenceEligibility {
+  if (!qualification || qualification.qualified) return eligibility;
+  const reasonCodes = [...new Set<EvidenceEligibilityReasonCode>([...eligibility.reasonCodes, "verification_source_untrusted"])].sort();
+  return {
+    ...eligibility,
+    verifiedCorrect: "unknown",
+    usableForDelayedCheck: eligibility.usableForDelayedCheck === "no" ? "no" : "unknown",
+    reasonCodes,
+  };
+}
+
+/** Gate an already-qualified observation by its cartridge emission, if one was recorded. */
+export function gateObservationCartridgeEvidence(
+  eligibility: EvidenceEligibility,
+  observationId: string,
+  observation: CartridgeEvidenceObservationFacts,
+  input: CartridgeEvidenceInput | null | undefined,
+): { eligibility: EvidenceEligibility; qualification: CartridgeEvidenceQualification | null } {
+  if (input == null) return { eligibility, qualification: null };
+  let qualification: CartridgeEvidenceQualification;
+  try {
+    if (!isPlainCartridgeRecord(input)) throw new TypeError("Cartridge evidence input requires a plain record");
+    const emissionsProperty = Object.getOwnPropertyDescriptor(input, "emissions");
+    if (!emissionsProperty) return { eligibility, qualification: null };
+    if (!Object.hasOwn(emissionsProperty, "value")) throw new TypeError("Cartridge emissions require a data property");
+
+    const emissions: unknown = emissionsProperty.value;
+    if (emissions === undefined) return { eligibility, qualification: null };
+    if (!isPlainCartridgeRecord(emissions)) throw new TypeError("Cartridge emissions require a plain record");
+    const entry = Object.getOwnPropertyDescriptor(emissions, observationId);
+    if (!entry) return { eligibility, qualification: null };
+    if (!Object.hasOwn(entry, "value")) throw new TypeError("Cartridge emission requires a data property");
+
+    qualification = qualifyCartridgeEmission(readCartridgeDataProperty(input, "registry"), entry.value, observation);
+  } catch {
+    qualification = malformedCartridgeEmission();
+  }
+  return { eligibility: applyCartridgeEvidenceGate(eligibility, qualification), qualification };
+}
+
+/** `evaluateEvidenceEligibility` followed by the optional cartridge gate. */
+export function evaluateCartridgeEvidenceEligibility(
+  observation: EvidenceObservation,
+  context: EvidenceEligibilityContext,
+  cartridge?: { registry: CartridgeRegistry; emission: CartridgeObservationEmission } | null,
+): { eligibility: EvidenceEligibility; qualification: CartridgeEvidenceQualification | null } {
+  const eligibility = evaluateEvidenceEligibility(observation, context);
+  if (cartridge === null || cartridge === undefined) return { eligibility, qualification: null };
+  let qualification: CartridgeEvidenceQualification;
+  try {
+    if (!isPlainCartridgeRecord(cartridge)) throw new TypeError("Cartridge evidence wrapper requires a plain record");
+    const registryProperty = Object.getOwnPropertyDescriptor(cartridge, "registry");
+    const emissionProperty = Object.getOwnPropertyDescriptor(cartridge, "emission");
+    if (!registryProperty || !Object.hasOwn(registryProperty, "value")
+      || !emissionProperty || !Object.hasOwn(emissionProperty, "value")) {
+      throw new TypeError("Cartridge evidence wrapper requires data properties");
+    }
+    qualification = qualifyCartridgeEmission(registryProperty.value, emissionProperty.value,
+      { outcome: observation.outcome ?? null, requirementKey: observation.requirementKey ?? null });
+  } catch {
+    qualification = malformedCartridgeEmission();
+  }
+  return { eligibility: applyCartridgeEvidenceGate(eligibility, qualification), qualification };
 }

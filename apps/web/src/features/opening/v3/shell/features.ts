@@ -1,3 +1,5 @@
+import { navigationIsActive, openingNavigation, type OpeningNavigationOptions } from "../../shell/navigation";
+
 /**
  * 功能注册表：路由、导航位置、布局模板、层级与现有实现的唯一来源。
  * 导航、激活态、过渡方向、手机「更多」、设置子页都从这里派生；新增功能只加一行。
@@ -29,9 +31,9 @@ export type Feature = {
 export const FEATURES: Feature[] = [
   { id: "today", route: "/opening/today", label: "学习", icon: "start", placement: "core", depth: 0, layout: "start", source: "features/opening/planning/today-dashboard" },
   { id: "suggestions", route: "/opening/suggestions", label: "建议", icon: "start", placement: "none", depth: 0, layout: "redirect", parent: "today", source: "app/(opening)/opening/suggestions → /opening/today" },
-  { id: "agent", route: "/opening/agent", label: "助理", icon: "assistant", placement: "none", depth: 1, layout: "workspace", parent: "today", source: "features/opening/assistant/agent-workspace" },
-  { id: "assistant", route: "/opening/assistant", label: "对话", icon: "assistant", placement: "none", depth: 1, layout: "thread", parent: "today", source: "features/opening/assistant/assistant-entry" },
-  { id: "courses", route: "/opening/courses", label: "课程", icon: "courses", placement: "none", depth: 1, layout: "list", parent: "today", source: "app/(opening)/opening/courses/page" },
+  { id: "agent", route: "/opening/agent", label: "探索", icon: "assistant", placement: "core", depth: 0, layout: "workspace", source: "features/opening/assistant/agent-workspace" },
+  { id: "assistant", route: "/opening/assistant", label: "对话", icon: "assistant", placement: "none", depth: 1, layout: "thread", parent: "agent", source: "features/opening/assistant/assistant-entry" },
+  { id: "courses", route: "/opening/courses", label: "课程", icon: "courses", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/courses/page" },
   { id: "course-new", route: "/opening/courses/new", label: "新建课程", icon: "add", placement: "none", depth: 2, layout: "form", parent: "courses", source: "features/opening/courses/course-create" },
   { id: "course", route: "/opening/courses/[id]", label: "课程空间", icon: "courses", placement: "none", depth: 1, layout: "course", parent: "courses", source: "features/opening/courses/course-detail" },
   { id: "course-exam", route: "/opening/courses/[id]/exam", label: "考试", icon: "exam", placement: "none", depth: 2, layout: "form", parent: "courses", source: "features/opening/exam-sprint/course-exam-view" },
@@ -42,12 +44,14 @@ export const FEATURES: Feature[] = [
   { id: "review-session", route: "/opening/review/session", label: "复习会话", icon: "review", placement: "none", depth: 2, layout: "session", parent: "review", source: "新增：复用 features/opening/review 复习服务与 cards/card-review-view 的评分接口" },
   { id: "review", route: "/opening/review", label: "复习", icon: "review", placement: "core", depth: 0, layout: "list", source: "features/opening/review/review-hub" },
   { id: "library", route: "/opening/library", label: "资料", icon: "library", placement: "core", depth: 0, layout: "list", source: "app/(opening)/opening/library/page" },
-  { id: "library-new", route: "/opening/library/new", label: "上传资料", icon: "upload", placement: "none", depth: 2, layout: "form", parent: "library", source: "features/opening/editor/new-document" },
+  { id: "library-new", route: "/opening/library/new", label: "新建笔记", icon: "add", placement: "none", depth: 2, layout: "form", parent: "library", source: "features/opening/editor/new-document" },
   { id: "document", route: "/opening/library/[id]", label: "资料", icon: "library", placement: "none", depth: 2, layout: "reader", parent: "library", source: "features/opening/editor/document-editor（原生文档）/ PDF·照片阅读" },
   { id: "sprint", route: "/opening/sprint", label: "冲刺", icon: "sprint", placement: "none", depth: 1, layout: "list", parent: "today", source: "features/opening/exam-sprint/sprint-course-chooser" },
   { id: "cards", route: "/opening/cards", label: "卡组", icon: "cards", placement: "none", depth: 1, layout: "list", parent: "review", source: "features/opening/review/review-route (legacyCardsHref)" },
   { id: "search", route: "/opening/search", label: "搜索", icon: "search", placement: "none", depth: 1, layout: "list", parent: "library", source: "features/opening/search/search-workspace" },
   { id: "settings", route: "/opening/settings", label: "设置", icon: "settings", placement: "system", depth: 0, layout: "settings", source: "app/(opening)/opening/settings/page" },
+  { id: "settings-planning", route: "/opening/settings/planning", label: "学习安排", icon: "settings", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "features/opening/planning/today-dashboard" },
+  { id: "settings-learning", route: "/opening/settings/learning", label: "学习偏好", icon: "settings", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "app/(opening)/opening/settings/learning/page" },
   { id: "settings-connections", route: "/opening/settings/connections", label: "连接", icon: "connections", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "features/opening/connections/connection-settings" },
   { id: "settings-export", route: "/opening/settings/export", label: "导出", icon: "export", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "app/(opening)/opening/settings/export/page" },
   { id: "settings-learning-test", route: "/opening/settings/learning-test", label: "学习测试", icon: "measure", placement: "none", depth: 1, layout: "settings", parent: "settings", source: "features/opening/measurement/measurement-view" },
@@ -74,10 +78,12 @@ export function featureHref(id: string, params: Record<string, string> = {}): st
 }
 
 /** 当前路径应高亮的导航入口 id（每个路径只高亮一个） */
-export function activeNavId(pathname: string): string | null {
+export function activeNavId(pathname: string, options: OpeningNavigationOptions = {}): string | null {
+  const primary = openingNavigation(options).find(item => navigationIsActive(item.href, pathname, "", options));
+  if (primary) return resolveFeature(primary.href)?.id ?? null;
   let feature = resolveFeature(pathname);
   while (feature && feature.placement === "none" && feature.parent) feature = byId.get(feature.parent) ?? null;
-  return feature && feature.placement !== "none" ? feature.id : null;
+  return feature?.placement === "system" || feature?.placement === "tool" ? feature.id : null;
 }
 
 /** 过渡方向：进入更深为 forward，返回更浅为 back，同级切换为 swap */
@@ -87,7 +93,15 @@ export function navDirection(from: string, to: string): "forward" | "back" | "sw
   return b > a ? "forward" : b < a ? "back" : "swap";
 }
 
-export const NAV_CORE = FEATURES.filter(feature => feature.placement === "core");
+export function shellNavigationFeatures(options: OpeningNavigationOptions = {}) {
+  return openingNavigation(options).map(({ href, label, group }) => {
+    const feature = resolveFeature(href);
+    if (!feature) throw new Error(`Missing feature for navigation route ${href}`);
+    return { ...feature, label, placement: group === "core" ? "core" as const : "tool" as const };
+  });
+}
+
+export const NAV_CORE = shellNavigationFeatures().filter(feature => feature.placement === "core");
 export const NAV_TOOLS = FEATURES.filter(feature => feature.placement === "tool");
 export const NAV_SYSTEM = FEATURES.filter(feature => feature.placement === "system");
 export const SETTINGS_PAGES = FEATURES.filter(feature => feature.id === "settings" || feature.parent === "settings");

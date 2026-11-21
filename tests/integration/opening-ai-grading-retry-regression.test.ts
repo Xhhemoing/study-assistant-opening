@@ -61,7 +61,8 @@ it.each(["success", "provider", "parse", "persist", "settle", "usage"] as const)
   try {
     await runJob(f.queue, f.jobId, createGradeObservationHandler(deps));
     const job = await f.queue.get(fixture.scope, f.jobId);
-    expect(job.state).toBe(phase === "success" || phase === "settle" || phase === "usage" ? "succeeded" : "outcome_unknown");
+    const billedFailure = phase === "parse" || phase === "persist";
+    expect(job.state).toBe(billedFailure ? "failed" : phase === "provider" ? "outcome_unknown" : "succeeded");
     const diagnostic = { phase, errorClass: phase === "provider" ? "OpeningProviderError" : "Error",
       code: phase === "provider" ? "PROVIDER_UNAVAILABLE" : phase === "parse" ? "GRADING_PARSE" : phase === "usage" ? "USAGE_MISSING" : "UNKNOWN",
       attemptedFetch: true, httpStatus: phase === "provider" ? 503 : 200 };
@@ -71,11 +72,12 @@ it.each(["success", "provider", "parse", "persist", "settle", "usage"] as const)
     expect(JSON.stringify(job.result)).not.toContain(sensitive);
     expect(JSON.stringify(warning.mock.calls)).not.toContain(sensitive);
     const [before] = await fixture.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${f.operationId}`;
-    expect(before).toMatchObject({ state: phase === "success" ? "completed" : "reserved", release_reason: null });
-    if (["provider", "parse", "persist", "usage"].includes(phase)) expect(before!.outcome_unknown_at).not.toBeNull();
+    expect(before).toMatchObject({ state: phase === "success" || billedFailure ? "completed" : "reserved", release_reason: null });
+    if (phase === "provider" || phase === "usage") expect(before!.outcome_unknown_at).not.toBeNull();
+    if (billedFailure) expect(before).toMatchObject({ amount_cents: 1, outcome_unknown_at: null, result_ref: null });
     const current = await f.jobs.read(fixture.scope, { observationId: f.original.id });
     const status = await f.jobs.enqueue(fixture.scope, { observationId: current.headObservationId });
-    expect(status).toMatchObject({ status: phase === "success" ? "graded" : "unknown_cost", retryable: false });
+    expect(status).toMatchObject({ status: phase === "success" ? "graded" : billedFailure ? "needs_manual" : "unknown_cost", retryable: false });
     expect(await runJob(f.queue, f.jobId, createGradeObservationHandler(deps))).toBe(false);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(await fixture.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${f.operationId}`).toEqual([before]);

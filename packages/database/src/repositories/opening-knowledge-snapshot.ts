@@ -1,11 +1,7 @@
 import { createHash } from "node:crypto";
-import { knowledgeSnapshotSchema, type KnowledgeSnapshot, type SourceChunk } from "@aistudy/contracts";
-import { z } from "zod";
+import { storedKnowledgeSnapshotSchema, type KnowledgeSnapshot, type SourceChunk } from "@aistudy/contracts";
 
-export const storedKnowledgeSnapshotSchema = knowledgeSnapshotSchema.extend({
-  coveredSourceChunkDigests: z.record(z.string(), z.string().regex(/^[0-9a-f]{64}$/)).optional(),
-});
-export type StoredKnowledgeSnapshot = z.infer<typeof storedKnowledgeSnapshotSchema>;
+export { storedKnowledgeSnapshotSchema, type StoredKnowledgeSnapshot } from "@aistudy/contracts";
 
 /** Parser retries retain identical rows and allocate new IDs for changed or added chunks. */
 export function knowledgeChunkDigests(chunks: readonly Pick<SourceChunk, "id" | "sourceId">[]): Record<string, string> {

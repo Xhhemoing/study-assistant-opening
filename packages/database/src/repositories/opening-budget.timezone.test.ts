@@ -17,6 +17,7 @@ function fakeSql() {
   const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     const q = strings.join("?");
     const ws = values.find((v) => v === wsBad || v === wsOk) as string | undefined;
+    if (q.includes("clock_timestamp()")) return Promise.resolve([{ instant: new Date("2026-10-12T00:00:00Z") }]);
     if (q.includes("FROM workspaces")) return Promise.resolve([{ id: ws }]);
     if (q.includes("FROM workspace_preferences")) {
       return Promise.resolve([{ ai_settings: null, planning_settings: { timeZone: zones[ws!] } }]);
