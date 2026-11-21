@@ -170,6 +170,22 @@ function toWeekSession(row: Record<string, unknown>): WeekSession {
 
 const TIMETABLE_REVISION_PREFIX = "timetable-revision:";
 
+function timetableSessionsDigest(rows: readonly Record<string, unknown>[]): string {
+  const entries = rows
+    .filter(row => row.id != null)
+    .map(row => ({
+      id: String(row.id),
+      courseName: String(row.course_name ?? ""),
+      courseId: row.course_id == null ? null : String(row.course_id),
+      weekday: Number(row.weekday),
+      weeks: Array.isArray(row.weeks) ? row.weeks.map(Number) : [],
+      startPeriod: Number(row.start_period),
+      endPeriod: Number(row.end_period),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0, 32);
+}
+
 async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
   const rows = await sql`
     SELECT s.*, ps.hard_blocks_fingerprint FROM workspaces w
@@ -178,11 +194,14 @@ async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
     WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
     ORDER BY s.weekday, s.start_period, s.id`;
   const sessions = rows.filter(row => row.id != null).map(toWeekSession);
-  const firstSession = rows.find(row => row.id != null);
   const fingerprint = rows[0]?.hard_blocks_fingerprint as string | null | undefined;
-  const revision = fingerprint?.startsWith(TIMETABLE_REVISION_PREFIX)
+  // Combine the sentinel UUID (tracks empty-to-empty replaces) with a canonical digest of all
+  // opening_timetable_sessions rows (including generated row UUIDs) so rolling-deploy base
+  // instances that replace sessions directly without touching opening_plan_state still invalidate stale previews.
+  const sentinel = fingerprint?.startsWith(TIMETABLE_REVISION_PREFIX)
     ? fingerprint.slice(TIMETABLE_REVISION_PREFIX.length)
-    : (firstSession?.id as string | null) ?? `empty:${scope.workspaceId}`;
+    : `empty:${scope.workspaceId}`;
+  const revision = `${sentinel}:${timetableSessionsDigest(rows)}`;
   return { sessions, revision };
 }
 

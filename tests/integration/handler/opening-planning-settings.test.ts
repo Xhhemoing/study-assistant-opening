@@ -222,7 +222,7 @@ describe("opening planning-settings handlers (DL9)", () => {
     const put = (rows: typeof sessions, expectedRevision: string) =>
       putTimetable(req(path, "PUT", { sessions: rows, expectedRevision }, freshCookie));
     const initial = await snapshot();
-    expect(initial).toEqual({ sessions: [], revision: expect.stringMatching(/^empty:[\da-f-]{36}$/i) });
+    expect(initial).toEqual({ sessions: [], revision: expect.stringMatching(/^empty:[\da-f-]{36}:[0-9a-f]{32}$/i) });
     const other = await registerUser("other-untouched-timetable");
     const otherSnapshot = async () => (await getTimetable(req(path, "GET", undefined, other))).json();
     const untouched = await otherSnapshot();
@@ -236,7 +236,7 @@ describe("opening planning-settings handlers (DL9)", () => {
     const imported = await snapshot();
     expect((await put([], imported.revision)).status).toBe(200);
     const cleared = await snapshot();
-    expect(cleared).toEqual({ sessions: [], revision: expect.stringMatching(/^[\da-f-]{36}$/i) });
+    expect(cleared).toEqual({ sessions: [], revision: expect.stringMatching(/^[\da-f-]{36}:[0-9a-f]{32}$/i) });
     expect(cleared.revision).not.toBe(imported.revision);
     const stale = await put(sessions, initial.revision);
     expect(stale.status).toBe(409);

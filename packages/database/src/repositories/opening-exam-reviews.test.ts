@@ -356,4 +356,102 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     expect(unknownFrags.some(fr => fr.__fragment === "AND updated_at=(?::text)::timestamptz" && fr.values?.[0] === "2026-10-17 00:02:00.123456+00")).toBe(true);
     expect(unknownFrags.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(false);
   });
+
+  it("locks all legacy same-intent rows and never creates a new review when an older row is released_only but a sibling is unknown or ready", async () => {
+    const idA = "77777777-7777-4777-8777-777777777771";
+    const idB = "77777777-7777-4777-8777-777777777772";
+    const runScenario = async (siblingStatus: "unknown" | "ready") => {
+      const statuses: Record<string, string> = { [idA]: "pending", [idB]: siblingStatus };
+      const ledgerByOp: Record<string, Array<Record<string, unknown>>> = {
+        [`exam-review:${scope.workspaceId}:${idA}`]: [
+          { state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 },
+        ],
+        [`exam-review:${scope.workspaceId}:${idB}`]: [
+          { state: "reserved", release_reason: null, outcome_unknown_at: new Date("2026-10-17T00:00:30Z"), pending_reconcile_cents: 0 },
+        ],
+      };
+      const calls: Array<{ query: string; values: unknown[] }> = [];
+      let inserted = false;
+      const makeRow = (id: string, createdAt: string, isStale: boolean) => ({
+        id,
+        sprint_id: sprintId,
+        workspace_id: scope.workspaceId,
+        owner_user_id: scope.ownerUserId,
+        source_item_id: input.sourceItemId,
+        work_source_id: workId,
+        work_source_version: 1,
+        reference_source_id: referenceId,
+        reference_source_version: 1,
+        answer_text: input.answerText,
+        client_key: `legacy-${id}`,
+        intent: { ...input, clientKey: `legacy-${id}` },
+        status: statuses[id],
+        proposal: siblingStatus === "ready" && id === idB ? {
+          transcription: "x=1", questionMatch: true, outcome: "correct",
+          steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
+        } : null,
+        model_label: siblingStatus === "ready" && id === idB ? "vision-model" : null,
+        privacy_epoch: 1,
+        created_at: new Date(createdAt),
+        updated_at: new Date(createdAt),
+        is_stale: isStale,
+      });
+      const exec = (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?").replace(/\s+/g, " ").trim();
+        if (strings.length === 1 && query === "") return { __fragment: "" };
+        if (query.startsWith("AND ")) return { __fragment: query, values };
+        calls.push({ query, values });
+        if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId, privacy_epoch: 1 }]);
+        if (query.includes("FROM opening_exam_sprints s JOIN opening_exam_bindings")) {
+          return Promise.resolve([{ id: sprintId, pack_snapshot: pack, state, binding }]);
+        }
+        if (query.includes("FROM courses WHERE")) return Promise.resolve([{ id: courseId }]);
+        if (query.includes("FROM opening_sources s JOIN opening_source_versions")) return Promise.resolve([{ id: workId }]);
+        if (query.includes("SELECT version FROM opening_sources")) return Promise.resolve([{ version: 1 }]);
+        if (query.includes("SELECT mime FROM opening_sources")) return Promise.resolve([{ mime: "image/png" }]);
+        if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ "?column?": 1 }]);
+        if (query.includes("FROM opening_budget_reservations")) {
+          const opId = String(values[1]);
+          return Promise.resolve(ledgerByOp[opId] ?? []);
+        }
+        if (query.includes("UPDATE opening_exam_reviews SET status='failed'")) {
+          statuses[String(values[0])] = "failed";
+          return Promise.resolve([]);
+        }
+        if (query.includes("INSERT INTO opening_exam_reviews")) {
+          inserted = true;
+          return Promise.resolve([{ lease_updated_at: "2026-10-17 00:05:00.000000+00" }]);
+        }
+        if (query.includes("FROM opening_exam_reviews")) {
+          if (query.includes("AND client_key=?")) return Promise.resolve([]);
+          if (query.includes("WHERE id=?")) {
+            const targetId = String(values[0]);
+            return Promise.resolve([makeRow(targetId, targetId === idA ? "2026-10-17T00:00:00.000Z" : "2026-10-17T00:00:05.000Z", true)]);
+          }
+          // Multi-row candidate query: must NOT have LIMIT 1 and must lock ORDER BY id ASC FOR UPDATE.
+          expect(query).not.toContain("LIMIT 1");
+          expect(query).toContain("ORDER BY id ASC FOR UPDATE");
+          return Promise.resolve([
+            makeRow(idA, "2026-10-17T00:00:00.000Z", true),
+            makeRow(idB, "2026-10-17T00:00:05.000Z", true),
+          ]);
+        }
+        return Promise.resolve([]);
+      };
+      const sql = Object.assign(exec, {
+        json: (value: unknown) => value,
+        begin: async <T>(fn: (tx: unknown) => Promise<T>) => fn(sql),
+      }) as unknown as Sql;
+      const ctx = await createOpeningExamReviewsRepository(sql).begin(scope, { ...input, clientKey: `fresh-key-${siblingStatus}` });
+      expect(statuses[idA]).toBe("failed");
+      expect(statuses[idB]).toBe(siblingStatus);
+      expect(inserted).toBe(false);
+      expect(ctx.review.id).toBe(idB);
+      expect(ctx.review.status).toBe(siblingStatus);
+      expect(ctx.executionUpdatedAt).toBeUndefined();
+      expect(ctx.reusedUnresolved).toBe(siblingStatus === "unknown" ? true : undefined);
+    };
+    await runScenario("unknown");
+    await runScenario("ready");
+  });
 });

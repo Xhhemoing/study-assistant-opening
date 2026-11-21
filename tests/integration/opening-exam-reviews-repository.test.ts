@@ -616,5 +616,32 @@ describe("exam photo review repository integration", () => {
     expect(retryFreshAfterBackup.review.status).toBe("unknown");
     expect(retryFreshAfterBackup.reusedUnresolved).toBe(true);
     expect(retryFreshAfterBackup.executionUpdatedAt).toBeUndefined();
+
+    // 7) Legacy multi-row same-intent workspace (row A expired released_only + row B unresolved unknown):
+    //    must mark A failed, return B (reusedUnresolved: true), and NEVER create row C.
+    const legacyAnswer = "Legacy multi-row same-intent answer";
+    const rowA = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: legacyAnswer }));
+    const rowAOpId = `exam-review:${f.scope.workspaceId}:${rowA.review.id}`;
+    await f.sql`INSERT INTO opening_budget_reservations(id, workspace_id, purpose, amount_cents, request_id, state, release_reason)
+      VALUES(${randomUUID()}, ${f.scope.workspaceId}, 'practice.grade-photo', 10, ${rowAOpId}, 'released', 'not_sent')`;
+    const rowBId = randomUUID();
+    const rowBInput = input({ clientKey: randomUUID(), answerText: legacyAnswer });
+    const [rowARecord] = await f.sql`SELECT sprint_id, privacy_epoch FROM opening_exam_reviews WHERE id = ${rowA.review.id}`;
+    await f.sql`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
+      work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
+      client_key,intent,status,privacy_epoch)
+      VALUES(${rowBId},${rowARecord!.sprint_id},${f.scope.workspaceId},${f.scope.ownerUserId},${rowBInput.sourceItemId},
+      ${rowBInput.workSourceId},${rowBInput.workSourceVersion},${rowBInput.referenceSourceId},${rowBInput.referenceSourceVersion},
+      ${legacyAnswer},${rowBInput.clientKey},${f.sql.json(rowBInput)},'unknown',${rowARecord!.privacy_epoch})`;
+    await f.sql`UPDATE opening_exam_reviews SET updated_at = now() - interval '61 seconds' WHERE id = ${rowA.review.id}`;
+
+    const multiRowRetry = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: legacyAnswer }));
+    expect(await rawReview(rowA.review.id)).toMatchObject({ status: "failed" });
+    expect(multiRowRetry.review.id).toBe(rowBId);
+    expect(multiRowRetry.review.status).toBe("unknown");
+    expect(multiRowRetry.reusedUnresolved).toBe(true);
+    expect(multiRowRetry.executionUpdatedAt).toBeUndefined();
+    const legacyRows = await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId} AND answer_text=${legacyAnswer}`;
+    expect(legacyRows).toHaveLength(2);
   });
 });

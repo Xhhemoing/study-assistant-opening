@@ -230,7 +230,9 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             }
           }
           const checked = await validate(tx, scope, input), id = randomUUID();
-          const [reusable] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+          // Lock ALL non-failed same-intent rows in canonical id order so a legacy multi-row
+          // workspace cannot skip an active/unknown/ready sibling after expiring an older row.
+          const candidates = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
             FROM opening_exam_reviews
             WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
               AND sprint_id=${checked.sprintId} AND source_item_id=${input.sourceItemId}
@@ -238,17 +240,88 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
               AND reference_source_id=${input.referenceSourceId} AND reference_source_version=${input.referenceSourceVersion}
               AND privacy_epoch=${checked.privacyEpoch} AND answer_text=${input.answerText}
               AND status IN ('pending', 'unknown', 'ready')
-            ORDER BY CASE WHEN status='ready' THEN 0 ELSE 1 END, created_at, id LIMIT 1 FOR UPDATE`;
-          if (reusable) {
-            const reconciled = await reconcileExistingReview(tx, scope, reusable, {
-              wrapCommittedReceipt: false,
-              allowFreshOnReleasedStale: true,
-            });
-            if (reconciled) {
-              const alias: ExamReviewAlias = { reviewId: String(reusable.id) };
+            ORDER BY id ASC
+            FOR UPDATE`;
+          if (candidates.length) {
+            const sortByCreatedThenId = (a: Row, b: Row) => {
+              const aTime = new Date(a.created_at as string | Date).getTime();
+              const bTime = new Date(b.created_at as string | Date).getTime();
+              return aTime !== bTime ? aTime - bTime : String(a.id).localeCompare(String(b.id));
+            };
+            const readyRows: Row[] = [];
+            const blockingRows: Row[] = [];
+            const reclaimableRows: Row[] = [];
+            for (const row of candidates) {
+              const rowId = String(row.id);
+              if (row.status === "ready") {
+                readyRows.push(row);
+              } else if (row.status === "unknown") {
+                if (row.is_stale) {
+                  const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
+                  if (ledger === "released_only") {
+                    await tx`UPDATE opening_exam_reviews
+                      SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
+                    continue;
+                  }
+                }
+                blockingRows.push(row);
+              } else if (row.status === "pending") {
+                if (!row.is_stale) {
+                  blockingRows.push(row);
+                } else {
+                  const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
+                  if (ledger === "released_only") {
+                    await tx`UPDATE opening_exam_reviews
+                      SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+                    continue;
+                  }
+                  if (ledger === "active_or_billed") {
+                    await tx`UPDATE opening_exam_reviews SET status='unknown'
+                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+                    blockingRows.push(row);
+                  } else {
+                    reclaimableRows.push(row);
+                  }
+                }
+              }
+            }
+            const attachAlias = async (reviewId: string) => {
+              const alias: ExamReviewAlias = { reviewId };
               await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
                 VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
-              return reconciled;
+            };
+            if (readyRows.length) {
+              const chosenId = String(readyRows.sort(sortByCreatedThenId)[0]!.id);
+              const context = await readContext(tx, scope, chosenId);
+              await attachAlias(chosenId);
+              return context;
+            }
+            if (blockingRows.length) {
+              const chosenId = String(blockingRows.sort(sortByCreatedThenId)[0]!.id);
+              const context = await readContext(tx, scope, chosenId);
+              await attachAlias(chosenId);
+              return { ...context, reusedUnresolved: true };
+            }
+            if (reclaimableRows.length) {
+              const ordered = reclaimableRows.sort(sortByCreatedThenId);
+              const chosenId = String(ordered[0]!.id);
+              const context = await readContext(tx, scope, chosenId);
+              for (const extra of ordered.slice(1)) {
+                await tx`UPDATE opening_exam_reviews
+                  SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                  WHERE id=${String(extra.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+              }
+              const [reclaimed] = await tx`UPDATE opening_exam_reviews
+                SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                WHERE id=${chosenId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
+                RETURNING updated_at::text AS lease_updated_at`;
+              await attachAlias(chosenId);
+              return {
+                ...context,
+                ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
+              };
             }
           }
           const [inserted] = await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,

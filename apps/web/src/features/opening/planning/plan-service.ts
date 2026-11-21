@@ -439,7 +439,14 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
 
     async saveTimetable(scope: Scope, raw: unknown, rawRevision?: unknown): Promise<WeekSession[]> {
       const sessions = z.array(weekSessionSchema).parse(raw);
-      const revision = z.union([uuidSchema, z.templateLiteral(["empty:", uuidSchema]), z.literal("empty")]).optional().parse(rawRevision);
+      const digest = z.string().regex(/^[0-9a-f]{32}$/);
+      const revision = z.union([
+        z.templateLiteral([uuidSchema, ":", digest]),
+        z.templateLiteral(["empty:", uuidSchema, ":", digest]),
+        uuidSchema,
+        z.templateLiteral(["empty:", uuidSchema]),
+        z.literal("empty"),
+      ]).optional().parse(rawRevision);
       return repo.replaceTimetable(scope, sessions, revision);
     },
 
