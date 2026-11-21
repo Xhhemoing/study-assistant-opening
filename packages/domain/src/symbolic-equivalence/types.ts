@@ -1534,11 +1534,24 @@ function buildCadPlan(
           candidate = subtractRational(candidate, rational(1n));
         }
       }
-      if (pointInInterval(candidate, iv) && !parsedDomain.excluded.some((e) => equalRational(e, candidate))) {
+      if (
+        pointInInterval(candidate, iv) &&
+        !parsedDomain.excluded.some((e) => equalRational(e, candidate)) &&
+        polynomialEvaluate(master, candidate).n !== 0n
+      ) {
         pushRationalSite(candidate);
         openCells.push({ left: leftBound, right: rightBound, sample: candidate });
+      } else {
+        unresolvedRootIsolation = true;
       }
     };
+
+    if (iv.left !== null && !iv.leftOpen && !parsedDomain.excluded.some((e) => equalRational(e, iv.left!))) {
+      pushRationalSite(iv.left);
+    }
+    if (iv.right !== null && !iv.rightOpen && !parsedDomain.excluded.some((e) => equalRational(e, iv.right!))) {
+      pushRationalSite(iv.right);
+    }
 
     const isolated = polynomialDegree(master) >= 1 ? isolateRealRoots(master, iv) : { roots: [], unresolvedRootIsolation: false };
     if (isolated.unresolvedRootIsolation) unresolvedRootIsolation = true;
@@ -1586,6 +1599,9 @@ function buildCadPlan(
           emitOpenSample(exactRootMid, r.high);
           rootBounds.push({ low: r.low, high: r.high });
           continue;
+        }
+        if (exactRootMid === null && (leftWitness === null || rightWitness === null)) {
+          unresolvedRootIsolation = true;
         }
         if (leftWitness !== null) {
           pushRationalSite(leftWitness);

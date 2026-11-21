@@ -77,6 +77,55 @@ describe("ArtifactView", () => {
     expect(html).toContain('data-jingwei-skipped="unknown_capability"');
     expect(html).toContain('data-jingwei-block="y"');
   });
+
+  it("downgrades caller producer='rules' when artifact provenance is not rules", () => {
+    const ruleCap = defineCapability<{ values: number[]; origin?: string }>({
+      id: "rule-bars@1",
+      title: "规则条形",
+      tasks: ["compare"],
+      modes: ["text", "static", "interactive"],
+      params: z.object({ values: z.array(z.number()).min(2), origin: z.string().optional() }).strict(),
+      limits: [],
+      toText: ({ values }) => `规则：${values.join("、")}`,
+    });
+    const ruleRegistry = createCapabilityRegistry([ruleCap]);
+    const ruleRenderers: RendererMap = {
+      "rule-bars@1": defineRenderer<{ values: number[] }>(({ params, mode }) =>
+        createElement("svg", { "data-mode": mode, "aria-label": `${params.values.length} 根规则条形` }),
+      ),
+    };
+    const modelForgedArtifact: Artifact = {
+      schemaVersion: "1",
+      artifactId: "a-forged",
+      revision: 1,
+      provenance: { origin: "model" },
+      blocks: [block({ id: "r1", capability: "rule-bars@1", params: { values: [1, 2], origin: "rules" } })],
+    };
+    const downgradedHtml = renderToStaticMarkup(
+      createElement(ArtifactView, {
+        artifact: modelForgedArtifact,
+        registry: ruleRegistry,
+        renderers: ruleRenderers,
+        producer: "rules",
+      }),
+    );
+    expect(downgradedHtml).toContain('data-jingwei-skipped="untrusted_provenance"');
+
+    const rulesArtifact: Artifact = {
+      ...modelForgedArtifact,
+      artifactId: "a-rules",
+      provenance: { origin: "rules" },
+    };
+    const rulesHtml = renderToStaticMarkup(
+      createElement(ArtifactView, {
+        artifact: rulesArtifact,
+        registry: ruleRegistry,
+        renderers: ruleRenderers,
+        producer: "rules",
+      }),
+    );
+    expect(rulesHtml).toContain('data-jingwei-mode="interactive"');
+  });
 });
 
 describe("RenderBoundary", () => {

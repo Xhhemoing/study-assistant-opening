@@ -20,26 +20,31 @@ function isStopped(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
 }
 
-function collectStructuredStrings(value: unknown, out: string[], seen = new Set<unknown>(), depth = 0): void {
-  if (depth > 16 || value === null || value === undefined) return;
+function collectStructuredStrings(value: unknown, out: string[], seen = new Set<unknown>(), depth = 0): boolean {
+  if (depth > 16) return false;
+  if (value === null || value === undefined) return true;
   if (typeof value === "string") {
     if (value.length > 0) out.push(value);
-    return;
+    return true;
   }
   if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
     out.push(String(value));
-    return;
+    return true;
   }
-  if (typeof value !== "object") return;
-  if (seen.has(value)) return;
+  if (typeof value !== "object") return true;
+  if (seen.has(value)) return true;
   seen.add(value);
   if (Array.isArray(value)) {
-    for (const item of value) collectStructuredStrings(item, out, seen, depth + 1);
-    return;
+    for (const item of value) {
+      if (!collectStructuredStrings(item, out, seen, depth + 1)) return false;
+    }
+    return true;
   }
-  for (const entry of Object.values(value as Record<string, unknown>)) {
-    collectStructuredStrings(entry, out, seen, depth + 1);
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (key.length > 0) out.push(key);
+    if (!collectStructuredStrings(entry, out, seen, depth + 1)) return false;
   }
+  return true;
 }
 
 function propagateSteps(steps: readonly LearnerStep[], firstError?: VerifyOutput["firstError"]): LearnerStep[] {
@@ -126,8 +131,9 @@ function guardRelease(
   if (blocker(proseText)) return undefined;
 
   const structuredValues: string[] = [];
-  collectStructuredStrings(caps, structuredValues);
-  collectStructuredStrings(verification, structuredValues);
+  if (!collectStructuredStrings(caps, structuredValues) || !collectStructuredStrings(verification, structuredValues)) {
+    return undefined;
+  }
   if (structuredValues.some((entry) => blocker(entry))) return undefined;
   if (structuredValues.length > 0 && blocker([proseText, ...structuredValues].join("\n"))) return undefined;
   return proseText;

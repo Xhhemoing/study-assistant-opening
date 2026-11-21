@@ -279,6 +279,25 @@ describe("bounded symbolic equivalence", () => {
     );
     expect(closeRootsResult.status).toBe("unverified");
     expect(closeRootsResult.reason).toBe("unresolved_root_isolation");
+
+    // Round-7 P1-A: unbracketed root after 64 Sturm steps fails closed and closed endpoints outside [-3, 3] are probed
+    const unresolvedBigCoeff = verifyScalarEquivalence(
+      "sqrt(2722258935367507707706996859454145691648 * x^2 - 1)^2",
+      "2722258935367507707706996859454145691648 * x^2 - 1",
+      { intervals: [{ left: 0, right: 2, leftOpen: true }] },
+    );
+    expect(unresolvedBigCoeff.status).toBe("unverified");
+    expect(unresolvedBigCoeff.reason).toBe("unresolved_root_isolation");
+    expect(
+      verifyScalarEquivalence("abs(x^2 - 110) + sin(x - 12) / sin(x - 12)", "abs(x^2 - 110) + 1", {
+        intervals: [{ left: 10, right: 12 }],
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("abs(x^2 - 110) + sin(x - 10) / sin(x - 10)", "abs(x^2 - 110) + 1", {
+        intervals: [{ left: 10, right: 12 }],
+      }).status,
+    ).toBe("inequivalent");
   });
 
   it("checks derivative residuals, variable forwarding, piecewise integrals, and general substitution bounds", () => {
@@ -462,5 +481,35 @@ describe("bounded 408 VM", () => {
     expect(traceHeapBlast.status).toBe("unverified");
     if (traceHeapBlast.status === "unverified") expect(traceHeapBlast.reason).toBe("memory_limit_exceeded");
     expect(traceHeapBlast.trace.length).toBeLessThan(10);
+
+    // Round-7 P1-B: free reclaims field string bytes and clears live field payloads while keeping use-after-free tombstones
+    const payload = "x".repeat(4_000);
+    const allocFreeLoop = runCSubset408({
+      memoryBytes: 256_000,
+      instructions: [
+        { op: "const", target: "i", value: 0 },
+        { op: "alloc", target: "p", fields: { payload } },
+        { op: "free", pointer: { variable: "p" } },
+        { op: "binary", target: "i", operator: "+", left: { variable: "i" }, right: 1 },
+        { op: "binary", target: "cont", operator: "<", left: { variable: "i" }, right: 8 },
+        { op: "branch", condition: { variable: "cont" }, ifTrue: 1, ifFalse: 6 },
+        { op: "return", value: { variable: "i" } },
+      ],
+    });
+    expect(allocFreeLoop.status).toBe("verified");
+    if (allocFreeLoop.status === "verified") expect(allocFreeLoop.value).toBe(8);
+
+    const freedUaf = runCSubset408({
+      instructions: [
+        { op: "alloc", target: "p", fields: { secretField: "abc" } },
+        { op: "free", pointer: { variable: "p" } },
+        { op: "field", target: "q", pointer: { variable: "p" }, field: "secretField" },
+        { op: "load", target: "v", pointer: { variable: "q" } },
+      ],
+    });
+    expect(freedUaf.status).toBe("unverified");
+    if (freedUaf.status === "unverified") expect(freedUaf.reason).toBe("use_after_free");
+    const postFreeSnapshot = freedUaf.trace.find((snap) => snap.op === "free" && snap.phase === "after");
+    expect(postFreeSnapshot?.heap["1"]).toEqual({ generation: 2, live: false, fields: {} });
   });
 });

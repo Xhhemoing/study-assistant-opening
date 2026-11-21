@@ -93,16 +93,18 @@ export function decideBlock(
   };
 }
 
+export function resolveArtifactBlockProducer(artifact: Artifact, producer: BlockProducer = "model"): BlockProducer {
+  // Untrusted artifact metadata may never elevate a model-produced artifact above caller provenance.
+  return producer === "rules" && artifact.provenance.origin !== "rules" ? "model" : producer;
+}
+
 export function decideArtifact(
   artifact: Artifact,
   registry: CapabilityRegistry,
   prefs: ViewPrefs = {},
   options: DecideOptions = {},
 ): BlockDecision[] {
-  const requestedProducer: BlockProducer = options.producer ?? "model";
-  // Untrusted artifact metadata may never elevate a model-produced artifact above caller provenance.
-  const effectiveProducer: BlockProducer =
-    requestedProducer === "rules" && artifact.provenance.origin !== "rules" ? "model" : requestedProducer;
+  const effectiveProducer = resolveArtifactBlockProducer(artifact, options.producer);
   return artifact.blocks.map((block) => decideBlock(block, registry, prefs, { producer: effectiveProducer }));
 }
 

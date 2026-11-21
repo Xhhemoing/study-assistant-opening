@@ -354,9 +354,22 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           }
           const object = requirePointer(pointer);
           if (!object) return heap.has(pointer.objectId) ? failure("use_after_free") : failure("wild_pointer");
+          let freedFieldStringBytes = 0;
+          for (const [key, value] of object.fields) {
+            if (typeof key === "string") freedFieldStringBytes += key.length * 2;
+            if (typeof value === "string") freedFieldStringBytes += value.length * 2;
+          }
           object.live = false;
           object.generation++;
-          heapBytes = Math.max(0, heapBytes - (HEAP_HEADER_BYTES - HEAP_TOMBSTONE_BYTES) - object.slotCount * HEAP_SLOT_BYTES);
+          object.fields.clear();
+          object.initialized.clear();
+          heapBytes = Math.max(
+            0,
+            heapBytes -
+              (HEAP_HEADER_BYTES - HEAP_TOMBSTONE_BYTES) -
+              object.slotCount * HEAP_SLOT_BYTES -
+              freedFieldStringBytes,
+          );
           break;
         }
         case "load": {

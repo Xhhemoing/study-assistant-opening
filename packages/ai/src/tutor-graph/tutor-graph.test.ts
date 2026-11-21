@@ -252,4 +252,69 @@ describe("TutorGraph fast path", () => {
     expect(budget.state).toBe("contaminated");
     expect(budget.cooldownUntilMs).toBe(1000 + 72 * 3_600_000);
   });
+
+  it("rejects structured release payloads with blocked keys or nesting past depth 16, and rejects non-finite budget inputs", () => {
+    let deepNested: Record<string, unknown> = { leaf: "ok" };
+    for (let i = 0; i < 18; i++) deepNested = { [`layer${i}`]: deepNested };
+
+    const deepResult = runTutorGraph({
+      questionStem: "极限",
+      submission: {},
+      budget: createMinEntropyBudget({ now: () => 1000 }),
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () =>
+          ({
+            steps: [{ id: "s1", text: "一步", status: "valid" }],
+            nestedMeta: deepNested,
+          }) as never,
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: (text) => text.includes("NEVER_MATCH"),
+      },
+    });
+    expect(deepResult.state).toBe("unverified");
+    expect(deepResult.reason).toBe("release_guard_rejected");
+    expect(deepResult.releaseApproved).toBe(false);
+    expect(deepResult.verification).toEqual({ steps: [] });
+    expect(deepResult.publicTeaching).toBeUndefined();
+    expect(deepResult.releasedText).toBeUndefined();
+
+    const leakedKeyResult = runTutorGraph({
+      questionStem: "极限",
+      submission: {},
+      budget: createMinEntropyBudget({ now: () => 1000 }),
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => ({
+          steps: [{ id: "s1", text: "一步", status: "invalid" }],
+          firstError: { stepId: "s1", kind: "notation", message: "记号" },
+          ruleWitness: { secretAnswerKey: "benign" } as never,
+        }),
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: (text) => text.includes("secretAnswerKey"),
+      },
+    });
+    expect(leakedKeyResult.state).toBe("unverified");
+    expect(leakedKeyResult.reason).toBe("release_guard_rejected");
+    expect(leakedKeyResult.releaseApproved).toBe(false);
+    expect(leakedKeyResult.verification).toEqual({ steps: [] });
+
+    expect(() => createMinEntropyBudget({ cooldownHours: Number.NaN })).toThrow(RangeError);
+    expect(() => createMinEntropyBudget({ cooldownHours: -1 })).toThrow(RangeError);
+    expect(() => createMinEntropyBudget({ cooldownHours: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+
+    const guardBudget = createMinEntropyBudget({ seededRecipe: "seed-1", now: () => 1000 });
+    guardBudget.commitRelease(4, 1000);
+    expect(() => guardBudget.canRelease(1, Number.NaN)).toThrow(RangeError);
+    expect(() => guardBudget.canRelease(1, Number.POSITIVE_INFINITY)).toThrow(RangeError);
+    expect(() => guardBudget.commitRelease(1, Number.NaN)).toThrow(RangeError);
+    expect(() => guardBudget.resetForFreshVariant("seed-2", Number.NaN)).toThrow(RangeError);
+    expect(() => guardBudget.resetForFreshVariant("seed-2", Number.POSITIVE_INFINITY)).toThrow(RangeError);
+  });
 });

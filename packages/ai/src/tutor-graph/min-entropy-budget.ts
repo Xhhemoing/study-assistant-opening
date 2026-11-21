@@ -36,6 +36,14 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
     throw new RangeError("scaffoldBitBudget must be non-negative");
   }
   const effectiveCap = Math.min(configuredBudget, PURE_MAX_LEAKAGE_BITS);
+  if (options.cooldownHours !== undefined && (!Number.isFinite(options.cooldownHours) || options.cooldownHours < 0)) {
+    throw new RangeError(`cooldownHours must be a finite non-negative number; got ${String(options.cooldownHours)}.`);
+  }
+  const validateNowMs = (nowMs: number) => {
+    if (!Number.isFinite(nowMs)) {
+      throw new RangeError(`nowMs must be a finite number; got ${String(nowMs)}.`);
+    }
+  };
   const cooldownDurationMs = Math.max(options.cooldownHours ?? PURE_COOLDOWN_HOURS, PURE_COOLDOWN_HOURS) * 3_600_000;
   let currentSeed = options.initialSeed?.trim() || "__initial_seed__";
   const usedSeeds = new Set<string>([
@@ -86,6 +94,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
     },
     canRelease(worstBranchBits: number, nowMs = now()): MinEntropyReleaseCheck {
       validateBits(worstBranchBits);
+      validateNowMs(nowMs);
       if (cooldownUntilMs !== undefined && nowMs < cooldownUntilMs) {
         return { allowed: false, reason: "cooldown", state, leakageBits, cooldownUntil: cooldownUntilMs, cooldownUntilMs };
       }
@@ -127,6 +136,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
     },
     commitRelease(worstBranchBits: number, nowMs = now()) {
       validateBits(worstBranchBits);
+      validateNowMs(nowMs);
       if (state === "contaminated" || (cooldownUntilMs !== undefined && nowMs < cooldownUntilMs)) {
         if (state === "contaminated" && cooldownUntilMs === undefined) {
           cooldownUntilMs = nowMs + cooldownDurationMs;
@@ -147,6 +157,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
       return this.commitRelease(worstBranchBits, nowMs);
     },
     resetForFreshVariant(newSeed: string, nowMs = now()) {
+      validateNowMs(nowMs);
       const normalized = newSeed.trim();
       if (!normalized) throw new Error("seeded_recipe_required");
       if ((cooldownUntilMs !== undefined && nowMs < cooldownUntilMs) || (state === "contaminated" && cooldownUntilMs === undefined)) {

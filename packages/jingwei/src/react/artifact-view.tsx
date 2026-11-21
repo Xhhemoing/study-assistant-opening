@@ -3,7 +3,13 @@
 import type { ComponentType, ErrorInfo, ReactNode } from "react";
 import type { Artifact, ArtifactBlock } from "../artifact";
 import type { CapabilityRegistry, DisplayMode } from "../capability";
-import { decideBlock, type BlockDecision, type BlockFailReason, type BlockProducer } from "../decide";
+import {
+  decideBlock,
+  resolveArtifactBlockProducer,
+  type BlockDecision,
+  type BlockFailReason,
+  type BlockProducer,
+} from "../decide";
 import type { ViewPrefs } from "../view";
 import { RenderBoundary } from "./render-boundary";
 
@@ -107,12 +113,13 @@ export function BlockView({
 
 export type ArtifactViewProps = Omit<BlockViewProps, "block" | "resetKey"> & { artifact: Artifact };
 
-export function ArtifactView({ artifact, ...rest }: ArtifactViewProps) {
+export function ArtifactView({ artifact, producer, ...rest }: ArtifactViewProps) {
+  const effectiveProducer = resolveArtifactBlockProducer(artifact, producer);
   return (
     <article className="space-y-4" data-jingwei-artifact={artifact.artifactId} data-jingwei-revision={artifact.revision}>
       {artifact.title ? <h3 className="text-sm font-semibold text-zinc-950">{artifact.title}</h3> : null}
       {artifact.blocks.map((block) => (
-        <BlockView key={block.id} block={block} resetKey={artifact.revision} {...rest} />
+        <BlockView key={block.id} block={block} resetKey={artifact.revision} producer={effectiveProducer} {...rest} />
       ))}
     </article>
   );
