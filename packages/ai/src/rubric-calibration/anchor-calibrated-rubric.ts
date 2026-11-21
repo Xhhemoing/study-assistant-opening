@@ -1,0 +1,867 @@
+import {
+  RUBRIC_DIMENSIONS,
+  getSentinelAnchorsForDimension,
+  type DimensionSentinelAnchor,
+  type RubricDimension,
+} from "./sentinel-anchors";
+
+/**
+ * AnchorCalibratedRubricV1: position-swapped pairwise comparison against fixed
+ * Bradley–Terry sentinel anchors, fail-closed inconsistency/monotonicity gating,
+ * and template-padding / mastery purity enforcement.
+ */
+
+export type PairwiseChoice = "A" | "B" | "tie";
+export type RubricSubmissionMode = "practice_feedback" | "formal_assessment";
+
+export interface PairwiseSwapComparison {
+  readonly anchorId: string;
+  /** Forward presentation: A = student essay, B = sentinel anchor. */
+  readonly forwardChoice: PairwiseChoice;
+  /** Reverse presentation: A = sentinel anchor, B = student essay. */
+  readonly reverseChoice?: PairwiseChoice | null;
+}
+
+export interface RubricSubmissionInput {
+  readonly submissionId: string;
+  readonly dimension: RubricDimension;
+  readonly text: string;
+  readonly mode: RubricSubmissionMode;
+  readonly assisted: boolean;
+  readonly comparisons: readonly PairwiseSwapComparison[];
+  readonly anchors?: readonly DimensionSentinelAnchor[];
+  /**
+   * Independent formal-assessment submission IDs that corroborate this submission.
+   * Mastery updates require at least 1 distinct non-blank ID !== submissionId (total >= 2 independent drafts).
+   */
+  readonly corroboratingIndependentSubmissionIds?: readonly string[];
+}
+
+export type RubricInconsistencyReason =
+  | "invalid_submission_input"
+  | "invalid_anchor_definitions"
+  | "insufficient_anchor_coverage"
+  | "missing_reverse_comparison"
+  | "invalid_comparison_choice"
+  | "duplicate_anchor_comparison"
+  | "unknown_anchor_id"
+  | "swap_position_bias_first"
+  | "swap_position_bias_second"
+  | "swap_verdict_asymmetry"
+  | "non_adjacent_monotonicity_violation"
+  | "adjacent_monotonicity_violation"
+  | "non_finite_projection"
+  | "projection_outside_evidence_bracket"
+  | "unanchored_tail_extrapolation";
+
+export type MasteryExclusionReason =
+  | "practice_feedback_only"
+  | "assisted_submission"
+  | "interval_only_inconsistent"
+  | "template_padding_detected"
+  | "unanchored_tail_extrapolation"
+  | "single_draft_uncorroborated";
+
+export interface TemplatePaddingReport {
+  readonly isTemplatePadded: boolean;
+  readonly wordCount: number;
+  readonly clicheHits: readonly string[];
+  readonly totalClicheOccurrences: number;
+  readonly clicheWordRatio: number;
+}
+
+export interface ResolvedAnchorComparison {
+  readonly anchorId: string;
+  readonly band: number;
+  readonly thetaAnchor: number;
+  readonly outcome: 1 | 0.5 | 0 | null;
+  readonly consistent: boolean;
+  readonly reason: RubricInconsistencyReason | null;
+}
+
+export interface AnchorCalibratedRubricV1Result {
+  readonly schemaVersion: 1;
+  readonly submissionId: string;
+  readonly dimension: RubricDimension;
+  readonly status: "calibrated" | "interval_only";
+  /** Snapped 0.5 IELTS band in [0, 9]; strictly null when status === "interval_only". */
+  readonly band: number | null;
+  /** Continuous Bradley–Terry band projection clamped to [0, 9]; null when interval_only. */
+  readonly rawBand: number | null;
+  /** Bradley–Terry latent skill estimate; null when interval_only. */
+  readonly theta: number | null;
+  /** Non-fabricated [lowerBand, upperBand] bracket derived from consistent anchor bounds. */
+  readonly bandRange: readonly [number, number];
+  /** True ONLY when calibrated, formal_assessment, unassisted, not template-padded, and corroborated by >= 1 distinct corroboratingIndependentSubmissionIds. */
+  readonly countsTowardMastery: boolean;
+  readonly masteryExclusionReasons: readonly MasteryExclusionReason[];
+  readonly inconsistencyReasons: readonly RubricInconsistencyReason[];
+  readonly paddingReport: TemplatePaddingReport;
+  readonly anchorComparisons: readonly ResolvedAnchorComparison[];
+}
+
+const TEMPLATE_CLICHE_PATTERNS: readonly string[] = [
+  "in the contemporary era",
+  "rapid globalization",
+  "hotly debated topic",
+  "sparked heated debate",
+  "from all walks of life",
+  "universally acknowledged",
+  "every coin has two sides",
+  "goes without saying",
+  "plays a pivotal role",
+  "needless to say",
+  "undeniable fact",
+  "double-edged sword",
+  "speaks volumes",
+  "today's fast-paced world",
+  "as far as i am concerned",
+  "from my perspective, i firmly believe",
+  "it is widely believed that",
+  "in a nutshell",
+  "last but not least",
+  "in light of the aforementioned considerations",
+  "since the dawn of",
+  "every corner of society",
+];
+
+// Calibrated so all-wins projects to maxAnchor + 0.5 (8.5) and all-losses to minAnchor - 0.5 (4.0)
+// on the default 6-sentinel scale while keeping interior MLE unregularized (zero shrinkage bias).
+const BOUNDARY_PRIOR_LAMBDA = 0.015286;
+const MIN_BAND = 0;
+const MAX_BAND = 9;
+const MAX_ABS_THETA_ANCHOR = 20;
+const BRACKET_EPSILON = 1e-9;
+const MIN_ANCHOR_BAND_GAP = 0.5;
+const MIN_ANCHOR_THETA_GAP = 0.2;
+const MIN_ANCHOR_SLOPE = 0.05;
+const MAX_ANCHOR_SLOPE = 5.0;
+const MAX_UNANCHORED_TAIL_WIDTH = 2.0;
+const MAX_LOW_TAIL_ANCHOR_BAND = 5.5;
+const MIN_HIGH_TAIL_ANCHOR_BAND = 7.0;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function sigmoid(x: number): number {
+  if (x >= 0) {
+    const z = Math.exp(-x);
+    return 1 / (1 + z);
+  }
+  const z = Math.exp(x);
+  return z / (1 + z);
+}
+
+function countWords(text: string): number {
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  return trimmed.split(/\s+/).length;
+}
+
+function prevUnicodeChar(str: string, index: number): string {
+  if (index <= 0) return "";
+  const low = str.charCodeAt(index - 1);
+  if (index >= 2 && low >= 0xdc00 && low <= 0xdfff) {
+    const high = str.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) {
+      return str.slice(index - 2, index);
+    }
+  }
+  return str.slice(index - 1, index);
+}
+
+function nextUnicodeChar(str: string, index: number): string {
+  if (index < 0 || index >= str.length) return "";
+  const codePoint = str.codePointAt(index);
+  return codePoint === undefined ? "" : String.fromCodePoint(codePoint);
+}
+
+function isWordChar(ch: string): boolean {
+  return ch.length > 0 && /[\p{L}\p{M}\p{N}]/u.test(ch);
+}
+
+function countNonOverlappingOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let fromIndex = 0;
+  while (fromIndex <= haystack.length - needle.length) {
+    const idx = haystack.indexOf(needle, fromIndex);
+    if (idx === -1) break;
+    const beforeOk = idx === 0 || !isWordChar(prevUnicodeChar(haystack, idx));
+    const end = idx + needle.length;
+    const afterOk = end === haystack.length || !isWordChar(nextUnicodeChar(haystack, end));
+    if (beforeOk && afterOk) {
+      count++;
+      fromIndex = end;
+    } else {
+      fromIndex = idx + 1;
+    }
+  }
+  return count;
+}
+
+export function detectTemplatePadding(text: string): TemplatePaddingReport {
+  const normalized = text.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+  const wordCount = countWords(normalized);
+  const clicheHits: string[] = [];
+  let totalClicheOccurrences = 0;
+  let clicheWordCount = 0;
+
+  for (const phrase of TEMPLATE_CLICHE_PATTERNS) {
+    const occurrences = countNonOverlappingOccurrences(normalized, phrase);
+    if (occurrences > 0) {
+      clicheHits.push(phrase);
+      totalClicheOccurrences += occurrences;
+      clicheWordCount += countWords(phrase) * occurrences;
+    }
+  }
+
+  const clicheWordRatio = wordCount > 0 ? Math.min(1, clicheWordCount / wordCount) : 0;
+  const isTemplatePadded =
+    clicheHits.length >= 2 || totalClicheOccurrences >= 2 || clicheWordRatio >= 0.20;
+
+  return {
+    isTemplatePadded,
+    wordCount,
+    clicheHits,
+    totalClicheOccurrences,
+    clicheWordRatio,
+  };
+}
+
+function isValidPairwiseChoice(choice: unknown): choice is PairwiseChoice {
+  return choice === "A" || choice === "B" || choice === "tie";
+}
+
+function normalizeForward(choice: PairwiseChoice): "student" | "anchor" | "tie" {
+  if (choice === "A") return "student";
+  if (choice === "B") return "anchor";
+  return "tie";
+}
+
+function normalizeReverse(choice: PairwiseChoice): "student" | "anchor" | "tie" {
+  if (choice === "A") return "anchor";
+  if (choice === "B") return "student";
+  return "tie";
+}
+
+function resolveSwapPair(
+  forward: PairwiseChoice,
+  reverse: PairwiseChoice | null | undefined,
+): { outcome: 1 | 0.5 | 0 | null; reason: RubricInconsistencyReason | null } {
+  if (!isValidPairwiseChoice(forward)) {
+    return { outcome: null, reason: "invalid_comparison_choice" };
+  }
+  if (reverse === null || reverse === undefined) {
+    return { outcome: null, reason: "missing_reverse_comparison" };
+  }
+  if (!isValidPairwiseChoice(reverse)) {
+    return { outcome: null, reason: "invalid_comparison_choice" };
+  }
+  const f = normalizeForward(forward);
+  const r = normalizeReverse(reverse);
+  if (f === r) {
+    return { outcome: f === "student" ? 1 : f === "anchor" ? 0 : 0.5, reason: null };
+  }
+  if (forward === "A" && reverse === "A") {
+    return { outcome: null, reason: "swap_position_bias_first" };
+  }
+  if (forward === "B" && reverse === "B") {
+    return { outcome: null, reason: "swap_position_bias_second" };
+  }
+  return { outcome: null, reason: "swap_verdict_asymmetry" };
+}
+
+function computeBandBracket(resolved: readonly ResolvedAnchorComparison[]): readonly [number, number] {
+  if (resolved.length === 0) return [MIN_BAND, MAX_BAND];
+
+  let firstNonWin = resolved.length;
+  for (let i = 0; i < resolved.length; i++) {
+    const item = resolved[i];
+    if (!item || !item.consistent || item.outcome !== 1) {
+      firstNonWin = i;
+      break;
+    }
+  }
+
+  let lastNonLoss = -1;
+  for (let i = resolved.length - 1; i >= 0; i--) {
+    const item = resolved[i];
+    if (!item || !item.consistent || item.outcome !== 0) {
+      lastNonLoss = i;
+      break;
+    }
+  }
+
+  const lowerAnchor = firstNonWin > 0 ? resolved[firstNonWin - 1] : undefined;
+  const upperAnchor = lastNonLoss < resolved.length - 1 ? resolved[lastNonLoss + 1] : undefined;
+  const lowerBand = lowerAnchor ? lowerAnchor.band : MIN_BAND;
+  const upperBand = upperAnchor ? upperAnchor.band : MAX_BAND;
+  return lowerBand <= upperBand ? [lowerBand, upperBand] : [upperBand, lowerBand];
+}
+
+function solveBradleyTerryTheta(
+  anchors: readonly DimensionSentinelAnchor[],
+  outcomes: readonly (1 | 0.5 | 0)[],
+): number {
+  const m = anchors.length;
+  const totalScore = outcomes.reduce<number>((sum, value) => sum + value, 0);
+  const isBoundary = totalScore === 0 || totalScore === m;
+  const priorLambda = isBoundary ? BOUNDARY_PRIOR_LAMBDA : 0;
+  const priorCenter = anchors.reduce((sum, anchor) => sum + anchor.thetaAnchor, 0) / m;
+
+  const minAnchorTheta = anchors[0]?.thetaAnchor ?? 0;
+  const maxAnchorTheta = anchors[m - 1]?.thetaAnchor ?? 0;
+  let lo = minAnchorTheta - 16;
+  let hi = maxAnchorTheta + 16;
+
+  const scoreGradient = (theta: number): { g: number; gp: number } => {
+    let g = -priorLambda * (theta - priorCenter);
+    let gp = -priorLambda;
+    for (let i = 0; i < m; i++) {
+      const anchor = anchors[i];
+      const y = outcomes[i];
+      if (!anchor || y === undefined) continue;
+      const p = sigmoid(theta - anchor.thetaAnchor);
+      g += y - p;
+      gp -= p * (1 - p);
+    }
+    return { g, gp };
+  };
+
+  // Expand bracket defensively with bounded steps so g(lo) > 0 > g(hi).
+  for (let step = 0; step < 64 && scoreGradient(lo).g <= 0; step++) lo -= 8;
+  for (let step = 0; step < 64 && scoreGradient(hi).g >= 0; step++) hi += 8;
+
+  let theta = clamp(priorCenter, lo + 1e-6, hi - 1e-6);
+  for (let iteration = 0; iteration < 64; iteration++) {
+    const { g, gp } = scoreGradient(theta);
+    if (!Number.isFinite(g) || !Number.isFinite(gp)) return Number.NaN;
+    if (Math.abs(g) < 1e-12 || hi - lo < 1e-12) break;
+    if (g > 0) lo = theta;
+    else hi = theta;
+
+    const newton = gp < -1e-15 ? theta - g / gp : Number.NaN;
+    theta = Number.isFinite(newton) && newton > lo && newton < hi ? newton : 0.5 * (lo + hi);
+  }
+  return theta;
+}
+
+export function snapHalfBand(band: number): number {
+  return clamp(Math.round(band * 2) / 2, MIN_BAND, MAX_BAND);
+}
+
+function projectThetaToBand(
+  theta: number,
+  anchors: readonly DimensionSentinelAnchor[],
+): number {
+  if (!Number.isFinite(theta) || anchors.length < 2) return Number.NaN;
+  const first = anchors[0]!;
+  const second = anchors[1]!;
+  if (theta <= first.thetaAnchor) {
+    const slope = (second.band - first.band) / (second.thetaAnchor - first.thetaAnchor);
+    return first.band + (theta - first.thetaAnchor) * slope;
+  }
+  const last = anchors[anchors.length - 1]!;
+  const prevLast = anchors[anchors.length - 2]!;
+  if (theta >= last.thetaAnchor) {
+    const slope = (last.band - prevLast.band) / (last.thetaAnchor - prevLast.thetaAnchor);
+    return last.band + (theta - last.thetaAnchor) * slope;
+  }
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const lo = anchors[i]!;
+    const hi = anchors[i + 1]!;
+    if (theta >= lo.thetaAnchor && theta <= hi.thetaAnchor) {
+      const t = (theta - lo.thetaAnchor) / (hi.thetaAnchor - lo.thetaAnchor);
+      return lo.band + t * (hi.band - lo.band);
+    }
+  }
+  return Number.NaN;
+}
+
+function validateAndSortAnchors(
+  sourceAnchors: readonly DimensionSentinelAnchor[],
+  expectedDimension: RubricDimension,
+): readonly DimensionSentinelAnchor[] | null {
+  if (!Array.isArray(sourceAnchors) || sourceAnchors.length < 2) return null;
+  const seenIds = new Set<string>();
+  for (let i = 0; i < sourceAnchors.length; i += 1) {
+    if (!Object.hasOwn(sourceAnchors, i)) return null;
+    const anchor = sourceAnchors[i];
+    if (!anchor || typeof anchor.anchorId !== "string" || anchor.anchorId.trim().length === 0) return null;
+    if (anchor.dimension !== expectedDimension) return null;
+    if (seenIds.has(anchor.anchorId)) return null;
+    seenIds.add(anchor.anchorId);
+    if (
+      typeof anchor.band !== "number" ||
+      !Number.isFinite(anchor.band) ||
+      anchor.band < MIN_BAND ||
+      anchor.band > MAX_BAND
+    ) {
+      return null;
+    }
+    if (
+      typeof anchor.thetaAnchor !== "number" ||
+      !Number.isFinite(anchor.thetaAnchor) ||
+      Math.abs(anchor.thetaAnchor) > MAX_ABS_THETA_ANCHOR
+    ) {
+      return null;
+    }
+  }
+
+  const sorted = [...sourceAnchors].sort((a, b) => a.band - b.band || a.thetaAnchor - b.thetaAnchor);
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    if (!prev || !curr) return null;
+    const bandGap = curr.band - prev.band;
+    const thetaGap = curr.thetaAnchor - prev.thetaAnchor;
+    if (bandGap < MIN_ANCHOR_BAND_GAP - BRACKET_EPSILON || thetaGap < MIN_ANCHOR_THETA_GAP - BRACKET_EPSILON) {
+      return null;
+    }
+    const slope = bandGap / thetaGap;
+    if (
+      !Number.isFinite(slope) ||
+      slope < MIN_ANCHOR_SLOPE - BRACKET_EPSILON ||
+      slope > MAX_ANCHOR_SLOPE + BRACKET_EPSILON
+    ) {
+      return null;
+    }
+  }
+  return sorted;
+}
+
+const RUBRIC_REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
+const RUBRIC_ARRAY_BUFFER_LEN_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+const RUBRIC_DATA_VIEW_LEN_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
+const RUBRIC_ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
+const RUBRIC_WEAK_KEY = Object.freeze({});
+const VALID_RUBRIC_DIMENSIONS: ReadonlySet<string> = new Set(RUBRIC_DIMENSIONS);
+
+function matchesRubricBrand(check: () => unknown): boolean {
+  try {
+    check();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasRubricExoticSlot(obj: object): boolean {
+  try {
+    if (ArrayBuffer.isView(obj)) return true;
+    if (typeof RUBRIC_ERROR_IS_ERROR === "function" && RUBRIC_ERROR_IS_ERROR(obj)) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [RUBRIC_WEAK_KEY]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [RUBRIC_WEAK_KEY]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
+    if (
+      RUBRIC_REGEXP_SOURCE_GET &&
+      obj !== RegExp.prototype &&
+      matchesRubricBrand(() => Reflect.apply(RUBRIC_REGEXP_SOURCE_GET, obj, []))
+    ) {
+      return true;
+    }
+    if (RUBRIC_ARRAY_BUFFER_LEN_GET && matchesRubricBrand(() => Reflect.apply(RUBRIC_ARRAY_BUFFER_LEN_GET, obj, []))) {
+      return true;
+    }
+    if (RUBRIC_DATA_VIEW_LEN_GET && matchesRubricBrand(() => Reflect.apply(RUBRIC_DATA_VIEW_LEN_GET, obj, []))) {
+      return true;
+    }
+    if (matchesRubricBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Symbol.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(BigInt.prototype.valueOf, obj, []))) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+type RubricDataSnapshot = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
+
+function readRubricNode(obj: object): {
+  readonly array: boolean;
+  readonly entries: ReadonlyArray<readonly [string, unknown]>;
+} | null {
+  const array = Array.isArray(obj);
+  const proto = Object.getPrototypeOf(obj) as object | null;
+  if (array ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) return null;
+
+  const descriptors = Object.getOwnPropertyDescriptors(obj);
+  const keys = Reflect.ownKeys(descriptors);
+  const length: unknown = descriptors["length"]?.value;
+  if (array && (typeof length !== "number" || !Number.isSafeInteger(length) || keys.length !== length + 1)) return null;
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const key of keys) {
+    if (array && key === "length") continue;
+    if (typeof key !== "string" || key === "__proto__" || (array && key !== String(entries.length))) return null;
+    const descriptor = descriptors[key]!;
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return null;
+    entries.push([key, descriptor.value]);
+  }
+  return { array, entries };
+}
+
+/** Shared by the submission and benchmark gates. Business code only consumes the frozen copy. */
+export function snapshotPlainRubricData(value: unknown): RubricDataSnapshot {
+  const inStack = new WeakSet<object>();
+  const snapshots = new WeakMap<object, unknown>();
+  const postOrder: object[] = [];
+
+  function visit(raw: unknown): RubricDataSnapshot {
+    if (raw === null || (typeof raw !== "object" && typeof raw !== "function" && typeof raw !== "symbol")) {
+      return { ok: true, value: raw };
+    }
+    if (typeof raw !== "object" || inStack.has(raw)) return { ok: false };
+    if (snapshots.has(raw)) return { ok: true, value: snapshots.get(raw) };
+    inStack.add(raw);
+    if (hasRubricExoticSlot(raw)) return { ok: false };
+    const node = readRubricNode(raw);
+    if (!node) return { ok: false };
+
+    const copy: unknown[] | Record<string, unknown> = node.array
+      ? []
+      : Object.create(null) as Record<string, unknown>;
+    for (const [key, child] of node.entries) {
+      const snapshot = visit(child);
+      if (!snapshot.ok) return snapshot;
+      Object.defineProperty(copy, key, { value: snapshot.value, enumerable: true });
+    }
+    Object.freeze(copy);
+    snapshots.set(raw, copy);
+    inStack.delete(raw);
+    postOrder.push(raw);
+    return { ok: true, value: copy };
+  }
+
+  const verified = new WeakSet<object>();
+  const verifiedList: object[] = [];
+  function isClosed(container: ReturnType<typeof readRubricNode>): boolean {
+    return container !== null && container.entries.every(([, child]) => {
+      if (typeof child === "function" || typeof child === "symbol") return false;
+      return child === null || typeof child !== "object" || verified.has(child);
+    });
+  }
+
+  try {
+    const snapshot = visit(value);
+    if (!snapshot.ok) return snapshot;
+    for (const raw of postOrder) {
+      const node = readRubricNode(raw);
+      if (!node || !isClosed(node)) return { ok: false };
+      // Only the current node can run descriptor traps. Recheck the verified closure
+      // afterward so a shared child cannot carry an injected getter into the native clone.
+      if (!verifiedList.every((item) => isClosed(readRubricNode(item)))) return { ok: false };
+      const clone = structuredClone(raw);
+      if (Object.getPrototypeOf(clone) !== (node.array ? Array.prototype : Object.prototype)) {
+        return { ok: false };
+      }
+      verified.add(raw);
+      verifiedList.push(raw);
+    }
+    return snapshot;
+  } catch {
+    return { ok: false };
+  }
+}
+
+function hasIndependentCorroboration(frozenIds: unknown, ownSubmissionId: string): boolean {
+  const ownId = ownSubmissionId.trim();
+  if (ownId.length === 0 || !Array.isArray(frozenIds) || frozenIds.length === 0) return false;
+  const distinctOtherIds = new Set<string>();
+  for (let i = 0; i < frozenIds.length; i += 1) {
+    const entry = frozenIds[i];
+    if (typeof entry !== "string") return false;
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) return false;
+    if (trimmed !== ownId) distinctOtherIds.add(trimmed);
+  }
+  return distinctOtherIds.size >= 1;
+}
+
+export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): AnchorCalibratedRubricV1Result {
+  // Snapshot the entire descriptor graph before reading business fields.
+  const clonedInput = snapshotPlainRubricData(input);
+  const snap =
+    clonedInput.ok &&
+    clonedInput.value !== null &&
+    typeof clonedInput.value === "object" &&
+    !Array.isArray(clonedInput.value)
+      ? (clonedInput.value as Record<string, unknown>)
+      : null;
+
+  const submissionId = snap && typeof snap["submissionId"] === "string" ? snap["submissionId"] : "";
+  const rawDimension = snap ? snap["dimension"] : undefined;
+  const rawText = snap ? snap["text"] : undefined;
+  const rawMode = snap ? snap["mode"] : undefined;
+  const rawAssisted = snap ? snap["assisted"] : undefined;
+  const rawComparisons = snap ? snap["comparisons"] : undefined;
+  const rawAnchors = snap ? snap["anchors"] : undefined;
+  const rawCorroboration = snap ? snap["corroboratingIndependentSubmissionIds"] : undefined;
+
+  if (
+    !snap ||
+    typeof rawDimension !== "string" ||
+    !VALID_RUBRIC_DIMENSIONS.has(rawDimension) ||
+    typeof rawText !== "string" ||
+    (rawMode !== "practice_feedback" && rawMode !== "formal_assessment") ||
+    typeof rawAssisted !== "boolean" ||
+    !Array.isArray(rawComparisons)
+  ) {
+    const safeDimension: RubricDimension =
+      typeof rawDimension === "string" && VALID_RUBRIC_DIMENSIONS.has(rawDimension)
+        ? (rawDimension as RubricDimension)
+        : "task_response";
+    return {
+      schemaVersion: 1,
+      submissionId,
+      dimension: safeDimension,
+      status: "interval_only",
+      band: null,
+      rawBand: null,
+      theta: null,
+      bandRange: [MIN_BAND, MAX_BAND],
+      countsTowardMastery: false,
+      masteryExclusionReasons: ["interval_only_inconsistent", "single_draft_uncorroborated"],
+      inconsistencyReasons: ["invalid_submission_input"],
+      paddingReport: detectTemplatePadding(typeof rawText === "string" ? rawText : ""),
+      anchorComparisons: [],
+    };
+  }
+
+  const dimension = rawDimension as RubricDimension;
+  const text = rawText;
+  const mode = rawMode;
+  const assisted = rawAssisted;
+  const comparisons = rawComparisons as readonly PairwiseSwapComparison[];
+  const sourceAnchors =
+    rawAnchors === undefined
+      ? getSentinelAnchorsForDimension(dimension)
+      : (rawAnchors as readonly DimensionSentinelAnchor[]);
+  const paddingReport = detectTemplatePadding(text);
+  const anchors = validateAndSortAnchors(sourceAnchors, dimension);
+  const hasCorroboration = hasIndependentCorroboration(rawCorroboration, submissionId);
+
+  if (!anchors) {
+    const masteryExclusionReasons: MasteryExclusionReason[] = [];
+    if (mode === "practice_feedback") masteryExclusionReasons.push("practice_feedback_only");
+    if (assisted) masteryExclusionReasons.push("assisted_submission");
+    masteryExclusionReasons.push("interval_only_inconsistent");
+    if (paddingReport.isTemplatePadded) masteryExclusionReasons.push("template_padding_detected");
+    if (!hasCorroboration) masteryExclusionReasons.push("single_draft_uncorroborated");
+
+    return {
+      schemaVersion: 1,
+      submissionId,
+      dimension,
+      status: "interval_only",
+      band: null,
+      rawBand: null,
+      theta: null,
+      bandRange: [MIN_BAND, MAX_BAND],
+      countsTowardMastery: false,
+      masteryExclusionReasons,
+      inconsistencyReasons: ["invalid_anchor_definitions"],
+      paddingReport,
+      anchorComparisons: [],
+    };
+  }
+
+  const reasons = new Set<RubricInconsistencyReason>();
+
+  const comparisonByAnchor = new Map<string, PairwiseSwapComparison>();
+  const duplicateAnchorIds = new Set<string>();
+  const validAnchorIds = new Set(anchors.map((a) => a.anchorId));
+
+  for (const comparison of comparisons) {
+    if (!comparison || typeof comparison !== "object" || typeof comparison.anchorId !== "string") {
+      reasons.add("unknown_anchor_id");
+      continue;
+    }
+    if (!validAnchorIds.has(comparison.anchorId)) {
+      reasons.add("unknown_anchor_id");
+      continue;
+    }
+    if (duplicateAnchorIds.has(comparison.anchorId)) {
+      reasons.add("duplicate_anchor_comparison");
+      continue;
+    }
+    if (comparisonByAnchor.has(comparison.anchorId)) {
+      reasons.add("duplicate_anchor_comparison");
+      duplicateAnchorIds.add(comparison.anchorId);
+      comparisonByAnchor.delete(comparison.anchorId);
+      continue;
+    }
+    comparisonByAnchor.set(comparison.anchorId, comparison);
+  }
+
+  if (anchors.length < 2 || comparisonByAnchor.size + duplicateAnchorIds.size < anchors.length) {
+    reasons.add("insufficient_anchor_coverage");
+  }
+
+  const resolved: ResolvedAnchorComparison[] = anchors.map((anchor) => {
+    if (duplicateAnchorIds.has(anchor.anchorId)) {
+      return {
+        anchorId: anchor.anchorId,
+        band: anchor.band,
+        thetaAnchor: anchor.thetaAnchor,
+        outcome: null,
+        consistent: false,
+        reason: "duplicate_anchor_comparison",
+      };
+    }
+    const pair = comparisonByAnchor.get(anchor.anchorId);
+    if (!pair) {
+      return {
+        anchorId: anchor.anchorId,
+        band: anchor.band,
+        thetaAnchor: anchor.thetaAnchor,
+        outcome: null,
+        consistent: false,
+        reason: "insufficient_anchor_coverage",
+      };
+    }
+    const { outcome, reason } = resolveSwapPair(pair.forwardChoice, pair.reverseChoice);
+    if (reason) reasons.add(reason);
+    return {
+      anchorId: anchor.anchorId,
+      band: anchor.band,
+      thetaAnchor: anchor.thetaAnchor,
+      outcome,
+      consistent: reason === null,
+      reason,
+    };
+  });
+
+  // Check monotonic non-increasing outcomes across ascending sentinel anchors.
+  for (let i = 0; i < resolved.length; i++) {
+    const low = resolved[i];
+    if (!low || !low.consistent || low.outcome === null) continue;
+    for (let j = i + 1; j < resolved.length; j++) {
+      const high = resolved[j];
+      if (!high || !high.consistent || high.outcome === null) continue;
+      if (high.outcome > low.outcome) {
+        const isNonAdjacent = j - i >= 2 || high.band - low.band > 0.5;
+        reasons.add(isNonAdjacent ? "non_adjacent_monotonicity_violation" : "adjacent_monotonicity_violation");
+      }
+    }
+  }
+
+  const bandRange = computeBandBracket(resolved);
+  const inconsistencyReasons = [...reasons].sort();
+  const isConsistentAndMonotone = inconsistencyReasons.length === 0;
+
+  const masteryExclusionReasons: MasteryExclusionReason[] = [];
+  if (mode === "practice_feedback") masteryExclusionReasons.push("practice_feedback_only");
+  if (assisted) masteryExclusionReasons.push("assisted_submission");
+  if (!isConsistentAndMonotone) masteryExclusionReasons.push("interval_only_inconsistent");
+  if (paddingReport.isTemplatePadded) masteryExclusionReasons.push("template_padding_detected");
+  if (!hasCorroboration) masteryExclusionReasons.push("single_draft_uncorroborated");
+
+  if (!isConsistentAndMonotone) {
+    return {
+      schemaVersion: 1,
+      submissionId,
+      dimension,
+      status: "interval_only",
+      band: null,
+      rawBand: null,
+      theta: null,
+      bandRange,
+      countsTowardMastery: false,
+      masteryExclusionReasons,
+      inconsistencyReasons,
+      paddingReport,
+      anchorComparisons: resolved,
+    };
+  }
+
+  const outcomes = resolved.map((entry) => entry.outcome as 1 | 0.5 | 0);
+  const theta = solveBradleyTerryTheta(anchors, outcomes);
+  const rawUnclamped = projectThetaToBand(theta, anchors);
+  const rawBand = clamp(rawUnclamped, MIN_BAND, MAX_BAND);
+  const band = snapHalfBand(rawBand);
+
+  const nonFinite =
+    !Number.isFinite(theta) ||
+    !Number.isFinite(rawUnclamped) ||
+    !Number.isFinite(rawBand) ||
+    !Number.isFinite(band) ||
+    band < MIN_BAND ||
+    band > MAX_BAND;
+  const outsideBracket =
+    !nonFinite &&
+    (rawBand < bandRange[0] - BRACKET_EPSILON ||
+      rawBand > bandRange[1] + BRACKET_EPSILON ||
+      band < bandRange[0] - BRACKET_EPSILON ||
+      band > bandRange[1] + BRACKET_EPSILON);
+
+  const allWins = outcomes.every((o) => o === 1);
+  const allLosses = outcomes.every((o) => o === 0);
+  const firstAnchor = anchors[0]!;
+  const lastAnchor = anchors[anchors.length - 1]!;
+  const openTailWidth = bandRange[1] - bandRange[0];
+  const unanchoredHighTail =
+    allWins &&
+    (lastAnchor.band < MIN_HIGH_TAIL_ANCHOR_BAND - BRACKET_EPSILON ||
+      openTailWidth > MAX_UNANCHORED_TAIL_WIDTH + BRACKET_EPSILON);
+  const unanchoredLowTail =
+    allLosses &&
+    firstAnchor.band > MAX_LOW_TAIL_ANCHOR_BAND + BRACKET_EPSILON &&
+    openTailWidth > MAX_UNANCHORED_TAIL_WIDTH + BRACKET_EPSILON;
+  const clampedTailExtrapolation =
+    (allWins && rawUnclamped > MAX_BAND + BRACKET_EPSILON) ||
+    (allLosses && rawUnclamped < MIN_BAND - BRACKET_EPSILON);
+  const unanchoredTailExtrapolation =
+    !nonFinite && (unanchoredHighTail || unanchoredLowTail || clampedTailExtrapolation);
+
+  if (nonFinite || outsideBracket || unanchoredTailExtrapolation) {
+    const fallbackExclusions: MasteryExclusionReason[] = [...masteryExclusionReasons];
+    if (!fallbackExclusions.includes("interval_only_inconsistent")) {
+      fallbackExclusions.push("interval_only_inconsistent");
+    }
+    if (unanchoredTailExtrapolation && !fallbackExclusions.includes("unanchored_tail_extrapolation")) {
+      fallbackExclusions.push("unanchored_tail_extrapolation");
+    }
+    const fallbackReason: RubricInconsistencyReason = nonFinite
+      ? "non_finite_projection"
+      : outsideBracket
+        ? "projection_outside_evidence_bracket"
+        : "unanchored_tail_extrapolation";
+    return {
+      schemaVersion: 1,
+      submissionId,
+      dimension,
+      status: "interval_only",
+      band: null,
+      rawBand: null,
+      theta: null,
+      bandRange,
+      countsTowardMastery: false,
+      masteryExclusionReasons: fallbackExclusions,
+      inconsistencyReasons: [fallbackReason],
+      paddingReport,
+      anchorComparisons: resolved,
+    };
+  }
+
+  return {
+    schemaVersion: 1,
+    submissionId,
+    dimension,
+    status: "calibrated",
+    band,
+    rawBand,
+    theta,
+    bandRange,
+    countsTowardMastery: masteryExclusionReasons.length === 0,
+    masteryExclusionReasons,
+    inconsistencyReasons: [],
+    paddingReport,
+    anchorComparisons: resolved,
+  };
+}
