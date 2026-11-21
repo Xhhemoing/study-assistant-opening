@@ -77,9 +77,11 @@ function normalizeUnicodeMath(text: string): string {
     .replace(/[\u00F7\u2044\u2215]/g, "/")
     .replace(/\\(?:times|cdot)(?![a-z])/gi, "*")
     .replace(/[\u00D7\u00B7\u22C5]/g, "*")
-    .replace(/\\leq?\b|\u2264/gi, "<=")
-    .replace(/\\geq?\b|\u2265/gi, ">=")
-    .replace(/\\neq?\b|\u2260/gi, "!=")
+    .replace(/\\leq?(?![a-z])|≤/gi, "<=")
+    .replace(/\\geq?(?![a-z])|≥/gi, ">=")
+    .replace(/\\neq?(?![a-z])|≠/gi, "!=")
+    .replace(/\\approx(?![a-z])/gi, "≈")
+    .replace(/\\equiv(?![a-z])/gi, "≡")
     .toLowerCase();
 }
 
@@ -93,14 +95,14 @@ function normalizeForLeakScan(text: string): string {
  */
 function normalizeCompactForLeakScan(text: string): string {
   return normalizeForLeakScan(text).replace(
-    /\s*([,;:=+*/^<>{}()[\]|-])\s*/g,
+    /\s*(!=|[,;:=+*/^<>≈≡{}()[\]|-])\s*/g,
     "$1",
   );
 }
 
 /** Expose Markdown block boundaries and inline equation text before math compaction. */
 function stripEquationFormatting(text: string): string {
-  return equationMarkdownBlocks(text).map((block) => {
+  const formattedBlocks = equationMarkdownBlocks(text).map((block) => {
     if (Array.isArray(block)) return block.map(stripEquationSegment).join(";");
     if (typeof block !== "string") return stripEquationSegment(normalizeMathLayout(block.math));
     const formatted = stripEquationLine(block);
@@ -111,10 +113,11 @@ function stripEquationFormatting(text: string): string {
     // A break beside an operator cannot cut the operator away from its operand.
     const physical = math.replace(/ ?\n ?/gu, (gap: string, index: number) => {
       const adjacent = (math[index - 1] ?? "") + (math[index + gap.length] ?? "");
-      return /[+*/^=<>%-]/u.test(adjacent) ? " " : ";";
+      return /[+*/^=<>!≈≡%-]/u.test(adjacent) ? " " : ";";
     });
     return soft === physical ? soft : soft + ";" + physical;
-  }).join(";");
+  });
+  return normalizeAlignment(formattedBlocks.join(";"), "&");
 }
 
 const equationMarkers = /(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
@@ -145,36 +148,42 @@ function stripEquationLine(line: string): string {
   return candidates.map(stripEquationSegment).join(";");
 }
 
-const texRelation = /[:!<>]?=|[<>≈≡≤≥≠]|\\(?:approx|equiv|cong|sim|simeq|leq?|geq?|neq?)(?![A-Za-z])/u;
+const texRelation = /[=:!<>]?=|[<>≈≡≤≥≠]|\\(?:approx|equiv|cong|sim|simeq|leq?|geq?|neq?)(?![A-Za-z])/u;
 const startsWithRelation = new RegExp(`^\\s*(?:${texRelation.source})`, "u");
 const endsWithRelation = new RegExp(`(?:${texRelation.source})\\s*$`, "u");
-const texLayoutTokens = /\\\\(?:\s*\*)?(?:\s*\[[^\]]*\])?|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#[xX][\da-fA-F]+);|&|\n/gu;
+const variableRelation = new RegExp(`^[a-z]\\w*(?:${texRelation.source})`, "u");
+const relationWithOperand = new RegExp(String.raw`(?:${texRelation.source})\s*[+-]?\s*[\p{L}\p{N}\\([{.]`, "u");
+const numberedLabel = /(?:^|[^\s+*/^=-])\s*(?:\b(?:step|item|part|line|row|case|eq(?:uation)?|formula|problem|question|exercise|example|option|choice|turn|stage|point|section|rule|hint|move|no\.?)\s+|#)\d+[.)]?\s+$/iu;
 
-/** TeX rows and independent columns end equations. A tab beside a relation only aligns it. */
-function normalizeMathLayout(text: string): string {
+/** Only an unescaped alignment tab next to a relation joins its two columns. */
+function normalizeAlignment(text: string, separator: "&" | ";"): string {
+  if (!text.includes("&")) return text;
   const columns: string[] = [];
-  let column = "";
   let start = 0;
-  for (const { 0: token, index } of text.matchAll(texLayoutTokens)) {
-    column += text.slice(start, index);
-    start = index + token.length;
-    if (token === "&") {
-      columns.push(column);
-      column = "";
-    } else if (token.startsWith("\\\\")) {
-      column += ";";
-    } else if (token === "\n" || /^\\[ ,;!]$/u.test(token)) {
-      column += " ";
-    } else if (!token.startsWith("\\begin{") && !token.startsWith("\\end{")) {
-      column += token;
-    }
+  const tokens = /\\.|&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#[xX][\da-fA-F]+);|&/gu;
+  for (const { 0: token, index } of text.matchAll(tokens)) {
+    if (token !== "&") continue;
+    columns.push(text.slice(start, index));
+    start = index + 1;
   }
-  column += text.slice(start);
-  if (columns.length === 0) return column;
-  columns.push(column);
+  if (!columns.length) return text;
+  columns.push(text.slice(start));
   return columns.map((value, i) =>
-    i > 0 && !endsWithRelation.test(columns[i - 1]!) && !startsWithRelation.test(value) ? ";" + value : value,
+    i > 0 && !endsWithRelation.test(columns[i - 1]!) && !startsWithRelation.test(value) ? separator + value : value,
   ).join("");
+}
+
+function normalizeMathLayout(text: string): string {
+  // A comment may itself contain a closing bracket for a row's spacing argument.
+  const visible = text.replace(/(?<!\\)((?:\\\\)*)%[^\n]*/gu, "$1");
+  const tokens = /\\\\(?:\s*\*)?(?:\s*\[[^\]]*\])?|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|\n/gu;
+  const layout = visible.replace(tokens, (token) => {
+    if (token.startsWith("\\\\")) return ";";
+    if (token === "\n" || /^\\[ ,;!]$/u.test(token)) return " ";
+    if (token.startsWith("\\begin{") || token.startsWith("\\end{")) return "";
+    return token;
+  });
+  return normalizeAlignment(layout, ";");
 }
 
 /** Normalize each complete formula before either interpretation of a pipe splits it. */
@@ -230,13 +239,16 @@ function stripEquationSegment(segment: string): string {
     // The body of a closed code/math span has already been consumed above.
     parts[i + 1] = parts[i + 1]!.replace(hardBreak, ";");
   }
-  // Check rendered prose after emphasis removal. A spaced number may label the
-  // next formula, while a number inside a preceding formula can be a coefficient.
+  // A number can introduce a complete formula. Before a fragment such as $x$,
+  // only an explicit prose label distinguishes that number from a coefficient.
   let proseStart = 0;
   for (const [open, close] of mathSpans) {
-    const prose = parts.slice(proseStart, open).join("");
-    if (/\d[.)]?\s+$/u.test(prose) && /^\s*\p{L}/u.test(parts.slice(open + 1, close).join(""))) {
-      parts[open] = ";";
+    const prose = normalizeUnicodeMath(parts.slice(proseStart, open).join(""));
+    if (/\d[.)]?\s+$/u.test(prose)) {
+      const body = normalizeUnicodeMath(parts.slice(open + 1, close).join(""));
+      if (/^\s*\p{L}/u.test(body) && (relationWithOperand.test(body) || numberedLabel.test(prose))) {
+        parts[open] = ";";
+      }
     }
     proseStart = close + 1;
   }
@@ -683,9 +695,9 @@ export function detectProtectedLeakage(
         (targetRational !== null &&
           (fractionRationals.some((frac) => rationalsEqual(frac, targetRational)) ||
             scientificRationals.some((sci) => rationalsEqual(sci, targetRational))));
-    } else if (/^[a-z]\w*=[+-]?\d+(?:\([^()]*\))?$/.test(compactToken)) {
-      const leftBoundary = /(?<![\p{L}\p{M}\p{N}_+*/^=<>!%.)\]}\\-]|\d\s)/u;
-      const rightBoundary = /(?![\p{L}\p{M}\p{N}_+*/^=<>%-]|\.\d)/u;
+    } else if (variableRelation.test(compactToken)) {
+      const leftBoundary = /(?<![\p{L}\p{M}\p{N}_+*/^=<>≈≡!%.)\]}\\-]|\d\s)/u;
+      const rightBoundary = /(?![\p{L}\p{M}\p{N}_+*/^=<>≈≡%-]|!=|:=|\.\d)/u;
       const equation = leftBoundary.source + escapeRegExp(compactToken) + rightBoundary.source;
       compactEquationText ??= normalizeCompactForLeakScan(stripEquationFormatting(releasedHintText));
       matched = new RegExp(equation, "u").test(compactEquationText);

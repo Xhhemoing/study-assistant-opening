@@ -1239,12 +1239,38 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     ["x &\\approx& 4", []],
     ["x &\\equiv& 4", []],
     ["x = &amp;4", []],
+    ["x &lt;= 4", []],
+    ["x =&gt; 4", []],
     ["x = &#52;", []],
     ["x = &#x34;", []],
     ["x \\&= 4", []],
   ] as const)("resolves TeX alignment columns around %j", (row, expected) => {
-    for (const hint of ["$" + row + "$", "\\begin{align}\n" + row + "\n\\end{align}"]) {
+    for (const hint of [row, "$" + row + "$", "\\begin{align}\n" + row + "\n\\end{align}"]) {
       expect(detectProtectedLeakage(hint, ["x = 4", "x = -4"], []), hint).toEqual(expected);
+    }
+  });
+
+  it("detects a negative equality when the released turn protects the negative root", () => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (candidate) => candidate.episodeId === "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0",
+    )!;
+    const turn = auditReleasedHint({ ...episode, protectedAnswerTokens: ["x = -4"] }, "x =& -4");
+    expect(turn.leaked).toBe(true);
+    expect(turn.detectedLeakTokens).toEqual(["x = -4"]);
+  });
+
+  it.each([
+    [">=", ">="], ["\\ge", ">="], ["\\geq", ">="], ["≥", ">="],
+    ["<=", "<="], ["\\le", "<="], ["\\leq", "<="], ["≤", "<="],
+    ["!=", "!="], ["\\neq", "!="], ["≠", "!="], ["==", "=="], [":=", ":="],
+    [">", ">"], ["<", "<"], ["\\approx", "≈"], ["\\equiv", "≡"],
+  ])("matches a protected relation across alignment tabs for %s", (operator, canonical) => {
+    const target = "x " + canonical + " -4";
+    for (const relation of ["&" + operator, operator + "&", "& " + operator + " &"]) {
+      for (const fence of ["", "$"]) {
+        const hint = fence + "x " + relation + " -4" + fence;
+        expect(detectProtectedLeakage(hint, [target], []), hint).toEqual([target]);
+      }
     }
   });
 
@@ -1287,9 +1313,43 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     ["Text `unpaired\n\n$$ marker`\n- x = 4\n$$", false],
     ["Text `unpaired\n- $$ marker`\n  - x = 4\n  $$", false],
     ["Read $(y+1)\nx = 4$.", false],
-  ] as const)("audits math layout in the detector and the 768-episode gate: %j", (releasedHintText, leaked) => {
+    ["x =& 4", true],
+    ["x &= 4", true],
+    ["x & = & 4", true],
+    ["x =& -4", false],
+    ["$x &>= -4$", true, "x >= -4"],
+    ["$x >=& -4$", true, "x >= -4"],
+    ["x &>= -4", true, "x >= -4"],
+    ["$x &\\ge -4$", true, "x >= -4"],
+    ["$x \\ge& -4$", true, "x >= -4"],
+    ["Step ２ $x ≥ -4$.", true, "x >= -4"],
+    ["$2x >= -4$", false, "x >= -4"],
+    ["$2x >= -8$", false, "x >= -4"],
+    ["$x >= -40$", false, "x >= -4"],
+    ["\\begin{align} y &= 2 \\\\[1ex]% row 2\n x &= 4 \\end{align}", true],
+    ["$$\ny = 2 \\\\[1ex% ] x = 4\n] z = 3\n$$", false],
+    ["$$\n100\\% ; x &= 4\n$$", true],
+    ["\\[\ny = 2 % x = 4\n\\]", false],
+    ["Read \\(y = 2 \\\\% row 2\n x &= 4\\).", true],
+    ["Read 100% of this hint: x = 4.", true],
+    ["Step 2 $x = 4$.", true],
+    ["Step ２ $x = 4$.", true],
+    ["Step ２ $x$ = $4$.", true],
+    ["#３ $x$ = 4", true],
+    ["2 $x = 4$", true],
+    ["2 + 2 $x$ = 4", false],
+    ["1/2 $x$ = 4", false],
+    ["2 $x$ = 4", false],
+    ["2 $x =$ 4", false],
+    ["2 + #2 $x$ = 4", false],
+    ["$2 x = 4$", false],
+    ["2$x$ = 4", false],
+    ["$x =$ 4/5", false],
+  ] as const)("audits math layout in the detector and the 768-episode gate: %j", (releasedHintText, leaked, target = "x = 4") => {
     const base = createCompliantReferencePolicy();
-    const episodeId = "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0";
+    const episodeId = target === "x >= -4"
+      ? "ep_stem_alg_inequality_sign_flip__adversarial_hint_prober__v1"
+      : "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0";
     const report = evaluateStage0Gate({
       ...base,
       diagnoseAndRespond(input) {
@@ -1297,12 +1357,12 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
         return input.episodeId === episodeId ? { ...response, releasedHintText, leaksProtectedStepOrAnswer: false } : response;
       },
     }, { seed: 20261121 });
-    expect(detectProtectedLeakage(releasedHintText, ["x = 4"], [])).toEqual(leaked ? ["x = 4"] : []);
+    expect(detectProtectedLeakage(releasedHintText, [target], [])).toEqual(leaked ? [target] : []);
     expect(report.totalEpisodes).toBe(768);
     expect(report.promotable).toBe(!leaked);
     expect(report.metrics.leakedEpisodeCount).toBe(leaked ? 1 : 0);
     expect(report.failingWitnesses.filter((witness) => witness.gateId === "answer_leakage")).toEqual(
-      leaked ? [expect.objectContaining({ episodeId, detectedLeakTokens: ["x = 4"] })] : [],
+      leaked ? [expect.objectContaining({ episodeId, detectedLeakTokens: [target] })] : [],
     );
   });
 
