@@ -573,6 +573,10 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(blocks.find(block => block.startOffset <= text.indexOf(row) && block.endOffset > text.indexOf(row)))
       .toMatchObject({ visibility: "public", startMs: null });
     expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: 2000 });
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    expect(partitionPedagogicalChunks(chunks, { allowHintGated: false }).indexableChunks.some(
+      chunk => chunk.text.includes("forty-two"),
+    )).toBe(false);
   });
 
   it.each(["t1 | forty-two", "[00:00-00:01] | forty-two", "| forty-two", "| t1 | forty-two |", "| | forty-two"])(
@@ -663,46 +667,97 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
 
   it.each([
     ["## Answer Key\n", "forty-two"],
+    ["## Answer Key | notes\n--- | ---\n", "forty-two"],
     ["## Answer Key `x | y`\n", "forty-two"],
     ["## Answer Key \\| notes\n", "forty-two"],
     ["> [!solution]", "> forty-two"],
+    ["- > [!solution]", "  > forty-two"],
     [":::solution", "forty-two\n[00:02-00:03] :::"],
+    ["- :::solution", "  forty-two\n  :::"],
+    ["~~~solution | notes", "forty-two\n[00:02-00:03] ~~~"],
     ["<details>", "forty-two</details>"],
     ["\\begin{solution}", "forty-two\n[00:02-00:03] \\end{solution}"],
+    ["Answer Key\n---", "forty-two"],
   ])("keeps a timed protected block outside an unprefixed table (%s)", (open, answer) => {
     const text = ["Topic | Note", "--- | ---", "a | b", "[00:00-00:01] " + open,
       "[00:01-00:02] " + answer].join("\n");
     const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
-    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: false });
     expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(false);
     expect(sealedChunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
       visibility: "sealed", startMs: 1000, endMs: 2000,
+    });
+    for (const chunk of chunks) expect(text.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+  });
+
+  it("keeps a timed list-nested Setext heading and its underline together after a table", () => {
+    const text = ["Topic | Note", "--- | ---", "a | b", "[00:00-00:01] - Answer Key",
+      "[00:01-00:02]   ---", "[00:02-00:03]   forty-two"].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: false });
+    expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(false);
+    expect(sealedChunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      visibility: "sealed", startMs: 2000, endMs: 3000,
+    });
+  });
+
+  it("retains hint gating on a timed callout following a table", () => {
+    const text = ["Topic | Note", "--- | ---", "a | b", "[00:00-00:01] > [!hint]",
+      "[00:01-00:02] > forty-two"].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const { indexableChunks, hintGatedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: false });
+    expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(false);
+    expect(hintGatedChunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      visibility: "hint_gated", startMs: 1000, endMs: 2000,
     });
   });
 
   it.each(["-", "*", "+", "1."])("keeps a timestamped %s marker in a pipe-less table row", marker => {
     const text = ["Answer Key | Note", "--- | ---", `[00:00-00:01] ${marker} forty-two`, "forty-three"].join("\n");
-    const blocks = parsePedagogicalAst(text);
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: false });
     for (const secret of ["forty-two", "forty-three"]) {
-      expect(blocks.find(block => block.text.includes(secret))).toMatchObject({
+      expect(indexableChunks.some(chunk => chunk.text.includes(secret))).toBe(false);
+      expect(sealedChunks.find(chunk => chunk.text.includes(secret))).toMatchObject({
         visibility: "sealed", startMs: null, endMs: null,
       });
     }
   });
 
-  it.each(["- note", "* note", "+ note", "1. note", "## Lecture"])(
+  it("keeps first-column protection on a list-like row with an explicit separator", () => {
+    const text = "Answer Key | Note\n--- | ---\n[00:00-00:01] - forty-two | note";
+    const block = parsePedagogicalAst(text).find(candidate => candidate.text.includes("forty-two"));
+    expect(block).toMatchObject({ visibility: "sealed", startMs: null, endMs: null });
+  });
+
+  it.each(["- note", "* note", "+ note", "1. note"])(
     "preserves table column protection after a timestamped row starting with %s", firstCell => {
       const text = ["Time | Answer Key", "--- | ---", `[00:00-00:01] ${firstCell} | forty-two`,
         "[00:01-00:02] | forty-three", "t1 | forty-four", "", "[00:02-00:03] Public afterward"].join("\n");
-      const blocks = parsePedagogicalAst(text);
+      const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+      const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: false });
       for (const secret of ["forty-two", "forty-three", "forty-four"]) {
-        expect(blocks.find(block => block.text.includes(secret))).toMatchObject({
+        expect(indexableChunks.some(chunk => chunk.text.includes(secret))).toBe(false);
+        expect(sealedChunks.find(chunk => chunk.text.includes(secret))).toMatchObject({
           text: secret, visibility: "sealed", startMs: null, endMs: null, startOffset: text.indexOf(secret),
         });
       }
-      expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: 2000, endMs: 3000 });
+      expect(chunks.at(-1)).toMatchObject({ visibility: "public", startMs: 2000, endMs: 3000 });
     },
   );
+
+  it("keeps column protection on a timed heading with a pipe as it starts a new section", () => {
+    const text = ["Time | Answer Key", "--- | ---", "[00:00-00:01] ## Lecture | forty-two",
+      "[00:01-00:02] | forty-three", "t1 | forty-four", "", "[00:02-00:03] Public afterward"].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: false });
+    expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(false);
+    expect(sealedChunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      visibility: "sealed", startMs: 0, endMs: 1000,
+    });
+    expect(indexableChunks.some(chunk => chunk.text.includes("forty-three"))).toBe(true);
+    expect(indexableChunks.some(chunk => chunk.text.includes("forty-four"))).toBe(true);
+  });
 
   it("applies the first column's protection to a pipe-less timed block that ends the table", () => {
     const text = ["Answer Key | Note", "--- | ---", "[00:00-00:01] ## forty-two", "",

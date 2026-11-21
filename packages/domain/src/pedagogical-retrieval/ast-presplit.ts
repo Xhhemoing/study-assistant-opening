@@ -196,7 +196,7 @@ type InlineCueTiming = {
   startMs: number;
   endMs: number;
   prefixLength: number;
-  visibilityFloor?: PedagogicalVisibility;
+  precedingTableVisibility?: PedagogicalVisibility;
 };
 
 function parseInlineTranscriptCue(line: string): InlineCueTiming | null {
@@ -515,6 +515,32 @@ function tableColumnVisibility(label: string): PedagogicalVisibility {
   if (SEALED_HEADING_RE.test(label)) return "sealed";
   if (HINT_HEADING_RE.test(label)) return "hint_gated";
   return "public";
+}
+
+function timedTableRowVisibility(raw: string, columns: readonly PedagogicalVisibility[]): PedagogicalVisibility {
+  if (columns.every(visibility => visibility === "public")) return "public";
+  const { cells, hasSeparator } = parseTableRowCells({ raw, start: 0 });
+  if (!hasSeparator) return columns[0] ?? "public";
+  let visibility: PedagogicalVisibility = "public";
+  for (const [index, cell] of cells.entries()) {
+    const column = columns[index];
+    if (column && raw.slice(cell.start, cell.end).trim()) visibility = maxVisibility(visibility, column);
+  }
+  return visibility;
+}
+
+function startsTimedTableBoundary(
+  body: string,
+  containers: readonly MarkdownContainer[],
+  nextRaw?: string,
+): boolean {
+  if (interruptsPipeTable(body) || CALLOUT_HEADER_RE.test(body.trimStart())) return true;
+  const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}[ \t]*$/.exec(body);
+  if (latex && (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null)) return true;
+  if (nextRaw === undefined || !SEALED_HEADING_RE.test(body) || /^(?: {4}| {0,3}\t)/.test(body)) return false;
+  const nextTiming = parseInlineTranscriptCue(nextRaw);
+  const underline = continueMarkdownContainers(nextRaw.slice(nextTiming?.prefixLength ?? 0), containers);
+  return underline.depth === containers.length && SETEXT_UNDERLINE_RE.test(underline.body);
 }
 
 function matchFenceOpening(line: string): RegExpExecArray | null {
@@ -1080,7 +1106,7 @@ interface TranscriptRegion {
 function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTiming | null> {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
-  let tableFirstColumn: PedagogicalVisibility | undefined;
+  let tableColumns: PedagogicalVisibility[] | undefined;
   return lines.map(({ raw }, index) => {
     if (fence) {
       const timing = fence.literal ? null : parseInlineTranscriptCue(raw);
@@ -1094,40 +1120,37 @@ function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTimi
     }
     const timing = parseInlineTranscriptCue(raw);
     const cueBody = timing ? raw.slice(timing.prefixLength) : "";
-    const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}[ \t]*$/.exec(cueBody);
-    const timedBlock = interruptsPipeTable(cueBody) ||
-      (latex !== null && (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null));
-    let visibilityFloor: PedagogicalVisibility = "public";
-    if (tableFirstColumn !== undefined) {
+    const cueLine = timing && readMarkdownContainerLine(cueBody, containers);
+    const next = lines[index + 1];
+    const explicitBoundary = cueLine !== null && startsTimedTableBoundary(cueLine.body, cueLine.containers, next?.raw);
+    let precedingTableVisibility: PedagogicalVisibility | undefined;
+    if (tableColumns) {
       const continuation = continueMarkdownContainers(raw, containers);
       if (continuation.depth === containers.length && isPipeTableBodyRow(continuation.body)) {
-        if (!timedBlock) return null;
-        // List markers after a literal timestamp and explicit cell separators belong to the table.
-        if (LIST_ITEM_RE.test(cueBody) && !THEMATIC_BREAK_RE.test(cueBody)) return null;
-        if (parseTableRowCells({ raw: continuation.body, start: 0 }).hasSeparator) return null;
-        visibilityFloor = tableFirstColumn;
+        // Literal rows keep their column positions. Explicit blocks end the table even when they contain pipes.
+        if (!explicitBoundary) return null;
+        precedingTableVisibility = timedTableRowVisibility(continuation.body, tableColumns);
       }
-      tableFirstColumn = undefined;
+      tableColumns = undefined;
     }
 
     const documentLine = readMarkdownContainerLine(raw, containers);
-    const next = lines[index + 1];
     const delimiter = next && continueMarkdownContainers(next.raw, documentLine.containers);
-    const headerCells = !timedBlock && delimiter?.depth === documentLine.containers.length
+    const headerCells = !explicitBoundary && !interruptsPipeTable(cueBody) &&
+      delimiter?.depth === documentLine.containers.length
       ? pipeTableHeaderCells({ raw: documentLine.body, start: 0 }, delimiter.body)
       : null;
-    const firstCell = headerCells?.[0];
-    if (firstCell) {
+    if (headerCells) {
       containers = documentLine.containers;
-      tableFirstColumn = tableColumnVisibility(documentLine.body.slice(firstCell.start, firstCell.end));
+      tableColumns = headerCells.map(cell => tableColumnVisibility(documentLine.body.slice(cell.start, cell.end)));
       return null;
     }
 
-    const line = timing ? readMarkdownContainerLine(cueBody, containers) : documentLine;
+    const line = cueLine ?? documentLine;
     containers = line.containers;
     const opener = matchFenceOpening(line.body)?.[1];
     if (opener) fence = { opener, literal: !timing };
-    return timing && visibilityFloor !== "public" ? { ...timing, visibilityFloor } : timing;
+    return timing && precedingTableVisibility !== undefined ? { ...timing, precedingTableVisibility } : timing;
   });
 }
 
@@ -1148,6 +1171,13 @@ function parseInlineCuedDocument(
     const timing = timings[index];
     const next = timings[index + 1];
     const body = line.raw.slice(timing?.prefixLength ?? 0);
+    if (timing?.precedingTableVisibility !== undefined) {
+      // An unwrapped Setext title still looks like a table row until its underline.
+      // Keep the boundary in the projected Markdown without changing source offsets.
+      parts.push("\n");
+      offset++;
+      cueSeparator("");
+    }
     const separator = cueSeparator(body, timing && next ? lines[index + 1]!.raw.slice(next.prefixLength) : undefined);
     if (timing || captionRowStarts?.has(line.start)) timedRows.add(offset);
     if (timing) {
@@ -1189,7 +1219,10 @@ function parseInlineCuedDocument(
       continue;
     }
 
-    const visibilityFloor = maxVisibility(options.defaultVisibility ?? "public", cue.timing.visibilityFloor ?? "public");
+    const visibilityFloor = maxVisibility(
+      options.defaultVisibility ?? "public",
+      cue.timing.precedingTableVisibility ?? "public",
+    );
     const spans = start === end
       ? [{ start, end, visibility: "sealed" } satisfies CueSpan]
       : splitCueVisibility(markdown, start, end, visibilityFloor, readRange, true);
