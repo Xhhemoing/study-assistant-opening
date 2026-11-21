@@ -771,7 +771,8 @@ function startsWithEquals(text: string): boolean {
 }
 
 function startsWithContinuationOperator(text: string): boolean {
-  return /^\s*(?:\\times|\\div|\\cdot|\\pm|\\mp|[+\-*/×÷−±·⋅∕⁄])/.test(stripLeadingHorizontalSpacing(text));
+  return startsWithBinaryOnlyOperator(text)
+    || /^(?:\\(?:pm|mp)(?![A-Za-z])|[+\-−±])/.test(stripLeadingHorizontalSpacing(text));
 }
 
 function startsWithBinaryOnlyOperator(text: string): boolean {
@@ -813,17 +814,13 @@ function mergeAlignedCells(cells: string[]): string[] {
       continue;
     }
     if (endsWithOperatorOrEquals(current) || startsWithEquals(stripped)) {
-      current = `${current} ${cell}`;
+      current = `${current} ${stripped}`;
       continue;
     }
     if (startsWithContinuationOperator(stripped)) {
-      if (!current.includes("=")) {
-        current = `${current} ${cell}`;
-        continue;
-      }
-      const isSignedNewEquation = /^[+\-−]/.test(stripped) && isNewColumnEquation(nonEmpty, i);
+      const isSignedNewEquation = current.includes("=") && /^[+\-−]/.test(stripped) && isNewColumnEquation(nonEmpty, i);
       if (!isSignedNewEquation) {
-        current = `${current} ${cell}`;
+        current = `${current} ${stripped}`;
         continue;
       }
     }
@@ -836,7 +833,9 @@ function mergeAlignedCells(cells: string[]): string[] {
 
 function shouldRejoinRowClause(prev: string, next: string): boolean {
   if (endsWithOperatorOrEquals(prev)) return true;
-  if (startsWithEquals(next)) return prev.includes("=") || looksLikeMathExpression(prev);
+  if (startsWithEquals(next) || startsWithBinaryOnlyOperator(next)) {
+    return prev.includes("=") || looksLikeMathExpression(prev);
+  }
   if (startsWithContinuationOperator(next)) {
     if (prev.includes("=")) return !next.includes("=");
     return looksLikeMathExpression(prev);
@@ -871,7 +870,9 @@ function extractFromLatexFragment(raw: string, out: string[], insideMathEnv = fa
       }
       if (WRAPPED_SINGLE_EQUATION_ENVS.has(outer.env)) {
         const { rows } = splitTopLevelRows(body, { splitNewlines: false });
-        const joined = cleanEquationClause(rows.filter(r => r !== INTERTEXT_BREAK).map(r => r.trim()).filter(Boolean).join(" "));
+        const joined = cleanEquationClause(rows.filter(row => row !== INTERTEXT_BREAK).map(row =>
+          startsWithEquals(row) || startsWithContinuationOperator(row) ? stripLeadingHorizontalSpacing(row) : row.trim(),
+        ).join(" "));
         if (!joined) return false;
         if (joined.includes("=")) {
           out.push(joined);
@@ -939,7 +940,7 @@ function extractFromLatexFragment(raw: string, out: string[], insideMathEnv = fa
       if (!cleaned) continue;
       if (singleGroupRow) {
         if (pendingRowClause && shouldRejoinRowClause(pendingRowClause, cleaned)) {
-          pendingRowClause = `${pendingRowClause} ${cleaned}`.trim();
+          pendingRowClause = `${pendingRowClause} ${stripLeadingHorizontalSpacing(cleaned)}`.trim();
         } else {
           flushPending();
           pendingRowClause = cleaned;
