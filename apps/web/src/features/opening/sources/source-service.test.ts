@@ -998,4 +998,87 @@ describe("opening signed upload service", () => {
     });
   });
 
+  it("isolates v2 retryParse and downloads from historical v1 mixed-case keys", async () => {
+    const sql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    const storage: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+    };
+    const jobs: { key: string; kind: string; payload: { sourceId: string; sourceVersion?: number; objectKey?: string } }[] = [];
+    const lookupQueries: { canonicalLower: string; canonicalExact: string }[] = [];
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("INSERT INTO opening_jobs")) {
+        jobs.push({
+          key: String(values[3]),
+          kind: String(values[4]),
+          payload: values[5] as { sourceId: string; sourceVersion?: number; objectKey?: string },
+        });
+      }
+      if (query.startsWith("SELECT j.key FROM opening_jobs j")) {
+        const canonicalLower = String(values[3]).toLowerCase();
+        const canonicalExact = String(values[4]);
+        lookupQueries.push({ canonicalLower, canonicalExact });
+        const matched = jobs.find(j => j.key.toLowerCase() === canonicalLower && j.key !== canonicalExact);
+        return matched ? [{ key: matched.key }] : [];
+      }
+      return (sql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof sql, {
+      json: sql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage);
+    const ticket = await svc.beginUpload(principal, {
+      name: "multi-version.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    const canonicalId = ticket.source.id;
+    const upperId = canonicalId.toUpperCase();
+    const v1MixedKey = storage.finalKey(upperId, 1);
+    const v2CanonicalKey = storage.finalKey(canonicalId, 2);
+    const v2MixedKey = storage.finalKey(upperId, 2);
+    s3.objects.set(v1MixedKey, { bytes: pdfBytes, etag: "etag-v1" });
+    jobs.push({ key: v1MixedKey, kind: "parse", payload: { sourceId: upperId, sourceVersion: 1 } });
+
+    const row = sql.sources.get(canonicalId)!;
+    row.upload_state = "uploaded";
+    row.parse_state = "failed";
+    row.version = 2;
+
+    // Missing v2 must never fall back to v1 mixed-case key on download or retryParse.
+    await expect(svc.getDownloadUrl(principal, canonicalId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(lookupQueries.at(-1)).toEqual({
+      canonicalLower: v2CanonicalKey.toLowerCase(),
+      canonicalExact: v2CanonicalKey,
+    });
+
+    const retriedWithoutV2 = await svc.retryParse(principal, canonicalId);
+    expect(retriedWithoutV2.parseState).toBe("queued");
+    expect(jobs.at(-1)?.payload).toEqual({ sourceId: canonicalId, sourceVersion: 2 });
+    expect(lookupQueries.at(-1)).toEqual({
+      canonicalLower: v2CanonicalKey.toLowerCase(),
+      canonicalExact: v2CanonicalKey,
+    });
+
+    // When a mixed-case v2 key exists alongside v1, resolution picks strictly v2.
+    s3.objects.set(v2MixedKey, { bytes: pdfBytes, etag: "etag-v2" });
+    jobs.push({ key: v2MixedKey, kind: "parse", payload: { sourceId: upperId, sourceVersion: 2 } });
+    row.parse_state = "failed";
+    const dlV2 = await svc.getDownloadUrl(principal, canonicalId);
+    expect(dlV2.url).toContain(v2MixedKey);
+    const retriedWithV2 = await svc.retryParse(principal, canonicalId);
+    expect(retriedWithV2.parseState).toBe("queued");
+    expect(jobs.at(-1)?.payload).toEqual({
+      sourceId: canonicalId,
+      sourceVersion: 2,
+      objectKey: v2MixedKey,
+    });
+  });
+
 });

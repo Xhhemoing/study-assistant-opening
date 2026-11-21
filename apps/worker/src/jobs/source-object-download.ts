@@ -26,17 +26,19 @@ const PRESIGN_OPTIONS = {
 function validLegacyFinalKey(
   candidate: unknown,
   sourceId: string,
+  sourceVersion: number,
   canonicalKey: string,
 ): candidate is string {
   if (typeof candidate !== "string" || candidate === canonicalKey) return false;
-  const ownPrefix = `opening/sources/${sourceId.toLowerCase()}/`;
+  const ownVersionKey = `opening/sources/${sourceId.toLowerCase()}/v${sourceVersion}`;
   const lower = candidate.toLowerCase();
-  return lower === canonicalKey.toLowerCase() && lower.startsWith(ownPrefix) && !candidate.includes("..");
+  return lower === canonicalKey.toLowerCase() && lower === ownVersionKey && !candidate.includes("..");
 }
 
 async function resolveFallbackKeys(input: {
   scope: OpeningScope;
   sourceId: string;
+  sourceVersion: number;
   canonicalKey: string;
   jobKey: string;
   payload: unknown;
@@ -44,7 +46,7 @@ async function resolveFallbackKeys(input: {
 }): Promise<string[]> {
   const candidates: string[] = [];
   const add = (value: unknown) => {
-    if (validLegacyFinalKey(value, input.sourceId, input.canonicalKey) && !candidates.includes(value)) {
+    if (validLegacyFinalKey(value, input.sourceId, input.sourceVersion, input.canonicalKey) && !candidates.includes(value)) {
       candidates.push(value);
     }
   };
@@ -76,6 +78,7 @@ export async function fetchPresignedSourceObject(input: {
       const fallbacks = await resolveFallbackKeys({
         scope: input.scope,
         sourceId: input.source.id,
+        sourceVersion: input.source.version,
         canonicalKey,
         jobKey: input.job.key,
         payload: input.payload,
@@ -99,6 +102,7 @@ export async function fetchPresignedSourceObject(input: {
   const fallbacks = await resolveFallbackKeys({
     scope: input.scope,
     sourceId: input.source.id,
+    sourceVersion: input.source.version,
     canonicalKey,
     jobKey: input.job.key,
     payload: input.payload,

@@ -74,6 +74,24 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
   const now = options.now ?? (() => new Date());
   const scopeOf = (p: Principal) => ({ workspaceId: boundWorkspaceId(p), ownerUserId: p.userId });
   const auth = (p: Principal, action: string) => assertAuthorized(p, action as never, { type: "workspace", workspaceId: boundWorkspaceId(p) });
+  async function resolveRecordedLegacyFinalKey(
+    scope: OpeningScope,
+    sourceId: string,
+    canonicalKey: string,
+  ): Promise<string | null> {
+    const recordedKey = await (sources.resolveLegacyFinalKey
+      ? sources.resolveLegacyFinalKey(scope, sourceId, canonicalKey)
+      : resolveLegacySourceFinalKey(sql, scope, sourceId, canonicalKey));
+    if (
+      !recordedKey
+      || recordedKey === canonicalKey
+      || recordedKey.toLowerCase() !== canonicalKey.toLowerCase()
+      || recordedKey.includes("..")
+    ) {
+      return null;
+    }
+    return recordedKey;
+  }
   async function resolveReadableFinalKey(
     scope: OpeningScope,
     rawId: string,
@@ -92,9 +110,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const rawKey = storage.finalKey(rawId, version);
       if (await storage.objectExists(rawKey)) return rawKey;
     }
-    const recordedKey = await (sources.resolveLegacyFinalKey
-      ? sources.resolveLegacyFinalKey(scope, sourceId, canonicalKey)
-      : resolveLegacySourceFinalKey(sql, scope, sourceId, canonicalKey));
+    const recordedKey = await resolveRecordedLegacyFinalKey(scope, sourceId, canonicalKey);
     if (recordedKey && await storage.objectExists(recordedKey)) {
       return recordedKey;
     }
@@ -344,9 +360,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
         if (rawKey) {
           try { return await storage.getObjectStream(rawKey); } catch { /* fall through */ }
         }
-        const recordedKey = await (sources.resolveLegacyFinalKey
-          ? sources.resolveLegacyFinalKey(scope, sourceId, downloadKey)
-          : resolveLegacySourceFinalKey(sql, scope, sourceId, downloadKey));
+        const recordedKey = await resolveRecordedLegacyFinalKey(scope, sourceId, downloadKey);
         if (recordedKey) return storage.getObjectStream(recordedKey);
         throw error;
       });

@@ -699,4 +699,88 @@ describe("parse source handler", () => {
     })).rejects.toThrow("missing object in storage");
     expect(presignedKeys).toEqual([canonicalKey]);
   });
+
+  it("never substitutes a v1 mixed-case object when parsing or retrying v2", async () => {
+    const hexSourceId = "00000000-0000-4000-8000-0000000000cd";
+    const mixedId = hexSourceId.toUpperCase();
+    const v1Bytes = Buffer.from("stale-v1");
+    const v2Bytes = Buffer.from("fresh-v2");
+    const v1MixedKey = `opening/sources/${mixedId}/v1`;
+    const v2CanonicalKey = `opening/sources/${hexSourceId}/v2`;
+    const v2MixedKey = `opening/sources/${mixedId}/v2`;
+    const presignedKeys: string[] = [];
+    const chunksPublished: unknown[] = [];
+    const v2Source = source({
+      id: hexSourceId,
+      version: 2,
+      mime: "text/plain",
+      bytes: v2Bytes.byteLength,
+      sha256: digest(v2Bytes),
+    });
+    const d = await deps({ source: v2Source });
+
+    const handler = createParseSourceHandler({
+      sources: {
+        get: async () => v2Source,
+        markParseState: async () => v2Source,
+        resolveLegacyFinalKey: vi.fn(async (_s, _id, canonical) => (canonical === v2CanonicalKey ? v1MixedKey : null)),
+      },
+      chunks: {
+        replaceChunks: async (_scope, input) => { chunksPublished.push(input); },
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === v1MixedKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === v1MixedKey) return `data:text/plain;base64,${v1Bytes.toString("base64")}`;
+          throw new Error("v2 object missing in storage");
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(handler({ ...job, key: v1MixedKey }, {
+      sourceId: hexSourceId,
+      sourceVersion: 2,
+      objectKey: v1MixedKey,
+    })).rejects.toThrow("v2 object missing in storage");
+    expect(presignedKeys).toEqual([v2CanonicalKey]);
+    expect(chunksPublished).toEqual([]);
+
+    presignedKeys.length = 0;
+    const mixedV2Handler = createParseSourceHandler({
+      sources: {
+        get: async () => v2Source,
+        markParseState: async () => v2Source,
+        resolveLegacyFinalKey: vi.fn(async () => v2MixedKey),
+      },
+      chunks: {
+        replaceChunks: async (_scope, input) => { chunksPublished.push(input); },
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === v1MixedKey || key === v2MixedKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === v2MixedKey) return `data:text/plain;base64,${v2Bytes.toString("base64")}`;
+          throw new Error(`unexpected key: ${key}`);
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(mixedV2Handler({ ...job, key: v1MixedKey }, {
+      sourceId: hexSourceId,
+      sourceVersion: 2,
+      objectKey: v1MixedKey,
+    })).resolves.toEqual({ pages: 1 });
+    expect(presignedKeys).toEqual([v2MixedKey]);
+  });
 });

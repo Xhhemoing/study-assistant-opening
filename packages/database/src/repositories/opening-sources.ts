@@ -231,7 +231,13 @@ export async function resolveLegacySourceFinalKey(
     LIMIT 1
   `;
   const key = rows[0]?.key ? String(rows[0].key) : null;
-  if (!key || !key.toLowerCase().startsWith(ownPrefix) || key.includes("..")) {
+  if (
+    !key
+    || key === canonicalFinalKey
+    || key.toLowerCase() !== canonicalLower
+    || !key.toLowerCase().startsWith(ownPrefix)
+    || key.includes("..")
+  ) {
     return null;
   }
   return key;
