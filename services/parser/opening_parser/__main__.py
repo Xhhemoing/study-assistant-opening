@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from .physical_pages import texts_by_page, visual_kinds_by_page
+from .physical_pages import extract_physical_pages, texts_by_page, visual_kinds_by_page
 
 PDF = "application/pdf"
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -142,17 +142,31 @@ def main(argv=None):
         page_range = (args.page_start, args.page_end) if args.page_start is not None else None
         conversion = convert(path, args.timeout_seconds, page_range) if page_range else convert(path, args.timeout_seconds)
         pages = []
-        by_page = texts_by_page(conversion)
+        if args.mime == PDF:
+            extraction = extract_physical_pages(conversion)
+            by_page = extraction.texts_by_page
+            visual_kinds = extraction.visual_kinds_by_page
+            sealed_by_page = extraction.section_sealed_by_page
+            had_sealed_by_page = extraction.had_sealed_by_page
+        else:
+            by_page = texts_by_page(conversion)
+            visual_kinds = {}
+            sealed_by_page = {}
+            had_sealed_by_page = {}
         if page_range:
             expected = set(range(args.page_start, args.page_end + 1))
             if set(by_page) != expected:
                 raise ValueError("parser did not preserve the requested physical page range")
-        visual_kinds = visual_kinds_by_page(conversion, by_page) if args.mime == PDF else {}
         for page_number, texts in sorted(by_page.items()):
             text = "\n".join(texts)
             if len(text) > TEXT_CAP:
                 text = text[:TEXT_CAP] + "\n…[truncated]"
-            pages.append({"page": page_number, "text": text, "imagePath": None, "visualKinds": visual_kinds.get(page_number, [])})
+            entry = {"page": page_number, "text": text, "imagePath": None, "visualKinds": visual_kinds.get(page_number, [])}
+            if sealed_by_page.get(page_number):
+                entry["sectionSealedAtEnd"] = True
+            if had_sealed_by_page.get(page_number):
+                entry["hadSealedContent"] = True
+            pages.append(entry)
         if len(pages) > args.max_pages:
             raise ValueError("max-pages would truncate pages")
         output = json.dumps({"pages": pages}, ensure_ascii=False, separators=(",", ":"))

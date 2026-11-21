@@ -7,6 +7,7 @@ TableItem export, including the upstream merge that corrupts charspans.
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from docling.datamodel.base_models import AssembledUnit, Cluster, ConversionStatus, InputFormat, Page, Table, TextElement
@@ -16,6 +17,7 @@ from docling.models.stages.reading_order.readingorder_model import ReadingOrderM
 from docling_core.types.doc import BoundingBox, DocItemLabel, DoclingDocument, ProvenanceItem, Size, TableCell
 
 from opening_parser import __main__ as cli
+from opening_parser import physical_pages
 
 
 SIZE = Size(width=612, height=792)
@@ -128,6 +130,421 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertIn("formula", visual[11])
         self.assertIn("table", visual[12])
         self.assertEqual(visual[13], ["scan"])
+
+    def test_academic_discourse_blocks_preserve_single_page_charspans_and_sealing(self):
+        result = result_for(
+            [
+                text_element(11, "Definition 1.1: A metric space is a pair (X, d).", 1),
+                text_element(11, "Theorem 1.2: Every compact set is closed.", 2),
+                text_element(11, "Proof: Assume K is compact. Let x be a limit point", 3),
+            ],
+            [
+                text_element(12, "Proof (continued): Then x lies in K. □", 1),
+                text_element(12, "Worked Example 1: Evaluate d(0, 1) = 1.", 2),
+                text_element(12, "Figure 1: Unit interval diagram", 3, DocItemLabel.CAPTION),
+                text_element(12, "Exercise 1: Show d(x, y) >= 0.\nAnswer Key: By non-negativity axiom.", 4),
+            ],
+            [
+                text_element(13, "参考答案\n1. 由非负性可得。\n2. 略。", 1),
+            ],
+        )
+        extracted_default = physical_pages.extract_physical_pages(result, include_sealed=False)
+        extracted_raw = physical_pages.extract_physical_pages(result, include_sealed=True)
+        blocks_by_page = extracted_default.discourse_blocks_by_page
+        raw_blocks_by_page = extracted_raw.discourse_blocks_by_page
+        raw_texts = extracted_raw.texts_by_page
+        public_texts = cli.texts_by_page(result)
+
+        p11_raw = "\n".join(raw_texts[11])
+        p12_raw = "\n".join(raw_texts[12])
+        p13_raw = "\n".join(raw_texts[13])
+
+        self.assertEqual([b.kind for b in blocks_by_page[11]], ["definition", "theorem", "proof"])
+        self.assertEqual([b.visibility_hint for b in blocks_by_page[11]], ["public", "public", "hint_gated"])
+        self.assertFalse(blocks_by_page[11][2].continued_from_prev_page)
+        self.assertTrue(blocks_by_page[11][2].continues_on_next_page)
+
+        self.assertEqual([b.kind for b in blocks_by_page[12]], ["proof", "worked_example", "figure_caption", "exercise", "solution_sealed"])
+        self.assertTrue(blocks_by_page[12][0].continued_from_prev_page)
+        self.assertFalse(blocks_by_page[12][0].continues_on_next_page)
+        self.assertEqual(blocks_by_page[12][2].caption_ref, "Figure 1")
+        self.assertEqual(blocks_by_page[12][2].associated_visual_kind, "picture")
+        self.assertEqual(blocks_by_page[12][3].visibility_hint, "public")
+        self.assertEqual(blocks_by_page[12][4].visibility_hint, "sealed")
+
+        self.assertEqual([b.kind for b in blocks_by_page[13]], ["solution_sealed"])
+        self.assertEqual(blocks_by_page[13][0].visibility_hint, "sealed")
+
+        for page_no, raw_text in ((11, p11_raw), (12, p12_raw), (13, p13_raw)):
+            public_page_text = "\n".join(public_texts[page_no])
+            for block in blocks_by_page[page_no]:
+                self.assertEqual(block.page_number, page_no)
+                if block.visibility_hint == "sealed":
+                    self.assertIsNone(block.char_start)
+                    self.assertIsNone(block.char_end)
+                    self.assertEqual(raw_text[block.raw_char_start:block.raw_char_end], block.text)
+                else:
+                    self.assertEqual(public_page_text[block.char_start:block.char_end], block.text)
+            for block in raw_blocks_by_page[page_no]:
+                self.assertEqual(raw_text[block.char_start:block.char_end], block.text)
+
+        # Public texts preserve exercises and public blocks on page 12 while sealing inline & standalone answer keys.
+        self.assertIn("Exercise 1: Show d(x, y) >= 0.", "\n".join(public_texts[12]))
+        self.assertNotIn("Answer Key", "\n".join(public_texts[12]))
+        self.assertNotIn("non-negativity axiom", "\n".join(public_texts[12]))
+        self.assertEqual(public_texts[13], [])
+        visuals = cli.visual_kinds_by_page(result, public_texts)
+        self.assertEqual(visuals[13], [])
+
+    def test_chinese_academic_headings_and_implicit_proof_continuation(self):
+        result = result_for(
+            [
+                text_element(11, "定义 1.1：设 V 为线性空间。", 1),
+                text_element(11, "引理 1.2：零向量唯一。", 2),
+                text_element(11, "证明：设存在两个零向量 0₁ 与 0₂，则", 3),
+            ],
+            [
+                text_element(12, "0₁ = 0₁ + 0₂ = 0₂。证毕。", 1),
+                text_element(12, "例题 2：计算矩阵的秩。", 2),
+                text_element(12, "习题 1：证明转置矩阵的秩不变。", 3),
+                text_element(12, "解答：利用行秩等于列秩即可。", 4),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        self.assertEqual([b.kind for b in blocks[11]], ["definition", "theorem", "proof"])
+        self.assertTrue(blocks[11][2].continues_on_next_page)
+        self.assertEqual([b.kind for b in blocks[12]], ["proof", "worked_example", "exercise", "solution_sealed"])
+        self.assertTrue(blocks[12][0].continued_from_prev_page)
+        self.assertFalse(blocks[12][0].continues_on_next_page)
+        public_p12 = "\n".join(cli.texts_by_page(result)[12])
+        self.assertIn("习题 1", public_p12)
+        self.assertNotIn("行秩等于列秩", public_p12)
+
+    def test_two_tier_sealing_avoids_prose_false_positives_and_blocks_answer_key_breakouts(self):
+        result = result_for(
+            [
+                text_element(11, "Theorem 2.1: If det(A) != 0, then Ax = b has a unique\nsolution. Moreover, x = A^{-1}b.", 1),
+                text_element(11, "## Solutions\nA homogeneous mixture of two substances.", 2),
+                text_element(11, "Solution-phase synthesis proceeds cleanly.", 3),
+                text_element(11, "解析、代数与拓扑是基础课程。", 4),
+                text_element(11, "Answer key concepts are summarized here.", 5),
+                text_element(11, "Example 1: Compute d/dx(x^2).\nSolution: By the power rule, 2x.\n\nNotice that it vanishes at 0.", 6),
+                text_element(11, "例 1：求导。\n解：导数为 2x。", 7),
+                text_element(11, "Figure 1: Lookup table for sin(x)", 8, DocItemLabel.CAPTION),
+                text_element(11, "Continued fractions converge rapidly.", 9),
+            ],
+            [
+                text_element(12, "Answers to Selected Exercises\n1.1 x = 3\n1.2 y = 4", 1),
+            ],
+            [
+                text_element(13, "Answer Key\nChapter 1\nProblem 1: x = 3", 1),
+            ],
+            [
+                text_element(14, "参考答案\n第一章\n1. x = 3", 1),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+        p11_pub = "\n".join(pub[11])
+        self.assertIn("unique\nsolution. Moreover", p11_pub)
+        self.assertIn("homogeneous mixture", p11_pub)
+        self.assertIn("Solution-phase synthesis", p11_pub)
+        self.assertIn("解析、代数与拓扑", p11_pub)
+        self.assertIn("Answer key concepts", p11_pub)
+        self.assertIn("By the power rule, 2x.", p11_pub)
+        self.assertIn("导数为 2x", p11_pub)
+        self.assertIn("Continued fractions", p11_pub)
+
+        caption_block = next(b for b in blocks[11] if b.kind == "figure_caption")
+        self.assertEqual(caption_block.associated_visual_kind, "picture")
+        self.assertFalse(any(b.kind == "solution_sealed" for b in blocks[11]))
+        self.assertFalse(blocks[11][-1].continued_from_prev_page)
+
+        self.assertEqual(pub[12], [])
+        self.assertEqual(pub[13], [])
+        self.assertEqual(pub[14], [])
+        self.assertEqual([b.kind for b in blocks[12]], ["solution_sealed"])
+        self.assertEqual([b.kind for b in blocks[13]], ["solution_sealed"])
+        self.assertEqual([b.kind for b in blocks[14]], ["solution_sealed"])
+
+    def test_running_answer_header_and_ocr_all_sealed_page_suppress_vision_and_none_text(self):
+        result = result_for(
+            [
+                text_element(11, "Answers to Exercises", 1, DocItemLabel.PAGE_HEADER),
+                text_element(11, "1.1 x = 3", 2),
+            ],
+        )
+        pub = cli.texts_by_page(result)
+        self.assertEqual(pub[11], [])
+        self.assertEqual(cli.visual_kinds_by_page(result, pub)[11], [])
+
+        # Test visual_kinds_by_page resilience to text=None, Table elements, and OCR cells using lightweight doubles
+        # (never mutating read-only Pydantic Page.cells or passing text=None into ReadingOrderModel).
+        stub_page = SimpleNamespace(
+            page_no=11,
+            cells=[SimpleNamespace(text="1.1 x = 3", from_ocr=True), SimpleNamespace(text=None, from_ocr=False)],
+            assembled=SimpleNamespace(elements=[
+                SimpleNamespace(page_no=11, text=None, orig=None, table_cells=[SimpleNamespace(text="1.1 | 3")], label="table", children=[], cluster=None),
+            ]),
+            parsed_page=SimpleNamespace(bitmap_resources=[]),
+            predictions=SimpleNamespace(layout=SimpleNamespace(clusters=[])),
+        )
+        stub_conv = SimpleNamespace(document=SimpleNamespace(pages=[11]), pages=[stub_page])
+        self.assertEqual(cli.visual_kinds_by_page(stub_conv, {11: []})[11], [])
+
+    def test_end_of_chapter_answers_cross_page_worked_example_and_allcaps_markdown_sealing(self):
+        result = result_for(
+            [
+                text_element(11, "Example 1: Compute the integral.", 1),
+            ],
+            [
+                text_element(12, "Solution: Integrate term by term.", 1),
+                text_element(12, "例题 1：计算矩阵的秩。\n解答：\n由初等行变换可得。", 2),
+                text_element(12, "参考答案\n1. x = 3", 3),
+            ],
+            [
+                text_element(13, "Chapter 2: Vector Spaces", 1, DocItemLabel.SECTION_HEADER),
+                text_element(13, "Definition 2.1: A vector space over F.", 2),
+                text_element(13, "**ANSWERS TO SELECTED EXERCISES**\n1.1 x = 3", 3),
+            ],
+            [
+                text_element(14, "**课后答案**：1. x = 3\n**练习答案**：2. y = 4", 1),
+                text_element(14, "Theorem 2.2: Basis size is invariant.", 2),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+        self.assertIn("Integrate term by term.", "\n".join(pub[12]))
+        self.assertIn("由初等行变换可得。", "\n".join(pub[12]))
+        self.assertNotIn("x = 3", "\n".join(pub[12]))
+        self.assertEqual(blocks[12][0].kind, "worked_example")
+        self.assertEqual(blocks[12][1].kind, "worked_example")
+
+        p13_pub = "\n".join(pub[13])
+        self.assertIn("Chapter 2: Vector Spaces", p13_pub)
+        self.assertIn("Definition 2.1: A vector space over F.", p13_pub)
+        self.assertNotIn("ANSWERS TO SELECTED EXERCISES", p13_pub)
+        self.assertNotIn("1.1 x = 3", p13_pub)
+
+        p14_pub = "\n".join(pub[14])
+        self.assertNotIn("课后答案", p14_pub)
+        self.assertNotIn("练习答案", p14_pub)
+        self.assertIn("Theorem 2.2: Basis size is invariant.", p14_pub)
+
+    def test_astral_math_charspans_align_exactly_with_public_texts(self):
+        result = result_for([
+            text_element(11, "Exercise 1: Compute 𝑥² + 1.\nAnswer Key: 𝑥 = 2.", 1),
+            text_element(11, "Theorem 1: Let 𝑥 ∈ ℝ.", 2),
+        ])
+        ext = physical_pages.extract_physical_pages(result, include_sealed=False)
+        public_p11 = "\n".join(ext.texts_by_page[11])
+        self.assertEqual(public_p11, "Exercise 1: Compute 𝑥² + 1.\nTheorem 1: Let 𝑥 ∈ ℝ.")
+        blocks = ext.discourse_blocks_by_page[11]
+        self.assertEqual([b.kind for b in blocks], ["exercise", "solution_sealed", "theorem"])
+        for block in blocks:
+            if block.visibility_hint == "sealed":
+                self.assertIsNone(block.char_start)
+                self.assertIsNone(block.char_end)
+            else:
+                self.assertEqual(public_p11[block.char_start:block.char_end], block.text)
+
+    def test_round4_same_page_bibliography_exit_section_header_cross_page_exit_and_aligned_headers(self):
+        result = result_for(
+            [
+                text_element(11, "Appendix A: Answers to the Exercises\n1.1 x = 3", 1),
+                text_element(11, "Bibliography", 2),
+                text_element(11, "[1] Knuth, TAOCP.", 3),
+                text_element(11, "ANSWERS TO THE EXERCISES (CONTINUED)\n2.1 y = 4", 4),
+            ],
+            [
+                text_element(12, "Vector Spaces", 1, DocItemLabel.SECTION_HEADER),
+                text_element(12, "The equation has a unique\nsolution\nfor all x > 0.", 2),
+                text_element(12, "**Solution**\nx = 9.", 3),
+                text_element(12, "## Solutions\nA homogeneous mixture.", 4),
+            ],
+            [
+                text_element(13, "课后练习答案\n1. 对", 1),
+            ],
+            [
+                text_element(14, "Partial Differential Equations", 1, DocItemLabel.TITLE),
+                text_element(14, "Wave equation u_tt = c^2 u_xx.", 2),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+        p11_pub = "\n".join(pub[11])
+        self.assertIn("Bibliography", p11_pub)
+        self.assertIn("[1] Knuth, TAOCP.", p11_pub)
+        self.assertNotIn("1.1 x = 3", p11_pub)
+        self.assertNotIn("2.1 y = 4", p11_pub)
+        self.assertEqual([b.kind for b in blocks[11]], ["solution_sealed", "narrative", "solution_sealed"])
+
+        p12_pub = "\n".join(pub[12])
+        self.assertIn("Vector Spaces", p12_pub)
+        self.assertIn("for all x > 0.", p12_pub)
+        self.assertNotIn("x = 9.", p12_pub)
+        self.assertIn("A homogeneous mixture.", p12_pub)
+
+        self.assertEqual(pub[13], [])
+        p14_pub = "\n".join(pub[14])
+        self.assertIn("Partial Differential Equations", p14_pub)
+        self.assertIn("Wave equation u_tt = c^2 u_xx.", p14_pub)
+
+    def test_round5_mid_page_continuation_backmatter_split_and_short_numbered_answer_guard(self):
+        result = result_for(
+            [
+                text_element(11, "Appendix A: Answers to the Exercises\n1.1 x = 3", 1),
+            ],
+            [
+                text_element(12, "1.2 y = 4", 1),
+                text_element(12, "Bibliography", 2),
+                text_element(12, "[1] Knuth, TAOCP.", 3),
+            ],
+            [
+                text_element(13, "参考文献", 1),
+                text_element(13, "华罗庚《高等数学引论》。", 2),
+            ],
+            [
+                text_element(14, "Answer Key\n1.1 A", 1),
+            ],
+            [
+                text_element(15, "1.2 True", 1, DocItemLabel.SECTION_HEADER),
+                text_element(15, "1.3 A, B", 2, DocItemLabel.SECTION_HEADER),
+                text_element(15, "附录 B：符号表", 3),
+                text_element(15, "R denotes real numbers.", 4),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+
+        self.assertEqual(pub[12], ["Bibliography", "[1] Knuth, TAOCP."])
+        self.assertEqual([b.kind for b in blocks[12]], ["solution_sealed", "narrative"])
+
+        self.assertEqual(pub[13], ["参考文献", "华罗庚《高等数学引论》。"])
+        self.assertEqual(pub[15], ["附录 B：符号表", "R denotes real numbers."])
+
+    def test_round6_section_sealed_at_end_cli_and_lecture_heading(self):
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+
+        result = result_for(
+            [
+                text_element(11, "Theorem 1: All norms on R^n are equivalent.", 1),
+                text_element(11, "Answer Key\n1. x = 2", 2),
+            ],
+            [
+                text_element(12, "第 3 讲 特征值\n特征多项式定义如下。", 1),
+            ],
+            [
+                text_element(13, "**Solutions to Selected Exercises**\n1. x = 5", 1),
+            ],
+            [
+                text_element(14, "Section 1.2: Exercises\n1. Find x.", 1),
+                text_element(14, "Bibliography\n[1] Strang.", 2),
+            ],
+        )
+        ext = physical_pages.extract_physical_pages(result)
+        self.assertEqual(ext.texts_by_page[11], ["Theorem 1: All norms on R^n are equivalent."])
+        self.assertTrue(ext.section_sealed_by_page[11])
+        self.assertFalse(ext.section_sealed_by_page[12])
+        self.assertIn("特征多项式定义如下。", "\n".join(ext.texts_by_page[12]))
+        self.assertTrue(ext.section_sealed_by_page[13])
+        self.assertNotIn("Exercises", "\n".join(ext.texts_by_page[14]))
+        self.assertIn("Bibliography", "\n".join(ext.texts_by_page[14]))
+        self.assertFalse(ext.section_sealed_by_page[14])
+
+        cli_result = result_for(
+            [
+                text_element(11, "Theorem 1.", 1),
+                text_element(11, "Answer Key\n1. x = 2", 2),
+            ],
+            [
+                text_element(12, "第 3 讲 特征值\n特征多项式定义如下。", 1),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            stdout = io.StringIO()
+            with patch.object(cli, "convert", return_value=cli_result), patch.object(cli, "create_converter", return_value=None), redirect_stdout(stdout):
+                code = cli.main(["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", "20"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["pages"]), 2)
+        self.assertEqual(payload["pages"][0]["text"], "Theorem 1.")
+        self.assertIs(payload["pages"][0].get("sectionSealedAtEnd"), True)
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][1])
+
+    def test_round7_caption_inside_seal_lecture_answer_guard_and_had_sealed(self):
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+
+        result = result_for(
+            [
+                text_element(11, "Answer Key\n1. x = 2", 1),
+                text_element(11, "Figure 1: Solution graph.", 2, DocItemLabel.CAPTION),
+                text_element(11, "2. y = 4", 3),
+            ],
+            [
+                text_element(12, "第 3 讲 参考答案\n1. 对", 1, DocItemLabel.SECTION_HEADER),
+                text_element(12, "2. 错", 2),
+            ],
+            [
+                text_element(13, "第 3 讲 特征值\n定义：Ax = λx。", 1, DocItemLabel.SECTION_HEADER),
+            ],
+            [
+                text_element(14, "Theorem 1: Norm equivalence.", 1),
+                text_element(14, "Answer: x = 1.", 2),
+                text_element(14, "Chapter 2: Next Topic\nPublic proof.", 3),
+            ],
+            [
+                text_element(15, "Chapter 3: Pure Public\nTheorem 2: Continuity.", 1),
+            ],
+        )
+        ext = physical_pages.extract_physical_pages(result)
+        self.assertEqual(ext.texts_by_page[11], [])
+        self.assertTrue(ext.section_sealed_by_page[11])
+        self.assertTrue(ext.had_sealed_by_page[11])
+
+        self.assertEqual(ext.texts_by_page[12], [])
+        self.assertTrue(ext.section_sealed_by_page[12])
+        self.assertTrue(ext.had_sealed_by_page[12])
+
+        self.assertFalse(ext.section_sealed_by_page[13])
+        self.assertFalse(ext.had_sealed_by_page[13])
+        self.assertIn("定义：Ax = λx。", "\n".join(ext.texts_by_page[13]))
+
+        self.assertNotIn("Answer", "\n".join(ext.texts_by_page[14]))
+        self.assertIn("Theorem 1: Norm equivalence.", "\n".join(ext.texts_by_page[14]))
+        self.assertFalse(ext.section_sealed_by_page[14])
+        self.assertTrue(ext.had_sealed_by_page[14])
+
+        self.assertFalse(ext.section_sealed_by_page[15])
+        self.assertFalse(ext.had_sealed_by_page[15])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sample-r7.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            stdout = io.StringIO()
+            with patch.object(cli, "convert", return_value=result), patch.object(cli, "create_converter", return_value=None), redirect_stdout(stdout):
+                code = cli.main(["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", "20"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["pages"]), 5)
+        self.assertIs(payload["pages"][0].get("sectionSealedAtEnd"), True)
+        self.assertIs(payload["pages"][0].get("hadSealedContent"), True)
+        self.assertIs(payload["pages"][1].get("sectionSealedAtEnd"), True)
+        self.assertIs(payload["pages"][1].get("hadSealedContent"), True)
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][2])
+        self.assertNotIn("hadSealedContent", payload["pages"][2])
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][3])
+        self.assertIs(payload["pages"][3].get("hadSealedContent"), True)
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][4])
+        self.assertNotIn("hadSealedContent", payload["pages"][4])
 
 
 if __name__ == "__main__":

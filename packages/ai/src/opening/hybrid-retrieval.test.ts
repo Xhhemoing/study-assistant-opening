@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SourceChunk } from "@aistudy/contracts";
-import { budgetRankedMaterial, rankMaterialContext, segmentMaterialChunks } from "./hybrid-retrieval";
+import { budgetRankedMaterial, materialSegmentKey, rankMaterialContext, segmentMaterialChunks } from "./hybrid-retrieval";
 import { renderContext } from "./context";
 
 const chunk = (id: string, text: string, page = 1): SourceChunk => ({ id, text, page, sourceId: id, sourceVersion: 1,
@@ -55,5 +55,174 @@ describe("material hybrid retrieval", () => {
     const overhead = renderContext([{ ...source, text: "" }]).length;
     expect(budgetRankedMaterial([source], overhead + 1)).toEqual([]);
     expect(budgetRankedMaterial([source], overhead + 2)[0]?.text).toBe("𝑥");
+  });
+
+  it("keeps LaTeX display, inline, and nested environments unbroken across segment boundaries", () => {
+    const cases = [
+      { name: "display $$", prefix: "a".repeat(90), formula: "$$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$" },
+      { name: "display \\[...\\]", prefix: "b".repeat(90), formula: "\\[\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}\\]" },
+      { name: "inline \\(...\\)", prefix: "c".repeat(90), formula: "\\(\\alpha + \\beta = \\gamma\\)" },
+      { name: "nested env", prefix: "d".repeat(85), formula: "\\begin{cases} x & \\begin{cases} 1 \\\\ 2 \\end{cases} \\\\ y & 3 \\end{cases}" },
+      { name: "inline $...$ with currency", prefix: "Item costs $25 and $30; " + "e".repeat(70), formula: "$f(x) = x^2 + 1$" },
+      { name: "escaped \\$", prefix: "Price \\$10 " + "f".repeat(80), formula: "$g(x) = \\sqrt{x}$" },
+    ];
+    const encoder = new TextEncoder();
+    for (const item of cases) {
+      const full = item.prefix + item.formula + " tail";
+      const segments = segmentMaterialChunks([chunk(item.name, full)], 120);
+      expect(segments.map(s => s.chunk.text).join("")).toBe(full);
+      expect(segments.every(s => encoder.encode(s.chunk.text).length <= 120)).toBe(true);
+      expect(segments.some(s => s.chunk.text.includes(item.formula))).toBe(true);
+    }
+  });
+
+  it("falls back safely on oversized, unclosed, or currency $ spans without dropping bytes or breaking surrogate pairs", () => {
+    const encoder = new TextEncoder();
+    const unclosed = "Cost $25\n\n" + "😀".repeat(40) + "$$unclosed math " + "z".repeat(150);
+    const segUnclosed = segmentMaterialChunks([chunk("unclosed", unclosed)], 100);
+    expect(segUnclosed.map(s => s.chunk.text).join("")).toBe(unclosed);
+    expect(segUnclosed.every(s => encoder.encode(s.chunk.text).length <= 100)).toBe(true);
+
+    const oversizedFormula = "$$" + "\\alpha + ".repeat(40) + "\\beta$$";
+    const segOver = segmentMaterialChunks([chunk("oversized", oversizedFormula)], 80);
+    expect(segOver.length).toBeGreaterThan(1);
+    expect(segOver.map(s => s.chunk.text).join("")).toBe(oversizedFormula);
+    expect(segOver.every(s => encoder.encode(s.chunk.text).length <= 80)).toBe(true);
+
+    const unclosedEnv = "\\begin{align} x = 1 " + "😀".repeat(35) + "\\begin{cases} a \\\\ b \\end{cases}";
+    const segEnv = segmentMaterialChunks([chunk("env", unclosedEnv)], 96);
+    expect(segEnv.map(s => s.chunk.text).join("")).toBe(unclosedEnv);
+    expect(segEnv.every(s => encoder.encode(s.chunk.text).length <= 96)).toBe(true);
+    expect(segEnv.some(s => s.chunk.text.includes("\\begin{cases} a \\\\ b \\end{cases}"))).toBe(true);
+  });
+
+  it("protects numeric-leading inline LaTeX like $1, 2, \\dots, n$ and $5! = 120$ while ignoring currency", () => {
+    const encoder = new TextEncoder();
+    const numericSeq = "设 " + "a".repeat(60) + "$1, 2, \\dots, n$ 为正整数，$x + y = z$。";
+    const segSeq = segmentMaterialChunks([chunk("seq", numericSeq)], 80);
+    expect(segSeq.map(s => s.chunk.text).join("")).toBe(numericSeq);
+    expect(segSeq.every(s => encoder.encode(s.chunk.text).length <= 80)).toBe(true);
+    expect(segSeq.some(s => s.chunk.text.includes("$1, 2, \\dots, n$"))).toBe(true);
+
+    const factorial = "Compute " + "w".repeat(65) + "$5! = 120$ now";
+    const segFac = segmentMaterialChunks([chunk("fac", factorial)], 80);
+    expect(segFac.map(s => s.chunk.text).join("")).toBe(factorial);
+    expect(segFac.some(s => s.chunk.text.includes("$5! = 120$"))).toBe(true);
+
+    const currency = "Tickets cost $50 and VIP costs $100. " + "x".repeat(60);
+    const segCurrency = segmentMaterialChunks([chunk("currency", currency)], 40);
+    expect(segCurrency.map(s => s.chunk.text).join("")).toBe(currency);
+    expect(segCurrency.every(s => encoder.encode(s.chunk.text).length <= 40)).toBe(true);
+
+    const setMembership = "If " + "u".repeat(65) + "$1 \\in A$ and $0 \\to \\infty$, done.";
+    const segSet = segmentMaterialChunks([chunk("set", setMembership)], 80);
+    expect(segSet.map(s => s.chunk.text).join("")).toBe(setMembership);
+    expect(segSet.some(s => s.chunk.text.includes("$1 \\in A$"))).toBe(true);
+    expect(segSet.some(s => s.chunk.text.includes("$0 \\to \\infty$"))).toBe(true);
+
+    const singleZero = "For $0$: " + "v".repeat(60) + " ($x + y = z$)";
+    const segZero = segmentMaterialChunks([chunk("zero", singleZero)], 75);
+    expect(segZero.map(s => s.chunk.text).join("")).toBe(singleZero);
+    expect(segZero.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
+
+    const singleOne = "设$1$，且" + "w".repeat(60) + "$f(x) = x^2 + 1$。";
+    const segOne = segmentMaterialChunks([chunk("one", singleOne)], 75);
+    expect(segOne.map(s => s.chunk.text).join("")).toBe(singleOne);
+    expect(segOne.some(s => s.chunk.text.includes("$f(x) = x^2 + 1$"))).toBe(true);
+
+    const pricesList = "Prices: $10, $20, and $30 " + "p".repeat(50);
+    const segPrices = segmentMaterialChunks([chunk("prices", pricesList)], 32);
+    expect(segPrices.map(s => s.chunk.text).join("")).toBe(pricesList);
+    expect(segPrices.every(s => encoder.encode(s.chunk.text).length <= 32)).toBe(true);
+
+    const zhCurrencyBeforeMath = "售价$50，求解" + "u".repeat(55) + "$x + y = z$。";
+    const segZh = segmentMaterialChunks([chunk("zh-curr", zhCurrencyBeforeMath)], 75);
+    expect(segZh.map(s => s.chunk.text).join("")).toBe(zhCurrencyBeforeMath);
+    expect(segZh.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
+
+    const enCurrencyBeforeMath = "Cost $50;find" + "u".repeat(55) + "$x + y = z$.";
+    const segEn = segmentMaterialChunks([chunk("en-curr", enCurrencyBeforeMath)], 75);
+    expect(segEn.map(s => s.chunk.text).join("")).toBe(enCurrencyBeforeMath);
+    expect(segEn.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
+  });
+
+  it("scans pathological backslash and mismatched-env inputs in linear O(N) time", () => {
+    const backslashes = "\\".repeat(100_000);
+    const envs = "\\begin{a}".repeat(5_000) + "\\end{b}".repeat(5_000);
+    const started = performance.now();
+    const s1 = segmentMaterialChunks([chunk("bs", backslashes)], 4096);
+    const s2 = segmentMaterialChunks([chunk("env", envs)], 4096);
+    const elapsedMs = performance.now() - started;
+    expect(s1.map(s => s.chunk.text).join("")).toBe(backslashes);
+    expect(s2.map(s => s.chunk.text).join("")).toBe(envs);
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
+  it("keeps >2048-char numeric-leading inline math unbroken across segments", () => {
+    const mathBody = "$1+" + "x+".repeat(1100) + "x$";
+    const text = "a".repeat(3000) + mathBody + " tail";
+    const segments = segmentMaterialChunks([chunk("long-num-math", text)], 4096);
+    expect(segments.map(s => s.chunk.text).join("")).toBe(text);
+    expect(segments.every(s => Buffer.byteLength(s.chunk.text, "utf8") <= 4096)).toBe(true);
+    expect(segments.some(s => s.chunk.text.includes(mathBody))).toBe(true);
+  });
+
+  it("namespaces math-shifted segment keys away from legacy 0..k keys and recalls pre-reindex dense hits", () => {
+    const formulaTail = "$$x + y = z$$ eigenvalue theorem tail";
+    const shifted = chunk("formula-doc", "a".repeat(5990) + formulaTail);
+    const segments = segmentMaterialChunks([shifted]);
+    expect(segments).toHaveLength(2);
+    expect(segments.map(s => s.chunk.text).join("")).toBe(shifted.text);
+    expect(segments[0]!.segmentIndex).toBeGreaterThanOrEqual(262_144);
+    expect(segments[1]!.segmentIndex).toBe(segments[0]!.segmentIndex + 1);
+    expect(segments[1]!.segmentIndex).toBeLessThan(2_147_483_647);
+    expect(segmentMaterialChunks([shifted]).map(materialSegmentKey)).toEqual(segments.map(materialSegmentKey));
+
+    const legacyKeys = new Set(["formula-doc:0", "formula-doc:1"]);
+    expect(segments.some(s => legacyKeys.has(materialSegmentKey(s)))).toBe(false);
+
+    const unshifted = chunk("plain-doc", "b".repeat(6010));
+    expect(segmentMaterialChunks([unshifted]).map(s => s.segmentIndex)).toEqual([0, 1]);
+
+    const legacySeg1 = { chunk: { ...shifted, text: shifted.text.slice(6000) }, segmentIndex: 1 };
+    const decoys = Array.from({ length: 8 }, (_, idx) => chunk(`decoy-${idx}`, "unrelated syllabus announcement"));
+
+    const recalled = rankMaterialContext({
+      chunks: [...decoys, shifted],
+      query: "orthogonal projection",
+      maxCharacters: 500,
+      dense: [legacySeg1],
+    });
+    expect(recalled[0]?.id).toBe("formula-doc");
+    expect(recalled[0]?.text).toContain(formulaTail);
+
+    const rejected = rankMaterialContext({
+      chunks: [chunk("chosen", "Selected page", 3), shifted],
+      query: "orthogonal projection",
+      maxCharacters: 7000,
+      preferChunkId: "chosen",
+      dense: [
+        { ...legacySeg1, chunk: { ...legacySeg1.chunk, sourceVersion: 2 } },
+        { ...legacySeg1, chunk: { ...legacySeg1.chunk, text: "tampered slice text" } },
+        { ...legacySeg1, chunk: { ...legacySeg1.chunk, id: "foreign-doc" } },
+        { chunk: { ...shifted, text: shifted.text.slice(0, 5990) }, segmentIndex: segments[0]!.segmentIndex },
+        { chunk: { ...shifted, text: shifted.text.slice(0, 6000) }, segmentIndex: 0 },
+      ],
+    });
+    expect(rejected.map(row => row.id)).toEqual(["chosen", "formula-doc"]);
+    expect(rejected[1]?.text).toBe("a".repeat(5990));
+
+    // Batched reindexing (~32 segments/batch) can commit segment 0 before segment 1; legacy slices for segment 1 must still recall.
+    const batchedReindex = rankMaterialContext({
+      chunks: [...decoys, shifted],
+      query: "orthogonal projection",
+      maxCharacters: 7000,
+      dense: [
+        segments[0]!,
+        legacySeg1,
+      ],
+    });
+    expect(batchedReindex[0]?.id).toBe("formula-doc");
+    expect(batchedReindex[0]?.text).toContain(formulaTail);
   });
 });
