@@ -1218,6 +1218,80 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
       );
     }
 
+    // Point-in-time cutoff (`nowMs`): querying Day 16 (before Day 17 release/payout-2 & Day 18 Order E release)
+    // MUST exclude future-dated releases, clawbacks, and payout settlements from both per-purchase and summary views!
+    const day15 = exactMaturity + DAY_MS; // cr-a-claw-1 recorded here; cr-a-claw-2 is on day 16
+    const day16 = exactMaturity + 2 * DAY_MS; // cr-a-claw-2 recorded here; cr-d-rel & ps-2 are on day 17
+    const day17 = exactMaturity + 3 * DAY_MS; // cr-d-rel & ps-2 recorded here; cr-e-rel is on day 18
+
+    const orderAAtDay15 = projectCreatorRoyaltyPosition(
+      ledger,
+      "order-a",
+      day15,
+    );
+    expect(orderAAtDay15).toMatchObject({
+      status: "partially_clawed_back",
+      clawedBackMicros: 14_700_000n,
+      netSettledMicros: 29_400_000n,
+    });
+
+    const orderDAtDay16 = projectCreatorRoyaltyPosition(
+      ledger,
+      "order-d",
+      day16,
+    );
+    expect(orderDAtDay16).toMatchObject({
+      status: "pending_escrow",
+      escrowMaturedAtEvaluation: true,
+      releasableMicros: 70_000_000n,
+      releasedMicros: 0n,
+    });
+
+    // Day-16 historical summary sees Order D & E matured, Order A settled in ps-1 + clawed back,
+    // and EXCLUDES Day-17 ps-2 settlement & cr-d-rel and Day-18 cr-e-rel!
+    const summaryAtDay16 = summarizeCreatorRoyaltyPayableBalance(ledger, {
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      nowMs: day16,
+    });
+    expect(summaryAtDay16).toEqual({
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      pendingEscrowMicros: 0n,
+      maturedReleasableMicros: 140_000_000n, // order-d ($70) + order-e ($70) both matured and unreleased on day 16
+      grossReleasedMicros: 44_100_000n, // only cr-a-rel; cr-d-rel (day 17) & cr-e-rel (day 18) excluded
+      paidOutReleasedGrossMicros: 44_100_000n, // only ps-1; ps-2 (day 17) excluded
+      unsettledReleasedMicros: 0n,
+      postReleaseClawbackMicros: 44_100_000n,
+      settledClawbackMicros: 0n, // ps-2 (day 17) excluded so clawbacks are still unsettled on day 16
+      outstandingClawbackOffsetMicros: 44_100_000n,
+      totalNetDisbursedMicros: 44_100_000n,
+      netPayableMicros: 95_900_000n, // 140M matured - 44.1M unsettled clawbacks
+      netSettledLifetimeMicros: 0n,
+    });
+
+    // Day-17 summary includes Day-17 cr-d-rel & ps-2 while still excluding Day-18 cr-e-rel
+    const summaryAtDay17 = summarizeCreatorRoyaltyPayableBalance(ledger, {
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      nowMs: day17,
+    });
+    expect(summaryAtDay17).toEqual({
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      pendingEscrowMicros: 0n,
+      maturedReleasableMicros: 70_000_000n, // order-e still unreleased on day 17
+      grossReleasedMicros: 114_100_000n, // cr-a-rel + cr-d-rel
+      paidOutReleasedGrossMicros: 114_100_000n, // ps-1 + ps-2
+      unsettledReleasedMicros: 0n,
+      postReleaseClawbackMicros: 44_100_000n,
+      settledClawbackMicros: 44_100_000n,
+      outstandingClawbackOffsetMicros: 0n,
+      totalNetDisbursedMicros: 70_000_000n,
+      netPayableMicros: 70_000_000n,
+      netSettledLifetimeMicros: 70_000_000n,
+    });
+
     // Purchase B: full chargeback within 14d voids escrowed entry cleanly before release
     ledger = appendCreatorRoyaltyAccrual(ledger, {
       entryId: "cr-b-1",
@@ -1553,6 +1627,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         learnerId: "stu-6",
         skillId: "genuine-five-students",
         occurredAtMs: validWeek.weekEndUtcMs, // exclusive end boundary -> ignored
+        recordedAtMs: validWeek.weekEndUtcMs,
       },
       {
         learnerId: "stu-7",
@@ -1564,13 +1639,43 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         learnerId: "stu-late-11",
         skillId: "genuine-five-students",
         occurredAtMs: validWeek.weekStartUtcMs + 15_000, // late enrollee -> excluded from frozen roster
+        recordedAtMs: validWeek.weekStartUtcMs + 15_000,
       },
       {
         learnerId: "unenrolled-ghost",
         skillId: "genuine-five-students",
         occurredAtMs: validWeek.weekStartUtcMs + 10_000, // not enrolled -> ignored
+        recordedAtMs: validWeek.weekStartUtcMs + 10_000,
       },
     ];
+
+    // Missing recordedAtMs fails closed with INVALID_TIMESTAMP so late events cannot bypass ingestion cutoff
+    try {
+      aggregateCohortEventsToHeatmap({
+        cohortId: "cohort-cs408",
+        mode: "cohort",
+        role: "instructor",
+        window: {
+          weekStartUtcMs: validWeek.weekStartUtcMs,
+          weekEndUtcMs: validWeek.weekEndUtcMs,
+        },
+        evaluatedAtMs: validWeek.weekEndUtcMs,
+        enrolledRoster,
+        skillIds: ["genuine-five-students"],
+        events: [
+          {
+            learnerId: "stu-1",
+            skillId: "genuine-five-students",
+            occurredAtMs: validWeek.weekStartUtcMs + 10_000,
+            recordedAtMs: undefined as unknown as number,
+          },
+        ],
+      });
+      expect.unreachable("Expected INVALID_TIMESTAMP");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe("INVALID_TIMESTAMP");
+    }
 
     const heatmap = aggregateCohortEventsToHeatmap({
       cohortId: "cohort-cs408",
@@ -1622,12 +1727,55 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       eventRate: 0.5,
     });
 
-    // Seal snapshot once per (cohortId, isoWeekKey): identical replay returns frozen original; mutated count throws COHORT_WEEK_ALREADY_PUBLISHED
+    // Seal snapshot once per (cohortId, isoWeekKey): deeply frozen against caller mutation; identical replay returns frozen original; mutated count throws COHORT_WEEK_ALREADY_PUBLISHED
     let pubLedger = createCohortSnapshotPublicationLedger();
-    const firstSeal = sealCohortWeeklySnapshot(pubLedger, heatmap);
+    // Create an unfrozen mutable copy to prove sealing deep-clones and isolates ledger state from caller references
+    const mutableBeforeSeal = {
+      ...heatmap,
+      window: heatmap.window ? { ...heatmap.window } : null,
+      cells: heatmap.cells.map((c) => ({ ...c })),
+    };
+    const firstSeal = sealCohortWeeklySnapshot(pubLedger, mutableBeforeSeal);
     pubLedger = firstSeal.ledger;
     expect(firstSeal.idempotentReplay).toBe(false);
     expect(firstSeal.snapshot.sealed).toBe(true);
+    expect(Object.isFrozen(firstSeal.snapshot)).toBe(true);
+    expect(Object.isFrozen(firstSeal.snapshot.window)).toBe(true);
+    expect(Object.isFrozen(firstSeal.snapshot.cells)).toBe(true);
+    expect(Object.isFrozen(firstSeal.snapshot.cells[0])).toBe(true);
+    expect(Object.isFrozen(firstSeal.snapshot.cells[1])).toBe(true);
+
+    // Mutating caller's original object in-place MUST NOT corrupt stored ledger entry and MUST fail replay as altered
+    (
+      mutableBeforeSeal.cells[1] as { eventLearnerCount: number }
+    ).eventLearnerCount = 9;
+    expect(
+      pubLedger.snapshotsByKey.get(firstSeal.snapshot.publicationKey!)
+        ?.cells[1]?.eventLearnerCount,
+    ).toBe(5);
+    try {
+      sealCohortWeeklySnapshot(pubLedger, mutableBeforeSeal);
+      expect.unreachable("Expected COHORT_WEEK_ALREADY_PUBLISHED");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "COHORT_WEEK_ALREADY_PUBLISHED",
+      );
+    }
+
+    // Forging an unfinalized snapshot (finalizedAtMs < weekEndUtcMs) directly into sealCohortWeeklySnapshot fails closed
+    try {
+      sealCohortWeeklySnapshot(createCohortSnapshotPublicationLedger(), {
+        ...heatmap,
+        finalizedAtMs: validWeek.weekEndUtcMs - 1,
+      });
+      expect.unreachable("Expected COHORT_WEEK_NOT_FINALIZED");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "COHORT_WEEK_NOT_FINALIZED",
+      );
+    }
 
     const replayViaAggregate = aggregateCohortEventsToHeatmap({
       cohortId: "cohort-cs408",
@@ -1645,6 +1793,8 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     });
     expect(replayViaAggregate.idempotentReplay).toBe(true);
     expect(replayViaAggregate.sealed).toBe(true);
+    expect(Object.isFrozen(replayViaAggregate)).toBe(true);
+    expect(Object.isFrozen(replayViaAggregate.cells[1])).toBe(true);
     expect(replayViaAggregate.finalizedAtMs).toBe(validWeek.weekEndUtcMs); // original sealed timestamp preserved
 
     // Attempting to republish the same (cohortId, isoWeekKey) with an extra backdated event (E=6 instead of E=5) MUST fail closed
@@ -1666,6 +1816,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
             learnerId: "stu-8",
             skillId: "genuine-five-students",
             occurredAtMs: validWeek.weekStartUtcMs + 45_000,
+            recordedAtMs: validWeek.weekStartUtcMs + 45_000,
           },
         ],
         publishedSnapshots: pubLedger,
@@ -1929,7 +2080,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       );
     }
 
-    // Empty issuedLaunchNonces registry or blank expectedNonce in policy fails closed
+    // Empty issuedLaunchNonces registry or whitespace-padded expectedNonce in policy fails closed
     expect(() =>
       validateLti13DeepLinkingClaims(validClaims, {
         ...registryPolicy,
@@ -1942,6 +2093,30 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         expectedNonce: "   ",
       }),
     ).toThrow(CommercialResilienceError);
+    expect(() =>
+      validateLti13DeepLinkingClaims(validClaims, {
+        ...registryPolicy,
+        expectedNonce: " fresh-nonce-abc123 ",
+      }),
+    ).toThrow(CommercialResilienceError);
+
+    // Whitespace-padded claims.nonce MUST NOT be trimmed to match expectedNonce
+    for (const paddedNonce of [
+      " fresh-nonce-abc123",
+      "fresh-nonce-abc123 ",
+      " fresh-nonce-abc123 ",
+      "fresh-nonce\tabc123",
+    ]) {
+      const paddedRes = validateLti13DeepLinkingClaims(
+        {
+          ...validClaims,
+          nonce: paddedNonce,
+        },
+        registryPolicy,
+      );
+      expect(paddedRes.valid).toBe(false);
+      expect(paddedRes.errors.map((e) => e.code)).toContain("INVALID_NONCE");
+    }
   });
 
   it("satisfies deterministic property invariants across margin ceilings, bilateral privacy cells, and royalty splits", () => {

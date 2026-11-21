@@ -1098,27 +1098,25 @@ export function appendCreatorRoyaltyAccrual(
   return appendValidatedRoyaltyEntry(ledger, entry);
 }
 
-/**
- * Projects the current append-only state of a purchase's creator royalty at
- * timestamp `nowMs`. Entries remain in `pending_escrow` until
- * `nowMs >= settledPurchaseAtMs + 14 * 86_400_000`.
- */
-export function projectCreatorRoyaltyPosition(
+function projectCreatorRoyaltyPositionInternal(
   ledger: CreatorRoyaltyLedger,
   purchaseId: string,
   nowMs: number,
+  includeFutureEntries: boolean,
 ): CreatorRoyaltyPosition {
   const normalizedPurchaseId = normalizeIdentifier(purchaseId, "purchaseId");
   const evaluatedAtMs = assertSafeTimestampMs(nowMs, "nowMs");
 
   const history = ledger.entries.filter(
-    (item) => item.purchaseId === normalizedPurchaseId,
+    (item) =>
+      item.purchaseId === normalizedPurchaseId &&
+      (includeFutureEntries || item.recordedAtMs <= evaluatedAtMs),
   );
   const latest = history[history.length - 1];
   if (!latest) {
     throw new CommercialResilienceError(
       "PURCHASE_NOT_FOUND",
-      `No creator royalty entries found for purchase "${normalizedPurchaseId}"`,
+      `No creator royalty entries found for purchase "${normalizedPurchaseId}" as of ${evaluatedAtMs}`,
     );
   }
 
@@ -1171,6 +1169,19 @@ export function projectCreatorRoyaltyPosition(
     netSettledMicros,
     payableOffsetMicros,
   };
+}
+
+/**
+ * Projects the point-in-time append-only state of a purchase's creator royalty
+ * strictly as of `nowMs` (ignoring entries with `recordedAtMs > nowMs`).
+ * Entries remain in `pending_escrow` until `nowMs >= settledPurchaseAtMs + 14 * 86_400_000`.
+ */
+export function projectCreatorRoyaltyPosition(
+  ledger: CreatorRoyaltyLedger,
+  purchaseId: string,
+  nowMs: number,
+): CreatorRoyaltyPosition {
+  return projectCreatorRoyaltyPositionInternal(ledger, purchaseId, nowMs, false);
 }
 
 /**
@@ -1234,10 +1245,11 @@ export function recordPostReleaseRoyaltyClawback(
     );
   }
 
-  const current = projectCreatorRoyaltyPosition(
+  const current = projectCreatorRoyaltyPositionInternal(
     ledger,
     purchaseId,
     expectedRecordedAtMs ?? refundOccurredAtMs,
+    true,
   );
 
   if (refundOccurredAtMs < current.settledPurchaseAtMs) {
@@ -1382,10 +1394,11 @@ export function appendCreatorRoyaltyRefund(
     );
   }
 
-  const current = projectCreatorRoyaltyPosition(
+  const current = projectCreatorRoyaltyPositionInternal(
     ledger,
     purchaseId,
     refundOccurredAtMs,
+    true,
   );
 
   if (refundOccurredAtMs < current.settledPurchaseAtMs) {
@@ -1494,7 +1507,12 @@ export function appendCreatorRoyaltyRelease(
     );
   }
 
-  const current = projectCreatorRoyaltyPosition(ledger, purchaseId, nowMs);
+  const current = projectCreatorRoyaltyPositionInternal(
+    ledger,
+    purchaseId,
+    nowMs,
+    true,
+  );
 
   if (current.status === "excluded") {
     throw new CommercialResilienceError(
@@ -1883,7 +1901,9 @@ export function summarizeCreatorRoyaltyPayableBalance(
         `Creator royalty entry "${entry.entryId}" has currency "${entry.currency}", expected "${currency}"`,
       );
     }
-    purchaseIds.add(entry.purchaseId);
+    if (entry.recordedAtMs <= nowMs) {
+      purchaseIds.add(entry.purchaseId);
+    }
   }
 
   let paidOutReleasedGrossMicros = 0n;
@@ -1898,6 +1918,9 @@ export function summarizeCreatorRoyaltyPayableBalance(
         "CURRENCY_MISMATCH",
         `Payout settlement "${settlement.entryId}" has currency "${settlement.currency}", expected "${currency}"`,
       );
+    }
+    if (settlement.settledAtMs > nowMs) {
+      continue;
     }
     paidOutReleasedGrossMicros += settlement.grossReleasedMicros;
     settledClawbackMicros += settlement.settledClawbackMicros;

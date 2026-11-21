@@ -420,13 +420,80 @@ export function computeFrozenRosterDigest(
 export interface CohortSnapshotPublicationLedger {
   readonly ledgerKind: "cohort_snapshot_publication";
   readonly snapshotsByKey: ReadonlyMap<string, CohortHeatmapResult>;
+  readonly snapshotDigestsByKey: ReadonlyMap<string, string>;
 }
 
 export function createCohortSnapshotPublicationLedger(): CohortSnapshotPublicationLedger {
-  return {
-    ledgerKind: "cohort_snapshot_publication",
+  return Object.freeze({
+    ledgerKind: "cohort_snapshot_publication" as const,
     snapshotsByKey: new Map<string, CohortHeatmapResult>(),
-  };
+    snapshotDigestsByKey: new Map<string, string>(),
+  });
+}
+
+function cloneAndFreezeCohortSnapshot(
+  snapshot: CohortHeatmapResult,
+  overrides?: {
+    readonly publicationKey?: string | null;
+    readonly sealed?: boolean;
+    readonly idempotentReplay?: boolean;
+  },
+): CohortHeatmapResult {
+  const frozenWindow = snapshot.window
+    ? Object.freeze({ ...snapshot.window })
+    : null;
+  const frozenCells = Object.freeze(
+    snapshot.cells.map((cell) => Object.freeze({ ...cell })),
+  );
+  return Object.freeze({
+    cohortSurfaceVisible: snapshot.cohortSurfaceVisible,
+    cohortId: snapshot.cohortId,
+    publicationKey:
+      overrides && "publicationKey" in overrides
+        ? (overrides.publicationKey ?? null)
+        : snapshot.publicationKey,
+    window: frozenWindow,
+    finalizedAtMs: snapshot.finalizedAtMs,
+    frozenRosterDigest: snapshot.frozenRosterDigest,
+    sealed: overrides?.sealed ?? snapshot.sealed,
+    idempotentReplay: overrides?.idempotentReplay ?? snapshot.idempotentReplay,
+    cells: frozenCells,
+    disclosedCellCount: snapshot.disclosedCellCount,
+    suppressedCellCount: snapshot.suppressedCellCount,
+  });
+}
+
+function computeCohortSnapshotStructuralDigest(
+  snapshot: CohortHeatmapResult,
+): string {
+  const cellPayload = snapshot.cells
+    .map((cell) =>
+      [
+        `${cell.skillId.length}:${cell.skillId}`,
+        cell.suppressed ? "1" : "0",
+        String(cell.enrolledActiveCount ?? "null"),
+        String(cell.eventLearnerCount ?? "null"),
+        String(cell.complementLearnerCount ?? "null"),
+        String(cell.eventRate ?? "null"),
+        String(cell.eventRateBps ?? "null"),
+        String(cell.suppressionReason ?? "null"),
+      ].join(","),
+    )
+    .join(";");
+  const canonical = [
+    "cohort-snapshot-v1",
+    snapshot.cohortSurfaceVisible ? "1" : "0",
+    snapshot.cohortId ?? "null",
+    snapshot.window?.isoWeekKey ?? "null",
+    String(snapshot.window?.weekStartUtcMs ?? "null"),
+    String(snapshot.window?.weekEndUtcMs ?? "null"),
+    snapshot.frozenRosterDigest ?? "null",
+    String(snapshot.disclosedCellCount),
+    String(snapshot.suppressedCellCount),
+    String(snapshot.cells.length),
+    cellPayload,
+  ].join("|");
+  return `sha256:${sha256HexPure(canonical)}`;
 }
 
 export function cohortSnapshotPublicationKey(
@@ -488,19 +555,33 @@ function lookupPublishedSnapshot(
     | CohortSnapshotPublicationLedger
     | undefined,
   publicationKey: string,
-): CohortHeatmapResult | undefined {
+): {
+  readonly snapshot: CohortHeatmapResult;
+  readonly expectedDigest: string | null;
+} | undefined {
   if (!source) {
     return undefined;
   }
   if ("ledgerKind" in source) {
-    return source.snapshotsByKey.get(publicationKey);
+    const snapshot = source.snapshotsByKey.get(publicationKey);
+    if (!snapshot) {
+      return undefined;
+    }
+    return {
+      snapshot,
+      expectedDigest: source.snapshotDigestsByKey.get(publicationKey) ?? null,
+    };
   }
-  return source.get(publicationKey);
+  const snapshot = source.get(publicationKey);
+  if (!snapshot) {
+    return undefined;
+  }
+  return { snapshot, expectedDigest: null };
 }
 
 /**
- * Seals at most ONE immutable finalized snapshot per `(cohortId, isoWeekKey)`.
- * Replaying an identical snapshot returns the original sealed snapshot verbatim;
+ * Seals at most ONE deeply-frozen immutable finalized snapshot per `(cohortId, isoWeekKey)`.
+ * Replaying an identical snapshot returns a deeply frozen copy of the original sealed snapshot;
  * attempting to publish any altered count/cell/digest for an already-published
  * `(cohortId, isoWeekKey)` throws `COHORT_WEEK_ALREADY_PUBLISHED`.
  */
@@ -525,43 +606,67 @@ export function sealCohortWeeklySnapshot(
     );
   }
 
+  const validatedWindow = validateFixedIsoWeekWindow(snapshot.window);
+  const finalizedAtMs = assertSafeTimestampMs(
+    snapshot.finalizedAtMs,
+    "snapshot.finalizedAtMs",
+  );
+  if (finalizedAtMs < validatedWindow.weekEndUtcMs) {
+    throw new CommercialResilienceError(
+      "COHORT_WEEK_NOT_FINALIZED",
+      `Cohort snapshot for ${validatedWindow.isoWeekKey} cannot be sealed before week close (${validatedWindow.weekEndUtcMs})`,
+    );
+  }
+
   const key = cohortSnapshotPublicationKey(
     snapshot.cohortId,
-    snapshot.window.isoWeekKey,
+    validatedWindow.isoWeekKey,
   );
+  const candidateFrozen = cloneAndFreezeCohortSnapshot(snapshot, {
+    publicationKey: key,
+    sealed: true,
+    idempotentReplay: false,
+  });
+  const candidateDigest = computeCohortSnapshotStructuralDigest(candidateFrozen);
+
   const existing = ledger.snapshotsByKey.get(key);
   if (existing) {
-    if (cohortSnapshotsEquivalent(existing, snapshot)) {
+    const storedDigest =
+      ledger.snapshotDigestsByKey.get(key) ??
+      computeCohortSnapshotStructuralDigest(existing);
+    const existingDigest = computeCohortSnapshotStructuralDigest(existing);
+    if (
+      existingDigest === storedDigest &&
+      candidateDigest === storedDigest &&
+      cohortSnapshotsEquivalent(existing, candidateFrozen)
+    ) {
       return {
         ledger,
-        snapshot: {
-          ...existing,
+        snapshot: cloneAndFreezeCohortSnapshot(existing, {
           sealed: true,
           idempotentReplay: true,
-        },
+        }),
         idempotentReplay: true,
       };
     }
     throw new CommercialResilienceError(
       "COHORT_WEEK_ALREADY_PUBLISHED",
-      `Cohort snapshot for (${snapshot.cohortId}, ${snapshot.window.isoWeekKey}) was already published and cannot be mutated`,
+      `Cohort snapshot for (${snapshot.cohortId}, ${validatedWindow.isoWeekKey}) was already published and cannot be mutated`,
     );
   }
 
-  const sealedSnapshot: CohortHeatmapResult = {
-    ...snapshot,
-    publicationKey: key,
-    sealed: true,
-    idempotentReplay: false,
-  };
   const nextMap = new Map(ledger.snapshotsByKey);
-  nextMap.set(key, sealedSnapshot);
+  nextMap.set(key, candidateFrozen);
+  const nextDigests = new Map(ledger.snapshotDigestsByKey);
+  nextDigests.set(key, candidateDigest);
+
   return {
-    ledger: {
-      ledgerKind: "cohort_snapshot_publication",
+    ledger: Object.freeze({
+      ledgerKind: "cohort_snapshot_publication" as const,
       snapshotsByKey: nextMap,
-    },
-    snapshot: sealedSnapshot,
+      snapshotDigestsByKey: nextDigests,
+    }),
+    snapshot: cloneAndFreezeCohortSnapshot(candidateFrozen),
     idempotentReplay: false,
   };
 }
@@ -678,17 +783,27 @@ export function buildCohortHeatmap(
     suppressedCellCount,
   };
 
-  const existing = lookupPublishedSnapshot(
+  const existingRecord = lookupPublishedSnapshot(
     input.publishedSnapshots,
     publicationKey,
   );
-  if (existing) {
-    if (cohortSnapshotsEquivalent(existing, candidate)) {
-      return {
-        ...existing,
+  if (existingRecord) {
+    const existingDigest = computeCohortSnapshotStructuralDigest(
+      existingRecord.snapshot,
+    );
+    const candidateDigest = computeCohortSnapshotStructuralDigest(candidate);
+    const digestIntact =
+      existingRecord.expectedDigest === null ||
+      existingDigest === existingRecord.expectedDigest;
+    if (
+      digestIntact &&
+      existingDigest === candidateDigest &&
+      cohortSnapshotsEquivalent(existingRecord.snapshot, candidate)
+    ) {
+      return cloneAndFreezeCohortSnapshot(existingRecord.snapshot, {
         sealed: true,
         idempotentReplay: true,
-      };
+      });
     }
     throw new CommercialResilienceError(
       "COHORT_WEEK_ALREADY_PUBLISHED",
@@ -696,7 +811,7 @@ export function buildCohortHeatmap(
     );
   }
 
-  return candidate;
+  return cloneAndFreezeCohortSnapshot(candidate);
 }
 
 export interface CohortRosterMember {
@@ -709,8 +824,8 @@ export interface CohortSkillEventRecord {
   readonly learnerId: string;
   readonly skillId: string;
   readonly occurredAtMs: number;
-  /** Optional server ingestion timestamp; late-ingested events with recordedAtMs > weekEndUtcMs are excluded from closed weeks. */
-  readonly recordedAtMs?: number;
+  /** Required server ingestion UTC ms timestamp; late-ingested events with recordedAtMs > weekEndUtcMs are excluded from closed weeks. */
+  readonly recordedAtMs: number;
 }
 
 export interface AggregateCohortEventsInput {
@@ -819,15 +934,13 @@ export function aggregateCohortEventsToHeatmap(
       ev.occurredAtMs,
       `events[${i}].occurredAtMs`,
     );
-    if (ev.recordedAtMs !== undefined) {
-      const recordedAtMs = assertSafeTimestampMs(
-        ev.recordedAtMs,
-        `events[${i}].recordedAtMs`,
-      );
-      // Post-close late-ingested events cannot retroactively mutate a closed week.
-      if (recordedAtMs > validatedWindow.weekEndUtcMs) {
-        continue;
-      }
+    const recordedAtMs = assertSafeTimestampMs(
+      ev.recordedAtMs,
+      `events[${i}].recordedAtMs`,
+    );
+    // Post-close late-ingested events cannot retroactively mutate a closed week.
+    if (recordedAtMs > validatedWindow.weekEndUtcMs) {
+      continue;
     }
 
     if (
@@ -1166,32 +1279,33 @@ export function validateLti13DeepLinkingClaims(
       normalizeIdentifier(id, `policy.allowedDeploymentIds[${idx}]`),
     ),
   );
-  const expectedNonce = normalizeIdentifier(
-    policy.expectedNonce,
-    "policy.expectedNonce",
-  );
-  if (/\s/.test(expectedNonce)) {
+  if (
+    typeof policy.expectedNonce !== "string" ||
+    policy.expectedNonce.length === 0 ||
+    /\s/.test(policy.expectedNonce)
+  ) {
     throw new CommercialResilienceError(
       "INVALID_IDENTIFIER",
-      "policy.expectedNonce must not contain whitespace",
+      "policy.expectedNonce must be a non-empty string with no whitespace",
     );
   }
+  const expectedNonce = policy.expectedNonce;
   let activeLaunchRegistry: Set<string> | null = null;
   if (policy.issuedLaunchNonces !== undefined) {
     activeLaunchRegistry = new Set<string>();
     let idx = 0;
     for (const rawNonce of policy.issuedLaunchNonces) {
-      const normalized = normalizeIdentifier(
-        rawNonce,
-        `policy.issuedLaunchNonces[${idx}]`,
-      );
-      if (/\s/.test(normalized)) {
+      if (
+        typeof rawNonce !== "string" ||
+        rawNonce.length === 0 ||
+        /\s/.test(rawNonce)
+      ) {
         throw new CommercialResilienceError(
           "INVALID_IDENTIFIER",
-          `policy.issuedLaunchNonces[${idx}] must not contain whitespace`,
+          `policy.issuedLaunchNonces[${idx}] must be a non-empty string with no whitespace`,
         );
       }
-      activeLaunchRegistry.add(normalized);
+      activeLaunchRegistry.add(rawNonce);
       idx += 1;
     }
     if (activeLaunchRegistry.size === 0) {
@@ -1285,27 +1399,35 @@ export function validateLti13DeepLinkingClaims(
     });
   }
 
-  // 5. Nonce strictly bound to single-launch expectedNonce (+ optional active-session registry) + replay protection
-  const nonce = typeof claims.nonce === "string" ? claims.nonce.trim() : "";
-  if (nonce.length === 0 || /\s/.test(nonce)) {
+  // 5. Exact byte-for-byte nonce validation bound to single-launch expectedNonce (+ optional active-session registry) + replay protection
+  const rawNonce = claims.nonce;
+  let validNonce: string | null = null;
+  if (
+    typeof rawNonce !== "string" ||
+    rawNonce.length === 0 ||
+    /\s/.test(rawNonce)
+  ) {
     errors.push({
       code: "INVALID_NONCE",
-      message: "LTI 1.3 nonce must be a non-empty whitespace-free string",
+      message:
+        "LTI 1.3 nonce must be a non-empty string with no leading, trailing, or internal whitespace",
     });
-  } else if (policy.usedNonces?.has(nonce)) {
+  } else if (policy.usedNonces?.has(rawNonce)) {
     errors.push({
       code: "NONCE_REPLAYED",
-      message: `LTI 1.3 nonce "${nonce}" has already been consumed`,
+      message: `LTI 1.3 nonce "${rawNonce}" has already been consumed`,
     });
   } else if (
-    nonce !== expectedNonce ||
-    (activeLaunchRegistry !== null && !activeLaunchRegistry.has(nonce))
+    rawNonce !== expectedNonce ||
+    (activeLaunchRegistry !== null && !activeLaunchRegistry.has(rawNonce))
   ) {
     errors.push({
       code: "UNRECOGNIZED_NONCE",
       message:
-        "LTI 1.3 nonce must match this launch's exact expectedNonce (and active session registry if provided)",
+        "LTI 1.3 nonce must match this launch's exact expectedNonce byte-for-byte (and active session registry if provided)",
     });
+  } else {
+    validNonce = rawNonce;
   }
 
   // 6. Expiration (`exp`) & issued-at (`iat`)
@@ -1490,7 +1612,8 @@ export function validateLti13DeepLinkingClaims(
     !mappedRole ||
     !resourceLinkId ||
     validExp === null ||
-    validIat === null
+    validIat === null ||
+    validNonce === null
   ) {
     return {
       valid: false,
@@ -1508,11 +1631,11 @@ export function validateLti13DeepLinkingClaims(
       : null;
 
   const nextUsedNonces = new Set<string>(policy.usedNonces ?? []);
-  nextUsedNonces.add(nonce);
+  nextUsedNonces.add(validNonce);
 
   return {
     valid: true,
-    consumedNonce: nonce,
+    consumedNonce: validNonce,
     nextUsedNonces,
     errors: [],
     context: {
@@ -1520,7 +1643,7 @@ export function validateLti13DeepLinkingClaims(
       clientId: expectedClientId,
       deploymentId,
       subject,
-      nonce,
+      nonce: validNonce,
       messageType: validMessageType,
       expiresAtMs: validExp * 1000,
       issuedAtMs: validIat * 1000,
