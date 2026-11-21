@@ -515,13 +515,16 @@ const NUMBERED_ITEM_MARKER = `(?:\\d+[.)]?\\s*${BRACKETED_ITEM_MARKER}|\\d+(?:[A
 const ITEM_MARKER_AFTER_ABBREVIATION_RE = new RegExp(
   `^\\s*(?:${NUMBERED_ITEM_MARKER}|${BRACKETED_ITEM_MARKER})`,
 );
-const SPACED_ITEM_START =
-  String.raw`(?:\s*[:：.;,\-–—])?\s+(?:\p{L}{2}|[A-Za-z]\s*(?::=|=(?![=>])|∈|\\in\b)|\$[^$\r\n]+\$)`;
-const ITEM_MARKER_FOLLOW = `(?=$|[\\s:：\\p{L}]|${SPACED_ITEM_START})`;
+const ITEM_CONTENT_START =
+  String.raw`(?:\p{L}{2}|[A-Za-z]\s*(?::=|=(?![=>])|∈|\\in\b)|\$[^$\r\n]+\$)`;
+const ITEM_START_SEPARATOR = String.raw`(?:\s+|\s*[:：.;,\-–—]\s*)`;
+const DELIMITED_ITEM_START = `${ITEM_START_SEPARATOR}${ITEM_CONTENT_START}`;
+const ITEM_MARKER_FOLLOW = `(?=$|[\\s:：\\p{L}]|${DELIMITED_ITEM_START})`;
 const ITEM_MARKER_WITHIN_SENTENCE_RE = new RegExp(
   `(?<=^|[\\s,，、:：])(?<![=+*/^−-]\\s*)(?:${NUMBERED_ITEM_MARKER}|(?:[Ee]xercise|[Pp]roblem|[Qq]uestion|[Pp]art|[Ii]tem)\\s+\\d+)${ITEM_MARKER_FOLLOW}|` +
     `(?<=(?:^|[,，、:：])\\s*)${BRACKETED_ITEM_MARKER}${ITEM_MARKER_FOLLOW}|` +
-    `(?<=\\s)(?<![=+*/^−-]\\s*)${BRACKETED_ITEM_MARKER}(?=${SPACED_ITEM_START})`,
+    `(?<=\\s)(?<![=+*/^−-]\\s*)${BRACKETED_ITEM_MARKER}(?=${DELIMITED_ITEM_START})|` +
+    `(?<=^|[\\s,，、:：])(?<![=+*/^−-]\\s*)(?<bareLetter>[A-Za-z]\\))(?=${ITEM_START_SEPARATOR}?${ITEM_CONTENT_START})`,
   "gu",
 );
 const POSTFIX_APPROXIMATION_RE = /\d\s+approx$/i;
@@ -974,6 +977,9 @@ function areGroupUnitTokensBoundInSentence(
   let itemEnd = sentence.length;
   for (const marker of sentence.matchAll(ITEM_MARKER_WITHIN_SENTENCE_RE)) {
     const markerEnd = marker.index + marker[0].length;
+    if (marker.groups?.bareLetter && findMatchingGroupOpen(sentence, markerEnd - 1) !== -1) {
+      continue;
+    }
     if (markerEnd <= groupStart - start) {
       itemStart = markerEnd;
     } else if (marker.index >= operandEnd - start) {
@@ -1214,6 +1220,15 @@ function containsCjkBoundedSubstring(haystack: string, needle: string): boolean 
   return new RegExp(`${prefix}${escaped}${suffix}`, "iu").test(haystack);
 }
 
+const OPTION_WRAPPER_OPEN = /[\p{Pi}\p{Ps}\p{Quotation_Mark}<`]/u.source;
+const OPTION_WRAPPER_CLOSE = /[\p{Pf}\p{Pe}\p{Quotation_Mark}>`]/u.source;
+const OPTION_COMMA = "[,，、]";
+const PRECEDING_CHOICE_IN_LIST_RE = new RegExp(
+  `(?:${OPTION_WRAPPER_OPEN}\\s*[a-z]\\s*${OPTION_WRAPPER_CLOSE}|(?<!${NON_CJK_WORD_CHAR})[a-z])\\s*` +
+    `(?:${OPTION_COMMA}(?:\\s*(?:and|or)\\b)?|\\b(?:and|or)\\b)\\s*$`,
+  "iu",
+);
+
 function containsSingleChoiceReveal(rawText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
   const patterns = [
@@ -1222,9 +1237,11 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
       "iu",
     ),
     new RegExp(`=\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?!${ALPHA_NUM_IDENT_CHAR})`, "iu"),
-    new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "iu"),
   ];
-  return patterns.some(pattern => pattern.test(rawText));
+  if (patterns.some(pattern => pattern.test(rawText))) return true;
+
+  const trailing = new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "iu").exec(rawText);
+  return trailing !== null && !PRECEDING_CHOICE_IN_LIST_RE.test(rawText.slice(0, trailing.index));
 }
 
 const COMPOUND_BINARY_ADD_SUB_RE =
@@ -1265,7 +1282,8 @@ function compactJsonPunctuation(text: string): string {
 }
 
 // Match optional closing and opening wrappers between labels, preserving the word boundaries at the ends.
-const OPTION_SEQUENCE_SEPARATOR = /\s*(?:["'`”’」』】)\]}]\s*)?[,，、]\s*(?:["'`“‘「『【([{]\s*)?/.source;
+const OPTION_SEQUENCE_SEPARATOR =
+  `\\s*(?:${OPTION_WRAPPER_CLOSE}\\s*)?${OPTION_COMMA}\\s*(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
 
 function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecret: string): boolean {
   if (!rawSecret.trimStart().startsWith("[")) return false;

@@ -1853,6 +1853,14 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "Speed change: (m/s) −4, (b) let m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b) m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b): m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b):m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b).m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b);m = 6 and s = 2.",
+    "Speed change: (m/s) −4 b):m = 6 and s = 2.",
+    "Speed change: (m/s) −4 b)m = 6 and s = 2.",
+    "Speed change: (m/s) −4 [b]:m = 6 and s = 2.",
+    "Speed change: (m/s) −4 2.m = 6 and s = 2.",
+    "Speed change: (m/s) −4 2(b)—m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b)： m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b). m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b); m = 6 and s = 2.",
@@ -1909,6 +1917,22 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
   });
 
+  it("rejects a signed answer before a compact sub-item on a sibling card back", () => {
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-signed-compact-sibling",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({ answerKey: "-4" }),
+        {
+          ...makeFlashcardCandidate(900),
+          backSummary: "Speed change: (m/s) −4 (b):m = 6 and s = 2.",
+        },
+      ],
+    })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+  });
+
   it.each([
     "First evaluate (m/s) − 4, where m = 6 and s = 2.",
     "Please first evaluate (m/s) − 4.",
@@ -1940,6 +1964,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "(m/s) −4, where m = (a) + (b) and s = 2.",
     "(m/s) −4, where m = 2(b), s = 2.",
     "(m/s) −4, where m = (a) + (b), s = 2.",
+    "(m/s) −4, where m = (a)(b), s = 2.",
+    "(m/s) −4, where m = f(x, b), and s = 2.",
     "(m/s) −4, where m = approx. +.6 and s = 2.",
     "(m/s) −4, where m = approx. 5.2 and s = 2.",
     "(m/s) −4, e.g. m = 6 and s = 2.",
@@ -1969,6 +1995,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     ["variant stem", "“B”， “D”"],
     ["variant stem", "「 B 」 、 「 D 」"],
     ["variant stem", "[ B ], ( D )"],
+    ["variant stem", "«B», «D»"],
+    ["variant stem", "‹B›, ‹D›"],
+    ["variant stem", "《B》，〈D〉"],
     ["sibling card", '["B","D"]'],
     ["sibling card", '["B", "D"]'],
     ["sibling card", "B , D"],
@@ -1980,6 +2009,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     ["sibling card", "‘B’、‘D’"],
     ["sibling card", "B、D"],
     ["sibling card", 'B , " D "'],
+    ["sibling card", "«B», «D»"],
+    ["sibling card", "<B>, <D>"],
+    ["sibling card", "『 B 』、『 D 』"],
   ] as const)("rejects a sealed array in a %s (%s)", (surface, sequence) => {
     const leakedText = `Use the sequence ${sequence}.`;
     const variant = makeMissVariantCandidate({
@@ -2014,6 +2046,40 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       })).toMatchObject({ ok: true });
     },
   );
+
+  it.each([
+    ["variant stem", "Compare [D], [B]"],
+    ["variant stem", "Compare D, [B]"],
+    ["variant stem", "Compare D, B"],
+    ["sibling card", "Compare [D], [B]"],
+    ["sibling card", 'Compare "D" and "B"'],
+    ["sibling card", 'Compare «D» and [B]'],
+  ] as const)("allows a reversed sequence at the end of a %s (%s)", (surface, text) => {
+    const variant = makeMissVariantCandidate({
+      sealedPayload: { order: ["B", "D"] },
+      freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+    });
+    const candidates = surface === "variant stem" ? [variant] : [
+      variant,
+      { ...makeFlashcardCandidate(900), backSummary: text },
+    ];
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-array-terminal-decoy",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates,
+    })).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    "The marked response [B]",
+    "Compare the candidates, [B]",
+    "Compare [D], [B]. Correct option is B",
+    "Compare [D], [B]. The answer = B",
+  ])("still detects a single-choice reveal in %j", stem => {
+    expect(containsAnswerLeak(stem, "B")).toBe(true);
+  });
 
   it("rejects a candidate with an inherited protected getter without invoking it", () => {
     let getterCalled = false;
