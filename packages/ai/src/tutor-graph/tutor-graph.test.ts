@@ -218,9 +218,11 @@ describe("TutorGraph fast path", () => {
   });
 
   it.each([
-    { blocked: "concept_cue", rejects: false },
-    { blocked: "all", rejects: true },
-  ])("accounts for a pure release when verification blocks $blocked only on invalid attempts", ({ blocked, rejects }) => {
+    { blocked: "concept_cue", stem: "积分" },
+    { blocked: "concept_cue", stem: "题干包含 concept_cue" },
+    { blocked: "推导依据", stem: "积分" },
+    { blocked: "all", stem: "积分" },
+  ])("keeps pure outcomes binary when verification blocks $blocked on invalid attempts with stem $stem", ({ blocked, stem }) => {
     const assertCurrent = () => undefined;
     const outcomes = (["valid", "unknown", "invalid"] as const).map((status) => {
       let deny = false;
@@ -230,7 +232,7 @@ describe("TutorGraph fast path", () => {
         return { steps: [{ id: "s1", text: "attempt", status }] };
       });
       const input = {
-        questionStem: "积分",
+        questionStem: stem,
         submission: { steps: [{ id: "s1", text: "attempt" }] },
         attemptSubmitted: true,
         budget,
@@ -242,20 +244,50 @@ describe("TutorGraph fast path", () => {
 
     const [valid, unknown, invalid] = outcomes;
     if (!valid || !unknown || !invalid) throw new Error("missing verification outcome");
-    expect(valid.result.publicTeaching?.movePlan.move).toBe("invite_next_step");
-    expect(unknown.result.publicTeaching?.movePlan.move).toBe("concept_cue");
-    if (rejects) {
-      expect(invalid.result).toMatchObject({
-        state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: 1,
-      });
-      expect(invalid.result.releasedText).toBeUndefined();
-    } else {
-      expect(new Set(outcomes.map(({ result }) => JSON.stringify(result))).size).toBeLessThanOrEqual(2);
-      expect(invalid.result).toEqual(valid.result);
-    }
+    expect(new Set(outcomes.map(({ result }) => JSON.stringify(result))).size).toBeLessThanOrEqual(2);
+    expect(valid.result).toEqual(unknown.result);
+    expect(valid.result).toMatchObject({
+      state: "released",
+      releaseApproved: true,
+      leakageBits: 1,
+      publicTeaching: { questionStem: stem, movePlan: { move: "concept_cue" } },
+    });
+    expect(invalid.result).toMatchObject({
+      state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: 1,
+    });
+    expect(invalid.result.releasedText).toBeUndefined();
+    expect(invalid.result.publicTeaching).toBeUndefined();
     expect(invalid.input.budget.leakageBits).toBe(1);
     expect(runTutorGraph(invalid.input).state).toBe("budget_contaminated");
     expect(invalid.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the preflight fallback when verification loosens the release guard", () => {
+    const assertCurrent = () => undefined;
+    let blockConservativePrompt = true;
+    const result = runTutorGraph({
+      questionStem: "积分",
+      submission: {},
+      attemptSubmitted: true,
+      budget: createMinEntropyBudget({ now: () => 1000 }),
+      verifyCaps: {
+        assertCurrent,
+        verify: () => {
+          blockConservativePrompt = false;
+          return { steps: [{ id: "s1", text: "a", status: "valid" }] };
+        },
+      },
+      releaseCaps: {
+        assertCurrent,
+        answerLeakageBlocker: (text) => blockConservativePrompt && text.includes("推导依据"),
+      },
+    });
+    expect(result).toMatchObject({
+      state: "released",
+      releasedText: "Attempt recorded.",
+      publicTeaching: { questionStem: "", movePlan: { move: "concept_cue" } },
+      leakageBits: 1,
+    });
   });
 
   it("checks the remaining pure budget before running the post-verification release guard", () => {
@@ -306,6 +338,32 @@ describe("TutorGraph fast path", () => {
     });
     expect(result).toMatchObject({ state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: bits });
     expect(budget.leakageBits).toBe(bits);
+  });
+
+  it.each([
+    { status: "valid", move: "invite_next_step" },
+    { status: "invalid", move: "concept_cue" },
+  ] as const)("keeps $move for a coarsened practice attempt with a $status step", ({ status, move }) => {
+    const assertCurrent = () => undefined;
+    const budget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 1.5, now: () => 1000 });
+    const steps = [{ id: "s1", text: "a" }, { id: "s2", text: "b" }] as const;
+    const result = runTutorGraph({
+      questionStem: "积分",
+      submission: { steps },
+      attemptSubmitted: true,
+      assessmentMode: "practice",
+      budget,
+      verifyCaps: {
+        assertCurrent,
+        verify: () => ({ steps: [{ ...steps[0], status: "valid" }, { ...steps[1], status }] }),
+      },
+      releaseCaps: { assertCurrent, answerLeakageBlocker: () => false },
+    });
+    expect(result).toMatchObject({
+      state: "released",
+      leakageBits: 1,
+      publicTeaching: { movePlan: { move }, learnerSteps: steps.map((step) => ({ ...step, status: "unknown" })) },
+    });
   });
 
   it("blocks hint release when canRelease denies exceeding scaffoldBitBudget and records cooldown", () => {
@@ -515,7 +573,7 @@ describe("TutorGraph fast path", () => {
     expect(secondStepTurn.verification).toEqual({ steps: [] });
   });
 
-  it("strips undeclared verifier fields, hides thrown verifier messages, and enforces log2(outcomes) with pure coarsening", () => {
+  it("strips undeclared verifier fields, hides thrown verifier messages, and bounds pure outcomes", () => {
     const crashBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 1.5, now: () => 1000 });
     const crashed = runTutorGraph({
       questionStem: "积分",
@@ -539,7 +597,7 @@ describe("TutorGraph fast path", () => {
     expect(crashed.releaseApproved).toBe(false);
     expect(JSON.stringify(crashed)).not.toContain("INTERNAL_DB_SECRET_SOLUTION_42");
 
-    // Round-15 P1-1: pure-turn verifier exception maps to the same 1-bit conservative outcome with <= 2 total outcomes
+    // With a static guard, a verifier exception has the same public outcome as a verdict.
     const pureOracleOutcomes = new Set<string>();
     for (const verdictFn of [
       () => ({ steps: [{ id: "s1", text: "x", status: "valid" as const }] }),
@@ -564,7 +622,7 @@ describe("TutorGraph fast path", () => {
       expect(JSON.stringify(res)).not.toContain("INTERNAL_DB_SECRET_SOLUTION_42");
       pureOracleOutcomes.add(JSON.stringify(res));
     }
-    expect(pureOracleOutcomes.size).toBe(2);
+    expect(pureOracleOutcomes.size).toBe(1);
 
     const leakBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
     const stripped = runTutorGraph({
@@ -652,7 +710,7 @@ describe("TutorGraph fast path", () => {
       expect(res.verification.firstError).toBeUndefined();
       shapeSet.add(JSON.stringify({ teaching: res.publicTeaching, verification: res.verification }));
     }
-    expect(shapeSet.size).toBe(2);
+    expect(shapeSet.size).toBe(1);
 
     const practiceBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });
     const twoStep = runTutorGraph({
@@ -675,7 +733,7 @@ describe("TutorGraph fast path", () => {
     expect(twoStep.state).toBe("released");
     expect(twoStep.leakageBits).toBeCloseTo(Math.log2(3), 10);
 
-    // Round-11 P1-1: pure turns always emit <= 2 public outcomes (all-valid vs coarsened unknown/invalid) and charge 1 bit
+    // Pure turns with a static guard charge one bit and release the same prompt for every verdict.
     const omittedFirstErrorShapes = new Set<string>();
     const partialVerdicts: Array<Parameters<typeof runTutorGraph>[0]["verifyCaps"]["verify"]> = [
       () => ({
@@ -707,7 +765,7 @@ describe("TutorGraph fast path", () => {
         ],
       }),
     ];
-    for (const [idx, verifyFn] of partialVerdicts.entries()) {
+    for (const verifyFn of partialVerdicts) {
       const purePartialBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
       const res = runTutorGraph({
         questionStem: "微积分",
@@ -723,11 +781,8 @@ describe("TutorGraph fast path", () => {
       expect(res.verification.firstError).toBeUndefined();
       const shape = JSON.stringify({ teaching: res.publicTeaching, verification: res.verification });
       omittedFirstErrorShapes.add(shape);
-      if (idx > 0 && idx < 3) {
-        expect(omittedFirstErrorShapes.size).toBe(1);
-      }
     }
-    expect(omittedFirstErrorShapes.size).toBe(2);
+    expect(omittedFirstErrorShapes.size).toBe(1);
 
     const singleStepShapes = new Set<string>();
     const singleStepVerdicts: Array<Parameters<typeof runTutorGraph>[0]["verifyCaps"]["verify"]> = [
@@ -739,7 +794,7 @@ describe("TutorGraph fast path", () => {
         firstError: { stepId: "s1", kind: "domain", message: "bad" },
       }),
     ];
-    for (const [idx, verifyFn] of singleStepVerdicts.entries()) {
+    for (const verifyFn of singleStepVerdicts) {
       const b = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
       const res = runTutorGraph({
         questionStem: "求导",
@@ -753,9 +808,8 @@ describe("TutorGraph fast path", () => {
       expect(b.leakageBits).toBe(1);
       expect(res.verification).toEqual({ steps: [] });
       singleStepShapes.add(JSON.stringify({ teaching: res.publicTeaching, verification: res.verification }));
-      if (idx === 1) expect(singleStepShapes.size).toBe(2);
     }
-    expect(singleStepShapes.size).toBe(2);
+    expect(singleStepShapes.size).toBe(1);
 
     // Round-13 P1-1: exhaustive 0-bit & 1-bit oracle test across diverse verifier step counts, texts, IDs, dependsOn, and secrets
     let deepVerifierMeta: Record<string, unknown> = { ok: true };
@@ -877,6 +931,7 @@ describe("TutorGraph fast path", () => {
     });
     expect(stemBlockedPure.state).toBe("released");
     expect(stemBlockedPure.releaseApproved).toBe(true);
+    expect(stemBlockedPure.publicTeaching?.questionStem).toBe("");
     expect(stemBlockedBudget.leakageBits).toBe(1);
     expect(JSON.stringify(stemBlockedPure)).not.toContain("SECRET_ANSWER_42");
 
@@ -934,31 +989,39 @@ describe("TutorGraph fast path", () => {
     expect(rejectRightBudget.leakageBits).toBe(0);
     expect(rejectWrongBudget.leakageBits).toBe(0);
 
-    // Round-18 P1-1: stateful post-verify guard tightening re-validates fallbacks before branching on correctness
-    const midTurnBlocked = new Set<string>();
-    const midFallbackBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
-    const midFallbackRes = runTutorGraph({
-      questionStem: "积分",
-      submission: { steps: [{ id: "s1", text: "attempt" }] },
-      budget: midFallbackBudget,
-      attemptSubmitted: true,
-      verifyCaps: {
-        verify: () => {
-          midTurnBlocked.add("推导依据");
-          return { steps: [{ id: "s1", text: "a", status: "invalid" }] };
+    // The guard can withhold the committed prompt after verification.
+    const midTurnOutcomes = new Set<string>();
+    for (const blocked of [undefined, "推导依据", "Attempt recorded.", "all"]) {
+      let verified = false;
+      const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const result = runTutorGraph({
+        questionStem: "积分",
+        submission: { steps: [{ id: "s1", text: "attempt" }] },
+        budget,
+        attemptSubmitted: true,
+        verifyCaps: {
+          verify: () => {
+            verified = true;
+            return { steps: [{ id: "s1", text: "a", status: "invalid" }] };
+          },
+          assertCurrent: () => undefined,
         },
-        assertCurrent: () => undefined,
-      },
-      releaseCaps: {
-        assertCurrent: () => undefined,
-        answerLeakageBlocker: (text) => Array.from(midTurnBlocked).some((needle) => text.includes(needle)),
-      },
-    });
-    expect(midFallbackRes.state).toBe("released");
-    expect(midFallbackRes.releaseApproved).toBe(true);
-    expect(midFallbackRes.releasedText).toBe("Attempt recorded.");
-    expect(midFallbackBudget.leakageBits).toBe(1);
-    expect(JSON.stringify(midFallbackRes)).not.toContain("推导依据");
+        releaseCaps: {
+          assertCurrent: () => undefined,
+          answerLeakageBlocker: (text) => verified && blocked !== undefined && (blocked === "all" || text.includes(blocked)),
+        },
+      });
+      const outcome = JSON.stringify(result);
+      midTurnOutcomes.add(outcome);
+      if (blocked === "推导依据" || blocked === "all") {
+        expect(result).toMatchObject({ state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: 1 });
+        expect(outcome).not.toContain("推导依据");
+      } else {
+        expect(result).toMatchObject({ state: "released", releaseApproved: true, leakageBits: 1 });
+      }
+      expect(budget.leakageBits).toBe(1);
+    }
+    expect(midTurnOutcomes.size).toBeLessThanOrEqual(2);
 
     const makeMidTurnAllRejectRun = (status: "valid" | "invalid") => {
       let blockEverything = false;
@@ -987,7 +1050,7 @@ describe("TutorGraph fast path", () => {
     expect(midRejectWrong.leakageBits).toBe(1);
 
     expect(zeroBitOutcomes.size).toBe(1);
-    expect(oneBitOutcomes.size).toBe(2);
+    expect(oneBitOutcomes.size).toBe(1);
 
     // Round-10 P1-2 Bypass 2: pure turn clamped to 1.5-bit ceiling even when passed a practice-configured budget
     const reusedPracticeBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });
