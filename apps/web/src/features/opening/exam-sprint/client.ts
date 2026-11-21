@@ -29,6 +29,7 @@ export function createExamSprintClientKey(): string { return crypto.randomUUID()
 const terminalWriteStatuses = new Set([400, 404, 409, 413]);
 const uncertainMessage = "上一操作的保存结果尚未确认。请恢复该操作后继续，以免重复记录。";
 const describeError = (error: unknown) => userFacingMessage(error, "连接失败，请稍后重试。");
+const isResolvedReview = (review: ExamWorkReview) => review.status === "ready" || review.status === "failed";
 
 /** All sprint and integration mutations share one lock and one replay envelope. */
 export function createExamSprintClient(options: { workspaceId?: string; courseId?: string; fetcher?: typeof fetch; keyFactory?: () => string } = {}) {
@@ -41,6 +42,7 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
   let pending: Pending | null = null;
   let fingerprint = "";
   let recovery: ReturnType<typeof sprintRecoveryStore> | undefined;
+  const unresolvedReviews = new Map<string, { fingerprint: string; clientKey: string }>();
   function publish(update: Partial<ExamSprintSnapshot>) { snapshot = { ...snapshot, ...update }; listeners.forEach(listener => listener()); }
   function begin(writing: boolean) {
     active?.controller.abort();
@@ -68,8 +70,18 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
   async function loadTarget(target: Target, path: string) {
     if (active?.writing) return;
     const operation = begin(false);
-    try { const result = await request(operation.controller.signal, target, path); if (isCurrent(operation)) publish({ ...result, error: pending ? uncertainMessage : null }); }
-    catch (error) { if (isCurrent(operation)) publish({ error: describeError(error) }); }
+    try {
+      const result = await request(operation.controller.signal, target, path);
+      if (!isCurrent(operation)) return;
+      if (result.review && isResolvedReview(result.review)) {
+        const receipt = unresolvedReviews.get(result.review.id);
+        if (receipt) {
+          recovery?.confirm(receipt.fingerprint, receipt.clientKey);
+          unresolvedReviews.delete(result.review.id);
+        }
+      }
+      publish({ ...result, error: pending ? uncertainMessage : null });
+    } catch (error) { if (isCurrent(operation)) publish({ error: describeError(error) }); }
     finally { finish(operation); }
   }
   async function write(command: Pending, recovering: boolean, operation = begin(true)) {
@@ -89,7 +101,13 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
       writeAttempted = true;
       const result = await request(operation.controller.signal, command.target, command.path, command);
       if (!isCurrent(operation)) return;
-      recovery?.confirm(fingerprint, command.body.clientKey);
+      if (result.review && !isResolvedReview(result.review)) {
+        // The POST returned a receipt, but the paid review is still unresolved.
+        unresolvedReviews.set(result.review.id, { fingerprint, clientKey: command.body.clientKey });
+      } else {
+        recovery?.confirm(fingerprint, command.body.clientKey);
+        if (result.review) unresolvedReviews.delete(result.review.id);
+      }
       pending = null; publish({ ...result, error: null, uncertain: false });
       return result;
     } catch (error) {

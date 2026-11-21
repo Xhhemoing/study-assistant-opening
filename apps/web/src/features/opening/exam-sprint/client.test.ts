@@ -371,7 +371,7 @@ const reviewInput = { sourceItemId: "source-item-1", workSourceId: "22222222-222
 const review = { id: "44444444-4444-4444-8444-444444444444", sourceItemId: reviewInput.sourceItemId, workSourceId: reviewInput.workSourceId, referenceSourceId: reviewInput.referenceSourceId, workSourceVersion: reviewInput.workSourceVersion, referenceSourceVersion: reviewInput.referenceSourceVersion, answerText: reviewInput.answerText, createdAt: "2026-10-17T12:00:00Z", status: "pending", proposal: null, modelLabel: null };
 
 describe("exam integration shares mutation recovery", () => {
-  it.each(["refresh", "storage unavailable"] as const)("deduplicates a committed photo review after %s within its workspace and course", async mode => {
+  it.each(["refresh", "storage unavailable"] as const)("reuses the key across client instances until the photo review resolves (%s)", async mode => {
     const storage = new Map<string, string>();
     const sessionStorage = {
       getItem: (name: string) => storage.get(name) ?? null,
@@ -384,13 +384,14 @@ describe("exam integration shares mutation recovery", () => {
     vi.stubGlobal("window", { sessionStorage });
     try {
       const charged = new Set<string>();
+      let status = "pending";
       const fetcher = vi.fn<Fetcher>(async (_url, init) => {
         const { clientKey } = JSON.parse(String(init?.body));
         if (!charged.has(clientKey)) {
           charged.add(clientKey);
           throw new TypeError("response lost after model review committed");
         }
-        return Response.json(review);
+        return Response.json({ ...review, status });
       });
       const command = { action: "review", input: { ...reviewInput, answerText: "x".repeat(20000) } } as const;
       const options = { workspaceId: "workspace-A", courseId: mode, fetcher };
@@ -406,21 +407,50 @@ describe("exam integration shares mutation recovery", () => {
       const other = createExamSprintClient({ ...options, workspaceId: "workspace-B", keyFactory: () => "other-workspace-key",
         fetcher: async (_url, init) => {
           expect(JSON.parse(String(init?.body)).clientKey).toBe("other-workspace-key");
-          return Response.json(review);
+          return Response.json({ ...review, status: "failed" });
         } });
       await other.sendIntegration(command);
       expect(other.getSnapshot().review?.id).toBe(review.id);
 
       // A refresh discards the module cache. A remount with blocked storage keeps it.
-      if (mode === "refresh") vi.resetModules();
-      const create = mode === "refresh" ? (await import("./client")).createExamSprintClient : createExamSprintClient;
-      const restored = create({ ...options, keyFactory: () => "unexpected-new-key" });
-      await restored.sendIntegration(command);
-      expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, key]);
+      for (const nextStatus of ["pending", "unknown", "failed"]) {
+        status = nextStatus;
+        if (mode === "refresh") vi.resetModules();
+        const create = mode === "refresh" ? (await import("./client")).createExamSprintClient : createExamSprintClient;
+        const restored = create({ ...options, keyFactory: () => "unexpected-new-key" });
+        await restored.sendIntegration(command);
+        expect(restored.getSnapshot().review).toMatchObject({ id: review.id, status });
+        if (mode === "refresh" && status !== "failed") {
+          expect(JSON.parse([...storage.values()][0] ?? "[]")).toEqual([[expect.stringMatching(/^[a-f0-9]{64}$/), key]]);
+        }
+        restored.dispose();
+      }
+      expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, key, key, key]);
       expect(charged.size).toBe(1);
-      expect(restored.getSnapshot().review?.id).toBe(review.id);
       expect(storage.size).toBe(0);
     } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("confirms only the matching review key when a manual refresh returns a ready review", async () => {
+    const ready = { ...review, status: "ready", proposal: { transcription: "x=2", questionMatch: true, outcome: "correct",
+      steps: [{ label: "计算", verdict: "correct", feedback: "正确" }], summary: "正确", errorCause: null } };
+    const fetcher = vi.fn<Fetcher>()
+      .mockResolvedValueOnce(Response.json(review))
+      .mockResolvedValueOnce(Response.json({ ...ready, id: "another-review" }))
+      .mockResolvedValueOnce(Response.json({ ...review, status: "unknown" }))
+      .mockResolvedValueOnce(Response.json(ready))
+      .mockResolvedValueOnce(Response.json(review));
+    const keys = vi.fn().mockReturnValueOnce(key).mockReturnValueOnce("next-review-key");
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    const command = { action: "review", input: reviewInput } as const;
+    await client.sendIntegration(command);
+    await client.loadReview("another-review");
+    await client.sendIntegration(command);
+    await client.loadReview(review.id);
+    expect(client.getSnapshot().review?.status).toBe("ready");
+    await client.sendIntegration(command);
+    const posts = fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, key, "next-review-key"]);
   });
 
   it("blocks all write types after a lost binding response and replays the same binding key", async () => {
