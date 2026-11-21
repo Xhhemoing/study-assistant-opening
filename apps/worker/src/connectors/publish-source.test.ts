@@ -7,8 +7,10 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
   const objects = new Set<string>();
   let storageHealthy = false;
   const uploadSignals: (AbortSignal | undefined)[] = [];
+  const events: string[] = [];
   const storage = {
     upload: vi.fn(async ({ key, signal }: { key: string; signal?: AbortSignal }) => {
+      events.push("upload");
       uploadSignals.push(signal);
       objects.add(key);
     }),
@@ -22,6 +24,9 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
     publish: vi.fn<Imports["publish"]>(async (_scope, _input, stage) => {
       await stage();
       return duplicate;
+    }),
+    refreshConnectorReservationCutoff: vi.fn<Imports["refreshConnectorReservationCutoff"]>(async () => {
+      events.push("refresh");
     }),
     removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(async (_scope, _identity, _sourceId, _key, _byteSize, remove) => {
       await remove();
@@ -46,6 +51,7 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
   expect(objects.has(firstKey)).toBe(true);
   expect(uploadSignals).toHaveLength(2);
   expect(uploadSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
+  expect(events).toEqual(["refresh", "upload", "refresh", "upload"]);
 });
 
 it("forwards putUncertain accurately across pre-PUT, upload failure, and post-upload DB failure", async () => {
@@ -57,19 +63,34 @@ it("forwards putUncertain accurately across pre-PUT, upload failure, and post-up
   };
   const removeSpy = vi.fn(async () => undefined);
   const removeUnpublishedSource = vi.fn(async () => undefined);
+  const refreshConnectorReservationCutoff = vi.fn(async () => undefined);
 
   // Pre-PUT failure: publish rejects before entering stage().
   const prePutImports: Imports = {
     publish: vi.fn(async () => { throw new Error("connection locked"); }),
+    refreshConnectorReservationCutoff,
     removeUnpublishedSource,
   };
   await expect(publishConnectorSource(prePutImports, { upload: vi.fn(), remove: removeSpy }, scope, delivery))
     .rejects.toThrow("connection locked");
   expect(removeUnpublishedSource).not.toHaveBeenCalled();
 
+  // Pre-PUT failure when reservation refresh detects lost reservation before storage.upload runs.
+  const uploadMock = vi.fn();
+  const refreshFailImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
+    refreshConnectorReservationCutoff: vi.fn(async () => { throw new Error("reservation gone"); }),
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(refreshFailImports, { upload: uploadMock, remove: removeSpy }, scope, delivery))
+    .rejects.toThrow("reservation gone");
+  expect(uploadMock).not.toHaveBeenCalled();
+  expect(removeUnpublishedSource).not.toHaveBeenCalled();
+
   // Uncertain PUT failure: storage.upload starts then aborts/throws -> putUncertain: true.
   const putErrorImports: Imports = {
     publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
+    refreshConnectorReservationCutoff,
     removeUnpublishedSource,
   };
   await expect(publishConnectorSource(putErrorImports, {
@@ -92,6 +113,7 @@ it("forwards putUncertain accurately across pre-PUT, upload failure, and post-up
       await stage();
       throw new Error("receipt check constraint failed");
     }),
+    refreshConnectorReservationCutoff,
     removeUnpublishedSource,
   };
   await expect(publishConnectorSource(dbErrorImports, {

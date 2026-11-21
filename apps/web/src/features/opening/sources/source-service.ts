@@ -290,6 +290,9 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
           // Best-effort sync: source action already committed.
         }
       }
+      if (result.cleanup.connectorReservation) {
+        stagingDiscoveryFailed = false;
+      }
       if (!result.deleted) return { sourceId, aiExcluded: true, deleted: false, cleanupPending: 0, retryAfter: null };
       let released = false;
       const cleanupKeys = new Set(result.cleanup.keys);
@@ -304,12 +307,13 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       if (deferredConnector) {
         remaining = result.cleanup;
       } else {
-        const extraRetryKeys = input.action === "retry_cleanup"
-          ? discoveredStagingKeys.filter(key =>
-            key.toLowerCase() === canonicalStagingKey.toLowerCase() && !key.includes("..") && !cleanupKeys.has(key))
+        const extraStagingKeys = !result.cleanup.connectorReservation
+          ? discoveredStagingKeys.filter(
+            key => key.toLowerCase() === canonicalStagingKey.toLowerCase() && !key.includes("..") && !cleanupKeys.has(key),
+          )
           : [];
         let extraStagingFailed = false;
-        for (const key of extraRetryKeys) {
+        for (const key of extraStagingKeys) {
           try { await storage.deleteObject(key); }
           catch { extraStagingFailed = true; }
         }

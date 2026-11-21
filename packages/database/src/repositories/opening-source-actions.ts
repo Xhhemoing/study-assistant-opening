@@ -31,6 +31,16 @@ function isConnectorReservationRow(row: Record<string, unknown>): boolean {
   return String(row.id).toLowerCase() === connectorReservationId(String(row.source_id));
 }
 
+function validExtraObjectKeys(canonicalId: string, keys: Keys, extraKeys?: readonly string[]): string[] {
+  if (!extraKeys?.length) return [];
+  const ownPrefix = `opening/sources/${canonicalId}/`;
+  const ownStagingKeyLower = keys.stagingKey(canonicalId).toLowerCase();
+  return extraKeys.filter(extraKey => {
+    const lowerExtra = extraKey.toLowerCase();
+    return !extraKey.includes("..") && (lowerExtra === ownStagingKeyLower || lowerExtra.startsWith(ownPrefix));
+  });
+}
+
 function cleanup(row: Record<string, unknown>): Cleanup {
   return {
     keys: (row.pending_object_keys as string[] | null) ?? [],
@@ -123,13 +133,25 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
         await owner(tx, scope, true);
         const sourceRows = await tx`SELECT version, upload_url_expires_at FROM opening_sources
           WHERE id=${canonicalId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
-        const existing = await tx`SELECT * FROM opening_privacy_exclusions WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}`;
+        const existing = await tx`SELECT * FROM opening_privacy_exclusions WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId} FOR UPDATE`;
         if (!sourceRows.length) {
           if (input.action === "delete" && existing[0]?.asset_deleted_at) {
             const receipt = existing[0];
             const receiptSourceId = String(receipt.source_id).toLowerCase();
-            return { deleted: true, cleanup: String(receipt.id).toLowerCase() === connectorReservationId(receiptSourceId)
-              ? await claimCleanup(tx, scope, receiptSourceId) : cleanup(receipt) };
+            if (String(receipt.id).toLowerCase() === connectorReservationId(receiptSourceId)) {
+              return { deleted: true, cleanup: await claimCleanup(tx, scope, receiptSourceId) };
+            }
+            const validExtra = validExtraObjectKeys(receiptSourceId, keys, options?.extraKeys);
+            if (validExtra.length) {
+              const existingKeys = (receipt.pending_object_keys as string[] | null) ?? [];
+              const mergedKeys = [...new Set([...existingKeys, ...validExtra])];
+              if (mergedKeys.length > existingKeys.length) {
+                await tx`UPDATE opening_privacy_exclusions SET pending_object_keys=${mergedKeys}
+                  WHERE workspace_id=${scope.workspaceId} AND source_id=${receiptSourceId} AND asset_deleted_at IS NOT NULL`;
+                receipt.pending_object_keys = mergedKeys;
+              }
+            }
+            return { deleted: true, cleanup: cleanup(receipt) };
           }
           throw new OpeningSourceError("NOT_FOUND", "Source not found");
         }
@@ -166,12 +188,8 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
         }
         const sourcePrefix = "opening/sources/";
         const ownPrefix = `${sourcePrefix}${canonicalId}/`;
-        const ownStagingKeyLower = keys.stagingKey(canonicalId).toLowerCase();
-        for (const extraKey of options?.extraKeys ?? []) {
-          const lowerExtra = extraKey.toLowerCase();
-          if (!extraKey.includes("..") && (lowerExtra === ownStagingKeyLower || lowerExtra.startsWith(ownPrefix))) {
-            objectKeys.add(extraKey);
-          }
+        for (const extraKey of validExtraObjectKeys(canonicalId, keys, options?.extraKeys)) {
+          objectKeys.add(extraKey);
         }
         const images = await tx`SELECT image_object_key FROM opening_source_chunks
           WHERE source_id=${canonicalId} AND image_object_key IS NOT NULL

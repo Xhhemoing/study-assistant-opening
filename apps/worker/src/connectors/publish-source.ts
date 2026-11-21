@@ -9,7 +9,10 @@ export type ConnectorSourceStorage = {
   remove(key: string): Promise<void>;
 };
 
-type ConnectorImports = Pick<ReturnType<typeof createOpeningImportsRepository>, "publish" | "removeUnpublishedSource">;
+type ConnectorImports = Pick<
+  ReturnType<typeof createOpeningImportsRepository>,
+  "publish" | "removeUnpublishedSource" | "refreshConnectorReservationCutoff"
+>;
 
 async function removeWithRetry(storage: ConnectorSourceStorage, key: string) {
   for (const backoffMs of [25, 50]) {
@@ -50,6 +53,7 @@ export async function publishConnectorSource(
       identity: input.identity, connectionVersion: input.connectionVersion, cursor: input.cursor,
       sourceId, source, key, quota,
     }, async () => {
+      await imports.refreshConnectorReservationCutoff(scope, sourceId, key);
       staged = true;
       putUncertain = true;
       await storage.upload({

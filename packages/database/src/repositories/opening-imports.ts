@@ -4,7 +4,7 @@ import type { ImapCursor, ImportIdentity, UploadInput } from "@aistudy/contracts
 import { OpeningConnectionError } from "./opening-connections";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
-import { CONNECTOR_RESERVATION_GRACE_MS, connectorReservationId, releaseConnectorReservation } from "./opening-source-actions";
+import { CONNECTOR_PUT_TIMEOUT_MS, CONNECTOR_RESERVATION_GRACE_MS, connectorReservationId, releaseConnectorReservation } from "./opening-source-actions";
 import { reserveOpeningSourceQuota } from "./opening-source-quota";
 import { createOpeningSourceRepository, type OpeningScope, type OpeningSourceQuota } from "./opening-sources";
 
@@ -175,12 +175,12 @@ export function createOpeningImportsRepository(sql: Sql) {
             UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${canonicalSourceId}
             UNION ALL SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalSourceId} LIMIT 1`;
           if (used) throw new OpeningConnectionError("CONFLICT", "connector source object is already reserved");
-          const reservationNotBefore = new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS);
+          const initialCutoffSeconds = Math.ceil((CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS) / 1000);
           await tx`INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, availability)
             VALUES (${canonicalSourceId}, 0, ${scope.workspaceId}, ${input.source.bytes}, 'unavailable')`;
           await tx`INSERT INTO opening_privacy_exclusions
             (id, workspace_id, source_id, asset_deleted_at, pending_object_keys, cleanup_not_before)
-            VALUES (${connectorReservationId(canonicalSourceId)}, ${scope.workspaceId}, ${canonicalSourceId}, now(), ARRAY[${input.key}]::text[], ${reservationNotBefore})`;
+            VALUES (${connectorReservationId(canonicalSourceId)}, ${scope.workspaceId}, ${canonicalSourceId}, now(), ARRAY[${input.key}]::text[], now() + make_interval(secs => ${initialCutoffSeconds}))`;
           return null;
         });
         if (duplicate) return duplicate;
@@ -218,6 +218,41 @@ export function createOpeningImportsRepository(sql: Sql) {
         await writeImapCursor(tx, scope, input.connectionId, input.cursor.next.folder, input.cursor);
       });
     },
+    async refreshConnectorReservationCutoff(
+      scope: OpeningScope,
+      sourceId: string,
+      key: string,
+      options?: { now?: Date },
+    ): Promise<void> {
+      const canonicalId = sourceId.toLowerCase();
+      const cutoffSeconds = Math.ceil((CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS) / 1000);
+      await sql.begin(async tx => {
+        const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
+        const explicitCutoff = options?.now
+          ? new Date(options.now.getTime() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS)
+          : null;
+        const [updated] = explicitCutoff
+          ? await tx`UPDATE opening_privacy_exclusions
+              SET cleanup_not_before = GREATEST(COALESCE(cleanup_not_before, ${explicitCutoff}), ${explicitCutoff})
+              WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
+                AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
+                AND pending_object_keys=ARRAY[${key}]::text[]
+                AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${canonicalId})
+              RETURNING id`
+          : await tx`UPDATE opening_privacy_exclusions
+              SET cleanup_not_before = GREATEST(
+                COALESCE(cleanup_not_before, now() + make_interval(secs => ${cutoffSeconds})),
+                now() + make_interval(secs => ${cutoffSeconds})
+              )
+              WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
+                AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
+                AND pending_object_keys=ARRAY[${key}]::text[]
+                AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${canonicalId})
+              RETURNING id`;
+        if (!updated) throw new OpeningConnectionError("CONFLICT", "connector staging reservation changed");
+      });
+    },
     async removeUnpublishedSource(
       scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, _byteSize: number,
       remove: () => Promise<void>,
@@ -231,21 +266,36 @@ export function createOpeningImportsRepository(sql: Sql) {
         if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
         const [published] = await tx`SELECT 1 FROM opening_sources WHERE id=${canonicalId} LIMIT 1`;
         if (published) return;
-        const enforceNotBefore = options?.putUncertain ?? true;
-        if (await releaseConnectorReservation(tx, scope, canonicalId, key, {
-          enforceNotBefore,
+        const uncertainPut = options?.putUncertain ?? true;
+        if (uncertainPut) {
+          const graceSeconds = Math.ceil(CONNECTOR_RESERVATION_GRACE_MS / 1000);
+          const explicitCutoff = options?.now
+            ? new Date(options.now.getTime() + CONNECTOR_RESERVATION_GRACE_MS)
+            : null;
+          const [extended] = explicitCutoff
+            ? await tx`UPDATE opening_privacy_exclusions
+                SET cleanup_not_before = GREATEST(COALESCE(cleanup_not_before, ${explicitCutoff}), ${explicitCutoff})
+                WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
+                  AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
+                RETURNING id`
+            : await tx`UPDATE opening_privacy_exclusions
+                SET cleanup_not_before = GREATEST(
+                  COALESCE(cleanup_not_before, now() + make_interval(secs => ${graceSeconds})),
+                  now() + make_interval(secs => ${graceSeconds})
+                )
+                WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
+                  AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
+                RETURNING id`;
+          if (extended) {
+            // Uncertain PUT: extend grace window to a full post-abort duration while
+            // attempting best-effort immediate S3 deletion.
+            await remove();
+            return;
+          }
+        } else if (await releaseConnectorReservation(tx, scope, canonicalId, key, {
+          enforceNotBefore: false,
           now: options?.now,
         })) {
-          await remove();
-          return;
-        }
-        const [reservation] = await tx`SELECT id FROM opening_privacy_exclusions
-          WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
-            AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
-          LIMIT 1`;
-        if (reservation) {
-          // Uncertain PUT inside the grace window: attempt immediate S3 DELETE
-          // best-effort, while leaving the reservation intact until cleanup_not_before.
           await remove();
           return;
         }

@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createOpeningImportsRepository } from "./opening-imports";
-import { connectorReservationId } from "./opening-source-actions";
+import {
+  CONNECTOR_PUT_TIMEOUT_MS,
+  CONNECTOR_RESERVATION_GRACE_MS,
+  connectorReservationId,
+  createOpeningSourceActionsRepository,
+} from "./opening-source-actions";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const ownerUserId = "00000000-0000-4000-8000-0000000000aa";
@@ -13,35 +18,61 @@ const key = `opening/sources/${sourceId}/v0`;
 
 function fakeImportsSql(opts: { committed?: boolean; notBefore: Date }) {
   let reservationPresent = !opts.committed;
-  const tag = (async (parts: TemplateStringsArray) => {
+  let cutoff = opts.notBefore;
+  const tag = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
-    if (query.startsWith("SELECT pg_advisory_xact_lock")) return [];
-    if (query.startsWith("SELECT id FROM workspaces")) return [{ id: workspaceId }];
-    if (query.startsWith("SELECT 1 FROM opening_sources")) return opts.committed ? [{ "?column?": 1 }] : [];
-    if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) {
-      return reservationPresent ? [{ id: reservationId, cleanup_not_before: opts.notBefore }] : [];
+    if (query === "" || query === "FOR UPDATE") return Promise.resolve(query);
+    if (query.startsWith("SELECT pg_advisory_xact_lock")) return Promise.resolve([]);
+    if (query.startsWith("SELECT id FROM workspaces")) return Promise.resolve([{ id: workspaceId }]);
+    if (query.startsWith("SELECT 1 FROM opening_sources")) return Promise.resolve(opts.committed ? [{ "?column?": 1 }] : []);
+    if (query.startsWith("UPDATE opening_privacy_exclusions SET cleanup_not_before = GREATEST")) {
+      if (!reservationPresent) return Promise.resolve([]);
+      const candidate = values[1] instanceof Date ? values[1] : new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS);
+      if (candidate > cutoff) cutoff = candidate;
+      return Promise.resolve([{ id: reservationId }]);
     }
-    if (query.startsWith("DELETE FROM opening_source_versions")) return [{ source_id: sourceId }];
+    if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) {
+      return Promise.resolve(reservationPresent ? [{ id: reservationId, cleanup_not_before: cutoff }] : []);
+    }
+    if (query.startsWith("DELETE FROM opening_source_versions")) return Promise.resolve([{ source_id: sourceId }]);
     if (query.startsWith("DELETE FROM opening_privacy_exclusions")) {
       reservationPresent = false;
-      return [];
+      return Promise.resolve([]);
     }
     if (query.startsWith("SELECT id FROM opening_privacy_exclusions")) {
-      return reservationPresent ? [{ id: reservationId }] : [];
+      return Promise.resolve(reservationPresent ? [{ id: reservationId }] : []);
     }
     if (query.startsWith("SELECT 1 FROM opening_source_versions")) {
-      return reservationPresent ? [{ "?column?": 1 }] : [];
+      return Promise.resolve(reservationPresent ? [{ "?column?": 1 }] : []);
     }
-    throw new Error(`unexpected sql: ${query}`);
+    return Promise.reject(new Error(`unexpected sql: ${query}`));
   }) as unknown as Sql;
   tag.begin = (async (cb: (tx: Sql) => Promise<unknown>) => cb(tag)) as unknown as Sql["begin"];
   return {
     sql: tag,
     hasReservation: () => reservationPresent,
+    getCutoff: () => cutoff,
   };
 }
 
-describe("opening imports removeUnpublishedSource grace window", () => {
+describe("opening imports reservation cutoff and removeUnpublishedSource grace window", () => {
+  it("refreshes cleanup_not_before before storage.upload and rejects missing reservations", async () => {
+    const start = new Date("2030-01-01T00:00:00.000Z");
+    const db = fakeImportsSql({ notBefore: new Date("2030-01-01T00:00:05.000Z") });
+    const repo = createOpeningImportsRepository(db.sql);
+
+    const delayedUploadStart = new Date("2030-01-01T00:02:00.000Z");
+    await repo.refreshConnectorReservationCutoff(scope, sourceId, key, { now: delayedUploadStart });
+    expect(db.getCutoff()).toEqual(
+      new Date(delayedUploadStart.getTime() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS),
+    );
+    expect(db.getCutoff().getTime()).toBeGreaterThan(start.getTime() + CONNECTOR_RESERVATION_GRACE_MS);
+
+    const missing = fakeImportsSql({ committed: true, notBefore: start });
+    await expect(createOpeningImportsRepository(missing.sql).refreshConnectorReservationCutoff(scope, sourceId, key))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
   it("releases immediately when putUncertain is false even inside cleanup_not_before", async () => {
     const clock = new Date("2030-01-01T00:00:10.000Z");
     const db = fakeImportsSql({ notBefore: new Date("2030-01-01T00:01:00.000Z") });
@@ -53,23 +84,29 @@ describe("opening imports removeUnpublishedSource grace window", () => {
     expect(db.hasReservation()).toBe(false);
   });
 
-  it("attempts immediate S3 remove while keeping the reservation durable inside cleanup_not_before on uncertain PUT", async () => {
-    const clock = new Date("2030-01-01T00:00:10.000Z");
-    const db = fakeImportsSql({ notBefore: new Date("2030-01-01T00:01:00.000Z") });
+  it("extends cleanup_not_before on uncertain PUT abort and holds reservation until post-abort grace expires", async () => {
+    const initialExpiry = new Date("2030-01-01T00:01:00.000Z");
+    const db = fakeImportsSql({ notBefore: initialExpiry });
     const remove = vi.fn(async () => undefined);
     const repo = createOpeningImportsRepository(db.sql);
+    const actions = createOpeningSourceActionsRepository(db.sql);
 
+    // Uncertain PUT aborts near or after initial expiry -> must extend a full grace window past abortAt.
+    const abortAt = new Date("2030-01-01T00:01:20.000Z");
     await repo.removeUnpublishedSource(
-      scope, identity, sourceId, key, 128, remove, { putUncertain: true, now: clock },
+      scope, identity, sourceId, key, 128, remove, { putUncertain: true, now: abortAt },
     );
     expect(remove).toHaveBeenCalledTimes(1);
     expect(db.hasReservation()).toBe(true);
+    expect(db.getCutoff()).toEqual(new Date(abortAt.getTime() + CONNECTOR_RESERVATION_GRACE_MS));
 
-    const afterGrace = new Date("2030-01-01T00:01:01.000Z");
-    await repo.removeUnpublishedSource(
-      scope, identity, sourceId, key, 128, remove, { putUncertain: true, now: afterGrace },
-    );
-    expect(remove).toHaveBeenCalledTimes(2);
+    // Sweeper inside post-abort grace window stays blocked; after grace expires, it releases cleanly.
+    const insidePostAbortGrace = new Date(abortAt.getTime() + CONNECTOR_RESERVATION_GRACE_MS - 1_000);
+    await expect(actions.cleaned(scope, sourceId, key, insidePostAbortGrace)).resolves.toBe(false);
+    expect(db.hasReservation()).toBe(true);
+
+    const afterPostAbortGrace = new Date(abortAt.getTime() + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
+    await expect(actions.cleaned(scope, sourceId, key, afterPostAbortGrace)).resolves.toBe(true);
     expect(db.hasReservation()).toBe(false);
   });
 
