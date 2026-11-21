@@ -437,7 +437,8 @@ function classifyQuarantineRecord(
 
   if (
     liveKeyTree.masterKey.status === "shredded" ||
-    shreddedWorkspaceKeyIds.has(record.workspaceKeyId)
+    shreddedWorkspaceKeyIds.has(liveKeyTree.masterKey.workspaceKeyId.trim()) ||
+    shreddedWorkspaceKeyIds.has(record.workspaceKeyId.trim())
   ) {
     return "shredded_workspace_key";
   }
@@ -462,8 +463,14 @@ function classifyQuarantineRecord(
   if (recordSourceId) {
     liveSource = sourceById.get(recordSourceId);
     if (
+      liveSource &&
+      (liveSource.status === "shredded" ||
+        shreddedSourceKeyIds.has(liveSource.sourceKeyId.trim()))
+    ) {
+      return "shredded_source_key";
+    }
+    if (
       revokedSourceIds.has(recordSourceId) ||
-      liveSource?.status === "shredded" ||
       liveSource?.status === "revoked" ||
       !liveSource
     ) {
@@ -479,7 +486,10 @@ function classifyQuarantineRecord(
         ? "revoked_or_deleted_source"
         : "stale_source_key";
     }
-    if (liveSource.status === "shredded") {
+    if (
+      liveSource.status === "shredded" ||
+      shreddedSourceKeyIds.has(liveSource.sourceKeyId.trim())
+    ) {
       return "shredded_source_key";
     }
     if (
@@ -512,13 +522,19 @@ export function evaluateQuarantineRestoreBundle(
   const bundleId = assertNonEmpty(input.bundleId, "bundleId");
   validateKeyTree(input.liveKeyTree);
 
-  const shreddedWorkspaceKeyIds = new Set<string>(input.shreddedKeyIds ?? []);
-  const shreddedSourceKeyIds = new Set<string>(input.shreddedKeyIds ?? []);
-  const revokedSourceIds = new Set<string>(input.revokedSourceIds ?? []);
+  const shreddedWorkspaceKeyIds = new Set<string>(
+    (input.shreddedKeyIds ?? []).map((key) => key.trim()).filter(Boolean),
+  );
+  const shreddedSourceKeyIds = new Set<string>(
+    (input.shreddedKeyIds ?? []).map((key) => key.trim()).filter(Boolean),
+  );
+  const revokedSourceIds = new Set<string>(
+    (input.revokedSourceIds ?? []).map((id) => id.trim()).filter(Boolean),
+  );
   const revokedSourceKeyIds = new Set<string>();
 
   if (input.liveKeyTree.masterKey.status === "shredded") {
-    shreddedWorkspaceKeyIds.add(input.liveKeyTree.masterKey.workspaceKeyId);
+    shreddedWorkspaceKeyIds.add(input.liveKeyTree.masterKey.workspaceKeyId.trim());
   }
 
   const sourceById = new Map<string, SourceEnvelopeKey>();
@@ -540,13 +556,13 @@ export function evaluateQuarantineRestoreBundle(
   for (const receipt of input.existingReceipts ?? []) {
     if (receipt.workspaceId !== input.liveKeyTree.workspaceId) continue;
     if (receipt.shreddedWorkspaceKeyId) {
-      shreddedWorkspaceKeyIds.add(receipt.shreddedWorkspaceKeyId);
+      shreddedWorkspaceKeyIds.add(receipt.shreddedWorkspaceKeyId.trim());
     }
     for (const keyId of receipt.shreddedSourceKeyIds) {
-      shreddedSourceKeyIds.add(keyId);
+      shreddedSourceKeyIds.add(keyId.trim());
     }
     for (const sourceId of receipt.shreddedSourceIds) {
-      revokedSourceIds.add(sourceId);
+      revokedSourceIds.add(sourceId.trim());
     }
   }
 

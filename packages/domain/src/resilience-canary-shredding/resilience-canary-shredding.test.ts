@@ -782,6 +782,62 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
     });
     expect(cleanOnly.status).toBe("approved_clean");
     expect(cleanOnly.liveApplyAllowed).toBe(true);
+
+    // Source-ID-only record (sourceKeyId omitted) still blocks when resolved sourceKeyId or workspaceKeyId is in shreddedKeyIds
+    const sourceIdOnlyWithShreddedKeyList = evaluateQuarantineRestoreBundle({
+      bundleId: "bundle-source-id-only-shredded-keys",
+      policy: "strip_shredded_lineage",
+      liveKeyTree: initialTree,
+      shreddedKeyIds: ["ks-b"],
+      records: [
+        {
+          recordId: "rec-source-id-only-resolved-shredded",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: "src-b",
+          sourceKeyId: null,
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-source-a-clean-against-ks-b-shred",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: "src-a",
+          sourceKeyId: null,
+          privacyEpoch: 1,
+        },
+      ],
+    });
+    expect(sourceIdOnlyWithShreddedKeyList.status).toBe("approved_after_filtering");
+    expect(sourceIdOnlyWithShreddedKeyList.approvedRecords.map((r) => r.recordId)).toEqual([
+      "rec-source-a-clean-against-ks-b-shred",
+    ]);
+    expect(sourceIdOnlyWithShreddedKeyList.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
+      ["rec-source-id-only-resolved-shredded", "shredded_source_key"],
+    ]);
+
+    const workspaceKeyShreddedEvidence = evaluateQuarantineRestoreBundle({
+      bundleId: "bundle-workspace-key-shredded-list",
+      policy: "strict_atomic",
+      liveKeyTree: initialTree,
+      shreddedKeyIds: ["kw-1"],
+      records: [
+        {
+          recordId: "rec-active-source-under-shredded-kw",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: "src-a",
+          privacyEpoch: 1,
+        },
+      ],
+    });
+    expect(workspaceKeyShreddedEvidence.status).toBe("rejected_shredded_lineage");
+    expect(workspaceKeyShreddedEvidence.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
+      ["rec-active-source-under-shredded-kw", "shredded_workspace_key"],
+    ]);
   });
 
   it("fails closed for sourceKeyId-only restore records (deleted without receipt, revoked, stale source epoch, rotated sourceKeyId)", () => {
@@ -1067,23 +1123,27 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       EMERGENCY_ROLLBACK_SLA_MS,
     );
 
-    // Live authoritativeStoreState allows lease acquisition even when caller's local state.synchronizedAtMs is older than 2s
+    // Live authoritativeStoreState allows lease acquisition even when caller's local state.synchronizedAtMs OR stateSynchronizedAtMs hint is older than 2s
     const liveStoreSnapshot = createCanaryRolloutState({
       rolloutId: "rollout-lease",
       schemaContractBackwardCompatible: true,
       stage: "10_percent",
       epoch: 3,
+      synchronizedAtMs: 14_500,
     });
     const liveAuthRenew = acquireCandidatePublishLease(
       { ...initial, synchronizedAtMs: 1_000 },
       "worker-live-auth",
       15_000,
-      { authoritativeStoreState: liveStoreSnapshot },
+      {
+        authoritativeStoreState: liveStoreSnapshot,
+        stateSynchronizedAtMs: 1_000,
+      },
     );
     expect(liveAuthRenew.granted).toBe(true);
     if (liveAuthRenew.granted) {
       expect(liveAuthRenew.lease.issuedAtMs).toBe(15_000);
-      expect(liveAuthRenew.lease.expiresAtMs).toBe(17_000);
+      expect(liveAuthRenew.lease.expiresAtMs).toBe(16_500);
     }
 
     // Without explicit certifiedCompleteInventory, even empty/expired activeLeases preserves full 2s drain window for partitioned workers
@@ -1096,6 +1156,33 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     expect(uncertifiedRollback.maxDrainWindowMs).toBe(2_000);
     expect(uncertifiedRollback.rollbackDeadlineAtMs).toBe(17_000);
     expect(uncertifiedRollback.withinRollbackSla).toBe(true);
+
+    // Centrally revoked but NOT worker-acknowledged lease stays in certified drain until expiresAtMs
+    const centrallyRevokedLease = revokeCandidatePublishLease(acquired.lease);
+    const unackedRevokeDrain = triggerEmergencyRollback(
+      initial,
+      "central_revoke_unacked",
+      11_000,
+      [centrallyRevokedLease],
+      { certifiedCompleteInventory: true },
+    );
+    expect(unackedRevokeDrain.maxDrainWindowMs).toBe(1_000);
+    expect(unackedRevokeDrain.rollbackDeadlineAtMs).toBe(12_000);
+
+    // Worker-acknowledged revocation at <= rollbackAtMs excludes the lease from certified drain
+    const workerAckedRevokedLease = revokeCandidatePublishLease(acquired.lease, {
+      workerAcknowledged: true,
+      acknowledgedAtMs: 10_900,
+    });
+    const ackedRevokeDrain = triggerEmergencyRollback(
+      initial,
+      "worker_acked_revoke",
+      11_000,
+      [workerAckedRevokedLease],
+      { certifiedCompleteInventory: true },
+    );
+    expect(ackedRevokeDrain.maxDrainWindowMs).toBe(0);
+    expect(ackedRevokeDrain.rollbackDeadlineAtMs).toBe(11_000);
 
     // Only when caller certifies complete authoritative inventory do already-expired activeLeases clamp maxDrainWindowMs = 0
     const expiredDrainRollback = triggerEmergencyRollback(

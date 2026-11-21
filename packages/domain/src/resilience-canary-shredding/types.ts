@@ -426,6 +426,8 @@ export type CandidatePublishLease = {
   expiresAtMs: number;
   ttlMs: 2000;
   revoked: boolean;
+  workerAcknowledgedRevocation?: boolean;
+  revocationAcknowledgedAtMs?: number | null;
 };
 
 export type AcquireLeaseOptions = {

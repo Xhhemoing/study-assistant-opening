@@ -302,11 +302,16 @@ export function acquireCandidatePublishLease(
       syncAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
     );
   } else {
-    // Evaluate staleness against the authoritative snapshot (or treat a live
-    // authoritativeStoreState without an older sync watermark as freshly synced
-    // at nowMs), ignoring any stale local state.synchronizedAtMs.
-    const authRawSyncAtMs =
-      options?.stateSynchronizedAtMs ?? authoritativeState.synchronizedAtMs ?? null;
+    // Prefer authoritativeStoreState.synchronizedAtMs over any stale caller
+    // stateSynchronizedAtMs hint (and treat live authoritativeStoreState without
+    // a watermark as freshly synchronized at nowMs).
+    if (options?.stateSynchronizedAtMs !== undefined) {
+      assertNonNegativeFinite(
+        options.stateSynchronizedAtMs,
+        "stateSynchronizedAtMs",
+      );
+    }
+    const authRawSyncAtMs = authoritativeState.synchronizedAtMs ?? null;
     if (authRawSyncAtMs !== null) {
       const authSyncAtMs = assertNonNegativeFinite(
         authRawSyncAtMs,
@@ -349,10 +354,27 @@ export function acquireCandidatePublishLease(
 
 export function revokeCandidatePublishLease(
   lease: CandidatePublishLease,
+  acknowledgment?: {
+    workerAcknowledged?: boolean;
+    acknowledgedAtMs?: number;
+  },
 ): CandidatePublishLease {
+  if (acknowledgment?.acknowledgedAtMs !== undefined) {
+    assertNonNegativeFinite(
+      acknowledgment.acknowledgedAtMs,
+      "acknowledgedAtMs",
+    );
+  }
+  const workerAcknowledged = acknowledgment?.workerAcknowledged === true;
   return {
     ...lease,
     revoked: true,
+    workerAcknowledgedRevocation: workerAcknowledged,
+    revocationAcknowledgedAtMs: workerAcknowledged
+      ? (acknowledgment?.acknowledgedAtMs ??
+        lease.revocationAcknowledgedAtMs ??
+        null)
+      : (lease.revocationAcknowledgedAtMs ?? null),
   };
 }
 
@@ -509,14 +531,31 @@ export function triggerEmergencyRollback(
 
   let enumeratedDrainWindowMs = 0;
   if (activeLeases !== undefined) {
-    let latestExpiry = triggeredAtMs;
     for (const lease of activeLeases) {
-      if (lease.revoked || !Number.isFinite(lease.expiresAtMs)) continue;
-      if (lease.expiresAtMs > latestExpiry) {
-        latestExpiry = lease.expiresAtMs;
+      const workerAckedRevocation =
+        lease.revoked &&
+        lease.workerAcknowledgedRevocation === true &&
+        typeof lease.revocationAcknowledgedAtMs === "number" &&
+        Number.isFinite(lease.revocationAcknowledgedAtMs) &&
+        lease.revocationAcknowledgedAtMs <= triggeredAtMs;
+      if (workerAckedRevocation) continue;
+
+      if (!Number.isFinite(lease.expiresAtMs)) {
+        enumeratedDrainWindowMs = Math.max(
+          enumeratedDrainWindowMs,
+          CANDIDATE_PUBLISH_LEASE_TTL_MS,
+        );
+        continue;
+      }
+
+      if (lease.expiresAtMs > triggeredAtMs) {
+        const remainingMs = lease.expiresAtMs - triggeredAtMs;
+        enumeratedDrainWindowMs = Math.max(
+          enumeratedDrainWindowMs,
+          remainingMs,
+        );
       }
     }
-    enumeratedDrainWindowMs = Math.max(0, latestExpiry - triggeredAtMs);
   }
 
   // Unless the caller certifies a complete lease inventory with zero unenumerated
