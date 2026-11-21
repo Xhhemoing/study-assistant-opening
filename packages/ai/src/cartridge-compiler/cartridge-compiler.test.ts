@@ -2969,6 +2969,68 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     expect(urlGetterCalled).toBe(false);
   });
 
+  it("keeps the validated reflection policy when the scorer edits caller-owned slots and rules", () => {
+    const slots = { cue: "Check the premise." };
+    const rubric = makeValidZeroDivisionRubric();
+    const requiredAstTokens = [...rubric.requiredAstTokens];
+    const basePolicy = {
+      ...makeBasePolicy(),
+      approvedTemplateSlots: slots,
+      rubricAnchors: [{ ...rubric, requiredAstTokens }],
+    };
+    const round = runGepaOptimizationRound({
+      basePolicy,
+      split: createDisjointTrajectorySplit([]),
+      extraCandidatePatches: [{ candidateId: "policy_snapshot", patches: [] }],
+      scoreCandidate: ({ candidateId }) => {
+        slots.cue = "updated@example.test";
+        requiredAstTokens.length = 0;
+        return buildMatureCohort(candidateId, {
+          learnerCount: 25,
+          repairedCount: 23,
+          t7PassedCount: 24,
+        });
+      },
+      paretoOptions: { baseline: { cRate: 0.85, t7Rate: 0.72 } },
+    });
+
+    const policy = round.reflectionContext.currentPolicy;
+    expect(policy.approvedTemplateSlots).toEqual({ cue: "Check the premise." });
+    expect(policy.rubricAnchors[0]!.requiredAstTokens).toEqual(rubric.requiredAstTokens);
+    expect(Object.isFrozen(policy.approvedTemplateSlots)).toBe(true);
+    expect(Object.isFrozen(policy.rubricAnchors[0]!.requiredAstTokens)).toBe(true);
+    expect(round.pareto.promotedCandidateIds).toEqual(["policy_snapshot"]);
+  });
+
+  it("vetoes cyclic scorer receipts while a sibling with shared acyclic metadata promotes", () => {
+    const ids = ["missing_id_cycle", "valid_id_cycle", "shared_metadata"];
+    const round = runGepaOptimizationRound({
+      basePolicy: makeBasePolicy(),
+      split: createDisjointTrajectorySplit([]),
+      extraCandidatePatches: ids.map((candidateId) => ({ candidateId, patches: [] })),
+      scoreCandidate: ({ candidateId }) => {
+        const metrics = buildMatureCohort(candidateId, {
+          learnerCount: 25,
+          repairedCount: 23,
+          t7PassedCount: 24,
+        });
+        const shared = { source: "scorer" };
+        if (candidateId === "shared_metadata") {
+          return { ...metrics, metadata: [shared, shared] };
+        }
+        const metadata: unknown[] = [];
+        const receipt = candidateId === "missing_id_cycle" ? { metadata } : { ...metrics, metadata };
+        metadata.push(receipt);
+        return receipt as CartridgeCandidateMetrics;
+      },
+      paretoOptions: { baseline: { cRate: 0.85, t7Rate: 0.72 } },
+    });
+
+    expect(round.pareto.vetoedCandidateIds).toEqual(["missing_id_cycle", "valid_id_cycle"]);
+    expect(round.pareto.frontierCandidateIds).toEqual(["shared_metadata"]);
+    expect(round.pareto.promotedCandidateIds).toEqual(["shared_metadata"]);
+  });
+
   it("isolates scoreCandidate callback mutations from internal snapshots and returned GEPA round candidates (Round-15 P1-5)", () => {
     const records: ErrorTrajectoryRecord[] = [];
     for (let comp = 0; comp < 4; comp += 1) {

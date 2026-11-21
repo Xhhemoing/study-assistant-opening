@@ -152,6 +152,23 @@ function checkStrictPlainObjectOwnProperties(
   }
 }
 
+function assertTemplateSlotContainer(slots: unknown, path: string): void {
+  const issues: string[] = [];
+  if (isPlainObject(slots)) {
+    checkPrototypePollutionKeys(slots, path, issues);
+    checkStrictPlainObjectOwnProperties(slots, path, issues);
+  } else {
+    issues.push(`${path}:must_be_plain_object`);
+  }
+  if (issues.length > 0) {
+    throw new GepaInvalidPatchPayloadError(
+      `Invalid approvedTemplateSlots container: ${issues.join("; ")}`,
+      "approvedTemplateSlots",
+      issues,
+    );
+  }
+}
+
 function checkStrictPlainArray(arr: readonly unknown[], path: string, issues: string[]): void {
   if (Object.getPrototypeOf(arr) !== Array.prototype) {
     issues.push(`${path}:forbidden_non_plain_array`);
@@ -1143,35 +1160,8 @@ export function validateAndApplyGepaPatch(
     }
 
     case "approvedTemplateSlots": {
-      const slotIssues: string[] = [];
-      if (!isPlainObject(policy.approvedTemplateSlots)) {
-        slotIssues.push("basePolicy.approvedTemplateSlots:must_be_plain_object");
-      } else {
-        checkPrototypePollutionKeys(
-          policy.approvedTemplateSlots,
-          "basePolicy.approvedTemplateSlots",
-          slotIssues,
-        );
-        checkStrictPlainObjectOwnProperties(
-          policy.approvedTemplateSlots,
-          "basePolicy.approvedTemplateSlots",
-          slotIssues,
-        );
-      }
-      if (!isPlainObject(patch.payload)) {
-        slotIssues.push("approvedTemplateSlots.payload:must_be_plain_object");
-      } else {
-        checkPrototypePollutionKeys(patch.payload, "approvedTemplateSlots", slotIssues);
-        checkStrictPlainObjectOwnProperties(patch.payload, "approvedTemplateSlots", slotIssues);
-      }
-      if (slotIssues.length > 0) {
-        throw new GepaInvalidPatchPayloadError(
-          `Invalid approvedTemplateSlots container: ${slotIssues.join("; ")}`,
-          "approvedTemplateSlots",
-          slotIssues,
-        );
-      }
-
+      assertTemplateSlotContainer(policy.approvedTemplateSlots, "basePolicy.approvedTemplateSlots");
+      assertTemplateSlotContainer(patch.payload, "approvedTemplateSlots.payload");
       const nextSlots: Record<string, string> = {};
       for (const k of Object.keys(policy.approvedTemplateSlots)) {
         if (!PROTOTYPE_POLLUTION_KEYS.has(k)) {
@@ -1246,7 +1236,12 @@ export function buildGepaReflectionContext(
     currentPolicy: sanitizedPolicy,
   };
   assertNoRawPiiInValue(context, "gepa_reflection_output");
-  return context;
+  // Validate the original slot descriptors before copying enumerable policy data.
+  assertTemplateSlotContainer(
+    sanitizedPolicy.approvedTemplateSlots,
+    "basePolicy.approvedTemplateSlots",
+  );
+  return deepClonePlainGepaValue(context, true);
 }
 
 /**
@@ -1388,31 +1383,36 @@ export interface RunGepaOptimizationRoundInput {
   readonly paretoOptions: ParetoEvaluationOptions;
 }
 
-function deepClonePlainGepaValue<T>(value: T, freeze = false): T {
+class CyclicGepaValueError extends Error {}
+
+function deepClonePlainGepaValue<T>(value: T, freeze = false, ancestors = new Set<object>()): T {
   if (value === null || typeof value !== "object") {
     return value;
   }
+  if (ancestors.has(value)) throw new CyclicGepaValueError("Cyclic GEPA data.");
+  ancestors.add(value);
   if (Array.isArray(value)) {
     const out: unknown[] = [];
     for (let i = 0; i < value.length; i += 1) {
-      out.push(deepClonePlainGepaValue(value[i], freeze));
+      out.push(deepClonePlainGepaValue(value[i], freeze, ancestors));
     }
+    ancestors.delete(value);
     return (freeze ? Object.freeze(out) : out) as unknown as T;
   }
   const out: Record<string, unknown> = {};
-  const keys = Object.keys(value as Record<string, unknown>);
-  for (let i = 0; i < keys.length; i += 1) {
-    const key = keys[i]!;
-    if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+  for (const key of Object.getOwnPropertyNames(value)) {
     const desc = Object.getOwnPropertyDescriptor(value, key);
-    if (!desc || !desc.enumerable || desc.get || desc.set) continue;
+    if (!desc || !("value" in desc)) continue;
+    const child = deepClonePlainGepaValue(desc.value, freeze, ancestors);
+    if (!desc.enumerable || PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
     Object.defineProperty(out, key, {
-      value: deepClonePlainGepaValue(desc.value, freeze),
+      value: child,
       enumerable: true,
       writable: true,
       configurable: true,
     });
   }
+  ancestors.delete(value);
   return (freeze ? Object.freeze(out) : out) as T;
 }
 
@@ -1520,7 +1520,13 @@ export function runGepaOptimizationRound(
   for (let i = 0; i < frozenProposed.length; i += 1) {
     const raw = rawReceipts[i];
     assertNoRawPiiInValue(raw, `scorer_receipt[${frozenProposed[i]!.candidateId}]`);
-    snapshottedReceipts.push(isPlainObject(raw) ? deepClonePlainGepaValue(raw) : raw);
+    try {
+      snapshottedReceipts.push(isPlainObject(raw) ? deepClonePlainGepaValue(raw) : raw);
+    } catch (error) {
+      if (!(error instanceof CyclicGepaValueError)) throw error;
+      // The existing malformed-receipt path vetoes this candidate under its proposed ID.
+      snapshottedReceipts.push(null);
+    }
   }
 
   // Pre-collect all candidateIds across proposed candidates, baseline, and raw receipts so any
@@ -1620,7 +1626,7 @@ export function runGepaOptimizationRound(
   const pareto = evaluateParetoFrontierAndPromotion(candidateMetrics, safeParetoOptions);
 
   return {
-    reflectionContext: deepClonePlainGepaValue(reflectionContext, true),
+    reflectionContext,
     candidates: deepClonePlainGepaValue(frozenProposed, true),
     pareto,
   };

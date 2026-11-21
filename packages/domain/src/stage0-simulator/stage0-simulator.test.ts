@@ -840,6 +840,27 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(protoGetterInvoked).toBe(false);
   });
 
+  it("combines unary signs around grouped fractions before comparing protected answers", () => {
+    const positive = ["3/4", "0.75"];
+    const negative = ["-3/4", "-0.75"];
+    const cases = [
+      ["-(-6/8)", positive],
+      ["-(-6/-8)", negative],
+      ["-(+6/-8)", positive],
+      ["-( 6 / -8 )", positive],
+      ["−{ -( -6 / 8 ) }", negative],
+      ["-(-3/4)", positive],
+      ["-\\frac{-6}{8}", positive],
+      ["-\\frac{-6}{-8}", negative],
+      ["-( \\frac{-6}{8} )", positive],
+      ["x - (-6/8)", negative],
+    ] as const;
+    for (const [expression, expected] of cases) {
+      const hits = detectProtectedLeakage("The limit is " + expression + ".", positive, negative);
+      expect(hits, expression).toEqual(expected);
+    }
+  });
+
   it("catches signed denominators ('6/-8', '-6/-8', '\\frac{-6}{-8}', '\\frac{6}{-8}', '(6)/(-8)') with exact combined-sign rational reduction (Round-15 P1-4)", () => {
     // Positive +3/4 equivalents with negative numerator AND negative denominator MUST trigger "3/4" & "0.75" and NOT "-3/4"!
     for (const posSigned of [

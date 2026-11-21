@@ -94,38 +94,37 @@ function normalizeNumericScanText(text: string): string {
  * meaning `-` is binary subtraction rather than a unary negative sign on the literal.
  */
 function isBinaryOperandBefore(text: string, signIndex: number): boolean {
-  const trimmedBefore = text.slice(0, signIndex).trimEnd();
-  if (trimmedBefore.length === 0) return false;
-  return /(?:\d|[)\]}]|(?:^|[^a-z])[a-z])$/.test(trimmedBefore);
+  let operandEnd = signIndex - 1;
+  while (operandEnd >= 0 && text[operandEnd] === " ") operandEnd -= 1;
+  const last = text[operandEnd] ?? "";
+  return (
+    /[\d)\]}]/.test(last) ||
+    (/[a-z]/.test(last) && !/[a-z]/.test(text[operandEnd - 1] ?? ""))
+  );
 }
 
 function hasUnaryMinusBefore(text: string, matchStart: number, matchEnd: number): boolean {
   let left = matchStart;
   let right = matchEnd;
-  // Peel immediately enclosing matching grouping delimiters `(...)` or `{...}`
-  // so forms like `-(7.5e-1)`, `-(6/8)`, `-(0.75)`, `-\left(0.75\right)` stay negative.
-  while (left > 0 && right < text.length) {
-    let l = left - 1;
-    while (l >= 0 && text[l] === " ") l -= 1;
-    let r = right;
-    while (r < text.length && text[r] === " ") r += 1;
-    if (
-      l >= 0 &&
-      r < text.length &&
-      ((text[l] === "(" && text[r] === ")") || (text[l] === "{" && text[r] === "}"))
-    ) {
-      left = l;
-      right = r + 1;
-    } else {
-      break;
+  let negative = false;
+  // Walk outwards across both unary signs and matched groups, e.g. -(-6/8).
+  while (left > 0) {
+    while (left > 0 && text[left - 1] === " ") left -= 1;
+    const preceding = text[left - 1];
+    if (preceding === "-" || preceding === "+") {
+      if (isBinaryOperandBefore(text, left - 1)) break;
+      if (preceding === "-") negative = !negative;
+      left -= 1;
+      continue;
     }
+    while (right < text.length && text[right] === " ") right += 1;
+    const closesGroup =
+      (preceding === "(" && text[right] === ")") || (preceding === "{" && text[right] === "}");
+    if (!closesGroup) break;
+    left -= 1;
+    right += 1;
   }
-
-  const before = text.slice(0, left);
-  const minusMatch = /-\s*$/.exec(before);
-  if (!minusMatch) return false;
-  const signIndex = left - minusMatch[0].length;
-  return !isBinaryOperandBefore(text, signIndex);
+  return negative;
 }
 
 function gcdInt(a: number, b: number): number {
