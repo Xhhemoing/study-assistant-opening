@@ -506,8 +506,10 @@ export function createCourseMembershipRepository(
               throw new CourseMembershipError("NOT_FOUND", `Course not found: ${input.courseId}`);
             }
           }
+          // Serialize source classification (e.g. first mock_exam membership) against
+          // standalone readStream/withStreamPublication's FOR SHARE on opening_sources.
           const current = await tx`SELECT id FROM opening_sources WHERE id=${input.assetId}
-            AND workspace_id=${input.workspaceId} FOR SHARE`;
+            AND workspace_id=${input.workspaceId} FOR UPDATE`;
           if (!current.length) throw new CourseMembershipError("NOT_FOUND", "Source not found");
           if (input.replacesSourceId) {
             const oldRows = await tx`

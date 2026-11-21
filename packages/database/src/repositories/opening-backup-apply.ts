@@ -1,9 +1,14 @@
+import { validateBackupWorkspaceAssets } from "../../../domain/src/opening/backup-workspace-assets";
+import { restorePendingSprintAttempts, restoreSprintPack } from "./opening-backup-exam-pack";
 import { OpeningStorageError } from "../storage/opening-s3";
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
 import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
 import { cardSourcesIncluded } from "./card-sources";
 import { validateRetainedMaterialImportState } from "./opening-material-import-state";
+import { projectOpeningBackupCardSources, projectOpeningRestoreLibrary } from "./opening-backup-library";
+import { restoreKnowledgeDefinitions } from "./opening-backup-knowledge";
+import { connectorReservationId } from "./opening-source-actions";
 /**
  * Opening-scoped restore apply executor (Q03).
  *
@@ -15,7 +20,7 @@ import { validateRetainedMaterialImportState } from "./opening-material-import-s
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import {
   normalizeOpeningRestoreHistory,
   OPENING_RESTORE_APPLY_ORDER,
@@ -125,6 +130,22 @@ const RESTORE_GUARANTEES: OpeningRestoreApplyGuarantees = {
 
 /** Allowlisted insert columns per APPLY_ORDER table (snake_case as exported). */
 export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_ORDER)[number], readonly string[]> = {
+  library_documents: ["id", "workspace_id", "title", "lifecycle", "schema_version", "current_revision_number", "created_at", "updated_at", "deleted_at"],
+  library_blocks: ["id", "workspace_id", "document_id", "type", "position", "content", "created_at", "updated_at"],
+  library_revisions: ["id", "workspace_id", "document_id", "revision_number", "parent_revision_number", "title", "lifecycle", "reason", "blocks", "created_at"],
+  library_relations: ["id", "workspace_id", "from_type", "from_id", "to_type", "to_id", "relation_type", "created_at", "source"],
+  library_properties: ["id", "workspace_id", "subject_type", "subject_id", "key", "value_type", "value", "created_at", "updated_at"],
+  opening_note_provenance: ["document_id", "workspace_id", "context_source_refs", "created_at"],
+  opening_course_knowledge: ["workspace_id", "owner_user_id", "course_id", "version", "snapshot", "source_versions", "updated_at"],
+  opening_knowledge_confirmations: ["id", "workspace_id", "owner_user_id", "course_id", "node_id", "node_label", "node_kind", "confirmed_at", "graph_version_before", "graph_version_after", "source_versions", "evidence_chunk_ids"],
+  opening_exam_sprints: ["id", "workspace_id", "owner_user_id", "course_id", "pack_snapshot", "state", "created_at", "updated_at"],
+  opening_exam_papers: ["id", "sprint_id", "workspace_id", "owner_user_id", "course_id", "source_id", "source_version", "teacher", "year", "label", "kind", "skills", "client_key", "intent", "recorded_at"],
+  opening_exam_reviews: ["id", "sprint_id", "workspace_id", "owner_user_id", "source_item_id", "work_source_id", "work_source_version", "reference_source_id", "reference_source_version", "answer_text", "client_key", "intent", "status", "proposal", "model_label", "privacy_epoch", "created_at", "updated_at"],
+  opening_exam_bindings: ["sprint_id", "course_id", "binding", "updated_at"],
+  opening_exam_attempt_links: ["id", "sprint_id", "exam_attempt_id", "learning_attempt_id", "node_id", "requirement_key", "first_family_exposure", "delayed_earliest_at", "submitted_answer", "captured_at", "observation_id", "publication", "prediction"],
+  opening_exam_help_receipts: ["id", "attempt_link_id", "kind", "delivered_at", "history_revision", "workspace_history_revision", "content_snapshot"],
+  opening_exam_source_mappings: ["sprint_id", "source_item_id", "skill_ids", "updated_at"],
+  opening_exam_source_observations: ["sprint_id", "source_record_id", "skill_ids", "observation_id"],
   workspace_preferences: [
     "workspace_id", "default_entry", "ai_settings", "planning_settings", "adaptive_planning", "learning_management", "intervention_settings",
     "auto_grade_on_save",
@@ -301,6 +322,12 @@ const JSONB_COLUMNS = new Set([
   "opening_source_versions.material_manifest",
   "opening_turns.help_input_snapshot", "opening_help_exposures.help_input_snapshot",
   "opening_retest_activities.learning_protocol",
+  "library_blocks.content", "library_revisions.blocks", "library_properties.value", "opening_note_provenance.context_source_refs",
+  "opening_course_knowledge.snapshot", "opening_course_knowledge.source_versions",
+  "opening_knowledge_confirmations.source_versions", "opening_knowledge_confirmations.evidence_chunk_ids",
+  "opening_exam_sprints.pack_snapshot", "opening_exam_sprints.state", "opening_exam_bindings.binding",
+  "opening_exam_papers.skills", "opening_exam_papers.intent", "opening_exam_reviews.intent", "opening_exam_reviews.proposal",
+  "opening_exam_attempt_links.prediction",
   "learning_events.payload",
   "workspace_preferences.ai_settings",
   "workspace_preferences.planning_settings",
@@ -376,6 +403,8 @@ function filterPayload(
   row: Record<string, unknown>,
   workspaceId: string,
 ): Record<string, unknown> | null {
+  if (table === "opening_exam_attempt_links") row = { ...row, first_family_exposure: false };
+  if (table === "opening_exam_reviews" && row.status === "pending") row = { ...row, status: "unknown" };
   row = normalizeOpeningImportedEvaluation(table, row);
   const allowed = OPENING_RESTORE_ROW_COLUMNS[table];
   const payload: Record<string, unknown> = {};
@@ -391,12 +420,32 @@ function filterPayload(
     if (table === "course_asset_memberships" && col === "updated_at" && typeof value === "string") {
       value = tx`${tx.typed(value, 25)}::timestamptz`;
     }
-    if (JSONB_COLUMNS.has(`${table}.${col}`) && value !== null && typeof value === "object" && !(value instanceof Date)) {
+    // A library property may hold a JSON scalar, including a JSON string or null.
+    if (table === "library_properties" && col === "value") value = tx.json(value as never);
+    else if (JSONB_COLUMNS.has(`${table}.${col}`) && value !== null && typeof value === "object" && !(value instanceof Date)) {
       value = tx.json(value as never);
     }
     payload[col] = value;
   }
   return Object.keys(payload).length ? payload : null;
+}
+
+async function assertOpeningRestoreTarget(tx: TransactionSql, backup: OpeningBackup, owner: string, seeded = false) {
+  const workspaceId = backup.workspaceId;
+  const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, owner);
+  const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
+    confirmLocalRestore: true,
+    availableCourseIds: facts.availableCourseIds,
+    currentMemoryDeletions: facts.currentMemoryDeletions,
+    currentLearningState: facts.currentLearningState,
+  });
+  if (!livePlan.ok) {
+    throw Object.assign(new Error(livePlan.errors.join("; ")), { restoreCode: livePlan.code });
+  }
+  const liveCounts = await readOpeningRestoreNamespaceCounts(tx as unknown as Sql, workspaceId);
+  if (seeded) liveCounts.opening_workspace_history_revisions -= 1;
+  const empty = evaluateOpeningRestoreEmptyNamespace(liveCounts);
+  if (!empty.ok) throw Object.assign(new Error(`TARGET_NOT_EMPTY:${empty.errors.join("|")}`), { code: "TARGET_NOT_EMPTY" });
 }
 
 /**
@@ -420,7 +469,19 @@ export async function executeOpeningRestoreApply(
 
   const journal = args.currentDeletionJournal ?? [];
   const preview = validateOpeningRestore(args.backup, journal, args.currentMemoryDeletions);
-  const planned = planOpeningRestoreApply(args.backup, journal, {
+  const forbidden = OPENING_RESTORE_APPLY_ORDER.find(isOpeningRestoreNeverTable);
+  if (!preview.allowed || forbidden) {
+    return { ok: false, code: "PREFLIGHT_REJECTED", mutated: false, guarantees: RESTORE_GUARANTEES, preview,
+      errors: forbidden ? [`Forbidden backup table: ${forbidden}`] : preview.errors };
+  }
+  const normalized = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
+  const rawTables = normalized.tables as Record<string, Record<string, unknown>[]>;
+  const tables = projectOpeningRestoreLibrary(rawTables);
+  const backup: OpeningBackup = { ...normalized, tables: {
+    ...tables, ...(tables.cards && { cards: projectOpeningBackupCardSources(tables,
+      [...(rawTables.opening_note_provenance ?? []), ...(tables.opening_note_provenance ?? [])]) }),
+  } };
+  const planned = planOpeningRestoreApply(backup, journal, {
     confirmLocalRestore: true,
     availableCourseIds: args.availableCourseIds,
     currentLearningState: args.currentLearningState,
@@ -455,7 +516,6 @@ export async function executeOpeningRestoreApply(
     }
   }
 
-  const backup = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
   const workspaceId = backup.workspaceId;
 
   let objectPutStarted = false;
@@ -471,18 +531,12 @@ export async function executeOpeningRestoreApply(
     let pendingJobsCancelled = 0;
 
     await sql.begin(async (tx) => {
-      const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
+      const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`;
       if (!workspace) throw new Error("restore workspace owner is missing");
-      const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, String(workspace.owner_user_id));
-      const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
-        confirmLocalRestore: true,
-        availableCourseIds: facts.availableCourseIds,
-        currentMemoryDeletions: facts.currentMemoryDeletions,
-        currentLearningState: facts.currentLearningState,
-      });
-      if (!livePlan.ok) {
-        throw Object.assign(new Error(livePlan.errors.join("; ")), { restoreCode: livePlan.code });
-      }
+      const owner = String(workspace.owner_user_id);
+      const assetErrors: string[] = [];
+      validateBackupWorkspaceAssets(backup.tables as Record<string, Record<string, unknown>[]>, assetErrors, owner);
+      if (assetErrors.length) throw new Error(assetErrors.join("; "));
       const linkedMilestones = (backup.tables.workspace_preferences as Record<string, unknown>[] | undefined)?.some(row => {
         const parsed = openingAdaptivePrefsSchema.safeParse(row.adaptive_planning);
         return parsed.success && Object.values(parsed.data.courseGoals).some(goal => goal.milestones?.some(milestone =>
@@ -490,37 +544,41 @@ export async function executeOpeningRestoreApply(
       });
       if (linkedMilestones || backup.tables.course_goals?.length || backup.tables.course_requirements?.length) {
         const linkErrors: string[] = [];
-        validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
-        validateBackupLearningGoals(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
+        validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, owner);
+        validateBackupLearningGoals(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, owner);
         if (linkErrors.length) throw new Error(linkErrors.join("; "));
       }
-      const liveCounts = await readOpeningRestoreNamespaceCounts(tx as unknown as Sql, workspaceId);
-      const emptyLive = evaluateOpeningRestoreEmptyNamespace(liveCounts);
-      if (!emptyLive.ok) {
-        const err = new Error(`TARGET_NOT_EMPTY:${emptyLive.errors.join("|")}`);
-        (err as Error & { code?: string }).code = "TARGET_NOT_EMPTY";
-        throw err;
-      }
-
       const importedVersions = new Map<Record<string, unknown>, Record<string, unknown>>();
       const historyRows = (backup.tables.opening_workspace_history_revisions as Record<string, unknown>[] | undefined) ?? [];
-      const history = historyRows.find(row => row.owner_user_id === workspace.owner_user_id && row.workspace_id === workspaceId);
+      const history = historyRows.find(row => String(row.owner_user_id).toLowerCase() === owner
+        && String(row.workspace_id).toLowerCase() === workspaceId.toLowerCase());
       for (const row of (backup.tables.opening_source_versions as Record<string, unknown>[] | undefined) ?? []) {
-        const manifest = validateRetainedMaterialImportState({ material_manifest_revision: 0, ...row },
+        const manifest = validateRetainedMaterialImportState(row,
           String(row.source_id), Number(row.version), Number(history?.revision ?? 0));
-        if (!manifest) continue;
+        if (manifest) importedVersions.set(row, { ...row, material_manifest: { ...manifest, restoredFromBackup: true } });
+      }
+      const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
+      const restoredObservations = observations.length ? restoreOpeningGradingMetadata(observations, workspaceId, owner) : observations;
+      const restoredSprints = (backup.tables.opening_exam_sprints as Record<string, unknown>[] | undefined)?.map(restoreSprintPack) ?? [];
+
+      // Reject known invalid archives or target drift before trying to seed the history lock.
+      await assertOpeningRestoreTarget(tx, backup, owner);
+      // Match live history writers, including first initialization, before locking the workspace.
+      const seeded = await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+        VALUES(${workspaceId},${owner},0) ON CONFLICT DO NOTHING RETURNING workspace_id`;
+      await tx`SELECT revision FROM opening_workspace_history_revisions
+        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
+      const [lockedWorkspace] = await tx`SELECT id FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
+      if (!lockedWorkspace) throw new Error("restore workspace owner changed");
+      // Drift can commit while we wait for either lock, so only this read authorizes apply.
+      await assertOpeningRestoreTarget(tx, backup, owner, seeded.length > 0);
+
+      for (const [row, imported] of importedVersions) {
         // Archive contents cannot authenticate a reviewer, even if the UUID still
         // exists locally. Keep original audit/pins, but never activate it as a
         // current acceptance. Missing user pointers follow 0097's nullable FK.
         const users = row.material_reviewed_by == null ? [] : await tx`SELECT id FROM users WHERE id=${String(row.material_reviewed_by)} FOR KEY SHARE`;
-        importedVersions.set(row, { ...row, material_manifest: { ...manifest, restoredFromBackup: true },
-          material_reviewed_by: users.length ? row.material_reviewed_by : null });
-      }
-
-      const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
-      let restoredObservations = observations;
-      if (observations.length) {
-        restoredObservations = restoreOpeningGradingMetadata(observations, workspaceId, String(workspace.owner_user_id));
+        imported.material_reviewed_by = users.length ? row.material_reviewed_by : null;
       }
 
       const cancelled = await tx`
@@ -539,7 +597,8 @@ export async function executeOpeningRestoreApply(
         const rows = (backup.tables[table] as Record<string, unknown>[] | undefined) ?? [];
         const orderedRows = table === "opening_learning_decisions"
           ? [...rows].sort((a, b) => ["plan", "session", "activity"].indexOf(String(a.layer)) - ["plan", "session", "activity"].indexOf(String(b.layer)))
-          : table === "opening_learning_observations" ? restoredObservations : rows;
+          : table === "opening_learning_observations" ? restoredObservations
+          : table === "opening_exam_sprints" ? restoredSprints : rows;
         for (const row of orderedRows) {
           if (!row || typeof row !== "object") continue;
           // Observation root/head references are cyclic and immediate FKs.
@@ -548,13 +607,31 @@ export async function executeOpeningRestoreApply(
           const insertRow = table === "opening_learning_observations"
             ? { ...row, root_observation_id: null, revises_observation_id: null, effective_head_id: null }
             : table === "opening_source_versions" ? importedVersions.get(row) ?? row : row;
+          if (table === "opening_privacy_exclusions") {
+            if ("pending_object_keys" in insertRow || "cleanup_not_before" in insertRow) {
+              throw new Error("storage cleanup state cannot be restored");
+            }
+            if (typeof insertRow.id === "string" && typeof insertRow.source_id === "string"
+              && (insertRow.memory_id === null || insertRow.memory_id === undefined)
+              && insertRow.id.toLowerCase() === connectorReservationId(insertRow.source_id)) {
+              throw new Error("temporary connector reservation cannot be restored");
+            }
+          }
           const payload = filterPayload(tx as unknown as Sql, table, insertRow, workspaceId);
           if (!payload) continue;
           if (table === "cards") {
             const [admitted] = await tx`SELECT ${cardSourcesIncluded(tx, workspaceId, tx`${row.source_ids as string[]}::uuid[]`)} AS included`;
             if (!admitted?.included) throw new Error("card source is deleted, excluded, or unavailable");
           }
-          await tx`INSERT INTO ${tx(table)} ${tx(payload)}`;
+          if (table === "opening_course_knowledge") {
+            payload.node_definitions = tx.json(await restoreKnowledgeDefinitions(tx, row, workspaceId));
+          }
+          if (table === "opening_workspace_history_revisions" && row === history) {
+            await tx`UPDATE opening_workspace_history_revisions SET revision=${Number(row.revision)}
+              WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
+          } else {
+            await tx`INSERT INTO ${tx(table)} ${tx(payload)}`;
+          }
           rowsInserted += 1;
         }
         if (table === "opening_learning_observations") {
@@ -567,6 +644,9 @@ export async function executeOpeningRestoreApply(
           }
         }
       }
+      if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
+      if (!history) await tx`DELETE FROM opening_workspace_history_revisions
+        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
 
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;

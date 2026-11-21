@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { planOpeningRestoreApply } from "./backup-apply-plan";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
-import { sourceReferences } from "./backup-validation";
+import {
+  noteProvenanceSourceReferences,
+  sourceReferences,
+  turnMemoryDependencyIds,
+  turnSourceReferences,
+} from "./backup-validation";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const ownerId = "33333333-3333-4333-8333-333333333333";
@@ -31,6 +37,15 @@ describe("context provenance at the backup boundary", () => {
     const before = structuredClone(input);
     expect(sourceReferences(input)).toEqual([sourceId, sourceId, otherSourceId]);
     expect(input).toEqual(before);
+  });
+
+  it("accepts publication metadata on notes while requiring citations in other contexts", () => {
+    const source = { sourceId, sourceVersion: 1, publication: true };
+    const note = { context_source_refs: [source, { answerKeyBlockIds: [turnId] }, { publicationCardIds: [candidateId] }] };
+    expect(noteProvenanceSourceReferences(note)).toEqual([sourceId]);
+    expect(sourceReferences(note)).toBeNull();
+    expect(noteProvenanceSourceReferences({ context_source_refs: [source, { answerKeyBlockIds: [null] }] })).toBeNull();
+    expect(noteProvenanceSourceReferences({ context_source_refs: [{ sourceId, answerKeyBlockIds: [turnId] }] })).toBeNull();
   });
 
   it.each([{}, "[]", [null], [{}], [{ sourceId, sourceVersion: "1" }],
@@ -85,5 +100,132 @@ describe("context provenance at the backup boundary", () => {
     input.tables.opening_assistant_candidates = [row({ id: candidateId, conversation_id: conversationId,
       source_turn_id, source_ids: [], payload: {} })];
     expect(validateOpeningRestore(input, [], currentMemoryDeletions).allowed).toBe(false);
+  });
+
+  it("accepts assistant turn memoryDependencyIds in restore validation and apply planning when backed by exported memories", () => {
+    const originTurnId = "77777777-7777-4777-8777-777777777777";
+    const memoryId = "88888888-8888-4888-8888-888888888888";
+    const documentlessTurn = turn({ context_source_refs: [{ memoryDependencyIds: [memoryId.toUpperCase()] }] });
+    expect(turnMemoryDependencyIds(documentlessTurn)).toEqual([memoryId]);
+    expect(turnSourceReferences(documentlessTurn)).toEqual([]);
+
+    const mixedTurn = turn({
+      context_source_refs: [
+        { sourceId, sourceVersion: 0, memoryOnly: true },
+        { memoryDependencyIds: [memoryId] },
+      ],
+    });
+    expect(turnMemoryDependencyIds(mixedTurn)).toEqual([memoryId]);
+    expect(turnSourceReferences(mixedTurn)).toEqual([sourceId]);
+    // Non-turn tables must still reject memoryDependencyIds strictly.
+    expect(sourceReferences(documentlessTurn)).toBeNull();
+    expect(noteProvenanceSourceReferences(documentlessTurn)).toBeNull();
+
+    const originTurn = turn({ id: originTurnId, role: "user", context_source_refs: null });
+    const memoryRow = row({ id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [originTurnId] });
+    for (const assistantTurn of [documentlessTurn, mixedTurn]) {
+      const input = backup([originTurn, assistantTurn]);
+      input.tables.opening_memories = [memoryRow];
+      const before = structuredClone(input);
+      expect(validateOpeningRestore(input, [], currentMemoryDeletions).allowed).toBe(true);
+      expect(planOpeningRestoreApply(input, [], {
+        confirmLocalRestore: true,
+        currentMemoryDeletions,
+      }).ok).toBe(true);
+      expect(input).toEqual(before);
+    }
+  });
+
+  it.each([
+    { label: "missing", ancestor: null },
+    { label: "revoked", ancestor: { kind: "confirmed", status: "revoked" } },
+    { label: "superseded", ancestor: { kind: "confirmed", status: "superseded" } },
+    { label: "rejected", ancestor: { kind: "confirmed", status: "rejected" } },
+    { label: "candidate", ancestor: { kind: "candidate", status: "active" } },
+    { label: "expired", ancestor: { kind: "temporary", status: "active", expires_at: "2000-01-01T00:00:00Z" } },
+    { label: "unexpired", ancestor: { kind: "temporary", status: "active", expires_at: "2099-01-01T00:00:00Z" } },
+  ])("checks $label ancestors through both edges of the backup graph", ({ label, ancestor }) => {
+    const originalId = "aaaaaaaa-0000-4000-8000-000000000001";
+    const ancestorId = "aaaaaaaa-0000-4000-8000-000000000002";
+    const intermediateTurnId = "aaaaaaaa-0000-4000-8000-000000000003";
+    const intermediateMemoryId = "aaaaaaaa-0000-4000-8000-000000000004";
+    const input = backup([
+      turn({ id: originalId, role: "user" }),
+      turn({ id: intermediateTurnId, context_source_refs: [{ memoryDependencyIds: [ancestorId.toUpperCase()] }] }),
+      turn({ context_source_refs: [{ memoryDependencyIds: [intermediateMemoryId.toUpperCase()] }] }),
+    ]);
+    input.tables.opening_memories = [
+      row({ id: intermediateMemoryId, kind: "confirmed", status: "active", source_turn_ids: [intermediateTurnId.toUpperCase()] }),
+      row({ id: candidateId, kind: "candidate", status: "active", source_turn_ids: [turnId] }),
+      ...(ancestor ? [row({ id: ancestorId, source_turn_ids: [originalId.toUpperCase()], ...ancestor })] : []),
+    ];
+    const result = validateOpeningRestore(input, [], currentMemoryDeletions);
+    expect(result.allowed).toBe(label === "unexpired");
+    if (label !== "unexpired") expect(result.errors).toContain("memory source turn has an unavailable memory dependency");
+  });
+
+  it("propagates an unavailable dependency through a cycle", () => {
+    const cycleId = "aaaaaaaa-0000-4000-8000-000000000005";
+    const input = backup([
+      turn({ context_source_refs: [{ memoryDependencyIds: [cycleId.toUpperCase(), candidateId] }] }),
+    ]);
+    input.tables.opening_memories = [
+      row({ id: cycleId, kind: "confirmed", status: "active", source_turn_ids: [turnId] }),
+    ];
+    expect(validateOpeningRestore(input, [], currentMemoryDeletions).errors)
+      .toContain("memory source turn has an unavailable memory dependency");
+  });
+
+  it.each([
+    { name: "empty array", refs: [{ memoryDependencyIds: [] }] },
+    { name: "non-UUID element", refs: [{ memoryDependencyIds: ["not-a-uuid"] }] },
+    { name: "extra property", refs: [{ memoryDependencyIds: [candidateId], extra: true }] },
+    { name: "mixed sourceId and memoryDependencyIds", refs: [{ sourceId, sourceVersion: 0, memoryDependencyIds: [candidateId] }] },
+    { name: "duplicate memory IDs", refs: [{ memoryDependencyIds: [candidateId, candidateId.toUpperCase()] }] },
+    { name: "multiple metadata elements", refs: [{ memoryDependencyIds: [candidateId] }, { memoryDependencyIds: [turnId] }] },
+    { name: "user turn carrying memoryDependencyIds", role: "user", refs: [{ memoryDependencyIds: [candidateId] }] },
+  ])("rejects malformed turn memoryDependencyIds ($name)", ({ role, refs }) => {
+    const malformedTurn = turn({ role: role ?? "assistant", context_source_refs: refs });
+    expect(turnMemoryDependencyIds(malformedTurn)).toBeNull();
+    expect(turnSourceReferences(malformedTurn)).toBeNull();
+    const input = backup([malformedTurn]);
+    const preview = validateOpeningRestore(input, [], currentMemoryDeletions);
+    expect(preview.allowed).toBe(false);
+    expect(preview.errors).toContain("table opening_turns has invalid source lineage");
+  });
+
+  it("rejects memoryDependencyIds on non-turn tables and rejects dangling or deleted turn memory dependencies", () => {
+    const originTurnId = "77777777-7777-4777-8777-777777777777";
+    const memoryId = "88888888-8888-4888-8888-888888888888";
+
+    // 1. Non-turn table (opening_note_provenance) carrying memoryDependencyIds fails closed.
+    const noteBackup = backup([]);
+    noteBackup.tables.opening_note_provenance = [row({
+      document_id: candidateId,
+      context_source_refs: [{ memoryDependencyIds: [memoryId] }],
+    })];
+    expect(validateOpeningRestore(noteBackup, [], currentMemoryDeletions).errors)
+      .toContain("table opening_note_provenance has invalid source lineage");
+
+    // 2. Dangling memoryDependencyIds (missing from opening_memories) fails closed and requires live memory deletion facts.
+    const danglingBackup = backup([turn({ context_source_refs: [{ memoryDependencyIds: [memoryId] }] })]);
+    const missingFacts = validateOpeningRestore(danglingBackup, []);
+    expect(missingFacts.allowed).toBe(false);
+    expect(missingFacts.errors).toContain("current owner-scoped memory deletion facts are required");
+    expect(missingFacts.errors).toContain("table opening_turns references a memory missing from the backup");
+
+    // 3. Turn referencing a memory deleted in currentMemoryDeletions fails closed.
+    const deletedBackup = backup([
+      turn({ id: originTurnId, role: "user", context_source_refs: null }),
+      turn({ context_source_refs: [{ memoryDependencyIds: [memoryId] }] }),
+    ]);
+    deletedBackup.tables.opening_memories = [row({ id: memoryId, status: "active", source_turn_ids: [originTurnId] })];
+    const deletedFacts = {
+      workspaceId,
+      memories: [{ memoryId, deletedAt: "2026-11-21T00:00:00.000Z" }],
+    };
+    const deletedPreview = validateOpeningRestore(deletedBackup, [], deletedFacts);
+    expect(deletedPreview.allowed).toBe(false);
+    expect(deletedPreview.errors).toContain("table opening_turns references a deleted memory");
   });
 });

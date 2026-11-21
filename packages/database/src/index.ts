@@ -11,6 +11,10 @@ export * from "./schema/identity";
 export * from "./schema/preferences";
 export * from "./schema/explorations";
 export * from "./repositories/library";
+export {
+  hasForgedOrProtectedBlock,
+  PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
+} from "./repositories/library-protected-blocks";
 export * from "./repositories/course-membership";
 export * from "./repositories/identity";
 export * from "./repositories/preferences";
@@ -62,6 +66,14 @@ export { magicMatchesMime } from "./storage/magic";
 export * from "./schema/opening-assistant-candidates";
 export * from "./repositories/opening-candidates";
 export * from "./repositories/opening-tutor-jobs";
+export {
+  advanceOpeningWorkspacePrivacyEpoch, hasAttemptedFallbackStreamSeal,
+  isUnconfirmedStreamSealError, markFallbackStreamSealAttempted, markUnconfirmedStreamSeal,
+  openingRedisConnectionOptions, openingRedisDatabase, openingRedisEndpoint,
+  runWithNestedTutorStreamFences, sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS,
+  tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, tutorStreamPreAnswerHeadKey,
+  UnconfirmedStreamSealError, withOpeningTutorStreamFenceCommit,
+} from "./repositories/opening-tutor-stream-fence";
 export * from "./repositories/opening-context-provenance";
 
 export * from "./schema/opening-memory";

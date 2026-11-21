@@ -6,9 +6,9 @@ import { afterAll, expect, it } from "vitest";
 import type { AiGradingProposal, LearningObservation } from "@aistudy/contracts";
 import { createOpeningAiGradingRepository, executeOpeningRestoreApply, readOpeningBackupRecords,
   readLearningPreferences, readOpeningObservationHistory, readOpeningRestoreNamespaceCounts, reviseOpeningLearningObservation } from "@aistudy/database";
-import { OPENING_RESTORE_APPLY_ORDER, type OpeningBackup } from "@aistudy/domain";
+import type { OpeningBackup } from "@aistudy/domain";
 import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
-import { createBackupFixture, type BackupFixture } from "./opening-backup-records-fixture";
+import { createBackupFixture, deleteBackupFixtureRows, type BackupFixture } from "./opening-backup-records-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 
 const fixtures: BackupFixture[] = [];
@@ -71,16 +71,7 @@ async function exportRecords(fixture: BackupFixture) {
 }
 async function emptyDurableNamespace(fixture: BackupFixture) {
   const { sql, scope } = fixture;
-  await sql.begin(async tx => {
-    for (const table of [...OPENING_RESTORE_APPLY_ORDER].reverse()) {
-      if (table === "opening_source_chunks") {
-        await tx`DELETE FROM opening_source_chunks WHERE source_id IN
-          (SELECT id FROM opening_sources WHERE workspace_id=${scope.workspaceId})`;
-      } else {
-        await tx`DELETE FROM ${tx(table)} WHERE workspace_id=${scope.workspaceId}`;
-      }
-    }
-  });
+  await sql.begin(tx => deleteBackupFixtureRows(tx, scope));
   const counts = await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId);
   expect(Object.values(counts).every(count => count === 0), JSON.stringify(counts)).toBe(true);
 }

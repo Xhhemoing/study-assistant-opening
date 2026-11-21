@@ -1,3 +1,4 @@
+import { OPENING_RESTORE_APPLY_ORDER, OPTIONAL_ASSET_TABLES } from "./backup-inventory";
 import { learningStateRestoreErrors, type OpeningRestoreLearningState } from "./backup-learning-state";
 import {
   validateOpeningRestore,
@@ -27,51 +28,7 @@ export type OpeningRestoreApplyPlanResult =
   | { ok: true; plan: OpeningRestoreApplyPlan }
   | { ok: false; code: "REQUIRES_EXPLICIT_CONFIRMATION" | "PREFLIGHT_REJECTED" | "JOURNAL_DRIFT"; errors: string[] };
 
-/** Fixed dependency order derived from the migrations' foreign keys. Never reorder freely. */
-export const OPENING_RESTORE_APPLY_ORDER = [
-  "workspace_preferences",
-  "courses",
-  "course_goals", "course_goal_links", "goal_time_windows", "course_requirements",
-  "course_requirement_evidence_links",
-  "opening_sources",
-  "cards",
-  "card_review_states",
-  "learning_events",
-  "course_asset_memberships",
-  "opening_source_versions",
-  "opening_source_chunks",
-  "opening_conversations",
-  "opening_teaching_activities",
-  "opening_teaching_units",
-  "opening_teaching_activity_specs",
-  "opening_learning_sessions",
-  "opening_problem_refs",
-  "opening_learning_history_revisions",
-  "opening_learning_activity_history_revisions",
-  "opening_workspace_history_revisions",
-  "opening_learning_item_versions",
-  "opening_learning_attempts",
-  "opening_turns",
-  "opening_assistant_candidates",
-  "opening_help_exposures",
-  "opening_learning_observations",
-  "opening_learning_asset_links",
-  "opening_skill_evidence",
-  "opening_memories",
-  "opening_privacy_exclusions",
-  "opening_tasks",
-  "opening_plan_feedback",
-  "opening_retest_activities",
-  "opening_timetable_sessions",
-  "opening_hard_blocks",
-  "opening_plan_state",
-  "opening_plan_drafts",
-  "opening_plan_acceptances",
-  "opening_suggestion_feedback",
-  "opening_learning_decisions",
-  "opening_learning_shadow_predictions",
-  "opening_study_intent_events",
-] as const;
+export { OPENING_RESTORE_APPLY_ORDER } from "./backup-inventory";
 
 function sameJournal(backup: OpeningBackup, current: readonly OpeningDeletionMark[]): boolean {
   const key = (mark: OpeningDeletionMark) => `${mark.sourceId.toLowerCase()}\u0000${new Date(mark.deletedAt).toISOString()}\u0000${mark.assetDeletedAt ? new Date(mark.assetDeletedAt).toISOString() : ""}`;
@@ -158,7 +115,9 @@ export function planOpeningRestoreApply(
   return {
     ok: true,
     plan: {
-      batches: OPENING_RESTORE_APPLY_ORDER.map((table) => ({ table, rows: (tables[table] as unknown[] | undefined)?.length ?? 0 })),
+      batches: OPENING_RESTORE_APPLY_ORDER.filter(table =>
+        table in tables || !OPTIONAL_ASSET_TABLES.has(table))
+        .map(table => ({ table, rows: tables[table]?.length ?? 0 })),
       objectCount: journal.objects.length,
     },
   };

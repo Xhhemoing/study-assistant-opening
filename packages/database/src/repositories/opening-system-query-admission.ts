@@ -45,7 +45,7 @@ export async function readSystemQueryAncestry(tx: TransactionSql, scope: Scope, 
   }
   const batch = [...refs].filter((entry): entry is [string, ContextSourceRef[]] => entry[1] !== null && entry[1].length <= 64)
     .map(([rootId, sourceRefs]) => ({ rootId, refs: sourceRefs }));
-  const checked = batch.length ? await tx`SELECT batch."rootId",batch.refs,${contextSourceRefsIncluded(tx, scope.workspaceId, tx`batch.refs`)} AS admitted
+  const checked = batch.length ? await tx`SELECT batch."rootId",batch.refs,${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`batch.refs`)} AS admitted
     FROM jsonb_to_recordset(${JSON.stringify(batch)}::text::jsonb) AS batch("rootId" uuid,refs jsonb)` : [];
   return { complete: true, admitted: new Map(checked.filter(row => row.admitted).map(row => [String(row.rootId), parseContextSourceRefs(row.refs)!])) };
 }

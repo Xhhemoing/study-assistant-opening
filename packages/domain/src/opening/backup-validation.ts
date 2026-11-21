@@ -89,8 +89,135 @@ function parseCitations(value: unknown): string[] | null {
   for (const citation of citations) {
     if (!isRecord(citation) || !isUuid(citation.sourceId)
       || typeof citation.sourceVersion !== "number"
-      || !Number.isSafeInteger(citation.sourceVersion) || citation.sourceVersion < 0) return null;
+      || !Number.isSafeInteger(citation.sourceVersion) || citation.sourceVersion < 0
+      || (citation.memoryOnly !== undefined && typeof citation.memoryOnly !== "boolean")) return null;
     refs.push(citation.sourceId);
+  }
+  return refs;
+}
+
+/** Assistant turn provenance can carry exact global-memory dependency IDs alongside versioned source refs. */
+export function turnMemoryDependencyMetadata(value: unknown): { memoryDependencyIds: string[] } | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "memoryDependencyIds") return null;
+  const ids = value.memoryDependencyIds;
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every(isUuid)) return null;
+  const normalized = ids.map(id => id.toLowerCase());
+  if (new Set(normalized).size !== normalized.length) return null;
+  return { memoryDependencyIds: normalized };
+}
+
+/** Extract exact global-memory dependency IDs from an opening_turns row. Returns null on malformed metadata. */
+export function turnMemoryDependencyIds(row: Record<string, unknown>): string[] | null {
+  if (row.context_source_refs === undefined || row.context_source_refs === null) return [];
+  if (!Array.isArray(row.context_source_refs)) return null;
+  let metadata: string[] | null = null;
+  for (const ref of row.context_source_refs) {
+    if (isRecord(ref) && "memoryDependencyIds" in ref) {
+      if (row.role !== "assistant" || metadata !== null) return null;
+      const parsed = turnMemoryDependencyMetadata(ref);
+      if (!parsed) return null;
+      metadata = parsed.memoryDependencyIds;
+    }
+  }
+  return metadata ?? [];
+}
+
+type BackupHistoryRow = Record<string, unknown>;
+
+function canSupplyBackupMemory(row: BackupHistoryRow, now: number): boolean {
+  if (row.status !== "active" || row.course_id != null) return false;
+  if (row.kind === "confirmed") return true;
+  if (row.kind !== "temporary") return false;
+  const expires = row.expires_at;
+  return (expires instanceof Date ? expires.getTime() : typeof expires === "string" ? Date.parse(expires) : NaN) > now;
+}
+
+/** Propagate broken lineage through both directions of the turn/memory dependency graph. */
+export function unavailableBackupMemoryLineage(
+  turns: readonly BackupHistoryRow[],
+  memories: readonly BackupHistoryRow[],
+  now: number,
+  deletedMemoryIds?: ReadonlySet<string>,
+): ReadonlySet<BackupHistoryRow> {
+  const byId = (rows: readonly BackupHistoryRow[]) => new Map(
+    rows.flatMap(row => isUuid(row.id) ? [[row.id.toLowerCase(), row] as const] : []),
+  );
+  const turnsById = byId(turns);
+  const memoriesById = byId(memories.filter(row => isUuid(row.id)
+    && !deletedMemoryIds?.has(row.id.toLowerCase()) && canSupplyBackupMemory(row, now)));
+  const dependents = new Map<BackupHistoryRow, BackupHistoryRow[]>();
+  const unavailable = new Set<BackupHistoryRow>();
+  const link = (row: BackupHistoryRow, ids: string[] | null, targets: typeof turnsById) => {
+    if (!ids) {
+      unavailable.add(row);
+      return;
+    }
+    for (const id of ids) {
+      const target = targets.get(id.toLowerCase());
+      if (!target) {
+        unavailable.add(row);
+        continue;
+      }
+      const users = dependents.get(target);
+      if (users) users.push(row);
+      else dependents.set(target, [row]);
+    }
+  };
+  for (const turn of turns) link(turn, turnMemoryDependencyIds(turn), memoriesById);
+  for (const memory of memories) {
+    const sourceIds = parseUuidArray(memory.source_turn_ids);
+    if (!isUuid(memory.id) || deletedMemoryIds?.has(memory.id.toLowerCase()) || memory.status === "deleted") {
+      unavailable.add(memory);
+    }
+    link(memory, sourceIds?.length ? sourceIds : null, turnsById);
+  }
+  // Set iteration visits newly added rows once, even for a cycle.
+  for (const row of unavailable) {
+    for (const dependent of dependents.get(row) ?? []) unavailable.add(dependent);
+  }
+  return unavailable;
+}
+
+/** Note provenance can carry publication metadata alongside its versioned source refs. */
+export function notePublicationMetadata(value: unknown) {
+  if (!isRecord(value) || Object.keys(value).length !== 1) return null;
+  if (Array.isArray(value.answerKeyBlockIds) && value.answerKeyBlockIds.every(isUuid)) {
+    return { answerKeyBlockIds: value.answerKeyBlockIds.map(id => id.toLowerCase()) };
+  }
+  if (Array.isArray(value.publicationCardIds) && value.publicationCardIds.every(isUuid)) {
+    return { publicationCardIds: value.publicationCardIds.map(id => id.toLowerCase()) };
+  }
+  return null;
+}
+
+const openingCitationRoles = new Set(["teach", "prompt", "example", "answer_key"]);
+const openingCitationStatuses = new Set(["bound", "missing", "mismatch"]);
+
+function isOpeningCitationBindingEnvelope(binding: Record<string, unknown>): boolean {
+  return isUuid(binding.blockId)
+    && typeof binding.role === "string" && openingCitationRoles.has(binding.role)
+    && typeof binding.status === "string" && openingCitationStatuses.has(binding.status)
+    && binding.factualSupport === "unverified";
+}
+
+/** Both the live projection and saved revision blocks persist compiler citation lineage here. */
+export function libraryBlockSourceReferences(block: Record<string, unknown>): string[] | null {
+  const binding = isRecord(block.content) ? block.content.citationBinding : undefined;
+  if (!isRecord(binding) || !isOpeningCitationBindingEnvelope(binding)) return [];
+  if (!Array.isArray(binding.refs)) return null;
+  return parseCitations(binding.refs)?.map(id => id.toLowerCase()) ?? null;
+}
+
+export function libraryRevisionSourceReferences(blocks: unknown): string[] | null {
+  if (!Array.isArray(blocks)) return null;
+  const refs: string[] = [];
+  for (const block of blocks) {
+    if (!isRecord(block)) return null;
+    const ids = libraryBlockSourceReferences(block);
+    if (!ids) return null;
+    for (const id of ids) refs.push(id);
   }
   return refs;
 }
@@ -158,4 +285,21 @@ export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQu
   if (!opaque) return null;
   refs.push(...opaque);
   return refs.map((id) => id.toLowerCase());
+}
+
+export function noteProvenanceSourceReferences(row: Record<string, unknown>): string[] | null {
+  if (!Array.isArray(row.context_source_refs)) return null;
+  return sourceReferences({ ...row, context_source_refs: row.context_source_refs.filter(ref => !notePublicationMetadata(ref)) });
+}
+
+export function turnSourceReferences(row: Record<string, unknown>): string[] | null {
+  if (row.context_source_refs === undefined || row.context_source_refs === null) {
+    return sourceReferences(row);
+  }
+  if (!Array.isArray(row.context_source_refs)) return null;
+  if (turnMemoryDependencyIds(row) === null) return null;
+  return sourceReferences({
+    ...row,
+    context_source_refs: row.context_source_refs.filter(ref => !turnMemoryDependencyMetadata(ref)),
+  });
 }

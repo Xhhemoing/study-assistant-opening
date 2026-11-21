@@ -10,6 +10,7 @@ export {
   type OpeningProviderOptions,
   type ProviderTextDelta,
 } from "./opening/provider";
+export { onFailedResponseUsage, type FailedResponseUsage } from "./opening/provider-stream";
 export { assertOpeningProviderEndpoint, OpeningProviderEndpointError } from "./opening/provider-network";
 export { classifyProviderFailure, type ProviderFailure } from "./opening/errors";
 export { buildTutorMetadataInput, tutorCitationsFromMarkdown } from "./opening/tutor-metadata";
@@ -81,6 +82,7 @@ export {
   ledgerActionForProviderError,
   replayDisposition,
   runBudgetedCall,
+  runBudgetedCallWithReceipt,
   settleCentsForActual,
   type BudgetCallOutcomeCode,
   type BudgetReplayDisposition,

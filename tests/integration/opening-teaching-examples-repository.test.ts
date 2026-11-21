@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { createModelGateway } from "@aistudy/ai";
 import { createTeachingExampleHandler } from "../../apps/worker/src/jobs/teaching-example";
+import { scopeBudget } from "../../apps/worker/src/runtime/model-gateway";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingExamplesRepository, createOpeningJobRepository, openingJobScope, teachingExampleJobPayloadSchema, createOpeningLearningRepository, createOpeningTeachingHintRepository, readOpeningLearningEvidenceContext } from "@aistudy/database";
+import { createOpeningBudgetRepository, createOpeningTeachingActivitiesRepository, createOpeningTeachingContentRepository, createOpeningTeachingExamplesRepository, createOpeningJobRepository, openingJobScope, teachingExampleJobPayloadSchema, createOpeningLearningRepository, createOpeningTeachingHintRepository, readOpeningLearningEvidenceContext } from "@aistudy/database";
 import { createOpeningTeachingCommandService } from "../../apps/web/src/features/opening/teaching/command-service";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -132,18 +133,17 @@ it.each(["before_send", "after_output", "purpose_revoked"] as const)("rejects %s
 it.each(["exact", "normalized"] as const)("refuses %s current prompt collision after synthetic output without publication, resend or unrelated help", async spelling => {
   const f = await seed(), queued = await f.repository.request(fixture.scope, f.request, 1), job = (await f.jobs.claim(queued.operationId))!;
   const collision = spelling === "exact" ? String(f.blocks[1]!.content.text) : String(f.blocks[1]!.content.text).replace(/\s+/g, "");
-  const release = vi.fn(async () => {}), settle = vi.fn(async () => {}), markUnknown = vi.fn(async () => {});
-  let ledger: "unsent" | "unknown" = "unsent";
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
   const provider = { complete: vi.fn(async () => ({ text: JSON.stringify({ problem: collision, workedSolution: "幂次加一后除以4，得 $x^4/4+C$；求导核对。" }),
     inputTokens: 20, outputTokens: 40, citedChunkIds: [], requestId: null, candidates: [] })) };
   const gateway = createModelGateway({ resolve: async () => ({ provider, modelSnapshot: { id: "synthetic", providerId: "synthetic", modelName: "synthetic", inputCentsPerMillion: 1, outputCentsPerMillion: 1 }, inputCentsPerMillion: 1, outputCentsPerMillion: 1 }) });
-  const handler = createTeachingExampleHandler({ repository: { ...f.repository, ledger: async () => ledger }, gateway, budget: () => ({
-    reserve: async () => ({ id: randomUUID(), state: "reserved" }), claimExecution: async () => true, release, settle,
-    markUnknown: async () => { ledger = "unknown"; await markUnknown(); },
-  }) });
+  const handler = createTeachingExampleHandler({ repository: f.repository, gateway, budget: scope => scopeBudget(budget, scope) });
   await expect(handler(job, job.payload)).rejects.toThrow("当前练习题");
   expect(provider.complete).toHaveBeenCalledTimes(1);
-  expect(markUnknown).toHaveBeenCalledTimes(1); expect(release).not.toHaveBeenCalled(); expect(settle).not.toHaveBeenCalled();
+  const [receipt] = await fixture.sql`SELECT state, amount_cents, result_ref, outcome_unknown_at, release_reason
+    FROM opening_budget_reservations WHERE workspace_id=${fixture.scope.workspaceId} AND request_id=${`teaching-example:${job.id}`}`;
+  expect(receipt).toEqual({ state: "completed", amount_cents: 1, result_ref: null, outcome_unknown_at: null, release_reason: null });
+  expect(await f.repository.ledger(fixture.scope, job.id)).toBe("completed");
   await expect(handler(job, job.payload)).rejects.toThrow("不会重发");
   expect(provider.complete).toHaveBeenCalledTimes(1);
   const init = (await f.content.getClientInit(fixture.scope, f.activity.id))!;

@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningSourceRepository } from "@aistudy/database";
+import { connectorReservationId, createOpeningSourceRepository, createSqlClient } from "@aistudy/database";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 import { GET as impact } from "../../../apps/web/src/app/api/opening/sources/[id]/impact/route";
@@ -51,5 +52,30 @@ describe("source actions HTTP boundary", () => {
     const s = await source(true), params = { params: Promise.resolve({ id: s.id }) };
     expect((await impact(request(`${s.id}/impact`), params)).status).toBe(404);
     expect((await action(request(`${s.id}/actions`, { action: "retry_cleanup" }), params)).status).toBe(404);
+  });
+  it("returns 409 for uppercase UUID cleanup/delete while connector session lock is held and 404 for nonexistent retry_cleanup", async () => {
+    const missingId = randomUUID();
+    expect((await action(request(`${missingId}/actions`, { action: "retry_cleanup" }), { params: Promise.resolve({ id: missingId }) })).status).toBe(404);
+
+    const lockedId = randomUUID();
+    const upperId = lockedId.toUpperCase();
+    const key = `opening/sources/${lockedId}/v0`;
+    const lockSql = createSqlClient(process.env.OPENING_TEST_DATABASE_URL!, { max: 1 });
+    try {
+      await lockSql`SELECT pg_advisory_lock(hashtextextended(${lockedId}, 0))`;
+      await f.sql`INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, availability)
+        VALUES (${lockedId}, 0, ${f.scope.workspaceId}, 64, 'unavailable')`;
+      await f.sql`INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, asset_deleted_at, pending_object_keys)
+        VALUES (${connectorReservationId(lockedId)}, ${f.scope.workspaceId}, ${lockedId}, now(), ARRAY[${key}]::text[])`;
+
+      const params = { params: Promise.resolve({ id: upperId }) };
+      expect((await action(request(`${upperId}/actions`, { action: "retry_cleanup" }), params)).status).toBe(409);
+      expect((await action(request(`${upperId}/actions`, { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }), params)).status).toBe(409);
+      expect(await f.sql`SELECT id FROM opening_privacy_exclusions WHERE source_id=${lockedId}`).toHaveLength(1);
+    } finally {
+      await lockSql.end({ timeout: 5 });
+      await f.sql`DELETE FROM opening_privacy_exclusions WHERE source_id=${lockedId}`;
+      await f.sql`DELETE FROM opening_source_versions WHERE source_id=${lockedId}`;
+    }
   });
 });

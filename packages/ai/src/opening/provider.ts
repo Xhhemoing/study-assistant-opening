@@ -10,7 +10,7 @@ import { hasMediaInput, mediaInputCostBound, mediaInputBytes, type MediaInputCos
 import { classifyProviderFailure } from "./errors";
 import { renderContext } from "./context";
 import { assertOpeningProviderEndpoint, fetchOpeningProvider, OpeningProviderEndpointError } from "./provider-network";
-import { OpeningProviderStreamError, readOpeningProviderStream, type ProviderTextDelta } from "./provider-stream";
+import { onFailedResponseUsage, OpeningProviderStreamError, readOpeningProviderStream, type ProviderTextDelta } from "./provider-stream";
 import { parseModelJson } from "./latex-json";
 import { parseProviderUsage } from "./usage";
 export type { ProviderTextDelta } from "./provider-stream";
@@ -199,12 +199,11 @@ function parseJsonObjectContent(raw: string): Record<string, unknown> {
   throw new OpeningProviderError("PROVIDER_RESPONSE", "provider returned malformed task JSON");
 }
 
-function parseOutput(body: unknown, format: NonNullable<ProviderInput["outputFormat"]> = "answer", allowedTools: string[] = []): ProviderOutput {
-  const value = body as Record<string, unknown>;
-  const choices = value?.choices;
-  const message = Array.isArray(choices) && choices[0] && typeof choices[0] === "object"
-    ? (choices[0] as Record<string, unknown>).message
-    : undefined;
+function parseOutput(choices: unknown, accounting: Pick<ProviderOutput, "requestId" | "inputTokens" | "outputTokens" | "cachedInputTokens"> | null,
+  format: NonNullable<ProviderInput["outputFormat"]>, allowedTools: string[] = []): ProviderOutput {
+  const choice = Array.isArray(choices) && choices[0] && typeof choices[0] === "object"
+    ? choices[0] as Record<string, unknown> : undefined;
+  const message = choice?.message;
   if (!message || typeof message !== "object") {
     throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid provider response");
   }
@@ -212,17 +211,17 @@ function parseOutput(body: unknown, format: NonNullable<ProviderInput["outputFor
   if (typeof messageValue.refusal === "string") {
     throw new OpeningProviderError("PROVIDER_REFUSAL", "provider refused the request");
   }
+  const finishReason = choice?.finish_reason;
   const calls = messageValue.tool_calls;
   if (Array.isArray(calls) && calls.length) {
-    if (!allowedTools.length || !Array.isArray(choices) || choices[0]?.finish_reason !== "tool_calls") throw new OpeningProviderError("PROVIDER_RESPONSE", "unexpected or incomplete tool call");
+    if (!allowedTools.length || finishReason !== "tool_calls") throw new OpeningProviderError("PROVIDER_RESPONSE", "unexpected or incomplete tool call");
     const parsed = providerToolCallSchema.array().min(1).max(4).safeParse(calls.map((raw: unknown) => {
       const call = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
       const fn = call.function && typeof call.function === "object" ? call.function as Record<string, unknown> : {};
       return { id: call.id, name: call.type === "function" ? fn.name : null, arguments: fn.arguments };
     }));
     if (!parsed.success || parsed.data.some(call => !allowedTools.includes(call.name)) || new Set(parsed.data.map(call => call.id)).size !== parsed.data.length) throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid provider tool calls");
-    const parsedUsage = parseProviderUsage(value.usage);
-    if (!parsedUsage) {
+    if (!accounting) {
       throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid provider response");
     }
     const output = providerOutputSchema.safeParse({
@@ -230,15 +229,15 @@ function parseOutput(body: unknown, format: NonNullable<ProviderInput["outputFor
       citedChunkIds: [],
       candidates: [],
       toolCalls: parsed.data,
-      requestId: typeof value.id === "string" ? value.id : null,
-      inputTokens: parsedUsage.inputTokens,
-      outputTokens: parsedUsage.outputTokens,
-      cachedInputTokens: parsedUsage.cachedInputTokens,
+      ...accounting,
     });
     if (!output.success) {
       throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid provider response");
     }
     return output.data;
+  }
+  if (finishReason != null && finishReason !== "stop") {
+    throw new OpeningProviderError("PROVIDER_RESPONSE", "provider did not finish the answer");
   }
   if (typeof messageValue.content !== "string") {
     throw new OpeningProviderError("PROVIDER_RESPONSE", "provider returned malformed answer JSON");
@@ -250,16 +249,12 @@ function parseOutput(body: unknown, format: NonNullable<ProviderInput["outputFor
   if (!answer.success) {
     throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid structured answer");
   }
-  const parsedUsage = parseProviderUsage(value.usage);
-  if (!parsedUsage) {
+  if (!accounting) {
     throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid provider response");
   }
   const output = providerOutputSchema.safeParse({
     ...answer.data,
-    requestId: typeof value.id === "string" ? value.id : null,
-    inputTokens: parsedUsage.inputTokens,
-    outputTokens: parsedUsage.outputTokens,
-    cachedInputTokens: parsedUsage.cachedInputTokens,
+    ...accounting,
   });
   if (!output.success) {
     throw new OpeningProviderError("PROVIDER_RESPONSE", "invalid provider response");
@@ -404,9 +399,28 @@ export function createOpeningProvider(options: OpeningProviderOptions): { comple
           if (signal.aborted || error instanceof OpeningProviderEndpointError) throw error;
           throw new OpeningProviderError("PROVIDER_RESPONSE", "provider returned malformed JSON", false, true);
         }
-        const output = parseOutput(body, format, input.tools?.map(tool => tool.name));
-        recordGradingDiagnostic(output, phase, { attemptedFetch: requestSent, httpStatus });
-        return output;
+        const envelope = body as Record<string, unknown> | null;
+        const requestId = typeof envelope?.id === "string" ? envelope.id : null;
+        const usage = parseProviderUsage(envelope?.usage, { clamp: false });
+        const accounting = usage && {
+          ...usage, requestId,
+          cachedInputTokens: usage.cachedInputTokens === null || usage.inputTokens === null
+            ? usage.cachedInputTokens : Math.min(usage.cachedInputTokens, usage.inputTokens),
+        };
+        try {
+          const output = parseOutput(envelope?.choices, accounting, format, input.tools?.map(tool => tool.name));
+          recordGradingDiagnostic(output, phase, { attemptedFetch: requestSent, httpStatus });
+          return output;
+        } catch (error) {
+          if (accounting && accounting.inputTokens !== null && accounting.outputTokens !== null) {
+            onTextDelta?.[onFailedResponseUsage]?.({
+              requestId: requestId && requestId.length > 200 ? null : requestId,
+              inputTokens: accounting.inputTokens, outputTokens: accounting.outputTokens,
+              cachedInputTokens: accounting.cachedInputTokens,
+            });
+          }
+          throw error;
+        }
       } catch (error) {
         const failure = error instanceof OpeningProviderError ? error
           : error instanceof OpeningProviderStreamError ? new OpeningProviderError(error.code, error.message, false, true, httpStatus)

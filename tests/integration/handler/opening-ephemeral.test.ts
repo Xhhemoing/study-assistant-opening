@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { OpeningProviderError } from "@aistudy/ai";
+import { createOpeningBudgetRepository } from "@aistudy/database";
 import {
   complete,
   captureEphemeralLogs,
@@ -19,6 +20,29 @@ beforeEach(resetEphemeralRows);
 afterAll(stopEphemeralHandler);
 
 describe("POST /api/opening/ephemeral", () => {
+  it("returns the paid answer and provenance when it claims an existing legacy key", async () => {
+    const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
+    const workspaceId = await workspaceForCookie();
+    const [owner] = await sql`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`;
+    const scope = { workspaceId, ownerUserId: String(owner!.owner_user_id) };
+    const clientKey = "lesson-123";
+    const held = await createOpeningBudgetRepository(sql, { envCapCents: 100_000 }).reserve(scope, {
+      requestId: "eph:lesson-123", amountCents: 10, purpose: "tutor",
+      parentBudget: { id: `study-ephemeral:${workspaceId}:${clientKey}` },
+    });
+    complete.mockResolvedValue({ text: "paid answer", citedChunkIds: [], candidates: [], requestId: "provider",
+      inputTokens: 4, outputTokens: 2 });
+    const input = { text: "Explain this", sourceIds: [], mode: "explain", history: [], clientKey };
+    const response = await POST(postEphemeral(input));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ text: "paid answer", provenanceId: held.id });
+    const [receipt] = await sql`SELECT r.request_id, r.state, p.id FROM opening_budget_reservations r
+      JOIN opening_ephemeral_provenance p ON p.id=r.id WHERE r.workspace_id=${workspaceId}`;
+    expect(receipt).toEqual({ request_id: "eph:lesson-123", state: "completed", id: held.id });
+    expect((await POST(postEphemeral(input))).status).toBe(409);
+    expect(complete).toHaveBeenCalledOnce();
+  });
+
   it("returns a stripped reply and writes no conversation, job, candidate, memory, or learning rows", async () => {
     const { POST } = await import("../../../apps/web/src/app/api/opening/ephemeral/route");
     const before = await ephemeralCounts();

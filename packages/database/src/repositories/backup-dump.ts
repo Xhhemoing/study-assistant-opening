@@ -1,13 +1,18 @@
+import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
+import { privateExamDocumentIds, readBackupLibrarySourceVersions, readBackupNoteProvenance, readBackupTeachingSourceRefs } from "./opening-backup-library";
+import { attachNativeTeachingOrigins, readNativeTeachingOrigins } from "./native-backup-teaching";
+import { historicalTeachingDocumentsByCard, publicationAnswerKeysByDocument, publicationSourceRefsByDocument } from "./backup-publication-provenance";
 import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
+import { projectNativeBackupLibrary } from "./backup-native-library";
 import { attachNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
 import {
-  buildNativeBackup,
+  buildNativeBackup, NATIVE_BACKUP_TABLES,
   type NativeBackupRecord,
   type NativeBackupSnapshot,
 } from "@aistudy/domain/native";
 import { listMigrationFiles } from "../migrate";
-import { camelRow, filesFromBlocks } from "./backup-map";
+import { camelRow } from "./backup-map";
 import { BackupRestoreError } from "./backup-types";
 
 export async function assertBackupWorkspaceOwner(
@@ -33,6 +38,8 @@ export async function dumpWorkspaceSnapshot(
   workspaceId: string,
   ownerUserId: string,
 ): Promise<NativeBackupSnapshot> {
+  const forbidden = NATIVE_BACKUP_TABLES.find(isForbiddenBackupTable);
+  if (forbidden) throw new BackupRestoreError("VALIDATION", `Forbidden backup table: ${forbidden}`);
   const workspace = await assertBackupWorkspaceOwner(sql, workspaceId, ownerUserId);
   const [
     courses,
@@ -75,7 +82,13 @@ export async function dumpWorkspaceSnapshot(
   if (!latestMigrationId) {
     throw new BackupRestoreError("VALIDATION", "No migrations are registered");
   }
-  return applyNativeNoteExportPrivacy(sql, workspaceId, {
+  const privateExams = await privateExamDocumentIds(sql, workspaceId);
+  const [noteProvenance, sourceVersions, teachingSpecs, origins] = await Promise.all([
+    readBackupNoteProvenance(sql, workspaceId), readBackupLibrarySourceVersions(sql, workspaceId),
+    readBackupTeachingSourceRefs(sql, workspaceId), readNativeTeachingOrigins(sql, workspaceId, cards, privateExams),
+  ]);
+  const answerKeys = publicationAnswerKeysByDocument(teachingSpecs, noteProvenance);
+  const snapshot: NativeBackupSnapshot = {
     sourceWorkspaceId: workspaceId,
     workspace,
     latestMigrationId,
@@ -92,10 +105,15 @@ export async function dumpWorkspaceSnapshot(
       blocks: explorationBlocks,
     }, "explorationId"),
     promotions: nestBy(promotions, { targets: promotionTargets }, "promotionId"),
-    cards: nestBy(cards, { reviewStates: cardStates }, "cardId"),
+    cards: nestBy(attachNativeTeachingOrigins(cards, origins, historicalTeachingDocumentsByCard(noteProvenance)), { reviewStates: cardStates }, "cardId"),
     events,
-    files: filesFromBlocks(blocks),
-  });
+    files: [],
+  };
+  const { records: learnerSnapshot } = projectNativeBackupLibrary(
+    snapshot, privateExams, [...answerKeys.values()].flat(), new Set(sourceVersions.keys()), teachingSpecs, origins,
+  );
+  return applyNativeNoteExportPrivacy(sql, workspaceId, { ...snapshot, ...learnerSnapshot },
+    publicationSourceRefsByDocument(teachingSpecs, sourceVersions), answerKeys);
 }
 
 export function snapshotToPackage(snapshot: NativeBackupSnapshot) {
@@ -103,6 +121,7 @@ export function snapshotToPackage(snapshot: NativeBackupSnapshot) {
 }
 
 async function selectAll(sql: Sql, table: string, workspaceId: string): Promise<NativeBackupRecord[]> {
+  if (isForbiddenBackupTable(table)) throw new BackupRestoreError("VALIDATION", `Forbidden backup table: ${table}`);
   const rows = await sql<Record<string, unknown>[]>`
     SELECT * FROM ${sql(table)} WHERE workspace_id = ${workspaceId}
   `;

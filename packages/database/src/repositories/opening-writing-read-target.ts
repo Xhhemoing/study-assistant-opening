@@ -9,6 +9,7 @@ import {
   type WritingVariantMeta,
 } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
+import { noteContextSourceRefs } from "./opening-context-provenance";
 import { openingNoteReadable } from "./opening-note-provenance";
 
 type Db = Sql | TransactionSql;
@@ -112,43 +113,43 @@ export function parseAuthorizedWritingActivityCheckpoint(row: {
 export function openingWritingActivityReadableSql(
   db: Db,
   scope: Scope,
-  activityAlias: ReturnType<Db>,
+  activityAlias: () => ReturnType<Db>,
 ) {
   return db`(
     (
-      ${activityAlias}.create_intent->>'protocol' IS DISTINCT FROM ${WRITING_WORKSPACE_PROTOCOL}
+      ${activityAlias()}.create_intent->>'protocol' IS DISTINCT FROM ${WRITING_WORKSPACE_PROTOCOL}
       AND NOT (
         CASE
-          WHEN jsonb_typeof(COALESCE(${activityAlias}.checkpoint_json, '{}'::jsonb)) = 'object'
-            THEN (COALESCE(${activityAlias}.checkpoint_json, '{}'::jsonb) ? 'writingWorkspace')
+          WHEN jsonb_typeof(COALESCE(${activityAlias()}.checkpoint_json, '{}'::jsonb)) = 'object'
+            THEN (COALESCE(${activityAlias()}.checkpoint_json, '{}'::jsonb) ? 'writingWorkspace')
           ELSE false
         END
       )
     )
     OR (
-      ${activityAlias}.workspace_id = ${scope.workspaceId}
-      AND ${activityAlias}.owner_user_id = ${scope.ownerUserId}
-      AND jsonb_typeof(${activityAlias}.create_intent) = 'object'
-      AND ${activityAlias}.create_intent->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
-      AND ${activityAlias}.create_intent->>'workGroupId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-      AND jsonb_typeof(${activityAlias}.checkpoint_json) = 'object'
-      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace') = 'object'
-      AND ${activityAlias}.checkpoint_json->'writingWorkspace'->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
-      AND lower(${activityAlias}.checkpoint_json->'writingWorkspace'->>'workGroupId') = lower(${activityAlias}.create_intent->>'workGroupId')
-      AND ${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeDocumentId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'activeVariantLabel') = 'string'
-      AND char_length(btrim(${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeVariantLabel')) BETWEEN 1 AND 80
-      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'savedRevisionNumber') = 'number'
-      AND (${activityAlias}.checkpoint_json->'writingWorkspace'->>'savedRevisionNumber') ~ '^(0|[1-9][0-9]*)(\\.0+)?$'
-      AND (${activityAlias}.checkpoint_json->'writingWorkspace' ? 'focusBlockId')
+      ${activityAlias()}.workspace_id = ${scope.workspaceId}
+      AND ${activityAlias()}.owner_user_id = ${scope.ownerUserId}
+      AND jsonb_typeof(${activityAlias()}.create_intent) = 'object'
+      AND ${activityAlias()}.create_intent->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
+      AND ${activityAlias()}.create_intent->>'workGroupId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND jsonb_typeof(${activityAlias()}.checkpoint_json) = 'object'
+      AND jsonb_typeof(${activityAlias()}.checkpoint_json->'writingWorkspace') = 'object'
+      AND ${activityAlias()}.checkpoint_json->'writingWorkspace'->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
+      AND lower(${activityAlias()}.checkpoint_json->'writingWorkspace'->>'workGroupId') = lower(${activityAlias()}.create_intent->>'workGroupId')
+      AND ${activityAlias()}.checkpoint_json->'writingWorkspace'->>'activeDocumentId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND jsonb_typeof(${activityAlias()}.checkpoint_json->'writingWorkspace'->'activeVariantLabel') = 'string'
+      AND char_length(btrim(${activityAlias()}.checkpoint_json->'writingWorkspace'->>'activeVariantLabel')) BETWEEN 1 AND 80
+      AND jsonb_typeof(${activityAlias()}.checkpoint_json->'writingWorkspace'->'savedRevisionNumber') = 'number'
+      AND (${activityAlias()}.checkpoint_json->'writingWorkspace'->>'savedRevisionNumber') ~ '^(0|[1-9][0-9]*)(\\.0+)?$'
+      AND (${activityAlias()}.checkpoint_json->'writingWorkspace' ? 'focusBlockId')
       AND (
-        jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'focusBlockId') = 'null'
+        jsonb_typeof(${activityAlias()}.checkpoint_json->'writingWorkspace'->'focusBlockId') = 'null'
         OR (
-          jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'focusBlockId') = 'string'
-          AND char_length(${activityAlias}.checkpoint_json->'writingWorkspace'->>'focusBlockId') BETWEEN 1 AND 120
+          jsonb_typeof(${activityAlias()}.checkpoint_json->'writingWorkspace'->'focusBlockId') = 'string'
+          AND char_length(${activityAlias()}.checkpoint_json->'writingWorkspace'->>'focusBlockId') BETWEEN 1 AND 120
         )
       )
-      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'updatedAt') = 'string'
+      AND jsonb_typeof(${activityAlias()}.checkpoint_json->'writingWorkspace'->'updatedAt') = 'string'
       AND EXISTS (
         SELECT 1
         FROM library_documents wd
@@ -161,7 +162,7 @@ export function openingWritingActivityReadableSql(
          AND wp.subject_id = wd.id
          AND wp.key = ${WRITING_META_PROPERTY_KEY}
         WHERE wd.workspace_id = ${scope.workspaceId}
-          AND wd.id::text = lower(${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeDocumentId')
+          AND wd.id::text = lower(${activityAlias()}.checkpoint_json->'writingWorkspace'->>'activeDocumentId')
           AND wd.deleted_at IS NULL
           AND NOT EXISTS (
             SELECT 1
@@ -175,7 +176,7 @@ export function openingWritingActivityReadableSql(
                   SELECT 1
                   FROM jsonb_array_elements(
                     CASE
-                      WHEN jsonb_typeof(np.context_source_refs) = 'array' THEN np.context_source_refs
+                      WHEN jsonb_typeof(np.context_source_refs) = 'array' THEN ${noteContextSourceRefs(db, () => db`np.context_source_refs`)}
                       ELSE '[]'::jsonb
                     END
                   ) ref
@@ -191,7 +192,7 @@ export function openingWritingActivityReadableSql(
               )
           )
           AND jsonb_typeof(wp.value) = 'object'
-          AND lower(wp.value->>'workGroupId') = lower(${activityAlias}.create_intent->>'workGroupId')
+          AND lower(wp.value->>'workGroupId') = lower(${activityAlias()}.create_intent->>'workGroupId')
           AND jsonb_typeof(wp.value->'variantLabel') = 'string'
           AND char_length(btrim(wp.value->>'variantLabel')) BETWEEN 1 AND 80
           AND (wp.value ? 'parentDocumentId')
