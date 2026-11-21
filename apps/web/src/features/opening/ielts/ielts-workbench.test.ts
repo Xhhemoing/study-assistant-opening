@@ -493,34 +493,76 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
-  it("keeps freshly generated Speaking feedback after a controlled host persists the receipt", async () => {
-    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
-    function ControlledHost() {
-      const [receipt, setReceipt] = useState<typeof fixture.initialSpeakingReceipt>();
-      return createElement(IeltsSpeakingTransferCard, {
-        seed: fixture.speakingSeed,
-        initialTranscript: fixture.initialSpeakingTranscript,
-        initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
-        initialReceipt: receipt,
-        onEvaluated: (nextReceipt: typeof fixture.initialSpeakingReceipt) => {
-          const { createdAt, ...rest } = structuredClone(nextReceipt);
-          setReceipt({ createdAt, ...rest });
-        },
+  it.each(["receipt only", "transcript, duration and receipt"] as const)(
+    "keeps freshly generated Speaking feedback when a controlled host writes back %s", async (writeBack) => {
+      const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+      function ControlledHost({ revoked }: { revoked: boolean }) {
+        const [receipt, setReceipt] = useState<typeof fixture.initialSpeakingReceipt>();
+        const savedAnswer = writeBack === "transcript, duration and receipt" ? receipt : undefined;
+        return createElement(IeltsSpeakingTransferCard, {
+          seed: fixture.speakingSeed,
+          initialTranscript: savedAnswer?.sourceTranscript ?? fixture.initialSpeakingTranscript,
+          initialDurationSeconds: savedAnswer?.durationSeconds ?? fixture.initialSpeakingDurationSeconds,
+          initialReceipt: revoked ? undefined : receipt,
+          onEvaluated: (nextReceipt: typeof fixture.initialSpeakingReceipt) => {
+            const { createdAt, ...rest } = structuredClone(nextReceipt);
+            setReceipt({ createdAt, ...rest });
+          },
+        });
+      }
+
+      await act(async () => root.render(createElement(ControlledHost, { revoked: false })));
+      await act(async () => {
+        setNativeInputValue(
+          host.querySelector<HTMLTextAreaElement>("textarea")!,
+          `${fixture.initialSpeakingTranscript} Actually, rail remains the practical choice.`,
+        );
+        setNativeInputValue(host.querySelector<HTMLInputElement>('input[type="number"]')!, "75");
       });
-    }
+      await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
 
-    await act(async () => root.render(createElement(ControlledHost)));
-    await act(async () => {
-      setNativeInputValue(
-        host.querySelector<HTMLTextAreaElement>("textarea")!,
-        `${fixture.initialSpeakingTranscript} Actually, rail remains the practical choice.`,
-      );
-    });
-    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+      expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
+      expect(host.querySelector('[data-speaking-pace="on_target"]')).not.toBeNull();
+      await act(async () => root.render(createElement(ControlledHost, { revoked: true })));
+      expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+    },
+  );
 
-    expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
-    expect(host.querySelector('[data-speaking-pace="on_target"]')).not.toBeNull();
-  });
+  it.each(["receipt only", "complete attempt"] as const)(
+    "keeps an edited answer assisted on reevaluation after the host returns %s", async (writeBack) => {
+      const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+      const seed = fixture.speakingSeed;
+      const transcript = `${fixture.initialSpeakingTranscript} That is why I would choose rail.`;
+      const durationSeconds = 75;
+      const onEvaluated = vi.fn<(receipt: typeof fixture.initialSpeakingReceipt) => void>();
+      const render = (receipt?: typeof fixture.initialSpeakingReceipt) => {
+        const savedAnswer = writeBack === "complete attempt" ? receipt : undefined;
+        return act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+          seed, onEvaluated, initialReceipt: receipt,
+          initialTranscript: savedAnswer?.sourceTranscript ?? fixture.initialSpeakingTranscript,
+          initialDurationSeconds: savedAnswer?.durationSeconds ?? fixture.initialSpeakingDurationSeconds,
+        })));
+      };
+      await render();
+      await act(async () => {
+        setNativeInputValue(host.querySelector<HTMLTextAreaElement>("textarea")!, transcript);
+        setNativeInputValue(host.querySelector<HTMLInputElement>('input[type="number"]')!, String(durationSeconds));
+      });
+      const evaluate = () => act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+      await evaluate();
+      expect(onEvaluated.mock.lastCall?.[0].countsTowardMastery).toBe(true);
+
+      await render(evaluateSpeakingRetelling({ seed, transcript, durationSeconds, assisted: true }));
+      const checkedBeforeReevaluation = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked;
+      await evaluate();
+      expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+        sourceTranscript: transcript, durationSeconds, assisted: true, epistemicStatus: "practice_feedback",
+        masteryQualified: false, countsTowardMastery: false,
+      });
+      expect(checkedBeforeReevaluation).toBe(true);
+      expect(host.querySelector('[data-speaking-epistemic="practice_feedback"]')).not.toBeNull();
+    },
+  );
 
   it.each(["transcript", "duration", "practice feedback", "mastery flag", "assistance", "removal"] as const)(
     "discards generated Speaking mastery after the host changes %s on the same seed",
@@ -620,7 +662,7 @@ describe("IeltsSpeakingTransferCard", () => {
       expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
       await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
       expect(onEvaluated).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-        sourceTranscript: "My unfinished answer", durationSeconds: 75, masteryQualified: false,
+        sourceTranscript: "My unfinished answer", durationSeconds: 75, assisted: false, masteryQualified: false,
       }));
     },
   );

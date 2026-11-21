@@ -46,12 +46,6 @@ export function IeltsSpeakingTransferCard({
     initialDurationSeconds === undefined && initialReceipt === undefined;
   const startingTranscript = useDemo ? demo.initialSpeakingTranscript : initialTranscript ?? "";
   const candidateReceipt = useDemo ? demo.initialSpeakingReceipt : initialReceipt;
-  const matchingReceipt = candidateReceipt?.seedId === seed.seedId &&
-    candidateReceipt.sourceTranscript === startingTranscript &&
-    (initialDurationSeconds === undefined || initialDurationSeconds === candidateReceipt.durationSeconds)
-      ? candidateReceipt
-      : null;
-  const startingDuration = String(initialDurationSeconds ?? matchingReceipt?.durationSeconds ?? "");
   const attemptKey = JSON.stringify([
     seed.seedId, seed.cartridgeId, seed.sourcePromptId, seed.sourceDraftId,
   ]);
@@ -60,8 +54,7 @@ export function IeltsSpeakingTransferCard({
       key={attemptKey}
       seed={seed}
       startingTranscript={startingTranscript}
-      startingDuration={startingDuration}
-      matchingReceipt={matchingReceipt}
+      seedReceipt={candidateReceipt?.seedId === seed.seedId ? candidateReceipt : null}
       external={{
         transcript: initialTranscript,
         durationSeconds: initialDurationSeconds,
@@ -81,15 +74,13 @@ type ExternalSpeakingInput = {
 function SpeakingAttempt({
   seed,
   startingTranscript,
-  startingDuration,
-  matchingReceipt,
+  seedReceipt,
   external,
   onEvaluated,
 }: {
   readonly seed: IeltsSpeakingPart3Seed;
   readonly startingTranscript: string;
-  readonly startingDuration: string;
-  readonly matchingReceipt: IeltsSpeakingFeedbackReceipt | null;
+  readonly seedReceipt: IeltsSpeakingFeedbackReceipt | null;
   readonly external: ExternalSpeakingInput;
   readonly onEvaluated: IeltsSpeakingTransferCardProps["onEvaluated"];
 }) {
@@ -104,22 +95,33 @@ function SpeakingAttempt({
     receiptSnapshot: string;
     receipt: IeltsSpeakingFeedbackReceipt;
   } | null>(null);
+  const matchingReceipt = seedReceipt?.sourceTranscript === startingTranscript &&
+    (external.durationSeconds === undefined || external.durationSeconds === seedReceipt.durationSeconds)
+    ? seedReceipt : null;
   const answer = editedAnswer ?? {
     transcript: startingTranscript,
-    durationInput: startingDuration,
+    durationInput: String(external.durationSeconds ?? matchingReceipt?.durationSeconds ?? ""),
     assisted: matchingReceipt?.assisted ?? false,
   };
-  const { transcript, durationInput, assisted } = answer;
+  const { transcript, durationInput } = answer;
   const parsedDuration = durationInput.trim() === "" ? Number.NaN : Number(durationInput);
   const receiptDuration = Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : null;
+  const assisted = answer.assisted || (seedReceipt?.assisted === true &&
+    seedReceipt.sourceTranscript === transcript && seedReceipt.durationSeconds === receiptDuration);
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
   const authority = JSON.stringify([targets, context]);
-  let evaluatedReceipt = editedAnswer ? null : matchingReceipt;
+  let evaluatedReceipt = matchingReceipt;
   if (localEvaluation) {
     const baseline = localEvaluation.external;
     const receiptChanged = baseline.receiptSnapshot !== external.receiptSnapshot;
-    if (localEvaluation.authority !== authority ||
+    const hostOwnsAnswer = external.receiptSnapshot === localEvaluation.receiptSnapshot &&
+      external.transcript === localEvaluation.receipt.sourceTranscript &&
+      external.durationSeconds === localEvaluation.receipt.durationSeconds;
+    if (hostOwnsAnswer) {
+      setEditedAnswer(null);
+      setLocalEvaluation(null);
+    } else if (localEvaluation.authority !== authority ||
       baseline.transcript !== external.transcript ||
       !Object.is(baseline.durationSeconds, external.durationSeconds) ||
       (receiptChanged && localEvaluation.receiptSnapshot !== external.receiptSnapshot)) {
