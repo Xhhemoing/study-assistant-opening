@@ -138,6 +138,27 @@ async function streamFixture(historySourceId?: string) {
   return { fixture, scope, sql, jobId, key, writer, reader, jobs, deps };
 }
 
+it("revokes the same Redis privacy epoch for upper- and lowercase workspace UUIDs", async () => {
+  const { fixture, scope, sql, jobId, key, writer, reader, jobs } = await streamFixture();
+  const mixedCase = { ...scope, workspaceId: scope.workspaceId.toUpperCase() };
+  keys.push(`opening:tutor-stream:epoch:${mixedCase.workspaceId}`);
+  try {
+    const job = (await jobs.claim(jobId))!;
+    await writer.begin(scope.workspaceId, jobId, { privacyEpoch: 0, contextSourceRefs: [],
+      exposureReceiptId: null, executionId: job.executionId });
+    await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, mixedCase))).resolves.toBe(1);
+    expect(await redis.get(`opening:tutor-stream:epoch:${scope.workspaceId}`)).toBe("1");
+    expect(await redis.hget(key, "sequence")).toBe("0");
+    expect(await writer.append(scope.workspaceId, jobId, "stale", job.executionId, 0)).toBe(0);
+    await writer.begin(mixedCase.workspaceId, jobId, { privacyEpoch: 0, contextSourceRefs: [],
+      exposureReceiptId: null, executionId: job.executionId });
+    expect(await reader.read(mixedCase.workspaceId, jobId)).toBeNull();
+  } finally {
+    keys.push(`opening:tutor-stream:${mixedCase.workspaceId}:${jobId}`);
+    await fixture.close();
+  }
+});
+
 const output = { text: "First unsafe tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
 
 it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s commits even when Redis control stalls", async revocation => {

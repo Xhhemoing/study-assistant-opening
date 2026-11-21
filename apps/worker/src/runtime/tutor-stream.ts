@@ -2,7 +2,7 @@ import type IORedis from "ioredis";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   parseContextSourceRefs, sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema,
-  tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, type ContextSourceRef, type TutorAttemptFence,
+  tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, tutorStreamPreAnswerHeadKey, type ContextSourceRef, type TutorAttemptFence,
 } from "@aistudy/database";
 import { uuidSchema } from "@aistudy/contracts";
 
@@ -21,6 +21,9 @@ const channelFor = (workspaceId: string, jobId: string) => `${tutorStreamKey(wor
 function attemptHeadBinding(workspaceId: string, fence?: TutorAttemptFence) {
   if (fence?.rootObservationId && fence.headObservationId) {
     return { key: tutorStreamAttemptHeadKey(workspaceId, fence.rootObservationId), id: fence.headObservationId };
+  }
+  if (fence?.rootObservationId === null && fence.headObservationId === null) {
+    return { key: tutorStreamPreAnswerHeadKey(workspaceId, fence.attemptId), id: "unsubmitted" };
   }
 }
 

@@ -6,9 +6,11 @@ import type { OpeningScope } from "./opening-sources";
 
 export const TUTOR_STREAM_TTL_SECONDS = 15 * 60;
 export const tutorStreamKey = (workspaceId: string, jobId: string) => `opening:tutor-stream:${workspaceId}:${jobId}`;
-export const tutorStreamEpochKey = (workspaceId: string) => `opening:tutor-stream:epoch:${workspaceId}`;
+export const tutorStreamEpochKey = (workspaceId: string) => `opening:tutor-stream:epoch:${workspaceId.toLowerCase()}`;
 export const tutorStreamAttemptHeadKey = (workspaceId: string, rootObservationId: string) =>
   `opening:tutor-stream:attempt-head:${workspaceId}:${rootObservationId}`;
+export const tutorStreamPreAnswerHeadKey = (workspaceId: string, attemptId: string) =>
+  `opening:tutor-stream:attempt-head:${workspaceId.toLowerCase()}:unsubmitted:${attemptId.toLowerCase()}`;
 
 /** Match ioredis 5.6.1's URL precedence and decimal conversion. */
 export function openingRedisDatabase(redisUrl: string): number {
@@ -149,28 +151,38 @@ export async function fenceCancelledOpeningTutorStream(workspaceId: string, jobI
     workspaceId, jobId, executionId);
 }
 
-/** Confirm the new head while the revision transaction still holds the root lock. */
-export async function fenceOpeningTutorAttemptHead(workspaceId: string, rootObservationId: string, headObservationId: string,
+/** Call while holding the workspace history and attempt or observation root locks. */
+export async function fenceOpeningTutorAttemptHead(tx: TransactionSql, workspaceId: string, attemptId: string,
+  rootObservationId: string | null, headObservationId: string,
   redisUrl = process.env.REDIS_URL?.trim()): Promise<void> {
-  if (!redisUrl) return;
+  // A terminal claim can still have Redis bytes in flight. New publications
+  // must acquire the history lock and check the attempt again after commit.
+  const [execution] = await tx`SELECT 1 FROM opening_tutor_jobs j
+    JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+    WHERE j.workspace_id=${workspaceId} AND j.timing_execution_id IS NOT NULL
+      AND (t.attempt_id=${attemptId} OR (t.attempt_id IS NULL AND lower(t.context_anchor->>'attemptId')=${attemptId})) LIMIT 1`;
+  if (!execution) return;
+  if (!redisUrl) throw new Error("Redis is required to revoke tutor attempt stream publication");
+  const key = rootObservationId === null ? tutorStreamPreAnswerHeadKey(workspaceId, attemptId)
+    : tutorStreamAttemptHeadKey(workspaceId, rootObservationId);
   // Outlive existing stream snapshots, while bounding the effect of a failed PG commit.
   await evalRevocationRedis(redisUrl, `
     redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
-  `, 1, tutorStreamAttemptHeadKey(workspaceId, rootObservationId), headObservationId, TUTOR_STREAM_TTL_SECONDS);
+  `, 1, key, headObservationId, TUTOR_STREAM_TTL_SECONDS);
 }
 
 /** Call inside the revocation transaction, before it can commit. */
 export async function advanceOpeningWorkspacePrivacyEpoch(tx: TransactionSql, scope: OpeningScope,
   redisUrl = process.env.REDIS_URL?.trim()): Promise<number> {
   const [workspace] = await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1, updated_at=now()
-    WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING privacy_epoch`;
+    WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING id,privacy_epoch`;
   if (!workspace) throw new Error("Workspace disappeared while revoking tutor stream eligibility");
   const epoch = Number(workspace.privacy_epoch);
 
   if (!redisUrl) {
     // A claimed execution can have unresolved bytes even after a terminal job write.
     const [execution] = await tx`SELECT 1 FROM opening_tutor_jobs
-      WHERE workspace_id=${scope.workspaceId} AND timing_execution_id IS NOT NULL LIMIT 1`;
+      WHERE workspace_id=${workspace.id} AND timing_execution_id IS NOT NULL LIMIT 1`;
     if (execution) throw new Error("Redis is required to revoke tutor stream publication");
     return epoch;
   }
@@ -179,6 +191,6 @@ export async function advanceOpeningWorkspacePrivacyEpoch(tx: TransactionSql, sc
   await evalRevocationRedis(redisUrl, `
     local minimum = tonumber(redis.call('GET', KEYS[1]) or '0')
     redis.call('SET', KEYS[1], math.max(minimum, tonumber(ARGV[1])), 'EX', ARGV[2])
-  `, 1, tutorStreamEpochKey(scope.workspaceId), epoch, TUTOR_STREAM_TTL_SECONDS);
+  `, 1, tutorStreamEpochKey(String(workspace.id)), epoch, TUTOR_STREAM_TTL_SECONDS);
   return epoch;
 }
