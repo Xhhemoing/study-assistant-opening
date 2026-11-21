@@ -511,6 +511,77 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     expect(containsAnswerLeak("Value is 3.14", "3")).toBe(false);
     expect(containsAnswerLeak("Solve x^2 - 4 = 0", "-4")).toBe(false);
 
+    // [Round-8 P1] Binary `+`/`-` whitespace normalization across compound math/equation expressions
+    // (`x = 2 + 3` <-> `x=2+3`, `a + b` <-> `a+b`, `2x - 1` <-> `2x-1`) in BOTH flashcard and miss_variant stems,
+    // while keeping standalone signed literals (`"-4"`) non-false-positive on `"Solve x^2 - 4 = 0"`.
+    expect(containsAnswerLeak("Check x=2+3 carefully.", "x = 2 + 3")).toBe(true);
+    expect(containsAnswerLeak("Check x = 2 + 3 carefully.", "x=2+3")).toBe(true);
+    expect(containsAnswerLeak("Evaluate a+b directly.", "a + b")).toBe(true);
+    expect(containsAnswerLeak("Evaluate a + b directly.", "a+b")).toBe(true);
+    expect(containsAnswerLeak("Remember 2x-1 vanishes.", "2x - 1")).toBe(true);
+    expect(containsAnswerLeak("Remember 2x - 1 vanishes.", "2x-1")).toBe(true);
+    expect(containsAnswerLeak("其解为x=2+3。", "x = 2 + 3")).toBe(true);
+
+    for (const [idx, exprCase] of [
+      { answerKey: "x = 2 + 3", stem: "Verify that x=2+3 satisfies the system." },
+      { answerKey: "x=2+3", stem: "Verify that x = 2 + 3 satisfies the system." },
+      { answerKey: "a + b", stem: "Recall that a+b stays invariant." },
+      { answerKey: "2x - 1", stem: "Use the derivative 2x-1 here." },
+    ].entries()) {
+      const rejectedMiss = issueOfflineFlashcardLease({
+        leaseId: `lease-r8-binary-miss-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: exprCase.answerKey,
+            freshVariantStem: exprCase.stem,
+          }),
+        ],
+      });
+      expect(rejectedMiss.ok).toBe(false);
+      if (!rejectedMiss.ok) {
+        expect(rejectedMiss.httpStatus).toBe(422);
+        expect(rejectedMiss.code).toBe("miss_variant_answer_leak");
+      }
+
+      const rejectedFlashcard = issueOfflineFlashcardLease({
+        leaseId: `lease-r8-binary-fc-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({ answerKey: exprCase.answerKey }),
+          {
+            ...makeFlashcardCandidate(400 + idx),
+            prompt: "Review algebraic form.",
+            backSummary: exprCase.stem,
+          },
+        ],
+      });
+      expect(rejectedFlashcard.ok).toBe(false);
+      if (!rejectedFlashcard.ok) {
+        expect(rejectedFlashcard.httpStatus).toBe(422);
+        expect(rejectedFlashcard.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    // Standalone signed literal "-4" must STILL not false-positive on binary subtraction "Solve x^2 - 4 = 0".
+    const benignSignedLiteral = issueOfflineFlashcardLease({
+      leaseId: "lease-r8-signed-benign",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({
+          answerKey: "-4",
+          freshVariantStem: "Solve x^2 - 4 = 0 for all real roots.",
+        }),
+      ],
+    });
+    expect(benignSignedLiteral.ok).toBe(true);
+
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
       { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },
@@ -1960,7 +2031,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     });
   });
 
-  it("rejects same-course, multi-hop flagged, missing-epoch, bridged-prior contamination ([P1-6]), and duplicate-edge weight inflation", () => {
+  it("rejects same-course, multi-hop flagged, missing-epoch, bridged-prior contamination ([P1-6]), and duplicate-edge weight inflation", async () => {
     const result = computeCrossCourseWeakPrior({
       targetCourseId: "course-target",
       targetConceptId: "span",
@@ -2256,5 +2327,113 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     if (!uuidReplay.ok) throw new Error("expected UUID replay");
     expect(uuidReplay.replayedCount).toBe(1);
     expect(uuidReplay.settledCount).toBe(0);
+
+    // [Round-8 P2] Pre-Round-7 stored ledger entry whose payloadFingerprint was hashed from
+    // raw uppercase UUIDs MUST replay idempotently (both uppercase and lowercase retries),
+    // while genuine payload mutations STILL return 409 seq_payload_mismatch!
+    const preR7LeaseUuidLower = "44444444-5555-4666-8777-888888888888";
+    const preR7LeaseUuidUpper = preR7LeaseUuidLower.toUpperCase();
+    const preR7CardUuidLower = "55555555-6666-4777-8888-999999999999";
+    const preR7CardUuidUpper = preR7CardUuidLower.toUpperCase();
+    const preR7EntryUpper = {
+      leaseId: preR7LeaseUuidUpper,
+      seq: 1,
+      cardId: preR7CardUuidUpper,
+      expectedCardRevision: 1,
+      rating: "good" as const,
+    };
+    // Simulate a legacy pre-Round-7 SHA-256 fingerprint computed over raw uppercase UUIDs
+    // (before canonicalizeIdentifier lowercased UUIDs).
+    const preR7CanonicalJson = `{"cardId":"${preR7CardUuidUpper}","expectedCardRevision":1,"leaseId":"${preR7LeaseUuidUpper}","rating":"good","seq":1}`;
+    const preR7DigestBytes = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(preR7CanonicalJson)),
+    );
+    const preR7RawUppercaseFingerprint = [...preR7DigestBytes]
+      .map(byte => byte.toString(16).padStart(2, "0"))
+      .join("");
+
+    const preR7Lease = issueOfflineFlashcardLease({
+      leaseId: preR7LeaseUuidUpper,
+      workspaceId: courseAUuidUpper,
+      learnerId: lowerUuid,
+      issuedAtMs: T0,
+      candidates: [{ ...makeFlashcardCandidate(1), cardId: preR7CardUuidUpper }],
+    });
+    if (!preR7Lease.ok) throw new Error("expected preR7 lease");
+
+    const preR7ReceiptSnapshot = {
+      ...createInitialOfflineFsrsSnapshot(preR7CardUuidLower, T0 + 60_000, 2),
+      lastServerReviewedAtMs: T0 + 60_000,
+    };
+    const legacyLedger = {
+      [`${preR7LeaseUuidUpper}:1`]: {
+        leaseId: preR7LeaseUuidUpper,
+        seq: 1,
+        payloadFingerprint: preR7RawUppercaseFingerprint,
+        receipt: {
+          leaseId: preR7LeaseUuidUpper,
+          seq: 1,
+          cardId: preR7CardUuidUpper,
+          rawRating: "good" as const,
+          effectiveRating: "good" as const,
+          clampedFromEasy: false,
+          authorityClock: "server_receipt" as const,
+          effectiveReviewedAtMs: T0 + 60_000,
+          delayedCheckMinted: false as const,
+          allowMasteryPromotion: false as const,
+          transferVerified: false as const,
+          strippedClientFlags: [],
+          previousRevision: 1,
+          newRevision: 2,
+          nextSnapshot: preR7ReceiptSnapshot,
+        },
+      },
+    };
+
+    const legacyReplayUpper = reconcileOfflineLeaseOutbox({
+      lease: preR7Lease.lease,
+      serverCards: { [preR7CardUuidLower]: preR7ReceiptSnapshot },
+      processedLedger: legacyLedger,
+      serverReceiptAtMs: T0 + 120_000,
+      entries: [preR7EntryUpper],
+    });
+    expect(legacyReplayUpper.ok).toBe(true);
+    if (!legacyReplayUpper.ok) throw new Error("expected legacy uppercase replay");
+    expect(legacyReplayUpper.replayedCount).toBe(1);
+    expect(legacyReplayUpper.results[0]?.outcome).toBe("replayed");
+
+    const legacyReplayLower = reconcileOfflineLeaseOutbox({
+      lease: preR7Lease.lease,
+      serverCards: { [preR7CardUuidLower]: preR7ReceiptSnapshot },
+      processedLedger: legacyLedger,
+      serverReceiptAtMs: T0 + 120_000,
+      entries: [
+        {
+          leaseId: preR7LeaseUuidLower,
+          seq: 1,
+          cardId: preR7CardUuidLower,
+          expectedCardRevision: 1,
+          rating: "good",
+        },
+      ],
+    });
+    expect(legacyReplayLower.ok).toBe(true);
+    if (!legacyReplayLower.ok) throw new Error("expected legacy lowercase replay");
+    expect(legacyReplayLower.replayedCount).toBe(1);
+    expect(legacyReplayLower.results[0]?.outcome).toBe("replayed");
+
+    const legacyMutatedConflict = reconcileOfflineLeaseOutbox({
+      lease: preR7Lease.lease,
+      serverCards: { [preR7CardUuidLower]: preR7ReceiptSnapshot },
+      processedLedger: legacyLedger,
+      serverReceiptAtMs: T0 + 120_000,
+      entries: [{ ...preR7EntryUpper, rating: "hard" }],
+    });
+    expect(legacyMutatedConflict.ok).toBe(true);
+    if (!legacyMutatedConflict.ok) throw new Error("expected conflict response");
+    expect(legacyMutatedConflict.results[0]).toMatchObject({
+      outcome: "seq_payload_mismatch",
+      httpStatus: 409,
+    });
   });
 });

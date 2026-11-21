@@ -207,11 +207,38 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
   return patterns.some(pattern => pattern.test(rawText));
 }
 
+const COMPOUND_BINARY_ADD_SUB_RE = /(?<=[\p{N})]|(?<![\p{Script=Latin}\p{Script=Greek}_])[a-z]|\b(?:pi|theta|alpha|beta|gamma|delta|epsilon|zeta|eta|kappa|lambda|mu|nu|xi|rho|sigma|tau|phi|chi|psi|omega|inf|infty))\s*([+-])\s*(?=[\p{N}(]|[a-z](?![\p{Script=Latin}\p{Script=Greek}_])|(?:pi|theta|alpha|beta|gamma|delta|epsilon|zeta|eta|kappa|lambda|mu|nu|xi|rho|sigma|tau|phi|chi|psi|omega|inf|infty)\b|sqrt\()/giu;
+
+const COMPOUND_MATH_EXPR_RE = new RegExp(
+  `^(?:[+-]|\\+-|-\\+)?[\\p{N}a-z().]+(?:[+\\-*\\/^][\\p{N}a-z().]+)+$`,
+  "iu",
+);
+
+const STANDALONE_SIGNED_LITERAL_RE = new RegExp(
+  `^(?:\\+-|-\\+|[+-])(?:` +
+    `\\d+(?:\\.\\d+)?(?:\\/\\d+)?` +
+    `|(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\)|[a-z]\\^\\d+)(?:\\/[a-z0-9]+)?` +
+    `|\\d+(?:\\/\\d+)?\\s*(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\))` +
+    `|\\d+[a-z](?:\\^\\d+)?` +
+  `)$`,
+  "i",
+);
+
+function collapseBinaryAddSubWhitespace(canonicalizedText: string): string {
+  let current = canonicalizedText;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next = current.replace(COMPOUND_BINARY_ADD_SUB_RE, "$1");
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
 /**
  * Checks whether a candidate stem/text leaks a secret answer/solution value, including:
  * - exact normalized equality (after symmetric Unicode math canonicalization)
  * - non-trivial substring or multi-segment solution excerpts
- * - whitespace-tolerant equations/inequalities (`x=5`, `x<=5`, `x>=0`, `x!=1`)
+ * - whitespace-tolerant equations/inequalities and compound `+`/`-` math expressions (`x = 2 + 3` <-> `x=2+3`, `a + b` <-> `a+b`, `2x - 1` <-> `2x-1`)
  * - short single-token numeric/symbolic answers (`"42"`, `"−7"`, `"0.5"`, `"½"`, `"π/2"`, `"√2"`, `"±3"`, `"∞"`)
  * - single-letter choice answer reveals (e.g. `"Correct option is B"`, `"(B)"`)
  */
@@ -225,18 +252,51 @@ export function containsAnswerLeak(
   if (!normalizedStem || !normalizedSecret) return false;
   if (normalizedStem === normalizedSecret) return true;
 
+  const compactStem = collapseBinaryAddSubWhitespace(normalizedStem);
+  const compactSecret = collapseBinaryAddSubWhitespace(normalizedSecret);
+  if (!STANDALONE_SIGNED_LITERAL_RE.test(normalizedSecret) && compactStem === compactSecret) {
+    return true;
+  }
+
   const includeShortTokens = options.includeShortTokens ?? true;
 
   for (const segment of extractLeakSegments(normalizedSecret)) {
+    const isStandaloneSigned = STANDALONE_SIGNED_LITERAL_RE.test(segment);
+    const compactSegment = isStandaloneSigned
+      ? segment
+      : collapseBinaryAddSubWhitespace(segment);
+
     if (segment.length >= 6 && normalizedStem.includes(segment)) {
+      return true;
+    }
+    if (!isStandaloneSigned && compactSegment.length >= 6 && compactStem.includes(compactSegment)) {
       return true;
     }
     const tokenCount = segment.split(/\s+/).filter(Boolean).length;
     if (tokenCount >= 2 && segment.length >= 4 && containsTokenBoundedSubstring(normalizedStem, segment)) {
       return true;
     }
-    if (RELATION_OP_RE.test(segment)) {
-      const compactRel = segment.replace(/\s*(<=|>=|!=|~=|==|=|<|>)\s*/g, "$1");
+    if (!isStandaloneSigned) {
+      const compactTokenCount = compactSegment.split(/\s+/).filter(Boolean).length;
+      if (
+        compactTokenCount >= 2 &&
+        compactSegment.length >= 4 &&
+        containsTokenBoundedSubstring(compactStem, compactSegment)
+      ) {
+        return true;
+      }
+      if (
+        includeShortTokens &&
+        compactTokenCount === 1 &&
+        compactSegment.length >= 3 &&
+        COMPOUND_MATH_EXPR_RE.test(compactSegment) &&
+        containsStandaloneNumericOrSymbolicToken(compactStem, compactSegment)
+      ) {
+        return true;
+      }
+    }
+    if (RELATION_OP_RE.test(compactSegment)) {
+      const compactRel = compactSegment.replace(/\s*(<=|>=|!=|~=|==|=|<|>)\s*/g, "$1");
       if (compactRel.length >= 3) {
         const relRegexSource = compactRel
           .split(/(<=|>=|!=|~=|==|=|<|>)/)
@@ -248,7 +308,7 @@ export function containsAnswerLeak(
           `(?<!${ALPHA_NUM_IDENT_CHAR})${relRegexSource}(?!${ALPHA_NUM_IDENT_CHAR})`,
           "iu",
         );
-        if (relPattern.test(normalizedStem)) {
+        if (relPattern.test(normalizedStem) || (!isStandaloneSigned && relPattern.test(compactStem))) {
           return true;
         }
       }
@@ -900,6 +960,15 @@ function scheduleServerReceiptFsrs(
   };
 }
 
+function computeRawTrimmedOutboxPayloadFingerprint(entry: OfflineOutboxEntryInput): string {
+  const trimmedEntry: OfflineOutboxEntryInput = {
+    ...entry,
+    leaseId: isNonEmptyString(entry.leaseId) ? entry.leaseId.trim() : entry.leaseId,
+    cardId: isNonEmptyString(entry.cardId) ? entry.cardId.trim() : entry.cardId,
+  };
+  return sha256Utf8Hex(canonicalizeForFingerprint(trimmedEntry));
+}
+
 function buildPayloadSummary(entry: OfflineOutboxEntryInput): OfflineOutboxPayloadSummary {
   return {
     cardId: isNonEmptyString(entry.cardId) ? canonicalizeIdentifier(entry.cardId) : entry.cardId,
@@ -911,13 +980,38 @@ function buildPayloadSummary(entry: OfflineOutboxEntryInput): OfflineOutboxPaylo
 
 function payloadMatchesLedgerEntry(
   entry: OfflineOutboxEntryInput,
-  payloadFingerprint: string,
+  canonicalFingerprint: string,
   ledgerEntry: OfflineOutboxLedgerEntry,
 ): boolean {
-  if (ledgerEntry.payloadFingerprint !== payloadFingerprint) return false;
+  const canonicalEntryLeaseId = isNonEmptyString(entry.leaseId)
+    ? canonicalizeIdentifier(entry.leaseId)
+    : entry.leaseId;
   const canonicalEntryCardId = isNonEmptyString(entry.cardId)
     ? canonicalizeIdentifier(entry.cardId)
     : entry.cardId;
+
+  const rawTrimmedFingerprint = computeRawTrimmedOutboxPayloadFingerprint(entry);
+  let fingerprintMatches =
+    ledgerEntry.payloadFingerprint === canonicalFingerprint ||
+    ledgerEntry.payloadFingerprint === rawTrimmedFingerprint;
+
+  // Also support legacy pre-Round-7 stored ledger fingerprints whose original leaseId/cardId
+  // used uppercase UUIDs while the replay arrives with canonical lowercase UUIDs (or vice versa).
+  if (
+    !fingerprintMatches &&
+    canonicalizeIdentifier(ledgerEntry.leaseId) === canonicalEntryLeaseId &&
+    canonicalizeIdentifier(ledgerEntry.receipt.cardId) === canonicalEntryCardId
+  ) {
+    const legacyCaseEntry: OfflineOutboxEntryInput = {
+      ...entry,
+      leaseId: ledgerEntry.leaseId,
+      cardId: ledgerEntry.receipt.cardId,
+    };
+    const legacyCaseFingerprint = sha256Utf8Hex(canonicalizeForFingerprint(legacyCaseEntry));
+    fingerprintMatches = ledgerEntry.payloadFingerprint === legacyCaseFingerprint;
+  }
+
+  if (!fingerprintMatches) return false;
   const summary = ledgerEntry.payloadSummary;
   if (summary) {
     if (
@@ -1226,16 +1320,16 @@ export function reconcileOfflineLeaseOutbox(
     ) {
       conflictCount += 1;
       results.push({
-        leaseId: lease.leaseId,
+        leaseId: canonicalLeaseId,
         seq: entry.seq,
-        cardId: entry.cardId,
+        cardId: canonicalEntryCardId,
         outcome: "reviewed_elsewhere",
         httpStatus: 409,
         serverRevision: serverCard.revision,
         leasedCardRevision: leasedCard.cardRevision,
         expectedCardRevision: entry.expectedCardRevision,
         serverLastReviewedAtMs: serverCard.lastServerReviewedAtMs,
-        reason: `Card ${entry.cardId} was reviewed elsewhere (serverRevision=${serverCard.revision}, leasedRevision=${leasedCard.cardRevision}, expected=${entry.expectedCardRevision}).`,
+        reason: `Card ${canonicalEntryCardId} was reviewed elsewhere (serverRevision=${serverCard.revision}, leasedRevision=${leasedCard.cardRevision}, expected=${entry.expectedCardRevision}).`,
       });
       continue;
     }
