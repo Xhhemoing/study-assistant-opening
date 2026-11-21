@@ -1,4 +1,4 @@
-import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences } from "@aistudy/domain";
+import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences, turnMemoryDependencyIds } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
 import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, projectOpeningBackupProvenance, readBackupLibrary, readBackupNoteProvenance } from "./opening-backup-library";
 import { readBackupCourseAssets } from "./opening-backup-course-assets";
@@ -373,9 +373,23 @@ export async function readOpeningBackupTableRows(
       (row.turn_id == null || turnIds.has(row.turn_id))
       && (row.help_input_snapshot == null || turnIds.has((row.help_input_snapshot as { userTurnId: string }).userTurnId))
       && (row.attempt_id == null || attemptIds.has(row.attempt_id)));
-    const turnIdsLower = new Set(
+    const preMemoryTurnIdsLower = new Set(
       tables.opening_turns.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])),
     );
+    tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
+      && (row.source_turn_ids as string[]).every(turn => typeof turn === "string" && preMemoryTurnIdsLower.has(turn.toLowerCase())));
+    const memoryIdsLower = new Set(
+      tables.opening_memories.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])),
+    );
+    const turnCountBeforeMemoryDeps = tables.opening_turns.length;
+    tables.opening_turns = tables.opening_turns.filter(row => {
+      const depIds = turnMemoryDependencyIds(row);
+      return depIds !== null && depIds.every(depId => memoryIdsLower.has(depId));
+    });
+    const droppedMemoryDependentTurns = tables.opening_turns.length < turnCountBeforeMemoryDeps;
+    const turnIdsLower = droppedMemoryDependentTurns
+      ? new Set(tables.opening_turns.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])))
+      : preMemoryTurnIdsLower;
     const droppedOriginTurnActivities = new Set(
       tables.opening_teaching_activities
         .filter(row => {
@@ -393,6 +407,9 @@ export async function readOpeningBackupTableRows(
     );
     if (droppedOriginTurnActivities.size > 0) {
       tables.opening_teaching_activities = tables.opening_teaching_activities.filter(row => !droppedOriginTurnActivities.has(row.id));
+      continue;
+    }
+    if (droppedMemoryDependentTurns) {
       continue;
     }
     break;

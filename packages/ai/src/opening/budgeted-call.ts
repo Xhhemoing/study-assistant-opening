@@ -119,6 +119,12 @@ export type BudgetedCallOptions = {
   /** Runs after reservation, before any Provider request is authorized. */
   beforeSend?: () => Promise<void>;
   /**
+   * Optional send gate that wraps synchronous provider initiation (e.g. holding DB
+   * FOR SHARE locks until fetch starts, then releasing the DB connection before awaiting
+   * the network response). Any error thrown before startSend() is called releases "not_sent".
+   */
+  authorizeAndStartSend?: <T>(startSend: () => Promise<T>) => Promise<T>;
+  /**
    * Optional logical operation id (worker-side, BC1 medium).
    * When set, used as the ledger reserve/release idempotency key so retries
    * of the same operation reuse one reservation instead of stacking a second
@@ -337,9 +343,23 @@ export async function runBudgetedCallWithReceipt(options: BudgetedCallOptions): 
 
   try {
     let output: ProviderOutput;
+    let sendStarted = false;
     try {
-      output = await options.provider.complete(options.input, options.signal, onTextDelta);
+      if (options.authorizeAndStartSend) {
+        output = await options.authorizeAndStartSend(() => {
+          sendStarted = true;
+          return options.provider!.complete(options.input, options.signal, onTextDelta);
+        });
+      } else {
+        sendStarted = true;
+        output = await options.provider.complete(options.input, options.signal, onTextDelta);
+      }
     } catch (error) {
+      if (!sendStarted) {
+        // Authorization failed before provider.complete was ever invoked.
+        await releaseUnsent(error);
+        throw error;
+      }
       const usage = failedResponseUsage;
       if (usage) {
         phase = "usage";

@@ -11,6 +11,7 @@ import { dailyDraftAdvisoryLockKeys } from "./opening-plans";
 import { proposeOpeningLocalPlan } from "./opening-local-replan";
 import { applyAssistantProposal, proposalTransactionClient } from "./opening-assistant-proposal-effects";
 import { countPendingAssistantProposals, listPendingAssistantProposals } from "./opening-assistant-proposal-pending";
+import { withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 const map = (row: Record<string, unknown>): AssistantProposalRecord => {
   const intent = assistantProposalCreateSchema.parse(row.intent);
@@ -102,7 +103,7 @@ export function createOpeningAssistantProposalsRepository(sql: Sql, options: { e
     },
     async decide(scope: Scope, id: string, raw: AssistantProposalDecision): Promise<AssistantProposalRecord> {
       const input = controlledLearningTools.accept_proposal.input.parse(raw);
-      return sql.begin(async tx => {
+      return withOpeningTutorStreamFenceCommit(sql, async tx => {
         const [preview] = await tx`SELECT * FROM opening_assistant_proposals WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         if (!preview) throw learningError("NOT_FOUND", "proposal not found");
         const intent = assistantProposalCreateSchema.parse(preview.intent);

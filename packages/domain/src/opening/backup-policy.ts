@@ -12,7 +12,8 @@ import { validateBackupPlanFeedback } from "./backup-plan-feedback";
 import { validateBackupSystemQuery } from "./backup-system-query";
 import { validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, libraryBlockSourceReferences,
-  libraryRevisionSourceReferences, noteProvenanceSourceReferences, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
+  libraryRevisionSourceReferences, noteProvenanceSourceReferences, parseUuidArray, sourceReferences,
+  turnMemoryDependencyIds, turnSourceReferences, validObject } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
 export type OpeningMemoryDeletions = {
@@ -273,7 +274,13 @@ export function validateOpeningRestore(
   }
   const errors: string[] = [];
   const tables = backup.tables;
-  const needsMemoryFacts = (tables.opening_memories?.length ?? 0) > 0 || backup.memoryDeletions !== undefined;
+  const hasTurnMemoryDeps = (tables.opening_turns ?? []).some(row => {
+    const deps = turnMemoryDependencyIds(row);
+    return deps !== null && deps.length > 0;
+  });
+  const needsMemoryFacts = (tables.opening_memories?.length ?? 0) > 0
+    || hasTurnMemoryDeps
+    || backup.memoryDeletions !== undefined;
   if ((needsMemoryFacts || currentMemoryDeletions !== undefined)
     && !isMemoryDeletions(currentMemoryDeletions, backup.workspaceId)) {
     errors.push("current owner-scoped memory deletion facts are required");
@@ -299,6 +306,9 @@ export function validateOpeningRestore(
   const turns = new Map((tables.opening_turns ?? [])
     .filter((row) => isUuid(row.id) && isUuid(row.workspace_id) && row.workspace_id.toLowerCase() === workspaceId)
     .map((row) => [(row.id as string).toLowerCase(), row]));
+  const ownedMemories = new Set((tables.opening_memories ?? [])
+    .filter((row) => isUuid(row.id) && isUuid(row.workspace_id) && row.workspace_id.toLowerCase() === workspaceId)
+    .map((row) => (row.id as string).toLowerCase()));
   for (const [name, rows] of Object.entries(tables)) {
     if (!OPENING_BACKUP_TABLE_SET.has(name)) {
       errors.push(`table ${name} is not allowlisted`);
@@ -321,6 +331,13 @@ export function validateOpeningRestore(
         if (row.role === "assistant" && row.context_source_refs == null) {
           errors.push("assistant context provenance is missing or unknown");
         }
+        const memoryDeps = turnMemoryDependencyIds(row);
+        if (memoryDeps?.some(id => deletedMemories.has(id))) {
+          errors.push("table opening_turns references a deleted memory");
+        }
+        if (memoryDeps?.some(id => !ownedMemories.has(id))) {
+          errors.push("table opening_turns references a memory missing from the backup");
+        }
       }
       if (name === "opening_assistant_candidates") {
         const turn = isUuid(row.source_turn_id) ? turns.get(row.source_turn_id.toLowerCase()) : undefined;
@@ -333,6 +350,7 @@ export function validateOpeningRestore(
       const refs = name === "library_blocks" ? libraryBlockSourceReferences(row)
         : name === "library_revisions" ? libraryRevisionSourceReferences(row.blocks)
         : name === "opening_note_provenance" ? noteProvenanceSourceReferences(row)
+        : name === "opening_turns" ? turnSourceReferences(row)
           : sourceReferences(row, name === "opening_problem_refs" || name === "opening_learning_item_versions");
       if (refs === null) errors.push(`table ${name} has invalid source lineage`);
       if (libraryContent && refs?.some(id => !ownedSources.has(id))) {

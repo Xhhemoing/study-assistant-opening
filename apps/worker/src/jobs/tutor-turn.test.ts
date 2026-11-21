@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
-import { OpeningBudgetError, type OpeningTutorTimingInput } from "@aistudy/database";
+import { OpeningProviderError, OpeningModelRoutingError, onFailedResponseUsage, selectContext } from "@aistudy/ai";
+import {
+  markFallbackStreamSealAttempted, OpeningBudgetError, UnconfirmedStreamSealError,
+  type OpeningTutorJobsRepository, type OpeningTutorTimingInput,
+} from "@aistudy/database";
 import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
+import { DEFAULT_SEAL_DEADLINE_MS, TutorStreamExpiredError } from "../runtime/tutor-stream";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 import type { TutorNextActionService } from "./tutor-next-action";
 import { inferComposerIntent } from "@aistudy/domain";
@@ -33,7 +37,8 @@ describe("tutor turn handler", () => {
 
   function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown; sourceIds?: string[]; sourceVersions?: Record<string, number>; missingSourceIds?: string[] } = {}) {
     const tutorJobs = {
-      get: vi.fn(async () => claimedJob),
+      get: vi.fn(async () => overrides.claim ?? claimedJob),
+      withStreamPublication: vi.fn<OpeningTutorJobsRepository["withStreamPublication"]>(async (_scope, _job, _context, publish) => publish()),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       readAttemptContext: vi.fn(async () => ({ privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId, itemVersionId: claimedJob.conversationId },
@@ -292,6 +297,257 @@ describe("tutor turn handler", () => {
     expect(provider.complete).toHaveBeenCalledOnce();
   });
 
+  it("batches 200 rapid 50-byte deltas into 35 authorized appends with no text loss", async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps, provider, tutorJobs } = setup();
+      const assertCurrent = vi.fn(async () => {});
+      const purposePin = { courseId: claimedJob.conversationId, materialUse: "citation" as const, sources: [{
+        sourceId: chunkA.sourceId, sourceVersion: 0, membershipId: claimedJob.userTurnId,
+        purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
+      }] };
+      const retrieveContext: typeof deps.retrieveContext = async (...args) =>
+        ({ ...await deps.retrieveContext(...args), purposePin, assertCurrent });
+      const stream = { begin: vi.fn(async () => {}), append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      const deltas = Array.from({ length: 200 }, (_, index) => String(index).padStart(50, "0"));
+      const text = deltas.join("");
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        const beforeStreaming = tutorJobs.withStreamPublication.mock.calls.length;
+        await delta("");
+        expect(stream.append).not.toHaveBeenCalled();
+        await delta(deltas[0]);
+        expect(stream.append.mock.calls.map(call => call[2])).toEqual([deltas[0]]);
+        expect(tutorJobs.withStreamPublication.mock.calls.length - beforeStreaming).toBe(1);
+        for (const part of deltas.slice(1)) await delta(part);
+        expect(tutorJobs.withStreamPublication.mock.calls.length - beforeStreaming).toBe(stream.append.mock.calls.length);
+        return { text, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      await createTutorTurnHandler({ ...deps, stream, retrieveContext })(claimedJob.id);
+      expect(Buffer.byteLength(text)).toBe(10_000);
+      expect(stream.begin).toHaveBeenCalledWith(claimedJob.workspaceId, claimedJob.id,
+        expect.objectContaining({ materialPurposePin: purposePin }));
+      expect(stream.append).toHaveBeenCalledTimes(35);
+      expect(stream.append.mock.calls.map(call => call[2]).join("")).toBe(text);
+      expect(tutorJobs.withStreamPublication).toHaveBeenCalledTimes(36);
+      for (const [, , publicationContext] of tutorJobs.withStreamPublication.mock.calls) {
+        expect(publicationContext.materialPurposePin).toEqual(purposePin);
+      }
+      // Stream publication checks material admission inside withStreamPublication; only the four non-publication checks call assertCurrent.
+      expect(assertCurrent).toHaveBeenCalledTimes(4);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("flushes at 40ms from the first buffered delta even though the provider is paused", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { deps, provider } = setup();
+      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        await delta("First");
+        await delta(" second");
+        await new Promise(resolve => setTimeout(resolve, 20));
+        await delta(" third");
+        await new Promise(resolve => setTimeout(resolve, 80));
+        return { text: "First second third", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      const run = createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+      await vi.advanceTimersByTimeAsync(39);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " second third"]);
+      await vi.advanceTimersByTimeAsync(60);
+      await run;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("uses UTF-8 bytes for the size threshold", async () => {
+    const { deps, provider } = setup();
+    const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+    const part = "学".repeat(43);
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("First");
+      await delta(part);
+      expect(stream.append).toHaveBeenCalledTimes(1);
+      await delta(part);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", part + part]);
+      return { text: "First" + part + part, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+  });
+
+  it.each(["material", "privacy", "claim"] as const)("aborts a paused provider on %s drift and drops the pending batch", async fence => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { deps, provider, tutorJobs, budget } = setup();
+      const drift = new Error("source revoked");
+      let revoked = false;
+      const purposePin = { courseId: claimedJob.conversationId, materialUse: "citation" as const, sources: [{
+        sourceId: chunkA.sourceId, sourceVersion: 0, membershipId: claimedJob.userTurnId,
+        purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
+      }] };
+      const retrieveContext: typeof deps.retrieveContext = async (...args) => ({
+        ...await deps.retrieveContext(...args),
+        purposePin,
+        assertCurrent: async () => { if (revoked && fence === "material") throw drift; },
+      });
+      const privacy = {
+        getWorkspaceEpoch: async () => revoked && fence === "privacy" ? 1 : 0,
+        listExcludedSourceIds: async () => [],
+      };
+      tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, context, publish) => {
+        expect(context.materialPurposePin).toEqual(purposePin);
+        if (revoked && fence === "material") throw drift;
+        if (revoked && fence === "claim") throw Object.assign(new Error("claim changed"), { code: "CONFLICT" });
+        if (revoked && fence === "privacy") throw new PrivacyEpochError("privacy changed");
+        await publish();
+      });
+      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      const providerAborted = vi.fn();
+      provider.complete.mockImplementationOnce(async (_input, signal, delta) => {
+        await delta("First");
+        await delta(" never publish");
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => { providerAborted(); reject(signal.reason); }, { once: true });
+        });
+      });
+      const run = createTutorTurnHandler({ ...deps, stream, retrieveContext, privacy })(claimedJob.id);
+      const result = run.catch(error => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      revoked = true;
+      await vi.advanceTimersByTimeAsync(40);
+      expect(providerAborted).toHaveBeenCalledOnce();
+      const error = await result;
+      if (fence === "material") expect(error).toBe(drift);
+      else if (fence === "privacy") expect(error).toBeInstanceOf(PrivacyEpochError);
+      else expect(error).toMatchObject({ code: "CONFLICT" });
+      expect(tutorJobs.fail).toHaveBeenCalledOnce();
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+      expect(budget.markUnknown).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("propagates a publication claim rejection before reserving tutor budget", async () => {
+    const { deps, tutorJobs, budget, provider } = setup();
+    const cancelled = Object.assign(new Error("tutor job cancelled"), { code: "CONFLICT" });
+    tutorJobs.withStreamPublication.mockRejectedValueOnce(cancelled);
+    const stream = { begin: vi.fn(), append: vi.fn() };
+
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toBe(cancelled);
+    expect(stream.begin).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it.each([new TypeError("invalid stream context"), Object.assign(new Error("stream forbidden"), { code: "FORBIDDEN" })])(
+    "propagates an unexpected stream begin error before reserving budget: %s", async failure => {
+      const { deps, budget, provider } = setup();
+      const stream = { begin: vi.fn().mockRejectedValue(failure), append: vi.fn() };
+      const onStreamUnavailable = vi.fn();
+      await expect(createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)).rejects.toBe(failure);
+      expect(onStreamUnavailable).not.toHaveBeenCalled();
+      expect(budget.reserve).not.toHaveBeenCalled();
+      expect(provider.complete).not.toHaveBeenCalled();
+    });
+
+  it.each(["without streaming", "after Redis begin fails"])("rechecks an unbound claim before sending %s", async mode => {
+    const { deps, tutorJobs, budget, provider } = setup();
+    const stream = mode === "after Redis begin fails"
+      ? { begin: vi.fn().mockRejectedValue(new Error("Command timed out")), append: vi.fn() }
+      : undefined;
+    budget.claimExecution.mockImplementationOnce(async () => {
+      tutorJobs.get.mockResolvedValue({ ...claimedJob, status: "cancelled" });
+      return true;
+    });
+
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it("settles confirmed provider usage when cancellation blocks only the final buffered batch", async () => {
+    const { deps, provider, tutorJobs, budget } = setup();
+    const cancelled = Object.assign(new Error("tutor job cancelled"), { code: "CONFLICT" });
+    const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => 1) };
+    tutorJobs.withStreamPublication.mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+      .mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+      .mockRejectedValueOnce(cancelled);
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("First");
+      await delta(" tail");
+      expect(stream.append).toHaveBeenCalledOnce();
+      return { text: "First tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toBe(cancelled);
+
+    expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+    expect(budget.settle).toHaveBeenCalledOnce();
+    expect(budget.markUnknown).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+  it("drains a timer flush racing provider completion before settling or completing the turn", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { deps, provider, tutorJobs, budget } = setup();
+      let authorize!: () => void;
+      const authorization = new Promise<void>(resolve => { authorize = resolve; });
+      let hold = false;
+      tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, _context, publish) => {
+        if (hold) await authorization;
+        await publish();
+      });
+      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        await delta("First");
+        hold = true;
+        await delta(" tail");
+        await new Promise(resolve => setTimeout(resolve, 41));
+        return { text: "First tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      const run = createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+      await vi.advanceTimersByTimeAsync(40);
+      expect(tutorJobs.withStreamPublication).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(budget.settle).not.toHaveBeenCalled();
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      authorize();
+      await run;
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " tail"]);
+      expect(tutorJobs.completeTurn).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("flushes authorized trailing text before recording a provider error and ignores late callbacks", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+    const interrupted = new Error("provider closed prematurely");
+    let late!: (text: string) => Promise<void>;
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      late = delta;
+      await delta("First");
+      await delta(" tail");
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      throw interrupted;
+    });
+    tutorJobs.fail.mockImplementationOnce(async () => {
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " tail"]);
+    });
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toBe(interrupted);
+    await late(" after close");
+    expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " tail"]);
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+
   it("records one model/Redis observation per execution without blocking first publication", async () => {
     vi.useFakeTimers();
     try {
@@ -313,7 +569,7 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
     expect(record.mock.calls.map(call => call[1].kind)).toEqual(["tutor_first_text", "tutor_first_chunk"]);
     expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ executionId, claimToken, observedAt: expect.any(Date), durationMs: expect.any(Number) }));
-    expect(stream.append.mock.calls[0]).toEqual([claimedJob.workspaceId, claimedJob.id, "First", executionId]);
+    expect(stream.append.mock.calls[0]).toEqual([claimedJob.workspaceId, claimedJob.id, "First", executionId, 0, undefined]);
     finish(); await run;
     expect(provider.complete).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }
@@ -387,11 +643,12 @@ describe("tutor turn handler", () => {
       expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
       await onTextDelta("F = ");
       await onTextDelta("ma [1]");
-      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = ", "ma [1]"]);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = "]);
       return { text: "F = ma [1]", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 100, outputTokens: 50 };
     });
     tutorJobs.completeTurn.mockImplementationOnce(async () => {
       expect(budget.settle).toHaveBeenCalledOnce();
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = ", "ma [1]"]);
     });
     await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
     expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
@@ -1339,5 +1596,564 @@ describe("tutor turn handler", () => {
     // Unknown invented id dropped; currentPage=1 → prefer chunkA only.
     expect(completeArg.citations.map((c) => c.chunkId)).toEqual([chunkA.id]);
     expect(completeArg.citations[0]).toMatchObject({ page: 1 });
+  });
+
+  it("propagates UnconfirmedStreamSealError out of withStreamPublication, skips redundant seal, and fails the job with preserved claimToken", async () => {
+    const claimedWithExecution = {
+      ...claimedJob,
+      claimToken: "00000000-0000-4000-8000-0000000000cc",
+      executionId: "00000000-0000-4000-8000-0000000000ee",
+    };
+    const { deps, provider, tutorJobs, budget } = setup({ claim: claimedWithExecution });
+    const sealError = new UnconfirmedStreamSealError(new Error("Command timed out"), new Error("connect ECONNREFUSED"));
+    const onStreamUnavailable = vi.fn();
+    let seenByPublication: unknown;
+    tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, _context, publish) => {
+      try {
+        await publish();
+      } catch (error) {
+        seenByPublication = error;
+        throw error;
+      }
+    });
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => { throw sealError; }),
+    };
+    let capturedSignal: AbortSignal | undefined;
+    provider.complete.mockImplementationOnce(async (_input, signal, delta) => {
+      capturedSignal = signal;
+      await delta("First");
+      return { text: "First", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+
+    await expect(createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)).rejects.toBe(sealError);
+    expect(seenByPublication).toBe(sealError);
+    expect(onStreamUnavailable).toHaveBeenCalledWith(sealError);
+    expect(stream.seal).not.toHaveBeenCalled();
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(capturedSignal?.reason).toBe(sealError);
+    expect(budget.markUnknown).toHaveBeenCalledOnce();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(
+      { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      claimedJob.id,
+      expect.any(String),
+      undefined,
+      claimedWithExecution.claimToken,
+    );
+  });
+
+  it("bounds a hung fallback stream.seal on withStreamPublication failure so failure cleanup is never delayed", async () => {
+    vi.useFakeTimers();
+    try {
+      const claimedWithExecution = {
+        ...claimedJob,
+        claimToken: "00000000-0000-4000-8000-0000000000cd",
+        executionId: "00000000-0000-4000-8000-0000000000ef",
+      };
+      const { deps, provider, tutorJobs } = setup({ claim: claimedWithExecution });
+      const pgDrop = Object.assign(new Error("connection dropped"), { code: "CONNECTION_CLOSED" });
+      const onStreamUnavailable = vi.fn();
+      tutorJobs.withStreamPublication
+        .mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+        .mockRejectedValueOnce(pgDrop);
+      const stream = {
+        begin: vi.fn(async () => {}),
+        seal: vi.fn(() => new Promise<void>(() => undefined)),
+        append: vi.fn(async () => 1),
+      };
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        await delta("First");
+        return { text: "First", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      const result = createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)
+        .then(() => undefined, error => error);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await result).toBe(pgDrop);
+      expect(stream.seal).toHaveBeenCalledWith(claimedJob.workspaceId, claimedJob.id, claimedWithExecution.executionId);
+      expect(onStreamUnavailable).toHaveBeenCalledOnce();
+      expect(tutorJobs.fail).toHaveBeenCalledWith(
+        { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+        claimedJob.id,
+        expect.any(String),
+        undefined,
+        claimedWithExecution.claimToken,
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips duplicate fallback stream.seal when withStreamPublication already attempted bounded sealing", async () => {
+    const claimedWithExecution = {
+      ...claimedJob,
+      claimToken: "00000000-0000-4000-8000-0000000000ce",
+      executionId: "00000000-0000-4000-8000-0000000000f0",
+    };
+    const { deps, provider, tutorJobs } = setup({ claim: claimedWithExecution });
+    const pgDrop = Object.assign(new Error("connection dropped"), { code: "CONNECTION_CLOSED" });
+    markFallbackStreamSealAttempted(pgDrop);
+    const onStreamUnavailable = vi.fn();
+    tutorJobs.withStreamPublication
+      .mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+      .mockRejectedValueOnce(pgDrop);
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(() => new Promise<void>(() => undefined)),
+      append: vi.fn(async () => 1),
+    };
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("First");
+      return { text: "First", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await expect(createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)).rejects.toBe(pgDrop);
+    expect(stream.seal).not.toHaveBeenCalled();
+    expect(onStreamUnavailable).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledOnce();
+  });
+
+  it("separates global memory lineage sources from explicit course material across stream publication and completeTurn", async () => {
+    const memoryOnlySourceId = "00000000-0000-4000-8000-000000000099";
+    const { deps, tutorJobs } = setup();
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => 1),
+    };
+    const memories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: "00000000-0000-4000-8000-0000000000aa", workspaceId: claimedJob.workspaceId, courseId: null,
+          kind: "confirmed" as const, text: "Learner prefers visual steps", sourceTurnIds: [claimedJob.userTurnId],
+          version: 0, expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+        }],
+        sourceRefs: [
+          { sourceId: chunkA.sourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0 },
+        ],
+      })),
+    };
+
+    await expect(createTutorTurnHandler({ ...deps, stream, memories })(claimedJob.id)).resolves.toEqual({ skipped: false });
+    // Full union stays in contextSourceRefs for provenance/privacy revocation, while memoryLineageSourceIds
+    // carries ONLY non-explicit global memory lineage (excluding chunkA.sourceId which is explicitly selected).
+    expect(stream.begin).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      expect.objectContaining({
+        contextSourceRefs: expect.arrayContaining([
+          { sourceId: chunkA.sourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
+        ]),
+        memoryLineageSourceIds: [memoryOnlySourceId],
+        globalMemoryIds: ["00000000-0000-4000-8000-0000000000aa"],
+      }),
+    );
+    expect(tutorJobs.withStreamPublication).toHaveBeenCalledWith(
+      expect.anything(),
+      claimedJob.id,
+      expect.objectContaining({
+        memoryLineageSourceIds: [memoryOnlySourceId],
+        globalMemoryIds: ["00000000-0000-4000-8000-0000000000aa"],
+      }),
+      expect.any(Function),
+    );
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextSourceRefs: expect.arrayContaining([
+          { sourceId: chunkA.sourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
+        ]),
+      }),
+      expect.objectContaining({
+        memoryLineageSourceIds: [memoryOnlySourceId],
+        globalMemoryIds: ["00000000-0000-4000-8000-0000000000aa"],
+      }),
+    );
+  });
+
+  it("blocks provider dispatch when an injected temporary memory expires before send or fails DB re-check", async () => {
+    const tempMemoryId = "00000000-0000-4000-8000-0000000000bb";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+      const { deps, provider, budget } = setup();
+      const memories = {
+        listContext: vi.fn(async () => ({
+          memories: [{
+            id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+            kind: "temporary" as const, text: "Short-lived preference", sourceTurnIds: [claimedJob.userTurnId],
+            version: 0, expiresAt: "2026-11-21T00:00:01.000Z", status: "active" as const,
+            createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+          }],
+          sourceRefs: [],
+        })),
+      };
+      // Advance clock past expiresAt right when resolveModel runs (between prompt assembly and beforeSend).
+      const resolveModel = vi.fn(async () => {
+        vi.advanceTimersByTime(2_000);
+        return {
+          provider,
+          modelSnapshot: { id: "m1", providerId: "p", modelName: "m", inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+          inputCentsPerMillion: 100, outputCentsPerMillion: 200,
+        };
+      });
+      await expect(createTutorTurnHandler({ ...deps, memories, resolveModel })(claimedJob.id))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+      expect(provider.complete).not.toHaveBeenCalled();
+      expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // DB-authoritative assertGlobalMemoriesCurrent rejection also prevents provider dispatch.
+    const { deps: dbDeps, provider: dbProvider, budget: dbBudget, tutorJobs: dbJobs } = setup();
+    const assertGlobalMemoriesCurrent = vi.fn(async () => {
+      throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
+    });
+    const dbMemories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+          kind: "temporary" as const, text: "Short-lived preference", sourceTurnIds: [claimedJob.userTurnId],
+          version: 0, expiresAt: "2099-01-01T00:00:00.000Z", status: "active" as const,
+          createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+        }],
+        sourceRefs: [],
+      })),
+    };
+    await expect(createTutorTurnHandler({
+      ...dbDeps,
+      tutorJobs: { ...dbJobs, assertGlobalMemoriesCurrent },
+      memories: dbMemories,
+    })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(assertGlobalMemoriesCurrent).toHaveBeenCalledWith(
+      { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      [tempMemoryId],
+    );
+    expect(dbProvider.complete).not.toHaveBeenCalled();
+    expect(dbBudget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+  });
+
+  it("preserves onFailedResponseUsage across stream delta batching so refused streams settle confirmed usage instead of outcome_unknown", async () => {
+    const { deps, provider, budget, tutorJobs } = setup();
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => 1),
+    };
+    const refusal = new OpeningProviderError("PROVIDER_REFUSAL", "refused", true);
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      expect(typeof onTextDelta?.[onFailedResponseUsage]).toBe("function");
+      onTextDelta?.[onFailedResponseUsage]?.({
+        requestId: "req-refused-usage",
+        inputTokens: 1_000_000,
+        outputTokens: 500_000,
+        cachedInputTokens: null,
+      });
+      throw refusal;
+    });
+
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toBe(refusal);
+    expect(budget.settle).toHaveBeenCalledWith(
+      { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      "res-1",
+      expect.any(Number),
+    );
+    expect(budget.markUnknown).not.toHaveBeenCalled();
+    expect(tutorJobs.markUnknown).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledOnce();
+  });
+
+  it("aborts beforeSend when temporary memory expires during an earlier beforeSend await or when final send gate rejects execution/epoch", async () => {
+    const tempMemoryId = "00000000-0000-4000-8000-0000000000cc";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+      const { deps, provider, budget } = setup();
+      const memories = {
+        listContext: vi.fn(async () => ({
+          memories: [{
+            id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+            kind: "temporary" as const, text: "Expiring during beforeSend", sourceTurnIds: [claimedJob.userTurnId],
+            version: 0, expiresAt: "2026-11-21T00:00:01.000Z", status: "active" as const,
+            createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+          }],
+          sourceRefs: [],
+        })),
+      };
+      // Advance wall clock INSIDE beforeSend's privacy epoch check (after earlier checks already ran).
+      let epochReads = 0;
+      const privacy = {
+        getWorkspaceEpoch: vi.fn(async () => {
+          epochReads += 1;
+          if (epochReads >= 2) vi.advanceTimersByTime(2_000);
+          return 0;
+        }),
+        listExcludedSourceIds: vi.fn(async () => []),
+      };
+      await expect(createTutorTurnHandler({ ...deps, memories, privacy })(claimedJob.id))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+      expect(provider.complete).not.toHaveBeenCalled();
+      expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Final send gate (assertSendAuthorized) sees timing_execution_id cleared / privacy_epoch drift and blocks provider.complete.
+    const claimedWithExecution = {
+      ...claimedJob,
+      claimToken: "00000000-0000-4000-8000-0000000000d1",
+      executionId: "00000000-0000-4000-8000-0000000000d2",
+    };
+    const { deps: gateDeps, provider: gateProvider, budget: gateBudget, tutorJobs: gateJobs } = setup({ claim: claimedWithExecution });
+    const assertSendAuthorized = vi.fn(async () => {
+      throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+    });
+    await expect(createTutorTurnHandler({
+      ...gateDeps,
+      tutorJobs: { ...gateJobs, assertSendAuthorized },
+    })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(assertSendAuthorized).toHaveBeenCalledWith(
+      { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      claimedJob.id,
+      expect.objectContaining({
+        claimToken: claimedWithExecution.claimToken,
+        executionId: claimedWithExecution.executionId,
+      }),
+    );
+    expect(gateProvider.complete).not.toHaveBeenCalled();
+    expect(gateBudget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+  });
+
+  it("never exempts conversation history or learner-context sources from course admission even when also cited by an active global memory", async () => {
+    const historySharedSourceId = "00000000-0000-4000-8000-000000000091";
+    const learnerSharedSourceId = "00000000-0000-4000-8000-000000000092";
+    const memoryOnlySourceId = "00000000-0000-4000-8000-000000000093";
+    const memoryId = "00000000-0000-4000-8000-000000000094";
+    const { deps, tutorJobs } = setup();
+    tutorJobs.loadHistoryContext.mockResolvedValueOnce({
+      history: [{ role: "user", text: "yesterday" }, { role: "assistant", text: "used detached history source" }],
+      sourceRefs: [{ sourceId: historySharedSourceId, sourceVersion: 0 }],
+    });
+    const learnerContext = {
+      read: vi.fn(async () => ({
+        courseId: claimedJob.conversationId,
+        title: "力学",
+        asOf: "2026-11-21T00:00:00Z",
+        privacyEpoch: 0,
+        goal: null,
+        weaknesses: [],
+        recentMistakes: [],
+        observationIds: [],
+        sourceRefs: [{ sourceId: learnerSharedSourceId, sourceVersion: 0 }],
+      })),
+      assertCurrent: vi.fn(async () => {}),
+    };
+    const memories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: memoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+          kind: "confirmed" as const, text: "Global memory sharing sources", sourceTurnIds: [claimedJob.userTurnId],
+          version: 0, expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+        }],
+        sourceRefs: [
+          { sourceId: historySharedSourceId, sourceVersion: 0 },
+          { sourceId: learnerSharedSourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0 },
+        ],
+      })),
+    };
+    const stream = { begin: vi.fn(async () => {}), seal: vi.fn(async () => {}), append: vi.fn(async () => 1) };
+    const assertSendAuthorized = vi.fn(async () => {});
+
+    await expect(createTutorTurnHandler({
+      ...deps,
+      tutorJobs: { ...tutorJobs, assertSendAuthorized },
+      learnerContext,
+      memories,
+      stream,
+    })(claimedJob.id)).resolves.toEqual({ skipped: false });
+
+    // Only memoryOnlySourceId may enter memoryLineageSourceIds; historySharedSourceId and learnerSharedSourceId stay course-bound!
+    for (const observed of [
+      assertSendAuthorized.mock.calls[0]?.[2],
+      stream.begin.mock.calls[0]?.[2],
+      tutorJobs.withStreamPublication.mock.calls[0]?.[2],
+      tutorJobs.completeTurn.mock.calls[0]?.[1],
+    ]) {
+      expect(observed).toMatchObject({
+        memoryLineageSourceIds: [memoryOnlySourceId],
+        globalMemoryIds: [memoryId],
+      });
+    }
+  });
+
+  it("preserves memoryOnly history provenance on follow-up course turns while keeping non-memory history course-bound", async () => {
+    const priorMemoryOnlySourceId = "00000000-0000-4000-8000-000000000095";
+    const priorCourseSourceId = "00000000-0000-4000-8000-000000000096";
+    const memoryId = "00000000-0000-4000-8000-000000000097";
+    const { deps, tutorJobs } = setup();
+    tutorJobs.loadHistoryContext.mockResolvedValueOnce({
+      history: [{ role: "user", text: "turn 1" }, { role: "assistant", text: "turn 1 answer" }],
+      sourceRefs: [
+        { sourceId: priorCourseSourceId, sourceVersion: 0 },
+        { sourceId: priorMemoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
+      ],
+    });
+    const memories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: memoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+          kind: "confirmed" as const, text: "Global memory", sourceTurnIds: [claimedJob.userTurnId],
+          version: 0, expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+        }],
+        sourceRefs: [
+          { sourceId: priorCourseSourceId, sourceVersion: 0 },
+          { sourceId: priorMemoryOnlySourceId, sourceVersion: 0 },
+        ],
+      })),
+    };
+    const authorizeSend = vi.fn<OpeningTutorJobsRepository["authorizeSend"]>(async (_scope, _job, _ctx, startSend, beforeStartSend) => {
+      beforeStartSend?.();
+      return startSend();
+    });
+
+    await expect(createTutorTurnHandler({
+      ...deps,
+      tutorJobs: { ...tutorJobs, authorizeSend },
+      memories,
+    })(claimedJob.id)).resolves.toEqual({ skipped: false });
+
+    expect(authorizeSend).toHaveBeenCalledWith(
+      expect.anything(),
+      claimedJob.id,
+      expect.objectContaining({
+        memoryLineageSourceIds: [priorMemoryOnlySourceId],
+        globalMemoryIds: [memoryId],
+      }),
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextSourceRefs: expect.arrayContaining([
+          { sourceId: priorCourseSourceId, sourceVersion: 0 },
+          { sourceId: priorMemoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
+        ]),
+      }),
+      expect.objectContaining({
+        memoryLineageSourceIds: [priorMemoryOnlySourceId],
+        globalMemoryIds: [memoryId],
+      }),
+    );
+  });
+
+  it("propagates earliest temporaryMemoryExpiresAt to stream cache and invokes provider synchronously inside authorizeSend", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+      const tempEarlier = "00000000-0000-4000-8000-0000000000d5";
+      const tempLater = "00000000-0000-4000-8000-0000000000d6";
+      const { deps, provider, tutorJobs } = setup();
+      const events: string[] = [];
+      const stream = { begin: vi.fn(async () => {}), seal: vi.fn(async () => {}), append: vi.fn(async () => 1) };
+      const memories = {
+        listContext: vi.fn(async () => ({
+          memories: [
+            {
+              id: tempLater, workspaceId: claimedJob.workspaceId, courseId: null,
+              kind: "temporary" as const, text: "Later expiry", sourceTurnIds: [claimedJob.userTurnId],
+              version: 0, expiresAt: "2026-11-21T02:00:00.000Z", status: "active" as const,
+              createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+            },
+            {
+              id: tempEarlier, workspaceId: claimedJob.workspaceId, courseId: null,
+              kind: "temporary" as const, text: "Earlier expiry", sourceTurnIds: [claimedJob.userTurnId],
+              version: 0, expiresAt: "2026-11-21T00:30:00.000Z", status: "active" as const,
+              createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+            },
+          ],
+          sourceRefs: [],
+        })),
+      };
+      provider.complete.mockImplementationOnce((_input, _signal, onTextDelta) => {
+        events.push("provider-invoked-sync");
+        return Promise.resolve(onTextDelta?.("ok")).then(() => ({
+          text: "ok", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10,
+        }));
+      });
+      const authorizeSend = vi.fn<OpeningTutorJobsRepository["authorizeSend"]>(async (_scope, _job, _ctx, startSend, beforeStartSend) => {
+        events.push("db-lock-held");
+        beforeStartSend?.();
+        const inFlight = startSend();
+        events.push("db-lock-released");
+        return await inFlight;
+      });
+      await expect(createTutorTurnHandler({
+        ...deps,
+        tutorJobs: { ...tutorJobs, authorizeSend },
+        memories,
+        stream,
+      })(claimedJob.id)).resolves.toEqual({ skipped: false });
+      expect(events).toEqual(["db-lock-held", "provider-invoked-sync", "db-lock-released"]);
+      expect(stream.begin).toHaveBeenCalledWith(
+        claimedJob.workspaceId,
+        claimedJob.id,
+        expect.objectContaining({ temporaryMemoryExpiresAt: "2026-11-21T00:30:00.000Z" }),
+      );
+      expect(DEFAULT_SEAL_DEADLINE_MS).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("propagates retained history memoryIds/temporaryMemoryExpiresAt and aborts fail-closed when Redis append throws TutorStreamExpiredError", async () => {
+    const historyMemId = "00000000-0000-4000-8000-0000000000e1";
+    const historyExpiresAt = "2099-01-01T00:05:00.000Z";
+    const { deps, provider, tutorJobs } = setup();
+    tutorJobs.loadHistoryContext.mockResolvedValueOnce({
+      history: [{ role: "user", text: "prior" }, { role: "assistant", text: "prior answer using temp memory" }],
+      sourceRefs: [],
+      memoryIds: [historyMemId],
+      temporaryMemoryExpiresAt: historyExpiresAt,
+    });
+    const onStreamUnavailable = vi.fn();
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => { throw new TutorStreamExpiredError(); }),
+    };
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      await onTextDelta?.("expired delta");
+      return { text: "expired delta", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+
+    await expect(createTutorTurnHandler({
+      ...deps, stream, onStreamUnavailable,
+    })(claimedJob.id)).rejects.toBeInstanceOf(TutorStreamExpiredError);
+    expect(stream.begin).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      expect.objectContaining({
+        globalMemoryIds: [historyMemId],
+        temporaryMemoryExpiresAt: historyExpiresAt,
+      }),
+    );
+    expect(stream.append).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      "expired delta",
+      undefined,
+      0,
+      undefined,
+      historyExpiresAt,
+    );
+    expect(onStreamUnavailable).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledOnce();
   });
 });

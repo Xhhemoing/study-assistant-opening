@@ -12,7 +12,7 @@ import {
   type StudyContextAnchor,
   type TutorLearnerContext,
 } from "@aistudy/contracts";
-import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService, tutorCitationsFromMarkdown } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, onFailedResponseUsage, renumberInlineCitations, resolveCitations, selectContext, type ProviderTextDelta, type SystemQueryService, tutorCitationsFromMarkdown } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -22,6 +22,7 @@ import {
   makeStudyLanguageSupport,
   studyIntentInstruction,
   instructionWithMemories,
+  isMemoryEligible,
   makeTutorInstruction,
   PageCitationClarifyError,
   preferCitationsForPage,
@@ -38,7 +39,9 @@ import type {
   OpeningStudyExposureInput,
   OpeningTutorTimingInput,
 } from "@aistudy/database";
-import { mergeContextSourceRefs, OpeningBudgetError, tutorAttemptFence } from "@aistudy/database";
+import {
+  hasAttemptedFallbackStreamSeal, mergeContextSourceRefs, OpeningBudgetError, tutorAttemptFence,
+} from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
 import {
@@ -51,7 +54,7 @@ import {
   type ResolvedTaskModel,
   type ParentInteractionBudget,
 } from "@aistudy/ai";
-import type { TutorStreamWriter } from "../runtime/tutor-stream";
+import { DEFAULT_SEAL_DEADLINE_MS, isTutorStreamExpiredError, isTutorStreamUnavailable, isUnconfirmedStreamSealError, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { prepareTutorNextAction, type TutorNextActionService } from "./tutor-next-action";
 import { withJobHeartbeat } from "../runtime/lifecycle";
@@ -74,7 +77,8 @@ export type TutorTurnDeps = {
   proposals?: { reply(scope: Scope, input: { sourceTurnId: string; purpose: "plan" | "teach"; question: string; courseId?: string | null;
     jobLease?: { jobId: string; claimToken: string }; parentBudget?: ParentInteractionBudget }): Promise<{ text: string; proposal: unknown; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] }> };
   systemQuery?: SystemQueryService;
-  stream?: Pick<TutorStreamWriter, "begin"> & { append: (...args: Parameters<TutorStreamWriter["append"]>) => Promise<number | void> };
+  stream?: Pick<TutorStreamWriter, "begin"> & Partial<Pick<TutorStreamWriter, "seal">>
+    & { append: (...args: Parameters<TutorStreamWriter["append"]>) => Promise<number | void> };
   timing?: { record(scope: Scope, input: OpeningTutorTimingInput): Promise<unknown> };
   onTimingUnavailable?: (error: unknown) => void;
   streamExposures?: { generate(scope: Scope, input: OpeningStudyExposureInput): Promise<{ id: string }> };
@@ -330,16 +334,64 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       if (allowedSourceIds.length && (!retrieved?.assertCurrent || !retrieved.purposePin)) throw Object.assign(new Error("material admission pin unavailable"), { code: "CONFLICT" });
       const assertMaterialsCurrent = async () => { await retrieved?.assertCurrent?.(); };
       const context = (retrieved?.chunks ?? selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
-      const { history, sourceRefs: historySourceRefs } = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
+      const loadedHistory = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
+      const { history, sourceRefs: historySourceRefs } = loadedHistory;
+      const historyMemoryIds = loadedHistory.memoryIds ?? [];
+      const historyTempExpiresAt = loadedHistory.temporaryMemoryExpiresAt;
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
         ? await deps.memories.listContext(scope, contextNow)
         : { memories: [], sourceRefs: [] };
       const learnerContext = await deps.learnerContext?.read(scope, { courseId: turn.courseId ?? turn.contextAnchor?.courseId,
         sourceIds: allowedSourceIds }) ?? null;
+      const nonMemorySourceIds = new Set(
+        [
+          ...allowedSourceIds,
+          ...context.map(({ sourceId }) => sourceId),
+          ...historySourceRefs.filter(ref => ref.memoryOnly !== true).map(({ sourceId }) => sourceId),
+          ...(learnerContext?.sourceRefs ?? []).map(({ sourceId }) => sourceId),
+          ...(attemptContext?.sourceRefs ?? []).map(({ sourceId }) => sourceId),
+          ...(turn.contextAnchor?.sourceId ? [turn.contextAnchor.sourceId] : []),
+        ].map(sourceId => sourceId.toLowerCase()),
+      );
+      const memoryLineageSourceIds = [...new Set(
+        [
+          ...memoryContext.sourceRefs,
+          ...historySourceRefs.filter(ref => ref.memoryOnly === true),
+        ]
+          .map(({ sourceId }) => sourceId.toLowerCase())
+          .filter(sourceId => !nonMemorySourceIds.has(sourceId)),
+      )].sort();
+      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow));
+      const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
+      const temporaryExpiryCandidates = [
+        ...injectedTemporaryMemories.map(memory => memory.expiresAt!),
+        ...(historyTempExpiresAt ? [historyTempExpiresAt] : []),
+      ];
+      const earliestTemporaryMemoryExpiresAt = temporaryExpiryCandidates.length
+        ? temporaryExpiryCandidates.reduce<string>((earliest, candidate) =>
+            Date.parse(candidate) < Date.parse(earliest) ? candidate : earliest,
+          temporaryExpiryCandidates[0]!)
+        : undefined;
+      const assertTempMemoriesUnexpiredSync = () => {
+        if (earliestTemporaryMemoryExpiresAt === undefined) return;
+        const expiresAt = Date.parse(earliestTemporaryMemoryExpiresAt);
+        if (Number.isNaN(expiresAt) || expiresAt <= Date.now()) {
+          throw Object.assign(new Error("injected temporary memory expired before send"), { code: "CONFLICT" });
+        }
+      };
+      const globalMemoryIds = [...new Set([
+        ...eligibleMemories
+          .filter(memory => memory.courseId == null)
+          .map(memory => memory.id.toLowerCase()),
+        ...historyMemoryIds.map(id => id.toLowerCase()),
+      ])].sort();
+      const memoryTaggedSourceRefs = memoryContext.sourceRefs.map(ref =>
+        nonMemorySourceIds.has(ref.sourceId.toLowerCase()) ? ref : { ...ref, memoryOnly: true },
+      );
       const contextSourceRefs = mergeContextSourceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
-        historySourceRefs, memoryContext.sourceRefs, learnerContext?.sourceRefs ?? [], attemptContext?.sourceRefs ?? [],
+        historySourceRefs, memoryTaggedSourceRefs, learnerContext?.sourceRefs ?? [], attemptContext?.sourceRefs ?? [],
       );
       const mode = helpInputSnapshot.tutorMode;
       const baseInstruction = instructionWithMemories(
@@ -401,38 +453,86 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         : undefined;
       const exposureReceipt = streamExposure
         ? await deps.streamExposures!.generate(scope, streamExposure) : null;
+      const streamContext = { privacyEpoch: jobEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
+        executionId: claimed.executionId,
+        ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
+        ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
+        ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+        ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}) };
+      const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
+      const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
       if (deps.stream) {
-        try {
-          await deps.stream.begin(scope.workspaceId, claimed.id, { privacyEpoch: jobEpoch ?? 0,
-            contextSourceRefs, exposureReceiptId: exposureReceipt?.id ?? null, claimToken: claimed.claimToken,
-            ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}),
-            ...(claimed.executionId ? { executionId: claimed.executionId } : {}) });
-        } catch (error) {
-          streamAvailable = false;
-          deps.onStreamUnavailable?.(error);
-        }
+        const stream = deps.stream;
+        const cacheContext = { ...streamContext, exposureReceiptId: exposureReceipt?.id ?? null,
+          ...(attemptFence ? { attemptFence } : {}) };
+        await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
+          assertTempMemoriesUnexpiredSync();
+          try { await stream.begin(scope.workspaceId, claimed.id, cacheContext); }
+          catch (error) {
+            if (!isTutorStreamUnavailable(error)) throw error;
+            streamAvailable = false;
+            deps.onStreamUnavailable?.(error);
+          }
+        });
       }
       let firstTextAt: number | null = null;
-      const onTextDelta = deps.stream ? async (delta: string) => {
-        if (!delta) return;
-        await assertMaterialsCurrent();
-        await assertAttemptCurrent();
-        if (firstTextAt === null) {
-          const observedAt = new Date();
-          firstTextAt = performance.now();
-          recordTiming("tutor_first_text", observedAt, Math.round(firstTextAt - claimObservedAt));
-        }
-        if (!streamAvailable) return;
+      const authorizeAndPublish = async (text: string) => {
         try {
-          const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, delta, claimed.executionId);
-          if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
+          await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
+            assertTempMemoriesUnexpiredSync();
+            if (firstTextAt === null) {
+              const observedAt = new Date();
+              firstTextAt = performance.now();
+              recordTiming("tutor_first_text", observedAt, Math.round(firstTextAt - claimObservedAt));
+            }
+            if (!streamAvailable) return;
+            try {
+              // Keep this inside the publication transaction: on a transport
+              // error the worker writer settles only after Redis confirms the seal
+              // or hits its bounded deadline (throwing UnconfirmedStreamSealError).
+              const sequence = earliestTemporaryMemoryExpiresAt !== undefined
+                ? await deps.stream!.append(
+                  scope.workspaceId, claimed.id, text, claimed.executionId,
+                  streamContext.privacyEpoch, attemptFence, earliestTemporaryMemoryExpiresAt,
+                )
+                : await deps.stream!.append(
+                  scope.workspaceId, claimed.id, text, claimed.executionId,
+                  streamContext.privacyEpoch, attemptFence,
+                );
+              if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
+            } catch (error) {
+              if (isTutorStreamExpiredError(error)) throw error;
+              streamAvailable = false;
+              deps.onStreamUnavailable?.(error);
+              if (isUnconfirmedStreamSealError(error)) throw error;
+            }
+          });
+        } catch (error) {
+          if (
+            claimed.executionId
+            && deps.stream?.seal
+            && !isUnconfirmedStreamSealError(error)
+            && !hasAttemptedFallbackStreamSeal(error)
+          ) {
+            let sealTimer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              const sealAttempt = Promise.resolve().then(() => deps.stream!.seal!(scope.workspaceId, claimed.id, claimed.executionId!));
+              void sealAttempt.catch(() => undefined);
+              const deadline = new Promise<never>((_resolve, reject) => {
+                sealTimer = setTimeout(() => reject(new Error(`fallback stream seal timed out after ${DEFAULT_SEAL_DEADLINE_MS}ms`)), DEFAULT_SEAL_DEADLINE_MS);
+                sealTimer.unref?.();
+              });
+              await Promise.race([sealAttempt, deadline]);
+            } catch (sealError) { deps.onStreamUnavailable?.(sealError); }
+            finally { clearTimeout(sealTimer); }
+          }
+          throw error;
         }
-        catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
-      } : undefined;
+      };
       // BC1: operationId = durable tutor job id so BullMQ retries reuse one ledger
       // reservation; a fallback model runs under its own ":fallback" key.
-      const callWith = (model: ResolvedTaskModel | undefined, operationId: string) => {
+      const callWith = async (model: ResolvedTaskModel | undefined, operationId: string) => {
         const terms = model
           ? reservationTerms(model, input, deps.config.reservedCents)
           : (() => {
@@ -442,13 +542,31 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
                 actualCents: (settled: ProviderOutput) => actualCentsForOutput(settled, rates),
               } as ReservationTerms;
             })();
-        return runBudgetedCall({
+        const provider = model?.provider ?? deps.provider;
+        let publicationFailure: { reason: unknown } | undefined;
+        const streamingProvider: BudgetedProvider | null = provider && deps.stream && input.outputFormat === "markdown" ? {
+          complete: async (providerInput, callerSignal, callerOnTextDelta) => {
+            const result = await withTutorDeltaBatches(
+              (signal, onTextDelta) => {
+                const failedUsage = callerOnTextDelta?.[onFailedResponseUsage];
+                const forwarded: ProviderTextDelta = failedUsage
+                  ? Object.assign((delta: string) => onTextDelta(delta), { [onFailedResponseUsage]: failedUsage })
+                  : onTextDelta;
+                const combinedSignal = callerSignal ? AbortSignal.any([callerSignal, signal]) : signal;
+                return provider.complete(providerInput, combinedSignal, forwarded);
+              },
+              authorizeAndPublish,
+            );
+            publicationFailure = result.publicationFailure;
+            return result.value;
+          },
+        } : provider;
+        const output = await runBudgetedCall({
           requestFamily: tutorOperationId,
-          provider: model?.provider ?? deps.provider,
+          provider: streamingProvider,
           modelSnapshot: model?.modelSnapshot,
           budget: scopedBudget,
           input,
-          ...(input.outputFormat === "markdown" && onTextDelta ? { onTextDelta } : {}),
           requestId: operationId,
           operationId,
           parentBudget,
@@ -463,7 +581,48 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
             await assertMaterialsCurrent();
           },
+          authorizeAndStartSend: async <T>(startSend: () => Promise<T>): Promise<T> => {
+            const sendContext = {
+              ...(jobEpoch !== null ? { expectedPrivacyEpoch: jobEpoch } : {}),
+              claimToken: claimed.claimToken,
+              executionId: claimed.executionId,
+              contextSourceRefs,
+              ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
+              ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
+              ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+              ...(attemptContext ? { attemptContext } : {}),
+            };
+            // Hold FOR SHARE locks across synchronous provider.complete / fetch initiation,
+            // releasing the DB connection immediately on commit without awaiting network I/O.
+            if (deps.tutorJobs.authorizeSend) {
+              return deps.tutorJobs.authorizeSend(scope, claimed.id, sendContext, startSend, assertTempMemoriesUnexpiredSync);
+            }
+            if (deps.tutorJobs.assertSendAuthorized) {
+              await deps.tutorJobs.assertSendAuthorized(scope, claimed.id, sendContext);
+            } else {
+              if (globalMemoryIds.length) {
+                await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds);
+              }
+              if (deps.privacy && jobEpoch !== null) {
+                assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+              }
+              const current = await deps.tutorJobs.get(scope, claimed.id);
+              if (
+                current?.status !== "running"
+                || current.claimToken !== claimed.claimToken
+                || (claimed.executionId !== undefined && current.executionId !== claimed.executionId)
+                || (claimed.claimToken !== undefined && current.executionId === null)
+              ) {
+                throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+              }
+            }
+            assertTempMemoriesUnexpiredSync();
+            return startSend();
+          },
         });
+        // Settle confirmed provider usage before a refused tail can end the job.
+        if (publicationFailure) throw publicationFailure.reason;
+        return output;
       };
       let output: ProviderOutput;
       try {
@@ -571,6 +730,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         claimToken: claimed.claimToken,
         enqueueMetadata: Boolean(deps.stream),
       }, { materialPurposePin: retrieved?.purposePin,
+        ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
+        ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
         ...(attemptContext ? { attemptContext: { target: attemptTarget, snapshot: attemptContext } } : {}) });
       // The answer and optional metadata outbox entry are durable. Release this
       // tutor worker slot; suggestions run in their own bounded queue.

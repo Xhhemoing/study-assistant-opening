@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createOpeningSourceRepository } from "./opening-sources";
 import { createOpeningSourceActionsRepository } from "./opening-source-actions";
@@ -17,6 +17,9 @@ type Row = Record<string, unknown>;
 type Fragment = { query: string; values: unknown[] };
 const isFragment = (value: unknown): value is Fragment => typeof value === "object" && value !== null && "query" in value && "values" in value;
 
+beforeEach(() => vi.stubEnv("REDIS_URL", undefined));
+afterEach(() => vi.unstubAllEnvs());
+
 /** Execute statements lazily like postgres: interpolated SQL fragments do not acquire locks. */
 function database(handler: (query: string, values: unknown[]) => Row[]) {
   let locked = false, inTransaction = false, revision = 0, epoch = 0;
@@ -31,7 +34,8 @@ function database(handler: (query: string, values: unknown[]) => Row[]) {
     if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return [];
     if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) { locked = true; return [{ revision }]; }
     if (query.startsWith("UPDATE opening_workspace_history_revisions")) { expect(locked).toBe(true); return [{ revision: ++revision }]; }
-    if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ privacy_epoch: ++epoch }];
+    if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: ++epoch }];
+    if (query.startsWith("SELECT 1 FROM opening_tutor_jobs") || query.startsWith("SELECT j.id, j.timing_execution_id FROM opening_tutor_jobs") || query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
     if (query.startsWith("DELETE FROM opening_learning_eligibility")) { invalidations.push(values); return []; }
     return handler(query, values);
   };

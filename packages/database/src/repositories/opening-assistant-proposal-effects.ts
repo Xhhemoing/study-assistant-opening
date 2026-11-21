@@ -11,13 +11,14 @@ import { createOpeningMemoryRepository } from "./opening-memory";
 import { reviseOpeningLearningObservation } from "./opening-observation-revisions";
 import { admitLearningSources, learningError } from "./opening-learning-facts";
 import type { ContextSourceRef } from "./opening-context-provenance";
+import { runWithNestedTutorStreamFences } from "./opening-tutor-stream-fence";
 
 /** Existing repositories keep their mutation invariants, inside this acceptance transaction. */
 export function proposalTransactionClient(tx: TransactionSql): Sql {
   return new Proxy(tx, { get(target, key, receiver) {
     if (key === "begin") return (...args: unknown[]) => {
       const execute = args.at(-1) as (nested: TransactionSql) => Promise<unknown>;
-      return target.savepoint(nested => execute(nested));
+      return target.savepoint(nested => runWithNestedTutorStreamFences(tx, nested, execute));
     };
     return Reflect.get(target, key, receiver);
   } }) as unknown as Sql;

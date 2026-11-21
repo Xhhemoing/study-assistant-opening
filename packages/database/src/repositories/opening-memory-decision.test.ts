@@ -6,12 +6,16 @@ import { OpeningMemoryError } from "./opening-memory-types";
 const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() };
 const id = randomUUID();
 
-function stub(options: { deniedOwnerRead?: number; failure?: { query: string; error: Error } } = {}) {
+function stub(options: {
+  deniedOwnerRead?: number;
+  failure?: { query: string; error: Error };
+  rowOverride?: Partial<{ status: string; kind: string; version: number; last_decision_client_key: string | null }>;
+} = {}) {
   const calls: string[] = [];
   let ownerReads = 0;
   const row = { id, workspace_id: scope.workspaceId, course_id: null, kind: "candidate", text: "note",
-    source_turn_ids: [], version: 0, status: "active", expires_at: null,
-    created_at: new Date(), updated_at: new Date() };
+    source_turn_ids: [], version: 0, status: "active", expires_at: null, last_decision_client_key: null as string | null,
+    created_at: new Date(), updated_at: new Date(), ...(options.rowOverride ?? {}) };
   const tx = async (strings: TemplateStringsArray) => {
     const query = strings.join(" ").replace(/\s+/g, " ").trim();
     calls.push(query);
@@ -24,6 +28,8 @@ function stub(options: { deniedOwnerRead?: number; failure?: { query: string; er
     if (query.includes("UPDATE opening_memories")) return [{ ...row, version: 1,
       kind: query.includes("kind = 'confirmed'") ? "confirmed" : "candidate",
       status: query.includes("status = 'rejected'") ? "rejected" : "active" }];
+    if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: scope.workspaceId, privacy_epoch: 1 }];
+    if (query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
     return [];
   };
   const begin = vi.fn(async (run: (db: typeof tx) => Promise<unknown>) => run(tx));
@@ -44,6 +50,7 @@ for (const decide of [confirmOwnedMemory, rejectOwnedMemory]) {
       expect(workspace).toBeGreaterThan(history);
       expect(memory).toBeGreaterThan(workspace);
       expect(calls.some(query => query.includes("revision=revision+1"))).toBe(false);
+      expect(calls.some(query => query.startsWith("UPDATE workspaces SET privacy_epoch"))).toBe(decide === rejectOwnedMemory);
     });
 
     it.each([1, 2, 3])("retains typed ownership denial at read %s", async deniedOwnerRead => {
@@ -66,3 +73,12 @@ for (const decide of [confirmOwnedMemory, rejectOwnedMemory]) {
     });
   });
 }
+
+it("rejectOwnedMemory skips privacy_epoch advance on idempotent replay", async () => {
+  const { sql, calls } = stub({
+    rowOverride: { status: "rejected", kind: "confirmed", version: 1, last_decision_client_key: "same-key" },
+  });
+  const result = await rejectOwnedMemory(sql as never, scope, id, 0, "same-key");
+  expect(result.status).toBe("rejected");
+  expect(calls.some(query => query.startsWith("UPDATE workspaces SET privacy_epoch"))).toBe(false);
+});

@@ -17,6 +17,7 @@ export type TutorAttemptContext = {
   currentAnswer: { observationId: string; answer: string; answerRevision: number } | null;
   rootObservationId: string | null;
   headObservationId: string | null;
+  headRevision?: number;
   workSource: { id: string; version: number; physicalPage: number } | null;
   effectiveGrading: { observationId: string; answerRevision: number; outcome: string; verdictSource: string;
     aiEvaluation: ReturnType<typeof aiEvaluationSchema.parse> | null;
@@ -27,12 +28,14 @@ export const tutorAttemptFenceSchema = z.object({
   attemptId: z.string().uuid(), itemVersionId: z.string().uuid(),
   rootObservationId: z.string().uuid().nullable(), headObservationId: z.string().uuid().nullable(),
   answerRevision: z.number().int().positive().nullable(),
+  headRevision: z.number().int().nonnegative().optional(),
 }).strict();
 export type TutorAttemptFence = z.infer<typeof tutorAttemptFenceSchema>;
 export function tutorAttemptFence(snapshot: TutorAttemptContext): TutorAttemptFence {
   return tutorAttemptFenceSchema.parse({ attemptId: snapshot.anchor.attemptId, itemVersionId: snapshot.anchor.itemVersionId,
     rootObservationId: snapshot.rootObservationId, headObservationId: snapshot.headObservationId,
-    answerRevision: snapshot.currentAnswer?.answerRevision ?? null });
+    answerRevision: snapshot.currentAnswer?.answerRevision ?? null,
+    ...(snapshot.headRevision !== undefined ? { headRevision: snapshot.headRevision } : {}) });
 }
 const conflict = () => learningError("CONFLICT", "bound attempt context is unavailable or changed");
 
@@ -122,9 +125,13 @@ export async function readTutorAttemptContext(db: Db, scope: OpeningScope, targe
   }
   const answer = (row: Record<string, unknown> | undefined) => row ? { observationId: String(row.id),
     answer: String(row.answer), answerRevision: Number(row.answer_revision) } : null;
+  const rawHeadRevision = head ? Number(head.workspace_history_revision) : 0;
+  const headRevision = Number.isSafeInteger(rawHeadRevision) && rawHeadRevision >= 0 ? rawHeadRevision : undefined;
   return { privacyEpoch: Number(turn.privacy_epoch), anchor, originalQuestion: item.stem_snapshot,
     originalAnswer: answer(original), currentAnswer: answer(head), rootObservationId: original ? String(original.id) : null,
-    headObservationId: head ? String(head.id) : null, workSource, effectiveGrading, sourceRefs };
+    headObservationId: head ? String(head.id) : null,
+    ...(headRevision !== undefined ? { headRevision } : {}),
+    workSource, effectiveGrading, sourceRefs };
 }
 
 export async function assertTutorAttemptContext(db: Db, scope: OpeningScope, target: TutorAttemptContextTarget, expected: TutorAttemptContext) {

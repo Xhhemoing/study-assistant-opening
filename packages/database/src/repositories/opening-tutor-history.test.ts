@@ -42,4 +42,52 @@ describe("loadTutorHistory context selection", () => {
       sourceRefs: [{ sourceId, sourceVersion: 0 }],
     });
   });
+  it("preserves memoryOnly history lineage and filters expired/inactive memoryOnly turns via clock_timestamp()", async () => {
+    const queries: string[] = [];
+    const memorySourceId = "00000000-0000-4000-8000-000000000002";
+    const sql = (async (strings: TemplateStringsArray) => {
+      const text = strings.join("?").replace(/\s+/g, " ").trim();
+      queries.push(text);
+      if (!text.includes("WITH prior")) return [];
+      return [{
+        question: "question", answer: "answer",
+        user_source_refs: [{ sourceId, sourceVersion: 0 }],
+        assistant_source_refs: [
+          { sourceId, sourceVersion: 0 },
+          { sourceId: memorySourceId, sourceVersion: 0, memoryOnly: true },
+        ],
+      }];
+    }) as unknown as Sql;
+    sql.unsafe = (() => "fragment") as unknown as Sql["unsafe"];
+    const result = await loadTutorHistoryContext(sql, scope, "turn-1");
+    expect(result.sourceRefs).toEqual([
+      { sourceId, sourceVersion: 0 },
+      { sourceId: memorySourceId, sourceVersion: 0, memoryOnly: true },
+    ]);
+    expect(queries.some(q => q.includes("(mem_ref->>'memoryOnly') = 'true'") && q.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+    expect(queries.some(q => q.includes("'memoryDependencyIds'") && q.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+  });
+  it("extracts saved memoryIds and earliest temporaryMemoryExpiresAt from history and fails closed on elapsed expiry", async () => {
+    const m1 = "00000000-0000-4000-8000-0000000000a1";
+    const m2 = "00000000-0000-4000-8000-0000000000a2";
+    const later = "2099-01-02T00:00:00.000Z";
+    const earlier = "2099-01-01T00:00:00.000Z";
+    const sql = fakeSql([
+      { question: "q2", answer: "a2", user_source_refs: [], assistant_source_refs: [{ memoryDependencyIds: [m2] }], memory_temporary_expires_at: later },
+      { question: "q1", answer: "a1", user_source_refs: [], assistant_source_refs: [{ memoryDependencyIds: [m1] }], memory_temporary_expires_at: earlier },
+    ]);
+    expect(await loadTutorHistoryContext(sql, scope, "turn-3")).toEqual({
+      history: [
+        { role: "user", text: "q1" }, { role: "assistant", text: "a1" },
+        { role: "user", text: "q2" }, { role: "assistant", text: "a2" },
+      ],
+      sourceRefs: [],
+      memoryIds: [m1, m2],
+      temporaryMemoryExpiresAt: earlier,
+    });
+    const elapsedSql = fakeSql([
+      { question: "q1", answer: "a1", user_source_refs: [], assistant_source_refs: [{ memoryDependencyIds: [m1] }], memory_temporary_expires_at: "2000-01-01T00:00:00.000Z" },
+    ]);
+    expect(await loadTutorHistoryContext(elapsedSql, scope, "turn-2")).toEqual({ history: [], sourceRefs: [] });
+  });
 });

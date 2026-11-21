@@ -21,6 +21,8 @@ export {
 
 export {
   courseSourcePurposeSchema,
+  courseSourceUseSchema,
+  openingMaterialPurposePinSchema,
   courseSourcePurposeAllows,
   type CourseSourcePurpose,
   type CourseSourceUse,
