@@ -38,7 +38,7 @@ export type DayPlanResult = {
 
 /** Optional placement hints carried with the ranker's existing list of IDs. */
 export const carryOverTaskIds = Symbol("carryOverTaskIds");
-type PreferredTaskOrder = readonly string[] & {
+export type PreferredTaskOrder = readonly string[] & {
   readonly [carryOverTaskIds]?: ReadonlySet<string>;
 };
 
@@ -59,6 +59,11 @@ export type PlanDayOptions = {
    * deadline and priority. Deadlines within the planning day take precedence.
    */
   preferredOrder?: PreferredTaskOrder;
+  /**
+   * Optional explicit set of carry-over task IDs from yesterday's accepted plan.
+   * Takes precedence over the `[carryOverTaskIds]` metadata on `preferredOrder`.
+   */
+  carryOverTaskIds?: ReadonlySet<string>;
   /**
    * Planning clock. Blocks must not start before this instant (in addition to
    * slot start and any retest recommendedAt / not-before).
@@ -388,11 +393,13 @@ export function planDay(
     start: Math.max(Date.parse(slot.start), dayStartMs ?? Number.NEGATIVE_INFINITY),
     end: Math.min(Date.parse(slot.end), dayStartMs === undefined ? Number.POSITIVE_INFINITY : dayEndMs),
   })).filter(slot => slot.start < slot.end);
-  const carryOver = options.preferredOrder?.[carryOverTaskIds];
+  const carryOver = options.carryOverTaskIds ?? options.preferredOrder?.[carryOverTaskIds];
   // Callers with only an ordered list can still preserve larger independent
   // windows. Within a single window, use best fit only for identified carry-over.
-  const preferShortGap = (task: TaskItem) => rank.has(task.id) && !deadlineInDay(task)
-    && (carryOver?.has(task.id) ?? originalSlots.length > 1);
+  const preferShortGap = (task: TaskItem) => !deadlineInDay(task)
+    && (carryOver !== undefined
+      ? carryOver.has(task.id)
+      : rank.has(task.id) && originalSlots.length > 1);
   const workItems: Work[] = pending.map((task) => ({
     task,
     duration: task.minutes * 60_000,

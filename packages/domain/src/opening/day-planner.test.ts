@@ -526,4 +526,23 @@ describe("bounded feasibility repair", () => {
       [id(3), at("09:50"), at("10:10")],
     ]);
   });
+
+  it("supports explicit options.carryOverTaskIds in a single split window without symbol metadata", () => {
+    const pinned = task(1, { minutes: 10, notBefore: at("11:00"), dueAt: at("11:10") });
+    const carry = task(2, { minutes: 30, priority: 5 });
+    const ordinary = task(3, { minutes: 30, priority: 1 });
+    const result = planDay([carry, pinned, ordinary], [slot("09:00", "12:20")], {
+      localDate: "2026-09-14",
+      timeZone: "UTC",
+      planningNow: at("08:00"),
+      preferredOrder: [pinned.id, carry.id, ordinary.id],
+      carryOverTaskIds: new Set([carry.id]),
+    });
+    expect(result.unscheduled).toEqual([]);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [ordinary.id, at("09:00"), at("09:30")],
+      [pinned.id, at("11:00"), at("11:10")],
+      [carry.id, at("11:10"), at("11:40")],
+    ]);
+  });
 });

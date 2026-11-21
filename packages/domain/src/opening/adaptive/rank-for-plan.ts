@@ -19,6 +19,7 @@ export type RankForPlanInput = {
 export type RankForPlanResult = {
   orderedTaskIds: string[];
   reasons: Record<string, PlanBlockReason>;
+  carryOverTaskIds: ReadonlySet<string>;
 };
 
 /** At most this many items of one course in a row (deadline items excluded). */
@@ -140,15 +141,17 @@ export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
     ...ordinary(own),
     ...ordinary(suggested),
   ];
+  const carryOver = new Set(carry.map((item) => item.id));
   const orderedTaskIds = ordered.map((item) => item.id);
   // The planner receives the order separately from the reasons. Keep the
   // carry-over hint on that list without changing its array contents.
   Object.defineProperty(orderedTaskIds, carryOverTaskIds, {
-    value: new Set(carry.map((item) => item.id)),
+    value: carryOver,
   });
   return {
     orderedTaskIds,
     reasons: Object.fromEntries(ordered.map((item) => [item.id, item.reason])),
+    carryOverTaskIds: carryOver,
   };
 }
 
