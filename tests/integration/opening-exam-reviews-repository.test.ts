@@ -707,5 +707,46 @@ describe("exam photo review repository integration", () => {
       await expect(repository.assertCurrent(f.scope, stale.review.id, String(aged!.lease))).rejects.toMatchObject({ code: "CONFLICT" });
       expect((await repository.begin(f.scope, stale.input)).review.id).toBe(readyId);
     }
+
+    for (const entry of ["retry-first", "complete-first", "winner-completes", "concurrent"] as const) {
+      const answerText = `Billed sibling ${entry}`;
+      const old = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText }));
+      const aliasInput = input({ clientKey: randomUUID(), answerText });
+      await repository.begin(f.scope, aliasInput);
+      const operationId = `exam-review:${f.scope.workspaceId}:${old.review.id}`;
+      await f.sql`INSERT INTO opening_budget_reservations(id,workspace_id,purpose,amount_cents,request_id,state)
+        VALUES(${randomUUID()},${f.scope.workspaceId},'practice.grade-photo',10,${operationId},'reserved')`;
+      const otherInput = input({ clientKey: randomUUID(), answerText });
+      const otherId = randomUUID();
+      const [record] = await f.sql`SELECT sprint_id,privacy_epoch FROM opening_exam_reviews WHERE id=${old.review.id}`;
+      const otherReady = entry === "retry-first" || entry === "complete-first";
+      await f.sql`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
+        work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
+        client_key,intent,status,proposal,model_label,privacy_epoch)
+        VALUES(${otherId},${record!.sprint_id},${f.scope.workspaceId},${f.scope.ownerUserId},${otherInput.sourceItemId},
+        ${otherInput.workSourceId},${otherInput.workSourceVersion},${otherInput.referenceSourceId},${otherInput.referenceSourceVersion},
+        ${answerText},${otherInput.clientKey},${f.sql.json(otherInput)},${otherReady ? "ready" : "pending"},
+        ${otherReady ? f.sql.json(proposal) : null},${otherReady ? "winner" : null},${record!.privacy_epoch})`;
+      await f.sql`UPDATE opening_exam_reviews SET updated_at=now()-interval '61 seconds' WHERE id=${old.review.id}`;
+      if (entry === "retry-first") expect((await repository.begin(f.scope, otherInput)).review.id).toBe(otherId);
+      if (entry === "winner-completes") await repository.complete(f.scope, otherId, proposal, "winner");
+      if (entry === "concurrent") {
+        await Promise.all([repository.complete(f.scope, old.review.id, proposal, "old"), repository.complete(f.scope, otherId, proposal, "winner")]);
+      } else {
+        await repository.complete(f.scope, old.review.id, proposal, "late");
+      }
+      const rows = await f.sql`SELECT id,status,client_key FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId} AND answer_text=${answerText}`;
+      expect(rows.filter(row => row.status === "ready")).toHaveLength(1);
+      const winner = String(rows.find(row => row.status === "ready")!.id);
+      if (entry !== "concurrent") {
+        expect(winner).toBe(otherId);
+        expect(rows.find(row => row.id === old.review.id)).toMatchObject({ status: "unknown", client_key: old.input.clientKey });
+      }
+      const ledger = await f.sql`SELECT state FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} AND request_id=${operationId}`;
+      expect(ledger).toEqual([{ state: "reserved" }]);
+      for (const retry of [old.input, aliasInput, otherInput]) {
+        expect((await repository.begin(f.scope, retry)).review.id).toBe(winner);
+      }
+    }
   });
 });

@@ -122,6 +122,23 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     return allReleasedNotSent ? "released_only" : "active_or_billed";
   }
 
+  async function pointToWinner(tx: TransactionSql, row: Row, chosenId: string) {
+    const rowId = String(row.id);
+    if (rowId === chosenId) return;
+    const sprintId = String(row.sprint_id);
+    const alias: ExamReviewAlias = { reviewId: chosenId };
+    await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
+      VALUES(${randomUUID()},${sprintId},${supersededReviewKey(rowId)},${tx.json(alias)},now())
+      ON CONFLICT (sprint_id,client_key) DO UPDATE SET intent=EXCLUDED.intent, recorded_at=now()`;
+    for (const prefix of [REVIEW_ALIAS_KEY_PREFIX, SUPERSEDED_REVIEW_KEY_PREFIX]) {
+      await tx`UPDATE opening_exam_integration_commands
+        SET intent=${tx.json(alias)}, recorded_at=now()
+        WHERE sprint_id=${sprintId}
+          AND left(client_key, length(${prefix}))=${prefix}
+          AND intent->>'reviewId'=${rowId}`;
+    }
+  }
+
   async function reconcileSameIntentRows(
     tx: TransactionSql,
     scope: Scope,
@@ -184,26 +201,12 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
       for (const row of superseded) {
         const rowId = String(row.id);
         if (rowId === chosenId) continue;
-        const sprintId = String(row.sprint_id);
-        const alias: ExamReviewAlias = { reviewId: chosenId };
         await tx`UPDATE opening_exam_reviews
           SET status='failed',
               updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
           WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
             AND status IN ('pending', 'unknown')`;
-        await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
-          VALUES(${randomUUID()},${sprintId},${supersededReviewKey(rowId)},${tx.json(alias)},now())
-          ON CONFLICT (sprint_id,client_key) DO UPDATE SET intent=EXCLUDED.intent, recorded_at=now()`;
-        await tx`UPDATE opening_exam_integration_commands
-          SET intent=${tx.json(alias)}, recorded_at=now()
-          WHERE sprint_id=${sprintId}
-            AND left(client_key, length(${REVIEW_ALIAS_KEY_PREFIX}))=${REVIEW_ALIAS_KEY_PREFIX}
-            AND intent->>'reviewId'=${rowId}`;
-        await tx`UPDATE opening_exam_integration_commands
-          SET intent=${tx.json(alias)}, recorded_at=now()
-          WHERE sprint_id=${sprintId}
-            AND left(client_key, length(${SUPERSEDED_REVIEW_KEY_PREFIX}))=${SUPERSEDED_REVIEW_KEY_PREFIX}
-            AND intent->>'reviewId'=${rowId}`;
+        await pointToWinner(tx, row, chosenId);
       }
     };
     const pick = (bucket: Row[]) => {
@@ -214,9 +217,16 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
       return bucket.sort(sortByCreatedThenId)[0]!;
     };
     if (readyRows.length) {
-      const chosenId = String(pick(readyRows).id);
+      const chosenId = String(readyRows.sort(sortByCreatedThenId)[0]!.id);
       const context = await load(chosenId);
       await supersedeRows([...releasedStaleRows, ...reclaimableRows], chosenId);
+      for (const row of blockingRows) {
+        if (row.status === "pending") {
+          await tx`UPDATE opening_exam_reviews SET status='unknown'
+            WHERE id=${String(row.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+        }
+        await pointToWinner(tx, row, chosenId);
+      }
       return { context, chosenId };
     }
     if (blockingRows.length) {
@@ -317,12 +327,12 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             if (Number(existing.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
             const existingId = String(existing.id);
             let preferredId = existingId;
-            if (existing.status === "failed") {
-              const [pointer] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
+            const [pointer] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
                 JOIN opening_exam_sprints s ON s.id=c.sprint_id
                 WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
                   AND c.client_key=${supersededReviewKey(existingId)} AND c.sprint_id=${String(existing.sprint_id)} LIMIT 1`;
-              if (!pointer) return await readCommittedExamReceipt(() => readContext(tx, scope, existingId));
+            if (!pointer && existing.status === "failed") return await readCommittedExamReceipt(() => readContext(tx, scope, existingId));
+            if (pointer) {
               const parsed = examReviewAliasSchema.safeParse(pointer.intent);
               const target = parsed.success && lockedRows.find(row => String(row.id) === parsed.data.reviewId
                 && String(row.sprint_id) === String(existing.sprint_id));
@@ -433,9 +443,48 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     async complete(scope: Scope, id: string, raw: ExamWorkReviewProposal, modelLabel: string | null): Promise<void> {
       const proposal = examWorkReviewProposalSchema.parse(raw);
       await sql.begin(async tx => {
+        // Use the same workspace serialization as begin before acquiring review locks.
+        const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owner) throw learningError("NOT_FOUND", "工作区不存在");
         await readContext(tx, scope, id);
-        await tx`UPDATE opening_exam_reviews SET status='ready',proposal=${tx.json(proposal)},model_label=${modelLabel},updated_at=now()
-          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status IN ('pending', 'unknown')`;
+        const rows = await tx`SELECT r.* FROM opening_exam_reviews r
+          WHERE r.workspace_id=${scope.workspaceId} AND r.owner_user_id=${scope.ownerUserId}
+            AND EXISTS (SELECT 1 FROM opening_exam_reviews original
+              WHERE original.id=${id} AND original.workspace_id=r.workspace_id AND original.owner_user_id=r.owner_user_id
+                AND original.sprint_id=r.sprint_id AND original.source_item_id=r.source_item_id
+                AND original.work_source_id=r.work_source_id AND original.work_source_version=r.work_source_version
+                AND original.reference_source_id=r.reference_source_id AND original.reference_source_version=r.reference_source_version
+                AND original.privacy_epoch=r.privacy_epoch AND original.answer_text=r.answer_text)
+          ORDER BY r.id ASC FOR UPDATE OF r`;
+        const current = rows.find(row => String(row.id) === id);
+        if (!current || (current.status !== "pending" && current.status !== "unknown")) return;
+        const [pointer] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
+          JOIN opening_exam_sprints s ON s.id=c.sprint_id
+          WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
+            AND c.client_key=${supersededReviewKey(id)} AND c.sprint_id=${String(current.sprint_id)} LIMIT 1`;
+        if (pointer) {
+          if (!examReviewAliasSchema.safeParse(pointer.intent).success) {
+            throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
+          }
+          return;
+        }
+        const ready = rows.filter(row => row.status === "ready")
+          .sort((a, b) => new Date(a.created_at as Date).getTime() - new Date(b.created_at as Date).getTime()
+            || String(a.id).localeCompare(String(b.id)))[0];
+        const chosenId = ready ? String(ready.id) : id;
+        if (!ready) {
+          await tx`UPDATE opening_exam_reviews SET status='ready',proposal=${tx.json(proposal)},model_label=${modelLabel},updated_at=now()
+            WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status IN ('pending', 'unknown')`;
+        }
+        for (const row of rows) {
+          if (String(row.id) === chosenId || (row.status !== "pending" && row.status !== "unknown")) continue;
+          if (row.status === "pending") {
+            await tx`UPDATE opening_exam_reviews SET status='unknown'
+              WHERE id=${String(row.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+          }
+          await pointToWinner(tx, row, chosenId);
+        }
       });
     },
     async fail(scope: Scope, id: string, status: "unknown" | "failed", expectedUpdatedAt?: string): Promise<void> {

@@ -284,7 +284,7 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
       steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
     }, "model");
     const completeCall = failedFake.calls.find(c => c.query.includes("SET status='ready'"));
-    expect(completeCall?.query).toContain("AND status IN ('pending', 'unknown')");
+    expect(completeCall).toBeUndefined();
     expect(failedFake.getStatus()).toBe("failed");
   });
 
@@ -504,6 +504,30 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     expect(store.getRow(idA)).toMatchObject({ clientKey: "stale-key-a", status: "failed" });
     await expect(repo.assertCurrent(scope, idA, oldLease)).rejects.toMatchObject({ code: "CONFLICT" });
     expect((await repo.begin(scope, { ...input, clientKey: "stale-key-a" })).review.id).toBe(idB);
+  });
+
+  it.each(["retry-first", "complete-first", "winner-completes"] as const)("keeps billed late completion from publishing a second result: %s", async scenario => {
+    const a = "77777777-7777-4777-8777-777777777781";
+    const b = "77777777-7777-4777-8777-777777777782";
+    const ledger = [{ state: "reserved", release_reason: null, outcome_unknown_at: null, pending_reconcile_cents: 0 }];
+    const store = makeStatefulMultiRowSql({
+      rows: [
+        { id: a, clientKey: "active-key-a", status: "pending", createdAt: "2026-10-17T00:00:00Z", lease: "old-lease", isStale: true, ledgerRows: ledger },
+        { id: b, clientKey: "winner-key-b", status: scenario === "winner-completes" ? "pending" : "ready", createdAt: "2026-10-17T00:00:05Z", lease: "winner-lease", isStale: false, ledgerRows: [] },
+      ],
+      aliases: [{ clientKey: "active-alias-a", reviewId: a }],
+    });
+    const repo = createOpeningExamReviewsRepository(store.sql);
+    const proposal = { transcription: "late", questionMatch: true, outcome: "correct" as const,
+      steps: [{ label: "Step 1", verdict: "correct" as const, feedback: "ok" }], summary: "ok", errorCause: null };
+    if (scenario === "winner-completes") await repo.complete(scope, b, proposal, "winner");
+    if (scenario === "retry-first") expect((await repo.begin(scope, { ...input, clientKey: "winner-key-b" })).review.id).toBe(b);
+    await repo.complete(scope, a, proposal, "late");
+    expect(store.getRow(a)).toMatchObject({ status: "unknown", clientKey: "active-key-a", ledgerRows: ledger });
+    expect(store.supersededTarget(a)).toBe(b);
+    for (const clientKey of ["active-key-a", "active-alias-a", "winner-key-b"]) {
+      expect((await repo.begin(scope, { ...input, clientKey })).review.id).toBe(b);
+    }
   });
 
   it("retargets supersession pointers and aliases when the winner is later superseded", async () => {
@@ -773,6 +797,9 @@ function makeStatefulMultiRowSql(options: {
       return Promise.resolve(matches ? [{ id: rowId }] : []);
     }
     if (query.includes("FROM opening_exam_reviews")) {
+      if (query.includes("FROM opening_exam_reviews r WHERE")) {
+        return Promise.resolve([...rowsById.values()].sort((a, b) => a.id.localeCompare(b.id)).map(toDbRow));
+      }
       if (query.includes("WHERE id=?")) {
         const targetId = String(values[0]);
         const row = rowsById.get(targetId);
@@ -806,6 +833,7 @@ function makeStatefulMultiRowSql(options: {
   return {
     sql,
     getRow: (id: string) => rowsById.get(id)!,
+    supersededTarget: (id: string) => aliasesByFullKey.get(`exam-review-superseded:v1:${"_".repeat(180)}:${id}`)?.reviewId,
     reclaimedCount: () => reclaimed,
     insertedCount: () => inserted,
   };
