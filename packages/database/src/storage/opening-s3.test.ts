@@ -129,4 +129,76 @@ describe("opening S3 storage", () => {
     });
   });
 
+  it("forwards abortSignal on putObject and lists matching mixed-case staging keys within bounded pages", async () => {
+    const calls: { command: { input: Record<string, unknown> }; options?: { abortSignal?: AbortSignal } }[] = [];
+    let page = 0;
+    const id = "ab000000-0000-4000-8000-0000000000cd";
+    const client: S3ClientLike = {
+      send: async (command, options) => {
+        const cmd = command as { constructor: { name: string }; input: Record<string, unknown> };
+        calls.push({ command: cmd, options });
+        if (cmd.input.Prefix === "opening/staging/a") {
+          page += 1;
+          return page < 2
+            ? { IsTruncated: true, NextContinuationToken: "t1", Contents: [{ Key: `opening/staging/aB000000-0000-4000-8000-0000000000Cd` }, { Key: "opening/staging/other" }] }
+            : { IsTruncated: false, Contents: [] };
+        }
+        if (cmd.input.Prefix === "opening/staging/A") {
+          return { IsTruncated: false, Contents: [{ Key: `opening/staging/${id.toUpperCase()}` }] };
+        }
+        return {};
+      },
+    };
+    const storage = new OpeningS3(
+      { endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      client,
+    );
+    const signal = AbortSignal.timeout(5000);
+    await storage.putObject("opening/sources/k/v0", new Uint8Array([1, 2]), { mime: "text/plain", signal });
+    expect(calls[0]?.options?.abortSignal).toBe(signal);
+
+    const matched = await storage.listMatchingStagingKeys(id);
+    expect(matched).toEqual([
+      "opening/staging/aB000000-0000-4000-8000-0000000000Cd",
+      `opening/staging/${id.toUpperCase()}`,
+    ]);
+  });
+
+  it("paginates past 5 pages and throws an error instead of returning partial results on truncation or missing token", async () => {
+    const id = "00000000-0000-4000-8000-0000000000cd";
+    let page = 0;
+    const pagedStorage = new OpeningS3(
+      { endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      {
+        send: async () => {
+          page += 1;
+          if (page < 7) {
+            return { IsTruncated: true, NextContinuationToken: `t${page}`, Contents: [] };
+          }
+          return { IsTruncated: false, Contents: [{ Key: `opening/staging/${id.toUpperCase()}` }] };
+        },
+      },
+    );
+    expect(await pagedStorage.listMatchingStagingKeys(id)).toEqual([`opening/staging/${id.toUpperCase()}`]);
+    expect(page).toBe(7);
+
+    const infiniteStorage = new OpeningS3(
+      { endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      { send: async () => ({ IsTruncated: true, NextContinuationToken: "always", Contents: [] }) },
+    );
+    await expect(infiniteStorage.listMatchingStagingKeys(id)).rejects.toMatchObject({
+      name: "OpeningStorageError",
+      code: "UNAVAILABLE",
+    });
+
+    const brokenTokenStorage = new OpeningS3(
+      { endpoint: "http://minio", region: "us-east-1", bucket: "aistudy", accessKeyId: "a", secretAccessKey: "b", forcePathStyle: true },
+      { send: async () => ({ IsTruncated: true, Contents: [{ Key: `opening/staging/${id}` }] }) },
+    );
+    await expect(brokenTokenStorage.listMatchingStagingKeys(id)).rejects.toMatchObject({
+      name: "OpeningStorageError",
+      code: "UNAVAILABLE",
+    });
+  });
+
 });

@@ -1,4 +1,6 @@
 import { getAuthRuntime } from "../../../../../../server/runtime";
+import { ApiError, jsonError } from "../../../../../../features/auth/service";
+import { readOpeningRawBody } from "../../../../../../features/opening/request-body";
 import {
   createDingTalkCallbackHttpService,
   DingTalkClientError,
@@ -6,38 +8,47 @@ import {
   OpeningSourceError,
   MAX_DINGTALK_EVENT_BYTES,
 } from "../../../../../../features/opening/connections/dingtalk-callback-service";
-import { getOpeningObjectWriter } from "../../../../../../features/opening/server/data-services";
+import { getOpeningConnectorStorage } from "../../../../../../features/opening/server/data-services";
 
 export async function POST(request: Request): Promise<Response> {
   let response: Response;
   try {
-    const runtime = getAuthRuntime();
+    const rawBody = new TextDecoder().decode(await readOpeningRawBody(request, MAX_DINGTALK_EVENT_BYTES));
     const url = new URL(request.url);
-    const signature = url.searchParams.get("signature");
-    const timestamp = url.searchParams.get("timestamp");
+    const signature = url.searchParams.get("msg_signature") ?? url.searchParams.get("signature");
+    const timestamp = url.searchParams.get("timeStamp") ?? url.searchParams.get("timestamp");
     const nonce = url.searchParams.get("nonce");
     if (!signature || !timestamp || !nonce) {
       throw new DingTalkClientError("FORMAT", "callback query parameters are incomplete");
     }
-    const encryptedBody = await request.text();
-    if (!encryptedBody || encryptedBody.length > MAX_DINGTALK_EVENT_BYTES) {
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(rawBody) as unknown;
+    } catch {
       throw new DingTalkClientError("FORMAT", "callback body is invalid");
     }
-    const writeObject = getOpeningObjectWriter();
-    const service = createDingTalkCallbackHttpService(runtime.sql, {
-      uploadStaging: writeObject,
-      uploadFinal: writeObject,
-    });
-    const result = await service.callback({ signature, timestamp, nonce, encryptedBody });
-    void result;
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
+      || typeof (envelope as Record<string, unknown>).encrypt !== "string"
+      || !(envelope as Record<string, unknown>).encrypt) {
+      throw new DingTalkClientError("FORMAT", "callback body is invalid");
+    }
+    const encryptedBody = (envelope as { encrypt: string }).encrypt;
+    const runtime = getAuthRuntime();
+    const service = createDingTalkCallbackHttpService(runtime.sql, getOpeningConnectorStorage());
+    await service.callback({ signature, timestamp, nonce, encryptedBody });
     const ack = service.success(timestamp, nonce);
     response = Response.json(ack, { headers: { "Cache-Control": "no-store" } });
     return response;
   } catch (error) {
-    if (error instanceof DingTalkClientError) {
+    if (error instanceof ApiError) {
+      response = error.status >= 500
+        ? Response.json({ error: { code: "CONFIGURATION", message: "callback processing failed" } }, { status: error.status })
+        : jsonError(error);
+    } else if (error instanceof DingTalkClientError) {
+      const status = error.code === "INVALID_CONFIG" ? 503 : 400;
       response = Response.json(
-        { error: { code: error.code, message: error.message } },
-        { status: error.code === "INVALID_CONFIG" ? 503 : 400 },
+        { error: { code: error.code, message: status >= 500 ? "callback processing failed" : error.message } },
+        { status },
       );
     } else if (error instanceof OpeningConnectionError) {
       response = Response.json(

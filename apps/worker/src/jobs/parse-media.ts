@@ -18,6 +18,7 @@ import {
 } from "../parsers/media-process";
 import { validateMediaSegments } from "../parsers/media-segments";
 import type { TranscribeAdapterInput } from "../parsers/transcribe-adapter";
+import { fetchPresignedSourceObject, type LegacyFinalKeyResolver, type SourceDownloadStorage } from "./source-object-download";
 
 const MEDIA_MIMES = new Set([
   "video/mp4",
@@ -34,15 +35,9 @@ const BLOCKED_NOT_CONFIGURED_ERROR = {
   retryable: false,
 } as const;
 
-type Storage = {
-  presignGet(
-    key: string,
-    input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string },
-  ): Promise<string>;
-  finalKey(id: string, version: number): string;
-};
+type Storage = SourceDownloadStorage;
 
-type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
+type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState"> & LegacyFinalKeyResolver;
 
 export type PutObjectFn = (input: { key: string; body: Buffer; mime: string }) => Promise<void>;
 
@@ -144,12 +139,14 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
     const signal = new AbortController().signal;
 
     try {
-      const url = await deps.storage.presignGet(deps.storage.finalKey(source.id, source.version), {
-        expiresInSeconds: 900,
-        responseContentDisposition: "attachment",
-        responseCacheControl: "private, no-store",
+      const response = await fetchPresignedSourceObject({
+        scope,
+        source,
+        job,
+        payload,
+        storage: deps.storage,
+        sources: deps.sources,
       });
-      const response = await fetch(url);
       if (!response.ok || !response.body) throw new Error("source download failed");
       let bytes = 0;
       const limited = new Transform({
