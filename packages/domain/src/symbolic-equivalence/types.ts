@@ -1,4 +1,12 @@
-import { addRational, divideRational, equalRational, multiplyRational, rational, subtractRational, type SpanRational } from "../opening/span-rational";
+import {
+  addRational as rawAddRational,
+  divideRational as rawDivideRational,
+  equalRational,
+  multiplyRational as rawMultiplyRational,
+  rational as rawRational,
+  subtractRational as rawSubtractRational,
+  type SpanRational,
+} from "../opening/span-rational";
 
 export type EquivalenceStatus = "equivalent" | "inequivalent" | "unverified";
 export type VerificationResult = {
@@ -36,22 +44,158 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+class PolyComplexityError extends Error {
+  constructor() {
+    super("polynomial_complexity_exceeded");
+  }
+}
+
+const MAX_POLY_COEFF_BITS = 4096;
+const MAX_POLY_COEFF_MAGNITUDE = 1n << BigInt(MAX_POLY_COEFF_BITS);
+const MAX_RATIONAL_DECIMAL_DIGITS = 1235;
+
+function bigAbs(n: bigint): bigint {
+  return n < 0n ? -n : n;
+}
+
+function bigIntBitLength(n: bigint): number {
+  const abs = n < 0n ? -n : n;
+  if (abs === 0n) return 0;
+  const hex = abs.toString(16);
+  return (hex.length - 1) * 4 + (32 - Math.clz32(Number.parseInt(hex[0]!, 16)));
+}
+
+function checkPolyCoeffBound(coeff: SpanRational): void {
+  if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) {
+    throw new PolyComplexityError();
+  }
+}
+
+function bigGcd(a: bigint, b: bigint): bigint {
+  a = bigAbs(a);
+  b = bigAbs(b);
+  while (b !== 0n) [a, b] = [b, a % b];
+  return a;
+}
+
+function bigLcm(a: bigint, b: bigint): bigint {
+  if (a === 0n || b === 0n) return 0n;
+  const reducedA = bigAbs(a) / bigGcd(a, b);
+  if (bigIntBitLength(reducedA) + bigIntBitLength(b) > MAX_POLY_COEFF_BITS + 1) {
+    throw new PolyComplexityError();
+  }
+  const out = bigAbs(reducedA * b);
+  if (out > MAX_POLY_COEFF_MAGNITUDE) throw new PolyComplexityError();
+  return out;
+}
+
+function rational(n: bigint, d = 1n): SpanRational {
+  if (d === 0n) throw new RangeError("Zero denominator");
+  if (bigIntBitLength(n) > MAX_POLY_COEFF_BITS * 4 || bigIntBitLength(d) > MAX_POLY_COEFF_BITS * 4) {
+    throw new PolyComplexityError();
+  }
+  const out = rawRational(n, d);
+  checkPolyCoeffBound(out);
+  return out;
+}
+
+function addRational(a: SpanRational, b: SpanRational): SpanRational {
+  checkPolyCoeffBound(a);
+  checkPolyCoeffBound(b);
+  if (a.n === 0n) return b;
+  if (b.n === 0n) return a;
+  const g = bigGcd(a.d, b.d);
+  const da = a.d / g;
+  const db = b.d / g;
+  if (bigIntBitLength(da) + bigIntBitLength(db) > MAX_POLY_COEFF_BITS + 1) {
+    throw new PolyComplexityError();
+  }
+  const leftTermBits = bigIntBitLength(a.n) + bigIntBitLength(db);
+  const rightTermBits = bigIntBitLength(b.n) + bigIntBitLength(da);
+  if (
+    g === 1n &&
+    Math.abs(leftTermBits - rightTermBits) >= 2 &&
+    Math.max(leftTermBits, rightTermBits) > MAX_POLY_COEFF_BITS + 2
+  ) {
+    throw new PolyComplexityError();
+  }
+  if (Math.max(leftTermBits, rightTermBits) > MAX_POLY_COEFF_BITS * 2 + 2) {
+    throw new PolyComplexityError();
+  }
+  const out = rawAddRational(a, b);
+  checkPolyCoeffBound(out);
+  return out;
+}
+
+function subtractRational(a: SpanRational, b: SpanRational): SpanRational {
+  return addRational(a, { n: -b.n, d: b.d });
+}
+
+function multiplyRational(a: SpanRational, b: SpanRational): SpanRational {
+  checkPolyCoeffBound(a);
+  checkPolyCoeffBound(b);
+  if (a.n === 0n || b.n === 0n) return rawRational(0n);
+  const g1 = bigGcd(bigAbs(a.n), b.d);
+  const g2 = bigGcd(bigAbs(b.n), a.d);
+  const an = a.n / g1;
+  const bd = b.d / g1;
+  const bn = b.n / g2;
+  const ad = a.d / g2;
+  if (
+    bigIntBitLength(an) + bigIntBitLength(bn) > MAX_POLY_COEFF_BITS + 1 ||
+    bigIntBitLength(ad) + bigIntBitLength(bd) > MAX_POLY_COEFF_BITS + 1
+  ) {
+    throw new PolyComplexityError();
+  }
+  const out = rawMultiplyRational({ n: an, d: ad }, { n: bn, d: bd });
+  checkPolyCoeffBound(out);
+  return out;
+}
+
+function divideRational(a: SpanRational, b: SpanRational): SpanRational {
+  if (b.n === 0n) throw new RangeError("Zero denominator");
+  const invB: SpanRational = b.n < 0n ? { n: -b.d, d: -b.n } : { n: b.d, d: b.n };
+  return multiplyRational(a, invB);
+}
+
 export function toRational(value: unknown): SpanRational | null {
   if (typeof value === "bigint") return rational(value);
   if (typeof value === "number") return Number.isInteger(value) && Number.isSafeInteger(value) ? rational(BigInt(value)) : null;
   if (typeof value === "string") {
     const trimmed = value.trim().replaceAll("−", "-");
-    if (/^[+-]?\d+$/.test(trimmed)) return rational(BigInt(trimmed));
+    const intMatch = /^([+-]?)(\d+)$/.exec(trimmed);
+    if (intMatch) {
+      const digits = intMatch[2]!.replace(/^0+/, "");
+      if (digits.length > MAX_RATIONAL_DECIMAL_DIGITS) throw new PolyComplexityError();
+      const sign = intMatch[1] === "-" ? -1n : 1n;
+      return rational(digits ? sign * BigInt(digits) : 0n);
+    }
     const fraction = /^([+-]?\d+)\s*\/\s*([+-]?\d+)$/.exec(trimmed);
     if (fraction) {
+      const nDigits = fraction[1]!.replace(/^[+-]?0+/, "");
+      const dDigits = fraction[2]!.replace(/^[+-]?0+/, "");
+      if (nDigits.length > MAX_RATIONAL_DECIMAL_DIGITS * 2 || dDigits.length > MAX_RATIONAL_DECIMAL_DIGITS * 2) {
+        throw new PolyComplexityError();
+      }
       const den = BigInt(fraction[2]!);
       return den !== 0n ? rational(BigInt(fraction[1]!), den) : null;
     }
     const decimal = /^([+-]?)(\d*)\.(\d+)$/.exec(trimmed);
     if (decimal) {
+      if (trimmed.length > MAX_RATIONAL_DECIMAL_DIGITS * 4) throw new PolyComplexityError();
+      const intTrimmed = (decimal[2] || "").replace(/^0+/, "");
+      const decTrimmed = decimal[3]!.replace(/0+$/, "");
+      if (!decTrimmed) {
+        const sign = decimal[1] === "-" ? -1n : 1n;
+        if (intTrimmed.length > MAX_RATIONAL_DECIMAL_DIGITS) throw new PolyComplexityError();
+        return rational(intTrimmed ? sign * BigInt(intTrimmed) : 0n);
+      }
+      if (intTrimmed.length + decTrimmed.length > MAX_RATIONAL_DECIMAL_DIGITS) {
+        throw new PolyComplexityError();
+      }
       const sign = decimal[1] === "-" ? -1n : 1n;
-      const digits = `${decimal[2] || "0"}${decimal[3]}`;
-      return rational(sign * BigInt(digits), 10n ** BigInt(decimal[3]!.length));
+      const digits = `${intTrimmed || "0"}${decTrimmed}`;
+      return rational(sign * BigInt(digits), 10n ** BigInt(decTrimmed.length));
     }
     return null;
   }
@@ -71,41 +215,13 @@ function compareRational(a: SpanRational, b: SpanRational): -1 | 0 | 1 {
   return diff < 0n ? -1 : diff > 0n ? 1 : 0;
 }
 
-function bigAbs(n: bigint): bigint {
-  return n < 0n ? -n : n;
-}
-
-function bigGcd(a: bigint, b: bigint): bigint {
-  a = bigAbs(a);
-  b = bigAbs(b);
-  while (b !== 0n) [a, b] = [b, a % b];
-  return a;
-}
-
-function bigLcm(a: bigint, b: bigint): bigint {
-  if (a === 0n || b === 0n) return 0n;
-  return bigAbs((a / bigGcd(a, b)) * b);
-}
-
 export type Polynomial = Map<number, SpanRational>;
 export function polynomialConstant(value: SpanRational): Polynomial {
+  checkPolyCoeffBound(value);
   return value.n === 0n ? new Map() : new Map([[0, value]]);
 }
 export function polynomialVariable(): Polynomial {
   return new Map([[1, rational(1n)]]);
-}
-class PolyComplexityError extends Error {
-  constructor() {
-    super("polynomial_complexity_exceeded");
-  }
-}
-
-const MAX_POLY_COEFF_MAGNITUDE = 1n << 4096n;
-
-function checkPolyCoeffBound(coeff: SpanRational): void {
-  if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) {
-    throw new PolyComplexityError();
-  }
 }
 
 export function polynomialAdd(a: Polynomial, b: Polynomial, sign: 1 | -1 = 1): Polynomial {
@@ -139,6 +255,8 @@ export function polynomialMultiply(a: Polynomial, b: Polynomial): Polynomial {
   return out;
 }
 export function polynomialEvaluate(poly: Polynomial, x: SpanRational): SpanRational {
+  checkPolyCoeffBound(x);
+  for (const coeff of poly.values()) checkPolyCoeffBound(coeff);
   let out = rational(0n);
   const maxDeg = polynomialDegree(poly);
   if (maxDeg < 0) return out;
@@ -726,6 +844,7 @@ function evaluateConstantInt(expr: ScalarExpr): number | null {
 
 export type NormalizeLatexOptions = {
   preservedIdentifiers?: readonly string[];
+  implicitMulIdentifiers?: readonly string[];
   matrixImplicitMul?: boolean;
 };
 
@@ -803,6 +922,7 @@ export function normalizeLatexExpr(input: string, options?: NormalizeLatexOption
   for (const ident of options?.preservedIdentifiers ?? []) {
     if (ident) preservedSet.add(ident);
   }
+  const implicitMulSet = new Set<string>(options?.implicitMulIdentifiers ?? []);
   const matrixMode = Boolean(options?.matrixImplicitMul);
 
   const isSingleAtomId = (ident: string): boolean =>
@@ -1117,11 +1237,11 @@ export function normalizeLatexExpr(input: string, options?: NormalizeLatexOption
         continue;
       }
       if (isFunctionCall) {
-        if (!matrixMode || word.length >= 2 || preservedSet.has(word)) {
-          tokens.push({ kind: "fn", text: word });
+        if (implicitMulSet.has(word) || (matrixMode && word.length === 1)) {
+          tokens.push({ kind: "id", text: word });
           continue;
         }
-        tokens.push({ kind: "id", text: word });
+        tokens.push({ kind: "fn", text: word });
         continue;
       }
       if (preservedSet.has(word) || word.includes("_")) {
@@ -1168,7 +1288,10 @@ export function parseScalarExpr(
 ): ScalarExpr | null {
   if (typeof input === "number") return Number.isFinite(input) ? parseScalarExpr(String(input), options) : null;
   if (typeof input !== "string") return input;
-  const shouldNormalize = options?.matrixImplicitMul || /[\\{}]/.test(input);
+  const shouldNormalize =
+    Boolean(options?.matrixImplicitMul) ||
+    Boolean(options?.implicitMulIdentifiers && options.implicitMulIdentifiers.length > 0) ||
+    /[\\{}]/.test(input);
   const normalizedInput = shouldNormalize ? normalizeLatexExpr(input, options) : input;
   if (normalizedInput === null) return null;
   const source = normalizedInput.replaceAll("−", "-").trim();
@@ -1270,17 +1393,24 @@ export function evaluateScalar(
   x: SpanRational,
   variable = "x",
 ): { value?: SpanRational; defined: boolean; reason?: string } {
-  const form = rationalForm(expr, variable);
-  if (form.unsupported) return { defined: false, reason: form.unsupported };
-  if (form.zeroDenominator) return { defined: false, reason: "natural_domain_denominator_zero" };
-  for (const den of form.domainDenominators) {
-    if (polynomialEvaluate(den, x).n === 0n) {
-      return { defined: false, reason: "natural_domain_denominator_zero" };
+  try {
+    const form = rationalForm(expr, variable);
+    if (form.unsupported) return { defined: false, reason: form.unsupported };
+    if (form.zeroDenominator) return { defined: false, reason: "natural_domain_denominator_zero" };
+    for (const den of form.domainDenominators) {
+      if (polynomialEvaluate(den, x).n === 0n) {
+        return { defined: false, reason: "natural_domain_denominator_zero" };
+      }
     }
+    const denominator = polynomialEvaluate(form.denominator, x);
+    if (denominator.n === 0n) return { defined: false, reason: "natural_domain_denominator_zero" };
+    return { value: divideRational(polynomialEvaluate(form.numerator, x), denominator), defined: true };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { defined: false, reason: "polynomial_complexity_exceeded" };
+    }
+    throw err;
   }
-  const denominator = polynomialEvaluate(form.denominator, x);
-  if (denominator.n === 0n) return { defined: false, reason: "natural_domain_denominator_zero" };
-  return { value: divideRational(polynomialEvaluate(form.numerator, x), denominator), defined: true };
 }
 
 function integerSquareRoot(value: bigint): bigint | null {
@@ -3416,14 +3546,28 @@ function verifyScalarEquivalenceInner(
   referenceInput: ScalarExpr | string,
   domain?: DomainSpec,
 ): VerificationResult {
+  const hasNonComm = Boolean(domain?.nonCommutativeVars && domain.nonCommutativeVars.length > 0);
+  const scalarVar =
+    domain?.variable && !(domain?.nonCommutativeVars ?? []).includes(domain.variable)
+      ? domain.variable
+      : !(domain?.nonCommutativeVars ?? []).includes("x")
+        ? "x"
+        : null;
+  const implicitMulIdents = hasNonComm
+    ? [...(domain?.nonCommutativeVars ?? []), ...(scalarVar ? [scalarVar] : [])]
+    : [];
   const preserved = [
     ...(domain?.variable ? [domain.variable] : []),
     ...(domain?.nonCommutativeVars ?? []),
   ];
-  const student = parseScalarExpr(studentInput, { preservedIdentifiers: preserved });
-  const reference = parseScalarExpr(referenceInput, { preservedIdentifiers: preserved });
+  const parseOpts: NormalizeLatexOptions = {
+    preservedIdentifiers: preserved,
+    ...(implicitMulIdents.length > 0 ? { implicitMulIdentifiers: implicitMulIdents } : {}),
+  };
+  const student = parseScalarExpr(studentInput, parseOpts);
+  const reference = parseScalarExpr(referenceInput, parseOpts);
   if (!student || !reference) return { status: "unverified", reason: "parse_outside_decidable_fragment", domain };
-  if (domain?.nonCommutativeVars && domain.nonCommutativeVars.length > 0) {
+  if (hasNonComm) {
     return verifyNonCommutativeParsed(student, reference, domain, false);
   }
 
@@ -3535,10 +3679,47 @@ function verifyScalarEquivalenceInner(
   const rConstraints = collectConstraints(reference, variable);
 
   if (sConstraints.alwaysUndefined !== rConstraints.alwaysUndefined) {
+    const otherExpr = sConstraints.alwaysUndefined ? reference : student;
+    const otherRf = sConstraints.alwaysUndefined ? rf : sf;
+    const otherConstraints = sConstraints.alwaysUndefined ? rConstraints : sConstraints;
+    const cad = buildCadPlan(otherConstraints.rational, parsedDomain, otherConstraints.splitPolys);
+    if (cad.complexityExceeded) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
+    let verifiedWitness: string | null = null;
+    const candidateSites: SampleSite[] = [
+      ...cad.sites,
+      ...cad.openCells.map((cell) => ({ kind: "rational", x: cell.sample }) as SampleSite),
+    ];
+    for (const site of candidateSites) {
+      if (!constraintsSatisfiedAtSite(otherConstraints, site)) continue;
+      if (!otherRf.unsupported && site.kind === "rational") {
+        const denOk =
+          polynomialEvaluate(otherRf.denominator, site.x).n !== 0n &&
+          otherRf.domainDenominators.every((den) => polynomialEvaluate(den, site.x).n !== 0n);
+        if (denOk) {
+          polynomialEvaluate(otherRf.numerator, site.x);
+          verifiedWitness = formatRational(site.x);
+          break;
+        }
+      } else {
+        const status = resolveExprDefinedAtSite(otherExpr, site, variable);
+        if (status === "defined") {
+          verifiedWitness = formatSampleSite(site);
+          break;
+        }
+      }
+    }
+    if (!verifiedWitness) {
+      if (otherConstraints.hasNonRationalDomainOps || cad.unresolvedRootIsolation) {
+        return { status: "unverified", reason: "unresolved_nonrational_domain", domain };
+      }
+      return { status: "unverified", reason: "empty_natural_domain", domain };
+    }
     return {
       status: "inequivalent",
       reason: "natural_domain_mismatch",
-      witness: { input: variable, detail: sConstraints.alwaysUndefined ? "student undefined" : "reference undefined" },
+      witness: { input: verifiedWitness, detail: sConstraints.alwaysUndefined ? "student undefined" : "reference undefined" },
       domain,
     };
   }
@@ -3596,6 +3777,12 @@ function verifyScalarEquivalenceInner(
     if (residual.size === 0) {
       if (validRationalPoints.length === 0) {
         return { status: "unverified", reason: "empty_natural_domain", domain };
+      }
+      for (const x of validRationalPoints) {
+        polynomialEvaluate(sf.numerator, x);
+        polynomialEvaluate(sf.denominator, x);
+        polynomialEvaluate(rf.numerator, x);
+        polynomialEvaluate(rf.denominator, x);
       }
       return { status: "equivalent", reason: "exact_rational_identity_on_locked_domain", domain };
     }
@@ -4497,176 +4684,191 @@ export function verifySubstitutionBounds(input: SubstitutionBounds): Verificatio
   }
 }
 
-type NcPoly = Map<string, SpanRational>;
+type MatrixWordMap = Map<string, ScalarExpr>;
 
-function splitNcKey(key: string): { scalar: string[]; nc: string[] } {
-  if (!key) return { scalar: [], nc: [] };
-  const sep = key.indexOf("\u0001");
-  if (sep < 0) return { scalar: [], nc: [] };
-  const sPart = key.slice(0, sep);
-  const nPart = key.slice(sep + 1);
-  return {
-    scalar: sPart ? sPart.split("\u0000") : [],
-    nc: nPart ? nPart.split("\u0000") : [],
-  };
-}
-
-function joinNcKey(scalar: readonly string[], nc: readonly string[]): string {
-  if (scalar.length === 0 && nc.length === 0) return "";
-  return `${scalar.join("\u0000")}\u0001${nc.join("\u0000")}`;
-}
-
-function ncPolyAdd(a: NcPoly, b: NcPoly, sign: 1 | -1 = 1): NcPoly {
-  const out = new Map<string, SpanRational>();
-  for (const [k, v] of a) {
-    checkPolyCoeffBound(v);
-    out.set(k, v);
+function exprContainsAnyVar(expr: ScalarExpr, targetVars: ReadonlySet<string>): boolean {
+  switch (expr.kind) {
+    case "const":
+      return false;
+    case "variable":
+      return targetVars.has(expr.name);
+    case "neg":
+    case "sqrt":
+    case "abs":
+    case "ln":
+    case "sin":
+    case "cos":
+    case "exp":
+      return exprContainsAnyVar(expr.value, targetVars);
+    case "pow":
+      return exprContainsAnyVar(expr.base, targetVars);
+    case "add":
+    case "sub":
+    case "mul":
+    case "div":
+      return exprContainsAnyVar(expr.left, targetVars) || exprContainsAnyVar(expr.right, targetVars);
   }
-  for (const [k, v] of b) {
-    checkPolyCoeffBound(v);
-    const next = sign === 1 ? addRational(out.get(k) ?? rational(0n), v) : subtractRational(out.get(k) ?? rational(0n), v);
-    checkPolyCoeffBound(next);
-    if (next.n === 0n) out.delete(k);
-    else out.set(k, next);
-    if (out.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
-  }
-  return out;
 }
 
-function ncPolyScale(a: NcPoly, factor: SpanRational): NcPoly {
-  checkPolyCoeffBound(factor);
-  for (const v of a.values()) checkPolyCoeffBound(v);
-  if (factor.n === 0n || a.size === 0) return new Map();
-  const out = new Map<string, SpanRational>();
-  for (const [k, v] of a) {
-    const scaled = multiplyRational(v, factor);
-    checkPolyCoeffBound(scaled);
-    if (scaled.n !== 0n) out.set(k, scaled);
-  }
-  return out;
+function combineMatrixScalarExpr(left: ScalarExpr | undefined, right: ScalarExpr, op: "add" | "sub"): ScalarExpr {
+  if (!left) return op === "add" ? right : { kind: "neg", value: right };
+  return { kind: op, left, right };
 }
 
-function ncPolyMultiply(a: NcPoly, b: NcPoly, budget: PolyMulBudget): NcPoly {
-  if (a.size > MAX_SYMBOLIC_POLY_TERMS || b.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
-  for (const v of a.values()) checkPolyCoeffBound(v);
-  for (const v of b.values()) checkPolyCoeffBound(v);
-  if (a.size === 0 || b.size === 0) return new Map();
-  const out = new Map<string, SpanRational>();
-  for (const [ka, va] of a) {
-    const pa = splitNcKey(ka);
-    for (const [kb, vb] of b) {
-      budget.mulSteps++;
-      if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) throw new PolyComplexityError();
-      const pb = splitNcKey(kb);
-      const scalar = [...pa.scalar, ...pb.scalar].sort();
-      const nc = [...pa.nc, ...pb.nc];
-      if (scalar.length + nc.length > MAX_SYMBOLIC_POLY_DEGREE) throw new PolyComplexityError();
-      const prod = multiplyRational(va, vb);
-      checkPolyCoeffBound(prod);
-      const key = joinNcKey(scalar, nc);
-      const next = addRational(out.get(key) ?? rational(0n), prod);
-      checkPolyCoeffBound(next);
-      if (next.n === 0n) out.delete(key);
-      else {
-        out.set(key, next);
-        if (out.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
-      }
-    }
-  }
-  return out;
+function matrixWordDegree(word: string): number {
+  return word ? word.split("\u0000").length : 0;
 }
 
-function toNcPoly(
+function concatMatrixWords(a: string, b: string): string {
+  if (!a) return b;
+  if (!b) return a;
+  return `${a}\u0000${b}`;
+}
+
+function sortMatrixWord(word: string): string {
+  if (!word) return "";
+  return word.split("\u0000").sort().join("\u0000");
+}
+
+function decomposeMatrixExpr(
   expr: ScalarExpr,
   nonCommVars: ReadonlySet<string>,
   budget: PolyMulBudget,
-): { ok: true; value: NcPoly } | { ok: false; reason: string } {
+): { ok: true; words: MatrixWordMap; scalarFactors: ScalarExpr[] } | { ok: false; reason: string } {
+  if (!exprContainsAnyVar(expr, nonCommVars)) {
+    const scalarFactors = expr.kind === "const" && toRational(expr.value)?.n === 0n ? [] : [expr];
+    return { ok: true, words: new Map([["", expr]]), scalarFactors };
+  }
   switch (expr.kind) {
-    case "const": {
-      const q = toRational(expr.value);
-      if (!q) return { ok: false, reason: "non_rational_constant" };
-      checkPolyCoeffBound(q);
-      return { ok: true, value: q.n === 0n ? new Map() : new Map([["", q]]) };
-    }
-    case "variable": {
-      const key = nonCommVars.has(expr.name) ? joinNcKey([], [expr.name]) : joinNcKey([expr.name], []);
-      return { ok: true, value: new Map([[key, rational(1n)]]) };
-    }
+    case "variable":
+      return { ok: true, words: new Map([[expr.name, { kind: "const", value: 1 }]]), scalarFactors: [] };
     case "neg": {
-      const inner = toNcPoly(expr.value, nonCommVars, budget);
-      return inner.ok ? { ok: true, value: ncPolyScale(inner.value, rational(-1n)) } : inner;
+      const inner = decomposeMatrixExpr(expr.value, nonCommVars, budget);
+      if (!inner.ok) return inner;
+      const words: MatrixWordMap = new Map();
+      for (const [w, coeff] of inner.words) {
+        words.set(w, { kind: "neg", value: coeff });
+      }
+      return { ok: true, words, scalarFactors: inner.scalarFactors };
     }
     case "add":
     case "sub": {
-      const l = toNcPoly(expr.left, nonCommVars, budget);
+      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget);
       if (!l.ok) return l;
-      const r = toNcPoly(expr.right, nonCommVars, budget);
+      const r = decomposeMatrixExpr(expr.right, nonCommVars, budget);
       if (!r.ok) return r;
-      return { ok: true, value: ncPolyAdd(l.value, r.value, expr.kind === "add" ? 1 : -1) };
+      const words: MatrixWordMap = new Map(l.words);
+      for (const [w, coeff] of r.words) {
+        words.set(w, combineMatrixScalarExpr(words.get(w), coeff, expr.kind));
+        if (words.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
+      }
+      return { ok: true, words, scalarFactors: [...l.scalarFactors, ...r.scalarFactors] };
     }
     case "mul": {
-      const l = toNcPoly(expr.left, nonCommVars, budget);
+      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget);
       if (!l.ok) return l;
-      const r = toNcPoly(expr.right, nonCommVars, budget);
+      const r = decomposeMatrixExpr(expr.right, nonCommVars, budget);
       if (!r.ok) return r;
-      return { ok: true, value: ncPolyMultiply(l.value, r.value, budget) };
-    }
-    case "div": {
-      const l = toNcPoly(expr.left, nonCommVars, budget);
-      if (!l.ok) return l;
-      const r = toNcPoly(expr.right, nonCommVars, budget);
-      if (!r.ok) return r;
-      if (r.value.size === 1 && r.value.has("")) {
-        const denom = r.value.get("")!;
-        if (denom.n !== 0n) {
-          return { ok: true, value: ncPolyScale(l.value, divideRational(rational(1n), denom)) };
+      const words: MatrixWordMap = new Map();
+      for (const [wl, cl] of l.words) {
+        for (const [wr, cr] of r.words) {
+          budget.mulSteps++;
+          if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) throw new PolyComplexityError();
+          const combinedWord = concatMatrixWords(wl, wr);
+          if (matrixWordDegree(combinedWord) > MAX_SYMBOLIC_POLY_DEGREE) throw new PolyComplexityError();
+          const prodCoeff: ScalarExpr = { kind: "mul", left: cl, right: cr };
+          words.set(combinedWord, combineMatrixScalarExpr(words.get(combinedWord), prodCoeff, "add"));
+          if (words.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
         }
       }
-      return { ok: false, reason: "non_commutative_division_unsupported" };
+      return { ok: true, words, scalarFactors: [...l.scalarFactors, ...r.scalarFactors] };
+    }
+    case "div": {
+      if (exprContainsAnyVar(expr.right, nonCommVars)) {
+        return { ok: false, reason: "non_commutative_division_unsupported" };
+      }
+      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget);
+      if (!l.ok) return l;
+      const words: MatrixWordMap = new Map();
+      for (const [w, coeff] of l.words) {
+        words.set(w, { kind: "div", left: coeff, right: expr.right });
+      }
+      return { ok: true, words, scalarFactors: [...l.scalarFactors, expr.right] };
     }
     case "pow": {
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
         return { ok: false, reason: "power_out_of_bounds" };
       }
-      const b = toNcPoly(expr.base, nonCommVars, budget);
-      if (!b.ok) return b;
       if (expr.exponent <= 0) {
-        const hasVar = [...b.value.keys()].some((k) => k !== "");
-        if (hasVar) return { ok: false, reason: "non_commutative_power_unsupported" };
-        const scalarVal = b.value.get("") ?? rational(0n);
-        if (scalarVal.n === 0n) return { ok: false, reason: "natural_domain_denominator_zero" };
-        let val = rational(1n);
-        const step = divideRational(rational(1n), scalarVal);
-        checkPolyCoeffBound(step);
-        for (let i = 0; i < Math.abs(expr.exponent); i++) {
-          val = multiplyRational(val, step);
-          checkPolyCoeffBound(val);
-        }
-        return { ok: true, value: new Map([["", val]]) };
+        return { ok: false, reason: "non_commutative_power_unsupported" };
       }
-      let acc: NcPoly = new Map([["", rational(1n)]]);
+      const base = decomposeMatrixExpr(expr.base, nonCommVars, budget);
+      if (!base.ok) return base;
+      let accWords: MatrixWordMap = new Map([["", { kind: "const", value: 1 }]]);
       for (let i = 0; i < expr.exponent; i++) {
-        acc = ncPolyMultiply(acc, b.value, budget);
+        const next: MatrixWordMap = new Map();
+        for (const [wl, cl] of accWords) {
+          for (const [wr, cr] of base.words) {
+            budget.mulSteps++;
+            if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) throw new PolyComplexityError();
+            const combinedWord = concatMatrixWords(wl, wr);
+            if (matrixWordDegree(combinedWord) > MAX_SYMBOLIC_POLY_DEGREE) throw new PolyComplexityError();
+            const prodCoeff: ScalarExpr = { kind: "mul", left: cl, right: cr };
+            next.set(combinedWord, combineMatrixScalarExpr(next.get(combinedWord), prodCoeff, "add"));
+            if (next.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
+          }
+        }
+        accWords = next;
       }
-      return { ok: true, value: acc };
+      return { ok: true, words: accWords, scalarFactors: base.scalarFactors };
     }
     default:
       return { ok: false, reason: `${expr.kind}_outside_non_commutative_fragment` };
   }
 }
 
-function collapseCommutativeNcPoly(poly: NcPoly): NcPoly {
-  const out = new Map<string, SpanRational>();
-  for (const [key, coeff] of poly) {
-    checkPolyCoeffBound(coeff);
-    const { scalar, nc } = splitNcKey(key);
-    const collapsedKey = joinNcKey([...scalar, ...nc].sort(), []);
-    const next = addRational(out.get(collapsedKey) ?? rational(0n), coeff);
-    checkPolyCoeffBound(next);
-    if (next.n === 0n) out.delete(collapsedKey);
-    else out.set(collapsedKey, next);
+function resolveNonCommutativeVarsAndScalar(
+  student: ScalarExpr,
+  reference: ScalarExpr,
+  domain: DomainSpec | undefined,
+  defaultAllNonCommutative: boolean,
+): { ok: true; nonCommVars: Set<string>; scalarVar: string | null } | { ok: false; reason: string } {
+  const vars = new Set([...collectVariables(student), ...collectVariables(reference)]);
+  const declaredNc = domain?.nonCommutativeVars ?? [];
+  const declaredScalar = domain?.variable && !declaredNc.includes(domain.variable) ? domain.variable : null;
+  if (declaredNc.length > 0) {
+    const nonCommVars = new Set(declaredNc);
+    let scalarVar = declaredScalar;
+    if (!scalarVar) {
+      const remaining = [...vars].filter((v) => !nonCommVars.has(v));
+      if (defaultAllNonCommutative) {
+        if (remaining.length > 1) return { ok: false, reason: "foreign_variable" };
+        scalarVar = remaining[0] ?? "x";
+      } else {
+        scalarVar = !nonCommVars.has("x") ? "x" : null;
+        for (const v of remaining) {
+          if (v !== scalarVar) return { ok: false, reason: "foreign_variable" };
+        }
+      }
+    } else {
+      for (const v of vars) {
+        if (!nonCommVars.has(v) && v !== scalarVar) return { ok: false, reason: "foreign_variable" };
+      }
+    }
+    return { ok: true, nonCommVars, scalarVar };
   }
-  return out;
+  const nonCommVars = defaultAllNonCommutative
+    ? new Set([...vars].filter((v) => v !== declaredScalar))
+    : new Set<string>();
+  return { ok: true, nonCommVars, scalarVar: declaredScalar };
+}
+
+function firstUnverifiedFactorReason(factors: readonly ScalarExpr[], scalarDomain: DomainSpec): string | null {
+  for (const factor of factors) {
+    const selfRes = verifyScalarEquivalence(factor, factor, scalarDomain);
+    if (selfRes.status === "unverified") return selfRes.reason ?? "empty_natural_domain";
+  }
+  return null;
 }
 
 function verifyNonCommutativeParsed(
@@ -4679,33 +4881,75 @@ function verifyNonCommutativeParsed(
     const parsedDomain = parseDomainSpec(domain);
     if (!parsedDomain) return { status: "unverified", reason: "invalid_domain", domain };
     if (parsedDomain.empty) return { status: "unverified", reason: "empty_domain", domain };
-    const vars = new Set([...collectVariables(student), ...collectVariables(reference)]);
-    const scalarVar = domain?.variable && !(domain.nonCommutativeVars ?? []).includes(domain.variable) ? domain.variable : null;
-    const nonCommVars = new Set(
-      domain?.nonCommutativeVars && domain.nonCommutativeVars.length > 0
-        ? domain.nonCommutativeVars
-        : defaultAllNonCommutative
-          ? [...vars].filter((v) => v !== scalarVar)
-          : [],
-    );
-    if (!defaultAllNonCommutative) {
-      for (const v of vars) {
-        if (!nonCommVars.has(v) && v !== scalarVar) {
-          return { status: "unverified", reason: "foreign_variable", domain };
-        }
+    const resolved = resolveNonCommutativeVarsAndScalar(student, reference, domain, defaultAllNonCommutative);
+    if (!resolved.ok) return { status: "unverified", reason: resolved.reason, domain };
+
+    const { nonCommVars, scalarVar } = resolved;
+    const budget: PolyMulBudget = { mulSteps: 0 };
+    const sDecomp = decomposeMatrixExpr(student, nonCommVars, budget);
+    if (!sDecomp.ok) return { status: "unverified", reason: sDecomp.reason, domain };
+    const rDecomp = decomposeMatrixExpr(reference, nonCommVars, budget);
+    if (!rDecomp.ok) return { status: "unverified", reason: rDecomp.reason, domain };
+
+    const scalarDomain: DomainSpec = {
+      variable: scalarVar ?? "x",
+      ...(domain?.intervals ? { intervals: domain.intervals } : {}),
+      ...(domain?.excluded ? { excluded: domain.excluded } : {}),
+    };
+
+    const sUnverifiedFactor = firstUnverifiedFactorReason(sDecomp.scalarFactors, scalarDomain);
+    const rUnverifiedFactor = firstUnverifiedFactorReason(rDecomp.scalarFactors, scalarDomain);
+    if (sUnverifiedFactor && rUnverifiedFactor) {
+      return { status: "unverified", reason: sUnverifiedFactor, domain };
+    }
+
+    const allWords = new Set([...sDecomp.words.keys(), ...rDecomp.words.keys()]);
+    const zeroConst: ScalarExpr = { kind: "const", value: 0 };
+    const inequivalentResults: VerificationResult[] = [];
+    for (const word of allWords) {
+      const sCoeff = sDecomp.words.get(word) ?? zeroConst;
+      const rCoeff = rDecomp.words.get(word) ?? zeroConst;
+      const res = verifyScalarEquivalence(sCoeff, rCoeff, scalarDomain);
+      if (res.status === "unverified") {
+        return { status: "unverified", reason: res.reason, domain };
+      }
+      if (res.status === "inequivalent") {
+        inequivalentResults.push(res);
       }
     }
-    const budget: PolyMulBudget = { mulSteps: 0 };
-    const sPoly = toNcPoly(student, nonCommVars, budget);
-    const rPoly = toNcPoly(reference, nonCommVars, budget);
-    if (!sPoly.ok) return { status: "unverified", reason: sPoly.reason, domain };
-    if (!rPoly.ok) return { status: "unverified", reason: rPoly.reason, domain };
-    const diff = ncPolyAdd(sPoly.value, rPoly.value, -1);
-    if (diff.size === 0) {
-      return { status: "equivalent", reason: "non_commutative_ring_identity", domain };
+
+    if (inequivalentResults.length === 0) {
+      if (sUnverifiedFactor || rUnverifiedFactor) {
+        return { status: "unverified", reason: sUnverifiedFactor ?? rUnverifiedFactor!, domain };
+      }
+      return {
+        status: "equivalent",
+        reason: scalarVar ? "domain_aware_non_commutative_identity" : "non_commutative_ring_identity",
+        domain,
+      };
     }
-    const collapsed = collapseCommutativeNcPoly(diff);
-    if (collapsed.size === 0) {
+    if (sUnverifiedFactor || rUnverifiedFactor) {
+      return { status: "unverified", reason: sUnverifiedFactor ?? rUnverifiedFactor!, domain };
+    }
+
+    // Check if the nonzero discrepancy disappears under commutative word sorting (pure commutation error)
+    const collapsedWords = new Map<string, ScalarExpr>();
+    for (const word of allWords) {
+      const sCoeff = sDecomp.words.get(word);
+      const rCoeff = rDecomp.words.get(word);
+      const sorted = sortMatrixWord(word);
+      if (sCoeff) collapsedWords.set(sorted, combineMatrixScalarExpr(collapsedWords.get(sorted), sCoeff, "add"));
+      if (rCoeff) collapsedWords.set(sorted, combineMatrixScalarExpr(collapsedWords.get(sorted), rCoeff, "sub"));
+    }
+    let allCollapsedEquivalent = collapsedWords.size > 0;
+    for (const diffExpr of collapsedWords.values()) {
+      const chk = verifyScalarEquivalence(diffExpr, zeroConst, scalarDomain);
+      if (chk.status !== "equivalent") {
+        allCollapsedEquivalent = false;
+        break;
+      }
+    }
+    if (allCollapsedEquivalent) {
       return {
         status: "inequivalent",
         reason: "non_commutative_mismatch",
@@ -4716,7 +4960,7 @@ function verifyNonCommutativeParsed(
     return {
       status: "inequivalent",
       reason: "non_commutative_residual_nonzero",
-      witness: { input: "expression", detail: "non-commutative expressions differ" },
+      witness: inequivalentResults[0]?.witness ?? { input: "expression", detail: "non-commutative expressions differ" },
       domain,
     };
   } catch (err) {
@@ -4738,12 +4982,14 @@ export function verifyMatrixExpressionEquivalence(
   const parsedDomain = parseDomainSpec(domain);
   if (!parsedDomain) return { status: "unverified", reason: "invalid_domain", domain };
   if (parsedDomain.empty) return { status: "unverified", reason: "empty_domain", domain };
-  const preserved = [
-    ...(domain?.variable ? [domain.variable] : []),
+  const implicitMulIdents = [
     ...(domain?.nonCommutativeVars ?? []),
+    ...(domain?.variable ? [domain.variable] : []),
   ];
+  const preserved = [...implicitMulIdents];
   const parseOpts: NormalizeLatexOptions = {
     preservedIdentifiers: preserved,
+    implicitMulIdentifiers: implicitMulIdents,
     matrixImplicitMul: true,
   };
   const student = parseScalarExpr(studentInput, parseOpts);

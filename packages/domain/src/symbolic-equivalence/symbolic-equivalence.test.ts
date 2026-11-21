@@ -560,6 +560,87 @@ describe("bounded symbolic equivalence", () => {
     const zeroPowZeroExp = verifyScalarEquivalence("x^(0^0)", "x");
     expect(zeroPowZeroExp.status).toBe("unverified");
     expect(zeroPowZeroExp.reason).toBe("parse_outside_decidable_fragment");
+
+    // Round-13 P1-2: exact Horner & scalar evaluation magnitude cap at x = 2^3000
+    const x2_3000 = (1n << 3000n).toString();
+    const hornerZero = verifyScalarEquivalence("x^2", "0", {
+      intervals: [{ left: x2_3000, right: x2_3000 }],
+    });
+    expect(hornerZero.status).toBe("unverified");
+    expect(hornerZero.reason).toBe("polynomial_complexity_exceeded");
+
+    const hornerSelf = verifyScalarEquivalence("x^2", "x^2", {
+      intervals: [{ left: x2_3000, right: x2_3000 }],
+    });
+    expect(hornerSelf.status).toBe("unverified");
+    expect(hornerSelf.reason).toBe("polynomial_complexity_exceeded");
+
+    // Round-13 P1-3: empty locked domain must not misreport 0^0 vs (x-1)^0 or 1/0 vs 1/(x-1) as inequivalent
+    expect(verifyScalarEquivalence("0^0", "(x - 1)^0", { intervals: [{ left: 1, right: 1 }] }).status).toBe("unverified");
+    expect(verifyScalarEquivalence("1 / 0", "1 / (x - 1)", { intervals: [{ left: 1, right: 1 }] }).status).toBe(
+      "unverified",
+    );
+    expect(verifyScalarEquivalence("0^0", "(x - 1)^0", { intervals: [{ left: 0, right: 2 }] }).status).toBe(
+      "inequivalent",
+    );
+
+    // Round-13 P1-4: matrix / non-commutative comparator honors scalar domain restrictions & empty scalar domains
+    expect(
+      verifyScalarEquivalence("x * A", "A", {
+        variable: "x",
+        nonCommutativeVars: ["A"],
+        intervals: [{ left: 1, right: 1 }],
+      }).status,
+    ).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence("abs(x) * A", "x * A", {
+        variable: "x",
+        nonCommutativeVars: ["A"],
+        intervals: [{ left: 0, right: 5 }],
+      }).status,
+    ).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence("x * A", "2 * A", {
+        variable: "x",
+        nonCommutativeVars: ["A"],
+        intervals: [{ left: 1, right: 1 }],
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("(0^0) * A", "((x - 1)^0) * A", {
+        variable: "x",
+        nonCommutativeVars: ["A"],
+        intervals: [{ left: 1, right: 1 }],
+      }).status,
+    ).toBe("unverified");
+    expect(
+      verifyMatrixExpressionEquivalence("(1 / (x - 1)) * A", "A", {
+        variable: "x",
+        nonCommutativeVars: ["A"],
+        intervals: [{ left: 1, right: 1 }],
+      }).status,
+    ).toBe("unverified");
+
+    // Round-13 P2: declared matrix/scalar identifiers permit implicit multiplication before parentheses while unknown fns fail closed
+    expect(
+      verifyScalarEquivalence("A(B - C)", "A*B - A*C", {
+        nonCommutativeVars: ["A", "B", "C"],
+      }).status,
+    ).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence("A(B - C)", "(B - C)A", {
+        nonCommutativeVars: ["A", "B", "C"],
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyMatrixExpressionEquivalence("A\\left(B + C\\right)", "AB + AC", {
+        nonCommutativeVars: ["A", "B", "C"],
+      }).status,
+    ).toBe("equivalent");
+    expect(verifyScalarEquivalence("foo(x)", "foo * x").status).toBe("unverified");
+    expect(verifyMatrixExpressionEquivalence("foo(x)", "foo * x", { nonCommutativeVars: ["A"] }).status).toBe(
+      "unverified",
+    );
   });
 });
 

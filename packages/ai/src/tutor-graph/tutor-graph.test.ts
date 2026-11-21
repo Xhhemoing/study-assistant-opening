@@ -148,13 +148,14 @@ describe("TutorGraph fast path", () => {
   });
 
   it("scans structured witness params/stepErrors and scrubs raw verification on rejection or abort", () => {
-    const budget = createMinEntropyBudget({ scaffoldBitBudget: 1, now: () => 1000 });
+    const budget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });
     const controller = new AbortController();
 
     const blockedStructured = runTutorGraph({
       questionStem: "积分",
       submission: {},
       budget,
+      assessmentMode: "practice",
       attemptSubmitted: true,
       verifyCaps: {
         verify: () => ({
@@ -205,6 +206,7 @@ describe("TutorGraph fast path", () => {
       releaseCaps: {
         stopSignal: controller.signal,
         assertCurrent: () => undefined,
+        answerLeakageBlocker: () => false,
       },
     });
     expect(aborted.state).toBe("stopped");
@@ -262,7 +264,8 @@ describe("TutorGraph fast path", () => {
     const deepResult = runTutorGraph({
       questionStem: "极限",
       submission: {},
-      budget: createMinEntropyBudget({ now: () => 1000 }),
+      budget: createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 }),
+      assessmentMode: "practice",
       attemptSubmitted: true,
       verifyCaps: {
         verify: () =>
@@ -287,7 +290,8 @@ describe("TutorGraph fast path", () => {
     const leakedKeyResult = runTutorGraph({
       questionStem: "极限",
       submission: {},
-      budget: createMinEntropyBudget({ now: () => 1000 }),
+      budget: createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 }),
+      assessmentMode: "practice",
       attemptSubmitted: true,
       verifyCaps: {
         verify: () => ({
@@ -627,11 +631,92 @@ describe("TutorGraph fast path", () => {
       });
       expect(res.state).toBe("released");
       expect(b.leakageBits).toBe(1);
-      expect(res.verification).toEqual({ steps: [{ id: "s1", text: "a", status: "unknown" }] });
+      expect(res.verification).toEqual({ steps: [] });
       singleStepShapes.add(JSON.stringify({ teaching: res.publicTeaching, verification: res.verification }));
       if (idx === 1) expect(singleStepShapes.size).toBe(2);
     }
     expect(singleStepShapes.size).toBe(2);
+
+    // Round-13 P1-1: exhaustive 0-bit & 1-bit oracle test across diverse verifier step counts, texts, IDs, dependsOn, and secrets
+    let deepVerifierMeta: Record<string, unknown> = { ok: true };
+    for (let i = 0; i < 18; i++) deepVerifierMeta = { [`d${i}`]: deepVerifierMeta };
+    const candidateSubmission = {
+      steps: [
+        { id: "c1", text: "x^2", dependsOn: [] },
+        { id: "c2", text: "2x", dependsOn: ["c1"] },
+      ],
+    };
+    const diverseVerifierOutputs: Array<Parameters<typeof runTutorGraph>[0]["verifyCaps"]["verify"]> = [
+      () =>
+        ({
+          steps: [
+            { id: "v_pass_1", text: "alpha", status: "valid", dependsOn: ["x"] },
+            { id: "v_pass_2", text: "SECRET_42", status: "valid", dependsOn: ["v_pass_1", "extra"] },
+            { id: "v_pass_3", text: "extra_step", status: "valid" },
+          ],
+          nestedMeta: deepVerifierMeta,
+        }) as never,
+      () => ({
+        steps: [{ id: "v_pass_only", text: "single", status: "valid" }],
+      }),
+      () => ({
+        steps: [
+          { id: "v_f1", text: "different1", status: "invalid", dependsOn: ["z"] },
+          { id: "v_f2", text: "SECRET_42", status: "valid" },
+        ],
+        firstError: { stepId: "v_f1", kind: "domain", message: "SECRET_42" },
+      }),
+      () => ({
+        steps: [
+          { id: "v_a", text: "valid_first", status: "valid" },
+          { id: "v_b", text: "fail_second", status: "invalid", dependsOn: ["v_a"] },
+          { id: "v_c", text: "c", status: "unknown" },
+          { id: "v_d", text: "d", status: "invalid" },
+        ],
+        ruleWitness: { capability: "function-diff-plot@1", params: { origin: "rules", title: "SECRET_42" } },
+      }),
+      () => ({
+        steps: [],
+      }),
+    ];
+
+    const zeroBitOutcomes = new Set<string>();
+    const oneBitOutcomes = new Set<string>();
+    for (const verifyFn of diverseVerifierOutputs) {
+      const zeroB = createMinEntropyBudget({ scaffoldBitBudget: 0, now: () => 1000 });
+      const zeroRes = runTutorGraph({
+        questionStem: "积分",
+        submission: candidateSubmission,
+        budget: zeroB,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verifyFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_42") },
+      });
+      expect(zeroB.leakageBits).toBe(0);
+      expect(JSON.stringify(zeroRes)).not.toContain("SECRET_42");
+      zeroBitOutcomes.add(JSON.stringify(zeroRes));
+
+      const oneB = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const oneRes = runTutorGraph({
+        questionStem: "积分",
+        submission: candidateSubmission,
+        budget: oneB,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verifyFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_42") },
+      });
+      expect(oneRes.state).toBe("released");
+      expect(oneB.leakageBits).toBe(1);
+      expect(JSON.stringify(oneRes)).not.toContain("SECRET_42");
+      expect(oneRes.verification.steps).toEqual([
+        { id: "c1", text: "x^2", status: "unknown", dependsOn: [] },
+        { id: "c2", text: "2x", status: "unknown", dependsOn: ["c1"] },
+      ]);
+      expect(oneRes.publicTeaching?.learnerSteps).toEqual(oneRes.verification.steps);
+      oneBitOutcomes.add(JSON.stringify(oneRes));
+    }
+    expect(zeroBitOutcomes.size).toBe(1);
+    expect(oneBitOutcomes.size).toBe(2);
 
     // Round-10 P1-2 Bypass 2: pure turn clamped to 1.5-bit ceiling even when passed a practice-configured budget
     const reusedPracticeBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });

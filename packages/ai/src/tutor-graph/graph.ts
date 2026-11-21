@@ -48,6 +48,35 @@ function collectStructuredStrings(value: unknown, out: string[], seen = new Set<
   return true;
 }
 
+function extractSubmissionCandidateSteps(submission: unknown): LearnerStep[] {
+  if (typeof submission !== "object" || submission === null || Array.isArray(submission)) return [];
+  const rawSteps = (submission as { steps?: unknown }).steps;
+  if (!Array.isArray(rawSteps)) return [];
+  const out: LearnerStep[] = [];
+  for (let idx = 0; idx < rawSteps.length; idx++) {
+    const item = rawSteps[idx];
+    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+    const step = item as Record<string, unknown>;
+    const id = typeof step.id === "string" || typeof step.id === "number" ? String(step.id) : `s${idx + 1}`;
+    const text =
+      typeof step.text === "string"
+        ? step.text
+        : typeof step.expression === "string"
+          ? step.expression
+          : typeof step.claim === "string"
+            ? step.claim
+            : "";
+    const dependsOn = Array.isArray(step.dependsOn) ? step.dependsOn.map((dep) => String(dep)) : undefined;
+    out.push({
+      id,
+      text,
+      status: "unknown",
+      ...(dependsOn ? { dependsOn } : {}),
+    });
+  }
+  return out;
+}
+
 function projectLearnerStep(
   step: LearnerStep,
   overrideStatus?: LearnerStep["status"],
@@ -321,6 +350,38 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     };
   }
 
+  // Enforce release-cap precondition and 0-bit budget ceiling before consulting verifier
+  if (typeof input.releaseCaps.answerLeakageBlocker !== "function") {
+    input.releaseCaps.assertCurrent();
+    const stoppedBeforeVerify = isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal);
+    return {
+      state: stoppedBeforeVerify ? "stopped" : "unverified",
+      providerCalls: 0,
+      verification: { steps: [] },
+      leakageBits: budget.leakageBits,
+      helpState: budget.state,
+      cooldownUntilMs: budget.cooldownUntilMs,
+      releaseApproved: false,
+      reason: stoppedBeforeVerify ? "cancelled" : "release_guard_rejected",
+    };
+  }
+
+  const rawTurnCap =
+    typeof (budget as { maxBitsPerTurn?: unknown }).maxBitsPerTurn === "number" &&
+    Number.isFinite((budget as { maxBitsPerTurn?: number }).maxBitsPerTurn)
+      ? (budget as { maxBitsPerTurn: number }).maxBitsPerTurn
+      : PURE_MAX_LEAKAGE_BITS;
+  const isPureTurn = assessmentMode !== "practice";
+  const turnCap = isPureTurn ? Math.min(rawTurnCap, PURE_MAX_LEAKAGE_BITS) : rawTurnCap;
+
+  if (rawTurnCap === 0 || (isPureTurn && (turnCap < 1 || budget.leakageBits + 1 >= PURE_MAX_LEAKAGE_BITS))) {
+    const preCheck = budget.canRelease(1, nowMs);
+    return blockedByBudgetResult(
+      budget,
+      preCheck.allowed ? "budget_exhausted" : (preCheck.reason ?? "budget_exhausted"),
+    );
+  }
+
   input.verifyCaps.assertCurrent();
   let verification: VerifyOutput;
   try {
@@ -359,13 +420,6 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   const disclosesAnswerDependentInfo = Boolean(verification.firstError || verification.ruleWitness || disclosedStepCount > 0);
   const uncoarsenedBits = Math.max(disclosesAnswerDependentInfo ? 1 : 0, stepOutcomeBits);
 
-  const rawTurnCap =
-    typeof (budget as { maxBitsPerTurn?: unknown }).maxBitsPerTurn === "number" &&
-    Number.isFinite((budget as { maxBitsPerTurn?: number }).maxBitsPerTurn)
-      ? (budget as { maxBitsPerTurn: number }).maxBitsPerTurn
-      : PURE_MAX_LEAKAGE_BITS;
-  const isPureTurn = assessmentMode !== "practice";
-  const turnCap = isPureTurn ? Math.min(rawTurnCap, PURE_MAX_LEAKAGE_BITS) : rawTurnCap;
   const pureAllValid =
     propagatedSteps.length > 0 &&
     !verification.firstError &&
@@ -375,33 +429,24 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     uncoarsenedBits <= turnCap;
   const shouldCoarsen = isPureTurn || (disclosedStepCount >= 2 && !uncoarsenedFits);
 
-  // On pure/assessed turns the verifier runs once and emits at most 2 public outcomes (log2(2) = 1 bit).
-  const requiredBits = isPureTurn ? 1 : shouldCoarsen ? 1 : uncoarsenedBits;
-  if (isPureTurn && budget.leakageBits + requiredBits >= PURE_MAX_LEAKAGE_BITS) {
-    const pureCheck = budget.canRelease(requiredBits, nowMs);
-    return blockedByBudgetResult(
-      budget,
-      pureCheck.allowed ? "budget_exhausted" : (pureCheck.reason ?? "budget_exhausted"),
-    );
-  }
+  // On pure/coarsened turns the verifier runs once and emits at most 2 public outcomes (log2(2) = 1 bit).
+  const requiredBits = shouldCoarsen ? 1 : uncoarsenedBits;
   const releaseCheck = budget.canRelease(requiredBits, nowMs);
   if (!releaseCheck.allowed) {
     return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
   }
 
-  const releasedSteps = shouldCoarsen
-    ? propagatedSteps.map((step) => projectLearnerStep(step, "unknown", null))
-    : propagatedSteps;
-  const publicTeaching = toPublicCaps(
+  const candidateSteps = shouldCoarsen ? extractSubmissionCandidateSteps(input.submission) : propagatedSteps;
+  let publicTeaching = toPublicCaps(
     input.questionStem,
-    releasedSteps,
+    candidateSteps,
     verification,
     shouldCoarsen ? { coarsened: true, allVerifiedValid: pureAllValid } : {},
   );
   const publicVerification: VerifyOutput = shouldCoarsen
-    ? { steps: releasedSteps }
+    ? { steps: candidateSteps }
     : {
-        steps: releasedSteps,
+        steps: candidateSteps,
         ...(verification.deterministic !== undefined ? { deterministic: verification.deterministic } : {}),
         ...(verification.firstError
           ? {
@@ -413,7 +458,19 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
             }
           : {}),
       };
-  const releasedText = guardRelease(publicTeaching, verification, input.releaseCaps);
+  // On coarsened/pure turns guardRelease never sees raw verifier data so verifier output cannot create a 3rd state.
+  let releasedText = guardRelease(
+    publicTeaching,
+    shouldCoarsen ? publicVerification : verification,
+    input.releaseCaps,
+  );
+  if (releasedText === undefined && shouldCoarsen && pureAllValid) {
+    publicTeaching = toPublicCaps(input.questionStem, candidateSteps, verification, {
+      coarsened: true,
+      allVerifiedValid: false,
+    });
+    releasedText = guardRelease(publicTeaching, publicVerification, input.releaseCaps);
+  }
   if (releasedText === undefined || isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
     const stopped = isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal);
     return {
