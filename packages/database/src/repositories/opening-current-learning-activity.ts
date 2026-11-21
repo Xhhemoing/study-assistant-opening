@@ -1,4 +1,6 @@
 import {
+  WRITING_META_PROPERTY_KEY,
+  WRITING_WORKSPACE_PROTOCOL,
   uuidSchema,
   type Scope,
   type WritingActivityCheckpoint,
@@ -6,6 +8,7 @@ import {
 import { isDeepStrictEqual } from "node:util";
 import { compareCurrentLearningActivities, selectCurrentLearningActivity, selectCurrentWorkspaceActivity } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
+import { openingNoteReadable } from "./opening-note-provenance";
 import {
   openingWritingActivityReadableSql,
   parseAuthorizedWritingActivityCheckpoint,
@@ -16,12 +19,13 @@ type Db = Sql | TransactionSql;
 /** Server-side identities only; never pass browser-provided task projections here. */
 export type OpeningCurrentLearningReference = { activityId?: string | null; sessionId?: string | null; taskId?: string | null };
 export type OpeningCurrentLearningActivity = { activityId: string; sessionId: string | null; courseId: string };
-type CandidateOptions = { recoveryOnly?: boolean; hasDecisionOnly?: boolean; spanOnly?: boolean; retestReferences?: string[] | null; references?: string[]; sessionId?: string | null };
+type CandidateOptions = { recoveryOnly?: boolean; hasDecisionOnly?: boolean; spanOnly?: boolean; retestReferences?: string[] | null; references?: string[]; sessionId?: string | null; rankByEngagement?: boolean };
 type CourseCandidateRow = {
   id: string;
   courseId: string;
   status: string;
   updatedAt: string;
+  learnerEngagedAt?: string | null;
   sessionId: string | null;
   placeholder: boolean;
   writingCheckpoint: WritingActivityCheckpoint | null;
@@ -31,9 +35,49 @@ function normalizeReferenceId(value: string): string {
   return uuidSchema.safeParse(value).success ? value.toLowerCase() : value;
 }
 
+// Teaching activity timestamps can reflect background publication. Writing workspace
+// starts and checkpoint updates are learner actions, as are edits to its saved variants.
+function learnerEngagementAt(db: Db, scope: Scope) {
+  const writing = () => db`a.create_intent->>'protocol'=${WRITING_WORKSPACE_PROTOCOL}`;
+  return db`GREATEST(
+    CASE WHEN ${writing()} THEN a.updated_at END,
+    (SELECT max(GREATEST(attempt.started_at,attempt.submitted_at)) FROM opening_learning_attempts attempt
+      WHERE attempt.activity_id=a.id AND attempt.workspace_id=a.workspace_id AND attempt.owner_user_id=a.owner_user_id
+        AND attempt.course_id=a.course_id),
+    (SELECT max(event.created_at) FROM opening_study_intent_events event
+      WHERE event.activity_id=a.id AND event.workspace_id=a.workspace_id AND event.owner_user_id=a.owner_user_id),
+    CASE WHEN a.create_intent->>'protocol'='span-lesson-v1' THEN (
+      SELECT max(decision.created_at) FROM opening_learning_decisions decision
+      WHERE decision.workspace_id=a.workspace_id AND decision.owner_user_id=a.owner_user_id
+        AND decision.layer='activity' AND decision.target_id=a.id
+        AND decision.receipt->'reasonCodes' ? 'entry:span-next'
+        AND decision.receipt->>'selectedAction' LIKE 'create:%'
+    ) END,
+    (SELECT max(turn.created_at) FROM opening_turns turn
+      JOIN opening_conversations conversation ON conversation.id=turn.conversation_id
+        AND conversation.workspace_id=turn.workspace_id AND conversation.owner_user_id=a.owner_user_id
+      WHERE turn.workspace_id=a.workspace_id AND turn.role='user'
+        AND (turn.context_anchor->>'activityId'=a.id::text
+          OR EXISTS (SELECT 1 FROM opening_learning_sessions session
+            WHERE session.id=turn.learning_session_id AND session.activity_id=a.id
+              AND session.workspace_id=a.workspace_id AND session.owner_user_id=a.owner_user_id
+              AND session.course_id IS NOT DISTINCT FROM a.course_id))),
+    CASE WHEN ${writing()} THEN (
+      SELECT max(revision.created_at) FROM library_properties p
+      JOIN library_documents d ON d.id=p.subject_id AND d.workspace_id=p.workspace_id
+      JOIN library_revisions revision ON revision.document_id=d.id AND revision.workspace_id=d.workspace_id
+      WHERE p.workspace_id=a.workspace_id AND p.subject_type='document' AND p.key=${WRITING_META_PROPERTY_KEY}
+        AND lower(p.value->>'workGroupId')=lower(a.create_intent->>'workGroupId')
+        AND d.deleted_at IS NULL AND ${openingNoteReadable(db, scope.workspaceId, db`d.id`)}
+        AND revision.revision_number>1
+    ) END
+  )`;
+}
+
 async function candidates(db: Db, scope: Scope, courseId: string | null, options: CandidateOptions = {}): Promise<CourseCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id
+  const engagement = options.rankByEngagement ? db`,${learnerEngagementAt(db, scope)} AS learner_engaged_at` : db``;
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id${engagement}
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
     JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id AND c.archived_at IS NULL
@@ -46,7 +90,7 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       AND NOT (COALESCE(a.checkpoint_json,'{}'::jsonb) ? 'cardReviewSession')
       AND COALESCE(a.create_intent->>'legacy','false')<>'true'
       AND a.client_key NOT LIKE 'legacy-course-continue:%'
-      AND ${openingWritingActivityReadableSql(db, scope, db`a`)}
+      AND ${openingWritingActivityReadableSql(db, scope, () => db`a`)}
       AND ${options.spanOnly ? db`a.create_intent->>'protocol'='span-lesson-v1'` : db`true`}
       AND ${options.retestReferences ? db`lower(a.checkpoint_json->'spanLesson'->>'retestId')=ANY(${options.retestReferences}::text[])`
         : options.spanOnly ? db`a.checkpoint_json->'spanLesson'->>'retestId' IS NULL` : db`true`}
@@ -61,7 +105,8 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       AND ${options.hasDecisionOnly ? db`(a.create_intent->>'protocol'='span-lesson-v1' OR a.goal_json ? 'courseRoute')
         AND EXISTS (SELECT 1 FROM opening_learning_decisions d WHERE d.workspace_id=a.workspace_id
         AND d.owner_user_id=a.owner_user_id AND d.layer='activity' AND d.target_id=a.id)` : db`true`}
-      AND ${normalizedRefs?.length ? db`lower(a.id::text)=ANY(${normalizedRefs}::text[])` : db`true`}`;
+      AND ${normalizedRefs?.length ? db`lower(a.id::text)=ANY(${normalizedRefs}::text[])` : db`true`}
+    ORDER BY a.updated_at DESC,a.id DESC`;
   return rows.map(row => {
     const span = row.create_intent?.protocol === "span-lesson-v1";
     const parsedWriting = parseAuthorizedWritingActivityCheckpoint(row);
@@ -78,6 +123,7 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       courseId: String(row.course_id),
       status: String(row.status),
       updatedAt: new Date(row.updated_at).toISOString(),
+      learnerEngagedAt: row.learner_engaged_at ? new Date(row.learner_engaged_at).toISOString() : null,
       sessionId: row.session_id ? String(row.session_id) : null,
       placeholder,
       writingCheckpoint: parsedWriting.kind === "writing" ? parsedWriting.checkpoint : null,
@@ -173,7 +219,7 @@ export async function readOpeningTaskTeachingBinding(db: Db, scope: Scope, cours
 }
 /** Read-only identity owner. Content, authorization and receipts stay with their existing readers. */
 export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, courseId: string,
-  reference: OpeningCurrentLearningReference = {}, options: { spanOnly?: boolean; retestId?: string } = {}): Promise<OpeningCurrentLearningActivity | null> {
+  reference: OpeningCurrentLearningReference = {}, options: { spanOnly?: boolean; retestId?: string; rankByEngagement?: boolean } = {}): Promise<OpeningCurrentLearningActivity | null> {
   const references: string[] = [];
   let retestReferences: string[] | null = null;
   if (options.retestId) {
@@ -202,6 +248,7 @@ export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, c
   }
   const rows = await candidates(db, scope, courseId, {
     ...options,
+    rankByEngagement: references.length === 0 && (options.rankByEngagement ?? true),
     retestReferences,
     references,
     sessionId: reference.sessionId,
@@ -230,8 +277,8 @@ export async function readOpeningCurrentLearningRecovery(db: Db, scope: Scope): 
     }
     return perCourse.sort(compareCurrentLearningActivities)[0];
   };
-  const current = (await selectRecovery(await candidates(db, scope, null, { recoveryOnly: true })))
-    ?? (await selectRecovery(await candidates(db, scope, null, { hasDecisionOnly: true })));
+  const current = (await selectRecovery(await candidates(db, scope, null, { recoveryOnly: true, rankByEngagement: true })))
+    ?? (await selectRecovery(await candidates(db, scope, null, { hasDecisionOnly: true, rankByEngagement: true })));
   return current ? { activityId: current.id, sessionId: current.sessionId, courseId: current.courseId } : null;
 }
 
@@ -260,6 +307,7 @@ type WorkspaceCandidateRow = {
   courseId: string | null;
   status: string;
   updatedAt: string;
+  learnerEngagedAt?: string | null;
   sessionId: string | null;
   placeholder: boolean;
   writingCheckpoint: WritingActivityCheckpoint | null;
@@ -271,7 +319,8 @@ async function workspaceCandidates(
   options: { recoveryOnly?: boolean; references?: string[]; sessionId?: string | null } = {},
 ): Promise<WorkspaceCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,
+  const engagement = options.recoveryOnly ? db`,${learnerEngagementAt(db, scope)} AS learner_engaged_at` : db``;
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json${engagement},
       s.id AS session_id, (c.id IS NOT NULL) AS course_present
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
@@ -286,7 +335,7 @@ async function workspaceCandidates(
       AND NOT (COALESCE(a.checkpoint_json,'{}'::jsonb) ? 'cardReviewSession')
       AND COALESCE(a.create_intent->>'legacy','false')<>'true'
       AND a.client_key NOT LIKE 'legacy-course-continue:%'
-      AND ${openingWritingActivityReadableSql(db, scope, db`a`)}
+      AND ${openingWritingActivityReadableSql(db, scope, () => db`a`)}
       AND ${options.recoveryOnly ? db`(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId') IS NULL
         OR EXISTS (SELECT 1 FROM opening_retest_activities r
           LEFT JOIN opening_tasks rt ON rt.id=r.task_id AND rt.workspace_id=r.workspace_id AND rt.owner_user_id=r.owner_user_id
@@ -312,6 +361,7 @@ async function workspaceCandidates(
         courseId: row.course_id == null ? null : String(row.course_id),
         status: String(row.status),
         updatedAt: new Date(row.updated_at).toISOString(),
+        learnerEngagedAt: row.learner_engaged_at ? new Date(row.learner_engaged_at).toISOString() : null,
         sessionId: row.session_id ? String(row.session_id) : null,
         placeholder,
         writingCheckpoint: parsedWriting.kind === "writing" ? parsedWriting.checkpoint : null,

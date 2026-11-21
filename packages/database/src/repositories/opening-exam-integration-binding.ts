@@ -1,7 +1,7 @@
 import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  knowledgeSnapshotSchema, openingAdaptivePrefsSchema,
+  openingAdaptivePrefsSchema,
   type ExamBindInput, type ExamCourseBinding, type ExamMaterialBinding, type ExamPack,
   type ExamSkillBinding, type KnowledgeSnapshot, type Scope,
 } from "@aistudy/contracts";
@@ -13,6 +13,7 @@ import { readCurrentExamNodeIds } from "./opening-exam-skill-identity";
 import { reserveOpeningSourceQuota, type OpeningSourceQuota } from "./opening-source-quota";
 import { examPackDirectorySections } from "./opening-exam-source-format";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
+import { readPublicKnowledgeSnapshot, storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
 
 const sourceVersionsSchema = z.record(z.string().uuid(), z.number().int().nonnegative());
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -128,7 +129,7 @@ export async function ensureExamCourseBinding(
     }
     const [storedGraph] = await tx`SELECT snapshot FROM opening_course_knowledge
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${input.courseId} FOR UPDATE`;
-    const currentNodes = storedGraph ? knowledgeSnapshotSchema.parse(storedGraph.snapshot).nodes : [];
+    const currentNodes = storedGraph ? readPublicKnowledgeSnapshot(storedGraph.snapshot).nodes : [];
     const currentNodeIds = await readCurrentExamNodeIds(tx, scope, existing);
     const skills = existing.skills.map(skill => ({ ...skill }));
     const seen = new Set<string>();
@@ -152,14 +153,17 @@ export async function ensureExamCourseBinding(
     WHERE workspace_id=${scope.workspaceId} AND course_id=${input.courseId} FOR UPDATE`;
   const row = rows[0];
   let graph: KnowledgeSnapshot = { courseId: input.courseId, version: 0, nodes: [], edges: [] };
+  let coveredSourceChunkDigests: Record<string, string> | undefined;
   let sourceVersions: Record<string, number> = {};
   if (row) {
-    const parsed = knowledgeSnapshotSchema.safeParse(row.snapshot), versions = sourceVersionsSchema.safeParse(row.source_versions);
+    const parsed = storedKnowledgeSnapshotSchema.safeParse(row.snapshot), versions = sourceVersionsSchema.safeParse(row.source_versions);
     if (row.owner_user_id !== scope.ownerUserId || !parsed.success || !versions.success
       || parsed.data.courseId !== input.courseId || !Number.isInteger(Number(row.version)) || Number(row.version) < 0) {
       throw conflict("课程知识图谱无法校验，未修改现有图谱");
     }
-    try { graph = validateKnowledgeSnapshot({ ...parsed.data, version: Number(row.version) }); }
+    const { coveredSourceChunkDigests: digests, ...snapshot } = parsed.data;
+    coveredSourceChunkDigests = digests;
+    try { graph = validateKnowledgeSnapshot({ ...snapshot, version: Number(row.version) }); }
     catch { throw conflict("课程知识图谱无法校验，未修改现有图谱"); }
     sourceVersions = versions.data;
   }
@@ -191,9 +195,10 @@ export async function ensureExamCourseBinding(
   });
   if (added.length) {
     const next = validateKnowledgeSnapshot({ ...graph, version: graph.version + 1, nodes: [...graph.nodes, ...added] });
+    const stored = coveredSourceChunkDigests ? { ...next, coveredSourceChunkDigests } : next;
     if (added.some(node => node.evidenceChunkIds.length)) sourceVersions[sourceId] = 0;
     await tx`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions,updated_at)
-      VALUES(${scope.workspaceId},${scope.ownerUserId},${input.courseId},${next.version},${tx.json(next as never)},${tx.json(sourceVersions)},${now})
+      VALUES(${scope.workspaceId},${scope.ownerUserId},${input.courseId},${next.version},${tx.json(stored as never)},${tx.json(sourceVersions)},${now})
       ON CONFLICT(workspace_id,course_id) DO UPDATE SET version=EXCLUDED.version,snapshot=EXCLUDED.snapshot,
         source_versions=EXCLUDED.source_versions,updated_at=EXCLUDED.updated_at`;
   }

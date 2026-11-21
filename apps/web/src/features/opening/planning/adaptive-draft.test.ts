@@ -127,4 +127,70 @@ describe("goal-aware adaptive draft integration", () => {
     }));
     expect(buildAdaptiveDraft(input).adaptive.suggestedTasks).toEqual([]);
   });
+
+  it("preserves carryOverTaskIds across resourcesBeforeSuggestion slicing in a split window", () => {
+    // 82 min single window split by a 10 min pinned deadline into 48 min + 24 min.
+    // Preserving carryOverTaskIds lets the 24 min carry-over take the shorter 24 min gap
+    // inside the budget probe, leaving 48 min continuous for a full 25 min suggestion.
+    const pinned = pending(1, {
+      minutes: 10,
+      notBefore: "2026-10-17T17:48:00Z",
+      dueAt: "2026-10-17T17:58:00Z",
+    });
+    const carry = pending(2, { minutes: 24, courseId: examCourse });
+    const input = draftInput({ kind: "custom", targetDate: "2026-10-20", weeklyMinutes: 0 }, [pinned, carry]);
+    input.yesterdayAccepted = [{
+      taskId: carry.id,
+      start: "2026-10-16T17:00:00Z",
+      end: "2026-10-16T17:24:00Z",
+      reason: "昨天",
+    }];
+    input.freeBlocks = [{ start: "2026-10-17T17:00:00Z", end: "2026-10-17T18:22:00Z", kind: "free" }];
+
+    const result = buildAdaptiveDraft(input);
+    expect(result.adaptive.suggestedTasks).toMatchObject([{ courseId: examCourse, minutes: 25 }]);
+    expect(result.unscheduledTaskIds).toEqual([]);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [result.adaptive.suggestedTasks![0]!.id, "2026-10-17T17:00:00.000Z", "2026-10-17T17:25:00.000Z"],
+      [pinned.id, "2026-10-17T17:48:00.000Z", "2026-10-17T17:58:00.000Z"],
+      [carry.id, "2026-10-17T17:58:00.000Z", "2026-10-17T18:22:00.000Z"],
+    ]);
+  });
+
+  it("preserves empty carryOverTaskIds across resourcesBeforeSuggestion slicing so probe and final plan agree across multiple windows", () => {
+    // Ordinary non-carry-over work (22 min) takes first fit in the 45 min window (leaving 23 min + 22 min).
+    // If slicing stripped the empty carryOverTaskIds set, the probe would treat ordinary work as best-fit
+    // in the 22 min window and propose a 25 min suggestion that cannot fit in the final plan.
+    const ordinary = pending(1, { minutes: 22, courseId: examCourse });
+    const input = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 }, [ordinary]);
+    input.freeBlocks = [
+      { start: "2026-10-17T17:00:00Z", end: "2026-10-17T17:45:00Z", kind: "free" },
+      { start: "2026-10-17T18:00:00Z", end: "2026-10-17T18:22:00Z", kind: "free" },
+    ];
+
+    const result = buildAdaptiveDraft(input);
+    expect(result.adaptive.suggestedTasks).toMatchObject([{ courseId: examCourse, minutes: 23 }]);
+    expect(result.unscheduledTaskIds).toEqual([]);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [ordinary.id, "2026-10-17T17:00:00.000Z", "2026-10-17T17:22:00.000Z"],
+      [result.adaptive.suggestedTasks![0]!.id, "2026-10-17T17:22:00.000Z", "2026-10-17T17:45:00.000Z"],
+    ]);
+  });
+
+  it("ranks an end-of-local-day deadline ahead of undated carry-over in adaptive drafts", () => {
+    const carry = pending(1, { priority: 5 });
+    const endOfDayDeadline = pending(2, { priority: 1, dueAt: "2026-10-18T07:00:00.000Z" });
+    const input = draftInput(null, [carry, endOfDayDeadline]);
+    input.yesterdayAccepted = [{
+      taskId: carry.id,
+      start: "2026-10-16T17:00:00Z",
+      end: "2026-10-16T17:30:00Z",
+      reason: "昨天",
+    }];
+    input.freeBlocks = [{ start: "2026-10-18T06:30:00.000Z", end: "2026-10-18T07:00:00.000Z", kind: "free" }];
+
+    const result = buildAdaptiveDraft(input);
+    expect(result.blocks.map(block => block.taskId)).toEqual([endOfDayDeadline.id]);
+    expect(result.unscheduledTaskIds).toEqual([carry.id]);
+  });
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import type { WorkspaceEntry } from "@aistudy/ui";
-import { BookOpen, Compass, Library, type LucideIcon } from "lucide-react";
+import { BookOpen, ChevronDown, Compass, Library, type LucideIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { z } from "zod";
@@ -58,55 +58,64 @@ export function Onboarding() {
   }
 
   if (error) return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-4 px-4" role="alert">
-      <span className="text-sm text-red-700">{error}</span>
-      <button className="inline-flex min-h-10 items-center rounded-md border border-zinc-200 px-3 text-sm text-zinc-800 hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" type="button" onClick={() => window.location.reload()}>重试</button>
+    <main className="flex min-h-dvh flex-col items-center justify-center gap-4 bg-bg px-4 text-text" role="alert">
+      <span className="text-sm text-danger">{error}</span>
+      <button className="keycap inline-flex min-h-10 items-center rounded-ctl px-3.5 text-sm font-medium text-text transition-[background-color,box-shadow,transform] duration-150 ease-out-strong hover:bg-surface-2 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" type="button" onClick={() => window.location.reload()}>重试</button>
     </main>
   );
-  if (!ready) return <main className="flex min-h-screen items-center justify-center px-4"><span className="text-sm text-zinc-500">正在准备你的学习空间</span></main>;
+  if (!ready) return <main className="flex min-h-dvh items-center justify-center bg-bg px-4 text-text"><span className="text-sm text-text-2">正在准备你的学习空间</span></main>;
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col justify-center gap-6 px-4 py-10 sm:px-6 lg:px-8">
-      <header className="space-y-3">
-        <span className="text-sm font-semibold text-emerald-700">AIstudy</span>
-        <h1 className="text-xl font-semibold tracking-[-0.02em] text-zinc-800">从你想学的内容开始</h1>
-        <p className="max-w-prose text-sm leading-6 text-zinc-500">说清想学什么，准备一节具体的学习。也可以跳过设置，直接探索或记笔记。</p>
-      </header>
-      {draftKey ? <FirstLearningForm draftKey={draftKey} onStarted={href => router.replace(href)} /> : null}
-      <details className="border-y border-zinc-200 py-3">
-        <summary className="cursor-pointer text-sm font-medium text-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700">跳过设置，选择其他入口</summary>
-        <div className="mt-2 divide-y divide-zinc-200">
-        {ONBOARDING_PATHS.map((path) => {
-          const Icon = PATH_ICONS[path.id];
-          return (
-            <button
-              className="flex min-h-20 w-full items-center gap-4 px-3 py-4 text-left transition-colors duration-150 hover:bg-zinc-50 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-              data-onboarding-path={path.id}
-              disabled={choicePending}
-              key={path.id}
-              onClick={() => void chooseEntry(path.entry, path.href)}
-              type="button"
-            >
-              <Icon aria-hidden="true" className="text-emerald-700" size={20} strokeWidth={1.7} />
-              <span className="flex flex-col gap-1">
-                <strong className="text-sm font-semibold text-zinc-800">{path.title}</strong>
-                <span className="text-xs leading-5 text-zinc-500">{path.description}</span>
-              </span>
-            </button>
-          );
-        })}
+    <main className="min-h-dvh bg-bg text-text">
+      <div className="mx-auto flex min-h-dvh w-full max-w-xl flex-col justify-center gap-5 px-4 py-10 sm:px-6 lg:px-8">
+        <div className="inline-flex items-center gap-2.5 text-sm font-semibold text-text">
+          <span className="keycap-ink inline-flex size-8 items-center justify-center rounded-lg text-xs" aria-hidden="true">AI</span>
+          <span>AIstudy</span>
         </div>
-      </details>
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-200 pt-4 text-sm">
-        <span className="text-zinc-500">或者直接进入</span>
-        <button
-          className="inline-flex min-h-10 items-center gap-2 rounded-md border border-zinc-200 px-3 text-sm text-zinc-800 hover:bg-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={choicePending}
-          onClick={() => void chooseEntry("library", "/opening/library")}
-          type="button"
-        >
-          <Library aria-hidden="true" size={16} />笔记知识库
-        </button>
+        <section className="rounded-panel border border-line bg-surface p-5 shadow-card sm:p-7">
+          <header className="mb-5 space-y-2">
+            <h1 className="font-serif text-2xl font-semibold tracking-tight text-text">从你想学的内容开始</h1>
+            <p className="max-w-prose text-sm leading-6 text-text-2">说清想学什么，准备一节具体的学习。也可以跳过设置，直接探索或记笔记。</p>
+          </header>
+          {draftKey ? <FirstLearningForm draftKey={draftKey} onStarted={href => router.replace(href)} /> : null}
+        </section>
+        <details className="group rounded-card border border-line bg-surface px-4 py-3 shadow-card">
+          <summary className="flex min-h-9 cursor-pointer list-none items-center justify-between text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden"><span>跳过设置，选择其他入口</span><ChevronDown size={15} aria-hidden="true" className="shrink-0 text-text-3 transition-transform duration-150 ease-out-strong group-open:rotate-180" /></summary>
+          <div className="mt-2 divide-y divide-line border-t border-line pt-1">
+          {ONBOARDING_PATHS.map((path) => {
+            const Icon = PATH_ICONS[path.id];
+            return (
+              <button
+                className="flex min-h-18 w-full items-center gap-3.5 rounded-lg px-3 py-3.5 text-left transition-colors duration-150 ease-out-strong hover:bg-surface-2 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+                data-onboarding-path={path.id}
+                disabled={choicePending}
+                key={path.id}
+                onClick={() => void chooseEntry(path.entry, path.href)}
+                type="button"
+              >
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent" aria-hidden="true">
+                  <Icon aria-hidden="true" size={18} strokeWidth={1.75} />
+                </span>
+                <span className="flex flex-col gap-0.5">
+                  <strong className="text-sm font-semibold text-text">{path.title}</strong>
+                  <span className="text-xs leading-5 text-text-2">{path.description}</span>
+                </span>
+              </button>
+            );
+          })}
+          </div>
+        </details>
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-sm">
+          <span className="text-text-2">或者直接进入</span>
+          <button
+            className="keycap inline-flex min-h-10 items-center gap-2 rounded-ctl px-3.5 text-sm font-medium text-text transition-[background-color,box-shadow,transform] duration-150 ease-out-strong hover:bg-surface-2 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={choicePending}
+            onClick={() => void chooseEntry("library", "/opening/library")}
+            type="button"
+          >
+            <Library aria-hidden="true" size={16} />笔记知识库
+          </button>
+        </div>
       </div>
     </main>
   );

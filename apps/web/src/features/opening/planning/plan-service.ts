@@ -20,6 +20,7 @@ import {
 import {
   addLocalDays,
   buildDailyDraftInput,
+  carryOverTaskIds,
   dailyDraftClientKey,
   deriveDayBlocks,
   planDay,
@@ -28,6 +29,7 @@ import {
   type ReplanOffer,
   resolveLocalDayBounds,
   type PlanDayOptions,
+  type PreferredTaskOrder,
 } from "@aistudy/domain";
 import {
   createOpeningPlansRepository,
@@ -118,7 +120,8 @@ export type BuildServerPlanDayOptionsArgs = {
   date: string;
   timeZone: string;
   now: Date;
-  preferredOrder?: readonly string[];
+  preferredOrder?: PreferredTaskOrder;
+  carryOverTaskIds?: ReadonlySet<string>;
 };
 
 /**
@@ -149,6 +152,10 @@ export function buildServerPlanDayOptions(args: BuildServerPlanDayOptionsArgs): 
   }
   if (args.preferredOrder?.length) {
     options.preferredOrder = args.preferredOrder;
+  }
+  const carryOver = args.carryOverTaskIds ?? args.preferredOrder?.[carryOverTaskIds];
+  if (carryOver !== undefined) {
+    options.carryOverTaskIds = carryOver;
   }
   return options;
 }
@@ -259,7 +266,13 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
             date,
             timeZone,
             now,
-            planDayOptions: (preferredOrder) => buildServerPlanDayOptions({ date, timeZone, now, preferredOrder }),
+            planDayOptions: (preferredOrder, carryOver) => buildServerPlanDayOptions({
+              date,
+              timeZone,
+              now,
+              preferredOrder,
+              carryOverTaskIds: carryOver,
+            }),
           });
           return {
             kind: "propose",
@@ -281,7 +294,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
           return true;
         });
         const now = clock();
-        const { orderedTaskIds, reasons } = buildDailyDraftInput({
+        const { orderedTaskIds, reasons, carryOverTaskIds: dailyCarryOverTaskIds } = buildDailyDraftInput({
           tasks,
           yesterdayAccepted,
           dueRetests,
@@ -302,6 +315,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
             timeZone,
             now,
             preferredOrder: orderedTaskIds,
+            carryOverTaskIds: dailyCarryOverTaskIds,
           }),
         );
         const blocks = applyDraftReasons(planned.blocks, reasons);
@@ -328,6 +342,40 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
     );
     if (result.draft?.suggestedTasks?.length && result.draft.origin !== "agent") {
       result.draft = withOpeningSuggestionFeedback(result.draft, await readOpeningSuppressedSuggestionIdentities(sql, scope, date));
+    }
+    return result;
+  }
+
+  async function readToday(scope: Scope, date: string, ensured?: EnsureDailyDraftResult): Promise<TodayPlanResult> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
+    }
+    const [state, hardBlocks, persisted] = await Promise.all([
+      repo.getToday(scope, date),
+      repo.listHardBlocks(scope, date),
+      ensured ? null : repo.findDraftByProposeClientKey(scope, date, dailyDraftClientKey(date)),
+    ]);
+    const acceptedVersion = state?.acceptedVersion ?? 0;
+    const blocks = state?.blocks ?? [];
+    const tasks = acceptedVersion ? await repo.listTasks(scope, { excludeInactiveRetests: true }) : [];
+    const skipped = acceptedVersion || persisted?.status === "accepted" ? "accepted"
+      : persisted?.status === "rejected" ? "rejected"
+      : !ensured && !persisted && !(await resolveFreeBlocks(scope, date)) ? "no_settings"
+      : null;
+    const dailyDraft = skipped ? null : ensured ? ensured.draft : persisted;
+    const visibleDraft = !ensured && dailyDraft?.suggestedTasks?.length && dailyDraft.origin !== "agent"
+      ? withOpeningSuggestionFeedback(dailyDraft, await readOpeningSuppressedSuggestionIdentities(sql, scope, date))
+      : dailyDraft;
+    const result: TodayPlanResult = {
+      date, acceptedVersion, blocks, hardBlocks,
+      dailyDraft: visibleDraft,
+      dailyDraftSkippedReason: skipped || ensured?.dailyDraftSkippedReason || null,
+    };
+    if (acceptedVersion) result.unplannedPendingCount = ensured?.unplannedPendingCount ?? countUnplannedPending(tasks, blocks);
+    if (ensured?.hasNewerSuggestion) result.hasNewerSuggestion = true;
+    if (acceptedVersion && loadFeatureSwitches().adaptivePlanning) {
+      const offer = shouldOfferReplan({ acceptedBlocks: blocks, tasks, now: clock() });
+      result.replanOffer = { ...offer, dismissalKey: `${scope.workspaceId}/${scope.ownerUserId}/${date}/${acceptedVersion}/${offer.reason}` };
     }
     return result;
   }
@@ -385,41 +433,28 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       return repo.listTimetable(scope);
     },
 
-    async saveTimetable(scope: Scope, raw: unknown): Promise<WeekSession[]> {
+    timetableSnapshot(scope: Scope) {
+      return repo.timetableSnapshot(scope);
+    },
+
+    async saveTimetable(scope: Scope, raw: unknown, rawRevision?: unknown): Promise<WeekSession[]> {
       const sessions = z.array(weekSessionSchema).parse(raw);
-      return repo.replaceTimetable(scope, sessions);
+      const digest = z.string().regex(/^[0-9a-f]{32}$/);
+      const revision = z.union([
+        z.templateLiteral([uuidSchema, ":", digest]),
+        z.templateLiteral(["empty:", uuidSchema, ":", digest]),
+        uuidSchema,
+        z.templateLiteral(["empty:", uuidSchema]),
+        z.literal("empty"),
+      ]).optional().parse(rawRevision);
+      return repo.replaceTimetable(scope, sessions, revision);
     },
 
     ensureDailyDraft,
+    readToday,
 
     async getToday(scope: Scope, date: string, options: EnsureDailyDraftOptions = {}): Promise<TodayPlanResult> {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
-      }
-      const ensured = await ensureDailyDraft(scope, date, options);
-      const state = await repo.getToday(scope, date);
-      const hard = await repo.listHardBlocks(scope, date);
-      const result: TodayPlanResult = {
-        date,
-        acceptedVersion: state?.acceptedVersion ?? 0,
-        blocks: state?.blocks ?? [],
-        hardBlocks: hard,
-        dailyDraft: ensured.draft,
-        dailyDraftSkippedReason: ensured.dailyDraftSkippedReason,
-      };
-      if (ensured.unplannedPendingCount !== undefined) {
-        result.unplannedPendingCount = ensured.unplannedPendingCount;
-      }
-      if (ensured.hasNewerSuggestion) result.hasNewerSuggestion = true;
-      if (state?.acceptedVersion && loadFeatureSwitches().adaptivePlanning) {
-        const offer = shouldOfferReplan({
-          acceptedBlocks: state.blocks,
-          tasks: await repo.listTasks(scope, { excludeInactiveRetests: true }),
-          now: clock(),
-        });
-        result.replanOffer = { ...offer, dismissalKey: `${scope.workspaceId}/${scope.ownerUserId}/${date}/${state.acceptedVersion}/${offer.reason}` };
-      }
-      return result;
+      return readToday(scope, date, await ensureDailyDraft(scope, date, options));
     },
 
     async proposeLocalReplan(scope: Scope, raw: unknown): Promise<LocalReplanResult> {

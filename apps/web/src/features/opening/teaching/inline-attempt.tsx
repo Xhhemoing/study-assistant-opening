@@ -385,7 +385,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
       {diagnostics ? <details open={skillEditorOpen} onToggle={event => setSkillEditorOpen(event.currentTarget.open)}>
         <summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-focus-ring">{skillLabel.trim() ? "修正记录的技能" : "选择记录的技能"}</summary>
         <div className="space-y-2 pt-2">
-          <label className="block text-xs text-text-2">记录的技能<input className="mt-1 block w-full rounded-md border border-line bg-surface px-2 py-2" list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onChange={(event) => { skillEdited.current = true; setSkillLabel(event.target.value); persistDraft({ answer, skillLabel: event.target.value, prompt, photo }); }} /></label>
+          <label className="block text-xs text-text-2">记录的技能<input className={`mt-1 ${ui.input}`} list={skillListId} placeholder={prompt.trim()} value={skillLabel} maxLength={200} disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onChange={(event) => { skillEdited.current = true; setSkillLabel(event.target.value); persistDraft({ answer, skillLabel: event.target.value, prompt, photo }); }} /></label>
           <datalist id={skillListId}>{skillOptions.map((label) => <option key={label} value={label} />)}</datalist>
           {skillReuseHint ? <p className="text-xs leading-6 text-warn" role="status">与已有技能「{skillReuseHint}」仅空白/全半角/大小写不同。建议复用该名称以便摘要归并；不会自动改写你的输入。<button type="button" className="ml-2 font-medium text-accent underline" disabled={!ready || Boolean(draftConflict) || pending || Boolean(submission.current) || Boolean(preparation.current)} onClick={() => { skillEdited.current = true; setSkillLabel(skillReuseHint); persistDraft({ answer, skillLabel: skillReuseHint, prompt, photo }); }}>使用「{skillReuseHint}」</button></p> : null}
         </div>
@@ -411,7 +411,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
           if (revisionReturnedHead.current) { revisionReturnedHead.current = false; return; }
           void rereadComparison();
         }} />
-        : <><p className="text-xs font-medium text-text-2">{studentCopy.originalAnswer}</p><p className="whitespace-pre-wrap text-sm text-text">{recorded.answer}</p><AiGradingResult record={recorded} /></>}
+        : <><p className="text-xs font-medium text-text-2">{studentCopy.originalAnswer}</p><p className="whitespace-pre-wrap text-sm leading-7 text-text">{recorded.answer}</p><AiGradingResult record={recorded} /></>}
       {context.status !== "completed" && context.explicitRegrade
         && context.explicitRegrade.snapshot.expectedHead === recorded.id
         && context.explicitRegrade.snapshot.rootObservationId === (recorded.rootObservationId ?? recorded.id)
@@ -419,7 +419,7 @@ export function InlineAttemptForm({ blockId, prompt, context, ready, initialDraf
         : context.status !== "completed" && !context.explicitRegrade
           ? <ExplicitRegradeHttpOwner key={recorded.id} observationId={recorded.id} disabled={pending || rereadNeeded} onSettled={() => void rereadComparison()} /> : null}
       {context.status !== "completed" && !canGradeObservation(recorded) && !recorded.aiEvaluation && canCompleteObservation(recorded) ? <StageActionBar stage={observationStage(recorded)} primary={context.completionAction} /> : null}
-      {answerKey ? <div className="rounded-lg bg-surface p-3 ring-1 ring-line"><p className="mb-2 text-xs font-medium text-text-2">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-text-3">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <p className="text-xs text-text-2">{studentCopy.referenceAvailable}</p>}
+      {answerKey ? <div className="rounded-xl border border-line bg-surface p-3.5 shadow-card"><p className="mb-2 text-xs font-medium text-text-2">参考答案 · 请自行核对</p>{answerKey.answer ? <LearningProse text={answerKey.answer} /> : <p className="text-xs text-text-3">这道题没有紧接的参考答案，已保留未核对记录。</p>}</div> : <p className="text-xs text-text-2">{studentCopy.referenceAvailable}</p>}
       {context.status !== "completed" && !assessed && !checked && !rereadNeeded && answerKey?.answer && answerKey.referenceSourceId ? <div className="flex flex-wrap gap-2"><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("match"); }}>我答对了</button><button type="button" className={ui.secondary} disabled={pending} onClick={() => { void compare("mismatch"); }}>我答错了</button><button type="button" className={ui.quiet} disabled={pending} onClick={() => setChecked(true)}>暂不核对，保留未核对记录</button></div> : null}
       {rereadNeeded ? <button type="button" className={ui.secondary} disabled={pending} onClick={() => { void rereadComparison(); }}>重新读取核对记录</button> : null}
       {!assessed && answerKey?.answer && !answerKey.referenceSourceId ? <p className="text-xs text-text-2">参考答案缺少出处，暂时无法判断对错。你的原答案已保留。</p> : null}

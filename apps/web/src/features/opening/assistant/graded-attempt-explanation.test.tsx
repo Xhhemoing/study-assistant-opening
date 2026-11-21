@@ -83,8 +83,10 @@ it("carries the fresh-session native button request through the actual worker en
     rootObservationId: record.id, headObservationId: record.id, workSource: null, sourceRefs: [],
     effectiveGrading: { observationId: record.id, answerRevision: 1, outcome: "incorrect", verdictSource: "ai_graded", aiEvaluation: null, serverEvaluation: null } };
   // Repository doubles stand in only for persisted identities; the native request and worker are real.
-  const jobs = { get: vi.fn(async () => ({ workspaceId: id, ownerUserId: identity.id })),
-    claim: vi.fn(async () => ({ id: item, workspaceId: id, ownerUserId: identity.id, conversationId, userTurnId: sessionId, assistantTurnId: item, mode: request.mode })),
+  const claimToken = "55555555-5555-4555-8555-555555555555";
+  const runningJob = { id: item, workspaceId: id, ownerUserId: identity.id, conversationId, userTurnId: sessionId,
+    assistantTurnId: item, mode: request.mode, status: "running", claimToken } as const;
+  const jobs = { get: vi.fn(async () => runningJob), claim: vi.fn(async () => runningJob),
     getUserTurn: vi.fn(async () => ({ ...request, sourceVersions: {} })),
     freezeHelpInputSnapshot: vi.fn(async () => ({ userTurnId: sessionId, assistantTurnId: item, tutorMode: request.mode, studyIntent: null })),
     readAttemptContext: vi.fn(async () => context), assertAttemptContext: vi.fn(async () => {}),
@@ -97,7 +99,7 @@ it("carries the fresh-session native button request through the actual worker en
       release: vi.fn(async () => ({})), settle: vi.fn(async () => ({})), markUnknown: vi.fn(async () => ({})) } as unknown as TutorTurnDeps["budget"],
     provider, config: { maxContextCharacters: 5000, reservedCents: 1, maxOutputTokens: 256, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   })(item);
-  expect(jobs.readAttemptContext).toHaveBeenCalledWith({ workspaceId: id, ownerUserId: identity.id }, { userTurnId: sessionId, jobId: item, claimToken: undefined });
+  expect(jobs.readAttemptContext).toHaveBeenCalledWith({ workspaceId: id, ownerUserId: identity.id }, { userTurnId: sessionId, jobId: item, claimToken });
   expect(provider.complete).toHaveBeenCalledOnce();
   expect(JSON.parse(provider.complete.mock.calls[0]![0].text)).toMatchObject({ request: GRADED_ATTEMPT_EXPLANATION_TEXT,
     attemptContext: { originalQuestion: "Saved server question", originalAnswer: context.originalAnswer,
@@ -147,6 +149,60 @@ it("recovers a pending original job and then its complete turns using only real 
   expect(transport.mock.calls.some(([path]) => String(path) === `/api/opening/jobs/${item}`)).toBe(true);
   expect(host.textContent).toContain("原任务完成后的全部结果"); expect(bodies).toHaveLength(1);
 });
+it("retries a stopped creation with its saved conversation and key after remount, and can stop the retry", async () => {
+  let finishCreate!: () => void;
+  api.createConversation = vi.fn<OpeningApi["createConversation"]>(() => new Promise(resolve => {
+    finishCreate = () => resolve({ id: conversationId, title: "学习对话", courseId: attempt.courseId });
+  }));
+  await render();
+  await act(async () => action()!.click());
+  const stop = () => host.querySelector<HTMLButtonElement>('[aria-label="停止回答"]')!.click();
+  await act(async () => stop());
+  await act(async () => finishCreate());
+  const storageKey = Object.keys(localStorage).find(key => key.includes("graded-attempt-explain"))!;
+  const saved = JSON.parse(localStorage.getItem(storageKey)!);
+  expect(saved).toMatchObject({ phase: "ready", conversationId, clientKey: expect.any(String) });
+  expect(bodies).toHaveLength(0);
+  expect(action()!.disabled).toBe(false);
+
+  await act(async () => root.render(null));
+  await render();
+  expect(bodies).toHaveLength(0);
+  expect(action()!.disabled).toBe(false);
+  let finishAuthorization!: () => void;
+  transport.mockImplementationOnce(() => new Promise(resolve => {
+    finishAuthorization = () => resolve(Response.json({ user: cookieOwner }));
+  }));
+  await act(async () => action()!.click());
+  await act(async () => stop());
+  await act(async () => finishAuthorization());
+  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(saved);
+  expect(bodies).toHaveLength(0);
+
+  const normal = transport.getMockImplementation()!;
+  let acknowledgeTurn!: () => void;
+  transport.mockImplementation(async (path, init) => {
+    if (String(path) === "/api/opening/turns" && init?.method === "POST") {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Promise(resolve => { acknowledgeTurn = () => resolve(Response.json({ jobId: item, turnId: id })); });
+    }
+    return normal(path, init);
+  });
+  api.resumeConversation = vi.fn(async () => ({ conversationId, courseId: attempt.courseId, sourceIds: [], boundedHistory: [], historyTruncated: false }));
+  api.listTurns = vi.fn(async () => []);
+  api.getPendingJob = vi.fn(async () => null);
+  api.cancelJob = vi.fn<OpeningApi["cancelJob"]>(async () => ({ id: item, status: "cancelled", error: null, updatedAt: "2026-11-10T12:02:00Z" }));
+  await act(async () => action()!.click());
+  await act(async () => stop());
+  await act(async () => acknowledgeTurn());
+  expect(api.cancelJob).toHaveBeenCalledExactlyOnceWith(item);
+  expect(api.createConversation).toHaveBeenCalledOnce();
+  expect(bodies).toEqual([expect.objectContaining({ conversationId, clientKey: saved.clientKey,
+    attemptId: attempt.id, text: GRADED_ATTEMPT_EXPLANATION_TEXT })]);
+  expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual({ ...saved, phase: "submitted" });
+  expect(action()!.disabled).toBe(true);
+});
+
 it("does not blindly recreate a conversation after its create response is lost", async () => {
   api.createConversation = vi.fn(async () => { throw Error("lost create response"); });
   await render(); await act(async () => action()!.click());

@@ -85,7 +85,7 @@ export async function assertOwnedActivity(
     WHERE a.id = ${activityId}
       AND a.workspace_id = ${scope.workspaceId}
       AND a.owner_user_id = ${scope.ownerUserId}
-      AND ${openingWritingActivityReadableSql(sql, scope, sql`a`)}`;
+      AND ${openingWritingActivityReadableSql(sql, scope, () => sql`a`)}`;
   if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
   if (!(await isAuthorizedWritingActivityRow(sql, scope, rows[0] as Record<string, unknown>))) {
     throw learningError("NOT_FOUND", "teaching activity not found");
@@ -532,7 +532,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           AND r.status IN ('accepted','in_progress')
         WHERE a.workspace_id = ${scope.workspaceId}
           AND a.owner_user_id = ${scope.ownerUserId}
-          AND ${openingWritingActivityReadableSql(sql, scope, sql`a`)}
+          AND ${openingWritingActivityReadableSql(sql, scope, () => sql`a`)}
         ORDER BY a.updated_at DESC, a.id`;
       const authorized: TeachingActivity[] = [];
       for (const row of rows) {
@@ -680,7 +680,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           const fromList = [...from];
           const rows = await db`
             UPDATE opening_teaching_activities
-            SET generate_status = ${status}, updated_at = now()
+            SET generate_status = ${status}
             WHERE id = ${activityId}
               AND workspace_id = ${scope.workspaceId}
               AND owner_user_id = ${scope.ownerUserId}
@@ -690,7 +690,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         }
         const rows = await db`
           UPDATE opening_teaching_activities
-          SET generate_status = ${status}, updated_at = now()
+          SET generate_status = ${status}
           WHERE id = ${activityId}
             AND workspace_id = ${scope.workspaceId}
             AND owner_user_id = ${scope.ownerUserId}

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { snippetCreateInputSchema, type SnippetCreateInput } from "@aistudy/contracts";
-import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, noteContextSourceRefs, parseContextSourceRefs } from "./opening-context-provenance";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import type { OpeningScope } from "./opening-sources";
 
@@ -12,12 +12,13 @@ export class OpeningNoteError extends Error {
 
 /** AI exclusion still permits personal reading; permanent source deletion does not. */
 export function openingNoteReadable(db: Db, workspaceId: string, documentId: ReturnType<Db>) {
+  const refs = () => noteContextSourceRefs(db, () => db`np.context_source_refs`);
   return db`NOT EXISTS (SELECT 1 FROM opening_note_provenance np
     WHERE np.workspace_id=${workspaceId} AND np.document_id=${documentId}
       AND (np.context_source_refs IS NULL OR jsonb_typeof(np.context_source_refs) IS DISTINCT FROM 'array'
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array' THEN np.context_source_refs ELSE '[]'::jsonb END) ref
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array' THEN ${refs()} ELSE '[]'::jsonb END) ref
           WHERE NOT EXISTS (SELECT 1 FROM opening_sources s WHERE s.workspace_id=np.workspace_id AND s.id::text=lower(ref->>'sourceId')))
-        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array' THEN np.context_source_refs ELSE '[]'::jsonb END) ref
+        OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array' THEN ${refs()} ELSE '[]'::jsonb END) ref
           JOIN opening_privacy_exclusions e ON e.workspace_id=np.workspace_id AND e.source_id::text=lower(ref->>'sourceId')
           WHERE e.asset_deleted_at IS NOT NULL)))`;
 }
@@ -71,7 +72,7 @@ export function createOpeningNoteRepository(sql: Sql) {
             throw new OpeningNoteError("PROVENANCE_UNKNOWN", "回答的关联材料来源不完整，请重新提问后保存。");
           }
         }
-        const admission = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`)} AS included`;
+        const admission = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`)} AS included`;
         if (!admission[0]!.included) throw new OpeningNoteError("SOURCE_UNAVAILABLE", "关联材料已删除、停止供 AI 使用或版本已变化，无法保存此片段。");
         const documentId = randomUUID();
         const blocks = (structured?.length ? structured : [{ type: "paragraph", props: null, content: input.text, children: [] }])

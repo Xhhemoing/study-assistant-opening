@@ -8,17 +8,21 @@ const taskReads = vi.hoisted(() => ({
   upsertHardBlocks: vi.fn(),
   listHardBlocks: vi.fn(),
   listTimetable: vi.fn(),
+  replaceTimetable: vi.fn(),
+  findDraftByProposeClientKey: vi.fn(),
+  ensureAutoDraft: vi.fn(),
+}));
+const settingsReads = vi.hoisted(() => ({
+  get: vi.fn().mockResolvedValue({ settings: null, invalidStoredSettings: false }),
 }));
 vi.mock("@aistudy/database", async original => ({
   ...await original<typeof import("@aistudy/database")>(),
   createOpeningPlansRepository: () => taskReads,
-  createOpeningPlanningSettingsRepository: () => ({
-    get: vi.fn().mockResolvedValue({ settings: null, invalidStoredSettings: false }),
-  }),
+  createOpeningPlanningSettingsRepository: () => settingsReads,
 }));
-import { planDay } from "@aistudy/domain";
-import { OpeningPlanError } from "@aistudy/database";
-import type { TaskItem, TimeBlock } from "@aistudy/contracts";
+import { buildDailyDraftInput, planDay } from "@aistudy/domain";
+import { OpeningPlanError, type AutoDraftBuild } from "@aistudy/database";
+import type { OpeningPlanningSettings, TaskItem, TimeBlock } from "@aistudy/contracts";
 import {
   buildServerPlanDayOptions,
   createOpeningPlanService,
@@ -28,6 +32,19 @@ import {
 } from "./plan-service";
 
 const SH = "Asia/Shanghai";
+it("reads the existing daily draft without generating or changing plan state", async () => {
+  const scope = { workspaceId: id(1), ownerUserId: id(1) };
+  const date = "2026-11-19";
+  const draft = { id: id(2), date, status: "draft" };
+  taskReads.getToday.mockResolvedValueOnce(null);
+  taskReads.listHardBlocks.mockResolvedValueOnce([]);
+  taskReads.findDraftByProposeClientKey.mockResolvedValueOnce(draft);
+  const service = createOpeningPlanService({} as Sql);
+  expect(await service.readToday(scope, date)).toMatchObject({ date, acceptedVersion: 0, dailyDraft: draft });
+  expect(taskReads.findDraftByProposeClientKey).toHaveBeenCalledWith(scope, date, "auto-draft:2026-11-19");
+  expect(taskReads.ensureAutoDraft).not.toHaveBeenCalled();
+});
+
 it("projects persisted minutes without replacing the legacy task field and keeps UI listTasks unfiltered", async () => {
   taskReads.listTasks.mockReset();
   taskReads.listTasks.mockResolvedValue([task(1)]);
@@ -35,6 +52,16 @@ it("projects persisted minutes without replacing the legacy task field and keeps
   expect(await createOpeningPlanService({} as Sql).listTasks(scope))
     .toEqual([{ ...task(1), estimateMinutes: 30 }]);
   expect(taskReads.listTasks).toHaveBeenCalledWith(scope);
+});
+
+it("accepts composite digest timetable revisions and rejects malformed expectedRevision tokens", async () => {
+  const scope = { workspaceId: id(1), ownerUserId: id(1) };
+  const service = createOpeningPlanService({} as Sql);
+  const digest = "0123456789abcdef0123456789abcdef";
+  taskReads.replaceTimetable.mockResolvedValue([]);
+  await expect(service.saveTimetable(scope, [], `empty:${id(1)}:${digest}`)).resolves.toEqual([]);
+  await expect(service.saveTimetable(scope, [], `${id(2)}:${digest}`)).resolves.toEqual([]);
+  await expect(service.saveTimetable(scope, [], "not-a-revision")).rejects.toThrow();
 });
 
 it("filters inactive retests in proposePlan and proposeDeltaPlan (when a retest task is requested)", async () => {
@@ -171,6 +198,36 @@ describe("buildServerPlanDayOptions", () => {
     });
     expect(opts.preferredOrder).toEqual([id(1), id(2)]);
   });
+
+  it("forwards explicit carryOverTaskIds and falls back to buildDailyDraftInput metadata", () => {
+    const carry = task(1);
+    const ordinary = task(2);
+    const draft = buildDailyDraftInput({
+      tasks: [carry, ordinary],
+      yesterdayAccepted: [{ taskId: carry.id, start: "2026-10-08T09:00:00.000Z", end: "2026-10-08T09:30:00.000Z", reason: "昨天" }],
+      dueRetests: [],
+      freeBlocks: [slot("09:00", "12:00")],
+      now: new Date(at("08:00")),
+      timeZone: "UTC",
+      date: day,
+    });
+    const fromSymbol = buildServerPlanDayOptions({
+      date: day,
+      timeZone: "UTC",
+      now: new Date(at("08:00")),
+      preferredOrder: draft.orderedTaskIds,
+    });
+    expect([...(fromSymbol.carryOverTaskIds ?? [])]).toEqual([carry.id]);
+
+    const explicit = buildServerPlanDayOptions({
+      date: day,
+      timeZone: "UTC",
+      now: new Date(at("08:00")),
+      preferredOrder: [carry.id, ordinary.id],
+      carryOverTaskIds: new Set([ordinary.id]),
+    });
+    expect([...(explicit.carryOverTaskIds ?? [])]).toEqual([ordinary.id]);
+  });
 });
 
 describe("plan-service → planDay earliest wire", () => {
@@ -221,6 +278,82 @@ describe("plan-service → planDay earliest wire", () => {
     expect(opts.planningNow).toBeUndefined();
     const result = planDay([task(1)], [slot("09:00", "12:00")], opts);
     expect(result.blocks[0]?.start).toBe(at("09:00"));
+  });
+
+  it("preserves carryOverTaskIds from buildDailyDraftInput into ensureDailyDraft non-adaptive planDay", async () => {
+    const scope = { workspaceId: id(1), ownerUserId: id(1) };
+    const date = "2026-09-14";
+    const utcAt = (clock: string) => `${date}T${clock}:00.000Z`;
+    const pinned = task(1, { minutes: 10, notBefore: utcAt("11:00"), dueAt: utcAt("11:10") });
+    const carry = task(2, { minutes: 30, priority: 5 });
+    const ordinary = task(3, { minutes: 30, priority: 1 });
+    const planningSettings: OpeningPlanningSettings = {
+      weekOneMonday: "2026-09-07",
+      periodTimes: { "1": { start: "08:00", end: "08:45" } },
+      dailyWindow: { start: "09:00", end: "12:20" },
+      lunch: { start: "12:20", end: "13:00" },
+      dinner: { start: "17:30", end: "18:30" },
+      sleep: { start: "23:00", end: "07:00" },
+      timeZone: "UTC",
+    };
+
+    let built: AutoDraftBuild | undefined;
+    taskReads.listTimetable.mockReset().mockResolvedValue([]);
+    taskReads.listTasks.mockReset().mockResolvedValue([carry, pinned, ordinary]);
+    taskReads.getToday.mockReset().mockResolvedValue({
+      acceptedVersion: 1,
+      blocks: [{ taskId: carry.id, start: "2026-09-13T09:00:00.000Z", end: "2026-09-13T09:30:00.000Z", reason: "昨天" }],
+    });
+    taskReads.ensureAutoDraft.mockReset().mockImplementation(async (_scope, _date, _key, build) => {
+      built = await build();
+      return { draft: null, skippedBecauseAccepted: false, dailyDraftSkippedReason: null };
+    });
+    settingsReads.get.mockResolvedValue({ saved: true, settings: planningSettings, invalidStoredSettings: false });
+    try {
+      const service = createOpeningPlanService({} as Sql, { now: () => new Date(utcAt("08:00")) });
+      await service.ensureDailyDraft(scope, date);
+    } finally {
+      settingsReads.get.mockResolvedValue({ settings: null, invalidStoredSettings: false });
+    }
+
+    expect(built?.kind).toBe("propose");
+    if (built?.kind !== "propose") throw new Error("expected propose build");
+    expect(built.input.unscheduledTaskIds).toEqual([]);
+    expect(built.input.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [ordinary.id, utcAt("09:00"), utcAt("09:30")],
+      [pinned.id, utcAt("11:00"), utcAt("11:10")],
+      [carry.id, utcAt("11:10"), utcAt("11:40")],
+    ]);
+    expect(built.input.blocks.find((block) => block.taskId === carry.id)?.reason).toBe("顺延自昨天");
+  });
+
+  it("ranks an end-of-local-day deadline ahead of undated carry-over through buildDailyDraftInput and planDay", () => {
+    const date = "2026-09-14", timeZone = "America/Los_Angeles";
+    const now = new Date("2026-09-15T06:00:00.000Z");
+    const carry = task(1, { priority: 5 });
+    const endOfDayDeadline = task(2, { priority: 1, dueAt: "2026-09-15T07:00:00.000Z" });
+    const freeBlocks: TimeBlock[] = [{
+      start: "2026-09-15T06:30:00.000Z", end: "2026-09-15T07:00:00.000Z", kind: "free",
+    }];
+    const { orderedTaskIds, carryOverTaskIds } = buildDailyDraftInput({
+      tasks: [carry, endOfDayDeadline],
+      yesterdayAccepted: [{
+        taskId: carry.id, start: "2026-09-14T06:00:00.000Z", end: "2026-09-14T06:30:00.000Z", reason: "昨天",
+      }],
+      dueRetests: [],
+      freeBlocks,
+      now,
+      timeZone,
+      date,
+    });
+    expect(orderedTaskIds).toEqual([endOfDayDeadline.id, carry.id]);
+    const planned = planDay(
+      [carry, endOfDayDeadline],
+      freeBlocks,
+      buildServerPlanDayOptions({ date, timeZone, now, preferredOrder: orderedTaskIds, carryOverTaskIds }),
+    );
+    expect(planned.blocks.map((block) => block.taskId)).toEqual([endOfDayDeadline.id]);
+    expect(planned.unscheduledTaskIds).toEqual([carry.id]);
   });
 });
 

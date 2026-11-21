@@ -42,12 +42,12 @@ function ProposalCard({ row, actions }: { row: AssistantProposalRecord; actions:
       setError(userFacingMessage(cause, "结果尚未确认，请重试原操作。"));
     } finally { running.current = false; setBusy(false); }
   }
-  return <li className="space-y-2 border-b border-line py-4">
-    <h3 className="text-sm font-semibold">{proposalLabels[row.tool.name]}</h3>
-    <p className="whitespace-pre-wrap break-words text-sm leading-6">{proposalText(row)}</p>
+  return <li className="space-y-3 rounded-card border border-line bg-surface p-4 shadow-card">
+    <h3 className="text-sm font-semibold text-text">{proposalLabels[row.tool.name]}</h3>
+    <p className="whitespace-pre-wrap break-words text-sm leading-6 text-text-2">{proposalText(row)}</p>
     {row.tool.name === "propose_plan_change" ? <PlanProposalPreview row={row} /> : null}
     {error ? <p role="alert" className="text-sm text-warn">{error}</p> : null}
-    {result ? <p role="status" className="text-sm">{result.status === "accepted" ? "已接受" : "未采用"}</p> : <div className="flex gap-2">
+    {result ? <p role="status" className="text-sm font-medium text-text-2">{result.status === "accepted" ? "已接受" : "未采用"}</p> : <div className="flex flex-wrap gap-2 pt-1">
       <button data-action="accept" className={buttonClass} disabled={busy || intent?.action === "reject" || row.tool.name === "propose_plan_change" && !row.prepared?.preview} onClick={() => void decide("accept")}>{error && intent?.action === "accept" ? "重试接受" : "接受建议"}</button>
       <button data-action="reject" className={secondaryButtonClass} disabled={busy || intent?.action === "accept"} onClick={() => void decide("reject")}>{error && intent?.action === "reject" ? "重试不采用" : "不采用"}</button>
     </div>}
@@ -58,13 +58,13 @@ function ProposalCard({ row, actions }: { row: AssistantProposalRecord; actions:
 export function AssistantProposalInbox({ api }: { api: InboxApi }) {
   const actions = useMemo(() => createDecisions(api), [api]);
   const state = usePendingProposals(api, { retain: actions.retain });
-  return <section aria-label="对话建议收件箱" className="mx-auto max-w-4xl px-5 pb-5 sm:px-7">
-    <h2 className="text-sm font-semibold">对话建议{state.total ? ` · ${state.total} 项` : ""}</h2>
-    {state.error ? <div role="alert" className="space-y-2 py-3"><p className="text-sm text-warn">{state.error} 读取失败不代表没有待确认建议。</p>
+  return <section aria-label="对话建议收件箱" className="mx-auto max-w-4xl space-y-3 px-5 pb-6 sm:px-7">
+    <h2 className="text-sm font-semibold tabular-nums text-text">对话建议{state.total ? ` · ${state.total} 项` : ""}</h2>
+    {state.error ? <div role="alert" className="space-y-2 rounded-card border border-warn/25 bg-warn-soft p-4"><p className="text-sm text-warn">{state.error} 读取失败不代表没有待确认建议。</p>
       <button className={secondaryButtonClass} onClick={() => void state.refresh()}>重新读取建议</button></div> : null}
     {state.loading ? <p role="status" className="py-3 text-sm text-text-2">正在读取建议…</p> : null}
-    {!state.loading && !state.error && !state.rows.length ? <p className="py-3 text-sm text-text-2">暂无待确认的对话建议。</p> : null}
-    <ul>{state.rows.map(row => <ProposalCard key={`${row.id}:${row.version}`} row={row} actions={actions} />)}</ul>
+    {!state.loading && !state.error && !state.rows.length ? <p className="rounded-card border border-line bg-surface px-4 py-5 text-sm text-text-2 shadow-card">暂无待确认的对话建议。</p> : null}
+    <ul className="space-y-3">{state.rows.map(row => <ProposalCard key={`${row.id}:${row.version}`} row={row} actions={actions} />)}</ul>
     {state.cursor ? <button className={secondaryButtonClass} disabled={state.loading} onClick={() => void state.loadMore()}>读取更多建议</button> : null}
   </section>;
 }

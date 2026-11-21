@@ -5,6 +5,8 @@ import {
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS,
   assertParentInteractionBudget,
+  BudgetReplayError,
+  replayDisposition,
   type ParentInteractionBudget,
   resolveBudgetLocalDay,
   resolveBudgetTimeZone,
@@ -93,6 +95,8 @@ export type ReserveInput = {
   purpose: string;
   amountCents: number;
   requestId: string;
+  requestFamily?: string | null;
+  alternateRequestFamily?: string;
   /**
    * Free-tier models: at most this many non-released reservations for the snapshot's
    * model on the local budget day. Required for (and only meaningful with) amountCents 0.
@@ -103,8 +107,8 @@ export type ReserveInput = {
 export type OpeningBudgetRepository = {
   /**
    * Atomically reserve spend against the workspace cap; idempotent by
-   * requestId (replays the original reservation). Overspend rejects with
-   * BUDGET_EXCEEDED and writes nothing.
+   * requestId (replays the original reservation). A live or billed sibling
+   * attempt rejects with its replay disposition. Overspend writes nothing.
    */
   reserve(scope: OpeningScope, input: ReserveInput): Promise<BudgetReservationRecord>;
   /** True only when every persisted child of the owned parent was certainly not sent. */
@@ -276,7 +280,13 @@ function validateBudgetInput(input: OpeningBudgetCheckInput) {
   return { requestCap, zeroCost, modelSnapshot };
 }
 
-async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBudgetRepositoryOptions) {
+async function readBudgetClock(sql: BudgetSql): Promise<Date> {
+  // Match the precision of Date so the day calculation and SQL writes use the same instant.
+  const [sample] = await sql<{ instant: Date }[]>`SELECT date_trunc('milliseconds', clock_timestamp()) AS instant`;
+  return sample!.instant;
+}
+
+async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBudgetRepositoryOptions, instant: Date) {
   const prefs = await tx`
     SELECT ai_settings, planning_settings FROM workspace_preferences WHERE workspace_id = ${workspaceId}
   `;
@@ -289,12 +299,159 @@ async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBud
     ceilingCents: options.ceilingCents ?? OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   });
   const planningTz = readPlanningTimeZone(prefs[0]?.planning_settings ?? null);
-  const budgetDay = resolveBudgetLocalDay(new Date(), resolveBudgetTimeZone(planningTz ?? options.timeZone));
+  const budgetDay = resolveBudgetLocalDay(instant, resolveBudgetTimeZone(planningTz ?? options.timeZone));
   const unlimited = options.dailyQuotaMode === "unlimited";
   return { capCents: effective.capCents, budgetDay, unlimited, parentCapCents: unlimited ? options.parentCapCents! : effective.capCents };
 }
 
-// One ledger predicate for admission and atomic reserve. Unknown rows remain reserved.
+const RETRIEVAL_BUDGET_PREFIX = "retrieval:";
+const retrievalFamilyPrefixPattern = /^(?:retrieval:)+(?=.*\S)/;
+
+/** Normalize `"retrieval:<turnId>"` and `"<turnId>"` to one turn-family budget root. */
+export function parentBudgetFamilyRoot(parentId: string): string {
+  let root = parentId;
+  while (root.startsWith(RETRIEVAL_BUDGET_PREFIX)) {
+    const rest = root.slice(RETRIEVAL_BUDGET_PREFIX.length);
+    if (!rest.trim()) break;
+    root = rest;
+  }
+  return root;
+}
+
+export function parentBudgetFamilyIds(parentId: string): string[] {
+  const root = parentBudgetFamilyRoot(parentId);
+  return [...new Set([root, `${RETRIEVAL_BUDGET_PREFIX}${root}`, parentId])];
+}
+
+export function parentBudgetFamilyPredicate(
+  db: BudgetSql,
+  column: "id" | "parent_interaction_id",
+  parentId: string,
+) {
+  const rootId = parentBudgetFamilyRoot(parentId);
+  const familyIds = parentBudgetFamilyIds(parentId);
+  if (column === "id") {
+    return db`(
+      id = ANY(${familyIds}::text[])
+      OR (
+        starts_with(id, 'retrieval:retrieval:')
+        AND regexp_replace(id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
+      )
+    )`;
+  }
+  return db`(
+    parent_interaction_id = ANY(${familyIds}::text[])
+    OR (
+      starts_with(parent_interaction_id, 'retrieval:retrieval:')
+      AND regexp_replace(parent_interaction_id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
+    )
+  )`;
+}
+
+// Older callers omitted the root. Keep their legacy key interpretation.
+const attemptSuffix = /(?::fallback|:retry:[^:]+)+$/;
+
+function ephemeralRollbackSiblings(workspaceId: string, row: {
+  request_id: string; parent_interaction_id: string | null; purpose: string;
+}): string[] {
+  const prefix = `study-ephemeral:${workspaceId}:`;
+  if (row.purpose !== "tutor" || !row.parent_interaction_id?.startsWith(prefix)) return [];
+  const clientKey = row.parent_interaction_id.slice(prefix.length);
+  const legacy = `eph:${clientKey}`;
+  const encoded = `eph-v2:${workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
+  const keys = [legacy, `${legacy}:fallback`, encoded, `${encoded}:fallback`];
+  return keys.includes(row.request_id) ? keys.filter(key => key !== row.request_id).sort() : [];
+}
+
+async function insertRollbackFences(tx: TransactionSql, keys: string[], row: {
+  workspaceId: string; purpose: string; parentId: string | null; reservedAmount?: 0; instant?: Date;
+}) {
+  if (!keys.length) return;
+  await tx`
+    INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents,
+      request_id, parent_interaction_id, state, release_reason, created_at, updated_at)
+    SELECT keys.id, ${row.workspaceId}, ${row.purpose}, 0, ${row.reservedAmount ?? null},
+      keys.request_id, ${row.parentId}, 'released', 'not_sent',
+      COALESCE(${row.instant ?? null}::timestamptz, now()), COALESCE(${row.instant ?? null}::timestamptz, now())
+    FROM unnest(${keys.map(() => randomUUID())}::uuid[], ${keys}::text[]) WITH ORDINALITY AS keys(id, request_id, position)
+    ORDER BY keys.position
+    ON CONFLICT (request_id) DO NOTHING
+  `;
+}
+
+function isRollbackFence(row: BudgetReservationRecord) {
+  return row.state === "released" && row.releaseReason === "not_sent" && row.amountCents === 0
+    && row.reservedAmountCents === null && row.modelSnapshot === null
+    && row.executionClaimedAt === null && row.outcomeUnknownAt === null;
+}
+
+// fallbackStartsFamily records the real fallback attempt on its suffix key and
+// leaves terminal sibling markers with reserved_amount_cents = 0. They retain
+// the released/not_sent replay disposition without being reusable fences.
+function isTerminalRollbackFence(row: BudgetReservationRecord) {
+  return row.state === "released" && row.releaseReason === "not_sent" && row.amountCents === 0
+    && row.reservedAmountCents === 0 && row.modelSnapshot === null
+    && row.executionClaimedAt === null && row.outcomeUnknownAt === null;
+}
+
+function attemptsOf(tx: TransactionSql, family: string) {
+  return tx`(request_id = ${family} OR (
+    starts_with(request_id, ${family + ":"})
+    AND substring(request_id FROM char_length(${family}::text) + 1) ~ ${"^" + attemptSuffix.source}
+  ))`;
+}
+
+async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: string, input: ReserveInput,
+  excludedRequestId: string, parentId: string | undefined) {
+  const rollbackSiblings = ephemeralRollbackSiblings(workspaceId, {
+    request_id: excludedRequestId, parent_interaction_id: parentId ?? null, purpose: input.purpose,
+  });
+  if (input.requestFamily === null && !rollbackSiblings.length) return;
+  const family = input.requestFamily;
+  const root = family ?? input.requestId.replace(attemptSuffix, "");
+  const familyMatch = family === null
+    ? tx`false`
+    : family === undefined
+    ? tx`(request_id = ${root} OR starts_with(request_id, ${root + ":"}))
+      AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}`
+    : attemptsOf(tx, family);
+  // An opaque client key can also look like another parent's attempt suffix.
+  const familyScopedMatch = family !== null && parentId && input.alternateRequestFamily
+    ? tx`parent_interaction_id = ${parentId} AND ((${familyMatch}) OR ${attemptsOf(tx, input.alternateRequestFamily)})`
+    : familyMatch;
+  const siblingMatch = rollbackSiblings.length
+    ? tx`(${familyScopedMatch}) OR (request_id = ANY(${rollbackSiblings}::text[])
+        AND (parent_interaction_id = ${parentId ?? null} OR parent_interaction_id IS NULL))`
+    : familyScopedMatch;
+  const [sibling] = await tx`
+    SELECT id, state, purpose, result_ref, outcome_unknown_at, reconciled_at, pending_reconcile_cents
+    FROM opening_budget_reservations
+    WHERE workspace_id = ${workspaceId} AND request_id <> ${excludedRequestId}
+      AND (${siblingMatch})
+      AND NOT (state = 'released' AND COALESCE(release_reason IN ('not_sent', 'cancelled'), false)
+        AND outcome_unknown_at IS NULL AND COALESCE(pending_reconcile_cents, 0) = 0)
+    ORDER BY (state = 'reserved') DESC, id
+    LIMIT 1
+  `;
+  if (!sibling) return;
+  if (sibling.purpose !== input.purpose || sibling.state === "released") {
+    throw new OpeningBudgetError("CONFLICT", "request family already consumed");
+  }
+  const reservationId = String(sibling.id);
+  const disposition = replayDisposition({
+    id: reservationId,
+    state: String(sibling.state),
+    resultRef: sibling.result_ref as string | null,
+    outcomeUnknownAt: toDate(sibling.outcome_unknown_at),
+    reconciledAt: toDate(sibling.reconciled_at),
+    pendingReconcileCents: Number(sibling.pending_reconcile_cents ?? 0),
+  });
+  // Even an unclaimed sibling belongs to its own model and request key.
+  throw new BudgetReplayError(disposition ?? { kind: "in_flight", reservationId });
+}
+
+// Completed charges belong to their immutable reservation day. Active holds
+// count across midnight until release, settlement or TTL reconciliation.
 function chargedBudgetRows(tx: BudgetSql, workspaceId: string, day: ReturnType<typeof resolveBudgetLocalDay>) {
   return tx`workspace_id=${workspaceId} AND (
     state='reserved' OR
@@ -330,7 +487,7 @@ export async function checkOpeningBudgetAvailable(
   const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
   const owners = await sqlOrTx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-  const { capCents, budgetDay, unlimited } = await capAndDay(sqlOrTx, scope.workspaceId, options);
+  const { capCents, budgetDay, unlimited } = await capAndDay(sqlOrTx, scope.workspaceId, options, await readBudgetClock(sqlOrTx));
   const [usage] = await sqlOrTx`SELECT COALESCE(sum(amount_cents), 0) AS cents
     FROM opening_budget_reservations WHERE ${chargedBudgetRows(sqlOrTx, scope.workspaceId, budgetDay)}`;
   const availableCents = unlimited ? null : Math.max(0, capCents - Number(usage?.cents ?? 0));
@@ -341,13 +498,13 @@ export async function checkOpeningBudgetAvailable(
 }
 
 /** Read-only display snapshot; never reserves, settles or reconciles a pending charge. */
-export async function readOpeningDailyBudgetUsage(sql: Sql, scope: OpeningScope, now = new Date()): Promise<OpeningAiDailyUsage> {
+export async function readOpeningDailyBudgetUsage(sql: Sql, scope: OpeningScope, now?: Date): Promise<OpeningAiDailyUsage> {
   return sql.begin("isolation level repeatable read read only", async tx => {
     const [owner] = await tx`SELECT p.planning_settings FROM workspaces w
       LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
       WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
     if (!owner) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-    const day = resolveBudgetLocalDay(now, resolveBudgetTimeZone(readPlanningTimeZone(owner.planning_settings)));
+    const day = resolveBudgetLocalDay(now ?? await readBudgetClock(tx), resolveBudgetTimeZone(readPlanningTimeZone(owner.planning_settings)));
     // TTL reconciliation and media upper bounds are estimates, even when their
     // ledger state is completed. Keep all such holds visible across local days.
     const pending = tx`(state='reserved' OR (state='completed' AND
@@ -416,14 +573,17 @@ export function createOpeningBudgetRepository(
       return sql.begin(async tx => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-        // Same owner lock as reserve: configuration changes cannot hide a sibling
-        // that was sent, completed, unknown or still in flight.
-        const [row] = await tx`SELECT count(*)::int AS calls,
+        // Same owner lock and turn-family match as reserve(): any live, settled,
+        // unknown, or pending-reconcile sibling (including nested retrieval:) blocks retry.
+        const [row] = await tx`SELECT
+          bool_or(parent_interaction_id=${parentId}) AS has_parent,
           bool_and(state='released' AND outcome_unknown_at IS NULL
+            AND COALESCE(pending_reconcile_cents, 0) = 0
             AND COALESCE(release_reason IN ('not_sent','cancelled'), false)) AS not_sent
           FROM opening_budget_reservations
-          WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId}`;
-        return Number(row!.calls) > 0 && row!.not_sent === true;
+          WHERE workspace_id=${scope.workspaceId}
+            AND ${parentBudgetFamilyPredicate(tx, "parent_interaction_id", parentId)}`;
+        return row!.has_parent === true && row!.not_sent === true;
       });
     },
     async reserve(scope, input) {
@@ -434,20 +594,22 @@ export function createOpeningBudgetRepository(
       }
       const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
       try {
-      return await sql.begin(async (tx) => {
+      // Lazy reconcile in a short autonomous transaction BEFORE opening the main
+      // reserve transaction so reserve() never holds an out-of-order request_id
+      // row lock across insertRollbackFences (avoiding 40P01 with claimExecution).
+      await sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-
-        // Lazy reconcile: stale reserved rows become completed (pessimistic billing).
-        const cutoff = new Date(Date.now() - unknownAgeMs);
+        const instant = await readBudgetClock(tx);
+        const cutoff = new Date(instant.getTime() - unknownAgeMs);
         // Full amount stays charged, but the row is observably provisional
         // (reconciled_at + pending_reconcile_cents) with an audit event; it is
         // never released at zero and never re-sent.
         await tx`
           WITH reconciled AS (
             UPDATE opening_budget_reservations
-            SET state = 'completed', updated_at = now(), reconciled_at = now(),
-                outcome_unknown_at = COALESCE(outcome_unknown_at, now()),
+            SET state = 'completed', updated_at = ${instant}, reconciled_at = ${instant},
+                outcome_unknown_at = COALESCE(outcome_unknown_at, ${instant}),
                 pending_reconcile_cents = amount_cents
             WHERE workspace_id = ${scope.workspaceId}
               AND state = 'reserved'
@@ -455,66 +617,169 @@ export function createOpeningBudgetRepository(
             RETURNING id, workspace_id, amount_cents
           )
           INSERT INTO opening_budget_reconcile_events
-            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, state_before)
-          SELECT id, workspace_id, 'ttl_reconciled', amount_cents, amount_cents, 'reserved' FROM reconciled
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, state_before, created_at)
+          SELECT id, workspace_id, 'ttl_reconciled', amount_cents, amount_cents, 'reserved', ${instant} FROM reconciled
           ON CONFLICT (reservation_id, kind) DO NOTHING
         `;
+      });
+      return await sql.begin(async (tx) => {
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
 
-        const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options);
+        // Sample after the lock: a waiting transaction can cross the local midnight.
+        const instant = await readBudgetClock(tx);
 
-        const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
-        const existingRow = existing[0] ? mapReservation(existing[0] as Record<string, unknown>) : null;
+        const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options, instant);
+
+        const alternateId = parentBudget && input.alternateRequestFamily && input.requestFamily
+          ? input.alternateRequestFamily + input.requestId.slice(input.requestFamily.length)
+          : null;
+        const canonicalFallbackId = alternateId && input.requestId === `${input.requestFamily}:fallback`
+          ? input.requestFamily ?? null : null;
+        const exactRows = await tx`SELECT * FROM opening_budget_reservations
+          WHERE request_id IN (${input.requestId}, ${canonicalFallbackId}) OR (request_id = ${alternateId}
+            AND workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parentBudget?.id ?? null})`;
+        const primary = exactRows.find(row => row.request_id === input.requestId);
+        const alternate = exactRows.find(row => row.request_id === alternateId);
+        const primaryRow = primary ? mapReservation(primary as Record<string, unknown>) : null;
+        const alternateRow = alternate ? mapReservation(alternate as Record<string, unknown>) : null;
+        // Keep an existing exact key unless it belongs to another interaction.
+        const primaryOccupied = primary && (primary.workspace_id !== scope.workspaceId
+          || (primary.parent_interaction_id !== null && primary.parent_interaction_id !== parentBudget?.id));
+        // A fallback with no prior reservation can claim the canonical key only
+        // when neither the canonical key nor its fallback suffix exists yet.
+        // If another interaction occupies the fallback suffix, isolate onto alternateId.
+        const fallbackStartsFamily = canonicalFallbackId !== null && !primary
+          && !alternate && !exactRows.some(row => row.request_id === canonicalFallbackId);
+        // A fallback that starts a family has no primary reservation to adopt.
+        // Keep the suffix as the real attempt, then leave terminal sibling
+        // markers so an exact legacy retry cannot reactivate another call.
+        const alternateHasAttempt = alternateRow && !isRollbackFence(alternateRow) && !isTerminalRollbackFence(alternateRow);
+        const primaryFenced = primaryRow && isRollbackFence(primaryRow);
+        const requestId = !fallbackStartsFamily && alternateId
+          && (primaryOccupied || (!primary && alternate) || (primaryFenced && alternateHasAttempt)) ? alternateId : input.requestId;
+        const exactRow = requestId === input.requestId ? primaryRow : alternateRow;
+        // Leave the exact key occupied for rollback, including when another
+        // turn relies on its ownership. The current family can reuse its own
+        // unused fence only after sibling, quota and budget checks below.
+        const fence = exactRow && isRollbackFence(exactRow) && exactRow.workspaceId === scope.workspaceId
+          && exactRow.parentInteractionId === parentBudget?.id && exactRow.purpose === input.purpose ? exactRow : null;
+        const existingRow = fence ? null : exactRow;
         // An operator switching back to a finite day must not invalidate an already
         // recorded implicit parent's replay. This never moves a request to a new parent.
         if (!parentBudget && existingRow?.parentInteractionId === input.requestId) parentBudget = { id: input.requestId };
+        // A consumed canonical key may hold the fallback model's terms. Once
+        // execution started, the current route cannot change this turn's receipt.
+        if (existingRow && alternateId && requestId === input.requestFamily && existingRow.workspaceId === scope.workspaceId
+          && existingRow.parentInteractionId === parentBudget?.id && existingRow.purpose === input.purpose
+          && (existingRow.state === "completed" || (existingRow.state === "reserved"
+            && (existingRow.executionClaimedAt || existingRow.outcomeUnknownAt)))) {
+          return { ...existingRow, replayed: true };
+        }
         if (existingRow) {
           // Original amounts survive settlement. An old, unparented reservation
           // may be adopted once below; an attributed request can never move parents.
           const originalAmount = existingRow.reservedAmountCents ?? (existingRow.state === "reserved" ? existingRow.amountCents : null);
-          if (existingRow.workspaceId !== scope.workspaceId || existingRow.purpose !== input.purpose
+          const terminalFence = isTerminalRollbackFence(existingRow)
+            && existingRow.workspaceId === scope.workspaceId
+            && existingRow.parentInteractionId === parentBudget?.id
+            && existingRow.purpose === input.purpose;
+          if (!terminalFence
+            && (existingRow.workspaceId !== scope.workspaceId || existingRow.purpose !== input.purpose
             || (existingRow.parentInteractionId !== null && existingRow.parentInteractionId !== (parentBudget?.id ?? null))
             || (originalAmount !== null && originalAmount !== input.amountCents)
-            || JSON.stringify(existingRow.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
+             || JSON.stringify(existingRow.modelSnapshot) !== JSON.stringify(modelSnapshot))) {
             throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
           }
+        }
+        // A consumed exact key already replays without acquiring a claim.
+        // Check siblings before admitting any new attempt or replaying a release.
+        if (!existingRow || existingRow.state === "released"
+          || (existingRow.state === "reserved" && !existingRow.executionClaimedAt && !existingRow.outcomeUnknownAt)) {
+          await assertRequestFamilyAvailable(tx, scope.workspaceId, input, requestId, parentBudget?.id);
         }
         // An existing attributed key always replays, including a frozen/unknown
         // parent: replay never authorizes a second provider request.
         if (existingRow && (!parentBudget || existingRow.parentInteractionId !== null)) {
-          return mapReservation(existing[0] as Record<string, unknown>, true);
+          return { ...existingRow, replayed: true };
         }
 
         if (parentBudget) {
           const parent = parentBudget;
-          await tx`
-            INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
-            VALUES (${scope.workspaceId}, ${parent.id}, ${Math.min(parent.budgetCents ?? parentCapCents, parentCapCents)},
-              ${parent.maxProviderCalls ?? DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS})
-            ON CONFLICT (workspace_id, id) DO NOTHING
+          const rootId = parentBudgetFamilyRoot(parent.id);
+          const existingParents = await tx`
+            SELECT * FROM opening_parent_interaction_budgets
+            WHERE workspace_id = ${scope.workspaceId}
+              AND ${parentBudgetFamilyPredicate(tx, "id", parent.id)}
+            ORDER BY (id = ${parent.id}) DESC, (id = ${rootId}) DESC, id
           `;
-          const [pinned] = await tx`SELECT * FROM opening_parent_interaction_budgets
-            WHERE workspace_id = ${scope.workspaceId} AND id = ${parent.id}`;
+          const ownPinned = existingParents.find(row => row.id === parent.id);
+          const limitAnchor = ownPinned ?? existingParents[0];
+          const requestedBudgetCents = parent.budgetCents !== undefined ? Math.min(parent.budgetCents, parentCapCents) : undefined;
+          const requestedMaxCalls = parent.maxProviderCalls;
           // Retries may omit a tighter limit but cannot silently enlarge or replace it.
-          if ((parent.budgetCents !== undefined && Math.min(parent.budgetCents, parentCapCents) !== Number(pinned!.budget_cents))
-            || (parent.maxProviderCalls !== undefined && parent.maxProviderCalls !== Number(pinned!.max_provider_calls))) {
+          if (limitAnchor && ((requestedBudgetCents !== undefined && requestedBudgetCents !== Number(limitAnchor.budget_cents))
+            || (requestedMaxCalls !== undefined && requestedMaxCalls !== Number(limitAnchor.max_provider_calls)))) {
             throw new OpeningBudgetError("CONFLICT", "parent interaction limits already pinned");
           }
+          const pinnedBudgetCents = existingParents.length
+            ? Math.min(...existingParents.map(row => Number(row.budget_cents)))
+            : (requestedBudgetCents ?? parentCapCents);
+          const pinnedMaxCalls = existingParents.length
+            ? Math.min(...existingParents.map(row => Number(row.max_provider_calls)))
+            : (requestedMaxCalls ?? DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS);
+          const blockedSource = existingParents.find(row => row.blocked_at != null);
+          const familyBlocked = blockedSource !== undefined;
+          if (!ownPinned) {
+            await tx`
+              INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls, blocked_at, blocked_reason)
+              VALUES (${scope.workspaceId}, ${parent.id}, ${pinnedBudgetCents}, ${pinnedMaxCalls},
+                ${blockedSource?.blocked_at ?? null}, ${blockedSource?.blocked_reason ?? null})
+              ON CONFLICT (workspace_id, id) DO NOTHING
+            `;
+          }
+          // Aggregate spend & provider calls across the turn family (<turnId> + retrieval:<turnId>),
+          // while keeping outcome_unknown blocking scoped strictly to the exact parent_interaction_id.
           const [usage] = await tx`
-            SELECT COALESCE(sum(amount_cents) FILTER (WHERE state <> 'released'), 0) AS cents,
-              count(*)::int AS calls,
-              count(*) FILTER (WHERE outcome_unknown_at IS NOT NULL)::int AS unknown_calls
+            SELECT COALESCE(sum(
+                CASE
+                  WHEN state <> 'released' OR outcome_unknown_at IS NOT NULL THEN GREATEST(amount_cents, COALESCE(pending_reconcile_cents, 0))
+                  WHEN COALESCE(pending_reconcile_cents, 0) > 0 THEN pending_reconcile_cents
+                  ELSE 0
+                END
+              ), 0) AS cents,
+              count(*) FILTER (WHERE NOT (state = 'released' AND COALESCE(release_reason = 'not_sent', false)
+                AND amount_cents = 0 AND COALESCE(reserved_amount_cents, 0) = 0 AND model_snapshot IS NULL
+                AND execution_claimed_at IS NULL AND outcome_unknown_at IS NULL))::int AS calls,
+              count(*) FILTER (WHERE outcome_unknown_at IS NOT NULL AND parent_interaction_id = ${parent.id})::int AS unknown_calls
             FROM opening_budget_reservations
-            WHERE workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parent.id}
+            WHERE workspace_id = ${scope.workspaceId}
+              AND ${parentBudgetFamilyPredicate(tx, "parent_interaction_id", parent.id)}
           `;
           // Existing post-send/terminal legacy rows must stay replayable and must
           // enter this parent's accounting, even when their bill already exceeds it.
           const replayOnly = existingRow && (existingRow.state !== "reserved" || existingRow.executionClaimedAt !== null || existingRow.outcomeUnknownAt !== null);
           if (!replayOnly) {
-            if (pinned!.blocked_at) throw new OpeningBudgetError("PARENT_BUDGET_BLOCKED", "parent interaction cost bound was exceeded");
+            if (familyBlocked) throw new OpeningBudgetError("PARENT_BUDGET_BLOCKED", "parent interaction cost bound was exceeded");
             if (Number(usage!.unknown_calls) > 0) throw new OpeningBudgetError("PARENT_BUDGET_OUTCOME_UNKNOWN", "parent interaction has unknown billing; not re-sending");
-            if (Number(usage!.calls) >= Number(pinned!.max_provider_calls)) throw new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached");
+            if (Number(usage!.calls) >= pinnedMaxCalls) throw new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached");
             // All settled spend + outstanding reservations + next conservative bound.
-            if (Number(usage!.cents) + input.amountCents > Math.min(Number(pinned!.budget_cents), parentCapCents)) {
+            if (Number(usage!.cents) + input.amountCents > Math.min(pinnedBudgetCents, parentCapCents)) {
+              // When the workspace's daily cap is already exhausted for a new paid charge,
+              // surface daily quota/request errors instead of attributing the refusal solely to
+              // the parent interaction (so fallback routing and user messaging stay accurate).
+              if (!existingRow && !zeroCost && !unlimited) {
+                const [daily] = await tx`
+                  SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
+                  WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
+                `;
+                if (input.amountCents + Number(daily?.used ?? 0) > capCents) {
+                  if (await requestCapReached(tx, scope.workspaceId, budgetDay, modelSnapshot, requestCap)) {
+                    throw new OpeningBudgetError("REQUEST_CAP_EXCEEDED", "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。");
+                  }
+                  throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
+                }
+              }
               throw new OpeningBudgetError("PARENT_BUDGET_EXCEEDED", "parent interaction budget exceeded");
             }
           }
@@ -532,16 +797,34 @@ export function createOpeningBudgetRepository(
         // Count all current reserved rows plus completed spend on the local day
         // using half-open [dayStart, nextDayStart) absolute instants (not UTC date).
         // A zero-cost (free-tier) row adds no spend, so the cents cap does not gate it.
+        const reuseFence = fence ? tx`ON CONFLICT (request_id) DO UPDATE
+          SET amount_cents = excluded.amount_cents, reserved_amount_cents = excluded.reserved_amount_cents,
+              model_snapshot = excluded.model_snapshot, state = 'reserved', release_reason = NULL,
+              created_at = excluded.created_at, updated_at = excluded.updated_at
+          WHERE opening_budget_reservations.id = ${fence.id} AND opening_budget_reservations.state = 'released'
+            AND opening_budget_reservations.reserved_amount_cents IS NULL AND opening_budget_reservations.outcome_unknown_at IS NULL` : tx``;
+        const rollbackSiblings = ephemeralRollbackSiblings(scope.workspaceId, {
+          request_id: requestId, parent_interaction_id: parentBudget?.id ?? null, purpose: input.purpose,
+        });
+        const fenceTerms = { workspaceId: scope.workspaceId, purpose: input.purpose, parentId: parentBudget?.id ?? null,
+          // Rollback fences on a fallback attempt stay terminal so a not_sent
+          // fallback under key collision cannot reactivate on later retries.
+          reservedAmount: canonicalFallbackId !== null ? 0 as const : undefined, instant };
+        // The unique request key is global. Take it and every sibling fence in
+        // the same order even when workspaces start on different attempts.
+        await insertRollbackFences(tx, rollbackSiblings.filter(key => key < requestId), fenceTerms);
         const rows = await tx`
-          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id)
-          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}
+          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id, created_at, updated_at)
+          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}, ${instant}, ${instant}
           WHERE ${zeroCost || unlimited} OR ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
           ), 0) <= ${capCents}
+          ${reuseFence}
           RETURNING *
         `;
         if (!rows.length) throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
+        await insertRollbackFences(tx, rollbackSiblings.filter(key => key > requestId), fenceTerms);
         return mapReservation(rows[0] as Record<string, unknown>);
       });
       } catch (error) {
@@ -560,16 +843,72 @@ export function createOpeningBudgetRepository(
       return changeState(scope, { by: "requestId", value: requestId }, "completed", { resultRef: options.resultRef });
     },
     async claimExecution(scope, reservationId) {
-      const rows = await sql`
-        UPDATE opening_budget_reservations
-        SET execution_claimed_at = now(), updated_at = now()
+      const [candidate] = await sql<{ request_id: string; parent_interaction_id: string | null; purpose: string }[]>`
+        SELECT request_id, parent_interaction_id, purpose FROM opening_budget_reservations
         WHERE id = ${reservationId} AND ${inScope(scope)}
-          AND state = 'reserved'
-          AND execution_claimed_at IS NULL
-          AND outcome_unknown_at IS NULL
-        RETURNING id
       `;
-      return rows.length === 1;
+      if (!candidate) return false;
+      const claim = async (db: BudgetSql) => {
+        const rows = await db`
+          UPDATE opening_budget_reservations
+          SET execution_claimed_at = now(), updated_at = now()
+          WHERE id = ${reservationId} AND ${inScope(scope)}
+            AND parent_interaction_id IS NOT DISTINCT FROM ${candidate.parent_interaction_id}
+            AND state = 'reserved' AND execution_claimed_at IS NULL AND outcome_unknown_at IS NULL
+          RETURNING id
+        `;
+        return rows.length === 1;
+      };
+      const siblings = ephemeralRollbackSiblings(scope.workspaceId, candidate);
+      if (!siblings.length) return claim(sql);
+      class UnclaimedExecutionError extends Error {}
+      const before = siblings.filter(key => key < candidate.request_id);
+      const after = siblings.filter(key => key > candidate.request_id);
+      const fenceTerms = {
+        workspaceId: scope.workspaceId,
+        purpose: candidate.purpose,
+        parentId: candidate.parent_interaction_id,
+      };
+      return sql.begin(async tx => {
+        // Rollback reserve takes this same lock before reading or creating an exact key.
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owners.length) return false;
+        const [liveSibling] = await tx`
+          SELECT id FROM opening_budget_reservations
+          WHERE request_id = ANY(${siblings}::text[]) AND workspace_id = ${scope.workspaceId}
+            AND (parent_interaction_id IS NULL OR parent_interaction_id = ${candidate.parent_interaction_id})
+            AND NOT (state = 'released' AND COALESCE(release_reason IN ('not_sent', 'cancelled'), false)
+              AND outcome_unknown_at IS NULL AND pending_reconcile_cents = 0)
+          LIMIT 1
+        `;
+        if (liveSibling) {
+          await tx`
+            UPDATE opening_budget_reservations
+            SET amount_cents = 0, reserved_amount_cents = NULL, model_snapshot = NULL,
+                state = 'released', release_reason = 'not_sent', execution_claimed_at = NULL,
+                outcome_unknown_at = NULL, reconciled_at = NULL, pending_reconcile_cents = 0,
+                settlement_cost_basis = NULL, result_ref = NULL, updated_at = now()
+            WHERE id = ${reservationId} AND ${inScope(scope)}
+              AND parent_interaction_id IS NOT DISTINCT FROM ${candidate.parent_interaction_id}
+              AND state = 'reserved' AND execution_claimed_at IS NULL AND outcome_unknown_at IS NULL
+          `;
+          return false;
+        }
+        try {
+          return await tx.savepoint(async sp => {
+            // Touch global request_id keys in strict ascending order, matching reserve().
+            await insertRollbackFences(sp, before, fenceTerms);
+            if (!(await claim(sp))) {
+              throw new UnclaimedExecutionError();
+            }
+            await insertRollbackFences(sp, after, fenceTerms);
+            return true;
+          });
+        } catch (error) {
+          if (error instanceof UnclaimedExecutionError) return false;
+          throw error;
+        }
+      });
     },
     async settle(scope, reservationId, actualCents, options = {}) {
       if (!Number.isSafeInteger(actualCents) || actualCents < 0) {
@@ -590,51 +929,67 @@ export function createOpeningBudgetRepository(
         if (!current.length) {
           throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
         }
-        const row = mapReservation(current[0] as Record<string, unknown>);
+        const currentRow = current[0] as Record<string, unknown>;
+        const row = mapReservation(currentRow);
+        const instant = await readBudgetClock(tx);
+        const createdAt = toDate(currentRow.created_at) ?? instant;
         // Zero only settles a zero-cost (free-tier) reservation; paid calls stay positive.
         if (actualCents === 0 && (row.reservedAmountCents ?? row.amountCents) !== 0) {
           throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
         }
+        let reservationOverrunAlert: BudgetReconcileEvent | null = null;
         if (actualCents > (row.reservedAmountCents ?? row.amountCents)) {
           if (row.parentInteractionId) {
             await tx`UPDATE opening_parent_interaction_budgets
-              SET blocked_at = COALESCE(blocked_at, now()), blocked_reason = 'actual_exceeded_conservative_bound'
-              WHERE workspace_id = ${scope.workspaceId} AND id = ${row.parentInteractionId}`;
+              SET blocked_at = COALESCE(blocked_at, ${instant}), blocked_reason = 'actual_exceeded_conservative_bound'
+              WHERE workspace_id = ${scope.workspaceId}
+                AND ${parentBudgetFamilyPredicate(tx, "id", row.parentInteractionId)}`;
           }
           const event = await tx`INSERT INTO opening_budget_reconcile_events
-            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents)
-            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${row.reservedAmountCents ?? row.amountCents})
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, created_at)
+            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${row.reservedAmountCents ?? row.amountCents}, ${instant})
             ON CONFLICT (reservation_id, kind) DO NOTHING RETURNING *`;
-          if (event.length) alerts.push(mapEvent(event[0] as Record<string, unknown>));
+          if (event.length) reservationOverrunAlert = mapEvent(event[0] as Record<string, unknown>);
         }
         if (row.state === "reserved") {
           const rows = await tx`
             UPDATE opening_budget_reservations
-            SET amount_cents = ${actualCents}, state = 'completed', updated_at = now(),
+            SET amount_cents = ${actualCents}, state = 'completed', updated_at = ${instant},
                 result_ref = COALESCE(${resultRef}, result_ref), outcome_unknown_at = NULL,
                 settlement_cost_basis = ${options.costBasis ?? "usage_pricing"}
             WHERE id = ${reservationId}
             RETURNING *
           `;
+          if (reservationOverrunAlert) alerts.push(reservationOverrunAlert);
           return mapReservation(rows[0] as Record<string, unknown>);
         }
+        const reconcilingMediaUpperBound = row.state === "completed"
+          && row.settlementCostBasis === "media_usage_upper_bound"
+          && options.costBasis === "vendor_receipt";
         // Free-tier TTL reconciliation has no pending cents, but its receipt is
         // still late. The unique late_receipt event below permits it only once.
-        const lateAfterReconcile = row.state === "completed" && ((row.reconciledAt !== null
-          && (row.pendingReconcileCents > 0 || (row.reservedAmountCents === 0 && actualCents === 0)))
-          || (row.settlementCostBasis === "media_usage_upper_bound" && options.costBasis === "vendor_receipt"));
+        const lateAfterReconcile = row.state === "completed" && row.reconciledAt !== null
+          && (row.pendingReconcileCents > 0
+            || (row.reservedAmountCents === 0 && actualCents === 0 && row.settlementCostBasis === null));
         const lateAfterRelease = row.state === "released";
-        if (!lateAfterReconcile && !lateAfterRelease) {
+        if (!reconcilingMediaUpperBound && !lateAfterReconcile && !lateAfterRelease) {
           // Normal completed row: duplicate receipt is rejected, never re-applied.
           throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
         }
         // Late receipt: audited compensation. The provider DID run, so the real
         // cost is recorded (no loss), pending reconcile cleared exactly once.
+        // If TTL/release recovery provisionally recorded media_usage_upper_bound,
+        // a final vendor_receipt updates that late_receipt record instead of colliding.
+        const conflictAction = reconcilingMediaUpperBound
+          ? tx`ON CONFLICT (reservation_id, kind) DO UPDATE
+            SET amount_after_cents = excluded.amount_after_cents,
+                reported_actual_cents = excluded.reported_actual_cents`
+          : tx`ON CONFLICT (reservation_id, kind) DO NOTHING`;
         const events = await tx`
           INSERT INTO opening_budget_reconcile_events
-            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before)
-          VALUES (${row.id}, ${row.workspaceId}, 'late_receipt', ${lateAfterRelease ? 0 : row.amountCents}, ${actualCents}, ${actualCents}, ${row.state})
-          ON CONFLICT (reservation_id, kind) DO NOTHING
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, created_at)
+          VALUES (${row.id}, ${row.workspaceId}, 'late_receipt', ${lateAfterRelease ? 0 : row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${instant})
+          ${conflictAction}
           RETURNING id
         `;
         if (!events.length) {
@@ -643,34 +998,55 @@ export function createOpeningBudgetRepository(
         const rows = await tx`
           UPDATE opening_budget_reservations
           SET amount_cents = ${actualCents}, state = 'completed', pending_reconcile_cents = 0,
-              reconciled_at = COALESCE(reconciled_at, now()), updated_at = now(),
+              reconciled_at = COALESCE(reconciled_at, ${instant}), updated_at = ${instant},
               result_ref = COALESCE(${resultRef}, result_ref), outcome_unknown_at = NULL,
               settlement_cost_basis = ${options.costBasis ?? "usage_pricing"}
           WHERE id = ${reservationId}
           RETURNING *
         `;
         // A late receipt is real spend that bypassed the reserve-time cap
-        // check. If it pushes local-day usage over the cap, record an audited
-        // cap_overrun event and raise the alert hook: never silent.
-        const { capCents, budgetDay, unlimited } = await capAndDay(tx, row.workspaceId, budgetOptions);
-        const usage = await tx`
-          SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
-          WHERE workspace_id = ${row.workspaceId} AND (
-            state = 'reserved' OR
-            (state = 'completed' AND created_at >= ${budgetDay.dayStart} AND created_at < ${budgetDay.nextDayStart})
-          )
-        `;
+        // check. Evaluate against the reservation's local day (when created on
+        // an earlier day than receipt settlement) as well as today's active day
+        // window so prior-day cap overruns are always audited.
+        const currentDay = await capAndDay(tx, row.workspaceId, budgetOptions, instant);
+        const reservationDay = await capAndDay(tx, row.workspaceId, budgetOptions, createdAt);
+        const sameLocalDay = reservationDay.budgetDay.localDate === currentDay.budgetDay.localDate;
+        const usage = sameLocalDay
+          ? await tx`
+            SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
+            WHERE ${chargedBudgetRows(tx, row.workspaceId, currentDay.budgetDay)}
+          `
+          : await tx`
+            SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
+            WHERE workspace_id = ${row.workspaceId} AND state <> 'released'
+              AND created_at >= ${reservationDay.budgetDay.dayStart}
+              AND created_at < ${reservationDay.budgetDay.nextDayStart}
+          `;
         const usageAfter = Number(usage[0]?.used ?? 0);
-        if (!unlimited && usageAfter > capCents) {
+        let dailyCapOverrunAlert: BudgetReconcileEvent | null = null;
+        if (!reservationDay.unlimited && usageAfter > reservationDay.capCents) {
+          // Reservation-overage inserts leave usage_after_cents NULL; upgrade that
+          // slot once on daily-cap overrun while skipping rows that already have
+          // usage_after_cents recorded so replays never double-fire alerts.
           const overrun = await tx`
             INSERT INTO opening_budget_reconcile_events
-              (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, usage_after_cents)
-            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${usageAfter - actualCents}, ${usageAfter}, ${actualCents}, ${row.state}, ${capCents}, ${usageAfter})
-            ON CONFLICT (reservation_id, kind) DO NOTHING
+              (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, usage_after_cents, created_at)
+            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${usageAfter - actualCents}, ${usageAfter}, ${actualCents}, ${row.state}, ${reservationDay.capCents}, ${usageAfter}, ${instant})
+            ON CONFLICT (reservation_id, kind) DO UPDATE
+              SET amount_before_cents = excluded.amount_before_cents,
+                  amount_after_cents = excluded.amount_after_cents,
+                  reported_actual_cents = excluded.reported_actual_cents,
+                  state_before = excluded.state_before,
+                  cap_cents = excluded.cap_cents,
+                  usage_after_cents = excluded.usage_after_cents,
+                  created_at = excluded.created_at
+            WHERE opening_budget_reconcile_events.usage_after_cents IS NULL
             RETURNING *
           `;
-          if (overrun.length) alerts.push(mapEvent(overrun[0] as Record<string, unknown>));
+          if (overrun.length) dailyCapOverrunAlert = mapEvent(overrun[0] as Record<string, unknown>);
         }
+        const overrunAlert = dailyCapOverrunAlert ?? reservationOverrunAlert;
+        if (overrunAlert) alerts.push(overrunAlert);
         return mapReservation(rows[0] as Record<string, unknown>);
       });
       for (const alert of alerts) await onReconcileAlert?.(alert);

@@ -1,9 +1,138 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
+import { DEFAULT_OPENING_INTERVENTION_PREFS, interventionPrefsSchema } from "@aistudy/contracts";
 import { createOpeningPlansRepository } from "./opening-plans";
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const task = { id: "task", title: "Due task", minutes: 25, due_at: null, priority: 1, status: "pending", version: 4 };
+
+it("accepts an untouched timetable revision only in its issuing workspace", async () => {
+  let sentinelFingerprint: string | null = null;
+  const query = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const text = parts.join("?").replace(/\s+/g, " ").trim();
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
+    if (text.startsWith("SELECT s.*, ps.hard_blocks_fingerprint FROM workspaces")) {
+      return values[1] === scope.workspaceId
+        ? [{ id: null, hard_blocks_fingerprint: sentinelFingerprint }]
+        : [{ id: null, hard_blocks_fingerprint: null }];
+    }
+    if (text.startsWith("INSERT INTO opening_plan_state")) {
+      const [workspaceId, day, nextFingerprint] = values as [string, string, string];
+      if (workspaceId === scope.workspaceId) sentinelFingerprint = nextFingerprint;
+      return [{ day }];
+    }
+    return [];
+  });
+  const sql = Object.assign(query, { json: (value: unknown) => value,
+    begin: (run: (tx: Sql) => unknown) => run(query as unknown as Sql) });
+  const repo = createOpeningPlansRepository(sql as unknown as Sql);
+  const { revision } = await repo.timetableSnapshot(scope);
+  expect(revision).toMatch(new RegExp(`^empty:${scope.workspaceId}:[0-9a-f]{32}$`));
+  await expect(repo.replaceTimetable({ ...scope, workspaceId: "other" }, [], revision)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("DELETE"))).toBe(false);
+  await expect(repo.replaceTimetable(scope, [], revision)).resolves.toEqual([]);
+  expect(sentinelFingerprint).toMatch(/^timetable-revision:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("opening_workspace_history_revisions"))).toBe(false);
+});
+
+it("persists timetable revisions in the reserved opening_plan_state sentinel without touching history", async () => {
+  let sentinelFingerprint: string | null = null;
+  const query = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const text = parts.join("?").replace(/\s+/g, " ").trim();
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.startsWith("SELECT s.*, ps.hard_blocks_fingerprint FROM workspaces")) {
+      expect(values[0]).toBe("1900-01-01");
+      return [{ id: null, hard_blocks_fingerprint: sentinelFingerprint }];
+    }
+    if (text.startsWith("INSERT INTO opening_plan_state")) {
+      const [, day, nextFingerprint, prefix] = values as [string, string, string, string];
+      expect(day).toBe("1900-01-01");
+      if (sentinelFingerprint !== null && !sentinelFingerprint.startsWith(prefix)) return [];
+      sentinelFingerprint = nextFingerprint;
+      return [{ day }];
+    }
+    return [];
+  });
+  const sql = Object.assign(query, { json: (value: unknown) => value,
+    begin: (run: (tx: Sql) => unknown) => run(query as unknown as Sql) });
+  const repo = createOpeningPlansRepository(sql as unknown as Sql);
+  const before = await repo.timetableSnapshot(scope);
+  await repo.replaceTimetable(scope, [], before.revision);
+  const after = await repo.timetableSnapshot(scope);
+  expect(after.sessions).toEqual([]);
+  expect(after.revision).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[0-9a-f]{32}$/);
+  expect(after.revision).not.toBe(before.revision);
+  expect(sentinelFingerprint).toBe(`timetable-revision:${after.revision.split(":")[0]}`);
+  await repo.replaceTimetable(scope, [], after.revision);
+  const updated = await repo.timetableSnapshot(scope);
+  expect(updated.revision).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[0-9a-f]{32}$/);
+  expect(updated.revision).not.toBe(after.revision);
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("opening_workspace_history_revisions"))).toBe(false);
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("intervention_settings"))).toBe(false);
+  expect(interventionPrefsSchema.parse(DEFAULT_OPENING_INTERVENTION_PREFS)).toEqual(DEFAULT_OPENING_INTERVENTION_PREFS);
+});
+
+it("rejects a stale preview when a rolling-deploy base instance mutates timetable rows without bumping the sentinel", async () => {
+  const sentinelFingerprint = "timetable-revision:11111111-1111-4111-8111-111111111111";
+  let sessionRows: Array<Record<string, unknown>> = [{
+    id: "22222222-2222-4222-8222-222222222222",
+    course_name: "Physics",
+    course_id: null,
+    weekday: 1,
+    weeks: [1, 2],
+    start_period: 1,
+    end_period: 2,
+    hard_blocks_fingerprint: sentinelFingerprint,
+  }];
+  const query = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const text = parts.join("?").replace(/\s+/g, " ").trim();
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
+    if (text.startsWith("SELECT s.*, ps.hard_blocks_fingerprint FROM workspaces")) {
+      return sessionRows.length ? sessionRows : [{ id: null, hard_blocks_fingerprint: sentinelFingerprint }];
+    }
+    return [];
+  });
+  const sql = Object.assign(query, { json: (value: unknown) => value,
+    begin: (run: (tx: Sql) => unknown) => run(query as unknown as Sql) });
+  const repo = createOpeningPlansRepository(sql as unknown as Sql);
+  const preview = await repo.timetableSnapshot(scope);
+
+  // Simulate a base-version instance replacing opening_timetable_sessions directly (fresh row UUID)
+  // without updating opening_plan_state.hard_blocks_fingerprint.
+  sessionRows = [{
+    id: "33333333-3333-4333-8333-333333333333",
+    course_name: "Physics",
+    course_id: null,
+    weekday: 1,
+    weeks: [1, 2],
+    start_period: 1,
+    end_period: 2,
+    hard_blocks_fingerprint: sentinelFingerprint,
+  }];
+  const afterBaseWrite = await repo.timetableSnapshot(scope);
+  expect(afterBaseWrite.revision).not.toBe(preview.revision);
+  await expect(repo.replaceTimetable(scope, [], preview.revision)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("DELETE"))).toBe(false);
+});
+
+it("rejects timetable replacement with CONFLICT when 1900-01-01 is occupied by a non-sentinel plan row", async () => {
+  const query = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const text = parts.join("?").replace(/\s+/g, " ").trim();
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: values[0] }];
+    if (text.startsWith("SELECT s.*, ps.hard_blocks_fingerprint FROM workspaces")) {
+      return [{ id: null, hard_blocks_fingerprint: "legacy-plan-fingerprint" }];
+    }
+    if (text.startsWith("INSERT INTO opening_plan_state")) return [];
+    return [];
+  });
+  const sql = Object.assign(query, { json: (value: unknown) => value,
+    begin: (run: (tx: Sql) => unknown) => run(query as unknown as Sql) });
+  const repo = createOpeningPlansRepository(sql as unknown as Sql);
+  const before = await repo.timetableSnapshot(scope);
+  expect(before.revision).toMatch(new RegExp(`^empty:${scope.workspaceId}:[0-9a-f]{32}$`));
+  await expect(repo.replaceTimetable(scope, [], before.revision)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("opening_workspace_history_revisions"))).toBe(false);
+});
 
 describe("opening task response versions", () => {
   it("returns the stored task version from the owner list", async () => {

@@ -148,3 +148,16 @@ it("retains every intent event and binds copied/guessed declarations to their ac
   (value.opening_study_intent_events[0]!.payload as Record<string, unknown>).signals = [];
   expect(errors(value)).toContain("Study answer-condition signals are missing their original attempt");
 });
+
+it("matches create_intent.sourceTurnId case-insensitively for valid UUIDs while rejecting missing or foreign turns", () => {
+  const value = tables();
+  const convId = "90000000-0000-4000-8000-000000000001";
+  const userTurnId = "abcdef01-2345-4678-89ab-cdef01234567";
+  value.opening_conversations = [{ ...scope, id: convId, course_id: null }];
+  value.opening_turns = [{ ...scope, id: userTurnId, conversation_id: convId, role: "user", mode: "hint" }];
+  value.opening_teaching_activities![0]!.create_intent = { sourceTurnId: userTurnId.toUpperCase() };
+  expect(errors(value)).toEqual([]);
+
+  value.opening_turns = [];
+  expect(errors(value)).toContain("Teaching source user turn lineage is missing or foreign");
+});

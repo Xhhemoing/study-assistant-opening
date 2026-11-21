@@ -23,6 +23,7 @@ import {
 } from "./cards-ops";
 import { assertReplayableReviewEvent } from "./cards-replay";
 import { CardRepositoryError, type CardStateRecord } from "./cards-types";
+import { withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 /** Whether a review also became a learning fact; replays of older events may not know why it was skipped. */
 export type CardReviewEvidence = "recorded" | CardEvidenceSkipReason | "skipped_unknown";
@@ -44,7 +45,7 @@ export async function gradeCard(
 ): Promise<{ state: CardStateRecord; event: LearningEvent; created: boolean; evidence: CardReviewEvidence }> {
   const grade = reviewGradeSchema.parse(input.grade);
   const now = input.now ?? new Date(input.occurredAt);
-  return sql.begin(async (tx) => {
+  return withOpeningTutorStreamFenceCommit(sql, async (tx) => {
     const client = tx as Sql;
     const scope = { workspaceId: input.workspaceId, ownerUserId: input.ownerUserId };
     await lockWorkspaceLearningHistory(tx, scope);

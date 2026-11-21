@@ -53,7 +53,7 @@ export type SweepExpiredPendingUploadsOptions = {
 
 export type OpeningSourceRepository = {
   create(scope: OpeningScope, input: UploadInput, capture?: OpeningTextCapture): Promise<SourceRecord>;
-  get(scope: OpeningScope, id: string): Promise<SourceRecord>;
+  get(scope: OpeningScope, id: string, options?: { includePdfTextCap: true }): Promise<SourceRecord & { pdfTextCap?: unknown }>;
   getPendingUpload(scope: OpeningScope, id: string): Promise<{ source: SourceRecord; expiresAt: string }>;
   issueUploadTicket(scope: OpeningScope, id: string, sign: (source: SourceRecord) => Promise<Omit<UploadTicket, "source">>): Promise<UploadTicket>;
   /** Marks pending → uploaded after validateStoredUpload at the boundary. */
@@ -64,6 +64,7 @@ export type OpeningSourceRepository = {
   ): Promise<SourceRecord>;
   completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void> }): Promise<SourceRecord>;
   retryParseWithJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number }): Promise<SourceRecord>;
+  resolveLegacyFinalKey?(scope: OpeningScope, sourceId: string, canonicalFinalKey: string): Promise<string | null>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
   markParseState(scope: OpeningScope, id: string, state: SourceRecord["parseState"], error?: unknown): Promise<SourceRecord>;
   /**
@@ -93,6 +94,13 @@ export type OpeningSourceRepository = {
   ): Promise<SweptPendingUpload[]>;
 };
 
+type StoredSourceError = NonNullable<SourceRecord["error"]> & { pdfTextCap?: number[] | string };
+
+export function mapOpeningSourceError(value: unknown): SourceRecord["error"] {
+  const error = value as StoredSourceError | null | undefined;
+  return error?.code ? { code: error.code, message: error.message, retryable: error.retryable } : null;
+}
+
 function mapSource(row: Record<string, unknown>): SourceRecord {
   return {
     id: row.id as string,
@@ -104,7 +112,7 @@ function mapSource(row: Record<string, unknown>): SourceRecord {
     version: Number(row.version),
     uploadState: row.upload_state as SourceRecord["uploadState"],
     parseState: row.parse_state as SourceRecord["parseState"],
-    error: (row.error as SourceRecord["error"]) ?? null,
+    error: mapOpeningSourceError(row.error),
     createdAt: new Date(row.created_at as string | Date).toISOString(),
   };
 }
@@ -208,6 +216,47 @@ export async function sweepExpiredPendingUploadsAll(
   return sweepExpiredPendingUploadsQuery(sql, {}, options);
 }
 
+/**
+ * Resolves a historical mixed-case object key recorded on an initial parse job
+ * when the canonical lowercase finalKey object does not exist in storage.
+ */
+export async function resolveLegacySourceFinalKey(
+  sql: Sql,
+  scope: OpeningScope,
+  sourceId: string,
+  canonicalFinalKey: string,
+): Promise<string | null> {
+  const canonicalId = sourceId.toLowerCase();
+  const ownPrefix = `opening/sources/${canonicalId}/`;
+  const canonicalLower = canonicalFinalKey.toLowerCase();
+  if (!canonicalLower.startsWith(ownPrefix) || canonicalFinalKey.includes("..")) {
+    return null;
+  }
+  const rows = await sql`
+    SELECT j.key FROM opening_jobs j
+    JOIN workspaces w ON w.id = j.workspace_id
+    WHERE j.workspace_id = ${scope.workspaceId}
+      AND w.owner_user_id = ${scope.ownerUserId}
+      AND j.kind IN ('parse', 'parse-media')
+      AND lower(j.payload->>'sourceId') = ${canonicalId}
+      AND lower(j.key) = ${canonicalLower}
+      AND j.key <> ${canonicalFinalKey}
+    ORDER BY j.created_at DESC, j.id DESC
+    LIMIT 1
+  `;
+  const key = rows[0]?.key ? String(rows[0].key) : null;
+  if (
+    !key
+    || key === canonicalFinalKey
+    || key.toLowerCase() !== canonicalLower
+    || !key.toLowerCase().startsWith(ownPrefix)
+    || key.includes("..")
+  ) {
+    return null;
+  }
+  return key;
+}
+
 export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRepositoryOptions = {}): OpeningSourceRepository {
   const quota = options.quota ?? DEFAULT_OPENING_SOURCE_QUOTA;
   const now = options.now ?? (() => new Date());
@@ -302,7 +351,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
       });
     },
 
-    async get(scope, id) {
+    async get(scope, id, options) {
       const rows = await sql`
         SELECT * FROM opening_sources
         WHERE id = ${id} AND workspace_id = ${scope.workspaceId}
@@ -311,7 +360,10 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
       if (!rows.length) {
         throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
       }
-      return mapSource(rows[0] as Record<string, unknown>);
+      const row = rows[0] as Record<string, unknown>;
+      const record = mapSource(row);
+      const pdfTextCap = (row.error as StoredSourceError | null)?.pdfTextCap;
+      return options?.includePdfTextCap && pdfTextCap !== undefined ? { ...record, pdfTextCap } : record;
     },
 
     async getPendingUpload(scope, id) {
@@ -438,12 +490,17 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         }
         const currentRows = await tx`SELECT * FROM opening_sources WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
         if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
-        const current = mapSource(currentRows[0] as Record<string, unknown>);
+        const row = currentRows[0] as Record<string, unknown>;
+        const current = mapSource(row);
         if (current.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "Only uploaded sources can be parsed again");
         if (current.parseState !== "failed" && !(current.parseState === "ready" && current.error?.code === "PARSE_PARTIAL" && current.error.retryable === true)) throw new OpeningSourceError("CONFLICT", "Only failed or retryable partial sources can be parsed again");
         if (current.error?.code === "PRIVACY_EXCLUDED") throw new OpeningSourceError("CONFLICT", "Excluded sources cannot be parsed again");
+        // Clear the public error when queuing, but carry the PDF cap evidence
+        // until publication replaces the corresponding chunks and warning.
+        const pdfTextCap = current.mime === "application/pdf" ? (row.error as StoredSourceError | null)?.pdfTextCap
+          ?? (current.error?.code === "PARSE_PARTIAL" ? current.error.message : undefined) : undefined;
         const sourceRows = await tx`UPDATE opening_sources
-          SET parse_state='queued', error=NULL, updated_at=now()
+          SET parse_state='queued', error=${pdfTextCap === undefined ? null : tx.json({ pdfTextCap })}, updated_at=now()
           WHERE id=${id} AND workspace_id=${scope.workspaceId} AND upload_state='uploaded'
             AND (parse_state='failed' OR (parse_state='ready' AND error->>'code'='PARSE_PARTIAL' AND (error->>'retryable')::boolean))
           RETURNING *`;
@@ -581,6 +638,10 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
 
     sweepExpiredPendingUploads(scope, options) {
       return sweepExpiredPendingUploadsQuery(sql, { workspaceId: scope.workspaceId }, options);
+    },
+
+    resolveLegacyFinalKey(scope, sourceId, canonicalFinalKey) {
+      return resolveLegacySourceFinalKey(sql, scope, sourceId, canonicalFinalKey);
     },
   };
 }

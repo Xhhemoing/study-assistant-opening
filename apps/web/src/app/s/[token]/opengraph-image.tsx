@@ -1,0 +1,204 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ImageResponse } from "next/og";
+import { allowsPublicTryChallenge } from "../../../features/opening/access-policy";
+import { sharePosterFooter } from "../../../features/opening/share/poster";
+import { toDisplayShareCard } from "../../../features/opening/share/schema";
+import { verifyPitfallShareToken } from "../../../features/opening/share/token-codec";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const alt = "AIstudy 防踩坑避雷卡";
+export const size = { width: 1200, height: 630 };
+export const contentType = "image/png";
+
+const FONT_FAMILY = "Share Poster";
+let posterFont: Buffer | undefined;
+
+const PREVIEW_MAX_AGE_SECONDS = 30;
+
+type OpenGraphImageProps = {
+  params: Promise<{ token: string }>;
+};
+
+function clipText(value: string, maxChars: number): string {
+  const chars = [...value];
+  if (chars.length <= maxChars) return value;
+  return `${chars.slice(0, Math.max(1, maxChars - 1)).join("")}…`;
+}
+
+export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
+  const { token } = await params;
+  const verified = verifyPitfallShareToken(token);
+
+  if (!verified.ok) {
+    return new Response("Not Found", {
+      status: 404,
+      headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+
+  const card = toDisplayShareCard(verified.payload);
+  const maxAge = Math.max(0, Math.min(PREVIEW_MAX_AGE_SECONDS, Math.floor(verified.payload.exp - Date.now() / 1000)));
+  const cohortBadge =
+    card.cohortTrapRate !== null
+      ? `约 ${card.cohortTrapRate}% 同学曾在此踩坑 · ${card.cohortSampleSize} 人样本`
+      : null;
+
+  return new ImageResponse(
+    (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          padding: "36px",
+          backgroundColor: "#faf9f5",
+          color: "#1f1e1b",
+          fontFamily: FONT_FAMILY,
+        }}
+      >
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "space-between",
+            backgroundColor: "#ffffff",
+            border: "2px solid #e8e5dc",
+            borderTop: "10px solid #047857",
+            borderRadius: "20px",
+            padding: "36px 44px",
+          }}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "16px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                <span style={{ fontSize: "24px", fontWeight: 700 }}>AIstudy</span>
+                <span style={{ fontSize: "20px", color: "#5e5d59" }}>· 防踩坑避雷卡</span>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  padding: "6px 18px",
+                  borderRadius: "999px",
+                  backgroundColor: "#f2f0e9",
+                  border: "1px solid #e8e5dc",
+                  fontSize: "19px",
+                  color: "#5e5d59",
+                  fontWeight: 600,
+                }}
+              >
+                {clipText(card.subjectLabel, 24)}
+              </div>
+            </div>
+
+            <div
+              style={{
+                fontSize: "40px",
+                fontWeight: 700,
+                lineHeight: 1.25,
+                color: "#1f1e1b",
+              }}
+            >
+              {clipText(card.pitfallTitle, 46)}
+            </div>
+
+            {cohortBadge ? (
+              <div style={{ display: "flex" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    padding: "6px 16px",
+                    borderRadius: "999px",
+                    backgroundColor: "#f6ece2",
+                    color: "#a4501f",
+                    fontSize: "18px",
+                    fontWeight: 600,
+                  }}
+                >
+                  {cohortBadge}
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div style={{ display: "flex", gap: "20px", width: "100%" }}>
+            <div
+              style={{
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+                padding: "20px 24px",
+                borderRadius: "14px",
+                backgroundColor: "#f6ece2",
+                border: "1px solid #e8e5dc",
+              }}
+            >
+              <div style={{ fontSize: "18px", fontWeight: 700, color: "#a4501f" }}>
+                容易踩的坑
+              </div>
+              <div style={{ fontSize: "21px", lineHeight: 1.5, color: "#1f1e1b" }}>
+                {clipText(card.trapSummary, 84)}
+              </div>
+            </div>
+
+            <div
+              style={{
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+                padding: "20px 24px",
+                borderRadius: "14px",
+                backgroundColor: "#e6f2eb",
+                border: "1px solid #d1e7db",
+              }}
+            >
+              <div style={{ fontSize: "18px", fontWeight: 700, color: "#047857" }}>
+                避坑口诀
+              </div>
+              <div style={{ fontSize: "21px", lineHeight: 1.5, fontWeight: 600, color: "#1f1e1b" }}>
+                {clipText(card.takeawayRule, 84)}
+              </div>
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              borderTop: "1px solid #e8e5dc",
+              paddingTop: "16px",
+              fontSize: "18px",
+              color: "#6e6c65",
+            }}
+          >
+            <span>匿名学习避雷卡 · 不含个人账号与成绩信息</span>
+            <span style={{ color: "#1f1e1b", fontWeight: 600 }}>
+              {sharePosterFooter(allowsPublicTryChallenge())}
+            </span>
+          </div>
+        </div>
+      </div>
+    ),
+    {
+      ...size,
+      headers: { "Cache-Control": `public, max-age=${maxAge}, must-revalidate` },
+      fonts: [{
+        name: FONT_FAMILY,
+        data: posterFont ??= readFileSync(join(process.cwd(), "src/features/opening/share/assets/share-poster.woff")),
+      }],
+    },
+  );
+}

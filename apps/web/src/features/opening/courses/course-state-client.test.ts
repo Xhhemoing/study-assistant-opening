@@ -10,7 +10,7 @@ describe("course state client", () => {
     }));
   });
   it("requests reversible course state only and returns the saved course", async () => {
-    const course = { id, title: "代数", slug: "algebra", description: "", createdAt: "2026-09-29T00:00:00Z", updatedAt: "2026-09-29T00:00:00Z", archivedAt: "2026-09-29T00:00:00Z", learningPreferenceOverrides: {} };
+    const course = { id, workspaceId: "22222222-2222-4222-8222-222222222222", title: "代数", slug: "algebra", description: "", createdAt: "2026-09-29T00:00:00Z", updatedAt: "2026-09-29T00:00:00Z", archivedAt: "2026-09-29T00:00:00Z", learningPreferenceOverrides: {} };
     const fetcher = vi.fn(async () => Response.json({ course }));
     expect(await createCourseStateClient(fetcher).setArchived(id, true)).toEqual(course);
     expect(fetcher).toHaveBeenCalledWith(`/api/courses/${id}`, expect.objectContaining({ method: "PATCH", body: '{"archived":true}' }));

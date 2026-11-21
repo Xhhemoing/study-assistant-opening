@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { CourseAsset, CourseSummary } from "./course-model";
 
 const courseSchema = z.object({
-  id: z.string().uuid(), title: z.string(), slug: z.string(), description: z.string(),
+  workspaceId: z.string().uuid(), id: z.string().uuid(), title: z.string(), slug: z.string(), description: z.string(),
   createdAt: z.string(), updatedAt: z.string(), archivedAt: z.string().nullable(),
   learningPreferenceOverrides: courseLearningPreferencesUpdateSchema,
 });

@@ -28,21 +28,28 @@ export const VISIBLE_FLAGS = [
   "OPENING_TEACHING_VALIDATION_ENABLED", "OPENING_MODEL_DAILY_CAP_CENTS",
 ];
 
-const QUEUE_KINDS = ["parse", "tutor", "tutor-metadata", "retest", "remind", "build-course-knowledge",
-  "parse-media", "extract-study-actions", "compile-teaching-unit", "index-source", "recognize-photo-question", "grade-observation"];
+const parserQueues = ["parse", "parse-media"];
+const logisticsQueues = ["remind", "build-course-knowledge", "extract-study-actions", "index-source"];
+const teachingQueues = ["tutor", "tutor-metadata", "retest", "compile-teaching-unit", "recognize-photo-question", "grade-observation"];
+const learningQueues = [...logisticsQueues, ...teachingQueues];
+const queuesByRole = new Map([
+  ["all", [...parserQueues, ...learningQueues]], ["learning", learningQueues], ["parser", parserQueues],
+  ["logistics", logisticsQueues], ["teaching", teachingQueues],
+]);
+
 export function verifyWorkerReadiness(receipt, snapshot, release, configured, now = Date.now()) {
   const role = configured.WORKER_ROLE?.trim() || "all";
-  const expected = QUEUE_KINDS.filter(kind => role === "all" || (role === "parser"
-    ? ["parse", "parse-media"].includes(kind) : !["parse", "parse-media"].includes(kind))).sort();
-  if (!["all", "learning", "parser"].includes(role) || receipt?.version !== 1 || receipt.release !== release
-    || receipt.role !== role || snapshot.environment.WORKER_ROLE !== configured.WORKER_ROLE
+  const expectedRole = role === "tutor" ? "teaching" : role;
+  const expected = queuesByRole.get(expectedRole);
+  if (!expected || receipt?.version !== 1 || receipt.release !== release
+    || receipt.role !== expectedRole || snapshot.environment.WORKER_ROLE !== configured.WORKER_ROLE
     || !Number.isSafeInteger(receipt.pid) || receipt.pid < 1
     || !(receipt.pid === Number(snapshot.pid) || (receipt.supervisorPid === Number(snapshot.pid) && snapshot.consumerParentPid === Number(snapshot.pid)))
     || snapshot.consumerPid !== receipt.pid || snapshot.consumerCwd !== release
     || !snapshot.consumerArgumentPaths?.includes(`${release}/apps/worker/src/index.ts`)
     || !Number.isSafeInteger(receipt.checkedAt) || !Number.isSafeInteger(receipt.expiresAt)
     || receipt.checkedAt > now || receipt.expiresAt <= now || receipt.expiresAt - receipt.checkedAt > 15_000
-    || !Array.isArray(receipt.queueKinds) || JSON.stringify([...receipt.queueKinds].sort()) !== JSON.stringify(expected)) {
+    || !Array.isArray(receipt.queueKinds) || JSON.stringify([...receipt.queueKinds].sort()) !== JSON.stringify([...expected].sort())) {
     throw new Error("Worker consumers are not ready for this PID/release/role/queue set.");
   }
 }

@@ -1,16 +1,17 @@
 import type { Sql, TransactionSql } from "postgres";
 import { assistantCandidateSchema, retestCandidateSchema } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { createOpeningCandidateRepository } from "./opening-candidates";
+import { mapOpeningCandidateRow } from "./opening-candidates";
 import { lockLearningHistory } from "./opening-learning-facts";
 import { OpeningPlanError } from "./opening-plan-error";
 import { includedTurn } from "./opening-backup-record-predicates";
+import { readTurnsWithActiveMemoryDependencies, turnHasMemoryDependencies } from "./opening-context-provenance";
 import { admitTaskCandidate } from "./opening-task-candidate-admission";
 
 type Db = Sql | TransactionSql;
-function cleanJsonSources(db: Db, scope: OpeningScope, ids: ReturnType<Db>) {
-  return db`jsonb_typeof(${ids}) = 'array' AND NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${ids}) = 'array' THEN ${ids} ELSE '[]'::jsonb END) ref(id)
+function cleanJsonSources(db: Db, scope: OpeningScope, ids: () => ReturnType<Db>) {
+  return db`jsonb_typeof(${ids()}) = 'array' AND NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${ids()}) = 'array' THEN ${ids()} ELSE '[]'::jsonb END) ref(id)
     WHERE NOT EXISTS (
       SELECT 1 FROM opening_sources s WHERE s.id::text = lower(ref.id)
         AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
@@ -22,20 +23,26 @@ function admittedRetest(db: Db, scope: OpeningScope) {
   return db`EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
     AND EXISTS (SELECT 1 FROM courses c WHERE c.id::text = j.payload->>'courseId' AND c.workspace_id = ${scope.workspaceId})
     AND (j.payload->>'accepted' = 'true' OR COALESCE(j.payload->>'invalidated', 'false') = 'false')
-    AND ${cleanJsonSources(db, scope, db`j.payload->'sourceIds'`)}`;
+    AND ${cleanJsonSources(db, scope, () => db`j.payload->'sourceIds'`)}`;
 }
 export async function readOpeningAssistantReviewCandidates(sql: Sql, scope: OpeningScope) {
-  const candidates = await createOpeningCandidateRepository(sql).listPending(scope);
-  const rows = await sql`
-    SELECT a.id FROM opening_assistant_candidates a
-    JOIN opening_turns t ON t.id = a.source_turn_id AND t.conversation_id = a.conversation_id
-      AND t.workspace_id = a.workspace_id AND t.status = 'complete'
-    WHERE a.workspace_id = ${scope.workspaceId} AND a.status = 'pending'
-      AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
-      AND ${cleanJsonSources(sql, scope, sql`a.source_ids`)}
-      AND ${includedTurn(sql, scope.workspaceId, scope.ownerUserId, "t")}`;
-  const visible = new Set(rows.map((row) => row.id as string));
-  return candidates.filter((candidate) => visible.has(candidate.id) && assistantCandidateSchema.safeParse(candidate.payload).success);
+  return sql.begin("isolation level repeatable read, read only", async tx => {
+    const candidates = await tx`
+      SELECT a.*, ${turnHasMemoryDependencies(tx)} AS has_memory_dependencies
+      FROM opening_assistant_candidates a
+      JOIN opening_turns t ON t.id = a.source_turn_id AND t.conversation_id = a.conversation_id
+        AND t.workspace_id = a.workspace_id AND t.status = 'complete'
+      WHERE a.workspace_id = ${scope.workspaceId} AND a.status = 'pending'
+        AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
+        AND ${cleanJsonSources(tx, scope, () => tx`a.source_ids`)}
+        AND ${includedTurn(tx, scope.workspaceId, scope.ownerUserId, "t")}
+      ORDER BY a.created_at ASC`;
+    const dependentTurns = [...new Set(candidates.filter(row => row.has_memory_dependencies).map(row => row.source_turn_id as string))];
+    // Keep the recursive plan off ordinary review reads. Both phases share the owner-scoped snapshot.
+    const activeTurns = await readTurnsWithActiveMemoryDependencies(tx, scope.workspaceId, dependentTurns);
+    return candidates.filter(row => (!row.has_memory_dependencies || activeTurns.has(row.source_turn_id as string))
+      && assistantCandidateSchema.safeParse(row.payload).success).map(mapOpeningCandidateRow);
+  });
 }
 export async function readOpeningRetestReviewCandidates(sql: Sql, scope: OpeningScope) {
   const rows = await sql`

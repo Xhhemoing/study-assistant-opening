@@ -5,7 +5,7 @@ import { examPaperInputSchema, type ExamForecastOverview, type ExamPack, type Ex
 import { forecastExamTopics } from "@aistudy/domain";
 import { learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { assertExamMaterialAvailable } from "./opening-exam-integration-binding";
-import { lockBoundExamCourse, parseExamBinding } from "./opening-exam-integration-facts";
+import { readCommittedExamReceipt, lockBoundExamCourse, parseExamBinding } from "./opening-exam-integration-facts";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -60,6 +60,15 @@ export function createOpeningExamForecastRepository(sql: Sql, initialPack: ExamP
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw learningError("NOT_FOUND", "工作区不存在");
+        const [existing] = await tx`SELECT intent FROM opening_exam_papers WHERE workspace_id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
+        if (existing) {
+          if (!isDeepStrictEqual(existing.intent, input)) throw conflict("同一登记标识不能登记不同试卷内容");
+          return readCommittedExamReceipt(async () => {
+            await lockBoundExamCourse(tx, scope);
+            return overview(tx, scope, input.teacher);
+          });
+        }
         await lockBoundExamCourse(tx, scope);
         const [sprint] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
           WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -70,12 +79,6 @@ export function createOpeningExamForecastRepository(sql: Sql, initialPack: ExamP
         if (binding.courseId !== bound.course_id) throw conflict("课程绑定无法校验");
         const skillIds = new Set(pack.questions.map(question => question.skillId));
         if (input.skills.some(skill => !skillIds.has(skill.skillId))) throw learningError("VALIDATION", "试卷包含题包中不存在的技能");
-        const [existing] = await tx`SELECT intent FROM opening_exam_papers WHERE workspace_id=${scope.workspaceId}
-          AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
-        if (existing) {
-          if (!isDeepStrictEqual(existing.intent, input)) throw conflict("同一登记标识不能登记不同试卷内容");
-          return overview(tx, scope, input.teacher);
-        }
         await assertExamMaterialAvailable(tx, scope, input.sourceId, input.sourceVersion);
         const [current] = await tx`SELECT version FROM opening_sources WHERE id=${input.sourceId}`;
         if (Number(current?.version) !== input.sourceVersion) throw conflict("试卷材料已更新，请选择当前版本");

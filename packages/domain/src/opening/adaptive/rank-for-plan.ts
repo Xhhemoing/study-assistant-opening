@@ -1,6 +1,7 @@
 import type { CourseGoal, PlanBlockReason, PlannedBlock, SuggestedTask, TaskItem } from "@aistudy/contracts";
 import { localDateKeyInZone } from "../daily-draft";
-import { taskNotBeforeAt } from "../day-planner";
+import { carryOverTaskIds, taskNotBeforeAt } from "../day-planner";
+import { resolveLocalDayBounds } from "../local-day-bounds";
 import { taskCourseId } from "./types";
 import { goalPlanningPriority, goalPlanningReason, resolveGoalLearningContext } from "./goal-policy";
 
@@ -18,6 +19,7 @@ export type RankForPlanInput = {
 export type RankForPlanResult = {
   orderedTaskIds: string[];
   reasons: Record<string, PlanBlockReason>;
+  carryOverTaskIds: ReadonlySet<string>;
 };
 
 /** At most this many items of one course in a row (deadline items excluded). */
@@ -80,13 +82,14 @@ export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
     return { id: task.id, courseId: taskCourseId(task), reason };
   };
   const nowMs = input.now.getTime();
+  const dayEndMs = resolveLocalDayBounds(date, timeZone).nextDayStart.getTime();
 
   const deadlines = pending
-    .filter((task) => task.dueAt !== null && localDateKeyInZone(new Date(task.dueAt), timeZone) <= date)
+    .filter((task) => deadlineMs(task) <= dayEndMs)
     .sort(compareOwnTasks)
     .map((task) => take(task, {
       code: "deadline",
-      label: Date.parse(task.dueAt!) <= nowMs ? "已逾期，优先处理" : "今天截止",
+      label: deadlineMs(task) <= nowMs ? "已逾期，优先处理" : "今天截止",
     }));
 
   const retests = pending
@@ -138,9 +141,17 @@ export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
     ...ordinary(own),
     ...ordinary(suggested),
   ];
+  const carryOver = new Set(carry.map((item) => item.id));
+  const orderedTaskIds = ordered.map((item) => item.id);
+  // The planner receives the order separately from the reasons. Keep the
+  // carry-over hint on that list without changing its array contents.
+  Object.defineProperty(orderedTaskIds, carryOverTaskIds, {
+    value: carryOver,
+  });
   return {
-    orderedTaskIds: ordered.map((item) => item.id),
+    orderedTaskIds,
     reasons: Object.fromEntries(ordered.map((item) => [item.id, item.reason])),
+    carryOverTaskIds: carryOver,
   };
 }
 

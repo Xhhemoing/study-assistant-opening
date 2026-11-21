@@ -77,7 +77,7 @@ async function callGrader(deps: OpeningAiGradingServiceDeps, scope: Scope,
     const ledger = await deps.repository.ledger(scope, base);
     if (ledger === "unknown" || ledger === "in_flight") throw unknownCost();
     if (ledger !== "unsent") throw conflict("这次批改已有发送记录，原答案已保存，请手动改评。");
-    try { return await deps.gateway.call(scope, task, { ...options, budget, operationId }); }
+    try { return await deps.gateway.call(scope, task, { ...options, budget, operationId, requestFamily: base }); }
     catch (error) {
       if (!isBudgetReplayError(error) || error.disposition.kind !== "released"
         || !["not_sent", "cancelled"].includes(error.disposition.reason ?? "")) throw error;

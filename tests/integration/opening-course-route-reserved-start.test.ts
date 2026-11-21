@@ -31,7 +31,7 @@ const ready = (result: CourseRouteActionResult) => {
 // Never exempt UUID-shaped strings in prompt bodies, feedback, hints or checkpoints.
 function assertNoPrivateKey(value: unknown, answer: string, path = ''): void {
   if (typeof value === 'string') {
-    const metadata = /^(result\.requirementId|result\.activity\.(id|workspaceId|ownerUserId|courseId|sourceIds\.\d+)|init\.(id|activityId|teachingUnitId|documentId)|init\.(blocks|blockOrder)\.\d+\.blockId|init\.sourceRefs\.\d+\.(sourceId|chunkId))$/;
+    const metadata = /^(result\.requirementId|result\.activity\.(id|workspaceId|ownerUserId|courseId|sourceIds\.\d+)|init\.(id|activityId|teachingUnitId|documentId)|init\.(blocks|blockOrder)\.\d+\.blockId|init\.sourceRefs\.\d+\.(sourceId|chunkId)|serverEvaluation\.(observationId|attemptId|problemId|itemVersionId))$/;
     if (metadata.test(path) && uuidSchema.safeParse(value).success) return;
     const href = path === 'result.href' ? /^\/opening\/courses\/([^/]+)\/study\?activity=(.+)$/.exec(value) : null;
     if (href && uuidSchema.safeParse(href[1]).success && uuidSchema.safeParse(href[2]).success) return;
@@ -160,7 +160,7 @@ it.each([['2603', 'correct'], ['2604', 'incorrect'], ['not a number', 'unverifie
   if (expected !== 'unverified') {
     expect(answer).toMatchObject({ verdictSource: 'deterministic', assistance: 'hinted', eligibility: { independentAttempt: 'no' } });
     expect(answer.serverEvaluation).toMatchObject({ decision: expected, evaluatorVersion: 'teaching-key-exact-v1' });
-    assertNoPrivateKey(answer.serverEvaluation, '2603');
+    assertNoPrivateKey({ serverEvaluation: answer.serverEvaluation }, '2603');
   }
   const feedback = await createOpeningTeachingContentRepository(f.sql).getClientInit(f.scope, result.activity.id);
   assertPrivatePromptOnly(result, feedback, '2603');
@@ -219,6 +219,24 @@ it('accepts UUID metadata containing answer digits but detects private fields an
   }
   expect(() => assertPrivatePromptOnly({ ...result, answer: 'redacted' }, publicInit, '2603')).toThrow();
   expect(() => assertPrivatePromptOnly(result, { ...publicInit, key: 'redacted' }, '2603')).toThrow();
+  const sampleEvaluation = {
+    observationId: '12914c61-2603-45a2-b690-7349b9809edc',
+    attemptId: '22914c61-2603-45a2-b690-7349b9809edc',
+    problemId: '32914c61-2603-45a2-b690-7349b9809edc',
+    itemVersionId: '42914c61-2603-45a2-b690-7349b9809edc',
+    requirementKey: 'arithmetic',
+    evaluatorVersion: 'teaching-key-exact-v1',
+    specVersion: 'teaching-key-v1',
+    decision: 'incorrect',
+    outcome: 'incorrect',
+    reasonCodes: ['teaching_key_mismatch'],
+    evaluatedAt: '2026-11-21T07:55:48.000Z',
+  };
+  expect(() => assertNoPrivateKey({ serverEvaluation: sampleEvaluation }, '2603')).not.toThrow();
+  expect(() => assertNoPrivateKey(sampleEvaluation, '2603')).toThrow();
+  expect(() => assertNoPrivateKey({ serverEvaluation: { ...sampleEvaluation, observationId: 'not-a-uuid-2603' } }, '2603')).toThrow();
+  expect(() => assertNoPrivateKey({ serverEvaluation: { ...sampleEvaluation, requirementKey: 'arithmetic-2603' } }, '2603')).toThrow();
+  expect(() => assertNoPrivateKey({ serverEvaluation: { ...sampleEvaluation, reasonCodes: ['leak-2603'] } }, '2603')).toThrow();
 });
 it.each([
   ['1+2*3+3', '10', 'correct'], ['1+2*3+3', '127', 'incorrect'],

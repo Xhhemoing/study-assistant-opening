@@ -125,6 +125,16 @@ describe("opening restore privacy boundary", () => {
     expect(validateOpeningRestore(preserved, [mark]).recordCounts.opening_privacy_exclusions).toBe(1);
   });
 
+  it("rejects deterministic UUIDv8 temporary connector reservation rows on restore", () => {
+    const reservationId = `${sourceId.slice(0, 14)}8${sourceId.slice(15)}`;
+    const reservation = backup({
+      opening_privacy_exclusions: [row({ id: reservationId, source_id: sourceId, memory_id: null })],
+    });
+    expect(validateOpeningRestore(reservation, [mark]).errors).toContain(
+      "temporary connector reservation cannot be restored",
+    );
+  });
+
   it("rejects memory whose source turns are not owned by the workspace", () => {
     const foreign = "55555555-5555-4555-8555-555555555555";
     const input = backup({

@@ -117,6 +117,12 @@ import { retestReviewSchema } from "../planning/review-types";
 
 export type { JobStatusResponse } from "@aistudy/contracts";
 
+const scopedJobLookupResponseSchema = jobStatusResponseSchema.extend({
+  clientKey: z.string().min(1).max(200).optional(),
+}).strict();
+
+export type ScopedJobLookupResponse = z.infer<typeof scopedJobLookupResponseSchema>;
+
 const thinTutorActionSchema = z.object({
   kind: z.enum(["clarify", "guided", "worked_example", "independent_variant", "delayed_retest"]),
   skillLabel: z.string().min(1).max(200),
@@ -305,13 +311,21 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(jobStatusResponseSchema, body);
     },
 
-    async getPendingJob(conversationId: string, signal?: AbortSignal): Promise<JobStatusResponse | null> {
+    async getPendingJob(
+      conversationId: string,
+      signal?: AbortSignal,
+      options?: { clientKey?: string },
+    ): Promise<ScopedJobLookupResponse | null> {
+      const query = options?.clientKey ? `?clientKey=${encodeURIComponent(options.clientKey)}` : "";
       const body = await request(
-        `/api/opening/conversations/${conversationId}/pending-job`,
+        `/api/opening/conversations/${conversationId}/pending-job${query}`,
         { method: "GET", signal },
         fetchImpl,
       );
-      return parseOpeningResponse(jobStatusResponseSchema.nullable(), body);
+      return parseOpeningResponse(
+        options?.clientKey ? scopedJobLookupResponseSchema.nullable() : jobStatusResponseSchema.nullable(),
+        body,
+      );
     },
 
     async replyEphemeral(
@@ -589,10 +603,11 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(openingAdaptivePrefsResponseSchema, body);
     },
 
-    /** `refreshSuggestions` replaces an open draft whose suggestions are out of date (hasNewerSuggestion). */
-    async getToday(date: string, options: { refreshSuggestions?: boolean } = {}): Promise<TodayPlanRead> {
+    /** Draft generation and replacement are explicit POSTs. Ordinary plan reads are GETs. */
+    async getToday(date: string, options: { prepareDraft?: boolean; refreshSuggestions?: boolean } = {}): Promise<TodayPlanRead> {
       const refresh = options.refreshSuggestions ? "&refresh=suggestions" : "";
-      const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method: "GET" }, fetchImpl);
+      const method = options.prepareDraft || options.refreshSuggestions ? "POST" : "GET";
+      const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method }, fetchImpl);
       return parseOpeningResponse(todayPlanSchema, body);
     },
 

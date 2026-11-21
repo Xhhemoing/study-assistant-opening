@@ -1,0 +1,653 @@
+import { graphemeBoundaries } from "./graphemes";
+import { countProseWords, maskIeltsMarkup, maskIeltsParagraphs } from "./prose";
+import {
+  IELTS_CARTRIDGE_ID,
+  IELTS_CRITERIA,
+  isDenseIeltsArray,
+  isNonBlankIeltsString,
+  readIeltsPromptId,
+  type IeltsBandScore,
+  type IeltsCriterion,
+  type IeltsCriterionAssessment,
+  type IeltsEpistemicStatus,
+  type IeltsEssayDraft,
+  type IeltsEvidenceSourceKind,
+  type IeltsMemorizedTemplateHit,
+  type IeltsRubricReceipt,
+  type IeltsRubricValidationError,
+  type IeltsRubricValidationResult,
+  type IeltsSpanEvidence,
+  type IeltsTaskMode,
+  type IeltsUpgradeTarget,
+} from "./types";
+import { getWritingDraftSource, getWritingTransferSource, hasValidWritingTargetPatterns } from "./writing-source";
+
+const MIN_BAND = 4;
+const MAX_BAND = 9;
+const MIN_VERIFIED_WRITING_WORDS = 180;
+
+type TemplateCatalogEntry = {
+  readonly phrase: string;
+  readonly severity: "warning" | "blocking";
+  readonly advice: string;
+};
+
+/**
+ * Curated memorized IELTS essay templates that indicate formulaic stuffing
+ * rather than authentic lexical control.
+ */
+export const IELTS_MEMORIZED_TEMPLATE_CATALOG: readonly TemplateCatalogEntry[] = [
+  {
+    phrase: "with the rapid development of",
+    severity: "blocking",
+    advice: "去掉空泛套话开头，直接点明题目争议焦点与政策背景。",
+  },
+  {
+    phrase: "every coin has two sides",
+    severity: "blocking",
+    advice: "用具体的权衡对象替代谚语式套话，例如点明短期效率与长期成本。",
+  },
+  {
+    phrase: "it is a double-edged sword",
+    severity: "blocking",
+    advice: "不要用万能比喻概括正反面，直接写出具体的收益与代价。",
+  },
+  {
+    phrase: "there is no denying the fact that",
+    severity: "blocking",
+    advice: "删除冗余模板句干，直接陈述核心事实或前提。",
+  },
+  {
+    phrase: "a heated debate has been sparked",
+    severity: "blocking",
+    advice: "改用更贴近题干语境的表达，说明争议双方各自关注什么。",
+  },
+  {
+    phrase: "nowadays, more and more people",
+    severity: "blocking",
+    advice: "避免泛化的 nowadays 开头，直接指明受影响群体或城市现象。",
+  },
+  {
+    phrase: "as far as i am concerned",
+    severity: "warning",
+    advice: "改用更简洁自然的立场表达，例如 I contend that 或 In my view。",
+  },
+  {
+    phrase: "last but not least",
+    severity: "warning",
+    advice: "改用体现逻辑关系的衔接词（如 Equally important / Beyond immediate cost）。",
+  },
+  {
+    phrase: "in a nutshell",
+    severity: "warning",
+    advice: "该表达偏口语化，议论文结尾建议改用 In conclusion 或 Ultimately。",
+  },
+  {
+    phrase: "from where i stand",
+    severity: "warning",
+    advice: "学术写作中建议改为更客观的立场句，避免过度口语化套语。",
+  },
+];
+
+export function isValidIeltsBand(value: number): value is IeltsBandScore {
+  if (!Number.isFinite(value)) return false;
+  if (value < MIN_BAND || value > MAX_BAND) return false;
+  return Math.abs(value * 2 - Math.round(value * 2)) < 1e-9;
+}
+
+export function clampToIeltsBand(raw: number): IeltsBandScore {
+  const clamped = Math.min(MAX_BAND, Math.max(MIN_BAND, raw));
+  const rounded = Math.floor(clamped * 2 + 0.5) / 2;
+  return Math.min(MAX_BAND, Math.max(MIN_BAND, rounded)) as IeltsBandScore;
+}
+
+/**
+ * Official IELTS band rounding: average of 4 criteria rounded to nearest 0.5
+ * (.25 rounds up to .5, .75 rounds up to the next whole band).
+ */
+export function computeOverallIeltsBand(
+  scores: Readonly<Record<IeltsCriterion, IeltsBandScore>>,
+): IeltsBandScore {
+  const sum = IELTS_CRITERIA.reduce((acc, code) => acc + scores[code], 0);
+  const average = sum / IELTS_CRITERIA.length;
+  return clampToIeltsBand(average);
+}
+
+export function countEnglishWords(text: string): number {
+  return countProseWords(maskIeltsMarkup(text));
+}
+
+export function countDraftWords(paragraphs: readonly string[]): number {
+  return countProseWords(maskIeltsParagraphs(paragraphs).join("\n"));
+}
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildFlexiblePhraseRegex(phrase: string, flags: string): RegExp {
+  const tokens = phrase
+    .trim()
+    .split(/\s+/)
+    .map(escapeRegExp);
+  const pattern = tokens.join("\\s+");
+  const startsWord = /^[\p{L}\p{N}]/u.test(phrase.trim());
+  const endsWord = /[\p{L}\p{N}]$/u.test(phrase.trim());
+  const prefix = startsWord ? "(?<![\\p{L}\\p{N}])" : "";
+  const suffix = endsWord ? "(?![\\p{L}\\p{N}])" : "";
+  return new RegExp(`${prefix}${pattern}${suffix}`, flags);
+}
+
+type GroundedTemplateHit = IeltsMemorizedTemplateHit &
+  Required<Pick<IeltsMemorizedTemplateHit, "startOffset" | "endOffset">>;
+
+/**
+ * Counts EVERY occurrence of memorized templates across every paragraph (global
+ * match per paragraph so repeated boilerplate in the same paragraph is never missed).
+ */
+export function detectMemorizedTemplates(
+  paragraphs: readonly string[],
+): GroundedTemplateHit[] {
+  const hits: GroundedTemplateHit[] = [];
+  maskIeltsParagraphs(paragraphs).forEach((paragraph, paragraphIndex) => {
+    if (!paragraph.trim()) return;
+    for (const entry of IELTS_MEMORIZED_TEMPLATE_CATALOG) {
+      const regex = buildFlexiblePhraseRegex(entry.phrase, "giu");
+      for (const match of paragraph.matchAll(regex)) {
+        const startOffset = match.index ?? 0;
+        const endOffset = startOffset + match[0].length;
+        hits.push({
+          phrase: entry.phrase,
+          paragraphIndex,
+          severity: entry.severity,
+          advice: entry.advice,
+          startOffset,
+          endOffset,
+        });
+      }
+    }
+  });
+  return hits;
+}
+
+export function hasMemorizedTemplateStuffing(
+  hits: readonly IeltsMemorizedTemplateHit[],
+): boolean {
+  return hits.some((hit) => hit.severity === "blocking") || hits.length >= 2;
+}
+
+type FoldedOffsetEntry = {
+  readonly origStart: number;
+  readonly origEnd: number;
+};
+
+/**
+ * Per-code-point Unicode case-folding with exact UTF-16 `[origStart, origEnd]`
+ * reverse offset mapping. Handles:
+ * - Surrogate pairs (e.g. "😀")
+ * - Case-expanding dotted capital I ("İ" -> "i\u0307" WITHOUT stripping \u0307,
+ *   so "i\u0307stanbul" distinguishes "İstanbul" from ASCII "Istanbul")
+ * - Greek final sigma equivalence ("Σ" / "σ" / "ς" -> "σ")
+ * - German capital sharp S ("ẞ" -> "ß")
+ */
+function foldWithUtf16Offsets(text: string): {
+  readonly folded: string;
+  readonly map: readonly FoldedOffsetEntry[];
+} {
+  let folded = "";
+  const map: FoldedOffsetEntry[] = [];
+  let utf16Offset = 0;
+
+  for (const ch of text) {
+    const origStart = utf16Offset;
+    const origEnd = utf16Offset + ch.length;
+    utf16Offset = origEnd;
+
+    const lowered = ch
+      .toLowerCase()
+      .replace(/\u03c2/gu, "\u03c3")
+      .replace(/\u1e9e/gu, "\u00df");
+
+    for (let i = 0; i < lowered.length; i += 1) {
+      folded += lowered[i];
+      map.push({ origStart, origEnd });
+    }
+  }
+
+  return { folded, map };
+}
+
+/**
+ * Unicode-safe excerpt locator: folds both text and query per Unicode code point
+ * while tracking exact UTF-16 `[origStart, origEnd]` reverse mappings (handling
+ * surrogate pairs like "😀", length-expanding case folds like "İ" -> "i\u0307"
+ * without collapsing dotted/undotted I, and Greek final sigma equivalence
+ * "ΟΔΥΣΣΕΎΣ" <-> "οδυσσεύς").
+ * Guarantees `paragraph.slice(startOffset, endOffset) === matchedText`.
+ */
+export function locateGroundedExcerpt(
+  paragraph: string,
+  excerpt: string,
+): { startOffset: number; endOffset: number; matchedText: string } | null {
+  const trimmed = excerpt.trim();
+  if (!trimmed) return null;
+
+  const boundaries = graphemeBoundaries(paragraph);
+  const exactIndex = paragraph.indexOf(trimmed);
+  const exactEnd = exactIndex + trimmed.length;
+  if (
+    exactIndex >= 0 &&
+    boundaries.floor(exactIndex) === exactIndex &&
+    boundaries.floor(exactEnd) === exactEnd
+  ) {
+    return {
+      startOffset: exactIndex,
+      endOffset: exactEnd,
+      matchedText: trimmed,
+    };
+  }
+
+  const { folded: foldedParagraph, map } = foldWithUtf16Offsets(paragraph);
+  const foldedNeedleTokens = trimmed
+    .split(/\s+/)
+    .map((token) => escapeRegExp(foldWithUtf16Offsets(token).folded))
+    .filter(Boolean);
+  if (foldedNeedleTokens.length === 0) return null;
+
+  const regex = new RegExp(foldedNeedleTokens.join("\\s+"), "gu");
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(foldedParagraph)) !== null) {
+    const matchStart = match.index;
+    const matchEnd = matchStart + match[0].length;
+    const startOffset = map[matchStart]!.origStart;
+    const endOffset = map[matchEnd - 1]!.origEnd;
+    if (
+      map[matchStart - 1]?.origStart === startOffset ||
+      map[matchEnd]?.origEnd === endOffset ||
+      boundaries.floor(startOffset) !== startOffset ||
+      boundaries.floor(endOffset) !== endOffset
+    ) {
+      // In Unicode mode starting inside a surrogate pair can repeat this match.
+      const codePoint = foldedParagraph.codePointAt(matchStart)!;
+      regex.lastIndex = matchStart + (codePoint > 0xffff ? 2 : 1);
+      continue;
+    }
+    return {
+      startOffset,
+      endOffset,
+      matchedText: paragraph.slice(startOffset, endOffset),
+    };
+  }
+
+  return null;
+}
+
+export type EpistemicResolutionInput = {
+  readonly draftVersion: number;
+  readonly assisted: boolean;
+  readonly crossDraftTransferVerified: boolean;
+  readonly freshPromptTransfer?: boolean;
+  readonly memorizedTemplateHits: readonly IeltsMemorizedTemplateHit[];
+  readonly wordCount: number;
+  readonly minVerifiedWords?: number;
+  readonly disqualificationReason?: string;
+};
+
+export type EpistemicResolution = {
+  readonly epistemicStatus: IeltsEpistemicStatus;
+  readonly countsTowardMastery: boolean;
+  readonly masteryQualified: boolean;
+  readonly evidenceSource: IeltsEvidenceSourceKind;
+  readonly epistemicReason: string;
+};
+
+/**
+ * Honest evidence epistemology gate:
+ * - Single-draft or assisted feedback is ALWAYS `practice_feedback` (never counts toward mastery).
+ * - Memorized-template stuffing blocks formal verification.
+ * - Formal `rubric_verified_evidence` requires unassisted cross-draft transfer (v2+) OR
+ *   unassisted fresh-prompt transfer with zero template stuffing and sufficient length.
+ */
+export function resolveIeltsEpistemicStatus(
+  input: EpistemicResolutionInput,
+): EpistemicResolution {
+  const minWords = input.minVerifiedWords ?? MIN_VERIFIED_WRITING_WORDS;
+
+  if (input.assisted) {
+    return {
+      epistemicStatus: "practice_feedback",
+      countsTowardMastery: false,
+      masteryQualified: false,
+      evidenceSource: "assisted_revision",
+      epistemicReason: "本次作答包含提示或脚手架辅助，仅作练习诊断反馈，不计入正式掌握度。",
+    };
+  }
+
+  if (hasMemorizedTemplateStuffing(input.memorizedTemplateHits)) {
+    return {
+      epistemicStatus: "practice_feedback",
+      countsTowardMastery: false,
+      masteryQualified: false,
+      evidenceSource:
+        input.draftVersion <= 1 ? "single_draft_diagnostic" : "assisted_revision",
+      epistemicReason: "检测到高频模板套话堆砌，需替换为贴合语境的原创表达后才可计入量规复核证据。",
+    };
+  }
+
+  if (input.wordCount < minWords) {
+    return {
+      epistemicStatus: "practice_feedback",
+      countsTowardMastery: false,
+      masteryQualified: false,
+      evidenceSource: "single_draft_diagnostic",
+      epistemicReason: `当前有效词数为 ${input.wordCount} 词，低于独立复核门槛（${minWords} 词），暂作为练习诊断反馈。`,
+    };
+  }
+
+  if (input.disqualificationReason) {
+    return {
+      epistemicStatus: "practice_feedback",
+      countsTowardMastery: false,
+      masteryQualified: false,
+      evidenceSource:
+        input.draftVersion <= 1 ? "single_draft_diagnostic" : "assisted_revision",
+      epistemicReason: input.disqualificationReason,
+    };
+  }
+
+  if (input.freshPromptTransfer) {
+    return {
+      epistemicStatus: "rubric_verified_evidence",
+      countsTowardMastery: true,
+      masteryQualified: true,
+      evidenceSource: "unassisted_fresh_prompt_transfer",
+      epistemicReason: "独立完成新题迁移作答且未检测到模板套话，已确认为量规复核证据。",
+    };
+  }
+
+  if (input.draftVersion >= 2 && input.crossDraftTransferVerified) {
+    return {
+      epistemicStatus: "rubric_verified_evidence",
+      countsTowardMastery: true,
+      masteryQualified: true,
+      evidenceSource: "unassisted_cross_draft_transfer",
+      epistemicReason: "独立完成多稿精修并确认核心改写目标已迁移落地，已确认为量规复核证据。",
+    };
+  }
+
+  return {
+    epistemicStatus: "practice_feedback",
+    countsTowardMastery: false,
+    masteryQualified: false,
+    evidenceSource: "single_draft_diagnostic",
+    epistemicReason:
+      input.draftVersion <= 1
+        ? "单稿初评仅用于定位改写方向，不计入正式掌握度；完成独立二稿迁移后将升级为量规复核证据。"
+        : "当前改写尚未达到跨草稿迁移确认标准，暂保留为练习诊断反馈。",
+  };
+}
+
+type DraftLineage = Pick<IeltsEssayDraft, "promptId" | "version" | "basedOnVersion">;
+
+export function getWritingTransferLineage(
+  baseline: DraftLineage | undefined,
+  revised: DraftLineage,
+): "advancing_revision" | "fresh_prompt" | null {
+  if (
+    !baseline ||
+    !Number.isSafeInteger(baseline.version) || baseline.version < 1 ||
+    !Number.isSafeInteger(revised.version) || revised.version < 1
+  ) {
+    return null;
+  }
+  const baselinePromptId = readIeltsPromptId(baseline.promptId);
+  const revisedPromptId = readIeltsPromptId(revised.promptId);
+  if (!baselinePromptId || !revisedPromptId) return null;
+  const parent = revised.basedOnVersion;
+  // The supplied baseline is the only draft available to verify an explicit parent.
+  if (parent !== undefined && (parent !== baseline.version || parent >= revised.version)) {
+    return null;
+  }
+  if (revisedPromptId !== baselinePromptId) return "fresh_prompt";
+  const followsBaseline = parent !== undefined || revised.version === baseline.version + 1;
+  return followsBaseline ? "advancing_revision" : null;
+}
+
+export type CreateRubricReceiptInput = {
+  readonly receiptId: string;
+  readonly taskMode: IeltsTaskMode;
+  readonly draft: IeltsEssayDraft;
+  readonly baselineDraft?: DraftLineage & Pick<IeltsEssayDraft, "paragraphs"> &
+    Partial<Pick<IeltsEssayDraft, "draftId" | "assisted">>;
+  readonly transferTargets?: readonly IeltsUpgradeTarget[];
+  readonly promptStatement?: string;
+  readonly assessments: readonly IeltsCriterionAssessment[];
+  readonly crossDraftTransferVerified: boolean;
+  readonly freshPromptTransfer?: boolean;
+  readonly minVerifiedWords?: number;
+  readonly disqualificationReason?: string;
+  readonly createdAt?: string;
+};
+
+/**
+ * Validates all 4 IELTS criteria (TR/CC/LR/GRA), strict 4.0-9.0 (0.5 step) bands,
+ * mandatory paragraph-grounded textual evidence spans, and honest epistemic status.
+ */
+export function createGroundedRubricReceipt(
+  input: CreateRubricReceiptInput,
+): IeltsRubricValidationResult {
+  const errors: IeltsRubricValidationError[] = [];
+  const paragraphs = input.draft.paragraphs;
+  const promptId = readIeltsPromptId(input.draft.promptId);
+  if (!promptId || (input.baselineDraft && !readIeltsPromptId(input.baselineDraft.promptId))) {
+    return { ok: false, errors: [{ code: "INVALID_RECEIPT", message: "Invalid IELTS Writing prompt ID." }] };
+  }
+  const isParagraph = (value: unknown) => typeof value === "string";
+  if (
+    !isDenseIeltsArray(paragraphs, isParagraph) ||
+    (input.baselineDraft && !isDenseIeltsArray(input.baselineDraft.paragraphs, isParagraph)) ||
+    !isDenseIeltsArray(input.assessments, (value) => typeof value === "object" && value !== null) ||
+    (input.transferTargets !== undefined && !isDenseIeltsArray(input.transferTargets, hasValidWritingTargetPatterns))
+  ) {
+    return {
+      ok: false,
+      errors: [{ code: "INVALID_LIST", message: "Draft paragraphs, assessments, and transfer targets must be dense lists." }],
+    };
+  }
+  const prose = maskIeltsParagraphs(paragraphs);
+  const wordCount = countProseWords(prose.join("\n"));
+
+  if (wordCount === 0) {
+    errors.push({
+      code: "EMPTY_DRAFT",
+      message: "Draft must contain at least one word.",
+    });
+  }
+
+  const byCriterion = new Map<IeltsCriterion, IeltsCriterionAssessment>();
+  for (const assessment of input.assessments) {
+    byCriterion.set(assessment.criterion, assessment);
+  }
+
+  const groundedCriteria = {} as Record<IeltsCriterion, IeltsCriterionAssessment>;
+  const bandMap = {} as Record<IeltsCriterion, IeltsBandScore>;
+
+  for (const criterion of IELTS_CRITERIA) {
+    const assessment = byCriterion.get(criterion);
+    if (!assessment) {
+      errors.push({
+        code: "MISSING_CRITERION",
+        criterion,
+        message: `Missing required IELTS criterion assessment: ${criterion}.`,
+      });
+      continue;
+    }
+
+    if (!isValidIeltsBand(assessment.band)) {
+      errors.push({
+        code: "INVALID_BAND",
+        criterion,
+        message: `Criterion ${criterion} band (${String(assessment.band)}) must be between 4.0 and 9.0 in 0.5 steps.`,
+      });
+    } else {
+      bandMap[criterion] = assessment.band;
+    }
+
+    if (
+      !isDenseIeltsArray(assessment.evidenceSpans, (value) => typeof value === "object" && value !== null) ||
+      assessment.evidenceSpans.length === 0
+    ) {
+      errors.push({
+        code: "MISSING_EVIDENCE_SPANS",
+        criterion,
+        message: `Criterion ${criterion} must include at least one span-grounded textual evidence quote.`,
+      });
+      continue;
+    }
+
+    const groundedSpans: IeltsSpanEvidence[] = [];
+    for (const span of assessment.evidenceSpans) {
+      if (span.criterion !== criterion) {
+        errors.push({
+          code: "CRITERION_MISMATCH",
+          criterion,
+          spanId: span.id,
+          message: `Span ${span.id} declares criterion ${span.criterion} inside ${criterion} assessment.`,
+        });
+        continue;
+      }
+
+      if (
+        !isNonBlankIeltsString(span.excerpt) ||
+        !isNonBlankIeltsString(span.diagnosis) ||
+        !isNonBlankIeltsString(span.upgradeRewrite)
+      ) {
+        errors.push({
+          code: "EMPTY_SPAN_FIELD",
+          criterion,
+          spanId: span.id,
+          message: `Span ${span.id} must provide non-empty excerpt, diagnosis, and upgradeRewrite.`,
+        });
+        continue;
+      }
+
+      if (
+        !Number.isInteger(span.paragraphIndex) ||
+        span.paragraphIndex < 0 ||
+        span.paragraphIndex >= paragraphs.length
+      ) {
+        errors.push({
+          code: "PARAGRAPH_OUT_OF_RANGE",
+          criterion,
+          spanId: span.id,
+          message: `Span ${span.id} references paragraphIndex ${span.paragraphIndex}, outside 0..${paragraphs.length - 1}.`,
+        });
+        continue;
+      }
+
+      const paragraphText = paragraphs[span.paragraphIndex] ?? "";
+      const { startOffset, endOffset, excerpt } = span;
+      let located: ReturnType<typeof locateGroundedExcerpt> = null;
+      if (startOffset === undefined && endOffset === undefined) {
+        const proseLocated = locateGroundedExcerpt(prose[span.paragraphIndex]!, excerpt);
+        if (proseLocated) {
+          const boundaries = graphemeBoundaries(paragraphText);
+          if (
+            boundaries.floor(proseLocated.startOffset) === proseLocated.startOffset &&
+            boundaries.floor(proseLocated.endOffset) === proseLocated.endOffset
+          ) {
+            located = {
+              ...proseLocated,
+              matchedText: paragraphText.slice(proseLocated.startOffset, proseLocated.endOffset),
+            };
+          }
+        }
+      } else if (
+        startOffset !== undefined && Number.isInteger(startOffset) &&
+        endOffset !== undefined && Number.isInteger(endOffset) &&
+        startOffset >= 0 && endOffset > startOffset && endOffset <= paragraphText.length &&
+        paragraphText.slice(startOffset, endOffset) === excerpt
+      ) {
+        const boundaries = graphemeBoundaries(paragraphText);
+        if (boundaries.floor(startOffset) === startOffset && boundaries.floor(endOffset) === endOffset) {
+          located = { startOffset, endOffset, matchedText: excerpt };
+        }
+      }
+      if (!located || !prose[span.paragraphIndex]!.slice(located.startOffset, located.endOffset).trim()) {
+        errors.push({
+          code: "EXCERPT_NOT_GROUNDED",
+          criterion,
+          spanId: span.id,
+          message: `Span ${span.id} excerpt "${span.excerpt}" does not exist in paragraph ${span.paragraphIndex}.`,
+        });
+        continue;
+      }
+
+      groundedSpans.push({
+        ...span,
+        excerpt: located.matchedText,
+        startOffset: located.startOffset,
+        endOffset: located.endOffset,
+      });
+    }
+
+    if (groundedSpans.length > 0 && isValidIeltsBand(assessment.band)) {
+      groundedCriteria[criterion] = {
+        ...assessment,
+        evidenceSpans: groundedSpans,
+      };
+    }
+  }
+
+  if (errors.length > 0) {
+    return { ok: false, errors };
+  }
+
+  const memorizedTemplateFlags = detectMemorizedTemplates(paragraphs);
+  const baseline = input.baselineDraft;
+  const promptStatement = input.promptStatement?.trim();
+  const transferSource =
+    baseline?.draftId !== undefined && baseline.assisted !== undefined && input.transferTargets &&
+    countDraftWords(baseline.paragraphs) > 0
+      ? getWritingTransferSource(
+          { ...baseline, draftId: baseline.draftId, assisted: baseline.assisted },
+          input.transferTargets,
+          promptStatement,
+        )
+      : undefined;
+  const lineage = getWritingTransferLineage(baseline, input.draft);
+  const hasTransferSource = transferSource !== undefined && transferSource.targets.length > 0;
+  const epistemic = resolveIeltsEpistemicStatus({
+    draftVersion: input.draft.version,
+    assisted: input.draft.assisted,
+    crossDraftTransferVerified: lineage === "advancing_revision" && hasTransferSource && input.crossDraftTransferVerified,
+    freshPromptTransfer: lineage === "fresh_prompt" && hasTransferSource && input.freshPromptTransfer,
+    memorizedTemplateHits: memorizedTemplateFlags,
+    wordCount,
+    minVerifiedWords: input.minVerifiedWords,
+    disqualificationReason: input.disqualificationReason,
+  });
+  const receipt: IeltsRubricReceipt = {
+    receiptId: input.receiptId,
+    cartridgeId: IELTS_CARTRIDGE_ID,
+    taskMode: input.taskMode,
+    promptId,
+    draftId: input.draft.draftId,
+    draftVersion: input.draft.version,
+    sourceDraft: getWritingDraftSource(input.draft),
+    ...(promptStatement ? { promptStatement } : {}),
+    transferSource,
+    overallBand: computeOverallIeltsBand(bandMap),
+    criteria: groundedCriteria,
+    epistemicStatus: epistemic.epistemicStatus,
+    countsTowardMastery: epistemic.countsTowardMastery,
+    masteryQualified: epistemic.masteryQualified,
+    epistemicReason: epistemic.epistemicReason,
+    evidenceSource: epistemic.evidenceSource,
+    memorizedTemplateFlags,
+    wordCount,
+    createdAt: input.createdAt ?? input.draft.createdAt,
+  };
+
+  return { ok: true, receipt };
+}

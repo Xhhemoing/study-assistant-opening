@@ -3,6 +3,7 @@ import {
   ledgerActionForProviderError,
   runBudgetedCall,
   settleCentsForActual,
+  isPostProviderFailure,
 } from "./budgeted-call";
 import { createOpeningProvider, OpeningProviderError } from "./provider";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
@@ -80,10 +81,71 @@ describe("ledgerActionForProviderError", () => {
 });
 
 describe("durable provider receipts", () => {
+  const streamInput: ProviderInput = {
+    instruction: "teach", text: "question", mode: "explain", chunks: [], maxOutputTokens: 100,
+    mediaCapability: "text_only", imageParts: [], outputFormat: "markdown",
+  };
+  const streamFrame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+  const streamChoice = (delta: object, finish_reason: string | null = null) => streamFrame({
+    choices: [{ index: 0, delta, finish_reason }],
+  });
+  const promptUsage = streamFrame({ choices: [], usage: { prompt_tokens: 37, prompt_cache_hit_tokens: 10 } });
+  const completionUsage = streamFrame({ choices: [], usage: { prompt_tokens: 0, prompt_cache_hit_tokens: 0, completion_tokens: 11 } });
+  const done = "data: [DONE]\n\n";
+
+  it("settles prompt and cached usage reported before generated text with trailer completion usage", async () => {
+    const b = fakeBudget();
+    const body = promptUsage + streamChoice({ content: "ans" }) + streamChoice({ content: "wer" })
+      + streamChoice({}, "stop") + completionUsage + done;
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const actualCents = vi.fn((usage: ProviderOutput) => usage.inputTokens! + usage.outputTokens! - usage.cachedInputTokens!);
+    await expect(runBudgetedCall({ ...options, input: streamInput, provider, budget: b.api, actualCents }))
+      .resolves.toMatchObject({ text: "answer", inputTokens: 37, outputTokens: 11, cachedInputTokens: 10 });
+    expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      inputTokens: 37, outputTokens: 11, cachedInputTokens: 10,
+    }));
+    expect(b.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 38 }]);
+    expect(b.repo.unknowns).toEqual([]);
+  });
+
+  it.each([
+    { label: "stop", tail: streamChoice({}, "stop") + completionUsage + done, complete: true },
+    { label: "content_filter", tail: streamChoice({}, "content_filter") + completionUsage + done, complete: true },
+    { label: "usage and DONE only", tail: completionUsage + done, complete: true },
+    { label: "usage then EOF", tail: completionUsage, complete: false },
+    { label: "stop and usage then EOF", tail: streamChoice({}, "stop") + completionUsage, complete: false },
+    { label: "DONE without output usage", tail: done, complete: false },
+  ])("accounts for a streamed refusal with $label", async ({ tail, complete }) => {
+    const b = fakeBudget(), delivered = vi.fn(), persistResult = vi.fn();
+    const body = promptUsage + streamChoice({ refusal: "refused", content: "hidden" })
+      + streamChoice({ content: "also hidden" })
+      + tail;
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const actualCents = vi.fn((usage: ProviderOutput) => usage.inputTokens! + usage.outputTokens! - usage.cachedInputTokens!);
+    await expect(runBudgetedCall({ ...options, input: streamInput, provider, budget: b.api, actualCents,
+      onTextDelta: delivered, persistResult })).rejects.toMatchObject({ code: "PROVIDER_REFUSAL", requestSent: true });
+    expect(delivered).not.toHaveBeenCalled();
+    expect(persistResult).not.toHaveBeenCalled();
+    expect(b.repo.released).toEqual([]);
+    if (complete) {
+      expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        inputTokens: 37, outputTokens: 11, cachedInputTokens: 10,
+      }));
+      expect(b.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 38 }]);
+      expect(b.repo.unknowns).toEqual([]);
+    } else {
+      expect(actualCents).not.toHaveBeenCalled();
+      expect(b.repo.settled).toEqual([]);
+      expect(b.repo.unknowns).toEqual(["res-1"]);
+    }
+  });
+
   it.each(["interrupted", "aborted", "delivery failed"])("keeps a partial stream %s unknown and refuses the same ledger key on replay", async failure => {
     const b = fakeBudget(), persistResult = vi.fn();
     const caller = new AbortController(), deltas: string[] = [];
-    const stream = 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n';
+    const stream = 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}],"usage":{"prompt_tokens":37,"completion_tokens":1}}\n\n';
     const fetchImpl = vi.fn().mockResolvedValue(new Response(stream));
     const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl });
     const input: ProviderInput = { instruction: "teach", text: "question", mode: "explain", chunks: [], maxOutputTokens: 100,
@@ -119,14 +181,99 @@ describe("durable provider receipts", () => {
     expect(order).toEqual(["persist", "settle"]);
   });
 
-  it("keeps a failed persistence unknown and never releases or settles it", async () => {
+  it("settles the actual receipt even when persistence fails, then rethrows the same error", async () => {
     const b = fakeBudget();
-    await expect(runBudgetedCall({ ...options, input: options.input as never, provider: { complete: async () => output }, budget: b.api,
-      persistResult: async () => { throw new Error("storage failed"); },
-    })).rejects.toThrow("storage failed");
-    expect(b.repo.unknowns).toEqual(["res-1"]);
+    const failure = new Error("storage failed");
+    const settle = vi.fn(b.api.settle);
+    await expect(runBudgetedCall({ ...options, input: options.input as never, provider: { complete: async () => output },
+      budget: { ...b.api, settle }, resultRef: "missing-result",
+      persistResult: async () => { throw failure; },
+    })).rejects.toBe(failure);
+    expect(b.repo.unknowns).toEqual([]);
     expect(b.repo.released).toEqual([]);
-    expect(b.repo.settled).toEqual([]);
+    expect(settle).toHaveBeenCalledExactlyOnceWith("res-1", 120);
+  });
+
+  it.each([
+    { termination: "EOF", code: "PROVIDER_RESPONSE", usageChunk: '{"prompt_tokens":37,"completion_tokens":11,"prompt_cache_hit_tokens":13}' },
+    { termination: "socket error", code: "PROVIDER_NETWORK", usageChunk: '{"prompt_tokens":37,"completion_tokens":11,"prompt_cache_hit_tokens":13}' },
+    { termination: "incomplete usage", code: "PROVIDER_RESPONSE", usageChunk: '{"prompt_tokens":37}' },
+  ])("retains only authoritative stream usage before $termination", async ({ termination, code, usageChunk }) => {
+    const b = fakeBudget(), persistResult = vi.fn();
+    const frames = 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"stop"}]}\n\n'
+      + `data: {"choices":[],"usage":${usageChunk}}\n\n`;
+    let sentFrames = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sentFrames) {
+          sentFrames = true;
+          controller.enqueue(new TextEncoder().encode(frames));
+        } else if (termination === "socket error") {
+          controller.error(new Error("socket disconnected"));
+        } else {
+          controller.close();
+        }
+      },
+    });
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const input: ProviderInput = { instruction: "teach", text: "question", mode: "explain", chunks: [], maxOutputTokens: 100,
+      mediaCapability: "text_only", imageParts: [], outputFormat: "markdown" };
+    const actualCents = vi.fn((receipt: ProviderOutput) => receipt.inputTokens! + receipt.outputTokens! - receipt.cachedInputTokens!);
+    await expect(runBudgetedCall({ ...options, input, provider, budget: b.api, actualCents, persistResult }))
+      .rejects.toMatchObject({ code, requestSent: true });
+    expect(persistResult).not.toHaveBeenCalled();
+    expect(b.repo.released).toEqual([]);
+    if (termination === "incomplete usage") {
+      expect(actualCents).not.toHaveBeenCalled();
+      expect(b.repo.settled).toEqual([]);
+      expect(b.repo.unknowns).toEqual(["res-1"]);
+    } else {
+      expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        inputTokens: 37, outputTokens: 11, cachedInputTokens: 13,
+      }));
+      expect(b.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 35 }]);
+      expect(b.repo.unknowns).toEqual([]);
+    }
+  });
+
+  it.each([
+    { failure: "truncated stream", format: "markdown", code: "PROVIDER_RESPONSE", billed: true,
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":11}}\n\ndata: [DONE]\n\n' },
+    { failure: "interim stream usage", format: "markdown", code: "PROVIDER_RESPONSE", billed: false,
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":3}}\n\ndata: {"choices":[{"index":0,"delta":{"content":" more"}}]}\n\n' },
+    { failure: "interim stream usage with zero trailer", format: "markdown", code: "PROVIDER_RESPONSE", billed: false,
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":3}}\n\ndata: {"choices":[{"index":0,"delta":{"content":" more"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}\n\ndata: [DONE]\n\n' },
+    { failure: "HTTP refusal", format: "json", code: "PROVIDER_REFUSAL", billed: true,
+      body: '{"choices":[{"message":{"refusal":"no"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
+    { failure: "malformed HTTP task JSON", format: "json", code: "PROVIDER_RESPONSE", billed: true,
+      body: '{"choices":[{"message":{"content":"{broken"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
+    { failure: "HTTP length finish", format: "json", code: "PROVIDER_RESPONSE", billed: true,
+      body: '{"choices":[{"finish_reason":"length","message":{"content":"{}"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
+  ] as const)("accounts for $failure without persisting an answer", async ({ format, code, billed, body }) => {
+    const b = fakeBudget(), persistResult = vi.fn();
+    const settle = vi.fn(b.api.settle);
+    const actualCents = vi.fn((receipt: ProviderOutput) => receipt.inputTokens! + receipt.outputTokens!);
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn(async () => new Response(body)),
+    });
+    const failed = runBudgetedCall({ ...options, provider, budget: { ...b.api, settle }, actualCents, persistResult,
+      resultRef: "must-not-publish", input: { instruction: options.input.instruction, text: options.input.text,
+        maxOutputTokens: 64, chunks: [], mode: "explain", mediaCapability: "text_only", imageParts: [], outputFormat: format },
+    });
+    await expect(failed).rejects.toMatchObject({ code });
+    expect(isPostProviderFailure(await failed.catch(error => error))).toBe(billed);
+    expect(persistResult).not.toHaveBeenCalled();
+    expect(b.repo.released).toEqual([]);
+    if (billed) {
+      expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ inputTokens: 37, outputTokens: 11 }));
+      expect(settle).toHaveBeenCalledExactlyOnceWith("res-1", 48);
+      expect(b.repo.unknowns).toEqual([]);
+    } else {
+      expect(actualCents).not.toHaveBeenCalled();
+      expect(settle).not.toHaveBeenCalled();
+      expect(b.repo.unknowns).toEqual(["res-1"]);
+    }
   });
 
   it("persists usable output without inventing a price when usage is missing", async () => {
@@ -135,6 +282,21 @@ describe("durable provider receipts", () => {
       provider: { complete: async () => ({ ...output, inputTokens: null }) }, budget: b.api,
       persistResult: async (_, receipt) => { expect(receipt.settledCents).toBeNull(); },
     });
+    expect(b.repo.unknowns).toEqual(["res-1"]);
+    expect(b.repo.settled).toEqual([]);
+  });
+
+  it("leaves completed stream usage unresolved when more content follows an interim usage chunk", async () => {
+    const b = fakeBudget();
+    const body = streamFrame({ choices: [{ index: 0, delta: { content: "ans" } }] })
+      + streamFrame({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 2 } })
+      + streamFrame({ choices: [{ index: 0, delta: { content: "wer" } }] })
+      + streamChoice({}, "stop")
+      + done;
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const result = await runBudgetedCall({ ...options, input: streamInput, provider, budget: b.api });
+    expect(result).toMatchObject({ text: "answer", inputTokens: null, outputTokens: null });
     expect(b.repo.unknowns).toEqual(["res-1"]);
     expect(b.repo.settled).toEqual([]);
   });
@@ -195,6 +357,64 @@ describe("runBudgetedCall", () => {
       settledCents: 80,
     }]);
     expect(repo.unknowns).toHaveLength(0);
+  });
+
+  it("authorizeAndStartSend releases not_sent before startSend, runs provider synchronously under lock, and marks unknown if commit fails post-start", async () => {
+    // 1. Rejection before startSend releases not_sent and never invokes provider.complete.
+    const preFail = fakeBudget();
+    const neverCalled = vi.fn(async () => output);
+    await expect(runBudgetedCall({
+      ...options,
+      budget: preFail.api,
+      provider: { complete: neverCalled },
+      authorizeAndStartSend: async () => {
+        throw Object.assign(new Error("revoked before send"), { code: "CONFLICT" });
+      },
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(neverCalled).not.toHaveBeenCalled();
+    expect(preFail.repo.released).toEqual(["req-1"]);
+    expect(preFail.repo.unknowns).toEqual([]);
+
+    // 2. Synchronous provider initiation under lock settles normally after lock release.
+    const ok = fakeBudget();
+    const events: string[] = [];
+    let finishNetwork!: (value: typeof output) => void;
+    const networkPromise = new Promise<typeof output>(resolve => { finishNetwork = resolve; });
+    const call = runBudgetedCall({
+      ...options,
+      budget: ok.api,
+      provider: {
+        complete: () => {
+          events.push("provider-started-sync");
+          return networkPromise;
+        },
+      },
+      authorizeAndStartSend: async startSend => {
+        events.push("lock-held");
+        const inFlight = startSend();
+        events.push("lock-released");
+        return await inFlight;
+      },
+    });
+    await vi.waitFor(() => expect(events).toEqual(["lock-held", "provider-started-sync", "lock-released"]));
+    finishNetwork(output);
+    expect((await call).text).toBe("ok");
+    expect(ok.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 120 }]);
+
+    // 3. Rejection AFTER startSend() was invoked (e.g. DB commit failure) marks unknown, never releases not_sent.
+    const postStartFail = fakeBudget();
+    await expect(runBudgetedCall({
+      ...options,
+      budget: postStartFail.api,
+      provider: { complete: () => new Promise(() => undefined) },
+      authorizeAndStartSend: async startSend => {
+        const inFlight = startSend();
+        void inFlight.catch(() => undefined);
+        throw new Error("db commit dropped after fetch initiated");
+      },
+    })).rejects.toThrow("db commit dropped after fetch initiated");
+    expect(postStartFail.repo.released).toEqual([]);
+    expect(postStartFail.repo.unknowns).toEqual(["res-1"]);
   });
 
   it("releases the reservation by requestId on a definitive failure", async () => {
@@ -368,6 +588,7 @@ describe("parent interaction budget boundary", () => {
       parentBudget: { id: "study-turn:1" },
     })).rejects.toMatchObject({ code: "BUDGET_INVALID_ACTUAL" });
     expect(repo.unknowns).toEqual(["res-1"]);
+    expect(repo.released).toEqual([]);
     expect(repo.settled).toHaveLength(0);
   });
 });
@@ -376,18 +597,28 @@ it("sends configured media under its byte bound and identifies usage pricing as 
   const { api } = fakeBudget();
   let sent = 0;
   let settlementMeta: unknown;
+  let persistedReceipt: unknown;
   const snapshot = { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 1, outputCentsPerMillion: 1,
     mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 10, mediaInputCentsPerMillion: 2 };
   await runBudgetedCall({ ...options, parentBudget: { id: "media-parent" }, modelSnapshot: snapshot,
     budget: { ...api, settle: async (_id: string, _cost: number, meta?: unknown) => { settlementMeta = meta; } },
     provider: { complete: async () => { sent++; return output; } },
+    persistResult: async (_output, receipt) => { persistedReceipt = receipt; },
     input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
   });
   expect(sent).toBe(1);
+  expect(persistedReceipt).toEqual({ reservationId: "res-1", settledCents: 120, costBasis: "media_usage_upper_bound" });
   expect(settlementMeta).toEqual({ costBasis: "media_usage_upper_bound" });
+  await runBudgetedCall({ ...options, requestId: "req-2", parentBudget: { id: "media-parent" }, modelSnapshot: snapshot,
+    budget: api,
+    provider: { complete: async () => { sent++; return { ...output, inputTokens: null }; } },
+    persistResult: async (_output, receipt) => { persistedReceipt = receipt; },
+    input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
+  });
+  expect(persistedReceipt).toEqual({ reservationId: "res-2", settledCents: null });
   await expect(runBudgetedCall({ ...options, parentBudget: { id: "media-parent" }, modelSnapshot: { ...snapshot, mediaMaxInputBytes: 1 },
     budget: api, provider: { complete: async () => { sent++; return output; } },
     input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
   })).rejects.toMatchObject({ code: "BUDGET_MEDIA_INPUT_TOO_LARGE" });
-  expect(sent).toBe(1);
+  expect(sent).toBe(2);
 });

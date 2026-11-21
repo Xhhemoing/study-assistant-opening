@@ -9,6 +9,7 @@ export type {
 export { NativeBackupError } from "./errors";
 export type { NativeBackupErrorCode } from "./errors";
 export { buildNativeBackup, emptyBackupCounts } from "./package";
+export { retainBackupEventChains } from "./events";
 export { planNativeRestore } from "./restore";
 export type { NativeRestorePlan, RestoreStep } from "./restore";
 export { sha256Hex, packFiles, assertFileHashes } from "./files";

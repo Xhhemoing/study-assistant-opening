@@ -20,10 +20,11 @@ import type { AiGradingWorkSource } from "@aistudy/contracts";
 import { enqueueOpeningAiGradingInTx } from "./opening-ai-grading-jobs";
 import { admitOpeningAiGradingWorkSource, readOpeningAiGradingContext } from "./opening-ai-grading-context";
 import { checkOpeningAutoGradeBudget } from "./opening-auto-grade-policy";
+import { fenceOpeningTutorAttemptHead, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 export async function insertOpeningLearningObservation(sql: Sql, scope: Scope, input: ObservationInput,
   opts: { preAnswerConfidence?: import("@aistudy/contracts").LearningAttemptSubmitInput["preAnswerConfidence"]; autoGrade?: OpeningAutoGradePolicy; workSource?: AiGradingWorkSource; verdictSource?: LearningObservation["verdictSource"]; referenceSourceId?: string | null; sourceTurnIds?: string[]; revisesObservationId?: string | null; examSprintPublication?: true; requirementKey?: string; capturedSourceVersions?: Record<string, number>; submittedAssistance?: LearningObservation["assistance"] } = {}) {
-  return sql.begin(tx => insertOpeningLearningObservationInTx(tx, scope, input, opts));
+  return withOpeningTutorStreamFenceCommit(sql, tx => insertOpeningLearningObservationInTx(tx, scope, input, opts));
 }
 
 /** Caller owns the transaction, so review scheduling and learning evidence commit together. */
@@ -293,7 +294,13 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
         )`;
     }
   }
-  return qualify(mapLearningObservation(rows[0]));
+  const observation = await qualify(mapLearningObservation(rows[0]));
+  if (attempt) {
+    await fenceOpeningTutorAttemptHead(tx, String(attempt.workspace_id), String(attempt.id), null, id, {
+      headRevision: workspaceRevision,
+    });
+  }
+  return observation;
 }
 
 

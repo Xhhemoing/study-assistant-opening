@@ -24,7 +24,7 @@ export function CourseSprintMode({ course }: { course: CourseSummary }) {
     <div className="min-h-0 flex-1 overflow-y-auto">
       {course.archivedAt
         ? <EmptyState title="课程已归档" description="恢复课程后再进入冲刺，原有记录会继续保留。" action={<Link className={ui.primary} href={href}>查看课程</Link>} />
-        : <CourseSprintPack key={course.id} courseId={course.id}>
+        : <CourseSprintPack key={`${course.workspaceId}:${course.id}`} workspaceId={course.workspaceId} courseId={course.id}>
           <div id="course-sprint-plan" tabIndex={-1}>
             <SprintBoard courseId={course.id} courseTitle={course.title} />
           </div>

@@ -2,7 +2,7 @@ import { format } from "node:util";
 import type { EphemeralProvenanceRepository } from "@aistudy/database";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderInput, ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
-import { OpeningProviderError, selectContext } from "@aistudy/ai";
+import { OpeningProviderError, selectContext, type BudgetedRepository } from "@aistudy/ai";
 import { createEphemeralTutorService, type EphemeralTutorDeps } from "./ephemeral-service";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
@@ -47,7 +47,7 @@ function deps(overrides?: {
 }) {
   const writes: string[] = [];
   const budget = {
-    reserve: vi.fn(async () => {
+    reserve: vi.fn<BudgetedRepository["reserve"]>(async () => {
       writes.push("budget:reserve");
       return { id: "res-1" };
     }),
@@ -313,7 +313,7 @@ describe("ephemeral content-free provenance", () => {
     const history = [{ role: "assistant" as const, text: "prior answer", provenanceId: sourceId }];
     const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history, historyPrivacyEpoch: 0 });
     expect(provenance.resolveHistory).toHaveBeenCalledWith(scope, history, 0);
-    expect(provenance.record).toHaveBeenCalledWith(scope, { requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: historyRefs });
+    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: historyRefs });
     expect(reply.provenanceId).toBe(chunkId);
     expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
   });
@@ -332,7 +332,7 @@ describe("ephemeral content-free provenance", () => {
     expect(sent.chunks).toEqual([chunk]);
     expect(JSON.stringify(sent)).not.toContain("UNVERIFIED-OLD-HISTORY");
     expect(provenance.record).toHaveBeenCalledWith(scope, {
-      requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 1 }],
+      reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 1 }],
     });
     expect(reply).toMatchObject({ historyDiscarded: true, provenanceId: chunkId });
   });
@@ -353,7 +353,7 @@ describe("ephemeral content-free provenance", () => {
     const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history: [] });
     expect(provenance.resolveHistory).not.toHaveBeenCalled();
     expect(f.complete.mock.calls[0]![0]!.history).toEqual([]);
-    expect(provenance.record).toHaveBeenCalledWith(scope, { requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [] });
+    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [] });
     expect(reply.historyDiscarded).toBe(false);
   });
 
@@ -366,7 +366,7 @@ describe("ephemeral content-free provenance", () => {
     });
     expect(provenance.resolveHistory).not.toHaveBeenCalled();
     expect(f.complete.mock.calls[0]![0]!.history).toEqual([]);
-    expect(provenance.record).toHaveBeenCalledWith(scope, { requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [] });
+    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [] });
     expect(reply.historyDiscarded).toBe(true);
   });
   it("Package C: vague query still sends non-empty context when selected chunks exist", async () => {
@@ -472,7 +472,20 @@ it("uses the same operation key for an ephemeral retry and refuses to resend a c
   f.budget.reserve.mockResolvedValueOnce(completed);
   await expect(f.service.replyEphemeral(scope, input)).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED", status: 409 });
   expect(f.complete).toHaveBeenCalledTimes(1);
-  expect(f.budget.reserve.mock.calls.map(call => call[0].requestId)).toEqual(["eph:stable-ephemeral-key", "eph:stable-ephemeral-key"]);
+  const [first, replay] = f.budget.reserve.mock.calls.map(([request]) => request);
+  expect(first).toMatchObject({ requestId: "eph:stable-ephemeral-key", requestFamily: "eph:stable-ephemeral-key" });
+  expect(replay).toMatchObject({ requestId: first!.requestId, requestFamily: first!.requestId });
+});
+
+it("records provenance for the exact claimed ledger row", async () => {
+  const record = vi.fn(async () => "res-1");
+  const f = deps({ provenance: { record, resolveHistory: async () => [] } });
+  f.budget.reserve.mockResolvedValueOnce({ id: "res-1", requestId: "eph:claimed:fallback", state: "reserved" });
+  await expect(f.service.replyEphemeral(scope, { text: "Explain", sourceIds: [], history: [], clientKey: "different-key" }))
+    .resolves.toMatchObject({ provenanceId: "res-1" });
+  expect(record).toHaveBeenCalledExactlyOnceWith(scope, {
+    reservationId: "res-1", requestId: "eph:claimed:fallback", privacyEpoch: 0, contextSourceRefs: [],
+  });
 });
 
 
@@ -513,7 +526,7 @@ it("keeps no-material temporary requests out of course retrieval and provider ch
   const f = deps({ listReadySourceIdsForCourse: listReady, complete: async () => ({ ...output, citedChunkIds: [], candidates: [] }) });
   await f.service.replyEphemeral(scope, { courseId: workspaceId, text: "general", sourceIds: [], sourceSelection: "none", mode: "listen", history: [] });
   expect(listReady).not.toHaveBeenCalled();
-  expect(f.complete).toHaveBeenCalledWith(expect.objectContaining({ chunks: [] }), undefined);
+  expect(f.complete).toHaveBeenCalledWith(expect.objectContaining({ chunks: [] }), undefined, expect.any(Function));
 });
 
 it("refuses an empty explicit selection before dispatching a temporary model request", async () => {

@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository } from "@aistudy/database";
+import {
+  createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository,
+  runWithNestedTutorStreamFences, withOpeningTutorStreamFenceCommit,
+} from "@aistudy/database";
+import { knowledgeNodeDefinition } from "@aistudy/domain";
+import type { KnowledgeNode, SourceChunk } from "@aistudy/contracts";
 import { readOpeningSourceContent } from "../../packages/database/src/repositories/opening-source-content";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
 import { openRaceSession } from "./opening-race-helpers";
@@ -16,6 +21,24 @@ async function seed(scope = f.scope) {
   return id;
 }
 const chunk = (text: string, page = 1) => ({ text, page, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null });
+
+it('publishes a retryable partial PDF warning with its ready chunks and clears it on full replacement', async () => {
+  const sourceId = await seed();
+  const repository = createOpeningSourceChunksRepository(f.sql);
+  const warning = { code: 'PARSE_PARTIAL', message: '第 2 页未能识别，可以重新解析', retryable: true };
+  const chunks = [chunk('Readable first page')];
+
+  await repository.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks, warning });
+
+  expect(await f.sql`SELECT s.parse_state, s.error, c.text FROM opening_sources s
+    JOIN opening_source_chunks c ON c.source_id=s.id AND c.source_version=s.version WHERE s.id=${sourceId}`)
+    .toEqual([{ parse_state: 'ready', error: warning, text: 'Readable first page' }]);
+
+  await repository.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks: [...chunks, chunk('Recovered page', 2)] });
+
+  expect(await f.sql`SELECT parse_state, error, error IS NULL AS cleared FROM opening_sources WHERE id=${sourceId}`)
+    .toEqual([{ parse_state: 'ready', error: null, cleared: true }]);
+});
 function barrier() {
   let release!: () => void;
   const ready = new Promise<void>(resolve => { release = resolve; });
@@ -56,6 +79,26 @@ async function semanticState(sourceId: string) {
   };
 }
 
+it.each(["unreadable stream", "invalid final chunk"] as const)("rolls back PDF publication for an %s", async scenario => {
+  const sourceId = await seed();
+  const repository = createOpeningSourceChunksRepository(f.sql);
+  const warning = { code: "PARSE_PARTIAL", message: "Retry is available", retryable: true };
+  await repository.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks: [chunk("Published page")], warning });
+  const before = await semanticState(sourceId);
+  async function* pdfChunks() {
+    if (scenario === "unreadable stream") {
+      yield chunk("   ");
+      return;
+    }
+    for (let page = 1; page <= 64; page++) yield chunk(`Replacement ${page}`, page);
+    yield chunk("x".repeat(100_001), 65);
+  }
+  await expect(repository.replacePdfChunks(f.scope, {
+    sourceId, sourceVersion: 1, chunks: pdfChunks(), preservePages: [],
+  })).rejects.toThrow(scenario === "unreadable stream" ? "no readable text" : "opening_source_chunks_text_check");
+  expect(await semanticState(sourceId)).toEqual(before);
+});
+
 // A valid legacy graph makes a premature definition write observable too.
 async function legacyGraph(sourceId: string, scope = f.scope) {
   const courseId = randomUUID(), nodeId = randomUUID(), chunkId = randomUUID();
@@ -74,6 +117,65 @@ async function legacyGraph(sourceId: string, scope = f.scope) {
   return { courseId, nodeId, chunkId };
 }
 
+it("preserves legacy definitions over 128 replaced PDF pages without materializing whole-graph text in the client", async () => {
+  const sourceId = await seed(), { courseId, chunkId } = await legacyGraph(sourceId);
+  const pages = Array.from({ length: 128 }, (_, index) => ({ ...chunk(`${index}\r\ne\u0301 ${"x".repeat(89_990)}`, index + 1),
+    id: index === 0 ? chunkId : randomUUID(), sourceId, sourceVersion: 1 }));
+  await f.sql`UPDATE opening_source_chunks SET text=${pages[0]!.text} WHERE id=${chunkId}`;
+  const rows = pages.slice(1).map(page => ({ id: page.id, source_id: sourceId, source_version: 1, page: page.page, text: page.text }));
+  await f.sql`INSERT INTO opening_source_chunks ${f.sql(rows)}`;
+  const node = (evidence: SourceChunk[]): KnowledgeNode => ({ id: randomUUID(), courseId, label: "Définition",
+    kind: "concept", evidenceChunkIds: evidence.map(page => page.id), status: "supported" });
+  const allPages = node(pages);
+  const nodes = [allPages, ...pages.map(page => node([page]))];
+  const alreadyDefined = nodes[1]!;
+  await f.sql`UPDATE opening_course_knowledge SET snapshot=${f.sql.json({ courseId, version: 1, nodes, edges: [] })},
+    node_definitions=${f.sql.json({ [alreadyDefined.id]: "existing definition" })} WHERE course_id=${courseId}`;
+
+  const textBatches: { rows: number; bytes: number }[] = [];
+  let snapshotsRead = 0;
+  const monitored = new Proxy(f.sql, { get(target, property) {
+    if (property !== "begin") return Reflect.get(target, property);
+    return (callback: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => callback(new Proxy(tx, {
+      apply(query, thisArg, args) {
+        const pending = Reflect.apply(query, thisArg, args);
+        if (!Array.isArray(args[0]?.raw) || !/^\s*SELECT\b/i.test(args[0][0])) return pending;
+        return pending.then((result: Record<string, unknown>[]) => {
+          snapshotsRead += result.filter(row => Object.hasOwn(row, "snapshot")).length;
+          const texts = result.flatMap(row => typeof row.text === "string" ? [row.text] : []);
+          if (texts.length) textBatches.push({ rows: texts.length, bytes: texts.reduce((sum, text) => sum + Buffer.byteLength(text), 0) });
+          return result;
+        });
+      },
+    })));
+  } });
+  const repository = createOpeningSourceChunksRepository(monitored);
+  async function* replacements() {
+    for (const page of pages) yield chunk(`Replaced page ${page.page}`, page.page);
+  }
+  await repository.replacePdfChunks(f.scope, { sourceId, sourceVersion: 1, chunks: replacements(), preservePages: [] });
+
+  expect(textBatches.every(batch => batch.rows <= 16 && batch.bytes <= 256 * 1024)).toBe(true);
+  const [preserved] = await f.sql`SELECT node_definitions FROM opening_course_knowledge WHERE course_id=${courseId}`;
+  const definitions = preserved!.node_definitions as Record<string, string>;
+  expect(Object.keys(definitions)).toHaveLength(nodes.length);
+  expect(definitions[alreadyDefined.id]).toBe("existing definition");
+  for (const candidate of nodes.filter(candidate => candidate !== alreadyDefined)) {
+    expect(definitions[candidate.id] === knowledgeNodeDefinition(candidate, pages), `definition of ${candidate.id}`).toBe(true);
+  }
+  const published = await repository.listChunks(f.scope, sourceId);
+  expect(published.map(page => page.text)).toEqual(pages.map(page => `Replaced page ${page.page}`));
+
+  // Even when the current citations match the source, a fully defined graph needs no backfill read.
+  await f.sql`UPDATE opening_course_knowledge SET snapshot=${f.sql.json({ courseId, version: 1, edges: [],
+    nodes: [{ ...allPages, evidenceChunkIds: published.map(page => page.id) }] })} WHERE course_id=${courseId}`;
+  textBatches.length = 0;
+  snapshotsRead = 0;
+  await repository.replacePdfChunks(f.scope, { sourceId, sourceVersion: 1, chunks: replacements(), preservePages: [] });
+  expect(snapshotsRead).toBe(0);
+  expect(textBatches).toEqual([]);
+}, 30_000);
+
 async function historyRace(privacy: boolean) {
   const sourceId = await seed(), graph = await legacyGraph(sourceId), scope = await parseJob(sourceId);
   // Commit the counter before holding it, so the parser waits on SELECT FOR UPDATE,
@@ -86,7 +188,7 @@ async function historyRace(privacy: boolean) {
   let holding: Promise<unknown> | undefined, parsing: Promise<unknown> | undefined;
   try {
     await Promise.all([holder.ready, parser.ready]);
-    holding = boundedTransactions(holder.sql).begin(async tx => {
+    holding = withOpeningTutorStreamFenceCommit(boundedTransactions(holder.sql), async tx => {
       await lockWorkspaceLearningHistory(tx, scope);
       held.release();
       await release.ready;
@@ -94,7 +196,8 @@ async function historyRace(privacy: boolean) {
         // The real privacy repository re-enters this transaction via a savepoint;
         // it takes history then workspace UPDATE and increments the epoch itself.
         const nested = new Proxy(holder.sql, { get(target, property) {
-          return property === 'begin' ? (callback: (inner: TransactionSql) => Promise<unknown>) => tx.savepoint(callback)
+          return property === 'begin'
+            ? (callback: (inner: TransactionSql) => Promise<unknown>) => tx.savepoint(inner => runWithNestedTutorStreamFences(tx, inner, callback))
             : Reflect.get(target, property);
         } });
         await createOpeningPrivacyRepository(tx).recordExclusions(nested, scope,

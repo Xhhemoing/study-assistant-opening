@@ -37,7 +37,7 @@ describe("markdown export service", () => {
       principal,
       { documentId, workspaceId: otherWorkspace },
     );
-    expect(getDocument).toHaveBeenCalledWith({ workspaceId, documentId });
+    expect(getDocument).toHaveBeenCalledWith({ workspaceId, documentId, redactAnswerKeys: true });
     expect(result.format).toBe("markdown");
     expect(result.lossReport.claimedLossless).toBe(false);
     expect(result.markdown).toContain("正文");

@@ -2,7 +2,7 @@ import type { TransactionSql } from "postgres";
 import { openingAdaptivePrefsSchema, type Scope, type SystemQueryRequest } from "@aistudy/contracts";
 import type { OpeningSystemQueryDraft } from "./opening-system-query";
 import { cardReadable } from "./card-sources";
-import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, noteContextSourceRefs, parseNoteContextSourceRefs } from "./opening-context-provenance";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 
@@ -16,11 +16,11 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       FROM library_documents d LEFT JOIN opening_note_provenance np ON np.document_id=d.id
       WHERE d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND d.title ILIKE ${pattern}
         AND (np.document_id IS NULL OR (np.workspace_id=${scope.workspaceId}
-          AND ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`np.context_source_refs`, false)}))
+          AND ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)}))
       ORDER BY d.updated_at DESC,d.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
     if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
     out.data = rows.slice(0, a.limit).map(row => {
-      out.sourceRefs.push(...(parseContextSourceRefs(row.context_source_refs) ?? []));
+      out.sourceRefs.push(...(parseNoteContextSourceRefs(row.context_source_refs) ?? []));
       out.evidence.push({ id: `note:${row.id}`, kind: "note", title: String(row.title).slice(0, 200), recordId: String(row.id),
         href: `/opening/library/${row.id}`, revision: String(row.current_revision_number) });
       return { id: row.id, title: String(row.title).slice(0, 240), revision: Number(row.current_revision_number), updatedAt: iso(row.updated_at), contentWithheld: true,
@@ -33,7 +33,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       LEFT JOIN opening_note_provenance np ON np.document_id=c.source_document_id AND np.workspace_id=c.workspace_id
       WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} AND NOT c.archived
         AND ${a.courseId ? tx`c.course_id=${a.courseId}` : tx`TRUE`} AND ${cardReadable(tx, scope.workspaceId)}
-        AND (np.document_id IS NULL OR ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`np.context_source_refs`, false)})
+        AND (np.document_id IS NULL OR ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})
       ORDER BY s.due_at NULLS LAST,c.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
     if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
     out.data = [];
@@ -41,7 +41,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       // Cards retain source identities; capture each current source version as consumed metadata.
       const refs = (row.source_ids as string[]).length ? await tx`SELECT id AS "sourceId",version AS "sourceVersion" FROM opening_sources
         WHERE workspace_id=${scope.workspaceId} AND id=ANY(${row.source_ids as string[]}::uuid[])` : [];
-      out.sourceRefs.push(...refs.map(ref => ({ sourceId: String(ref.sourceId), sourceVersion: Number(ref.sourceVersion) })), ...(parseContextSourceRefs(row.context_source_refs) ?? []));
+      out.sourceRefs.push(...refs.map(ref => ({ sourceId: String(ref.sourceId), sourceVersion: Number(ref.sourceVersion) })), ...(parseNoteContextSourceRefs(row.context_source_refs) ?? []));
       out.evidence.push({ id: `card:${row.id}`, kind: "card", title: "复习卡片", recordId: String(row.id), href: "/opening/cards", revision: String(row.content_version) });
       out.data.push({ id: row.id, contentVersion: Number(row.content_version), courseId: row.course_id, dueAt: row.due_at ? iso(row.due_at) : null, answerWithheld: true,
         summary: `卡片 ${row.id}；内容版本 ${row.content_version}；复习到期 ${row.due_at ? iso(row.due_at) : "未知"}；复习安排不是掌握证明，答案未释放` });

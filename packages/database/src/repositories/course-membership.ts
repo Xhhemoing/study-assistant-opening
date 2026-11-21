@@ -14,6 +14,7 @@ import {
   LibraryError,
   type DocumentRecord,
 } from "./library";
+import { mapOpeningSourceError } from "./opening-sources";
 
 const ASSET_TYPES = new Set(assetTypeSchema.options);
 const ROLES = new Set(["core", "optional", "reference", "archive"] as const);
@@ -505,8 +506,10 @@ export function createCourseMembershipRepository(
               throw new CourseMembershipError("NOT_FOUND", `Course not found: ${input.courseId}`);
             }
           }
+          // Serialize source classification (e.g. first mock_exam membership) against
+          // standalone readStream/withStreamPublication's FOR SHARE on opening_sources.
           const current = await tx`SELECT id FROM opening_sources WHERE id=${input.assetId}
-            AND workspace_id=${input.workspaceId} FOR SHARE`;
+            AND workspace_id=${input.workspaceId} FOR UPDATE`;
           if (!current.length) throw new CourseMembershipError("NOT_FOUND", "Source not found");
           if (input.replacesSourceId) {
             const oldRows = await tx`
@@ -679,7 +682,7 @@ export function createCourseMembershipRepository(
               version: Number(row.version),
               uploadState: row.upload_state as SourceRecord["uploadState"],
               parseState: row.parse_state as SourceRecord["parseState"],
-              error: (row.error as SourceRecord["error"]) ?? null,
+              error: mapOpeningSourceError(row.error),
               createdAt: new Date(row.created_at as string | Date).toISOString(),
             };
           }
