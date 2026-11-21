@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ExamBindInput, ExamPack, ExamSprintCommand, ExamSprintOverview, ObservationInput } from "@aistudy/contracts";
 import { evaluateEvidenceEligibility } from "@aistudy/domain";
 import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
+import { createOpeningExamForecastRepository } from "../../packages/database/src/repositories/opening-exam-forecast";
 import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
 import { createOpeningLearningAttemptRepository } from "../../packages/database/src/repositories/opening-learning-attempts";
 import { insertOpeningLearningObservation, insertOpeningLearningObservationInTx } from "../../packages/database/src/repositories/opening-learning-observations";
@@ -109,6 +110,27 @@ async function source(options: { image?: boolean; version?: number; history?: bo
   }
   return { sourceTitle: "Worksheet.pdf", sourceId: id, sourceVersion: version };
 }
+
+it("distinguishes archived exact-key replays from new writes across sprint, binding, mapping and paper registration", async () => {
+  const binding = bindInput(), material = await source();
+  const map = { clientKey: key(), sourceItemId: "paper-1", skillIds: ["limit-laws"] };
+  const paper = { clientKey: key(), sourceId: material.sourceId, sourceVersion: 1, teacher: "Teacher",
+    year: 2024, label: "Final", kind: "past_exam" as const, skills: [{ skillId: "limit-laws", points: 10 }] };
+  const command = { action: "start", mode: "practice", clientKey: key() } as const;
+  const forecast = createOpeningExamForecastRepository(f.sql, pack);
+  const writes = [
+    (fresh: boolean) => integration.bind(f.scope, fresh ? { ...binding, clientKey: key() } : binding),
+    (fresh: boolean) => integration.mapSource(f.scope, fresh ? { ...map, clientKey: key() } : map),
+    (fresh: boolean) => forecast.record(f.scope, fresh ? { ...paper, clientKey: key() } : paper),
+    (fresh: boolean) => sprint.act(f.scope, fresh ? { ...command, clientKey: key() } : command),
+  ];
+  for (const write of writes) await write(false);
+  await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId}`;
+  for (const write of writes) {
+    await expect(write(false)).rejects.toMatchObject({ code: "NOT_FOUND", examReceiptCommitted: true });
+    await expect(write(true)).rejects.not.toHaveProperty("examReceiptCommitted");
+  }
+});
 
 it("adds missing material pins without rewriting the milestone, skill bindings, or an unrelated stale pin", async () => {
   const old = await source(), current = await source(), milestoneId = randomUUID();

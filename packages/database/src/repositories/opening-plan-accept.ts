@@ -6,6 +6,7 @@ import { parseSuggestionKey } from "@aistudy/domain";
 import { assertCoachAcceptance } from "./opening-coach-plans";
 import { assertOpeningSuggestedSelectionAllowed } from "./opening-suggestion-feedback";
 import { OpeningPlanError } from "./opening-plan-error";
+import { assertPlanningDay } from "./opening-plan-day";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
 import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
@@ -24,6 +25,7 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
       WHERE id=${input.draftId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     if (!located) throw new OpeningPlanError("NOT_FOUND", "draft not found");
     const day = new Date(located.day as string | Date).toISOString().slice(0, 10);
+    assertPlanningDay(day);
     // Same day lock as auto-draft recomputation, before any workspace/row lock.
     const digest = createHash("sha256").update(`opening-daily-draft:${scope.workspaceId}:${day}`).digest();
     await tx`SELECT pg_advisory_xact_lock(${digest.readInt32BE(0)}, ${digest.readInt32BE(4)})`;

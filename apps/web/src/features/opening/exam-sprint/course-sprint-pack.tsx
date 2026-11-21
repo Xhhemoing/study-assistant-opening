@@ -20,7 +20,8 @@ export function coursePackStatus(body: unknown): Exclude<CoursePackStatus, "load
  * An existing binding puts training before the plan. Unbound courses keep planning
  * first and load the sample pack only after the learner opens the import entry.
  */
-export function CourseSprintPack({ courseId, initialStatus = "loading", children }: {
+export function CourseSprintPack({ workspaceId, courseId, initialStatus = "loading", children }: {
+  workspaceId?: string;
   courseId: string;
   initialStatus?: CoursePackStatus;
   children?: ReactNode;
@@ -72,7 +73,7 @@ export function CourseSprintPack({ courseId, initialStatus = "loading", children
     </> : null}
     <section id={packId} ref={packRef} tabIndex={-1} aria-label="题包训练" hidden={!bound && !importOpen}>
       {!bound ? <p className="my-2 text-xs leading-6 text-text-3">示例题包是一套预置的 Math I 练习，只有确认关联后才会进入这门课程。</p> : null}
-      {bound || optedIn ? <ExamSprintView courseId={courseId} embedded onCourseBound={onCourseBound} /> : null}
+      {bound || optedIn ? <ExamSprintView workspaceId={workspaceId} courseId={courseId} embedded onCourseBound={onCourseBound} /> : null}
     </section>
   </div>;
 

@@ -51,7 +51,7 @@ function parsePatch(stored: unknown): InterventionPrefsPatch | null {
 export function createOpeningInterventionSettingsRepository(sql: Sql) {
   return {
     async getGlobal(scope: Scope) {
-      const rows = await sql`SELECT p.intervention_settings FROM workspaces w
+      const rows = await sql`SELECT p.intervention_settings - 'timetableRevision' AS intervention_settings FROM workspaces w
         LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
       if (!rows.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");

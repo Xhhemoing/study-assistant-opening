@@ -10,6 +10,15 @@ export async function packWithExamSourceMappings(tx: TransactionSql, sprintId: s
   return { ...pack, sourceItems: pack.sourceItems.map(item => ({ ...item,
     skills: (rows.find(row => row.source_item_id === item.id)?.skill_ids ?? []) as string[] })) };
 }
+/** A receipt confirms the write, but its result still has to pass current access checks. */
+export async function readCommittedExamReceipt<T>(read: () => Promise<T>): Promise<T> {
+  try { return await read(); } catch (error) {
+    if (error instanceof Error && "code" in error && !("businessCode" in error && typeof error.businessCode === "string")) {
+      Object.assign(error, { examReceiptCommitted: true });
+    }
+    throw error;
+  }
+}
 /** Workspace-history and owner are locked first by every caller. */
 export async function lockExamCourse(tx: TransactionSql, scope: Scope, courseId: string): Promise<void> {
   const rows = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
