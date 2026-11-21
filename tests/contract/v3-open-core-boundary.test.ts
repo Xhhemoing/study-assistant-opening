@@ -1,5 +1,9 @@
-import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
+  rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { builtinModules } from "node:module";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
@@ -16,14 +20,15 @@ type PackageJson = {
   imports?: Record<string, unknown>;
 };
 
-type EdgeKind = "runtime" | "type" | "reexport" | "dynamic" | "require";
+type Use = "runtime" | "type";
+type EdgeKind = Use | "types-directive" | "reexport" | "dynamic" | "require";
 type RuntimeProfile = "browser-ui" | "portable-runtime";
 
 type Edge = {
   spec: string;
   line: number;
   kind: EdgeKind;
-  reference?: "path" | "types";
+  reference?: "path";
 };
 
 export type BoundaryViolation = {
@@ -46,6 +51,10 @@ const SOURCE_SUBSTITUTIONS: Record<string, string[]> = {
   ".jsx": [".tsx", ".d.ts"],
   ".mjs": [".mts", ".d.mts"],
   ".cjs": [".cts", ".d.cts"],
+  ".ts": [".d.ts"],
+  ".tsx": [".d.ts"],
+  ".mts": [".d.mts"],
+  ".cts": [".d.cts"],
 };
 const PORTABLE_EXTERNALS = new Set(["zod", "ts-fsrs", "react", "react/jsx-runtime", "react-dom"]);
 const UI_EXTERNALS = new Set(["@radix-ui/react-dialog", "@radix-ui/react-tabs", "@radix-ui/react-toast", "lucide-react"]);
@@ -73,6 +82,12 @@ const CLOSED_DIRECTORY_NAMES = new Set([
 const slash = (value: string) => value.replaceAll("\\", "/");
 const normalizeFile = (file: string) => path.normalize(path.resolve(file));
 const rootedPath = (spec: string) => spec.startsWith("/") || /^[a-z]:/iu.test(spec);
+const declaration = (file: string) => /\.d\.[cm]?ts$/iu.test(file);
+
+function within(root: string, file: string): boolean {
+  const relative = path.relative(root, file);
+  return relative.split(path.sep)[0] !== ".." && !path.isAbsolute(relative);
+}
 
 function isClosedFile(file: string, root: string): boolean {
   const relative = slash(path.relative(root, file)).toLowerCase();
@@ -89,14 +104,19 @@ function isStringRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function collectConditionalTargets(value: unknown): string[] {
-  if (typeof value === "string") return [value];
-  if (Array.isArray(value) || isStringRecord(value)) return Object.values(value).flatMap(collectConditionalTargets);
+type ManifestTarget = { spec: string; use: Use };
+
+function collectConditionalTargets(value: unknown, use: Use): ManifestTarget[] {
+  if (typeof value === "string") return [{ spec: slash(value), use }];
+  if (Array.isArray(value) || isStringRecord(value)) {
+    return Object.entries(value).flatMap(([key, child]) =>
+      collectConditionalTargets(child, key === "types" || key.startsWith("types@") ? "type" : use));
+  }
   return [];
 }
 
-function matchPatternMap(map: Record<string, unknown>, spec: string) {
-  if (Object.hasOwn(map, spec)) return { key: spec, targets: collectConditionalTargets(map[spec]) };
+function matchPatternMap(map: Record<string, unknown>, spec: string, use: Use) {
+  if (Object.hasOwn(map, spec)) return { key: spec, targets: collectConditionalTargets(map[spec], use) };
   const patterns = Object.keys(map)
     .filter(key => {
       const star = key.indexOf("*");
@@ -108,7 +128,9 @@ function matchPatternMap(map: Record<string, unknown>, spec: string) {
   if (!pattern) return undefined;
   const star = pattern.indexOf("*");
   const matched = spec.slice(star, spec.length - (pattern.length - star - 1));
-  const targets = collectConditionalTargets(map[pattern]).map(target => target.replaceAll("*", () => matched));
+  const targets = collectConditionalTargets(map[pattern], use).map(target => ({
+    ...target, spec: target.spec.replaceAll("*", () => matched),
+  }));
   return { key: pattern, targets };
 }
 
@@ -129,7 +151,7 @@ function parseEdges(file: string, text: string): Edge[] {
     edges.push({
       spec: slash(ref.fileName),
       line: source.getLineAndCharacterOfPosition(ref.pos).line + 1,
-      kind: "type", reference: "types",
+      kind: "types-directive",
     });
   }
   const line = (node: ts.Node) => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
@@ -174,50 +196,123 @@ function parseEdges(file: string, text: string): Edge[] {
   return edges;
 }
 
-type Resolution = { file: string } | { violation: string };
+type Resolution = { file: string; use: Use } | { violation: string };
+
+function requireTarget(results: Resolution[], spec: string, use: Use): Resolution[] {
+  if (!results.length) return [{ violation: spec }];
+  if (use === "type") return results.map(result => "file" in result ? { ...result, use: "type" } : result);
+  if (results.every(result => "file" in result && result.use === "type")) results.push({ violation: spec });
+  return results;
+}
+
+class BlockedPath extends Error {}
+
+function resolveBranch(resolve: () => Resolution[]): Resolution[] {
+  try {
+    return resolve();
+  } catch (error) {
+    if (error instanceof BlockedPath) return [{ violation: error.message }];
+    throw error;
+  }
+}
 
 class ModuleGraph {
   private readonly profile: RuntimeProfile;
   private readonly root: string;
+  private readonly realRoot: string;
   private readonly files: ReadonlyMap<string, string>;
   private readonly virtualOnly: boolean;
   private readonly packageRoots = new Map<string, string>();
   private readonly manifestCache = new Map<string, PackageJson | null>();
+  private readonly physicalPaths = new Map<string, string | undefined>();
 
   constructor(options: GraphOptions) {
     this.profile = options.profile ?? "browser-ui";
     this.root = normalizeFile(options.root);
     this.files = new Map([...options.files ?? new Map()].map(([file, text]) => [normalizeFile(file), text]));
     this.virtualOnly = options.virtualOnly ?? false;
+    this.realRoot = this.virtualOnly ? this.root : normalizeFile(realpathSync.native(this.root));
     for (const [file] of this.files) {
-      if (path.basename(file) !== "package.json") continue;
+      if (path.basename(file) !== "package.json" || this.label(file).split("/").includes("node_modules")) continue;
+      if (isClosedFile(file, this.root)) continue;
       const manifest = this.readManifest(file);
       if (manifest?.name) this.packageRoots.set(manifest.name, path.dirname(file));
     }
     if (!this.virtualOnly) {
       const packagesRoot = path.join(this.root, "packages");
-      if (existsSync(packagesRoot)) {
-        for (const name of requireDirectoryNames(packagesRoot)) {
-          const packageRoot = path.join(packagesRoot, name);
-          const manifest = this.loadManifest(packageRoot);
+      let physicalRoot: string | undefined;
+      try {
+        physicalRoot = this.diskPath(packagesRoot);
+      } catch (error) {
+        if (error instanceof BlockedPath) return;
+        throw error;
+      }
+      if (physicalRoot) {
+        for (const entry of readdirSync(physicalRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const packageRoot = path.join(packagesRoot, entry.name);
+          const manifest = this.registeredManifest(packageRoot);
           if (manifest?.name) this.packageRoots.set(manifest.name, packageRoot);
         }
       }
     }
   }
 
-  private readText(file: string): string | undefined {
-    const normalized = normalizeFile(file);
-    const virtual = this.files.get(normalized);
-    if (virtual !== undefined) return virtual;
-    if (this.virtualOnly || !existsSync(normalized) || !statSync(normalized).isFile()) return undefined;
-    return readFileSync(normalized, "utf8");
+  private registeredManifest(packageRoot: string): PackageJson | null {
+    try {
+      return this.loadManifest(packageRoot);
+    } catch (error) {
+      // An inaccessible workspace cannot supply a resolvable package name.
+      if (error instanceof BlockedPath) return null;
+      throw error;
+    }
+  }
+
+  private diskPath(file: string): string | undefined {
+    if (!within(this.root, file)) throw new BlockedPath(this.label(file));
+    if (file === this.root) return this.realRoot;
+    if (this.physicalPaths.has(file)) return this.physicalPaths.get(file);
+    const parent = this.diskPath(path.dirname(file));
+    const child = parent && path.join(parent, path.basename(file));
+    let physical: string | undefined;
+    if (child && lstatSync(child, { throwIfNoEntry: false })) {
+      try {
+        physical = normalizeFile(realpathSync.native(child));
+      } catch {
+        throw new BlockedPath(this.label(file));
+      }
+      if (!within(this.realRoot, physical)) throw new BlockedPath(this.label(file));
+    }
+    this.physicalPaths.set(file, physical);
+    return physical;
+  }
+
+  // Express the canonical path in the checkout's namespace, including when the root is a link.
+  sourcePath(file: string): string | undefined {
+    if (!within(this.root, file)) throw new BlockedPath(this.label(file));
+    let source: string | undefined;
+    if (this.files.has(file)) source = file;
+    else if (!this.virtualOnly) {
+      const physical = this.diskPath(file);
+      if (physical && statSync(physical).isFile()) source = path.join(this.root, path.relative(this.realRoot, physical));
+    }
+    if (source && isClosedFile(file, this.root)) throw new BlockedPath(this.label(file));
+    if (source && isClosedFile(source, this.root)) throw new BlockedPath(this.label(source));
+    return source;
+  }
+
+  readSource(file: string, checkLicense = false) {
+    const source = this.sourcePath(file);
+    if (!source) return undefined;
+    const license = checkLicense ? this.licenseViolation(file, source) : undefined;
+    const text = this.files.get(file) ?? readFileSync(path.join(this.realRoot, path.relative(this.root, source)), "utf8");
+    return { source, text, license };
   }
 
   private readManifest(file: string): PackageJson | null {
     const normalized = normalizeFile(file);
     if (this.manifestCache.has(normalized)) return this.manifestCache.get(normalized) ?? null;
-    const text = this.readText(normalized);
+    const text = this.readSource(normalized)?.text;
     const parsed: PackageJson | null = text === undefined ? null : JSON.parse(text);
     if (text !== undefined && !isStringRecord(parsed)) throw new Error(`Invalid manifest: ${this.label(file)}`);
     this.manifestCache.set(normalized, parsed);
@@ -237,15 +332,17 @@ class ModuleGraph {
     }
   }
 
-  licenseViolation(file: string): string | undefined {
-    const owner = this.findPackageRoot(file) ?? this.root;
-    if (this.loadManifest(owner)?.license !== "Apache-2.0") return this.label(path.join(owner, "package.json"));
+  private licenseViolation(file: string, source: string): string | undefined {
+    for (const candidate of new Set([file, source])) {
+      const owner = this.findPackageRoot(candidate) ?? this.root;
+      if (this.loadManifest(owner)?.license !== "Apache-2.0") return this.label(path.join(owner, "package.json"));
+    }
     if (this.loadManifest(this.root)?.license !== "Apache-2.0") return "package.json";
     return undefined;
   }
 
   private resolvePath(
-    base: string, spec: string, lookup: "module" | "file-reference" | "package-root" = "module", seenDirs = new Set<string>(),
+    base: string, spec: string, use: Use, lookup: "module" | "file-reference" | "package-root" = "module", seenDirs = new Set<string>(),
   ): Resolution[] {
     const relative = path.relative(this.root, base);
     if (relative.split(path.sep)[0] === ".." || path.isAbsolute(relative) || seenDirs.has(base)) return [{ violation: spec }];
@@ -265,59 +362,130 @@ class ModuleGraph {
     }
     const manifest = lookup === "file-reference" ? null : this.loadManifest(base);
     // Relative CommonJS directory imports can still load index when exports exists.
-    if (lookup !== "file-reference" && (manifest?.exports === undefined || !manifest.main)) {
+    if (lookup !== "file-reference") {
       candidates.push(...SOURCE_EXTENSIONS.map(ext => path.join(base, "index" + ext)));
     }
-    const results: Resolution[] = candidates.filter(file => this.readText(file) !== undefined).map(file => ({ file }));
+    const results: Resolution[] = [];
+    for (const file of candidates) {
+      results.push(...resolveBranch(() => {
+        const source = this.sourcePath(file);
+        if (!source) return [];
+        const implementation = SOURCE_EXTENSIONS.includes(path.extname(source)) && !declaration(source) && !declaration(file);
+        return [{ file, use: implementation ? use : "type" }];
+      }));
+    }
     if (manifest) {
-      const seen = new Set(seenDirs).add(base);
+      const physical = this.virtualOnly ? base : this.diskPath(base) ?? base;
+      if (seenDirs.has(physical)) return [{ violation: spec }];
+      const seen = new Set(seenDirs).add(physical);
       if (manifest.exports !== undefined) {
-        results.push(...this.resolveExports(base, manifest.exports, ".", spec, seen));
+        results.push(...this.resolveExports(base, manifest.exports, ".", spec, use, seen));
       }
-      const targets = collectConditionalTargets([manifest.main, manifest.module, manifest.types, manifest.typings, manifest.browser]);
-      for (const target of new Set(targets.map(slash))) {
-        if (rootedPath(target)) results.push({ violation: target });
-        else results.push(...this.resolvePath(path.resolve(base, target), target, "module", seen));
+      const browser = isStringRecord(manifest.browser) ? Object.values(manifest.browser) : [manifest.browser];
+      const targets = [
+        ...collectConditionalTargets([manifest.main, manifest.module, ...browser], "runtime"),
+        ...collectConditionalTargets([manifest.types, manifest.typings], "type"),
+      ];
+      for (const target of targets) {
+        results.push(...this.resolveManifestTarget(base, target, seen));
       }
     }
-    return results.length ? results : [{ violation: spec }];
+    return requireTarget(results, spec, use);
   }
 
-  private resolveExports(root: string, exports: unknown, subpath: string, spec: string, seenDirs: Set<string>): Resolution[] {
-    let targets: string[] | undefined;
+  private exportTargets(exports: unknown, subpath: string, use: Use): ManifestTarget[] {
     if (isStringRecord(exports) && Object.keys(exports).some(key => key.startsWith("."))) {
-      targets = matchPatternMap(exports, subpath)?.targets;
-    } else if (subpath === ".") {
-      targets = collectConditionalTargets(exports);
+      return matchPatternMap(exports, subpath, use)?.targets ?? [];
     }
-    if (!targets?.length) return [{ violation: spec }];
-    return [...new Set(targets.map(slash))].flatMap(target => target.startsWith("./")
-      ? this.resolvePath(path.resolve(root, target), target, "module", seenDirs)
-      : [{ violation: target }]);
+    return subpath === "." ? collectConditionalTargets(exports, use) : [];
   }
 
-  private resolvePackage(spec: string): Resolution[] {
+  private resolveManifestTarget(root: string, target: ManifestTarget, seenDirs: Set<string>): Resolution[] {
+    if (rootedPath(target.spec)) return [{ violation: target.spec }];
+    const paths = new Set([path.resolve(root, target.spec)]);
+    // Parent-relative entries can select different files on either side of a junction.
+    if (target.spec.split("/").includes("..") && !this.virtualOnly) {
+      const manifest = this.sourcePath(path.join(root, "package.json"));
+      if (manifest) paths.add(path.resolve(path.dirname(manifest), target.spec));
+    }
+    return [...paths].flatMap(file => resolveBranch(() => this.resolvePath(file, target.spec, target.use, "module", seenDirs)));
+  }
+
+  private resolveExports(root: string, exports: unknown, subpath: string, spec: string, use: Use, seenDirs: Set<string>): Resolution[] {
+    const targets = this.exportTargets(exports, subpath, use);
+    const results = targets.flatMap(target => target.spec.startsWith("./")
+      ? this.resolveManifestTarget(root, target, seenDirs)
+      : [{ violation: target.spec }]);
+    return requireTarget(results, spec, use);
+  }
+
+  private resolvePackage(spec: string, use: Use): Resolution[] {
     const [, name, rest] = spec.match(/^(@aistudy\/[^/]+)(\/.*)?$/u) ?? [];
     const root = this.packageRoots.get(name);
     const manifest = root && this.loadManifest(root);
     if (!root || !manifest) return [{ violation: spec }];
     const subpath = rest ? "." + rest : ".";
     if (manifest.exports === undefined) {
-      return this.resolvePath(path.resolve(root, subpath), spec, subpath === "." ? "package-root" : "module");
+      return this.resolvePath(path.resolve(root, subpath), spec, use, subpath === "." ? "package-root" : "module");
     }
-    return this.resolveExports(root, manifest.exports, subpath, spec, new Set([root]));
+    return this.resolveExports(root, manifest.exports, subpath, spec, use, new Set([root]));
+  }
+
+  private resolveAmbient(spec: string, from: string): Resolution[] {
+    // TypeScript mangles @scope/name to @types/scope__name.
+    const name = spec.replace(/^@types\//u, "").replace(/^([\w.-]+)__([\w.-]+)$/u, "@$1/$2");
+    if (!/^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u.test(name) ||
+        name === "node" || BUILTINS.has(name) || CLOSED_PACKAGE_SPECS.some(pattern => pattern.test(name))) {
+      return [{ violation: spec }];
+    }
+    const directoryName = name.replace(/^@/u, "").replace("/", "__");
+    let directory = path.dirname(from);
+    while (within(this.root, directory)) {
+      const owner = path.join(directory, "node_modules", "@types", directoryName);
+      const present = [...this.files.keys()].some(file => within(owner, file));
+      if (present || (!this.virtualOnly && this.diskPath(owner))) return this.ambientEntries(owner, spec);
+      if (directory === this.root) break;
+      directory = path.dirname(directory);
+    }
+    return [{ violation: spec }];
+  }
+
+  private ambientEntries(owner: string, spec: string): Resolution[] {
+    const manifest = this.loadManifest(owner);
+    const targets = collectConditionalTargets([manifest?.types, manifest?.typings], "type");
+    if (manifest?.exports !== undefined) {
+      const entries = this.exportTargets(manifest.exports, ".", "runtime");
+      if (!entries.length) return [{ violation: spec }];
+      targets.push(...entries);
+    }
+    if (!targets.length) targets.push({ spec: "index.d.ts", use: "type" });
+    const resolved = targets.flatMap(target => resolveBranch(() => {
+      const base = path.resolve(owner, target.spec);
+      if (rootedPath(target.spec) || !within(owner, base)) return [{ violation: spec }];
+      const ext = path.extname(base);
+      const files = declaration(base) ? [base] : (ext ? SOURCE_SUBSTITUTIONS[ext] ?? [] : [".d.ts", ".d.mts", ".d.cts"])
+        .filter(declaration).map(suffix => base.slice(0, base.length - ext.length) + suffix);
+      const results: Resolution[] = [];
+      for (const file of files) {
+        const physical = this.sourcePath(file);
+        if (physical && declaration(physical)) results.push({ file, use: "type" });
+      }
+      // An explicit declaration must exist. JS export conditions contribute any paired declarations.
+      return target.use === "type" || declaration(base) ? requireTarget(results, spec, "type") : results;
+    }));
+    return requireTarget(resolved, spec, "type");
   }
 
   resolveEdge(edge: Edge, from: string): Resolution[] {
+    if (edge.kind === "types-directive") return this.resolveAmbient(edge.spec, from);
     if (edge.reference === "path") {
       if (rootedPath(edge.spec)) return [{ violation: edge.spec }];
-      return this.resolvePath(path.resolve(path.dirname(from), edge.spec), edge.spec, "file-reference");
+      return this.resolvePath(path.resolve(path.dirname(from), edge.spec), edge.spec, "type", "file-reference");
     }
-    if (edge.reference === "types" && edge.spec.startsWith("node:")) return [{ violation: edge.spec }];
-    return this.resolveImport(edge.spec, from);
+    return this.resolveImport(edge.spec, from, edge.kind === "type" || declaration(from) ? "type" : "runtime");
   }
 
-  private resolveImport(spec: string, from: string, seenSpecs = new Set<string>()): Resolution[] {
+  private resolveImport(spec: string, from: string, use: Use, seenSpecs = new Set<string>()): Resolution[] {
     if (this.profile === "portable-runtime" && PORTABLE_NODE_MODULES.has(spec)) return [];
     if (spec.startsWith("node:") || BUILTINS.has(spec) || CLOSED_PACKAGE_SPECS.some(pattern => pattern.test(spec))) {
       return [{ violation: spec }];
@@ -327,18 +495,20 @@ class ModuleGraph {
     if (spec.startsWith("#")) {
       const owner = this.findPackageRoot(from);
       const imports = owner && this.loadManifest(owner)?.imports;
-      const match = imports && matchPatternMap(imports, spec);
+      const match = imports && matchPatternMap(imports, spec, use);
       if (!owner || !match || !match.targets.length || seenSpecs.has(match.key)) return [{ violation: spec }];
       // Track matched keys per branch so even a wildcard that expands itself must terminate.
       const seen = new Set(seenSpecs).add(match.key);
-      return [...new Set(match.targets.map(slash))].flatMap(target => target.startsWith("./")
-        ? this.resolvePath(path.resolve(owner, target), target)
-        : this.resolveImport(target, from, seen));
+      const results = match.targets.flatMap(target => resolveBranch(() => target.spec.startsWith("./")
+        ? this.resolvePath(path.resolve(owner, target.spec), target.spec, target.use)
+        : this.resolveImport(target.spec, from, target.use, seen)));
+      if (use === "runtime" && !match.targets.some(target => target.use === "runtime")) results.push({ violation: spec });
+      return results;
     }
     if (spec.startsWith("./") || spec.startsWith("../") || spec === "." || spec === "..") {
-      return this.resolvePath(path.resolve(path.dirname(from), spec), spec);
+      return this.resolvePath(path.resolve(path.dirname(from), spec), spec, use);
     }
-    if (spec.startsWith("@aistudy/")) return this.resolvePackage(spec);
+    if (spec.startsWith("@aistudy/")) return this.resolvePackage(spec, use);
     return [{ violation: spec }];
   }
 
@@ -346,17 +516,6 @@ class ModuleGraph {
     const relative = path.relative(this.root, normalizeFile(file));
     return slash(relative || path.basename(file));
   }
-
-  text(file: string): string | undefined {
-    return this.readText(file);
-  }
-}
-
-function requireDirectoryNames(directory: string): string[] {
-  if (!existsSync(directory)) return [];
-  return readdirSync(directory, { withFileTypes: true })
-    .filter((entry: { isDirectory: () => boolean }) => entry.isDirectory())
-    .map((entry: { name: string }) => entry.name);
 }
 
 export function analyzeModuleGraph(entries: readonly string[], options: GraphOptions): { violations: BoundaryViolation[] } {
@@ -370,20 +529,24 @@ export function analyzeModuleGraph(entries: readonly string[], options: GraphOpt
     const reportedLicenses = new Set<string>();
     while (stack.length) {
       const current = stack.pop()!;
-      const text = graph.text(current.file);
-      if (text === undefined || isClosedFile(current.file, options.root)) {
-        violations.push({ entry: entryLabel, target: graph.label(current.file), chain: current.chain });
+      let module: ReturnType<ModuleGraph["readSource"]>;
+      try {
+        module = graph.readSource(current.file, options.requirePermissiveCandidateLicense);
+        if (!module) throw new BlockedPath(graph.label(current.file));
+      } catch (error) {
+        if (!(error instanceof BlockedPath)) throw error;
+        violations.push({ entry: entryLabel, target: error.message, chain: current.chain });
         continue;
       }
-      const license = options.requirePermissiveCandidateLicense && graph.licenseViolation(current.file);
+      const { source, text, license } = module;
       if (license && !reportedLicenses.has(license)) {
         reportedLicenses.add(license);
         violations.push({ entry: entryLabel, target: license, chain: [...current.chain, license] });
       }
-      for (const edge of parseEdges(current.file, text)) {
+      for (const edge of parseEdges(source, text)) {
         const kind = edge.kind === "runtime" ? "" : ` [${edge.kind}]`;
         const hop = `${graph.label(current.file)}:${edge.line} -> ${edge.spec}${kind}`;
-        for (const target of graph.resolveEdge(edge, current.file)) {
+        for (const target of resolveBranch(() => graph.resolveEdge(edge, source))) {
           if ("violation" in target) {
             violations.push({ entry: entryLabel, target: target.violation, chain: [...current.chain, hop, target.violation] });
           } else if (!visited.has(target.file)) {
@@ -565,7 +728,158 @@ describe("v3 Open-Core public candidate boundary", () => {
       "index.d.ts": names.map(name => `/// <reference types="${name}" />`).join("\n"),
     }, "index.d.ts", undefined, profile);
     expect(violations.map(v => v.target)).toEqual(names);
-    for (const [i, v] of violations.entries()) expect(v.chain).toContain(`index.d.ts:${i + 1} -> ${names[i]} [type]`);
+    for (const [i, v] of violations.entries()) expect(v.chain).toContain(`index.d.ts:${i + 1} -> ${names[i]} [types-directive]`);
+  });
+
+  it.each(["browser-ui", "portable-runtime"] as const)("resolves ambient packages independently of runtime allowlists in %s", profile => {
+    const entry = "public.d.ts";
+    const files = { [entry]: '/// <reference types="react" />' };
+    expect(virtualAnalyze(files, entry, undefined, profile).violations.map(v => v.target)).toEqual(["react"]);
+    const result = virtualAnalyze({
+      ...files,
+      "node_modules/@types/react/package.json": JSON.stringify({ exports: { ".": { types: "./ambient.d.mts" } } }),
+      "node_modules/@types/react/ambient.d.mts": '/// <reference types="node" />',
+      "node_modules/@types/node/index.d.ts": "export {};",
+    }, entry, undefined, profile);
+    expect(result.violations.map(v => v.target)).toEqual(["node"]);
+    expect(result.violations[0].chain).toContain("node_modules/@types/react/ambient.d.mts");
+  });
+
+  it.each(["types", "typings"])("requires an actual declaration at the ambient %s target", field => {
+    const files = {
+      "index.d.ts": '/// <reference types="@demo/view" />',
+      "node_modules/@types/demo__view/package.json": JSON.stringify({ [field]: "./public.d.cts" }),
+      "node_modules/@types/demo__view/index.d.ts": "export {};",
+    };
+    expect(virtualAnalyze({ ...files, "node_modules/@types/demo__view/public.d.cts": "export {};" }, "index.d.ts").violations).toEqual([]);
+    expect(virtualAnalyze(files, "index.d.ts").violations).toHaveLength(1);
+  });
+
+  it("checks ambient index declarations and rejects prohibited names or traversal even if a file exists", () => {
+    const names = ["local", "pg", "../internal", "node:buffer"];
+    const result = virtualAnalyze({
+      "index.d.ts": names.map(name => `/// <reference types="${name}" />`).join("\n"),
+      "node_modules/@types/local/index.d.ts": 'export type T = import("./epistemic/internal").T;',
+      "node_modules/@types/local/epistemic/internal.d.ts": "export type T = string;",
+      "node_modules/@types/pg/index.d.ts": "export {};",
+      "node_modules/internal/index.d.ts": "export {};",
+    }, "index.d.ts", undefined, "portable-runtime");
+    expect(result.violations.map(v => v.target).sort()).toEqual([
+      "../internal", "node:buffer", "node_modules/@types/local/epistemic/internal.d.ts", "pg",
+    ]);
+  });
+
+  it("checks the CJS directory index even with exports, main and an available declaration", () => {
+    const result = virtualAnalyze({
+      "index.ts": 'require("./helper");',
+      "helper/package.json": JSON.stringify({ exports: "./public.js", main: "./runtime.cjs" }),
+      "helper/public.js": "export {};",
+      "helper/runtime.d.cts": "export {};",
+      "helper/index.js": 'require("pg");',
+    }, "index.ts");
+    expect(result.violations.map(v => v.target).sort()).toEqual(["./runtime.cjs", "pg"]);
+  });
+
+  it("treats browser replacements as runtime entries even for a package named types", () => {
+    const result = virtualAnalyze({
+      "index.ts": 'import "./helper";',
+      "helper/package.json": JSON.stringify({ browser: { types: "./shim.js" } }),
+      "helper/index.js": "export {};",
+      "helper/shim.d.ts": "export {};",
+    }, "index.ts");
+    expect(result.violations.map(v => v.target)).toEqual(["./shim.js"]);
+  });
+
+  it("checks declarations inferred from ambient export conditions alongside explicit types", () => {
+    const result = virtualAnalyze({
+      "index.d.ts": '/// <reference types="react" />',
+      "node_modules/@types/react/package.json": JSON.stringify({ exports: {
+        import: { types: "./public.d.ts" }, require: "./common.cjs",
+      } }),
+      "node_modules/@types/react/public.d.ts": "export {};",
+      "node_modules/@types/react/common.d.cts": '/// <reference types="node" />',
+    }, "index.d.ts");
+    expect(result.violations.map(v => v.target)).toEqual(["node"]);
+  });
+
+  it.each([
+    ['import "./impl.js"', "./impl.js", "impl.d.ts"],
+    ['require("./impl.cjs")', "./impl.cjs", "impl.d.cts"],
+    ['import("./impl.mjs")', "./impl.mjs", "impl.d.mts"],
+    ['export * from "./impl"', "./impl", "impl.d.ts"],
+  ])("requires an implementation for %s", (code, spec, declaration) => {
+    const files = { "index.ts": code, [declaration]: "export {};" };
+    expect(virtualAnalyze(files, "index.ts").violations.map(v => v.target)).toEqual([spec]);
+    files["index.ts"] = `import type { T } from "${spec}";`;
+    expect(virtualAnalyze(files, "index.ts").violations).toEqual([]);
+  });
+
+  it("keeps nested type conditions distinct from runtime exports, even at the same target", () => {
+    const files = {
+      "index.ts": 'import "@aistudy/lite";',
+      "lite/package.json": JSON.stringify({ name: "@aistudy/lite", exports: { ".": {
+        import: { types: "./rules.mjs", default: "./rules.mjs" },
+      } } }),
+      "lite/rules.d.mts": 'export type T = import("pg").T;',
+    };
+    expect(virtualAnalyze(files, "index.ts").violations.map(v => v.target).sort()).toEqual(["./rules.mjs", "pg"]);
+    expect(virtualAnalyze({ ...files, "lite/rules.mts": "export {};" }, "index.ts").violations.map(v => v.target)).toEqual(["pg"]);
+  });
+
+  it("checks paired declarations even for an explicit source import", () => {
+    const result = virtualAnalyze({
+      "index.ts": 'import "./module.cts";',
+      "module.cts": "export {};",
+      "module.d.cts": 'export type T = import("pg").T;',
+    }, "index.ts");
+    expect(result.violations.map(v => v.target)).toEqual(["pg"]);
+  });
+
+  it("checks a junction's physical boundary and both package owners before accepting an export", () => {
+    const temp = mkdtempSync(path.join(tmpdir(), "aistudy-boundary-"));
+    try {
+      const root = path.join(temp, "repo");
+      const entry = path.join(root, "index.ts");
+      const closed = path.join(root, "packages/domain/src/epistemic");
+      const privateOwner = path.join(root, "internal");
+      const portable = path.join(root, "portable");
+      const external = path.join(temp, "external");
+      for (const dir of [external, closed, path.join(privateOwner, "lib"), portable]) {
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(path.join(dir, "entry.ts"), "export {};", "utf8");
+      }
+      writeFileSync(path.join(root, "package.json"), '{"license":"Apache-2.0"}', "utf8");
+      writeFileSync(path.join(privateOwner, "package.json"), '{"license":"UNLICENSED"}', "utf8");
+      const check = (dir: string, license = false) => {
+        writeFileSync(entry, `import "./${dir}/entry.ts";`, "utf8");
+        return analyzeModuleGraph([entry], { root, requirePermissiveCandidateLicense: license }).violations.map(v => v.target);
+      };
+      symlinkSync(portable, path.join(root, "portable-link"), "junction");
+      symlinkSync(external, path.join(root, "external-link"), "junction");
+      symlinkSync(closed, path.join(root, "closed-link"), "junction");
+      symlinkSync(path.join(privateOwner, "lib"), path.join(root, "owner-link"), "junction");
+      symlinkSync(portable, path.join(privateOwner, "portable-link"), "junction");
+      symlinkSync(portable, path.join(root, "exam-forecast"), "junction");
+      expect(check("portable-link", true)).toEqual([]);
+      expect(check("external-link")).toHaveLength(1);
+      expect(check("closed-link")).toEqual(["packages/domain/src/epistemic/entry.ts"]);
+      expect(check("owner-link", true)).toEqual(["internal/package.json"]);
+      expect(check("internal/portable-link", true)).toEqual(["internal/package.json"]);
+      expect(check("exam-forecast")).toEqual(["exam-forecast/entry.ts"]);
+      writeFileSync(path.join(privateOwner, "lib/package.json"), '{"main":"../parent.cjs"}', "utf8");
+      writeFileSync(path.join(privateOwner, "parent.cjs"), 'require("pg");', "utf8");
+      writeFileSync(path.join(root, "parent.cjs"), "module.exports = {};", "utf8");
+      writeFileSync(entry, 'require("./owner-link");', "utf8");
+      expect(analyzeModuleGraph([entry], { root }).violations.map(v => v.target)).toEqual(["pg"]);
+      // A blocked manifest must never reach the JSON parser.
+      writeFileSync(path.join(external, "package.json"), "invalid JSON", "utf8");
+      writeFileSync(entry, 'require("./external-link");', "utf8");
+      expect(analyzeModuleGraph([entry], { root }).violations).toHaveLength(1);
+      rmSync(external, { recursive: true });
+      expect(analyzeModuleGraph([entry], { root }).violations).toHaveLength(1);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
   });
 
   it.each(['require("./helper")', 'import "./helper"'])("reads directory main alongside a clean index for %s", code => {
@@ -754,7 +1068,7 @@ describe("v3 Open-Core public candidate boundary", () => {
 
   it("parses TS generics and traverses ESM, CommonJS and declaration paths with normalized separators", () => {
     const { violations } = virtualAnalyze({
-      "index.ts": 'const id = <T>(v: T) => v;\nexport * from ".\\\\lib\\\\esm.mjs";\nimport "./ambient";',
+      "index.ts": 'const id = <T>(v: T) => v;\nexport * from ".\\\\lib\\\\esm.mjs";\nimport type { T } from "./ambient";',
       "ambient.d.ts": 'export type T = import("pg").T;',
       "lib/esm.mts": 'export * from "./common.cjs";',
       "lib/common.cts": 'require("./prebuilt.mjs");',

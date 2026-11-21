@@ -174,12 +174,17 @@ allowlist.
 
 The analyzer checks that each selected entry is a readable file, then follows runtime
 and type-only edges across workspace packages and local modules. Triple-slash path
-references resolve relative to the declaring file. Triple-slash type references
-also enter the graph. For directory imports the gate checks root export conditions,
-legacy runtime and declaration entries, browser mappings, and applicable index files.
-Missing entries, references outside the repository, and directory entry cycles fail
-the check. It matches exact
-subpaths before wildcard patterns and reports a chain from the entry to each violation.
+references resolve relative to the declaring file. Ambient type directives resolve
+through in-repository `node_modules/@types` declarations, including their transitive
+references. Runtime allowlists apply only to module imports.
+
+Directory resolution checks root export conditions, legacy entries, browser mappings,
+and existing index files. Runtime targets require an implementation, and the gate also
+scans any paired declarations. Missing entries and directory entry cycles fail the check.
+Before reading disk files or manifests, the analyzer resolves links within the real
+repository root. It checks both the requested path and its destination for closed-core
+content and, during export, for the owning package's license. The gate matches exact
+subpaths before wildcard patterns and reports the chain to each violation.
 The in-memory cases cover mixed public and private conditional branches, alias cycles,
 Node built-ins, Wave P directories, dynamic calls, declaration files, and private
 manifests in an export candidate. The `requirePermissiveCandidateLicense` option selects
