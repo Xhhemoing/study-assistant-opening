@@ -348,6 +348,48 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             else:
                 self.assertEqual(public_p11[block.char_start:block.char_end], block.text)
 
+    def test_round4_same_page_bibliography_exit_section_header_cross_page_exit_and_aligned_headers(self):
+        result = result_for(
+            [
+                text_element(11, "Appendix A: Answers to the Exercises\n1.1 x = 3", 1),
+                text_element(11, "Bibliography", 2),
+                text_element(11, "[1] Knuth, TAOCP.", 3),
+                text_element(11, "ANSWERS TO THE EXERCISES (CONTINUED)\n2.1 y = 4", 4),
+            ],
+            [
+                text_element(12, "Vector Spaces", 1, DocItemLabel.SECTION_HEADER),
+                text_element(12, "The equation has a unique\nsolution\nfor all x > 0.", 2),
+                text_element(12, "**Solution**\nx = 9.", 3),
+                text_element(12, "## Solutions\nA homogeneous mixture.", 4),
+            ],
+            [
+                text_element(13, "课后练习答案\n1. 对", 1),
+            ],
+            [
+                text_element(14, "Partial Differential Equations", 1, DocItemLabel.TITLE),
+                text_element(14, "Wave equation u_tt = c^2 u_xx.", 2),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+        p11_pub = "\n".join(pub[11])
+        self.assertIn("Bibliography", p11_pub)
+        self.assertIn("[1] Knuth, TAOCP.", p11_pub)
+        self.assertNotIn("1.1 x = 3", p11_pub)
+        self.assertNotIn("2.1 y = 4", p11_pub)
+        self.assertEqual([b.kind for b in blocks[11]], ["solution_sealed", "narrative", "solution_sealed"])
+
+        p12_pub = "\n".join(pub[12])
+        self.assertIn("Vector Spaces", p12_pub)
+        self.assertIn("for all x > 0.", p12_pub)
+        self.assertNotIn("x = 9.", p12_pub)
+        self.assertIn("A homogeneous mixture.", p12_pub)
+
+        self.assertEqual(pub[13], [])
+        p14_pub = "\n".join(pub[14])
+        self.assertIn("Partial Differential Equations", p14_pub)
+        self.assertIn("Wave equation u_tt = c^2 u_xx.", p14_pub)
+
 
 if __name__ == "__main__":
     unittest.main()

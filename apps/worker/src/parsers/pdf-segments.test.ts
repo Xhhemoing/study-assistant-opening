@@ -5,11 +5,11 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, PdfSegment, PdfSegmentIdentity, PdfSegmentPage } from "@aistudy/database";
-import { createParseSourceHandler, sealTextWithState } from "../jobs/parse-source";
+import { createParseSourceHandler, sealTextWithState, type ParseSourceVisualPageInput, type ParseSourceVisualPageResult } from "../jobs/parse-source";
 import { BoundsExceededError } from "./docling-process";
 import { MAX_PDF_BOOK_PAGES, parsePdfSegments, watchPdfExecution, type PdfSegmentBatch } from "./pdf-segments";
 import { pdfParserProfile } from "./ocr-health";
-import type { ParserRunner } from "./types";
+import type { ParserRunner, VisualPageKind } from "./types";
 
 const scope = { workspaceId: "w", ownerUserId: "u", jobExecution: { id: "job", token: "claim", privacyEpoch: 0 } };
 function setup(total = 23) {
@@ -585,13 +585,13 @@ describe("bounded resumable PDF parser", () => {
     pages: Array<{
       page: number;
       text: string;
-      visualKinds?: Array<"scan" | "figure" | "table" | "formula" | "handwriting">;
+      visualKinds?: VisualPageKind[];
       discourseBlocks?: Array<Record<string, unknown>>;
     }>;
     savedChunks?: NewSourceChunk[];
     recognizePages?: (
-      inputs: Array<{ physicalPage: number; nativeText: string; visualKinds: string[] }>,
-    ) => AsyncGenerator<{ text: string; imageObjectKey: string } | null>;
+      inputs: readonly ParseSourceVisualPageInput[],
+    ) => AsyncGenerator<ParseSourceVisualPageResult | null, void, void>;
   }) {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-r3-"));
     try {
@@ -796,5 +796,123 @@ describe("bounded resumable PDF parser", () => {
       ],
     );
     expect(rawSpanText).toBe("Problem 1.\n\nTheorem 1.");
+  });
+
+  it("Round-4: promotes dotted items and bare chapters after docling-blank pages, handles multi-bold markdown, and keeps lowercase wrapped solution public", async () => {
+    const dottedAfterBlank = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: [] },
+        { page: 2, text: "1.1 x = 3\n1.2 y = 4", visualKinds: [] },
+        { page: 3, text: "Chapter 2\n1. x = 3", visualKinds: [] },
+        { page: 4, text: "第二章\n1. x = 3", visualKinds: [] },
+        { page: 5, text: "Section 1.2\n1. x = 3", visualKinds: [] },
+        { page: 6, text: "**Chapter 2**: **Vector Spaces**\nTheorem 2.1: Basis exists.", visualKinds: [] },
+      ],
+    });
+    expect(dottedAfterBlank.publishedChunks.map(c => c.page)).toEqual([6]);
+    expect(dottedAfterBlank.publishedChunks[0]?.text).toBe("**Chapter 2**: **Vector Spaces**\nTheorem 2.1: Basis exists.");
+
+    const exerciseAfterBlank = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: [] },
+        { page: 2, text: "Exercise 1: Compute x + 1.", visualKinds: [] },
+      ],
+    });
+    expect(exerciseAfterBlank.publishedChunks.map(c => c.page)).toEqual([2]);
+
+    const multiBoldAndCase = await runPdfScenario({
+      pages: [
+        { page: 1, text: "The equation has a unique\nsolution\nfor all x > 0.", visualKinds: [] },
+        { page: 2, text: "Problem 1.\n**Answer**: **42**\n\n**课后答案**：**1. x = 3**", visualKinds: [] },
+        { page: 3, text: "2. y = 4\n## Next Topic\nWorked Solution\nx = 2.", visualKinds: [] },
+      ],
+    });
+    expect(multiBoldAndCase.publishedChunks.map(c => c.page)).toEqual([1, 2, 3]);
+    expect(multiBoldAndCase.publishedChunks[0]?.text).toBe("The equation has a unique\nsolution\nfor all x > 0.");
+    expect(multiBoldAndCase.publishedChunks[1]?.text).toBe("Problem 1.");
+    expect(multiBoldAndCase.publishedChunks[2]?.text).toBe("## Next Topic");
+  });
+
+  it("Round-4: strips stale [视觉转写与描述] headers, redacts sealed imageObjectKey, preserves Vision sealState on reuse, and falls back to recognizePages", async () => {
+    const staleVisionOnly = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Exercises 1:\nSolve x.", visualKinds: [] },
+        { page: 2, text: "", visualKinds: ["scan"] },
+        { page: 3, text: "Theorem 1: Always true.", visualKinds: ["picture"] },
+      ],
+      savedChunks: [
+        {
+          page: 2,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[视觉转写与描述]\nAnswer Key\n1. x = 1",
+          imageObjectKey: "vision/p2-secret",
+        },
+        {
+          page: 3,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[原生提取]\nTheorem 1: Always true.\n\n[视觉转写与描述]\nAnswer Key\n2. y = 2",
+          imageObjectKey: "vision/p3-secret",
+        },
+      ],
+    });
+    expect(staleVisionOnly.publishedChunks.map(c => c.page)).toEqual([1, 3]);
+    expect(staleVisionOnly.publishedChunks[1]?.text).toBe("Theorem 1: Always true.");
+    expect(staleVisionOnly.publishedChunks[1]?.imageObjectKey).toBeNull();
+
+    const reusedWithAnswerKey = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: ["scan"] },
+        { page: 2, text: "2. y = 2", visualKinds: [] },
+        { page: 3, text: "Chapter 2: Vector Spaces\nIntro.", visualKinds: [] },
+      ],
+      savedChunks: [
+        {
+          page: 1,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[视觉转写与描述]\nTheorem 1.\n\nAnswer Key\n1. x = 1",
+          imageObjectKey: "vision/p1-public",
+        },
+      ],
+    });
+    expect(reusedWithAnswerKey.publishedChunks.map(c => c.page)).toEqual([1, 3]);
+    expect(reusedWithAnswerKey.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nTheorem 1.");
+    expect(reusedWithAnswerKey.publishedChunks[0]?.imageObjectKey).toBe("vision/p1-public");
+
+    const seenPages: number[] = [];
+    const fallbackOnDynamicInvalidation = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: ["scan"] },
+        { page: 2, text: "", visualKinds: ["scan"] },
+      ],
+      savedChunks: [
+        {
+          page: 2,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[视觉转写与描述]\n1. x = 1",
+          imageObjectKey: "vision/stale-p2",
+        },
+      ],
+      recognizePages: async function* (inputs) {
+        for (const input of inputs) {
+          seenPages.push(input.physicalPage);
+          if (input.physicalPage === 1) yield { text: "Answer Key\n0. x = 0", imageObjectKey: "img-1" };
+          else if (input.physicalPage === 2) yield { text: "Chapter 2: Vector Spaces\nRecovered page 2.", imageObjectKey: "img-2" };
+        }
+      },
+    });
+    expect(seenPages).toEqual([1, 2]);
+    expect(fallbackOnDynamicInvalidation.outcome).toEqual({ pages: 2 });
+    expect(fallbackOnDynamicInvalidation.pdfWarning).toBeUndefined();
+    expect(fallbackOnDynamicInvalidation.publishedChunks).toHaveLength(1);
+    expect(fallbackOnDynamicInvalidation.publishedChunks[0]?.page).toBe(2);
+    expect(fallbackOnDynamicInvalidation.publishedChunks[0]?.text).toContain("Recovered page 2.");
   });
 });

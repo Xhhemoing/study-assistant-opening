@@ -134,6 +134,16 @@ describe("material hybrid retrieval", () => {
     const segPrices = segmentMaterialChunks([chunk("prices", pricesList)], 32);
     expect(segPrices.map(s => s.chunk.text).join("")).toBe(pricesList);
     expect(segPrices.every(s => encoder.encode(s.chunk.text).length <= 32)).toBe(true);
+
+    const zhCurrencyBeforeMath = "售价$50，求解" + "u".repeat(55) + "$x + y = z$。";
+    const segZh = segmentMaterialChunks([chunk("zh-curr", zhCurrencyBeforeMath)], 75);
+    expect(segZh.map(s => s.chunk.text).join("")).toBe(zhCurrencyBeforeMath);
+    expect(segZh.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
+
+    const enCurrencyBeforeMath = "Cost $50;find" + "u".repeat(55) + "$x + y = z$.";
+    const segEn = segmentMaterialChunks([chunk("en-curr", enCurrencyBeforeMath)], 75);
+    expect(segEn.map(s => s.chunk.text).join("")).toBe(enCurrencyBeforeMath);
+    expect(segEn.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
   });
 
   it("scans pathological backslash and mismatched-env inputs in linear O(N) time", () => {

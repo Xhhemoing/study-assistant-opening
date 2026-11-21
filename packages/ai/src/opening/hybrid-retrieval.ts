@@ -41,8 +41,7 @@ function codePointUtf8Bytes(cp: number): number {
 
 const BEGIN_ENV_RE = /\\begin\{([A-Za-z][A-Za-z0-9*]*)\}/y;
 const END_ENV_RE = /\\end\{([A-Za-z][A-Za-z0-9*]*)\}/y;
-const LATEX_CMD_RE = /\\[A-Za-z]+/g;
-const CURRENCY_PROSE_WORD_RE = /\b(?:and|or|to|for|per|with|from|in|of|at|is|are|was|were|cost|costs|price|prices|usd|cad|aud|eur|cents?|dollars?)\b/i;
+const CURRENCY_PROSE_OR_NON_MATH_RE = /\b(?:and|or|to|for|per|with|from|in|of|at|is|are|was|were|cost|costs|price|prices|usd|cad|aud|eur|cents?|dollars?)\b|\b[A-Za-z]{2,}\b|[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/iu;
 const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 
 function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
@@ -70,7 +69,7 @@ function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
   if (/\s/.test(prev) || (next >= "0" && next <= "9")) return true;
   const inner = text.slice(dollarIndex + 1, closeIdx);
   if (MATH_COMMAND_OR_OP_RE.test(inner)) return false;
-  if (CURRENCY_PROSE_WORD_RE.test(inner.replace(LATEX_CMD_RE, " "))) return true;
+  if (CURRENCY_PROSE_OR_NON_MATH_RE.test(inner)) return true;
   return false;
 }
 
