@@ -145,7 +145,10 @@ export async function assertNativeCardRestorePrivacy(sql: Sql, workspaceId: stri
       throw new BackupRestoreError("VALIDATION", "Restore cannot replace retained card origins");
     }
     if (ids.length && packed.sourceWorkspaceId !== workspaceId) throw new BackupRestoreError("VALIDATION", "linked cards require their original workspace and source materials");
-    const combined = [...new Set([...ids, ...((current?.source_ids ?? []) as string[])])];
+    const combined = [...new Set([...ids, ...((current?.source_ids ?? []) as string[])].map(id => id.toLowerCase()))];
+    if (current && combined.length > 32) {
+      throw new BackupRestoreError("VALIDATION", "Retained card source lineage exceeds 32 materials");
+    }
     const [admitted] = await sql`SELECT ${cardSourcesIncluded(sql, workspaceId, sql`${combined}::uuid[]`)} AS included`;
     if (!admitted?.included) throw new BackupRestoreError("VALIDATION", "card source is deleted, excluded, or unavailable");
   }

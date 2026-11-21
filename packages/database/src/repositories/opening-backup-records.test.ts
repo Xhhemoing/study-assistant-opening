@@ -46,6 +46,37 @@ function fakeSql(handler: (call: Call) => unknown[]) {
 }
 
 describe("readOpeningBackupRecords", () => {
+  it("keeps role-only answer IDs and activity sources when the library is read again", async () => {
+    const live = { id: candidateId, source_ids: [turnId] };
+    const dropped = { id: "dropped-activity" };
+    const doc = { id: workspaceId, workspace_id: workspaceId };
+    const key = { id: ownerUserId, type: "text", document_id: doc.id, content: { text: "private answer" } };
+    const visible = { ...key, id: "visible", content: { text: "public lesson" } };
+    const sql = fakeSql(({ query }) => {
+      const statement = query.trim();
+      if (statement.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (statement.startsWith("SELECT id, workspace_id, name, mime")) return [{ id: turnId, version: 2 }];
+      if (statement.startsWith("SELECT a.id, a.workspace_id, a.owner_user_id, a.course_id, a.status")) return [live, dropped];
+      if (statement.startsWith("SELECT u.id, u.workspace_id, u.owner_user_id, u.title")) return [{ id: "unit", document_id: doc.id }];
+      if (statement.startsWith("SELECT s.id, s.workspace_id, s.owner_user_id, s.activity_id, s.teaching_unit_id")) return [
+        { id: "kept-spec", activity_id: live.id, teaching_unit_id: "unit", document_id: doc.id, source_refs: [],
+          block_order: [{ blockId: key.id, blockType: "text", role: "answer_key" }] },
+        { id: "dropped-spec", activity_id: dropped.id, teaching_unit_id: "missing-unit", document_id: "missing-document", source_refs: [] },
+      ];
+      if (statement.startsWith("SELECT d.id,d.workspace_id,d.title")) return [doc];
+      if (statement.startsWith("SELECT b.id,b.workspace_id,b.document_id")) return [key, visible];
+      if (statement.startsWith("SELECT r.id,r.workspace_id,r.document_id")) return [{ document_id: doc.id, blocks: [key, visible] }];
+      return [];
+    });
+    const { tables } = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+    expect(sql.calls.filter(call => call.query.trim().startsWith("SELECT b.id,b.workspace_id,b.document_id"))).toHaveLength(2);
+    expect(tables.library_blocks).toEqual([visible]);
+    expect(tables.library_revisions[0]?.blocks).toEqual([visible]);
+    expect(tables.opening_note_provenance).toMatchObject([{ document_id: doc.id, context_source_refs: [
+      { sourceId: turnId, sourceVersion: 2, publication: true }, { answerKeyBlockIds: [key.id] },
+    ] }]);
+  });
+
   it("authorizes first and reads the fixed durable table set in one read-only transaction", async () => {
     const sql = fakeSql((call) => call.query.includes("FROM workspaces") ? [{ privacy_epoch: 3 }] : []);
     const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });

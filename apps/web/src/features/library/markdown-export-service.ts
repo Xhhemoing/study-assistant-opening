@@ -17,9 +17,10 @@ export async function exportMarkdownForPrincipal(
   body: unknown,
 ): Promise<MarkdownExportResponse> {
   const parsed = markdownExportRequestSchema.parse(body ?? {});
+  const options = { redactAnswerKeys: true };
   const documents = parsed.documentId
-    ? [await getDocumentForPrincipal(runtime, principal, parsed.documentId)]
-    : await listDocumentsForPrincipal(runtime, principal);
+    ? [await getDocumentForPrincipal(runtime, principal, parsed.documentId, options)]
+    : await listDocumentsForPrincipal(runtime, principal, options);
 
   const extras: LossEntry[] = [];
   const portable = await Promise.all(documents.map(async (document) => {

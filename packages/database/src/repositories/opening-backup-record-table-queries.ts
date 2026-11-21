@@ -292,6 +292,8 @@ export async function readOpeningBackupTableRows(
   let turnIds!: Set<unknown>;
   let admittedAnchor!: (row: Record<string, unknown>) => boolean;
   const noteProvenance = await readBackupNoteProvenance(tx, id);
+  // Each pass rereads library content. Keep the original answer labels after block-order projection.
+  const originalSpecs = tables.opening_teaching_activity_specs;
   for (;;) {
     const currentActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
     if (tables.opening_teaching_activity_specs.some(row => !currentActivityIds.has(row.activity_id))) {
@@ -300,7 +302,7 @@ export async function readOpeningBackupTableRows(
       const keptUnitsAfterDrop = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
       tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !unitsFromSpecs.has(row.id) || keptUnitsAfterDrop.has(row.id));
     }
-    libraryTables = await readBackupLibrary(tx, id, tables, privateExams, noteProvenance);
+    libraryTables = await readBackupLibrary(tx, id, tables, privateExams, noteProvenance, originalSpecs);
     const specsAfterLibrary = new Map<unknown, number>();
     for (const spec of tables.opening_teaching_activity_specs) {
       specsAfterLibrary.set(spec.activity_id, (specsAfterLibrary.get(spec.activity_id) ?? 0) + 1);

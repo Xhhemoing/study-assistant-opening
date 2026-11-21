@@ -27,13 +27,21 @@ export function parseBackupSourceRefs(value: unknown): BackupSourceRef[] | null 
   return refs.map(ref => publications.has(`${ref.sourceId}:${ref.sourceVersion}`) ? { ...ref, publication: true } : ref);
 }
 
+/** Activity-only sources use the current version when there is no explicit citation. */
+export function publicationSourceCandidates(spec: Row): unknown[] {
+  const citations = Array.isArray(spec.source_refs) ? spec.source_refs : [];
+  const activityIds = Array.isArray(spec.activity_source_ids) ? spec.activity_source_ids : [];
+  const citedIds = new Set(citations.map(value => String(asObject(value)?.sourceId).toLowerCase()));
+  return [...citations, ...activityIds.filter(id => !citedIds.has(String(id).toLowerCase())).map(sourceId => ({ sourceId }))];
+}
+
 export function publicationSourceRefsByDocument(specs: Row[], sourceVersions: ReadonlyMap<string, number>) {
   const documents = new Map<string, PublicationSourceRef[]>();
   for (const spec of specs) {
     if (typeof spec.document_id !== "string" || !Array.isArray(spec.source_refs)) continue;
     const id = spec.document_id.toLowerCase();
     const refs = documents.get(id) ?? [];
-    for (const value of spec.source_refs) {
+    for (const value of publicationSourceCandidates(spec)) {
       const citation = asObject(value);
       if (typeof citation?.sourceId !== "string") continue;
       const sourceId = citation.sourceId.toLowerCase();

@@ -68,12 +68,13 @@ function asGenerationConfig(value: unknown): TeachingGenerationConfig {
 }
 
 async function retainTeachingPublication(tx: TransactionSql, scope: Scope,
-  spec: Pick<ActivitySpec, "activityId" | "documentId" | "sourceRefs" | "blockOrder">, superseded = false) {
-  const sourceIds = [...new Set(spec.sourceRefs.map(ref => ref.sourceId.toLowerCase()))];
+  spec: Pick<ActivitySpec, "activityId" | "documentId" | "sourceRefs" | "blockOrder">,
+  activitySourceIds: string[], superseded = false) {
+  const sourceIds = [...new Set([...activitySourceIds, ...spec.sourceRefs.map(ref => ref.sourceId)].map(id => id.toLowerCase()))];
   const answerIds = answerKeyBlockIds(spec.blockOrder);
   const sources = sourceIds.length ? await tx`SELECT id,version FROM opening_sources
     WHERE workspace_id=${scope.workspaceId} AND id=ANY(${sourceIds}::uuid[])` : [];
-  const refs = publicationSourceRefsByDocument([{ document_id: spec.documentId, source_refs: spec.sourceRefs }],
+  const refs = publicationSourceRefsByDocument([{ document_id: spec.documentId, source_refs: spec.sourceRefs, activity_source_ids: activitySourceIds }],
     new Map(sources.map(row => [String(row.id), Number(row.version)]))).get(spec.documentId.toLowerCase()) ?? [];
   const cards = superseded ? await tx`UPDATE cards c SET source_ids=ARRAY(
     SELECT DISTINCT source.id FROM unnest(c.source_ids || ${sourceIds}::uuid[]) AS source(id) ORDER BY source.id)
@@ -469,6 +470,7 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
           FOR UPDATE`;
         if (!activityRows.length) throw learningError("NOT_FOUND", "teaching activity not found");
         const activity = activityRows[0] as Record<string, unknown>;
+        const activitySourceIds = (activity.source_ids ?? []) as string[];
         const currentContentVersion = Number(activity.content_version);
 
         const unitRows = await tx`
@@ -584,7 +586,7 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
           }, compiled.revisionId);
         }
 
-        if (existingSpec) await retainTeachingPublication(tx, scope, existingSpec,
+        if (existingSpec) await retainTeachingPublication(tx, scope, existingSpec, activitySourceIds,
           existingSpec.documentId !== desiredGraph.documentId || !isDeepStrictEqual(existingSpec.sourceRefs, sourceRefs));
         const specId = existingSpec?.id ?? randomUUID();
         const upserted = await tx`
@@ -634,7 +636,7 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
             AND workspace_id = ${scope.workspaceId}`;
 
         const spec = mapSpec(upserted[0] as Record<string, unknown>);
-        await retainTeachingPublication(tx, scope, spec);
+        await retainTeachingPublication(tx, scope, spec, activitySourceIds);
         return spec;
   }
 

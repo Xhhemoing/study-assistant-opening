@@ -4,7 +4,7 @@ import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 import { backupPrivateLibrary } from "./backup-private-library";
 import { asObject } from "./backup-map";
 import { withPublicationCardSourceIds } from "./card-sources";
-import { historicalTeachingDocumentsByCard, parseBackupSourceRefs, publicationAnswerKeysByDocument, publicationMetadata, publicationMetadataIds, publicationSourceRefsByDocument } from "./backup-publication-provenance";
+import { historicalTeachingDocumentsByCard, parseBackupSourceRefs, publicationAnswerKeysByDocument, publicationMetadata, publicationMetadataIds, publicationSourceCandidates, publicationSourceRefsByDocument } from "./backup-publication-provenance";
 
 type Tables = OpeningBackupRecordSnapshot["tables"];
 type LibraryTables = Partial<Record<string, Record<string, unknown>[]>>;
@@ -20,22 +20,29 @@ export function readBackupNoteProvenance(sql: Sql | TransactionSql, workspace: s
 
 export function excludedTeachingDocumentIds(specs: Record<string, unknown>[], sources: ReadonlySet<string>): string[] {
   return specs.flatMap(spec => typeof spec.document_id === "string" &&
-    (!Array.isArray(spec.source_refs) || spec.source_refs.some(ref => {
+    (!Array.isArray(spec.source_refs) || publicationSourceCandidates(spec).some(ref => {
       const source = asObject(ref)?.sourceId;
       return typeof source !== "string" || !sources.has(source.toLowerCase());
     })) ? [spec.document_id] : []);
 }
 
 export function readBackupTeachingSourceRefs(sql: Sql | TransactionSql, workspace: string) {
-  return sql`SELECT spec.document_id,spec.source_refs,spec.block_order FROM opening_teaching_activity_specs spec
+  return sql`SELECT spec.document_id,spec.source_refs,spec.block_order,a.source_ids AS activity_source_ids
+    FROM opening_teaching_activity_specs spec
+    JOIN opening_teaching_activities a ON a.id=spec.activity_id AND a.workspace_id=spec.workspace_id
     JOIN library_documents d ON d.id=spec.document_id
     WHERE spec.workspace_id=${workspace} AND d.workspace_id=${workspace}`;
+}
+
+function teachingSpecsWithActivitySources(tables: LibraryTables): Record<string, unknown>[] {
+  const activities = new Map((tables.opening_teaching_activities ?? []).map(row => [row.id, row.source_ids]));
+  return (tables.opening_teaching_activity_specs ?? []).map(spec => ({ ...spec, activity_source_ids: activities.get(spec.activity_id) }));
 }
 
 /** Portable automatic cards retain publication lineage even after the spec is detached. */
 export function projectOpeningBackupCardSources(tables: LibraryTables, allProvenance = tables.opening_note_provenance ?? []) {
   const observations = new Map((tables.opening_learning_observations ?? []).map(row => [row.id, row.activity_id]));
-  const specs = tables.opening_teaching_activity_specs ?? [];
+  const specs = teachingSpecsWithActivitySources(tables);
   const documentByActivity = new Map(specs.map(row => [row.activity_id, row.document_id]));
   const sourcesByDocument = new Map<string, Set<string>>();
   function addSources(document: unknown, refs: unknown, historical: boolean) {
@@ -48,7 +55,7 @@ export function projectOpeningBackupCardSources(tables: LibraryTables, allProven
     }
     sourcesByDocument.set(id, sources);
   }
-  for (const row of specs) addSources(row.document_id, row.source_refs, false);
+  for (const row of specs) addSources(row.document_id, publicationSourceCandidates(row), false);
   for (const row of allProvenance) addSources(row.document_id, row.context_source_refs, true);
   const historicalDocuments = historicalTeachingDocumentsByCard(allProvenance);
   const includedDocuments = tables.library_documents && new Set(tables.library_documents.filter(row => row.deleted_at == null)
@@ -94,7 +101,7 @@ function projectTeachingBlockOrder(row: Record<string, unknown>, blockAllowed: (
 function withOpeningPublicationProvenance(tables: LibraryTables) {
   const provenance = new Map((tables.opening_note_provenance ?? []).map(row => [String(row.document_id).toLowerCase(), row]));
   const docs = new Map((tables.library_documents ?? []).map(row => [String(row.id).toLowerCase(), row]));
-  const specs = tables.opening_teaching_activity_specs ?? [];
+  const specs = teachingSpecsWithActivitySources(tables);
   const sources = new Map((tables.opening_sources ?? []).map(row => [String(row.id).toLowerCase(), Number(row.version)]));
   const publications = publicationSourceRefsByDocument(specs, sources);
   const answerKeys = publicationAnswerKeysByDocument(specs, [...provenance.values()]);
@@ -163,9 +170,9 @@ export function isPrivateExamActivity(sql: Sql | TransactionSql, privateExams: s
 /** The same historical lineage predicate used by native note export. Child objects follow
  * admitted document and block identities, including both ends of polymorphic relations. */
 export async function readBackupLibrary(tx: TransactionSql, workspace: string, tables: Tables, privateExams: string[],
-  provenance: Record<string, unknown>[]) {
+  provenance: Record<string, unknown>[], originalSpecs: Record<string, unknown>[]) {
   const sourceIds = new Set(tables.opening_sources.map(row => String(row.id)));
-  const excludedDocuments = [...privateExams, ...excludedTeachingDocumentIds(tables.opening_teaching_activity_specs, sourceIds)];
+  const excludedDocuments = [...privateExams, ...excludedTeachingDocumentIds(teachingSpecsWithActivitySources(tables), sourceIds)];
   const documents = [...await tx`SELECT d.id,d.workspace_id,d.title,d.lifecycle,d.schema_version,d.current_revision_number,
       d.created_at,d.updated_at,d.deleted_at FROM library_documents d
     WHERE d.workspace_id=${workspace} AND NOT (d.id=ANY(${excludedDocuments}::uuid[]))
@@ -188,7 +195,7 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
       r.title,r.lifecycle,r.reason,r.blocks,r.created_at FROM library_revisions r
     WHERE r.workspace_id=${workspace} AND r.document_id=ANY(${candidateIds}::uuid[]) ORDER BY r.document_id,r.revision_number`];
   const library = backupPrivateLibrary(documents, blocks, revisions, "document_id", [],
-    privateTeachingBlockIds({ ...tables, opening_note_provenance: provenance }), sourceIds);
+    privateTeachingBlockIds({ opening_teaching_activity_specs: originalSpecs, opening_note_provenance: provenance }), sourceIds);
   const ids = library.documents.map(row => String(row.id));
   const blockIds = library.blocks.map(row => String(row.id));
   const relations = [...await tx`SELECT id,workspace_id,from_type,from_id,to_type,to_id,relation_type,created_at,source
@@ -204,11 +211,14 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
   tables.opening_teaching_units = tables.opening_teaching_units.filter(row => documentsIncluded.has(String(row.document_id)));
   const units = new Set(tables.opening_teaching_units.map(row => row.id));
   const specs = tables.opening_teaching_activity_specs.filter(row => documentsIncluded.has(String(row.document_id)) && units.has(row.teaching_unit_id));
+  const retainedSpecIds = new Set(specs.map(row => row.id));
   tables.opening_teaching_activity_specs = specs.map(row => projectTeachingBlockOrder(row, library.blockAllowed));
   return { library_documents: library.documents, library_blocks: library.blocks, library_revisions: library.revisions,
     library_relations: relations, library_properties: properties,
     opening_note_provenance: withOpeningPublicationProvenance({
-      library_documents: library.documents, opening_teaching_activity_specs: specs, opening_sources: tables.opening_sources,
+      library_documents: library.documents,
+      opening_teaching_activity_specs: originalSpecs.filter(row => retainedSpecIds.has(row.id)),
+      opening_teaching_activities: tables.opening_teaching_activities, opening_sources: tables.opening_sources,
       opening_note_provenance: provenance.filter(row => documentsIncluded.has(String(row.document_id))),
     }) };
 }

@@ -12,6 +12,7 @@ import { createMemoryOpeningRestoreObjectPut, executeOpeningRestoreApply, readOp
 import { insertTestTeachingActivity } from "./opening-fixture";
 import { dumpWorkspaceSnapshot, snapshotToPackage } from "../../packages/database/src/repositories/backup-dump";
 import { createBackupRestoreRepository } from "../../packages/database/src/repositories/backup-restore";
+import { createCardRepository } from "../../packages/database/src/repositories/cards";
 import { createOpeningKnowledgeRepository } from "../../packages/database/src/repositories/opening-knowledge";
 import { createOpeningSourceChunksRepository } from "../../packages/database/src/repositories/opening-source-chunks";
 import { createOpeningFirstLearningRepository } from "../../packages/database/src/repositories/opening-first-learning";
@@ -268,7 +269,7 @@ it("excludes historical teaching text and dependent records when a superseded pu
   } finally { await sql.end(); }
 });
 
-it.each(["single", "superseded"])("retains %s publication sources on Opening v2 documents and cards after restore and spec removal", async publication => {
+it.each(["activity-only", "superseded"])("retains %s publication sources on Opening v2 documents and cards after restore and spec removal", async publication => {
   const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
   const sql = createSqlClient(url.toString(), { max: 1 });
   const rollback = new Error("rollback Opening card restore"), discardSeed = new Error("discard source workspace");
@@ -288,11 +289,23 @@ it.each(["single", "superseded"])("retains %s publication sources on Opening v2 
         const [lesson] = await tx`SELECT activity_id,course_id FROM opening_learning_sessions WHERE id=${session}`;
         await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${lesson!.course_id},${w},'Course','course')`;
         await tx`UPDATE opening_teaching_activities SET course_id=${lesson!.course_id} WHERE id=${lesson!.activity_id}`;
+        if (publication === "activity-only") {
+          await tx`UPDATE opening_teaching_activities SET source_ids=${[source]} WHERE id=${lesson!.activity_id}`;
+        }
         const unit = await teaching.createUnit(scope, { title: "Lesson",
           blocks: [{ id: block, type: "text", content: { text: "Publication-derived lesson" } }] });
         const spec = { activityId: String(lesson!.activity_id), teachingUnitId: unit.id,
-          revisionNumber: unit.currentRevisionNumber, blockOrder: [], sourceRefs: [{ sourceId: source, version: 1 }] };
+          revisionNumber: unit.currentRevisionNumber, blockOrder: [],
+          sourceRefs: publication === "activity-only" ? [] : [{ sourceId: source, version: 1 }] };
         await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 0 });
+        if (publication === "activity-only") {
+          const expected = [{ sourceId: source, sourceVersion: 1, publication: true }];
+          expect(await tx`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${unit.documentId}`)
+            .toEqual([{ context_source_refs: expected }]);
+          await tx`DELETE FROM opening_note_provenance WHERE document_id=${unit.documentId}`;
+          const native = await createBackupRestoreRepository(db).exportWorkspace(scope);
+          expect(native.records.documents[0]?.openingProvenance).toMatchObject({ contextSourceRefs: expected });
+        }
         if (publication === "superseded") await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 1, sourceRefs: [] });
         await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
           VALUES(${card},${w},${u},'Lesson card','Learner answer',${observation})`;
@@ -308,8 +321,8 @@ it.each(["single", "superseded"])("retains %s publication sources on Opening v2 
         } });
         if (!composed.ok) throw new Error(composed.errors.join(", "));
         const backup = JSON.parse(JSON.stringify(composed.backup)) as OpeningBackup;
-        // A legacy archive with one publication only records its source on the spec.
-        if (publication === "single") {
+        // An older archive may only record the source on the parent activity.
+        if (publication === "activity-only") {
           backup.tables.opening_note_provenance = [];
           backup.tables.opening_teaching_activity_specs![0]!.block_order = [{ blockId: key, blockType: "text", role: "answer_key" }];
           (backup.tables.library_revisions![0]!.blocks as Record<string, unknown>[]).push(keyBlock);
@@ -331,7 +344,7 @@ it.each(["single", "superseded"])("retains %s publication sources on Opening v2 
       expect(await outer`SELECT source_ids FROM cards WHERE id=${card}`).toEqual([{ source_ids: [source] }]);
       await outer`DELETE FROM opening_teaching_activity_specs WHERE workspace_id=${w}`;
       await outer`DELETE FROM opening_teaching_units WHERE workspace_id=${w}`;
-      if (publication === "single") {
+      if (publication === "activity-only") {
         const restored = await createBackupRestoreRepository(db).exportWorkspace(scope);
         expect(restored.records.documents[0]!.openingProvenance).toMatchObject({ answerKeyBlockIds: [key] });
         expect(JSON.stringify(restored.records.revisions)).not.toContain(keyBlock.content.text);
@@ -339,7 +352,8 @@ it.each(["single", "superseded"])("retains %s publication sources on Opening v2 
       await backupRows(db, scope).exclude(source);
       const openingAfter = await readOpeningBackupRecords(db, scope);
       const nativeAfter = await createBackupRestoreRepository(db).exportWorkspace(scope);
-      expect(openingAfter.tables.opening_learning_observations).toMatchObject([{ id: observation }]);
+      if (publication === "activity-only") expect(openingAfter.tables.opening_learning_observations).toEqual([]);
+      else expect(openingAfter.tables.opening_learning_observations).toMatchObject([{ id: observation }]);
       for (const artifact of [openingAfter.tables, nativeAfter.records]) {
         for (const omitted of [document, block, card, review]) {
           expect(JSON.stringify(artifact)).not.toContain(omitted);
@@ -366,7 +380,7 @@ async function withPublicationFixture(run: (tx: TransactionSql, scope: { workspa
   } finally { await sql.end(); }
 }
 
-it.each(["publication source", "old document"])("blocks an automatic card after switching units and excluding the %s", async exclusion => {
+it.each(["publication source", "old document", "soft-deleted document"])("blocks an automatic card after switching units and restricting the %s", async exclusion => {
   await withPublicationFixture(async (tx, scope) => {
     const db = transactionClient(tx), rows = backupRows(db, scope), backups = createBackupRestoreRepository(db);
     const teaching = createOpeningTeachingContentRepository(db);
@@ -397,11 +411,22 @@ it.each(["publication source", "old document"])("blocks an automatic card after 
     expect((await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "skip" })).applied)
       .toMatchObject({ cards: 1, events: 3 });
     expect((await readOpeningBackupRecords(db, scope)).tables.cards).toMatchObject([{ id: card }]);
-    await rows.exclude(exclusion === "publication source" ? sourceA : documentSource);
+    if (exclusion === "soft-deleted document") {
+      await tx`UPDATE library_documents SET deleted_at=now() WHERE id=${first.documentId}`;
+    } else {
+      // A legacy card may rely solely on the historical document for its earlier source.
+      if (exclusion === "publication source") await tx`UPDATE cards SET source_ids=${[sourceB]} WHERE id=${card}`;
+      await rows.exclude(exclusion === "publication source" ? sourceA : documentSource);
+    }
+    if (exclusion !== "old document") {
+      await expect(createCardRepository(db).getCard({ workspaceId: scope.workspaceId, cardId: card }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
     for (const artifact of [(await backups.exportWorkspace(scope)).records, (await readOpeningBackupRecords(db, scope)).tables]) {
       const wire = JSON.stringify(artifact);
       expect(wire).toContain(second.documentId);
-      for (const id of [first.documentId, card, review, ...corrections]) expect(wire).not.toContain(id);
+      for (const id of [card, review, ...corrections]) expect(wire).not.toContain(id);
+      if (exclusion !== "soft-deleted document") expect(wire).not.toContain(first.documentId);
     }
   });
 });
@@ -524,8 +549,10 @@ it("remembers a text block's answer-key role after republication and restore", a
 it("merges Native skip lineage before importing revisions and reviews onto retained parents", async () => {
   await withPublicationFixture(async (tx, scope) => {
     const db = transactionClient(tx), rows = backupRows(db, scope), backups = createBackupRestoreRepository(db);
-    const source = await rows.source(), retainedSource = await rows.source(), session = await rows.learning(), observation = await rows.observation(session);
+    const source = await rows.source(), activitySource = await rows.source(), retainedSource = await rows.source();
+    const session = await rows.learning(), observation = await rows.observation(session);
     const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
+    await tx`UPDATE opening_teaching_activities SET source_ids=${[activitySource]} WHERE id=${origin!.activity_id}`;
     const teaching = createOpeningTeachingContentRepository(db), block = randomUUID(), key = randomUUID();
     const unit = await teaching.createUnit(scope, { title: "Lesson", blocks: [
       { id: block, type: "text", content: { text: "Publication-derived revision" } }, { id: key, type: "text", content: { text: "Answer key" } },
@@ -547,12 +574,13 @@ it("merges Native skip lineage before importing revisions and reviews onto retai
     expect(restored.applied).toMatchObject({ revisions: 1, events: 3 });
     const before = await backups.exportWorkspace(scope);
     expect(before.records.documents).toMatchObject([{ openingProvenance: { answerKeyBlockIds: [key], contextSourceRefs: expect.arrayContaining([
-      { sourceId: source, sourceVersion: 1, publication: true }, { sourceId: retainedSource, sourceVersion: 1, publication: true },
+      { sourceId: source, sourceVersion: 1, publication: true }, { sourceId: activitySource, sourceVersion: 1, publication: true },
+      { sourceId: retainedSource, sourceVersion: 1, publication: true },
     ]) } }]);
     expect(before.records.cards).toMatchObject([{ id: card, originObservationRootId: observation,
-      sourceIds: expect.arrayContaining([source, retainedSource]) }]);
+      sourceIds: expect.arrayContaining([source, activitySource, retainedSource]) }]);
     expect(before.records.events.map(row => row.id)).toEqual(expect.arrayContaining([review, ...corrections]));
-    await rows.exclude(source);
+    await rows.exclude(activitySource);
     for (const artifact of [(await backups.exportWorkspace(scope)).records, (await readOpeningBackupRecords(db, scope)).tables]) {
       for (const id of [unit.documentId, revision, card, review, ...corrections]) expect(JSON.stringify(artifact)).not.toContain(id);
     }
