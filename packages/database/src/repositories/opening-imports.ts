@@ -221,7 +221,7 @@ export function createOpeningImportsRepository(sql: Sql) {
     async removeUnpublishedSource(
       scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, _byteSize: number,
       remove: () => Promise<void>,
-      options?: { putAttempted?: boolean; now?: Date },
+      options?: { putUncertain?: boolean; now?: Date },
     ): Promise<void> {
       const canonicalId = sourceId.toLowerCase();
       await sql.begin(async tx => {
@@ -231,9 +231,9 @@ export function createOpeningImportsRepository(sql: Sql) {
         if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
         const [published] = await tx`SELECT 1 FROM opening_sources WHERE id=${canonicalId} LIMIT 1`;
         if (published) return;
-        const uncertainPut = options?.putAttempted ?? true;
+        const enforceNotBefore = options?.putUncertain ?? true;
         if (await releaseConnectorReservation(tx, scope, canonicalId, key, {
-          enforceNotBefore: uncertainPut,
+          enforceNotBefore,
           now: options?.now,
         })) {
           await remove();

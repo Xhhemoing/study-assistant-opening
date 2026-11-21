@@ -48,7 +48,7 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
   expect(uploadSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
 });
 
-it("forwards putAttempted on uncertain PUT failure and skips cleanup on pre-PUT publish failure", async () => {
+it("forwards putUncertain accurately across pre-PUT, upload failure, and post-upload DB failure", async () => {
   const scope = { workspaceId: "workspace", ownerUserId: "owner" };
   const delivery = {
     connectionVersion: 1,
@@ -67,7 +67,7 @@ it("forwards putAttempted on uncertain PUT failure and skips cleanup on pre-PUT 
     .rejects.toThrow("connection locked");
   expect(removeUnpublishedSource).not.toHaveBeenCalled();
 
-  // Uncertain PUT failure: storage.upload starts then aborts/throws.
+  // Uncertain PUT failure: storage.upload starts then aborts/throws -> putUncertain: true.
   const putErrorImports: Imports = {
     publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
     removeUnpublishedSource,
@@ -76,13 +76,35 @@ it("forwards putAttempted on uncertain PUT failure and skips cleanup on pre-PUT 
     upload: vi.fn(async () => { throw new Error("PUT timed out"); }),
     remove: removeSpy,
   }, scope, delivery)).rejects.toThrow("PUT timed out");
-  expect(removeUnpublishedSource).toHaveBeenCalledWith(
+  expect(removeUnpublishedSource).toHaveBeenLastCalledWith(
     scope,
     delivery.identity,
     expect.any(String),
     expect.stringMatching(/^opening\/sources\/.+\/v0$/),
     delivery.bytes.byteLength,
     expect.any(Function),
-    { putAttempted: true },
+    { putUncertain: true },
+  );
+
+  // Post-upload DB failure: storage.upload succeeded cleanly -> putUncertain: false so reservation releases immediately.
+  const dbErrorImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => {
+      await stage();
+      throw new Error("receipt check constraint failed");
+    }),
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(dbErrorImports, {
+    upload: vi.fn(async () => undefined),
+    remove: removeSpy,
+  }, scope, delivery)).rejects.toThrow("receipt check constraint failed");
+  expect(removeUnpublishedSource).toHaveBeenLastCalledWith(
+    scope,
+    delivery.identity,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    delivery.bytes.byteLength,
+    expect.any(Function),
+    { putUncertain: false },
   );
 });

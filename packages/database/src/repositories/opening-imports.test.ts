@@ -42,12 +42,12 @@ function fakeImportsSql(opts: { committed?: boolean; notBefore: Date }) {
 }
 
 describe("opening imports removeUnpublishedSource grace window", () => {
-  it("releases immediately when putAttempted is false even inside cleanup_not_before", async () => {
+  it("releases immediately when putUncertain is false even inside cleanup_not_before", async () => {
     const clock = new Date("2030-01-01T00:00:10.000Z");
     const db = fakeImportsSql({ notBefore: new Date("2030-01-01T00:01:00.000Z") });
     const remove = vi.fn(async () => undefined);
     await createOpeningImportsRepository(db.sql).removeUnpublishedSource(
-      scope, identity, sourceId, key, 128, remove, { putAttempted: false, now: clock },
+      scope, identity, sourceId, key, 128, remove, { putUncertain: false, now: clock },
     );
     expect(remove).toHaveBeenCalledOnce();
     expect(db.hasReservation()).toBe(false);
@@ -60,14 +60,14 @@ describe("opening imports removeUnpublishedSource grace window", () => {
     const repo = createOpeningImportsRepository(db.sql);
 
     await repo.removeUnpublishedSource(
-      scope, identity, sourceId, key, 128, remove, { putAttempted: true, now: clock },
+      scope, identity, sourceId, key, 128, remove, { putUncertain: true, now: clock },
     );
     expect(remove).toHaveBeenCalledTimes(1);
     expect(db.hasReservation()).toBe(true);
 
     const afterGrace = new Date("2030-01-01T00:01:01.000Z");
     await repo.removeUnpublishedSource(
-      scope, identity, sourceId, key, 128, remove, { putAttempted: true, now: afterGrace },
+      scope, identity, sourceId, key, 128, remove, { putUncertain: true, now: afterGrace },
     );
     expect(remove).toHaveBeenCalledTimes(2);
     expect(db.hasReservation()).toBe(false);
@@ -77,7 +77,7 @@ describe("opening imports removeUnpublishedSource grace window", () => {
     const db = fakeImportsSql({ committed: true, notBefore: new Date("2030-01-01T00:01:00.000Z") });
     const remove = vi.fn(async () => undefined);
     await createOpeningImportsRepository(db.sql).removeUnpublishedSource(
-      scope, identity, sourceId, key, 128, remove, { putAttempted: false },
+      scope, identity, sourceId, key, 128, remove, { putUncertain: false },
     );
     expect(remove).not.toHaveBeenCalled();
   });
