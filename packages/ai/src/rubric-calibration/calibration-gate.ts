@@ -185,6 +185,8 @@ interface ResolvedCalibrationThresholds {
   readonly minAdmissibleCoverage: number;
   readonly lowTailMaxBand: number;
   readonly highTailMinBand: number;
+  readonly customLowTailMaxBand: number | null;
+  readonly customHighTailMinBand: number | null;
   readonly maxPaddingGain: number;
 }
 
@@ -192,7 +194,14 @@ function resolveTighteningThresholds(
   overrides: RubricCalibrationGateThresholds | undefined,
 ): { readonly thresholds: ResolvedCalibrationThresholds; readonly valid: boolean } {
   if (!overrides) {
-    return { thresholds: DEFAULT_CALIBRATION_THRESHOLDS, valid: true };
+    return {
+      thresholds: {
+        ...DEFAULT_CALIBRATION_THRESHOLDS,
+        customLowTailMaxBand: null,
+        customHighTailMinBand: null,
+      },
+      valid: true,
+    };
   }
 
   let valid = true;
@@ -234,20 +243,24 @@ function resolveTighteningThresholds(
     DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage,
     checkFinite(overrides.minAdmissibleCoverage, DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage, 0, 1),
   );
-  const lowTailMaxBand = Math.min(
-    DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand,
-    checkFinite(overrides.lowTailMaxBand, DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand, 0, 9),
-  );
-  const highTailMinBand = Math.max(
-    DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand,
-    checkFinite(overrides.highTailMinBand, DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand, 0, 9),
-  );
+
+  // Default tail cutoffs are always mandatory; custom cutoffs are validated and enforced additionally.
+  const customLowTailMaxBand =
+    overrides.lowTailMaxBand === undefined
+      ? null
+      : checkFinite(overrides.lowTailMaxBand, DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand, 0, 9);
+  const customHighTailMinBand =
+    overrides.highTailMinBand === undefined
+      ? null
+      : checkFinite(overrides.highTailMinBand, DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand, 0, 9);
   const maxPaddingGain = Math.min(
     DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain,
     checkFinite(overrides.maxPaddingGain, DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain, 0, 9),
   );
 
-  if (lowTailMaxBand >= highTailMinBand) {
+  const effectiveCustomLow = customLowTailMaxBand ?? DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand;
+  const effectiveCustomHigh = customHighTailMinBand ?? DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand;
+  if (effectiveCustomLow >= effectiveCustomHigh) {
     valid = false;
   }
 
@@ -260,8 +273,10 @@ function resolveTighteningThresholds(
       maxAbsBiasHigh,
       minSdRatio,
       minAdmissibleCoverage,
-      lowTailMaxBand,
-      highTailMinBand,
+      lowTailMaxBand: DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand,
+      highTailMinBand: DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand,
+      customLowTailMaxBand,
+      customHighTailMinBand,
       maxPaddingGain,
     },
   };
@@ -303,6 +318,17 @@ export function evaluateRubricCalibrationGate(input: {
   if (lowTail.length === 0) failures.add("missing_low_tail_samples");
   if (highTail.length === 0) failures.add("missing_high_tail_samples");
 
+  const customLowTail =
+    t.customLowTailMaxBand !== null
+      ? admissiblePairs.filter((pair) => pair.trueBand <= t.customLowTailMaxBand! + FLOAT_EPSILON)
+      : null;
+  const customHighTail =
+    t.customHighTailMinBand !== null
+      ? admissiblePairs.filter((pair) => pair.trueBand >= t.customHighTailMinBand! - FLOAT_EPSILON)
+      : null;
+  if (customLowTail !== null && customLowTail.length === 0) failures.add("missing_low_tail_samples");
+  if (customHighTail !== null && customHighTail.length === 0) failures.add("missing_high_tail_samples");
+
   const trueBands = admissiblePairs.map((pair) => pair.trueBand);
   const predBands = admissiblePairs.map((pair) => pair.predBand);
 
@@ -323,6 +349,14 @@ export function evaluateRubricCalibrationGate(input: {
 
   const biasLow = lowTail.length > 0 ? mean(lowTail.map((p) => p.predBand - p.trueBand)) : null;
   const biasHigh = highTail.length > 0 ? mean(highTail.map((p) => p.predBand - p.trueBand)) : null;
+  const customBiasLow =
+    customLowTail !== null && customLowTail.length > 0
+      ? mean(customLowTail.map((p) => p.predBand - p.trueBand))
+      : null;
+  const customBiasHigh =
+    customHighTail !== null && customHighTail.length > 0
+      ? mean(customHighTail.map((p) => p.predBand - p.trueBand))
+      : null;
   const sdRatio = sdTrue !== null && sdPred !== null && sdTrue > 0 ? sdPred / sdTrue : null;
 
   if (qwk === null || !Number.isFinite(qwk) || qwk + FLOAT_EPSILON < t.minQwk) {
@@ -331,10 +365,16 @@ export function evaluateRubricCalibrationGate(input: {
   if (smd === null || !Number.isFinite(smd) || Math.abs(smd) > t.maxAbsSmd + FLOAT_EPSILON) {
     failures.add("smd_exceeds_threshold");
   }
-  if (biasLow !== null && Math.abs(biasLow) > t.maxAbsBiasLow + FLOAT_EPSILON) {
+  if (
+    (biasLow !== null && Math.abs(biasLow) > t.maxAbsBiasLow + FLOAT_EPSILON) ||
+    (customBiasLow !== null && Math.abs(customBiasLow) > t.maxAbsBiasLow + FLOAT_EPSILON)
+  ) {
     failures.add("low_tail_bias_exceeds_threshold");
   }
-  if (biasHigh !== null && Math.abs(biasHigh) > t.maxAbsBiasHigh + FLOAT_EPSILON) {
+  if (
+    (biasHigh !== null && Math.abs(biasHigh) > t.maxAbsBiasHigh + FLOAT_EPSILON) ||
+    (customBiasHigh !== null && Math.abs(customBiasHigh) > t.maxAbsBiasHigh + FLOAT_EPSILON)
+  ) {
     failures.add("high_tail_bias_exceeds_threshold");
   }
   if (sdRatio === null || !Number.isFinite(sdRatio) || sdRatio + FLOAT_EPSILON < t.minSdRatio) {

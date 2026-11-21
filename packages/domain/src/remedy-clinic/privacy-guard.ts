@@ -120,16 +120,37 @@ export function isSourceRefActive(
   return entry.version === ref.sourceVersion;
 }
 
+export function isDenseArray<T>(value: unknown): value is readonly T[] {
+  if (!Array.isArray(value)) return false;
+  for (let i = 0; i < value.length; i += 1) {
+    if (!Object.hasOwn(value, i)) return false;
+  }
+  return true;
+}
+
 export function areSourceRefsActive(
   sourceRefs: readonly RemedySourceRef[],
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
   if (!Array.isArray(sourceRefs) || sourceRefs.length === 0) return false;
-  return sourceRefs.every((ref) => isSourceRefActive(ref, activeSourcesMap));
+  for (let i = 0; i < sourceRefs.length; i += 1) {
+    if (!Object.hasOwn(sourceRefs, i)) return false;
+    const ref = sourceRefs[i];
+    if (!ref || !isSourceRefActive(ref, activeSourcesMap)) return false;
+  }
+  return true;
 }
 
 export function cloneSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
-  return sourceRefs.map((ref) => ({ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion }));
+  if (!Array.isArray(sourceRefs)) return [];
+  const cloned: RemedySourceRef[] = [];
+  for (let i = 0; i < sourceRefs.length; i += 1) {
+    if (!Object.hasOwn(sourceRefs, i)) continue;
+    const ref = sourceRefs[i];
+    if (!ref || typeof ref !== "object") continue;
+    cloned.push({ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion });
+  }
+  return cloned;
 }
 
 export function cloneEvidenceCase(item: ClinicEvidenceCase): ClinicEvidenceCase {

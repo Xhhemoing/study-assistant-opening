@@ -1,5 +1,4 @@
 import {
-  bandFromTheta,
   getSentinelAnchorsForDimension,
   type DimensionSentinelAnchor,
   type RubricDimension,
@@ -44,7 +43,8 @@ export type RubricInconsistencyReason =
   | "swap_verdict_asymmetry"
   | "non_adjacent_monotonicity_violation"
   | "adjacent_monotonicity_violation"
-  | "non_finite_projection";
+  | "non_finite_projection"
+  | "projection_outside_evidence_bracket";
 
 export type MasteryExclusionReason =
   | "practice_feedback_only"
@@ -120,6 +120,8 @@ const TEMPLATE_CLICHE_PATTERNS: readonly string[] = [
 const BOUNDARY_PRIOR_LAMBDA = 0.015286;
 const MIN_BAND = 0;
 const MAX_BAND = 9;
+const MAX_ABS_THETA_ANCHOR = 20;
+const BRACKET_EPSILON = 1e-9;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -140,6 +142,10 @@ function countWords(text: string): number {
   return trimmed.split(/\s+/).length;
 }
 
+function isWordChar(ch: string | undefined): boolean {
+  return ch !== undefined && /[a-z0-9]/.test(ch);
+}
+
 function countNonOverlappingOccurrences(haystack: string, needle: string): number {
   if (!needle) return 0;
   let count = 0;
@@ -147,8 +153,15 @@ function countNonOverlappingOccurrences(haystack: string, needle: string): numbe
   while (fromIndex <= haystack.length - needle.length) {
     const idx = haystack.indexOf(needle, fromIndex);
     if (idx === -1) break;
-    count++;
-    fromIndex = idx + needle.length;
+    const beforeOk = idx === 0 || !isWordChar(haystack[idx - 1]);
+    const end = idx + needle.length;
+    const afterOk = end === haystack.length || !isWordChar(haystack[end]);
+    if (beforeOk && afterOk) {
+      count++;
+      fromIndex = end;
+    } else {
+      fromIndex = idx + 1;
+    }
   }
   return count;
 }
@@ -304,12 +317,42 @@ export function snapHalfBand(band: number): number {
   return clamp(Math.round(band * 2) / 2, MIN_BAND, MAX_BAND);
 }
 
+function projectThetaToBand(
+  theta: number,
+  anchors: readonly DimensionSentinelAnchor[],
+): number {
+  if (!Number.isFinite(theta) || anchors.length < 2) return Number.NaN;
+  const first = anchors[0]!;
+  const second = anchors[1]!;
+  if (theta <= first.thetaAnchor) {
+    const slope = (second.band - first.band) / (second.thetaAnchor - first.thetaAnchor);
+    return first.band + (theta - first.thetaAnchor) * slope;
+  }
+  const last = anchors[anchors.length - 1]!;
+  const prevLast = anchors[anchors.length - 2]!;
+  if (theta >= last.thetaAnchor) {
+    const slope = (last.band - prevLast.band) / (last.thetaAnchor - prevLast.thetaAnchor);
+    return last.band + (theta - last.thetaAnchor) * slope;
+  }
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const lo = anchors[i]!;
+    const hi = anchors[i + 1]!;
+    if (theta >= lo.thetaAnchor && theta <= hi.thetaAnchor) {
+      const t = (theta - lo.thetaAnchor) / (hi.thetaAnchor - lo.thetaAnchor);
+      return lo.band + t * (hi.band - lo.band);
+    }
+  }
+  return Number.NaN;
+}
+
 function validateAndSortAnchors(
   sourceAnchors: readonly DimensionSentinelAnchor[],
 ): readonly DimensionSentinelAnchor[] | null {
   if (!Array.isArray(sourceAnchors) || sourceAnchors.length < 2) return null;
   const seenIds = new Set<string>();
-  for (const anchor of sourceAnchors) {
+  for (let i = 0; i < sourceAnchors.length; i += 1) {
+    if (!Object.hasOwn(sourceAnchors, i)) return null;
+    const anchor = sourceAnchors[i];
     if (!anchor || typeof anchor.anchorId !== "string" || anchor.anchorId.trim().length === 0) return null;
     if (seenIds.has(anchor.anchorId)) return null;
     seenIds.add(anchor.anchorId);
@@ -321,7 +364,13 @@ function validateAndSortAnchors(
     ) {
       return null;
     }
-    if (typeof anchor.thetaAnchor !== "number" || !Number.isFinite(anchor.thetaAnchor)) return null;
+    if (
+      typeof anchor.thetaAnchor !== "number" ||
+      !Number.isFinite(anchor.thetaAnchor) ||
+      Math.abs(anchor.thetaAnchor) > MAX_ABS_THETA_ANCHOR
+    ) {
+      return null;
+    }
   }
 
   const sorted = [...sourceAnchors].sort((a, b) => a.band - b.band || a.thetaAnchor - b.thetaAnchor);
@@ -469,18 +518,27 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
 
   const outcomes = resolved.map((entry) => entry.outcome as 1 | 0.5 | 0);
   const theta = solveBradleyTerryTheta(anchors, outcomes);
-  const rawUnclamped = bandFromTheta(theta);
+  const rawUnclamped = projectThetaToBand(theta, anchors);
   const rawBand = clamp(rawUnclamped, MIN_BAND, MAX_BAND);
   const band = snapHalfBand(rawBand);
 
-  if (
+  const nonFinite =
     !Number.isFinite(theta) ||
     !Number.isFinite(rawUnclamped) ||
     !Number.isFinite(rawBand) ||
     !Number.isFinite(band) ||
     band < MIN_BAND ||
-    band > MAX_BAND
-  ) {
+    band > MAX_BAND;
+  const bracketLow = Math.min(bandRange[0], snapHalfBand(bandRange[0])) - BRACKET_EPSILON;
+  const bracketHigh = Math.max(bandRange[1], snapHalfBand(bandRange[1])) + BRACKET_EPSILON;
+  const outsideBracket =
+    !nonFinite &&
+    (rawBand < bandRange[0] - BRACKET_EPSILON ||
+      rawBand > bandRange[1] + BRACKET_EPSILON ||
+      band < bracketLow ||
+      band > bracketHigh);
+
+  if (nonFinite || outsideBracket) {
     const fallbackExclusions: MasteryExclusionReason[] = [...masteryExclusionReasons];
     if (!fallbackExclusions.includes("interval_only_inconsistent")) {
       fallbackExclusions.push("interval_only_inconsistent");
@@ -496,7 +554,7 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
       bandRange,
       countsTowardMastery: false,
       masteryExclusionReasons: fallbackExclusions,
-      inconsistencyReasons: ["non_finite_projection"],
+      inconsistencyReasons: [nonFinite ? "non_finite_projection" : "projection_outside_evidence_bracket"],
       paddingReport,
       anchorComparisons: resolved,
     };

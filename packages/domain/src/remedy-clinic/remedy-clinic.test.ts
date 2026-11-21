@@ -729,5 +729,108 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(nullActiveEntry.evidenceCases).toEqual([]);
     expect(nullActiveEntry.steps[0].selectedCases).toEqual([]);
     expect(nullActiveEntry.steps[2].probes).toEqual([]);
+
+    // Sparse arrays in ruleSourceRefs and probe.sourceRefs must fail closed and never drop provenance.
+    const sparseRefs = new Array<{ sourceId: string; sourceVersion: string }>(1);
+    const sparseRuleRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      ruleSourceRefs: sparseRefs,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [probe2, makeProbe({ probeId: "probe-ok-2", input: { a: -5, b: 20 } })],
+    });
+    expect(sparseRuleRes.status).toBe("invalid_input");
+
+    // Probe 1's predict callback mutating input.ruleSourceRefs and probe2.sourceRefs mid-run cannot strip provenance.
+    const mutableProbe2: {
+      sourceRefs?: Array<{ sourceId: string; sourceVersion: string }>;
+    } & ReturnType<typeof makeProbe> = {
+      ...makeProbe({ probeId: "probe-2-mut-target", input: { a: -7, b: 28 } }),
+      sourceRefs: [{ sourceId: "src-probe-2", sourceVersion: "v1" }],
+    };
+    const mutableInput: Parameters<typeof generateRemedyClinic<InequalityInput, string>>[0] = {
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      ruleTitle: "IMMUTABLE_RULE_TITLE",
+      ruleSourceRefs: [{ sourceId: "src-rule", sourceVersion: "v1" }],
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [],
+    };
+    const hostileProbe1 = {
+      ...makeProbe({ probeId: "probe-hostile-1", input: { a: -2, b: 8 } }),
+      sourceRefs: [{ sourceId: "src-probe-1", sourceVersion: "v1" }],
+    };
+    const origHostilePredict = hostileProbe1.correctModel.predict;
+    hostileProbe1.correctModel = {
+      ...hostileProbe1.correctModel,
+      predict: (inp) => {
+        (mutableInput as { ruleSourceRefs?: unknown }).ruleSourceRefs = undefined;
+        delete mutableProbe2.sourceRefs;
+        return origHostilePredict(inp);
+      },
+    };
+    (mutableInput as { candidateProbes: unknown[] }).candidateProbes = [hostileProbe1, mutableProbe2];
+    const immutableRes = generateRemedyClinic(mutableInput);
+    expect(immutableRes.status).toBe("active");
+    expect(immutableRes.clinic!.ruleSourceRefs).toEqual([{ sourceId: "src-rule", sourceVersion: "v1" }]);
+    expect(immutableRes.clinic!.steps[2].probes[1]!.sourceRefs).toEqual([
+      { sourceId: "src-probe-2", sourceVersion: "v1" },
+    ]);
+
+    // Enumerable getter on probe.input must be rejected BEFORE structuredClone without invoking the getter.
+    let getterInvoked = false;
+    const getterInput = Object.defineProperty({ b: 8 }, "a", {
+      enumerable: true,
+      get() {
+        getterInvoked = true;
+        return -2;
+      },
+    }) as unknown as InequalityInput;
+    const getterProbe = {
+      ...makeProbe({ probeId: "probe-getter-input", input: { a: -2, b: 8 } }),
+      input: getterInput,
+    };
+    const getterRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [getterProbe, probe2],
+    });
+    expect(getterInvoked).toBe(false);
+    expect(getterRes.status).toBe("insufficient_distinguishable_probes");
+    expect(getterRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+
+    // Partial probe revocation leaving >= 2 surviving probes must report partial_source_revoked_still_active.
+    const thirdProbe = {
+      ...clinic.steps[2].probes[1]!,
+      probeId: "probe-extra-revoked",
+      sourceRefs: [{ sourceId: "src-probe-revoked-extra", sourceVersion: "v1" }],
+    };
+    const threeProbeClinic = {
+      ...clinic,
+      steps: [
+        clinic.steps[0],
+        clinic.steps[1],
+        { ...clinic.steps[2], probes: [...clinic.steps[2].probes, thirdProbe] },
+      ] as typeof clinic.steps,
+    };
+    const partialProbeReval = revalidateRemedyClinic(threeProbeClinic, allSources, 6);
+    expect(partialProbeReval.status).toBe("active");
+    expect(partialProbeReval.steps[2].probes).toHaveLength(2);
+    expect(partialProbeReval.revocationSummary.strippedCaseCount).toBe(0);
+    expect(partialProbeReval.revocationSummary.strippedProbeCount).toBe(1);
+    expect(partialProbeReval.revocationSummary.reason).toBe("partial_source_revoked_still_active");
   });
 });

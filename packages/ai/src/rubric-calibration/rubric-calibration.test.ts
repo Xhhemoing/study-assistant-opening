@@ -313,6 +313,59 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     const shortBoilerplate = detectTemplatePadding("In light of the aforementioned considerations, policy choices matter.");
     expect(shortBoilerplate.clicheWordRatio).toBeGreaterThanOrEqual(0.20);
     expect(shortBoilerplate.isTemplatePadded).toBe(true);
+
+    // Word-boundary matching: "undeniable factual" must NOT falsely match "undeniable fact".
+    const cleanFactual = detectTemplatePadding(
+      "The report identifies undeniable factual errors and undeniable factual discrepancies in municipal budget projections.",
+    );
+    expect(cleanFactual.clicheHits).toEqual([]);
+    expect(cleanFactual.totalClicheOccurrences).toBe(0);
+    expect(cleanFactual.isTemplatePadded).toBe(false);
+
+    // Out-of-range custom thetaAnchor (e.g. 100 / 101) fails closed and never projects outside evidence bracket.
+    const extremeThetaAnchors = [
+      { ...baseAnchors[0]!, anchorId: "ext-45", band: 4.5 as const, thetaAnchor: 100 },
+      { ...baseAnchors[1]!, anchorId: "ext-50", band: 5.0 as const, thetaAnchor: 101 },
+    ];
+    const extremeThetaRes = evaluateAnchorCalibratedRubric({
+      submissionId: "extreme-theta",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: extremeThetaAnchors,
+      comparisons: [
+        { anchorId: "ext-45", forwardChoice: "A", reverseChoice: "B" },
+        { anchorId: "ext-50", forwardChoice: "B", reverseChoice: "A" },
+      ],
+    });
+    expect(extremeThetaRes.status).toBe("interval_only");
+    expect(extremeThetaRes.band).toBeNull();
+    expect(extremeThetaRes.countsTowardMastery).toBe(false);
+    expect(extremeThetaRes.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+
+    // Valid custom scale anchors project strictly within the [4.5, 5.0] evidence bracket.
+    const customScaleAnchors = [
+      { ...baseAnchors[0]!, anchorId: "cs-45", band: 4.5 as const, thetaAnchor: 0 },
+      { ...baseAnchors[1]!, anchorId: "cs-50", band: 5.0 as const, thetaAnchor: 1 },
+    ];
+    const customScaleRes = evaluateAnchorCalibratedRubric({
+      submissionId: "custom-scale-ok",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: customScaleAnchors,
+      comparisons: [
+        { anchorId: "cs-45", forwardChoice: "A", reverseChoice: "B" },
+        { anchorId: "cs-50", forwardChoice: "B", reverseChoice: "A" },
+      ],
+    });
+    expect(customScaleRes.status).toBe("calibrated");
+    expect(customScaleRes.rawBand!).toBeGreaterThanOrEqual(4.5);
+    expect(customScaleRes.rawBand!).toBeLessThanOrEqual(5.0);
+    expect(customScaleRes.band!).toBeGreaterThanOrEqual(4.5);
+    expect(customScaleRes.band!).toBeLessThanOrEqual(5.0);
   });
 
   it("blocks mastery updates for practice_feedback, assisted submissions, and template-padded essays", () => {
@@ -563,5 +616,20 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
     });
     expect(nanThreshold.passed).toBe(false);
     expect(nanThreshold.failures).toContain("invalid_threshold_configuration");
+
+    // Narrowing lowTailMaxBand to 4.5 must NOT hide a +0.50 bias in the default <= 5.0 tail.
+    const hiddenTailErrorPreds = [4.5, 6.0, 5.0, 6.5, 7.5, 8.0];
+    const hiddenTailAttempt = evaluateRubricCalibrationGate({
+      benchmarkItems: trueBands.map((trueBand, index) => ({
+        itemId: `tail-${index}`,
+        trueBand,
+        evaluation: calibratedPoint(hiddenTailErrorPreds[index]!),
+      })),
+      counterfactualTriplets: passingCounterfactuals,
+      thresholds: { lowTailMaxBand: 4.5 },
+    });
+    expect(hiddenTailAttempt.passed).toBe(false);
+    expect(hiddenTailAttempt.metrics.biasLow).toBeCloseTo(0.5, 10);
+    expect(hiddenTailAttempt.failures).toContain("low_tail_bias_exceeds_threshold");
   });
 });
