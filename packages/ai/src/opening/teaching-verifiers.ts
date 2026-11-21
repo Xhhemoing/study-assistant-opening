@@ -569,7 +569,11 @@ function findMatchingEnvEnd(text: string, openIndex: number): { env: string; bod
   return null;
 }
 
-function splitTopLevelRows(text: string): { rows: string[]; hasIntertext: boolean } {
+function splitTopLevelRows(
+  text: string,
+  options: { splitNewlines?: boolean } = {},
+): { rows: string[]; hasIntertext: boolean } {
+  const splitNewlines = options.splitNewlines ?? true;
   const rows: string[] = [];
   let start = 0;
   let braceDepth = 0;
@@ -578,7 +582,7 @@ function splitTopLevelRows(text: string): { rows: string[]; hasIntertext: boolea
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
     if (ch === "\r" || ch === "\n") {
-      if (braceDepth === 0 && envDepth === 0) {
+      if (splitNewlines && braceDepth === 0 && envDepth === 0) {
         rows.push(text.slice(start, i));
         if (ch === "\r" && text[i + 1] === "\n") i++;
         start = i + 1;
@@ -801,7 +805,7 @@ function isExtractableEnv(env: string): boolean {
   return EQUATION_ROW_ENVS.has(env) || WRAPPED_SINGLE_EQUATION_ENVS.has(env) || CASES_ENVS.has(env);
 }
 
-function extractFromLatexFragment(raw: string, out: string[]): boolean {
+function extractFromLatexFragment(raw: string, out: string[], insideMathEnv = false): boolean {
   const text = stripOuterMathDelimiters(raw);
   if (!text) return false;
   if (text.startsWith("\\begin{")) {
@@ -809,7 +813,7 @@ function extractFromLatexFragment(raw: string, out: string[]): boolean {
     if (outer && outer.afterEnd === text.length) {
       const body = text.slice(outer.bodyStart, outer.bodyEnd);
       if (CASES_ENVS.has(outer.env)) {
-        const { rows } = splitTopLevelRows(body);
+        const { rows } = splitTopLevelRows(body, { splitNewlines: false });
         for (const branch of rows) {
           if (!branch.trim() || branch === INTERTEXT_BREAK) continue;
           const cells = splitTopLevelAmpersands(branch);
@@ -821,7 +825,7 @@ function extractFromLatexFragment(raw: string, out: string[]): boolean {
         return true;
       }
       if (WRAPPED_SINGLE_EQUATION_ENVS.has(outer.env)) {
-        const { rows } = splitTopLevelRows(body);
+        const { rows } = splitTopLevelRows(body, { splitNewlines: false });
         const joined = cleanEquationClause(rows.filter(r => r !== INTERTEXT_BREAK).map(r => r.trim()).filter(Boolean).join(" "));
         if (!joined) return false;
         if (joined.includes("=")) {
@@ -831,11 +835,11 @@ function extractFromLatexFragment(raw: string, out: string[]): boolean {
         return true;
       }
       if (EQUATION_ROW_ENVS.has(outer.env)) {
-        return extractFromLatexFragment(body, out);
+        return extractFromLatexFragment(body, out, true);
       }
     }
   }
-  const { rows, hasIntertext } = splitTopLevelRows(text);
+  const { rows, hasIntertext } = splitTopLevelRows(text, { splitNewlines: !insideMathEnv });
   let hasNonEquationContent = hasIntertext;
   let pendingRowClause: string | null = null;
   const flushPending = () => {
@@ -868,7 +872,7 @@ function extractFromLatexFragment(raw: string, out: string[]): boolean {
           extractedInner = true;
           hasNonEquationContent = true;
           outerParts.push(group.slice(outerStart, innerStart));
-          extractFromLatexFragment(group.slice(innerStart, innerEnv.afterEnd), out);
+          extractFromLatexFragment(group.slice(innerStart, innerEnv.afterEnd), out, true);
           outerStart = innerEnv.afterEnd;
           cursor = innerEnv.afterEnd;
         } else {
@@ -925,7 +929,7 @@ const TEXT_MACRO_NAMES = new Set(["text", "mtext", "textbf", "textit", "textrm",
 
 const PROSE_CONNECTIVE_WORD = /^(?:and|or|when|where|if|then|so|for|with|hence|thus|since|as|therefore|because|but|otherwise|while)$/i;
 
-const CJK_CLAUSE_CONNECTIVE = /^(?:所以|因此|于是|从而|进而|并且|而且|但是|然而|如果|因为|由于|其中|此时|例如|比如|验证|检查|步骤|且|或|和|与|即|故|则|若|当|得|由)$/;
+const CJK_CLAUSE_CONNECTIVE = /^(?:所以|因此|于是|从而|进而|并且|而且|但是|然而|如果|因为|由于|其中|此时|例如|比如|验证|检查|步骤|得到|可得|解得|化简得|整理得|推出|由此得|由此可得|且|或|和|与|即|故|则|若|当|得|由)$/;
 
 function isProseTextMacroBody(body: string): boolean {
   const trimmed = body.trim();

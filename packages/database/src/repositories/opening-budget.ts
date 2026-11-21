@@ -765,6 +765,21 @@ export function createOpeningBudgetRepository(
             if (Number(usage!.calls) >= pinnedMaxCalls) throw new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached");
             // All settled spend + outstanding reservations + next conservative bound.
             if (Number(usage!.cents) + input.amountCents > Math.min(pinnedBudgetCents, parentCapCents)) {
+              // When the workspace's daily cap is already exhausted for a new paid charge,
+              // surface daily quota/request errors instead of attributing the refusal solely to
+              // the parent interaction (so fallback routing and user messaging stay accurate).
+              if (!existingRow && !zeroCost && !unlimited) {
+                const [daily] = await tx`
+                  SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
+                  WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
+                `;
+                if (input.amountCents + Number(daily?.used ?? 0) > capCents) {
+                  if (await requestCapReached(tx, scope.workspaceId, budgetDay, modelSnapshot, requestCap)) {
+                    throw new OpeningBudgetError("REQUEST_CAP_EXCEEDED", "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。");
+                  }
+                  throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
+                }
+              }
               throw new OpeningBudgetError("PARENT_BUDGET_EXCEEDED", "parent interaction budget exceeded");
             }
           }

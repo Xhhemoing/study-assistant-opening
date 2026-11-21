@@ -905,6 +905,24 @@ describe("retrieval turn-family budget aggregation and isolation", () => {
         return [{ cents, calls, unknown_calls: unknownCalls }];
       }
 
+      if (q.includes("COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations")) {
+        const [wsId, dayStart, nextDayStart] = compiled.params as [string, Date, Date];
+        const used = [...reservations.values()]
+          .filter(r =>
+            r.workspace_id === wsId
+            && (
+              r.state === "reserved"
+              || (
+                r.state === "completed"
+                && (r.created_at as Date) >= dayStart
+                && (r.created_at as Date) < nextDayStart
+              )
+            ),
+          )
+          .reduce((sum, r) => sum + Number(r.amount_cents), 0);
+        return [{ used }];
+      }
+
       if (q.includes("SELECT count(*)::int AS n FROM opening_budget_reservations")) {
         const wsId = compiled.params[0] as string;
         const modelId = compiled.params[1] as string;
@@ -1325,5 +1343,62 @@ describe("retrieval turn-family budget aggregation and isolation", () => {
     await repo.release(scope, tutor.requestId, "not_sent");
     expect(await repo.isParentNotSent(scope, turnId)).toBe(true);
     expect(await repo.isParentNotSent(scope, nestedRetrievalId)).toBe(true);
+  });
+
+  it("reports BUDGET_EXCEEDED when daily workspace cap is exhausted across retrieval and tutor in limited mode, and PARENT_BUDGET_EXCEEDED when only tighter parent cap is exceeded", async () => {
+    const h = turnFamilyLedgerHarness();
+    const limitedDaily = createOpeningBudgetRepository(h.sql, { envCapCents: 10 });
+    const turnA = "study-turn:limited-daily-cap";
+    const embA = await limitedDaily.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-limited-daily",
+      requestFamily: null,
+      parentBudget: { id: `retrieval:${turnA}` },
+    });
+    await limitedDaily.markUnknown(scope, embA.id);
+
+    // Daily cap (10c) only has 9c left, so 10c tutor fails with BUDGET_EXCEEDED (not PARENT_BUDGET_EXCEEDED).
+    await expect(limitedDaily.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: "tutor-limited-daily-10",
+      requestFamily: null,
+      parentBudget: { id: turnA },
+    })).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    await expect(limitedDaily.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 9,
+      requestId: "tutor-limited-daily-9",
+      requestFamily: null,
+      parentBudget: { id: turnA },
+    })).resolves.toMatchObject({ state: "reserved", amountCents: 9 });
+
+    // With daily workspace headroom available, an explicit tighter parent cap rejects with PARENT_BUDGET_EXCEEDED.
+    const limitedTightParent = createOpeningBudgetRepository(h.sql, { envCapCents: 50 });
+    const turnB = "study-turn:limited-parent-cap";
+    const embB = await limitedTightParent.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-limited-parent",
+      requestFamily: null,
+      parentBudget: { id: `retrieval:${turnB}`, budgetCents: 10 },
+    });
+    await limitedTightParent.markUnknown(scope, embB.id);
+
+    await expect(limitedTightParent.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: "tutor-limited-parent-10",
+      requestFamily: null,
+      parentBudget: { id: turnB },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_EXCEEDED" });
+    await expect(limitedTightParent.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 9,
+      requestId: "tutor-limited-parent-9",
+      requestFamily: null,
+      parentBudget: { id: turnB },
+    })).resolves.toMatchObject({ state: "reserved", amountCents: 9 });
   });
 });

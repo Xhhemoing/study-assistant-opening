@@ -365,6 +365,19 @@ describe("teaching-verifiers", () => {
     ["multi-clause implication contradiction in second clause", String.raw`1 + 1 = 2 \implies 2 + 2 = 5`, "2 + 2 = 5"],
     ["multi-clause inequality contradiction on RHS of <", String.raw`1 + 1 = 2 < 2 + 2 = 5`, "2 + 2 = 5"],
     ["unit equation followed by arithmetic contradiction", "1 + 2 = 300 厘米, 1 + 1 = 5", "1 + 1 = 5"],
+    ["CJK derivation connective 得到 contradiction", "1 + 1 = 2 得到 2 + 2 = 5", "2 + 2 = 5"],
+    ["CJK derivation connective 可得 contradiction", "1 + 1 = 2 可得 2 + 2 = 5", "2 + 2 = 5"],
+    ["CJK derivation connective 解得 contradiction", "x = 1 解得 2 + 2 = 5", "2 + 2 = 5"],
+    ["CJK derivation connective 化简得 contradiction", "x + 0 = x 化简得 2 + 2 = 5", "2 + 2 = 5"],
+    ["CJK derivation connective 整理得 contradiction", "x = y 整理得 2 + 2 = 5", "2 + 2 = 5"],
+    ["CJK derivation connective 推出 contradiction", "1 + 1 = 2 推出 2 + 2 = 5", "2 + 2 = 5"],
+    ["CJK derivation connective 由此得 contradiction", "1 + 1 = 2 由此得 2 + 2 = 5", "2 + 2 = 5"],
+    ["CJK derivation connective 由此可得 contradiction", "1 + 1 = 2 由此可得 2 + 2 = 5", "2 + 2 = 5"],
+    ["aligned wrapped line contradiction with physical newline", "\\begin{aligned}\n1 + 1 &= 1\n+ 1 = 2 \\\\\n2 + 2 &= 5\n\\end{aligned}", "2 + 2 = 5"],
+    ["aligned wrapped line false-sum contradiction across physical newline", "\\begin{aligned}\n1 + 1 &= 1\n+ 2 = 4\n\\end{aligned}", "1 + 1 = 1 + 2 = 4"],
+    ["gather* CRLF wrapped expression contradiction", "\\begin{gather*}\r\n1 + 2 =\r\n4\r\n\\end{gather*}", "1 + 2 = 4"],
+    ["nested aligned inside equation* with physical newline contradiction", "\\begin{equation*}\n\\begin{aligned}\n1 + 1 &= 2 \\\\\n2 + 2 &= 5\n\\end{aligned}\n\\end{equation*}", "2 + 2 = 5"],
+    ["aligned with nested pmatrix and physical newlines before contradiction", "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n2 + 2 &= 5\n\\end{aligned}", "2 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -386,6 +399,11 @@ describe("teaching-verifiers", () => {
       String.raw`\begin{multline*} 1 + 2 + 3 \\ + 4 = 10 \end{multline*}`,
       String.raw`\begin{split} 1 + 2 + 3 \\ &\quad + 4 = 10 \end{split}`,
       String.raw`\begin{aligned}[t] 2 + 2 &= 4 & -3 + 3 &= 0 \end{aligned}`,
+      "\\begin{aligned}\n1 + 1 &= 1\n+ 1 = 2 \\\\\n2 + 2 &= 4\n\\end{aligned}",
+      "\\begin{align*}\n1 + 2\n+ 3 &= 6\n\\end{align*}",
+      "\\begin{eqnarray*}\r\n1 + 1 &=& 1\r\n+ 1\r\n\\end{eqnarray*}",
+      "\\begin{gather}\n1 + 2 + 3\n= 6\n\\end{gather}",
+      "\\begin{equation*}\n\\begin{aligned}\n1 + 1 &= 1\n+ 1 = 2\n\\end{aligned}\n\\end{equation*}",
     ]) {
       const passReport = await verifyTeachingContent({
         activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -424,6 +442,7 @@ describe("teaching-verifiers", () => {
       "1 + 2 = 300 厘米, 1 + 1 = 2",
       "1 + 1 = 2 得到 2 + 2 = 4",
       String.raw`3 \text{ 米} = 300 厘米 = 3000 毫米`,
+      "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n1 + 1 &= 2\n\\end{aligned}",
     ]) {
       const unknownReport = await verifyTeachingContent({
         activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
