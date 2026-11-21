@@ -365,11 +365,12 @@ describe("TutorGraph fast path", () => {
     expect(zeroBlocked.verification).toEqual({ steps: [] });
     expect(zeroBlocked.publicTeaching).toBeUndefined();
 
-    const stepBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const stepBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 1.5, now: () => 1000 });
     const firstValidStep = runTutorGraph({
       questionStem: "求导",
       submission: {},
       budget: stepBudget,
+      assessmentMode: "practice",
       attemptSubmitted: true,
       verifyCaps: {
         verify: () =>
@@ -401,6 +402,7 @@ describe("TutorGraph fast path", () => {
       questionStem: "求导",
       submission: {},
       budget: stepBudget,
+      assessmentMode: "practice",
       attemptSubmitted: true,
       verifyCaps: {
         verify: () => ({
@@ -549,7 +551,7 @@ describe("TutorGraph fast path", () => {
     expect(twoStep.state).toBe("released");
     expect(twoStep.leakageBits).toBeCloseTo(Math.log2(3), 10);
 
-    // Round-10 P1-2 Bypass 1: omitted firstError with partial invalid/unknown step verdicts across 3 steps still coarsens under pure cap
+    // Round-11 P1-1: pure turns always emit <= 2 public outcomes (all-valid vs coarsened unknown/invalid) and charge 1 bit
     const omittedFirstErrorShapes = new Set<string>();
     const partialVerdicts: Array<Parameters<typeof runTutorGraph>[0]["verifyCaps"]["verify"]> = [
       () => ({
@@ -573,6 +575,13 @@ describe("TutorGraph fast path", () => {
           { id: "s3", text: "c", status: "unknown" },
         ],
       }),
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "valid" },
+          { id: "s2", text: "b", status: "valid" },
+          { id: "s3", text: "c", status: "valid" },
+        ],
+      }),
     ];
     for (const [idx, verifyFn] of partialVerdicts.entries()) {
       const purePartialBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
@@ -585,11 +594,44 @@ describe("TutorGraph fast path", () => {
         releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
       });
       expect(res.state).toBe("released");
-      expect(purePartialBudget.leakageBits).toBe(idx === 0 ? 0 : 1);
+      expect(purePartialBudget.leakageBits).toBe(1);
       expect(res.publicTeaching?.learnerSteps.every((step) => step.status === "unknown")).toBe(true);
-      omittedFirstErrorShapes.add(JSON.stringify({ teaching: res.publicTeaching, verification: res.verification }));
+      expect(res.verification.firstError).toBeUndefined();
+      const shape = JSON.stringify({ teaching: res.publicTeaching, verification: res.verification });
+      omittedFirstErrorShapes.add(shape);
+      if (idx > 0 && idx < 3) {
+        expect(omittedFirstErrorShapes.size).toBe(1);
+      }
     }
     expect(omittedFirstErrorShapes.size).toBe(2);
+
+    const singleStepShapes = new Set<string>();
+    const singleStepVerdicts: Array<Parameters<typeof runTutorGraph>[0]["verifyCaps"]["verify"]> = [
+      () => ({ steps: [{ id: "s1", text: "a", status: "valid" }] }),
+      () => ({ steps: [{ id: "s1", text: "a", status: "unknown" }] }),
+      () => ({ steps: [{ id: "s1", text: "a", status: "invalid" }] }),
+      () => ({
+        steps: [{ id: "s1", text: "a", status: "invalid" }],
+        firstError: { stepId: "s1", kind: "domain", message: "bad" },
+      }),
+    ];
+    for (const [idx, verifyFn] of singleStepVerdicts.entries()) {
+      const b = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const res = runTutorGraph({
+        questionStem: "求导",
+        submission: {},
+        budget: b,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verifyFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+      });
+      expect(res.state).toBe("released");
+      expect(b.leakageBits).toBe(1);
+      expect(res.verification).toEqual({ steps: [{ id: "s1", text: "a", status: "unknown" }] });
+      singleStepShapes.add(JSON.stringify({ teaching: res.publicTeaching, verification: res.verification }));
+      if (idx === 1) expect(singleStepShapes.size).toBe(2);
+    }
+    expect(singleStepShapes.size).toBe(2);
 
     // Round-10 P1-2 Bypass 2: pure turn clamped to 1.5-bit ceiling even when passed a practice-configured budget
     const reusedPracticeBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });

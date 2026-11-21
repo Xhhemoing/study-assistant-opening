@@ -19,6 +19,7 @@ export type DomainSpec = {
   variable?: string;
   excluded?: readonly (string | number)[];
   intervals?: readonly DomainInterval[];
+  nonCommutativeVars?: readonly string[];
 };
 
 export type ScalarExpr =
@@ -93,13 +94,33 @@ export function polynomialConstant(value: SpanRational): Polynomial {
 export function polynomialVariable(): Polynomial {
   return new Map([[1, rational(1n)]]);
 }
+class PolyComplexityError extends Error {
+  constructor() {
+    super("polynomial_complexity_exceeded");
+  }
+}
+
+const MAX_POLY_COEFF_MAGNITUDE = 1n << 4096n;
+
+function checkPolyCoeffBound(coeff: SpanRational): void {
+  if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) {
+    throw new PolyComplexityError();
+  }
+}
+
 export function polynomialAdd(a: Polynomial, b: Polynomial, sign: 1 | -1 = 1): Polynomial {
-  const out = new Map(a);
+  const out = new Map<number, SpanRational>();
+  for (const [degree, value] of a) {
+    checkPolyCoeffBound(value);
+    out.set(degree, value);
+  }
   for (const [degree, value] of b) {
+    checkPolyCoeffBound(value);
     const next =
       sign === 1
         ? addRational(out.get(degree) ?? rational(0n), value)
         : subtractRational(out.get(degree) ?? rational(0n), value);
+    checkPolyCoeffBound(next);
     if (next.n === 0n) out.delete(degree);
     else out.set(degree, next);
   }
@@ -136,27 +157,16 @@ function polynomialLeadCoeff(poly: Polynomial): SpanRational {
 }
 
 function polynomialScale(poly: Polynomial, factor: SpanRational): Polynomial {
+  checkPolyCoeffBound(factor);
+  for (const coeff of poly.values()) checkPolyCoeffBound(coeff);
   if (factor.n === 0n || poly.size === 0) return new Map();
   const out = new Map<number, SpanRational>();
   for (const [deg, coeff] of poly) {
     const scaled = multiplyRational(coeff, factor);
+    checkPolyCoeffBound(scaled);
     if (scaled.n !== 0n) out.set(deg, scaled);
   }
   return out;
-}
-
-class PolyComplexityError extends Error {
-  constructor() {
-    super("polynomial_complexity_exceeded");
-  }
-}
-
-const MAX_POLY_COEFF_MAGNITUDE = 1n << 4096n;
-
-function checkPolyCoeffBound(coeff: SpanRational): void {
-  if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) {
-    throw new PolyComplexityError();
-  }
 }
 
 function polynomialPrimitivePositive(poly: Polynomial): Polynomial {
@@ -456,7 +466,11 @@ const MAX_SYMBOLIC_MUL_STEPS = 4096;
 type PolyMulBudget = { mulSteps: number };
 
 function exceedsPolyLimits(poly: Polynomial, maxDegree = MAX_SYMBOLIC_POLY_DEGREE): boolean {
-  return polynomialDegree(poly) > maxDegree || poly.size > MAX_SYMBOLIC_POLY_TERMS;
+  if (polynomialDegree(poly) > maxDegree || poly.size > MAX_SYMBOLIC_POLY_TERMS) return true;
+  for (const coeff of poly.values()) {
+    if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) return true;
+  }
+  return false;
 }
 
 function boundedPolyMultiply(
@@ -466,6 +480,12 @@ function boundedPolyMultiply(
   maxDegree = MAX_SYMBOLIC_POLY_DEGREE,
 ): Polynomial | null {
   if (a.size > MAX_SYMBOLIC_POLY_TERMS || b.size > MAX_SYMBOLIC_POLY_TERMS) return null;
+  for (const [, va] of a) {
+    if (bigAbs(va.n) > MAX_POLY_COEFF_MAGNITUDE || va.d > MAX_POLY_COEFF_MAGNITUDE) return null;
+  }
+  for (const [, vb] of b) {
+    if (bigAbs(vb.n) > MAX_POLY_COEFF_MAGNITUDE || vb.d > MAX_POLY_COEFF_MAGNITUDE) return null;
+  }
   if (a.size === 0 || b.size === 0) return new Map();
   const degA = polynomialDegree(a);
   const degB = polynomialDegree(b);
@@ -478,7 +498,10 @@ function boundedPolyMultiply(
       budget.mulSteps++;
       if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) return null;
       const degree = da + db;
-      const next = addRational(out.get(degree) ?? rational(0n), multiplyRational(va, vb));
+      const prod = multiplyRational(va, vb);
+      if (bigAbs(prod.n) > MAX_POLY_COEFF_MAGNITUDE || prod.d > MAX_POLY_COEFF_MAGNITUDE) return null;
+      const next = addRational(out.get(degree) ?? rational(0n), prod);
+      if (bigAbs(next.n) > MAX_POLY_COEFF_MAGNITUDE || next.d > MAX_POLY_COEFF_MAGNITUDE) return null;
       if (next.n === 0n) out.delete(degree);
       else {
         out.set(degree, next);
@@ -501,19 +524,36 @@ export function rationalForm(
   variable = "x",
   budget: PolyMulBudget = { mulSteps: 0 },
 ): RationalForm {
+  try {
+    return rationalFormInner(expr, variable, budget);
+  } catch (err) {
+    if (err instanceof PolyComplexityError) return polyComplexityFailure();
+    throw err;
+  }
+}
+
+function rationalFormInner(
+  expr: ScalarExpr,
+  variable = "x",
+  budget: PolyMulBudget = { mulSteps: 0 },
+): RationalForm {
   switch (expr.kind) {
     case "const": {
       const value = toRational(expr.value);
-      return value
-        ? { numerator: polynomialConstant(value), denominator: polynomialConstant(rational(1n)), domainDenominators: [] }
-        : { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "non_rational_constant" };
+      if (!value) {
+        return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "non_rational_constant" };
+      }
+      if (bigAbs(value.n) > MAX_POLY_COEFF_MAGNITUDE || value.d > MAX_POLY_COEFF_MAGNITUDE) {
+        return polyComplexityFailure();
+      }
+      return { numerator: polynomialConstant(value), denominator: polynomialConstant(rational(1n)), domainDenominators: [] };
     }
     case "variable":
       return expr.name === variable
         ? { numerator: polynomialVariable(), denominator: polynomialConstant(rational(1n)), domainDenominators: [] }
         : { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "foreign_variable" };
     case "neg": {
-      const inner = rationalForm(expr.value, variable, budget);
+      const inner = rationalFormInner(expr.value, variable, budget);
       if (inner.unsupported) return inner;
       return {
         ...inner,
@@ -522,8 +562,8 @@ export function rationalForm(
     }
     case "add":
     case "sub": {
-      const left = rationalForm(expr.left, variable, budget);
-      const right = rationalForm(expr.right, variable, budget);
+      const left = rationalFormInner(expr.left, variable, budget);
+      const right = rationalFormInner(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
       }
@@ -541,8 +581,8 @@ export function rationalForm(
       };
     }
     case "mul": {
-      const left = rationalForm(expr.left, variable, budget);
-      const right = rationalForm(expr.right, variable, budget);
+      const left = rationalFormInner(expr.left, variable, budget);
+      const right = rationalFormInner(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
       }
@@ -557,8 +597,8 @@ export function rationalForm(
       };
     }
     case "div": {
-      const left = rationalForm(expr.left, variable, budget);
-      const right = rationalForm(expr.right, variable, budget);
+      const left = rationalFormInner(expr.left, variable, budget);
+      const right = rationalFormInner(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
       }
@@ -582,7 +622,7 @@ export function rationalForm(
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "power_out_of_bounds" };
       }
-      const inner = rationalForm(expr.base, variable, budget);
+      const inner = rationalFormInner(expr.base, variable, budget);
       if (inner.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: inner.unsupported };
       }
@@ -608,9 +648,9 @@ export function rationalForm(
         numerator = nextNum;
         denominator = nextDen;
       }
-      const extraDens = expr.exponent < 0 ? [inner.numerator, inner.denominator] : [];
+      const extraDens = expr.exponent <= 0 ? [inner.numerator, inner.denominator] : [];
       const zeroDenominator =
-        inner.zeroDenominator || (expr.exponent < 0 && (inner.numerator.size === 0 || inner.denominator.size === 0));
+        inner.zeroDenominator || (expr.exponent <= 0 && (inner.numerator.size === 0 || inner.denominator.size === 0));
       return {
         numerator,
         denominator,
@@ -661,10 +701,249 @@ function evaluateConstantInt(expr: ScalarExpr): number | null {
   }
 }
 
+const LATEX_FN_NAMES = new Set(["sqrt", "abs", "sin", "cos", "ln", "exp"]);
+
+function readBalancedGroup(
+  src: string,
+  start: number,
+  openCh: "{" | "[",
+  closeCh: "}" | "]",
+): { content: string; nextIndex: number } | null {
+  if (src[start] !== openCh) return null;
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === openCh) depth++;
+    else if (src[i] === closeCh) {
+      depth--;
+      if (depth === 0) return { content: src.slice(start + 1, i), nextIndex: i + 1 };
+    }
+  }
+  return null;
+}
+
+function skipWs(src: string, idx: number): number {
+  let i = idx;
+  while (i < src.length && /\s/.test(src[i]!)) i++;
+  return i;
+}
+
+export function normalizeLatexExpr(input: string): string {
+  let s = input.replaceAll("−", "-").trim();
+  while (s.length >= 2 && s.startsWith("$") && s.endsWith("$")) {
+    s = s.slice(1, -1).trim();
+  }
+  if (!s) return "";
+
+  const rewriteMacros = (src: string): string => {
+    let out = "";
+    let i = 0;
+    const readLatexArg = (pos: number): { content: string; nextIndex: number } | null => {
+      const p = skipWs(src, pos);
+      if (src[p] === "{") return readBalancedGroup(src, p, "{", "}");
+      if (/[A-Za-z0-9]/.test(src[p] ?? "")) return { content: src[p]!, nextIndex: p + 1 };
+      return null;
+    };
+    while (i < src.length) {
+      const ch = src[i]!;
+      if (ch === "\\") {
+        const tail = src.slice(i + 1);
+        const cmdMatch = /^([A-Za-z]+|[,;! ])/.exec(tail);
+        if (cmdMatch) {
+          const cmd = cmdMatch[1]!;
+          const afterCmd = i + 1 + cmd.length;
+          if (cmd === "," || cmd === ";" || cmd === "!" || cmd === " ") {
+            out += " ";
+            i = afterCmd;
+            continue;
+          }
+          if (cmd === "cdot" || cmd === "times") {
+            out += " * ";
+            i = afterCmd;
+            continue;
+          }
+          if (cmd === "div") {
+            out += " / ";
+            i = afterCmd;
+            continue;
+          }
+          if (cmd === "left" || cmd === "right") {
+            const nextPos = skipWs(src, afterCmd);
+            if (src[nextPos] === "|") {
+              out += cmd === "left" ? " abs(" : ") ";
+              i = nextPos + 1;
+              continue;
+            }
+            if (src.slice(nextPos, nextPos + 2) === "\\|") {
+              out += cmd === "left" ? " abs(" : ") ";
+              i = nextPos + 2;
+              continue;
+            }
+            i = afterCmd;
+            continue;
+          }
+          if (cmd === "frac") {
+            const num = readLatexArg(afterCmd);
+            const den = num ? readLatexArg(num.nextIndex) : null;
+            if (num && den) {
+              out += `((${rewriteMacros(num.content)})/(${rewriteMacros(den.content)}))`;
+              i = den.nextIndex;
+              continue;
+            }
+          }
+          if (cmd === "sqrt") {
+            let argStart = skipWs(src, afterCmd);
+            if (src[argStart] === "[") {
+              const opt = readBalancedGroup(src, argStart, "[", "]");
+              if (opt && opt.content.trim() === "2") argStart = skipWs(src, opt.nextIndex);
+              else {
+                out += ch;
+                i++;
+                continue;
+              }
+            }
+            const arg = readLatexArg(argStart);
+            if (arg) {
+              out += ` sqrt(${rewriteMacros(arg.content)})`;
+              i = arg.nextIndex;
+              continue;
+            }
+          }
+          if (LATEX_FN_NAMES.has(cmd)) {
+            const argStart = skipWs(src, afterCmd);
+            if (src[argStart] === "{") {
+              const grp = readBalancedGroup(src, argStart, "{", "}");
+              if (grp) {
+                out += ` ${cmd}(${rewriteMacros(grp.content)})`;
+                i = grp.nextIndex;
+                continue;
+              }
+            }
+            if (src[argStart] !== "(") {
+              const arg = readLatexArg(argStart);
+              if (arg) {
+                out += ` ${cmd}(${rewriteMacros(arg.content)})`;
+                i = arg.nextIndex;
+                continue;
+              }
+            }
+            out += ` ${cmd}`;
+            i = afterCmd;
+            continue;
+          }
+        }
+      }
+      if ((ch === "^" || ch === "_") && skipWs(src, i + 1) < src.length) {
+        const argStart = skipWs(src, i + 1);
+        if (src[argStart] === "{") {
+          const grp = readBalancedGroup(src, argStart, "{", "}");
+          if (grp) {
+            out += `${ch}(${rewriteMacros(grp.content)})`;
+            i = grp.nextIndex;
+            continue;
+          }
+        }
+      }
+      if (ch === "{") {
+        const grp = readBalancedGroup(src, i, "{", "}");
+        if (grp) {
+          out += `(${rewriteMacros(grp.content)})`;
+          i = grp.nextIndex;
+          continue;
+        }
+      }
+      out += ch;
+      i++;
+    }
+    return out;
+  };
+
+  const expanded = rewriteMacros(s);
+  type TokKind = "num" | "id" | "fn" | "lparen" | "rparen" | "op";
+  const tokens: Array<{ kind: TokKind; text: string }> = [];
+  let p = 0;
+  while (p < expanded.length) {
+    const c = expanded[p]!;
+    if (/\s/.test(c)) {
+      p++;
+      continue;
+    }
+    if (c === "(") {
+      tokens.push({ kind: "lparen", text: "(" });
+      p++;
+      continue;
+    }
+    if (c === ")") {
+      tokens.push({ kind: "rparen", text: ")" });
+      p++;
+      continue;
+    }
+    if ("+-*/^_".includes(c)) {
+      tokens.push({ kind: "op", text: c });
+      p++;
+      continue;
+    }
+    const numMatch = /^(?:\d+(?:\.\d+)?|\.\d+)/.exec(expanded.slice(p));
+    if (numMatch) {
+      tokens.push({ kind: "num", text: numMatch[0] });
+      p += numMatch[0].length;
+      continue;
+    }
+    const wordMatch = /^[A-Za-z][A-Za-z0-9]*/.exec(expanded.slice(p));
+    if (wordMatch) {
+      const word = wordMatch[0];
+      p += word.length;
+      if (LATEX_FN_NAMES.has(word)) {
+        tokens.push({ kind: "fn", text: word });
+        continue;
+      }
+      let j = 0;
+      while (j < word.length) {
+        const rest = word.slice(j);
+        const afterWordWs = skipWs(expanded, p);
+        const fnPrefix = [...LATEX_FN_NAMES].find(
+          (fn) => rest.startsWith(fn) && rest.length === fn.length && expanded[afterWordWs] === "(",
+        );
+        if (fnPrefix) {
+          tokens.push({ kind: "fn", text: fnPrefix });
+          j += fnPrefix.length;
+          continue;
+        }
+        const unitMatch = /^[A-Za-z]\d*/.exec(rest);
+        if (unitMatch) {
+          tokens.push({ kind: "id", text: unitMatch[0] });
+          j += unitMatch[0].length;
+        } else {
+          tokens.push({ kind: "id", text: rest[0]! });
+          j++;
+        }
+      }
+      continue;
+    }
+    tokens.push({ kind: "op", text: c });
+    p++;
+  }
+
+  let normalized = "";
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const prev = idx > 0 ? tokens[idx - 1]! : null;
+    const curr = tokens[idx]!;
+    if (prev) {
+      const prevEndsAtom = prev.kind === "num" || prev.kind === "id" || prev.kind === "rparen";
+      const currStartsAtom = curr.kind === "num" || curr.kind === "id" || curr.kind === "fn" || curr.kind === "lparen";
+      if (prevEndsAtom && currStartsAtom) {
+        normalized += "*";
+      }
+    }
+    normalized += curr.text;
+  }
+  return normalized;
+}
+
 export function parseScalarExpr(input: ScalarExpr | string | number): ScalarExpr | null {
   if (typeof input === "number") return Number.isFinite(input) ? parseScalarExpr(String(input)) : null;
   if (typeof input !== "string") return input;
-  const source = input.replaceAll("−", "-").trim();
+  const normalizedInput = /[\\{}]/.test(input) ? normalizeLatexExpr(input) : input;
+  const source = normalizedInput.replaceAll("−", "-").trim();
   if (!source) return null;
   let index = 0;
   const peek = () => source[index] ?? "";
@@ -815,9 +1094,15 @@ function extractSquareFree(n: bigint): { square: bigint; rest: bigint } {
 type RadicalSum = Map<bigint, SpanRational>;
 
 function radicalAdd(a: RadicalSum, b: RadicalSum, sign: 1 | -1 = 1): RadicalSum {
-  const out = new Map(a);
+  const out = new Map<bigint, SpanRational>();
+  for (const [rad, coeff] of a) {
+    checkPolyCoeffBound(coeff);
+    out.set(rad, coeff);
+  }
   for (const [rad, coeff] of b) {
+    checkPolyCoeffBound(coeff);
     const next = sign === 1 ? addRational(out.get(rad) ?? rational(0n), coeff) : subtractRational(out.get(rad) ?? rational(0n), coeff);
+    checkPolyCoeffBound(next);
     if (next.n === 0n) out.delete(rad);
     else out.set(rad, next);
   }
@@ -827,11 +1112,15 @@ function radicalAdd(a: RadicalSum, b: RadicalSum, sign: 1 | -1 = 1): RadicalSum 
 function radicalMultiply(a: RadicalSum, b: RadicalSum): RadicalSum {
   const out = new Map<bigint, SpanRational>();
   for (const [d1, c1] of a) {
+    checkPolyCoeffBound(c1);
     for (const [d2, c2] of b) {
+      checkPolyCoeffBound(c2);
       const g = bigGcd(d1, d2);
       const d = (d1 / g) * (d2 / g);
       const term = multiplyRational(multiplyRational(c1, c2), rational(g));
+      checkPolyCoeffBound(term);
       const next = addRational(out.get(d) ?? rational(0n), term);
+      checkPolyCoeffBound(next);
       if (next.n === 0n) out.delete(d);
       else out.set(d, next);
     }
@@ -921,6 +1210,7 @@ function evaluateRadicalConst(expr: ScalarExpr): { ok: true; value: RadicalSum }
     case "const": {
       const q = toRational(expr.value);
       if (!q) return { ok: false, defined: true, reason: "non_rational_constant" };
+      checkPolyCoeffBound(q);
       return { ok: true, value: q.n === 0n ? new Map() : new Map([[1n, q]]) };
     }
     case "variable":
@@ -973,7 +1263,11 @@ function evaluateRadicalConst(expr: ScalarExpr): { ok: true; value: RadicalSum }
       }
       const base = evaluateRadicalConst(expr.base);
       if (!base.ok) return base;
-      if (expr.exponent === 0) return { ok: true, value: new Map([[1n, rational(1n)]]) };
+      if (expr.exponent === 0) {
+        return base.value.size === 0
+          ? { ok: false, defined: false, reason: "natural_domain_denominator_zero" }
+          : { ok: true, value: new Map([[1n, rational(1n)]]) };
+      }
       let stepBase: RadicalSum = base.value;
       if (expr.exponent < 0) {
         const inv = radicalDivide(new Map([[1n, rational(1n)]]), stepBase);
@@ -1359,6 +1653,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
         break;
     }
     const rf = rationalForm(denExpr, variable);
+    if (rf.unsupported === "polynomial_complexity_exceeded") throw new PolyComplexityError();
     if (!rf.unsupported) {
       addRfDens(rf);
       if (rf.numerator.size === 0) alwaysUndefined = true;
@@ -1403,6 +1698,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
       case "abs": {
         walk(node.value);
         const rf = rationalForm(node.value, variable);
+        if (rf.unsupported === "polynomial_complexity_exceeded") throw new PolyComplexityError();
         if (!rf.unsupported) {
           addRfDens(rf);
           pushSplitPoly(rf.numerator);
@@ -1435,7 +1731,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
       }
       case "pow": {
         walk(node.base);
-        if (node.exponent < 0) {
+        if (node.exponent <= 0) {
           extractDenominatorConstraints(node.base);
         }
         return;
@@ -1443,6 +1739,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
       case "sqrt": {
         walk(node.value);
         const rf = rationalForm(node.value, variable);
+        if (rf.unsupported === "polynomial_complexity_exceeded") throw new PolyComplexityError();
         if (!rf.unsupported) {
           addRfDens(rf);
           const prod = boundedPolyMultiply(rf.numerator, rf.denominator, { mulSteps: 0 });
@@ -1462,6 +1759,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
         walk(node.value);
         if (node.value.kind === "abs") {
           const rfAbs = rationalForm(node.value.value, variable);
+          if (rfAbs.unsupported === "polynomial_complexity_exceeded") throw new PolyComplexityError();
           if (!rfAbs.unsupported) {
             addRfDens(rfAbs);
             if (rfAbs.numerator.size === 0) alwaysUndefined = true;
@@ -1470,6 +1768,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
           }
         }
         const rf = rationalForm(node.value, variable);
+        if (rf.unsupported === "polynomial_complexity_exceeded") throw new PolyComplexityError();
         if (!rf.unsupported) {
           addRfDens(rf);
           const prod = boundedPolyMultiply(rf.numerator, rf.denominator, { mulSteps: 0 });
@@ -1886,10 +2185,18 @@ function evaluateExactRationalExt(
         return { status: "unsupported", reason: "power_out_of_bounds" };
       }
       if (base.status !== "value") return base;
-      if (expr.exponent < 0 && base.value.n === 0n) return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+      if (expr.exponent <= 0 && base.value.n === 0n) return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
       let val = rational(1n);
       const step = expr.exponent >= 0 ? base.value : rational(base.value.d, base.value.n);
-      for (let i = 0; i < Math.abs(expr.exponent); i++) val = multiplyRational(val, step);
+      if (bigAbs(step.n) > MAX_POLY_COEFF_MAGNITUDE || step.d > MAX_POLY_COEFF_MAGNITUDE) {
+        return { status: "unsupported", reason: "polynomial_complexity_exceeded" };
+      }
+      for (let i = 0; i < Math.abs(expr.exponent); i++) {
+        val = multiplyRational(val, step);
+        if (bigAbs(val.n) > MAX_POLY_COEFF_MAGNITUDE || val.d > MAX_POLY_COEFF_MAGNITUDE) {
+          return { status: "unsupported", reason: "polynomial_complexity_exceeded" };
+        }
+      }
       return { status: "value", value: val };
     }
   }
@@ -2072,7 +2379,10 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
     case "pow": {
       const b = evaluateFloatSafe(expr.base, x, variable, xRadius);
       if (b.status !== "ok") return b;
-      if (expr.exponent < 0 && Math.abs(b.value) <= BOUND_EPS + b.err) return { status: "unstable" };
+      if (expr.exponent <= 0 && b.value === 0 && b.err === 0) {
+        return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+      }
+      if (expr.exponent <= 0 && Math.abs(b.value) <= BOUND_EPS + b.err) return { status: "unstable" };
       const val = b.value ** expr.exponent;
       if (!Number.isFinite(val) || Math.abs(val) >= 1e10) return { status: "unstable" };
       if (expr.exponent === 0) return { status: "ok", value: 1, err: 0, marginOk: b.marginOk, irrational: false };
@@ -2217,9 +2527,15 @@ class MPolyOverflowError extends Error {
 }
 
 function mpolyAdd(a: MPoly, b: MPoly, sign: 1 | -1 = 1): MPoly {
-  const out = new Map(a);
+  const out = new Map<string, SpanRational>();
+  for (const [k, v] of a) {
+    if (bigAbs(v.n) > MAX_POLY_COEFF_MAGNITUDE || v.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
+    out.set(k, v);
+  }
   for (const [k, v] of b) {
+    if (bigAbs(v.n) > MAX_POLY_COEFF_MAGNITUDE || v.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
     const next = sign === 1 ? addRational(out.get(k) ?? rational(0n), v) : subtractRational(out.get(k) ?? rational(0n), v);
+    if (bigAbs(next.n) > MAX_POLY_COEFF_MAGNITUDE || next.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
     if (next.n === 0n) out.delete(k);
     else out.set(k, next);
     if (out.size > 1024) throw new MPolyOverflowError();
@@ -2228,6 +2544,7 @@ function mpolyAdd(a: MPoly, b: MPoly, sign: 1 | -1 = 1): MPoly {
 }
 
 function mpolyConst(q: SpanRational): MPoly {
+  if (bigAbs(q.n) > MAX_POLY_COEFF_MAGNITUDE || q.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
   return q.n === 0n ? new Map() : new Map([["", q]]);
 }
 
@@ -2249,10 +2566,15 @@ function formatMPolyKey(p: MPoly): string {
 }
 
 function mpolyScale(p: MPoly, q: SpanRational): MPoly {
+  if (bigAbs(q.n) > MAX_POLY_COEFF_MAGNITUDE || q.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
+  for (const v of p.values()) {
+    if (bigAbs(v.n) > MAX_POLY_COEFF_MAGNITUDE || v.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
+  }
   if (q.n === 0n || p.size === 0) return new Map();
   const out = new Map<string, SpanRational>();
   for (const [k, v] of p) {
     const next = multiplyRational(v, q);
+    if (bigAbs(next.n) > MAX_POLY_COEFF_MAGNITUDE || next.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
     if (next.n !== 0n) out.set(k, next);
   }
   return out;
@@ -2278,12 +2600,16 @@ type RingAtomRegistry = {
 function mpolyMultiply(a: MPoly, b: MPoly, reg: RingAtomRegistry): MPoly {
   let acc: MPoly = new Map();
   for (const [ka, ca] of a) {
+    if (bigAbs(ca.n) > MAX_POLY_COEFF_MAGNITUDE || ca.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
     const pa = parseMonomialKey(ka);
     for (const [kb, cb] of b) {
+      if (bigAbs(cb.n) > MAX_POLY_COEFF_MAGNITUDE || cb.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
       const pb = parseMonomialKey(kb);
       const combined = new Map(pa);
       for (const [atom, exp] of pb) combined.set(atom, (combined.get(atom) ?? 0) + exp);
-      let term = new Map<string, SpanRational>([["", multiplyRational(ca, cb)]]);
+      const prodCoeff = multiplyRational(ca, cb);
+      if (bigAbs(prodCoeff.n) > MAX_POLY_COEFF_MAGNITUDE || prodCoeff.d > MAX_POLY_COEFF_MAGNITUDE) throw new MPolyOverflowError();
+      let term = new Map<string, SpanRational>([["", prodCoeff]]);
       const extraFactors: MPoly[] = [];
       const remPowers = new Map<string, number>();
       let expExponentSum: MPoly | null = null;
@@ -2552,6 +2878,7 @@ function ringNormalizeRational(
         if (!Number.isInteger(node.exponent) || Math.abs(node.exponent) > 12) return null;
         const b = convert(node.base);
         if (!b) return null;
+        if (node.exponent <= 0 && b.num.size === 0) return null;
         if (node.exponent === 0) return { num: mpolyConst(rational(1n)), den: mpolyConst(rational(1n)) };
         if (node.exponent < 0 && b.num.size === 0) return null;
         const stepNum = node.exponent >= 0 ? b.num : b.den;
@@ -2829,6 +3156,9 @@ function verifyScalarEquivalenceInner(
   const student = parseScalarExpr(studentInput);
   const reference = parseScalarExpr(referenceInput);
   if (!student || !reference) return { status: "unverified", reason: "parse_outside_decidable_fragment", domain };
+  if (domain?.nonCommutativeVars && domain.nonCommutativeVars.length > 0) {
+    return verifyNonCommutativeParsed(student, reference, domain, false);
+  }
 
   const variable = domain?.variable ?? "x";
   const vars = new Set([...collectVariables(student), ...collectVariables(reference)]);
@@ -3875,6 +4205,247 @@ export function verifySubstitutionBounds(input: SubstitutionBounds): Verificatio
     reason: "transformed_bounds_mismatch",
     witness: { input: `${formatRational(lower)}..${formatRational(upper)}`, detail },
   };
+}
+
+type NcPoly = Map<string, SpanRational>;
+
+function splitNcKey(key: string): { scalar: string[]; nc: string[] } {
+  if (!key) return { scalar: [], nc: [] };
+  const sep = key.indexOf("\u0001");
+  if (sep < 0) return { scalar: [], nc: [] };
+  const sPart = key.slice(0, sep);
+  const nPart = key.slice(sep + 1);
+  return {
+    scalar: sPart ? sPart.split("\u0000") : [],
+    nc: nPart ? nPart.split("\u0000") : [],
+  };
+}
+
+function joinNcKey(scalar: readonly string[], nc: readonly string[]): string {
+  if (scalar.length === 0 && nc.length === 0) return "";
+  return `${scalar.join("\u0000")}\u0001${nc.join("\u0000")}`;
+}
+
+function ncPolyAdd(a: NcPoly, b: NcPoly, sign: 1 | -1 = 1): NcPoly {
+  const out = new Map<string, SpanRational>();
+  for (const [k, v] of a) {
+    checkPolyCoeffBound(v);
+    out.set(k, v);
+  }
+  for (const [k, v] of b) {
+    checkPolyCoeffBound(v);
+    const next = sign === 1 ? addRational(out.get(k) ?? rational(0n), v) : subtractRational(out.get(k) ?? rational(0n), v);
+    checkPolyCoeffBound(next);
+    if (next.n === 0n) out.delete(k);
+    else out.set(k, next);
+    if (out.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
+  }
+  return out;
+}
+
+function ncPolyScale(a: NcPoly, factor: SpanRational): NcPoly {
+  checkPolyCoeffBound(factor);
+  for (const v of a.values()) checkPolyCoeffBound(v);
+  if (factor.n === 0n || a.size === 0) return new Map();
+  const out = new Map<string, SpanRational>();
+  for (const [k, v] of a) {
+    const scaled = multiplyRational(v, factor);
+    checkPolyCoeffBound(scaled);
+    if (scaled.n !== 0n) out.set(k, scaled);
+  }
+  return out;
+}
+
+function ncPolyMultiply(a: NcPoly, b: NcPoly, budget: PolyMulBudget): NcPoly {
+  if (a.size > MAX_SYMBOLIC_POLY_TERMS || b.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
+  for (const v of a.values()) checkPolyCoeffBound(v);
+  for (const v of b.values()) checkPolyCoeffBound(v);
+  if (a.size === 0 || b.size === 0) return new Map();
+  const out = new Map<string, SpanRational>();
+  for (const [ka, va] of a) {
+    const pa = splitNcKey(ka);
+    for (const [kb, vb] of b) {
+      budget.mulSteps++;
+      if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) throw new PolyComplexityError();
+      const pb = splitNcKey(kb);
+      const scalar = [...pa.scalar, ...pb.scalar].sort();
+      const nc = [...pa.nc, ...pb.nc];
+      if (scalar.length + nc.length > MAX_SYMBOLIC_POLY_DEGREE) throw new PolyComplexityError();
+      const prod = multiplyRational(va, vb);
+      checkPolyCoeffBound(prod);
+      const key = joinNcKey(scalar, nc);
+      const next = addRational(out.get(key) ?? rational(0n), prod);
+      checkPolyCoeffBound(next);
+      if (next.n === 0n) out.delete(key);
+      else {
+        out.set(key, next);
+        if (out.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
+      }
+    }
+  }
+  return out;
+}
+
+function toNcPoly(
+  expr: ScalarExpr,
+  nonCommVars: ReadonlySet<string>,
+  budget: PolyMulBudget,
+): { ok: true; value: NcPoly } | { ok: false; reason: string } {
+  switch (expr.kind) {
+    case "const": {
+      const q = toRational(expr.value);
+      if (!q) return { ok: false, reason: "non_rational_constant" };
+      checkPolyCoeffBound(q);
+      return { ok: true, value: q.n === 0n ? new Map() : new Map([["", q]]) };
+    }
+    case "variable": {
+      const key = nonCommVars.has(expr.name) ? joinNcKey([], [expr.name]) : joinNcKey([expr.name], []);
+      return { ok: true, value: new Map([[key, rational(1n)]]) };
+    }
+    case "neg": {
+      const inner = toNcPoly(expr.value, nonCommVars, budget);
+      return inner.ok ? { ok: true, value: ncPolyScale(inner.value, rational(-1n)) } : inner;
+    }
+    case "add":
+    case "sub": {
+      const l = toNcPoly(expr.left, nonCommVars, budget);
+      if (!l.ok) return l;
+      const r = toNcPoly(expr.right, nonCommVars, budget);
+      if (!r.ok) return r;
+      return { ok: true, value: ncPolyAdd(l.value, r.value, expr.kind === "add" ? 1 : -1) };
+    }
+    case "mul": {
+      const l = toNcPoly(expr.left, nonCommVars, budget);
+      if (!l.ok) return l;
+      const r = toNcPoly(expr.right, nonCommVars, budget);
+      if (!r.ok) return r;
+      return { ok: true, value: ncPolyMultiply(l.value, r.value, budget) };
+    }
+    case "div": {
+      const l = toNcPoly(expr.left, nonCommVars, budget);
+      if (!l.ok) return l;
+      const r = toNcPoly(expr.right, nonCommVars, budget);
+      if (!r.ok) return r;
+      if (r.value.size === 1 && r.value.has("")) {
+        const denom = r.value.get("")!;
+        if (denom.n !== 0n) {
+          return { ok: true, value: ncPolyScale(l.value, divideRational(rational(1n), denom)) };
+        }
+      }
+      return { ok: false, reason: "non_commutative_division_unsupported" };
+    }
+    case "pow": {
+      if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
+        return { ok: false, reason: "power_out_of_bounds" };
+      }
+      const b = toNcPoly(expr.base, nonCommVars, budget);
+      if (!b.ok) return b;
+      if (expr.exponent <= 0) {
+        const hasVar = [...b.value.keys()].some((k) => k !== "");
+        if (hasVar) return { ok: false, reason: "non_commutative_power_unsupported" };
+        const scalarVal = b.value.get("") ?? rational(0n);
+        if (scalarVal.n === 0n) return { ok: false, reason: "natural_domain_denominator_zero" };
+        let val = rational(1n);
+        const step = divideRational(rational(1n), scalarVal);
+        checkPolyCoeffBound(step);
+        for (let i = 0; i < Math.abs(expr.exponent); i++) {
+          val = multiplyRational(val, step);
+          checkPolyCoeffBound(val);
+        }
+        return { ok: true, value: new Map([["", val]]) };
+      }
+      let acc: NcPoly = new Map([["", rational(1n)]]);
+      for (let i = 0; i < expr.exponent; i++) {
+        acc = ncPolyMultiply(acc, b.value, budget);
+      }
+      return { ok: true, value: acc };
+    }
+    default:
+      return { ok: false, reason: `${expr.kind}_outside_non_commutative_fragment` };
+  }
+}
+
+function collapseCommutativeNcPoly(poly: NcPoly): NcPoly {
+  const out = new Map<string, SpanRational>();
+  for (const [key, coeff] of poly) {
+    const { scalar, nc } = splitNcKey(key);
+    const collapsedKey = joinNcKey([...scalar, ...nc].sort(), []);
+    const next = addRational(out.get(collapsedKey) ?? rational(0n), coeff);
+    if (next.n === 0n) out.delete(collapsedKey);
+    else out.set(collapsedKey, next);
+  }
+  return out;
+}
+
+function verifyNonCommutativeParsed(
+  student: ScalarExpr,
+  reference: ScalarExpr,
+  domain: DomainSpec | undefined,
+  defaultAllNonCommutative: boolean,
+): VerificationResult {
+  try {
+    const vars = new Set([...collectVariables(student), ...collectVariables(reference)]);
+    const scalarVar = domain?.variable && !(domain.nonCommutativeVars ?? []).includes(domain.variable) ? domain.variable : null;
+    const nonCommVars = new Set(
+      domain?.nonCommutativeVars && domain.nonCommutativeVars.length > 0
+        ? domain.nonCommutativeVars
+        : defaultAllNonCommutative
+          ? [...vars].filter((v) => v !== scalarVar)
+          : [],
+    );
+    if (!defaultAllNonCommutative) {
+      for (const v of vars) {
+        if (!nonCommVars.has(v) && v !== scalarVar) {
+          return { status: "unverified", reason: "foreign_variable", domain };
+        }
+      }
+    }
+    const budget: PolyMulBudget = { mulSteps: 0 };
+    const sPoly = toNcPoly(student, nonCommVars, budget);
+    const rPoly = toNcPoly(reference, nonCommVars, budget);
+    if (!sPoly.ok) return { status: "unverified", reason: sPoly.reason, domain };
+    if (!rPoly.ok) return { status: "unverified", reason: rPoly.reason, domain };
+    const diff = ncPolyAdd(sPoly.value, rPoly.value, -1);
+    if (diff.size === 0) {
+      return { status: "equivalent", reason: "non_commutative_ring_identity", domain };
+    }
+    const collapsed = collapseCommutativeNcPoly(diff);
+    if (collapsed.size === 0) {
+      return {
+        status: "inequivalent",
+        reason: "non_commutative_mismatch",
+        witness: { input: "factor_order", detail: "non-commutative multiplication order differs" },
+        domain,
+      };
+    }
+    return {
+      status: "inequivalent",
+      reason: "non_commutative_residual_nonzero",
+      witness: { input: "expression", detail: "non-commutative expressions differ" },
+      domain,
+    };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
+    throw err;
+  }
+}
+
+export function verifyMatrixExpressionEquivalence(
+  studentInput: ScalarExpr | string,
+  referenceInput: ScalarExpr | string,
+  domain?: DomainSpec,
+): VerificationResult {
+  const parseMatrixSide = (input: ScalarExpr | string): ScalarExpr | null => {
+    const direct = parseScalarExpr(input);
+    if (direct) return direct;
+    return typeof input === "string" ? parseScalarExpr(normalizeLatexExpr(input)) : null;
+  };
+  const student = parseMatrixSide(studentInput);
+  const reference = parseMatrixSide(referenceInput);
+  if (!student || !reference) return { status: "unverified", reason: "parse_outside_decidable_fragment", domain };
+  return verifyNonCommutativeParsed(student, reference, domain, true);
 }
 
 export const checkScalarEquivalence = verifyScalarEquivalence;

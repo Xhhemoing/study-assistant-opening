@@ -190,17 +190,18 @@ function toPublicCaps(
   questionStem: string,
   steps: readonly LearnerStep[],
   verification: VerifyOutput,
-  options: { coarsenedHasError?: boolean } = {},
+  options: { coarsened?: boolean; allVerifiedValid?: boolean } = {},
 ): PublicTeachingCaps {
   const projectedSteps = steps.map((step) => projectLearnerStep(step));
-  if (options.coarsenedHasError !== undefined) {
+  if (options.coarsened) {
+    const allValid = Boolean(options.allVerifiedValid);
     const movePlan: MovePlan = {
-      move: options.coarsenedHasError ? "concept_cue" : "invite_next_step",
-      rationale: options.coarsenedHasError ? "已检测到步骤存在可疑前提或推导，请先整体复查关键条件" : "保持下一步由学习者完成",
+      move: allValid ? "invite_next_step" : "concept_cue",
+      rationale: allValid ? "保持下一步由学习者完成" : "请先整体复查关键条件与每一步推导依据",
     };
-    const text = options.coarsenedHasError
-      ? "解答中存在一处需要复查的前提或推导，你会先检查哪一步的依据？"
-      : "你愿意先写出下一步，并说明依据吗？";
+    const text = allValid
+      ? "你愿意先写出下一步，并说明依据吗？"
+      : "请先复查本题条件与已有步骤的推导依据，你会先检查哪一步？";
     return {
       questionStem: String(questionStem),
       learnerSteps: projectedSteps,
@@ -363,14 +364,20 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     Number.isFinite((budget as { maxBitsPerTurn?: number }).maxBitsPerTurn)
       ? (budget as { maxBitsPerTurn: number }).maxBitsPerTurn
       : PURE_MAX_LEAKAGE_BITS;
-  const turnCap = assessmentMode === "practice" ? rawTurnCap : Math.min(rawTurnCap, PURE_MAX_LEAKAGE_BITS);
+  const isPureTurn = assessmentMode !== "practice";
+  const turnCap = isPureTurn ? Math.min(rawTurnCap, PURE_MAX_LEAKAGE_BITS) : rawTurnCap;
+  const pureAllValid =
+    propagatedSteps.length > 0 &&
+    !verification.firstError &&
+    propagatedSteps.every((step) => step.status === "valid" && step.error === undefined);
   const uncoarsenedFits =
-    uncoarsenedBits <= turnCap &&
-    (assessmentMode === "practice" || uncoarsenedBits === 0 || budget.leakageBits + uncoarsenedBits < PURE_MAX_LEAKAGE_BITS);
-  const shouldCoarsen = disclosedStepCount >= 2 && !uncoarsenedFits;
+    !isPureTurn &&
+    uncoarsenedBits <= turnCap;
+  const shouldCoarsen = isPureTurn || (disclosedStepCount >= 2 && !uncoarsenedFits);
 
-  const requiredBits = shouldCoarsen ? 1 : uncoarsenedBits;
-  if (assessmentMode !== "practice" && requiredBits > 0 && budget.leakageBits + requiredBits >= PURE_MAX_LEAKAGE_BITS) {
+  // On pure/assessed turns the verifier runs once and emits at most 2 public outcomes (log2(2) = 1 bit).
+  const requiredBits = isPureTurn ? 1 : shouldCoarsen ? 1 : uncoarsenedBits;
+  if (isPureTurn && budget.leakageBits + requiredBits >= PURE_MAX_LEAKAGE_BITS) {
     const pureCheck = budget.canRelease(requiredBits, nowMs);
     return blockedByBudgetResult(
       budget,
@@ -382,13 +389,15 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
   }
 
-  const coarsenedHasError = shouldCoarsen
-    ? Boolean(verification.firstError || propagatedSteps.some((step) => step.status === "invalid" || step.error !== undefined))
-    : undefined;
   const releasedSteps = shouldCoarsen
     ? propagatedSteps.map((step) => projectLearnerStep(step, "unknown", null))
     : propagatedSteps;
-  const publicTeaching = toPublicCaps(input.questionStem, releasedSteps, verification, { coarsenedHasError });
+  const publicTeaching = toPublicCaps(
+    input.questionStem,
+    releasedSteps,
+    verification,
+    shouldCoarsen ? { coarsened: true, allVerifiedValid: pureAllValid } : {},
+  );
   const publicVerification: VerifyOutput = shouldCoarsen
     ? { steps: releasedSteps }
     : {

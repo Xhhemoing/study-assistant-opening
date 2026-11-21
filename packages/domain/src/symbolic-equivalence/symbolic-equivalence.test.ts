@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   findLinearDependency,
+  normalizeLatexExpr,
   parseScalarExpr,
+  rationalForm,
   runCSubset408,
   simplifyRadical,
   sturmCount,
   verifyEigenspace,
   verifyIndefiniteIntegral,
+  verifyMatrixExpressionEquivalence,
   verifyNullspace,
   verifyScalarEquivalence,
   verifySubspaceBasis,
@@ -389,6 +392,93 @@ describe("bounded symbolic equivalence", () => {
     });
     expect(mismatchBounds.status).toBe("inequivalent");
     expect(mismatchBounds.witness?.detail).toContain("4");
+  });
+
+  it("enforces intermediate coefficient magnitude bounds before cancellation (P1-2)", () => {
+    const huge = 1n << 4097n;
+    const halfHuge = 1n << 4096n;
+    expect(() => polynomialAdd(new Map([[0, rational(huge)]]), new Map([[0, rational(-huge)]]))).toThrow(
+      /polynomial_complexity_exceeded/,
+    );
+    expect(() => polynomialAdd(new Map([[1, rational(halfHuge)]]), new Map([[1, rational(halfHuge)]]))).toThrow(
+      /polynomial_complexity_exceeded/,
+    );
+
+    const directConst = rationalForm({ kind: "const", value: rational(huge) }, "x");
+    expect(directConst.unsupported).toBe("polynomial_complexity_exceeded");
+
+    const hugeMulCancel = verifyScalarEquivalence(
+      {
+        kind: "sub",
+        left: {
+          kind: "mul",
+          left: { kind: "const", value: rational(halfHuge) },
+          right: { kind: "mul", left: { kind: "const", value: 2 }, right: { kind: "variable", name: "x" } },
+        },
+        right: {
+          kind: "mul",
+          left: { kind: "const", value: rational(huge) },
+          right: { kind: "variable", name: "x" },
+        },
+      },
+      "0",
+    );
+    expect(hugeMulCancel.status).toBe("unverified");
+    expect(hugeMulCancel.reason).toBe("polynomial_complexity_exceeded");
+
+    const nestedConstCancel = verifyScalarEquivalence("(((2^12)^12)^12)^12 - (((2^12)^12)^12)^12", "0");
+    expect(nestedConstCancel.status).toBe("unverified");
+    expect(nestedConstCancel.reason).toBe("polynomial_complexity_exceeded");
+  });
+
+  it("preserves base != 0 domain constraints on zero exponents (P1-3)", () => {
+    const onSingletonZero = verifyScalarEquivalence("(x - 1)^0", "1", {
+      intervals: [{ left: 1, right: 1 }],
+    });
+    expect(onSingletonZero.status).toBe("inequivalent");
+    expect(onSingletonZero.reason).toBe("natural_domain_mismatch");
+
+    const onReals = verifyScalarEquivalence("(x - 1)^0", "1");
+    expect(onReals.status).toBe("inequivalent");
+    expect(onReals.reason).toBe("natural_domain_mismatch");
+
+    expect(verifyScalarEquivalence("(x - 1)^0", "1", { excluded: [1] }).status).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence("(x - 1)^0", "1", { intervals: [{ left: 1, leftOpen: true }] }).status,
+    ).toBe("equivalent");
+    expect(verifyScalarEquivalence("2^0", "1").status).toBe("equivalent");
+    expect(verifyScalarEquivalence("(1 - 1)^0", "1").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("(1 - 1)^0", "1").reason).toBe("natural_domain_mismatch");
+    expect(verifyScalarEquivalence("exp(x)^0", "1").status).toBe("equivalent");
+  });
+
+  it("normalizes LaTeX brace implicit multiplication and guards non-commutative matrix algebra", () => {
+    expect(normalizeLatexExpr("x^{ab}")).toBe("x^(a*b)");
+    expect(normalizeLatexExpr("x_{ab}")).toBe("x_(a*b)");
+    expect(normalizeLatexExpr("x^{2y}")).toBe("x^(2*y)");
+    expect(normalizeLatexExpr("\\sqrt{2x}")).toBe("sqrt(2*x)");
+    expect(normalizeLatexExpr("\\frac{x^{2}-1}{x-1}")).toBe("((x^(2)-1)/(x-1))");
+    expect(
+      verifyScalarEquivalence("\\frac{x^{2}-1}{x-1}", "x + 1", {
+        excluded: [1],
+      }).status,
+    ).toBe("equivalent");
+
+    expect(verifyMatrixExpressionEquivalence("A*(B - C)", "A*B - A*C").status).toBe("equivalent");
+    const swapped = verifyMatrixExpressionEquivalence("A*(B - C)", "(B - C)*A");
+    expect(swapped.status).toBe("inequivalent");
+    expect(swapped.reason).toBe("non_commutative_mismatch");
+
+    const scalarScoped = verifyScalarEquivalence("A*(B - C)", "(B - C)*A", {
+      nonCommutativeVars: ["A", "B", "C"],
+    });
+    expect(scalarScoped.status).toBe("inequivalent");
+    expect(scalarScoped.reason).toBe("non_commutative_mismatch");
+
+    expect(verifyMatrixExpressionEquivalence("(A + B)^2", "A^2 + A*B + B*A + B^2").status).toBe("equivalent");
+    expect(verifyMatrixExpressionEquivalence("(A + B)^2", "A^2 + 2*A*B + B^2").reason).toBe(
+      "non_commutative_mismatch",
+    );
   });
 });
 
