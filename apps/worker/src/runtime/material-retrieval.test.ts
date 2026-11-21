@@ -77,9 +77,12 @@ describe("shared material retriever", () => {
     expect(mocks.hasIndex).toHaveBeenCalledWith(scope, expect.objectContaining(route));
     expect(mocks.search).toHaveBeenCalledWith(scope, expect.objectContaining({ ...route, modelKey: config.modelKey, dimensions: 3 }));
   });
-  it.each(["configuration", "index", "quota", "timeout"])("falls back to lexical material when %s is unavailable", async reason => {
+  it.each(["configuration", "index", "quota", "parent-budget", "parent-calls", "parent-unknown", "timeout"])("falls back to lexical material when %s is unavailable", async reason => {
     if (reason === "index") mocks.hasIndex.mockResolvedValue(false);
     if (reason === "quota") mocks.embed.mockRejectedValue(new Error("budget limit"));
+    if (reason === "parent-budget") mocks.embed.mockRejectedValue(new OpeningBudgetError("PARENT_BUDGET_EXCEEDED", "parent interaction budget exceeded"));
+    if (reason === "parent-calls") mocks.embed.mockRejectedValue(new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached"));
+    if (reason === "parent-unknown") mocks.embed.mockRejectedValue(new OpeningBudgetError("PARENT_BUDGET_OUTCOME_UNKNOWN", "parent interaction has unknown billing; not re-sending"));
     if (reason === "timeout") mocks.embed.mockRejectedValue(new Error("embedding request timed out"));
     const result = await createOpeningMaterialRetriever(sql, budget, reason === "configuration" ? null : config)(scope, { ...input, query: "零空间" });
     expect(result).toMatchObject({ mode: "lexical", chunks: [{ id: "semantic" }] });

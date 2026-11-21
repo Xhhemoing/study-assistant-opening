@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ActivitySpecPublishInput, SourceChunk } from "@aistudy/contracts";
-import { mayPublishVerified } from "@aistudy/domain";
+import { checkArithmeticAnswer, mayPublishVerified } from "@aistudy/domain";
 import { assembleTeachingEvidencePack } from "./teaching-evidence";
 import {
   createTeachingValidationAfterPublish,
@@ -330,6 +330,60 @@ describe("teaching-verifiers", () => {
     expect(report.layers.find(layer => layer.layer === "tool_result")).toMatchObject({
       outcome: "fail", details: { latex: "2 + 2 = 5" },
     });
+  });
+
+  const realArithmeticCheckFormula = async (latex: string): Promise<{ ok: boolean } | { unknown: true; reason: string }> => {
+    const equals = latex.indexOf("=");
+    if (equals < 0) return { unknown: true, reason: "exact arithmetic tool requires an equality" };
+    const checked = checkArithmeticAnswer(latex.slice(0, equals), latex);
+    if (checked === null) return { unknown: true, reason: "equality is outside the supported exact arithmetic language or limits" };
+    return { ok: checked === "correct" };
+  };
+
+  it.each([
+    ["gathered symbolic before contradiction", String.raw`\begin{gathered} x = y \\ 2 + 2 = 5 \end{gathered}`],
+    ["gathered contradiction before symbolic", String.raw`\begin{gathered} 2 + 2 = 5 \\ x = y \end{gathered}`],
+    ["align* with non-equation header", String.raw`\begin{align*} \text{Step 1} \\ x &= y \\ 2 + 2 &= 5 \end{align*}`],
+    ["align with tags, spacing, and trailing punctuation", String.raw`$$\begin{align} \text{Check:} \\ 2 + 2 &= 5, \tag{1} \\[6pt] x &= y. \notag \end{align}$$`],
+    ["aligned side-by-side columns", String.raw`\[\begin{aligned} x &= y & 2 + 2 &= 5 \end{aligned}\]`],
+    ["gather with \\cr and non-equation line", String.raw`\begin{gather} \text{Verify} \cr x = y \cr 2 + 2 = 5 \end{gather}`],
+    ["eqnarray and array environments", String.raw`\begin{array}{ll} x = y \\ 2 + 2 = 5; \end{array}`],
+    ["cases contradiction in branch expression", String.raw`f(x) = \begin{cases} 2 + 2 = 5, & x = 0 \\ 2, & x = 1 \end{cases}`],
+    ["cases contradiction in later branch", String.raw`f(x) = \begin{cases} 1, & x = 0 \\ 2 + 2 = 5, & x = 1 \end{cases}`],
+    ["cases contradiction in branch condition", String.raw`f(x) = \begin{cases} 1, & 2 + 2 = 5 \\ 2, & x = 1 \end{cases}`],
+  ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex) => {
+    const report = await verifyTeachingContent({
+      activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
+      blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex } }],
+      tools: { checkFormula: realArithmeticCheckFormula },
+    });
+    expect(report.layers.find(layer => layer.layer === "tool_result")).toMatchObject({
+      outcome: "fail", details: { latex: "2 + 2 = 5" },
+    });
+    expect(report.factPassed).toBe(false);
+    expect(mayPublishVerified(report)).toBe(false);
+  });
+
+  it("passes pure multiline arithmetic blocks and keeps valid piecewise cases or matrices unknown without false failure", async () => {
+    const passReport = await verifyTeachingContent({
+      activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
+      blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex: String.raw`\begin{gathered} 1 + 1 = 2 \\ 2 + 2 = 4 \end{gathered}` } }],
+      tools: { checkFormula: realArithmeticCheckFormula },
+    });
+    expect(passReport.layers.find(layer => layer.layer === "tool_result")).toMatchObject({ outcome: "pass" });
+
+    for (const latex of [
+      String.raw`f(x) = \begin{cases} 1, & x = 0 \\ 2, & x = 1 \end{cases}`,
+      String.raw`f(x) = \begin{cases} 1 + 1, & x = 0 \\ 2, & x = 1 \end{cases}`,
+      String.raw`\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix} = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}`,
+    ]) {
+      const unknownReport = await verifyTeachingContent({
+        activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
+        blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex } }],
+        tools: { checkFormula: realArithmeticCheckFormula },
+      });
+      expect(unknownReport.layers.find(layer => layer.layer === "tool_result")?.outcome).toBe("unknown");
+    }
   });
 
   it("C7: peer-model upvote rejected as independent proof", () => {

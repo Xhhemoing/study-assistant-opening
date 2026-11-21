@@ -72,6 +72,39 @@ describe("pgvector material repository", () => {
     }
   });
 
+  it("enforces aggregate spend and call limits across retrieval and tutor under unlimited daily mode while isolating unknown blocking", async () => {
+    const { sourceId, snapshot } = await seed("matrix kernel");
+    const unlimitedBudget = createOpeningBudgetRepository(f.sql, { envCapCents: 0, dailyQuotaMode: "unlimited", parentCapCents: 10 });
+    const retrieve = createOpeningMaterialRetriever(f.sql, unlimitedBudget, { ...model, modelName: "embedding",
+      baseUrl: "https://embedding.example.test/v1", apiKey: "fixture", billing: "metered",
+      inputCentsPerMillion: 1, requestDimensions: true, dailyRequestCap: null });
+    const turnId = `study-turn:${randomUUID()}`;
+    const parentBudget = { id: turnId, maxProviderCalls: 2 };
+    const opId = randomUUID();
+    const input = { courseContext: { courseId: null, materialUse: "citation" as const }, chunks: snapshot.chunks,
+      sourceIds: [sourceId], query: "kernel", maxCharacters: 2000, operationId: opId, parentBudget };
+    const send = vi.spyOn(network, "fetchOpeningProvider").mockImplementation((_url, init) =>
+      new Promise((_resolve, reject) => init.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true })));
+    try {
+      expect(await retrieve(f.scope, input)).toMatchObject({ mode: "lexical", chunks: snapshot.chunks });
+      expect(await retrieve(f.scope, input)).toMatchObject({ mode: "lexical", chunks: snapshot.chunks });
+      expect(send).toHaveBeenCalledTimes(1);
+
+      // Unknown embedding (1c, 1 call) still counts toward the turn family cap (10c, 2 calls).
+      await expect(unlimitedBudget.reserve(f.scope, { purpose: "tutor", parentBudget, requestId: randomUUID(), amountCents: 10 }))
+        .rejects.toMatchObject({ code: "PARENT_BUDGET_EXCEEDED" });
+      // Lexical fallback tutor (9c) is NOT blocked by retrieval's unknown outcome and fits within 10c & 2 calls.
+      const tutor = await unlimitedBudget.reserve(f.scope, { purpose: "tutor", parentBudget, requestId: randomUUID(), amountCents: 9 });
+      expect(tutor).toMatchObject({ state: "reserved", amountCents: 9, parentInteractionId: turnId });
+      await unlimitedBudget.settle(f.scope, tutor.id, 5);
+      // 1c embedding + 5c tutor = 6c <= 10c, but 2 family calls already reached maxProviderCalls: 2.
+      await expect(unlimitedBudget.reserve(f.scope, { purpose: "tutor", parentBudget, requestId: randomUUID(), amountCents: 1 }))
+        .rejects.toMatchObject({ code: "PARENT_BUDGET_CALL_LIMIT" });
+    } finally {
+      send.mockRestore();
+    }
+  });
+
   it("requires a tutor reservation and admits a fresh attempt only when every recorded call was unsent", async () => {
     const repository = createOpeningSourceEmbeddingsRepository(f.sql);
     const budget = createOpeningBudgetRepository(f.sql, { envCapCents: 50 });

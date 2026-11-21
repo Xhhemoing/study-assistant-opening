@@ -444,6 +444,355 @@ function verifyClaimSupport(input: VerifyTeachingInput): LayerResult {
   };
 }
 
+const EQUATION_ROW_ENVS = new Set([
+  "align", "align*", "aligned", "alignat", "alignat*", "alignedat",
+  "xalignat", "xalignat*", "xxalignat", "flalign", "flalign*",
+  "gather", "gather*", "gathered", "eqnarray", "eqnarray*",
+  "equation", "equation*", "split", "multline", "multline*", "array",
+]);
+
+const CASES_ENVS = new Set(["cases", "cases*", "dcases", "dcases*", "rcases", "rcases*"]);
+
+const ARG_SKIP_ENVS = new Set(["array", "alignat", "alignat*", "alignedat", "xalignat", "xalignat*", "xxalignat"]);
+
+function readBalancedGroup(text: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\\" && i + 1 < text.length) {
+      i++;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return -1;
+}
+
+function readBalancedBracket(text: string, openIndex: number): number {
+  let braceDepth = 0;
+  for (let i = openIndex; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\\" && i + 1 < text.length) {
+      i++;
+      continue;
+    }
+    if (ch === "{") braceDepth++;
+    else if (ch === "}") braceDepth = Math.max(0, braceDepth - 1);
+    else if (ch === "]" && braceDepth === 0) return i + 1;
+  }
+  return -1;
+}
+
+function stripOuterMathDelimiters(raw: string): string {
+  let text = raw.trim();
+  while (text) {
+    if (text.startsWith("$$") && text.endsWith("$$") && text.length >= 4 && !text.slice(2, -2).includes("$$")) {
+      text = text.slice(2, -2).trim();
+      continue;
+    }
+    if (text.startsWith("\\[") && text.endsWith("\\]") && text.length >= 4 && !text.slice(2, -2).includes("\\]")) {
+      text = text.slice(2, -2).trim();
+      continue;
+    }
+    if (text.startsWith("\\(") && text.endsWith("\\)") && text.length >= 4 && !text.slice(2, -2).includes("\\)")) {
+      text = text.slice(2, -2).trim();
+      continue;
+    }
+    if (text.startsWith("$") && text.endsWith("$") && text.length >= 2 && !text.slice(1, -1).includes("$")) {
+      text = text.slice(1, -1).trim();
+      continue;
+    }
+    break;
+  }
+  return text;
+}
+
+function matchEnvTag(text: string, index: number, kind: "begin" | "end"): { env: string; endIndex: number } | null {
+  const prefix = `\\${kind}{`;
+  if (!text.startsWith(prefix, index)) return null;
+  const close = text.indexOf("}", index + prefix.length);
+  if (close < 0) return null;
+  const env = text.slice(index + prefix.length, close).trim();
+  return env ? { env, endIndex: close + 1 } : null;
+}
+
+function findMatchingEnvEnd(text: string, openIndex: number): { env: string; bodyStart: number; bodyEnd: number; afterEnd: number } | null {
+  const open = matchEnvTag(text, openIndex, "begin");
+  if (!open) return null;
+  let bodyStart = open.endIndex;
+  while (bodyStart < text.length && /\s/.test(text[bodyStart]!)) bodyStart++;
+  if (text[bodyStart] === "[") {
+    const bracketEnd = readBalancedBracket(text, bodyStart);
+    if (bracketEnd > 0) {
+      bodyStart = bracketEnd;
+      while (bodyStart < text.length && /\s/.test(text[bodyStart]!)) bodyStart++;
+    }
+  }
+  if (ARG_SKIP_ENVS.has(open.env) && text[bodyStart] === "{") {
+    const argEnd = readBalancedGroup(text, bodyStart);
+    if (argEnd > 0) bodyStart = argEnd;
+  }
+  let envDepth = 1;
+  for (let i = bodyStart; i < text.length; i++) {
+    if (text[i] === "\\") {
+      const nestedOpen = matchEnvTag(text, i, "begin");
+      if (nestedOpen) {
+        envDepth++;
+        i = nestedOpen.endIndex - 1;
+        continue;
+      }
+      const nestedClose = matchEnvTag(text, i, "end");
+      if (nestedClose) {
+        envDepth--;
+        if (envDepth === 0) {
+          return { env: open.env, bodyStart, bodyEnd: i, afterEnd: nestedClose.endIndex };
+        }
+        i = nestedClose.endIndex - 1;
+        continue;
+      }
+      if (i + 1 < text.length) i++;
+    }
+  }
+  return null;
+}
+
+function splitTopLevelRows(text: string): { rows: string[]; hasIntertext: boolean } {
+  const rows: string[] = [];
+  let start = 0;
+  let braceDepth = 0;
+  let envDepth = 0;
+  let hasIntertext = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\r" || ch === "\n") {
+      if (braceDepth === 0 && envDepth === 0) {
+        rows.push(text.slice(start, i));
+        if (ch === "\r" && text[i + 1] === "\n") i++;
+        start = i + 1;
+      }
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth++;
+      continue;
+    }
+    if (ch === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      continue;
+    }
+    if (ch !== "\\") continue;
+    if (text[i + 1] === "\\") {
+      if (braceDepth === 0 && envDepth === 0) {
+        rows.push(text.slice(start, i));
+        let next = i + 2;
+        if (text[next] === "*") next++;
+        const dimMatch = /^[ \t]*\[\s*-?(?:\d+(?:\.\d+)?|\.\d+|\\[A-Za-z]+)\s*(?:pt|px|em|ex|rem|mm|cm|in|pc|bp|dd|cc|sp|mu|\\[A-Za-z]+)\s*\]/i.exec(text.slice(next));
+        if (dimMatch) next += dimMatch[0].length;
+        start = next;
+        i = next - 1;
+      } else {
+        i++;
+      }
+      continue;
+    }
+    const open = matchEnvTag(text, i, "begin");
+    if (open) {
+      envDepth++;
+      i = open.endIndex - 1;
+      continue;
+    }
+    const close = matchEnvTag(text, i, "end");
+    if (close) {
+      envDepth = Math.max(0, envDepth - 1);
+      i = close.endIndex - 1;
+      continue;
+    }
+    if (braceDepth === 0 && envDepth === 0) {
+      const crMatch = /^\\cr(?![A-Za-z])/.exec(text.slice(i));
+      if (crMatch) {
+        rows.push(text.slice(start, i));
+        start = i + crMatch[0].length;
+        i = start - 1;
+        continue;
+      }
+      const interMatch = /^\\(?:short)?intertext(?![A-Za-z])\s*\{/.exec(text.slice(i));
+      if (interMatch) {
+        const groupEnd = readBalancedGroup(text, i + interMatch[0].length - 1);
+        if (groupEnd > 0) {
+          rows.push(text.slice(start, i));
+          hasIntertext = true;
+          start = groupEnd;
+          i = groupEnd - 1;
+          continue;
+        }
+      }
+    }
+    if (i + 1 < text.length && !/[A-Za-z]/.test(text[i + 1]!)) i++;
+  }
+  rows.push(text.slice(start));
+  return { rows, hasIntertext };
+}
+
+function splitTopLevelAmpersands(row: string): string[] {
+  const cells: string[] = [];
+  let start = 0;
+  let braceDepth = 0;
+  let envDepth = 0;
+  for (let i = 0; i < row.length; i++) {
+    const ch = row[i]!;
+    if (ch === "\\") {
+      const open = matchEnvTag(row, i, "begin");
+      if (open) {
+        envDepth++;
+        i = open.endIndex - 1;
+        continue;
+      }
+      const close = matchEnvTag(row, i, "end");
+      if (close) {
+        envDepth = Math.max(0, envDepth - 1);
+        i = close.endIndex - 1;
+        continue;
+      }
+      if (i + 1 < row.length && !/[A-Za-z]/.test(row[i + 1]!)) i++;
+      continue;
+    }
+    if (ch === "{") braceDepth++;
+    else if (ch === "}") braceDepth = Math.max(0, braceDepth - 1);
+    else if (ch === "&" && braceDepth === 0 && envDepth === 0) {
+      cells.push(row.slice(start, i));
+      start = i + 1;
+    }
+  }
+  cells.push(row.slice(start));
+  return cells;
+}
+
+function stripBraceArgMacros(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\\") {
+      const macroMatch = /^\\(?:tag\*?|label|cline)(?![A-Za-z])\s*\{/.exec(text.slice(i));
+      if (macroMatch) {
+        const groupEnd = readBalancedGroup(text, i + macroMatch[0].length - 1);
+        if (groupEnd > 0) {
+          i = groupEnd - 1;
+          continue;
+        }
+      }
+    }
+    out += text[i]!;
+  }
+  return out;
+}
+
+function cleanEquationClause(raw: string): string {
+  let text = stripOuterMathDelimiters(raw);
+  text = stripBraceArgMacros(text);
+  text = text
+    .replace(/\\(?:notag|nonumber|hline|toprule|midrule|bottomrule|displaystyle|textstyle|scriptstyle|scriptscriptstyle)(?![A-Za-z])/g, " ")
+    .replace(/\\left\s*\(/g, "(")
+    .replace(/\\right\s*\)/g, ")")
+    .replace(/\\(?:quad|qquad|enspace|thinspace)(?![A-Za-z])/g, " ")
+    .replace(/\\[,;:! ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.,;。，；]+$/, "")
+    .trim();
+  return text;
+}
+
+function endsWithOperatorOrEquals(text: string): boolean {
+  return /(?:=|\\times|\\div|\\cdot|[+\-*/×÷−])\s*$/.test(text);
+}
+
+function startsWithOperatorOrEquals(text: string): boolean {
+  return /^\s*(?:=|\\times|\\div|\\cdot|[+\-*/×÷−])/.test(text);
+}
+
+function extractFromLatexFragment(raw: string, out: string[]): boolean {
+  const text = stripOuterMathDelimiters(raw);
+  if (!text) return false;
+  if (text.startsWith("\\begin{")) {
+    const outer = findMatchingEnvEnd(text, 0);
+    if (outer && outer.afterEnd === text.length) {
+      if (CASES_ENVS.has(outer.env)) {
+        const { rows } = splitTopLevelRows(text.slice(outer.bodyStart, outer.bodyEnd));
+        for (const branch of rows) {
+          if (!branch.trim()) continue;
+          const cells = splitTopLevelAmpersands(branch);
+          for (const cell of cells) {
+            const cleaned = cleanEquationClause(cell);
+            if (cleaned.includes("=")) out.push(cleaned);
+          }
+        }
+        return true;
+      }
+      if (EQUATION_ROW_ENVS.has(outer.env)) {
+        return extractFromLatexFragment(text.slice(outer.bodyStart, outer.bodyEnd), out);
+      }
+    }
+  }
+  const { rows, hasIntertext } = splitTopLevelRows(text);
+  let hasNonEquationContent = hasIntertext;
+  for (const row of rows) {
+    if (!row.trim()) continue;
+    const cells = splitTopLevelAmpersands(row);
+    const groups: string[] = [];
+    if (cells.length === 1) {
+      groups.push(cells[0]!);
+    } else {
+      let current = "";
+      for (const rawCell of cells) {
+        const cell = rawCell.trim();
+        if (!cell) continue;
+        if (!current) current = cell;
+        else if (endsWithOperatorOrEquals(current) || startsWithOperatorOrEquals(cell)) {
+          current = `${current} ${cell}`;
+        } else {
+          groups.push(current);
+          current = cell;
+        }
+      }
+      if (current) groups.push(current);
+    }
+    for (const group of groups) {
+      let extractedInner = false;
+      let cursor = 0;
+      while (cursor < group.length) {
+        const innerStart = group.indexOf("\\begin{", cursor);
+        if (innerStart < 0) break;
+        const innerEnv = findMatchingEnvEnd(group, innerStart);
+        if (!innerEnv) break;
+        if (EQUATION_ROW_ENVS.has(innerEnv.env) || CASES_ENVS.has(innerEnv.env)) {
+          extractedInner = true;
+          hasNonEquationContent = true;
+          extractFromLatexFragment(group.slice(innerStart, innerEnv.afterEnd), out);
+          cursor = innerEnv.afterEnd;
+        } else {
+          cursor = innerStart + 7;
+        }
+      }
+      if (extractedInner) continue;
+      const cleaned = cleanEquationClause(group);
+      if (!cleaned) continue;
+      if (cleaned.includes("=")) out.push(cleaned);
+      else hasNonEquationContent = true;
+    }
+  }
+  return hasNonEquationContent;
+}
+
+function extractFormulaSnippets(formula: string): string[] {
+  const equations: string[] = [];
+  const hasNonEquationContent = extractFromLatexFragment(formula, equations);
+  if (equations.length === 0 || hasNonEquationContent) equations.push(formula);
+  return [...new Set(equations)];
+}
+
 async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult> {
   const latexSnippets: string[] = [];
   let unknown: LayerResult | undefined;
@@ -457,12 +806,12 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
       unknown ??= { layer: "tool_result", outcome: "unknown", reason: "formula block has no checkable latex" };
     }
     for (const formula of new Set(formulas)) {
-      const lines = formula.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-      latexSnippets.push(...(lines.every(line => line.includes("=")) ? lines : [formula]));
+      latexSnippets.push(...extractFormulaSnippets(formula));
     }
   }
 
-  if (latexSnippets.length === 0) {
+  const uniqueSnippets = [...new Set(latexSnippets)];
+  if (uniqueSnippets.length === 0) {
     return unknown ?? {
       layer: "tool_result",
       outcome: "skipped",
@@ -478,7 +827,7 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
     };
   }
 
-  for (const latex of latexSnippets) {
+  for (const latex of uniqueSnippets) {
     let result: { ok: boolean } | { unknown: true; reason: string };
     try {
       result = await input.tools.checkFormula(latex);
