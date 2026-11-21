@@ -43,7 +43,7 @@ export const artifactSchema = z
     title: z.string().min(1).max(200).optional(),
     provenance: z
       .object({
-        origin: z.enum(["model", "rules", "user", "import"]),
+        origin: z.enum(["model", "rules", "user", "import", "ai_candidate", "assistant"]),
         note: z.string().max(300).optional(),
       })
       .strict(),

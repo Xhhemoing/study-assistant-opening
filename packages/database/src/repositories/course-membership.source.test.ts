@@ -71,8 +71,14 @@ function makeSql(handlers: {
 }
 
 describe("course membership source resolver (RU-01)", () => {
-  it("links a same-workspace source without VALIDATION", async () => {
-    const repo = createCourseMembershipRepository(makeSql({ sourceWs: W }) as never);
+  it("links a same-workspace source without VALIDATION and locks opening_sources FOR UPDATE", async () => {
+    const queries: string[] = [];
+    const base = makeSql({ sourceWs: W });
+    const tracked = Object.assign(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+      queries.push(parts.join("?").replace(/\s+/g, " ").trim());
+      return base(parts, ...values);
+    }, { begin: <T>(callback: (tx: SqlFn) => Promise<T>) => callback(tracked as unknown as SqlFn) });
+    const repo = createCourseMembershipRepository(tracked as never);
     const membership = await repo.addAssetMembership({
       workspaceId: W,
       courseId: C,
@@ -88,6 +94,7 @@ describe("course membership source resolver (RU-01)", () => {
       workspaceId: W,
       purpose: null,
     });
+    expect(queries.some(q => q.startsWith("SELECT id FROM opening_sources") && q.includes("FOR UPDATE"))).toBe(true);
   });
 
   it.each(["teaching", "practice", "mock_exam", "reference"] as const)("preserves explicit %s purpose without changing role or visibility", async purpose => {

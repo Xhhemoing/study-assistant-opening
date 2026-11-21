@@ -51,7 +51,7 @@ describe("context lineage SQL mode and scope emission", () => {
     { name: "live permits unavailable versions", historical: false, availability: false, expectedHistorical: false, bypassAvailability: true },
   ])("binds independent historical and availability options: $name", ({ historical, availability, expectedHistorical, bypassAvailability }) => {
     const db = sqlFixture(), refs = { text: "lineage.refs", values: [] };
-    const actual = contextSourceRefsIncluded(db as unknown as TransactionSql, "workspace", refs as never, historical, availability) as unknown as Fragment;
+    const actual = contextSourceRefsIncluded(db as unknown as TransactionSql, "workspace", () => ({ ...refs }) as never, historical, availability) as unknown as Fragment;
     expect(actual.values).toEqual(["workspace", bypassAvailability, "workspace", expectedHistorical, "workspace"]);
     expect(actual.text).toContain("COALESCE(jsonb_typeof(lineage.refs) = 'array', false)");
     expect(actual.text).toContain("CASE WHEN jsonb_typeof(lineage.refs) = 'array' THEN lineage.refs ELSE '[]'::jsonb END");
@@ -66,7 +66,8 @@ describe("context lineage SQL mode and scope emission", () => {
     expect(actual.values).toEqual([]);
     expect(actual.text).toContain(`CASE WHEN ${alias}.role = 'assistant' THEN ${alias}.context_source_refs`);
     expect(actual.text).toContain(`FROM unnest(${alias}.source_ids) sid(id)`);
-    expect(actual.text).toContain(`${alias}.source_versions->sid.id::text`);
+    expect(actual.text).toContain("lower(pin.source_id) = sid.id::text AND pin.source_version IS NOT NULL");
+    expect(actual.text).toContain(`${alias}.context_anchor->>'sourceId'`);
     expect(actual.text).toContain(`jsonb_typeof(${alias}.citations)='array' THEN ${alias}.citations ELSE '[null]'::jsonb END`);
     expect(actual.text).toContain("UNION ALL");
   });

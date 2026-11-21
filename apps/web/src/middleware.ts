@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { isAllowedCookieAuthOrigin } from "./features/opening/access-policy";
+import { isAllowedCookieAuthOrigin, isDingTalkWebhook } from "./features/opening/access-policy";
 import { recordLegacyApiRequest } from "./features/opening/legacy-api-observation";
 import { sprintCourseId } from "./features/opening/exam-sprint/sprint-course-route";
 
@@ -67,6 +67,12 @@ export function middleware(request: NextRequest) {
   }
   if (!pathname.startsWith("/api/")) {
     return NextResponse.next();
+  }
+  if (isDingTalkWebhook(request.method, pathname)) {
+    const headers = new Headers(request.headers);
+    headers.delete("cookie");
+    headers.delete("authorization");
+    return NextResponse.next({ request: { headers } });
   }
 
   const publicBaseUrl = cookieAuthBaseUrl(process.env, request.nextUrl.origin);

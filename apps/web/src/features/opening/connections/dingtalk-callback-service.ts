@@ -1,30 +1,26 @@
-import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { z } from "zod";
-import { loadOpeningUploadQuota } from "@aistudy/config";
 import {
   importIdentitySchema,
   sourceMimeSchema,
-  uploadInputSchema,
   type ImportIdentity,
   type SourceMime,
 } from "@aistudy/contracts";
 import {
-  createOpeningConnectionsRepository,
   createOpeningImportsRepository,
-  createOpeningPrivacyRepository,
-  createOpeningSourceRepository,
   OpeningConnectionError,
   OpeningSourceError,
 } from "@aistudy/database";
 import {
   buildDingTalkCallbackResponse,
   DingTalkClientError,
+  type DingTalkCallbackEnvelope,
+  type DingTalkEncryptedCallback,
   isFreshDingTalkEventTimestamp,
   verifyAndDecryptDingTalkEvent,
 } from "../../../../../worker/src/connectors/dingtalk-client";
 import { canReadDingTalkResource } from "../../../../../worker/src/connectors/dingtalk-policy";
-import { importIdentityKey } from "../../../../../worker/src/connectors/import-identity";
+import { publishConnectorSource, type ConnectorSourceStorage } from "../../../../../worker/src/connectors/publish-source";
 
 export const MAX_DINGTALK_EVENT_BYTES = 64 * 1024;
 export const DINGTALK_EVENT_TIMESTAMP_MAX_AGE_SECONDS = 300;
@@ -39,20 +35,14 @@ const callbackConnectionMapSchema = z.record(z.string(), callbackConnectionSchem
 
 export type DingTalkCallbackConnection = z.infer<typeof callbackConnectionSchema>;
 
-export type DingTalkCallbackInput = {
-  signature: string;
-  timestamp: string;
-  nonce: string;
-  encryptedBody: string;
-  now?: () => number;
+export type DingTalkCallbackInput = DingTalkCallbackEnvelope & {
 };
 
 export type DingTalkCallbackDeps = {
   sql: Sql;
   now?: () => number;
   download?: (url: URL) => Promise<Uint8Array>;
-  uploadStaging: (input: { key: string; bytes: Uint8Array; mime: string }) => Promise<void>;
-  uploadFinal: (input: { key: string; bytes: Uint8Array; mime: string }) => Promise<void>;
+  storage: ConnectorSourceStorage;
 };
 
 export type DingTalkCallbackResult = {
@@ -63,12 +53,7 @@ export type DingTalkCallbackResult = {
   receiptId: string | null;
 };
 
-export type DingTalkCallbackResponse = {
-  signature: string;
-  timestamp: string;
-  nonce: string;
-  encrypted: string;
-};
+export type DingTalkCallbackResponse = DingTalkEncryptedCallback;
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim() ?? "";
@@ -113,19 +98,24 @@ export async function receiveDingTalkCallback(
   input: DingTalkCallbackInput,
   deps: DingTalkCallbackDeps,
 ): Promise<DingTalkCallbackResult> {
+  const timestamp = input.timeStamp ?? input.timestamp ?? "";
   const now = deps.now ?? (() => Date.now());
-  if (!isFreshDingTalkEventTimestamp(input.timestamp, DINGTALK_EVENT_TIMESTAMP_MAX_AGE_SECONDS, now)) {
+  if (!isFreshDingTalkEventTimestamp(timestamp, DINGTALK_EVENT_TIMESTAMP_MAX_AGE_SECONDS, now)) {
     throw new DingTalkClientError("FORMAT", "callback timestamp is stale");
   }
 
   const config = responseConfig();
   const event = verifyAndDecryptDingTalkEvent({
     ...config,
-    signature: input.signature,
-    timestamp: input.timestamp,
-    nonce: input.nonce,
-    encryptedBody: input.encryptedBody,
+    ...input,
   });
+  if (event === "check_url" || (
+    event && typeof event === "object" && !Array.isArray(event)
+      && typeof ((event as Record<string, unknown>).eventType ?? (event as Record<string, unknown>).EventType) === "string"
+      && String((event as Record<string, unknown>).eventType ?? (event as Record<string, unknown>).EventType).toLowerCase() === "check_url"
+  )) {
+    return { eventId: "check_url", duplicate: false, imported: 0, sourceId: null, receiptId: null };
+  }
   if (!event || typeof event !== "object" || Array.isArray(event)) {
     throw new DingTalkClientError("FORMAT", "callback event must be an object");
   }
@@ -146,7 +136,6 @@ export async function receiveDingTalkCallback(
       AND c.workspace_id = ${routing.workspaceId}
       AND c.owner_user_id = ${routing.ownerUserId}
       AND w.owner_user_id = ${routing.ownerUserId}
-    FOR UPDATE
     LIMIT 1
   `;
   if (!connection) throw new OpeningConnectionError("NOT_FOUND", "connection not found");
@@ -156,7 +145,7 @@ export async function receiveDingTalkCallback(
 
   const grantedScopes = (connection.allowed_scopes as string[] | null) ?? [];
   const requiredScope = typeof record.requiredScope === "string" ? record.requiredScope : "";
-  if (!requiredScope || !grantedScopes.some(_ => canReadDingTalkResource(requiredScope, grantedScopes))) {
+  if (!requiredScope || !canReadDingTalkResource(requiredScope, grantedScopes)) {
     throw new DingTalkClientError("FORMAT", "callback is not authorized by connection scopes");
   }
 
@@ -166,16 +155,9 @@ export async function receiveDingTalkCallback(
     generation: "callback",
     remoteId: eventId,
   });
-  const identityKey = importIdentityKey(identity);
-  const [existingReceipt] = await deps.sql`
-    SELECT id
-    FROM opening_import_receipts
-    WHERE workspace_id = ${routing.workspaceId}
-      AND connection_id = ${routing.connectionId}
-      AND identity_key = ${identityKey}
-    FOR UPDATE
-    LIMIT 1
-  `;
+  const imports = createOpeningImportsRepository(deps.sql);
+  const scope = { workspaceId: routing.workspaceId, ownerUserId: routing.ownerUserId };
+  const existingReceipt = await imports.findByIdentity(scope, identity);
   if (existingReceipt) {
     return { eventId, duplicate: true, imported: 0, sourceId: null, receiptId: String(existingReceipt.id) };
   }
@@ -212,43 +194,14 @@ export async function receiveDingTalkCallback(
     }
   }
 
-  const sources = createOpeningSourceRepository(deps.sql, { quota: loadOpeningUploadQuota() });
-  const imports = createOpeningImportsRepository(deps.sql);
-  const privacy = createOpeningPrivacyRepository(deps.sql);
-  const connections = createOpeningConnectionsRepository(deps.sql);
-  const scope = {
-    workspaceId: routing.workspaceId,
-    ownerUserId: routing.ownerUserId,
-  };
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const source = await sources.create(scope, uploadInputSchema.parse({
-    name,
-    mime,
-    bytes: bytes.byteLength,
-    sha256,
-  }));
-  const stagingKey = `opening/staging/${source.id}`;
-  const finalKey = `opening/sources/${source.id}/v${source.version}`;
-  await deps.uploadStaging({ key: stagingKey, bytes, mime });
-  const privacyEpoch = await privacy.getWorkspaceEpoch(scope);
-  await sources.completeWithParseJob(scope, source.id, {
-    key: finalKey,
-    payload: { sourceId: source.id, sourceVersion: source.version },
-    privacyEpoch,
-    actual: { bytes: bytes.byteLength, sha256, mime },
-    beforeComplete: () => deps.uploadFinal({ key: finalKey, bytes, mime }),
+  const receipt = await publishConnectorSource(imports, deps.storage, scope, {
+    connectionVersion: Number(connection.version), identity, name, mime, bytes,
   });
-  const receipt = await imports.commit(scope, {
-    connectionVersion: Number(connection.version),
-    identity,
-    sourceId: source.id,
-  });
-  await connections.get(scope, routing.connectionId);
   return {
     eventId,
     duplicate: receipt.duplicate,
     imported: receipt.duplicate ? 0 : 1,
-    sourceId: source.id,
+    sourceId: receipt.duplicate ? null : receipt.sourceIds[0]!,
     receiptId: receipt.id,
   };
 }
@@ -258,18 +211,13 @@ export function encryptedDingTalkSuccess(timestamp: string, nonce: string): Ding
   return buildDingTalkCallbackResponse({ ...responseConfig(), timestamp, nonce });
 }
 
-export type DingTalkStorageDeps = {
-  uploadStaging: DingTalkCallbackDeps["uploadStaging"];
-  uploadFinal: DingTalkCallbackDeps["uploadFinal"];
-};
-
 export function createDingTalkCallbackHttpService(
   sql: Sql,
-  storage: DingTalkStorageDeps,
+  storage: ConnectorSourceStorage,
 ) {
   return {
     callback(input: DingTalkCallbackInput) {
-      return receiveDingTalkCallback(input, { sql, ...storage });
+      return receiveDingTalkCallback(input, { sql, storage });
     },
     success(timestamp: string, nonce: string) {
       return encryptedDingTalkSuccess(timestamp, nonce);

@@ -28,6 +28,23 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
       anchor: { purpose: "learning_help", attemptId: claimedJob.userTurnId, itemVersionId: claimedJob.conversationId }, originalQuestion: "saved question",
       originalAnswer: null, currentAnswer: null, rootObservationId: null, headObservationId: null, workSource: null, effectiveGrading: null, sourceRefs: [] })),
     assertAttemptContext: vi.fn<OpeningTutorJobsRepository["assertAttemptContext"]>(async () => {}),
+    assertGlobalMemoriesCurrent: vi.fn<OpeningTutorJobsRepository["assertGlobalMemoriesCurrent"]>(async () => {}),
+    authorizeSend: vi.fn<OpeningTutorJobsRepository["authorizeSend"]>(async (scope, jobId, ctx, startSend, beforeStartSend) => {
+      await tutorJobs.assertSendAuthorized(scope, jobId, ctx);
+      beforeStartSend?.();
+      return startSend();
+    }),
+    assertSendAuthorized: vi.fn<OpeningTutorJobsRepository["assertSendAuthorized"]>(async (scope, jobId, ctx) => {
+      const current = await tutorJobs.get(scope, jobId);
+      if (
+        current?.status !== "running"
+        || current.claimToken !== ctx.claimToken
+        || (ctx.executionId !== undefined && current.executionId !== ctx.executionId)
+        || (ctx.claimToken !== undefined && current.executionId === null)
+      ) {
+        throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+      }
+    }),
     freezeHelpInputSnapshot: vi.fn<OpeningTutorJobsRepository["freezeHelpInputSnapshot"]>(async (): Promise<HelpInputSnapshot> => ({ userTurnId: claimedJob.userTurnId, assistantTurnId: claimedJob.assistantTurnId, tutorMode: "explain", studyIntent: null })),
     completeTurn: vi.fn<OpeningTutorJobsRepository["completeTurn"]>(async () => {}),
     canAppendCompletedTurnCandidates: vi.fn<OpeningTutorJobsRepository["canAppendCompletedTurnCandidates"]>(async () => true),
@@ -42,6 +59,7 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
     findPendingForConversation: vi.fn<OpeningTutorJobsRepository["findPendingForConversation"]>(unexpected),
     cancel: vi.fn<OpeningTutorJobsRepository["cancel"]>(unexpected),
     readStream: vi.fn<OpeningTutorJobsRepository["readStream"]>(unexpected),
+    withStreamPublication: vi.fn<OpeningTutorJobsRepository["withStreamPublication"]>(async (_scope, _job, _context, publish) => publish()),
     listQueued: vi.fn<OpeningTutorJobsRepository["listQueued"]>(unexpected),
     loadCompletedTurnForMetadata: vi.fn<OpeningTutorJobsRepository["loadCompletedTurnForMetadata"]>(unexpected),
     applyUserTurnIntent: vi.fn<OpeningTutorJobsRepository["applyUserTurnIntent"]>(unexpected),
@@ -51,7 +69,7 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
     executionClaimedAt: null, outcomeUnknownAt: null, releaseReason: null, resultRef: null, reconciledAt: null, pendingReconcileCents: 0, reservedAmountCents: 100, replayed: false,
   };
   const budget = {
-    reserve: vi.fn<TutorTurnDeps["budget"]["reserve"]>(async () => reservation),
+    reserve: vi.fn<TutorTurnDeps["budget"]["reserve"]>(async (_scope, input) => ({ ...reservation, requestId: input.requestId })),
     release: vi.fn<TutorTurnDeps["budget"]["release"]>(async () => reservation),
     settle: vi.fn<TutorTurnDeps["budget"]["settle"]>(async () => reservation),
     claimExecution: vi.fn<TutorTurnDeps["budget"]["claimExecution"]>(async () => true),
@@ -66,6 +84,42 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
 }
 
 describe("sm95 typed attempt context", () => {
+  it("rechecks the claim after attempt and material checks, before the paid send", async () => {
+    const { deps, tutorJobs, budget, provider } = setup({ sourceIds: [], chunks: [] });
+    const claimToken = "00000000-0000-4000-8000-000000000007";
+    const current = { ...claimedJob, claimToken };
+    tutorJobs.claim.mockResolvedValue(current);
+    tutorJobs.get.mockResolvedValue(current);
+    tutorJobs.heartbeat.mockResolvedValue(true);
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, attemptId: claimedJob.userTurnId });
+    tutorJobs.assertAttemptContext.mockImplementationOnce(async () => {
+      tutorJobs.get.mockResolvedValue({ ...current, claimToken: "00000000-0000-4000-8000-000000000008" });
+    });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it("aborts before paid send when timing_execution_id is fenced or privacy_epoch advances before the final send gate", async () => {
+    const { deps, tutorJobs, budget, provider } = setup({ sourceIds: [], chunks: [] });
+    const claimToken = "00000000-0000-4000-8000-000000000007";
+    const executionId = "00000000-0000-4000-8000-000000000009";
+    const current = { ...claimedJob, claimToken, executionId };
+    tutorJobs.claim.mockResolvedValue(current);
+    tutorJobs.get.mockResolvedValue(current);
+    tutorJobs.heartbeat.mockResolvedValue(true);
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, attemptId: claimedJob.userTurnId });
+    tutorJobs.assertAttemptContext.mockImplementationOnce(async () => {
+      // Simulate advanceOpeningWorkspacePrivacyEpoch clearing timing_execution_id while status stays running.
+      tutorJobs.get.mockResolvedValue({ ...current, executionId: undefined });
+    });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
   it("sm95 binds saved question, original/current answer and effective grade without pasting them into the request", async () => {
     const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
     const snapshot = { privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId },
@@ -143,20 +197,28 @@ describe("sm95 typed attempt context", () => {
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
   });
 
-  it("sm95 blocks a stale stream delta before append without logging the saved context", async () => {
+  it.each([false, true])("sm95 rejects attempt drift before publishing the batch (buffered=%s)", async buffered => {
     const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
     const drift = Object.assign(new Error("bound attempt context is unavailable or changed"), { code: "CONFLICT" });
-    tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined).mockRejectedValueOnce(drift);
-    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    const publish = async (_scope: unknown, _job: string, context: Parameters<OpeningTutorJobsRepository["withStreamPublication"]>[2],
+      callback: () => Promise<void>) => {
+      expect(context.attemptContext?.anchor.attemptId).toBe(claimedJob.userTurnId);
+      await callback();
+    };
+    tutorJobs.withStreamPublication.mockImplementationOnce(publish); // Cache initialization.
+    if (buffered) tutorJobs.withStreamPublication.mockImplementationOnce(publish); // First batch.
+    tutorJobs.withStreamPublication.mockRejectedValueOnce(drift);
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
     const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
     provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
       if (!onTextDelta) throw new Error("Expected stream callback");
+      if (buffered) await onTextDelta("first");
       await onTextDelta("must not be released");
       return { text: "must not be released", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 1, outputTokens: 1 };
     });
     await expect(createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id)).rejects.toBe(drift);
-    expect(stream.append).not.toHaveBeenCalled();
+    expect(stream.append.mock.calls.map(call => call[2])).toEqual(buffered ? ["first"] : []);
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
     expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, TUTOR_FAILURE_MESSAGE, undefined, undefined);
   });

@@ -24,8 +24,13 @@ export async function readOpeningRestoreCurrentFacts(
 ): Promise<OpeningRestoreCurrentFacts> {
   const [owner] = await tx`SELECT id FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${ownerUserId}`;
   if (!owner) throw new Error("restore workspace owner is missing or changed");
-  const marks = await tx`SELECT source_id, deleted_at, asset_deleted_at FROM opening_privacy_exclusions
-    WHERE workspace_id=${workspaceId} AND source_id IS NOT NULL ORDER BY source_id`;
+  const marks = await tx`SELECT e.source_id, e.deleted_at, e.asset_deleted_at FROM opening_privacy_exclusions e
+    WHERE e.workspace_id=${workspaceId} AND e.source_id IS NOT NULL
+      AND NOT (
+        e.memory_id IS NULL
+        AND e.id::text = overlay(e.source_id::text placing '8' from 15 for 1)
+      )
+    ORDER BY e.source_id`;
   const currentDeletionJournal = marks.map(row => ({
     sourceId: String(row.source_id), deletedAt: new Date(row.deleted_at as string | Date).toISOString(),
     ...(row.asset_deleted_at ? { assetDeletedAt: new Date(row.asset_deleted_at as string | Date).toISOString() } : {}),

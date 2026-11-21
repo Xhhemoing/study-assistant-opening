@@ -8,6 +8,7 @@ import { cardSourcesIncluded } from "./card-sources";
 import { validateRetainedMaterialImportState } from "./opening-material-import-state";
 import { projectOpeningBackupCardSources, projectOpeningRestoreLibrary } from "./opening-backup-library";
 import { restoreKnowledgeDefinitions } from "./opening-backup-knowledge";
+import { connectorReservationId } from "./opening-source-actions";
 /**
  * Opening-scoped restore apply executor (Q03).
  *
@@ -615,6 +616,16 @@ export async function executeOpeningRestoreApply(
             : table === "opening_learning_observations"
             ? { ...row, root_observation_id: null, revises_observation_id: null, effective_head_id: null }
             : table === "opening_source_versions" ? importedVersions.get(row) ?? row : row;
+          if (table === "opening_privacy_exclusions") {
+            if ("pending_object_keys" in insertRow || "cleanup_not_before" in insertRow) {
+              throw new Error("storage cleanup state cannot be restored");
+            }
+            if (typeof insertRow.id === "string" && typeof insertRow.source_id === "string"
+              && (insertRow.memory_id === null || insertRow.memory_id === undefined)
+              && insertRow.id.toLowerCase() === connectorReservationId(insertRow.source_id)) {
+              throw new Error("temporary connector reservation cannot be restored");
+            }
+          }
           const payload = filterPayload(tx as unknown as Sql, table, insertRow, workspaceId);
           if (!payload) continue;
           if (table === "cards") {

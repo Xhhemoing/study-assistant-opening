@@ -9,6 +9,12 @@ export const learningIso = (value: unknown): string | null => value == null ? nu
 /** Public manual checks retain their reference metadata without claiming independent grading. */
 export const learnerVerdictSource = (source: LearningObservation["verdictSource"]): LearningObservation["verdictSource"] =>
   source === "reference_checked" || source === "ai_graded" ? "self_report" : source;
+const workspaceLearningHistoryLockedTxs = new WeakSet<object>();
+
+export function hasWorkspaceLearningHistoryLockForTx(tx: TransactionSql): boolean {
+  return workspaceLearningHistoryLockedTxs.has(tx as unknown as object);
+}
+
 /** Lock before any owner/course/root/activity/task lock; readers never lock this row. */
 export async function lockWorkspaceLearningHistory(tx: TransactionSql, scope: Scope): Promise<void> {
   const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -17,6 +23,7 @@ export async function lockWorkspaceLearningHistory(tx: TransactionSql, scope: Sc
     VALUES (${scope.workspaceId},${scope.ownerUserId},0) ON CONFLICT DO NOTHING`;
   await tx`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${scope.workspaceId}
     AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+  workspaceLearningHistoryLockedTxs.add(tx as unknown as object);
 }
 /** Advance once for a real learning-semantic mutation, in the transaction holding the counter lock. Non-observation mutations leave valid gaps in fixed-R history. */
 export async function nextWorkspaceLearningHistoryRevision(tx: TransactionSql, scope: Scope): Promise<number> {

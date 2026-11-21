@@ -39,7 +39,7 @@ export function filterNativeNotes(snapshot: NativeBackupSnapshot, provenance: Re
 export async function applyNativeNoteExportPrivacy(sql: Sql, workspaceId: string, snapshot: NativeBackupSnapshot,
   publications: ReadonlyMap<string, BackupSourceRef[]>, answerKeys: ReadonlyMap<string, string[]>): Promise<NativeBackupSnapshot> {
   const rows = await sql`SELECT document_id, context_source_refs,
-    ${contextSourceRefsIncluded(sql, workspaceId, noteContextSourceRefs(sql, sql`context_source_refs`), true)} AS included
+    ${contextSourceRefsIncluded(sql, workspaceId, () => noteContextSourceRefs(sql, () => sql`context_source_refs`), true)} AS included
     FROM opening_note_provenance WHERE workspace_id=${workspaceId}`;
   const provenance = new Map<string, NoteBackupProvenance | null>();
   const note = (id: string, refs: BackupSourceRef[]) => ({ contextSourceRefs: refs,
@@ -105,7 +105,7 @@ export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: stri
   }
   for (const origin of origins) {
     if (origin.contextSourceRefs === null) throw new BackupRestoreError("VALIDATION", "Linked note provenance is unknown");
-    const admitted = await sql`SELECT ${contextSourceRefsIncluded(sql, workspaceId, sql`${sql.json(origin.contextSourceRefs)}::jsonb`, true)} AS included`;
+    const admitted = await sql`SELECT ${contextSourceRefsIncluded(sql, workspaceId, () => sql`${sql.json(origin.contextSourceRefs)}::jsonb`, true)} AS included`;
     if (!admitted[0]!.included) throw new BackupRestoreError("VALIDATION", "Linked note source is deleted, excluded, or unavailable; restore was not applied");
   }
 }

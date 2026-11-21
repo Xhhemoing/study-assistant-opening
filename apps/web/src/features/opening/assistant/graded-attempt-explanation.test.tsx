@@ -83,8 +83,10 @@ it("carries the fresh-session native button request through the actual worker en
     rootObservationId: record.id, headObservationId: record.id, workSource: null, sourceRefs: [],
     effectiveGrading: { observationId: record.id, answerRevision: 1, outcome: "incorrect", verdictSource: "ai_graded", aiEvaluation: null, serverEvaluation: null } };
   // Repository doubles stand in only for persisted identities; the native request and worker are real.
-  const jobs = { get: vi.fn(async () => ({ workspaceId: id, ownerUserId: identity.id })),
-    claim: vi.fn(async () => ({ id: item, workspaceId: id, ownerUserId: identity.id, conversationId, userTurnId: sessionId, assistantTurnId: item, mode: request.mode })),
+  const claimToken = "55555555-5555-4555-8555-555555555555";
+  const runningJob = { id: item, workspaceId: id, ownerUserId: identity.id, conversationId, userTurnId: sessionId,
+    assistantTurnId: item, mode: request.mode, status: "running", claimToken } as const;
+  const jobs = { get: vi.fn(async () => runningJob), claim: vi.fn(async () => runningJob),
     getUserTurn: vi.fn(async () => ({ ...request, sourceVersions: {} })),
     freezeHelpInputSnapshot: vi.fn(async () => ({ userTurnId: sessionId, assistantTurnId: item, tutorMode: request.mode, studyIntent: null })),
     readAttemptContext: vi.fn(async () => context), assertAttemptContext: vi.fn(async () => {}),
@@ -97,7 +99,7 @@ it("carries the fresh-session native button request through the actual worker en
       release: vi.fn(async () => ({})), settle: vi.fn(async () => ({})), markUnknown: vi.fn(async () => ({})) } as unknown as TutorTurnDeps["budget"],
     provider, config: { maxContextCharacters: 5000, reservedCents: 1, maxOutputTokens: 256, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   })(item);
-  expect(jobs.readAttemptContext).toHaveBeenCalledWith({ workspaceId: id, ownerUserId: identity.id }, { userTurnId: sessionId, jobId: item, claimToken: undefined });
+  expect(jobs.readAttemptContext).toHaveBeenCalledWith({ workspaceId: id, ownerUserId: identity.id }, { userTurnId: sessionId, jobId: item, claimToken });
   expect(provider.complete).toHaveBeenCalledOnce();
   expect(JSON.parse(provider.complete.mock.calls[0]![0].text)).toMatchObject({ request: GRADED_ATTEMPT_EXPLANATION_TEXT,
     attemptContext: { originalQuestion: "Saved server question", originalAnswer: context.originalAnswer,

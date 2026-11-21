@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createOpeningSourceRepository } from "./opening-sources";
 import { createOpeningSourceActionsRepository } from "./opening-source-actions";
@@ -17,6 +17,9 @@ type Row = Record<string, unknown>;
 type Fragment = { query: string; values: unknown[] };
 const isFragment = (value: unknown): value is Fragment => typeof value === "object" && value !== null && "query" in value && "values" in value;
 
+beforeEach(() => vi.stubEnv("REDIS_URL", undefined));
+afterEach(() => vi.unstubAllEnvs());
+
 /** Execute statements lazily like postgres: interpolated SQL fragments do not acquire locks. */
 function database(handler: (query: string, values: unknown[]) => Row[]) {
   let locked = false, inTransaction = false, revision = 0, epoch = 0;
@@ -31,7 +34,8 @@ function database(handler: (query: string, values: unknown[]) => Row[]) {
     if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return [];
     if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) { locked = true; return [{ revision }]; }
     if (query.startsWith("UPDATE opening_workspace_history_revisions")) { expect(locked).toBe(true); return [{ revision: ++revision }]; }
-    if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ privacy_epoch: ++epoch }];
+    if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: ++epoch }];
+    if (query.startsWith("SELECT 1 FROM opening_tutor_jobs") || query.startsWith("SELECT j.id, j.timing_execution_id FROM opening_tutor_jobs") || query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
     if (query.startsWith("DELETE FROM opening_learning_eligibility")) { invalidations.push(values); return []; }
     return handler(query, values);
   };
@@ -136,6 +140,41 @@ describe("learning semantic revision writers", () => {
     expect(db.revision()).toBe(2);
     expect(db.epoch()).toBe(2);
     expect(db.invalidations).toHaveLength(2);
+  });
+
+  it("includes mixed-case stagingKey when historical opening_jobs.key recorded a mixed-case finalKey on lowercase delete", async () => {
+    const upperId = sourceId.toUpperCase();
+    const recordedMixedFinalKey = `opening/sources/${upperId}/v0`;
+    let pendingKeys: unknown;
+    const db = database((query, values) => {
+      if (query.startsWith("UPDATE opening_course_knowledge SET node_definitions")) return [];
+      if (query.startsWith("SELECT version, upload_url_expires_at")) return [{ version: 0 }];
+      if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("SELECT m.id") || query.startsWith("SELECT version FROM opening_source_versions")) return [];
+      if (query.startsWith("SELECT image_object_key")) return [{ image_object_key: recordedMixedFinalKey }];
+      if (query.startsWith("INSERT INTO opening_privacy_exclusions")) return [];
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET asset_deleted_at")) {
+        pendingKeys = values[1];
+        return [];
+      }
+      if (query.startsWith("DELETE FROM opening_sources")
+        || query.startsWith("DELETE FROM course_asset_memberships")
+        || query.startsWith("UPDATE opening_source_versions")) return [];
+      throw new Error(query);
+    });
+    const repo = createOpeningSourceActionsRepository(db.sql);
+    const keys = {
+      stagingKey: (source: string) => `opening/staging/${source}`,
+      finalKey: (source: string, version: number) => `opening/sources/${source}/v${version}`,
+    };
+    const result = await repo.apply(scope, sourceId, { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }, keys, new Date(at));
+    expect(result.cleanup.keys).toEqual(expect.arrayContaining([
+      `opening/staging/${sourceId}`,
+      `opening/staging/${upperId}`,
+      `opening/sources/${sourceId}/v0`,
+      recordedMixedFinalKey,
+    ]));
+    expect(pendingKeys).toEqual(result.cleanup.keys);
   });
 
   it.each([false, true])("memory deletion advances semantic revision only for new exclusions (already excluded: %s)", async (alreadyExcluded) => {

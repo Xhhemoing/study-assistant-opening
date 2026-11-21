@@ -12,6 +12,7 @@ import { readCommittedExamReceipt, lockBoundExamCourse, packWithExamSourceMappin
 import { syncExamIntegration } from "./opening-exam-integration-attempts";
 import { readExamIntegrationInTx } from "./opening-exam-integration";
 import { examSourceExposureCoverage, readExamSourceExposure } from "./opening-exam-source-exposure";
+import { withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 export { OpeningExamSprintRepositoryError } from "./opening-exam-sprint-snapshot";
 
 
@@ -58,7 +59,7 @@ export function createOpeningExamSprintRepository(sql: Sql, pack: ExamPack) {
 
     async act(scope: Scope, raw: ExamSprintCommand): Promise<ExamSprintOverview> {
       const command = examSprintCommandSchema.parse(raw);
-      return sql.begin(async tx => {
+      return withOpeningTutorStreamFenceCommit(sql, async tx => {
         // Serialize first-write creation too; a state-row lock alone cannot lock a missing row.
         await lockWorkspaceLearningHistory(tx, scope);
         await lockOwner(tx, scope, true);
