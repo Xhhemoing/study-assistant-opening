@@ -128,6 +128,15 @@ function pendingStopTurnSettled(turns: readonly TurnRecord[], clientKey: string)
   return !assistant || assistant.role !== "assistant" || assistant.status !== "pending";
 }
 
+function matchesDeferredStopJob(
+  job: JobStatusResponse | null,
+  stop: { clientKey: string; jobId?: string },
+): boolean {
+  if (!job) return false;
+  if (typeof job.clientKey === "string") return job.clientKey === stop.clientKey;
+  return stop.jobId !== undefined && job.id === stop.jobId;
+}
+
 export function pendingJobDiscoveryState(
   result: { ok: true; job: JobStatusResponse | null } | { ok: false; error: unknown },
 ): PendingJobDiscovery {
@@ -667,7 +676,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       setRecoveryNow(Date.now());
       const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
       if (deferredStop) {
-        if (discovered.kind === "active" && pendingJob?.clientKey === deferredStop.clientKey) {
+        if (discovered.kind === "active" && matchesDeferredStopJob(pendingJob, deferredStop)) {
           setActiveJobId(null);
           setPending(false);
           await stopSavedJobRef.current(discovered.activeJobId, id, { fromDeferredStop: true });
@@ -678,8 +687,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
           setPendingStopRecovery(false);
         } else {
           // Unfiltered pending-job only returns the conversation's newest job, so a newer
-          // turn from another tab can hide our stopped job. Query by clientKey before clearing.
-          let scopedJob: Awaited<ReturnType<OpeningApi["getPendingJob"]>>;
+          // turn from another tab can hide our stopped job. Query by clientKey before deciding.
+          let scopedJob: JobStatusResponse | null;
           try {
             scopedJob = await api.getPendingJob(id, signal, { clientKey: deferredStop.clientKey });
           } catch (scopedError) {
@@ -688,6 +697,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
             if (unavailable.kind === "unavailable") {
               setPendingHint(`尚未确认是否有进行中的回答：${unavailable.message}`);
             }
+            setActiveJobId(null);
+            setPending(false);
             setRecoveryRequired(true);
             setPendingStopRecovery(true);
             return true;
@@ -695,45 +706,60 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
           if (signal?.aborted) return false;
           const scopedDiscovered = pendingJobDiscoveryState({ ok: true, job: scopedJob });
           if (scopedDiscovered.kind === "active") {
-            if (!scopedJob?.clientKey || scopedJob.clientKey === deferredStop.clientKey) {
+            if (matchesDeferredStopJob(scopedJob, deferredStop)) {
               setActiveJobId(null);
               setPending(false);
               await stopSavedJobRef.current(scopedDiscovered.activeJobId, id, { fromDeferredStop: true });
               return true;
             }
-            // Legacy/unfiltered response returned a different clientKey: never cancel it and
-            // never clear our Stop marker without confirmation for deferredStop.clientKey.
-            setRecoveryRequired(true);
-            setPendingStopRecovery(true);
-          } else if (discovered.kind === "active") {
-            // clientKey-scoped lookup confirmed no active queued/running job for our clientKey.
-            pendingStop.current = null;
-            setPendingStopRecovery(false);
+            // Skewed/legacy response omitted clientKey or returned another tab's clientKey:
+            // never cancel it and never clear our Stop marker without positive confirmation.
+          } else {
+            // Scoped lookup saw no active job for deferredStop.clientKey. Refresh turns once
+            // and ONLY clear pendingStop if our own turn is positively confirmed terminal;
+            // otherwise our POST may still be in flight / uncommitted on the server.
+            let confirmedSettled = false;
+            try {
+              const refreshedTurns = await api.listTurns(id, signal);
+              if (signal?.aborted) return false;
+              const turnsValid = !guard.receipt || !refreshedTurns.some(turn => turn.conversationId !== id
+                || turn.contextAnchor?.attemptId !== learningAttempt?.id
+                || turn.contextAnchor?.itemVersionId !== learningAttempt?.itemVersionId);
+              if (turnsValid) {
+                observedTurns.current = refreshedTurns;
+                setTurns(refreshedTurns);
+                confirmedSettled = pendingStopTurnSettled(refreshedTurns, deferredStop.clientKey);
+              }
+            } catch {
+              if (signal?.aborted) return false;
+            }
+            if (confirmedSettled) {
+              pendingStop.current = null;
+              setPendingStopRecovery(false);
+            }
           }
         }
       }
       const remainingStop = pendingStop.current?.conversationId === id ? pendingStop.current : null;
-      if (discovered.kind === "active") {
+      if (remainingStop) {
+        // Keep pendingStop armed and do not adopt another tab's active stream over an unresolved Stop.
+        setActiveJobId(null);
+        setPending(false);
+        setRecoveryRequired(true);
+        setPendingStopRecovery(true);
+        setPendingHint(discovered.kind === "unknown" ? discovered.hint : "尚未确认发送结果，请重新读取对话。");
+      } else if (discovered.kind === "active") {
         setActiveJobId(discovered.activeJobId);
         setPending(discovered.pending);
         setPendingHint(discovered.hint);
       } else if (discovered.kind === "unknown") {
-        if (remainingStop) {
-          setRecoveryRequired(true);
-          setPendingStopRecovery(true);
-        }
         setActiveJobId(null);
         setPending(false);
         setPendingHint(discovered.hint);
       } else {
         setActiveJobId(null);
         setPending(false);
-        if (remainingStop) {
-          // Keep pendingStop and recovery active while delivery of the stopped turn is still uncertain.
-          setRecoveryRequired(true);
-          setPendingStopRecovery(true);
-          setPendingHint("尚未确认发送结果，请重新读取对话。");
-        } else if (!guard.receipt || nextTurns.length) {
+        if (!guard.receipt || nextTurns.length) {
           setPendingHint("");
         }
       }
@@ -894,7 +920,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
 
   const turnStopLock = useRef(false);
   const savedSubmission = useRef<{ conversationId: string | null; clientKey: string; dispatched: boolean; stopRequested: boolean } | null>(null);
-  const pendingStop = useRef<{ conversationId: string; clientKey: string } | null>(null);
+  const pendingStop = useRef<{ conversationId: string; clientKey: string; jobId?: string } | null>(null);
 
   async function stopSavedJob(jobId: string, id: string | null, options?: { fromDeferredStop?: boolean }) {
     if (turnStopLock.current) return;
@@ -965,7 +991,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       submitted = true;
       setUnknownJob(null);
       if (saved.stopRequested) {
-        pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
+        pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey, jobId: result.jobId };
         setActiveJobId(null);
         setPending(false);
         await stopSavedJob(result.jobId, conversationId, { fromDeferredStop: true });
@@ -1177,7 +1203,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       preserveEntrySelection.current = false;
       if (!options?.preserveDraft) setDraft("");
       if (saved.stopRequested) {
-        pendingStop.current = { conversationId: id, clientKey: saved.clientKey };
+        pendingStop.current = { conversationId: id, clientKey: saved.clientKey, jobId: submitted.jobId };
         setActiveJobId(null);
         setPending(false);
         await stopSavedJob(submitted.jobId, id, { fromDeferredStop: true });

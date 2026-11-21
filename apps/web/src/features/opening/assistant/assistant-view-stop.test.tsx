@@ -193,9 +193,10 @@ it("does not cancel an active job from another tab (different clientKey) and cle
 
     const reloadButton = Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话")!;
     await act(async () => reloadButton.click());
-    // Must NOT cancel the other tab's job; must NOT clear our Stop marker on an unfiltered response returning another clientKey.
+    // Must NOT cancel the other tab's job, must NOT adopt its stream over our unresolved Stop, and must keep recovery armed.
     expect(cancelJob).not.toHaveBeenCalled();
-    expect(getJob).toHaveBeenCalledWith(otherJobId, expect.anything());
+    expect(getJob).not.toHaveBeenCalled();
+    expect(Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话")).toBeTruthy();
     expect(Array.from(host.querySelectorAll("button")).find(b => b.textContent === "继续提问")).toBeTruthy();
   } finally {
     await act(async () => root.unmount());
@@ -502,7 +503,7 @@ it("recovers and cancels Tab A's active job by (conversationId, clientKey) even 
   }
 });
 
-it("clears Tab A's Stop marker and adopts Tab B when clientKey-scoped lookup proves Tab A has no active job", async () => {
+it("keeps Tab A's Stop armed while Tab A's POST is uncommitted even when Tab B is active, then cancels Tab A once committed", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
@@ -510,19 +511,28 @@ it("clears Tab A's Stop marker and adopts Tab B when clientKey-scoped lookup pro
   document.body.append(host);
   const root = createRoot(host);
   const id = "16161616-1616-4616-8616-161616161616";
+  const tabAJobId = "18181818-1818-4818-8818-181818181818";
   const tabBJobId = "17171717-1717-4717-8717-171717171717";
   const now = new Date().toISOString();
   let tabAClientKey = "";
+  let tabAPhase: "uncommitted" | "running" | "cancelled" = "uncommitted";
   let rejectSubmit!: (reason?: unknown) => void;
   const submitPending = new Promise<never>((_resolve, reject) => { rejectSubmit = reject; });
   const submitTurn = vi.fn((input: { clientKey: string }) => {
     tabAClientKey = input.clientKey;
     return submitPending;
   });
-  const cancelJob = vi.fn();
+  const cancelJob = vi.fn(async (jobId: string) => {
+    if (jobId === tabAJobId) tabAPhase = "cancelled";
+    return { id: jobId, status: "cancelled" as const, error: null, updatedAt: now };
+  });
   const getJob = vi.fn(async (jobId: string) => ({ id: jobId, status: "running" as const, error: null, updatedAt: now }));
   const getPendingJob = vi.fn(async (_conversationId: string, _signal?: AbortSignal, options?: { clientKey?: string }) => {
-    if (options?.clientKey) return null;
+    if (options?.clientKey) {
+      return options.clientKey === tabAClientKey && tabAPhase === "running"
+        ? { id: tabAJobId, status: "running" as const, error: null, updatedAt: now, clientKey: tabAClientKey }
+        : null;
+    }
     return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now, clientKey: "tab-b-client-key" };
   });
   const api = {
@@ -544,12 +554,134 @@ it("clears Tab A's Stop marker and adopts Tab B when clientKey-scoped lookup pro
       await Promise.resolve();
     });
 
+    const reloadButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话");
+    const dismissButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "继续提问");
+    // First reread while Tab A's POST is still uncommitted (scoped lookup returns null and Tab A turn not in history):
+    // must keep pendingStop armed and NOT adopt Tab B's stream.
+    await act(async () => reloadButton()!.click());
+    expect(getPendingJob).toHaveBeenCalledWith(id, expect.anything(), { clientKey: tabAClientKey });
+    expect(cancelJob).not.toHaveBeenCalled();
+    expect(getJob).not.toHaveBeenCalled();
+    expect(reloadButton()).toBeTruthy();
+    expect(dismissButton()).toBeTruthy();
+
+    // 50ms later Tab A's POST commits; next reread finds Tab A's exact clientKey, cancels ONLY Tab A, and then adopts Tab B.
+    tabAPhase = "running";
+    await act(async () => reloadButton()!.click());
+    expect(cancelJob.mock.calls).toEqual([[tabAJobId]]);
+    expect(getJob).toHaveBeenCalledWith(tabBJobId, expect.anything());
+    expect(dismissButton()).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+it("clears Tab A's Stop marker and adopts Tab B only once Tab A's own turn is positively confirmed terminal", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const id = "19191919-1919-4919-8919-191919191919";
+  const tabBJobId = "20202020-2020-4020-8020-202020202020";
+  const now = new Date().toISOString();
+  let tabAClientKey = "";
+  let rejectSubmit!: (reason?: unknown) => void;
+  const submitPending = new Promise<never>((_resolve, reject) => { rejectSubmit = reject; });
+  const submitTurn = vi.fn((input: { clientKey: string }) => {
+    tabAClientKey = input.clientKey;
+    return submitPending;
+  });
+  const cancelJob = vi.fn();
+  const getJob = vi.fn(async (jobId: string) => ({ id: jobId, status: "running" as const, error: null, updatedAt: now }));
+  const getPendingJob = vi.fn(async (_conversationId: string, _signal?: AbortSignal, options?: { clientKey?: string }) => {
+    if (options?.clientKey) return null;
+    return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now, clientKey: "tab-b-client-key" };
+  });
+  let listTurnsCalls = 0;
+  const api = {
+    listSources: async () => [],
+    createConversation: vi.fn(async () => ({ id, title: "学习对话", courseId: null })),
+    submitTurn,
+    cancelJob,
+    resumeConversation: async () => ({ conversationId: id, courseId: null, sourceIds: [], boundedHistory: [] }),
+    // First listTurns returns empty (in-flight race); follow-up listTurns after scoped null confirms Tab A settled.
+    listTurns: vi.fn(async () => {
+      listTurnsCalls += 1;
+      return listTurnsCalls >= 2
+        ? [
+            { id: "21212121-2121-4121-8121-212121212121", conversationId: id, role: "user" as const, text: "Tab A 提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const, clientKey: tabAClientKey },
+            { id: "22222222-2222-4222-8222-222222222221", conversationId: id, role: "assistant" as const, text: "已取消", citations: [], createdAt: now, mode: "explain" as const, status: "failed" as const },
+          ]
+        : [];
+    }),
+    getPendingJob,
+    getJob,
+  } as unknown as OpeningApi;
+  try {
+    await act(async () => root.render(<AssistantView api={api} startFresh initialDraft="Tab A 提问" />));
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="停止回答"]')!.click());
+    await act(async () => {
+      rejectSubmit(new TypeError("lost ack"));
+      await Promise.resolve();
+    });
+
     const reloadButton = Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话")!;
     await act(async () => reloadButton.click());
     expect(getPendingJob).toHaveBeenCalledWith(id, expect.anything(), { clientKey: tabAClientKey });
     expect(cancelJob).not.toHaveBeenCalled();
     expect(getJob).toHaveBeenCalledWith(tabBJobId, expect.anything());
     expect(Array.from(host.querySelectorAll("button")).find(b => b.textContent === "继续提问")).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+it("refuses to cancel an active job when a skewed server omits clientKey on scoped pending-job discovery", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const id = "23232323-2323-4323-8323-232323232323";
+  const tabBJobId = "24242424-2424-4424-8424-242424242424";
+  const now = new Date().toISOString();
+  let rejectSubmit!: (reason?: unknown) => void;
+  const submitPending = new Promise<never>((_resolve, reject) => { rejectSubmit = reject; });
+  const cancelJob = vi.fn();
+  const getJob = vi.fn(async (jobId: string) => ({ id: jobId, status: "running" as const, error: null, updatedAt: now }));
+  // Simulates an older server ignoring ?clientKey= and omitting clientKey from the JSON response.
+  const getPendingJob = vi.fn(async () => ({ id: tabBJobId, status: "running" as const, error: null, updatedAt: now }));
+  const api = {
+    listSources: async () => [],
+    createConversation: vi.fn(async () => ({ id, title: "学习对话", courseId: null })),
+    submitTurn: vi.fn(() => submitPending),
+    cancelJob,
+    resumeConversation: async () => ({ conversationId: id, courseId: null, sourceIds: [], boundedHistory: [] }),
+    listTurns: async () => [],
+    getPendingJob,
+    getJob,
+  } as unknown as OpeningApi;
+  try {
+    await act(async () => root.render(<AssistantView api={api} startFresh initialDraft="Tab A 提问" />));
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="停止回答"]')!.click());
+    await act(async () => {
+      rejectSubmit(new TypeError("lost ack"));
+      await Promise.resolve();
+    });
+
+    const reloadButton = Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话")!;
+    await act(async () => reloadButton.click());
+    expect(cancelJob).not.toHaveBeenCalled();
+    expect(getJob).not.toHaveBeenCalled();
+    expect(Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话")).toBeTruthy();
+    expect(Array.from(host.querySelectorAll("button")).find(b => b.textContent === "继续提问")).toBeTruthy();
   } finally {
     await act(async () => root.unmount());
     host.remove();
