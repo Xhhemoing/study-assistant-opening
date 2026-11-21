@@ -1,9 +1,11 @@
 import type { SkillBeliefV1 } from "../epistemic/belief";
 
 export const MAX_EXACT_KST_STATES = 20_000;
-export const DEFAULT_MIN_PLACEMENT_ITEMS = 6;
-export const DEFAULT_MAX_PLACEMENT_ITEMS = 10;
-export const DEFAULT_PLACEMENT_BUDGET_SECONDS = 300;
+export const DEFAULT_MIN_PLACEMENT_ITEMS = 8;
+export const DEFAULT_MAX_PLACEMENT_ITEMS = 12;
+export const MAX_PLACEMENT_ITEMS_CEILING = 12;
+export const DEFAULT_PLACEMENT_BUDGET_SECONDS = 900;
+export const MAX_PLACEMENT_BUDGET_SECONDS = 900;
 export const DEFAULT_SKIP_THRESHOLD = 0.85;
 export const DEFAULT_READY_THRESHOLD = 0.7;
 export const DEFAULT_HIGH_VALUE_WEIGHT_THRESHOLD = 0.2;
@@ -93,6 +95,7 @@ export type KstSnapshotV1 = {
   outerFringeBySkill: Readonly<Record<string, number>>;
   parentsSatisfiedBySkill: Readonly<Record<string, number>>;
   skillCovariance: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  prerequisitesBySkill?: Readonly<Record<string, readonly string[]>>;
   consumedProbeObservationIds: readonly string[];
 };
 

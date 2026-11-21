@@ -338,7 +338,127 @@ function validateProbabilityRecord(
   }
 }
 
-export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
+function validateCanonicalStateRecord(
+  record: unknown,
+  label: string,
+  allowedSkills: ReadonlySet<string>,
+): string[][] {
+  validateProbabilityRecord(record, label, { requireSumOne: true, requireNonEmpty: true });
+  const keys = Object.keys(record as Record<string, unknown>);
+  const parsedStates: string[][] = [];
+  for (const stateKey of keys) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stateKey);
+    } catch {
+      throw new DiagnosticPlacementError("VALIDATION", `${label} has invalid state key ${stateKey}`);
+    }
+    if (!Array.isArray(parsed)) {
+      throw new DiagnosticPlacementError("VALIDATION", `${label} state key must be a JSON array`);
+    }
+    const items: string[] = [];
+    for (let k = 0; k < parsed.length; k++) {
+      if (!Object.hasOwn(parsed, k) || typeof parsed[k] !== "string") {
+        throw new DiagnosticPlacementError("VALIDATION", `${label} state key ${stateKey} has invalid element at index ${k}`);
+      }
+      const skillId = parsed[k]!;
+      if (!allowedSkills.has(skillId)) {
+        throw new DiagnosticPlacementError("VALIDATION", `${label} references unknown state skill ${skillId}`);
+      }
+      if (k > 0 && !(cmpStr(parsed[k - 1]!, skillId) < 0)) {
+        throw new DiagnosticPlacementError("VALIDATION", `${label} state key ${stateKey} must be strictly sorted and unique`);
+      }
+      items.push(skillId);
+    }
+    if (JSON.stringify(items) !== stateKey) {
+      throw new DiagnosticPlacementError("VALIDATION", `${label} has non-canonical state key ${stateKey}`);
+    }
+    parsedStates.push(items);
+  }
+  return parsedStates;
+}
+
+function validateSnapshotAgainstDag(
+  snapshot: KstSnapshotV1,
+  knownSkills: ReadonlySet<string>,
+  prereqsMap: ReadonlyMap<string, readonly string[]>,
+  graph: ValidatedSkillGraph,
+  compSkillSets: readonly ReadonlySet<string>[],
+  compParsedStates: readonly (readonly (readonly string[])[])[],
+  snapshotParsedStates: readonly (readonly string[])[] | null,
+): void {
+  if (knownSkills.size !== graph.topoOrder.length || !graph.topoOrder.every(id => knownSkills.has(id))) {
+    throw new DiagnosticPlacementError("VALIDATION", "Snapshot skills do not match prerequisite DAG");
+  }
+  // No prerequisite edge may cross between different componentJointWeights entries
+  const compIndexBySkill = new Map<string, number>();
+  compSkillSets.forEach((set, idx) => set.forEach(s => compIndexBySkill.set(s, idx)));
+  if (compSkillSets.length > 0) {
+    for (const [u, parents] of prereqsMap.entries()) {
+      const cu = compIndexBySkill.get(u);
+      for (const p of parents) {
+        if (compIndexBySkill.get(p) !== cu) {
+          throw new DiagnosticPlacementError("VALIDATION", `Prerequisite edge ${p} -> ${u} crosses KST snapshot components`);
+        }
+      }
+    }
+  }
+  // Every state key in wByState and comp.wByState must be downward-closed
+  const checkDownset = (states: readonly (readonly string[])[], label: string): void => {
+    for (const stateSkills of states) {
+      const stateSet = new Set(stateSkills);
+      for (const u of stateSkills) {
+        for (const p of prereqsMap.get(u) ?? []) {
+          if (!stateSet.has(p)) {
+            throw new DiagnosticPlacementError("VALIDATION", `${label} contains non-downward-closed state missing prerequisite ${p} of ${u}`);
+          }
+        }
+      }
+    }
+  };
+  if (snapshotParsedStates) checkDownset(snapshotParsedStates, "wByState");
+  for (let idx = 0; idx < compParsedStates.length; idx++) {
+    checkDownset(compParsedStates[idx]!, `componentJointWeights[${idx}].wByState`);
+  }
+
+  // Build sub-DAG component mapping so exact downset enumeration runs per weakly-connected DAG subcomponent (fast O(sum))
+  const subCompBySkill = new Map<string, number>();
+  graph.components.forEach((sub, sIdx) => sub.forEach(id => subCompBySkill.set(id, sIdx)));
+  const exactCountPerSubComp = new Map<number, bigint | "exceeded">();
+  const getSubCompExactCount = (sIdx: number): bigint | "exceeded" => {
+    let cached = exactCountPerSubComp.get(sIdx);
+    if (cached === undefined) {
+      const subSkills = graph.components[sIdx]!;
+      const res = enumerateDownsetsBounded(subSkills, graph, MAX_EXACT_KST_STATES);
+      cached = res.exceededLimit ? "exceeded" : BigInt(res.states.length);
+      exactCountPerSubComp.set(sIdx, cached);
+    }
+    return cached;
+  };
+
+  for (let idx = 0; idx < snapshot.componentJointWeights.length; idx++) {
+    const comp = snapshot.componentJointWeights[idx]!;
+    if (comp.approximationMode !== "exact") continue;
+    const subIndices = new Set<number>();
+    for (const s of comp.skillIds) subIndices.add(subCompBySkill.get(s)!);
+    let trueCount = 1n;
+    for (const sIdx of subIndices) {
+      const subCount = getSubCompExactCount(sIdx);
+      if (subCount === "exceeded") {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] exceeds MAX_EXACT_KST_STATES under true prerequisite DAG`);
+      }
+      trueCount *= subCount;
+      if (trueCount > BigInt(MAX_EXACT_KST_STATES)) {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] merged exact count exceeds MAX_EXACT_KST_STATES under true prerequisite DAG`);
+      }
+    }
+    if (BigInt(comp.stateCount) !== trueCount || BigInt(comp.exactStateCountEstimate ?? -1) !== trueCount) {
+      throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] stateCount does not match true DAG downset count (${trueCount})`);
+    }
+  }
+}
+
+export function validateKstSnapshot(snapshot: KstSnapshotV1, skills?: readonly DiagnosticSkillNode[]): void {
   if (!snapshot || typeof snapshot !== "object" || snapshot.schemaVersion !== 1 || typeof snapshot.snapshotId !== "string" || !snapshot.snapshotId.trim()) {
     throw new DiagnosticPlacementError("VALIDATION", "Invalid KstSnapshotV1 header");
   }
@@ -387,13 +507,15 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
       throw new DiagnosticPlacementError("VALIDATION", `outerFringeBySkill[${skillId}] + piBySkill[${skillId}] exceeds 1`);
     }
   }
-  if (snapshot.wByState !== null) {
-    validateProbabilityRecord(snapshot.wByState, "wByState", { requireSumOne: true, requireNonEmpty: true });
-  }
+  const snapshotParsedStates = snapshot.wByState !== null
+    ? validateCanonicalStateRecord(snapshot.wByState, "wByState", knownSkills)
+    : null;
   if (!Array.isArray(snapshot.componentJointWeights)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 componentJointWeights must be an array");
   }
   const seenCompSkills = new Set<string>();
+  const compSkillSets: Set<string>[] = [];
+  const compParsedStates: string[][][] = [];
   let allComponentsExact = true;
   let hasBoundedComponent = false;
   let exactStateProduct = 1n;
@@ -426,25 +548,10 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
       seenCompSkills.add(skillId);
       compSkillSet.add(skillId);
     }
-    validateProbabilityRecord(comp.wByState, `componentJointWeights[${idx}].wByState`, { requireSumOne: true, requireNonEmpty: true });
-    const stateKeys = Object.keys(comp.wByState);
-    for (const stateKey of stateKeys) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(stateKey);
-      } catch {
-        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].wByState has invalid state key ${stateKey}`);
-      }
-      if (!Array.isArray(parsed) || canonicalStateKey(parsed as string[]) !== stateKey) {
-        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].wByState has non-canonical state key ${stateKey}`);
-      }
-      for (const s of parsed) {
-        if (typeof s !== "string" || !compSkillSet.has(s)) {
-          throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].wByState references unknown state skill`);
-        }
-      }
-    }
-    if (!Number.isSafeInteger(comp.stateCount) || comp.stateCount !== stateKeys.length) {
+    compSkillSets.push(compSkillSet);
+    const parsedComp = validateCanonicalStateRecord(comp.wByState, `componentJointWeights[${idx}].wByState`, compSkillSet);
+    compParsedStates.push(parsedComp);
+    if (!Number.isSafeInteger(comp.stateCount) || comp.stateCount !== parsedComp.length) {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].stateCount mismatch`);
     }
     if (comp.approximationMode === "exact") {
@@ -481,8 +588,8 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
       if (snapshot.approximationMode === "component_decomposed" && (snapshot.componentJointWeights.length < 2 || exactStateProduct <= BigInt(MAX_EXACT_KST_STATES))) {
         throw new DiagnosticPlacementError("VALIDATION", "Snapshot component_decomposed mode requires >= 2 components and product > MAX_EXACT_KST_STATES");
       }
-      if (snapshot.totalFeasibleStateCountExact !== undefined && snapshot.totalFeasibleStateCountExact !== exactStateProduct.toString()) {
-        throw new DiagnosticPlacementError("VALIDATION", "Snapshot totalFeasibleStateCountExact does not match component state product");
+      if (typeof snapshot.totalFeasibleStateCountExact !== "string" || snapshot.totalFeasibleStateCountExact !== exactStateProduct.toString()) {
+        throw new DiagnosticPlacementError("VALIDATION", "Non-bounded snapshot requires exact totalFeasibleStateCountExact string matching component state product");
       }
       const expectedSafeCount = exactStateProduct <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(exactStateProduct) : null;
       if (snapshot.totalFeasibleStateCount !== expectedSafeCount) {
@@ -503,6 +610,40 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
     if (!Object.hasOwn(snapshot.consumedProbeObservationIds, idx) || typeof snapshot.consumedProbeObservationIds[idx] !== "string") {
       throw new DiagnosticPlacementError("VALIDATION", `KstSnapshotV1 consumedProbeObservationIds[${idx}] must be a string`);
     }
+  }
+
+  let validatedPrereqs: Map<string, readonly string[]> | null = null;
+  let validatedGraph: ValidatedSkillGraph | null = null;
+  if (snapshot.prerequisitesBySkill !== undefined) {
+    if (!snapshot.prerequisitesBySkill || typeof snapshot.prerequisitesBySkill !== "object" || Array.isArray(snapshot.prerequisitesBySkill)) {
+      throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 prerequisitesBySkill must be a record");
+    }
+    const syntheticNodes: DiagnosticSkillNode[] = [];
+    for (const [skillId, rawParents] of Object.entries(snapshot.prerequisitesBySkill)) {
+      if (!knownSkills.has(skillId) || !Array.isArray(rawParents)) {
+        throw new DiagnosticPlacementError("VALIDATION", `Invalid prerequisitesBySkill entry for ${skillId}`);
+      }
+      for (let k = 0; k < rawParents.length; k++) {
+        if (!Object.hasOwn(rawParents, k) || typeof rawParents[k] !== "string" || !knownSkills.has(rawParents[k]!)) {
+          throw new DiagnosticPlacementError("VALIDATION", `Invalid prerequisite reference in prerequisitesBySkill[${skillId}]`);
+        }
+      }
+      syntheticNodes.push({ skillId, chapterId: "snapshot", prerequisiteIds: rawParents });
+    }
+    if (syntheticNodes.length !== knownSkills.size) {
+      throw new DiagnosticPlacementError("VALIDATION", "prerequisitesBySkill must cover every skill in piBySkill");
+    }
+    validatedGraph = validateSkillGraph(syntheticNodes);
+    validatedPrereqs = new Map<string, readonly string[]>();
+    for (const [id, rec] of validatedGraph.skillsById.entries()) validatedPrereqs.set(id, rec.prerequisiteIds);
+  }
+  if (skills !== undefined) {
+    validatedGraph = validateSkillGraph(skills);
+    validatedPrereqs = new Map<string, readonly string[]>();
+    for (const [id, rec] of validatedGraph.skillsById.entries()) validatedPrereqs.set(id, rec.prerequisiteIds);
+  }
+  if (validatedGraph && validatedPrereqs) {
+    validateSnapshotAgainstDag(snapshot, knownSkills, validatedPrereqs, validatedGraph, compSkillSets, compParsedStates, snapshotParsedStates);
   }
 }
 
@@ -882,6 +1023,10 @@ export class KstStateSpace {
     const piBySkill = this.getSkillMarginals();
     const { outerFringeBySkill, parentsSatisfiedBySkill } = this.getOuterFringeAndParentsSatisfied();
     const skillCovariance = this.getSkillCovariance(piBySkill);
+    const prerequisitesBySkill: Record<string, readonly string[]> = {};
+    for (const [skillId, rec] of this.graph.skillsById.entries()) {
+      defineRecordEntry(prerequisitesBySkill, skillId, [...rec.prerequisiteIds]);
+    }
     const componentJointWeights: KstComponentJointWeights[] = this.components.map(comp => {
       const wByState: Record<string, number> = {};
       for (let s = 0; s < comp.states.length; s++) {
@@ -906,6 +1051,7 @@ export class KstStateSpace {
       outerFringeBySkill,
       parentsSatisfiedBySkill,
       skillCovariance,
+      prerequisitesBySkill,
       consumedProbeObservationIds: [...this.consumedProbeObservationIds],
     };
   }

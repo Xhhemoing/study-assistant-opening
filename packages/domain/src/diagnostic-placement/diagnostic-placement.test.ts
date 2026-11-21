@@ -1138,3 +1138,188 @@ describe("Round-6 aggregate/component mode parity, redundant-variant DFS & spars
     })).toThrow(DiagnosticPlacementError);
   });
 });
+
+describe("Round-7 DAG snapshot certification, 8-12/900s Wave P limits, merge-only DFS & collision-free maps", () => {
+  it("[P1-1] rejects forged bounded snapshots relabeled exact under true DAG, rejects duplicate state keys, and requires exact string on 53-root snapshot", () => {
+    const starSkills: DiagnosticSkillNode[] = [
+      { skillId: "ROOT", chapterId: "c1" },
+      ...Array.from({ length: 16 }, (_, i) => ({ skillId: `LEAF_${String(i).padStart(2, "0")}`, chapterId: "c1", prerequisiteIds: ["ROOT"] })),
+    ];
+    const boundedSnap = buildKstPriorSnapshot(createKstStateSpace(starSkills));
+    const boundedComp = boundedSnap.componentJointWeights[0]!;
+
+    // Fully relabel both snapshot AND component to "exact" with matching retained stateCount -> still fails DAG verification!
+    const fullyForged = {
+      ...boundedSnap,
+      approximationMode: "exact" as const,
+      totalFeasibleStateCount: boundedComp.stateCount,
+      totalFeasibleStateCountExact: String(boundedComp.stateCount),
+      componentJointWeights: [
+        {
+          ...boundedComp,
+          approximationMode: "exact" as const,
+          exactStateCountEstimate: boundedComp.stateCount,
+        },
+      ],
+    };
+    expect(() => classifyPlacementRoutes(fullyForged, starSkills, { readyThreshold: 0.1, skipThreshold: 1 })).toThrow(DiagnosticPlacementError);
+    expect(() => validateKstSnapshot(fullyForged, starSkills)).toThrow(DiagnosticPlacementError);
+
+    // Reject duplicate skill IDs inside state key like ["A", "A"]
+    const smallSnap = buildKstPriorSnapshot(createKstStateSpace([{ skillId: "A", chapterId: "c1" }]));
+    expect(() => validateKstSnapshot({ ...smallSnap, wByState: { "[]": 0.5, '["A","A"]': 0.5 } })).toThrow(DiagnosticPlacementError);
+
+    // 53-root snapshot requires totalFeasibleStateCountExact === String(2n ** 53n) and rejects null
+    const roots53 = Array.from({ length: 53 }, (_, i) => ({ skillId: `R_${i}`, chapterId: "c1" }));
+    const snap53 = buildKstPriorSnapshot(createKstStateSpace(roots53));
+    expect(() => validateKstSnapshot({ ...snap53, totalFeasibleStateCountExact: null })).toThrow(DiagnosticPlacementError);
+    expect(() => validateKstSnapshot({ ...snap53, totalFeasibleStateCountExact: (2n ** 53n).toString() })).not.toThrow();
+  });
+
+  it("[P1-2] enforces Wave P 8-12 item and 900s defaults/ceilings plus unconditional elapsedSeconds > remainingBudgetSeconds guard", () => {
+    const skills8 = Array.from({ length: 8 }, (_, i) => ({ skillId: `W_${i}`, chapterId: `c${i}` }));
+    const pool8: DiagnosticProbeItem[] = skills8.map((s, i) => ({
+      itemId: `w-item-${i}`,
+      familyId: `w-fam-${i}`,
+      chapterId: s.chapterId,
+      requiredSkillIds: [s.skillId],
+      slip: 0.1,
+      guess: 0.1,
+      estimatedSeconds: 60,
+    }));
+
+    // Default config (8..12 items, 900s) completes 8 x 60s probes cleanly (480s <= 900s)
+    const defaultSession = new DiagnosticPlacementSession({ skills: skills8, candidatePool: pool8 });
+    expect(defaultSession.minItems).toBe(8);
+    expect(defaultSession.maxItems).toBe(12);
+    expect(defaultSession.totalBudgetSeconds).toBe(900);
+    for (let i = 0; i < 8; i++) {
+      const sel = defaultSession.selectNextProbe();
+      expect(sel.status).toBe("selected");
+      defaultSession.recordResponse({ observationId: `w-obs-${i}`, itemId: sel.probe!.itemId, correct: true });
+    }
+    expect(defaultSession.getSessionSummary().administeredCount).toBe(8);
+    expect(defaultSession.getSessionSummary().remainingBudgetSeconds).toBe(420);
+
+    // Hard ceilings: maxItems > 12 or totalBudgetSeconds > 900 rejected
+    expect(() => new DiagnosticPlacementSession({ skills: skills8, candidatePool: pool8, config: { minItems: 8, maxItems: 13 } })).toThrow(DiagnosticPlacementError);
+    expect(() => new DiagnosticPlacementSession({ skills: skills8, candidatePool: pool8, config: { minItems: 8, maxItems: 12, totalBudgetSeconds: 901 } })).toThrow(DiagnosticPlacementError);
+
+    // Pending probe elapsedSeconds > remainingBudgetSeconds fails closed INFEASIBLE without applying evidence
+    const boundedSess = new DiagnosticPlacementSession({
+      skills: skills8,
+      candidatePool: pool8,
+      config: { minItems: 8, maxItems: 12, totalBudgetSeconds: 900 },
+    });
+    const pending = boundedSess.selectNextProbe();
+    expect(pending.status).toBe("selected");
+    try {
+      boundedSess.recordResponse({ observationId: "too-long-pending", itemId: pending.probe!.itemId, correct: true, elapsedSeconds: 901 });
+      expect.unreachable("should throw INFEASIBLE");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("INFEASIBLE");
+    }
+    expect(boundedSess.getSessionSummary().remainingBudgetSeconds).toBe(900);
+    expect(boundedSess.getSessionSummary().administeredCount).toBe(0);
+    expect(boundedSess.getSessionSummary().consumedProbeObservationIds).toEqual([]);
+  });
+
+  it("[P2-1] solves GPT 3x28-state counterexample (X=6, Y=1, Z=1 with zero-cap twins & 31 AC/AB variants) via merge-only DFS", () => {
+    const makeChain = (prefix: string, chapterId: string, len: number): DiagnosticSkillNode[] =>
+      Array.from({ length: len }, (_, i) => ({
+        skillId: `${prefix}_${i}`,
+        chapterId,
+        ...(i > 0 ? { prerequisiteIds: [`${prefix}_${i - 1}`] } : {}),
+      }));
+
+    // 3 chains of 27 skills => 28 states each (28^2 = 784 <= 20_000, 28^3 = 21_952 > 20_000)
+    const skills = [
+      ...makeChain("A", "Q", 27),
+      ...makeChain("B", "X", 27),
+      ...makeChain("C", "Y", 27),
+      { skillId: "Z_0", chapterId: "Z" },
+      { skillId: "DEAD_0", chapterId: "ZERO" },
+    ];
+    const pool: DiagnosticProbeItem[] = [
+      { itemId: "q-0", familyId: "fam-q", chapterId: "Q", requiredSkillIds: ["A_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      // X has 30 single-group probes (paired with ZERO maxItems=0 chapter twins), cheapest shares fam-shared with Y's sole AB probe
+      { itemId: "x-shared", familyId: "fam-shared", chapterId: "X", requiredSkillIds: ["B_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      { itemId: "dead-shared", familyId: "fam-shared", chapterId: "ZERO", requiredSkillIds: ["DEAD_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      ...Array.from({ length: 29 }, (_, i) => ([
+        { itemId: `x-${i}`, familyId: `fam-x-${i}`, chapterId: "X", requiredSkillIds: ["B_1"], slip: 0.1, guess: 0.1, estimatedSeconds: 2 },
+        { itemId: `dead-${i}`, familyId: `fam-x-${i}`, chapterId: "ZERO", requiredSkillIds: ["DEAD_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      ])).flat(),
+      // Y has 1 AB probe sharing fam-shared + 31 AC probes in distinct families
+      { itemId: "y-ab-sole", familyId: "fam-shared", chapterId: "Y", requiredSkillIds: ["A_2", "B_2"], slip: 0.05, guess: 0.05, estimatedSeconds: 1 },
+      ...Array.from({ length: 31 }, (_, i) => ({
+        itemId: `y-ac-${i}`,
+        familyId: `fam-yac-${i}`,
+        chapterId: "Y",
+        requiredSkillIds: ["A_3", "C_3"],
+        slip: 0.05,
+        guess: 0.05,
+        estimatedSeconds: 1,
+      })),
+      // Z has 31 AB probes in distinct families (after Y picks y-ab-sole, A+B are already merged so Z's AB probes become single-group!)
+      ...Array.from({ length: 31 }, (_, i) => ({
+        itemId: `z-ab-${i}`,
+        familyId: `fam-zab-${i}`,
+        chapterId: "Z",
+        requiredSkillIds: ["A_4", "B_4"],
+        slip: 0.05,
+        guess: 0.05,
+        estimatedSeconds: 1,
+      })),
+    ];
+
+    const session = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: {
+        minItems: 9,
+        maxItems: 9,
+        totalBudgetSeconds: 60,
+        chapterQuotas: { Q: 1, X: 6, Y: 1, Z: 1, ZERO: { minItems: 0, maxItems: 0 } },
+      },
+    });
+    session.recordResponse({ observationId: "obs-q0", itemId: "q-0", correct: true });
+    for (let step = 1; step < 9; step++) {
+      const sel = session.selectNextProbe();
+      expect(sel.status).toBe("selected");
+      session.recordResponse({ observationId: `obs-r7-${step}`, itemId: sel.probe!.itemId, correct: true });
+    }
+    const summary = session.getSessionSummary();
+    expect(summary.chapterCounts["Q"]).toBe(1);
+    expect(summary.chapterCounts["X"]).toBe(6);
+    expect(summary.chapterCounts["Y"]).toBe(1);
+    expect(summary.chapterCounts["Z"]).toBe(1);
+  });
+
+  it("[P2-2] avoids NUL-separator key collisions between familyId and chapterId across 8 required chapters", () => {
+    const chapters = ["x\0y", "y", "p\0q", "q", "ch5", "ch6", "ch7", "ch8"];
+    const skills: DiagnosticSkillNode[] = chapters.map((ch, i) => ({ skillId: `S_${i}`, chapterId: ch }));
+    const pool: DiagnosticProbeItem[] = [
+      { itemId: "col-1", familyId: "f", chapterId: "x\0y", requiredSkillIds: ["S_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+      { itemId: "col-2", familyId: "f\0x", chapterId: "y", requiredSkillIds: ["S_1"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+      { itemId: "col-3", familyId: "g", chapterId: "p\0q", requiredSkillIds: ["S_2"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+      { itemId: "col-4", familyId: "g\0p", chapterId: "q", requiredSkillIds: ["S_3"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+      { itemId: "col-5", familyId: "f5", chapterId: "ch5", requiredSkillIds: ["S_4"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+      { itemId: "col-6", familyId: "f6", chapterId: "ch6", requiredSkillIds: ["S_5"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+      { itemId: "col-7", familyId: "f7", chapterId: "ch7", requiredSkillIds: ["S_6"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+      { itemId: "col-8", familyId: "f8", chapterId: "ch8", requiredSkillIds: ["S_7"], slip: 0.1, guess: 0.1, estimatedSeconds: 10 },
+    ];
+    const chapterQuotas: Record<string, number> = Object.fromEntries(chapters.map(c => [c, 1]));
+    const session = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: { minItems: 8, maxItems: 8, totalBudgetSeconds: 80, chapterQuotas },
+    });
+    for (let i = 0; i < 8; i++) {
+      const sel = session.selectNextProbe();
+      expect(sel.status).toBe("selected");
+      session.recordResponse({ observationId: `nul-${i}`, itemId: sel.probe!.itemId, correct: true });
+    }
+    expect(session.getSessionSummary().administeredCount).toBe(8);
+  });
+});
