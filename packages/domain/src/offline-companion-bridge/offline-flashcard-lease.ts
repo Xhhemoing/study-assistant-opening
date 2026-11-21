@@ -510,8 +510,18 @@ const ALGEBRAIC_SYMBOL_CHAR_RE = /^[\d.+\-*/^|'\u2032\u2019\u2212\u00D7\u00F7\u0
 const LINE_BREAK_RE = /[\r\n\u2028\u2029]/;
 const ABBREVIATION_END_RE = /(?<![\p{L}\p{N}_])(e\.g|i\.e|cf|vs|viz|etc|approx)$/iu;
 const SENTENCE_START_AFTER_ABBREVIATION_RE = /^(?:\s+\p{Lu}\p{Ll}|\s*\p{Script=Han})/u;
-const ITEM_MARKER_AFTER_ABBREVIATION_RE =
-  /^\s*(?:(?:\d+\s*)?(?:\([a-z0-9]+\)|\[[a-z0-9]+\])|\d+[a-z][.)]|\d+\s*(?:\)|\.(?!\d)))/i;
+const BRACKETED_ITEM_MARKER = "(?:\\([A-Za-z0-9]+\\)|\\[[A-Za-z0-9]+\\])";
+const NUMBERED_ITEM_MARKER = `(?:\\d+[.)]?\\s*${BRACKETED_ITEM_MARKER}|\\d+(?:[A-Za-z]|\\s*)(?:\\)|\\.(?!\\d)))`;
+const ITEM_MARKER_AFTER_ABBREVIATION_RE = new RegExp(
+  `^\\s*(?:${NUMBERED_ITEM_MARKER}|${BRACKETED_ITEM_MARKER})`,
+);
+const ITEM_MARKER_FOLLOW = "(?=$|[\\s:：\\p{L}])";
+const ITEM_MARKER_WITHIN_SENTENCE_RE = new RegExp(
+  `(?<=^|[\\s,，、:：])(?<![=+*/^−-]\\s*)(?:${NUMBERED_ITEM_MARKER}|(?:[Ee]xercise|[Pp]roblem|[Qq]uestion|[Pp]art|[Ii]tem)\\s+\\d+)${ITEM_MARKER_FOLLOW}|` +
+    `(?<=(?:^|[,，、:：])\\s*)${BRACKETED_ITEM_MARKER}${ITEM_MARKER_FOLLOW}|` +
+    `(?<=\\s)(?<![=+*/^−-]\\s*)${BRACKETED_ITEM_MARKER}(?=\\s+\\p{L}{2})`,
+  "gu",
+);
 const POSTFIX_APPROXIMATION_RE = /\d\s+approx$/i;
 const APPROXIMATE_NUMBER_RE = /^\s*[+−-]?(?:\d|\.\d)/u;
 
@@ -958,13 +968,25 @@ function areGroupUnitTokensBoundInSentence(
   let end = operandEnd;
   while (end < text.length && !isSentenceDelimiter(text, end)) end += 1;
   const sentence = text.slice(start, end);
+  let itemStart = 0;
+  let itemEnd = sentence.length;
+  for (const marker of sentence.matchAll(ITEM_MARKER_WITHIN_SENTENCE_RE)) {
+    const markerEnd = marker.index + marker[0].length;
+    if (markerEnd <= groupStart - start) {
+      itemStart = markerEnd;
+    } else if (marker.index >= operandEnd - start) {
+      itemEnd = marker.index;
+      break;
+    }
+  }
+  const item = sentence.slice(itemStart, itemEnd);
   for (const token of unitTokens) {
     if (token.length !== 1) return false;
     const bindingRe = new RegExp(
       `(?<!${NON_CJK_WORD_CHAR}|[+*/^×÷]\\s*)${token}\\s*=\\s*(?=[A-Za-z\\p{Script=Greek}\\d(\\[\\\\+−\\-√]|\\.\\d)`,
       "u",
     );
-    if (!bindingRe.test(sentence)) {
+    if (!bindingRe.test(item)) {
       return false;
     }
   }
@@ -1234,6 +1256,31 @@ function collapseBinaryAddSubWhitespace(canonicalizedText: string): string {
   return current;
 }
 
+function compactJsonPunctuation(text: string): string {
+  return text.replace(/"(?:[^"\\]|\\[\s\S])*"|\s*([[{}\],:])\s*/g, (match, punctuation: string | undefined) =>
+    punctuation ?? match,
+  );
+}
+
+function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecret: string): boolean {
+  if (!rawSecret.trimStart().startsWith("[")) return false;
+  let values: unknown;
+  try {
+    values = JSON.parse(rawSecret);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(values) || values.length === 0) return false;
+
+  const compactStem = compactJsonPunctuation(stem);
+  if (compactStem.includes(compactJsonPunctuation(normalizedSecret))) return true;
+
+  // Complete letter-choice sequences can also be disclosed without JSON quotes.
+  return values.length >= 2 &&
+    values.every((value: unknown) => typeof value === "string" && /^[a-z]$/i.test(value)) &&
+    containsUnicodeWordBoundedToken(compactStem, values.join(","));
+}
+
 /**
  * Checks whether a candidate stem/text leaks a secret answer/solution value, including:
  * - exact normalized equality (after symmetric Unicode math canonicalization)
@@ -1252,6 +1299,7 @@ export function containsAnswerLeak(
   const normalizedSecret = normalizeComparableText(secretText);
   if (!normalizedStem || !normalizedSecret) return false;
   if (normalizedStem === normalizedSecret) return true;
+  if (containsArrayAnswerLeak(normalizedStem, normalizedSecret, secretText)) return true;
 
   const compactStem = collapseBinaryAddSubWhitespace(normalizedStem);
   const compactSecret = collapseBinaryAddSubWhitespace(normalizedSecret);
@@ -1511,7 +1559,9 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
     if (arrayLength !== null) {
       remainingNodes -= arrayLength - indexedChildren;
       if (remainingNodes < 0) throw new RangeError("Protected payload exceeds inspection bounds");
-      return `[${parts.join(",")}]`;
+      const json = `[${parts.join(",")}]`;
+      if (arrayLength > 0) texts.add(json);
+      return json;
     }
     const json = `{${parts.join(",")}}`;
     if (parts.length > 0) texts.add(json);
@@ -2022,6 +2072,60 @@ export function computeOfflineOutboxPayloadFingerprint(entry: OfflineOutboxEntry
   return sha256Utf8Hex(canonicalizeForFingerprint(normalizedEntry));
 }
 
+const LEASE_SCOPE_FIELDS = ["leaseId", "workspaceId", "learnerId", "issuedAtMs"];
+const LEASE_REQUEST_FIELDS = [...LEASE_SCOPE_FIELDS, "candidates", "existingActiveLease"];
+const LEASE_CARD_FIELDS = [
+  "cardId", "cardKind", "cardRevision", "lastServerReviewedAtMs",
+  "prompt", "backSummary", "freshVariantId", "freshVariantStem",
+];
+const EXISTING_LEASE_FIELDS = [
+  ...LEASE_SCOPE_FIELDS, "schemaVersion", "status", "expiresAtMs", "supersededAtMs",
+  "supersededByLeaseId", "revokedAtMs", "cards",
+];
+
+function isPlainLeaseRecord(value: unknown, knownFields: readonly string[], inspectAllOwnFields = false): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (prototype !== null && prototype !== Object.prototype) return false;
+
+  const fields = [...knownFields, ...FORBIDDEN_MISS_VARIANT_FIELDS];
+  const keys = inspectAllOwnFields ? new Set([...fields, ...Reflect.ownKeys(value)]) : fields;
+  for (const key of keys) {
+    const property = Object.getOwnPropertyDescriptor(value, key);
+    if (property ? !Object.hasOwn(property, "value") : key in value) return false;
+    const inherited = prototype === null ? undefined : Object.getOwnPropertyDescriptor(prototype, key);
+    if (inherited && !Object.hasOwn(inherited, "value")) return false;
+  }
+  return true;
+}
+
+function isPlainLeaseArray(value: unknown): value is readonly unknown[] {
+  if (!Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Array.prototype || prototype === null;
+}
+
+function inspectLeaseCards<Card>(cards: readonly Card[]): Card[] | null {
+  const inspected: Card[] = [];
+  for (let index = 0; index < cards.length; index += 1) {
+    const property = Object.getOwnPropertyDescriptor(cards, String(index));
+    if (!property || !Object.hasOwn(property, "value") || !isPlainLeaseRecord(property.value, LEASE_CARD_FIELDS)) {
+      return null;
+    }
+    inspected.push(property.value as Card);
+  }
+  return inspected;
+}
+
+function rejectUninspectableLeaseInput(): IssueOfflineFlashcardLeaseResult {
+  return {
+    ok: false,
+    code: "miss_variant_answer_leak",
+    httpStatus: 422,
+    message: "Offline lease refused: the request or a card could not be inspected as plain data.",
+  };
+}
+
 /**
  * Issues a 12-hour single-active offline flashcard lease for `(workspaceId, learnerId)`
  * containing `1..30` strictly sanitized cards. Any prior active lease for the same
@@ -2030,6 +2134,7 @@ export function computeOfflineOutboxPayloadFingerprint(entry: OfflineOutboxEntry
 export function issueOfflineFlashcardLease(
   input: IssueOfflineFlashcardLeaseInput,
 ): IssueOfflineFlashcardLeaseResult {
+  if (!isPlainLeaseRecord(input, LEASE_REQUEST_FIELDS)) return rejectUninspectableLeaseInput();
   if (
     !isSafeIdentifier(input.leaseId) ||
     !isSafeIdentifier(input.workspaceId) ||
@@ -2050,7 +2155,9 @@ export function issueOfflineFlashcardLease(
       message: "issuedAtMs must be a finite non-negative timestamp.",
     };
   }
-  if (input.candidates.length === 0) {
+  const candidateList = input.candidates;
+  if (!isPlainLeaseArray(candidateList)) return rejectUninspectableLeaseInput();
+  if (candidateList.length === 0) {
     return {
       ok: false,
       code: "empty_lease_cards",
@@ -2058,7 +2165,7 @@ export function issueOfflineFlashcardLease(
       message: "Offline lease requires at least 1 card.",
     };
   }
-  if (input.candidates.length > MAX_OFFLINE_LEASE_CARDS) {
+  if (candidateList.length > MAX_OFFLINE_LEASE_CARDS) {
     return {
       ok: false,
       code: "lease_card_limit_exceeded",
@@ -2076,6 +2183,7 @@ export function issueOfflineFlashcardLease(
 
   if (input.existingActiveLease) {
     const prior = input.existingActiveLease;
+    if (!isPlainLeaseRecord(prior, EXISTING_LEASE_FIELDS, true)) return rejectUninspectableLeaseInput();
     if (
       canonicalizeIdentifier(prior.workspaceId) !== workspaceId ||
       canonicalizeIdentifier(prior.learnerId) !== learnerId
@@ -2096,9 +2204,13 @@ export function issueOfflineFlashcardLease(
       };
     }
     if (prior.status === "active") {
+      if (!isPlainLeaseArray(prior.cards)) return rejectUninspectableLeaseInput();
+      const priorCards = inspectLeaseCards(prior.cards);
+      if (!priorCards) return rejectUninspectableLeaseInput();
       supersededLeaseId = canonicalizeIdentifier(prior.leaseId);
       supersededLease = {
         ...prior,
+        cards: priorCards,
         status: "superseded",
         supersededAtMs: input.issuedAtMs,
         supersededByLeaseId: leaseId,
@@ -2106,14 +2218,17 @@ export function issueOfflineFlashcardLease(
     }
   }
 
+  const candidates = inspectLeaseCards(candidateList);
+  if (!candidates) return rejectUninspectableLeaseInput();
+
   // Collect protected secrets across ALL candidates so every card (flashcard AND miss_variant)
   // is checked against both self and cross-card protected answers/sealed payloads.
   const allProtectedSecrets = new Set<string>();
-  for (const candidate of input.candidates) {
+  for (const candidate of candidates) {
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
       const property = Object.getOwnPropertyDescriptor(candidate, forbiddenField);
       if (!property) continue;
-      const secretTexts = "value" in property ? collectSecretTexts(property.value) : null;
+      const secretTexts = Object.hasOwn(property, "value") ? collectSecretTexts(property.value) : null;
       if (!secretTexts) {
         return {
           ok: false,
@@ -2129,7 +2244,7 @@ export function issueOfflineFlashcardLease(
 
   const seenCardIds = new Set<string>();
   const sanitizedCards: OfflineLeaseCard[] = [];
-  for (const candidate of input.candidates) {
+  for (const candidate of candidates) {
     const sanitized = sanitizeLeaseCandidate(candidate, allProtectedSecrets);
     if (!sanitized.ok) {
       return sanitized;

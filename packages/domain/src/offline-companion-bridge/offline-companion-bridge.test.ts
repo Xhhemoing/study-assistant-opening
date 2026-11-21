@@ -1846,6 +1846,13 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "先计算速度 (m/s) −4。",
     "Calculate speed (km/h) −4.",
     "Answer (m/s) −4, where m = 6 and s = 2.",
+    "1(a) Let m = 6 and s = 2, 2(b) Speed change: (m/s) −4.",
+    "1(a) 设 m = 6，s = 2，2(b)速度变化：(m/s) −4。",
+    "1(a) Speed change: (m/s) −4 2(b) Let m = 6 and s = 2.",
+    "Let m = 6 and s = 2, (b) Speed change: (m/s) −4.",
+    "Speed change: (m/s) −4, (b) let m = 6 and s = 2.",
+    "Let m = 6 and s = 2 (b) speed change: (m/s) −4.",
+    "Speed change: (m/s) −4, Exercise 2 Let m = 6 and s = 2.",
     "(m/s) −4. In the next exercise, m = 6 and s = 2.",
     "Speed change: (m/s) −4 approx. In the next exercise, m = 6 and s = 2.",
     "Speed change: (m/s) −4 approx. m = 6 and s = 2.",
@@ -1915,6 +1922,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "Evaluate (l/s) − 4, where l = 6 and s = 2.",
     "Evaluate (μl/s) − 4.",
     "(m/s) −4, where m = 6.5 and s = .2.",
+    "1(a) Let m = 6 and s = 2, (m/s) −4.",
+    "1(a) Previous question, 2(b) (m/s) −4, where m = 6 and s = (2).",
+    "(m/s) −4, where m = 2(x) and s = 3.",
     "(m/s) −4, where m = approx. +.6 and s = 2.",
     "(m/s) −4, where m = approx. 5.2 and s = 2.",
     "(m/s) −4, e.g. m = 6 and s = 2.",
@@ -1930,6 +1940,108 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       issuedAtMs: T0,
       candidates: [makeMissVariantCandidate({ answerKey: "-4", freshVariantStem })],
     })).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    ["variant stem", '["B","D"]'],
+    ["variant stem", '[ "B", "D" ]'],
+    ["variant stem", "B, D"],
+    ["sibling card", '["B","D"]'],
+    ["sibling card", '["B", "D"]'],
+    ["sibling card", "B , D"],
+  ] as const)("rejects a sealed array in a %s (%s)", (surface, sequence) => {
+    const leakedText = `Use the sequence ${sequence}.`;
+    const variant = makeMissVariantCandidate({
+      sealedPayload: { order: ["B", "D"] },
+      freshVariantStem: surface === "variant stem" ? leakedText : "Which ordering is correct?",
+    });
+    const candidates = surface === "variant stem" ? [variant] : [
+      variant,
+      { ...makeFlashcardCandidate(900), prompt: "Recall the order.", backSummary: leakedText },
+    ];
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-array-reveal",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates,
+    })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+  });
+
+  it("allows a different sequence in a stem", () => {
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-array-decoy",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [makeMissVariantCandidate({
+        freshVariantStem: 'Compare the sequence ["D", "B"] with your result.',
+        sealedPayload: { order: ["B", "D"] },
+      })],
+    })).toMatchObject({ ok: true });
+  });
+
+  it("rejects a candidate with an inherited protected getter without invoking it", () => {
+    let getterCalled = false;
+    const candidate = makeMissVariantCandidate({ freshVariantStem: "The indicator turns violet." });
+    Reflect.deleteProperty(candidate, "answerKey");
+    Object.setPrototypeOf(candidate, {
+      get answerKey() {
+        getterCalled = true;
+        return "violet";
+      },
+    });
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-prototype-secret",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [candidate],
+    })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    expect(getterCalled).toBe(false);
+  });
+
+  it.each(["request", "candidate list", "candidate"] as const)(
+    "rejects a known getter on the %s without invoking it",
+    target => {
+      let getterCalled = false;
+      const candidate = makeMissVariantCandidate();
+      const input = {
+        leaseId: "lease-accessor",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [candidate],
+      };
+      const defineGetter = (record: object, key: string, value: unknown) => {
+        Object.defineProperty(record, key, {
+          get() {
+            getterCalled = true;
+            return value;
+          },
+        });
+      };
+      if (target === "request") defineGetter(input, "candidates", input.candidates);
+      if (target === "candidate list") defineGetter(input.candidates, "0", candidate);
+      if (target === "candidate") defineGetter(candidate, "freshVariantStem", "Find the result.");
+      expect(issueOfflineFlashcardLease(input))
+        .toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+      expect(getterCalled).toBe(false);
+    },
+  );
+
+  it("accepts plain records with null prototypes at issuance", () => {
+    const candidate = makeMissVariantCandidate();
+    Object.setPrototypeOf(candidate, null);
+    const input = {
+      leaseId: "lease-plain-data",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [candidate],
+    };
+    Object.setPrototypeOf(input, null);
+    expect(issueOfflineFlashcardLease(input)).toMatchObject({ ok: true });
   });
 
   it.each(["variant stem", "sibling card"] as const)("rejects nested sealed answers in a %s", surface => {
