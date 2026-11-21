@@ -47,18 +47,103 @@ function collectStructuredStrings(value: unknown, out: string[], seen = new Set<
   return true;
 }
 
+function projectLearnerStep(
+  step: LearnerStep,
+  overrideStatus?: LearnerStep["status"],
+  overrideError?: string | null,
+): LearnerStep {
+  const error = overrideError === null ? undefined : (overrideError ?? step.error);
+  return {
+    id: String(step.id),
+    text: String(step.text),
+    status: overrideStatus ?? step.status,
+    ...(error !== undefined ? { error: String(error) } : {}),
+    ...(Array.isArray(step.dependsOn) ? { dependsOn: step.dependsOn.map((dep) => String(dep)) } : {}),
+  };
+}
+
+function projectRuleWitnessParams(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const input = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (input.origin === "rules") out.origin = "rules";
+  if (Array.isArray(input.allowedActions)) out.allowedActions = [];
+  if (typeof input.title === "string") out.title = input.title;
+  if (typeof input.explanation === "string") out.explanation = input.explanation;
+  if (Array.isArray(input.points)) {
+    out.points = input.points.flatMap((point) => {
+      if (typeof point !== "object" || point === null || Array.isArray(point)) return [];
+      const p = point as Record<string, unknown>;
+      return [
+        {
+          ...(typeof p.x === "string" ? { x: p.x } : {}),
+          ...(typeof p.student === "string" ? { student: p.student } : {}),
+          ...(typeof p.reference === "string" ? { reference: p.reference } : {}),
+          ...(typeof p.kind === "string" ? { kind: p.kind } : {}),
+        },
+      ];
+    });
+  }
+  if (Array.isArray(input.pivots)) {
+    out.pivots = input.pivots.flatMap((pivot) => {
+      if (typeof pivot !== "object" || pivot === null || Array.isArray(pivot)) return [];
+      const pv = pivot as Record<string, unknown>;
+      return [
+        {
+          ...(typeof pv.step === "number" ? { step: pv.step } : {}),
+          ...(typeof pv.operation === "string" ? { operation: pv.operation } : {}),
+          ...(Array.isArray(pv.matrix)
+            ? {
+                matrix: pv.matrix.map((row) => (Array.isArray(row) ? row.map((cell) => String(cell)) : [])),
+              }
+            : {}),
+        },
+      ];
+    });
+  }
+  if (Array.isArray(input.dependency)) out.dependency = input.dependency.map((item) => String(item));
+  const projectNodes = (list: unknown) =>
+    Array.isArray(list)
+      ? list.flatMap((node) => {
+          if (typeof node !== "object" || node === null || Array.isArray(node)) return [];
+          const n = node as Record<string, unknown>;
+          return [
+            {
+              ...(typeof n.id === "string" ? { id: n.id } : {}),
+              ...(n.next === null || typeof n.next === "string" ? { next: n.next } : {}),
+            },
+          ];
+        })
+      : undefined;
+  const before = projectNodes(input.before);
+  if (before) out.before = before;
+  const after = projectNodes(input.after);
+  if (after) out.after = after;
+  if (Array.isArray(input.severed)) out.severed = input.severed.map((item) => String(item));
+  if (Array.isArray(input.dangling)) out.dangling = input.dangling.map((item) => String(item));
+  return out;
+}
+
+function projectRuleWitness(witness: VerifyOutput["ruleWitness"]): { capability: string; params: Record<string, unknown> } | undefined {
+  if (!witness || typeof witness !== "object") return undefined;
+  return {
+    capability: String(witness.capability),
+    params: projectRuleWitnessParams(witness.params),
+  };
+}
+
 function propagateSteps(steps: readonly LearnerStep[], firstError?: VerifyOutput["firstError"]): LearnerStep[] {
-  if (!firstError) return steps.map((step) => ({ ...step }));
+  if (!firstError) return steps.map((step) => projectLearnerStep(step));
   let seen = false;
   return steps.map((step) => {
     if (step.id === firstError.stepId) {
       seen = true;
-      return { ...step, status: "invalid", error: firstError.message };
+      return projectLearnerStep(step, "invalid", firstError.message);
     }
     if (seen && step.status !== "unknown") {
-      return { ...step, status: "dependent", error: undefined };
+      return projectLearnerStep(step, "dependent", null);
     }
-    return { ...step };
+    return projectLearnerStep(step);
   });
 }
 
@@ -100,19 +185,46 @@ function questionFor(move: MovePlan, error?: VerifyOutput["firstError"]): string
   }
 }
 
-function toPublicCaps(questionStem: string, steps: readonly LearnerStep[], verification: VerifyOutput): PublicTeachingCaps {
-  const movePlan = chooseMove(verification.firstError);
+function toPublicCaps(
+  questionStem: string,
+  steps: readonly LearnerStep[],
+  verification: VerifyOutput,
+  options: { coarsenedHasError?: boolean } = {},
+): PublicTeachingCaps {
+  const projectedSteps = steps.map((step) => projectLearnerStep(step));
+  if (options.coarsenedHasError !== undefined) {
+    const movePlan: MovePlan = {
+      move: options.coarsenedHasError ? "concept_cue" : "invite_next_step",
+      rationale: options.coarsenedHasError ? "已检测到步骤存在可疑前提或推导，请先整体复查关键条件" : "保持下一步由学习者完成",
+    };
+    const text = options.coarsenedHasError
+      ? "解答中存在一处需要复查的前提或推导，你会先检查哪一步的依据？"
+      : "你愿意先写出下一步，并说明依据吗？";
+    return {
+      questionStem: String(questionStem),
+      learnerSteps: projectedSteps,
+      movePlan,
+      publicBlocks: [{ kind: "question", text }],
+    };
+  }
+  const rawPlan = chooseMove(verification.firstError);
+  const movePlan: MovePlan = {
+    move: rawPlan.move,
+    ...(rawPlan.targetStepId !== undefined ? { targetStepId: String(rawPlan.targetStepId) } : {}),
+    rationale: String(rawPlan.rationale),
+  };
   const blocks: PublicTeachingBlock[] = [{ kind: "question", text: questionFor(movePlan, verification.firstError) }];
-  if (verification.ruleWitness) {
+  const projectedWitness = projectRuleWitness(verification.ruleWitness);
+  if (projectedWitness) {
     blocks.push({
       kind: "rule_witness",
       text: "规则见证卡可用于检查局部条件。",
-      descriptor: { ...verification.ruleWitness },
+      descriptor: projectedWitness,
     });
   }
   return {
-    questionStem,
-    learnerSteps: steps.map((step) => ({ ...step })),
+    questionStem: String(questionStem),
+    learnerSteps: projectedSteps,
     movePlan,
     publicBlocks: blocks,
   };
@@ -211,7 +323,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   let verification: VerifyOutput;
   try {
     verification = input.verifyCaps.verify(input.submission);
-  } catch (error) {
+  } catch {
     return {
       state: "unverified",
       providerCalls: 0,
@@ -220,7 +332,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       helpState: budget.state,
       cooldownUntilMs: budget.cooldownUntilMs,
       releaseApproved: false,
-      reason: error instanceof Error ? error.message : "verification_failed",
+      reason: "verifier_execution_failed",
     };
   }
 
@@ -237,21 +349,52 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     };
   }
 
-  const steps = propagateSteps(verification.steps, verification.firstError);
-  const disclosesAnswerDependentInfo = Boolean(
-    verification.firstError ||
-      verification.ruleWitness ||
-      steps.some((step) => step.status !== "unknown" || step.error !== undefined),
-  );
-  const worstBranchBits = disclosesAnswerDependentInfo ? 1 : 0;
-  const releaseCheck = budget.canRelease(worstBranchBits, nowMs);
+  const propagatedSteps = propagateSteps(verification.steps, verification.firstError);
+  const nonNeutralStepCount = propagatedSteps.filter((step) => step.status !== "unknown" || step.error !== undefined).length;
+  const disclosedStepCount = Math.max(nonNeutralStepCount, verification.firstError ? propagatedSteps.length : 0);
+  const stepOutcomeBits = disclosedStepCount > 0 ? Math.log2(disclosedStepCount + 1) : 0;
+  const disclosesAnswerDependentInfo = Boolean(verification.firstError || verification.ruleWitness || disclosedStepCount > 0);
+  const uncoarsenedBits = Math.max(disclosesAnswerDependentInfo ? 1 : 0, stepOutcomeBits);
+
+  const turnCap =
+    typeof (budget as { maxBitsPerTurn?: unknown }).maxBitsPerTurn === "number" &&
+    Number.isFinite((budget as { maxBitsPerTurn?: number }).maxBitsPerTurn)
+      ? (budget as { maxBitsPerTurn: number }).maxBitsPerTurn
+      : 1.5;
+  const uncoarsenedFits =
+    uncoarsenedBits <= turnCap &&
+    (assessmentMode === "practice" || uncoarsenedBits === 0 || budget.leakageBits + uncoarsenedBits < turnCap);
+  const shouldCoarsen = disclosedStepCount >= 2 && !uncoarsenedFits;
+
+  const requiredBits = shouldCoarsen ? 1 : uncoarsenedBits;
+  const releaseCheck = budget.canRelease(requiredBits, nowMs);
   if (!releaseCheck.allowed) {
     return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
   }
 
-  const publicTeaching = toPublicCaps(input.questionStem, steps, verification);
-
-  const releasedText = guardRelease(publicTeaching, { ...verification, steps }, input.releaseCaps);
+  const coarsenedHasError = shouldCoarsen
+    ? Boolean(verification.firstError || propagatedSteps.some((step) => step.status === "invalid" || step.error !== undefined))
+    : undefined;
+  const releasedSteps = shouldCoarsen
+    ? propagatedSteps.map((step) => projectLearnerStep(step, "unknown", null))
+    : propagatedSteps;
+  const publicTeaching = toPublicCaps(input.questionStem, releasedSteps, verification, { coarsenedHasError });
+  const publicVerification: VerifyOutput = shouldCoarsen
+    ? { steps: releasedSteps }
+    : {
+        steps: releasedSteps,
+        ...(verification.deterministic !== undefined ? { deterministic: verification.deterministic } : {}),
+        ...(verification.firstError
+          ? {
+              firstError: {
+                stepId: String(verification.firstError.stepId),
+                kind: String(verification.firstError.kind),
+                message: String(verification.firstError.message),
+              },
+            }
+          : {}),
+      };
+  const releasedText = guardRelease(publicTeaching, verification, input.releaseCaps);
   if (releasedText === undefined || isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
     const stopped = isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal);
     return {
@@ -266,26 +409,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     };
   }
 
-  budget.commitRelease(worstBranchBits, nowMs);
-  const publicVerification: VerifyOutput = {
-    steps: steps.map((step) => ({
-      id: step.id,
-      text: step.text,
-      status: step.status,
-      ...(step.error !== undefined ? { error: step.error } : {}),
-      ...(step.dependsOn !== undefined ? { dependsOn: [...step.dependsOn] } : {}),
-    })),
-    ...(verification.deterministic !== undefined ? { deterministic: verification.deterministic } : {}),
-    ...(verification.firstError
-      ? {
-          firstError: {
-            stepId: verification.firstError.stepId,
-            kind: verification.firstError.kind,
-            message: verification.firstError.message,
-          },
-        }
-      : {}),
-  };
+  budget.commitRelease(requiredBits, nowMs);
   return {
     state: "released",
     providerCalls: 0,

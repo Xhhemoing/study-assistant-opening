@@ -377,7 +377,9 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           if (!object) return isPointer(pointer) && heap.has(pointer.objectId) ? failure("use_after_free") : failure("wild_pointer");
           const key = isPointer(pointer) ? pointer.fieldOrIndex : null;
           if (key === null) return failure("type_error", "root_pointer_has_no_load_field");
-          if (typeof key === "number" && (object.length === undefined || key < 0 || key >= object.length)) return failure("out_of_bounds");
+          if (typeof key === "number" && (object.length === undefined || !Number.isSafeInteger(key) || key < 0 || key >= object.length)) {
+            return failure("out_of_bounds");
+          }
           if (typeof key === "string" && !object.declaredFields.has(key)) return failure("out_of_bounds", "undeclared_field");
           if (!object.initialized.has(key)) return failure("uninitialized_read");
           const loaded = object.fields.get(key);
@@ -395,7 +397,9 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           if (!object) return isPointer(pointer) && heap.has(pointer.objectId) ? failure("use_after_free") : failure("wild_pointer");
           const key = isPointer(pointer) ? pointer.fieldOrIndex : null;
           if (key === null) return failure("type_error", "root_pointer_has_no_store_field");
-          if (typeof key === "number" && (object.length === undefined || key < 0 || key >= object.length)) return failure("out_of_bounds");
+          if (typeof key === "number" && (object.length === undefined || !Number.isSafeInteger(key) || key < 0 || key >= object.length)) {
+            return failure("out_of_bounds");
+          }
           if (typeof key === "string" && !object.declaredFields.has(key)) return failure("out_of_bounds", "undeclared_field");
           const prevField = object.fields.get(key);
           const prevStrBytes = typeof prevField === "string" ? prevField.length * 2 : 0;
@@ -427,13 +431,22 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           if (pointer === null) return failure("null_dereference");
           const index = read(instruction.index);
           if (index === undefined) return failure("uninitialized_read");
-          if (typeof index !== "number" || !Number.isInteger(index)) return failure("type_error");
+          if (typeof index !== "number" || !Number.isSafeInteger(index)) {
+            return failure("out_of_bounds");
+          }
           const object = requirePointer(pointer);
           if (!object) return isPointer(pointer) && heap.has(pointer.objectId) ? failure("use_after_free") : failure("wild_pointer");
-          const baseOffset = isPointer(pointer) && typeof pointer.fieldOrIndex === "number" ? pointer.fieldOrIndex : isPointer(pointer) && pointer.fieldOrIndex === null ? 0 : NaN;
-          if (!Number.isInteger(baseOffset)) return failure("type_error");
+          const baseOffset =
+            isPointer(pointer) && typeof pointer.fieldOrIndex === "number"
+              ? pointer.fieldOrIndex
+              : isPointer(pointer) && pointer.fieldOrIndex === null
+                ? 0
+                : NaN;
+          if (!Number.isSafeInteger(baseOffset)) return failure("out_of_bounds");
           const effectiveIndex = baseOffset + index;
-          if (object.length === undefined || effectiveIndex < 0 || effectiveIndex >= object.length) return failure("out_of_bounds");
+          if (object.length === undefined || !Number.isSafeInteger(effectiveIndex) || effectiveIndex < 0 || effectiveIndex >= object.length) {
+            return failure("out_of_bounds");
+          }
           const error = writeTarget(instruction.target, { objectId: object.id, generation: object.generation, fieldOrIndex: effectiveIndex });
           if (error) return error;
           break;

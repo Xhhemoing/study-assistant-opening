@@ -145,10 +145,28 @@ function polynomialScale(poly: Polynomial, factor: SpanRational): Polynomial {
   return out;
 }
 
+class PolyComplexityError extends Error {
+  constructor() {
+    super("polynomial_complexity_exceeded");
+  }
+}
+
+const MAX_POLY_COEFF_MAGNITUDE = 1n << 4096n;
+
+function checkPolyCoeffBound(coeff: SpanRational): void {
+  if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) {
+    throw new PolyComplexityError();
+  }
+}
+
 function polynomialPrimitivePositive(poly: Polynomial): Polynomial {
   if (poly.size === 0) return new Map();
   let lcmDen = 1n;
-  for (const coeff of poly.values()) lcmDen = bigLcm(lcmDen, coeff.d);
+  for (const coeff of poly.values()) {
+    checkPolyCoeffBound(coeff);
+    lcmDen = bigLcm(lcmDen, coeff.d);
+    if (lcmDen > MAX_POLY_COEFF_MAGNITUDE) throw new PolyComplexityError();
+  }
   let gcdNum = 0n;
   for (const coeff of poly.values()) gcdNum = bigGcd(gcdNum, bigAbs(coeff.n) * (lcmDen / coeff.d));
   if (gcdNum === 0n) return new Map();
@@ -164,18 +182,23 @@ function polynomialMonic(poly: Polynomial): Polynomial {
 function polynomialDivMod(a: Polynomial, b: Polynomial): { quotient: Polynomial; remainder: Polynomial } {
   const degB = polynomialDegree(b);
   if (degB < 0) throw new RangeError("Polynomial division by zero");
+  if (a.size > 512 || b.size > 512) throw new PolyComplexityError();
   let rem = new Map(a);
   const quot = new Map<number, SpanRational>();
   const leadB = polynomialLeadCoeff(b);
+  let divSteps = 0;
   while (rem.size > 0) {
+    if (++divSteps > 128) throw new PolyComplexityError();
     const degR = polynomialDegree(rem);
     if (degR < degB) break;
     const shift = degR - degB;
     const termCoeff = divideRational(polynomialLeadCoeff(rem), leadB);
+    checkPolyCoeffBound(termCoeff);
     quot.set(shift, addRational(quot.get(shift) ?? rational(0n), termCoeff));
     const subtrahend = new Map<number, SpanRational>();
     for (const [d, c] of b) {
       const next = multiplyRational(c, termCoeff);
+      checkPolyCoeffBound(next);
       if (next.n !== 0n) subtrahend.set(d + shift, next);
     }
     rem = polynomialAdd(rem, subtrahend, -1);
@@ -197,7 +220,9 @@ function polynomialDerivative(poly: Polynomial): Polynomial {
 function polynomialGcd(a: Polynomial, b: Polynomial): Polynomial {
   let x = polynomialPrimitivePositive(a);
   let y = polynomialPrimitivePositive(b);
+  let gcdSteps = 0;
   while (y.size > 0) {
+    if (++gcdSteps > 128) throw new PolyComplexityError();
     const rem = polynomialDivMod(x, y).remainder;
     x = y;
     y = rem.size > 0 ? polynomialPrimitivePositive(rem) : new Map();
@@ -221,10 +246,12 @@ type NormalizedInterval = { left: SpanRational | null; right: SpanRational | nul
 
 function buildSturmChain(sfPoly: Polynomial): Polynomial[] {
   const s0 = polynomialPrimitivePositive(sfPoly);
+  if (polynomialDegree(s0) > MAX_SYMBOLIC_POLY_DEGREE) throw new PolyComplexityError();
   const s1 = polynomialPrimitivePositive(polynomialDerivative(s0));
   const chain: Polynomial[] = [s0];
   if (s1.size > 0) chain.push(s1);
   while (chain.length >= 2 && polynomialDegree(chain[chain.length - 1]!) > 0) {
+    if (chain.length > MAX_SYMBOLIC_POLY_DEGREE + 8) throw new PolyComplexityError();
     const prev2 = chain[chain.length - 2]!;
     const prev1 = chain[chain.length - 1]!;
     const rem = polynomialDivMod(prev2, prev1).remainder;
@@ -1084,32 +1111,49 @@ function rfNeg(a: RationalForm): RationalForm {
   };
 }
 
-function rfAdd(a: RationalForm, b: RationalForm, sign: 1 | -1 = 1): RationalForm {
+function rfAdd(a: RationalForm, b: RationalForm, sign: 1 | -1 = 1, budget: PolyMulBudget = { mulSteps: 0 }): RationalForm {
+  if (a.unsupported || b.unsupported) {
+    return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: a.unsupported ?? b.unsupported };
+  }
+  const leftTerm = boundedPolyMultiply(a.numerator, b.denominator, budget);
+  const rightTerm = boundedPolyMultiply(b.numerator, a.denominator, budget);
+  const denominator = boundedPolyMultiply(a.denominator, b.denominator, budget);
+  if (!leftTerm || !rightTerm || !denominator) return polyComplexityFailure();
+  const numerator = polynomialAdd(leftTerm, rightTerm, sign);
+  if (exceedsPolyLimits(numerator)) return polyComplexityFailure();
   return {
-    numerator: polynomialAdd(
-      polynomialMultiply(a.numerator, b.denominator),
-      polynomialMultiply(b.numerator, a.denominator),
-      sign,
-    ),
-    denominator: polynomialMultiply(a.denominator, b.denominator),
+    numerator,
+    denominator,
     domainDenominators: [...a.domainDenominators, ...b.domainDenominators],
     zeroDenominator: a.zeroDenominator || b.zeroDenominator,
   };
 }
 
-function rfMul(a: RationalForm, b: RationalForm): RationalForm {
+function rfMul(a: RationalForm, b: RationalForm, budget: PolyMulBudget = { mulSteps: 0 }): RationalForm {
+  if (a.unsupported || b.unsupported) {
+    return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: a.unsupported ?? b.unsupported };
+  }
+  const numerator = boundedPolyMultiply(a.numerator, b.numerator, budget);
+  const denominator = boundedPolyMultiply(a.denominator, b.denominator, budget);
+  if (!numerator || !denominator) return polyComplexityFailure();
   return {
-    numerator: polynomialMultiply(a.numerator, b.numerator),
-    denominator: polynomialMultiply(a.denominator, b.denominator),
+    numerator,
+    denominator,
     domainDenominators: [...a.domainDenominators, ...b.domainDenominators],
     zeroDenominator: a.zeroDenominator || b.zeroDenominator,
   };
 }
 
-function rfDiv(a: RationalForm, b: RationalForm): RationalForm {
+function rfDiv(a: RationalForm, b: RationalForm, budget: PolyMulBudget = { mulSteps: 0 }): RationalForm {
+  if (a.unsupported || b.unsupported) {
+    return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: a.unsupported ?? b.unsupported };
+  }
+  const numerator = boundedPolyMultiply(a.numerator, b.denominator, budget);
+  const denominator = boundedPolyMultiply(a.denominator, b.numerator, budget);
+  if (!numerator || !denominator) return polyComplexityFailure();
   return {
-    numerator: polynomialMultiply(a.numerator, b.denominator),
-    denominator: polynomialMultiply(a.denominator, b.numerator),
+    numerator,
+    denominator,
     domainDenominators: [...a.domainDenominators, ...b.domainDenominators, b.numerator, b.denominator],
     zeroDenominator: a.zeroDenominator || b.zeroDenominator || b.numerator.size === 0 || b.denominator.size === 0,
   };
@@ -1117,7 +1161,11 @@ function rfDiv(a: RationalForm, b: RationalForm): RationalForm {
 
 function rfEqual(a: RationalForm, b: RationalForm): boolean {
   if (a.unsupported || b.unsupported || a.denominator.size === 0 || b.denominator.size === 0) return false;
-  return polynomialAdd(polynomialMultiply(a.numerator, b.denominator), polynomialMultiply(b.numerator, a.denominator), -1).size === 0;
+  const budget: PolyMulBudget = { mulSteps: 0 };
+  const left = boundedPolyMultiply(a.numerator, b.denominator, budget);
+  const right = boundedPolyMultiply(b.numerator, a.denominator, budget);
+  if (!left || !right) return false;
+  return polynomialAdd(left, right, -1).size === 0;
 }
 
 type LinearRadicalComb = {
@@ -1397,8 +1445,13 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
         const rf = rationalForm(node.value, variable);
         if (!rf.unsupported) {
           addRfDens(rf);
-          const prod = polynomialMultiply(rf.numerator, rf.denominator);
-          if (prod.size > 0) rationalList.push({ kind: "ge0", poly: prod });
+          const prod = boundedPolyMultiply(rf.numerator, rf.denominator, { mulSteps: 0 });
+          if (prod) {
+            if (prod.size > 0) rationalList.push({ kind: "ge0", poly: prod });
+          } else {
+            uncheckedOps.push({ kind: "ge0", expr: node.value });
+            hasNonRationalDomainOps = true;
+          }
         } else if (!isProvablyNonnegExpr(node.value)) {
           uncheckedOps.push({ kind: "ge0", expr: node.value });
           hasNonRationalDomainOps = true;
@@ -1419,9 +1472,14 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
         const rf = rationalForm(node.value, variable);
         if (!rf.unsupported) {
           addRfDens(rf);
-          const prod = polynomialMultiply(rf.numerator, rf.denominator);
-          if (prod.size === 0) alwaysUndefined = true;
-          else rationalList.push({ kind: "gt0", poly: prod });
+          const prod = boundedPolyMultiply(rf.numerator, rf.denominator, { mulSteps: 0 });
+          if (prod) {
+            if (prod.size === 0) alwaysUndefined = true;
+            else rationalList.push({ kind: "gt0", poly: prod });
+          } else {
+            uncheckedOps.push({ kind: "gt0", expr: node.value });
+            hasNonRationalDomainOps = true;
+          }
         } else if (!isProvablyPositiveExpr(node.value)) {
           uncheckedOps.push({ kind: "gt0", expr: node.value });
           hasNonRationalDomainOps = true;
@@ -1558,7 +1616,7 @@ function pickRationalBetween(a: SpanRational | null, b: SpanRational | null): Sp
 }
 
 type CadOpenCell = { left: SpanRational | null; right: SpanRational | null; sample: SpanRational };
-type CadPlan = { sites: SampleSite[]; openCells: CadOpenCell[]; unresolvedRootIsolation: boolean };
+type CadPlan = { sites: SampleSite[]; openCells: CadOpenCell[]; unresolvedRootIsolation: boolean; complexityExceeded?: boolean };
 
 function buildCadPlan(
   constraints: readonly DomainConstraint[],
@@ -1566,19 +1624,28 @@ function buildCadPlan(
   extraSplitPolys: readonly Polynomial[] = [],
 ): CadPlan {
   let master = polynomialConstant(rational(1n));
+  const cadBudget: PolyMulBudget = { mulSteps: 0 };
   for (const c of constraints) {
     if (polynomialDegree(c.poly) < 1) continue;
     const sf = polynomialSquareFree(c.poly);
     const g = polynomialGcd(master, sf);
     const factor = polynomialDegree(g) >= 1 ? polynomialDivMod(sf, g).quotient : sf;
-    if (polynomialDegree(factor) >= 1) master = polynomialPrimitivePositive(polynomialMultiply(master, factor));
+    if (polynomialDegree(factor) >= 1) {
+      const nextMaster = boundedPolyMultiply(master, factor, cadBudget);
+      if (!nextMaster) return { sites: [], openCells: [], unresolvedRootIsolation: true, complexityExceeded: true };
+      master = polynomialPrimitivePositive(nextMaster);
+    }
   }
   for (const p of extraSplitPolys) {
     if (polynomialDegree(p) < 1) continue;
     const sf = polynomialSquareFree(p);
     const g = polynomialGcd(master, sf);
     const factor = polynomialDegree(g) >= 1 ? polynomialDivMod(sf, g).quotient : sf;
-    if (polynomialDegree(factor) >= 1) master = polynomialPrimitivePositive(polynomialMultiply(master, factor));
+    if (polynomialDegree(factor) >= 1) {
+      const nextMaster = boundedPolyMultiply(master, factor, cadBudget);
+      if (!nextMaster) return { sites: [], openCells: [], unresolvedRootIsolation: true, complexityExceeded: true };
+      master = polynomialPrimitivePositive(nextMaster);
+    }
   }
 
   const sites: SampleSite[] = [];
@@ -2272,16 +2339,20 @@ function factorSquarePolynomial(poly: Polynomial): { square: Polynomial; squareF
   let sq = polynomialConstant(rational(1n));
   let rem = new Map(poly);
   let guard = 0;
+  const polyBudget: PolyMulBudget = { mulSteps: 0 };
   while (guard++ < 12 && polynomialDegree(rem) >= 2) {
     const g = polynomialGcd(rem, polynomialDerivative(rem));
     if (polynomialDegree(g) <= 0) break;
-    const g2 = polynomialMultiply(g, g);
+    const g2 = boundedPolyMultiply(g, g, polyBudget);
+    if (!g2) throw new MPolyOverflowError();
     if (polynomialDegree(g2) <= polynomialDegree(rem)) {
       const div1 = polynomialDivMod(rem, g);
       if (div1.remainder.size === 0) {
         const div2 = polynomialDivMod(div1.quotient, g);
         if (div2.remainder.size === 0) {
-          sq = polynomialMultiply(sq, g);
+          const nextSq = boundedPolyMultiply(sq, g, polyBudget);
+          if (!nextSq) throw new MPolyOverflowError();
+          sq = nextSq;
           rem = div2.quotient;
           continue;
         }
@@ -2295,7 +2366,9 @@ function factorSquarePolynomial(poly: Polynomial): { square: Polynomial; squareF
     if (check1.remainder.size !== 0) break;
     const check2 = polynomialDivMod(check1.quotient, factor);
     if (check2.remainder.size !== 0) break;
-    sq = polynomialMultiply(sq, factor);
+    const nextSq = boundedPolyMultiply(sq, factor, polyBudget);
+    if (!nextSq) throw new MPolyOverflowError();
+    sq = nextSq;
     rem = check2.quotient;
   }
   return { square: sq, squareFree: rem };
@@ -2515,7 +2588,8 @@ function ringNormalizeRational(
       case "sqrt": {
         const rf = rationalForm(node.value, variable);
         if (!rf.unsupported && rf.denominator.size > 0) {
-          const prod = polynomialMultiply(rf.numerator, rf.denominator);
+          const prod = boundedPolyMultiply(rf.numerator, rf.denominator, { mulSteps: 0 });
+          if (!prod) throw new MPolyOverflowError();
           return { num: buildSqrtOfPoly(prod), den: absPolyRing(rf.denominator) };
         }
         const inner = convert(node.value);
@@ -2612,7 +2686,7 @@ function ringNormalizeRational(
   try {
     return convert(expr);
   } catch (err) {
-    if (err instanceof MPolyOverflowError) return null;
+    if (err instanceof MPolyOverflowError || err instanceof PolyComplexityError) return null;
     throw err;
   }
 }
@@ -2718,6 +2792,21 @@ function canonicalizeUncheckedOps(
 }
 
 export function verifyScalarEquivalence(
+  studentInput: ScalarExpr | string,
+  referenceInput: ScalarExpr | string,
+  domain?: DomainSpec,
+): VerificationResult {
+  try {
+    return verifyScalarEquivalenceInner(studentInput, referenceInput, domain);
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
+    throw err;
+  }
+}
+
+function verifyScalarEquivalenceInner(
   studentInput: ScalarExpr | string,
   referenceInput: ScalarExpr | string,
   domain?: DomainSpec,
@@ -2854,6 +2943,9 @@ export function verifyScalarEquivalence(
       parsedDomain.excluded,
     );
     if (!denDiff.equal) {
+      if (denDiff.complexityExceeded) {
+        return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+      }
       return {
         status: "inequivalent",
         reason: "natural_domain_mismatch",
@@ -2862,17 +2954,25 @@ export function verifyScalarEquivalence(
       };
     }
 
-    const combinedDen = polynomialMultiply(sf.denominator, rf.denominator);
-    const residual = polynomialAdd(
-      polynomialMultiply(sf.numerator, rf.denominator),
-      polynomialMultiply(rf.numerator, sf.denominator),
-      -1,
-    );
-    const { sites, unresolvedRootIsolation } = buildCadPlan(
+    const crossBudget: PolyMulBudget = { mulSteps: 0 };
+    const combinedDen = boundedPolyMultiply(sf.denominator, rf.denominator, crossBudget);
+    const leftCross = boundedPolyMultiply(sf.numerator, rf.denominator, crossBudget);
+    const rightCross = boundedPolyMultiply(rf.numerator, sf.denominator, crossBudget);
+    if (!combinedDen || !leftCross || !rightCross) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
+    const residual = polynomialAdd(leftCross, rightCross, -1);
+    if (exceedsPolyLimits(residual)) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
+    const { sites, unresolvedRootIsolation, complexityExceeded } = buildCadPlan(
       [...sConstraints.rational, ...rConstraints.rational],
       parsedDomain,
       [...sConstraints.splitPolys, ...rConstraints.splitPolys],
     );
+    if (complexityExceeded) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
     if (unresolvedRootIsolation) {
       return { status: "unverified", reason: "unresolved_root_isolation", domain };
     }
@@ -2944,11 +3044,14 @@ export function verifyScalarEquivalence(
 
   // Extended fragment (radicals, abs, ln, sin, cos, exp): 1D CAD domain verification first
   const allRationalConstraints = [...sConstraints.rational, ...rConstraints.rational];
-  const { sites, openCells, unresolvedRootIsolation } = buildCadPlan(
+  const { sites, openCells, unresolvedRootIsolation, complexityExceeded } = buildCadPlan(
     allRationalConstraints,
     parsedDomain,
     [...sConstraints.splitPolys, ...rConstraints.splitPolys],
   );
+  if (complexityExceeded) {
+    return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+  }
   if (unresolvedRootIsolation) {
     return { status: "unverified", reason: "unresolved_root_isolation", domain };
   }
@@ -3191,14 +3294,19 @@ export function verifyScalarEquivalence(
   return { status: "unverified", reason: sf.unsupported ?? rf.unsupported ?? "symbolic_equivalence_unverified", domain };
 }
 
-function squareFreeProduct(polys: readonly Polynomial[]): Polynomial {
+function squareFreeProduct(polys: readonly Polynomial[]): Polynomial | null {
   let acc = polynomialConstant(rational(1n));
+  const polyBudget: PolyMulBudget = { mulSteps: 0 };
   for (const p of polys) {
     if (polynomialDegree(p) < 1) continue;
     const sf = polynomialSquareFree(p);
     const g = polynomialGcd(acc, sf);
     const factor = polynomialDegree(g) >= 1 ? polynomialDivMod(sf, g).quotient : sf;
-    if (polynomialDegree(factor) >= 1) acc = polynomialPrimitivePositive(polynomialMultiply(acc, factor));
+    if (polynomialDegree(factor) >= 1) {
+      const next = boundedPolyMultiply(acc, factor, polyBudget);
+      if (!next) return null;
+      acc = polynomialPrimitivePositive(next);
+    }
   }
   return acc;
 }
@@ -3208,37 +3316,55 @@ function checkDenominatorSetsEquivalent(
   referenceDens: readonly Polynomial[],
   intervals: readonly NormalizedInterval[],
   excluded: readonly SpanRational[],
-): { equal: true } | { equal: false; witness: { input: string; detail: string } } {
-  const sUnion = squareFreeProduct(studentDens);
-  const rUnion = squareFreeProduct(referenceDens);
-  const common = polynomialGcd(sUnion, rUnion);
-  let sOnly = polynomialDegree(common) >= 1 ? polynomialDivMod(sUnion, common).quotient : sUnion;
-  let rOnly = polynomialDegree(common) >= 1 ? polynomialDivMod(rUnion, common).quotient : rUnion;
+): { equal: true } | { equal: false; complexityExceeded?: boolean; witness: { input: string; detail: string } } {
+  try {
+    const sUnion = squareFreeProduct(studentDens);
+    const rUnion = squareFreeProduct(referenceDens);
+    if (!sUnion || !rUnion) {
+      return { equal: false, complexityExceeded: true, witness: { input: "domain", detail: "polynomial_complexity_exceeded" } };
+    }
+    const common = polynomialGcd(sUnion, rUnion);
+    let sOnly = polynomialDegree(common) >= 1 ? polynomialDivMod(sUnion, common).quotient : sUnion;
+    let rOnly = polynomialDegree(common) >= 1 ? polynomialDivMod(rUnion, common).quotient : rUnion;
 
-  for (const ex of excluded) {
-    if (polynomialDegree(sOnly) >= 1 && polynomialEvaluate(sOnly, ex).n === 0n) {
-      sOnly = polynomialDivMod(sOnly, linearFactor(ex)).quotient;
+    for (const ex of excluded) {
+      if (polynomialDegree(sOnly) >= 1 && polynomialEvaluate(sOnly, ex).n === 0n) {
+        sOnly = polynomialDivMod(sOnly, linearFactor(ex)).quotient;
+      }
+      if (polynomialDegree(rOnly) >= 1 && polynomialEvaluate(rOnly, ex).n === 0n) {
+        rOnly = polynomialDivMod(rOnly, linearFactor(ex)).quotient;
+      }
     }
-    if (polynomialDegree(rOnly) >= 1 && polynomialEvaluate(rOnly, ex).n === 0n) {
-      rOnly = polynomialDivMod(rOnly, linearFactor(ex)).quotient;
-    }
-  }
 
-  for (const iv of intervals) {
-    if (polynomialDegree(sOnly) >= 1 && sturmCount(sOnly, iv) > 0) {
-      const { roots } = isolateRealRoots(sOnly, iv);
-      const first = roots[0];
-      const witnessInput = first ? (first.kind === "exact" ? formatRational(first.value) : `(${formatRational(first.low)}, ${formatRational(first.high)})`) : "domain";
-      return { equal: false, witness: { input: witnessInput, detail: "student undefined" } };
+    for (const iv of intervals) {
+      if (polynomialDegree(sOnly) >= 1 && sturmCount(sOnly, iv) > 0) {
+        const { roots } = isolateRealRoots(sOnly, iv);
+        const first = roots[0];
+        const witnessInput = first
+          ? first.kind === "exact"
+            ? formatRational(first.value)
+            : `(${formatRational(first.low)}, ${formatRational(first.high)})`
+          : "domain";
+        return { equal: false, witness: { input: witnessInput, detail: "student undefined" } };
+      }
+      if (polynomialDegree(rOnly) >= 1 && sturmCount(rOnly, iv) > 0) {
+        const { roots } = isolateRealRoots(rOnly, iv);
+        const first = roots[0];
+        const witnessInput = first
+          ? first.kind === "exact"
+            ? formatRational(first.value)
+            : `(${formatRational(first.low)}, ${formatRational(first.high)})`
+          : "domain";
+        return { equal: false, witness: { input: witnessInput, detail: "reference undefined" } };
+      }
     }
-    if (polynomialDegree(rOnly) >= 1 && sturmCount(rOnly, iv) > 0) {
-      const { roots } = isolateRealRoots(rOnly, iv);
-      const first = roots[0];
-      const witnessInput = first ? (first.kind === "exact" ? formatRational(first.value) : `(${formatRational(first.low)}, ${formatRational(first.high)})`) : "domain";
-      return { equal: false, witness: { input: witnessInput, detail: "reference undefined" } };
+    return { equal: true };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { equal: false, complexityExceeded: true, witness: { input: "domain", detail: "polynomial_complexity_exceeded" } };
     }
+    throw err;
   }
-  return { equal: true };
 }
 
 function intersectInterval(iv: NormalizedInterval, bound: NormalizedInterval): NormalizedInterval | null {
@@ -3315,11 +3441,14 @@ function checkAntiderivativeDefinedOnIntegrandDomain(
   if (!parsedDomain || parsedDomain.empty) return null;
   const sConstraints = collectConstraints(antiderivative, variable);
   const iConstraints = collectConstraints(integrand, variable);
-  const { sites, openCells, unresolvedRootIsolation } = buildCadPlan(
+  const { sites, openCells, unresolvedRootIsolation, complexityExceeded } = buildCadPlan(
     [...sConstraints.rational, ...iConstraints.rational],
     parsedDomain,
     [...sConstraints.splitPolys, ...iConstraints.splitPolys],
   );
+  if (complexityExceeded) {
+    return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+  }
   if (unresolvedRootIsolation) {
     return { status: "unverified", reason: "unresolved_root_isolation", domain };
   }

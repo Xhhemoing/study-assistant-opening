@@ -299,10 +299,34 @@ describe("bounded symbolic equivalence", () => {
       }).status,
     ).toBe("inequivalent");
 
-    // Round-8 P1-3: nested symbolic polynomial powers fail closed before degree/term explosion
+    // Round-8 P1-3: nested symbolic polynomial powers & dense degree-64 cross-multiplies fail closed cleanly
     const nestedPow = verifyScalarEquivalence("((((x + 1)^12)^12)^12)^12", "((((x + 1)^12)^12)^12)^12");
     expect(nestedPow.status).toBe("unverified");
     expect(nestedPow.reason).toBe("polynomial_complexity_exceeded");
+
+    const poly8A = Array.from({ length: 9 }, (_, k) => (k === 0 ? "1" : `${k + 1} * x^${k}`)).join(" + ");
+    const poly8B = Array.from({ length: 9 }, (_, k) => (k === 0 ? "2" : `${k + 2} * x^${k}`)).join(" + ");
+    const denseCross = verifyScalarEquivalence(`1 / (${poly8A})^8`, `2 / (${poly8B})^8`, {
+      intervals: [{ left: 0, right: 1 }],
+    });
+    expect(denseCross.status).toBe("unverified");
+    expect(denseCross.reason).toBe("polynomial_complexity_exceeded");
+
+    const sparseDeg64Cross = verifyScalarEquivalence("1 / (((x^4)^4)^4 + 1)", "2 / (((x^4)^4)^4 + 2)", {
+      intervals: [{ left: 0, right: 1 }],
+    });
+    expect(sparseDeg64Cross.status).toBe("unverified");
+    expect(sparseDeg64Cross.reason).toBe("polynomial_complexity_exceeded");
+
+    const cadCombinedExceeded = verifyScalarEquivalence(
+      "sqrt((x^7)^5 + 1) * sqrt((x^7)^5 + 2)",
+      "sqrt((x^7)^5 + 1) * sqrt((x^7)^5 + 2)",
+    );
+    expect(cadCombinedExceeded.status).toBe("unverified");
+    expect(cadCombinedExceeded.reason).toBe("polynomial_complexity_exceeded");
+
+    const sqrtNestedPow = verifyScalarEquivalence("sqrt((((x + 1)^12)^12)^12)", "sqrt((((x + 1)^12)^12)^12)");
+    expect(sqrtNestedPow.status).toBe("unverified");
   });
 
   it("checks derivative residuals, variable forwarding, piecewise integrals, and general substitution bounds", () => {
@@ -574,5 +598,45 @@ describe("bounded 408 VM", () => {
     });
     expect(storeAndFreeLoop.status).toBe("verified");
     if (storeAndFreeLoop.status === "verified") expect(storeAndFreeLoop.value).toBe(8);
+
+    // Round-9 P1-4: reject fractional/non-safe-integer numeric slot indices across load, store, and index
+    const fractionalLoad = runCSubset408({
+      initial: { ptr: { objectId: 1, generation: 1, fieldOrIndex: 0.5 } },
+      instructions: [
+        { op: "alloc", target: "arr", length: 2 },
+        { op: "load", target: "out", pointer: { variable: "ptr" } },
+      ],
+    });
+    expect(fractionalLoad.status).toBe("unverified");
+    if (fractionalLoad.status === "unverified") expect(fractionalLoad.reason).toBe("out_of_bounds");
+
+    const fractionalStore = runCSubset408({
+      initial: { ptr: { objectId: 1, generation: 1, fieldOrIndex: 0.5 } },
+      instructions: [
+        { op: "alloc", target: "arr", length: 2 },
+        { op: "store", pointer: { variable: "ptr" }, value: 42 },
+      ],
+    });
+    expect(fractionalStore.status).toBe("unverified");
+    if (fractionalStore.status === "unverified") expect(fractionalStore.reason).toBe("out_of_bounds");
+
+    const fractionalIndex = runCSubset408({
+      instructions: [
+        { op: "alloc", target: "arr", length: 2 },
+        { op: "index", target: "q", pointer: { variable: "arr" }, index: 0.5 },
+      ],
+    });
+    expect(fractionalIndex.status).toBe("unverified");
+    if (fractionalIndex.status === "unverified") expect(fractionalIndex.reason).toBe("out_of_bounds");
+
+    const unsafeBigIndex = runCSubset408({
+      initial: { ptr: { objectId: 1, generation: 1, fieldOrIndex: 1e20 } },
+      instructions: [
+        { op: "alloc", target: "arr", length: 2 },
+        { op: "store", pointer: { variable: "ptr" }, value: 1 },
+      ],
+    });
+    expect(unsafeBigIndex.status).toBe("unverified");
+    if (unsafeBigIndex.status === "unverified") expect(unsafeBigIndex.reason).toBe("out_of_bounds");
   });
 });

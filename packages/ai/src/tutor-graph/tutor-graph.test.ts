@@ -53,11 +53,12 @@ describe("TutorGraph fast path", () => {
   });
 
   it("marks only the first error invalid and downstream steps dependent on submitted attempts", () => {
-    const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const budget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });
     const result = runTutorGraph({
       questionStem: "因式分解",
       submission: {},
       budget,
+      assessmentMode: "practice",
       attemptSubmitted: true,
       verifyCaps: {
         verify: () => ({
@@ -76,6 +77,7 @@ describe("TutorGraph fast path", () => {
     expect(result.state).toBe("released");
     expect(result.releaseApproved).toBe(true);
     expect(result.providerCalls).toBe(0);
+    expect(result.leakageBits).toBe(2);
     expect(result.publicTeaching?.learnerSteps.map((step) => step.status)).toEqual(["valid", "invalid", "dependent"]);
     expect(result.publicTeaching?.movePlan.move).toBe("local_counterexample");
   });
@@ -413,5 +415,138 @@ describe("TutorGraph fast path", () => {
     });
     expect(secondStepTurn.state).toBe("budget_contaminated");
     expect(secondStepTurn.verification).toEqual({ steps: [] });
+  });
+
+  it("strips undeclared verifier fields, hides thrown verifier messages, and enforces log2(outcomes) with pure coarsening", () => {
+    const crashBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const crashed = runTutorGraph({
+      questionStem: "积分",
+      submission: {},
+      budget: crashBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => {
+          throw new Error("INTERNAL_DB_SECRET_SOLUTION_42");
+        },
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: () => false,
+      },
+    });
+    expect(crashed.state).toBe("unverified");
+    expect(crashed.reason).toBe("verifier_execution_failed");
+    expect(crashed.releaseApproved).toBe(false);
+    expect(JSON.stringify(crashed)).not.toContain("INTERNAL_DB_SECRET_SOLUTION_42");
+
+    const leakBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const stripped = runTutorGraph({
+      questionStem: "极限",
+      submission: {},
+      budget: leakBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () =>
+          ({
+            steps: [{ id: "s1", text: "一步", status: "valid", leakedStepSecret: "RAW_STEP_KEY" }],
+            ruleWitness: {
+              capability: "function-diff-plot@1",
+              rawWitnessSecret: "RAW_WITNESS_KEY",
+              params: {
+                origin: "rules",
+                title: "差异",
+                points: [{ x: "1", kind: "discontinuity", secretPointKey: "RAW_POINT_KEY" }],
+                explanation: "说明",
+                extraParamSecret: "RAW_PARAM_KEY",
+              },
+            },
+          }) as never,
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: () => false,
+      },
+    });
+    expect(stripped.state).toBe("released");
+    const serialized = JSON.stringify(stripped);
+    expect(serialized).not.toContain("RAW_STEP_KEY");
+    expect(serialized).not.toContain("RAW_WITNESS_KEY");
+    expect(serialized).not.toContain("RAW_POINT_KEY");
+    expect(serialized).not.toContain("RAW_PARAM_KEY");
+
+    const shapeSet = new Set<string>();
+    const variants: Array<Parameters<typeof runTutorGraph>[0]["verifyCaps"]["verify"]> = [
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "valid" },
+          { id: "s2", text: "b", status: "valid" },
+          { id: "s3", text: "c", status: "valid" },
+        ],
+      }),
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "invalid" },
+          { id: "s2", text: "b", status: "valid" },
+          { id: "s3", text: "c", status: "valid" },
+        ],
+        firstError: { stepId: "s1", kind: "domain", message: "bad1" },
+      }),
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "valid" },
+          { id: "s2", text: "b", status: "invalid" },
+          { id: "s3", text: "c", status: "valid" },
+        ],
+        firstError: { stepId: "s2", kind: "domain", message: "bad2" },
+      }),
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "valid" },
+          { id: "s2", text: "b", status: "valid" },
+          { id: "s3", text: "c", status: "invalid" },
+        ],
+        firstError: { stepId: "s3", kind: "domain", message: "bad3" },
+      }),
+    ];
+    for (const verifyFn of variants) {
+      const pureBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const res = runTutorGraph({
+        questionStem: "微积分",
+        submission: {},
+        budget: pureBudget,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verifyFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+      });
+      expect(res.state).toBe("released");
+      expect(pureBudget.leakageBits).toBe(1);
+      expect(res.publicTeaching?.learnerSteps.every((step) => step.status === "unknown")).toBe(true);
+      expect(res.verification.firstError).toBeUndefined();
+      shapeSet.add(JSON.stringify({ teaching: res.publicTeaching, verification: res.verification }));
+    }
+    expect(shapeSet.size).toBe(2);
+
+    const practiceBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });
+    const twoStep = runTutorGraph({
+      questionStem: "微积分",
+      submission: {},
+      budget: practiceBudget,
+      assessmentMode: "practice",
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => ({
+          steps: [
+            { id: "s1", text: "a", status: "valid" },
+            { id: "s2", text: "b", status: "valid" },
+          ],
+        }),
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+    });
+    expect(twoStep.state).toBe("released");
+    expect(twoStep.leakageBits).toBeCloseTo(Math.log2(3), 10);
   });
 });

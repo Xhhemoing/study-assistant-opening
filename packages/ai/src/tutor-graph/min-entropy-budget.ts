@@ -8,6 +8,7 @@ export const PURE_COOLDOWN_MS = PURE_COOLDOWN_HOURS * 3_600_000;
 export type MinEntropyBudgetOptions = {
   scaffoldBitBudget?: number;
   cooldownHours?: number;
+  assessmentMode?: "pure" | "practice";
   now?: () => number;
   initialSeed?: string;
   usedSeeds?: readonly string[];
@@ -35,7 +36,8 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
   if (!Number.isFinite(configuredBudget) || configuredBudget < 0) {
     throw new RangeError("scaffoldBitBudget must be non-negative");
   }
-  const effectiveCap = Math.min(configuredBudget, PURE_MAX_LEAKAGE_BITS);
+  const isPractice = options.assessmentMode === "practice";
+  const effectiveCap = isPractice ? configuredBudget : Math.min(configuredBudget, PURE_MAX_LEAKAGE_BITS);
   if (options.cooldownHours !== undefined && (!Number.isFinite(options.cooldownHours) || options.cooldownHours < 0)) {
     throw new RangeError(`cooldownHours must be a finite non-negative number; got ${String(options.cooldownHours)}.`);
   }
@@ -70,6 +72,9 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
     },
     get leakageBits() {
       return leakageBits;
+    },
+    get maxBitsPerTurn() {
+      return effectiveCap;
     },
     get cooldownUntil() {
       return cooldownUntilMs;
@@ -109,7 +114,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
           cooldownUntilMs,
         };
       }
-      if (leakageBits >= PURE_MAX_LEAKAGE_BITS) {
+      if (!isPractice && leakageBits >= PURE_MAX_LEAKAGE_BITS) {
         contaminate(nowMs);
         return {
           allowed: false,
@@ -121,7 +126,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
         };
       }
       const nextBits = leakageBits + worstBranchBits;
-      if (nextBits > effectiveCap || (worstBranchBits > 0 && nextBits >= PURE_MAX_LEAKAGE_BITS)) {
+      if (nextBits > effectiveCap || (!isPractice && worstBranchBits > 0 && nextBits >= PURE_MAX_LEAKAGE_BITS)) {
         contaminate(nowMs);
         return {
           allowed: false,
@@ -145,7 +150,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
       }
       if (state === "pure" && worstBranchBits > 0) state = "scaffolded";
       leakageBits += worstBranchBits;
-      if (leakageBits >= PURE_MAX_LEAKAGE_BITS || leakageBits > effectiveCap) {
+      if ((!isPractice && leakageBits >= PURE_MAX_LEAKAGE_BITS) || leakageBits > effectiveCap) {
         contaminate(nowMs);
       }
       return { state, leakageBits, cooldownUntil: cooldownUntilMs, cooldownUntilMs };
