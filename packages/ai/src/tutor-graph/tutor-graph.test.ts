@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMinEntropyBudget } from "./min-entropy-budget";
+import { createControlledMinEntropyBudget, createMinEntropyBudget } from "./min-entropy-budget";
 import { runTutorGraph, runTutorGraphTurn } from "./graph";
 
 describe("TutorGraph fast path", () => {
@@ -84,7 +84,7 @@ describe("TutorGraph fast path", () => {
 
   it("enforces 1.5-bit cap, atomic 72h cooldown, and distinct SeededRecipe reset", () => {
     let nowMs = 1000;
-    const budget = createMinEntropyBudget({ scaffoldBitBudget: 8, now: () => nowMs, initialSeed: "seed-a" });
+    const { budget, hostControl } = createControlledMinEntropyBudget({ scaffoldBitBudget: 8, now: () => nowMs, initialSeed: "seed-a" });
     expect(budget.state).toBe("pure");
     budget.beforeRelease(1);
     expect(budget.state).toBe("scaffolded");
@@ -134,15 +134,15 @@ describe("TutorGraph fast path", () => {
     expect(afterCooldown.publicTeaching).toBeUndefined();
     expect(verify).not.toHaveBeenCalled();
 
-    expect(() => budget.resetForFreshVariant("seed-a", nowMs)).toThrow(/duplicate_seeded_recipe/);
-    budget.resetForFreshVariant("seed-b", nowMs);
+    expect(() => hostControl.resetForFreshVariant("seed-a", nowMs)).toThrow(/duplicate_seeded_recipe/);
+    hostControl.resetForFreshVariant("seed-b", nowMs);
     expect(budget.state).toBe("pure");
     expect(budget.leakageBits).toBe(0);
     expect(budget.cooldownUntilMs).toBeUndefined();
-    expect(() => budget.resetForFreshVariant("seed-a", nowMs)).toThrow(/duplicate_seeded_recipe/);
-    expect(() => budget.resetForFreshVariant("seed-b", nowMs)).toThrow(/duplicate_seeded_recipe/);
+    expect(() => hostControl.resetForFreshVariant("seed-a", nowMs)).toThrow(/duplicate_seeded_recipe/);
+    expect(() => hostControl.resetForFreshVariant("seed-b", nowMs)).toThrow(/duplicate_seeded_recipe/);
 
-    const directHit = budget.commitRelease(1.5, nowMs);
+    const directHit = createMinEntropyBudget({ now: () => nowMs }).commitRelease(1.5, nowMs);
     expect(directHit.state).toBe("contaminated");
     expect(directHit.cooldownUntilMs).toBe(nowMs + 72 * 3_600_000);
   });
@@ -478,6 +478,126 @@ describe("TutorGraph fast path", () => {
     expect(new Set(sequences.map((sequence) => JSON.stringify(sequence))).size).toBe(2);
     expect(new Set(sequences.map(([, second]) => JSON.stringify(second))).size).toBe(1);
     expect(new Set(sequences.map(([, , afterCooldown]) => JSON.stringify(afterCooldown))).size).toBe(1);
+  });
+
+  it.each([
+    { source: "verify", schedule: "microtask" },
+    { source: "verify", schedule: "promise" },
+    { source: "verify", schedule: "timer" },
+    { source: "guard", schedule: "microtask" },
+    { source: "guard", schedule: "promise" },
+    { source: "guard", schedule: "timer" },
+  ] as const)("blocks deferred budget mutation scheduled by $source via $schedule", async ({ source, schedule }) => {
+    const pairs: string[] = [];
+    for (const releaseBit of [false, true]) {
+      for (const mutateBit of [false, true]) {
+        const { budget, hostControl } = createControlledMinEntropyBudget({
+          scaffoldBitBudget: 1,
+          initialSeed: "seed-a",
+          now: () => 1000,
+        });
+        let calls = 0;
+        let verified = false;
+        const scheduleMutations = () => {
+          if (!mutateBit) return;
+          const mutate = () => {
+            try { budget.resetForFreshVariant("seed-b"); } catch { /* no reset authority */ }
+            try { budget.commitRelease(1); } catch { /* no commit authority */ }
+            budget.canRelease(1);
+          };
+          if (schedule === "microtask") queueMicrotask(mutate);
+          if (schedule === "promise") void Promise.resolve().then(mutate);
+          if (schedule === "timer") setTimeout(mutate, 0);
+        };
+        const assertCurrent = () => undefined;
+        const input = {
+          questionStem: "积分",
+          submission: {},
+          attemptSubmitted: true,
+          budget,
+          verifyCaps: {
+            assertCurrent,
+            verify: () => {
+              calls++;
+              verified = true;
+              if (source === "verify") {
+                scheduleMutations();
+                if (!releaseBit) throw new Error("private verifier failure");
+              }
+              return { steps: [] };
+            },
+          },
+          releaseCaps: {
+            assertCurrent,
+            answerLeakageBlocker: () => {
+              if (!verified) return false;
+              if (source === "guard") scheduleMutations();
+              return source === "guard" && !releaseBit;
+            },
+          },
+        };
+        const first = runTutorGraph(input);
+        if (schedule === "timer") await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        else await Promise.resolve();
+        expect(budget.snapshot()).toMatchObject({ state: "scaffolded", leakageBits: 1, currentSeed: "seed-a" });
+        const second = runTutorGraph(input);
+        expect(calls).toBe(1);
+        pairs.push(JSON.stringify([first, second]));
+        expect(() => budget.resetForFreshVariant("seed-b")).toThrow(/pure_budget_sealed/);
+        expect(() => budget.resetWithSeededRecipe("seed-b")).toThrow(/pure_budget_sealed/);
+        expect(() => budget.beforeRelease(1)).toThrow(/pure_budget_sealed/);
+        expect(() => budget.recordHint(1)).toThrow(/pure_budget_sealed/);
+        const beforeDeniedCheck = budget.snapshot();
+        expect(budget.canRelease(1).allowed).toBe(false);
+        expect(budget.snapshot()).toEqual(beforeDeniedCheck);
+        const nextNow = budget.cooldownUntilMs ?? 1000;
+        if (budget.cooldownUntilMs !== undefined) {
+          expect(() => hostControl.resetForFreshVariant("seed-b", 1000)).toThrow(/cooldown_active/);
+        }
+        hostControl.resetForFreshVariant("seed-b", nextNow);
+        expect(budget.snapshot()).toMatchObject({ state: "pure", leakageBits: 0, currentSeed: "seed-b" });
+        const fresh = runTutorGraph({ ...input, nowMs: nextNow, verifyCaps: { assertCurrent, verify: () => ({ steps: [] }) }, releaseCaps: { assertCurrent, answerLeakageBlocker: () => false } });
+        expect(fresh).toMatchObject({ state: "released", leakageBits: 1 });
+      }
+    }
+    expect(new Set(pairs).size).toBe(2);
+  });
+
+  it("keeps a pure-bound budget sealed across later practice requests", () => {
+    const { budget, hostControl } = createControlledMinEntropyBudget({
+      assessmentMode: "practice", scaffoldBitBudget: 4, initialSeed: "seed-a", now: () => 1000,
+    });
+    const assertCurrent = () => undefined;
+    const verify = vi.fn(() => ({ steps: [] }));
+    const input = {
+      questionStem: "积分", submission: {}, attemptSubmitted: true, budget,
+      verifyCaps: { assertCurrent, verify },
+      releaseCaps: { assertCurrent, answerLeakageBlocker: () => false },
+    };
+    expect(runTutorGraph(input)).toMatchObject({ state: "released", leakageBits: 1 });
+    expect(runTutorGraph({ ...input, assessmentMode: "practice" })).toMatchObject({
+      state: "budget_contaminated", reason: "budget_exhausted", leakageBits: 1,
+    });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(Object.getOwnPropertySymbols(budget)).toEqual([]);
+    expect(() => budget.resetForFreshVariant("seed-b")).toThrow(/pure_budget_sealed/);
+    hostControl.resetForFreshVariant("seed-b");
+    expect(runTutorGraph(input)).toMatchObject({ state: "released", leakageBits: 1 });
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it("seals a budget on an unsubmitted pure request", () => {
+    const budget = createMinEntropyBudget({ initialSeed: "seed-a", now: () => 1000 });
+    const assertCurrent = () => undefined;
+    const result = runTutorGraph({
+      questionStem: "积分", submission: {}, budget,
+      verifyCaps: { assertCurrent, verify: () => ({ steps: [] }) },
+      releaseCaps: { assertCurrent, answerLeakageBlocker: () => false },
+    });
+    expect(result).toMatchObject({ state: "released", leakageBits: 0 });
+    expect(() => budget.commitRelease(1)).toThrow(/pure_budget_sealed/);
+    expect(() => budget.resetForFreshVariant("seed-b")).toThrow(/pure_budget_sealed/);
+    expect(budget.snapshot()).toMatchObject({ state: "pure", leakageBits: 0, currentSeed: "seed-a" });
   });
 
   it.each([

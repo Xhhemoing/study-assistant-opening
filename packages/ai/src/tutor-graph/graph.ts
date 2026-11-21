@@ -5,7 +5,7 @@ import {
   fixedPureGuidance,
   type MinEntropyBudget,
 } from "./min-entropy-budget";
-import { pureBudgetScope } from "./budget-isolation";
+import { getBudgetControl } from "./budget-isolation";
 import type {
   LearnerStep,
   MovePlan,
@@ -373,12 +373,15 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       reason: "missing_entropy_budget",
     };
   }
+  const budgetControl = getBudgetControl(budget);
+  const isPureTurn = input.assessmentMode !== "practice" || budgetControl.isPureBound();
+  if (isPureTurn) budgetControl.sealPure();
   const nowMs = input.nowMs ?? budget.nowMs();
 
   // A signal aborted during an earlier verified turn must not change the
   // response for an already exhausted pure budget.
   if (
-    (input.assessmentMode ?? "pure") === "pure" &&
+    isPureTurn &&
     budget.leakageBits > 0
   ) {
     if (budget.cooldownUntilMs !== undefined && nowMs < budget.cooldownUntilMs) {
@@ -390,7 +393,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     const rawCap = Number.isFinite(budget.maxBitsPerTurn) ? budget.maxBitsPerTurn : PURE_MAX_LEAKAGE_BITS;
     const turnCap = Math.min(rawCap, PURE_MAX_LEAKAGE_BITS);
     if (turnCap - budget.leakageBits < 1 || budget.leakageBits + 1 >= PURE_MAX_LEAKAGE_BITS) {
-      const preCheck = budget.canRelease(1, nowMs);
+      const preCheck = budgetControl.canRelease(1, nowMs);
       return blockedByBudgetResult(budget, preCheck.allowed ? "budget_exhausted" : (preCheck.reason ?? "budget_exhausted"));
     }
   }
@@ -406,8 +409,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     return blockedByBudgetResult(budget, "budget_contaminated");
   }
 
-  const assessmentMode = input.assessmentMode ?? "pure";
-  const requiresSubmittedAttempt = assessmentMode === "pure" || budget.state === "pure";
+  const requiresSubmittedAttempt = isPureTurn || budget.state === "pure";
   if (input.answerProbe || (requiresSubmittedAttempt && input.attemptSubmitted !== true)) {
     const pure = fixedPureGuidance(input.answerProbe ? "unsubmitted_answer_probe" : "unsubmitted_pure_attempt");
     return {
@@ -434,12 +436,11 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     Number.isFinite((budget as { maxBitsPerTurn?: number }).maxBitsPerTurn)
       ? (budget as { maxBitsPerTurn: number }).maxBitsPerTurn
       : PURE_MAX_LEAKAGE_BITS;
-  const isPureTurn = assessmentMode !== "practice";
   const turnCap = isPureTurn ? Math.min(rawTurnCap, PURE_MAX_LEAKAGE_BITS) : rawTurnCap;
 
   const remainingBits = turnCap - budget.leakageBits;
   if (remainingBits < 1 || (isPureTurn && budget.leakageBits + 1 >= PURE_MAX_LEAKAGE_BITS)) {
-    const preCheck = budget.canRelease(1, nowMs);
+    const preCheck = budgetControl.canRelease(1, nowMs);
     return blockedByBudgetResult(
       budget,
       preCheck.allowed ? "budget_exhausted" : (preCheck.reason ?? "budget_exhausted"),
@@ -454,13 +455,13 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   }
 
   if (committedPure) {
-    const preVerifyCheck = budget.canRelease(1, nowMs);
+    const preVerifyCheck = budgetControl.canRelease(1, nowMs);
     if (!preVerifyCheck.allowed) {
       return blockedByBudgetResult(budget, preVerifyCheck.reason ?? "budget_exhausted");
     }
 
     // Spend the bit and snapshot both public outcomes before running the verifier.
-    const { leakageBits, state: helpState, cooldownUntilMs } = budget.commitRelease(1, nowMs);
+    const { leakageBits, state: helpState, cooldownUntilMs } = budgetControl.commitRelease(1, nowMs);
     const publicVerification: VerifyOutput = { steps: [] };
     const publicFields = { providerCalls: 0 as const, verification: publicVerification, leakageBits, helpState, cooldownUntilMs };
     const pureReleasedOutcome: TutorGraphResult = {
@@ -476,7 +477,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       releaseApproved: false,
       reason: "release_guard_rejected",
     };
-    return budget[pureBudgetScope]((wasTouched) => {
+    return budgetControl.runPure((wasTouched) => {
       const shouldWithhold = () =>
         wasTouched() || isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal);
 
@@ -506,12 +507,12 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
 
   // A verifier-dependent release or rejection spends at least one bit.
   const minimumReleaseBits = 1;
-  const minimumReleaseCheck = budget.canRelease(minimumReleaseBits, nowMs);
+  const minimumReleaseCheck = budgetControl.canRelease(minimumReleaseBits, nowMs);
   if (!minimumReleaseCheck.allowed) {
     return blockedByBudgetResult(budget, minimumReleaseCheck.reason ?? "budget_exhausted");
   }
   if (!verification) {
-    budget.commitRelease(minimumReleaseBits, nowMs);
+    budgetControl.commitRelease(minimumReleaseBits, nowMs);
     return {
       state: "unverified",
       providerCalls: 0,
@@ -539,7 +540,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
 
   const requiredBits = shouldCoarsen ? minimumReleaseBits : uncoarsenedBits;
   if (requiredBits > minimumReleaseBits) {
-    const releaseCheck = budget.canRelease(requiredBits, nowMs);
+    const releaseCheck = budgetControl.canRelease(requiredBits, nowMs);
     if (!releaseCheck.allowed) {
       return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
     }
@@ -583,7 +584,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   if (isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
     return withheldReleaseResult(budget, "cancelled");
   }
-  budget.commitRelease(requiredBits, nowMs);
+  budgetControl.commitRelease(requiredBits, nowMs);
   if (releasedText === undefined) {
     return withheldReleaseResult(budget, "release_guard_rejected");
   }

@@ -1,5 +1,5 @@
 import type { TutorGraphResult } from "./types";
-import { pureBudgetScope } from "./budget-isolation";
+import { registerBudgetControl } from "./budget-isolation";
 
 export type HelpState = "pure" | "scaffolded" | "contaminated";
 export const PURE_MAX_LEAKAGE_BITS = 1.5;
@@ -28,7 +28,7 @@ export const PURE_ANSWER_PROBE_GUIDANCE = "请提交完整解答后再进行核�
 export const PURE_CONTAMINATED_GUIDANCE = "提示额度已用尽，请先自行检查思路并重新独立作答。";
 export const PURE_COOLDOWN_GUIDANCE = "当前处于独立思考冷静期，请先自行检查思路并稍后再试。";
 
-export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
+function createBudgetPair(options: MinEntropyBudgetOptions) {
   let state: HelpState = "pure";
   let leakageBits = 0;
   let cooldownUntilMs: number | undefined;
@@ -54,6 +54,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
     ...(options.usedSeeds ?? []).map((seed) => seed.trim()).filter((seed) => seed.length > 0),
   ]);
   let pureScope: { touched: boolean } | undefined;
+  let pureBound = false;
 
   const validateBits = (worstBranchBits: number): void => {
     if (!Number.isFinite(worstBranchBits) || worstBranchBits < 0) {
@@ -68,7 +69,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
     }
   };
 
-  const budget = {
+  const internal = {
     get state() {
       return state;
     },
@@ -204,7 +205,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
         usedSeeds: [...usedSeeds],
       };
     },
-    [pureBudgetScope]<T>(run: (wasTouched: () => boolean) => T): T {
+    runPure<T>(run: (wasTouched: () => boolean) => T): T {
       if (pureScope) {
         pureScope.touched = true;
         throw new Error("pure_budget_in_use");
@@ -218,7 +219,76 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
       }
     },
   };
-  return budget;
+
+  const budget = Object.freeze({
+    get state() { return internal.state; },
+    get leakageBits() { return internal.leakageBits; },
+    get maxBitsPerTurn() { return internal.maxBitsPerTurn; },
+    get cooldownUntil() { return internal.cooldownUntil; },
+    get cooldownUntilMs() { return internal.cooldownUntilMs; },
+    get currentSeed() { return internal.currentSeed; },
+    get usedSeeds() { return internal.usedSeeds; },
+    nowMs: () => internal.nowMs(),
+    inspectUnsubmittedTurn: (kind: "answer_probe" | "procedural" | "sealed_submission") =>
+      internal.inspectUnsubmittedTurn(kind),
+    canRelease(bits: number, nowMs?: number): MinEntropyReleaseCheck {
+      if (pureBound) {
+        if (pureScope) pureScope.touched = true;
+        return {
+          allowed: false,
+          reason: "budget_exhausted",
+          state,
+          leakageBits,
+          cooldownUntil: cooldownUntilMs,
+          cooldownUntilMs,
+        };
+      }
+      return internal.canRelease(bits, nowMs);
+    },
+    commitRelease(bits: number, nowMs?: number) {
+      if (pureBound) {
+        if (pureScope) pureScope.touched = true;
+        throw new Error("pure_budget_sealed");
+      }
+      return internal.commitRelease(bits, nowMs);
+    },
+    beforeRelease(bits: number, nowMs?: number) {
+      return budget.commitRelease(bits, nowMs);
+    },
+    recordHint(bits: number, nowMs?: number) {
+      return budget.commitRelease(bits, nowMs);
+    },
+    resetForFreshVariant(seed: string, nowMs?: number) {
+      if (pureBound) {
+        if (pureScope) pureScope.touched = true;
+        throw new Error("pure_budget_sealed");
+      }
+      return internal.resetForFreshVariant(seed, nowMs);
+    },
+    resetWithSeededRecipe(seed: string, nowMs?: number) {
+      return budget.resetForFreshVariant(seed, nowMs);
+    },
+    snapshot: () => internal.snapshot(),
+  });
+  registerBudgetControl(budget, {
+    sealPure: () => { pureBound = true; },
+    isPureBound: () => pureBound,
+    canRelease: (bits, nowMs) => internal.canRelease(bits, nowMs),
+    commitRelease: (bits, nowMs) => internal.commitRelease(bits, nowMs),
+    runPure: (run) => internal.runPure(run),
+  });
+  const hostControl = Object.freeze({
+    resetForFreshVariant: (seed: string, nowMs?: number) => internal.resetForFreshVariant(seed, nowMs),
+  });
+  return { budget, hostControl };
+}
+
+export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
+  return createBudgetPair(options).budget;
+}
+
+export function createControlledMinEntropyBudget(options: MinEntropyBudgetOptions) {
+  return createBudgetPair(options);
 }
 
 export function fixedPureGuidance(reason = "unsubmitted_answer_probe"): Pick<
