@@ -432,6 +432,56 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     return withheldReleaseResult(budget, committedPure.kind === "stopped" ? "cancelled" : "release_guard_rejected");
   }
 
+  if (committedPure) {
+    const preVerifyCheck = budget.canRelease(1, nowMs);
+    if (!preVerifyCheck.allowed) {
+      return blockedByBudgetResult(budget, preVerifyCheck.reason ?? "budget_exhausted");
+    }
+
+    // Spend the bit and snapshot both public outcomes before running the verifier.
+    const { leakageBits, state: helpState, cooldownUntilMs } = budget.commitRelease(1, nowMs);
+    const publicVerification: VerifyOutput = { steps: [] };
+    const publicFields = { providerCalls: 0 as const, verification: publicVerification, leakageBits, helpState, cooldownUntilMs };
+    const pureReleasedOutcome: TutorGraphResult = {
+      ...publicFields,
+      state: "released",
+      publicTeaching: committedPure.caps,
+      releasedText: committedPure.text,
+      releaseApproved: true,
+    };
+    const pureWithheldOutcome: TutorGraphResult = {
+      ...publicFields,
+      state: "unverified",
+      releaseApproved: false,
+      reason: "release_guard_rejected",
+    };
+    const shouldWithhold = () => {
+      const currentCooldownUntilMs = budget.cooldownUntilMs;
+      return (
+        isStopped(input.verifyCaps.stopSignal) ||
+        isStopped(input.releaseCaps.stopSignal) ||
+        budget.state === "contaminated" ||
+        (currentCooldownUntilMs !== undefined && nowMs < currentCooldownUntilMs)
+      );
+    };
+
+    input.verifyCaps.assertCurrent();
+    try {
+      input.verifyCaps.verify(input.submission);
+    } catch {
+      // Verifier errors have no separate public result in pure mode.
+    }
+    if (shouldWithhold()) return pureWithheldOutcome;
+
+    try {
+      const postVerifyText = guardRelease(committedPure.caps, publicVerification, input.releaseCaps);
+      return postVerifyText === undefined || shouldWithhold() ? pureWithheldOutcome : pureReleasedOutcome;
+    } catch {
+      // Guard errors after verification withhold the same response as a denial.
+      return pureWithheldOutcome;
+    }
+  }
+
   input.verifyCaps.assertCurrent();
   let verification: VerifyOutput | undefined;
   try {
@@ -450,31 +500,6 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   if (!minimumReleaseCheck.allowed) {
     return blockedByBudgetResult(budget, minimumReleaseCheck.reason ?? "budget_exhausted");
   }
-  if (committedPure) {
-    // Recheck the one payload selected before verification. Choosing another
-    // payload here could expose a third outcome alongside release and rejection.
-    const publicVerification: VerifyOutput = { steps: [] };
-    const postVerifyText = guardRelease(committedPure.caps, publicVerification, input.releaseCaps);
-    if (isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
-      return withheldReleaseResult(budget, "cancelled");
-    }
-    budget.commitRelease(minimumReleaseBits, nowMs);
-    if (postVerifyText === undefined) {
-      return withheldReleaseResult(budget, "release_guard_rejected");
-    }
-    return {
-      state: "released",
-      providerCalls: 0,
-      verification: publicVerification,
-      publicTeaching: committedPure.caps,
-      releasedText: committedPure.text,
-      leakageBits: budget.leakageBits,
-      helpState: budget.state,
-      cooldownUntilMs: budget.cooldownUntilMs,
-      releaseApproved: true,
-    };
-  }
-
   if (!verification) {
     budget.commitRelease(minimumReleaseBits, nowMs);
     return {

@@ -290,11 +290,96 @@ describe("TutorGraph fast path", () => {
     });
   });
 
-  it("checks the remaining pure budget before running the post-verification release guard", () => {
+  it("withholds without calling the guard when pure verification contaminates the budget", () => {
     const assertCurrent = () => undefined;
     const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
     const checkAfterVerify = vi.fn(() => true);
     let verified = false;
+    const verify = vi.fn(() => {
+      budget.commitRelease(1);
+      verified = true;
+      return { steps: [] };
+    });
+    const input = {
+      questionStem: "积分",
+      submission: {},
+      attemptSubmitted: true,
+      budget,
+      verifyCaps: { assertCurrent, verify },
+      releaseCaps: { assertCurrent, answerLeakageBlocker: () => verified && checkAfterVerify() },
+    };
+    expect(runTutorGraph(input)).toMatchObject({
+      state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: 1,
+    });
+    expect(checkAfterVerify).not.toHaveBeenCalled();
+    expect(budget.state).toBe("contaminated");
+    expect(runTutorGraph(input).state).toBe("cooldown");
+    expect(runTutorGraph({ ...input, nowMs: budget.cooldownUntilMs }).state).toBe("budget_contaminated");
+    expect(verify).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns only two pure results across release, rejection, abort, and budget mutation", () => {
+    const assertCurrent = () => undefined;
+    const run = (verdict: "valid" | "invalid" | "unknown" | "throw") => {
+      const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const controller = new AbortController();
+      const checkAfterVerify = vi.fn(() => verdict === "invalid");
+      let bitsAtVerify: number | undefined;
+      const result = runTutorGraph({
+        questionStem: "积分",
+        submission: { steps: [{ id: "s1", text: "attempt" }] },
+        attemptSubmitted: true,
+        budget,
+        verifyCaps: {
+          assertCurrent,
+          verify: () => {
+            bitsAtVerify = budget.leakageBits;
+            if (verdict === "unknown") controller.abort();
+            if (verdict === "throw") {
+              budget.commitRelease(1);
+              throw new Error("Verifier error after budget mutation");
+            }
+            return { steps: [{ id: "s1", text: "attempt", status: verdict }] };
+          },
+        },
+        releaseCaps: {
+          assertCurrent,
+          stopSignal: controller.signal,
+          answerLeakageBlocker: () => bitsAtVerify !== undefined && checkAfterVerify(),
+        },
+      });
+      return { result, bitsAtVerify, checkAfterVerify, budget };
+    };
+    const released = run("valid");
+    const rejected = run("invalid");
+    const aborted = run("unknown");
+    const contaminated = run("throw");
+    const outcomes = [released, rejected, aborted, contaminated];
+    expect(new Set(outcomes.map(({ result }) => JSON.stringify(result))).size).toBe(2);
+    expect(released.result).toMatchObject({ state: "released", releaseApproved: true, leakageBits: 1 });
+    expect(released.checkAfterVerify).toHaveBeenCalled();
+    expect(rejected.checkAfterVerify).toHaveBeenCalled();
+    expect(aborted.checkAfterVerify).not.toHaveBeenCalled();
+    expect(contaminated.checkAfterVerify).not.toHaveBeenCalled();
+    for (const { result } of [rejected, aborted, contaminated]) {
+      expect(result).toMatchObject({
+        state: "unverified", reason: "release_guard_rejected", releaseApproved: false,
+        leakageBits: 1, helpState: "scaffolded",
+      });
+      expect(result.releasedText).toBeUndefined();
+      expect(result.cooldownUntilMs).toBeUndefined();
+    }
+    expect(outcomes.map(({ bitsAtVerify }) => bitsAtVerify)).toEqual([1, 1, 1, 1]);
+    expect(aborted.budget.leakageBits).toBe(1);
+    expect(contaminated.budget.state).toBe("contaminated");
+  });
+
+  it.each(["abort", "contaminate", "throw"] as const)("withholds when the post-verification guard can %s", (effect) => {
+    const assertCurrent = () => undefined;
+    const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const controller = new AbortController();
+    let verified = false;
+    let applied = false;
     const result = runTutorGraph({
       questionStem: "积分",
       submission: {},
@@ -303,15 +388,29 @@ describe("TutorGraph fast path", () => {
       verifyCaps: {
         assertCurrent,
         verify: () => {
-          budget.commitRelease(1);
           verified = true;
           return { steps: [] };
         },
       },
-      releaseCaps: { assertCurrent, answerLeakageBlocker: () => verified && checkAfterVerify() },
+      releaseCaps: {
+        assertCurrent,
+        stopSignal: controller.signal,
+        answerLeakageBlocker: () => {
+          if (verified && !applied) {
+            applied = true;
+            if (effect === "abort") controller.abort();
+            if (effect === "contaminate") budget.commitRelease(1);
+            if (effect === "throw") throw new Error("Post-verification guard error");
+          }
+          return false;
+        },
+      },
     });
-    expect(result).toMatchObject({ state: "budget_contaminated", reason: "budget_exhausted", leakageBits: 1 });
-    expect(checkAfterVerify).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      state: "unverified", reason: "release_guard_rejected", releaseApproved: false,
+      leakageBits: 1, helpState: "scaffolded",
+    });
+    expect(result.releasedText).toBeUndefined();
   });
 
   it.each([
