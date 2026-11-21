@@ -91,6 +91,55 @@ function createFakeClient(handlers: {
 }
 
 describe("imap-command-guard unsolicited FLAGS handling", () => {
+  it.each([
+    {
+      name: "body", fields: [atom("BODY.PEEK", [], [0, 32]), atom("UID"), atom("MODSEQ")], offset: 0,
+      payload: [atom("BODY", [], [0]), { type: "LITERAL", value: Buffer.from("mail") }],
+    },
+    {
+      name: "metadata", fields: [atom("UID"), atom("INTERNALDATE"), atom("MODSEQ")],
+      payload: [atom("INTERNALDATE"), atom("02-Jan-2026 03:04:05 +0000")],
+    },
+    { name: "UID probe", fields: atom("UID"), payload: [] },
+    { name: "CONDSTORE UID probe", fields: [atom("UID"), atom("MODSEQ")], payload: [] },
+  ])("routes MODSEQ updates on both sides of a $name target", async ({ fields, offset, payload }) => {
+    const modseq = [atom("MODSEQ"), [atom("77")]];
+    const updates = [
+      makeUntaggedFetch(2, [atom("UID"), atom("12"), ...modseq]),
+      makeUntaggedFetch(2, modseq),
+    ];
+    if (payload.length) updates.push(makeUntaggedFetch(1, [atom("UID"), atom("11"), ...modseq]));
+    const target = makeUntaggedFetch(1, [atom("UID"), atom("11"), atom("MODSEQ"), [atom("71")], ...payload]);
+    const fake = createFakeClient({
+      onExec: async ({ emitUntaggedFetch }) => {
+        for (const reply of [...updates, target, ...updates]) await emitUntaggedFetch(reply);
+      },
+    });
+    const guarded = installImapCommandGuard(fake.client);
+    const receiveTarget = vi.fn();
+    await runGuardedImapFetch(guarded, { maxBytes: 1024, expectedUid: 11, expectedStartOffset: offset }, () =>
+      guarded.exec("UID FETCH", [atom("11"), fields], { untagged: { FETCH: receiveTarget } }));
+    expect(receiveTarget).toHaveBeenCalledExactlyOnceWith(target);
+    expect(fake.untaggedFetch.mock.calls).toEqual([...updates, ...updates].map(update => [update]));
+    expect(fake.close).not.toHaveBeenCalled();
+  });
+
+  it("counts each matching UID and MODSEQ probe response toward the single-message limit", async () => {
+    const target = makeUntaggedFetch(1, [atom("UID"), atom("11"), atom("MODSEQ"), [atom("71")]]);
+    const fake = createFakeClient({
+      onExec: async ({ emitUntaggedFetch }) => {
+        await emitUntaggedFetch(target);
+        await emitUntaggedFetch(makeUntaggedFetch(2, [atom("MODSEQ"), [atom("77")]]));
+        await emitUntaggedFetch(target);
+      },
+    });
+    const guarded = installImapCommandGuard(fake.client);
+    await expect(runGuardedImapFetch(guarded, { maxBytes: 1024, expectedUid: 11 }, () =>
+      guarded.exec("UID FETCH", [atom("11"), [atom("UID"), atom("MODSEQ")]], { untagged: { FETCH: vi.fn() } })))
+      .rejects.toThrow("unexpected multiple FETCH responses");
+    expect(fake.untaggedFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("passes unsolicited FLAGS/MODSEQ notifications to untaggedFetch before and after target UID FETCH without aborting or polluting messages", async () => {
     const bodyBuf = Buffer.from("Subject: OK\r\n\r\nbody");
     const fake = createFakeClient({
@@ -178,7 +227,8 @@ describe("imap-command-guard unsolicited FLAGS handling", () => {
       onExec: async ({ emitWire, emitUntaggedFetch }) => {
         for (let i = 0; i < 20; i += 1) {
           emitWire(256);
-          await emitUntaggedFetch(makeUntaggedFetch(1, [atom("FLAGS"), [atom("\\Seen")]]));
+          const update = i % 2 ? [atom("MODSEQ"), [atom("77")]] : [atom("FLAGS"), [atom("\\Seen")]];
+          await emitUntaggedFetch(makeUntaggedFetch(1, update));
         }
       },
     });

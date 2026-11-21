@@ -89,8 +89,7 @@ type FetchAttemptScope = {
   latestAttemptSections: CapturedBodySections | null;
 };
 
-const PURE_FLAG_NOTIFICATION_KEYS = new Set(["FLAGS", "MODSEQ", "UID"]);
-const COMMAND_FLAG_FETCH_ITEMS = new Set(["FLAGS", "ALL", "FAST", "FULL"]);
+const FETCH_STATE_ITEMS = new Set(["FLAGS", "MODSEQ", "UID"]);
 
 type ActiveCommandGuard = {
   maxBytes: number;
@@ -99,7 +98,6 @@ type ActiveCommandGuard = {
   expectedStartOffset?: number;
   isProbe: boolean;
   isSingleMessageFetch: boolean;
-  canIgnoreUnsolicitedFlags: boolean;
   fetchScope: FetchAttemptScope | null;
   wireBytes: number;
   streamBytes: number;
@@ -232,24 +230,39 @@ function containsBinaryLiteral(value: unknown): boolean {
   return false;
 }
 
-function didCommandRequestFlags(attributes: unknown): boolean {
-  const items = Array.isArray(attributes) ? attributes.slice(1) : [];
-  const checkNode = (node: unknown): boolean => {
-    if (Array.isArray(node)) return node.some(checkNode);
-    if (!node || typeof node !== "object") return false;
-    const attr = node as ParsedAttrNode;
-    return !attr?.section && typeof attr?.value === "string"
-      && COMMAND_FLAG_FETCH_ITEMS.has(attr.value.toUpperCase());
+type StateFetchTarget = {
+  requestsFlags: boolean;
+  requiresUid: boolean;
+  expectedUid?: number;
+  expectedSequence?: number;
+};
+
+// A state-only response can satisfy a lookup, but cannot supply requested body or metadata.
+function getStateFetchTarget(command: string, attributes: unknown, expectedUid?: number): StateFetchTarget | undefined {
+  if (!Array.isArray(attributes)) return undefined;
+  const [selector, projection] = attributes;
+  const items = Array.isArray(projection) ? projection : [projection];
+  const names = items.map((item: ParsedAttrNode) => typeof item?.value === "string" ? item.value.toUpperCase() : "");
+  if (!names.length || !names.every(name => FETCH_STATE_ITEMS.has(name))) return undefined;
+  const singleId = /^\d{1,10}$/.test(selector?.value) ? Number(selector.value) : undefined;
+  return {
+    requestsFlags: names.includes("FLAGS"),
+    requiresUid: command === "UID FETCH" || names.includes("UID"),
+    expectedUid: expectedUid ?? (command === "UID FETCH" ? singleId : undefined),
+    // ImapFlow resolves fetchOne("*") to FETCH <last sequence> before exec.
+    expectedSequence: command === "FETCH" ? singleId : undefined,
   };
-  return items.some(checkNode);
 }
 
-function isUnsolicitedFlagsOnlyFetch(untagged: unknown): boolean {
-  const list = (untagged as { attributes?: unknown[] } | null)?.attributes?.[1];
+function isUnsolicitedFlagModseqFetchUpdate(untagged: unknown, target: StateFetchTarget | undefined): boolean {
+  const reply = untagged as { command?: string; attributes?: unknown[] } | null;
+  const list = reply?.attributes?.[1];
   if (!Array.isArray(list) || list.length < 2 || list.length % 2 !== 0) {
     return false;
   }
   let hasFlags = false;
+  let hasModseq = false;
+  let uid: number | undefined;
   for (let i = 0; i < list.length; i += 2) {
     const attrKey = list[i] as ParsedAttrNode;
     const attrVal = list[i + 1];
@@ -257,22 +270,30 @@ function isUnsolicitedFlagsOnlyFetch(untagged: unknown): boolean {
       return false;
     }
     const keyName = typeof attrKey.value === "string" ? attrKey.value.toUpperCase() : "";
-    if (!PURE_FLAG_NOTIFICATION_KEYS.has(keyName) || containsBinaryLiteral(attrVal)) {
+    if (!FETCH_STATE_ITEMS.has(keyName) || containsBinaryLiteral(attrVal)) {
       return false;
     }
     if (keyName === "FLAGS") {
       if (!Array.isArray(attrVal)) return false;
       hasFlags = true;
     } else if (keyName === "MODSEQ") {
-      if (!Array.isArray(attrVal)) return false;
+      if (!Array.isArray(attrVal) || attrVal.length !== 1 || !/^\d{1,20}$/.test(attrVal[0]?.value)) return false;
+      hasModseq = true;
     } else if (keyName === "UID") {
       const rawUid = (attrVal as ParsedAttrNode)?.value;
       if ((typeof rawUid !== "string" && typeof rawUid !== "number") || !/^\d{1,10}$/.test(String(rawUid))) {
         return false;
       }
+      uid = Number(rawUid);
+      if (!uid) return false;
     }
   }
-  return hasFlags;
+  if (!hasFlags && !hasModseq) return false;
+  // FLAGS on a UID lookup is a flag update, even if it carries the target UID.
+  if (!target || target.requestsFlags !== hasFlags) return true;
+  return (target.requiresUid && uid === undefined)
+    || (target.expectedUid !== undefined && uid !== target.expectedUid)
+    || (target.expectedSequence !== undefined && Number(reply?.command) !== target.expectedSequence);
 }
 
 function failActiveGuard(state: CommandGuardState, client: object, err: Error): void {
@@ -428,8 +449,9 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
   flow.exec = async (command, attributes, options) => {
     const cmd = String(command ?? "").toUpperCase().trim();
     const isFetch = cmd === "FETCH" || cmd === "UID FETCH";
-    const canIgnoreUnsolicitedFlags = isFetch && !didCommandRequestFlags(attributes);
     const fetchScope = isFetch ? state.activeFetchScope : null;
+    const stateFetchTarget = isFetch && fetchScope?.expectedStartOffset === undefined
+      ? getStateFetchTarget(cmd, attributes, fetchScope?.expectedUid) : undefined;
     if (fetchScope) {
       // Clear any captured sections from an earlier throttled attempt before starting this attempt.
       fetchScope.latestAttemptSections = null;
@@ -450,7 +472,6 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
             expectedStartOffset: fetchScope.expectedStartOffset,
             isProbe: fetchScope.isProbe,
             isSingleMessageFetch: true,
-            canIgnoreUnsolicitedFlags,
             fetchScope,
             wireBytes: 0,
             streamBytes: 0,
@@ -463,7 +484,6 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
             maxFetchResponses: state.limits.maxDiscoveryResponses,
             isProbe: false,
             isSingleMessageFetch: false,
-            canIgnoreUnsolicitedFlags,
             fetchScope: null,
             wireBytes: 0,
             streamBytes: 0,
@@ -475,7 +495,6 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
           maxBytes: state.limits.maxControlCommandBytes,
           isProbe: false,
           isSingleMessageFetch: false,
-          canIgnoreUnsolicitedFlags: false,
           fetchScope: null,
           wireBytes: 0,
           streamBytes: 0,
@@ -502,7 +521,7 @@ export function installImapCommandGuard<T extends object>(client: T, limits?: Im
         ...execOptions.untagged,
         FETCH: async (untagged: unknown) => {
           if (guard.failed) return;
-          if (guard.canIgnoreUnsolicitedFlags && isUnsolicitedFlagsOnlyFetch(untagged)) {
+          if (isUnsolicitedFlagModseqFetchUpdate(untagged, stateFetchTarget)) {
             if (typeof flow.untaggedFetch === "function") {
               await flow.untaggedFetch(untagged);
             }

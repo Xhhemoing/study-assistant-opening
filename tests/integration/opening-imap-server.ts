@@ -3,6 +3,7 @@ import { createServer } from "node:net";
 
 export type OpeningImapMail = {
   uid: number;
+  modseq?: number;
   internalDate?: Date;
   source: string;
   advertisedSize?: number;
@@ -46,6 +47,7 @@ export async function startOpeningImapServer(
 ): Promise<OpeningImapServer> {
   // Reply in fixture order while keeping sequence numbers in mailbox order.
   const mails = [...inputMails];
+  const highestModseq = Math.max(0, ...mails.map(mail => mail.modseq ?? 0));
   let logoutCount = 0;
 
   const sockets = new Map<Socket, Promise<void>>();
@@ -77,8 +79,11 @@ export async function startOpeningImapServer(
         const verb = (verbMatch?.[1] ?? "").toUpperCase();
         const args = verbMatch?.[2] ?? "";
         if (verb === "CAPABILITY") {
-          send("* CAPABILITY IMAP4rev1 UIDPLUS");
+          send(`* CAPABILITY IMAP4rev1 UIDPLUS${highestModseq ? " ENABLE CONDSTORE" : ""}`);
           tagged(tag, "OK CAPABILITY completed");
+        } else if (verb === "ENABLE" && highestModseq && args.toUpperCase() === "CONDSTORE") {
+          send("* ENABLED CONDSTORE");
+          tagged(tag, "OK ENABLE completed");
         } else if (verb === "LOGIN") {
           tagged(tag, "OK LOGIN completed");
         } else if (verb === "NAMESPACE") {
@@ -94,6 +99,7 @@ export async function startOpeningImapServer(
           send(`* ${mails.length} EXISTS`);
           send(`* 0 RECENT`);
           send(`* OK [UIDVALIDITY 42] UIDs valid`);
+          if (highestModseq) send(`* OK [HIGHESTMODSEQ ${highestModseq}] Highest mod-sequence`);
           send(`* OK [UIDNEXT ${Math.max(...mails.map(mail => mail.uid), 0) + 1}] next uid`);
           send(`* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)`);
           send(`* OK [PERMANENTFLAGS ()] read-only`);
@@ -123,6 +129,9 @@ export async function startOpeningImapServer(
             const metadataParts: string[] = [];
             if (isUidFetch || /\bUID\b/i.test(fields)) {
               metadataParts.push(`UID ${mail.uid}`);
+            }
+            if (mail.modseq !== undefined && /\bMODSEQ\b/i.test(fields)) {
+              metadataParts.push(`MODSEQ (${mail.modseq})`);
             }
             if (/\bINTERNALDATE\b/i.test(fields)) {
               metadataParts.push(`INTERNALDATE "${date}"`);

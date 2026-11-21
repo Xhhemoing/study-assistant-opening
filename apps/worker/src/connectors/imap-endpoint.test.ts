@@ -768,6 +768,43 @@ describe("approved IMAP dialer", () => {
     }
   });
 
+  it("preserves CONDSTORE body, metadata, UID and last-sequence results across MODSEQ updates", async () => {
+    const sendUpdates = ({ isUidFetch, fields, send }: {
+      isUidFetch: boolean; fields: string; send: (line: string) => void;
+    }) => {
+      // The last-message lookup selects sequence 2. All other lookups use UID 11 or 99.
+      const [otherSeq, otherUid] = isUidFetch ? [2, 12] : [1, 11];
+      send(`* ${otherSeq} FETCH (UID ${otherUid} MODSEQ (77))`);
+      send("* 2 FETCH (MODSEQ (77))");
+      if (/BODY|RFC822\.SIZE/.test(fields)) send("* 1 FETCH (UID 11 MODSEQ (77))");
+    };
+    const source = "Subject: CONDSTORE\r\n\r\nbody";
+    const server = await startOpeningImapServer(
+      [{ uid: 11, source, modseq: 81 }, { uid: 12, source: "second", modseq: 82 }],
+      { beforeFetch: sendUpdates, afterFetch: sendUpdates },
+    );
+    const client = installImapCommandGuard(
+      new ImapFlow({ host: "127.0.0.1", port: server.port, secure: false, logger: false, auth }),
+    );
+    try {
+      await client.connect();
+      await client.mailboxOpen("INBOX", { readOnly: true });
+      expect(client.enabled.has("CONDSTORE")).toBe(true);
+      await expect(client.fetchOne("11", { source: { start: 0, maxLength: 512 } }, { uid: true }))
+        .resolves.toMatchObject({ uid: 11, source: Buffer.from(source), modseq: 81n });
+      await expect(client.fetchOne("11", { size: true }, { uid: true }))
+        .resolves.toMatchObject({ uid: 11, size: Buffer.byteLength(source), modseq: 81n });
+      await expect(client.fetchOne("11", { uid: true }, { uid: true }))
+        .resolves.toMatchObject({ seq: 1, uid: 11, modseq: 81n });
+      await expect(client.fetchOne("*", { uid: true }, { uid: true }))
+        .resolves.toMatchObject({ seq: 2, uid: 12, modseq: 82n });
+      await expect(client.fetchOne("99", { uid: true }, { uid: true })).resolves.toBe(false);
+    } finally {
+      client.close();
+      await server.close();
+    }
+  });
+
   it("handles unsolicited FLAGS updates before and after UID FETCH in discovery, body fetch, overlap probe, and expunged messages", { timeout: 15_000 }, async () => {
     const body180 = "Subject: Unsolicited Flags\r\n\r\n" + "f".repeat(180 - "Subject: Unsolicited Flags\r\n\r\n".length);
     const server = await startOpeningImapServer(
