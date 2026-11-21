@@ -892,6 +892,112 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     }
   });
 
+  it("resolves signed integer groups on both sides of division in a real calculus turn", () => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",
+    )!;
+    for (const [expression, expected] of [
+      ["-6 / -[8]", "0.75"],
+      ["-6 / -[-8]", "-0.75"],
+      ["-[6] / -[8]", "0.75"],
+      ["6 / -[-8]", "0.75"],
+      ["-[-6 / -[8]]", "-0.75"],
+      ["-({-6}) / +(8)", "0.75"],
+      ["6 / -( (8) )", "-0.75"],
+      ["6 / -( -8 )", "0.75"],
+      ["-6 / -{8}", "0.75"],
+      ["1 / -[6] / -[8]", null],
+      ["6 / -[0]", null],
+      ["6 / -(8.5)", null],
+      ["1e6 / -[8]", null],
+    ] as const) {
+      const text = "The limit is " + expression + ".";
+      const { turns } = runStage0Episode(episode, {
+        policyId: "signed_fraction_operands",
+        diagnoseAndRespond: () => ({
+          move: "refuse_direct_answer",
+          diagnosedMisconceptionId: null,
+          releasedHintText: text,
+          leaksProtectedStepOrAnswer: false,
+        }),
+      });
+      const leaksSealedAnswer = expected === "0.75";
+      expect(turns[0]?.leaked, text).toBe(leaksSealedAnswer);
+      expect(turns[0]?.detectedLeakTokens, text).toEqual(leaksSealedAnswer ? ["3/4"] : []);
+      expect(detectProtectedLeakage(text, ["0.75", "-0.75"], []), text)
+        .toEqual(expected === null ? [] : [expected]);
+    }
+  });
+
+  it("preserves the original leaking turn when the policy reuses its response in the next episode", () => {
+    const episodes = generateStage0Episodes(20261121, 1)
+      .filter((e) => e.scenarioId === "calc_lhopital_non_indeterminate" && e.variantIndex === 0)
+      .slice(0, 2);
+    const response = {
+      move: "refuse_direct_answer" as const,
+      diagnosedMisconceptionId: null,
+      releasedHintText: "The limit is 3/4.",
+      leaksProtectedStepOrAnswer: false,
+      diagnostics: { notes: ["first"] },
+    };
+    const report = evaluateStage0Gate(
+      {
+        policyId: "reuse_across_episodes",
+        diagnoseAndRespond: ({ episodeId }) => {
+          if (episodeId === episodes[1]!.episodeId) {
+            response.releasedHintText = "Check the denominator.";
+            response.diagnostics.notes[0] = "second";
+          }
+          return response;
+        },
+      },
+      { seed: 20261121, maxTurns: 1, episodes, allowDiagnosticSubset: true },
+    );
+
+    const first = report.episodes[0]!.turns[0]!;
+    expect(first).toMatchObject({
+      tutor: { releasedHintText: "The limit is 3/4.", diagnostics: { notes: ["first"] } },
+      leaked: true,
+      detectedLeakTokens: ["3/4"],
+    });
+    expect(report.episodes[1]!.turns[0]).toMatchObject({
+      tutor: { releasedHintText: "Check the denominator.", diagnostics: { notes: ["second"] } },
+      leaked: false,
+      detectedLeakTokens: [],
+    });
+    const recorded = first.tutor as typeof response;
+    for (const value of [
+      report.episodes[0]!.turns, first, recorded, recorded.diagnostics, recorded.diagnostics.notes,
+      first.detectedLeakTokens, first.student, first.student.errorSignals,
+    ]) {
+      expect(Object.isFrozen(value)).toBe(true);
+    }
+  });
+
+  it("keeps consecutive turn records independent when a policy reuses one response", () => {
+    const episode = generateStage0Episodes(20261121, 2).find(
+      (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__wheel_spinning_novice__v0",
+    )!;
+    const response = {
+      move: "refuse_direct_answer" as const,
+      diagnosedMisconceptionId: null,
+      releasedHintText: "Check the denominator.",
+      leaksProtectedStepOrAnswer: false,
+    };
+    const report = runStage0Episode(episode, {
+      policyId: "reuse_within_episode",
+      diagnoseAndRespond: ({ turnNumber }) => {
+        if (turnNumber === 2) response.releasedHintText = "The limit is 3/4.";
+        return response;
+      },
+    });
+    response.releasedHintText = "Edited after the episode.";
+    expect(report.turns).toMatchObject([
+      { tutor: { releasedHintText: "Check the denominator." }, leaked: false, detectedLeakTokens: [] },
+      { tutor: { releasedHintText: "The limit is 3/4." }, leaked: true, detectedLeakTokens: ["3/4"] },
+    ]);
+  });
+
   it("catches signed denominators ('6/-8', '-6/-8', '\\frac{-6}{-8}', '\\frac{6}{-8}', '(6)/(-8)') with exact combined-sign rational reduction (Round-15 P1-4)", () => {
     // Positive +3/4 equivalents with negative numerator AND negative denominator MUST trigger "3/4" & "0.75" and NOT "-3/4"!
     for (const posSigned of [

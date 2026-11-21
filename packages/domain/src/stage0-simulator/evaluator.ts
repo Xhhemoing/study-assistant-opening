@@ -103,30 +103,36 @@ function isBinaryOperandBefore(text: string, signIndex: number): boolean {
   );
 }
 
-function hasUnaryMinusBefore(text: string, matchStart: number, matchEnd: number): boolean {
-  let left = matchStart;
-  let right = matchEnd;
+interface SignedMathSpan {
+  start: number;
+  end: number;
+  negative: boolean;
+}
+
+function readSignedMathSpan(text: string, start: number, end: number): SignedMathSpan {
   let negative = false;
-  // Walk outwards across both unary signs and matched groups, e.g. -(-6/8).
-  while (left > 0) {
-    while (left > 0 && text[left - 1] === " ") left -= 1;
-    const preceding = text[left - 1];
+  // Extend the token only across unary signs and complete pairs of enclosing delimiters.
+  while (start > 0) {
+    let left = start - 1;
+    while (left >= 0 && text[left] === " ") left -= 1;
+    const preceding = text[left];
     if (preceding === "-" || preceding === "+") {
-      if (isBinaryOperandBefore(text, left - 1)) break;
+      if (isBinaryOperandBefore(text, left)) break;
       if (preceding === "-") negative = !negative;
-      left -= 1;
+      start = left;
       continue;
     }
+    let right = end;
     while (right < text.length && text[right] === " ") right += 1;
     const closesGroup =
       (preceding === "(" && text[right] === ")") ||
       (preceding === "[" && text[right] === "]") ||
       (preceding === "{" && text[right] === "}");
     if (!closesGroup) break;
-    left -= 1;
-    right += 1;
+    start = left;
+    end = right + 1;
   }
-  return negative;
+  return { start, end, negative };
 }
 
 function gcdInt(a: number, b: number): number {
@@ -250,7 +256,7 @@ function extractScientificRationals(numericText: string): readonly ExactRational
   for (const m of numericText.matchAll(eNotationPattern)) {
     const startIdx = m.index ?? 0;
     const endIdx = startIdx + m[0].length;
-    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
+    const isNeg = readSignedMathSpan(numericText, startIdx, endIdx).negative;
     const rat = parseScientificToExactRational(`${isNeg ? "-" : ""}${m[1]!}`, m[2]!);
     if (rat) out.push(rat);
   }
@@ -262,7 +268,7 @@ function extractScientificRationals(numericText: string): readonly ExactRational
   for (const m of numericText.matchAll(pow10Pattern)) {
     const startIdx = m.index ?? 0;
     const endIdx = startIdx + m[0].length;
-    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
+    const isNeg = readSignedMathSpan(numericText, startIdx, endIdx).negative;
     const expStr = m[2] ?? m[3] ?? m[4]!;
     const rat = parseScientificToExactRational(`${isNeg ? "-" : ""}${m[1]!}`, expStr);
     if (rat) out.push(rat);
@@ -279,33 +285,34 @@ function extractScientificRationals(numericText: string): readonly ExactRational
  */
 function extractFractionRationals(numericText: string): readonly ExactRational[] {
   const out: ExactRational[] = [];
-  const fracText = numericText
-    .replace(/\(\s*([+-]?)\s*(\d+)\s*\)/g, "($1$2)")
-    .replace(/\[\s*([+-]?)\s*(\d+)\s*\]/g, "($1$2)")
-    .replace(/\{\s*([+-]?)\s*(\d+)\s*\}/g, "{$1$2}")
-    .replace(/\/\s*([+-])\s*(\d+)/g, "/$1$2");
-  const fractionPattern =
-    /(?<![\d./])(?:\(([+-]?\d+)\)|\{([+-]?\d+)\}|(\d+))\/(?:\(([+-]?\d+)\)|\{([+-]?\d+)\}|([+-]?\d+))(?!\d|\.\d|\/|[eE][+-]?\d|\*10\^(?:\{[+-]?\d+\}|\([+-]?\d+\)|[+-]?\d+))/g;
-  for (const m of fracText.matchAll(fractionPattern)) {
-    const rawNum = m[1] ?? m[2] ?? m[3]!;
-    const rawDen = m[4] ?? m[5] ?? m[6]!;
-    const numDigits = rawNum.replace(/^[+-]/, "");
-    const denDigits = rawDen.replace(/^[+-]/, "");
+  if (!numericText.includes("/")) return out;
+  const continuation = /\d|\.\d|\/|e[+-]?\d|\*10\^(?:\{[+-]?\d+\}|\([+-]?\d+\)|[+-]?\d+)/iy;
+  let numerator: (SignedMathSpan & { digits: string }) | undefined;
+  for (const match of numericText.matchAll(/\d+/g)) {
+    const digits = match[0];
+    const operand = readSignedMathSpan(numericText, match.index, match.index + digits.length);
     if (
-      numDigits.length > MAX_DECIMAL_MANTISSA_DIGITS ||
-      denDigits.length > MAX_DECIMAL_MANTISSA_DIGITS
+      numerator &&
+      numerator.end + 1 === operand.start &&
+      digits.length <= MAX_DECIMAL_MANTISSA_DIGITS
     ) {
-      continue;
+      // Each atom owns its signs. Only now include signs around the entire quotient.
+      const fraction = readSignedMathSpan(numericText, numerator.start, operand.end);
+      const prefix = numericText.slice(Math.max(0, fraction.start - 3), fraction.start);
+      continuation.lastIndex = fraction.end;
+      if (!/(?:[\d./]|\de[+-]?)$/i.test(prefix) && !continuation.test(numericText)) {
+        const num = BigInt(numerator.digits);
+        const den = BigInt(digits);
+        const rational = makeExactRational(
+          numerator.negative !== fraction.negative ? -num : num,
+          operand.negative ? -den : den,
+        );
+        if (rational) out.push(rational);
+      }
     }
-    const startIdx = m.index ?? 0;
-    const endIdx = startIdx + m[0].length;
-    let num = BigInt(rawNum);
-    if (hasUnaryMinusBefore(fracText, startIdx, endIdx)) {
-      num = -num;
-    }
-    const den = BigInt(rawDen);
-    const rat = makeExactRational(num, den);
-    if (rat) out.push(rat);
+    numerator = numericText[operand.end] === "/" && digits.length <= MAX_DECIMAL_MANTISSA_DIGITS
+      ? { ...operand, digits }
+      : undefined;
   }
   return out;
 }
@@ -321,7 +328,7 @@ function matchesWithNumericBoundaries(numericText: string, numericLiteral: strin
   for (const m of numericText.matchAll(re)) {
     const startIdx = m.index ?? 0;
     const endIdx = startIdx + m[0].length;
-    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
+    const isNeg = readSignedMathSpan(numericText, startIdx, endIdx).negative;
     if (isNeg === expectNegative) {
       return true;
     }
@@ -542,6 +549,7 @@ function assertStrictPlainStage0Container(value: object, path: string): void {
 function snapshotStage0PlainValue<T>(
   value: unknown,
   path: string,
+  freeze = false,
   seen: WeakSet<object> = new WeakSet(),
 ): T {
   if (
@@ -553,7 +561,10 @@ function snapshotStage0PlainValue<T>(
   ) {
     return value as T;
   }
-  if (typeof value === "function" && /\.scenario\.buildVariant$/.test(path)) {
+  if (
+    typeof value === "function" &&
+    /^(?:episode|episodes\[\d+\])\.scenario\.buildVariant$/.test(path)
+  ) {
     return value as T;
   }
   if (typeof value !== "object") {
@@ -581,10 +592,10 @@ function snapshotStage0PlainValue<T>(
           "tampered_episode",
         );
       }
-      out.push(snapshotStage0PlainValue(desc.value, `${path}[${i}]`, seen));
+      out.push(snapshotStage0PlainValue(desc.value, `${path}[${i}]`, freeze, seen));
     }
     seen.delete(value);
-    return out as unknown as T;
+    return (freeze ? Object.freeze(out) : out) as unknown as T;
   }
 
   const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
@@ -605,14 +616,14 @@ function snapshotStage0PlainValue<T>(
       );
     }
     Object.defineProperty(out, key, {
-      value: snapshotStage0PlainValue(desc.value, `${path}.${key}`, seen),
+      value: snapshotStage0PlainValue(desc.value, `${path}.${key}`, freeze, seen),
       enumerable: true,
       writable: true,
       configurable: true,
     });
   }
   seen.delete(value);
-  return out as T;
+  return (freeze ? Object.freeze(out) : out) as T;
 }
 
 function snapshotStage0Episodes(rawEpisodes: unknown): Stage0EpisodeSpec[] {
@@ -706,7 +717,7 @@ function runStage0EpisodeInternal(
       itemFamilyId: episode.itemFamilyId,
       prompt: episode.prompt,
       studentUtterance: deepFreezeClone(utterance),
-      history: deepFreezeClone(turns),
+      history: Object.freeze(turns.slice()),
       candidateMisconceptions: frozenCandidateMisconceptions,
       clarificationCue: episode.scenario.clarificationCue,
       analogCue: episode.variant.analogCue,
@@ -716,7 +727,11 @@ function runStage0EpisodeInternal(
       }),
     });
 
-    const tutorResponse = policy.diagnoseAndRespond(turnInput);
+    const tutorResponse = snapshotStage0PlainValue<Stage0TutorResponse>(
+      policy.diagnoseAndRespond(turnInput),
+      "tutorResponse",
+      true,
+    );
     const detectedLeakTokens = detectProtectedLeakage(
       tutorResponse.releasedHintText,
       auditProtectedAnswerTokens,
@@ -746,15 +761,15 @@ function runStage0EpisodeInternal(
       falseMisconceptionAttributed = true;
     }
 
-    turns.push({
+    turns.push(Object.freeze({
       turnNumber,
-      student: utterance,
+      student: turnInput.studentUtterance,
       tutor: tutorResponse,
-      detectedLeakTokens,
+      detectedLeakTokens: Object.freeze(detectedLeakTokens),
       leaked,
       localizedTargetMisconception: localizedTarget,
       falseMisconceptionAttribution: falseMisconception,
-    });
+    }));
 
     const transition = advanceStudentAfterTutorTurn({
       episode,
@@ -791,7 +806,7 @@ function runStage0EpisodeInternal(
     conceptId: episode.conceptId,
     personaId: episode.personaId,
     variantIndex: episode.variantIndex,
-    turns,
+    turns: Object.freeze(turns),
     totalTurns: turns.length,
     resolved: studentState.resolved,
     remediated: studentState.remediated,
