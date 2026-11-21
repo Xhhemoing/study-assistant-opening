@@ -376,7 +376,7 @@ describe("revision proposal repository", () => {
       for (const view of [legacyFetched, legacyListed]) {
         expect(view.baseBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, fx.visibleB.id]);
         expect(view.proposedBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, fx.visibleB.id]);
-        expect(view.diff.map((d) => d.blockId)).toEqual([fx.visibleA.id]);
+        expect(view.diff.map((d) => d.blockId)).toEqual([fx.visibleA.id, fx.visibleB.id]);
         expect(view.conflict?.currentBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, fx.visibleB.id]);
         for (const secret of fx.secrets) {
           expect(JSON.stringify(view)).not.toContain(secret);
@@ -805,6 +805,50 @@ describe("revision proposal repository", () => {
       expect(resolved.document?.blocks).toHaveLength(2);
       const trusted = await library.getDocument({ workspaceId, documentId: doc.id, includeAnswerKeys: true });
       expect(trusted.blocks.map((b) => b.id)).toContain(hiddenAnswerId);
+
+      // Pre-Round-2 stored legacy diff with separate removed(lowercase) + added(uppercase) entries
+      // must normalize on read and update the selected block in place on partial_accept rather than deleting it.
+      const legacyMixedId = randomUUID();
+      const currentLive = await library.getDocument({ workspaceId, documentId: doc.id });
+      const liveFirst = currentLive.blocks[0]!;
+      const liveRest = currentLive.blocks.slice(1);
+      const upperProposedFirst = {
+        id: liveFirst.id.toUpperCase(),
+        type: "paragraph",
+        position: 0,
+        content: { text: "LEGACY_MIXED_CASE_UPDATED" },
+      };
+      const staleMixedDiff = [
+        { blockId: liveFirst.id, kind: "removed", base: liveFirst, proposed: null },
+        { blockId: upperProposedFirst.id, kind: "added", base: null, proposed: upperProposedFirst },
+        ...liveRest.map((entry) => ({ blockId: entry.id, kind: "unchanged", base: entry, proposed: entry })),
+      ];
+      await sql`INSERT INTO revision_proposals(
+        id,workspace_id,document_id,base_revision_number,base_title,base_blocks,proposed_title,proposed_blocks,diff,source,provenance,support_state
+      ) VALUES (
+        ${legacyMixedId},${workspaceId},${doc.id},${currentLive.currentRevisionNumber},${currentLive.title},${sql.json(currentLive.blocks as never)},'LegacyMixed',${sql.json([upperProposedFirst, ...liveRest] as never)},${sql.json(staleMixedDiff as never)},${sql.json(source as never)},${sql.json({ origin: "manual", actorUserId: userId, sourceDocumentId: null, sourceRevisionNumber: currentLive.currentRevisionNumber } as never)},'supported'
+      )`;
+
+      const normalizedRead = await repository.get({ workspaceId, proposalId: legacyMixedId });
+      expect(normalizedRead.diff.find((entry) => entry.blockId === liveFirst.id)).toMatchObject({
+        blockId: liveFirst.id,
+        kind: "changed",
+      });
+      expect(normalizedRead.diff.filter((entry) => entry.blockId.toLowerCase() === liveFirst.id.toLowerCase())).toHaveLength(1);
+
+      const legacyPartial = await repository.review({
+        workspaceId,
+        proposalId: legacyMixedId,
+        action: "partial_accept",
+        selectedProposalBlockIds: [liveFirst.id],
+        actorUserId: userId,
+      });
+      expect(legacyPartial.proposal.status).toBe("accepted");
+      expect(legacyPartial.document?.blocks.find((b) => b.id === liveFirst.id)?.content).toEqual({
+        text: "LEGACY_MIXED_CASE_UPDATED",
+      });
+      const trustedAfterLegacy = await library.getDocument({ workspaceId, documentId: doc.id, includeAnswerKeys: true });
+      expect(trustedAfterLegacy.blocks.map((b) => b.id)).toContain(hiddenAnswerId);
     });
   });
 });

@@ -78,7 +78,11 @@ export function selectProposalBlocks(
   assertUnique(proposedBlocks);
   const selected = selectedSet(selectedProposalBlockIds);
   const proposedById = new Map(proposedBlocks.map((block) => [idKey(block.id), block]));
-  const removedIds = new Set(diff.filter((entry) => entry.kind === "removed").map((entry) => idKey(entry.blockId)));
+  const removedIds = new Set(
+    diff
+      .filter((entry) => entry.kind === "removed" && !proposedById.has(idKey(entry.blockId)))
+      .map((entry) => idKey(entry.blockId)),
+  );
   for (const rawId of selectedProposalBlockIds) {
     const key = idKey(rawId);
     if (!proposedById.has(key) && !removedIds.has(key)) throw new Error(`Unknown selected proposal block: ${rawId}`);
@@ -116,7 +120,11 @@ export function preserveBothBlocks(
   assertUnique(proposedBlocks);
   const selected = selectedSet(selectedProposalBlockIds);
   const proposedById = new Map(proposedBlocks.map((block) => [idKey(block.id), block]));
-  const removedIds = new Set(diff.filter((entry) => entry.kind === "removed").map((entry) => idKey(entry.blockId)));
+  const removedIds = new Set(
+    diff
+      .filter((entry) => entry.kind === "removed" && !proposedById.has(idKey(entry.blockId)))
+      .map((entry) => idKey(entry.blockId)),
+  );
   for (const rawId of selectedProposalBlockIds) {
     const key = idKey(rawId);
     if (!proposedById.has(key) && !removedIds.has(key)) throw new Error(`Unknown selected proposal block: ${rawId}`);

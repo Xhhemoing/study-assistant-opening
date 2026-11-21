@@ -141,21 +141,36 @@ function assertSelectedBlockIdsSafe(selectedIds: readonly string[], protectedIds
     }
   }
 }
+function computeVisibleDiff(
+  baseBlocks: RevisionProposalBlock[],
+  proposedBlocks: RevisionProposalBlock[],
+  fallbackDiff: RevisionProposalRecord["diff"],
+  hiddenIds: ReadonlySet<string>,
+  isVisible: (block: RevisionProposalBlock) => boolean,
+): RevisionProposalRecord["diff"] {
+  try {
+    return diffRevisionBlocks(baseBlocks, proposedBlocks);
+  } catch {
+    return fallbackDiff.filter((entry) =>
+      !hiddenIds.has(entry.blockId.toLowerCase())
+      && (!entry.base || isVisible(entry.base))
+      && (!entry.proposed || isVisible(entry.proposed)),
+    );
+  }
+}
 function redactProposal(
   proposal: RevisionProposalRecord,
   liveProtectedIds: ReadonlySet<string>,
 ): RevisionProposalRecord {
   const hiddenIds = collectProposalProtectedBlockIds(liveProtectedIds, proposal);
   const isVisible = excludeAnswerKeys([...hiddenIds]);
+  const baseBlocks = proposal.baseBlocks.filter(isVisible);
+  const proposedBlocks = proposal.proposedBlocks.filter(isVisible);
   return {
     ...proposal,
-    baseBlocks: proposal.baseBlocks.filter(isVisible),
-    proposedBlocks: proposal.proposedBlocks.filter(isVisible),
-    diff: proposal.diff.filter((entry) =>
-      !hiddenIds.has(entry.blockId.toLowerCase())
-      && (!entry.base || isVisible(entry.base))
-      && (!entry.proposed || isVisible(entry.proposed)),
-    ),
+    baseBlocks,
+    proposedBlocks,
+    diff: computeVisibleDiff(baseBlocks, proposedBlocks, proposal.diff, hiddenIds, isVisible),
     conflict: proposal.conflict
       ? {
           ...proposal.conflict,
@@ -347,7 +362,8 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
         } else {
           const selected = input.selectedProposalBlockIds ?? [];
           assertSelectedBlockIdsSafe(selected, protectedIds);
-          nextVisibleBlocks = selectProposalBlocks(policy.visibleBlocks, proposal.proposedBlocks, selected, visibleProposal.diff);
+          const visibleDiff = diffRevisionBlocks(visibleProposal.baseBlocks, visibleProposal.proposedBlocks);
+          nextVisibleBlocks = selectProposalBlocks(policy.visibleBlocks, proposal.proposedBlocks, selected, visibleDiff);
         }
         // Match library.ts updateDocumentInTx (normalizeBlocks before protected-block merge):
         // learner writes must retain at least one learner-visible block and cannot probe hidden blocks.
@@ -382,7 +398,8 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
         assertProposalBlocksSafe(proposal.proposedBlocks, protectedIds);
         assertSelectedBlockIdsSafe(input.selectedProposalBlockIds, protectedIds);
         const visibleProposal = redactProposal(proposal, protectedIds);
-        const nextVisibleBlocks = preserveBothBlocks(policy.visibleBlocks, proposal.proposedBlocks, input.selectedProposalBlockIds, visibleProposal.diff);
+        const visibleDiff = diffRevisionBlocks(visibleProposal.baseBlocks, visibleProposal.proposedBlocks);
+        const nextVisibleBlocks = preserveBothBlocks(policy.visibleBlocks, proposal.proposedBlocks, input.selectedProposalBlockIds, visibleDiff);
         assertValidRevisionBlocks(nextVisibleBlocks);
         assertProposalBlocksSafe(nextVisibleBlocks, protectedIds);
         const persistedBlocks = mergePreservedProtectedBlocks(policy.existingBlocks, nextVisibleBlocks, policy.isVisible);

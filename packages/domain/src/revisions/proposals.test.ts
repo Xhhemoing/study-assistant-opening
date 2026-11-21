@@ -131,4 +131,29 @@ const c = "33333333-3333-4333-8333-333333333333";
     expect(() => diffRevisionBlocks([block(a, "one", 0), block(upperA, "two", 1)], [])).toThrow(/Duplicate block id/);
     expect(() => selectProposalBlocks([block(a, "one", 0)], [block(a, "two", 0)], [a, upperA])).toThrow(/Duplicate selected block id/);
   });
+
+  it("updates in place when given a legacy diff with removed lowercase and added uppercase entries for the same UUID", () => {
+    const upperA = a.toUpperCase();
+    const legacyDiff = [
+      { blockId: a, kind: "removed" as const, base: block(a, "before", 0), proposed: null },
+      { blockId: b, kind: "removed" as const, base: block(b, "remove-me", 1), proposed: null },
+      { blockId: upperA, kind: "added" as const, base: null, proposed: block(upperA, "after", 0) },
+    ];
+
+    const selectedLower = selectProposalBlocks(
+      [block(a, "before", 0), block(b, "remove-me", 1)],
+      [block(upperA, "after", 0)],
+      [a],
+      legacyDiff,
+    );
+    expect(selectedLower).toEqual([block(a, "after", 0), block(b, "remove-me", 1)]);
+
+    const selectedUpper = selectProposalBlocks(
+      [block(a, "before", 0)],
+      [block(upperA, "after", 0)],
+      [upperA],
+      [legacyDiff[0]!, legacyDiff[2]!],
+    );
+    expect(selectedUpper).toEqual([block(a, "after", 0)]);
+  });
 });
