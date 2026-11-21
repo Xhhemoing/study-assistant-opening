@@ -1455,6 +1455,77 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       expect(r15Allowed.ok).toBe(true);
     }
 
+    // [Round-16 P1-1 & P1-2] Prose/unit parentheses (`(°C)`, `(C)`, `(points)`, `(a)`, `(%)`, `[°C]`)
+    // MUST NOT mask unary `-4` leakage outside math delimiters, while algebraic parenthesized expressions
+    // and full normalized Greek letters (`zeta`, `kappa`, `iota`, `upsilon`, etc.) remain allowed!
+    for (const [idx, r16LeakStem] of [
+      "Temperature change (\u00B0C) \u22124.",
+      "Temperature change (\u00B0C) - 4.",
+      "Temperature change (\u2103) \u22124.",
+      "Temperature change (C) \u22124.",
+      "Temperature change (C) - 4.",
+      "Score delta (points) \u22124.",
+      "Score delta (points) - 4.",
+      "Option (a) \u22124.",
+      "Option (a) - 4.",
+      "Option (a) \u22124, then solve x = 0.",
+      "Step (1) \u22124.",
+      "Change (%) \u22124.",
+      "Price ($) \u22124.",
+      "Temperature change [\u00B0C] \u22124.",
+      "1) \u22124.",
+      "Note (step 1) \u22124.",
+    ].entries()) {
+      expect(containsAnswerLeak(r16LeakStem, "-4")).toBe(true);
+      const r16Rejected = issueOfflineFlashcardLease({
+        leaseId: `lease-r16-leak-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r16LeakStem,
+          }),
+        ],
+      });
+      expect(r16Rejected.ok).toBe(false);
+      if (!r16Rejected.ok) {
+        expect(r16Rejected.httpStatus).toBe(422);
+        expect(r16Rejected.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    for (const [idx, r16BenignStem] of [
+      "Solve a \u2212 4*\u03B6 = 0, where \u03B6 = 1\u22122.",
+      "Solve a \u2212 4*\u03BA = 0, where \u03BA = 2.",
+      "Solve a \u2212 4*\u03B9 = 0, where \u03B9 = 1.",
+      "Solve (a \u2212 4) / 2 = 3",
+      "Solve (x + 1) \u2212 4 = 0",
+      "Compute (x + 1) \u2212 4.",
+      "Compute (2 * x) \u2212 4.",
+      "Solve (a) \u2212 4 = 0",
+      "Compute f(x) \u2212 4.",
+      "Compute sqrt(2) \u2212 4.",
+      "Evaluate $(x) \u2212 4$",
+      "Evaluate $(a + 1) \u2212 4$",
+    ].entries()) {
+      expect(containsAnswerLeak(r16BenignStem, "-4")).toBe(false);
+      const r16Allowed = issueOfflineFlashcardLease({
+        leaseId: `lease-r16-benign-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r16BenignStem,
+          }),
+        ],
+      });
+      expect(r16Allowed.ok).toBe(true);
+    }
+
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
       { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },

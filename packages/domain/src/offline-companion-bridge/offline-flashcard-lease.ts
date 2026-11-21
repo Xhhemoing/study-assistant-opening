@@ -90,8 +90,54 @@ function extractLeakSegments(normalizedSecret: string): string[] {
 }
 
 const SIGN_PREFIX = "(?:\\+-|-\\+|[+-])?";
-const GREEK_OR_CONST =
-  "(?:pi|theta|alpha|beta|gamma|delta|epsilon|zeta|eta|kappa|lambda|mu|nu|xi|rho|sigma|tau|phi|chi|psi|omega|inf|infty)";
+const GREEK_LETTER_NAMES = [
+  "alpha",
+  "beta",
+  "gamma",
+  "delta",
+  "epsilon",
+  "varepsilon",
+  "zeta",
+  "eta",
+  "theta",
+  "vartheta",
+  "iota",
+  "kappa",
+  "varkappa",
+  "lambda",
+  "mu",
+  "nu",
+  "xi",
+  "omicron",
+  "pi",
+  "varpi",
+  "rho",
+  "varrho",
+  "sigma",
+  "varsigma",
+  "tau",
+  "upsilon",
+  "phi",
+  "varphi",
+  "chi",
+  "psi",
+  "omega",
+] as const;
+
+const MATH_CONST_NAMES = ["inf", "infty", "infinity"] as const;
+
+const MATH_FUNCTION_NAMES = [
+  "sqrt",
+  "sin",
+  "cos",
+  "tan",
+  "log",
+  "ln",
+  "exp",
+  "abs",
+] as const;
+
+const GREEK_OR_CONST = `(?:${[...GREEK_LETTER_NAMES, ...MATH_CONST_NAMES].join("|")})`;
 
 const SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE = new RegExp(
   `^(?:` +
@@ -121,23 +167,26 @@ const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\u2260/g, "!="],
   [/\u2248/g, "~="],
   [/\u221E/g, "inf"],
-  [/[\u03C0\u03A0]/g, "pi"],
-  [/[\u03B8\u0398]/g, "theta"],
+  [/[\u03C0\u03A0\u03D6]/g, "pi"],
+  [/[\u03B8\u0398\u03D1]/g, "theta"],
   [/[\u03B1\u0391]/g, "alpha"],
   [/[\u03B2\u0392]/g, "beta"],
   [/[\u03B3\u0393]/g, "gamma"],
   [/[\u03B4\u0394]/g, "delta"],
-  [/[\u03B5\u0395]/g, "epsilon"],
+  [/[\u03B5\u0395\u03F5]/g, "epsilon"],
   [/\u03B6/g, "zeta"],
   [/\u03B7/g, "eta"],
-  [/\u03BA/g, "kappa"],
+  [/\u03B9/g, "iota"],
+  [/[\u03BA\u03F0]/g, "kappa"],
   [/[\u03BB\u039B]/g, "lambda"],
   [/\u03BC/g, "mu"],
   [/\u03BD/g, "nu"],
   [/[\u03BE\u039E]/g, "xi"],
-  [/\u03C1/g, "rho"],
+  [/\u03BF/g, "omicron"],
+  [/[\u03C1\u03F1]/g, "rho"],
   [/[\u03C3\u03A3\u03C2]/g, "sigma"],
   [/\u03C4/g, "tau"],
+  [/[\u03C5\u03A5]/g, "upsilon"],
   [/[\u03C6\u03A6\u03D5]/g, "phi"],
   [/\u03C7/g, "chi"],
   [/[\u03C8\u03A8]/g, "psi"],
@@ -414,11 +463,18 @@ function isInsideMathRange(index: number, ranges: ReadonlyArray<readonly [number
 }
 
 const DEFINITE_BINARY_LEFT_OPERAND_END_RE = new RegExp(
-  `(?:[\\d)\\]}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[B-HJ-Zb-hj-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))\\s*$`,
+  `(?:[\\d}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[B-HJ-Zb-hj-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))\\s*$`,
   "u",
 );
 
+const CLOSING_GROUP_END_RE = /[)\]]\s*$/;
+
 const AMBIGUOUS_PROSE_SINGLE_LETTER_END_RE = /(?<![\p{L}\p{N}_])[aAiI]\s*$/u;
+
+const DIRECT_MATH_CALL_PREFIX_RE = new RegExp(
+  `(?:[\\d)'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[A-Za-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${MATH_FUNCTION_NAMES.join("|")}))$`,
+  "iu",
+);
 
 const MATH_PROSE_CONJUNCTIONS: ReadonlySet<string> = new Set([
   "where",
@@ -430,36 +486,13 @@ const MATH_PROSE_CONJUNCTIONS: ReadonlySet<string> = new Set([
 ]);
 
 const ALGEBRAIC_EXPR_WORDS: ReadonlySet<string> = new Set([
-  "pi",
-  "tau",
-  "phi",
-  "psi",
-  "rho",
-  "eta",
-  "chi",
-  "mu",
-  "nu",
-  "xi",
-  "alpha",
-  "beta",
-  "gamma",
-  "delta",
-  "epsilon",
-  "theta",
-  "lambda",
-  "sigma",
-  "omega",
-  "inf",
-  "infinity",
-  "sqrt",
-  "sin",
-  "cos",
-  "tan",
-  "log",
-  "ln",
-  "exp",
-  "abs",
+  ...GREEK_LETTER_NAMES,
+  ...MATH_CONST_NAMES,
+  ...MATH_FUNCTION_NAMES,
 ]);
+
+const GROUP_ARITHMETIC_OP_RE = /^[+\-*/^\u2212\u00D7\u00F7\u00B7\u22C5\u2215\u2044]$/;
+const GROUP_MATH_AUX_CHAR_RE = /^[\d|'\u2032\u2019\u221A!_()[\]{}]$/;
 
 const LEADING_ALGEBRAIC_RELATION_RE =
   /^(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\\(?:le|leq|ge|geq|ne|neq)\b)/i;
@@ -614,31 +647,92 @@ function hasDirectLeftAlgebraicRelation(segment: string): boolean {
   return false;
 }
 
-function isBinaryLeftOperandBeforeSign(
+function findMatchingGroupOpen(text: string, closeIndex: number): number {
+  const closeChar = text[closeIndex];
+  const openChar = closeChar === ")" ? "(" : closeChar === "]" ? "[" : "";
+  if (!openChar) return -1;
+  let depth = 0;
+  for (let i = closeIndex; i >= 0; i -= 1) {
+    if (i > 0 && text[i - 1] === "\\") continue;
+    const ch = text[i];
+    if (ch === closeChar) {
+      depth += 1;
+    } else if (ch === openChar) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function analyzeAlgebraicGroupInner(inner: string): {
+  readonly isPureAlgebraic: boolean;
+  readonly hasArithmeticOperator: boolean;
+} {
+  let hasArithmeticOperator = false;
+  let hasOperandToken = false;
+  let i = 0;
+  while (i < inner.length) {
+    const ch = inner[i] ?? "";
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === ".") {
+      if (/\d/.test(inner[i + 1] ?? "")) {
+        hasOperandToken = true;
+        i += 1;
+        continue;
+      }
+      return { isPureAlgebraic: false, hasArithmeticOperator: false };
+    }
+    if (GROUP_ARITHMETIC_OP_RE.test(ch)) {
+      hasArithmeticOperator = true;
+      i += 1;
+      continue;
+    }
+    if (GROUP_MATH_AUX_CHAR_RE.test(ch) || /\p{Script=Greek}/u.test(ch)) {
+      if (/\d|\p{Script=Greek}/u.test(ch)) hasOperandToken = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\") {
+      let cmdEnd = i + 1;
+      while (cmdEnd < inner.length && /[A-Za-z]/.test(inner[cmdEnd] ?? "")) cmdEnd += 1;
+      if (cmdEnd > i + 1) {
+        hasOperandToken = true;
+        i = cmdEnd;
+        continue;
+      }
+      return { isPureAlgebraic: false, hasArithmeticOperator: false };
+    }
+    if (/[A-Za-z]/.test(ch)) {
+      let wordEnd = i + 1;
+      while (wordEnd < inner.length && /[A-Za-z]/.test(inner[wordEnd] ?? "")) wordEnd += 1;
+      const word = inner.slice(i, wordEnd).toLowerCase();
+      if (word.length === 1 || ALGEBRAIC_EXPR_WORDS.has(word)) {
+        hasOperandToken = true;
+        i = wordEnd;
+        continue;
+      }
+      return { isPureAlgebraic: false, hasArithmeticOperator: false };
+    }
+    return { isPureAlgebraic: false, hasArithmeticOperator: false };
+  }
+  return { isPureAlgebraic: hasOperandToken, hasArithmeticOperator };
+}
+
+function hasDirectClauseAlgebraicRelation(
   text: string,
-  signIndex: number,
+  exprStart: number,
   operandEndIndex: number,
-  mathRanges: ReadonlyArray<readonly [number, number]>,
 ): boolean {
-  const before = text.slice(0, signIndex);
-  if (DEFINITE_BINARY_LEFT_OPERAND_END_RE.test(before)) {
-    return true;
-  }
-  if (!AMBIGUOUS_PROSE_SINGLE_LETTER_END_RE.test(before)) {
-    return false;
-  }
-  if (isInsideMathRange(signIndex, mathRanges)) {
-    return true;
-  }
-  let varEnd = signIndex;
-  while (varEnd > 0 && /\s/.test(text[varEnd - 1] ?? "")) varEnd -= 1;
-  const varStart = Math.max(0, varEnd - 1);
-  const [clauseStart, clauseEnd] = extractLocalClauseRange(text, varStart, operandEndIndex);
-  const clauseBeforeVar = text.slice(clauseStart, varStart);
+  const [clauseStart, clauseEnd] = extractLocalClauseRange(text, exprStart, operandEndIndex);
+  const clauseBeforeExpr = text.slice(clauseStart, exprStart);
   const clauseAfterOperand = text.slice(operandEndIndex, clauseEnd);
   if (
     !hasDirectRightAlgebraicRelation(clauseAfterOperand) &&
-    !hasDirectLeftAlgebraicRelation(clauseBeforeVar)
+    !hasDirectLeftAlgebraicRelation(clauseBeforeExpr)
   ) {
     return false;
   }
@@ -652,6 +746,64 @@ function isBinaryLeftOperandBeforeSign(
   return true;
 }
 
+function isAlgebraicClosingGroupBeforeSign(
+  text: string,
+  signIndex: number,
+  operandEndIndex: number,
+  mathRanges: ReadonlyArray<readonly [number, number]>,
+): boolean {
+  if (isInsideMathRange(signIndex, mathRanges)) {
+    return true;
+  }
+  let closeIndex = signIndex;
+  while (closeIndex > 0 && /\s/.test(text[closeIndex - 1] ?? "")) closeIndex -= 1;
+  closeIndex -= 1;
+  const openIndex = findMatchingGroupOpen(text, closeIndex);
+  if (openIndex === -1) {
+    return false;
+  }
+  const inner = text.slice(openIndex + 1, closeIndex).trim();
+  if (!inner) {
+    return false;
+  }
+  const { isPureAlgebraic, hasArithmeticOperator } = analyzeAlgebraicGroupInner(inner);
+  if (!isPureAlgebraic) {
+    return false;
+  }
+  if (hasArithmeticOperator) {
+    return true;
+  }
+  if (text[openIndex] === "(" && DIRECT_MATH_CALL_PREFIX_RE.test(text.slice(0, openIndex))) {
+    return true;
+  }
+  return hasDirectClauseAlgebraicRelation(text, openIndex, operandEndIndex);
+}
+
+function isBinaryLeftOperandBeforeSign(
+  text: string,
+  signIndex: number,
+  operandEndIndex: number,
+  mathRanges: ReadonlyArray<readonly [number, number]>,
+): boolean {
+  const before = text.slice(0, signIndex);
+  if (DEFINITE_BINARY_LEFT_OPERAND_END_RE.test(before)) {
+    return true;
+  }
+  if (CLOSING_GROUP_END_RE.test(before)) {
+    return isAlgebraicClosingGroupBeforeSign(text, signIndex, operandEndIndex, mathRanges);
+  }
+  if (!AMBIGUOUS_PROSE_SINGLE_LETTER_END_RE.test(before)) {
+    return false;
+  }
+  if (isInsideMathRange(signIndex, mathRanges)) {
+    return true;
+  }
+  let varEnd = signIndex;
+  while (varEnd > 0 && /\s/.test(text[varEnd - 1] ?? "")) varEnd -= 1;
+  const varStart = Math.max(0, varEnd - 1);
+  return hasDirectClauseAlgebraicRelation(text, varStart, operandEndIndex);
+}
+
 const SPACED_UNARY_SIGN_RE = new RegExp(
   `(?<=^|[(\\[{$,;:=<>!~]\\s*|\\p{Script=Han}\\s*|\\p{Script=Hiragana}\\s*|\\p{Script=Katakana}\\s*|\\p{Script=Hangul}\\s*|\\b(?:is|equals|expected|result|value|gives|be|are|to|of|at|around|about)\\s+)([+-])\\s+${MATH_OPERAND_LOOKAHEAD}`,
   "giu",
@@ -661,7 +813,7 @@ const SPACED_UNICODE_MINUS_CANDIDATE_RE =
   /\u2212\s+(\d+(?:\.\d+)?|\.\d+|\u221A(?:\s*\([^)]*\)|\s*[a-z0-9]+)?|\p{Script=Greek}|sqrt\([^)]*\))/giu;
 
 const SPACED_PROSE_ARTICLE_SIGN_RE = new RegExp(
-  `(?<=(?<![\\p{L}\\p{N}_])[aAiI]\\s+)([+-])\\s+(\\d+(?:\\.\\d+)?|\\.\\d+|sqrt\\([^)]*\\)|(?:${GREEK_OR_CONST})\\b)`,
+  `(?<=(?:(?<![\\p{L}\\p{N}_])[aAiI]\\s+|[)\\]]\\s*))([+-])\\s+(\\d+(?:\\.\\d+)?|\\.\\d+|sqrt\\([^)]*\\)|(?:${GREEK_OR_CONST})\\b)`,
   "giu",
 );
 
