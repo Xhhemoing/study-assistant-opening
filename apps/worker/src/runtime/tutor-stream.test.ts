@@ -1,6 +1,9 @@
 import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
-import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter, isDefinitiveRedisRejection, withTutorDeltaBatches } from "./tutor-stream";
+import {
+  createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter, isDefinitiveRedisRejection,
+  isNonMutatingRedisReplyError, withTutorDeltaBatches,
+} from "./tutor-stream";
 
 function deferred() {
   let resolve!: () => void;
@@ -35,9 +38,65 @@ it.each([
   "READONLY You can't write against a read only replica.",
   "NOPERM this user has no permissions to run the 'eval' command",
   "WRONGPASS invalid username-password pair",
+  "NOAUTH Authentication required",
 ])("classifies definitive Redis rejections as non-retryable seal failures: %s", message => {
   const error = Object.assign(new Error(message), { name: "ReplyError" });
   expect(isDefinitiveRedisRejection(error)).toBe(true);
+});
+
+it.each(["LOADING Redis is loading the dataset in memory", "BUSY Redis is busy running a script",
+  "CLUSTERDOWN Hash slot is not served", "MASTERDOWN Link with MASTER is down", "TRYAGAIN Multiple keys request during rehashing"])(
+  "retries transient Redis reply %s while confirming a seal", async message => {
+    vi.useFakeTimers();
+    const appendError = new Error("Command timed out");
+    const transientError = Object.assign(new Error(message), { name: "ReplyError" });
+    const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+      eval: vi.fn().mockRejectedValue(appendError) };
+    const transient = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+      eval: vi.fn().mockRejectedValue(transientError) };
+    const confirmed = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+      eval: vi.fn().mockResolvedValue(undefined) };
+    const producer = { duplicate: vi.fn().mockReturnValueOnce(append).mockReturnValueOnce(transient).mockReturnValueOnce(confirmed) };
+    const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
+    try {
+      const result = writer.append("workspace", "job", "tail", "execution", 0).then(
+        () => undefined,
+        error => error,
+      );
+      await vi.waitFor(() => expect(transient.eval).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.waitFor(() => expect(confirmed.eval).toHaveBeenCalledOnce());
+      await expect(result).resolves.toBe(appendError);
+    } finally {
+      writer.disconnect();
+      vi.useRealTimers();
+    }
+  },
+);
+
+it.each(["NOAUTH Authentication required", "NOPERM this user has no permissions", "WRONGPASS invalid password",
+  "ERR command rejected", "READONLY replica is read only", "OOM command not allowed"])(
+  "fails fast on definitive seal reply %s", async message => {
+    const appendError = new Error("Command timed out");
+    const sealError = Object.assign(new Error(message), { name: "ReplyError" });
+    const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+      eval: vi.fn().mockRejectedValue(appendError) };
+    const control = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+      eval: vi.fn().mockRejectedValue(sealError) };
+    const producer = { duplicate: vi.fn().mockReturnValueOnce(append).mockReturnValueOnce(control) };
+    const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
+    try {
+      await expect(writer.append("workspace", "job", "tail", "execution", 0)).rejects.toBe(sealError);
+      expect(producer.duplicate).toHaveBeenCalledTimes(2);
+    } finally {
+      writer.disconnect();
+    }
+  },
+);
+
+it("treats every Redis ReplyError as a non-mutating append rejection", () => {
+  const error = Object.assign(new Error("LOADING Redis is loading the dataset in memory"), { name: "ReplyError" });
+  expect(isNonMutatingRedisReplyError(error)).toBe(true);
 });
 
 it("does not retry a Redis OOM seal while an append publication is held", async () => {

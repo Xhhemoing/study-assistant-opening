@@ -35,15 +35,23 @@ const redisTransportMessages = new Set([
   "Stream isn't writeable and enableOfflineQueue options is false",
 ]);
 
-const definitiveRedisReplyCodes = new Set(["ERR", "OOM", "READONLY", "NOPERM", "WRONGPASS"]);
+const definitiveRedisReplyCodes = new Set(["ERR", "OOM", "READONLY", "NOPERM", "WRONGPASS", "NOAUTH"]);
 
-/** Redis explicitly rejected this command, so retrying could only hold the PG lease longer. */
-export function isDefinitiveRedisRejection(error: unknown): boolean {
+/** A Redis reply proves that the specific append EVAL reached Redis and did not mutate state. */
+export function isNonMutatingRedisReplyError(error: unknown): boolean {
+  return error instanceof Error && error.name === "ReplyError";
+}
+
+/** Redis definitively rejected a seal, so retrying could only hold the PG lease longer. */
+export function isDefinitiveSealRejection(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  if (error.name === "ReplyError") return true;
   const code = /^-?([A-Z][A-Z0-9_-]*)\b/.exec(error.message.trim())?.[1];
   return code !== undefined && definitiveRedisReplyCodes.has(code);
 }
+
+// Preserve the existing exported name for callers while making the seal-only
+// meaning explicit at the call sites below.
+export const isDefinitiveRedisRejection = isDefinitiveSealRejection;
 
 export function isTutorStreamUnavailable(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -263,7 +271,7 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
         await seal(workspaceId, jobId, executionId);
         return;
       } catch (error) {
-        if (isDefinitiveRedisRejection(error)) throw error;
+        if (isDefinitiveSealRejection(error)) throw error;
         if (reported) await delay(500);
         else reportError(error);
         reported = true;
@@ -290,7 +298,7 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
         return await connection.writer.append(...args);
       } catch (error) {
         disconnectAppend(connection);
-        if (isDefinitiveRedisRejection(error)) throw error;
+        if (isNonMutatingRedisReplyError(error)) throw error;
         // Redis may still execute bytes already in transit. A confirmed seal on
         // the control connection orders that EVAL on Redis: it either already
         // ran under the PG locks, or sees the seal (or a missing/new execution).

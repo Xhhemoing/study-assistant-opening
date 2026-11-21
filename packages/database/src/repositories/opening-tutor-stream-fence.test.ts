@@ -1,7 +1,10 @@
 import { once } from "node:events";
 import { createServer, type AddressInfo, type Socket } from "node:net";
+import Redis from "ioredis";
 import { expect, it } from "vitest";
-import { fenceCancelledOpeningTutorStream } from "./opening-tutor-stream-fence";
+import {
+  fenceCancelledOpeningTutorStream, openingRedisConnectionOptions, tutorStreamAttemptHeadKey, tutorStreamKey,
+} from "./opening-tutor-stream-fence";
 
 async function withRedisServer(run: (url: string) => Promise<void>, onConnection: (socket: Socket) => void) {
   const sockets = new Set<Socket>();
@@ -19,6 +22,62 @@ async function withRedisServer(run: (url: string) => Promise<void>, onConnection
     await new Promise<void>(resolve => { server.close(() => resolve()); });
   }
 }
+
+function ioredisOptions(url: string) {
+  const redis = new Redis(url, { lazyConnect: true });
+  try {
+    const options = {
+      host: redis.options.host,
+      port: redis.options.port,
+      family: redis.options.family,
+      path: redis.options.path,
+      username: redis.options.username,
+      password: redis.options.password,
+      db: redis.options.db,
+      tls: redis.options.tls ? {} : undefined,
+    };
+    return Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined && value !== null));
+  } finally {
+    redis.disconnect();
+  }
+}
+
+it.each([
+  "6380",
+  "/tmp/redis.sock",
+  "localhost:6380/1",
+  "[::1]:6380",
+  "user:pass@host:6380/2",
+  "redis://localhost:6380/1",
+  "rediss://redis.example:6380/2",
+])("matches ioredis endpoint options for %s", url => {
+  expect(openingRedisConnectionOptions(url)).toEqual(ioredisOptions(url));
+});
+
+it("interprets a protocol-relative endpoint as a Redis URL", () => {
+  expect(openingRedisConnectionOptions(" //127.0.0.1:6380/2 ")).toMatchObject({
+    host: "127.0.0.1", port: 6380, family: 4, db: 2,
+  });
+});
+
+it("takes the first value from repeated query parameters", () => {
+  expect(openingRedisConnectionOptions(
+    "redis://?db=1&db=2&host=a&host=b&port=6380&port=6381&family=4&family=6&path=%2Fa&path=%2Fb&username=u&username=v&password=p&password=q&tls=0&tls=1",
+  )).toEqual({ host: "a", port: 6380, family: 4, path: "/a", username: "u", password: "p", db: 1, tls: {} });
+});
+
+it.each(["http://localhost:6379", "https://localhost:6379", "postgres://localhost:5432", "unix:///tmp/redis.sock"])(
+  "rejects unsupported explicit protocol %s", url => {
+    expect(() => openingRedisConnectionOptions(url)).toThrow("Invalid Redis fence URL");
+  },
+);
+
+it("canonicalizes workspace, job, and attempt stream key UUIDs", () => {
+  expect(tutorStreamKey("  ABCDEFAB-ABCD-4ABC-8ABC-ABCDEFABCDEF  ", "  12345678-1234-4123-8123-123456789ABC  "))
+    .toBe("opening:tutor-stream:abcdefab-abcd-4abc-8abc-abcdefabcdef:12345678-1234-4123-8123-123456789abc");
+  expect(tutorStreamAttemptHeadKey(" ABCDEFAB-ABCD-4ABC-8ABC-ABCDEFABCDEF ", " 12345678-1234-4123-8123-123456789ABC "))
+    .toBe("opening:tutor-stream:attempt-head:abcdefab-abcd-4abc-8abc-abcdefabcdef:12345678-1234-4123-8123-123456789abc");
+});
 
 it.each(["?db=3", "/?db=3", "/3?db=4"])(
   "authenticates and selects Redis DB 3 for %s before sealing, with byte-length arguments and split replies", async suffix => {

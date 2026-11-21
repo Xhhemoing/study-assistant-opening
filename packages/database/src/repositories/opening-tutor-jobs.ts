@@ -222,7 +222,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           throw new Error("terminal history coordination drift: workspace owner changed");
         }
       }
-      const rows = input.status === "failed"
+      const updated = input.status === "failed"
         ? await tx`
             UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json(errorJson as never)},
               updated_at = now()
@@ -230,7 +230,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND status IN ('running', 'queued')
               AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
               AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
-            RETURNING assistant_turn_id, timing_execution_id
+            RETURNING id, workspace_id, assistant_turn_id, timing_execution_id
           `
         : await tx`
             UPDATE opening_tutor_jobs SET status = 'outcome_unknown',
@@ -239,17 +239,12 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND status = 'running'
               AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
               AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
-            RETURNING assistant_turn_id, timing_execution_id
+            RETURNING id, workspace_id, assistant_turn_id, timing_execution_id
           `;
-      if (!rows.length) return false;
-      const terminalJob = rows[0] as Record<string, unknown>;
+      if (!updated.length) return false;
+      const terminalJob = updated[0] as Record<string, unknown>;
       const assistantTurnId = terminalJob.assistant_turn_id as string;
       const executionId = typeof terminalJob.timing_execution_id === "string" ? terminalJob.timing_execution_id : undefined;
-      if (executionId) {
-        // A recovered publisher may have released its PG locks with bytes still
-        // in transit. Confirm the Redis seal before this terminal transaction commits.
-        await fenceCancelledOpeningTutorStream(input.scope.workspaceId, input.jobId, executionId, options.tutorStreamRedisUrl);
-      }
       // A terminal turn (complete/failed/clarify/outcome_unknown) is never
       // rewritten, even if a stale job row is swept or re-terminated later.
       const terminal = [...TERMINAL_TURN_STATUSES];
@@ -272,6 +267,12 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           WHERE id = ${assistantTurnId} AND workspace_id = ${input.scope.workspaceId}
             AND NOT (status = ANY(${terminal}::text[]))
         `;
+      }
+      if (executionId) {
+        // A recovered publisher may have released its PG locks with bytes still
+        // in transit. Confirm the Redis seal before this terminal transaction commits.
+        await fenceCancelledOpeningTutorStream(terminalJob.workspace_id as string, terminalJob.id as string,
+          executionId, options.tutorStreamRedisUrl);
       }
       return true;
     }).catch(async (error: unknown) => {

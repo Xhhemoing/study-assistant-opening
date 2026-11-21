@@ -375,7 +375,7 @@ export async function main(): Promise<void> {
   const repository = createOpeningJobRepository(sql);
   const modelServices = createModelServices(sql, openingModel, embeddingConfig);
   // Legacy parser workers also own dispatcher/recovery duties even with no teaching consumers.
-  const tutorJobs = env.workerRole === "logistics" ? null : createOpeningTutorJobsRepository(sql);
+  const tutorJobs = env.workerRole === "logistics" ? null : createOpeningTutorJobsRepository(sql, { tutorStreamRedisUrl: env.redisUrl });
   if (queueKinds.has("tutor") && tutorJobs) {
     teaching = createTeachingHandlers(sql, env, producer, tutorJobs, reportError, modelServices);
   }

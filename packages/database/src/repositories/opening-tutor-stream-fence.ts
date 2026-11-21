@@ -5,12 +5,13 @@ import type { TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
 export const TUTOR_STREAM_TTL_SECONDS = 15 * 60;
-export const tutorStreamKey = (workspaceId: string, jobId: string) => `opening:tutor-stream:${workspaceId}:${jobId}`;
-export const tutorStreamEpochKey = (workspaceId: string) => `opening:tutor-stream:epoch:${workspaceId.toLowerCase()}`;
+export const tutorStreamKey = (workspaceId: string, jobId: string) =>
+  `opening:tutor-stream:${workspaceId.trim().toLowerCase()}:${jobId.trim().toLowerCase()}`;
+export const tutorStreamEpochKey = (workspaceId: string) => `opening:tutor-stream:epoch:${workspaceId.trim().toLowerCase()}`;
 export const tutorStreamAttemptHeadKey = (workspaceId: string, rootObservationId: string) =>
-  `opening:tutor-stream:attempt-head:${workspaceId}:${rootObservationId}`;
+  `opening:tutor-stream:attempt-head:${workspaceId.trim().toLowerCase()}:${rootObservationId.trim().toLowerCase()}`;
 export const tutorStreamPreAnswerHeadKey = (workspaceId: string, attemptId: string) =>
-  `opening:tutor-stream:attempt-head:${workspaceId.toLowerCase()}:unsubmitted:${attemptId.toLowerCase()}`;
+  `opening:tutor-stream:attempt-head:${workspaceId.trim().toLowerCase()}:unsubmitted:${attemptId.trim().toLowerCase()}`;
 
 export type OpeningRedisConnectionOptions = {
   host: string;
@@ -25,37 +26,72 @@ export type OpeningRedisConnectionOptions = {
 
 /** Resolve the standalone endpoint with ioredis 5.6.1 URL precedence. */
 export function openingRedisConnectionOptions(redisUrl: string): OpeningRedisConnectionOptions {
-  let parsed = parse(redisUrl, true, true);
-  if (!parsed.slashes && !redisUrl.startsWith("/")) {
-    parsed = parse("//" + redisUrl, true, true);
+  const trimmed = redisUrl.trim();
+  if (!trimmed) throw new Error("Invalid Redis fence URL");
+
+  const defaults = { host: "localhost", family: 4, db: 0 };
+  if (/^\d+$/.test(trimmed)) {
+    const port = Number.parseInt(trimmed, 10);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid Redis port");
+    return { ...defaults, port };
   }
-  if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    return { ...defaults, port: 6379, path: trimmed };
+  }
+
+  // ioredis treats a protocol-relative URL as a host when passed directly.
+  // The fence endpoint is explicitly Redis, so preserve its URL database form.
+  const normalized = trimmed.startsWith("//") ? `redis:${trimmed}` : trimmed;
+  const explicitProtocol = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(trimmed);
+  let parsed = parse(normalized, true, true);
+  if (explicitProtocol && parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
     throw new Error("Invalid Redis fence URL");
   }
-  const query = parsed.query as Record<string, string | undefined>;
+  if (!parsed.slashes && !normalized.startsWith("/")) {
+    parsed = parse("//" + normalized, true, true);
+  }
+  if (parsed.protocol !== null && parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
+    throw new Error("Invalid Redis fence URL");
+  }
+
+  const query = parsed.query as Record<string, string | string[] | undefined>;
+  const first = (value: string | string[] | undefined): string | undefined => Array.isArray(value) ? value[0] : value;
+  const queryHost = first(query.host);
+  const queryPort = first(query.port);
+  const queryDb = first(query.db);
+  const queryFamily = first(query.family);
+  const queryPath = first(query.path);
+  const queryUsername = first(query.username);
+  const queryPassword = first(query.password);
+  const queryTls = first(query.tls);
   const auth = parsed.auth;
   const authSeparator = auth?.indexOf(":") ?? -1;
-  const username = auth === null || auth === undefined
-    ? query.username
-    : authSeparator === -1 ? auth : auth.slice(0, authSeparator);
-  const password = auth === null || auth === undefined
-    ? query.password
-    : authSeparator === -1 ? "" : auth.slice(authSeparator + 1);
-  const rawPort = parsed.port ?? query.port ?? "6379";
+  const username = auth
+    ? authSeparator === -1 ? auth : auth.slice(0, authSeparator)
+    : queryUsername;
+  const password = auth
+    ? authSeparator === -1 ? "" : auth.slice(authSeparator + 1)
+    : queryPassword;
+  const rawPort = parsed.port ?? queryPort ?? "6379";
   const port = Number.parseInt(rawPort, 10);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid Redis port");
-  const rawDb = parsed.pathname && parsed.pathname.length > 1 ? parsed.pathname.slice(1) : query.db;
+  const rawDb = parsed.protocol === "redis:" || parsed.protocol === "rediss:"
+    ? parsed.pathname && parsed.pathname.length > 1 ? parsed.pathname.slice(1) : queryDb
+    : queryDb;
   const db = rawDb === undefined ? 0 : Number.parseInt(rawDb, 10);
   if (!Number.isSafeInteger(db) || db < 0) throw new Error("Invalid Redis database index");
-  const rawFamily = query.family;
+  const rawFamily = queryFamily;
   const family = rawFamily === undefined ? 4 : Number.parseInt(rawFamily, 10);
   if (!Number.isSafeInteger(family) || family < 0) throw new Error("Invalid Redis address family");
+  const path = parsed.protocol === "redis:" || parsed.protocol === "rediss:"
+    ? queryPath
+    : parsed.pathname ?? queryPath;
   const options: OpeningRedisConnectionOptions = {
-    host: parsed.hostname || query.host || "localhost", port, family, db,
-    ...(typeof query.path === "string" ? { path: query.path } : {}),
+    host: parsed.hostname || queryHost || "localhost", port, family, db,
+    ...(path !== undefined ? { path } : {}),
     ...(username !== undefined ? { username } : {}),
     ...(password !== undefined ? { password } : {}),
-    ...(parsed.protocol === "rediss:" || query.tls !== undefined && Boolean(query.tls) ? { tls: {} } : {}),
+    ...(parsed.protocol === "rediss:" || queryTls !== undefined && Boolean(queryTls) ? { tls: {} } : {}),
   };
   return options;
 }
