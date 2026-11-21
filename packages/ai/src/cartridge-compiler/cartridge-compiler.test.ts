@@ -921,4 +921,254 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       );
     }
   });
+
+  it("blocks whitespace-obfuscated token URLs before/after normalization and JWTs in learnerPseudoId (Round-3 P1-2)", () => {
+    // Tokenized URL with whitespace around '=' that normalization would collapse into ?token=abc
+    const spacedTokenUrl = makeTrajectory({
+      trajectoryId: "t_spaced_url",
+      missingPremise: "see https://x.test?token = abc12345 before solving",
+    });
+    expect(() => clusterErrorTrajectories([spacedTokenUrl])).toThrow(CartridgePiiViolationError);
+
+    const spacedTokenAst = makeTrajectory({
+      trajectoryId: "t_spaced_ast",
+      normalizedAstEdit: "DIV_VAR(x)|REF(https://x.test ? api_key = secret999)",
+    });
+    expect(() => clusterErrorTrajectories([spacedTokenAst])).toThrow(CartridgePiiViolationError);
+
+    // JWT embedded inside learnerPseudoId (matches base charset [A-Za-z0-9._:-]) MUST fail closed!
+    const jwtPseudo = makeTrajectory({
+      trajectoryId: "t_jwt_pseudo",
+      learnerPseudoId: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.sigABCDEF1234",
+    });
+    expect(() => clusterErrorTrajectories([jwtPseudo])).toThrow(CartridgePiiViolationError);
+
+    // Ensure buildGepaReflectionContext rejects spaced token URLs in train/dev inputs.
+    expect(() =>
+      buildGepaReflectionContext({
+        policy: makeBasePolicy(),
+        trainTrajectories: [spacedTokenUrl],
+        devTrajectories: [],
+        holdoutFirewall: {
+          holdoutTrajectoryIds: [],
+          holdoutLearnerPseudoIds: [],
+          holdoutItemFamilyIds: [],
+        },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+  });
+
+  it("enforces maxAllowedLeakageRate against the exact count-derived ratio (1000/99999 > 0.01) (Round-3 P1-3)", () => {
+    const safeBaseline = buildMatureCohort("cand_exact_safe", {
+      learnerCount: 25,
+      repairedCount: 22,
+      t7PassedCount: 24,
+    });
+
+    // Caller rounds 1000 / 99999 = 0.0100001000... down to 0.01 against maxAllowedLeakageRate = 0.01.
+    const roundedBypass: CartridgeCandidateMetrics = {
+      ...safeBaseline,
+      candidateId: "cand_rounded_leak_bypass",
+      l: {
+        rate: 0.01,
+        leakedReleasedTurns: 1000,
+        totalReleasedTurns: 99999,
+        severeLeakCount: 0,
+        guardBlockedCount: 0,
+      },
+    };
+
+    // Exact boundary 1000 / 100000 = 0.01 IS allowed when maxAllowedLeakageRate = 0.01.
+    const exactAtBoundary: CartridgeCandidateMetrics = {
+      ...safeBaseline,
+      candidateId: "cand_exact_at_cap",
+      l: {
+        rate: 0.01,
+        leakedReleasedTurns: 1000,
+        totalReleasedTurns: 100000,
+        severeLeakCount: 0,
+        guardBlockedCount: 0,
+      },
+    };
+
+    const result = evaluateParetoFrontierAndPromotion([roundedBypass, exactAtBoundary], {
+      baseline: { cRate: 0.8, t7Rate: 0.72 },
+      maxAllowedLeakageRate: 0.01,
+    });
+
+    expect(result.vetoedCandidateIds).toEqual(["cand_rounded_leak_bypass"]);
+    expect(result.promotedCandidateIds).toEqual(["cand_exact_at_cap"]);
+  });
+
+  it("hard-enforces one-sided alpha <= 0.05 at scorer and promotion gate so 5/5 cannot clear 0.80 via alpha=0.5 or forged LCB (Round-3 P1-4)", () => {
+    const fiveTrajs = Array.from({ length: 5 }, (_, i) =>
+      makeTrajectory({
+        trajectoryId: `alpha_t_${i}`,
+        learnerPseudoId: `pseudo_alpha_u${i + 1}`,
+        passedFreshFamilyTransfer: true,
+      }),
+    );
+
+    // Weakening alpha > 0.05 or confidenceZ < 1.64485 throws RangeError!
+    expect(() => computeCandidateMetrics("cand_weak_alpha", fiveTrajs, { alpha: 0.5 })).toThrow(
+      RangeError,
+    );
+    expect(() =>
+      computeCandidateMetrics("cand_weak_z", fiveTrajs, { confidenceZ: 0.5 }),
+    ).toThrow(RangeError);
+
+    // Forged custom scorer metrics attempting to pass 5/5 with inflated learnerClusterLowerBound: 0.95
+    const base5 = computeCandidateMetrics("cand_forged_lcb", fiveTrajs);
+    const forgedMetrics: CartridgeCandidateMetrics = {
+      ...base5,
+      t7:
+        base5.t7.status === "mature"
+          ? {
+              ...base5.t7,
+              learnerClusterLowerBound: 0.95,
+              clopperPearsonLowerBound: 0.95,
+            }
+          : base5.t7,
+    };
+
+    const promoCheck = evaluateParetoFrontierAndPromotion([forgedMetrics], {
+      baseline: { cRate: 0.8, t7Rate: 0.75 },
+      minT7Gain: 0.05,
+      minClusterCount: 5,
+    });
+    expect(promoCheck.promotedCandidateIds).toEqual([]);
+    expect(promoCheck.results[0]!.promotionBlockers).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("t7_lcb_exceeds_certified_cp95"),
+        expect.stringContaining("t7_lcb_below_gain_threshold"),
+      ]),
+    );
+
+    // Even via runGepaOptimizationRound with a custom scoreCandidate returning inflated LCB or effectiveClusterSampleSize=50!
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `gepa_forged_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_gepa_f_c${comp}_u${i}`,
+            itemFamilyId: `fam_gepa_f_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 42 });
+    const round = runGepaOptimizationRound({
+      basePolicy: makeBasePolicy(),
+      split,
+      clusteringOptions: { minSupport: 5 },
+      scoreCandidate: (cand) => ({
+        ...forgedMetrics,
+        candidateId: cand.candidateId,
+        t7:
+          base5.t7.status === "mature"
+            ? {
+                ...base5.t7,
+                effectiveClusterSampleSize: 50, // forged > learnerClusterCount (5)!
+                learnerClusterLowerBound: 0.92,
+                alpha: 0.5,
+              }
+            : base5.t7,
+      }),
+      paretoOptions: {
+        baseline: { cRate: 0.8, t7Rate: 0.75 },
+        minT7Gain: 0.05,
+        minClusterCount: 5,
+      },
+    });
+    expect(round.pareto.promotedCandidateIds).toEqual([]);
+  });
+
+  it("rejects undeclared keys on GEPA rule/anchor objects and reconstructs clean declared-only copies (Round-3 P2-1)", () => {
+    const base = makeBasePolicy();
+
+    // Undeclared extra key on moveRules item -> rejected
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "moveRules",
+        summary: "Extra field on moveRule",
+        payload: [
+          {
+            id: "r1",
+            conceptId: "alg.zero_product_property",
+            triggerRuleId: "err.divide_by_variable",
+            missingPremise: "x != 0",
+            move: "targeted_scaffold",
+            priority: 10,
+            undeclaredFlag: true,
+          },
+        ],
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // Undeclared extra key on hintLadder item -> rejected
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "hintLadder",
+        summary: "Extra field on hintStep",
+        payload: [
+          {
+            stage: 1,
+            conceptId: "alg.zero_product_property",
+            cueTemplate: "Check x != 0",
+            revealsPremiseCheck: true,
+            shadowOverride: "bypass",
+          },
+        ],
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // Undeclared extra key on nested RubricAnchorExample -> rejected
+    const validRubric = makeValidZeroDivisionRubric();
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "rubricAnchors",
+        summary: "Extra field on anchor",
+        payload: [
+          {
+            ...validRubric,
+            positiveAnchors: [
+              {
+                ...validRubric.positiveAnchors[0]!,
+                hiddenMetadata: "smuggled",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // Undeclared top-level patch key -> rejected
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Extra top-level field",
+        payload: { slotA: "Check premise" },
+        extraTopLevel: "nope",
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // Valid declared-only rubric patch produces cleanly reconstructed independent copy.
+    const applied = validateAndApplyGepaPatch(base, {
+      surface: "rubricAnchors",
+      summary: "Valid rubric",
+      payload: [validRubric],
+    });
+    expect(applied.rubricAnchors).toHaveLength(1);
+    expect(applied.rubricAnchors[0]).not.toBe(validRubric);
+    expect(Object.keys(applied.rubricAnchors[0]!).sort()).toEqual([
+      "conceptId",
+      "firstErrorRuleId",
+      "negativeAnchors",
+      "positiveAnchors",
+      "requiredAstTokens",
+      "requiredMissingPremise",
+      "ruleId",
+    ]);
+  });
 });

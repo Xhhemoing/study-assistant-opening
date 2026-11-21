@@ -225,6 +225,7 @@ export type T7Metric =
       readonly standardError: number;
       readonly clopperPearsonLowerBound: number;
       readonly learnerClusterLowerBound: number;
+      readonly alpha?: number;
     }
   | {
       readonly status: "pending";

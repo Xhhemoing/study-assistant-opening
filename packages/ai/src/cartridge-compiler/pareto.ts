@@ -12,6 +12,7 @@ import type {
 const EPSILON = 1e-12;
 export const DEFAULT_ONE_SIDED_95_Z = 1.6448536269514722;
 export const DEFAULT_ONE_SIDED_95_ALPHA = 0.05;
+export const MAX_PROMOTION_ALPHA = 0.05;
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
@@ -181,7 +182,18 @@ export function computeCandidateMetrics(
   options: ComputeCandidateMetricsOptions = {},
 ): CartridgeCandidateMetrics {
   const confidenceZ = options.confidenceZ ?? DEFAULT_ONE_SIDED_95_Z;
+  if (!Number.isFinite(confidenceZ) || confidenceZ < DEFAULT_ONE_SIDED_95_Z - 1e-6) {
+    throw new RangeError(
+      `computeCandidateMetrics requires one-sided confidenceZ >= ${DEFAULT_ONE_SIDED_95_Z} (alpha <= ${MAX_PROMOTION_ALPHA}); received ${String(confidenceZ)}.`,
+    );
+  }
   const alpha = options.alpha ?? oneSidedAlphaFromZ(confidenceZ);
+  if (!Number.isFinite(alpha) || alpha <= 0 || alpha > MAX_PROMOTION_ALPHA + 1e-9) {
+    throw new RangeError(
+      `computeCandidateMetrics requires one-sided alpha in (0, ${MAX_PROMOTION_ALPHA}] (at least 95% confidence); received ${String(alpha)}.`,
+    );
+  }
+  const effectiveAlpha = Math.min(alpha, MAX_PROMOTION_ALPHA);
   const allowPartialMaturity = options.allowPartialMaturity ?? false;
 
   let verifiableFirstErrorCount = 0;
@@ -325,7 +337,7 @@ export function computeCandidateMetrics(
     const clopperPearsonLowerBound = exactClopperPearsonLowerBound(
       effectiveSuccesses,
       effectiveClusterSampleSize,
-      alpha,
+      effectiveAlpha,
     );
 
     let ratioSe: number;
@@ -367,6 +379,7 @@ export function computeCandidateMetrics(
       standardError: effectiveSe,
       clopperPearsonLowerBound,
       learnerClusterLowerBound,
+      alpha: effectiveAlpha,
     };
   }
 
@@ -393,6 +406,19 @@ export function computeCandidateMetrics(
 
 export type ParetoObjectiveMode = "3d_c_neg_l_t7" | "2d_c_neg_l";
 
+function exactDerivedLeakageRate(candidate: CartridgeCandidateMetrics): number {
+  const { leakedReleasedTurns, totalReleasedTurns, rate } = candidate.l;
+  if (
+    isNonNegativeInteger(totalReleasedTurns) &&
+    totalReleasedTurns > 0 &&
+    isNonNegativeInteger(leakedReleasedTurns) &&
+    leakedReleasedTurns <= totalReleasedTurns
+  ) {
+    return leakedReleasedTurns / totalReleasedTurns;
+  }
+  return rate;
+}
+
 /**
  * Exact Pareto dominance check: returns true iff `a` dominates `b` (`a ≻ b`),
  * meaning `a` is >= `b` on every active objective and strictly > on at least one.
@@ -402,14 +428,16 @@ export function dominatesInObjectiveSpace(
   b: CartridgeCandidateMetrics,
   mode: ParetoObjectiveMode,
 ): boolean {
+  const aLeak = exactDerivedLeakageRate(a);
+  const bLeak = exactDerivedLeakageRate(b);
   const vecA =
     mode === "3d_c_neg_l_t7"
-      ? [a.c.rate, -a.l.rate, a.t7.status === "mature" ? a.t7.rate : Number.NEGATIVE_INFINITY]
-      : [a.c.rate, -a.l.rate];
+      ? [a.c.rate, -aLeak, a.t7.status === "mature" ? a.t7.rate : Number.NEGATIVE_INFINITY]
+      : [a.c.rate, -aLeak];
   const vecB =
     mode === "3d_c_neg_l_t7"
-      ? [b.c.rate, -b.l.rate, b.t7.status === "mature" ? b.t7.rate : Number.NEGATIVE_INFINITY]
-      : [b.c.rate, -b.l.rate];
+      ? [b.c.rate, -bLeak, b.t7.status === "mature" ? b.t7.rate : Number.NEGATIVE_INFINITY]
+      : [b.c.rate, -bLeak];
 
   let strictlyBetter = false;
   for (let i = 0; i < vecA.length; i += 1) {
@@ -473,26 +501,38 @@ function validateLeakageTelemetryFailClosed(
     );
   }
 
+  const validCounts = validTotal && validLeaked && l.leakedReleasedTurns <= l.totalReleasedTurns;
+  const derivedLeakageRate = validCounts ? l.leakedReleasedTurns / l.totalReleasedTurns : Number.NaN;
+
+  if (validCounts) {
+    // Enforce cap directly against the exact count-derived ratio (no rounding/tolerance bypass).
+    if (derivedLeakageRate > maxAllowedLeakageRate) {
+      vetoReasons.push(
+        `derived_leakageRate=${derivedLeakageRate.toFixed(9)} (${l.leakedReleasedTurns}/${l.totalReleasedTurns}) exceeds maxAllowedLeakageRate=${maxAllowedLeakageRate}`,
+      );
+    }
+    if (maxAllowedLeakageRate === 0 && l.leakedReleasedTurns !== 0) {
+      vetoReasons.push(
+        `zero_leakage_policy_violated:leakedReleasedTurns=${l.leakedReleasedTurns}`,
+      );
+    }
+  }
+
   if (typeof l.rate !== "number" || !Number.isFinite(l.rate) || l.rate < 0 || l.rate > 1) {
     vetoReasons.push(`invalid_leakageRate:must_be_finite_in_0_1(got=${String(l.rate)})`);
   } else {
-    if (validTotal && validLeaked) {
-      const expectedRate = l.leakedReleasedTurns / l.totalReleasedTurns;
-      if (Math.abs(l.rate - expectedRate) > 1e-6) {
-        vetoReasons.push(
-          `inconsistent_leakageRate:reported(${l.rate})!=computed(${expectedRate})`,
-        );
-      }
-    }
-    if (l.rate > maxAllowedLeakageRate + EPSILON) {
+    if (validCounts && Math.abs(l.rate - derivedLeakageRate) > 1e-9) {
       vetoReasons.push(
-        `leakageRate=${l.rate.toFixed(6)} exceeds maxAllowedLeakageRate=${maxAllowedLeakageRate}`,
+        `inconsistent_leakageRate:reported(${l.rate})!=derived(${derivedLeakageRate})`,
       );
     }
-    if (maxAllowedLeakageRate === 0 && (l.rate !== 0 || (validLeaked && l.leakedReleasedTurns !== 0))) {
+    if (l.rate > maxAllowedLeakageRate) {
       vetoReasons.push(
-        `zero_leakage_policy_violated:rate=${String(l.rate)},leakedReleasedTurns=${String(l.leakedReleasedTurns)}`,
+        `leakageRate=${l.rate.toFixed(9)} exceeds maxAllowedLeakageRate=${maxAllowedLeakageRate}`,
       );
+    }
+    if (maxAllowedLeakageRate === 0 && l.rate !== 0) {
+      vetoReasons.push(`zero_leakage_policy_violated:rate=${String(l.rate)}`);
     }
   }
 
@@ -605,21 +645,81 @@ export function evaluateParetoFrontierAndPromotion(
     if (candidate.t7.status === "pending") {
       promotionBlockers.push(`t7_pending:${candidate.t7.reason}`);
     } else {
+      const t7 = candidate.t7;
+      const validEligible =
+        isNonNegativeInteger(t7.eligibleFollowupCohortCount) &&
+        t7.eligibleFollowupCohortCount > 0;
+      const validPassed =
+        isNonNegativeInteger(t7.passedFreshTransferCount) &&
+        validEligible &&
+        t7.passedFreshTransferCount <= t7.eligibleFollowupCohortCount;
+      const validClusters =
+        isNonNegativeInteger(t7.learnerClusterCount) &&
+        t7.learnerClusterCount > 0 &&
+        validEligible &&
+        t7.learnerClusterCount <= t7.eligibleFollowupCohortCount;
+
       if (
-        !Number.isFinite(candidate.t7.rate) ||
-        !Number.isFinite(candidate.t7.learnerClusterLowerBound)
+        !validEligible ||
+        !validPassed ||
+        !validClusters ||
+        !Number.isFinite(t7.rate) ||
+        !Number.isFinite(t7.learnerClusterLowerBound)
       ) {
-        promotionBlockers.push("invalid_t7_metrics:non_finite");
+        promotionBlockers.push("invalid_t7_metrics:non_finite_or_inconsistent_counts");
       } else {
-        if (candidate.t7.learnerClusterCount < minClusterCount) {
+        const exactT7Rate = t7.passedFreshTransferCount / t7.eligibleFollowupCohortCount;
+        if (Math.abs(t7.rate - exactT7Rate) > 1e-9) {
           promotionBlockers.push(
-            `insufficient_student_clusters:${candidate.t7.learnerClusterCount}<${minClusterCount}`,
+            `inconsistent_t7_rate:reported(${t7.rate})!=derived(${exactT7Rate})`,
           );
         }
-        const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
-        if (candidate.t7.learnerClusterLowerBound + EPSILON < requiredT7Lcb) {
+        if (
+          t7.alpha !== undefined &&
+          (!Number.isFinite(t7.alpha) || t7.alpha <= 0 || t7.alpha > MAX_PROMOTION_ALPHA + 1e-9)
+        ) {
           promotionBlockers.push(
-            `t7_lcb_below_gain_threshold:${candidate.t7.learnerClusterLowerBound.toFixed(4)}<${requiredT7Lcb.toFixed(4)}`,
+            `t7_alpha_exceeds_max_0_05:${String(t7.alpha)}>${MAX_PROMOTION_ALPHA}`,
+          );
+        }
+        if (
+          !Number.isFinite(t7.effectiveClusterSampleSize) ||
+          t7.effectiveClusterSampleSize <= 0 ||
+          t7.effectiveClusterSampleSize > t7.learnerClusterCount + EPSILON
+        ) {
+          promotionBlockers.push(
+            `invalid_t7_effective_sample_size:${String(t7.effectiveClusterSampleSize)}/${t7.learnerClusterCount}`,
+          );
+        }
+
+        if (t7.learnerClusterCount < minClusterCount) {
+          promotionBlockers.push(
+            `insufficient_student_clusters:${t7.learnerClusterCount}<${minClusterCount}`,
+          );
+        }
+
+        // Independently recompute the exact one-sided 95% (alpha = 0.05) Clopper-Pearson ceiling
+        // so neither alpha > 0.05 nor a custom/forged scorer LCB can promote 5/5 past 0.80.
+        const boundedNEff =
+          Number.isFinite(t7.effectiveClusterSampleSize) && t7.effectiveClusterSampleSize > 0
+            ? Math.min(t7.learnerClusterCount, t7.effectiveClusterSampleSize)
+            : t7.learnerClusterCount;
+        const certifiedCp95Lcb = exactClopperPearsonLowerBound(
+          exactT7Rate * boundedNEff,
+          boundedNEff,
+          MAX_PROMOTION_ALPHA,
+        );
+        if (t7.learnerClusterLowerBound > certifiedCp95Lcb + 1e-9) {
+          promotionBlockers.push(
+            `t7_lcb_exceeds_certified_cp95:${t7.learnerClusterLowerBound.toFixed(4)}>${certifiedCp95Lcb.toFixed(4)}`,
+          );
+        }
+
+        const verifiedLcb = Math.min(t7.learnerClusterLowerBound, certifiedCp95Lcb);
+        const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
+        if (verifiedLcb + EPSILON < requiredT7Lcb) {
+          promotionBlockers.push(
+            `t7_lcb_below_gain_threshold:${verifiedLcb.toFixed(4)}<${requiredT7Lcb.toFixed(4)}`,
           );
         }
         const minAllowedC = options.baseline.cRate - nonInferiorityMargin;

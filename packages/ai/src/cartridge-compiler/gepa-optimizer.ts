@@ -21,10 +21,12 @@ import {
   type ParetoEvaluationOptions,
 } from "./types";
 import {
+  assertNoRawPiiInText,
   assertNoRawPiiInValue,
   canonicalizeIdentifier,
   canonicalizeTrajectoryRecord,
   clusterErrorTrajectories,
+  normalizeAstEdit,
   validateRubricAnchorPair,
 } from "./clustering";
 import { evaluateParetoFrontierAndPromotion } from "./pareto";
@@ -37,6 +39,40 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
   "__proto__",
   "constructor",
   "prototype",
+]);
+const PATCH_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(["surface", "summary", "payload"]);
+const MOVE_RULE_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "conceptId",
+  "triggerRuleId",
+  "missingPremise",
+  "move",
+  "priority",
+]);
+const HINT_STEP_KEYS: ReadonlySet<string> = new Set([
+  "stage",
+  "conceptId",
+  "cueTemplate",
+  "revealsPremiseCheck",
+]);
+const RUBRIC_RULE_KEYS: ReadonlySet<string> = new Set([
+  "ruleId",
+  "conceptId",
+  "firstErrorRuleId",
+  "requiredAstTokens",
+  "requiredMissingPremise",
+  "positiveAnchors",
+  "negativeAnchors",
+]);
+const RUBRIC_ANCHOR_KEYS: ReadonlySet<string> = new Set([
+  "anchorId",
+  "label",
+  "conceptId",
+  "firstErrorRuleId",
+  "normalizedAstEdit",
+  "establishedPremises",
+  "expression",
+  "rationale",
 ]);
 const MAX_SLOT_KEY_LENGTH = 256;
 const MAX_PATCH_STRING_LENGTH = 4096;
@@ -77,6 +113,20 @@ function checkPrototypePollutionKeys(
   }
 }
 
+function checkOnlyDeclaredKeys(
+  obj: Record<string, unknown>,
+  allowedKeys: ReadonlySet<string>,
+  path: string,
+  issues: string[],
+): void {
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+    if (!allowedKeys.has(key)) {
+      issues.push(`${path}:undeclared_key(${key})`);
+    }
+  }
+}
+
 function checkNonEmptyStringField(
   obj: Record<string, unknown>,
   key: string,
@@ -100,6 +150,7 @@ function validateRubricAnchorExampleShape(
     return;
   }
   checkPrototypePollutionKeys(value, path, issues);
+  checkOnlyDeclaredKeys(value, RUBRIC_ANCHOR_KEYS, path, issues);
   checkNonEmptyStringField(value, "anchorId", path, issues);
   if (value.label !== "positive" && value.label !== "negative") {
     issues.push(`${path}.label:must_be_positive_or_negative`);
@@ -135,6 +186,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
           return;
         }
         checkPrototypePollutionKeys(item, path, issues);
+        checkOnlyDeclaredKeys(item, MOVE_RULE_KEYS, path, issues);
         checkNonEmptyStringField(item, "id", path, issues);
         checkNonEmptyStringField(item, "conceptId", path, issues);
         checkNonEmptyStringField(item, "triggerRuleId", path, issues);
@@ -159,6 +211,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
           return;
         }
         checkPrototypePollutionKeys(item, path, issues);
+        checkOnlyDeclaredKeys(item, HINT_STEP_KEYS, path, issues);
         if (
           typeof item.stage !== "number" ||
           !Number.isFinite(item.stage) ||
@@ -188,6 +241,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
           return;
         }
         checkPrototypePollutionKeys(item, path, issues);
+        checkOnlyDeclaredKeys(item, RUBRIC_RULE_KEYS, path, issues);
         checkNonEmptyStringField(item, "ruleId", path, issues);
         checkNonEmptyStringField(item, "conceptId", path, issues);
         checkNonEmptyStringField(item, "firstErrorRuleId", path, issues);
@@ -614,6 +668,16 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
     );
   }
 
+  const topDeclaredIssues: string[] = [];
+  checkOnlyDeclaredKeys(patch, PATCH_TOP_LEVEL_KEYS, "patch", topDeclaredIssues);
+  if (topDeclaredIssues.length > 0) {
+    throw new GepaInvalidPatchPayloadError(
+      `GEPA patch contains undeclared top-level keys: ${topDeclaredIssues.join(", ")}`,
+      surface,
+      topDeclaredIssues,
+    );
+  }
+
   if (
     typeof patch.summary !== "string" ||
     patch.summary.trim().length === 0 ||
@@ -628,6 +692,71 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
 
   validateSurfacePayloadSchema(surface, patch.payload);
   assertNoRawPiiInValue(patch, `gepa_patch:${surface}`);
+  // Post-normalization PII scan on rubric anchor expressions/AST tokens/premises.
+  if (surface === "rubricAnchors") {
+    for (const rule of patch.payload as readonly MisconceptionRubricRule[]) {
+      assertNoRawPiiInText(
+        normalizeAstEdit(rule.requiredAstTokens.join("|")),
+        `gepa_patch:rubricAnchors.${rule.ruleId}.requiredAstTokens(post_norm)`,
+      );
+      for (const anchor of [...rule.positiveAnchors, ...rule.negativeAnchors]) {
+        assertNoRawPiiInText(
+          normalizeAstEdit(anchor.normalizedAstEdit),
+          `gepa_patch:rubricAnchors.${rule.ruleId}.${anchor.anchorId}(post_norm)`,
+        );
+      }
+    }
+  }
+}
+
+function cloneMoveRule(rule: CartridgeMoveRule): CartridgeMoveRule {
+  return {
+    id: rule.id,
+    conceptId: rule.conceptId,
+    triggerRuleId: rule.triggerRuleId,
+    missingPremise: rule.missingPremise,
+    move: rule.move,
+    priority: rule.priority,
+  };
+}
+
+function cloneHintStep(step: CartridgeHintStep): CartridgeHintStep {
+  return {
+    stage: step.stage,
+    conceptId: step.conceptId,
+    cueTemplate: step.cueTemplate,
+    revealsPremiseCheck: step.revealsPremiseCheck,
+  };
+}
+
+function cloneRubricRule(rule: MisconceptionRubricRule): MisconceptionRubricRule {
+  return {
+    ruleId: rule.ruleId,
+    conceptId: rule.conceptId,
+    firstErrorRuleId: rule.firstErrorRuleId,
+    requiredAstTokens: [...rule.requiredAstTokens],
+    requiredMissingPremise: rule.requiredMissingPremise,
+    positiveAnchors: rule.positiveAnchors.map((a) => ({
+      anchorId: a.anchorId,
+      label: a.label,
+      conceptId: a.conceptId,
+      firstErrorRuleId: a.firstErrorRuleId,
+      normalizedAstEdit: a.normalizedAstEdit,
+      establishedPremises: [...a.establishedPremises],
+      expression: a.expression,
+      rationale: a.rationale,
+    })),
+    negativeAnchors: rule.negativeAnchors.map((a) => ({
+      anchorId: a.anchorId,
+      label: a.label,
+      conceptId: a.conceptId,
+      firstErrorRuleId: a.firstErrorRuleId,
+      normalizedAstEdit: a.normalizedAstEdit,
+      establishedPremises: [...a.establishedPremises],
+      expression: a.expression,
+      rationale: a.rationale,
+    })),
+  };
 }
 
 function bumpPolicyVersion(version: string, suffix: string): string {
@@ -636,8 +765,9 @@ function bumpPolicyVersion(version: string, suffix: string): string {
 
 /**
  * Applies a validated declarative patch to a cartridge policy, returning a new
- * immutable policy. Rejects forbidden surfaces, malformed payload shapes,
- * raw PII in patch strings, and invalid rubric anchor pairs.
+ * immutable policy reconstructed strictly from validated declared fields.
+ * Rejects forbidden surfaces, undeclared/malformed payload shapes, raw PII in
+ * patch strings, and invalid rubric anchor pairs.
  */
 export function validateAndApplyGepaPatch(
   policy: CartridgeDeclarativePolicy,
@@ -648,9 +778,11 @@ export function validateAndApplyGepaPatch(
 
   switch (patch.surface) {
     case "moveRules": {
-      const merged = new Map<string, CartridgeMoveRule>(policy.moveRules.map((r) => [r.id, r]));
+      const merged = new Map<string, CartridgeMoveRule>(
+        policy.moveRules.map((r) => [r.id, cloneMoveRule(r)]),
+      );
       for (const rule of patch.payload) {
-        merged.set(rule.id, { ...rule });
+        merged.set(rule.id, cloneMoveRule(rule));
       }
       const sortedRules = [...merged.values()].sort((a, b) =>
         b.priority !== a.priority ? b.priority - a.priority : a.id.localeCompare(b.id),
@@ -664,10 +796,10 @@ export function validateAndApplyGepaPatch(
 
     case "hintLadder": {
       const merged = new Map<string, CartridgeHintStep>(
-        policy.hintLadder.map((h) => [`${h.conceptId}::${h.stage}`, h]),
+        policy.hintLadder.map((h) => [`${h.conceptId}::${h.stage}`, cloneHintStep(h)]),
       );
       for (const step of patch.payload) {
-        merged.set(`${step.conceptId}::${step.stage}`, { ...step });
+        merged.set(`${step.conceptId}::${step.stage}`, cloneHintStep(step));
       }
       const sortedHints = [...merged.values()].sort((a, b) => {
         const cmp = a.conceptId.localeCompare(b.conceptId);
@@ -681,7 +813,8 @@ export function validateAndApplyGepaPatch(
     }
 
     case "rubricAnchors": {
-      for (const rule of patch.payload) {
+      const sanitizedRules = patch.payload.map((rule) => cloneRubricRule(rule));
+      for (const rule of sanitizedRules) {
         const check = validateRubricAnchorPair(rule);
         if (!check.valid) {
           throw new InvalidRubricAnchorPairError(
@@ -692,9 +825,9 @@ export function validateAndApplyGepaPatch(
         }
       }
       const merged = new Map<string, MisconceptionRubricRule>(
-        policy.rubricAnchors.map((r) => [r.ruleId, r]),
+        policy.rubricAnchors.map((r) => [r.ruleId, cloneRubricRule(r)]),
       );
-      for (const rule of patch.payload) {
+      for (const rule of sanitizedRules) {
         merged.set(rule.ruleId, rule);
       }
       const sortedRubrics = [...merged.values()].sort((a, b) => a.ruleId.localeCompare(b.ruleId));
@@ -749,7 +882,7 @@ export function buildGepaReflectionContext(
   assertNoHoldoutLeakage(input.devTrajectories, input.holdoutFirewall);
 
   const summary = clusterErrorTrajectories(input.trainTrajectories, input.clusteringOptions);
-  return {
+  const context: GepaReflectionContext = {
     policyId: input.policy.policyId,
     policyVersion: input.policy.version,
     trainTrajectoryCount: input.trainTrajectories.length,
@@ -768,6 +901,8 @@ export function buildGepaReflectionContext(
     allowedSurfaces: ALLOWED_GEPA_MUTATION_SURFACES,
     currentPolicy: input.policy,
   };
+  assertNoRawPiiInValue(context, "gepa_reflection_output");
+  return context;
 }
 
 /**

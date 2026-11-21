@@ -282,6 +282,7 @@ export class Stage0ValidationError extends Error {
     readonly code:
       | "empty_episodes"
       | "incomplete_matrix"
+      | "tampered_episode"
       | "invalid_threshold"
       | "invalid_max_turns",
   ) {
@@ -297,6 +298,7 @@ export interface Stage0MatrixCoverage {
   readonly missingCellCount: number;
   readonly duplicateCellCount: number;
   readonly unknownCellCount: number;
+  readonly tamperedCellCount: number;
 }
 
 export interface Stage0EvaluationReport {

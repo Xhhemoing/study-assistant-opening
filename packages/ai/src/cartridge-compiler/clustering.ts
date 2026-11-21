@@ -18,11 +18,13 @@ const INTL_PHONE_PATTERN =
   /(?:^|[^\w])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})\b/;
 const SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/;
 const TOKEN_URL_PATTERN =
-  /https?:\/\/[^\s]*?(?:[?&](?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)=|[^/\s@]+:[^/\s@]+@)/i;
-const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/;
-const BEARER_TOKEN_PATTERN = /\bbearer\s+[A-Za-z0-9._~+/-]{12,}\b/i;
+  /https?:\/\/[^\s]*?(?:[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=|[^/\s@]+:[^/\s@]+@)/i;
+const SPACED_TOKEN_URL_PATTERN =
+  /https?:\/\/\S+(?:\s*[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=\s*\S+)/i;
+const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/;
+const BEARER_TOKEN_PATTERN = /\bbearer\s+[A-Za-z0-9._~+/-]{8,}\b/i;
 const RAW_PII_ASSIGNMENT_PATTERN =
-  /\b(?:student[_\s-]?id|raw[_\s-]?user[_\s-]?id|user[_\s-]?id|full[_\s-]?name|real[_\s-]?name|email|phone|tel|ssn)\s*[:=]\s*[^\s,;]+/i;
+  /\b(?:student[_\s-]?id|raw[_\s-]?user[_\s-]?id|user[_\s-]?id|full[_\s-]?name|real[_\s-]?name|email|phone|tel|ssn|access[_\s-]?token|api[_\s-]?key|password|passwd|secret)\s*[:=]\s*[^\s,;]+/i;
 const RAW_PII_PREFIX_PATTERN =
   /(?:^|[\s(|;,])(?:raw|email|mail|phone|tel|ssn|name):[^\s,;)|]+/i;
 
@@ -75,7 +77,9 @@ function detectRawPiiReasonsInText(text: string): string[] {
   if (EMAIL_PATTERN.test(normalized)) reasons.push("email");
   if (PHONE_PATTERN.test(normalized) || INTL_PHONE_PATTERN.test(normalized)) reasons.push("phone");
   if (SSN_PATTERN.test(normalized)) reasons.push("ssn");
-  if (TOKEN_URL_PATTERN.test(normalized)) reasons.push("url_with_credentials_or_token");
+  if (TOKEN_URL_PATTERN.test(normalized) || SPACED_TOKEN_URL_PATTERN.test(normalized)) {
+    reasons.push("url_with_credentials_or_token");
+  }
   if (JWT_PATTERN.test(normalized) || BEARER_TOKEN_PATTERN.test(normalized)) {
     reasons.push("auth_token");
   }
@@ -247,32 +251,41 @@ export function assertPseudonymizedTrajectory(record: ErrorTrajectoryRecord): vo
       offendingFields.push("learnerPseudoId:invalid_format");
     } else {
       const lowerPseudo = canonicalPseudo.toLowerCase();
+      const pseudoPiiReasons = detectRawPiiReasonsInText(canonicalPseudo);
       if (
-        EMAIL_PATTERN.test(canonicalPseudo) ||
-        PHONE_PATTERN.test(canonicalPseudo) ||
-        INTL_PHONE_PATTERN.test(canonicalPseudo) ||
-        SSN_PATTERN.test(canonicalPseudo) ||
+        pseudoPiiReasons.length > 0 ||
         canonicalPseudo.includes("@") ||
         FORBIDDEN_PSEUDO_PREFIXES.some((prefix) => lowerPseudo.startsWith(prefix))
       ) {
-        offendingFields.push("learnerPseudoId:raw_pii_detected");
+        offendingFields.push(
+          ...pseudoPiiReasons.map((r) => `learnerPseudoId:${r}`),
+          "learnerPseudoId:raw_pii_detected",
+        );
       }
     }
   }
 
-  // Scan ALL keys and string leaves (including normalizedAstEdit, missingPremise, snippet, and any extra/nested steps).
-  collectRawPiiViolations(
-    rawObject,
-    "trajectory",
-    offendingFields,
-    new WeakSet(),
-    new Set(["learnerPseudoId"]),
-  );
+  // Scan ALL keys and string leaves (including learnerPseudoId, normalizedAstEdit, missingPremise, snippet, and any extra/nested steps).
+  collectRawPiiViolations(rawObject, "trajectory", offendingFields, new WeakSet());
+
+  // Also scan post-normalization forms so whitespace-obfuscated tokens/URLs cannot emerge after normalization.
+  if (typeof record.normalizedAstEdit === "string") {
+    const postNormAst = normalizeAstEdit(record.normalizedAstEdit);
+    for (const reason of detectRawPiiReasonsInText(postNormAst)) {
+      offendingFields.push(`trajectory.normalizedAstEdit(post_norm):${reason}`);
+    }
+  }
+  if (typeof record.missingPremise === "string") {
+    const postNormPremise = normalizePremise(record.missingPremise);
+    for (const reason of detectRawPiiReasonsInText(postNormPremise)) {
+      offendingFields.push(`trajectory.missingPremise(post_norm):${reason}`);
+    }
+  }
 
   if (offendingFields.length > 0) {
     throw new CartridgePiiViolationError(
-      `Trajectory ${String(record.trajectoryId)} violated pseudonymization boundary: ${offendingFields.join(", ")}`,
-      offendingFields,
+      `Trajectory ${String(record.trajectoryId)} violated pseudonymization boundary: ${[...new Set(offendingFields)].join(", ")}`,
+      [...new Set(offendingFields)],
       rawTrajectoryId,
     );
   }
@@ -314,13 +327,25 @@ export function extractTrajectoryFeatures(
   record: ErrorTrajectoryRecord,
 ): ExtractedTrajectoryFeatures {
   const canonical = canonicalizeTrajectoryRecord(record);
+  const normalizedAstEdit = normalizeAstEdit(canonical.normalizedAstEdit);
+  const missingPremise = normalizePremise(canonical.missingPremise);
+  assertNoRawPiiInText(
+    normalizedAstEdit,
+    "trajectory.normalizedAstEdit:post_norm",
+    canonical.trajectoryId,
+  );
+  assertNoRawPiiInText(
+    missingPremise,
+    "trajectory.missingPremise:post_norm",
+    canonical.trajectoryId,
+  );
   return {
     trajectoryId: canonical.trajectoryId,
     learnerPseudoId: canonical.learnerPseudoId,
     conceptId: canonical.conceptId,
     firstErrorRuleId: canonical.firstErrorRuleId,
-    normalizedAstEdit: normalizeAstEdit(canonical.normalizedAstEdit),
-    missingPremise: normalizePremise(canonical.missingPremise),
+    normalizedAstEdit,
+    missingPremise,
     hintStage: canonical.hintStage,
     itemFamilyId: canonical.itemFamilyId,
   };
@@ -467,6 +492,8 @@ export function clusterErrorTrajectories(
       });
     });
   }
+
+  assertNoRawPiiInValue(clusters, "clustering_output");
 
   return {
     totalTrajectories: trajectories.length,

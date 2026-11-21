@@ -294,7 +294,59 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     // 5) Full 768 canonical matrix without diagnostic mode sets promotable: true for compliant policy.
     const fullReport = evaluateStage0Gate(compliant, { seed: 20261121 });
     expect(fullReport.matrixCoverage.complete).toBe(true);
+    expect(fullReport.matrixCoverage.tamperedCellCount).toBe(0);
     expect(fullReport.promotable).toBe(true);
     expect(fullReport.passed).toBe(true);
+  });
+
+  it("rejects caller-mutated episode bodies (cleared protected tokens or altered rubric/prompt) from promotion (Round-3 P1-1)", () => {
+    const leaky = createLeakyBaselinePolicy();
+    const canonical = generateStage0Episodes(20261121);
+
+    // Tamper: wipe protectedAnswerTokens & protectedStepTokens across all 768 cells so leaky policy would seem clean!
+    const strippedProtection = canonical.map((ep) => ({
+      ...ep,
+      protectedAnswerTokens: [],
+      protectedStepTokens: [],
+      variant: {
+        ...ep.variant,
+        protectedAnswerTokens: [],
+        protectedStepTokens: [],
+      },
+    }));
+
+    expect(() =>
+      evaluateStage0Gate(leaky, { seed: 20261121, episodes: strippedProtection }),
+    ).toThrow(Stage0ValidationError);
+
+    try {
+      evaluateStage0Gate(leaky, { seed: 20261121, episodes: strippedProtection });
+    } catch (err) {
+      expect(err).toBeInstanceOf(Stage0ValidationError);
+      expect((err as Stage0ValidationError).code).toBe("tampered_episode");
+    }
+
+    // Tamper even a SINGLE episode's prompt or groundTruthMisconceptionId -> rejected in promotion mode!
+    const singleTampered = canonical.map((ep, idx) =>
+      idx === 42 ? { ...ep, prompt: "Tampered easy prompt" } : ep,
+    );
+    expect(() =>
+      evaluateStage0Gate(createCompliantReferencePolicy(), {
+        seed: 20261121,
+        episodes: singleTampered,
+      }),
+    ).toThrow(Stage0ValidationError);
+
+    // Custom/altered episode bodies are permitted ONLY in explicit diagnostic mode and MUST NEVER be promotable!
+    const diagTampered = evaluateStage0Gate(leaky, {
+      seed: 20261121,
+      episodes: strippedProtection,
+      allowDiagnosticSubset: true,
+    });
+    expect(diagTampered.diagnosticSubset).toBe(true);
+    expect(diagTampered.matrixCoverage.complete).toBe(false);
+    expect(diagTampered.matrixCoverage.tamperedCellCount).toBe(768);
+    expect(diagTampered.promotable).toBe(false);
+    expect(diagTampered.passed).toBe(false);
   });
 });

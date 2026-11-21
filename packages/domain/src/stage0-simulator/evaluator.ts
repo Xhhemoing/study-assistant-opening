@@ -21,8 +21,6 @@ import {
   STAGE0_DEFAULT_MAX_TURNS,
   STAGE0_DEFAULT_SEED,
   STAGE0_EXPECTED_EPISODE_COUNT,
-  STAGE0_SCENARIOS,
-  STAGE0_VARIANTS_PER_PAIR,
   generateStage0Episodes,
 } from "./episodes";
 import {
@@ -194,31 +192,157 @@ export function runStage0Episode(
   };
 }
 
-const CANONICAL_STAGE0_CELL_KEYS: ReadonlySet<string> = (() => {
-  const keys = new Set<string>();
-  for (const scenario of STAGE0_SCENARIOS) {
-    for (const personaId of STAGE0_PERSONA_IDS) {
-      for (let variantIndex = 0; variantIndex < STAGE0_VARIANTS_PER_PAIR; variantIndex += 1) {
-        keys.add(`${scenario.scenarioId}::${personaId}::${variantIndex}`);
-      }
+function stringArraysEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function episodeMatchesCanonicalSpec(
+  candidate: Stage0EpisodeSpec,
+  canonical: Stage0EpisodeSpec,
+): boolean {
+  if (
+    candidate.episodeId !== canonical.episodeId ||
+    candidate.seed !== canonical.seed ||
+    candidate.scenarioId !== canonical.scenarioId ||
+    candidate.domain !== canonical.domain ||
+    candidate.conceptId !== canonical.conceptId ||
+    candidate.itemFamilyId !== canonical.itemFamilyId ||
+    candidate.freshTransferFamilyId !== canonical.freshTransferFamilyId ||
+    candidate.personaId !== canonical.personaId ||
+    candidate.variantIndex !== canonical.variantIndex ||
+    candidate.prompt !== canonical.prompt ||
+    candidate.groundTruthMisconceptionId !== canonical.groundTruthMisconceptionId ||
+    candidate.missingPremise !== canonical.missingPremise ||
+    candidate.isCarelessSlip !== canonical.isCarelessSlip ||
+    candidate.isAmbiguousNotation !== canonical.isAmbiguousNotation ||
+    candidate.remediationTarget !== canonical.remediationTarget ||
+    candidate.maxTurns !== canonical.maxTurns
+  ) {
+    return false;
+  }
+
+  if (
+    !stringArraysEqual(candidate.protectedAnswerTokens, canonical.protectedAnswerTokens) ||
+    !stringArraysEqual(candidate.protectedStepTokens, canonical.protectedStepTokens)
+  ) {
+    return false;
+  }
+
+  if (
+    !Array.isArray(candidate.candidateMisconceptions) ||
+    candidate.candidateMisconceptions.length !== canonical.candidateMisconceptions.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < canonical.candidateMisconceptions.length; i += 1) {
+    const cm = candidate.candidateMisconceptions[i];
+    const em = canonical.candidateMisconceptions[i];
+    if (
+      !cm ||
+      !em ||
+      cm.misconceptionId !== em.misconceptionId ||
+      cm.missingPremise !== em.missingPremise ||
+      cm.canonicalErrorSignal !== em.canonicalErrorSignal ||
+      cm.description !== em.description
+    ) {
+      return false;
     }
   }
-  return keys;
-})();
+
+  const cv = candidate.variant;
+  const ev = canonical.variant;
+  if (
+    !cv ||
+    cv.variantIndex !== ev.variantIndex ||
+    cv.prompt !== ev.prompt ||
+    cv.masteredWork !== ev.masteredWork ||
+    cv.misconceptionWork !== ev.misconceptionWork ||
+    cv.ambiguousWork !== ev.ambiguousWork ||
+    cv.clarifiedWork !== ev.clarifiedWork ||
+    cv.slipWork !== ev.slipWork ||
+    cv.repairedWork !== ev.repairedWork ||
+    cv.wheelSpinWork !== ev.wheelSpinWork ||
+    cv.analogCue !== ev.analogCue ||
+    cv.freshTransferPrompt !== ev.freshTransferPrompt ||
+    !stringArraysEqual(cv.protectedAnswerTokens, ev.protectedAnswerTokens) ||
+    !stringArraysEqual(cv.protectedStepTokens, ev.protectedStepTokens)
+  ) {
+    return false;
+  }
+
+  const cs = candidate.scenario;
+  const es = canonical.scenario;
+  if (
+    !cs ||
+    cs.scenarioId !== es.scenarioId ||
+    cs.domain !== es.domain ||
+    cs.conceptId !== es.conceptId ||
+    cs.itemFamilyId !== es.itemFamilyId ||
+    cs.freshTransferFamilyId !== es.freshTransferFamilyId ||
+    cs.title !== es.title ||
+    cs.misconceptionId !== es.misconceptionId ||
+    cs.misconceptionDescription !== es.misconceptionDescription ||
+    cs.missingPremise !== es.missingPremise ||
+    cs.canonicalErrorSignal !== es.canonicalErrorSignal ||
+    cs.ambiguousNotationSignal !== es.ambiguousNotationSignal ||
+    cs.clarificationCue !== es.clarificationCue ||
+    cs.slipSignal !== es.slipSignal ||
+    !cs.distractorMisconception ||
+    cs.distractorMisconception.misconceptionId !== es.distractorMisconception.misconceptionId ||
+    cs.distractorMisconception.missingPremise !== es.distractorMisconception.missingPremise ||
+    cs.distractorMisconception.canonicalErrorSignal !==
+      es.distractorMisconception.canonicalErrorSignal ||
+    cs.distractorMisconception.description !== es.distractorMisconception.description
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+export interface VerifyStage0MatrixOptions {
+  readonly seed?: number;
+  readonly maxTurns?: number;
+}
 
 export function verifyStage0MatrixCoverage(
   episodes: readonly Stage0EpisodeSpec[],
+  options: VerifyStage0MatrixOptions = {},
 ): Stage0MatrixCoverage {
+  const canonicalEpisodes = generateStage0Episodes(
+    options.seed ?? STAGE0_DEFAULT_SEED,
+    options.maxTurns ?? STAGE0_DEFAULT_MAX_TURNS,
+  );
+  const canonicalByCell = new Map<string, Stage0EpisodeSpec>();
+  for (const spec of canonicalEpisodes) {
+    canonicalByCell.set(`${spec.scenarioId}::${spec.personaId}::${spec.variantIndex}`, spec);
+  }
+
   const seenCanonical = new Set<string>();
+  const seenKeys = new Set<string>();
   let duplicateCellCount = 0;
   let unknownCellCount = 0;
+  let tamperedCellCount = 0;
 
   for (const episode of episodes) {
     const key = `${episode.scenarioId}::${episode.personaId}::${episode.variantIndex}`;
-    if (!CANONICAL_STAGE0_CELL_KEYS.has(key)) {
+    const canonical = canonicalByCell.get(key);
+    if (!canonical) {
       unknownCellCount += 1;
-    } else if (seenCanonical.has(key)) {
+      continue;
+    }
+    if (seenKeys.has(key)) {
       duplicateCellCount += 1;
+      continue;
+    }
+    seenKeys.add(key);
+
+    if (!episodeMatchesCanonicalSpec(episode, canonical)) {
+      tamperedCellCount += 1;
     } else {
       seenCanonical.add(key);
     }
@@ -231,7 +355,8 @@ export function verifyStage0MatrixCoverage(
     coveredCanonicalCells === STAGE0_EXPECTED_EPISODE_COUNT &&
     missingCellCount === 0 &&
     duplicateCellCount === 0 &&
-    unknownCellCount === 0;
+    unknownCellCount === 0 &&
+    tamperedCellCount === 0;
 
   return {
     complete,
@@ -240,6 +365,7 @@ export function verifyStage0MatrixCoverage(
     missingCellCount,
     duplicateCellCount,
     unknownCellCount,
+    tamperedCellCount,
   };
 }
 
@@ -249,8 +375,8 @@ export interface EvaluateStage0Options {
   readonly episodes?: readonly Stage0EpisodeSpec[];
   readonly thresholds?: Partial<Stage0GateThresholds>;
   /**
-   * Explicit diagnostic mode for partial episode subsets.
-   * When true, partial subsets are evaluated for diagnostics only and
+   * Explicit diagnostic mode for partial or custom episode subsets.
+   * When true, custom/partial subsets are evaluated for diagnostics only and
    * `promotable` / `passed` MUST ALWAYS remain `false`.
    */
   readonly allowDiagnosticSubset?: boolean;
@@ -317,8 +443,14 @@ export function evaluateStage0Gate(
     );
   }
 
-  const matrixCoverage = verifyStage0MatrixCoverage(episodeSpecs);
+  const matrixCoverage = verifyStage0MatrixCoverage(episodeSpecs, { seed, maxTurns });
   if (!matrixCoverage.complete && !diagnosticSubset) {
+    if (matrixCoverage.tamperedCellCount > 0) {
+      throw new Stage0ValidationError(
+        `Stage-0 promotion rejected caller-mutated episode definition(s): tampered=${matrixCoverage.tamperedCellCount}/${matrixCoverage.expectedCanonicalCells}. Pass allowDiagnosticSubset: true for non-promotable custom diagnostics.`,
+        "tampered_episode",
+      );
+    }
     throw new Stage0ValidationError(
       `Stage-0 promotion requires full 768-cell canonical matrix coverage (covered=${matrixCoverage.coveredCanonicalCells}/${matrixCoverage.expectedCanonicalCells}, missing=${matrixCoverage.missingCellCount}, duplicate=${matrixCoverage.duplicateCellCount}, unknown=${matrixCoverage.unknownCellCount}). Pass allowDiagnosticSubset: true for non-promotable diagnostics.`,
       "incomplete_matrix",
