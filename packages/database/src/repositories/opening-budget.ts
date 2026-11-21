@@ -847,6 +847,7 @@ export function createOpeningBudgetRepository(
         if (actualCents === 0 && (row.reservedAmountCents ?? row.amountCents) !== 0) {
           throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
         }
+        let reservationOverrunAlert: BudgetReconcileEvent | null = null;
         if (actualCents > (row.reservedAmountCents ?? row.amountCents)) {
           if (row.parentInteractionId) {
             await tx`UPDATE opening_parent_interaction_budgets
@@ -857,7 +858,7 @@ export function createOpeningBudgetRepository(
             (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, created_at)
             VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${row.reservedAmountCents ?? row.amountCents}, ${instant})
             ON CONFLICT (reservation_id, kind) DO NOTHING RETURNING *`;
-          if (event.length) alerts.push(mapEvent(event[0] as Record<string, unknown>));
+          if (event.length) reservationOverrunAlert = mapEvent(event[0] as Record<string, unknown>);
         }
         if (row.state === "reserved") {
           const rows = await tx`
@@ -868,6 +869,7 @@ export function createOpeningBudgetRepository(
             WHERE id = ${reservationId}
             RETURNING *
           `;
+          if (reservationOverrunAlert) alerts.push(reservationOverrunAlert);
           return mapReservation(rows[0] as Record<string, unknown>);
         }
         const reconcilingMediaUpperBound = row.state === "completed"
@@ -930,16 +932,30 @@ export function createOpeningBudgetRepository(
               AND created_at < ${reservationDay.budgetDay.nextDayStart}
           `;
         const usageAfter = Number(usage[0]?.used ?? 0);
+        let dailyCapOverrunAlert: BudgetReconcileEvent | null = null;
         if (!reservationDay.unlimited && usageAfter > reservationDay.capCents) {
+          // Reservation-overage inserts leave usage_after_cents NULL; upgrade that
+          // slot once on daily-cap overrun while skipping rows that already have
+          // usage_after_cents recorded so replays never double-fire alerts.
           const overrun = await tx`
             INSERT INTO opening_budget_reconcile_events
               (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, usage_after_cents, created_at)
             VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${usageAfter - actualCents}, ${usageAfter}, ${actualCents}, ${row.state}, ${reservationDay.capCents}, ${usageAfter}, ${instant})
-            ON CONFLICT (reservation_id, kind) DO NOTHING
+            ON CONFLICT (reservation_id, kind) DO UPDATE
+              SET amount_before_cents = excluded.amount_before_cents,
+                  amount_after_cents = excluded.amount_after_cents,
+                  reported_actual_cents = excluded.reported_actual_cents,
+                  state_before = excluded.state_before,
+                  cap_cents = excluded.cap_cents,
+                  usage_after_cents = excluded.usage_after_cents,
+                  created_at = excluded.created_at
+            WHERE opening_budget_reconcile_events.usage_after_cents IS NULL
             RETURNING *
           `;
-          if (overrun.length) alerts.push(mapEvent(overrun[0] as Record<string, unknown>));
+          if (overrun.length) dailyCapOverrunAlert = mapEvent(overrun[0] as Record<string, unknown>);
         }
+        const overrunAlert = dailyCapOverrunAlert ?? reservationOverrunAlert;
+        if (overrunAlert) alerts.push(overrunAlert);
         return mapReservation(rows[0] as Record<string, unknown>);
       });
       for (const alert of alerts) await onReconcileAlert?.(alert);

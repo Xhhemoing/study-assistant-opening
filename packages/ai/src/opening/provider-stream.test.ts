@@ -119,6 +119,56 @@ describe("direct Markdown streaming", () => {
     });
   });
 
+  it("leaves usage unresolved on normal completion when a frame after new content only repeats the previous output count", async () => {
+    for (const includeUsageOnStop of [false, true]) {
+      const h = harness();
+      const tail = includeUsageOnStop
+        ? event({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 24, completion_tokens: 5 } }) + done
+        : stop + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 5 } }) + done;
+      h.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 5 } })
+        + delta(" more") + tail);
+      await expect(h.provider.complete(input)).resolves.toMatchObject({
+        text: "answer more", inputTokens: null, outputTokens: null, cachedInputTokens: null,
+      });
+    }
+  });
+
+  it("keeps identical repeated terminal summary usage valid when no new content arrived in between", async () => {
+    const h = harness();
+    h.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 8 } })
+      + stop + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 8 } }) + done);
+    await expect(h.provider.complete(input)).resolves.toMatchObject({
+      text: "answer", inputTokens: 24, outputTokens: 8, cachedInputTokens: null,
+    });
+  });
+
+  it("does not validate repeated earlier partial usage on failure after more output arrives", async () => {
+    const h = harness(), receipt = vi.fn();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    h.write(delta("partial") + event({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 5 } })
+      + delta(" more") + event({ choices: [{ index: 0, delta: {}, finish_reason: "length" }] })
+      + event({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 5 } }) + done);
+    await expect(h.provider.complete(input, undefined, deliver)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+    expect(receipt).not.toHaveBeenCalled();
+  });
+
+  it("accepts strictly larger usage after interim usage and additional content on completion and length failure", async () => {
+    const h1 = harness();
+    h1.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 5 } })
+      + delta(" more") + stop + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 12 } }) + done);
+    await expect(h1.provider.complete(input)).resolves.toMatchObject({
+      text: "answer more", inputTokens: 24, outputTokens: 12, cachedInputTokens: null,
+    });
+
+    const h2 = harness(), receipt = vi.fn();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    h2.write(delta("partial") + event({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 5 } })
+      + delta(" more") + event({ choices: [{ index: 0, delta: {}, finish_reason: "length" }] })
+      + event({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 11 } }) + done);
+    await expect(h2.provider.complete(input, undefined, deliver)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+    expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: "stream-1", inputTokens: 37, outputTokens: 11, cachedInputTokens: null });
+  });
+
   it("does not validate earlier partial usage on failure when a zero-count trailer follows more output", async () => {
     const h = harness(), receipt = vi.fn();
     const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });

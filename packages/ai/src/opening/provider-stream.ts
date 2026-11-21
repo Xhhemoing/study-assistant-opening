@@ -102,7 +102,8 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
           invalidTrailer = true;
         }
         const monotonicOutput = parsedUsage.outputTokens !== null
-          && (prevOutput === null || parsedUsage.outputTokens >= prevOutput)
+          && (prevOutput === null
+            || (outputAfterLastUsage ? parsedUsage.outputTokens > prevOutput : parsedUsage.outputTokens >= prevOutput))
           && (!hasEmittedOutput || parsedUsage.outputTokens > 0);
         highestUsage = {
           inputTokens: nextInput,
