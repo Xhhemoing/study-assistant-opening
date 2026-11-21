@@ -22,9 +22,11 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     const kinds = page.visualKinds;
     if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some(kind => !["scan", "formula", "table", "picture"].includes(kind)) || new Set(kinds).size !== kinds.length)) throw new TypeError("invalid visual page metadata");
     if (page.sectionSealedAtEnd !== undefined && typeof page.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid sectionSealedAtEnd metadata");
+    if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
     return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null,
       ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }),
-      ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }) };
+      ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }),
+      ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }) };
   });
   if (new Set(pages.map((page) => page.page)).size !== pages.length) throw new RangeError("duplicate page number");
   return pages;

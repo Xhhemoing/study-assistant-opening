@@ -51,7 +51,7 @@ _VISUAL_CAPTION_REF_RE = re.compile(r"^(?:Figure|Fig\.?|Chart|Diagram|Scheme|图
 # avoid matching lowercase wrapped prose like "solution." or bare chemistry "Solutions").
 _SECTION_SEALED_RE = re.compile(
     r"^(?:"
-    r"(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]|附录\s*[A-Z0-9一二三四五六七八九十]+)\s*[:：.\-—]?\s*)?"
+    r"(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲]|附录\s*[A-Z0-9一二三四五六七八九十]+)\s*[:：.\-—]?\s*)?"
     r"(?:(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Key\s+(?:to|TO)\s+(?:the\s+|THE\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\s+(?:to|TO)\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\s+Questions?|REVIEW\s+QUESTIONS?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Self-Check\s+Exercises?|SELF-CHECK\s+EXERCISES?|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|Answer\s+Section|ANSWER\s+SECTION|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+(?:and|AND)\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
@@ -63,7 +63,7 @@ _SECTION_SEALED_RE = re.compile(
 )
 _INLINE_WITH_BODY_CHECK_RE = re.compile(r"[:：]\s*\S")
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
-    r"^(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部])\s*[:：.\-—]?\s*)?"
+    r"^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])\s*[:：.\-—]?\s*)?"
     r"(?:Answers?\s+(?:to|TO)\s+|ANSWERS?\s+(?:to|TO)\s+|Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|"
     r"Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|"
     r"Solutions?\s+(?:to|TO)\s+|SOLUTIONS?\s+(?:to|TO)\s+|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|"
@@ -71,6 +71,9 @@ _QUALIFIED_MULTI_SECTION_RE = re.compile(
     r"Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|"
     r"Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|"
     r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案)"
+    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])\s*[:：.\-—]\s*"
+    r"(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)"
+    r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)"
 )
 
 # Single-item inline answers attached to an exercise (always requires explicit ':' / '：' or 【...】).
@@ -159,14 +162,16 @@ _SECTION_BREAK_RE = re.compile(
     re.IGNORECASE,
 )
 _TITLED_CHAPTER_RE = re.compile(
-    r"^(?:(?:Chapter|Part|Section)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲])(?:\s*[:：.\-—]\s*|\s+)?(?P<title>.*)$",
+    r"^(?:(?:Chapter|Part|Section|Lecture)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲])(?:\s*[:：.\-—]\s*|\s+)?(?P<title>.*)$",
     re.IGNORECASE,
 )
-_ANSWER_TITLE_WORD_RE = re.compile(r"(?:Answer|Solution|Exercise|Problem|答案|解答|习题|练习)", re.IGNORECASE)
+_ANSWER_TITLE_WORD_RE = re.compile(r"(?:Answer|Solution|Exercise|Problem|Review|Practice|答案|解答|习题|练习|思考题)", re.IGNORECASE)
 _TEXTBOOK_NON_ANSWER_HEADING_RE = re.compile(
     r"^(?:"
-    r"(?:Definition|Notation|Terminology|Convention|Theorem|Lemma|Proposition|Corollary|Axiom|Conjecture|Claim|Worked\s+Example|Example|Lecture)\b"
-    r"|(?:定义|记号|约定|定理|引理|推论|命题|公理|猜想|例题|例\s*\d+|例\s*[:：]|第\s*[一二三四五六七八九十百千\d]+\s*讲)"
+    r"(?:Definition|Notation|Terminology|Convention|Theorem|Lemma|Proposition|Corollary|Axiom|Conjecture|Claim|Worked\s+Example|Example)\b"
+    r"|Lecture\s+(?:\d+|[IVXLCDM]+)\b(?!.*(?i:Answer\s+Key|\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?)\b|参考答案|标准答案|课后(?:习题|练习)?答案|习题答案|练习答案|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答|习题|练习))"
+    r"|(?:定义|记号|约定|定理|引理|推论|命题|公理|猜想|例题|例\s*\d+|例\s*[:：])"
+    r"|第\s*[一二三四五六七八九十百千\d]+\s*讲(?:\s*[:：.\-—]\s*|\s+|$)(?!.*(?i:参考答案|标准答案|课后(?:习题|练习)?答案|习题答案|练习答案|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答|习题|练习|Answer\s+Key|\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?)\b))"
     r")"
 )
 _MAJOR_NON_ANSWER_HEADING_RE = re.compile(
@@ -241,6 +246,7 @@ class PhysicalPagesExtraction:
     discourse_blocks_by_page: dict[int, list[DiscourseBlock]]
     visual_kinds_by_page: dict[int, list[str]]
     section_sealed_by_page: dict[int, bool] = field(default_factory=dict)
+    had_sealed_by_page: dict[int, bool] = field(default_factory=dict)
 
 
 def _normalized_label(node):
@@ -369,6 +375,8 @@ def _is_titled_non_answer_chapter(stripped: str) -> bool:
 
 
 def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
+    if _is_section_sealed_opener(stripped):
+        return False
     if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped):
         return True
     if _TEXTBOOK_NON_ANSWER_HEADING_RE.match(stripped):
@@ -377,7 +385,13 @@ def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_h
         return True
     if _STANDALONE_SOLUTION_HEADING_RE.match(stripped):
         return False
-    if (frag_label in _HEADING_LABELS or is_markdown_heading) and not _SECTION_BREAK_RE.match(stripped) and not _EXERCISE_RE.match(stripped) and not _SECTION_SEALED_RE.match(stripped) and not _INLINE_SEALED_ALWAYS_RE.match(stripped) and not _INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) and not re.search(r"(?:\b(?:Answers?|Solutions?|Exercises?|Problems?|Chapters?|Sections?|Parts?)\b|答案|解答|习题|练习|章|节)", stripped, re.IGNORECASE):
+    if re.match(
+        r"^(?:(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）]|(?:True|False|Yes|No|None)\.?$)",
+        stripped,
+        re.IGNORECASE,
+    ):
+        return False
+    if (frag_label in _HEADING_LABELS or is_markdown_heading) and not _SECTION_BREAK_RE.match(stripped) and not _EXERCISE_RE.match(stripped) and not _SECTION_SEALED_RE.match(stripped) and not _INLINE_SEALED_ALWAYS_RE.match(stripped) and not _INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) and not re.search(r"(?:\b(?:Answers?|Solutions?|Exercises?|Problems?|Chapters?|Sections?|Parts?|Lectures?)\b|答案|解答|习题|练习|章|节|篇|部|讲)", stripped, re.IGNORECASE):
         return True
     if (frag_label in _HEADING_LABELS or is_markdown_heading) and re.match(r"^\d+(?:\.\d+)+\s+(?!True\.?$|False\.?$|Yes\.?$|No\.?$|None\.?$|[A-F](?:\s*,\s*[A-F])*\.?$)[A-Z]", stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
@@ -425,12 +439,6 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
         if _is_section_sealed_opener(stripped):
             return "solution_sealed", "section_sealed", True, False, False, None, None
         return "narrative", None, False, False, False, None, None
-    if frag_label == "caption":
-        cap_match = _CAPTION_PREFIX_RE.match(stripped)
-        cap_ref = (cap_match.group("ref") or cap_match.group("zh_ref")) if cap_match else None
-        return "figure_caption", None, True, False, False, cap_ref.strip() if cap_ref else None, _caption_visual_kind(stripped, page_visuals)
-    if frag_label in ("table", "formula"):
-        return "narrative", None, False, False, False, None, None
 
     exited_section_seal = False
     if seal_mode == "section_sealed":
@@ -440,6 +448,13 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
             exited_section_seal = True
         else:
             return "solution_sealed", "section_sealed", False, False, False, None, None
+
+    if frag_label == "caption":
+        cap_match = _CAPTION_PREFIX_RE.match(stripped)
+        cap_ref = (cap_match.group("ref") or cap_match.group("zh_ref")) if cap_match else None
+        return "figure_caption", None, True, False, exited_section_seal, cap_ref.strip() if cap_ref else None, _caption_visual_kind(stripped, page_visuals)
+    if frag_label in ("table", "formula"):
+        return "narrative", None, False, False, exited_section_seal, None, None
 
     if in_worked_example and _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE.match(stripped):
         return "worked_example", None, False, False, False, None, None
@@ -888,9 +903,13 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False) -> Physi
     raw_texts = {p: [t for t, _ in raw_fragments[p]] for p in page_order}
     public_texts: dict[int, list[str]] = {}
     sealed_texts: dict[int, list[str]] = {}
+    had_sealed_by_page: dict[int, bool] = {}
     for page_number in page_order:
         frags = raw_fragments[page_number]
         blocks = _seal_furniture_on_all_sealed_page(blocks_by_page[page_number], entries_by_page[page_number])
+        had_sealed_by_page[page_number] = any(
+            b.kind == "solution_sealed" or b.visibility_hint == "sealed" for b in blocks
+        )
         public_texts[page_number] = _filter_fragments_by_visibility(frags, blocks, sealed_only=False)
         sealed_texts[page_number] = _filter_fragments_by_visibility(frags, blocks, sealed_only=True)
         blocks_by_page[page_number] = _align_block_charspans(
@@ -909,6 +928,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False) -> Physi
         discourse_blocks_by_page=blocks_by_page,
         visual_kinds_by_page=visuals,
         section_sealed_by_page=section_sealed_by_page,
+        had_sealed_by_page=had_sealed_by_page,
     )
 
 

@@ -206,10 +206,23 @@ describe("material hybrid retrieval", () => {
         { ...legacySeg1, chunk: { ...legacySeg1.chunk, text: "tampered slice text" } },
         { ...legacySeg1, chunk: { ...legacySeg1.chunk, id: "foreign-doc" } },
         { chunk: { ...shifted, text: shifted.text.slice(0, 5990) }, segmentIndex: segments[0]!.segmentIndex },
-        legacySeg1,
+        { chunk: { ...shifted, text: shifted.text.slice(0, 6000) }, segmentIndex: 0 },
       ],
     });
     expect(rejected.map(row => row.id)).toEqual(["chosen", "formula-doc"]);
     expect(rejected[1]?.text).toBe("a".repeat(5990));
+
+    // Batched reindexing (~32 segments/batch) can commit segment 0 before segment 1; legacy slices for segment 1 must still recall.
+    const batchedReindex = rankMaterialContext({
+      chunks: [...decoys, shifted],
+      query: "orthogonal projection",
+      maxCharacters: 7000,
+      dense: [
+        segments[0]!,
+        legacySeg1,
+      ],
+    });
+    expect(batchedReindex[0]?.id).toBe("formula-doc");
+    expect(batchedReindex[0]?.text).toContain(formulaTail);
   });
 });

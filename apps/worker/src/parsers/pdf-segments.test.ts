@@ -588,6 +588,7 @@ describe("bounded resumable PDF parser", () => {
       visualKinds?: VisualPageKind[];
       discourseBlocks?: Array<Record<string, unknown>>;
       sectionSealedAtEnd?: boolean;
+      hadSealedContent?: boolean;
     }>;
     savedChunks?: NewSourceChunk[];
     recognizePages?: (
@@ -666,7 +667,7 @@ describe("bounded resumable PDF parser", () => {
             stdout: JSON.stringify({
               pages: options.pages
                 .filter(p => p.page >= start && p.page <= end)
-                .map(p => ({ page: p.page, text: p.text, imagePath: null, visualKinds: p.visualKinds ?? [], ...(p.discourseBlocks ? { discourseBlocks: p.discourseBlocks } : {}), ...(p.sectionSealedAtEnd !== undefined ? { sectionSealedAtEnd: p.sectionSealedAtEnd } : {}) })),
+                .map(p => ({ page: p.page, text: p.text, imagePath: null, visualKinds: p.visualKinds ?? [], ...(p.discourseBlocks ? { discourseBlocks: p.discourseBlocks } : {}), ...(p.sectionSealedAtEnd !== undefined ? { sectionSealedAtEnd: p.sectionSealedAtEnd } : {}), ...(p.hadSealedContent !== undefined ? { hadSealedContent: p.hadSealedContent } : {}) })),
             }),
           };
         },
@@ -1115,5 +1116,179 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(publishedChunks.map(c => c.page)).toEqual([2]);
     expect(publishedChunks[0]?.text).toBe("第 3 讲 特征值\n定义：Ax = λx。");
+  });
+
+  it("Round-7 [P1-3, P1-4]: redacts hadSealedContent images, suppresses descriptions on self-closed Vision seals, and guards 第 3 讲 参考答案", async () => {
+    const decoded = decodeParserOutput(JSON.stringify({
+      pages: [
+        { page: 1, text: "Find x.", imagePath: null, visualKinds: ["picture"], hadSealedContent: true },
+        { page: 2, text: "Public.", imagePath: null, visualKinds: [] },
+      ],
+    }));
+    expect(decoded[0]).toEqual({ page: 1, text: "Find x.", imagePath: null, visualKinds: ["picture"], hadSealedContent: true });
+    expect("hadSealedContent" in decoded[1]!).toBe(false);
+    expect(() => decodeParserOutput(JSON.stringify({
+      pages: [{ page: 1, text: "x", imagePath: null, hadSealedContent: "yes" }],
+    }))).toThrow("invalid hadSealedContent metadata");
+
+    const live = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Find x.", visualKinds: ["picture"], hadSealedContent: true },
+        { page: 2, text: "", visualKinds: ["scan"] },
+        { page: 3, text: "Chapter 2: Public\nTheorem 1.", visualKinds: ["picture"] },
+      ],
+      recognizePages: async function* (inputs) {
+        for (const input of inputs) {
+          if (input.physicalPage === 1) {
+            yield {
+              text: "【原图忠实转写，尚需核对】\nFigure 1.\n\n【图表观察描述，非原文或解答】\nShows x = 2.\n\n【识别不确定，不能据此判定正确】\nUnclear digit.",
+              imageObjectKey: "vision/p1-inline-native-seal",
+            };
+          } else if (input.physicalPage === 2) {
+            yield {
+              text: "【原图忠实转写，尚需核对】\nPublic stem.\nAnswer Key\n1. x = 2\nEnd of Answers.\n\n【图表观察描述，非原文或解答】\nFull page shows x = 2.\n\n【识别不确定，不能据此判定正确】\nUncertain 2.",
+              imageObjectKey: "vision/p2-self-closed-seal",
+            };
+          } else if (input.physicalPage === 3) {
+            yield {
+              text: "【原图忠实转写，尚需核对】\nFigure 3.\n\n【图表观察描述，非原文或解答】\nClean diagram.",
+              imageObjectKey: "vision/p3-clean",
+            };
+          }
+        }
+      },
+    });
+    expect(live.pdfWarning).toBeUndefined();
+    expect(live.publishedChunks.map(c => c.page)).toEqual([1, 2, 3]);
+    expect(live.publishedChunks[0]?.text).toBe("[原生提取]\nFind x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nFigure 1.");
+    expect(live.publishedChunks[0]?.imageObjectKey).toBeNull();
+    expect(live.publishedChunks[1]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic stem.");
+    expect(live.publishedChunks[1]?.text).not.toContain("Shows x = 2.");
+    expect(live.publishedChunks[1]?.text).not.toContain("Full page shows x = 2.");
+    expect(live.publishedChunks[1]?.text).not.toContain("Uncertain 2.");
+    expect(live.publishedChunks[1]?.imageObjectKey).toBeNull();
+    expect(live.publishedChunks[2]?.text).toContain("Clean diagram.");
+    expect(live.publishedChunks[2]?.imageObjectKey).toBe("vision/p3-clean");
+
+    const lectureAnswerAndSavedSelfClosed = await runPdfScenario({
+      pages: [
+        { page: 1, text: "第 3 讲 参考答案\n1. x = 1", visualKinds: [] },
+        { page: 2, text: "2. y = 2", visualKinds: [] },
+        { page: 3, text: "第 3 讲 特征值\n定义：Ax = λx。", visualKinds: [] },
+        { page: 4, text: "Lecture 4: Answer Key\n1. a = 3", visualKinds: [] },
+        { page: 5, text: "2. b = 4", visualKinds: [] },
+        { page: 6, text: "Lecture 5: Singular Values", visualKinds: [] },
+        { page: 7, text: "Public problem.", visualKinds: ["scan"] },
+      ],
+      savedChunks: [
+        {
+          page: 7,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic problem.\nAnswer Key\n1. x = 9\nEnd of Answers.\n\n【图表观察描述，非原文或解答】\nAnswer plot.",
+          imageObjectKey: "vision/p7-stale",
+        },
+      ],
+    });
+    expect(lectureAnswerAndSavedSelfClosed.publishedChunks.map(c => c.page)).toEqual([3, 6, 7]);
+    expect(lectureAnswerAndSavedSelfClosed.publishedChunks[0]?.text).toBe("第 3 讲 特征值\n定义：Ax = λx。");
+    expect(lectureAnswerAndSavedSelfClosed.publishedChunks[2]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic problem.");
+    expect(lectureAnswerAndSavedSelfClosed.publishedChunks[2]?.imageObjectKey).toBeNull();
+  });
+
+  it("Round-7 [P1-5]: preserves same-page Vision on sectionSealedAtEnd, keeps seal across resume/fallback, and replays scanned raw Vision", async () => {
+    const liveSamePageVision = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Theorem 1: Norm equivalence.", visualKinds: ["picture"], sectionSealedAtEnd: true, hadSealedContent: true },
+        { page: 2, text: "2. y = 4", visualKinds: [] },
+        { page: 3, text: "Chapter 2: Rings\nDef.", visualKinds: [] },
+      ],
+      recognizePages: async function* () {
+        yield {
+          text: "【原图忠实转写，尚需核对】\nUnit ball diagram.\n\n【图表观察描述，非原文或解答】\nShows answer plot.",
+          imageObjectKey: "vision/p1-theorem",
+        };
+      },
+    });
+    expect(liveSamePageVision.pdfWarning).toBeUndefined();
+    expect(liveSamePageVision.publishedChunks.map(c => c.page)).toEqual([1, 3]);
+    expect(liveSamePageVision.publishedChunks[0]?.text).toBe("[原生提取]\nTheorem 1: Norm equivalence.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nUnit ball diagram.");
+    expect(liveSamePageVision.publishedChunks[0]?.imageObjectKey).toBeNull();
+
+    const resumeReusable = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Theorem 1.", visualKinds: ["picture"], sectionSealedAtEnd: true, hadSealedContent: true },
+        { page: 2, text: "2. y = 4", visualKinds: [] },
+        { page: 3, text: "Chapter 2: Rings\nDef.", visualKinds: [] },
+      ],
+      savedChunks: [
+        {
+          page: 1,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\nDiagram caption.",
+          imageObjectKey: "vision/old-p1",
+        },
+      ],
+    });
+    expect(resumeReusable.publishedChunks.map(c => c.page)).toEqual([1, 3]);
+    expect(resumeReusable.publishedChunks[0]?.imageObjectKey).toBeNull();
+
+    const resumeDegradedFallback = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Theorem 1.", visualKinds: ["picture"], sectionSealedAtEnd: true, hadSealedContent: true },
+        { page: 2, text: "2. y = 4", visualKinds: [] },
+        { page: 3, text: "Chapter 2: Rings\nDef.", visualKinds: [] },
+      ],
+      savedChunks: [
+        {
+          page: 1,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\nDiagram caption.",
+          imageObjectKey: "vision/old-p1",
+        },
+      ],
+      recognizePages: async function* () {
+        yield null;
+      },
+    });
+    expect(resumeDegradedFallback.publishedChunks.map(c => c.page)).toEqual([1, 3]);
+    expect(resumeDegradedFallback.publishedChunks[0]?.imageObjectKey).toBeNull();
+
+    const replayedPages: number[] = [];
+    const scannedResumeWithNullKey = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: ["scan"] },
+        { page: 2, text: "2. y = 4", visualKinds: [] },
+        { page: 3, text: "Chapter 2: Rings\nDef.", visualKinds: [] },
+      ],
+      savedChunks: [
+        {
+          page: 1,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[视觉转写与描述]\nPublic stem.",
+          imageObjectKey: null,
+        },
+      ],
+      recognizePages: async function* (inputs) {
+        for (const input of inputs) {
+          replayedPages.push(input.physicalPage);
+          if (input.physicalPage === 1) {
+            yield { text: "Public stem.\n\nAnswer Key\n1. x = 2", imageObjectKey: "vision/p1-cached" };
+          }
+        }
+      },
+    });
+    expect(replayedPages).toEqual([1]);
+    expect(scannedResumeWithNullKey.pdfWarning).toBeUndefined();
+    expect(scannedResumeWithNullKey.publishedChunks.map(c => c.page)).toEqual([1, 3]);
+    expect(scannedResumeWithNullKey.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nPublic stem.");
+    expect(scannedResumeWithNullKey.publishedChunks[0]?.imageObjectKey).toBeNull();
   });
 });

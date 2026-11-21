@@ -147,10 +147,12 @@ def main(argv=None):
             by_page = extraction.texts_by_page
             visual_kinds = extraction.visual_kinds_by_page
             sealed_by_page = extraction.section_sealed_by_page
+            had_sealed_by_page = extraction.had_sealed_by_page
         else:
             by_page = texts_by_page(conversion)
             visual_kinds = {}
             sealed_by_page = {}
+            had_sealed_by_page = {}
         if page_range:
             expected = set(range(args.page_start, args.page_end + 1))
             if set(by_page) != expected:
@@ -162,6 +164,8 @@ def main(argv=None):
             entry = {"page": page_number, "text": text, "imagePath": None, "visualKinds": visual_kinds.get(page_number, [])}
             if sealed_by_page.get(page_number):
                 entry["sectionSealedAtEnd"] = True
+            if had_sealed_by_page.get(page_number):
+                entry["hadSealedContent"] = True
             pages.append(entry)
         if len(pages) > args.max_pages:
             raise ValueError("max-pages would truncate pages")

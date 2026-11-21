@@ -419,12 +419,12 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
   // Dense rows must be members of the same source/version/chunk snapshot.
   const inputDense = input.dense ?? [];
   const resolvedDirect: Array<MaterialSegment | undefined> = [];
-  const directMatchedChunkIds = new Set<string>();
+  const directMatchedSegmentKeys = new Set<string>();
   for (const segment of inputDense) {
     const original = all.get(materialSegmentKey(segment));
     if (original && original.chunk.sourceVersion === segment.chunk.sourceVersion && original.chunk.text === segment.chunk.text) {
       resolvedDirect.push(original);
-      directMatchedChunkIds.add(original.chunk.id);
+      directMatchedSegmentKeys.add(materialSegmentKey(original));
     } else {
       resolvedDirect.push(undefined);
     }
@@ -445,7 +445,7 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       continue;
     }
     const segment = inputDense[i]!;
-    if (directMatchedChunkIds.has(segment.chunk.id) || !Number.isInteger(segment.segmentIndex) || segment.segmentIndex < 0) continue;
+    if (!Number.isInteger(segment.segmentIndex) || segment.segmentIndex < 0) continue;
     chunksById ??= new Map(input.chunks.map(chunk => [chunk.id, chunk]));
     const sourceChunk = chunksById.get(segment.chunk.id);
     if (!sourceChunk || sourceChunk.sourceVersion !== segment.chunk.sourceVersion || !sourceChunk.text.trim()) continue;
@@ -484,7 +484,7 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
     }
     if (bestEntry) {
       const key = materialSegmentKey(bestEntry.segment);
-      if (!seenDenseKeys.has(key)) {
+      if (!directMatchedSegmentKeys.has(key) && !seenDenseKeys.has(key)) {
         seenDenseKeys.add(key);
         dense.push(bestEntry.segment);
       }

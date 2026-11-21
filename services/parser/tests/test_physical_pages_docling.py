@@ -438,7 +438,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 text_element(12, "第 3 讲 特征值\n特征多项式定义如下。", 1),
             ],
             [
-                text_element(13, "**Solution**:\nx = 5", 1),
+                text_element(13, "**Solutions to Selected Exercises**\n1. x = 5", 1),
             ],
             [
                 text_element(14, "Section 1.2: Exercises\n1. Find x.", 1),
@@ -476,6 +476,75 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(payload["pages"][0]["text"], "Theorem 1.")
         self.assertIs(payload["pages"][0].get("sectionSealedAtEnd"), True)
         self.assertNotIn("sectionSealedAtEnd", payload["pages"][1])
+
+    def test_round7_caption_inside_seal_lecture_answer_guard_and_had_sealed(self):
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+
+        result = result_for(
+            [
+                text_element(11, "Answer Key\n1. x = 2", 1),
+                text_element(11, "Figure 1: Solution graph.", 2, DocItemLabel.CAPTION),
+                text_element(11, "2. y = 4", 3),
+            ],
+            [
+                text_element(12, "第 3 讲 参考答案\n1. 对", 1, DocItemLabel.SECTION_HEADER),
+                text_element(12, "2. 错", 2),
+            ],
+            [
+                text_element(13, "第 3 讲 特征值\n定义：Ax = λx。", 1, DocItemLabel.SECTION_HEADER),
+            ],
+            [
+                text_element(14, "Theorem 1: Norm equivalence.", 1),
+                text_element(14, "Answer: x = 1.", 2),
+                text_element(14, "Chapter 2: Next Topic\nPublic proof.", 3),
+            ],
+            [
+                text_element(15, "Chapter 3: Pure Public\nTheorem 2: Continuity.", 1),
+            ],
+        )
+        ext = physical_pages.extract_physical_pages(result)
+        self.assertEqual(ext.texts_by_page[11], [])
+        self.assertTrue(ext.section_sealed_by_page[11])
+        self.assertTrue(ext.had_sealed_by_page[11])
+
+        self.assertEqual(ext.texts_by_page[12], [])
+        self.assertTrue(ext.section_sealed_by_page[12])
+        self.assertTrue(ext.had_sealed_by_page[12])
+
+        self.assertFalse(ext.section_sealed_by_page[13])
+        self.assertFalse(ext.had_sealed_by_page[13])
+        self.assertIn("定义：Ax = λx。", "\n".join(ext.texts_by_page[13]))
+
+        self.assertNotIn("Answer", "\n".join(ext.texts_by_page[14]))
+        self.assertIn("Theorem 1: Norm equivalence.", "\n".join(ext.texts_by_page[14]))
+        self.assertFalse(ext.section_sealed_by_page[14])
+        self.assertTrue(ext.had_sealed_by_page[14])
+
+        self.assertFalse(ext.section_sealed_by_page[15])
+        self.assertFalse(ext.had_sealed_by_page[15])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sample-r7.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            stdout = io.StringIO()
+            with patch.object(cli, "convert", return_value=result), patch.object(cli, "create_converter", return_value=None), redirect_stdout(stdout):
+                code = cli.main(["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", "20"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["pages"]), 5)
+        self.assertIs(payload["pages"][0].get("sectionSealedAtEnd"), True)
+        self.assertIs(payload["pages"][0].get("hadSealedContent"), True)
+        self.assertIs(payload["pages"][1].get("sectionSealedAtEnd"), True)
+        self.assertIs(payload["pages"][1].get("hadSealedContent"), True)
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][2])
+        self.assertNotIn("hadSealedContent", payload["pages"][2])
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][3])
+        self.assertIs(payload["pages"][3].get("hadSealedContent"), True)
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][4])
+        self.assertNotIn("hadSealedContent", payload["pages"][4])
 
 
 if __name__ == "__main__":
