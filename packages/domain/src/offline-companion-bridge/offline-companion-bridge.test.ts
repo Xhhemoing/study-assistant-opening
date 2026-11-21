@@ -1024,13 +1024,23 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       ...legacyCtorLedgerEntry,
       leaseId: aliasUuidUpper,
       seq: 1,
-      receipt: { ...legacyCtorLedgerEntry.receipt, leaseId: aliasUuidUpper, cardId: aliasUuidUpper },
+      receipt: {
+        ...legacyCtorLedgerEntry.receipt,
+        leaseId: aliasUuidUpper,
+        cardId: aliasUuidUpper,
+        nextSnapshot: aliasSnapRev3,
+      },
     };
     const aliasLedgerLower = {
       ...legacyCtorLedgerEntry,
       leaseId: aliasUuidLower,
       seq: 1,
-      receipt: { ...legacyCtorLedgerEntry.receipt, leaseId: aliasUuidLower, cardId: aliasUuidLower },
+      receipt: {
+        ...legacyCtorLedgerEntry.receipt,
+        leaseId: aliasUuidLower,
+        cardId: aliasUuidLower,
+        nextSnapshot: aliasSnapRev1,
+      },
     };
     expect(() =>
       reconcileOfflineLeaseOutbox({
@@ -1142,6 +1152,113 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     expect(containsAnswerLeak("Evaluate f'(x) \u2212 g'(x) here.", "f'(x)-g'(x)")).toBe(true);
     expect(containsAnswerLeak("Evaluate f'(x)-g'(x) here.", "f'(x) \u2212 g'(x)")).toBe(true);
     expect(containsAnswerLeak("Evaluate x\u2019 \u2212 y\u2019 here.", "x\u2019-y\u2019")).toBe(true);
+
+    // [Round-12 P1-1] Curly prime `\u2019` (`’`) MUST canonicalize to `'` alongside `\u2032` (`′`)
+    // so cross-prime leak pairs (`x′-y′` <-> `x’ − y’`, `f’(x) + g’(x)` <-> `f'(x)+g'(x)`) are caught symmetrically!
+    expect(containsAnswerLeak("Evaluate x\u2019 \u2212 y\u2019 here.", "x\u2032-y\u2032")).toBe(true);
+    expect(containsAnswerLeak("Evaluate x\u2032-y\u2032 here.", "x\u2019 \u2212 y\u2019")).toBe(true);
+    expect(containsAnswerLeak("Evaluate x\u2019 \u2212 y\u2019 here.", "x' - y'")).toBe(true);
+    expect(containsAnswerLeak("Check f\u2019(x) + g\u2019(x) at zero.", "f'(x)+g'(x)")).toBe(true);
+    expect(containsAnswerLeak("Check f'(x)+g'(x) at zero.", "f\u2019(x) + g\u2019(x)")).toBe(true);
+    for (const [idx, primeCase] of [
+      { answerKey: "x\u2032-y\u2032", stem: "Evaluate x\u2019 \u2212 y\u2019 directly." },
+      { answerKey: "x\u2019 \u2212 y\u2019", stem: "Evaluate x\u2032-y\u2032 directly." },
+    ].entries()) {
+      const primeLeakMiss = issueOfflineFlashcardLease({
+        leaseId: `lease-r12-prime-miss-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: primeCase.answerKey,
+            freshVariantStem: primeCase.stem,
+          }),
+        ],
+      });
+      expect(primeLeakMiss.ok).toBe(false);
+      if (!primeLeakMiss.ok) {
+        expect(primeLeakMiss.httpStatus).toBe(422);
+        expect(primeLeakMiss.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    // [Round-12 P1-2] serverCards map key MUST agree with embedded snapshot.cardId after canonicalization,
+    // and processedLedger key/entry/receipt/nextSnapshot identities MUST agree (throwing TypeError before settling)!
+    const cardBSnap = createInitialOfflineFsrsSnapshot("card-2", T0 - 3_600_000, 5);
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: { "card-1": cardBSnap },
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [
+          { leaseId: "lease-r9-settle-guard", seq: 1, cardId: "card-1", expectedCardRevision: 1, rating: "good" },
+        ],
+      }),
+    ).toThrow(TypeError);
+
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: new Map([["card-1", cardBSnap]]),
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
+
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: { "card-1": validCard1Snap },
+        processedLedger: { "other-lease:1": legacyCtorLedgerEntry },
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
+
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: { "card-1": validCard1Snap },
+        processedLedger: {
+          "constructor:1": {
+            ...legacyCtorLedgerEntry,
+            receipt: { ...legacyCtorLedgerEntry.receipt, cardId: "card-1" },
+          },
+        },
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
+
+    // [Round-12 P2] Unprimed math variables (`x`, `a`, `θ`, `x_1`, `x_n`, `\theta`) before spaced Unicode
+    // minus (`\u2212`) MUST preserve binary subtraction (never triggering `"-4"`), while prose cues
+    // (`"The answer is − 4"`, `"Answer: − 4"`, `"Result = − 4"`) remain blocked and `"x − y"` <-> `"x-y"` leaks!
+    expect(containsAnswerLeak("Solve x \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Evaluate \u03B8 \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Evaluate a \u2212 4", "-4")).toBe(false);
+    expect(containsAnswerLeak("Find x_1 \u2212 4 and x_n \u2212 4", "-4")).toBe(false);
+    expect(containsAnswerLeak("Compute \\theta \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("The answer is \u2212 4", "-4")).toBe(true);
+    expect(containsAnswerLeak("The value is \u2212 4", "-4")).toBe(true);
+    expect(containsAnswerLeak("Answer: \u2212 4", "-4")).toBe(true);
+    expect(containsAnswerLeak("Result = \u2212 4", "-4")).toBe(true);
+    expect(containsAnswerLeak("Compute x \u2212 y here.", "x-y")).toBe(true);
+    expect(containsAnswerLeak("Compute x-y here.", "x \u2212 y")).toBe(true);
+
+    const benignVarMinusLease = issueOfflineFlashcardLease({
+      leaseId: "lease-r12-benign-var-minus",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({
+          answerKey: "-4",
+          freshVariantStem: "Solve x \u2212 4 = 0 and evaluate \u03B8 \u2212 4 = 0.",
+        }),
+      ],
+    });
+    expect(benignVarMinusLease.ok).toBe(true);
 
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },

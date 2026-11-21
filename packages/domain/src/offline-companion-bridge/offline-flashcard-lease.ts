@@ -146,19 +146,19 @@ const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\u221A\s*([a-z0-9]+(?:\.[a-z0-9]+)?)/gi, "sqrt($1)"],
   [/\u221A/g, "sqrt"],
   [/\bsqrt\s*([0-9]+(?:\.[0-9]+)?)/gi, "sqrt($1)"],
-  [/\u2032/g, "'"],
+  [/[\u2032\u2019]/g, "'"],
 ];
 
 const MATH_OPERAND_LOOKAHEAD =
   `(?=\\d|\\.|sqrt\\(|(?:${GREEK_OR_CONST})\\b)`;
 
 const SPACED_UNARY_SIGN_RE = new RegExp(
-  `(?<=^|[(\\[,;:=<>!~]|\\p{Script=Han}\\s*|\\p{Script=Hiragana}\\s*|\\p{Script=Katakana}\\s*|\\p{Script=Hangul}\\s*|\\b(?:is|equals|expected|result|value|gives|be|are|to|of|at|around|about)\\s+)([+-])\\s+${MATH_OPERAND_LOOKAHEAD}`,
+  `(?<=^|[(\\[,;:=<>!~]\\s*|\\p{Script=Han}\\s*|\\p{Script=Hiragana}\\s*|\\p{Script=Katakana}\\s*|\\p{Script=Hangul}\\s*|\\b(?:is|equals|expected|result|value|gives|be|are|to|of|at|around|about)\\s+)([+-])\\s+${MATH_OPERAND_LOOKAHEAD}`,
   "giu",
 );
 
 const SPACED_UNICODE_MINUS_UNARY_RE = new RegExp(
-  `(?<![\\d)\\]}|'\\u2032\\u2019]\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
+  `(?<!(?:[\\d)\\]}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[A-Za-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
   "giu",
 );
 
@@ -653,29 +653,62 @@ function isValidLedgerEntry(value: unknown): value is OfflineOutboxLedgerEntry {
   }
   const receipt = entry.receipt as Partial<OfflineSettledReceipt> | undefined;
   if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt)) return false;
-  return (
-    isNonEmptyString(receipt.leaseId) &&
-    typeof receipt.seq === "number" &&
-    Number.isSafeInteger(receipt.seq) &&
-    receipt.seq >= 1 &&
-    isNonEmptyString(receipt.cardId) &&
-    typeof receipt.rawRating === "string" &&
-    VALID_RAW_RATINGS.has(receipt.rawRating) &&
-    (receipt.effectiveRating === "again" ||
-      receipt.effectiveRating === "hard" ||
-      receipt.effectiveRating === "good") &&
-    typeof receipt.clampedFromEasy === "boolean" &&
-    receipt.authorityClock === "server_receipt" &&
-    isValidTimestamp(receipt.effectiveReviewedAtMs) &&
-    receipt.delayedCheckMinted === false &&
-    receipt.allowMasteryPromotion === false &&
-    receipt.transferVerified === false &&
-    Array.isArray(receipt.strippedClientFlags) &&
-    receipt.strippedClientFlags.every(flag => typeof flag === "string") &&
-    isNonNegativeSafeInteger(receipt.previousRevision) &&
-    isNonNegativeSafeInteger(receipt.newRevision) &&
-    isValidServerFlashcardSnapshot(receipt.nextSnapshot)
-  );
+  if (
+    !isNonEmptyString(receipt.leaseId) ||
+    typeof receipt.seq !== "number" ||
+    !Number.isSafeInteger(receipt.seq) ||
+    receipt.seq < 1 ||
+    !isNonEmptyString(receipt.cardId) ||
+    typeof receipt.rawRating !== "string" ||
+    !VALID_RAW_RATINGS.has(receipt.rawRating) ||
+    (receipt.effectiveRating !== "again" &&
+      receipt.effectiveRating !== "hard" &&
+      receipt.effectiveRating !== "good") ||
+    typeof receipt.clampedFromEasy !== "boolean" ||
+    receipt.authorityClock !== "server_receipt" ||
+    !isValidTimestamp(receipt.effectiveReviewedAtMs) ||
+    receipt.delayedCheckMinted !== false ||
+    receipt.allowMasteryPromotion !== false ||
+    receipt.transferVerified !== false ||
+    !Array.isArray(receipt.strippedClientFlags) ||
+    !receipt.strippedClientFlags.every(flag => typeof flag === "string") ||
+    !isNonNegativeSafeInteger(receipt.previousRevision) ||
+    !isNonNegativeSafeInteger(receipt.newRevision) ||
+    !isValidServerFlashcardSnapshot(receipt.nextSnapshot)
+  ) {
+    return false;
+  }
+  const canonicalEntryLeaseId = canonicalizeIdentifier(entry.leaseId);
+  const canonicalReceiptLeaseId = canonicalizeIdentifier(receipt.leaseId);
+  const canonicalReceiptCardId = canonicalizeIdentifier(receipt.cardId);
+  const canonicalNextSnapshotCardId = canonicalizeIdentifier(receipt.nextSnapshot.cardId);
+  if (
+    canonicalEntryLeaseId !== canonicalReceiptLeaseId ||
+    entry.seq !== receipt.seq ||
+    canonicalReceiptCardId !== canonicalNextSnapshotCardId
+  ) {
+    return false;
+  }
+  if (
+    entry.payloadSummary !== undefined &&
+    canonicalizeIdentifier(entry.payloadSummary.cardId) !== canonicalReceiptCardId
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function canonicalizeLedgerKey(rawKey: string): string | null {
+  const trimmed = rawKey.trim();
+  const sepIdx = trimmed.lastIndexOf(":");
+  if (sepIdx <= 0 || sepIdx === trimmed.length - 1) return null;
+  const rawLeasePart = trimmed.slice(0, sepIdx);
+  const rawSeqPart = trimmed.slice(sepIdx + 1);
+  if (!/^[1-9]\d*$/.test(rawSeqPart)) return null;
+  const seq = Number(rawSeqPart);
+  if (!Number.isSafeInteger(seq) || seq < 1) return null;
+  if (!isNonEmptyString(rawLeasePart)) return null;
+  return offlineOutboxIdempotencyKey(rawLeasePart, seq);
 }
 
 function isValidOptionalClientReviewedAtMs(value: unknown): value is number | null | undefined {
@@ -704,6 +737,12 @@ function toServerCardRecord(
       throw new TypeError(`serverCards entry for cardId "${cardId}" is structurally invalid.`);
     }
     const canonicalId = canonicalizeIdentifier(cardId);
+    const canonicalSnapshotCardId = canonicalizeIdentifier(snapshot.cardId);
+    if (canonicalId !== canonicalSnapshotCardId) {
+      throw new TypeError(
+        `serverCards key "${cardId}" does not match embedded snapshot.cardId "${snapshot.cardId}".`,
+      );
+    }
     if (Object.prototype.hasOwnProperty.call(out, canonicalId)) {
       throw new TypeError(
         `serverCards contains duplicate/conflicting canonical cardId "${canonicalId}" (from key "${cardId}").`,
@@ -734,6 +773,12 @@ function toLedgerRecord(
       throw new TypeError(`processedLedger entry for key "${ledgerKey}" is structurally invalid.`);
     }
     const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
+    const canonicalMapKey = canonicalizeLedgerKey(ledgerKey);
+    if (canonicalMapKey !== canonicalKey) {
+      throw new TypeError(
+        `processedLedger key "${ledgerKey}" does not match embedded entry identity "${canonicalKey}".`,
+      );
+    }
     if (Object.prototype.hasOwnProperty.call(out, canonicalKey)) {
       throw new TypeError(
         `processedLedger contains duplicate/conflicting canonical key "${canonicalKey}" (from key "${ledgerKey}").`,
