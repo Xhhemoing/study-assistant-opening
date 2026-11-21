@@ -69,8 +69,7 @@ function decimalPlaces(value: number): number | null {
   return Math.max(0, fracLen - exp);
 }
 
-function gridPointAt(minScore: number, step: number, index: number): number {
-  const raw = minScore + index * step;
+function cleanGridPoint(raw: number, minScore: number, step: number): number {
   if (!Number.isFinite(raw)) {
     throw new RangeError("Score grid point overflowed finite precision");
   }
@@ -89,6 +88,38 @@ function gridPointAt(minScore: number, step: number, index: number): number {
   return Object.is(raw, -0) ? 0 : raw;
 }
 
+function gridPointAt(minScore: number, step: number, index: number): number {
+  return cleanGridPoint(minScore + index * step, minScore, step);
+}
+
+function resolveAlignedScoreGridSteps(minScore: number, maxScore: number, step: number): number | null {
+  if (!Number.isFinite(minScore) || !Number.isFinite(maxScore) || minScore >= maxScore) {
+    return null;
+  }
+  if (!Number.isFinite(step) || step <= 0) {
+    return null;
+  }
+  const span = maxScore - minScore;
+  const rawSteps = span / step;
+  if (!Number.isFinite(rawSteps)) {
+    return null;
+  }
+  const nearestSteps = Math.round(rawSteps);
+  if (nearestSteps < 1 || nearestSteps > MAX_SCORE_GRID_STEPS) {
+    return null;
+  }
+  const rawMax = minScore + nearestSteps * step;
+  if (!Number.isFinite(rawMax)) {
+    return null;
+  }
+  const reconstructedMax = cleanGridPoint(rawMax, minScore, step);
+  const tol = Number.EPSILON * 8 * Math.max(1, Math.abs(minScore), Math.abs(maxScore));
+  if (Math.abs(reconstructedMax - maxScore) > tol) {
+    return null;
+  }
+  return nearestSteps;
+}
+
 export function snapToScoreGrid(
   value: number,
   range: readonly [number, number],
@@ -105,64 +136,70 @@ export function snapToScoreGrid(
   if (!Number.isFinite(value)) {
     throw new RangeError("Score value must be finite");
   }
+  if (minScore === maxScore) {
+    return minScore === 0 ? 0 : minScore;
+  }
   const rawSteps = (maxScore - minScore) / step;
   if (!Number.isFinite(rawSteps) || rawSteps > MAX_SCORE_GRID_STEPS) {
     throw new RangeError(`Score grid step count exceeds limit (${MAX_SCORE_GRID_STEPS})`);
   }
-  let maxK = Math.floor(rawSteps + 1e-12);
-  for (let iter = 0; iter < 2 && maxK >= 0 && gridPointAt(minScore, step, maxK) > maxScore; iter += 1) {
-    maxK -= 1;
+  const alignedSteps = resolveAlignedScoreGridSteps(minScore, maxScore, step);
+  let maxK: number;
+  if (alignedSteps !== null) {
+    maxK = alignedSteps;
+  } else {
+    maxK = Math.floor(rawSteps + 1e-12);
+    for (let iter = 0; iter < 2 && maxK >= 0 && gridPointAt(minScore, step, maxK) > maxScore; iter += 1) {
+      maxK -= 1;
+    }
+    if (maxK < 0 || gridPointAt(minScore, step, maxK) > maxScore) {
+      throw new RangeError("Score range contains no valid grid point");
+    }
   }
-  if (maxK < 0 || gridPointAt(minScore, step, maxK) > maxScore) {
-    throw new RangeError("Score range contains no valid grid point");
-  }
-  const minPoint = gridPointAt(minScore, step, 0);
-  const minGrid = minPoint < minScore ? minScore : minPoint;
-  if (minGrid > maxScore) {
-    throw new RangeError("Score range contains no valid grid point");
-  }
+  const pointAt = (k: number): number => {
+    if (k <= 0) return minScore === 0 ? 0 : minScore;
+    if (alignedSteps !== null && k >= maxK) return maxScore === 0 ? 0 : maxScore;
+    return gridPointAt(minScore, step, k);
+  };
 
   const clampedValue = Math.min(maxScore, Math.max(minScore, value));
-  const relUnits = (value - minScore) / step;
-  const rawK =
-    direction === "floor"
-      ? Math.floor(relUnits + 1e-12)
-      : direction === "ceil"
-        ? Math.ceil(relUnits - 1e-12)
-        : Math.floor(relUnits + 0.5);
-  let k = Math.min(maxK, Math.max(0, rawK));
-  let snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
-  for (let iter = 0; iter < 2 && snapped > maxScore && k > 0; iter += 1) {
-    k -= 1;
-    snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
-  }
-  for (let iter = 0; iter < 2 && snapped < minScore && k < maxK; iter += 1) {
-    k += 1;
-    snapped = gridPointAt(minScore, step, k);
-  }
-  if (direction === "floor" && snapped > clampedValue) {
-    for (let iter = 0; iter < 2 && snapped > clampedValue && k > 0; iter += 1) {
-      k -= 1;
-      snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
+  if (clampedValue <= minScore) return pointAt(0);
+  if (alignedSteps !== null && clampedValue >= maxScore) return pointAt(maxK);
+
+  const relUnits = (clampedValue - minScore) / step;
+  const clampK = (candidate: number): number => Math.min(maxK, Math.max(0, candidate));
+  const kFloor = clampK(Math.floor(relUnits));
+  const kCeil = clampK(Math.ceil(relUnits));
+  const kPrev = clampK(kFloor - 1);
+  const kNext = clampK(kCeil + 1);
+
+  if (direction === "floor") {
+    for (const candidate of [kNext, kCeil, kFloor, kPrev]) {
+      const pt = pointAt(candidate);
+      if (pt <= clampedValue) return pt;
     }
-    if (snapped > clampedValue) {
-      snapped = minScore;
+    return minScore === 0 ? 0 : minScore;
+  }
+
+  if (direction === "ceil") {
+    for (const candidate of [kPrev, kFloor, kCeil, kNext]) {
+      const pt = pointAt(candidate);
+      if (pt >= clampedValue) return pt;
     }
-  } else if (direction === "ceil" && snapped < clampedValue) {
-    for (let iter = 0; iter < 2 && snapped < clampedValue && k < maxK; iter += 1) {
-      k += 1;
-      const nextSnapped = gridPointAt(minScore, step, k);
-      if (nextSnapped > maxScore) break;
-      snapped = nextSnapped;
-    }
-    if (snapped < clampedValue) {
-      snapped = maxScore;
+    return maxScore === 0 ? 0 : maxScore;
+  }
+
+  let bestScore = pointAt(kPrev);
+  let bestDist = Math.abs(bestScore - clampedValue);
+  for (const candidate of [kFloor, kCeil, kNext]) {
+    const pt = pointAt(candidate);
+    const dist = Math.abs(pt - clampedValue);
+    if (dist <= bestDist) {
+      bestDist = dist;
+      bestScore = pt;
     }
   }
-  if (snapped < minScore || snapped > maxScore) {
-    throw new RangeError("Snapped score exceeds valid score range");
-  }
-  return snapped;
+  return bestScore;
 }
 
 export function computeWritingBand(
@@ -522,12 +559,7 @@ function isValidTimeModel(tm: ExamTimeModel): boolean {
 }
 
 function isAlignedScoreGrid(range: readonly [number, number], step: number): boolean {
-  const gridSteps = (range[1] - range[0]) / step;
-  if (!Number.isFinite(gridSteps) || gridSteps > MAX_SCORE_GRID_STEPS) {
-    return false;
-  }
-  const nearestSteps = Math.round(gridSteps);
-  return nearestSteps >= 1 && Math.abs(gridSteps - nearestSteps) <= 1e-9 * Math.max(1, nearestSteps);
+  return resolveAlignedScoreGridSteps(range[0], range[1], step) !== null;
 }
 
 const CANONICAL_IELTS_SECTIONS = [

@@ -766,7 +766,11 @@ function computeRubricWeightedSectionScore(
       intWeightedSum += rounded * scores[i]!;
     }
     if (allRational && intWeightSum > 0) {
-      return intWeightedSum / intWeightSum;
+      const candidate = intWeightedSum / intWeightSum;
+      if (Number.isFinite(intWeightedSum) && Number.isFinite(candidate)) {
+        return candidate;
+      }
+      break;
     }
   }
   let weightedSum = 0;
@@ -776,25 +780,54 @@ function computeRubricWeightedSectionScore(
     weightedSum += w * scores[i]!;
     weightSum += w;
   }
-  return weightSum > 0 ? weightedSum / weightSum : 0;
+  if (Number.isFinite(weightedSum) && weightSum > 0) {
+    const ratio = weightedSum / weightSum;
+    if (Number.isFinite(ratio)) return ratio;
+  }
+  if (weightSum > 0) {
+    let normalizedSum = 0;
+    for (let i = 0; i < parts.length; i++) {
+      normalizedSum += (parts[i]!.weight / weightSum) * scores[i]!;
+    }
+    return normalizedSum;
+  }
+  return 0;
+}
+
+function isCanonicalOneThirdTwoThirdsWriting(section: ExamSectionBlueprint): boolean {
+  if (section.sectionId !== "writing" || section.parts.length !== 2) return false;
+  const w0 = section.parts[0]!.weight;
+  const w1 = section.parts[1]!.weight;
+  return (
+    (Math.abs(w0 * 3 - 1) <= 1e-12 && Math.abs(w1 * 3 - 2) <= 1e-12) ||
+    (Math.abs(w0 * 3 - 2) <= 1e-12 && Math.abs(w1 * 3 - 1) <= 1e-12)
+  );
 }
 
 function extractWritingTaskPair(
   section: ExamSectionBlueprint,
   partScores: readonly number[],
 ): readonly [number, number] | undefined {
-  if (section.sectionId !== "writing" || section.parts.length !== 2 || partScores.length !== 2) {
+  if (!isCanonicalOneThirdTwoThirdsWriting(section) || partScores.length !== 2) {
     return undefined;
   }
   const w0 = section.parts[0]!.weight;
-  const w1 = section.parts[1]!.weight;
-  if (Math.abs(w0 * 3 - 1) <= 1e-12 && Math.abs(w1 * 3 - 2) <= 1e-12) {
-    return [partScores[0]!, partScores[1]!];
+  return Math.abs(w0 * 3 - 1) <= 1e-12 ? [partScores[0]!, partScores[1]!] : [partScores[1]!, partScores[0]!];
+}
+
+function computeIeltsOverallFromLRKey(input: {
+  readonly lrKey: number;
+  readonly writingBand: number;
+  readonly writingTasks?: readonly [number, number];
+  readonly speaking: number;
+}): number {
+  const clampedS = clamp(input.speaking, 0, 9);
+  if (input.writingTasks) {
+    const w1 = clamp(input.writingTasks[0], 0, 9);
+    const w2 = clamp(input.writingTasks[1], 0, 9);
+    return roundHalfUp05((input.lrKey + w1 + 2 * w2 + 3 * clampedS) / 12);
   }
-  if (Math.abs(w0 * 3 - 2) <= 1e-12 && Math.abs(w1 * 3 - 1) <= 1e-12) {
-    return [partScores[1]!, partScores[0]!];
-  }
-  return undefined;
+  return roundHalfUp05((input.lrKey + clamp(input.writingBand, 0, 9) + clampedS) / 4);
 }
 
 function computeIeltsOverallExact(input: {
@@ -805,12 +838,13 @@ function computeIeltsOverallExact(input: {
   readonly speaking: number;
 }): number {
   if (input.writingTasks) {
-    const l = clamp(input.listening, 0, 9);
-    const r = clamp(input.reading, 0, 9);
-    const w1 = clamp(input.writingTasks[0], 0, 9);
-    const w2 = clamp(input.writingTasks[1], 0, 9);
-    const s = clamp(input.speaking, 0, 9);
-    return roundHalfUp05((3 * l + 3 * r + w1 + 2 * w2 + 3 * s) / 12);
+    const threeLR = 3 * clamp(input.listening, 0, 9) + 3 * clamp(input.reading, 0, 9);
+    return computeIeltsOverallFromLRKey({
+      lrKey: threeLR,
+      writingBand: input.writingBand,
+      writingTasks: input.writingTasks,
+      speaking: input.speaking,
+    });
   }
   return computeIeltsOverallBand({
     listening: input.listening,
@@ -818,21 +852,6 @@ function computeIeltsOverallExact(input: {
     writing: input.writingBand,
     speaking: input.speaking,
   });
-}
-
-function computeIeltsOverallFromSumLR(input: {
-  readonly sumLR: number;
-  readonly writingBand: number;
-  readonly writingTasks?: readonly [number, number];
-  readonly speaking: number;
-}): number {
-  const clampedS = clamp(input.speaking, 0, 9);
-  if (input.writingTasks) {
-    const w1 = clamp(input.writingTasks[0], 0, 9);
-    const w2 = clamp(input.writingTasks[1], 0, 9);
-    return roundHalfUp05((3 * input.sumLR + w1 + 2 * w2 + 3 * clampedS) / 12);
-  }
-  return roundHalfUp05((input.sumLR + clamp(input.writingBand, 0, 9) + clampedS) / 4);
 }
 
 function simulateRubricSectionDraw(input: {
@@ -1198,6 +1217,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   } else {
     const preL = precomputedUntimedSections.get("listening")?.untimedDist;
     const preR = precomputedUntimedSections.get("reading")?.untimedDist;
+    const writingSec = blueprint.sections.find((sec) => sec.sectionId === "writing");
+    const useThreeLRKey = writingSec !== undefined && isCanonicalOneThirdTwoThirdsWriting(writingSec);
     if (preL && preR) {
       pmfOpsBudget.remaining -= preL.size * preR.size;
       if (pmfOpsBudget.remaining < 0) {
@@ -1210,8 +1231,9 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         for (const [bR, pR] of preR.entries()) {
           const prob = pL * pR;
           if (prob <= 0) continue;
-          const sumLR = clampedL + clamp(bR, 0, 9);
-          addToPmfWithCap(lrMap, sumLR, prob);
+          const clampedR = clamp(bR, 0, 9);
+          const lrKey = useThreeLRKey ? 3 * clampedL + 3 * clampedR : clampedL + clampedR;
+          addToPmfWithCap(lrMap, lrKey, prob);
         }
       }
       hoistedIeltsLRDist = lrMap;
@@ -1272,10 +1294,10 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         if (pmfOpsBudget.remaining < 0) {
           throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
         }
-        for (const [sumLR, probLR] of hoistedIeltsLRDist.entries()) {
+        for (const [lrKey, probLR] of hoistedIeltsLRDist.entries()) {
           if (probLR <= 0) continue;
-          const overall = computeIeltsOverallFromSumLR({
-            sumLR,
+          const overall = computeIeltsOverallFromLRKey({
+            lrKey,
             writingBand: staticW,
             writingTasks: staticWritingTasks,
             speaking: staticS,
@@ -1452,11 +1474,11 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           if (pmfOpsBudget.remaining < 0) {
             throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
           }
-          for (const [sumLR, probLR] of hoistedIeltsLRDist.entries()) {
+          for (const [lrKey, probLR] of hoistedIeltsLRDist.entries()) {
             const prob = probLR * drawWeight;
             if (prob <= 0) continue;
-            const overall = computeIeltsOverallFromSumLR({
-              sumLR,
+            const overall = computeIeltsOverallFromLRKey({
+              lrKey,
               writingBand: uW,
               writingTasks: untimedWritingTasks,
               speaking: uS,

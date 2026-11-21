@@ -3568,4 +3568,232 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       }),
     ).toThrow(RangeError);
   });
+
+  it("enforces all Round-12 3 P1 IEEE-754 invariants", () => {
+    // [R12 P1-1] Exact bit-for-bit IEEE-754 evaluation order parity between per-draw IELTS and hoisted LR PMF for L=0.2, R=2.8, W1=W2=S=0.
+    const parityBeliefs: Record<string, SkillBeliefV1> = {};
+    for (const skillId of IELTS_ACADEMIC_SKILL_IDS) {
+      parityBeliefs[skillId] = createSkillBelief({
+        workspaceId: "ws-1",
+        learnerId: "learner-r12",
+        courseId: "ielts-academic",
+        confirmedSkillVersion: 1,
+        abilityMean: 0,
+        abilityVariance: 0,
+        logStability: Math.log(14),
+        implicitLogCredit: 0,
+        lastDirectRecallAtMs: DAY_MS,
+      });
+    }
+    const parityBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      thetaCovariance: IELTS_ACADEMIC_SKILL_IDS.map(() => IELTS_ACADEMIC_SKILL_IDS.map(() => 0)),
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) => {
+        if (sec.sectionId === "listening" && sec.items && sec.rawToBandTable) {
+          return {
+            ...sec,
+            items: sec.items.map((item) => ({ ...item, guess: 0, lapse: 0 })),
+            rawToBandTable: sec.rawToBandTable.map((row) => ({ ...row, score: 0.2 })),
+          };
+        }
+        if (sec.sectionId === "reading" && sec.items && sec.rawToBandTable) {
+          return {
+            ...sec,
+            items: sec.items.map((item) => ({ ...item, guess: 0, lapse: 0 })),
+            rawToBandTable: sec.rawToBandTable.map((row) => ({ ...row, score: 2.8 })),
+          };
+        }
+        return sec;
+      }),
+    };
+    const zeroWsEvidence: ExamEvidenceRecord[] = [
+      {
+        evidenceId: "parity-w",
+        learnerId: "learner-r12",
+        sectionId: "writing",
+        evidenceKind: "rubric_assessment",
+        observedAtMs: DAY_MS,
+        countsTowardMastery: true,
+        assisted: false,
+        exposed: false,
+        rubricScore: { kind: "exact", score: 0 },
+      },
+      {
+        evidenceId: "parity-s",
+        learnerId: "learner-r12",
+        sectionId: "speaking",
+        evidenceKind: "rubric_assessment",
+        observedAtMs: DAY_MS,
+        countsTowardMastery: true,
+        assisted: false,
+        exposed: false,
+        rubricScore: { kind: "exact", score: 0 },
+      },
+    ];
+    const paritySim = simulateExamPaper({
+      blueprint: parityBp,
+      learnerId: "learner-r12",
+      beliefs: parityBeliefs,
+      evidence: zeroWsEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 10,
+      seed: 15,
+    });
+    expect(paritySim.timedExpectedScore).toBe(0.5);
+    expect(paritySim.matchedUntimedExpectedScore).toBe(0.5);
+    expect(paritySim.untimedExpectedScore).toBe(0.5);
+
+    // [R12 P1-2] Share endpoint alignment between validateExamBlueprint and snapToScoreGrid ([0, 2000.1] step 0.1 accepted, [0, 1 - 2^-31] step 0.125 rejected).
+    const bp20001 = createSharedFullPaperBlueprint({
+      blueprintId: "aligned-2000-1",
+      title: "Aligned 2000.1",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 2000.1,
+      skillIds: ["s"],
+      sections: [
+        {
+          sectionId: "sec",
+          label: "Sec",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 2000.1],
+          scoreStep: 0.1,
+          parts: [
+            {
+              partId: "p",
+              label: "P",
+              weight: 1,
+              skillIds: ["s"],
+              timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+            },
+          ],
+        },
+      ],
+    });
+    expect(validateExamBlueprint({ ...bp20001, scoreRange: [0, 2000.1], scoreStep: 0.1 })).toEqual([]);
+    expect(snapToScoreGrid(2000.1, [0, 2000.1], 0.1, "nearest")).toBe(2000.1);
+    expect(snapToScoreGrid(2000.1, [0, 2000.1], 0.1, "floor")).toBe(2000.1);
+    expect(snapToScoreGrid(2000.09, [0, 2000.1], 0.1, "ceil")).toBe(2000.1);
+
+    const nearBinaryMax = 1 - 2 ** -31;
+    const unalignedBinaryBp = createSharedFullPaperBlueprint({
+      blueprintId: "unaligned-binary-eps",
+      title: "Unaligned Binary",
+      totalTimeLimitMinutes: 30,
+      totalPoints: nearBinaryMax,
+      skillIds: ["s"],
+      sections: [
+        {
+          sectionId: "sec",
+          label: "Sec",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, nearBinaryMax],
+          scoreStep: 0.125,
+          parts: [
+            {
+              partId: "p",
+              label: "P",
+              weight: 1,
+              skillIds: ["s"],
+              timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+            },
+          ],
+        },
+      ],
+    });
+    const binaryErrors = validateExamBlueprint({ ...unalignedBinaryBp, scoreRange: [0, nearBinaryMax], scoreStep: 0.125 });
+    expect(binaryErrors).toContain("scoreStep");
+    expect(binaryErrors).toContain("sections.sec.scoreStep");
+
+    // [R12 P1-3] Overflow fallback in rubric weighted averaging when 1/3 + 2/3 parts sum past MAX_VALUE ([8e307, 9e307]).
+    const hugeWeightedBp = createSharedFullPaperBlueprint({
+      blueprintId: "huge-rubric-weighted",
+      title: "Huge Rubric Weighted",
+      totalTimeLimitMinutes: 60,
+      totalPoints: 1e308,
+      skillIds: ["kHuge"],
+      thetaCovariance: [[0]],
+      sections: [
+        {
+          sectionId: "sec",
+          label: "Sec",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 1e308],
+          scoreStep: 1e308,
+          parts: [
+            {
+              partId: "p1",
+              label: "P1",
+              weight: 1 / 3,
+              skillIds: ["kHuge"],
+              timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+            },
+            {
+              partId: "p2",
+              label: "P2",
+              weight: 2 / 3,
+              skillIds: ["kHuge"],
+              timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+            },
+          ],
+        },
+      ],
+    });
+    const hugeWeightedEvidence: ExamEvidenceRecord[] = [
+      {
+        evidenceId: "huge-p1",
+        learnerId: "l-huge-w",
+        sectionId: "sec",
+        partId: "p1",
+        evidenceKind: "rubric_assessment",
+        observedAtMs: DAY_MS,
+        countsTowardMastery: true,
+        assisted: false,
+        exposed: false,
+        rubricScore: { kind: "exact", score: 8e307 },
+      },
+      {
+        evidenceId: "huge-p2",
+        learnerId: "l-huge-w",
+        sectionId: "sec",
+        partId: "p2",
+        evidenceKind: "rubric_assessment",
+        observedAtMs: DAY_MS,
+        countsTowardMastery: true,
+        assisted: false,
+        exposed: false,
+        rubricScore: { kind: "exact", score: 9e307 },
+      },
+    ];
+    const hugeWeightedSim = simulateExamPaper({
+      blueprint: { ...hugeWeightedBp, scoreRange: [0, 1e308], scoreStep: 1e308 },
+      learnerId: "l-huge-w",
+      beliefs: {
+        kHuge: createSkillBelief({
+          workspaceId: "ws-1",
+          learnerId: "l-huge-w",
+          courseId: "huge",
+          confirmedSkillVersion: 1,
+          abilityMean: 0,
+          abilityVariance: 0,
+          logStability: Math.log(14),
+          implicitLogCredit: 0,
+          lastDirectRecallAtMs: DAY_MS,
+        }),
+      },
+      evidence: hugeWeightedEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 2,
+      seed: 16,
+    });
+    expect(Number.isFinite(hugeWeightedSim.sectionSummaries["sec"]!.timedMeanScore)).toBe(true);
+    expect(hugeWeightedSim.sectionSummaries["sec"]!.timedMeanScore).toBeCloseTo((8 / 3 + 6) * 1e307, -295);
+    expect(hugeWeightedSim.sectionSummaries["sec"]!.timedMeanScore).toBeGreaterThan(8e307);
+    expect(hugeWeightedSim.sectionSummaries["sec"]!.timedMeanScore).toBeLessThan(9e307);
+  });
 });
