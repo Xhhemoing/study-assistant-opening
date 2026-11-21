@@ -503,7 +503,7 @@ export * from "./opening/exam-sprint/engine";
 export { reportExamBkt } from "./opening/exam-sprint/analytics";
 export { forecastExamTopics } from "./opening/exam-sprint/forecast";
 export * from "./opening/evaluation/exam-choice-evaluator";
-export { sameKnowledgeNodeIdentity, knowledgeNodeDefinition } from "./opening/knowledge-node-identity";
+export { sameKnowledgeNodeIdentity, knowledgeNodeDefinition, knowledgeDefinitionHeader, serializeKnowledgeEvidence } from "./opening/knowledge-node-identity";
 
 export * from "./opening/span-verifier";
 export * from "./opening/span-repair";

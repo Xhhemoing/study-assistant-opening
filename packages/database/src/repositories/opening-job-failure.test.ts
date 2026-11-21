@@ -5,7 +5,7 @@ import { failOpeningJob } from "./opening-job-failure";
 const WORKSPACE = "00000000-0000-4000-8000-000000000001";
 const SOURCE = "00000000-0000-4000-8000-000000000003";
 
-type Recorded = { query: string; values: unknown[] };
+type Recorded = { query: string; parts: TemplateStringsArray; values: unknown[] };
 
 function fakeSql(job: { payload: unknown; privacy_epoch: number; kind?: string }, workspaceEpoch = 7,
   intercept?: (query: string, values: unknown[]) => unknown[] | undefined) {
@@ -13,7 +13,7 @@ function fakeSql(job: { payload: unknown; privacy_epoch: number; kind?: string }
   const kind = job.kind ?? "parse";
   const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
-    recorded.push({ query, values });
+    recorded.push({ query, parts, values });
     const result = intercept?.(query, values);
     if (result !== undefined) return Promise.resolve(result);
     if (query.startsWith("SELECT w.id")) return Promise.resolve([{ id: WORKSPACE, owner_user_id: "user-1", privacy_epoch: workspaceEpoch }]);
@@ -38,16 +38,14 @@ function lastFailureProjection(recorded: Recorded[]): Recorded {
   return recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources") && query.includes("parse_state = 'failed'")).at(-1)!;
 }
 
-/** Values bound to the `(? IS NULL OR s.version = ?)` version fence of a source update. */
+/** Read bindings from template boundaries so SQL operators cannot shift their indexes. */
 function versionFenceValues(entry: Recorded): unknown[] {
-  const parts = entry.query.split("?");
-  const bound: unknown[] = [];
-  entry.values.forEach((value, index) => {
-    const before = parts[index] ?? "";
-    const after = parts[index + 1] ?? "";
-    if (after.startsWith("::integer IS NULL") || before.endsWith("s.version = ")) bound.push(value);
+  return entry.values.filter((_, index) => {
+    const before = entry.parts[index] ?? "";
+    const after = entry.parts[index + 1] ?? "";
+    return /::integer IS NULL\s+OR s\.version\s*=\s*$/.test(after) ||
+      /::integer IS NULL\s+OR s\.version\s*=\s*$/.test(before);
   });
-  return bound;
 }
 
 describe("opening parse job failure projection", () => {
@@ -82,6 +80,20 @@ describe("opening parse job failure projection", () => {
     const sourceUpdates = recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources") && query.includes("parse_state = 'failed'"));
     expect(sourceUpdates.length).toBe(2);
     for (const update of sourceUpdates) expect(versionFenceValues(update)).toEqual([0, 0]);
+  });
+
+  it("carries private PDF cap evidence only into the unexcluded stale source projection", async () => {
+    const { sql, recorded } = fakeSql({ payload: { sourceId: SOURCE, sourceVersion: 0 }, privacy_epoch: 6 });
+
+    await expect(failOpeningJob(sql, "job-1", { retryable: true })).resolves.toBe(true);
+    const updates = recorded.filter(({ query }) => query.startsWith("UPDATE opening_sources") && query.includes("parse_state = 'failed'"));
+    const stale = updates.find(({ values }) => values.some(value => (value as { code?: string })?.code === "PARSE_STALE"));
+    expect(stale?.values).toContainEqual({ code: "PARSE_STALE", message: "隐私设置已变化，解析结果已丢弃。", retryable: false });
+    expect(stale?.query).toContain("AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions");
+    expect(stale?.query).toContain("jsonb_build_object('pdfTextCap', s.error->'pdfTextCap')");
+    const excluded = updates.find(({ values }) => values.some(value => (value as { code?: string })?.code === "PRIVACY_EXCLUDED"));
+    expect(excluded?.query).toContain("AND EXISTS (SELECT 1 FROM opening_privacy_exclusions");
+    expect(excluded?.query).not.toContain("pdfTextCap");
   });
 
   it("projects parse-media failure onto the source like parse", async () => {
