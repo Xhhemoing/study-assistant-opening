@@ -992,14 +992,17 @@ function checkEqualityWithRational(sideA: string, sideB: string): "correct" | "i
 }
 
 function isDigitInternalComma(text: string, index: number, clauseStart: number): boolean {
-  const prev = index > clauseStart ? text[index - 1]! : "";
-  const next = index + 1 < text.length ? text[index + 1]! : "";
-  if (!/\d/.test(prev) || !/\d/.test(next)) return false;
+  if (index <= clauseStart || index >= text.length - 1) return false;
+  if (!/\d/.test(text[index - 1]!) || !/\d/.test(text[index + 1]!)) return false;
 
   let left = index - 1;
-  while (left > clauseStart && /[\d,]/.test(text[left - 1]!)) left--;
+  while (left > clauseStart && (/\d/.test(text[left - 1]!) || (text[left - 1] === "," && left - 1 > clauseStart && /\d/.test(text[left - 2]!)))) {
+    left--;
+  }
   let right = index + 2;
-  while (right < text.length && /[\d,]/.test(text[right]!)) right++;
+  while (right < text.length && (/\d/.test(text[right]!) || (text[right] === "," && right + 1 < text.length && /\d/.test(text[right + 1]!)))) {
+    right++;
+  }
   const run = text.slice(left, right);
   const dotBefore = left > 0 && text[left - 1] === ".";
   const dotAfter = right < text.length && text[right] === ".";
@@ -1018,7 +1021,11 @@ function isDigitInternalComma(text: string, index: number, clauseStart: number):
           pos = end + 1;
           continue;
         }
-        const plain = /^(\d+)/.exec(rest)!;
+        const plain = /^(\d+)/.exec(rest);
+        if (!plain) {
+          pos++;
+          continue;
+        }
         const end = pos + plain[1]!.length;
         if (targetOffset === end) return false;
         pos = end + 1;
