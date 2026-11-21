@@ -271,6 +271,19 @@ describe("bounded symbolic equivalence", () => {
       }).status,
     ).toBe("unverified");
 
+    // Round-10 P1-1: > 2^4096 constant in buildCadPlan / verifyIndefiniteIntegral fails closed without uncaught PolyComplexityError
+    const hugeConst = (1n << 4097n).toString();
+    const hugeIntegral = verifyIndefiniteIntegral({
+      student: `x + (ln(x + ${hugeConst}))^0`,
+      integrand: "1",
+    });
+    expect(hugeIntegral.status).toBe("unverified");
+    expect(hugeIntegral.reason).toBe("polynomial_complexity_exceeded");
+
+    const hugeScalar = verifyScalarEquivalence(`sqrt(x + ${hugeConst})`, `sqrt(x + ${hugeConst})`);
+    expect(hugeScalar.status).toBe("unverified");
+    expect(hugeScalar.reason).toBe("polynomial_complexity_exceeded");
+
     // Round-6 P1-5: unresolved multi-root Sturm bracket at depth cap fails closed
     const m = "38685626227668133590597632";
     const closeRootsResult = verifyScalarEquivalence(

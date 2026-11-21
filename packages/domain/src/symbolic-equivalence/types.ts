@@ -1623,6 +1623,21 @@ function buildCadPlan(
   parsedDomain: { intervals: NormalizedInterval[]; excluded: SpanRational[] },
   extraSplitPolys: readonly Polynomial[] = [],
 ): CadPlan {
+  try {
+    return buildCadPlanInner(constraints, parsedDomain, extraSplitPolys);
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { sites: [], openCells: [], unresolvedRootIsolation: true, complexityExceeded: true };
+    }
+    throw err;
+  }
+}
+
+function buildCadPlanInner(
+  constraints: readonly DomainConstraint[],
+  parsedDomain: { intervals: NormalizedInterval[]; excluded: SpanRational[] },
+  extraSplitPolys: readonly Polynomial[] = [],
+): CadPlan {
   let master = polynomialConstant(rational(1n));
   const cadBudget: PolyMulBudget = { mulSteps: 0 };
   for (const c of constraints) {
@@ -3437,6 +3452,22 @@ function checkAntiderivativeDefinedOnIntegrandDomain(
   variable: string,
   domain: DomainSpec,
 ): VerificationResult | null {
+  try {
+    return checkAntiderivativeDefinedOnIntegrandDomainInner(antiderivative, integrand, variable, domain);
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
+    throw err;
+  }
+}
+
+function checkAntiderivativeDefinedOnIntegrandDomainInner(
+  antiderivative: ScalarExpr,
+  integrand: ScalarExpr,
+  variable: string,
+  domain: DomainSpec,
+): VerificationResult | null {
   const parsedDomain = parseDomainSpec(domain);
   if (!parsedDomain || parsedDomain.empty) return null;
   const sConstraints = collectConstraints(antiderivative, variable);
@@ -3583,6 +3614,21 @@ function checkAntiderivativeDefinedOnIntegrandDomain(
 }
 
 export function verifyIndefiniteIntegral(input: IntegralVerificationInput): VerificationResult {
+  const effectiveDomain: DomainSpec = {
+    ...input.domain,
+    variable: input.variable ?? input.domain?.variable ?? "x",
+  };
+  try {
+    return verifyIndefiniteIntegralInner(input);
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain: effectiveDomain };
+    }
+    throw err;
+  }
+}
+
+function verifyIndefiniteIntegralInner(input: IntegralVerificationInput): VerificationResult {
   const student = parseScalarExpr(input.student);
   const integrand = parseScalarExpr(input.integrand);
   if (!student || !integrand) return { status: "unverified", reason: "parse_outside_decidable_fragment" };

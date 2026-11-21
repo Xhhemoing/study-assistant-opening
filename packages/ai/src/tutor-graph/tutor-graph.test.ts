@@ -311,7 +311,7 @@ describe("TutorGraph fast path", () => {
     expect(() => createMinEntropyBudget({ cooldownHours: -1 })).toThrow(RangeError);
     expect(() => createMinEntropyBudget({ cooldownHours: Number.POSITIVE_INFINITY })).toThrow(RangeError);
 
-    const guardBudget = createMinEntropyBudget({ seededRecipe: "seed-1", now: () => 1000 });
+    const guardBudget = createMinEntropyBudget({ initialSeed: "seed-1", now: () => 1000 });
     guardBudget.commitRelease(4, 1000);
     expect(() => guardBudget.canRelease(1, Number.NaN)).toThrow(RangeError);
     expect(() => guardBudget.canRelease(1, Number.POSITIVE_INFINITY)).toThrow(RangeError);
@@ -548,5 +548,88 @@ describe("TutorGraph fast path", () => {
     });
     expect(twoStep.state).toBe("released");
     expect(twoStep.leakageBits).toBeCloseTo(Math.log2(3), 10);
+
+    // Round-10 P1-2 Bypass 1: omitted firstError with partial invalid/unknown step verdicts across 3 steps still coarsens under pure cap
+    const omittedFirstErrorShapes = new Set<string>();
+    const partialVerdicts: Array<Parameters<typeof runTutorGraph>[0]["verifyCaps"]["verify"]> = [
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "unknown" },
+          { id: "s2", text: "b", status: "unknown" },
+          { id: "s3", text: "c", status: "unknown" },
+        ],
+      }),
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "invalid" },
+          { id: "s2", text: "b", status: "unknown" },
+          { id: "s3", text: "c", status: "unknown" },
+        ],
+      }),
+      () => ({
+        steps: [
+          { id: "s1", text: "a", status: "unknown" },
+          { id: "s2", text: "b", status: "invalid" },
+          { id: "s3", text: "c", status: "unknown" },
+        ],
+      }),
+    ];
+    for (const [idx, verifyFn] of partialVerdicts.entries()) {
+      const purePartialBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const res = runTutorGraph({
+        questionStem: "微积分",
+        submission: {},
+        budget: purePartialBudget,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verifyFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+      });
+      expect(res.state).toBe("released");
+      expect(purePartialBudget.leakageBits).toBe(idx === 0 ? 0 : 1);
+      expect(res.publicTeaching?.learnerSteps.every((step) => step.status === "unknown")).toBe(true);
+      omittedFirstErrorShapes.add(JSON.stringify({ teaching: res.publicTeaching, verification: res.verification }));
+    }
+    expect(omittedFirstErrorShapes.size).toBe(2);
+
+    // Round-10 P1-2 Bypass 2: pure turn clamped to 1.5-bit ceiling even when passed a practice-configured budget
+    const reusedPracticeBudget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: 4, now: () => 1000 });
+    const pureOnPractice1 = runTutorGraph({
+      questionStem: "求导",
+      submission: {},
+      budget: reusedPracticeBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => ({
+          steps: [
+            { id: "s1", text: "a", status: "valid" },
+            { id: "s2", text: "b", status: "invalid" },
+            { id: "s3", text: "c", status: "invalid" },
+          ],
+          firstError: { stepId: "s2", kind: "domain", message: "bad" },
+        }),
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+    });
+    expect(pureOnPractice1.state).toBe("released");
+    expect(reusedPracticeBudget.leakageBits).toBe(1);
+    expect(pureOnPractice1.publicTeaching?.learnerSteps.every((step) => step.status === "unknown")).toBe(true);
+
+    const pureOnPractice2 = runTutorGraph({
+      questionStem: "求导",
+      submission: {},
+      budget: reusedPracticeBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => ({
+          steps: [{ id: "s1", text: "a", status: "invalid" }],
+        }),
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+    });
+    expect(pureOnPractice2.state).toBe("budget_contaminated");
+    expect(pureOnPractice2.releaseApproved).toBe(false);
+    expect(reusedPracticeBudget.leakageBits).toBe(1);
   });
 });

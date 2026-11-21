@@ -1,6 +1,7 @@
 import {
   PURE_CONTAMINATED_GUIDANCE,
   PURE_COOLDOWN_GUIDANCE,
+  PURE_MAX_LEAKAGE_BITS,
   fixedPureGuidance,
   type MinEntropyBudget,
 } from "./min-entropy-budget";
@@ -351,22 +352,31 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
 
   const propagatedSteps = propagateSteps(verification.steps, verification.firstError);
   const nonNeutralStepCount = propagatedSteps.filter((step) => step.status !== "unknown" || step.error !== undefined).length;
-  const disclosedStepCount = Math.max(nonNeutralStepCount, verification.firstError ? propagatedSteps.length : 0);
+  const hasAnswerDependentStepInfo = nonNeutralStepCount > 0 || Boolean(verification.firstError);
+  const disclosedStepCount = hasAnswerDependentStepInfo ? Math.max(nonNeutralStepCount, propagatedSteps.length) : 0;
   const stepOutcomeBits = disclosedStepCount > 0 ? Math.log2(disclosedStepCount + 1) : 0;
   const disclosesAnswerDependentInfo = Boolean(verification.firstError || verification.ruleWitness || disclosedStepCount > 0);
   const uncoarsenedBits = Math.max(disclosesAnswerDependentInfo ? 1 : 0, stepOutcomeBits);
 
-  const turnCap =
+  const rawTurnCap =
     typeof (budget as { maxBitsPerTurn?: unknown }).maxBitsPerTurn === "number" &&
     Number.isFinite((budget as { maxBitsPerTurn?: number }).maxBitsPerTurn)
       ? (budget as { maxBitsPerTurn: number }).maxBitsPerTurn
-      : 1.5;
+      : PURE_MAX_LEAKAGE_BITS;
+  const turnCap = assessmentMode === "practice" ? rawTurnCap : Math.min(rawTurnCap, PURE_MAX_LEAKAGE_BITS);
   const uncoarsenedFits =
     uncoarsenedBits <= turnCap &&
-    (assessmentMode === "practice" || uncoarsenedBits === 0 || budget.leakageBits + uncoarsenedBits < turnCap);
+    (assessmentMode === "practice" || uncoarsenedBits === 0 || budget.leakageBits + uncoarsenedBits < PURE_MAX_LEAKAGE_BITS);
   const shouldCoarsen = disclosedStepCount >= 2 && !uncoarsenedFits;
 
   const requiredBits = shouldCoarsen ? 1 : uncoarsenedBits;
+  if (assessmentMode !== "practice" && requiredBits > 0 && budget.leakageBits + requiredBits >= PURE_MAX_LEAKAGE_BITS) {
+    const pureCheck = budget.canRelease(requiredBits, nowMs);
+    return blockedByBudgetResult(
+      budget,
+      pureCheck.allowed ? "budget_exhausted" : (pureCheck.reason ?? "budget_exhausted"),
+    );
+  }
   const releaseCheck = budget.canRelease(requiredBits, nowMs);
   if (!releaseCheck.allowed) {
     return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
