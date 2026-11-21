@@ -46,6 +46,12 @@ describe("exam photo review is a durable proposal", () => {
     expect(call).not.toHaveBeenCalled();
     expect(images).not.toHaveBeenCalled();
   });
+  it("does not charge again when a fresh client key reuses an unresolved intent", async () => {
+    repository.begin.mockResolvedValueOnce({ review: { ...stored }, input, privacyEpoch: 2, referencePage: 3, questionLabel: "题1", reusedUnresolved: true });
+    expect(await service.review(scope, { ...input, clientKey: "fresh-review-key" })).toEqual(stored);
+    expect(call).not.toHaveBeenCalled();
+    expect(images).not.toHaveBeenCalled();
+  });
   it("abstains when the model cannot match the question", async () => {
     call.mockImplementation(async (_scope, _task, options: Options) => {
       await options.beforeSend?.();

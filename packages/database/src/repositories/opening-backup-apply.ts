@@ -399,6 +399,13 @@ function filterPayload(
   return Object.keys(payload).length ? payload : null;
 }
 
+export function stripLegacyTimetableRevision(row: Record<string, unknown>): Record<string, unknown> {
+  const settings = row.intervention_settings;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return row;
+  const { timetableRevision: _legacyRevision, ...withoutRevision } = settings as Record<string, unknown>;
+  return { ...row, intervention_settings: withoutRevision };
+}
+
 /**
  * Mutating Opening restore apply. Caller must already have passed confirm +
  * structural gates (or this re-checks them). Re-reads empty-namespace counts
@@ -545,7 +552,9 @@ export async function executeOpeningRestoreApply(
           // Observation root/head references are cyclic and immediate FKs.
           // Export order is by UUID, not predecessor; reconnect only after every
           // validated observation exists, in this same restore transaction.
-          const insertRow = table === "opening_learning_observations"
+          const insertRow = table === "workspace_preferences"
+            ? stripLegacyTimetableRevision(row)
+            : table === "opening_learning_observations"
             ? { ...row, root_observation_id: null, revises_observation_id: null, effective_head_id: null }
             : table === "opening_source_versions" ? importedVersions.get(row) ?? row : row;
           const payload = filterPayload(tx as unknown as Sql, table, insertRow, workspaceId);

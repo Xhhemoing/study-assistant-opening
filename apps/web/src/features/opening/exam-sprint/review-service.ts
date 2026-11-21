@@ -16,7 +16,7 @@ export function createExamPhotoReviewService(deps: {
     read: deps.repository.read,
     async review(scope: Scope, input: ExamWorkReviewInput) {
       const context = await deps.repository.begin(scope, input), id = context.review.id;
-      if (context.review.status !== "pending") return context.review;
+      if (context.reusedUnresolved || context.review.status !== "pending") return context.review;
       let sent = false;
       try {
         const [work, reference] = await Promise.all([

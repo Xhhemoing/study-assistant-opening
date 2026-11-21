@@ -171,6 +171,14 @@ describe("exam photo review repository integration", () => {
     expect(rows.map(row => row.id)).toEqual([first.review.id]);
   });
 
+  it("reuses the same unresolved intent across a fresh client key", async () => {
+    const first = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "  My explanation  " }));
+    const retry = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "My explanation" }));
+    expect(retry.review.id).toBe(first.review.id);
+    expect(retry.review.status).toBe("pending");
+    expect(await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: first.review.id }]);
+  });
+
   it("keeps the first completed proposal when later completions or failure callbacks arrive", async () => {
     const { review } = await repository.begin(f.scope, input());
     await repository.fail(f.scope, review.id, "unknown");

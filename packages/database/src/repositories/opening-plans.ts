@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import {
-  DEFAULT_OPENING_INTERVENTION_PREFS,
   isReservedDayAdjustmentProposePrefix,
   type AcceptPlanInput,
   type PlanBlockReason,
@@ -170,14 +169,25 @@ function toWeekSession(row: Record<string, unknown>): WeekSession {
 
 async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
   const rows = await sql`
-    SELECT s.*, p.intervention_settings->>'timetableRevision' AS revision FROM workspaces w
-    LEFT JOIN workspace_preferences p ON p.workspace_id = w.id
+    SELECT s.*, h.revision AS history_revision FROM workspaces w
+    LEFT JOIN opening_workspace_history_revisions h
+      ON h.workspace_id = w.id AND h.owner_user_id = w.owner_user_id
     LEFT JOIN opening_timetable_sessions s ON s.workspace_id = w.id AND s.owner_user_id = w.owner_user_id
     WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
     ORDER BY s.weekday, s.start_period, s.id`;
   const sessions = rows.filter(row => row.id != null).map(toWeekSession);
-  // Use the first ordered row for legacy timetables until their first replacement.
-  return { sessions, revision: (rows[0]?.revision as string | null) ?? (rows[0]?.id as string | null) ?? `empty:${scope.workspaceId}` };
+  const firstSession = rows.find(row => row.id != null);
+  const historyRevision = rows[0]?.history_revision;
+  const revision = historyRevision == null
+    ? (firstSession?.id as string | null) ?? `empty:${scope.workspaceId}`
+    : timetableRevisionToken(scope.workspaceId, Number(historyRevision));
+  return { sessions, revision };
+}
+
+/** Derive a UUID token from the rollback-transparent workspace history counter. */
+function timetableRevisionToken(workspaceId: string, revision: number): string {
+  const hex = createHash("sha256").update(`opening-timetable:${workspaceId}:${revision}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${(parseInt(hex[16]!, 16) & 0x3 | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
@@ -394,11 +404,10 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
               ${s.courseId ?? null}, ${s.weekday}, ${s.weeks}, ${s.startPeriod}, ${s.endPeriod}
             )`;
         }
-        const timetableRevision = randomUUID();
-        await tx`INSERT INTO workspace_preferences(workspace_id, intervention_settings)
-          VALUES (${scope.workspaceId}, ${tx.json({ ...DEFAULT_OPENING_INTERVENTION_PREFS, timetableRevision })})
-          ON CONFLICT(workspace_id) DO UPDATE SET intervention_settings =
-            jsonb_set(workspace_preferences.intervention_settings, '{timetableRevision}', EXCLUDED.intervention_settings->'timetableRevision')`;
+        await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+          VALUES (${scope.workspaceId},${scope.ownerUserId},0) ON CONFLICT DO NOTHING`;
+        await tx`UPDATE opening_workspace_history_revisions SET revision=revision+1
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         return (await readTimetableSnapshot(tx, scope)).sessions;
       });
     },

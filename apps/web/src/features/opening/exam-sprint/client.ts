@@ -31,6 +31,29 @@ const uncertainMessage = "上一操作的保存结果尚未确认。请恢复该
 const describeError = (error: unknown) => userFacingMessage(error, "连接失败，请稍后重试。");
 const isResolvedReview = (review: ExamWorkReview) => review.status === "ready" || review.status === "failed";
 
+function fallbackFingerprint(bytes: Uint8Array): string {
+  let a = 0x811c9dc5, b = 0x9e3779b9, c = 0x85ebca6b, d = 0xc2b2ae35;
+  for (const byte of bytes) {
+    a = Math.imul(a ^ byte, 0x01000193);
+    b = Math.imul(b ^ byte, 0x85ebca6b);
+    c = Math.imul(c ^ byte, 0xc2b2ae35);
+    d = Math.imul(d ^ byte, 0x27d4eb2d);
+  }
+  return [a, b, c, d, a ^ c, b ^ d, a ^ b, c ^ d]
+    .map(value => (value >>> 0).toString(16).padStart(8, "0")).join("");
+}
+
+async function fingerprintFor(bytes: Uint8Array): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle) {
+    try {
+      const digest = await subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    } catch { /* Use the deterministic local fallback below. */ }
+  }
+  return fallbackFingerprint(bytes);
+}
+
 /** All sprint and integration mutations share one lock and one replay envelope. */
 export function createExamSprintClient(options: { workspaceId?: string; courseId?: string; fetcher?: typeof fetch; keyFactory?: () => string } = {}) {
   const fetcher = options.fetcher ?? fetch;
@@ -140,15 +163,15 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
       const command = build("compare-intent");
       const { clientKey: _key, ...intent } = command.body;
       const bytes = new TextEncoder().encode(JSON.stringify([command.path, command.method, intent]));
-      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      const digest = await fingerprintFor(bytes);
       if (!isCurrent(operation)) return;
-      fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      fingerprint = digest;
       recovery ??= sprintRecoveryStore(options.workspaceId, options.courseId);
       const keySchema = command.target === "review" ? examWorkReviewInputSchema.shape.clientKey : examBindInputSchema.shape.clientKey;
       command.body.clientKey = keySchema.parse(recovery.get(fingerprint) ?? keyFactory());
       pending = command;
       // Persist before dispatch so closing the tab view cannot orphan a committed receipt.
-      recovery.remember(fingerprint, pending.body.clientKey);
+      recovery.remember(fingerprint, pending.body.clientKey, { protected: command.target === "review" });
     } catch {
       if (isCurrent(operation)) publish({ error: "请检查输入内容，暂未提交。" });
       finish(operation);

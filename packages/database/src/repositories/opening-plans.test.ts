@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
+import { DEFAULT_OPENING_INTERVENTION_PREFS, interventionPrefsSchema } from "@aistudy/contracts";
 import { createOpeningPlansRepository } from "./opening-plans";
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
@@ -18,6 +19,37 @@ it("accepts an untouched timetable revision only in its issuing workspace", asyn
   await expect(repo.replaceTimetable({ ...scope, workspaceId: "other" }, [], revision)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(query.mock.calls.some(([parts]) => parts.join("").includes("DELETE"))).toBe(false);
   await expect(repo.replaceTimetable(scope, [], revision)).resolves.toEqual([]);
+});
+
+it("derives timetable revisions from the rollback-safe history counter", async () => {
+  let history: number | null = null;
+  const query = vi.fn(async (parts: TemplateStringsArray) => {
+    const text = parts.join("?").replace(/\s+/g, " ").trim();
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.startsWith("SELECT s.*, h.revision AS history_revision")) {
+      return history === null ? [] : [{ id: null, history_revision: history }];
+    }
+    if (text.startsWith("INSERT INTO opening_workspace_history_revisions")) {
+      history ??= 0;
+      return [];
+    }
+    if (text.startsWith("UPDATE opening_workspace_history_revisions")) {
+      history = (history ?? 0) + 1;
+      return [];
+    }
+    return [];
+  });
+  const sql = Object.assign(query, { json: (value: unknown) => value,
+    begin: (run: (tx: Sql) => unknown) => run(query as unknown as Sql) });
+  const repo = createOpeningPlansRepository(sql as unknown as Sql);
+  const before = await repo.timetableSnapshot(scope);
+  await repo.replaceTimetable(scope, [], before.revision);
+  const after = await repo.timetableSnapshot(scope);
+  expect(after.sessions).toEqual([]);
+  expect(after.revision).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(after.revision).not.toBe(before.revision);
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("intervention_settings"))).toBe(false);
+  expect(interventionPrefsSchema.parse(DEFAULT_OPENING_INTERVENTION_PREFS)).toEqual(DEFAULT_OPENING_INTERVENTION_PREFS);
 });
 
 describe("opening task response versions", () => {

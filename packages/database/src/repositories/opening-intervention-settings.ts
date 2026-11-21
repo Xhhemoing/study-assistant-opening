@@ -70,8 +70,7 @@ export function createOpeningInterventionSettingsRepository(sql: Sql) {
         await tx`INSERT INTO workspace_preferences (workspace_id, intervention_settings)
           VALUES (${scope.workspaceId}, ${tx.json(parsed)})
           ON CONFLICT(workspace_id) DO UPDATE SET
-            intervention_settings=EXCLUDED.intervention_settings || jsonb_strip_nulls(jsonb_build_object(
-              'timetableRevision', workspace_preferences.intervention_settings->'timetableRevision')), updated_at=now()`;
+            intervention_settings=EXCLUDED.intervention_settings, updated_at=now()`;
       });
     },
 
