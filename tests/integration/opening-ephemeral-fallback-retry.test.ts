@@ -359,3 +359,103 @@ it.each(["unknown", "completed", "not_sent"] as const)("keeps the whole operatio
     expect(primaryCall).toHaveBeenCalledTimes(2); expect(fallbackCall).toHaveBeenCalledOnce();
   }
 });
+
+it("routes pre-reserve fallback to alternateId when legacy fallback key is occupied without primary", async () => {
+  const { budget } = ledger();
+  const key = `collision-${randomUUID()}`;
+  const legacyFallback = `eph:${key}:fallback`;
+  const encoded = encodedKey(f.scope.workspaceId, key);
+
+  // Another workspace holds eph:<key>:fallback without eph:<key>.
+  const otherRepo = createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 });
+  const occupant = await otherRepo.reserve(f.otherScope, {
+    purpose: "tutor", amountCents: 10, requestId: legacyFallback,
+    parentBudget: { id: `study-ephemeral:${f.otherScope.workspaceId}:${key}:occupant` },
+  });
+
+  const primaryFailure = new OpeningProviderError("PROVIDER_AUTH", "bad credentials");
+  const fallbackCall = vi.fn(async () => ({
+    text: "answered-on-v2", citedChunkIds: [], candidates: [], requestId: "v2-receipt", inputTokens: 1, outputTokens: 1,
+  }));
+  const service = createEphemeralTutorService({
+    budget, provider: null,
+    resolveModel: async () => { throw primaryFailure; },
+    resolveFallbackModel: async () => model("fallback-v2", fallbackCall),
+    sources: { listOwnedIds: async () => [] }, chunks: { listForSources: async () => [] },
+    privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+    config: { maxContextCharacters: 1000, maxOutputTokens: 32, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+  });
+
+  const request = { text: "Explain", sourceIds: [], history: [], clientKey: key };
+  await expect(service.replyEphemeral(f.scope, request)).resolves.toMatchObject({ text: "answered-on-v2" });
+  expect(fallbackCall).toHaveBeenCalledOnce();
+
+  await expect(service.replyEphemeral(f.scope, request)).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
+  expect(fallbackCall).toHaveBeenCalledOnce();
+
+  const [completed] = await f.sql`SELECT request_id, state, amount_cents FROM opening_budget_reservations
+    WHERE workspace_id = ${f.scope.workspaceId} AND state = 'completed' AND parent_interaction_id = ${`study-ephemeral:${f.scope.workspaceId}:${key}`}`;
+  expect(completed).toEqual({ request_id: `${encoded}:fallback`, state: "completed", amount_cents: 1 });
+  const [stillOccupied] = await f.sql`SELECT workspace_id, state FROM opening_budget_reservations WHERE id = ${occupant.id}`;
+  expect(stillOccupied).toEqual({ workspace_id: f.otherScope.workspaceId, state: "reserved" });
+});
+
+it("keeps alternateId rollback fences terminal after not_sent fallback under same-workspace fallback collision", async () => {
+  const { budget } = ledger();
+  const key = `same-ws-collision-${randomUUID()}`;
+  const encoded = encodedKey(f.scope.workspaceId, key);
+  const notSent = new OpeningProviderError("PROVIDER_AUTH", "bad credentials");
+  const primaryCall = vi.fn(async () => ({
+    text: "should-not-run", citedChunkIds: [], candidates: [], requestId: "p", inputTokens: 1, outputTokens: 1,
+  }));
+  const fallbackCall = vi.fn(async () => { throw notSent; });
+  let primaryAvailable = false;
+
+  const service = createEphemeralTutorService({
+    budget, provider: null,
+    resolveModel: async () => {
+      if (!primaryAvailable) throw notSent;
+      return model("primary-recovered", primaryCall);
+    },
+    resolveFallbackModel: async () => model("fallback-terminal", fallbackCall),
+    sources: { listOwnedIds: async () => [] }, chunks: { listForSources: async () => [] },
+    privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+    config: { maxContextCharacters: 1000, maxOutputTokens: 32, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+  });
+
+  // Turn 1 uses clientKey = "<key>:fallback", occupying eph:<key>:fallback while eph:<key> does not exist.
+  await expect(service.replyEphemeral(f.scope, { text: "Turn 1", sourceIds: [], history: [], clientKey: `${key}:fallback` }))
+    .rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
+  expect(fallbackCall).toHaveBeenCalledTimes(1);
+
+  // Turn 2 uses clientKey = "<key>" and hits a pre-reserve primary failure -> must isolate on eph-v2:...:fallback.
+  await expect(service.replyEphemeral(f.scope, { text: "Turn 2", sourceIds: [], history: [], clientKey: key }))
+    .rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
+  expect(fallbackCall).toHaveBeenCalledTimes(2);
+
+  const turn2Parent = `study-ephemeral:${f.scope.workspaceId}:${key}`;
+  const turn2Rows = await f.sql`SELECT request_id, state, amount_cents, reserved_amount_cents, release_reason, model_snapshot
+    FROM opening_budget_reservations WHERE workspace_id = ${f.scope.workspaceId} AND parent_interaction_id = ${turn2Parent}
+    ORDER BY request_id`;
+  const terminalFence = { state: "released", amount_cents: 0, reserved_amount_cents: 0, release_reason: "not_sent", model_snapshot: null };
+  expect(turn2Rows).toEqual(expect.arrayContaining([
+    { request_id: encoded, ...terminalFence },
+    { request_id: `eph:${key}`, ...terminalFence },
+    {
+      request_id: `${encoded}:fallback`,
+      state: "released",
+      amount_cents: 10,
+      reserved_amount_cents: 10,
+      release_reason: "not_sent",
+      model_snapshot: expect.objectContaining({ id: "fallback-terminal" }),
+    },
+  ]));
+  expect(turn2Rows).toHaveLength(3);
+
+  // Even after primary recovers, retrying the same clientKey must stay not_sent without reactivating fences.
+  primaryAvailable = true;
+  await expect(service.replyEphemeral(f.scope, { text: "Turn 2", sourceIds: [], history: [], clientKey: key }))
+    .rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
+  expect(primaryCall).not.toHaveBeenCalled();
+  expect(fallbackCall).toHaveBeenCalledTimes(2);
+});

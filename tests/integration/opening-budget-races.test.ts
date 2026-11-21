@@ -454,6 +454,90 @@ describe("opening budget races (two independent connections, deterministic barri
     await expect(contender).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
+  it("orders claimExecution rollback fences around candidate key to avoid cross-workspace 40P01 deadlock with reserve", async () => {
+    const key = "claim-vs-reserve-lock-order";
+    const primary = `eph:${key}`;
+    const fallback = `${primary}:fallback`;
+    const scopeA = fixture.scope;
+    const scopeB = fixture.otherScope;
+    const parentA = `study-ephemeral:${scopeA.workspaceId}:${key}`;
+    const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100 });
+    await fixture.sql`INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
+      VALUES (${scopeA.workspaceId}, ${parentA}, 100, 2)`;
+    const [candidate] = await fixture.sql<{ id: string }[]>`
+      INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, parent_interaction_id)
+      VALUES (${scopeA.workspaceId}, 'tutor', 10, 10, ${fallback}, ${parentA})
+      RETURNING id
+    `;
+
+    const primaryInserted = latch();
+    const proceedAfterFence = latch();
+    const holderB = track(a.sql.begin(async tx => {
+      await tx`INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, request_id)
+        VALUES (${scopeB.workspaceId}, 'tutor', 10, ${primary})`;
+      primaryInserted.open();
+      await proceedAfterFence.wait;
+      // Reserve's higher after-fence must succeed without deadlocking on Workspace A's claim.
+      await tx`INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, request_id)
+        VALUES (${scopeB.workspaceId}, 'tutor', 0, ${fallback})
+        ON CONFLICT (request_id) DO NOTHING`;
+    }));
+    await Promise.race([primaryInserted.wait, holderB]);
+
+    const claimA = track(budgetB.claimExecution(scopeA, candidate!.id));
+    try {
+      await waitUntilBlocked(fixture.sql, b.pid, a.pid, "claimExecution before-fence", /INSERT INTO opening_budget_reservations/);
+    } finally {
+      proceedAfterFence.open();
+    }
+
+    await expect(holderB).resolves.toBeUndefined();
+    await expect(claimA).resolves.toBe(true);
+    const [claimed] = await fixture.sql`SELECT state, execution_claimed_at FROM opening_budget_reservations WHERE id = ${candidate!.id}`;
+    expect(claimed).toMatchObject({ state: "reserved", execution_claimed_at: expect.any(Date) });
+    const fences = await fixture.sql`SELECT request_id, state FROM opening_budget_reservations
+      WHERE workspace_id = ${scopeA.workspaceId} AND request_id <> ${fallback} ORDER BY request_id`;
+    expect(fences).toHaveLength(2);
+    for (const row of fences) expect(row.state).toBe("released");
+  });
+
+  it("rolls back before-fences when claimExecution loses the row claim race", async () => {
+    const key = "claim-savepoint-rollback";
+    const fallback = `eph:${key}:fallback`;
+    const scope = fixture.scope;
+    const parentId = `study-ephemeral:${scope.workspaceId}:${key}`;
+    const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100 });
+    await fixture.sql`INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
+      VALUES (${scope.workspaceId}, ${parentId}, 100, 2)`;
+    const [candidate] = await fixture.sql<{ id: string }[]>`
+      INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, parent_interaction_id)
+      VALUES (${scope.workspaceId}, 'tutor', 10, 10, ${fallback}, ${parentId})
+      RETURNING id
+    `;
+
+    const locked = latch();
+    const unlock = latch();
+    const releaseFirst = track(a.sql.begin(async tx => {
+      await tx`SELECT id FROM workspaces WHERE id = ${scope.workspaceId} FOR UPDATE`;
+      locked.open();
+      await unlock.wait;
+      await tx`UPDATE opening_budget_reservations SET state = 'released', release_reason = 'not_sent' WHERE id = ${candidate!.id}`;
+    }));
+    await locked.wait;
+
+    const claimPending = track(budgetB.claimExecution(scope, candidate!.id));
+    try {
+      await waitUntilBlocked(fixture.sql, b.pid, a.pid, "claimExecution lock wait", /FOR UPDATE/);
+    } finally {
+      unlock.open();
+    }
+
+    await expect(releaseFirst).resolves.toBeUndefined();
+    await expect(claimPending).resolves.toBe(false);
+    const rows = await fixture.sql`SELECT request_id, state FROM opening_budget_reservations WHERE workspace_id = ${scope.workspaceId}`;
+    expect(rows).toEqual([{ request_id: fallback, state: "released" }]);
+  });
+
   it("concurrent balance race: workspace FOR UPDATE serializes two connections; only one fits the cap", async () => {
     const budgetA = createOpeningBudgetRepository(a.sql, { envCapCents: 100_000 });
     const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100_000 });

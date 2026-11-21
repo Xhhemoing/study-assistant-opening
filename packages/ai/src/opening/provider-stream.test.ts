@@ -74,6 +74,16 @@ describe("direct Markdown streaming", () => {
     expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: "stream-1", inputTokens: 24, outputTokens: 1100, cachedInputTokens: null });
   });
 
+  it("drops oversized stream requestId values when reporting failed response usage", async () => {
+    const h = harness(), receipt = vi.fn();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    h.write(event({ id: "x".repeat(201), choices: [{ index: 0, delta: { refusal: "refused" } }] })
+      + event({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 24, completion_tokens: 11 } })
+      + done);
+    await expect(h.provider.complete(input, undefined, deliver)).rejects.toMatchObject({ code: "PROVIDER_REFUSAL", requestSent: true });
+    expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: null, inputTokens: 24, outputTokens: 11, cachedInputTokens: null });
+  });
+
   it.each([0, undefined])("retains earlier usage through trailing text and a %s output count", async completionTokens => {
     const h = harness();
     h.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 1100 } })

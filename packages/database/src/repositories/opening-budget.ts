@@ -590,9 +590,10 @@ export function createOpeningBudgetRepository(
         // Keep an existing exact key unless it belongs to another interaction.
         const primaryOccupied = primary && (primary.workspace_id !== scope.workspaceId
           || (primary.parent_interaction_id !== null && primary.parent_interaction_id !== parentBudget?.id));
-        // A fallback with no prior reservation can claim the canonical key, even
-        // when a different interaction occupies its legacy fallback suffix.
-        const fallbackStartsFamily = canonicalFallbackId !== null && (!primary || primaryOccupied)
+        // A fallback with no prior reservation can claim the canonical key only
+        // when neither the canonical key nor its fallback suffix exists yet.
+        // If another interaction occupies the fallback suffix, isolate onto alternateId.
+        const fallbackStartsFamily = canonicalFallbackId !== null && !primary
           && !alternate && !exactRows.some(row => row.request_id === canonicalFallbackId);
         // A fallback that starts a family has no primary reservation to adopt.
         // Keep the suffix as the real attempt, then leave terminal sibling
@@ -706,7 +707,9 @@ export function createOpeningBudgetRepository(
           request_id: requestId, parent_interaction_id: parentBudget?.id ?? null, purpose: input.purpose,
         });
         const fenceTerms = { workspaceId: scope.workspaceId, purpose: input.purpose, parentId: parentBudget?.id ?? null,
-          reservedAmount: fallbackStartsFamily ? 0 as const : undefined, instant };
+          // Rollback fences on a fallback attempt stay terminal so a not_sent
+          // fallback under key collision cannot reactivate on later retries.
+          reservedAmount: canonicalFallbackId !== null ? 0 as const : undefined, instant };
         // The unique request key is global. Take it and every sibling fence in
         // the same order even when workspaces start on different attempts.
         await insertRollbackFences(tx, rollbackSiblings.filter(key => key < requestId), fenceTerms);
@@ -758,6 +761,14 @@ export function createOpeningBudgetRepository(
       };
       const siblings = ephemeralRollbackSiblings(scope.workspaceId, candidate);
       if (!siblings.length) return claim(sql);
+      class UnclaimedExecutionError extends Error {}
+      const before = siblings.filter(key => key < candidate.request_id);
+      const after = siblings.filter(key => key > candidate.request_id);
+      const fenceTerms = {
+        workspaceId: scope.workspaceId,
+        purpose: candidate.purpose,
+        parentId: candidate.parent_interaction_id,
+      };
       return sql.begin(async tx => {
         // Rollback reserve takes this same lock before reading or creating an exact key.
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -783,12 +794,20 @@ export function createOpeningBudgetRepository(
           `;
           return false;
         }
-        if (!(await claim(tx))) return false;
-        // Claim updates the existing row without modifying its unique key.
-        await insertRollbackFences(tx, siblings, {
-          workspaceId: scope.workspaceId, purpose: candidate.purpose, parentId: candidate.parent_interaction_id,
-        });
-        return true;
+        try {
+          return await tx.savepoint(async sp => {
+            // Touch global request_id keys in strict ascending order, matching reserve().
+            await insertRollbackFences(sp, before, fenceTerms);
+            if (!(await claim(sp))) {
+              throw new UnclaimedExecutionError();
+            }
+            await insertRollbackFences(sp, after, fenceTerms);
+            return true;
+          });
+        } catch (error) {
+          if (error instanceof UnclaimedExecutionError) return false;
+          throw error;
+        }
       });
     },
     async settle(scope, reservationId, actualCents, options = {}) {

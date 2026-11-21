@@ -24,6 +24,10 @@ function maxReportedTokens(previous: number | null | undefined, next: number | n
   return next === null ? previous ?? null : Math.max(previous ?? 0, next);
 }
 
+function boundFailedRequestId(requestId: string | null): string | null {
+  return requestId && requestId.length > 200 ? null : requestId;
+}
+
 async function deliverDelta(callback: ProviderTextDelta, delta: string, signal: AbortSignal) {
   let onAbort: () => void = () => undefined;
   const interrupted = new Promise<never>((_resolve, reject) => {
@@ -165,7 +169,10 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     const { inputTokens, outputTokens, cachedInputTokens } = usageSnapshot();
     if (hasTerminalOutputUsage && (answerFailure?.code !== "PROVIDER_REFUSAL" || done)
       && inputTokens !== null && outputTokens !== null) {
-      options.onTextDelta?.[onFailedResponseUsage]?.({ requestId, inputTokens, outputTokens, cachedInputTokens });
+      options.onTextDelta?.[onFailedResponseUsage]?.({
+        requestId: boundFailedRequestId(requestId),
+        inputTokens, outputTokens, cachedInputTokens,
+      });
     }
     throw error;
   } finally {
