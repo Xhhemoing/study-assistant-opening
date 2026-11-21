@@ -11,6 +11,8 @@ import {
   createSharedFullPaperBlueprint,
   evaluateCrnActionRoi,
   evaluateExamForecast,
+  filterIndependentCalibrationRecords,
+  formatJointTargetKey,
   IELTS_ACADEMIC_DIAGNOSTIC_SEEDS,
   IELTS_ACADEMIC_READING_RAW_TO_BAND,
   IELTS_ACADEMIC_SKILL_IDS,
@@ -845,5 +847,229 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     expect(recoveryOnlySnap.forecast.status).toBe("calibrated_forecast_ready");
     expect(recoveryOnlySnap.allocatedRecoveryMinutes).toBe(240);
     expect(recoveryOnlySnap.selectedActionIds).toEqual(["sleep-recovery"]);
+  });
+
+  it("enforces Round-3 MNAR joint-pass, quantile range, learner CRN isolation, and blueprint timeModel bounds", () => {
+    const beliefs = makeIeltsBeliefs({ abilityMean: 0.4, logStability: Math.log(14), lastDirectRecallAtMs: 0 });
+    const evidence = makeIndependentSectionEvidence(1_000);
+    const sim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      numDraws: 50,
+      seed: 21,
+    });
+
+    // [R3 P1-1] MNAR bias guard & inverted interval rejection in observedPassesJointTarget.
+    const target7 = { targetOverall: 7.0, targetMinSection: 6.5 };
+    const mnarCal: WholePaperCalibrationRecord[] = [
+      {
+        ...makeCalibrationRecords(1)[0]!,
+        recordId: "mnar-fail-missing-speaking",
+        observedScore: { kind: "exact", score: 6.5 },
+        observedSectionScores: { listening: 5.5, reading: 7.0, writing: 7.0 },
+      },
+      {
+        ...makeCalibrationRecords(1)[0]!,
+        recordId: "mnar-inverted-overall",
+        observedScore: { kind: "interval_only", low: 8.0, high: 5.0 },
+        observedSectionScores: { listening: 7.0, reading: 7.0, writing: 7.0, speaking: 7.0 },
+      },
+      {
+        ...makeCalibrationRecords(1)[0]!,
+        recordId: "mnar-inverted-section",
+        observedScore: { kind: "exact", score: 7.0 },
+        observedSectionScores: { listening: 5.5, reading: { low: 7.5, high: 6.0 }, writing: 7.0, speaking: 7.0 },
+      },
+    ];
+    const mnarRes = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: mnarCal,
+      targets: [target7],
+    });
+    expect(mnarRes[0]!.calibrationSampleCount).toBe(0);
+
+    // [R3 P1-2] Reject calibration records whose predictedQuantiles fall outside blueprint.scoreRange.
+    const outOfRangeQuantilesCal = makeCalibrationRecords(4).map((r, idx) =>
+      idx === 0 ? { ...r, predictedQuantiles: { q10: -10, q50: 6.5, q90: 20 } } : r,
+    );
+    const filteredQuantiles = filterIndependentCalibrationRecords({
+      records: outOfRangeQuantilesCal,
+      blueprintId: IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId,
+      targetKind: "same_blueprint_mock",
+      scoreRange: IELTS_ACADEMIC_V1_BLUEPRINT.scoreRange,
+    });
+    expect(filteredQuantiles.length).toBe(3);
+
+    // [R3 P1-3] buildUnifiedDecisionSnapshot isolates input.evidence by trimmed learnerId before CRN ROI.
+    const foreignHighWritingEvidence: ExamEvidenceRecord = {
+      evidenceId: "foreign-w-9",
+      learnerId: "other-learner-9",
+      paperFamilyId: "foreign-family",
+      sectionId: "writing",
+      partId: "writing-task-2",
+      countsTowardMastery: true,
+      assisted: false,
+      evidenceKind: "rubric_assessment",
+      observedAtMs: 1_000,
+      rubricScore: { kind: "exact", score: 9.0 },
+    };
+    const writingRepair: CandidateStudyAction = {
+      actionId: "w-repair",
+      title: "Writing Coherence Drill",
+      durationHours: 2,
+      kind: "skill_repair",
+      skillEffects: { "ielts.writing.task2_argument": { abilityDelta: 1.5 } },
+    };
+    const cleanSnap = buildUnifiedDecisionSnapshot({
+      decisionId: "dec-iso-clean",
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: " learner-target ",
+      beliefs,
+      evidence,
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: 2 * DAY_MS,
+      crnSeed: 55,
+      horizonHours: 72,
+      candidateActions: [writingRepair],
+      numDraws: 60,
+    });
+    const pollutedSnap = buildUnifiedDecisionSnapshot({
+      decisionId: "dec-iso-polluted",
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: " learner-target ",
+      beliefs,
+      evidence: [...evidence, foreignHighWritingEvidence],
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: 2 * DAY_MS,
+      crnSeed: 55,
+      horizonHours: 72,
+      candidateActions: [writingRepair],
+      numDraws: 60,
+    });
+    expect(pollutedSnap.rankedActions).toEqual(cleanSnap.rankedActions);
+    expect(pollutedSnap.selectedActionIds).toEqual(cleanSnap.selectedActionIds);
+    const blankLearnerSnap = buildUnifiedDecisionSnapshot({
+      decisionId: "dec-blank",
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "   ",
+      beliefs,
+      evidence,
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: 2 * DAY_MS,
+      crnSeed: 55,
+      horizonHours: 72,
+      candidateActions: [writingRepair],
+      numDraws: 40,
+    });
+    expect(blankLearnerSnap.rankedActions).toEqual([]);
+
+    // [R3 P2-1] Non-finite pauseRatio does not poison speakingFluencyShift into NaN.
+    const nanPauseEvidence: ExamEvidenceRecord[] = [
+      ...evidence.filter((e) => e.sectionId !== "speaking"),
+      {
+        evidenceId: "sp-nan-pause",
+        learnerId: "learner-target",
+        sectionId: "speaking",
+        countsTowardMastery: true,
+        assisted: false,
+        evidenceKind: "speech_timing",
+        observedAtMs: 1_000,
+        speechTimingReceipt: {
+          receiptId: "sr-nan",
+          durationSeconds: 110,
+          speechRateWpm: 130,
+          pauseRatio: Number.NaN,
+          calibrated: true,
+        },
+      },
+    ];
+    const nanPauseSim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      beliefs,
+      evidence: nanPauseEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 7,
+    });
+    expect(Number.isFinite(nanPauseSim.timedExpectedScore)).toBe(true);
+
+    // [R3 P2-2] Whitespace-padded learnerId / paperFamilyId cannot bypass exclusion.
+    const paddedCal = makeCalibrationRecords(4).map((r, idx) =>
+      idx === 0
+        ? { ...r, learnerId: " learner-target " }
+        : idx === 1
+          ? { ...r, paperFamilyId: " diag-family-a " }
+          : r,
+    );
+    const paddedFiltered = filterIndependentCalibrationRecords({
+      records: paddedCal,
+      blueprintId: IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId,
+      targetKind: "same_blueprint_mock",
+      scoreRange: IELTS_ACADEMIC_V1_BLUEPRINT.scoreRange,
+      excludeLearnerId: "learner-target",
+      excludePaperFamilyIds: new Set(["diag-family-a"]),
+    });
+    expect(paddedFiltered.length).toBe(2);
+
+    // [R3 P2-3] Honest official_exam calibration remediation & formatJointTargetKey / predictedJointPassByTarget.
+    const officialMissing = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: DAY_MS,
+      targetKind: "official_exam",
+    });
+    expect(officialMissing.status).toBe("insufficient_independent_evidence");
+    if (officialMissing.status === "insufficient_independent_evidence") {
+      expect(officialMissing.nextDiagnosticAction.kind).toBe("insufficient_official_exam_calibration");
+      expect(officialMissing.nextDiagnosticAction.message).toContain("同蓝图");
+    }
+
+    const keyedTarget = { targetOverall: 7, targetMinSection: 6.5 };
+    expect(formatJointTargetKey(keyedTarget)).toBe("7:6.5");
+    const byTargetCal: WholePaperCalibrationRecord[] = makeCalibrationRecords(4).map((r, idx) => ({
+      ...r,
+      predictedTargetPassProbs: undefined,
+      predictedJointPassByTarget: { "7.0:6.5": 0.2 + idx * 0.2 },
+    }));
+    const keyedLadder = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: byTargetCal,
+      targets: [keyedTarget],
+    });
+    expect(keyedLadder[0]!.calibrationSampleCount).toBe(4);
+
+    // [R3 P2-4] validateExamBlueprint rejects Infinity sigma on items and invalid timeModel on rubric parts.
+    const infItemSigmaBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "listening" && sec.items
+          ? {
+              ...sec,
+              items: [{ ...sec.items[0]!, timeModel: { ...sec.items[0]!.timeModel, sigma: Number.POSITIVE_INFINITY } }, ...sec.items.slice(1)],
+            }
+          : sec,
+      ),
+    };
+    expect(validateExamBlueprint(infItemSigmaBp)).toContain("sections.listening.items.ielts-l-1.timeModel");
+
+    const badRubricTimeBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "writing"
+          ? {
+              ...sec,
+              parts: [{ ...sec.parts[0]!, timeModel: { ...sec.parts[0]!.timeModel!, mu: Number.NaN } }, ...sec.parts.slice(1)],
+            }
+          : sec,
+      ),
+    };
+    expect(validateExamBlueprint(badRubricTimeBp)).toContain("sections.writing.parts.writing-task-1.timeModel");
   });
 });

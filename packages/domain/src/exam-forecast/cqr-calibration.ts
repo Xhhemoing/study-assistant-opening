@@ -107,20 +107,28 @@ export function filterIndependentCalibrationRecords(input: {
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
 }): WholePaperCalibrationRecord[] {
   const requiredEvidenceKind = input.targetKind === "official_exam" ? "official_exam" : "independent_mock";
+  const excludedLearner = input.excludeLearnerId?.trim();
+  const excludedFamilies = input.excludePaperFamilyIds
+    ? new Set([...input.excludePaperFamilyIds].map((id) => id.trim()).filter(Boolean))
+    : null;
   return input.records.filter((rec) => {
     if (rec.blueprintId !== input.blueprintId) return false;
     if (rec.targetKind !== input.targetKind) return false;
     if (rec.evidenceKind !== requiredEvidenceKind) return false;
     if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) return false;
-    if (!rec.learnerId || !rec.learnerId.trim() || !rec.paperFamilyId || !rec.paperFamilyId.trim()) return false;
-    if (input.excludeLearnerId && rec.learnerId === input.excludeLearnerId) return false;
-    if (input.excludePaperFamilyIds && input.excludePaperFamilyIds.has(rec.paperFamilyId)) return false;
+    const recLearner = rec.learnerId?.trim() ?? "";
+    const recFamily = rec.paperFamilyId?.trim() ?? "";
+    if (!recLearner || !recFamily) return false;
+    if (excludedLearner && recLearner === excludedLearner) return false;
+    if (excludedFamilies && excludedFamilies.has(recFamily)) return false;
 
     const { q10, q50, q90 } = rec.predictedQuantiles;
     if (!Number.isFinite(q10) || !Number.isFinite(q50) || !Number.isFinite(q90)) return false;
     if (q10 > q50 || q50 > q90) return false;
 
     const range = input.scoreRange;
+    if (range && (q10 < range[0] || q90 > range[1])) return false;
+
     if (rec.observedScore.kind === "exact") {
       const s = rec.observedScore.score;
       if (!Number.isFinite(s)) return false;
@@ -139,33 +147,35 @@ function observedPassesJointTarget(
   target: JointPassTarget,
   blueprint: ExamBlueprintV1,
 ): number | null {
-  const overallLow =
-    record.observedScore.kind === "exact"
-      ? record.observedScore.score
-      : Math.min(record.observedScore.low, record.observedScore.high);
-  const overallHigh =
-    record.observedScore.kind === "exact"
-      ? record.observedScore.score
-      : Math.max(record.observedScore.low, record.observedScore.high);
-  if (!Number.isFinite(overallLow) || !Number.isFinite(overallHigh) || overallLow > overallHigh) return null;
+  let overallLow: number;
+  if (record.observedScore.kind === "exact") {
+    const score = record.observedScore.score;
+    if (!Number.isFinite(score)) return null;
+    overallLow = score;
+  } else {
+    const { low, high } = record.observedScore;
+    if (!Number.isFinite(low) || !Number.isFinite(high) || low > high) return null;
+    overallLow = low;
+  }
 
   const overallPass = overallLow >= target.targetOverall ? 1 : 0;
   if (target.targetMinSection <= blueprint.scoreRange[0]) return overallPass;
 
   const sectionMap = record.observedSectionScores;
   if (!sectionMap) return null;
+  let sectionsPass = true;
   for (const section of blueprint.sections) {
     const val = sectionMap[section.sectionId];
     if (val === undefined) return null;
     if (typeof val === "number") {
       if (!Number.isFinite(val)) return null;
-      if (val < target.targetMinSection) return 0;
+      if (val < target.targetMinSection) sectionsPass = false;
     } else {
       if (!Number.isFinite(val.low) || !Number.isFinite(val.high) || val.low > val.high) return null;
-      if (val.low < target.targetMinSection) return 0;
+      if (val.low < target.targetMinSection) sectionsPass = false;
     }
   }
-  return overallPass;
+  return overallPass && sectionsPass ? 1 : 0;
 }
 
 function rawJointPassFromSimulation(
@@ -188,9 +198,17 @@ function rawJointPassFromSimulation(
   return passed / n;
 }
 
+export function formatJointTargetKey(target: JointPassTarget): string {
+  return `${Number(target.targetOverall)}:${Number(target.targetMinSection)}`;
+}
+
 function recordRawProbForTarget(record: WholePaperCalibrationRecord, target: JointPassTarget): number | null {
-  const targetKey = `${target.targetOverall}:${target.targetMinSection}`;
-  const keyed = record.predictedJointPassByTarget?.[targetKey];
+  if (!Number.isFinite(target.targetOverall) || !Number.isFinite(target.targetMinSection)) return null;
+  const canonicalKey = formatJointTargetKey(target);
+  const fixedKey = `${Number(target.targetOverall).toFixed(1)}:${Number(target.targetMinSection).toFixed(1)}`;
+  const keyed =
+    record.predictedJointPassByTarget?.[canonicalKey] ??
+    record.predictedJointPassByTarget?.[fixedKey];
   if (keyed !== undefined && Number.isFinite(keyed) && keyed >= 0 && keyed <= 1) return keyed;
 
   const matched = record.predictedTargetPassProbs?.find(
@@ -323,9 +341,12 @@ export function evaluateExamForecast(input: {
     .map((s) => s.sectionId)
     .filter((sid) => !coveredSections.has(sid));
 
-  const excludeFamilies = new Set<string>(input.targetPaperFamilyIds ?? []);
+  const excludeFamilies = new Set<string>(
+    (input.targetPaperFamilyIds ?? []).map((id) => id.trim()).filter(Boolean),
+  );
   for (const rec of admitted) {
-    if (rec.paperFamilyId) excludeFamilies.add(rec.paperFamilyId);
+    const familyId = rec.paperFamilyId?.trim();
+    if (familyId) excludeFamilies.add(familyId);
   }
   const validCalibrations = filterIndependentCalibrationRecords({
     records: input.calibrationRecords,
@@ -341,7 +362,18 @@ export function evaluateExamForecast(input: {
   const recommendedSeedIds = recommendedSeedIdsFor(missingSections);
 
   if (missingSections.length > 0 || n < 4 || k > n) {
-    const kind = missingSections.length > 0 ? "run_diagnostic_items" : "submit_independent_mock";
+    const kind =
+      missingSections.length > 0
+        ? "run_diagnostic_items"
+        : targetKind === "official_exam"
+          ? "insufficient_official_exam_calibration"
+          : "submit_independent_mock";
+    const message =
+      missingSections.length > 0
+        ? `请先完成缺口部分的独立诊断作答（${missingSections.join("、")}），再生成区间预估。`
+        : targetKind === "official_exam"
+          ? "官方考试历史标定样本不足，请切换同蓝图限时模考预估口径。"
+          : "当前同蓝图独立整卷标定样本不足 4 份，请再完成独立限时模考以建立 80% 区间。";
     return {
       schemaVersion: 1,
       blueprintId: input.blueprint.blueprintId,
@@ -354,10 +386,7 @@ export function evaluateExamForecast(input: {
         kind,
         sectionIds: missingSections.length > 0 ? missingSections : input.blueprint.sections.map((s) => s.sectionId),
         recommendedItemIds: recommendedSeedIds,
-        message:
-          missingSections.length > 0
-            ? `请先完成缺口部分的独立诊断作答（${missingSections.join("、")}），再生成区间预估。`
-            : "当前同蓝图独立整卷标定样本不足 4 份，请再完成独立限时模考以建立 80% 区间。",
+        message,
       },
       officialExamCalibrated: false,
     };

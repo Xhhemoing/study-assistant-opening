@@ -22,6 +22,10 @@ const clamp = (value: number, min: number, max: number): number => Math.min(max,
 const sigmoid = (x: number): number => (x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x)));
 
 export function isIndependentExamEvidence(record: ExamEvidenceRecord, learnerId?: string): boolean {
+  const trimmedTarget = learnerId?.trim();
+  const learnerMatches =
+    learnerId === undefined ||
+    (trimmedTarget !== undefined && trimmedTarget.length > 0 && record.learnerId?.trim() === trimmedTarget);
   return (
     record.countsTowardMastery === true &&
     record.assisted === false &&
@@ -29,7 +33,7 @@ export function isIndependentExamEvidence(record: ExamEvidenceRecord, learnerId?
     record.evidenceKind !== "practice_feedback" &&
     record.evidenceKind !== "self_report" &&
     Number.isFinite(record.observedAtMs) &&
-    (learnerId === undefined || record.learnerId === learnerId)
+    learnerMatches
   );
 }
 
@@ -225,7 +229,10 @@ function summarizeRubricAndTimingEvidence(admitted: readonly ExamEvidenceRecord[
         speakingCount += 1;
       } else if (receipt.speechRateWpm !== undefined && Number.isFinite(receipt.speechRateWpm)) {
         const wpmDelta = clamp((receipt.speechRateWpm - 125) / 80, -0.5, 0.5);
-        const pausePenalty = receipt.pauseRatio !== undefined ? clamp((receipt.pauseRatio - 0.18) * 1.5, -0.2, 0.5) : 0;
+        const pausePenalty =
+          receipt.pauseRatio !== undefined && Number.isFinite(receipt.pauseRatio)
+            ? clamp((receipt.pauseRatio - 0.18) * 1.5, -0.2, 0.5)
+            : 0;
         speakingShiftSum += wpmDelta - pausePenalty;
         speakingCount += 1;
       }

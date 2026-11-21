@@ -398,7 +398,7 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.points`);
             break;
           }
-          if (!(item.timeModel.sigma > 0 && Number.isFinite(item.timeModel.mu))) {
+          if (!(Number.isFinite(item.timeModel.sigma) && item.timeModel.sigma > 0 && Number.isFinite(item.timeModel.mu))) {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.timeModel`);
             break;
           }
@@ -415,6 +415,13 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
         }
         if (part.skillIds.length === 0 || part.skillIds.some((id) => !skillSet.has(id))) {
           missing.push(`sections.${section.sectionId}.parts.${part.partId}.skillIds`);
+          break;
+        }
+        if (
+          part.timeModel !== undefined &&
+          !(Number.isFinite(part.timeModel.sigma) && part.timeModel.sigma > 0 && Number.isFinite(part.timeModel.mu))
+        ) {
+          missing.push(`sections.${section.sectionId}.parts.${part.partId}.timeModel`);
           break;
         }
       }

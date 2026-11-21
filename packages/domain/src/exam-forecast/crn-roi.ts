@@ -1,6 +1,11 @@
 import { evaluateExamForecast } from "./cqr-calibration";
 import { validateExamBlueprint } from "./ielts-blueprint";
-import { generatePaperRandomDraws, simulateExamPaper, type PaperRandomDraw } from "./simulator";
+import {
+  generatePaperRandomDraws,
+  partitionExamEvidence,
+  simulateExamPaper,
+  type PaperRandomDraw,
+} from "./simulator";
 import type {
   CandidateStudyAction,
   CrnActionEvaluation,
@@ -37,6 +42,7 @@ function composeActionSetEffects(actions: readonly CandidateStudyAction[]): {
  */
 export function evaluateCrnActionRoi(input: {
   readonly blueprint: ExamBlueprintV1;
+  readonly learnerId?: string;
   readonly beliefs: SkillBeliefMap;
   readonly evidence: readonly ExamEvidenceRecord[];
   readonly examAtMs: number;
@@ -54,13 +60,18 @@ export function evaluateCrnActionRoi(input: {
     input.precomputedDraws ?? generatePaperRandomDraws(input.blueprint, numDraws, input.crnSeed);
   if (draws.length === 0) throw new RangeError("precomputedDraws must be non-empty");
 
+  const isolatedEvidence =
+    input.learnerId !== undefined
+      ? partitionExamEvidence(input.evidence, { learnerId: input.learnerId }).admitted
+      : input.evidence;
+
   const baseEffects = composeActionSetEffects(input.baselineActions);
   const plusEffects = composeActionSetEffects([...input.baselineActions, input.candidateAction]);
 
   const baseSim = simulateExamPaper({
     blueprint: input.blueprint,
     beliefs: input.beliefs,
-    evidence: input.evidence,
+    evidence: isolatedEvidence,
     examAtMs: input.examAtMs,
     precomputedDraws: draws,
     skillOverrides: baseEffects.skillOverrides,
@@ -70,7 +81,7 @@ export function evaluateCrnActionRoi(input: {
   const plusSim = simulateExamPaper({
     blueprint: input.blueprint,
     beliefs: input.beliefs,
-    evidence: input.evidence,
+    evidence: isolatedEvidence,
     examAtMs: input.examAtMs,
     precomputedDraws: draws,
     skillOverrides: plusEffects.skillOverrides,
@@ -100,7 +111,7 @@ export function evaluateCrnActionRoi(input: {
     const emptySim = simulateExamPaper({
       blueprint: input.blueprint,
       beliefs: input.beliefs,
-      evidence: input.evidence,
+      evidence: isolatedEvidence,
       examAtMs: input.examAtMs,
       precomputedDraws: draws,
     });
@@ -108,7 +119,7 @@ export function evaluateCrnActionRoi(input: {
     const aloneSim = simulateExamPaper({
       blueprint: input.blueprint,
       beliefs: input.beliefs,
-      evidence: input.evidence,
+      evidence: isolatedEvidence,
       examAtMs: input.examAtMs,
       precomputedDraws: draws,
       skillOverrides: aloneEffects.skillOverrides,
@@ -189,15 +200,21 @@ export function buildUnifiedDecisionSnapshot(input: {
   let rankedActions: CrnActionEvaluation[] = [];
   const selectedActionIds: string[] = [];
 
-  if (blueprintValid && studyCandidates.length > 0) {
+  const learnerId = input.learnerId.trim();
+  const { admitted: learnerEvidence } = learnerId
+    ? partitionExamEvidence(input.evidence, { learnerId })
+    : { admitted: [] as readonly ExamEvidenceRecord[] };
+
+  if (blueprintValid && learnerId.length > 0 && studyCandidates.length > 0) {
     const numDraws = Math.max(2, Math.round(input.numDraws ?? 400));
     const draws = generatePaperRandomDraws(input.blueprint, numDraws, input.crnSeed);
     rankedActions = studyCandidates
       .map((candidateAction) =>
         evaluateCrnActionRoi({
           blueprint: input.blueprint,
+          learnerId,
           beliefs: input.beliefs,
-          evidence: input.evidence,
+          evidence: learnerEvidence,
           examAtMs: input.examAtMs,
           baselineActions,
           candidateAction,

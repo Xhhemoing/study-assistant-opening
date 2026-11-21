@@ -208,7 +208,11 @@ export type PaperSimulationSummary = {
 };
 
 export type NextDiagnosticAction = {
-  readonly kind: "run_diagnostic_items" | "submit_independent_mock" | "collect_section_evidence";
+  readonly kind:
+    | "run_diagnostic_items"
+    | "submit_independent_mock"
+    | "collect_section_evidence"
+    | "insufficient_official_exam_calibration";
   readonly sectionIds: readonly string[];
   readonly recommendedItemIds: readonly string[];
   readonly message: string;
