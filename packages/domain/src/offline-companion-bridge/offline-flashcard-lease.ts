@@ -75,7 +75,16 @@ function containsTokenBoundedSubstring(haystack: string, needle: string): boolea
 }
 
 function normalizeLeakSyntax(text: string): string {
-  return text.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "");
+  const hasGroupingSpace = text.search(LOCALE_GROUPING_SPACE) !== -1;
+  // NFKC folds these spaces to plain spaces. Preserve them long enough to
+  // distinguish typographic digit grouping from separate numbers in prose.
+  const normalized = (hasGroupingSpace
+    ? text.replace(/[^\u00A0\u2007\u2009\u202F]+/gu, part => part.normalize("NFKC"))
+    : text.normalize("NFKC")).replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "");
+  return hasGroupingSpace
+    ? normalized.replace(LOCALE_SPACE_GROUPED_DECIMAL_RE, value => value.replace(LOCALE_GROUPING_SPACE, "_"))
+      .replace(LOCALE_GROUPING_SPACE, " ")
+    : normalized;
 }
 
 function containsSolutionDirectiveMarker(stem: string): boolean {
@@ -96,17 +105,18 @@ function extractLeakSegments(normalizedSecret: string): string[] {
 
 const SIGN_PREFIX = "(?:\\+-|-\\+|[+-])?";
 const DECIMAL_DIGITS = /\d+(?:_\d+)*/.source;
-const COMMA_GROUPED_INTEGER = /\d{1,3}(?:,\d{3})+(?!,\d)/.source;
+const COMMA_GROUPED_INTEGER = /(?:\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})+,\d{3})(?!,\d)/.source;
+const APOSTROPHE_GROUPED_INTEGER = /\d{1,3}(?:'\d{3})+(?!'\d)/.source;
+const GROUPED_INTEGER = `(?:${COMMA_GROUPED_INTEGER}|${APOSTROPHE_GROUPED_INTEGER})`;
+const DECIMAL_FRACTION = `\\.${DECIMAL_DIGITS}`;
 const DECIMAL_EXPONENT = "[+-]?" + DECIMAL_DIGITS;
 const OPTIONAL_DECIMAL_EXPONENT = "(?:[eE]" + DECIMAL_EXPONENT + ")?";
-const COMMA_GROUPED_DECIMAL = COMMA_GROUPED_INTEGER + "(?:\\." + DECIMAL_DIGITS + ")?" + OPTIONAL_DECIMAL_EXPONENT;
-const UNGROUPED_DECIMAL = "(?:" + DECIMAL_DIGITS + "(?:\\." + DECIMAL_DIGITS + ")?|\\." +
-  DECIMAL_DIGITS + ")" + OPTIONAL_DECIMAL_EXPONENT;
-const UNSIGNED_DECIMAL_LITERAL = "(?:" + COMMA_GROUPED_DECIMAL + "|" + UNGROUPED_DECIMAL + ")";
+const GROUPED_DECIMAL = `${GROUPED_INTEGER}(?:${DECIMAL_FRACTION})?${OPTIONAL_DECIMAL_EXPONENT}`;
+const UNGROUPED_DECIMAL = `(?:${DECIMAL_DIGITS}(?:${DECIMAL_FRACTION})?|${DECIMAL_FRACTION})${OPTIONAL_DECIMAL_EXPONENT}`;
+const UNSIGNED_DECIMAL_LITERAL = `(?:${GROUPED_DECIMAL}|${UNGROUPED_DECIMAL})`;
 const DECIMAL_LITERAL_RE = new RegExp(`^${SIGN_PREFIX}${UNSIGNED_DECIMAL_LITERAL}$`);
 const DECIMAL_VALUE_RE = new RegExp(
-  "^([+-]?)(" + COMMA_GROUPED_INTEGER + "|" + DECIMAL_DIGITS + ")?(?:\\.(" + DECIMAL_DIGITS +
-  "))?(?:[eE](" + DECIMAL_EXPONENT + "))?$",
+  `^([+-]?)(${GROUPED_INTEGER}|${DECIMAL_DIGITS})?(?:\\.(${DECIMAL_DIGITS}))?(?:[eE](${DECIMAL_EXPONENT}))?$`,
 );
 const GREEK_LETTER_NAMES = [
   "alpha",
@@ -1292,11 +1302,16 @@ const BARE_CORRECT_CUE = `(?<!${NON_CJK_WORD_CHAR})correct(?!${NON_CJK_WORD_CHAR
 const ANSWER_CUE_BEFORE_DASH_RE = new RegExp(`(?:${BOUNDED_ANSWER_CUE}|${BARE_CORRECT_CUE})\\s+$`, "iu");
 
 const NUMERIC_TOKEN_END = `(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d|[eE][+-]?\\d)`;
+const LOCALE_GROUPING_SPACE = /[\u00A0\u2007\u2009\u202F]/gu;
+const LOCALE_SPACE_GROUPED_DECIMAL_RE = new RegExp(standaloneNumericSource(
+  `(?<!\\d${LOCALE_GROUPING_SPACE.source})\\d{1,3}(${LOCALE_GROUPING_SPACE.source})\\d{3}(?:\\1\\d{3})*` +
+  `(?!${LOCALE_GROUPING_SPACE.source}\\d)(?:${DECIMAL_FRACTION})?${OPTIONAL_DECIMAL_EXPONENT}`,
+), "gu");
 // After an ellipsis, start at the digits rather than treating its final dot
 // as the leading decimal point of a different value.
 const UNGROUPED_DECIMAL_TOKEN = `(?!(?<=\\.)\\.)${UNGROUPED_DECIMAL}`;
 const DECIMAL_TOKEN_SOURCE = standaloneNumericSource(
-  `(?:${COMMA_GROUPED_DECIMAL}|(?!${COMMA_GROUPED_DECIMAL}${NUMERIC_TOKEN_END})${UNGROUPED_DECIMAL_TOKEN})`,
+  `(?:${GROUPED_DECIMAL}|(?!${GROUPED_DECIMAL}${NUMERIC_TOKEN_END})${UNGROUPED_DECIMAL_TOKEN})`,
 );
 const COMMA_LIST_DECIMAL_TOKEN_SOURCE = standaloneNumericSource(UNGROUPED_DECIMAL_TOKEN);
 
@@ -1343,7 +1358,7 @@ function canonicalDecimalValueKey(literal: string): string | null {
   if (!parts) return null;
   const [, sign, integer = "", rawFraction = "", exponent = "0"] = parts;
   const fraction = rawFraction.replaceAll("_", "");
-  const digits = integer.replace(/[_,]/g, "") + fraction;
+  const digits = integer.replace(/[_,']/g, "") + fraction;
   if (!digits) return null;
   const significant = digits.replace(/^0+/, "");
   if (!significant) return "0";
@@ -1465,7 +1480,7 @@ const NEXT_OPTION_RE = new RegExp(
 
 function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
-  const option = `${OPTION_WRAPPER_OPEN}?\\s*${escaped}\\s*${OPTION_WRAPPER_CLOSE}?(?!${ALPHA_NUM_IDENT_CHAR})`;
+  const option = `${OPTION_WRAPPER_OPEN}?\\s*${escaped}(?:\\s*${OPTION_WRAPPER_CLOSE})?(?!${ALPHA_NUM_IDENT_CHAR})`;
   const separator = /(?:-{1,2}>|={1,2}>|[-–—―→⇒⟶⟹:：=])/.source;
   const copula = /(?:(?:is|为|是)\s*)?/.source;
   const afterCue = `\\s*${copula}${separator}?\\s*${option}`;
@@ -1476,6 +1491,14 @@ function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLe
     new RegExp(`=\\s*${option}`, "iu"),
   ];
   if (patterns.some(pattern => pattern.test(optionText))) return true;
+
+  const bareCorrect = new RegExp(`${BARE_CORRECT_CUE}\\s*${copula}(${option})`, "giu");
+  for (const match of syntax.matchAll(bareCorrect)) {
+    const remainder = syntax.slice(match.index + match[0].length);
+    // "Correct a mistake" uses an article. Case, wrappers and line breaks
+    // distinguish it from a choice label in the same position.
+    if (match[1]?.trim() !== "a" || !/^[ \t]+(?!(?:and|or|then|is)\b)[a-z]{2,}\b/i.test(remainder)) return true;
+  }
 
   const wrapped = new RegExp(
     `${OPTION_WRAPPER_OPEN}\\s*${escaped}(${OPTION_END_PUNCTUATION})${OPTION_WRAPPER_CLOSE}`,
