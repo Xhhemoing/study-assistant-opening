@@ -16,11 +16,13 @@ import {
   logSumExp,
   posteriorMisconceptionMass,
   updateBeliefWithEvidence,
+  type EvidenceObservation,
   type SkillItemModel,
 } from "./gauss-hermite";
 import {
   calibrateItemRevision,
   type CalibrationAttempt,
+  type ParameterSnapshotV1,
 } from "./calibration";
 import {
   explorationWeight,
@@ -30,6 +32,7 @@ import {
 import {
   evaluateShadowV2Holdout,
   type ShadowV2Input,
+  type ShadowV2Row,
 } from "./shadow-v2";
 
 const baseBelief = (overrides: Partial<SkillBeliefV1> = {}): SkillBeliefV1 => createSkillBelief({
@@ -56,6 +59,35 @@ describe("hsrs-fire-dcm-v1 belief curve", () => {
     expect(retrievability(belief, Date.now())).toBeCloseTo(0.5, 12);
     expect(belief.misconceptionMass.map(([id]) => id)).toEqual(["a", "z"]);
     expect(belief.otherMass + belief.misconceptionMass.reduce((s, [, m]) => s + m, 0)).toBeCloseTo(1, 12);
+  });
+});
+
+describe("bounded belief inputs", () => {
+  it("keeps retrievability finite at extreme stability and invalid times", () => {
+    const belief = { ...baseBelief(), logStability: -1000, implicitLogCredit: Infinity };
+    expect(retrievability(belief, 0)).toBe(1);
+    expect(retrievability(belief, DAY_MS)).toBe(retrievability({ ...belief, logStability: -6 }, DAY_MS));
+    expect(effectiveRetrievability(belief, DAY_MS)).toBe(retrievability(belief, DAY_MS));
+    expect(effectiveRetrievability({ ...belief, implicitLogCredit: 1000 }, DAY_MS))
+      .toBe(effectiveRetrievability({ ...belief, implicitLogCredit: Math.log(1.2) }, DAY_MS));
+    expect(retrievability({ ...belief, logStability: 1000 }, DAY_MS))
+      .toBe(retrievability({ ...belief, logStability: 8 }, DAY_MS));
+    expect(retrievability({ ...belief, logStability: NaN }, NaN)).toBe(0.5);
+    expect(retrievability({ ...belief, logStability: NaN }, DAY_MS))
+      .toBe(retrievability({ ...belief, logStability: Math.log(10) }, DAY_MS));
+    expect(retrievability({ ...belief, lastDirectRecallAtMs: NaN }, DAY_MS, { familyPrior: NaN })).toBe(0.5);
+    expect(retrievability({ ...belief, lastDirectRecallAtMs: null }, DAY_MS, { familyPrior: 0 })).toBe(1e-6);
+    expect(retrievability({ ...belief, lastDirectRecallAtMs: null }, DAY_MS, { familyPrior: 1 })).toBe(1 - 1e-6);
+  });
+
+  it("preserves zero other mass when misconception mass is positive", () => {
+    const misconceptionMass = [["a", 2], ["b", 3]] as const;
+    for (const otherMass of [0, undefined]) {
+      const belief = baseBelief({ misconceptionMass, otherMass });
+      expect(belief.otherMass).toBe(0);
+      expect(belief.misconceptionMass).toEqual([["a", 0.4], ["b", 0.6]]);
+    }
+    expect(baseBelief({ otherMass: 0 }).otherMass).toBe(1);
   });
 });
 
@@ -96,6 +128,72 @@ describe("HSRS-IRT-DCM evidence update", () => {
     const third = deriveSessionScaffoldingAbility({ belief: before, item, atMs: DAY_MS, retryIndex: 2 });
     expect(third).toBeGreaterThanOrEqual(first);
     expect(third - before.abilityMean).toBeLessThanOrEqual(0.5);
+  });
+});
+
+describe("power-weighted evidence", () => {
+  const item: SkillItemModel = { itemId: "joint", a: 1, b: 0, g: 0, l: 0, misconceptions: [{ id: "target", delta: 1 }] };
+  const belief = baseBelief({ lastDirectRecallAtMs: null, implicitLogCredit: 0.1, misconceptionMass: [["target", 0.2]], otherMass: 0.8 });
+
+  it.each([
+    { outcome: false, channel: "hinted", misconceptionId: "target" },
+    { outcome: false, channel: "assisted" },
+    { outcome: true, channel: "multi-draft", isFreshFamily: true },
+    { outcome: false, channel: "distractor", misconceptionId: "target", hintsOrExposures: true },
+    { outcome: false, channel: "step-failure", misconceptionId: "target", powerWeight: 0 },
+    { outcome: true, channel: "unassisted", isFreshFamily: true, powerWeight: -1 },
+  ] satisfies Array<EvidenceObservation & { channel: NonNullable<EvidenceObservation["channel"]> }>)(
+    "preserves the complete prior for $channel at zero evidence weight",
+    observation => {
+      const result = updateBeliefWithEvidence({ belief, item, observation, atMs: DAY_MS });
+      expect(result.belief).toBe(belief);
+      expect(result.posteriorMass).toEqual([["__none__", 0.8], ["target", 0.2]]);
+      expect(result.retrievedProbability).toBe(0.5);
+      const applied = applyEvidenceChannel({ belief, item, atMs: DAY_MS, ...observation });
+      expect(applied.belief).toBe(belief);
+      expect(applied.posteriorMass).toEqual(result.posteriorMass);
+    },
+  );
+
+  it.each([
+    { channel: "distractor", omega: 1, mass: 0.6985014502836692, mean: -0.134218107125985, variance: 0.9500699570808507, rho: 0.4573026105106047 },
+    { channel: "distractor", omega: 0.5, mass: 0.4324436232953933, mean: -0.0737828788727207, variance: 0.9790183418025802, rho: 0.428738156825037 },
+    { channel: "step-failure", omega: 1, mass: 0.6985014502836692, mean: -0.134218107125985, variance: 0.9500699570808507, rho: 0.4573026105106047 },
+  ] as const)("marginalizes the joint $channel posterior at weight $omega", ({ channel, omega, mass, mean, variance, rho }) => {
+    // Independently evaluated joint masses with prior retrieval 1/2, guess-failure 3/4,
+    // zero IRT slip/guess, node offsets ±sqrt(3), and target likelihood ratio 8.
+    const observation = { outcome: false, channel, misconceptionId: "target", powerWeight: omega, misconceptionLikelihoodRatio: 8 };
+    const result = updateBeliefWithEvidence({ belief, item, atMs: DAY_MS, observation });
+    expect(result.belief.abilityMean).toBeCloseTo(mean, 12);
+    expect(result.belief.abilityVariance).toBeCloseTo(variance, 12);
+    expect(result.retrievedProbability).toBeCloseTo(rho, 12);
+    expect(new Map(result.posteriorMass).get("target")).toBeCloseTo(mass, 12);
+    expect(result.belief.misconceptionMass[0]?.[1]).toBeCloseTo(mass, 12);
+    expect(result.belief.otherMass).toBeCloseTo(1 - mass, 12);
+    expect(result.posteriorMass.reduce((sum, [, p]) => sum + p, 0)).toBeCloseTo(1, 12);
+    expect(result.belief.logStability).toBeCloseTo(belief.logStability - 0.25 * omega * (1 - rho), 12);
+    expect(result.belief.implicitLogCredit).toBe(0);
+    expect(applyEvidenceChannel({ belief, item, atMs: DAY_MS, ...observation }).belief).toEqual(result.belief);
+  });
+
+  it("uses posterior retrieval to decay a plain lapse and preserves the direct recall timestamp", () => {
+    const result = updateBeliefWithEvidence({ belief, item: { ...item, misconceptions: [] }, atMs: DAY_MS, observation: { outcome: false } });
+    // A symmetric ability prior and no IRT deltas give mean P(y=0 | retrieved)=1/2.
+    expect(result.retrievedProbability).toBeCloseTo(0.4, 12);
+    expect(result.belief.logStability).toBeCloseTo(belief.logStability - 0.15, 12);
+    expect(result.belief.implicitLogCredit).toBe(0);
+    expect(result.belief.lastDirectRecallAtMs).toBeNull();
+  });
+
+  it("decays a lapse at certainty, preserves stability on success and weights fresh recall credit", () => {
+    const current = baseBelief({ implicitLogCredit: 0.1 });
+    const update = (observation: EvidenceObservation) => updateBeliefWithEvidence({ belief: current, item, atMs: DAY_MS, observation });
+    expect(update({ outcome: false, retrievalProbability: 1 }).belief.logStability).toBeLessThan(current.logStability);
+    expect(update({ outcome: true, channel: "distractor", retrievalProbability: 0 }).belief.logStability).toBe(current.logStability);
+    const fresh = update({ outcome: true, isFreshFamily: true, retrievalProbability: 0.8, powerWeight: 0.5 });
+    expect(fresh.retrievedProbability).toBe(0.8);
+    expect(fresh.belief.lastDirectRecallAtMs).toBe(DAY_MS);
+    expect(fresh.belief.logStability).toBeCloseTo(current.logStability + 0.1 * (1 - fresh.directRetrievability), 12);
   });
 });
 
@@ -162,6 +260,39 @@ describe("three-tier empirical Bayes calibration", () => {
   });
 });
 
+describe("initial tier two MAP snapshot", () => {
+  const attempts: CalibrationAttempt[] = Array.from({ length: 50 }, (_, index) => ({
+    learnerId: `l-${index}`, publisherItemRevisionId: "rev-2", outcome: "correct",
+    independent: true, firstIndependentSubmission: true, abandoned: false, hinted: false, theta: 0,
+    attemptedAt: "2026-01-02T00:30:00+02:00",
+  }));
+
+  it("fits the first tier two snapshot from chronologically deduplicated human attempts", () => {
+    const later = attempts.map(attempt => ({ ...attempt, outcome: "incorrect" as const, attemptedAt: "2026-01-01T23:00:00Z" }));
+    const input = { publisherItemRevisionId: "rev-2", difficultyTag: "medium" as const, parameterSnapshotVersion: "19" };
+    const result = calibrateItemRevision({ ...input, attempts: [...later, ...attempts] });
+    expect(result.humanCount).toBe(50);
+    expect(result.tier).toBe(2);
+    // MAP solves b + 50 * sigmoid(b) = 0 for all correct, theta=0, guessing=0.
+    expect(result.servingDifficulty).toBeCloseTo(-2.817989, 5);
+    expect(result.parameterSnapshot).toMatchObject({ parameterSnapshotVersion: "19", publisherItemRevisionId: "rev-2", difficulty: result.servingDifficulty });
+  });
+
+  it("refits a foreign revision and moves uphill when the initial posterior is convex", () => {
+    const foreign: ParameterSnapshotV1 = {
+      schemaVersion: 1, parameterSnapshotVersion: "foreign", publisherItemRevisionId: "rev-1",
+      discrimination: 2, difficulty: -3, guessing: 0.25, lapse: 0.15, misconceptionDeltas: [],
+    };
+    const result = calibrateItemRevision({
+      publisherItemRevisionId: "rev-2", difficultyTag: "medium", previousParameterSnapshot: foreign,
+      attempts: attempts.map(attempt => ({ ...attempt, theta: 5, outcome: "incorrect" })),
+    });
+    expect(result.parameterSnapshot).toMatchObject({ publisherItemRevisionId: "rev-2", discrimination: 1, guessing: 0, lapse: 0.05 });
+    expect(result.servingDifficulty).toBeGreaterThan(5);
+    expect(result.parameterSnapshot?.difficulty).toBe(result.servingDifficulty);
+  });
+});
+
 describe("72 hour finite-horizon scheduler", () => {
   it("uses smooth cubic deadline exploration and a finite-horizon plan", () => {
     expect(explorationWeight(72, { min: 0.1, max: 0.9 })).toBeCloseTo(0.1, 12);
@@ -177,27 +308,125 @@ describe("72 hour finite-horizon scheduler", () => {
   });
 
   it("computes mutual information in nats and returns zero for a non-teaching probe", () => {
-    expect(mutualInformation([{ probability: 0.9, outcome: [0.9, 0.1] }, { probability: 0.1, outcome: [0.1, 0.9] }])).toBeCloseTo(0.368064207, 3);
-    expect(mutualInformation([{ probability: 0.5, outcome: [0.5, 0.5] }, { probability: 0.5, outcome: [0.5, 0.5] }])).toBeCloseTo(0, 12);
+    expect(mutualInformation([{ probability: 0.9, outcome: [0.9, 0.1] }, { probability: 0.1, outcome: [0.1, 0.9] }])).toBeCloseTo(0.1463105134, 10);
+    expect(mutualInformation([{ probability: 0.5, outcome: [1, 0] }, { probability: 0.5, outcome: [0, 1] }])).toBeCloseTo(Math.LN2, 12);
+    expect(mutualInformation([{ probability: 5, outcome: [2, 0, 0] }, { probability: 5, outcome: [0, 0, 8] }])).toBeCloseTo(Math.LN2, 12);
+    expect(mutualInformation([{ probability: 9, outcome: [1, 2] }, { probability: 1, outcome: [2, 4] }])).toBe(0);
   });
+
+  it("waits for release slots and never fits a late or repeated action", () => {
+    const plan = planFiniteHorizon({ horizonMinutes: 5, slotMinutes: 1, actions: [
+      { id: "delayed", durationMinutes: 1, utility: 10, earliestSlot: 10 },
+      { id: "release", durationMinutes: 2, utility: 5, earliestSlot: 3 },
+      { id: "early", durationMinutes: 1, utility: 1 },
+    ] });
+    expect(plan.actionIds).toEqual(["early", "release"]);
+    expect(plan.actionStartSlots).toEqual([0, 3]);
+    expect(plan.elapsedMinutes).toBe(5);
+    expect(plan.utility).toBe(6);
+  });
+
+  it("can choose idle slots over immediate work and consumes each action ID at most once", () => {
+    const plan = planFiniteHorizon({ horizonMinutes: 6, slotMinutes: 1, actions: [
+      { id: "too-long-now", durationMinutes: 4, utility: 8 },
+      { id: "released-later", durationMinutes: 3, utility: 10, earliestSlot: 2 },
+      { id: "one-off", durationMinutes: 1, utility: 4 },
+      { id: "one-off", durationMinutes: 1, utility: 4 },
+    ] });
+    expect(plan.actionIds).toEqual(["one-off", "released-later"]);
+    expect(plan.actionStartSlots).toEqual([0, 2]);
+    expect(plan.utility).toBe(14);
+  });
+
+  it("orders probes by the deadline weight inside the Bellman transition", () => {
+    const plan = planFiniteHorizon({ horizonMinutes: 120, slotMinutes: 60, deadlineHours: 73, actions: [
+      { id: "retention", durationMinutes: 60, retentionGain: 2 },
+      { id: "probe", durationMinutes: 60, diagnosticInformationGain: 100, utility: 1 },
+    ] });
+    expect(plan.actionIds).toEqual(["probe", "retention"]);
+    expect(plan.actionStartSlots).toEqual([0, 1]);
+    expect(plan.utility).toBeCloseTo(3 + 90 * (3 / 96 ** 2 - 2 / 96 ** 3), 12);
+    expect(plan.valueByStep).toEqual([plan.utility, 2, 0]);
+  });
+
+  it("advances by rounded slots and can wait when a negative diagnostic gain improves", () => {
+    const plan = planFiniteHorizon({ horizonMinutes: 180, slotMinutes: 60, deadlineHours: 74, actions: [
+      { id: "retention", durationMinutes: 60.1, utility: 2 },
+      { id: "cost", durationMinutes: 5, retentionGain: 1, informationGain: -1000 },
+    ] });
+    expect(plan.actionIds).toEqual(["retention", "cost"]);
+    expect(plan.actionStartSlots).toEqual([0, 2]);
+    expect(plan.utility).toBe(3);
+  });
+
+  it.each([{ horizonMinutes: NaN }, { horizonMinutes: Infinity }, { horizonMinutes: -1 },
+    { slotMinutes: NaN }, { slotMinutes: Infinity }, { slotMinutes: 0 }, { slotMinutes: -1 }])(
+    "rejects invalid temporal input %j",
+    override => expect(() => planFiniteHorizon({ horizonMinutes: 5, actions: [], ...override })).toThrow(RangeError),
+  );
+
+  it("schedules a large action set deterministically with fractional slots and release checks", () => {
+    const actions = Array.from({ length: 40 }, (_, i) => ({
+      id: `a-${i}`, durationMinutes: 0.5, utility: i + 1, earliestSlot: i === 39 ? 4 : 0,
+    }));
+    const input = { horizonMinutes: 2.5, slotMinutes: 0.5, actions };
+    const plan = planFiniteHorizon(input);
+    expect(planFiniteHorizon(input)).toEqual(plan);
+    expect(plan.actionIds).toEqual(["a-38", "a-37", "a-36", "a-35", "a-39"]);
+    expect(plan.actionStartSlots).toEqual([0, 1, 2, 3, 4]);
+    expect(plan.elapsedMinutes).toBe(2.5);
+  });
+});
+
+it("keeps the median of a representative large-action rollout below five milliseconds", () => {
+  const actions = Array.from({ length: 128 }, (_, index) => ({
+    id: String(index), durationMinutes: 1 + index % 11,
+    retentionGain: 1 + index % 13, diagnosticInformationGain: index % 19,
+    earliestSlot: index % 24,
+  }));
+  const input = { horizonMinutes: 120, slotMinutes: 5, deadlineHours: 74, actions };
+  const plan = planFiniteHorizon(input);
+  const samples = Array.from({ length: 30 }, () => {
+    const start = performance.now();
+    planFiniteHorizon(input);
+    return performance.now() - start;
+  }).sort((a, b) => a - b);
+  expect(samples[15]).toBeLessThan(5);
+  expect(plan.actionIds.length).toBeGreaterThan(0);
+  expect(new Set(plan.actionIds).size).toBe(plan.actionIds.length);
+  expect(plan.elapsedMinutes).toBeLessThanOrEqual(input.horizonMinutes);
 });
 
 describe("paired shadow v2", () => {
   it("keeps strict pre-attempt cutoff and excludes target family plus propagated history", () => {
+    const predictions: ShadowV2Row["predictions"] = {
+      "classical-bkt": 0.5, pfa: 0.5, "smoothed-frequency": 0.5, "ts-fsrs": 0.65,
+      "hsrs-fire-dcm-v1": 0.9, "no-fire": 0.8, "no-dcm": 0.6,
+    };
     const input: ShadowV2Input = {
-      cutoff: "2026-01-02T00:00:00Z", targetFamilyKeys: ["heldout"], propagatedFamilyKeys: ["prereq"],
+      cutoff: "2026-01-02T00:00:00Z", targetFamilyKeys: ["heldout"], propagatedFamilyKeys: new Set(["prereq"]),
       rows: [
-        { observationId: "before", familyKey: "other", attemptedAt: "2026-01-01T00:00:00Z", correct: true, predictions: { "classical-bkt": 0.5, pfa: 0.5, "smoothed-frequency": 0.5, "hsrs-fire-dcm-v1": 0.9 } },
-        { observationId: "after", familyKey: "other", attemptedAt: "2026-01-03T00:00:00Z", correct: false, predictions: { "classical-bkt": 0.5, pfa: 0.5, "smoothed-frequency": 0.5, "hsrs-fire-dcm-v1": 0.9 } },
-        { observationId: "target", familyKey: "heldout", attemptedAt: "2026-01-01T00:00:00Z", correct: false, predictions: { "classical-bkt": 0.5, pfa: 0.5, "smoothed-frequency": 0.5, "hsrs-fire-dcm-v1": 0.9 } },
-        { observationId: "propagated", familyKey: "prereq", attemptedAt: "2026-01-01T00:00:00Z", correct: false, predictions: { "classical-bkt": 0.5, pfa: 0.5, "smoothed-frequency": 0.5, "hsrs-fire-dcm-v1": 0.9 } },
+        { observationId: "before", familyKey: "other", attemptedAt: "2026-01-01T00:00:00Z", correct: true, predictions },
+        { observationId: "wrong", familyKey: "other", attemptedAt: "2026-01-01T00:00:00Z", correct: false, predictions: { ...predictions, "hsrs-fire-dcm-v1": 0.1, "no-fire": 0.3, "no-dcm": 0.5 } },
+        { observationId: "at-cutoff", familyKey: "other", attemptedAt: "2026-01-02T00:00:00Z", correct: false, predictions },
+        { observationId: "after", familyKey: "other", attemptedAt: "2026-01-03T00:00:00Z", correct: false, predictions },
+        { observationId: "target", familyKey: "heldout", attemptedAt: "2026-01-01T00:00:00Z", correct: false, predictions },
+        { observationId: "propagated", familyKey: "prereq", attemptedAt: "2026-01-01T00:00:00Z", correct: false, predictions },
       ],
     };
     const receipt = evaluateShadowV2Holdout(input);
     expect(receipt.schemaVersion).toBe(2);
-    expect(receipt.count).toBe(1);
+    expect(receipt.count).toBe(2);
+    expect(receipt.excludedFamilyKeys).toEqual(["heldout", "prereq"]);
     expect(receipt.models.find(model => model.modelId === "hsrs-fire-dcm-v1")?.brierDelta).toBeLessThan(0);
-    expect(receipt.ablation).toEqual(expect.arrayContaining(["no-fire", "no-dcm"]));
-    expect(() => evaluateShadowV2Holdout({ ...input, rows: [{ ...input.rows[0]!, predictions: { ...input.rows[0]!.predictions, pfa: 2 } }] })).toThrow(/prediction/);
+    expect(receipt.models.find(model => model.modelId === "ts-fsrs")?.count).toBe(2);
+    expect(receipt.ablation).toEqual(["no-fire", "no-dcm"]);
+    expect(receipt.ablationMetrics[0]?.brier).toBeCloseTo(0.065, 12);
+    expect(receipt.ablationMetrics[0]?.logLoss).toBeCloseTo(-Math.log(0.56) / 2, 12);
+    expect(receipt.ablationMetrics[1]?.brier).toBeCloseTo(0.205, 12);
+    expect(receipt.ablationMetrics[1]?.logLoss).toBeCloseTo(-Math.log(0.3) / 2, 12);
+    expect(() => evaluateShadowV2Holdout({ ...input, propagatedFamilyKeys: undefined } as unknown as ShadowV2Input)).toThrow(/propagated/i);
+    expect(() => evaluateShadowV2Holdout({ ...input, rows: [{ ...input.rows[0]!, predictions: { ...predictions, pfa: 2 } }] })).toThrow(/prediction/);
+    expect(() => evaluateShadowV2Holdout({ ...input, rows: [{ ...input.rows[0]!, predictions: { ...predictions, "no-fire": NaN } }] })).toThrow(/prediction/);
   });
 });

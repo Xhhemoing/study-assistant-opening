@@ -4,9 +4,16 @@ import {
   withBeliefBounds,
   type SkillBeliefV1,
 } from "./belief";
-import { conditionalSuccessProbability, updateBeliefWithEvidence, type SkillItemModel } from "./gauss-hermite";
+import {
+  conditionalSuccessProbability,
+  updateBeliefWithEvidence,
+  type BeliefEvidenceUpdate,
+  type EvidenceChannel,
+  type EvidenceObservation,
+  type SkillItemModel,
+} from "./gauss-hermite";
 
-export type EvidenceChannel = "unassisted" | "hinted" | "distractor" | "step-failure";
+export type { EvidenceChannel } from "./gauss-hermite";
 
 export function deriveSessionScaffoldingAbility(input: {
   belief: SkillBeliefV1;
@@ -24,26 +31,14 @@ export function deriveSessionScaffoldingAbility(input: {
   return input.belief.abilityMean + credit;
 }
 
-export function applyEvidenceChannel(input: {
+export function applyEvidenceChannel({ belief, item, atMs, ...observation }: EvidenceObservation & {
   belief: SkillBeliefV1;
   channel: EvidenceChannel;
   atMs: number;
   item: SkillItemModel;
-  outcome: boolean;
-  isFreshFamily?: boolean;
-  sameItemRepeat?: boolean;
-  sameFamilyClone?: boolean;
-  hintsOrExposures?: boolean;
-  retrievalProbability?: number;
-}): { belief: SkillBeliefV1; directRetrievability: number } {
-  if (input.channel === "hinted") return { belief: input.belief, directRetrievability: retrievability(input.belief, input.atMs) };
-  const result = updateBeliefWithEvidence({
-    belief: input.belief,
-    item: input.item,
-    observation: { outcome: input.outcome, channel: input.channel, isFreshFamily: input.isFreshFamily, sameItemRepeat: input.sameItemRepeat, sameFamilyClone: input.sameFamilyClone, hintsOrExposures: input.hintsOrExposures, retrievalProbability: input.retrievalProbability },
-    atMs: input.atMs,
-  });
-  return { belief: result.belief, directRetrievability: result.directRetrievability };
+}): Pick<BeliefEvidenceUpdate, "belief" | "directRetrievability" | "posteriorMass"> {
+  const result = updateBeliefWithEvidence({ belief, item, observation, atMs });
+  return { belief: result.belief, directRetrievability: result.directRetrievability, posteriorMass: result.posteriorMass };
 }
 
 export function prerequisiteInspectionWeights(input: {

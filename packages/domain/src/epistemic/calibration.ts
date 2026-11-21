@@ -49,9 +49,10 @@ function posteriorObjective(difficulty: number, input: {
   lapse: number;
 }): number {
   const prior = -0.5 * ((difficulty - input.priorDifficulty) / input.priorStandardDeviation) ** 2;
+  const item: SkillItemModel = { itemId: "calibration", a: 1, b: difficulty, g: input.guessing, l: input.lapse };
   const likelihood = input.attempts.reduce((sum, attempt) => {
-    const item: SkillItemModel = { itemId: "calibration", a: 1, b: difficulty, g: input.guessing, l: input.lapse };
-    const probability = conditionalSuccessProbability(item, attempt.theta ?? 0);
+    const theta = attempt.theta ?? 0;
+    const probability = conditionalSuccessProbability(item, Number.isFinite(theta) ? theta : 0);
     return sum + (attempt.outcome === "correct" ? Math.log(probability) : Math.log1p(-probability));
   }, 0);
   return prior + likelihood;
@@ -64,27 +65,58 @@ function estimateMap(input: {
   guessing: number;
   lapse: number;
 }): number {
+  const minimum = input.priorDifficulty - 10;
+  const maximum = input.priorDifficulty + 10;
   let mode = input.priorDifficulty;
+  let objective = posteriorObjective(mode, input);
+
+  // Guessing and lapse asymptotes can make the posterior non-concave.
+  for (let candidate = minimum; candidate <= maximum; candidate++) {
+    const value = posteriorObjective(candidate, input);
+    if (value > objective) {
+      mode = candidate;
+      objective = value;
+    }
+  }
+
   for (let iteration = 0; iteration < 32; iteration++) {
     const h = 1e-4;
-    const f0 = posteriorObjective(mode, input);
     const fp = posteriorObjective(mode + h, input);
     const fm = posteriorObjective(mode - h, input);
     const gradient = (fp - fm) / (2 * h);
-    const hessian = (fp - 2 * f0 + fm) / (h * h);
-    if (!Number.isFinite(gradient) || !Number.isFinite(hessian) || hessian >= -1e-10) break;
-    const next = clamp(mode - gradient / hessian, input.priorDifficulty - 10, input.priorDifficulty + 10);
-    if (Math.abs(next - mode) < 1e-8) { mode = next; break; }
-    mode = next;
+    const hessian = (fp - 2 * objective + fm) / (h * h);
+    if (!Number.isFinite(gradient) || Math.abs(gradient) < 1e-8) break;
+
+    let step = clamp(Number.isFinite(hessian) && hessian < -1e-10 ? -gradient / hessian : gradient, -2, 2);
+    let improved = false;
+    while (Math.abs(step) >= 1e-8) {
+      const candidate = clamp(mode + step, minimum, maximum);
+      if (candidate === mode) break;
+      const value = posteriorObjective(candidate, input);
+      if (value > objective) {
+        mode = candidate;
+        objective = value;
+        improved = true;
+        break;
+      }
+      step /= 2;
+    }
+    if (!improved) break;
   }
+
   return mode;
 }
 
 function firstIndependentAttempts(attempts: readonly CalibrationAttempt[], publisherItemRevisionId: string): CalibrationAttempt[] {
   const seen = new Set<string>();
-  return [...attempts]
+  return attempts
     .filter(attempt => attempt.publisherItemRevisionId === publisherItemRevisionId && attempt.independent && attempt.firstIndependentSubmission && !attempt.abandoned && !attempt.hinted)
-    .sort((a, b) => (a.attemptedAt ?? "").localeCompare(b.attemptedAt ?? "") || a.learnerId.localeCompare(b.learnerId))
+    .map(attempt => {
+      const timestamp = Date.parse(attempt.attemptedAt ?? "");
+      return { attempt, timestamp: Number.isFinite(timestamp) ? timestamp : -Infinity };
+    })
+    .sort((a, b) => a.timestamp - b.timestamp || a.attempt.learnerId.localeCompare(b.attempt.learnerId))
+    .map(({ attempt }) => attempt)
     .filter(attempt => {
       if (seen.has(attempt.learnerId)) return false;
       seen.add(attempt.learnerId);
@@ -121,8 +153,18 @@ export function calibrateItemRevision(input: {
       needsHumanKeyReview: false, parameterSnapshot: null };
   }
   const previous = input.previousParameterSnapshot;
-  const snapshot = previous ?? { schemaVersion: 1 as const, parameterSnapshotVersion: input.parameterSnapshotVersion ?? "1", publisherItemRevisionId: input.publisherItemRevisionId,
-    discrimination: 1, difficulty: priorDifficulty, guessing, lapse, misconceptionDeltas: [] as ReadonlyArray<readonly [string, number]> };
+  const snapshot: ParameterSnapshotV1 = previous?.publisherItemRevisionId === input.publisherItemRevisionId
+    ? previous
+    : {
+      schemaVersion: 1,
+      parameterSnapshotVersion: input.parameterSnapshotVersion ?? "1",
+      publisherItemRevisionId: input.publisherItemRevisionId,
+      discrimination: 1,
+      difficulty: estimateMap({ priorDifficulty, priorStandardDeviation, attempts, guessing, lapse }),
+      guessing,
+      lapse,
+      misconceptionDeltas: [],
+    };
   return { publisherItemRevisionId: input.publisherItemRevisionId, tier: 2, humanCount, priorDifficulty, priorStandardDeviation,
     unclippedDifficulty: snapshot.difficulty, servingDifficulty: snapshot.difficulty, discrimination: snapshot.discrimination, guessing: snapshot.guessing, lapse: snapshot.lapse,
     needsHumanKeyReview: false, parameterSnapshot: snapshot };

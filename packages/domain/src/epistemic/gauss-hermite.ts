@@ -21,9 +21,11 @@ export type SkillItemModel = {
   misconceptions?: readonly MisconceptionSpec[];
 };
 
+export type EvidenceChannel = "unassisted" | "hinted" | "assisted" | "multi-draft" | "distractor" | "step-failure";
+
 export type EvidenceObservation = {
   outcome: boolean;
-  channel?: "unassisted" | "hinted" | "distractor" | "step-failure";
+  channel?: EvidenceChannel;
   misconceptionId?: string;
   powerWeight?: number;
   isFreshFamily?: boolean;
@@ -52,8 +54,7 @@ const sigmoid = (value: number): number => {
 const safeProbability = (value: number): number => clamp(Number.isFinite(value) ? value : 0.5, 1e-15, 1 - 1e-15);
 
 export function logSumExp(values: readonly number[]): number {
-  if (!values.length) return -Infinity;
-  const maximum = Math.max(...values);
+  const maximum = values.reduce((max, value) => Math.max(max, value), -Infinity);
   if (!Number.isFinite(maximum)) return maximum;
   return maximum + Math.log(values.reduce((sum, value) => sum + Math.exp(value - maximum), 0));
 }
@@ -65,12 +66,12 @@ export function conditionalSuccessProbability(item: SkillItemModel, theta: numbe
   return clamp(g + (1 - g - l) * sigmoid(a * (theta - item.b) - misconceptionDelta), 1e-12, 1 - 1e-12);
 }
 
-function statePriors(belief: SkillBeliefV1, item: SkillItemModel): Array<{ id: string; prior: number; delta: number }> {
+function statePriors(belief: SkillBeliefV1, item: SkillItemModel): Array<{ id: string | null; prior: number; delta: number }> {
   const masses = new Map(belief.misconceptionMass);
   const itemDeltas = new Map((item.misconceptions ?? []).map(row => [row.id, row.delta] as const));
   const ids = new Set([...(item.misconceptions ?? []).map(row => row.id), ...masses.keys()]);
   return [
-    { id: "__none__", prior: belief.otherMass, delta: 0 },
+    { id: null, prior: belief.otherMass, delta: 0 },
     ...[...ids].map(id => ({ id, prior: masses.get(id) ?? 1e-12, delta: itemDeltas.get(id) ?? 0 })),
   ];
 }
@@ -97,61 +98,87 @@ export function updateBeliefWithEvidence(input: {
   const { belief, item, observation } = input;
   const direct = retrievability(belief, input.atMs, { familyPrior: input.familyPrior });
   const effective = effectiveRetrievability(belief, input.atMs, { familyPrior: input.familyPrior });
-  const retrieval = clamp(observation.retrievalProbability ?? direct, 0, 1);
-  const weight = clamp(observation.powerWeight ?? 1, 0, 1);
-  const states = statePriors(belief, item);
-  const nodes = GAUSS_HERMITE_3.map(node => ({ theta: belief.abilityMean + Math.sqrt(3 * belief.abilityVariance) * node.offset, weight: node.weight }));
-  const terms: Array<{ state: string; theta: number; logWeight: number; retrieval: number }> = [];
-  for (const state of states) {
-    for (const node of nodes) {
-      const q = conditionalSuccessProbability(item, node.theta, state.delta);
-      const passLikelihood = observation.outcome ? q : 1 - q;
-      const baseLikelihood = safeProbability(retrieval * passLikelihood + (1 - retrieval) * (observation.outcome ? 0.25 : 0.75));
-      const curatedRatio = observation.misconceptionId === state.id && observation.channel === "distractor"
-        ? Math.max(1, observation.misconceptionLikelihoodRatio ?? 8) : 1;
-      terms.push({ state: state.id, theta: node.theta, logWeight: Math.log(node.weight) + Math.log(state.prior) + weight * Math.log(safeProbability(baseLikelihood * curatedRatio)), retrieval });
-    }
-  }
-  const denominator = logSumExp(terms.map(term => term.logWeight));
-  const responsibilities = terms.map(term => ({ ...term, responsibility: Math.exp(term.logWeight - denominator) }));
-  const statePosterior = new Map<string, number>();
-  let abilityMean = 0;
-  for (const term of responsibilities) {
-    statePosterior.set(term.state, (statePosterior.get(term.state) ?? 0) + term.responsibility);
-    abilityMean += term.responsibility * term.theta;
-  }
-  if (observation.channel === "distractor" && observation.misconceptionId) {
-    const target = states.find(state => state.id === observation.misconceptionId);
-    if (target) {
-      const ratio = Math.max(1, observation.misconceptionLikelihoodRatio ?? 8);
-      const targetMass = posteriorMisconceptionMass({ priorMass: target.prior, likelihoodRatio: ratio });
-      const currentTarget = statePosterior.get(target.id) ?? 0;
-      const remainder = Math.max(0, 1 - currentTarget);
-      const scale = remainder > 0 ? (1 - targetMass) / remainder : 0;
-      for (const [id, mass] of statePosterior) statePosterior.set(id, id === target.id ? targetMass : mass * scale);
-    }
-  }
-  const abilityVariance = responsibilities.reduce((sum, term) => sum + term.responsibility * (term.theta - abilityMean) ** 2, 0);
-  const misconceptionMass = states.filter(state => state.id !== "__none__").map(state => [state.id, statePosterior.get(state.id) ?? 1e-12] as const);
-  const otherMass = Math.max(1e-12, statePosterior.get("__none__") ?? 1e-12);
+  const override = observation.retrievalProbability;
+  const retrievalOverride = override !== undefined && Number.isFinite(override) ? clamp(override, 0, 1) : undefined;
+  const retrieval = retrievalOverride ?? direct;
   const channel = observation.channel ?? "unassisted";
-  let updated = withBeliefBounds(belief, { abilityMean, abilityVariance, misconceptionMass, otherMass }, input.bounds);
-  if (channel === "unassisted" && observation.outcome && observation.isFreshFamily === true && !observation.sameItemRepeat && !observation.sameFamilyClone && !observation.hintsOrExposures) {
-    const eta = input.etaPlus ?? 0.25;
-    updated = withBeliefBounds(updated, { logStability: updated.logStability + eta * retrieval * (1 - direct), lastDirectRecallAtMs: input.atMs, implicitLogCredit: 0 }, input.bounds);
-  } else if (channel === "distractor" || channel === "step-failure") {
-    const eta = input.etaMinus ?? 0.25;
-    const decay = eta * Math.max(0, (1 - retrieval) - (1 - direct));
-    updated = withBeliefBounds(updated, { logStability: updated.logStability - decay, implicitLogCredit: 0 }, input.bounds);
-  } else if (channel === "hinted") {
-    updated = belief;
+  const power = observation.powerWeight ?? 1;
+  const weight = Number.isFinite(power) ? clamp(power, 0, 1) : 0;
+  const noEvidence = channel === "hinted" || channel === "assisted" || channel === "multi-draft" || observation.hintsOrExposures;
+  if (noEvidence || weight === 0) {
+    return {
+      belief,
+      directRetrievability: direct,
+      effectiveRetrievability: effective,
+      retrievedProbability: retrieval,
+      posteriorMass: [["__none__", belief.otherMass], ...belief.misconceptionMass],
+      prerequisiteInspectionWeights: [],
+    };
   }
+
+  const states = statePriors(belief, item);
+  const scale = Math.sqrt(3 * belief.abilityVariance);
+  const nodes = GAUSS_HERMITE_3.map(node => ({ theta: belief.abilityMean + scale * node.offset, weight: node.weight }));
+  const diagnosticTarget = !observation.outcome && (channel === "distractor" || channel === "step-failure")
+    ? observation.misconceptionId : undefined;
+  const ratio = observation.misconceptionLikelihoodRatio ?? 8;
+  const diagnosticLogRatio = Math.log(Number.isFinite(ratio) ? Math.max(1, ratio) : 8);
+  const guessLikelihood = observation.outcome ? 0.25 : 0.75;
+
+  const terms = states.flatMap((state, stateIndex) => {
+    const logRatio = state.id === diagnosticTarget ? diagnosticLogRatio : 0;
+    return nodes.map(node => {
+      const success = safeProbability(conditionalSuccessProbability(item, node.theta, state.delta));
+      const retrievedLikelihood = retrieval * (observation.outcome ? success : 1 - success);
+      const likelihood = retrievedLikelihood + (1 - retrieval) * guessLikelihood;
+      return {
+        stateIndex,
+        theta: node.theta,
+        logWeight: Math.log(state.prior) + Math.log(node.weight) + weight * (Math.log(likelihood) + logRatio),
+        // The state-specific likelihood ratio multiplies both retrieval branches and cancels here.
+        retrievedGivenOutcome: retrievedLikelihood / likelihood,
+      };
+    });
+  });
+
+  const denominator = logSumExp(terms.map(term => term.logWeight));
+  const responsibilities = terms.map(term => Math.exp(term.logWeight - denominator));
+  const statePosterior = new Float64Array(states.length);
+  let abilityMean = 0;
+  let posteriorRetrieval = 0;
+  for (const [index, term] of terms.entries()) {
+    const responsibility = responsibilities[index]!;
+    statePosterior[term.stateIndex] = statePosterior[term.stateIndex]! + responsibility;
+    abilityMean += responsibility * term.theta;
+    posteriorRetrieval += responsibility * term.retrievedGivenOutcome;
+  }
+  const abilityVariance = terms.reduce((sum, term, i) => sum + responsibilities[i]! * (term.theta - abilityMean) ** 2, 0);
+  const otherMass = statePosterior[0]!;
+  const misconceptionMass = states.slice(1).map((state, index) => [state.id!, statePosterior[index + 1]!] as const);
+  const rho = retrievalOverride ?? clamp(posteriorRetrieval, 0, 1);
+
+  let logStability = belief.logStability;
+  let implicitLogCredit = belief.implicitLogCredit;
+  let lastDirectRecallAtMs = belief.lastDirectRecallAtMs;
+  if (!observation.outcome) {
+    // Even a lapse at certain retrieval supplies weak evidence against stability.
+    logStability -= Math.max(0, input.etaMinus ?? 0.25) * weight * Math.max(1e-6, 1 - rho);
+    implicitLogCredit = 0;
+  } else if (channel === "unassisted" && observation.isFreshFamily === true && !observation.sameItemRepeat
+    && !observation.sameFamilyClone && Number.isFinite(input.atMs)) {
+    logStability += Math.max(0, input.etaPlus ?? 0.25) * weight * rho * (1 - direct);
+    lastDirectRecallAtMs = input.atMs;
+    implicitLogCredit = 0;
+  }
+
   return {
-    belief: updated,
+    belief: withBeliefBounds(belief, {
+      abilityMean, abilityVariance, misconceptionMass, otherMass, logStability, implicitLogCredit, lastDirectRecallAtMs,
+    }, input.bounds),
     directRetrievability: direct,
     effectiveRetrievability: effective,
-    retrievedProbability: retrieval,
-    posteriorMass: [...statePosterior.entries()].map(([id, mass]) => [id, mass] as const),
+    retrievedProbability: rho,
+    posteriorMass: [["__none__", otherMass], ...misconceptionMass],
     prerequisiteInspectionWeights: [],
   };
 }

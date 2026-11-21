@@ -48,7 +48,9 @@ function normalizedMass(input: MisconceptionMass | undefined, otherMass: number 
   }
   const sorted = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b));
   const misconceptionTotal = sorted.reduce((sum, [, mass]) => sum + mass, 0);
-  const requestedOther = Number.isFinite(otherMass) && (otherMass as number) > 0 ? otherMass as number : 1;
+  const requestedOther = otherMass === undefined
+    ? Number(misconceptionTotal === 0)
+    : Math.max(0, finite(otherMass, 0));
   const total = misconceptionTotal + requestedOther;
   if (!(total > 0)) return { misconceptionMass: [], otherMass: 1 };
   return {
@@ -84,7 +86,8 @@ export function createSkillBelief(input: {
     logStability: clamp(finite(input.logStability ?? Math.log(10), Math.log(10)), stabilityMin, stabilityMax),
     abilityMean: finite(input.abilityMean ?? 0, 0),
     abilityVariance: clamp(finite(input.abilityVariance ?? 1, 1), varianceMin, varianceMax),
-    lastDirectRecallAtMs: input.lastDirectRecallAtMs == null ? null : finite(input.lastDirectRecallAtMs, 0),
+    lastDirectRecallAtMs: input.lastDirectRecallAtMs != null && Number.isFinite(input.lastDirectRecallAtMs)
+      ? input.lastDirectRecallAtMs : null,
     implicitLogCredit: clamp(finite(input.implicitLogCredit ?? 0, 0), 0, MAX_IMPLICIT_LOG_CREDIT),
     misconceptionMass: mass.misconceptionMass,
     otherMass: mass.otherMass,
@@ -103,16 +106,23 @@ export function powerLawRetrievability(input: {
   curveExponent?: number;
   familyPrior?: number;
 }): number {
-  if (input.lastDirectRecallAtMs == null) return clamp(input.familyPrior ?? DEFAULT_FAMILY_PRIOR, 0, 1);
+  const lastRecall = input.lastDirectRecallAtMs;
+  if (lastRecall == null || !Number.isFinite(lastRecall) || !Number.isFinite(input.atMs)) {
+    return clamp(finite(input.familyPrior ?? DEFAULT_FAMILY_PRIOR, DEFAULT_FAMILY_PRIOR), 1e-6, 1 - 1e-6);
+  }
   const exponent = input.curveExponent ?? DEFAULT_CURVE_EXPONENT;
   if (!(exponent < 0) || !Number.isFinite(exponent)) throw new RangeError("curveExponent must be negative");
-  const interval = Math.max(0, input.atMs - input.lastDirectRecallAtMs) / DAY_MS;
-  const factor = Math.pow(0.9, 1 / exponent) - 1;
-  const denominator = Math.exp(input.logStability + (input.implicitLogCredit ?? 0));
-  return clamp(Math.pow(1 + factor * interval / denominator, exponent), 0, 1);
+  const elapsedDays = (input.atMs - lastRecall) / DAY_MS;
+  if (elapsedDays <= 0) return 1;
+
+  const logStability = clamp(finite(input.logStability, Math.log(10)), DEFAULT_LOG_STABILITY_MIN, DEFAULT_LOG_STABILITY_MAX);
+  const credit = clamp(finite(input.implicitLogCredit ?? 0, 0), 0, MAX_IMPLICIT_LOG_CREDIT);
+  const factor = Math.expm1(Math.log(0.9) / exponent);
+  const stability = Math.exp(logStability + credit);
+  return clamp(Math.exp(exponent * Math.log1p(factor * elapsedDays / stability)), 0, 1);
 }
 
-/** Direct evidence always uses c=0 unless useImplicitCredit is explicitly requested. */
+/** Direct evidence uses the recall curve with implicit credit set to zero. */
 export function retrievability(belief: SkillBeliefV1, atMs: number, options: { familyPrior?: number } = {}): number {
   return powerLawRetrievability({ logStability: belief.logStability, atMs, lastDirectRecallAtMs: belief.lastDirectRecallAtMs, familyPrior: options.familyPrior });
 }
