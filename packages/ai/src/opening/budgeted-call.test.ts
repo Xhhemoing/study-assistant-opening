@@ -90,12 +90,13 @@ describe("durable provider receipts", () => {
     choices: [{ index: 0, delta, finish_reason }],
   });
   const promptUsage = streamFrame({ choices: [], usage: { prompt_tokens: 37, prompt_cache_hit_tokens: 10 } });
-  const completionTrailer = streamFrame({ choices: [], usage: { completion_tokens: 11 } }) + "data: [DONE]\n\n";
+  const completionUsage = streamFrame({ choices: [], usage: { prompt_tokens: 0, prompt_cache_hit_tokens: 0, completion_tokens: 11 } });
+  const done = "data: [DONE]\n\n";
 
   it("settles prompt and cached usage reported before generated text with trailer completion usage", async () => {
     const b = fakeBudget();
     const body = promptUsage + streamChoice({ content: "ans" }) + streamChoice({ content: "wer" })
-      + streamChoice({}, "stop") + completionTrailer;
+      + streamChoice({}, "stop") + completionUsage + done;
     const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
       fetchImpl: async () => new Response(body) });
     const actualCents = vi.fn((usage: ProviderOutput) => usage.inputTokens! + usage.outputTokens! - usage.cachedInputTokens!);
@@ -108,13 +109,18 @@ describe("durable provider receipts", () => {
     expect(b.repo.unknowns).toEqual([]);
   });
 
-  it.each(["stop", "content_filter", "truncated EOF"])("accounts for a streamed refusal with %s", async finish => {
+  it.each([
+    { label: "stop", tail: streamChoice({}, "stop") + completionUsage + done, complete: true },
+    { label: "content_filter", tail: streamChoice({}, "content_filter") + completionUsage + done, complete: true },
+    { label: "usage and DONE only", tail: completionUsage + done, complete: true },
+    { label: "usage then EOF", tail: completionUsage, complete: false },
+    { label: "stop and usage then EOF", tail: streamChoice({}, "stop") + completionUsage, complete: false },
+    { label: "DONE without output usage", tail: done, complete: false },
+  ])("accounts for a streamed refusal with $label", async ({ tail, complete }) => {
     const b = fakeBudget(), delivered = vi.fn(), persistResult = vi.fn();
-    const complete = finish !== "truncated EOF";
     const body = promptUsage + streamChoice({ refusal: "refused", content: "hidden" })
       + streamChoice({ content: "also hidden" })
-      + (complete ? streamChoice({}, finish) + completionTrailer
-        : streamFrame({ choices: [], usage: { completion_tokens: 3 } }));
+      + tail;
     const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
       fetchImpl: async () => new Response(body) });
     const actualCents = vi.fn((usage: ProviderOutput) => usage.inputTokens! + usage.outputTokens! - usage.cachedInputTokens!);

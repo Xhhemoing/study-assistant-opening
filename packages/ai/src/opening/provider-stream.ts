@@ -20,6 +20,10 @@ function hasGeneratedDelta(raw: unknown): boolean {
     key !== "role" && value != null && value !== "" && (!Array.isArray(value) || value.length > 0));
 }
 
+function maxReportedTokens(previous: number | null | undefined, next: number | null): number | null {
+  return next === null ? previous ?? null : Math.max(previous ?? 0, next);
+}
+
 async function deliverDelta(callback: ProviderTextDelta, delta: string, signal: AbortSignal) {
   let onAbort: () => void = () => undefined;
   const interrupted = new Promise<never>((_resolve, reject) => {
@@ -67,12 +71,14 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     if (value.usage != null) {
       const parsedUsage = parseProviderUsage(value.usage, { clamp: false });
       if (!parsedUsage) invalid("invalid provider stream usage");
-      const trailer = stopped && value.choices.length === 0;
+      // Some providers end a refusal with a usage-only event and [DONE],
+      // without emitting a finish reason.
+      const trailer = value.choices.length === 0 && (stopped || answerFailure?.code === "PROVIDER_REFUSAL");
       if (!stopped || trailer) {
         latestUsage = {
-          inputTokens: parsedUsage.inputTokens ?? latestUsage?.inputTokens ?? null,
+          inputTokens: maxReportedTokens(latestUsage?.inputTokens, parsedUsage.inputTokens),
           outputTokens: parsedUsage.outputTokens ?? latestUsage?.outputTokens ?? null,
-          cachedInputTokens: parsedUsage.cachedInputTokens ?? latestUsage?.cachedInputTokens ?? null,
+          cachedInputTokens: maxReportedTokens(latestUsage?.cachedInputTokens, parsedUsage.cachedInputTokens),
         };
         if ((terminal || trailer) && parsedUsage.outputTokens !== null) hasTerminalOutputUsage = true;
       }
@@ -158,7 +164,8 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     // The provider adapter classifies transport errors after parsing returns.
     // Deliver validated usage separately so the wrapping cannot lose it.
     const { inputTokens, outputTokens, cachedInputTokens } = usageSnapshot();
-    if (hasTerminalOutputUsage && inputTokens !== null && outputTokens !== null) {
+    if (hasTerminalOutputUsage && (answerFailure?.code !== "PROVIDER_REFUSAL" || done)
+      && inputTokens !== null && outputTokens !== null) {
       options.onTextDelta?.[onFailedResponseUsage]?.({ requestId, inputTokens, outputTokens, cachedInputTokens });
     }
     throw error;

@@ -72,8 +72,66 @@ it.each(["old-to-new", "new-to-old", "unclaimed-legacy", "unclaimed-encoded"] as
   expect(provider.complete).toHaveBeenCalledOnce();
   const rows = await f.sql`SELECT id, request_id, state, amount_cents FROM opening_budget_reservations
     WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentBudget.id}`;
-  expect(rows).toEqual([{ id: existingId, request_id: storedKey, state: "completed", amount_cents: 1 }]);
+  expect(rows.filter(row => row.state === "completed")).toEqual([{ id: existingId, request_id: storedKey, state: "completed", amount_cents: 1 }]);
   expect(await provenance.resolveHistory(scope, [{ provenanceId: existingId }], 0)).toEqual([]);
+});
+
+it.each([
+  { ordering: "primary first", winnerSuffix: "", rollbackSuffix: ":fallback" },
+  { ordering: "legacy fallback first", winnerSuffix: ":fallback", rollbackSuffix: "" },
+])("fences the rollback exact reader with $ordering", async ({ winnerSuffix, rollbackSuffix }) => {
+  const { repo } = ledger();
+  const { scope } = f;
+  const clientKey = randomUUID(), requestFamily = `eph:${clientKey}`;
+  const parentBudget = { id: `study-ephemeral:${scope.workspaceId}:${clientKey}` };
+  const alternateRequestFamily = `eph-v2:${scope.workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
+  const requestId = requestFamily + winnerSuffix, rollbackKey = requestFamily + rollbackSuffix;
+  const terms = { purpose: "tutor", amountCents: 10 };
+  // A pre-existing unparented fallback is adopted with its original ID.
+  const legacy = winnerSuffix ? await repo.reserve(scope, { ...terms, requestId, requestFamily: null }) : null;
+  const winner = await repo.reserve(scope, { ...terms, requestId, parentBudget, requestFamily, alternateRequestFamily });
+  if (legacy) expect(winner.id).toBe(legacy.id);
+  expect(await repo.claimExecution(scope, winner.id)).toBe(true);
+
+  // 09a5f7b3 looks up the exact key and claims by row ID, with no sibling predicate.
+  const [exact] = await f.sql`SELECT * FROM opening_budget_reservations WHERE request_id=${rollbackKey}`;
+  expect(exact).toMatchObject({ workspace_id: scope.workspaceId, state: "released", amount_cents: 0, release_reason: "not_sent" });
+  const rollbackClaim = await f.sql`UPDATE opening_budget_reservations
+    SET execution_claimed_at=now(), updated_at=now()
+    WHERE id=${exact!.id} AND workspace_id=${scope.workspaceId} AND state='reserved'
+      AND execution_claimed_at IS NULL AND outcome_unknown_at IS NULL RETURNING id`;
+  expect(rollbackClaim).toHaveLength(0);
+  await repo.settle(scope, winner.id, 3);
+  const paid = await f.sql`SELECT request_id, amount_cents FROM opening_budget_reservations
+    WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentBudget.id} AND state='completed'`;
+  expect(paid).toEqual([{ request_id: requestId, amount_cents: 3 }]);
+});
+
+it("keeps a shared exact key fenced when its first owner releases and reuses it for fallback", async () => {
+  const { repo } = ledger();
+  const { scope } = f;
+  const terms = (clientKey: string) => ({
+    purpose: "tutor", amountCents: 10,
+    parentBudget: { id: `study-ephemeral:${scope.workspaceId}:${clientKey}` },
+    requestFamily: `eph:${clientKey}`,
+    alternateRequestFamily: `eph-v2:${scope.workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`,
+  });
+  const clientKey = randomUUID(), primary = terms(clientKey), other = terms(`${clientKey}:fallback`);
+  const first = await repo.reserve(scope, { ...primary, requestId: primary.requestFamily });
+  expect(await repo.claimExecution(scope, first.id)).toBe(true);
+  const [fence] = await f.sql`SELECT id FROM opening_budget_reservations WHERE request_id=${other.requestFamily}`;
+  const independent = await repo.reserve(scope, { ...other, requestId: other.requestFamily });
+  expect(independent.requestId).toBe(other.alternateRequestFamily);
+  expect(await repo.claimExecution(scope, independent.id)).toBe(true);
+  await repo.settle(scope, independent.id, 2);
+
+  await repo.release(scope, first.requestId, "not_sent");
+  await expect(repo.reserve(scope, { ...other, requestFamily: null, requestId: other.requestFamily }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  const fallback = await repo.reserve(scope, { ...primary, requestId: other.requestFamily });
+  expect(fallback).toMatchObject({ id: fence!.id, state: "reserved", amountCents: 10 });
+  expect(await repo.claimExecution(scope, fallback.id)).toBe(true);
+  await repo.settle(scope, fallback.id, 3);
 });
 
 it.each(["pre-reservation failure", "released not_sent"] as const)("fences both rollback retry routes after %s", async primaryFailure => {

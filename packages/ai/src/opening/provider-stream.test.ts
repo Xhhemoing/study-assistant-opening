@@ -235,6 +235,17 @@ describe("direct Markdown streaming", () => {
     });
   });
 
+  it.each([{ prompt: 120, cached: 96, trailer: 0 }, { prompt: 120, cached: 96, trailer: 30 },
+    { prompt: 0, cached: 0, trailer: 0 }])("keeps prompt $prompt and cached $cached when a trailer reports $trailer",
+  async ({ prompt, cached, trailer }) => {
+    const h = harness();
+    h.write(event({ choices: [], usage: { prompt_tokens: prompt, prompt_cache_hit_tokens: cached } })
+      + delta("answer") + stop
+      + event({ choices: [], usage: { prompt_tokens: trailer, prompt_cache_hit_tokens: trailer, completion_tokens: 18 } })
+      + done);
+    await expect(h.provider.complete(input)).resolves.toMatchObject({ inputTokens: prompt, cachedInputTokens: cached, outputTokens: 18 });
+  });
+
   it.each([
     ["negative cached_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: { cached_tokens: -1 } }],
     ["float cached_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: { cached_tokens: 1.5 } }],

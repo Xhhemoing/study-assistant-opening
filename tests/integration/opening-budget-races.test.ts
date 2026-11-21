@@ -217,9 +217,12 @@ describe("opening budget races (two independent connections, deterministic barri
     const completed = rows.filter(row => row.state === "completed");
     expect(completed).toHaveLength(4);
     expect(completed.map(row => row.request_id)).toEqual(expect.arrayContaining(["eph:lesson-123", "eph:lesson-123:retry", "eph:lesson-123:retry:bar"]));
-    expect(rows.filter(row => row.state !== "completed")).toEqual([
-      { request_id: "eph:lesson-123:fallback", state: "released", amount_cents: 0 },
+    const fences = rows.filter(row => row.state !== "completed");
+    expect(fences.map(row => row.request_id).sort()).toEqual([
+      "eph:lesson-123:fallback", "eph:lesson-123:fallback:fallback",
+      "eph:lesson-123:retry:bar:fallback", "eph:lesson-123:retry:fallback",
     ]);
+    for (const row of fences) expect(row).toMatchObject({ state: "released", amount_cents: 0 });
   });
 
   it("replays a legacy exact key for its parent even when it looks like another client's fallback", async () => {
@@ -280,6 +283,39 @@ describe("opening budget races (two independent connections, deterministic barri
     expect(markUnknown).toHaveBeenCalledExactlyOnceWith(row!.id);
     expect(settle).not.toHaveBeenCalled();
     await expect(gateway.call(scope, "tutor.explain", settings)).rejects.toMatchObject({ code: "BUDGET_OUTCOME_UNKNOWN" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it.each([true, false])("accounts for refusal and usage without a finish reason (DONE=%s)", async done => {
+    const scope = fixture.scope;
+    const repo = createOpeningBudgetRepository(a.sql, { envCapCents: 100 });
+    const frame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+    const body = frame({ choices: [], usage: { prompt_tokens: 3700, prompt_cache_hit_tokens: 1000 } })
+      + frame({ choices: [{ index: 0, delta: { refusal: "no" }, finish_reason: null }] })
+      + frame({ choices: [], usage: { prompt_tokens: 0, prompt_cache_hit_tokens: 0, completion_tokens: 1100 } })
+      + (done ? "data: [DONE]\n\n" : "");
+    const fetchImpl = vi.fn(async () => new Response(body));
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl });
+    const gateway = createModelGateway({ resolve: async () => model("stream", 1000, provider.complete) });
+    const budget = gatewayBudget(repo);
+    const settle = vi.spyOn(budget, "settle"), markUnknown = vi.spyOn(budget, "markUnknown");
+    const settings = { input: { ...input, outputFormat: "markdown" as const }, operationId: "stream-refusal",
+      minReservedCents: 10, budget, persistResult: vi.fn() };
+    await expect(gateway.call(scope, "tutor.explain", settings)).rejects.toMatchObject({ code: "PROVIDER_REFUSAL" });
+    const [row] = await fixture.sql`SELECT id, state, amount_cents, outcome_unknown_at, result_ref FROM opening_budget_reservations
+      WHERE workspace_id=${scope.workspaceId} AND request_id='stream-refusal'`;
+    if (done) {
+      expect(settle).toHaveBeenCalledExactlyOnceWith(row!.id, 5);
+      expect(markUnknown).not.toHaveBeenCalled();
+      expect(row).toMatchObject({ state: "completed", amount_cents: 5, outcome_unknown_at: null, result_ref: null });
+    } else {
+      expect(settle).not.toHaveBeenCalled();
+      expect(markUnknown).toHaveBeenCalledExactlyOnceWith(row!.id);
+      expect(row).toMatchObject({ state: "reserved", amount_cents: 10, outcome_unknown_at: expect.any(Date), result_ref: null });
+    }
+    expect(settings.persistResult).not.toHaveBeenCalled();
+    await expect(gateway.call(scope, "tutor.explain", settings))
+      .rejects.toMatchObject({ code: done ? "BUDGET_REPLAY_COMPLETED" : "BUDGET_OUTCOME_UNKNOWN" });
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
