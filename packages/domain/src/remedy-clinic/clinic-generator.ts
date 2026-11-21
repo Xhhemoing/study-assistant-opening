@@ -15,6 +15,7 @@ import {
   meetsClinicThreshold,
   readOwnDataIndex,
   selectSpreadRepresentativeCases,
+  snapshotActiveSourcesMap,
   type ActiveSourceEntry,
   type ActiveSourcesMap,
   type ClinicEvidenceCase,
@@ -306,6 +307,57 @@ const GENERATOR_RETURN = (
 )?.return;
 const ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
 const WEAK_PROBE_KEY = Object.freeze({});
+
+function getStructuredCloneErrorSignature(value: unknown): string | null {
+  try {
+    structuredClone(value);
+    return null;
+  } catch (err) {
+    if (err instanceof Error) return `${err.name}:${err.message}`;
+    return String(err);
+  }
+}
+
+const EXOTIC_CONTAINER_CLONE_ERRORS: ReadonlySet<string> = (() => {
+  const signatures = new Set<string>();
+  const agObjProto = Object.setPrototypeOf((async function* () {})(), Object.prototype);
+  const agNullProto = Object.setPrototypeOf((async function* () {})(), null);
+  const proxyObj = new Proxy({}, {});
+  for (const sample of [agObjProto, agNullProto, proxyObj]) {
+    const sig = getStructuredCloneErrorSignature(sample);
+    if (sig !== null) signatures.add(sig);
+  }
+  return signatures;
+})();
+
+/**
+ * Synchronous, zero-Promise-allocation, reaction-free check for function-bearing containers
+ * (input, candidateProbe, correctModel, hypothesis) AFTER all non-function properties have been
+ * proven getter-free plain data. Rejects AsyncGenerator, Generator, Promise, and Proxy at the root
+ * (where structuredClone fails before traversing properties) while accepting genuine plain objects
+ * whose only uncloneable values are the validated function fields.
+ */
+function isPlainContainerWithOnlyKnownFunctions(
+  root: object,
+  knownFunctions: readonly ((...args: never[]) => unknown)[],
+): boolean {
+  const actualSig = getStructuredCloneErrorSignature(root);
+  if (actualSig === null) return true;
+  if (knownFunctions.length === 0) return false;
+  const allowedFnSigs = new Set<string>();
+  for (const fn of knownFunctions) {
+    const fnSig = getStructuredCloneErrorSignature({ f: fn });
+    if (fnSig !== null) allowedFnSigs.add(fnSig);
+  }
+  if (!allowedFnSigs.has(actualSig)) return false;
+  if (EXOTIC_CONTAINER_CLONE_ERRORS.has(actualSig)) {
+    // Only disambiguate when the host engine distinguishes root exotic object errors from function errors.
+    for (const fnSig of allowedFnSigs) {
+      if (!EXOTIC_CONTAINER_CLONE_ERRORS.has(fnSig)) return false;
+    }
+  }
+  return true;
+}
 
 function matchesBrand(check: () => unknown): boolean {
   try {
@@ -652,107 +704,70 @@ function readOwnDataProp(obj: object, key: string): unknown {
   return descRes.desc.value;
 }
 
-function parseFrozenActiveSourceEntry(entry: unknown): ActiveSourceEntry | undefined {
-  if (typeof entry === "string" || typeof entry === "number") return entry;
-  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return undefined;
-  const rec = entry as Record<string, unknown>;
-  const version = readOwnDataProp(rec, "version");
-  const active = readOwnDataProp(rec, "active");
-  const revoked = readOwnDataProp(rec, "revoked");
-  if (typeof version !== "string" && typeof version !== "number") return undefined;
-  return Object.freeze({
-    version,
-    ...(typeof active === "boolean" ? { active } : {}),
-    ...(typeof revoked === "boolean" ? { revoked } : {}),
-  });
-}
+type SourceRefsSnapshotResult =
+  | { readonly kind: "ok"; readonly refs: readonly RemedySourceRef[] }
+  | { readonly kind: "empty_or_null_ref" }
+  | { readonly kind: "invalid_descriptor" };
 
-function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyMap<string, ActiveSourceEntry> {
-  if (!activeSourcesMap || typeof activeSourcesMap !== "object") return new Map();
+/**
+ * Single-pass sourceRefs validator: verifies dense plain array and plain primitive element records
+ * BEFORE running structuredClone (zero getter execution, zero second reads).
+ */
+function snapshotSourceRefsWithKind(sourceRefs: unknown): SourceRefsSnapshotResult {
+  const items = snapshotDenseOwnArray(sourceRefs);
+  if (!items) return { kind: "invalid_descriptor" };
 
-  let isGenuineMap = false;
-  try {
-    if (
-      Object.getPrototypeOf(activeSourcesMap) === Map.prototype &&
-      Reflect.ownKeys(activeSourcesMap).length === 0 &&
-      matchesBrand(() => Reflect.apply(Map.prototype.has, activeSourcesMap, [undefined]))
-    ) {
-      isGenuineMap = true;
-    }
-  } catch {
-    return new Map();
-  }
-
-  if (isGenuineMap) {
-    const mapSnap = new Map<string, ActiveSourceEntry>();
-    let invalidOrExoticEntry = false;
-    try {
-      Reflect.apply(Map.prototype.forEach, activeSourcesMap, [
-        (rawEntry: unknown, rawKey: unknown) => {
-          if (invalidOrExoticEntry) return;
-          if (typeof rawKey !== "string") {
-            invalidOrExoticEntry = true;
-            return;
-          }
-          const cloned = cloneAndFreezePlainData(rawEntry);
-          if (!cloned.ok) {
-            invalidOrExoticEntry = true;
-            return;
-          }
-          const parsed = parseFrozenActiveSourceEntry(cloned.value);
-          if (parsed !== undefined) {
-            mapSnap.set(rawKey, parsed);
-          }
-        },
-      ]);
-      if (invalidOrExoticEntry) return new Map();
-      // Every entry was verified getter-free above; structuredClone rejects Proxy-wrapped Map in C++.
-      structuredClone(activeSourcesMap);
-      return mapSnap;
-    } catch {
-      return new Map();
-    }
-  }
-
-  const clonedRecord = cloneAndFreezePlainData(activeSourcesMap);
-  if (
-    !clonedRecord.ok ||
-    clonedRecord.value === null ||
-    typeof clonedRecord.value !== "object" ||
-    Array.isArray(clonedRecord.value)
-  ) {
-    return new Map();
-  }
-  const snapshot = new Map<string, ActiveSourceEntry>();
-  const recordObj = clonedRecord.value as Record<string, unknown>;
-  for (const key of Object.keys(recordObj)) {
-    const parsed = parseFrozenActiveSourceEntry(readOwnDataProp(recordObj, key));
-    if (parsed !== undefined) snapshot.set(key, parsed);
-  }
-  return snapshot;
-}
-
-function freezeSourceRefs(sourceRefs: unknown): readonly RemedySourceRef[] | null {
-  const cloned = cloneAndFreezePlainData(sourceRefs);
-  if (!cloned.ok || !Array.isArray(cloned.value) || cloned.value.length === 0) return null;
+  let hasNullRef = false;
   const frozen: RemedySourceRef[] = [];
-  for (let i = 0; i < cloned.value.length; i += 1) {
-    const ref = cloned.value[i];
-    if (ref === null || typeof ref !== "object" || Array.isArray(ref)) return null;
-    const sourceId = readOwnDataProp(ref as object, "sourceId");
-    const sourceVersion = readOwnDataProp(ref as object, "sourceVersion");
+  for (let i = 0; i < items.length; i += 1) {
+    const el = items[i];
+    if (el === null) {
+      hasNullRef = true;
+      continue;
+    }
+    const rec = snapshotOwnRecord(el);
+    if (!rec) return { kind: "invalid_descriptor" };
+    for (const key of Object.keys(rec)) {
+      const val = rec[key];
+      if (val !== null && (typeof val === "object" || typeof val === "function")) {
+        return { kind: "invalid_descriptor" };
+      }
+    }
+    const sourceId = rec["sourceId"];
+    const sourceVersion = rec["sourceVersion"];
     if (typeof sourceId !== "string" || (typeof sourceVersion !== "string" && typeof sourceVersion !== "number")) {
-      return null;
+      return { kind: "invalid_descriptor" };
     }
     frozen.push(Object.freeze({ sourceId, sourceVersion }));
   }
-  return Object.freeze(frozen);
+
+  // Every reachable element is verified getter-free plain data; structuredClone rejects Proxy/Promise/Generator.
+  try {
+    structuredClone(sourceRefs);
+  } catch {
+    return { kind: "invalid_descriptor" };
+  }
+
+  if (items.length === 0 || hasNullRef) {
+    return { kind: "empty_or_null_ref" };
+  }
+  return { kind: "ok", refs: Object.freeze(frozen) };
+}
+
+function freezeSourceRefs(sourceRefs: unknown): readonly RemedySourceRef[] | null {
+  const snap = snapshotSourceRefsWithKind(sourceRefs);
+  return snap.kind === "ok" ? snap.refs : null;
+}
+
+interface IsolatedProbeModelResult {
+  readonly model: Record<string, unknown>;
+  readonly rawPredict: (...args: never[]) => unknown;
 }
 
 function isolateProbeModel<TInput, TObservable>(
   rawModel: unknown,
   role: "correct" | "misconception",
-): Record<string, unknown> | null {
+): IsolatedProbeModelResult | null {
   const modelSnap = snapshotOwnRecord(rawModel, {
     requireObjectProto: true,
     forbidOwnConstructor: true,
@@ -788,6 +803,11 @@ function isolateProbeModel<TInput, TObservable>(
       return null;
     }
   }
+  // All non-predict properties are verified getter-free plain data; verify rawModel itself is not
+  // an AsyncGenerator, Generator, Promise, or Proxy.
+  if (!isPlainContainerWithOnlyKnownFunctions(rawModel as object, [rawPredict as (...args: never[]) => unknown])) {
+    return null;
+  }
   Object.freeze(frozenReceiver);
 
   const predictFn = rawPredict as (this: unknown, probeInput: TInput) => TObservable;
@@ -806,7 +826,10 @@ function isolateProbeModel<TInput, TObservable>(
   if (role === "misconception") {
     base.description = readOwnDataProp(frozenReceiver, "description");
   }
-  return Object.freeze(base);
+  return {
+    model: Object.freeze(base),
+    rawPredict: rawPredict as (...args: never[]) => unknown,
+  };
 }
 
 function normalizePromptKey(prompt: string): string {
@@ -1065,7 +1088,21 @@ interface PreparedCandidateProbe<TInput, TObservable> {
   readonly frozenTargetMisconceptionId: string | undefined;
   readonly frozenSourceRefs: readonly RemedySourceRef[] | undefined;
   readonly frozenSpec: DistinguishableProbeSpec<TInput, TObservable>;
+  readonly rawFunctions: readonly ((...args: never[]) => unknown)[];
 }
+
+const KNOWN_PROBE_KEYS: ReadonlySet<string> = new Set([
+  "probeId",
+  "requirementKey",
+  "prompt",
+  "targetMisconceptionId",
+  "sourceRefs",
+  "input",
+  "correctModel",
+  "hypotheses",
+  "observableKey",
+  "parseResponse",
+]);
 
 function prepareCandidateProbe<TInput, TObservable>(
   probe: unknown,
@@ -1116,8 +1153,8 @@ function prepareCandidateProbe<TInput, TObservable>(
       rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
     };
   }
-  const isolatedCorrectModel = isolateProbeModel<TInput, TObservable>(rawCorrectModel, "correct");
-  if (!isolatedCorrectModel) {
+  const isolatedCorrectModelRes = isolateProbeModel<TInput, TObservable>(rawCorrectModel, "correct");
+  if (!isolatedCorrectModelRes) {
     return {
       prepared: null,
       rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
@@ -1125,62 +1162,68 @@ function prepareCandidateProbe<TInput, TObservable>(
   }
 
   const isolatedHypothesesList: Record<string, unknown>[] = [];
+  const probeFunctions: ((...args: never[]) => unknown)[] = [isolatedCorrectModelRes.rawPredict];
   for (let h = 0; h < hypothesesSnap.length; h += 1) {
-    const isolatedHyp = isolateProbeModel<TInput, TObservable>(hypothesesSnap[h], "misconception");
-    if (!isolatedHyp) {
+    const isolatedHypRes = isolateProbeModel<TInput, TObservable>(hypothesesSnap[h], "misconception");
+    if (!isolatedHypRes) {
       return {
         prepared: null,
         rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
       };
     }
-    isolatedHypothesesList.push(isolatedHyp);
+    isolatedHypothesesList.push(isolatedHypRes.model);
+    probeFunctions.push(isolatedHypRes.rawPredict);
+  }
+  if (typeof rawObservableKey === "function") {
+    probeFunctions.push(rawObservableKey as (...args: never[]) => unknown);
+  }
+  if (typeof rawParseResponse === "function") {
+    probeFunctions.push(rawParseResponse as (...args: never[]) => unknown);
   }
 
   let frozenSourceRefs: readonly RemedySourceRef[] | undefined;
   if (hasExplicitSourceRefs) {
-    const frozen = freezeSourceRefs(rawSourceRefs);
-    if (!frozen) {
-      const refsArray = snapshotDenseOwnArray(rawSourceRefs);
-      const isPlainEmptyOrMalformedRefs =
-        refsArray !== null &&
-        (() => {
-          try {
-            structuredClone(rawSourceRefs);
-            return true;
-          } catch {
-            return false;
-          }
-        })();
-      return {
-        prepared: null,
-        rejected: {
-          probeId: frozenProbeId,
-          reason: isPlainEmptyOrMalformedRefs
-            ? "revoked_probe_source"
-            : safeIsArray(rawSourceRefs) &&
-                (() => {
-                  const lenDesc = safeGetOwnPropertyDescriptor(rawSourceRefs, "length");
-                  if (!lenDesc.ok || !lenDesc.desc || lenDesc.desc.value === 0) return false;
-                  try {
-                    structuredClone(rawSourceRefs);
-                    return true;
-                  } catch {
-                    return false;
-                  }
-                })()
-              ? "revoked_probe_source"
-              : "invalid_probe_descriptor",
-          report: null,
-        },
-      };
-    }
-    if (!areSourceRefsActive(frozen, activeSources)) {
+    const refsSnap = snapshotSourceRefsWithKind(rawSourceRefs);
+    if (refsSnap.kind === "empty_or_null_ref") {
       return {
         prepared: null,
         rejected: { probeId: frozenProbeId, reason: "revoked_probe_source", report: null },
       };
     }
-    frozenSourceRefs = frozen;
+    if (refsSnap.kind === "invalid_descriptor") {
+      return {
+        prepared: null,
+        rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
+      };
+    }
+    if (!areSourceRefsActive(refsSnap.refs, activeSources)) {
+      return {
+        prepared: null,
+        rejected: { probeId: frozenProbeId, reason: "revoked_probe_source", report: null },
+      };
+    }
+    frozenSourceRefs = refsSnap.refs;
+  }
+
+  // Verify any extra own properties on probeSnap are getter-free plain data before checking probe root.
+  for (const key of Object.keys(probeSnap)) {
+    if (KNOWN_PROBE_KEYS.has(key)) continue;
+    if (!cloneAndFreezePlainData(probeSnap[key]).ok) {
+      return {
+        prepared: null,
+        rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
+      };
+    }
+  }
+  // Verify rawHypotheses and probe itself are not AsyncGenerator, Generator, Promise, or Proxy.
+  if (
+    !isPlainContainerWithOnlyKnownFunctions(rawHypotheses as object, probeFunctions) ||
+    !isPlainContainerWithOnlyKnownFunctions(probe as object, probeFunctions)
+  ) {
+    return {
+      prepared: null,
+      rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
+    };
   }
 
   if (!isNonBlankText(frozenPrompt)) {
@@ -1190,7 +1233,7 @@ function prepareCandidateProbe<TInput, TObservable>(
     };
   }
 
-  const frozenCorrectModel = isolatedCorrectModel as unknown as DistinguishableProbeSpec<
+  const frozenCorrectModel = isolatedCorrectModelRes.model as unknown as DistinguishableProbeSpec<
     TInput,
     TObservable
   >["correctModel"];
@@ -1240,6 +1283,7 @@ function prepareCandidateProbe<TInput, TObservable>(
       frozenTargetMisconceptionId,
       frozenSourceRefs,
       frozenSpec,
+      rawFunctions: probeFunctions,
     },
     rejected: null,
   };
@@ -1358,13 +1402,22 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     | { readonly kind: "prepared"; readonly entry: PreparedCandidateProbe<TInput, TObservable> }
     | { readonly kind: "rejected"; readonly rejected: RejectedClinicProbe }
   > = [];
+  let allProbesPrepared = true;
+  const inputKnownFunctions: ((...args: never[]) => unknown)[] = [
+    verifyRuleFn as (...args: never[]) => unknown,
+  ];
   for (let i = 0; i < candidateProbesSnap.length; i += 1) {
     const { prepared, rejected } = prepareCandidateProbe<TInput, TObservable>(
       candidateProbesSnap[i],
       activeSourcesSnapshot,
     );
-    if (prepared) preEvaluatedProbes.push({ kind: "prepared", entry: prepared });
-    else if (rejected) preEvaluatedProbes.push({ kind: "rejected", rejected });
+    if (prepared) {
+      preEvaluatedProbes.push({ kind: "prepared", entry: prepared });
+      for (const fn of prepared.rawFunctions) inputKnownFunctions.push(fn);
+    } else if (rejected) {
+      allProbesPrepared = false;
+      preEvaluatedProbes.push({ kind: "rejected", rejected });
+    }
   }
 
   const counters = {
@@ -1399,8 +1452,8 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       return invalidResult();
     }
   }
+  let allEmbeddingPlain = true;
   if (embeddingSnap) {
-    let allEmbeddingPlain = true;
     for (let i = 0; i < embeddingSnap.length; i += 1) {
       const clonedItem = cloneAndFreezePlainData(embeddingSnap[i]);
       if (!clonedItem.ok || clonedItem.value === null || typeof clonedItem.value !== "object" || Array.isArray(clonedItem.value)) {
@@ -1420,6 +1473,42 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       try {
         structuredClone(rawEmbeddingCandidates);
       } catch {
+        return invalidResult();
+      }
+    }
+  }
+
+  // Once all child containers are verified getter-free, verify top-level input itself is not
+  // an AsyncGenerator, Generator, Promise, or Proxy.
+  if (allProbesPrepared && allAttemptsPlain && allEmbeddingPlain && activeSourcesSnapshot.size > 0) {
+    const KNOWN_INPUT_KEYS = new Set([
+      "clinicId",
+      "learnerId",
+      "courseId",
+      "ruleId",
+      "ruleTitle",
+      "ruleSourceRefs",
+      "currentPrivacyEpoch",
+      "activeSourcesMap",
+      "attempts",
+      "embeddingRecallCandidates",
+      "verifyRuleViolation",
+      "candidateProbes",
+      "rubricCalibration",
+    ]);
+    let extraInputPlain = true;
+    for (const key of Object.keys(inputSnap)) {
+      if (KNOWN_INPUT_KEYS.has(key)) continue;
+      if (!cloneAndFreezePlainData(inputSnap[key]).ok) {
+        extraInputPlain = false;
+        break;
+      }
+    }
+    if (extraInputPlain) {
+      if (
+        !isPlainContainerWithOnlyKnownFunctions(rawCandidateProbes as object, inputKnownFunctions) ||
+        !isPlainContainerWithOnlyKnownFunctions(input as object, inputKnownFunctions)
+      ) {
         return invalidResult();
       }
     }

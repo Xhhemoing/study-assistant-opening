@@ -5,6 +5,7 @@ import {
   generateRemedyClinic,
   isSourceRefActive,
   revalidateRemedyClinic,
+  selectSpreadRepresentativeCases,
   type ActiveSourcesMap,
   type ClinicCandidateProbe,
   type DiagnosedRootAttempt,
@@ -2060,5 +2061,221 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       },
     });
     expect(cloneEvidenceCase(throwingCaseProxy).attemptId).toBe("");
+  });
+
+  it("enforces Round-11 zero-getter sourceRefs fallback, AsyncGenerator container checks, and privacy-guard single-pass hardening", async () => {
+    const allSources = {
+      "src-ch-1": { version: "v1", active: true },
+      "src-ch-2": { version: "v1", active: true },
+      "src-ch-3": { version: "v1", active: true },
+    };
+    const baseAttempts = [
+      makeAttempt({ attemptId: "a1", rootAttemptId: "r1", chapterId: "ch-1", localDate: "2026-10-01", sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a2", rootAttemptId: "r2", chapterId: "ch-2", localDate: "2026-10-03", sourceRefs: [{ sourceId: "src-ch-2", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a3", rootAttemptId: "r3", chapterId: "ch-3", localDate: "2026-10-05", sourceRefs: [{ sourceId: "src-ch-3", sourceVersion: "v1" }] }),
+    ];
+    const probe1 = makeProbe({ probeId: "r11-p1", input: { a: -2, b: 8 } });
+    const probe2 = makeProbe({ probeId: "r11-p2", input: { a: -3, b: 12 } });
+
+    // [P1-1] Element getter, array-slot getter, and stateful Proxy sourceRefs must execute ZERO getters
+    // and return invalid_probe_descriptor (never revoked_probe_source).
+    let getterRuns = 0;
+    const elemGetterRef = Object.defineProperty({ sourceVersion: "v1" }, "sourceId", {
+      enumerable: true,
+      get() {
+        getterRuns += 1;
+        return "src-ch-1";
+      },
+    }) as unknown as { sourceId: string; sourceVersion: string };
+    const slotGetterRefs = Object.defineProperty([] as Array<{ sourceId: string; sourceVersion: string }>, "0", {
+      enumerable: true,
+      get() {
+        getterRuns += 1;
+        return { sourceId: "src-ch-1", sourceVersion: "v1" };
+      },
+    });
+    let proxyRefsDescReads = 0;
+    const statefulProxyRefs = new Proxy([{ sourceId: "src-ch-1", sourceVersion: "v1" }], {
+      getOwnPropertyDescriptor(target, prop) {
+        if (prop === "0") {
+          proxyRefsDescReads += 1;
+          return {
+            value:
+              proxyRefsDescReads === 1
+                ? { sourceId: "src-ch-1", sourceVersion: "v1" }
+                : { sourceId: "src-revoked", sourceVersion: "v1" },
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      },
+    });
+
+    const p1Res = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [
+        { ...makeProbe({ probeId: "r11-elem-getter", input: { a: -2, b: 8 } }), sourceRefs: [elemGetterRef] },
+        { ...makeProbe({ probeId: "r11-slot-getter", input: { a: -3, b: 12 } }), sourceRefs: slotGetterRefs },
+        { ...makeProbe({ probeId: "r11-proxy-refs", input: { a: -4, b: 16 } }), sourceRefs: statefulProxyRefs },
+      ],
+    });
+    expect(getterRuns).toBe(0);
+    expect(proxyRefsDescReads).toBe(1);
+    expect(p1Res.status).toBe("insufficient_distinguishable_probes");
+    expect(p1Res.rejectedProbes.map((r) => r.reason)).toEqual([
+      "invalid_probe_descriptor",
+      "invalid_probe_descriptor",
+      "invalid_probe_descriptor",
+    ]);
+
+    // [P2-2] Reassigned-prototype AsyncGenerator passed as input, candidateProbe, correctModel, and hypothesis
+    // MUST be rejected cleanly, while plain objects succeed with ZERO unhandledRejection events.
+    const unhandledErrors: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandledErrors.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const makeAsyncGenObj = (props: Record<string, unknown>) => {
+        const ag = (async function* () {
+          yield 1;
+        })();
+        Object.setPrototypeOf(ag, Object.prototype);
+        Object.assign(ag, props);
+        return ag;
+      };
+
+      const plainOk = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [probe1, probe2],
+      });
+      expect(plainOk.status).toBe("active");
+
+      const agInput = makeAsyncGenObj({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [probe1, probe2],
+      });
+      const agInputRes = generateRemedyClinic(
+        agInput as unknown as Parameters<typeof generateRemedyClinic<InequalityInput, string>>[0],
+      );
+      expect(agInputRes.status).toBe("invalid_input");
+      expect(agInputRes.clinic).toBeNull();
+
+      const agProbe = makeAsyncGenObj({ ...probe1, probeId: "r11-ag-probe" });
+      const agCorrectModel = makeAsyncGenObj({ ...probe1.correctModel });
+      const agHyp = makeAsyncGenObj({ ...probe1.hypotheses[0]! });
+      const agContainersRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [
+          agProbe as unknown as ClinicCandidateProbe<InequalityInput, string>,
+          { ...probe1, probeId: "r11-ag-correct", correctModel: agCorrectModel as unknown as typeof probe1.correctModel },
+          {
+            ...probe1,
+            probeId: "r11-ag-hyp",
+            hypotheses: [agHyp as unknown as (typeof probe1.hypotheses)[0], probe1.hypotheses[1]!],
+          },
+        ],
+      });
+      expect(agContainersRes.status).toBe("insufficient_distinguishable_probes");
+      expect(agContainersRes.rejectedProbes.map((r) => r.reason)).toEqual([
+        "invalid_probe_descriptor",
+        "invalid_probe_descriptor",
+        "invalid_probe_descriptor",
+      ]);
+
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      expect(unhandledErrors).toEqual([]);
+
+      // [P2-1] privacy-guard direct exports: single-pass cloneEvidenceCase / selectSpreadRepresentativeCases
+      // and Proxy / reassigned-Promise Record activeSourcesMap rejection.
+      const baseClinic = plainOk.clinic!;
+      const validCase = baseClinic.evidenceCases[0]!;
+      let caseDescReads = 0;
+      const statefulCaseProxy = new Proxy(
+        { ...validCase },
+        {
+          getOwnPropertyDescriptor(target, prop) {
+            if (prop === "attemptId") caseDescReads += 1;
+            return Reflect.getOwnPropertyDescriptor(target, prop);
+          },
+        },
+      );
+      expect(cloneEvidenceCase(statefulCaseProxy).attemptId).toBe("");
+      expect(caseDescReads).toBe(1);
+
+      const errCase = new Error("r11-case-promise");
+      const promiseCase = Promise.reject(errCase);
+      Object.setPrototypeOf(promiseCase, Object.prototype);
+      Object.assign(promiseCase, { ...validCase });
+
+      const errSources = new Error("r11-sources-promise");
+      const promiseSources = Promise.reject(errSources);
+      Object.setPrototypeOf(promiseSources, Object.prototype);
+      Object.assign(promiseSources, { ...allSources });
+
+      try {
+        expect(cloneEvidenceCase(promiseCase as unknown as typeof validCase).attemptId).toBe("");
+        const spreadFromPromise = selectSpreadRepresentativeCases([
+          promiseCase as unknown as typeof validCase,
+          baseClinic.evidenceCases[1]!,
+          baseClinic.evidenceCases[2]!,
+        ]);
+        expect(spreadFromPromise[0]!.attemptId).toBe("");
+
+        const proxyRecordSources = new Proxy({ ...allSources }, {}) as unknown as ActiveSourcesMap;
+        expect(isSourceRefActive({ sourceId: "src-ch-1", sourceVersion: "v1" }, proxyRecordSources)).toBe(false);
+        expect(areSourceRefsActive([{ sourceId: "src-ch-1", sourceVersion: "v1" }], proxyRecordSources)).toBe(false);
+        expect(
+          isSourceRefActive(
+            { sourceId: "src-ch-1", sourceVersion: "v1" },
+            promiseSources as unknown as ActiveSourcesMap,
+          ),
+        ).toBe(false);
+        expect(
+          areSourceRefsActive(
+            [{ sourceId: "src-ch-1", sourceVersion: "v1" }],
+            promiseSources as unknown as ActiveSourcesMap,
+          ),
+        ).toBe(false);
+
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        expect(unhandledErrors).toContain(errCase);
+        expect(unhandledErrors).toContain(errSources);
+      } finally {
+        for (const p of [promiseCase, promiseSources]) {
+          Object.setPrototypeOf(p, Promise.prototype);
+          p.catch(() => {});
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

@@ -95,40 +95,145 @@ function isValidSourceVersion(version: unknown): version is string | number {
   return typeof version === "number" && Number.isFinite(version);
 }
 
-function safeGetOwnData(
-  obj: unknown,
-  key: string,
-): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  if (obj === null || typeof obj !== "object" || key === "__proto__") return { ok: false };
-  try {
-    const desc = Object.getOwnPropertyDescriptor(obj, key);
-    if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
-      return { ok: false };
-    }
-    return { ok: true, value: desc.value };
-  } catch {
-    return { ok: false };
-  }
-}
+const GUARD_REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
+const GUARD_ARRAY_BUFFER_LEN_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+const GUARD_DATA_VIEW_LEN_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
+const GUARD_SHARED_BUFFER_LEN_GET =
+  typeof SharedArrayBuffer !== "undefined"
+    ? Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength")?.get
+    : undefined;
+const GUARD_WEAK_REF_DEREF = typeof WeakRef !== "undefined" ? WeakRef.prototype.deref : undefined;
+const GUARD_FINALIZATION_UNREGISTER =
+  typeof FinalizationRegistry !== "undefined" ? FinalizationRegistry.prototype.unregister : undefined;
+const GUARD_GENERATOR_RETURN = (
+  Object.getPrototypeOf(Object.getPrototypeOf((function* () {})())) as { return?: (value?: unknown) => unknown } | null
+)?.return;
+const GUARD_ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
+const GUARD_WEAK_KEY = Object.freeze({});
+const VERIFIED_ACTIVE_SOURCE_SNAPSHOTS = new WeakSet<ReadonlyMap<string, ActiveSourceEntry>>();
 
-function isPlainOwnRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object") return false;
+function matchesGuardBrand(check: () => unknown): boolean {
   try {
-    if (Array.isArray(value)) return false;
-    const proto = Object.getPrototypeOf(value) as object | null;
-    if (proto !== Object.prototype && proto !== null) return false;
-    const keys = Reflect.ownKeys(value);
-    for (const key of keys) {
-      if (typeof key !== "string" || key === "__proto__") return false;
-      const desc = Object.getOwnPropertyDescriptor(value, key);
-      if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
-        return false;
-      }
-    }
+    check();
     return true;
   } catch {
     return false;
   }
+}
+
+function hasGuardExoticBrand(obj: object, proto: object | null, hasOwnConstructor: boolean): boolean {
+  try {
+    if (ArrayBuffer.isView(obj)) return true;
+    if (typeof GUARD_ERROR_IS_ERROR === "function") {
+      if (GUARD_ERROR_IS_ERROR(obj)) return true;
+    } else if (
+      (proto === Object.prototype || proto === null || proto === Array.prototype) &&
+      Object.getOwnPropertyDescriptor(obj, Symbol.toStringTag) === undefined &&
+      Object.prototype.toString.call(obj) === "[object Error]"
+    ) {
+      return true;
+    }
+    if (matchesGuardBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
+    if (matchesGuardBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
+    if (matchesGuardBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [GUARD_WEAK_KEY]))) return true;
+    if (matchesGuardBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [GUARD_WEAK_KEY]))) return true;
+    if (GUARD_WEAK_REF_DEREF && matchesGuardBrand(() => Reflect.apply(GUARD_WEAK_REF_DEREF, obj, []))) return true;
+    if (
+      GUARD_FINALIZATION_UNREGISTER &&
+      matchesGuardBrand(() => Reflect.apply(GUARD_FINALIZATION_UNREGISTER, obj, [GUARD_WEAK_KEY]))
+    ) {
+      return true;
+    }
+    if (matchesGuardBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
+    if (
+      GUARD_REGEXP_SOURCE_GET &&
+      obj !== RegExp.prototype &&
+      matchesGuardBrand(() => Reflect.apply(GUARD_REGEXP_SOURCE_GET, obj, []))
+    ) {
+      return true;
+    }
+    if (GUARD_ARRAY_BUFFER_LEN_GET && matchesGuardBrand(() => Reflect.apply(GUARD_ARRAY_BUFFER_LEN_GET, obj, []))) {
+      return true;
+    }
+    if (GUARD_DATA_VIEW_LEN_GET && matchesGuardBrand(() => Reflect.apply(GUARD_DATA_VIEW_LEN_GET, obj, []))) {
+      return true;
+    }
+    if (GUARD_SHARED_BUFFER_LEN_GET && matchesGuardBrand(() => Reflect.apply(GUARD_SHARED_BUFFER_LEN_GET, obj, []))) {
+      return true;
+    }
+    if (GUARD_GENERATOR_RETURN && matchesGuardBrand(() => Reflect.apply(GUARD_GENERATOR_RETURN, obj, [undefined]))) {
+      return true;
+    }
+    if (proto === Object.prototype && !hasOwnConstructor) {
+      try {
+        if (Reflect.apply(Promise.resolve, Object, [obj]) === obj) return true;
+      } catch {
+        // Not a Promise.
+      }
+    }
+    if (matchesGuardBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
+    if (matchesGuardBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
+    if (matchesGuardBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
+    if (matchesGuardBrand(() => Reflect.apply(Symbol.prototype.valueOf, obj, []))) return true;
+    if (matchesGuardBrand(() => Reflect.apply(BigInt.prototype.valueOf, obj, []))) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function isPrimitiveValue(val: unknown): boolean {
+  return val === null || (typeof val !== "object" && typeof val !== "function");
+}
+
+function snapshotOwnGuardRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object") return null;
+  try {
+    if (Array.isArray(value)) return null;
+    const proto = Object.getPrototypeOf(value) as object | null;
+    if (proto !== Object.prototype && proto !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    const snap: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    let hasOwnConstructor = false;
+    for (const key of keys) {
+      if (typeof key !== "string" || key === "__proto__") return null;
+      if (key === "constructor") hasOwnConstructor = true;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        !desc ||
+        !desc.enumerable ||
+        !Object.hasOwn(desc, "value") ||
+        desc.get !== undefined ||
+        desc.set !== undefined
+      ) {
+        return null;
+      }
+      Object.defineProperty(snap, key, {
+        value: desc.value,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+    }
+    if (hasGuardExoticBrand(value, proto, hasOwnConstructor)) return null;
+    return Object.freeze(snap);
+  } catch {
+    return null;
+  }
+}
+
+function snapshotPlainPrimitiveRecord(value: unknown): Record<string, unknown> | null {
+  const snap = snapshotOwnGuardRecord(value);
+  if (!snap) return null;
+  for (const key of Object.keys(snap)) {
+    if (!isPrimitiveValue(snap[key])) return null;
+  }
+  try {
+    structuredClone(value);
+  } catch {
+    return null;
+  }
+  return snap;
 }
 
 function isGenuinePlainMap(value: unknown): value is ReadonlyMap<unknown, unknown> {
@@ -158,6 +263,7 @@ function snapshotDenseArray(value: unknown): readonly unknown[] | null {
     }
     const len = lenDesc.value;
     if (Reflect.ownKeys(value).length !== len + 1) return null;
+    if (hasGuardExoticBrand(value, Array.prototype, false)) return null;
     const out: unknown[] = new Array(len);
     for (let i = 0; i < len; i += 1) {
       const desc = Object.getOwnPropertyDescriptor(value, String(i));
@@ -172,73 +278,137 @@ function snapshotDenseArray(value: unknown): readonly unknown[] | null {
       }
       out[i] = desc.value;
     }
-    return out;
+    return Object.freeze(out);
   } catch {
     return null;
   }
 }
 
-function lookupActiveSource(
-  activeSourcesMap: ActiveSourcesMap,
-  sourceId: string,
-): ActiveSourceEntry | undefined {
-  if (!activeSourcesMap || typeof activeSourcesMap !== "object") return undefined;
-  try {
-    if (isGenuinePlainMap(activeSourcesMap)) {
-      return Reflect.apply(Map.prototype.get, activeSourcesMap, [sourceId]) as ActiveSourceEntry | undefined;
-    }
-    const proto = Object.getPrototypeOf(activeSourcesMap) as object | null;
-    if (proto !== Object.prototype && proto !== null) return undefined;
-    if (sourceId === "__proto__") return undefined;
-    const slot = safeGetOwnData(activeSourcesMap, sourceId);
-    return slot.ok ? (slot.value as ActiveSourceEntry) : undefined;
-  } catch {
-    return undefined;
-  }
+function parseEntrySnap(entry: unknown): { readonly ok: true; readonly entry: ActiveSourceEntry | undefined } | { readonly ok: false } {
+  if (entry === null || entry === undefined) return { ok: true, entry: undefined };
+  if (typeof entry === "string" || typeof entry === "number") return { ok: true, entry };
+  const snap = snapshotPlainPrimitiveRecord(entry);
+  if (!snap) return { ok: false };
+  const version = snap["version"];
+  const active = snap["active"];
+  const revoked = snap["revoked"];
+  if (typeof version !== "string" && typeof version !== "number") return { ok: true, entry: undefined };
+  return {
+    ok: true,
+    entry: Object.freeze({
+      version,
+      ...(typeof active === "boolean" ? { active } : {}),
+      ...(typeof revoked === "boolean" ? { revoked } : {}),
+    }),
+  };
 }
 
-function isPlainPrimitiveRecord(value: unknown): value is Record<string, unknown> {
-  if (!isPlainOwnRecord(value)) return false;
-  try {
-    for (const key of Reflect.ownKeys(value)) {
-      if (typeof key !== "string") return false;
-      const desc = Object.getOwnPropertyDescriptor(value, key);
-      if (!desc || !Object.hasOwn(desc, "value")) return false;
-      const v = desc.value;
-      if (v !== null && (typeof v === "object" || typeof v === "function")) return false;
+/**
+ * Single-pass, Proxy/Promise/Generator/forged-Map-rejecting snapshot of ActiveSourcesMap.
+ * Never executes getters and returns an empty Map on any malformed/exotic entry or throw.
+ */
+export function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyMap<string, ActiveSourceEntry> {
+  if (!activeSourcesMap || typeof activeSourcesMap !== "object") {
+    const empty = new Map<string, ActiveSourceEntry>();
+    VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
+    return empty;
+  }
+  if (VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.has(activeSourcesMap as ReadonlyMap<string, ActiveSourceEntry>)) {
+    return activeSourcesMap as ReadonlyMap<string, ActiveSourceEntry>;
+  }
+
+  if (isGenuinePlainMap(activeSourcesMap)) {
+    const mapSnap = new Map<string, ActiveSourceEntry>();
+    let invalidOrExotic = false;
+    try {
+      Reflect.apply(Map.prototype.forEach, activeSourcesMap, [
+        (rawEntry: unknown, rawKey: unknown) => {
+          if (invalidOrExotic) return;
+          if (typeof rawKey !== "string") {
+            invalidOrExotic = true;
+            return;
+          }
+          const parsed = parseEntrySnap(rawEntry);
+          if (!parsed.ok) {
+            invalidOrExotic = true;
+            return;
+          }
+          if (parsed.entry !== undefined) {
+            mapSnap.set(rawKey, parsed.entry);
+          }
+        },
+      ]);
+      if (invalidOrExotic) {
+        const empty = new Map<string, ActiveSourceEntry>();
+        VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
+        return empty;
+      }
+      structuredClone(activeSourcesMap);
+      VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(mapSnap);
+      return mapSnap;
+    } catch {
+      const empty = new Map<string, ActiveSourceEntry>();
+      VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
+      return empty;
     }
-    structuredClone(value);
-    return true;
+  }
+
+  const recordSnap = snapshotOwnGuardRecord(activeSourcesMap);
+  if (!recordSnap) {
+    const empty = new Map<string, ActiveSourceEntry>();
+    VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
+    return empty;
+  }
+
+  const snapshot = new Map<string, ActiveSourceEntry>();
+  for (const key of Object.keys(recordSnap)) {
+    const parsed = parseEntrySnap(recordSnap[key]);
+    if (!parsed.ok) {
+      const empty = new Map<string, ActiveSourceEntry>();
+      VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
+      return empty;
+    }
+    if (parsed.entry !== undefined) {
+      snapshot.set(key, parsed.entry);
+    }
+  }
+  try {
+    structuredClone(activeSourcesMap);
   } catch {
+    const empty = new Map<string, ActiveSourceEntry>();
+    VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
+    return empty;
+  }
+  VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(snapshot);
+  return snapshot;
+}
+
+function isSourceRefActiveAgainstVerified(
+  ref: RemedySourceRef,
+  verifiedSources: ReadonlyMap<string, ActiveSourceEntry>,
+): boolean {
+  const refSnap = snapshotPlainPrimitiveRecord(ref);
+  if (!refSnap) return false;
+  const sourceId = refSnap["sourceId"];
+  const sourceVersion = refSnap["sourceVersion"];
+  if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return false;
+  const entry = verifiedSources.get(sourceId);
+  if (entry === undefined) return false;
+  if (typeof entry === "string" || typeof entry === "number") {
+    return entry === sourceVersion;
+  }
+  if (entry.revoked === true || entry.active === false) {
     return false;
   }
+  return entry.version === sourceVersion;
 }
 
 export function isSourceRefActive(
   ref: RemedySourceRef,
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
-  if (!isPlainPrimitiveRecord(ref)) return false;
-  if (!activeSourcesMap || typeof activeSourcesMap !== "object") return false;
-  const sourceIdSlot = safeGetOwnData(ref, "sourceId");
-  const sourceVersionSlot = safeGetOwnData(ref, "sourceVersion");
-  if (!sourceIdSlot.ok || !sourceVersionSlot.ok) return false;
-  const sourceId = sourceIdSlot.value;
-  const sourceVersion = sourceVersionSlot.value;
-  if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return false;
-  const entry = lookupActiveSource(activeSourcesMap, sourceId);
-  if (entry === undefined) return false;
-  if (typeof entry === "string" || typeof entry === "number") {
-    return entry === sourceVersion;
-  }
-  if (!isPlainPrimitiveRecord(entry)) return false;
-  const revokedSlot = safeGetOwnData(entry, "revoked");
-  const activeSlot = safeGetOwnData(entry, "active");
-  const versionSlot = safeGetOwnData(entry, "version");
-  if ((revokedSlot.ok && revokedSlot.value === true) || (activeSlot.ok && activeSlot.value === false)) {
-    return false;
-  }
-  return versionSlot.ok && versionSlot.value === sourceVersion;
+  const verifiedSources = snapshotActiveSourcesMap(activeSourcesMap);
+  return isSourceRefActiveAgainstVerified(ref, verifiedSources);
 }
 
 export function readOwnDataIndex<T>(
@@ -266,9 +436,10 @@ export function areSourceRefsActive(
 ): boolean {
   const items = snapshotDenseArray(sourceRefs);
   if (!items || items.length === 0) return false;
+  const verifiedSources = snapshotActiveSourcesMap(activeSourcesMap);
   for (let i = 0; i < items.length; i += 1) {
     const item = items[i];
-    if (!item || !isSourceRefActive(item as RemedySourceRef, activeSourcesMap)) return false;
+    if (!item || !isSourceRefActiveAgainstVerified(item as RemedySourceRef, verifiedSources)) return false;
   }
   try {
     structuredClone(sourceRefs);
@@ -278,58 +449,76 @@ export function areSourceRefsActive(
   return true;
 }
 
-export function cloneSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
+function snapshotSourceRefsStrict(
+  sourceRefs: unknown,
+): { readonly ok: true; readonly refs: readonly RemedySourceRef[] } | { readonly ok: false } {
   const items = snapshotDenseArray(sourceRefs);
-  if (!items) return Object.freeze([]);
+  if (!items) return { ok: false };
   const cloned: RemedySourceRef[] = [];
-  let safeToCloneCheck = true;
   for (let i = 0; i < items.length; i += 1) {
     const item = items[i];
     if (item === null || item === undefined) continue;
-    if (!isPlainPrimitiveRecord(item)) {
-      safeToCloneCheck = false;
-      continue;
-    }
-    const sourceIdSlot = safeGetOwnData(item, "sourceId");
-    const sourceVersionSlot = safeGetOwnData(item, "sourceVersion");
-    if (!sourceIdSlot.ok || !sourceVersionSlot.ok) continue;
+    const itemSnap = snapshotPlainPrimitiveRecord(item);
+    if (!itemSnap) return { ok: false };
+    const sourceId = itemSnap["sourceId"];
+    const sourceVersion = itemSnap["sourceVersion"];
     if (
-      typeof sourceIdSlot.value !== "string" ||
-      (typeof sourceVersionSlot.value !== "string" && typeof sourceVersionSlot.value !== "number")
+      typeof sourceId !== "string" ||
+      (typeof sourceVersion !== "string" && typeof sourceVersion !== "number")
     ) {
       continue;
     }
-    cloned.push(Object.freeze({ sourceId: sourceIdSlot.value, sourceVersion: sourceVersionSlot.value }));
+    cloned.push(Object.freeze({ sourceId, sourceVersion }));
   }
-  if (!safeToCloneCheck) return Object.freeze([]);
   try {
     structuredClone(sourceRefs);
   } catch {
-    return Object.freeze([]);
+    return { ok: false };
   }
-  return Object.freeze(cloned);
+  return { ok: true, refs: Object.freeze(cloned) };
 }
 
+export function cloneSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
+  const result = snapshotSourceRefsStrict(sourceRefs);
+  return result.ok ? result.refs : Object.freeze([]);
+}
+
+const EMPTY_INVALID_CASE: ClinicEvidenceCase = Object.freeze({
+  attemptId: "",
+  rootAttemptId: "",
+  chapterId: "",
+  localDate: "",
+  ruleId: "",
+  excerpt: "",
+  invariantSummary: "",
+  sourceRefs: Object.freeze([]),
+  privacyEpoch: -1,
+});
+
 export function cloneEvidenceCase(item: ClinicEvidenceCase): ClinicEvidenceCase {
-  if (!isPlainOwnRecord(item)) {
-    return Object.freeze({
-      attemptId: "",
-      rootAttemptId: "",
-      chapterId: "",
-      localDate: "",
-      ruleId: "",
-      excerpt: "",
-      invariantSummary: "",
-      sourceRefs: Object.freeze([]),
-      privacyEpoch: -1,
-    });
+  const snap = snapshotOwnGuardRecord(item);
+  if (!snap) return EMPTY_INVALID_CASE;
+
+  let frozenRefs: readonly RemedySourceRef[] = Object.freeze([]);
+  for (const key of Object.keys(snap)) {
+    if (key === "sourceRefs") {
+      const refsRes = snapshotSourceRefsStrict(snap[key]);
+      if (!refsRes.ok) return EMPTY_INVALID_CASE;
+      frozenRefs = refsRes.refs;
+      continue;
+    }
+    if (!isPrimitiveValue(snap[key])) {
+      return EMPTY_INVALID_CASE;
+    }
   }
-  const readStr = (key: string): string => {
-    const slot = safeGetOwnData(item, key);
-    return slot.ok && typeof slot.value === "string" ? slot.value : "";
-  };
-  const epochSlot = safeGetOwnData(item, "privacyEpoch");
-  const refsSlot = safeGetOwnData(item, "sourceRefs");
+  try {
+    structuredClone(item);
+  } catch {
+    return EMPTY_INVALID_CASE;
+  }
+
+  const readStr = (key: string): string => (typeof snap[key] === "string" ? (snap[key] as string) : "");
+  const epoch = snap["privacyEpoch"];
   return Object.freeze({
     attemptId: readStr("attemptId"),
     rootAttemptId: readStr("rootAttemptId"),
@@ -338,8 +527,8 @@ export function cloneEvidenceCase(item: ClinicEvidenceCase): ClinicEvidenceCase 
     ruleId: readStr("ruleId"),
     excerpt: readStr("excerpt"),
     invariantSummary: readStr("invariantSummary"),
-    sourceRefs: refsSlot.ok ? cloneSourceRefs(refsSlot.value as readonly RemedySourceRef[]) : Object.freeze([]),
-    privacyEpoch: epochSlot.ok && typeof epochSlot.value === "number" ? epochSlot.value : -1,
+    sourceRefs: frozenRefs,
+    privacyEpoch: typeof epoch === "number" ? epoch : -1,
   });
 }
 
@@ -511,11 +700,14 @@ function constructFallbackSpreadTriple(
 export function selectSpreadRepresentativeCases(
   cases: readonly ClinicEvidenceCase[],
 ): readonly ClinicEvidenceCase[] {
-  if (cases.length <= SELECTED_DIFF_CASE_COUNT) {
-    return cases.map(cloneEvidenceCase);
+  const items = snapshotDenseArray(cases);
+  if (!items) return Object.freeze([]);
+  const safeCases = items.map((item) => cloneEvidenceCase(item as ClinicEvidenceCase));
+  if (safeCases.length <= SELECTED_DIFF_CASE_COUNT) {
+    return Object.freeze(safeCases);
   }
 
-  const ordered = [...cases].sort(
+  const ordered = [...safeCases].sort(
     (x, y) =>
       compareUtf16(x.localDate, y.localDate) ||
       compareUtf16(x.chapterId, y.chapterId) ||
@@ -551,8 +743,8 @@ export function selectSpreadRepresentativeCases(
 
   if (requiresSpread && (!bestTuple || bestScore?.meetsSpread !== 1)) {
     const fallback = constructFallbackSpreadTriple(ordered);
-    if (fallback) return fallback.map(cloneEvidenceCase);
+    if (fallback) return Object.freeze([...fallback]);
   }
 
-  return bestTuple ? bestTuple.map(cloneEvidenceCase) : ordered.slice(0, SELECTED_DIFF_CASE_COUNT).map(cloneEvidenceCase);
+  return Object.freeze(bestTuple ? [...bestTuple] : ordered.slice(0, SELECTED_DIFF_CASE_COUNT));
 }
