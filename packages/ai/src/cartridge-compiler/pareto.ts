@@ -234,29 +234,19 @@ export function computeCandidateMetrics(
     const validGuard = isNonNegativeInteger(t.guardBlockedCount);
 
     if (!validTotal) {
-      telemetryIssues.push(
-        `trajectory:${t.trajectoryId}:invalid_totalReleasedTurns(${String(t.totalReleasedTurns)})`,
-      );
+      telemetryIssues.push("trajectory_invalid_totalReleasedTurns");
     }
     if (!validLeaked) {
-      telemetryIssues.push(
-        `trajectory:${t.trajectoryId}:invalid_leakedReleasedTurns(${String(t.leakedReleasedTurns)})`,
-      );
+      telemetryIssues.push("trajectory_invalid_leakedReleasedTurns");
     }
     if (validTotal && validLeaked && t.leakedReleasedTurns > t.totalReleasedTurns) {
-      telemetryIssues.push(
-        `trajectory:${t.trajectoryId}:leakedReleasedTurns(${t.leakedReleasedTurns})>totalReleasedTurns(${t.totalReleasedTurns})`,
-      );
+      telemetryIssues.push("trajectory_leaked_gt_total");
     }
     if (!validSevere) {
-      telemetryIssues.push(
-        `trajectory:${t.trajectoryId}:invalid_severeLeakCount(${String(t.severeLeakCount)})`,
-      );
+      telemetryIssues.push("trajectory_invalid_severeLeakCount");
     }
     if (!validGuard) {
-      telemetryIssues.push(
-        `trajectory:${t.trajectoryId}:invalid_guardBlockedCount(${String(t.guardBlockedCount)})`,
-      );
+      telemetryIssues.push("trajectory_invalid_guardBlockedCount");
     }
 
     // Preserve raw addition so NaN/negative/inconsistent values are never masked.
@@ -281,7 +271,7 @@ export function computeCandidateMetrics(
   }
 
   if (!isNonNegativeInteger(totalReleasedTurns) || totalReleasedTurns <= 0) {
-    telemetryIssues.push(`aggregate:totalReleasedTurns_must_be_positive(${String(totalReleasedTurns)})`);
+    telemetryIssues.push("aggregate_totalReleasedTurns_must_be_positive");
   }
 
   const cRate = verifiableFirstErrorCount > 0 ? repairedCount / verifiableFirstErrorCount : 0;
@@ -480,30 +470,24 @@ function validateLeakageTelemetryFailClosed(
   if (l.telemetryIssues !== undefined) {
     if (!Array.isArray(l.telemetryIssues)) {
       vetoReasons.push("telemetry_integrity:telemetryIssues_must_be_string_array");
-    } else {
-      for (let i = 0; i < l.telemetryIssues.length; i += 1) {
-        const issue = l.telemetryIssues[i];
-        if (typeof issue !== "string") {
-          vetoReasons.push(`telemetry_integrity:non_string_telemetryIssue[${i}]`);
-        } else {
-          vetoReasons.push(`telemetry_integrity:${issue}`);
-        }
+    } else if (l.telemetryIssues.length > 0) {
+      const hasNonString = l.telemetryIssues.some((entry) => typeof entry !== "string");
+      if (hasNonString) {
+        vetoReasons.push("telemetry_integrity:non_string_telemetryIssue");
+      } else {
+        vetoReasons.push("telemetry_integrity:reported_issues");
       }
     }
   }
 
   const validTotal = isNonNegativeInteger(l.totalReleasedTurns) && l.totalReleasedTurns > 0;
   if (!validTotal) {
-    vetoReasons.push(
-      `invalid_totalReleasedTurns:must_be_positive_integer(got=${String(l.totalReleasedTurns)})`,
-    );
+    vetoReasons.push("invalid_totalReleasedTurns:must_be_positive_integer");
   }
 
   const validLeaked = isNonNegativeInteger(l.leakedReleasedTurns);
   if (!validLeaked) {
-    vetoReasons.push(
-      `invalid_leakedReleasedTurns:must_be_nonnegative_integer(got=${String(l.leakedReleasedTurns)})`,
-    );
+    vetoReasons.push("invalid_leakedReleasedTurns:must_be_nonnegative_integer");
   }
 
   if (validTotal && validLeaked && l.leakedReleasedTurns > l.totalReleasedTurns) {
@@ -513,17 +497,13 @@ function validateLeakageTelemetryFailClosed(
   }
 
   if (!isNonNegativeInteger(l.severeLeakCount)) {
-    vetoReasons.push(
-      `invalid_severeLeakCount:must_be_nonnegative_integer(got=${String(l.severeLeakCount)})`,
-    );
+    vetoReasons.push("invalid_severeLeakCount:must_be_nonnegative_integer");
   } else if (l.severeLeakCount > 0) {
     vetoReasons.push(`severeLeakCount=${l.severeLeakCount} exceeds 0`);
   }
 
   if (!isNonNegativeInteger(l.guardBlockedCount)) {
-    vetoReasons.push(
-      `invalid_guardBlockedCount:must_be_nonnegative_integer(got=${String(l.guardBlockedCount)})`,
-    );
+    vetoReasons.push("invalid_guardBlockedCount:must_be_nonnegative_integer");
   }
 
   const validCounts = validTotal && validLeaked && l.leakedReleasedTurns <= l.totalReleasedTurns;
@@ -544,11 +524,11 @@ function validateLeakageTelemetryFailClosed(
   }
 
   if (typeof l.rate !== "number" || !Number.isFinite(l.rate) || l.rate < 0 || l.rate > 1) {
-    vetoReasons.push(`invalid_leakageRate:must_be_finite_in_0_1(got=${String(l.rate)})`);
+    vetoReasons.push("invalid_leakageRate:must_be_finite_in_0_1");
   } else {
     if (validCounts && Math.abs(l.rate - derivedLeakageRate) > 1e-9) {
       vetoReasons.push(
-        `inconsistent_leakageRate:reported(${l.rate})!=derived(${derivedLeakageRate})`,
+        `inconsistent_leakageRate:reported(${l.rate.toFixed(9)})!=derived(${derivedLeakageRate.toFixed(9)})`,
       );
     }
     if (l.rate > maxAllowedLeakageRate) {
@@ -557,7 +537,7 @@ function validateLeakageTelemetryFailClosed(
       );
     }
     if (maxAllowedLeakageRate === 0 && l.rate !== 0) {
-      vetoReasons.push(`zero_leakage_policy_violated:rate=${String(l.rate)}`);
+      vetoReasons.push(`zero_leakage_policy_violated:rate=${l.rate.toFixed(9)}`);
     }
   }
 
@@ -585,9 +565,7 @@ export function certifyMatureTransferLowerBound(
   const validEligible =
     isNonNegativeInteger(t7.eligibleFollowupCohortCount) && t7.eligibleFollowupCohortCount > 0;
   if (!validEligible) {
-    telemetryIssues.push(
-      `invalid_t7_eligibleFollowupCohortCount:${String(t7.eligibleFollowupCohortCount)}`,
-    );
+    telemetryIssues.push("invalid_t7_eligibleFollowupCohortCount");
   }
 
   const validPassed =
@@ -595,9 +573,7 @@ export function certifyMatureTransferLowerBound(
     validEligible &&
     t7.passedFreshTransferCount <= t7.eligibleFollowupCohortCount;
   if (!validPassed) {
-    telemetryIssues.push(
-      `invalid_t7_passedFreshTransferCount:${String(t7.passedFreshTransferCount)}/${String(t7.eligibleFollowupCohortCount)}`,
-    );
+    telemetryIssues.push("invalid_t7_passedFreshTransferCount");
   }
 
   const validClusters =
@@ -606,18 +582,14 @@ export function certifyMatureTransferLowerBound(
     validEligible &&
     t7.learnerClusterCount <= t7.eligibleFollowupCohortCount;
   if (!validClusters) {
-    telemetryIssues.push(
-      `invalid_t7_learnerClusterCount:${String(t7.learnerClusterCount)}/${String(t7.eligibleFollowupCohortCount)}`,
-    );
+    telemetryIssues.push("invalid_t7_learnerClusterCount");
   }
 
   let exactKishNEff = 0;
   if (!Array.isArray(t7.learnerOutcomeCounts)) {
     telemetryIssues.push("missing_t7_learnerOutcomeCounts");
   } else if (validClusters && t7.learnerOutcomeCounts.length !== t7.learnerClusterCount) {
-    telemetryIssues.push(
-      `inconsistent_t7_learnerOutcomeCounts_length:${t7.learnerOutcomeCounts.length}!=${t7.learnerClusterCount}`,
-    );
+    telemetryIssues.push("inconsistent_t7_learnerOutcomeCounts_length");
   } else {
     let sumCounts = 0;
     let sumSq = 0;
@@ -626,7 +598,7 @@ export function certifyMatureTransferLowerBound(
       const c = t7.learnerOutcomeCounts[i];
       if (!isNonNegativeInteger(c) || c <= 0) {
         allPosInt = false;
-        telemetryIssues.push(`invalid_t7_learnerOutcomeCounts[${i}]:${String(c)}`);
+        telemetryIssues.push("invalid_t7_learnerOutcomeCounts_entry");
         break;
       }
       sumCounts += c;
@@ -634,9 +606,7 @@ export function certifyMatureTransferLowerBound(
     }
     if (allPosInt && validEligible) {
       if (sumCounts !== t7.eligibleFollowupCohortCount) {
-        telemetryIssues.push(
-          `inconsistent_t7_learnerOutcomeCounts_sum:${sumCounts}!=${t7.eligibleFollowupCohortCount}`,
-        );
+        telemetryIssues.push("inconsistent_t7_learnerOutcomeCounts_sum");
       } else if (validClusters && sumSq > 0) {
         exactKishNEff = Math.min(
           t7.learnerClusterCount,
@@ -652,19 +622,20 @@ export function certifyMatureTransferLowerBound(
       : Number.NaN;
 
   if (typeof t7.rate !== "number" || !Number.isFinite(t7.rate) || t7.rate < 0 || t7.rate > 1) {
-    telemetryIssues.push(`invalid_t7_rate:${String(t7.rate)}`);
+    telemetryIssues.push("invalid_t7_rate");
   } else if (Number.isFinite(exactRate) && Math.abs(t7.rate - exactRate) > 1e-9) {
-    telemetryIssues.push(`inconsistent_t7_rate:reported(${t7.rate})!=derived(${exactRate})`);
+    telemetryIssues.push(
+      `inconsistent_t7_rate:reported(${t7.rate.toFixed(9)})!=derived(${exactRate.toFixed(9)})`,
+    );
   }
 
   if (
+    typeof t7.effectiveClusterSampleSize !== "number" ||
     !Number.isFinite(t7.effectiveClusterSampleSize) ||
     t7.effectiveClusterSampleSize <= 0 ||
     (exactKishNEff > 0 && t7.effectiveClusterSampleSize > exactKishNEff + 1e-9)
   ) {
-    telemetryIssues.push(
-      `inflated_or_invalid_effectiveClusterSampleSize:reported(${String(t7.effectiveClusterSampleSize)})>kish(${exactKishNEff.toFixed(6)})`,
-    );
+    telemetryIssues.push("inflated_or_invalid_effectiveClusterSampleSize");
   }
 
   if (
@@ -673,11 +644,15 @@ export function certifyMatureTransferLowerBound(
     t7.learnerClusterMean < 0 ||
     t7.learnerClusterMean > 1
   ) {
-    telemetryIssues.push(`invalid_t7_learnerClusterMean:${String(t7.learnerClusterMean)}`);
+    telemetryIssues.push("invalid_t7_learnerClusterMean");
   }
 
-  if (typeof t7.standardError !== "number" || !Number.isFinite(t7.standardError) || t7.standardError < 0) {
-    telemetryIssues.push(`invalid_t7_standardError:${String(t7.standardError)}`);
+  if (
+    typeof t7.standardError !== "number" ||
+    !Number.isFinite(t7.standardError) ||
+    t7.standardError < 0
+  ) {
+    telemetryIssues.push("invalid_t7_standardError");
   }
 
   if (
@@ -686,9 +661,7 @@ export function certifyMatureTransferLowerBound(
     t7.clopperPearsonLowerBound < 0 ||
     t7.clopperPearsonLowerBound > 1
   ) {
-    telemetryIssues.push(
-      `invalid_t7_clopperPearsonLowerBound:${String(t7.clopperPearsonLowerBound)}`,
-    );
+    telemetryIssues.push("invalid_t7_clopperPearsonLowerBound");
   }
 
   if (
@@ -697,9 +670,7 @@ export function certifyMatureTransferLowerBound(
     t7.learnerClusterLowerBound < 0 ||
     t7.learnerClusterLowerBound > 1
   ) {
-    telemetryIssues.push(
-      `invalid_t7_learnerClusterLowerBound:${String(t7.learnerClusterLowerBound)}`,
-    );
+    telemetryIssues.push("invalid_t7_learnerClusterLowerBound");
   }
 
   if (
@@ -709,11 +680,12 @@ export function certifyMatureTransferLowerBound(
       t7.alpha <= 0 ||
       t7.alpha > MAX_PROMOTION_ALPHA + 1e-9)
   ) {
-    telemetryIssues.push(`t7_alpha_exceeds_max_0_05:${String(t7.alpha)}>${MAX_PROMOTION_ALPHA}`);
+    telemetryIssues.push("t7_alpha_exceeds_max_0_05");
   }
 
   const boundedNEff =
     exactKishNEff > 0 &&
+    typeof t7.effectiveClusterSampleSize === "number" &&
     Number.isFinite(t7.effectiveClusterSampleSize) &&
     t7.effectiveClusterSampleSize > 0
       ? Math.min(exactKishNEff, t7.effectiveClusterSampleSize)
@@ -765,16 +737,16 @@ function validateObjectiveTelemetryFailClosed(
   const validVerifiable = isNonNegativeInteger(c.verifiableFirstErrorCount);
   const validRepaired = isNonNegativeInteger(c.repairedCount);
   if (!validVerifiable) {
-    issues.push(`invalid_c_verifiableFirstErrorCount:${String(c.verifiableFirstErrorCount)}`);
+    issues.push("invalid_c_verifiableFirstErrorCount");
   }
   if (!validRepaired) {
-    issues.push(`invalid_c_repairedCount:${String(c.repairedCount)}`);
+    issues.push("invalid_c_repairedCount");
   }
   if (validVerifiable && validRepaired && c.repairedCount > c.verifiableFirstErrorCount) {
-    issues.push(`inconsistent_c_counts:repaired(${c.repairedCount})>verifiable(${c.verifiableFirstErrorCount})`);
+    issues.push("inconsistent_c_counts");
   }
   if (!isNonNegativeInteger(c.abandonedCount)) {
-    issues.push(`invalid_c_abandonedCount:${String(c.abandonedCount)}`);
+    issues.push("invalid_c_abandonedCount");
   }
   if (
     typeof c.abandonmentRate !== "number" ||
@@ -782,15 +754,17 @@ function validateObjectiveTelemetryFailClosed(
     c.abandonmentRate < 0 ||
     c.abandonmentRate > 1
   ) {
-    issues.push(`invalid_c_abandonmentRate:${String(c.abandonmentRate)}`);
+    issues.push("invalid_c_abandonmentRate");
   }
   if (typeof c.rate !== "number" || !Number.isFinite(c.rate) || c.rate < 0 || c.rate > 1) {
-    issues.push(`invalid_c_rate:${String(c.rate)}`);
+    issues.push("invalid_c_rate");
   } else if (validVerifiable && validRepaired && c.repairedCount <= c.verifiableFirstErrorCount) {
     const expectedC =
       c.verifiableFirstErrorCount > 0 ? c.repairedCount / c.verifiableFirstErrorCount : 0;
     if (Math.abs(c.rate - expectedC) > 1e-9) {
-      issues.push(`inconsistent_c_rate:reported(${c.rate})!=derived(${expectedC})`);
+      issues.push(
+        `inconsistent_c_rate:reported(${c.rate.toFixed(9)})!=derived(${expectedC.toFixed(9)})`,
+      );
     }
   }
 
@@ -801,11 +775,8 @@ function validateObjectiveTelemetryFailClosed(
     typeof rawT7 !== "object" ||
     (rawT7.status !== "mature" && rawT7.status !== "pending")
   ) {
-    const rawStatus =
-      rawT7 && typeof rawT7 === "object"
-        ? (rawT7 as { status?: unknown }).status
-        : undefined;
-    issues.push(`invalid_t7_status:${String(rawStatus)}`);
+    // Fixed constant code — never echo raw malformed status values.
+    issues.push("invalid_t7_status");
   } else if (rawT7.status === "mature") {
     matureCert = certifyMatureTransferLowerBound(rawT7);
     if (!matureCert.validTelemetry) {
@@ -814,26 +785,20 @@ function validateObjectiveTelemetryFailClosed(
   } else if (rawT7.status === "pending") {
     const t7p = rawT7;
     if (!isNonNegativeInteger(t7p.eligibleFollowupCohortCount)) {
-      issues.push(
-        `invalid_pending_t7_eligibleFollowupCohortCount:${String(t7p.eligibleFollowupCohortCount)}`,
-      );
+      issues.push("invalid_pending_t7_eligibleFollowupCohortCount");
     }
     if (!isNonNegativeInteger(t7p.passedFreshTransferCount)) {
-      issues.push(
-        `invalid_pending_t7_passedFreshTransferCount:${String(t7p.passedFreshTransferCount)}`,
-      );
+      issues.push("invalid_pending_t7_passedFreshTransferCount");
     }
     if (
       isNonNegativeInteger(t7p.eligibleFollowupCohortCount) &&
       isNonNegativeInteger(t7p.passedFreshTransferCount) &&
       t7p.passedFreshTransferCount > t7p.eligibleFollowupCohortCount
     ) {
-      issues.push(
-        `inconsistent_pending_t7_counts:passed(${t7p.passedFreshTransferCount})>eligible(${t7p.eligibleFollowupCohortCount})`,
-      );
+      issues.push("inconsistent_pending_t7_counts");
     }
     if (!isNonNegativeInteger(t7p.pendingCohortCount)) {
-      issues.push(`invalid_pending_t7_pendingCohortCount:${String(t7p.pendingCohortCount)}`);
+      issues.push("invalid_pending_t7_pendingCohortCount");
     }
     if (typeof t7p.reason !== "string" || t7p.reason.trim().length === 0) {
       issues.push("invalid_pending_t7_reason");
@@ -843,7 +808,13 @@ function validateObjectiveTelemetryFailClosed(
   return { issues, matureCert };
 }
 
-function sanitizeMetricsForVeto(candidate: CartridgeCandidateMetrics): CartridgeCandidateMetrics {
+/**
+ * Projects any candidate receipt strictly onto declared schema fields so neither
+ * vetoed nor non-vetoed results can leak undeclared extra properties or non-string raw fields.
+ */
+function projectDeclaredCandidateMetrics(
+  candidate: CartridgeCandidateMetrics,
+): CartridgeCandidateMetrics {
   const safeTelemetryIssues = Array.isArray(candidate.l.telemetryIssues)
     ? candidate.l.telemetryIssues.filter((entry): entry is string => typeof entry === "string")
     : undefined;
@@ -1091,7 +1062,7 @@ export function evaluateParetoFrontierAndPromotion(
     } else {
       vetoMap.set(candidate.candidateId, {
         status: "vetoed_invalid_telemetry",
-        reasons: [`invalid_t7_status:${String((candidate.t7 as { status?: unknown }).status)}`],
+        reasons: ["invalid_t7_status"],
       });
     }
   }
@@ -1121,11 +1092,12 @@ export function evaluateParetoFrontierAndPromotion(
   }
 
   const results: ParetoCandidateEvaluation[] = canonicalCandidates.map((candidate) => {
+    const projectedMetrics = projectDeclaredCandidateMetrics(candidate);
     const veto = vetoMap.get(candidate.candidateId);
     if (veto) {
       return {
         candidateId: candidate.candidateId,
-        metrics: sanitizeMetricsForVeto(candidate),
+        metrics: projectedMetrics,
         status: veto.status,
         onParetoFrontier: false,
         dominatedBy: [],
@@ -1138,7 +1110,7 @@ export function evaluateParetoFrontierAndPromotion(
     if (dominatedBy.length > 0) {
       return {
         candidateId: candidate.candidateId,
-        metrics: candidate,
+        metrics: projectedMetrics,
         status: "dominated",
         onParetoFrontier: false,
         dominatedBy,
@@ -1168,15 +1140,11 @@ export function evaluateParetoFrontierAndPromotion(
           t7.alpha <= MAX_PROMOTION_ALPHA + 1e-9
         )
       ) {
-        promotionBlockers.push(
-          `t7_alpha_exceeds_max_0_05:${String(t7.alpha)}>${MAX_PROMOTION_ALPHA}`,
-        );
+        promotionBlockers.push("t7_alpha_exceeds_max_0_05");
       }
 
       if (!(t7.learnerClusterCount >= minClusterCount)) {
-        promotionBlockers.push(
-          `insufficient_student_clusters:${String(t7.learnerClusterCount)}<${minClusterCount}`,
-        );
+        promotionBlockers.push("insufficient_student_clusters");
       }
 
       if (
@@ -1186,28 +1154,24 @@ export function evaluateParetoFrontierAndPromotion(
           t7.learnerClusterLowerBound <= cert.certifiedCp95Lcb + 1e-9
         )
       ) {
-        promotionBlockers.push(
-          `t7_lcb_exceeds_certified_cp95:${String(t7.learnerClusterLowerBound)}>${String(cert.certifiedCp95Lcb)}`,
-        );
+        promotionBlockers.push("t7_lcb_exceeds_certified_cp95");
       }
 
       const verifiedLcb = Math.min(t7.learnerClusterLowerBound, cert.certifiedCp95Lcb);
       const requiredT7Lcb = baselineT7Rate + minT7Gain;
       if (!(Number.isFinite(verifiedLcb) && verifiedLcb + EPSILON >= requiredT7Lcb)) {
         promotionBlockers.push(
-          `t7_lcb_below_gain_threshold:${Number.isFinite(verifiedLcb) ? verifiedLcb.toFixed(4) : String(verifiedLcb)}<${requiredT7Lcb.toFixed(4)}`,
+          `t7_lcb_below_gain_threshold:${Number.isFinite(verifiedLcb) ? verifiedLcb.toFixed(4) : "non_finite"}<${requiredT7Lcb.toFixed(4)}`,
         );
       }
       const minAllowedC = baselineCRate - nonInferiorityMargin;
       if (!(Number.isFinite(candidate.c.rate) && candidate.c.rate + EPSILON >= minAllowedC)) {
         promotionBlockers.push(
-          `c_below_non_inferiority:${Number.isFinite(candidate.c.rate) ? candidate.c.rate.toFixed(4) : String(candidate.c.rate)}<${minAllowedC.toFixed(4)}`,
+          `c_below_non_inferiority:${Number.isFinite(candidate.c.rate) ? candidate.c.rate.toFixed(4) : "non_finite"}<${minAllowedC.toFixed(4)}`,
         );
       }
     } else {
-      promotionBlockers.push(
-        `invalid_t7_status:${String((candidate.t7 as { status?: unknown }).status)}`,
-      );
+      promotionBlockers.push("invalid_t7_status");
     }
 
     const status: ParetoCandidateStatus =
@@ -1215,7 +1179,7 @@ export function evaluateParetoFrontierAndPromotion(
 
     return {
       candidateId: candidate.candidateId,
-      metrics: candidate,
+      metrics: projectedMetrics,
       status,
       onParetoFrontier: true,
       dominatedBy: [],

@@ -9,6 +9,7 @@ import {
   assertDisjointSplitInvariants,
   assertNoHoldoutLeakage,
   assertNoRawPiiInText,
+  assertNoRawPiiInValue,
   buildGepaReflectionContext,
   canonicalizeIdentifier,
   certifyMatureTransferLowerBound,
@@ -1668,9 +1669,8 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     const badEntry = result.results.find((r) => r.candidateId === "cand_unknown_t7_status")!;
     expect(badEntry.status).toBe("vetoed_invalid_telemetry");
     expect(badEntry.onParetoFrontier).toBe(false);
-    expect(badEntry.vetoReasons).toEqual(
-      expect.arrayContaining([expect.stringContaining("invalid_t7_status:unknown")]),
-    );
+    expect(badEntry.vetoReasons).toEqual(expect.arrayContaining(["invalid_t7_status"]));
+    expect(JSON.stringify(badEntry.vetoReasons)).not.toContain("unknown");
   });
 
   it("allows valid UUIDs with 11-digit tails and alphanumeric IDs while still catching unformatted phones (Round-7 P1-1)", () => {
@@ -1784,6 +1784,140 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
 
     for (const opts of invalidOptionCases) {
       expect(() => evaluateParetoFrontierAndPromotion([safe], opts)).toThrow(RangeError);
+    }
+  });
+
+  it("scopes UUID masking ONLY to phone/SSN checks so UUID local-part emails and UUID Bearer tokens are caught (Round-8 P1-1)", () => {
+    // UUID local-part email MUST be rejected as email PII!
+    expect(() =>
+      assertNoRawPiiInText("550e8400-e29b-41d4-a716-446655440000@example.com", "uuid_email"),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Bearer token formatted as UUID MUST be rejected as auth_token PII!
+    expect(() =>
+      assertNoRawPiiInText("Bearer 550e8400-e29b-41d4-a716-446655440000", "uuid_bearer"),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Tokenized URL carrying UUID token MUST be rejected!
+    expect(() =>
+      assertNoRawPiiInText(
+        "https://api.example.edu/eval?token=550e8400-e29b-41d4-a716-446655440000",
+        "uuid_url_token",
+      ),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Benign bare UUID with 11-digit tail STILL passes cleanly (no phone/SSN false positive).
+    expect(() =>
+      assertNoRawPiiInText("trace=550e8400-e29b-41d4-a716-a12345678901", "uuid_benign"),
+    ).not.toThrow();
+  });
+
+  it("rejects nested numeric PII under arbitrary keys like extra.seed, blocks 9-digit SSN ints, avoids echoing malformed status, and strips extra fields on ALL returned receipts (Round-8 P1-2)", () => {
+    const clean = buildMatureCohort("cand_r8_base", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+
+    // Nested numeric phone under `{ extra: { seed: 4155550199 } }` MUST NOT bypass PII check via bare key name!
+    const nestedExtraSeed = {
+      ...clean,
+      candidateId: "cand_extra_seed_phone",
+      extra: { seed: 4155550199 },
+    } as unknown as CartridgeCandidateMetrics;
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([nestedExtraSeed], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // 9-digit SSN-length integer inside malformed t7.status MUST be rejected as numeric_ssn_pii!
+    const numericSsnStatus: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_ssn_status",
+      t7: {
+        status: 123456789 as never,
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 0,
+        reason: "bad",
+      } as unknown as CartridgeCandidateMetrics["t7"],
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([numericSsnStatus], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Malformed non-PII string status (e.g. "custom_secret_tag") is vetoed using fixed diagnostic code ONLY (never echoed).
+    const malformedStringStatus: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_custom_status",
+      t7: {
+        status: "custom_secret_tag" as never,
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 0,
+        reason: "bad",
+      } as unknown as CartridgeCandidateMetrics["t7"],
+    };
+    const malformedRes = evaluateParetoFrontierAndPromotion([malformedStringStatus], {
+      baseline: { cRate: 0.8, t7Rate: 0.72 },
+    });
+    expect(malformedRes.results[0]!.vetoReasons).toEqual(["invalid_t7_status"]);
+    expect(JSON.stringify(malformedRes)).not.toContain("custom_secret_tag");
+
+    // Non-vetoed (promoted) candidate carrying undeclared extra fields MUST have extra properties stripped on output!
+    const promotedWithExtra = {
+      ...clean,
+      candidateId: "cand_promoted_projected",
+      undeclaredTop: "should_not_appear",
+      c: { ...clean.c, undeclaredC: "drop_c" },
+      l: { ...clean.l, undeclaredL: "drop_l" },
+      t7: { ...clean.t7, undeclaredT7: "drop_t7" },
+    } as unknown as CartridgeCandidateMetrics;
+    const promotedRes = evaluateParetoFrontierAndPromotion([promotedWithExtra], {
+      baseline: { cRate: 0.8, t7Rate: 0.72 },
+    });
+    expect(promotedRes.promotedCandidateIds).toEqual(["cand_promoted_projected"]);
+    const outMetrics = promotedRes.results[0]!.metrics as unknown as Record<string, unknown>;
+    expect(outMetrics).not.toHaveProperty("undeclaredTop");
+    expect(outMetrics.c).not.toHaveProperty("undeclaredC");
+    expect(outMetrics.l).not.toHaveProperty("undeclaredL");
+    expect(outMetrics.t7).not.toHaveProperty("undeclaredT7");
+  });
+
+  it("redacts sensitive or PII-bearing property keys in CartridgePiiViolationError message and offendingFields (Round-8 P1-3)", () => {
+    const cases: { payload: unknown; forbiddenSubstrings: string[] }[] = [
+      {
+        payload: { "alice@example.com": "x" },
+        forbiddenSubstrings: ["alice@example.com"],
+      },
+      {
+        payload: { "ssn_123-45-6789": "4155550199" },
+        forbiddenSubstrings: ["ssn_123-45-6789", "123-45-6789", "4155550199"],
+      },
+      {
+        payload: { email: "bob@university.edu", nested: { phoneNumber: "4155550199" } },
+        forbiddenSubstrings: ["bob@university.edu", "4155550199", ".email:", ".phoneNumber:"],
+      },
+    ];
+
+    for (const { payload, forbiddenSubstrings } of cases) {
+      let caught: unknown;
+      try {
+        assertNoRawPiiInValue(payload, "audit_payload");
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(CartridgePiiViolationError);
+      const piiErr = caught as CartridgePiiViolationError;
+      const serializedFields = JSON.stringify(piiErr.offendingFields);
+      expect(serializedFields).toContain("[redacted_key]");
+      for (const secret of forbiddenSubstrings) {
+        expect(piiErr.message).not.toContain(secret);
+        expect(serializedFields).not.toContain(secret);
+      }
     }
   });
 });

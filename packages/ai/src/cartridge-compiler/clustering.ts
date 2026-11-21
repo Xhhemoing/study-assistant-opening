@@ -12,15 +12,6 @@ import {
 } from "./types";
 
 const FORBIDDEN_PII_FIELD_SET: ReadonlySet<string> = new Set(FORBIDDEN_PII_FIELDS);
-const SAFE_NUMERIC_METADATA_KEYS: ReadonlySet<string> = new Set([
-  "evaluatedatms",
-  "timestampms",
-  "createdatms",
-  "updatedatms",
-  "lastdirectrecallatms",
-  "atms",
-  "seed",
-]);
 const UUID_PATTERN =
   /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
@@ -30,12 +21,12 @@ const INTL_PHONE_PATTERN =
   /(?<![\w.])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})(?![\d.])/;
 const UNFORMATTED_PHONE_PATTERN =
   /(?<![0-9A-Za-z_.])\d{10,11}(?![0-9A-Za-z_]|\.\d)/;
-const SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/;
+const SSN_PATTERN = /(?<![\d.])\d{3}-\d{2}-\d{4}(?![\d.])/;
 const TOKEN_URL_PATTERN =
   /https?:\/\/[^\s]*?(?:[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=|[^/\s@]+:[^/\s@]+@)/i;
 const SPACED_TOKEN_URL_PATTERN =
   /https?:\/\/\S+(?:\s*[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=\s*\S+)/i;
-const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/;
+const JWT_PATTERN = /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}(?![A-Za-z0-9_-])/;
 const BEARER_TOKEN_PATTERN = /\bbearer\s+[A-Za-z0-9._~+/-]{8,}\b/i;
 const RAW_PII_ASSIGNMENT_PATTERN =
   /\b(?:student[_\s-]?id|raw[_\s-]?user[_\s-]?id|user[_\s-]?id|full[_\s-]?name|real[_\s-]?name|email|phone|tel|ssn|access[_\s-]?token|api[_\s-]?key|password|passwd|secret)\s*[:=]\s*[^\s,;]+/i;
@@ -87,19 +78,14 @@ export function canonicalizeIdentifier(
 
 function detectRawPiiReasonsInText(text: string): string[] {
   const nfkc = text.normalize("NFKC");
-  // Mask canonical 8-4-4-4-12 UUIDs BEFORE phone/SSN scanning and punctuation collapsing so
-  // UUID tails like "-a12345678901" never false-positive as unformatted phone numbers.
-  const rawMasked = text.replace(UUID_PATTERN, "<UUID>");
-  const nfkcMasked = nfkc.replace(UUID_PATTERN, "<UUID>");
-  const collapsedMasked = nfkcMasked.replace(/\s*([!=<>+-/*(),:?&])\s*/g, "$1");
-
-  const phoneForms = new Set<string>([rawMasked, nfkcMasked]);
-  const allForms = new Set<string>([rawMasked, nfkcMasked, collapsedMasked]);
+  const unmaskedCollapsed = nfkc.replace(/\s*([!=<>+-/*(),:?&])\s*/g, "$1");
+  const unmaskedForms = new Set<string>([text, nfkc, unmaskedCollapsed]);
 
   const reasons = new Set<string>();
-  for (const form of allForms) {
+  // Run email, URL/credential, auth-token, and raw-PII-identifier checks on UNMASKED text first
+  // so UUID local-part emails (e.g. <uuid>@example.com) and Bearer <uuid> tokens are never hidden.
+  for (const form of unmaskedForms) {
     if (EMAIL_PATTERN.test(form)) reasons.add("email");
-    if (SSN_PATTERN.test(form)) reasons.add("ssn");
     if (TOKEN_URL_PATTERN.test(form) || SPACED_TOKEN_URL_PATTERN.test(form)) {
       reasons.add("url_with_credentials_or_token");
     }
@@ -110,7 +96,17 @@ function detectRawPiiReasonsInText(text: string): string[] {
       reasons.add("raw_pii_identifier");
     }
   }
-  for (const form of phoneForms) {
+
+  // Mask canonical 8-4-4-4-12 UUIDs ONLY for phone and SSN detectors so UUID tails like
+  // "-a12345678901" never false-positive as phone numbers or SSNs.
+  const rawMasked = text.replace(UUID_PATTERN, "<UUID>");
+  const nfkcMasked = nfkc.replace(UUID_PATTERN, "<UUID>");
+  const collapsedMasked = nfkcMasked.replace(/\s*([!=<>+-/*(),:?&])\s*/g, "$1");
+
+  for (const form of new Set<string>([rawMasked, nfkcMasked, collapsedMasked])) {
+    if (SSN_PATTERN.test(form)) reasons.add("ssn");
+  }
+  for (const form of new Set<string>([rawMasked, nfkcMasked])) {
     if (
       PHONE_PATTERN.test(form) ||
       INTL_PHONE_PATTERN.test(form) ||
@@ -127,6 +123,21 @@ function detectRawPiiReasonsInText(text: string): string[] {
   return [...reasons];
 }
 
+export interface RawPiiScanOptions {
+  /**
+   * Optional exact full schema paths (e.g., `"root.evaluatedAtMs"`) explicitly
+   * exempted from numeric SSN/phone/ID digit-length checks. Never exempts by bare key name.
+   */
+  readonly allowedNumericMetadataPaths?: ReadonlySet<string>;
+}
+
+function sanitizeTrajectoryIdForError(trajectoryId: string | undefined): string | undefined {
+  if (trajectoryId === undefined) return undefined;
+  return detectRawPiiReasonsInText(trajectoryId).length > 0
+    ? "[redacted_trajectory_id]"
+    : trajectoryId;
+}
+
 /**
  * Fails closed (`CartridgePiiViolationError`) if `text` contains raw email,
  * phone, SSN, credentialed/tokenized URL, auth token, or raw student/user PII markers.
@@ -138,10 +149,11 @@ export function assertNoRawPiiInText(
 ): void {
   const reasons = detectRawPiiReasonsInText(text);
   if (reasons.length > 0) {
+    const safeTrajectoryId = sanitizeTrajectoryIdForError(trajectoryId);
     throw new CartridgePiiViolationError(
       `Raw PII detected at ${fieldPath}: ${reasons.join(", ")}`,
       reasons.map((r) => `${fieldPath}:${r}`),
-      trajectoryId,
+      safeTrajectoryId,
     );
   }
 }
@@ -152,7 +164,7 @@ function collectRawPiiViolations(
   out: string[],
   seen: WeakSet<object>,
   skipKeys?: ReadonlySet<string>,
-  currentKeyName?: string,
+  allowedNumericMetadataPaths?: ReadonlySet<string>,
 ): void {
   if (typeof value === "string") {
     const reasons = detectRawPiiReasonsInText(value);
@@ -162,15 +174,16 @@ function collectRawPiiViolations(
     return;
   }
   if (typeof value === "number" || typeof value === "bigint") {
-    const normalizedKey = currentKeyName ? normalizeFieldKey(currentKeyName) : "";
-    if (!SAFE_NUMERIC_METADATA_KEYS.has(normalizedKey)) {
+    if (!allowedNumericMetadataPaths?.has(pathLabel)) {
       const isInt = typeof value === "bigint" || (Number.isFinite(value) && Number.isInteger(value));
       if (isInt) {
         const absDigits =
           typeof value === "bigint"
             ? (value < 0n ? -value : value).toString()
             : Math.abs(value).toString();
-        if (absDigits.length === 10 || absDigits.length === 11) {
+        if (absDigits.length === 9) {
+          out.push(`${pathLabel}:numeric_ssn_pii`);
+        } else if (absDigits.length === 10 || absDigits.length === 11) {
           out.push(`${pathLabel}:numeric_phone_pii`);
         } else if (absDigits.length >= 15 && absDigits.length <= 18) {
           out.push(`${pathLabel}:numeric_id_pii`);
@@ -185,48 +198,70 @@ function collectRawPiiViolations(
 
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i += 1) {
-      collectRawPiiViolations(value[i], `${pathLabel}[${i}]`, out, seen, undefined, currentKeyName);
+      collectRawPiiViolations(
+        value[i],
+        `${pathLabel}[${i}]`,
+        out,
+        seen,
+        undefined,
+        allowedNumericMetadataPaths,
+      );
     }
     return;
   }
 
   for (const key of Object.keys(value as Record<string, unknown>)) {
     const normalizedKey = normalizeFieldKey(key);
-    if (FORBIDDEN_PII_FIELD_SET.has(normalizedKey)) {
-      out.push(`${pathLabel}.${key}:forbidden_pii_field`);
-    }
+    const isForbiddenField = FORBIDDEN_PII_FIELD_SET.has(normalizedKey);
     const keyReasons = detectRawPiiReasonsInText(key);
+    const isSensitiveOrPiiKey = isForbiddenField || keyReasons.length > 0;
+    const safeSegment = isSensitiveOrPiiKey ? "[redacted_key]" : key;
+    const childPath = `${pathLabel}.${safeSegment}`;
+
+    if (isForbiddenField) {
+      out.push(`${childPath}:forbidden_pii_field`);
+    }
     for (const reason of keyReasons) {
-      out.push(`${pathLabel}.<key:${key}>:${reason}`);
+      out.push(`${childPath}:key_${reason}`);
     }
     if (skipKeys?.has(key)) continue;
     collectRawPiiViolations(
       (value as Record<string, unknown>)[key],
-      `${pathLabel}.${key}`,
+      childPath,
       out,
       seen,
       undefined,
-      key,
+      allowedNumericMetadataPaths,
     );
   }
 }
 
 /**
- * Recursively inspects all keys and string leaves of an arbitrary value (such as
- * a trajectory or GEPA patch) and throws `CartridgePiiViolationError` on any raw PII.
+ * Recursively inspects all keys and leaves of an arbitrary value (such as a
+ * trajectory, scorer receipt, or GEPA patch) and throws `CartridgePiiViolationError`
+ * on any raw PII without echoing sensitive/PII-bearing keys.
  */
 export function assertNoRawPiiInValue(
   value: unknown,
   rootLabel: string,
   trajectoryId?: string,
+  options?: RawPiiScanOptions,
 ): void {
   const offending: string[] = [];
-  collectRawPiiViolations(value, rootLabel, offending, new WeakSet());
+  collectRawPiiViolations(
+    value,
+    rootLabel,
+    offending,
+    new WeakSet(),
+    undefined,
+    options?.allowedNumericMetadataPaths,
+  );
   if (offending.length > 0) {
+    const safeTrajectoryId = sanitizeTrajectoryIdForError(trajectoryId);
     throw new CartridgePiiViolationError(
       `Raw PII violation in ${rootLabel}: ${offending.join(", ")}`,
       offending,
-      trajectoryId,
+      safeTrajectoryId,
     );
   }
 }
@@ -342,10 +377,12 @@ export function assertPseudonymizedTrajectory(record: ErrorTrajectoryRecord): vo
   }
 
   if (offendingFields.length > 0) {
+    const safeTrajectoryId = sanitizeTrajectoryIdForError(rawTrajectoryId);
+    const deduped = [...new Set(offendingFields)];
     throw new CartridgePiiViolationError(
-      `Trajectory ${String(record.trajectoryId)} violated pseudonymization boundary: ${[...new Set(offendingFields)].join(", ")}`,
-      [...new Set(offendingFields)],
-      rawTrajectoryId,
+      `Trajectory ${safeTrajectoryId ?? "[unknown]"} violated pseudonymization boundary: ${deduped.join(", ")}`,
+      deduped,
+      safeTrajectoryId,
     );
   }
 }
