@@ -20,8 +20,8 @@ export type ExamReviewContext = {
 // Exceeds the 200-char clientKey ceiling of bind/mapSource so review aliases cannot collide in opening_exam_integration_commands.
 const REVIEW_ALIAS_KEY_PREFIX = `exam-review-alias:v1:${"_".repeat(180)}:`;
 const reviewAliasKey = (clientKey: string) => `${REVIEW_ALIAS_KEY_PREFIX}${clientKey}`;
-// Exceeds the 100-char examWorkReviewInputSchema.clientKey ceiling so tombstones cannot collide with caller keys.
-const SUPERSEDED_REVIEW_KEY_PREFIX = `superseded-review:v1:${"_".repeat(80)}:`;
+// Exceeds the integration command clientKey ceiling and remains disjoint from review aliases.
+const SUPERSEDED_REVIEW_KEY_PREFIX = `exam-review-superseded:v1:${"_".repeat(180)}:`;
 const supersededReviewKey = (reviewId: string) => `${SUPERSEDED_REVIEW_KEY_PREFIX}${reviewId}`;
 const STALE_PENDING_LEASE_SECONDS = 60;
 const reviewOperationId = (workspaceId: string, reviewId: string) => `exam-review:${workspaceId}:${reviewId}`;
@@ -184,24 +184,25 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
       for (const row of superseded) {
         const rowId = String(row.id);
         if (rowId === chosenId) continue;
-        const originalClientKey = String(row.client_key);
         const sprintId = String(row.sprint_id);
         const alias: ExamReviewAlias = { reviewId: chosenId };
         await tx`UPDATE opening_exam_reviews
           SET status='failed',
-              client_key=${supersededReviewKey(rowId)},
               updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
           WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
             AND status IN ('pending', 'unknown')`;
-        if (!originalClientKey.startsWith(SUPERSEDED_REVIEW_KEY_PREFIX)) {
-          await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
-            VALUES(${randomUUID()},${sprintId},${reviewAliasKey(originalClientKey)},${tx.json(alias)},now())
-            ON CONFLICT (sprint_id,client_key) DO UPDATE SET intent=EXCLUDED.intent, recorded_at=now()`;
-        }
+        await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
+          VALUES(${randomUUID()},${sprintId},${supersededReviewKey(rowId)},${tx.json(alias)},now())
+          ON CONFLICT (sprint_id,client_key) DO UPDATE SET intent=EXCLUDED.intent, recorded_at=now()`;
         await tx`UPDATE opening_exam_integration_commands
           SET intent=${tx.json(alias)}, recorded_at=now()
           WHERE sprint_id=${sprintId}
             AND left(client_key, length(${REVIEW_ALIAS_KEY_PREFIX}))=${REVIEW_ALIAS_KEY_PREFIX}
+            AND intent->>'reviewId'=${rowId}`;
+        await tx`UPDATE opening_exam_integration_commands
+          SET intent=${tx.json(alias)}, recorded_at=now()
+          WHERE sprint_id=${sprintId}
+            AND left(client_key, length(${SUPERSEDED_REVIEW_KEY_PREFIX}))=${SUPERSEDED_REVIEW_KEY_PREFIX}
             AND intent->>'reviewId'=${rowId}`;
       }
     };
@@ -282,6 +283,14 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
               AND (
                 client_key=${input.clientKey}
                 ${aliasTarget ? tx`OR (id=${aliasTarget.reviewId} AND sprint_id=${aliasTarget.sprintId})` : tx``}
+                OR EXISTS (
+                  SELECT 1 FROM opening_exam_reviews original
+                  JOIN opening_exam_integration_commands c ON c.sprint_id=original.sprint_id
+                    AND c.client_key=(${SUPERSEDED_REVIEW_KEY_PREFIX} || original.id::text)
+                  WHERE original.workspace_id=${scope.workspaceId} AND original.owner_user_id=${scope.ownerUserId}
+                    AND original.client_key=${input.clientKey} AND c.intent->>'reviewId'=opening_exam_reviews.id::text
+                    AND original.sprint_id=opening_exam_reviews.sprint_id
+                )
                 OR (
                   source_item_id=${input.sourceItemId}
                   AND work_source_id=${input.workSourceId} AND work_source_version=${input.workSourceVersion}
@@ -307,17 +316,33 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
             if (Number(existing.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
             const existingId = String(existing.id);
-            if (existing.status === "ready" || existing.status === "failed") {
-              return await readCommittedExamReceipt(() => readContext(tx, scope, existingId));
+            let preferredId = existingId;
+            if (existing.status === "failed") {
+              const [pointer] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
+                JOIN opening_exam_sprints s ON s.id=c.sprint_id
+                WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
+                  AND c.client_key=${supersededReviewKey(existingId)} AND c.sprint_id=${String(existing.sprint_id)} LIMIT 1`;
+              if (!pointer) return await readCommittedExamReceipt(() => readContext(tx, scope, existingId));
+              const parsed = examReviewAliasSchema.safeParse(pointer.intent);
+              const target = parsed.success && lockedRows.find(row => String(row.id) === parsed.data.reviewId
+                && String(row.sprint_id) === String(existing.sprint_id));
+              if (!target) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
+              const targetIntent = examWorkReviewInputSchema.safeParse(target.intent);
+              if (!targetIntent.success || !isDeepStrictEqual(reviewIntentBody(targetIntent.data), reviewIntentBody(input))
+                || Number(target.privacy_epoch) !== workspacePrivacyEpoch) {
+                throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
+              }
+              preferredId = String(target.id);
+              if (target.status === "failed") return await readCommittedExamReceipt(() => readContext(tx, scope, preferredId));
             }
             const sameIntent = lockedRows.filter(row => matchesSameIntent(row, String(existing.sprint_id)));
             const reconciled = await reconcileSameIntentRows(tx, scope, sameIntent, {
               wrapCommittedReceipt: true,
-              preferredRowId: existingId,
+              preferredRowId: preferredId,
             });
             return reconciled
               ? reconciled.context
-              : await readCommittedExamReceipt(() => readContext(tx, scope, existingId));
+              : await readCommittedExamReceipt(() => readContext(tx, scope, preferredId));
           }
           if (aliasTarget) {
             const target = lockedRows.find(
@@ -334,7 +359,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
               }
               if (Number(target.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
               const targetId = String(target.id);
-              if (target.status === "ready" || target.status === "failed") {
+              if (target.status === "failed") {
                 return await readCommittedExamReceipt(() => readContext(tx, scope, targetId));
               }
               const sameIntent = lockedRows.filter(row => matchesSameIntent(row, String(target.sprint_id)));

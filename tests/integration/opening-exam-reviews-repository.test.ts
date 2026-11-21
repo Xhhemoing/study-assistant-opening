@@ -673,6 +673,10 @@ describe("exam photo review repository integration", () => {
     const firstOriginalRetry = await repository.begin(f.scope, staleNoneA.input);
     expect(firstOriginalRetry.review).toMatchObject({ id: readySiblingId, status: "ready", proposal });
     expect(await rawReview(staleNoneA.review.id)).toMatchObject({ status: "failed" });
+    const [preservedKey] = await f.sql`SELECT client_key FROM opening_exam_reviews WHERE id=${staleNoneA.review.id}`;
+    expect(preservedKey!.client_key).toBe(staleNoneA.input.clientKey);
+    await expect(repository.begin(f.scope, { ...staleNoneA.input, answerText: "Different answer" }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
     await expect(repository.assertCurrent(f.scope, staleNoneA.review.id, String(staleNoneAged!.lease))).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(repository.assertCurrent(f.scope, staleNoneA.review.id)).rejects.toMatchObject({ code: "CONFLICT" });
 
@@ -680,5 +684,28 @@ describe("exam photo review repository integration", () => {
     expect(secondOriginalRetry.review).toMatchObject({ id: readySiblingId, status: "ready", proposal });
     const aliasRetryAfterSupersede = await repository.begin(f.scope, input({ clientKey: aliasKeyForA, answerText: supersededNoneAnswer }));
     expect(aliasRetryAfterSupersede.review).toMatchObject({ id: readySiblingId, status: "ready", proposal });
+
+    for (const entry of ["original", "alias"] as const) {
+      const answerText = `Direct ready retry ${entry}`;
+      const stale = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText }));
+      const readyInput = input({ clientKey: randomUUID(), answerText });
+      const readyId = randomUUID();
+      const [record] = await f.sql`SELECT sprint_id, privacy_epoch FROM opening_exam_reviews WHERE id=${stale.review.id}`;
+      await f.sql`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
+        work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
+        client_key,intent,status,proposal,model_label,privacy_epoch)
+        VALUES(${readyId},${record!.sprint_id},${f.scope.workspaceId},${f.scope.ownerUserId},${readyInput.sourceItemId},
+        ${readyInput.workSourceId},${readyInput.workSourceVersion},${readyInput.referenceSourceId},${readyInput.referenceSourceVersion},
+        ${answerText},${readyInput.clientKey},${f.sql.json(readyInput)},'ready',${f.sql.json(proposal)},'vision-model',${record!.privacy_epoch})`;
+      const aliasInput = input({ clientKey: randomUUID(), answerText });
+      expect((await repository.begin(f.scope, aliasInput)).review.id).toBe(readyId);
+      await f.sql`UPDATE opening_exam_reviews SET updated_at=now()-interval '61 seconds' WHERE id=${stale.review.id}`;
+      const [aged] = await f.sql`SELECT updated_at::text AS lease FROM opening_exam_reviews WHERE id=${stale.review.id}`;
+      expect((await repository.begin(f.scope, entry === "original" ? readyInput : aliasInput)).review.id).toBe(readyId);
+      const [retired] = await f.sql`SELECT status,client_key FROM opening_exam_reviews WHERE id=${stale.review.id}`;
+      expect(retired).toMatchObject({ status: "failed", client_key: stale.input.clientKey });
+      await expect(repository.assertCurrent(f.scope, stale.review.id, String(aged!.lease))).rejects.toMatchObject({ code: "CONFLICT" });
+      expect((await repository.begin(f.scope, stale.input)).review.id).toBe(readyId);
+    }
   });
 });

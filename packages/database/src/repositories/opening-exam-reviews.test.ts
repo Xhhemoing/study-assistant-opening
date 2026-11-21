@@ -386,7 +386,7 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
       const repo = createOpeningExamReviewsRepository(store.sql);
       const ctx = await repo.begin(scope, { ...input, clientKey: `fresh-key-${siblingStatus}` });
       expect(store.getRow(idA).status).toBe("failed");
-      expect(store.getRow(idA).clientKey).not.toBe(`legacy-${idA}`);
+      expect(store.getRow(idA).clientKey).toBe(`legacy-${idA}`);
       expect(store.getRow(idB).status).toBe(siblingStatus);
       expect(store.insertedCount()).toBe(0);
       expect(ctx.review.id).toBe(idB);
@@ -455,7 +455,7 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
       expect(store.insertedCount()).toBe(0);
       expect(store.getRow(idA).status).toBe("failed");
       expect(store.getRow(idA).lease).not.toBe(oldLeaseA);
-      expect(store.getRow(idA).clientKey).not.toBe(keyA);
+      expect(store.getRow(idA).clientKey).toBe(keyA);
       expect(first.review.id).toBe(idB);
       expect(first.review.status).toBe(siblingStatus);
       expect(first.executionUpdatedAt).toBeUndefined();
@@ -485,6 +485,47 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
           await runRetry(entry, rowALedger, siblingKind);
         }
       }
+    }
+  });
+
+  it.each(["original", "alias"] as const)("revokes stale sibling when ready winner is retried by %s", async entry => {
+    const idA = "77777777-7777-4777-8777-777777777781";
+    const idB = "77777777-7777-4777-8777-777777777782";
+    const oldLease = "2026-10-17 00:00:00.111111+00";
+    const store = makeStatefulMultiRowSql({
+      rows: [
+        { id: idA, clientKey: "stale-key-a", status: "pending", createdAt: "2026-10-17T00:00:00Z", lease: oldLease, isStale: true, ledgerRows: [] },
+        { id: idB, clientKey: "ready-key-b", status: "ready", createdAt: "2026-10-17T00:00:05Z", lease: oldLease, isStale: false, ledgerRows: [] },
+      ],
+      aliases: [{ clientKey: "alias-key-b", reviewId: idB }],
+    });
+    const repo = createOpeningExamReviewsRepository(store.sql);
+    expect((await repo.begin(scope, { ...input, clientKey: entry === "original" ? "ready-key-b" : "alias-key-b" })).review.id).toBe(idB);
+    expect(store.getRow(idA)).toMatchObject({ clientKey: "stale-key-a", status: "failed" });
+    await expect(repo.assertCurrent(scope, idA, oldLease)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await repo.begin(scope, { ...input, clientKey: "stale-key-a" })).review.id).toBe(idB);
+  });
+
+  it("retargets supersession pointers and aliases when the winner is later superseded", async () => {
+    const a = "77777777-7777-4777-8777-777777777781";
+    const b = "77777777-7777-4777-8777-777777777782";
+    const c = "77777777-7777-4777-8777-777777777783";
+    const lease = "2026-10-17 00:00:00.111111+00";
+    const store = makeStatefulMultiRowSql({
+      rows: [
+        { id: a, clientKey: "original-key-a", status: "pending", createdAt: "2026-10-17T00:00:00Z", lease, isStale: true, ledgerRows: [] },
+        { id: b, clientKey: "original-key-b", status: "pending", createdAt: "2026-10-17T00:00:01Z", lease, isStale: false, ledgerRows: [] },
+        { id: c, clientKey: "original-key-c", status: "failed", createdAt: "2026-10-17T00:00:02Z", lease, isStale: false, ledgerRows: [] },
+      ],
+      aliases: [{ clientKey: "alias-key-a", reviewId: a }],
+    });
+    const repo = createOpeningExamReviewsRepository(store.sql);
+    expect((await repo.begin(scope, { ...input, clientKey: "original-key-a" })).review.id).toBe(b);
+    store.getRow(b).isStale = true;
+    store.getRow(c).status = "ready";
+    expect((await repo.begin(scope, { ...input, clientKey: "original-key-b" })).review.id).toBe(c);
+    for (const clientKey of ["original-key-a", "alias-key-a", "original-key-b"]) {
+      expect((await repo.begin(scope, { ...input, clientKey })).review.id).toBe(c);
     }
   });
 
@@ -742,10 +783,14 @@ function makeStatefulMultiRowSql(options: {
       const reqClientKey = String(values[3]);
       const aliasFrag = values[4] as { __fragment?: string; values?: unknown[] } | undefined;
       const aliasReviewId = aliasFrag?.values?.[0] ? String(aliasFrag.values[0]) : null;
-      const reqAnswerText = String(values[11]);
+      const reqAnswerText = String(values[15]);
+      const original = [...rowsById.values()].find(r => r.clientKey === reqClientKey);
+      const supersededPrefix = `exam-review-superseded:v1:${"_".repeat(180)}:`;
+      const pointerId = original && aliasesByFullKey.get(`${supersededPrefix}${original.id}`)?.reviewId;
       const matched = [...rowsById.values()]
         .filter(r =>
           r.clientKey === reqClientKey
+          || r.id === pointerId
           || (aliasReviewId !== null && r.id === aliasReviewId)
           || (input.answerText === reqAnswerText && (r.status === "pending" || r.status === "unknown" || r.status === "ready")))
         .sort((a, b) => a.id.localeCompare(b.id))
