@@ -1030,7 +1030,7 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     }
   });
 
-  it("audits root equations at Markdown block boundaries without joining lines or cells", () => {
+  it("audits root equations across paragraph soft breaks and within individual table cells", () => {
     const episode = generateStage0Episodes(20261121, 1).find(
       (e) => e.episodeId === "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0",
     )!;
@@ -1080,7 +1080,8 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
       ["|*\\\\|**_x = 4_**|", true],
       ["$|x - 2| = 2$", false],
       ["Step 2\r\nx = 4\n+ Next step", true],
-      ["x =\n4", false],
+      ["x =\n4", true],
+      ["x =\n\n4", false],
       ["| x = | 4 |", false],
       ["2 * x = 4", false],
       ["2 - x = 4", false],
@@ -1152,12 +1153,12 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     ["$$\nx =\n4\n$$", false],
     ["The literal `$$\nmarker` appears here.\n\n- **x = 4**\n\n$$", true],
     ["The literal `start\nx = 4` appears here.", true],
-    ["Text `$$\n***\nmarker` appears here.\n- x = 4\n$$", false],
+    ["Text `$$\n***\nmarker` appears here.\n- x = 4\n$$", true],
     ["Literal ``\\begin{align}\nmarker`` ends here.\n- **x = 4**\n\\end{align}", true],
     ["> 10) [ ] ```text\n>     - x = 4\n>     ```", false],
-    ["Text `unpaired\n\n$$ marker`\n- x = 4\n$$", false],
-    ["Text `unpaired\n# $$ marker`\n- x = 4\n$$", false],
-    ["Text `unpaired\n- $$ marker`\n  - x = 4\n  $$", false],
+    ["Text `unpaired\n\n$$ marker`\n- x = 4\n$$", true],
+    ["Text `unpaired\n# $$ marker`\n- x = 4\n$$", true],
+    ["Text `unpaired\n- $$ marker`\n  - x = 4\n  $$", true],
     ["- ```text\n  - x = 4\n  ```", false],
     ["1. ```text\n   - x = 4\n   ```", false],
     ["> - ```text\n>   - x = 4\n>   ```", false],

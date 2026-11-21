@@ -23,7 +23,7 @@ import {
   STAGE0_EXPECTED_EPISODE_COUNT,
   generateStage0Episodes,
 } from "./episodes";
-import { equationMarkdownLines, equationSpanEnds, mathSpanClosers } from "./equation-markdown";
+import { equationMarkdownBlocks, equationSpanEnds, mathSpanClosers } from "./equation-markdown";
 import {
   advanceStudentAfterTutorTurn,
   buildInitialStudentUtterance,
@@ -100,9 +100,20 @@ function normalizeCompactForLeakScan(text: string): string {
 
 /** Expose Markdown block boundaries and inline equation text before math compaction. */
 function stripEquationFormatting(text: string): string {
-  return equationMarkdownLines(text)
-    .map((line) => typeof line === "string" ? stripEquationLine(line) : line.map(stripEquationSegment).join(";"))
-    .join(";");
+  return equationMarkdownBlocks(text).map((block) => {
+    if (Array.isArray(block)) return block.map(stripEquationSegment).join(";");
+    const formatted = stripEquationLine(block);
+    if (!formatted.includes("\n")) return formatted;
+    const math = normalizeUnicodeMath(formatted).replace(/[^\S\n]+/gu, " ");
+    const soft = math.replaceAll("\n", " ");
+    // Also audit complete equations at physical line starts (e.g. after "Step 2").
+    // A break beside an operator cannot cut the operator away from its operand.
+    const physical = math.replace(/ ?\n ?/gu, (gap: string, index: number) => {
+      const adjacent = (math[index - 1] ?? "") + (math[index + gap.length] ?? "");
+      return /[+*/^=<>%-]/u.test(adjacent) ? " " : ";";
+    });
+    return soft === physical ? soft : soft + ";" + physical;
+  }).join(";");
 }
 
 const equationMarkers = /(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
@@ -135,7 +146,9 @@ function stripEquationLine(line: string): string {
 
 function stripEquationSegment(segment: string): string {
   const parts = segment.split(equationMarkers);
-  if (parts.length === 1) return segment;
+  const hardBreak = /(?: {2}|\\)\n/gu;
+  if (parts.length === 1) return segment.replace(hardBreak, ";");
+  parts[0] = parts[0]!.replace(hardBreak, ";");
   const spanEnds = equationSpanEnds(parts);
   const cellOpeners = new Map<string, number[]>();
   for (let i = 1; i < parts.length; i += 2) {
@@ -152,6 +165,8 @@ function stripEquationSegment(segment: string): string {
     } else {
       stripEquationMarker(parts, i, cellOpeners);
     }
+    // The body of a closed code/math span has already been consumed above.
+    parts[i + 1] = parts[i + 1]!.replace(hardBreak, ";");
   }
   return parts.join("");
 }
