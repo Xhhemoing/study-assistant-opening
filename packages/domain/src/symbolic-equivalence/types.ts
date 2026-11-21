@@ -2646,10 +2646,96 @@ function evaluateExactRationalExt(
   }
 }
 
+type FloatValue = { status: "ok"; value: number; err: number; marginOk: boolean; exact: boolean };
 type FloatEvalResult =
-  | { status: "ok"; value: number; err: number; marginOk: boolean; irrational: boolean; exactZero?: boolean }
+  | FloatValue
   | { status: "undefined_domain"; reason: string }
   | { status: "unstable" };
+
+const FLOAT_DOMAIN_EPS = 1e-9;
+
+function isExactFloatZero(result: FloatValue): boolean {
+  return result.exact && result.value === 0;
+}
+
+function evaluateFloatLiteral(literal: Extract<ScalarExpr, { kind: "const" }>["value"]): FloatEvalResult {
+  const q = toRational(literal);
+  if (q) {
+    const arg = rationalToFloatArg(q);
+    return arg
+      ? { status: "ok", value: arg.fx, err: arg.xRadius, marginOk: true, exact: arg.xRadius === 0 }
+      : { status: "unstable" };
+  }
+  const value = Number(literal);
+  return Number.isFinite(value)
+    ? { status: "ok", value, err: Math.abs(value) * 1e-13 + Number.MIN_VALUE, marginOk: true, exact: false }
+    : { status: "unstable" };
+}
+
+function evaluateFloatBinary(
+  kind: "add" | "sub" | "mul" | "div",
+  left: FloatEvalResult,
+  right: FloatEvalResult,
+): FloatEvalResult {
+  if (left.status === "undefined_domain") return left;
+  if (right.status === "undefined_domain") return right;
+  if (left.status !== "ok" || right.status !== "ok") return { status: "unstable" };
+  const marginOk = left.marginOk && right.marginOk;
+  const l = left.value;
+  const r = right.value;
+
+  if (kind === "div") {
+    if (isExactFloatZero(right)) return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+    if (Math.abs(r) <= FLOAT_DOMAIN_EPS + right.err) return { status: "unstable" };
+    const value = l / r;
+    const rMin = Math.abs(r) - right.err;
+    const err = (left.err + Math.abs(l) * (right.err / rMin)) / rMin + Math.abs(value) * 1e-13;
+    return Number.isFinite(value) && Number.isFinite(err) && Math.abs(value) < 1e10
+      ? { status: "ok", value, err, marginOk, exact: isExactFloatZero(left) }
+      : { status: "unstable" };
+  }
+
+  const value = kind === "add" ? l + r : kind === "sub" ? l - r : l * r;
+  if (!Number.isFinite(value) || Math.abs(value) >= 1e10) return { status: "unstable" };
+  // Inexact operands can have a zero radius after underflow. Their value alone
+  // cannot certify cancellation or an exact integer result.
+  const exactZero = kind === "mul"
+    ? isExactFloatZero(left) || isExactFloatZero(right)
+    : left.exact && right.exact && l === (kind === "add" ? -r : r);
+  const exact = exactZero || (
+    left.exact && right.exact &&
+    Number.isSafeInteger(l) && Number.isSafeInteger(r) && Number.isSafeInteger(value)
+  );
+  const err = exact
+    ? 0
+    : kind === "mul"
+      ? Math.abs(l) * right.err + Math.abs(r) * left.err + left.err * right.err + Math.abs(value) * 1e-13
+      : left.err + right.err + (Math.abs(l) + Math.abs(r)) * 1e-14 + Math.abs(value) * 1e-14;
+  return Number.isFinite(err) ? { status: "ok", value, err, marginOk, exact } : { status: "unstable" };
+}
+
+function evaluateFloatPower(base: FloatEvalResult, exponent: number): FloatEvalResult {
+  if (base.status !== "ok") return base;
+  if (exponent <= 0 && isExactFloatZero(base)) {
+    return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+  }
+  if (exponent <= 0 && Math.abs(base.value) <= FLOAT_DOMAIN_EPS + base.err) return { status: "unstable" };
+  if (exponent === 0) return { status: "ok", value: 1, err: 0, marginOk: base.marginOk, exact: true };
+
+  const value = base.value ** exponent;
+  if (!Number.isFinite(value) || Math.abs(value) >= 1e10) return { status: "unstable" };
+  const exact = (exponent > 0 && isExactFloatZero(base)) || (
+    base.exact && Number.isSafeInteger(base.value) && Number.isSafeInteger(value) &&
+    Number.isInteger(exponent) && exponent > 0 && exponent <= 12 &&
+    BigInt(base.value) ** BigInt(exponent) === BigInt(value)
+  );
+  const magnitude = Math.abs(base.value);
+  const boundBase = exponent > 0 ? magnitude + base.err : magnitude - base.err;
+  const err = exact ? 0 : Math.abs(boundBase ** exponent - Math.abs(value)) + Math.abs(value) * 1e-13;
+  return Number.isFinite(err)
+    ? { status: "ok", value, err, marginOk: base.marginOk, exact }
+    : { status: "unstable" };
+}
 
 function rationalToFloatArg(q: SpanRational): { fx: number; xRadius: number } | null {
   if (q.n === 0n) return { fx: 0, xRadius: 0 };
@@ -2670,8 +2756,9 @@ function rationalToFloatArg(q: SpanRational): { fx: number; xRadius: number } | 
     fx = shift < -1022 ? sign * unit * 2 ** -1022 * 2 ** (shift + 1022) : sign * unit * 2 ** shift;
   }
   if (!Number.isFinite(fx) || (q.n !== 0n && fx === 0)) return null;
-  const isExactSafeInt = q.d === 1n && Number.isSafeInteger(fx) && BigInt(fx) === q.n;
-  const xRadius = isExactSafeInt ? 0 : Math.abs(fx) * 1e-13 + Number.MIN_VALUE;
+  const exactDyadic = Number.isSafeInteger(nNum) && BigInt(nNum) === q.n &&
+    Number.isFinite(dNum) && (q.d & (q.d - 1n)) === 0n && fx * dNum === nNum;
+  const xRadius = exactDyadic ? 0 : Math.abs(fx) * 1e-13 + Number.MIN_VALUE;
   return { fx, xRadius };
 }
 
@@ -2684,45 +2771,19 @@ function evaluateFloatSafe(
   depth = 0,
 ): FloatEvalResult {
   bumpAstSteps(state, depth);
-  const BOUND_EPS = 1e-9;
   switch (expr.kind) {
-    case "const": {
-      const q = toRational(expr.value);
-      if (q) {
-        const arg = rationalToFloatArg(q);
-        if (!arg) return { status: "unstable" };
-        return {
-          status: "ok",
-          value: arg.fx,
-          err: arg.xRadius,
-          marginOk: true,
-          irrational: false,
-          exactZero: q.n === 0n,
-        };
-      }
-      const val = Number(expr.value);
-      return Number.isFinite(val)
-        ? {
-            status: "ok",
-            value: val,
-            err: Number.isSafeInteger(val) ? 0 : Math.abs(val) * 1e-13 + Number.MIN_VALUE,
-            marginOk: true,
-            irrational: !Number.isInteger(val),
-            exactZero: false,
-          }
-        : { status: "unstable" };
-    }
+    case "const":
+      return evaluateFloatLiteral(expr.value);
     case "variable": {
       if (expr.name !== variable) return { status: "unstable" };
-      const exactInt = xRadius === 0 && Number.isSafeInteger(x);
-      const err = exactInt ? 0 : xRadius + Math.abs(x) * 1e-14 + (xRadius > 0 ? 1e-15 : 0);
+      const exact = xRadius === 0;
+      const err = exact ? 0 : xRadius + Math.abs(x) * 1e-14 + (xRadius > 0 ? 1e-15 : 0);
       return {
         status: "ok",
         value: x,
         err,
-        marginOk: xRadius === 0 || Math.abs(x) > BOUND_EPS + err,
-        irrational: xRadius > 0,
-        exactZero: x === 0 && xRadius === 0,
+        marginOk: xRadius === 0 || Math.abs(x) > FLOAT_DOMAIN_EPS + err,
+        exact,
       };
     }
     case "neg": {
@@ -2733,8 +2794,7 @@ function evaluateFloatSafe(
             value: -inner.value,
             err: inner.err,
             marginOk: inner.marginOk,
-            irrational: inner.irrational,
-            exactZero: inner.exactZero,
+            exact: inner.exact,
           }
         : inner;
     }
@@ -2745,130 +2805,80 @@ function evaluateFloatSafe(
             status: "ok",
             value: Math.abs(inner.value),
             err: inner.err,
-            marginOk: inner.marginOk && Math.abs(inner.value) > BOUND_EPS + inner.err,
-            irrational: inner.irrational,
-            exactZero: inner.exactZero,
+            marginOk: inner.marginOk && Math.abs(inner.value) > FLOAT_DOMAIN_EPS + inner.err,
+            exact: inner.exact,
           }
         : inner;
     }
     case "sqrt": {
       const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state, depth + 1);
       if (inner.status !== "ok") return inner;
-      if (inner.value + inner.err < -BOUND_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
-      if (inner.exactZero && inner.value === 0) {
-        return { status: "ok", value: 0, err: 0, marginOk: inner.marginOk, irrational: false, exactZero: true };
+      if (inner.value + inner.err < -FLOAT_DOMAIN_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
+      if (isExactFloatZero(inner)) {
+        return { status: "ok", value: 0, err: 0, marginOk: inner.marginOk, exact: true };
       }
-      if (inner.value - inner.err < BOUND_EPS) return { status: "unstable" };
+      if (inner.value - inner.err < FLOAT_DOMAIN_EPS) return { status: "unstable" };
       const s = Math.sqrt(inner.value);
       const minInner = inner.value - inner.err;
-      const exactInt = !inner.irrational && inner.err === 0 && Number.isSafeInteger(inner.value) && Number.isSafeInteger(s);
+      const exactInt =
+        inner.exact && Number.isSafeInteger(inner.value) && Number.isSafeInteger(s) && s * s === inner.value;
       const err = exactInt ? 0 : inner.err / (2 * Math.sqrt(minInner)) + s * 1e-13;
       return Number.isFinite(err)
-        ? { status: "ok", value: s, err, marginOk: inner.marginOk, irrational: !exactInt, exactZero: false }
+        ? { status: "ok", value: s, err, marginOk: inner.marginOk, exact: exactInt }
         : { status: "unstable" };
     }
     case "ln": {
       const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state, depth + 1);
       if (inner.status !== "ok") return inner;
-      if (inner.exactZero || inner.value + inner.err < -BOUND_EPS) {
+      if (isExactFloatZero(inner) || inner.value + inner.err < -FLOAT_DOMAIN_EPS) {
         return { status: "undefined_domain", reason: "ln_domain" };
       }
-      if (inner.value - inner.err <= BOUND_EPS) return { status: "unstable" };
-      const exactZero = !inner.irrational && inner.err === 0 && inner.value === 1;
+      if (inner.value - inner.err <= FLOAT_DOMAIN_EPS) return { status: "unstable" };
+      const exactZero = inner.exact && inner.value === 1;
       const val = exactZero ? 0 : Math.log(inner.value);
       const err = exactZero ? 0 : inner.err / (inner.value - inner.err) + Math.abs(val) * 1e-13;
       return Number.isFinite(err)
-        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactZero, exactZero }
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, exact: exactZero }
         : { status: "unstable" };
     }
     case "sin": {
       const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state, depth + 1);
       if (inner.status !== "ok") return inner;
-      const exactZero = Boolean(inner.exactZero);
+      const exactZero = isExactFloatZero(inner);
       const val = exactZero ? 0 : Math.sin(inner.value);
       const err = exactZero ? 0 : inner.err + Math.abs(val) * 1e-13 + 1e-15;
-      return { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactZero, exactZero };
+      return { status: "ok", value: val, err, marginOk: inner.marginOk, exact: exactZero };
     }
     case "cos": {
       const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state, depth + 1);
       if (inner.status !== "ok") return inner;
-      const exactOne = Boolean(inner.exactZero);
+      const exactOne = isExactFloatZero(inner);
       const val = exactOne ? 1 : Math.cos(inner.value);
       const err = exactOne ? 0 : inner.err + Math.abs(val) * 1e-13 + 1e-15;
-      return { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactOne, exactZero: false };
+      return { status: "ok", value: val, err, marginOk: inner.marginOk, exact: exactOne };
     }
     case "exp": {
       const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state, depth + 1);
       if (inner.status !== "ok") return inner;
       if (inner.value + inner.err > 50 || inner.value - inner.err < -50 || inner.err > 10) return { status: "unstable" };
-      const exactOne = Boolean(inner.exactZero);
+      const exactOne = isExactFloatZero(inner);
       const val = exactOne ? 1 : Math.exp(inner.value);
       const err = exactOne ? 0 : Math.exp(inner.value + inner.err) - val + val * 1e-13;
       return Number.isFinite(err)
-        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactOne, exactZero: false }
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, exact: exactOne }
         : { status: "unstable" };
     }
     case "add":
     case "sub":
     case "mul":
-    case "div": {
-      const l = evaluateFloatSafe(expr.left, x, variable, xRadius, state, depth + 1);
-      const r = evaluateFloatSafe(expr.right, x, variable, xRadius, state, depth + 1);
-      if (l.status === "undefined_domain") return l;
-      if (r.status === "undefined_domain") return r;
-      if (l.status !== "ok") return l;
-      if (r.status !== "ok") return r;
-      const irrational = l.irrational || r.irrational;
-      if (expr.kind === "div") {
-        if (r.exactZero) return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
-        if (Math.abs(r.value) <= BOUND_EPS + r.err) return { status: "unstable" };
-        const val = l.value / r.value;
-        const rMin = Math.abs(r.value) - r.err;
-        const err = (l.err + Math.abs(l.value) * (r.err / rMin)) / rMin + Math.abs(val) * 1e-13;
-        return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
-          ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational, exactZero: Boolean(l.exactZero) }
-          : { status: "unstable" };
-      }
-      const val = expr.kind === "add" ? l.value + r.value : expr.kind === "sub" ? l.value - r.value : l.value * r.value;
-      const exactInt = !irrational && l.err === 0 && r.err === 0 && Number.isSafeInteger(val);
-      const err = exactInt
-        ? 0
-        : expr.kind === "mul"
-          ? Math.abs(l.value) * r.err + Math.abs(r.value) * l.err + l.err * r.err + Math.abs(val) * 1e-13
-          : l.err + r.err + (Math.abs(l.value) + Math.abs(r.value)) * 1e-14 + Math.abs(val) * 1e-14;
-      const exactZero =
-        expr.kind === "mul"
-          ? Boolean((l.exactZero || r.exactZero) && Number.isFinite(val))
-          : Boolean((l.exactZero && r.exactZero) || (exactInt && val === 0));
-      return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
-        ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational, exactZero }
-        : { status: "unstable" };
-    }
-    case "pow": {
-      const b = evaluateFloatSafe(expr.base, x, variable, xRadius, state, depth + 1);
-      if (b.status !== "ok") return b;
-      if (expr.exponent <= 0 && b.exactZero) {
-        return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
-      }
-      if (expr.exponent <= 0 && Math.abs(b.value) <= BOUND_EPS + b.err) return { status: "unstable" };
-      const val = b.value ** expr.exponent;
-      if (!Number.isFinite(val) || Math.abs(val) >= 1e10) return { status: "unstable" };
-      if (expr.exponent === 0) return { status: "ok", value: 1, err: 0, marginOk: b.marginOk, irrational: false, exactZero: false };
-      const exactInt = !b.irrational && b.err === 0 && expr.exponent > 0 && Number.isSafeInteger(val);
-      const boundBase = expr.exponent > 0 ? Math.abs(b.value) + b.err : Math.abs(b.value) - b.err;
-      const boundVal = boundBase ** expr.exponent;
-      const err = exactInt ? 0 : Math.abs(boundVal - Math.abs(val)) + Math.abs(val) * 1e-13;
-      return Number.isFinite(err)
-        ? {
-            status: "ok",
-            value: val,
-            err,
-            marginOk: b.marginOk,
-            irrational: b.irrational && expr.exponent !== 0,
-            exactZero: Boolean(b.exactZero && expr.exponent > 0),
-          }
-        : { status: "unstable" };
-    }
+    case "div":
+      return evaluateFloatBinary(
+        expr.kind,
+        evaluateFloatSafe(expr.left, x, variable, xRadius, state, depth + 1),
+        evaluateFloatSafe(expr.right, x, variable, xRadius, state, depth + 1),
+      );
+    case "pow":
+      return evaluateFloatPower(evaluateFloatSafe(expr.base, x, variable, xRadius, state, depth + 1), expr.exponent);
   }
 }
 
@@ -6224,34 +6234,9 @@ function evalMultivarFloat(
   depth = 0,
 ): FloatEvalResult {
   if (depth > MAX_AST_WALK_DEPTH) throw new PolyComplexityError();
-  const BOUND_EPS = 1e-9;
   switch (expr.kind) {
-    case "const": {
-      const q = toRational(expr.value);
-      if (q) {
-        const arg = rationalToFloatArg(q);
-        if (!arg) return { status: "unstable" };
-        return {
-          status: "ok",
-          value: arg.fx,
-          err: arg.xRadius,
-          marginOk: true,
-          irrational: false,
-          exactZero: q.n === 0n,
-        };
-      }
-      const val = Number(expr.value);
-      return Number.isFinite(val)
-        ? {
-            status: "ok",
-            value: val,
-            err: Number.isSafeInteger(val) ? 0 : Math.abs(val) * 1e-13 + Number.MIN_VALUE,
-            marginOk: true,
-            irrational: !Number.isInteger(val),
-            exactZero: false,
-          }
-        : { status: "unstable" };
-    }
+    case "const":
+      return evaluateFloatLiteral(expr.value);
     case "variable": {
       const q = env.get(expr.name);
       if (!q) return { status: "unstable" };
@@ -6261,9 +6246,8 @@ function evalMultivarFloat(
         status: "ok",
         value: arg.fx,
         err: arg.xRadius,
-        marginOk: arg.xRadius === 0 || Math.abs(arg.fx) > BOUND_EPS + arg.xRadius,
-        irrational: arg.xRadius > 0,
-        exactZero: q.n === 0n,
+        marginOk: arg.xRadius === 0 || Math.abs(arg.fx) > FLOAT_DOMAIN_EPS + arg.xRadius,
+        exact: arg.xRadius === 0,
       };
     }
     case "neg": {
@@ -6274,8 +6258,7 @@ function evalMultivarFloat(
             value: -inner.value,
             err: inner.err,
             marginOk: inner.marginOk,
-            irrational: inner.irrational,
-            exactZero: inner.exactZero,
+            exact: inner.exact,
           }
         : inner;
     }
@@ -6286,36 +6269,35 @@ function evalMultivarFloat(
             status: "ok",
             value: Math.abs(inner.value),
             err: inner.err,
-            marginOk: inner.marginOk && Math.abs(inner.value) > BOUND_EPS + inner.err,
-            irrational: inner.irrational,
-            exactZero: inner.exactZero,
+            marginOk: inner.marginOk && Math.abs(inner.value) > FLOAT_DOMAIN_EPS + inner.err,
+            exact: inner.exact,
           }
         : inner;
     }
     case "sqrt": {
       const inner = evalMultivarFloat(expr.value, env, depth + 1);
       if (inner.status !== "ok") return inner;
-      if (inner.value + inner.err < -BOUND_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
-      if (inner.exactZero && inner.value === 0) {
-        return { status: "ok", value: 0, err: 0, marginOk: inner.marginOk, irrational: false, exactZero: true };
+      if (inner.value + inner.err < -FLOAT_DOMAIN_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
+      if (isExactFloatZero(inner)) {
+        return { status: "ok", value: 0, err: 0, marginOk: inner.marginOk, exact: true };
       }
-      if (inner.value - inner.err < BOUND_EPS) return { status: "unstable" };
+      if (inner.value - inner.err < FLOAT_DOMAIN_EPS) return { status: "unstable" };
       const s = Math.sqrt(inner.value);
       const err = inner.err / (2 * Math.sqrt(inner.value - inner.err)) + s * 1e-13;
       return Number.isFinite(err)
-        ? { status: "ok", value: s, err, marginOk: inner.marginOk, irrational: true, exactZero: false }
+        ? { status: "ok", value: s, err, marginOk: inner.marginOk, exact: false }
         : { status: "unstable" };
     }
     case "ln": {
       const inner = evalMultivarFloat(expr.value, env, depth + 1);
       if (inner.status !== "ok") return inner;
-      if (inner.exactZero || inner.value + inner.err < -BOUND_EPS) return { status: "undefined_domain", reason: "ln_domain" };
-      if (inner.value - inner.err <= BOUND_EPS) return { status: "unstable" };
-      const exactOne = !inner.irrational && inner.err === 0 && inner.value === 1;
+      if (isExactFloatZero(inner) || inner.value + inner.err < -FLOAT_DOMAIN_EPS) return { status: "undefined_domain", reason: "ln_domain" };
+      if (inner.value - inner.err <= FLOAT_DOMAIN_EPS) return { status: "unstable" };
+      const exactOne = inner.exact && inner.value === 1;
       const val = exactOne ? 0 : Math.log(inner.value);
       const err = exactOne ? 0 : inner.err / (inner.value - inner.err) + Math.abs(val) * 1e-13;
       return Number.isFinite(err)
-        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactOne, exactZero: exactOne }
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, exact: exactOne }
         : { status: "unstable" };
     }
     case "sin":
@@ -6326,8 +6308,8 @@ function evalMultivarFloat(
       if (expr.kind === "exp" && (inner.value + inner.err > 50 || inner.value - inner.err < -50 || inner.err > 10)) {
         return { status: "unstable" };
       }
-      const exactZero = expr.kind === "sin" ? Boolean(inner.exactZero) : false;
-      const exactConst = expr.kind === "sin" ? exactZero : Boolean(inner.exactZero);
+      const exactZero = expr.kind === "sin" ? isExactFloatZero(inner) : false;
+      const exactConst = expr.kind === "sin" ? exactZero : isExactFloatZero(inner);
       const val =
         expr.kind === "sin"
           ? exactZero
@@ -6346,70 +6328,20 @@ function evalMultivarFloat(
           ? Math.exp(inner.value + inner.err) - val + val * 1e-13
           : inner.err + Math.abs(val) * 1e-13 + 1e-15;
       return Number.isFinite(err)
-        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactConst, exactZero }
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, exact: exactConst }
         : { status: "unstable" };
     }
     case "add":
     case "sub":
     case "mul":
-    case "div": {
-      const l = evalMultivarFloat(expr.left, env, depth + 1);
-      const r = evalMultivarFloat(expr.right, env, depth + 1);
-      if (l.status === "undefined_domain") return l;
-      if (r.status === "undefined_domain") return r;
-      if (l.status !== "ok" || r.status !== "ok") return { status: "unstable" };
-      const irrational = l.irrational || r.irrational;
-      if (expr.kind === "div") {
-        if (r.exactZero) return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
-        if (Math.abs(r.value) <= BOUND_EPS + r.err) return { status: "unstable" };
-        const val = l.value / r.value;
-        const rMin = Math.abs(r.value) - r.err;
-        const err = (l.err + Math.abs(l.value) * (r.err / rMin)) / rMin + Math.abs(val) * 1e-13;
-        return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
-          ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational, exactZero: Boolean(l.exactZero) }
-          : { status: "unstable" };
-      }
-      const val = expr.kind === "add" ? l.value + r.value : expr.kind === "sub" ? l.value - r.value : l.value * r.value;
-      const exactInt = !irrational && l.err === 0 && r.err === 0 && Number.isSafeInteger(val);
-      const err = exactInt
-        ? 0
-        : expr.kind === "mul"
-          ? Math.abs(l.value) * r.err + Math.abs(r.value) * l.err + l.err * r.err + Math.abs(val) * 1e-13
-          : l.err + r.err + (Math.abs(l.value) + Math.abs(r.value)) * 1e-14 + Math.abs(val) * 1e-14;
-      const exactZero =
-        expr.kind === "mul"
-          ? Boolean((l.exactZero || r.exactZero) && Number.isFinite(val))
-          : Boolean((l.exactZero && r.exactZero) || (exactInt && val === 0));
-      return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
-        ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational, exactZero }
-        : { status: "unstable" };
-    }
-    case "pow": {
-      const b = evalMultivarFloat(expr.base, env, depth + 1);
-      if (b.status !== "ok") return b;
-      if (expr.exponent <= 0 && b.exactZero) {
-        return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
-      }
-      if (expr.exponent <= 0 && Math.abs(b.value) <= BOUND_EPS + b.err) return { status: "unstable" };
-      const val = b.value ** expr.exponent;
-      if (!Number.isFinite(val) || Math.abs(val) >= 1e10) return { status: "unstable" };
-      if (expr.exponent === 0) return { status: "ok", value: 1, err: 0, marginOk: b.marginOk, irrational: false, exactZero: false };
-      const boundBase = expr.exponent > 0 ? Math.abs(b.value) + b.err : Math.abs(b.value) - b.err;
-      const err =
-        !b.irrational && b.err === 0 && expr.exponent > 0 && Number.isSafeInteger(val)
-          ? 0
-          : Math.abs(boundBase ** expr.exponent - Math.abs(val)) + Math.abs(val) * 1e-13;
-      return Number.isFinite(err)
-        ? {
-            status: "ok",
-            value: val,
-            err,
-            marginOk: b.marginOk,
-            irrational: b.irrational && expr.exponent !== 0,
-            exactZero: Boolean(b.exactZero && expr.exponent > 0),
-          }
-        : { status: "unstable" };
-    }
+    case "div":
+      return evaluateFloatBinary(
+        expr.kind,
+        evalMultivarFloat(expr.left, env, depth + 1),
+        evalMultivarFloat(expr.right, env, depth + 1),
+      );
+    case "pow":
+      return evaluateFloatPower(evalMultivarFloat(expr.base, env, depth + 1), expr.exponent);
   }
 }
 

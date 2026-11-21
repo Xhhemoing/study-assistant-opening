@@ -1003,6 +1003,29 @@ describe("bounded symbolic equivalence", () => {
   });
 });
 
+describe("float zero provenance in natural domain checks", () => {
+  it.each([
+    "((0.0000000001^{12})^3 + \\sin(0\\cdot\\exp(1)))^0",
+    "((10^{-10})^{36} - 0)^0",
+  ])("does not certify an underflowed term as zero in %s", (expr) => {
+    expect.soft(verifyScalarEquivalence(expr, "1").status).not.toBe("inequivalent");
+    expect.soft(verifyMatrixExpressionEquivalence(
+      `\\begin{pmatrix} ${expr} & x & y \\end{pmatrix}`,
+      "\\begin{pmatrix} 1 & x & y \\end{pmatrix}",
+    ).status).not.toBe("inequivalent");
+  });
+
+  it("still certifies exact cancellation with a dyadic literal and a known transcendental zero", () => {
+    const expr = "(0.25 - 0.25 + \\sin(0\\cdot\\exp(1)))^0";
+    const domainMismatch = { status: "inequivalent", reason: "natural_domain_mismatch" };
+    expect(verifyScalarEquivalence(expr, "1")).toMatchObject(domainMismatch);
+    expect(verifyMatrixExpressionEquivalence(
+      `\\begin{pmatrix} ${expr} & x & y \\end{pmatrix}`,
+      "\\begin{pmatrix} 1 & x & y \\end{pmatrix}",
+    )).toMatchObject(domainMismatch);
+  });
+});
+
 describe("exact rational subspaces", () => {
   it("accepts a changed basis, rejects distinct planes with matching rank, and handles mismatched sizes", () => {
     expect(verifySubspaceEquality([[1, 0], [0, 1]], [[1, 1], [1, -1]]).status).toBe("equivalent");

@@ -185,13 +185,14 @@ describe("TutorGraph fast path", () => {
     expect(blockedStructured.releasedText).toBeUndefined();
     expect(blockedStructured.verification).toEqual({ steps: [] });
     expect(JSON.stringify(blockedStructured)).not.toContain("SECRET_42");
-    expect(budget.leakageBits).toBe(0);
-    expect(budget.state).toBe("pure");
+    expect(budget.leakageBits).toBe(1);
+    expect(budget.state).toBe("scaffolded");
 
     const aborted = runTutorGraph({
       questionStem: "积分",
       submission: {},
       budget,
+      assessmentMode: "practice",
       attemptSubmitted: true,
       verifyCaps: {
         verify: () => {
@@ -212,8 +213,99 @@ describe("TutorGraph fast path", () => {
     expect(aborted.state).toBe("stopped");
     expect(aborted.publicTeaching).toBeUndefined();
     expect(aborted.verification).toEqual({ steps: [] });
-    expect(budget.leakageBits).toBe(0);
-    expect(budget.state).toBe("pure");
+    expect(budget.leakageBits).toBe(1);
+    expect(budget.state).toBe("scaffolded");
+  });
+
+  it.each([
+    { blocked: "concept_cue", rejects: false },
+    { blocked: "all", rejects: true },
+  ])("accounts for a pure release when verification blocks $blocked only on invalid attempts", ({ blocked, rejects }) => {
+    const assertCurrent = () => undefined;
+    const outcomes = (["valid", "unknown", "invalid"] as const).map((status) => {
+      let deny = false;
+      const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const verify = vi.fn(() => {
+        deny = status === "invalid";
+        return { steps: [{ id: "s1", text: "attempt", status }] };
+      });
+      const input = {
+        questionStem: "积分",
+        submission: { steps: [{ id: "s1", text: "attempt" }] },
+        attemptSubmitted: true,
+        budget,
+        verifyCaps: { verify, assertCurrent },
+        releaseCaps: { assertCurrent, answerLeakageBlocker: (text: string) => deny && (blocked === "all" || text.includes(blocked)) },
+      };
+      return { result: runTutorGraph(input), input, verify };
+    });
+
+    const [valid, unknown, invalid] = outcomes;
+    if (!valid || !unknown || !invalid) throw new Error("missing verification outcome");
+    expect(valid.result.publicTeaching?.movePlan.move).toBe("invite_next_step");
+    expect(unknown.result.publicTeaching?.movePlan.move).toBe("concept_cue");
+    if (rejects) {
+      expect(invalid.result).toMatchObject({
+        state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: 1,
+      });
+      expect(invalid.result.releasedText).toBeUndefined();
+    } else {
+      expect(new Set(outcomes.map(({ result }) => JSON.stringify(result))).size).toBeLessThanOrEqual(2);
+      expect(invalid.result).toEqual(valid.result);
+    }
+    expect(invalid.input.budget.leakageBits).toBe(1);
+    expect(runTutorGraph(invalid.input).state).toBe("budget_contaminated");
+    expect(invalid.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks the remaining pure budget before running the post-verification release guard", () => {
+    const assertCurrent = () => undefined;
+    const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const checkAfterVerify = vi.fn(() => true);
+    let verified = false;
+    const result = runTutorGraph({
+      questionStem: "积分",
+      submission: {},
+      attemptSubmitted: true,
+      budget,
+      verifyCaps: {
+        assertCurrent,
+        verify: () => {
+          budget.commitRelease(1);
+          verified = true;
+          return { steps: [] };
+        },
+      },
+      releaseCaps: { assertCurrent, answerLeakageBlocker: () => verified && checkAfterVerify() },
+    });
+    expect(result).toMatchObject({ state: "budget_contaminated", reason: "budget_exhausted", leakageBits: 1 });
+    expect(checkAfterVerify).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { cap: 1.5, bits: 1 },
+    { cap: 4, bits: Math.log2(3) },
+  ])("charges $bits bits when a post-verification practice release is rejected at cap $cap", ({ cap, bits }) => {
+    const assertCurrent = () => undefined;
+    const budget = createMinEntropyBudget({ assessmentMode: "practice", scaffoldBitBudget: cap, now: () => 1000 });
+    let verified = false;
+    const result = runTutorGraph({
+      questionStem: "积分",
+      submission: {},
+      attemptSubmitted: true,
+      assessmentMode: "practice",
+      budget,
+      verifyCaps: {
+        assertCurrent,
+        verify: () => {
+          verified = true;
+          return { steps: [{ id: "s1", text: "a", status: "valid" }, { id: "s2", text: "b", status: "invalid" }] };
+        },
+      },
+      releaseCaps: { assertCurrent, answerLeakageBlocker: () => verified },
+    });
+    expect(result).toMatchObject({ state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: bits });
+    expect(budget.leakageBits).toBe(bits);
   });
 
   it("blocks hint release when canRelease denies exceeding scaffoldBitBudget and records cooldown", () => {
@@ -891,8 +983,8 @@ describe("TutorGraph fast path", () => {
     const midRejectWrong = makeMidTurnAllRejectRun("invalid");
     expect(midRejectRight.res).toMatchObject({ state: "unverified", releaseApproved: false, reason: "release_guard_rejected" });
     expect(midRejectRight.res).toEqual(midRejectWrong.res);
-    expect(midRejectRight.leakageBits).toBe(0);
-    expect(midRejectWrong.leakageBits).toBe(0);
+    expect(midRejectRight.leakageBits).toBe(1);
+    expect(midRejectWrong.leakageBits).toBe(1);
 
     expect(zeroBitOutcomes.size).toBe(1);
     expect(oneBitOutcomes.size).toBe(2);

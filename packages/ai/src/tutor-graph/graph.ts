@@ -308,27 +308,37 @@ type PureFallbackChoice =
   | { kind: "rejected" };
 
 function selectVerifiedPureFallback(
+  questionStem: string,
   releaseCaps: TutorGraphInput["releaseCaps"],
   verifyStopSignal?: AbortSignal,
 ): PureFallbackChoice {
-  const candidates: ReadonlyArray<{ text: string; rationale: string }> = [
+  const neutralPrompts = [
     { text: PURE_SAFE_CONSERVATIVE_PROMPT, rationale: "请先整体复查关键条件与每一步推导依据" },
     { text: "Attempt recorded.", rationale: "Attempt recorded." },
     { text: "Step recorded.", rationale: "Step recorded." },
   ];
-  for (const candidate of candidates) {
-    const candidateCaps: PublicTeachingCaps = {
-      questionStem: "",
-      learnerSteps: [],
-      movePlan: { move: "concept_cue", rationale: candidate.rationale },
-      publicBlocks: [{ kind: "question", text: candidate.text }],
-    };
-    const candidateReleased = guardRelease(candidateCaps, { steps: [] }, releaseCaps);
+  const verification: VerifyOutput = { steps: [] };
+  const candidates: Array<{ caps: PublicTeachingCaps; standaloneText?: string }> = neutralPrompts.map(
+    ({ text, rationale }) => ({
+      caps: {
+        questionStem: "",
+        learnerSteps: [],
+        movePlan: { move: "concept_cue", rationale },
+        publicBlocks: [{ kind: "question", text }],
+      },
+      standaloneText: text,
+    }),
+  );
+  candidates.push({
+    caps: toPublicCaps(questionStem, [], verification, { coarsened: true, allVerifiedValid: true }),
+  });
+  for (const { caps, standaloneText } of candidates) {
+    const candidateReleased = guardRelease(caps, verification, releaseCaps);
     if (isStopped(releaseCaps.stopSignal) || isStopped(verifyStopSignal)) {
       return { kind: "stopped" };
     }
     if (candidateReleased !== undefined) {
-      return { kind: "approved", caps: candidateCaps, text: candidate.text };
+      return { kind: "approved", caps, text: standaloneText ?? candidateReleased };
     }
   }
   return { kind: "rejected" };
@@ -418,7 +428,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   }
 
   if (isPureTurn) {
-    const preflightFallback = selectVerifiedPureFallback(input.releaseCaps, input.verifyCaps.stopSignal);
+    const preflightFallback = selectVerifiedPureFallback(input.questionStem, input.releaseCaps, input.verifyCaps.stopSignal);
     if (preflightFallback.kind === "stopped") {
       return {
         state: "stopped",
@@ -446,23 +456,11 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   }
 
   input.verifyCaps.assertCurrent();
-  let verification: VerifyOutput;
+  let verification: VerifyOutput | undefined;
   try {
     verification = input.verifyCaps.verify(input.submission);
   } catch {
-    if (!isPureTurn) {
-      return {
-        state: "unverified",
-        providerCalls: 0,
-        verification: { steps: [] },
-        leakageBits: budget.leakageBits,
-        helpState: budget.state,
-        cooldownUntilMs: budget.cooldownUntilMs,
-        releaseApproved: false,
-        reason: "verifier_execution_failed",
-      };
-    }
-    verification = { steps: [] };
+    verification = undefined;
   }
 
   if (isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
@@ -478,10 +476,31 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     };
   }
 
-  // Re-validate pure fallback candidates AFTER verify() completes and BEFORE inspecting verification correctness.
+  // A verifier-dependent release or rejection spends at least one bit.
+  const minimumReleaseBits = 1;
+  const minimumReleaseCheck = budget.canRelease(minimumReleaseBits, nowMs);
+  if (!minimumReleaseCheck.allowed) {
+    return blockedByBudgetResult(budget, minimumReleaseCheck.reason ?? "budget_exhausted");
+  }
+  if (!verification && !isPureTurn) {
+    budget.commitRelease(minimumReleaseBits, nowMs);
+    return {
+      state: "unverified",
+      providerCalls: 0,
+      verification: { steps: [] },
+      leakageBits: budget.leakageBits,
+      helpState: budget.state,
+      cooldownUntilMs: budget.cooldownUntilMs,
+      releaseApproved: false,
+      reason: "verifier_execution_failed",
+    };
+  }
+  verification ??= { steps: [] };
+
+  // Recheck the current pure guard before using a verifier verdict.
   let verifiedPureFallback: { caps: PublicTeachingCaps; text: string } | null = null;
   if (isPureTurn) {
-    const postVerifyFallback = selectVerifiedPureFallback(input.releaseCaps, input.verifyCaps.stopSignal);
+    const postVerifyFallback = selectVerifiedPureFallback(input.questionStem, input.releaseCaps, input.verifyCaps.stopSignal);
     if (postVerifyFallback.kind === "stopped") {
       return {
         state: "stopped",
@@ -495,6 +514,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       };
     }
     if (postVerifyFallback.kind === "rejected") {
+      budget.commitRelease(minimumReleaseBits, nowMs);
       return {
         state: "unverified",
         providerCalls: 0,
@@ -514,8 +534,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   const hasAnswerDependentStepInfo = nonNeutralStepCount > 0 || Boolean(verification.firstError);
   const disclosedStepCount = hasAnswerDependentStepInfo ? Math.max(nonNeutralStepCount, propagatedSteps.length) : 0;
   const stepOutcomeBits = disclosedStepCount > 0 ? Math.log2(disclosedStepCount + 1) : 0;
-  const disclosesAnswerDependentInfo = Boolean(verification.firstError || verification.ruleWitness || disclosedStepCount > 0);
-  const uncoarsenedBits = Math.max(disclosesAnswerDependentInfo ? 1 : 0, stepOutcomeBits);
+  const uncoarsenedBits = Math.max(minimumReleaseBits, stepOutcomeBits);
 
   const pureAllValid =
     propagatedSteps.length > 0 &&
@@ -526,11 +545,12 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     uncoarsenedBits <= turnCap;
   const shouldCoarsen = isPureTurn || (disclosedStepCount >= 2 && !uncoarsenedFits);
 
-  // On pure/coarsened turns the verifier runs once and emits at most 2 public outcomes (log2(2) = 1 bit).
-  const requiredBits = shouldCoarsen ? 1 : uncoarsenedBits;
-  const releaseCheck = budget.canRelease(requiredBits, nowMs);
-  if (!releaseCheck.allowed) {
-    return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
+  const requiredBits = shouldCoarsen ? minimumReleaseBits : uncoarsenedBits;
+  if (requiredBits > minimumReleaseBits) {
+    const releaseCheck = budget.canRelease(requiredBits, nowMs);
+    if (!releaseCheck.allowed) {
+      return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
+    }
   }
 
   // In pure assessment mode, never echo or release-guard raw learner-submitted text.
@@ -574,6 +594,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     releasedText = guardRelease(publicTeaching, publicVerification, input.releaseCaps);
   }
   const stoppedAfterGuard = isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal);
+  if (!stoppedAfterGuard) budget.commitRelease(requiredBits, nowMs);
   if (stoppedAfterGuard || (releasedText === undefined && !isPureTurn)) {
     return {
       state: stoppedAfterGuard ? "stopped" : "unverified",
@@ -591,7 +612,6 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     releasedText = verifiedPureFallback!.text;
   }
 
-  budget.commitRelease(requiredBits, nowMs);
   return {
     state: "released",
     providerCalls: 0,
