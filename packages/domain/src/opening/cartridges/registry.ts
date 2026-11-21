@@ -112,11 +112,12 @@ function validateEvidenceContracts(
         issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${report.issues.join(", ")}` });
       }
     } catch (error) {
+      const issue = error instanceof ProbeDefinitionError ? error.issue : "prediction_failed" as const;
       const detail = error instanceof ProbeDefinitionError ? error.issue : safeErrorDetail(error);
       issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${detail}` });
       reports.push(deepFreeze<ProbeDistinguishabilityReport>({
         probeId, distinguishable: false, predictions: [], ambiguousPairs: [],
-        degenerateAgainstCorrectModel: [], issues: ["prediction_failed"],
+        degenerateAgainstCorrectModel: [], issues: [issue],
       }));
     }
   }

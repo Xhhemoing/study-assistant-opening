@@ -584,6 +584,7 @@ describe("CartridgeRegistry", () => {
     expect(report).toMatchObject({
       ok: false,
       issues: [{ code: "evidence_probe_not_distinguishable", detail: expect.stringContaining("no_competing_hypotheses") }],
+      probeReports: [{ issues: ["no_competing_hypotheses"] }],
     });
   });
 
