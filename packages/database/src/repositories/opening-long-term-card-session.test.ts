@@ -1419,6 +1419,7 @@ describe("Round-9 fixes: standalone draft/replan 30% card cap, intraday post-adj
                 status: "pending",
               }],
               localReplan: {
+                kind: "local_replan_v1",
                 baseAcceptedVersion: 0,
                 baselineBlocks: [],
                 fixedBlocks: [],
@@ -1432,7 +1433,136 @@ describe("Round-9 fixes: standalone draft/replan 30% card cap, intraday post-adj
           now,
         },
       ),
-    ).rejects.toMatchObject({ code: "CONFLICT" });
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("卡片恢复可用上限"),
+    });
+  });
+
+  it("Round-10 P1-1: acceptOpeningPlan allows a non-local replacement draft (suggested_tasks: []) moving an existing 10m review_cards slot on a 40m day (12m cap)", async () => {
+    const day = "2026-11-19";
+    const now = new Date("2026-11-19T05:00:00.000Z"); // 13:00 Asia/Shanghai
+    const draftId = uuid("16161616", 1);
+    const cardTaskId = uuid("16161616", 2);
+
+    const oldCardBlock = {
+      taskId: cardTaskId,
+      start: "2026-11-19T01:00:00.000Z", // 09:00 Asia/Shanghai
+      end: "2026-11-19T01:10:00.000Z",   // 09:10 Asia/Shanghai (10m)
+      reason: "planned",
+    };
+    const replacementCardBlock = {
+      taskId: cardTaskId,
+      start: "2026-11-19T06:00:00.000Z", // 14:00 Asia/Shanghai
+      end: "2026-11-19T06:10:00.000Z",   // 14:10 Asia/Shanghai (10m)
+      reason: "planned",
+    };
+
+    const draftRow = {
+      id: draftId,
+      workspace_id: WS,
+      owner_user_id: OWNER,
+      day,
+      status: "draft",
+      origin: "manual",
+      version: 1,
+      base_version: 1,
+      strategy_version: null,
+      hard_blocks_fingerprint: "",
+      blocks: [replacementCardBlock],
+      suggested_tasks: [],
+      unscheduled_task_ids: [],
+      input_snapshot: {
+        tasks: [{
+          id: cardTaskId,
+          version: 1,
+          title: "到期卡片复习（有界会话）",
+          minutes: 10,
+          dueAt: null,
+          priority: 2,
+          status: "pending",
+        }],
+      },
+      reasons: {},
+      propose_client_key: "non-local-replace-card-1",
+    };
+
+    const cardTaskRow = {
+      id: cardTaskId,
+      workspace_id: WS,
+      owner_user_id: OWNER,
+      title: "到期卡片复习（有界会话）",
+      minutes: 10,
+      due_at: null,
+      not_before: null,
+      priority: 2,
+      status: "pending",
+      version: 1,
+      origin: "planner",
+      client_key: `planner:${day}:review_cards:c1:long-term`,
+      retest_id: null,
+      candidate_id: null,
+      candidate_reference_id: null,
+      scheduled_start_at: null,
+      recommended_at: null,
+      not_before_at: null,
+      snoozed_until: null,
+      learning_protocol: null,
+    };
+
+    let savedAcceptedBlocks: unknown = null;
+    const sql = createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("SELECT id FROM workspaces WHERE")) return [{ id: WS }];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        // 55 - 15 = 40m executable day -> strict 30% card cap = 12m.
+        return [{
+          learning_management: { dailyMinutes: 55, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("SELECT planning_settings FROM workspace_preferences")) {
+        return [{ planning_settings: planningSettings }];
+      }
+      if (query.includes("SELECT day FROM opening_plan_drafts")) return [{ day }];
+      if (query.includes("SELECT * FROM opening_plan_drafts")) return [draftRow];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) return [];
+      if (query.includes("INSERT INTO opening_plan_state")) return [];
+      if (query.includes("SELECT accepted_version, accepted_blocks, hard_blocks_fingerprint FROM opening_plan_state")) {
+        return [{ accepted_version: 1, accepted_blocks: [oldCardBlock], hard_blocks_fingerprint: "" }];
+      }
+      if (query.includes("SELECT day, accepted_blocks FROM opening_plan_state")) {
+        return [{ day, accepted_blocks: [oldCardBlock] }];
+      }
+      if (query.includes("FROM opening_plan_acceptances")) return [];
+      if (query.includes("SELECT a.id FROM opening_teaching_activities a")) return [];
+      if (query.includes("FROM opening_teaching_activities")) return [];
+      if (query.includes("SELECT DISTINCT course_id FROM opening_tasks")) return [];
+      if (query.includes("FROM opening_tasks")) return [cardTaskRow];
+      if (query.includes("FROM opening_timetable_sessions") || query.includes("FROM opening_hard_blocks")) return [];
+      if (query.includes("UPDATE opening_plan_state SET accepted_version=")) {
+        savedAcceptedBlocks = values[1];
+        return [];
+      }
+      if (query.includes("UPDATE opening_plan_drafts SET status='accepted'")) {
+        return [{ ...draftRow, status: "accepted", version: 2, blocks: savedAcceptedBlocks }];
+      }
+      if (query.includes("INSERT INTO opening_plan_acceptances")) return [];
+      return [];
+    });
+
+    const accepted = await acceptOpeningPlan(
+      sql,
+      SCOPE,
+      {
+        draftId,
+        expectedBaseVersion: 1,
+        clientKey: "accept-non-local-card-replace-1",
+      },
+      now,
+    );
+    expect(accepted.status).toBe("accepted");
+    expect(savedAcceptedBlocks).toEqual([replacementCardBlock]);
   });
 
   it("P1-2: intraday adjustment allows replacing a 10m review_cards slot with a non-overlapping 10m slot on a 40m day (12m cap) and rejects keeping both (20m > 12m)", async () => {

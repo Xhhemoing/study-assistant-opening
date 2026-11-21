@@ -310,19 +310,18 @@ export async function assertOpeningLearningManagementDraft(
       throw new OpeningPlanError("CONFLICT", "新的安排超出今日临时可用时长上限，请先调整今日安排；已接受事项保留。", "stale_version");
     }
   }
-  const suggestionIds = new Set(suggestions.map((item) => item.id));
   if (options?.acceptedBlocks !== undefined) {
     pendingDraftAcceptances.delete(tx as unknown as object);
     await assertAcceptedBlocksCardRecoveryCap(tx, scope, draftDay, options.acceptedBlocks, draft, now, state);
   } else if (
     !options?.standalone
-    && blocks.some((block) => suggestionIds.has(block.taskId))
     && (options?.deferToPlanAccept === true || hasWorkspaceLearningHistoryLockForTx(tx))
   ) {
-    // Inside `acceptOpeningPlan` (which holds `lockWorkspaceLearningHistory`), placed suggestions
-    // may still be deselected by `acceptSuggestedKeys` / coach selection before persistence;
-    // defer enforcement to `validateOpeningLocalReplan` / `assertOpeningPlanConstraints`
-    // so deselected `review_cards` suggestions never block unrelated ordinary tasks.
+    // Inside `acceptOpeningPlan` (which holds `lockWorkspaceLearningHistory`), always hand off
+    // to `validateOpeningLocalReplan` / `assertOpeningPlanConstraints` so the exact persisted
+    // replacement `blocks` (after any `acceptSuggestedKeys` / coach filtering) are checked once
+    // against `blocks + spilloverBlocks` using transaction `now`, never falling through to the
+    // additive standalone check in `assertOpeningPlanConstraints`.
     registerPendingDraftAcceptanceForTx(tx, { scope, draftDay, draft, now });
   } else {
     pendingDraftAcceptances.delete(tx as unknown as object);

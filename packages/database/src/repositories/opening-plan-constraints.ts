@@ -57,7 +57,7 @@ export async function assertOpeningPlanConstraints(tx: TransactionSql, scope: Sc
   if (!plannedBlocksFitConstraints(blocks, constraints, autoDraft && explicitFree === undefined)) throw conflict();
   if (pending) {
     await assertAcceptedBlocksCardRecoveryCap(tx, scope, day, blocks, pending.draft, pending.now);
-  } else if (explicitFree === undefined && blocks.length > 0 && !isLocalReplanConstraintsCheckActiveForTx(tx)) {
+  } else if (blocks.length > 0 && !isLocalReplanConstraintsCheckActiveForTx(tx)) {
     await assertStandaloneBlocksCardRecoveryCap(tx, scope, day, blocks, new Date());
   }
 }
