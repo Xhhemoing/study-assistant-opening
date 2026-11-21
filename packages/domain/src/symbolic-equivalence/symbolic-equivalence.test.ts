@@ -6,6 +6,7 @@ import { runCSubset408 } from "./c-subset-408";
 describe("bounded symbolic equivalence", () => {
   it("locks natural domains before cancelling denominators", () => {
     expect(verifyScalarEquivalence("x / x", "1").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("x / (2 * x - 1)", "1 / 2").status).toBe("inequivalent");
     const result = verifyScalarEquivalence("x / x", "1", { excluded: [0] });
     expect(result.status).toBe("equivalent");
   });

@@ -155,6 +155,16 @@ export function simplifyRadical(expr: ScalarExpr): ScalarExpr {
   return expr;
 }
 
+function rationalRootCandidates(poly: Polynomial): SpanRational[] {
+  const candidates: SpanRational[] = [];
+  for (let denominator = 1n; denominator <= 16n; denominator++) {
+    for (let numerator = -32n; numerator <= 32n; numerator++) {
+      const candidate = rational(numerator, denominator);
+      if (polynomialEvaluate(poly, candidate).n === 0n && !candidates.some((existing) => equalRational(existing, candidate))) candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
 function domainAllows(domain: DomainSpec | undefined, x: SpanRational): boolean {
   if (!domain) return true;
   const text = formatRational(x);
@@ -197,7 +207,7 @@ export function verifyScalarEquivalence(studentInput: ScalarExpr | string, refer
   }
   const denominator = polynomialMultiply(sf.denominator, rf.denominator);
   const residual = polynomialAdd(polynomialMultiply(sf.numerator, rf.denominator), polynomialMultiply(rf.numerator, sf.denominator), -1);
-  const candidates = [-3, -2, -1, 0, 1, 2, 3].map((value) => rational(BigInt(value)));
+  const candidates = [...[-3, -2, -1, 0, 1, 2, 3].map((value) => rational(BigInt(value))), ...rationalRootCandidates(denominator)];
   for (const x of candidates) {
     if (!domainAllows(domain, x)) continue;
     const denominatorValue = polynomialEvaluate(denominator, x);
@@ -209,8 +219,7 @@ export function verifyScalarEquivalence(studentInput: ScalarExpr | string, refer
     if (polynomialEvaluate(residual, x).n !== 0n) return { status: "inequivalent", reason: "residual_nonzero", witness: { input: formatRational(x), detail: "exact residual is non-zero" }, domain };
   }
   if (residual.size === 0) return { status: "equivalent", reason: "exact_rational_identity_on_locked_domain", domain };
-  if (polynomialDegree(residual) <= 12) return { status: "equivalent", reason: "exact_polynomial_identity_after_domain_lock", domain };
-  return { status: "unverified", reason: "degree_bound_exceeded", domain };
+  return { status: "unverified", reason: polynomialDegree(residual) <= 12 ? "residual_not_decided_by_bounded_exact_candidates" : "degree_bound_exceeded", domain };
 }
 
 export type IntegralVerificationInput = { student: ScalarExpr | string; integrand: ScalarExpr | string; variable?: string; domain?: DomainSpec; piecewise?: PiecewiseExpr };
