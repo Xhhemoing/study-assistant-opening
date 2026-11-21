@@ -63,6 +63,7 @@ type StreamPublicationContext = {
   privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; claimToken?: string; executionId?: string;
   materialPurposePin?: OpeningMaterialPurposePin;
   memoryLineageSourceIds?: readonly string[];
+  globalMemoryIds?: readonly string[];
 };
 
 type StreamTurnBinding = {
@@ -88,6 +89,7 @@ async function assertStreamMaterialAdmission(
     allowMissingPin?: boolean;
     skipPinRepoAssert?: boolean;
     memoryLineageSourceIds?: readonly string[];
+    globalMemoryIds?: readonly string[];
   } = {},
 ): Promise<void> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
@@ -109,6 +111,19 @@ async function assertStreamMaterialAdmission(
       memoryLineageSet.add(sourceId.toLowerCase());
     }
   }
+  const globalMemoryIdSet = new Set<string>();
+  if (admissionOptions.globalMemoryIds !== undefined) {
+    if (!Array.isArray(admissionOptions.globalMemoryIds)) {
+      throw Object.assign(new Error("stream global memory binding invalid"), { code: "CONFLICT" });
+    }
+    for (const memoryId of admissionOptions.globalMemoryIds) {
+      if (typeof memoryId !== "string" || !UUID_PATTERN.test(memoryId)) {
+        throw Object.assign(new Error("stream global memory binding invalid"), { code: "CONFLICT" });
+      }
+      globalMemoryIdSet.add(memoryId.toLowerCase());
+    }
+  }
+  const globalMemoryIdList = [...globalMemoryIdSet].sort();
   let pin: OpeningMaterialPurposePin | undefined;
   if (materialPurposePin === undefined) {
     if (turnSourceIds.length && !admissionOptions.allowMissingPin) {
@@ -185,9 +200,24 @@ async function assertStreamMaterialAdmission(
   if (pin && !admissionOptions.skipPinRepoAssert && (pin.courseId !== null || pin.sources.length > 0)) {
     await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
   }
+  if (globalMemoryIdList.length) {
+    // Lock and verify every exact injected global memory is still active (never superseded/deleted).
+    const activeMemories = await tx`SELECT id FROM opening_memories
+      WHERE workspace_id=${scope.workspaceId}
+        AND id=ANY(${globalMemoryIdList}::uuid[])
+        AND status='active'
+        AND course_id IS NULL
+      ORDER BY id FOR SHARE`;
+    if (activeMemories.length !== globalMemoryIdList.length) {
+      throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
+    }
+  }
   if (memoryOnlySourceIds.length) {
+    if (!globalMemoryIdList.length) {
+      throw Object.assign(new Error("stream global memory binding missing"), { code: "CONFLICT" });
+    }
     // Workspace-wide global memory lineage does not require active-course membership,
-    // but must still be genuinely backed by an active global memory and never mock_exam.
+    // but must still be genuinely backed by the exact active global memories and never mock_exam.
     const backed = await tx`
       SELECT DISTINCT lower(sid.id::text) AS source_id
       FROM unnest(${memoryOnlySourceIds}::uuid[]) AS sid(id)
@@ -195,6 +225,7 @@ async function assertStreamMaterialAdmission(
         SELECT 1
         FROM opening_memories m
         WHERE m.workspace_id = ${scope.workspaceId}
+          AND m.id = ANY(${globalMemoryIdList}::uuid[])
           AND m.status = 'active'
           AND m.course_id IS NULL
           AND EXISTS (
@@ -782,7 +813,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
             throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
           }
-          const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+          const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
             JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
             WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
@@ -798,9 +829,13 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
             context.contextSourceRefs, context.attemptContext?.sourceRefs, {
               memoryLineageSourceIds: context.memoryLineageSourceIds,
+              globalMemoryIds: context.globalMemoryIds,
             });
           if (context.contextSourceRefs.length) {
-            await assertStreamSources(tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs);
+            await assertStreamSources(
+              tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
+              job.source_versions as Record<string, unknown> | null | undefined,
+            );
           }
           try {
             publicationStarted = true;
@@ -877,11 +912,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!workspace) return null;
         const [row] = lockMode === "FOR UPDATE"
-          ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+          ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`
-          : await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+          : await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR SHARE OF j`;
@@ -907,8 +942,12 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
           context.contextSourceRefs, verifiedAttemptRefs, {
             memoryLineageSourceIds: context.memoryLineageSourceIds,
+            globalMemoryIds: context.globalMemoryIds,
           });
-        await assertStreamSources(tx, scope, context.contextSourceRefs, verifiedAttemptRefs);
+        await assertStreamSources(
+          tx, scope, context.contextSourceRefs, verifiedAttemptRefs,
+          row.source_versions as Record<string, unknown> | null | undefined,
+        );
         return job;
       };
 
@@ -998,6 +1037,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     }, options?: {
       materialPurposePin?: OpeningMaterialPurposePin;
       memoryLineageSourceIds?: readonly string[];
+      globalMemoryIds?: readonly string[];
       attemptContext?: { target: TutorAttemptContextTarget; snapshot: TutorAttemptContext };
     }): Promise<void> {
       await sql.begin(async (tx) => {
@@ -1046,7 +1086,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             );
           }
         }
-        if (!receipt && (options?.materialPurposePin !== undefined || input.contextSourceRefs !== undefined)) {
+        if (!receipt && (options?.materialPurposePin !== undefined || input.contextSourceRefs !== undefined || options?.globalMemoryIds !== undefined)) {
           const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
             JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
@@ -1060,6 +1100,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
                 allowMissingPin: options?.materialPurposePin === undefined,
                 skipPinRepoAssert: options?.materialPurposePin !== undefined,
                 memoryLineageSourceIds: options?.memoryLineageSourceIds,
+                globalMemoryIds: options?.globalMemoryIds,
               },
             );
             if (input.contextSourceRefs?.length) {

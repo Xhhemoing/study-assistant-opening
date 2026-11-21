@@ -58,7 +58,7 @@ export function createModelTranscribeAdapter(deps: {
   checkpoints?: {
     load(chunk: { index: number; offsetMs: number; durationMs: number; sourceId: string; sourceVersion: number }): Promise<ProviderOutput | null>;
     save(chunk: { index: number; offsetMs: number; durationMs: number; sourceId: string; sourceVersion: number }, output: ProviderOutput,
-      receipt: { reservationId: string; settledCents: number | null }): Promise<void>;
+      receipt: { reservationId: string; settledCents: number | null; costBasis?: "usage_pricing" | "media_usage_upper_bound" }): Promise<void>;
   };
   run?: MediaBinaryRunner;
   tempDir?: string;
@@ -102,7 +102,7 @@ export function createModelTranscribeAdapter(deps: {
           operationId: `transcribe:${deps.jobId}:${index}`,
           ...(deps.checkpoints ? {
             resultRef: `transcribe:${deps.jobId}:${index}`,
-            persistResult: async (output: ProviderOutput, receipt: { reservationId: string; settledCents: number | null }) => {
+            persistResult: async (output: ProviderOutput, receipt: { reservationId: string; settledCents: number | null; costBasis?: "usage_pricing" | "media_usage_upper_bound" }) => {
               parseSegments(output.text, durationMs);
               await deps.beforeSend?.();
               await deps.checkpoints!.save(chunk, output, receipt);

@@ -213,53 +213,78 @@ it("advanceOpeningWorkspacePrivacyEpoch skips Redis in idle workspaces, never fi
   });
 });
 
-it("fenceOpeningTutorAttemptHead filters to running jobs, skips Redis on rollback, and never blocks learner writes during a Redis outage", async () => {
+it("fenceOpeningTutorAttemptHead always updates Redis attempt-head monotonically post-commit, seals only running jobs, skips rollback, and fails loudly outside withOpeningTutorStreamFenceCommit", async () => {
   const workspaceId = "00000000-0000-4000-8000-000000000001";
   const attemptId = "00000000-0000-4000-8000-000000000005";
   const rootId = "00000000-0000-4000-8000-000000000006";
   const headId = "00000000-0000-4000-8000-000000000007";
+  const scope = { workspaceId, ownerUserId: "00000000-0000-4000-8000-000000000002" };
   let connections = 0;
+  const evalPayloads: string[] = [];
   const queries: string[] = [];
   await withRedisServer(async address => {
-    const makeSql = (hasRunningJob: boolean) => {
-      const tx = (async (parts: TemplateStringsArray) => {
+    const makeTx = (runningRows: Array<{ id: string; timing_execution_id: string }>) =>
+      (async (parts: TemplateStringsArray) => {
         const query = parts.join("?").replace(/\s+/g, " ").trim();
         queries.push(query);
-        if (query.startsWith("SELECT 1 FROM opening_tutor_jobs j")) return hasRunningJob ? [{ "?column?": 1 }] : [];
+        if (query.startsWith("SELECT j.id, j.timing_execution_id FROM opening_tutor_jobs j")) return runningRows;
+        if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: 2 }];
+        if (query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
         throw new Error(`unexpected query: ${query}`);
       }) as unknown as TransactionSql;
+    const makeSql = (runningRows: Array<{ id: string; timing_execution_id: string }>) => {
+      const tx = makeTx(runningRows);
       return {
         begin: async (fn: (db: TransactionSql) => Promise<unknown>) => fn(tx),
       } as unknown as Sql;
     };
 
-    // No running job (e.g. completed/terminal job only): zero Redis calls even with missing or blackholed Redis.
-    await withOpeningTutorStreamFenceCommit(makeSql(false), tx =>
-      fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, undefined));
+    // Unwrapped transactions fail loudly instead of silently dropping Redis invalidation.
+    await expect(fenceOpeningTutorAttemptHead(makeTx([]), workspaceId, attemptId, rootId, headId, `redis://${address}`))
+      .rejects.toThrow("withOpeningTutorStreamFenceCommit");
+    await expect(advanceOpeningWorkspacePrivacyEpoch(makeTx([]), scope, `redis://${address}`))
+      .rejects.toThrow("withOpeningTutorStreamFenceCommit");
+    expect(connections).toBe(0);
+
+    // No running job (idle workspace after completed turn): STILL advances attempt-head monotonically in Redis!
+    await withOpeningTutorStreamFenceCommit(makeSql([]), tx =>
+      fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, { redisUrl: `redis://${address}`, headRevision: 42 }));
     expect(queries[0]).toContain("j.status='running'");
-    expect(connections).toBe(0);
-
-    // Rolled-back transaction with a running job: zero Redis calls.
-    await expect(withOpeningTutorStreamFenceCommit(makeSql(true), async tx => {
-      await fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, `redis://${address}`);
-      expect(connections).toBe(0);
-      throw new Error("rollback observation");
-    })).rejects.toThrow("rollback observation");
-    await new Promise(resolve => setTimeout(resolve, 40));
-    expect(connections).toBe(0);
-
-    // Missing REDIS_URL with a running job: succeeds without throwing.
-    await expect(withOpeningTutorStreamFenceCommit(makeSql(true), tx =>
-      fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, null, headId, undefined))).resolves.toBeUndefined();
-    expect(connections).toBe(0);
-
-    // Blackholed Redis with a running job: commits immediately (< 500 ms) and fires post-commit.
-    const startedAt = performance.now();
-    await withOpeningTutorStreamFenceCommit(makeSql(true), tx =>
-      fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, `redis://${address}`));
-    expect(performance.now() - startedAt).toBeLessThan(500);
     await vi.waitFor(() => expect(connections).toBe(1));
-  }, () => {
-    connections += 1;
+    await vi.waitFor(() => expect(evalPayloads[0]).toContain("42"));
+    expect(evalPayloads[0]).toContain(`${tutorStreamAttemptHeadKey(workspaceId, rootId)}:rev`);
+
+    // Rolled-back transaction: zero Redis calls.
+    await expect(withOpeningTutorStreamFenceCommit(
+      makeSql([{ id: "00000000-0000-4000-8000-000000000008", timing_execution_id: "00000000-0000-4000-8000-000000000009" }]),
+      async tx => {
+        await fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, { redisUrl: `redis://${address}`, headRevision: 43 });
+        expect(connections).toBe(1);
+        throw new Error("rollback observation");
+      },
+    )).rejects.toThrow("rollback observation");
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(connections).toBe(1);
+
+    // Missing REDIS_URL: succeeds without throwing.
+    await expect(withOpeningTutorStreamFenceCommit(
+      makeSql([{ id: "00000000-0000-4000-8000-000000000008", timing_execution_id: "00000000-0000-4000-8000-000000000009" }]),
+      tx => fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, null, headId, { redisUrl: "", headRevision: 44 }),
+    )).resolves.toBeUndefined();
+    expect(connections).toBe(1);
+
+    // Blackholed Redis with a running job: commits immediately (< 500 ms) and fires post-commit with running execution seal.
+    const startedAt = performance.now();
+    await withOpeningTutorStreamFenceCommit(
+      makeSql([{ id: "00000000-0000-4000-8000-000000000008", timing_execution_id: "00000000-0000-4000-8000-000000000009" }]),
+      tx => fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, { redisUrl: `redis://${address}`, headRevision: 45 }),
+    );
+    expect(performance.now() - startedAt).toBeLessThan(500);
+    await vi.waitFor(() => expect(connections).toBe(2));
+    await vi.waitFor(() => expect(evalPayloads[1]).toContain("00000000-0000-4000-8000-000000000009"));
+  }, socket => {
+    const idx = connections++;
+    evalPayloads[idx] = "";
+    socket.on("data", chunk => { evalPayloads[idx] += chunk.toString("utf8"); });
   });
 });

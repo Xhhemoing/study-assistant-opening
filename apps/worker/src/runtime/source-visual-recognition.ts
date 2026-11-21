@@ -18,7 +18,7 @@ async function callVisual(deps: { repository: Repository; gateway: Pick<ModelGat
   let operationId = base;
   const visited = new Set<string>();
   while (true) {
-    try { return await deps.gateway.call(scope, "materials.recognize-page", { ...options, budget, operationId }); }
+    try { return await deps.gateway.call(scope, "materials.recognize-page", { ...options, budget, operationId, requestFamily: base }); }
     catch (error) {
       if (!isBudgetReplayError(error) || error.disposition.kind !== "released"
         || !["not_sent", "cancelled"].includes(error.disposition.reason ?? "") || visited.has(error.disposition.reservationId)) throw error;

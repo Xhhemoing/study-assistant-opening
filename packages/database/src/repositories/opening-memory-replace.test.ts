@@ -30,6 +30,8 @@ function sqlStub(reusedKey = false) {
       const text = strings.join(" ").replace(/\s+/g, " ").trim();
       calls.push(text);
       if (text.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (text.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: 1 }];
+      if (text.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
       if (text.includes("SELECT t.id FROM opening_turns")) return [{ id: sourceTurnId }];
       if (text.startsWith("UPDATE opening_memories")) return [{ id: memoryId }];
       if (text.includes("INSERT INTO opening_memories")) {
@@ -127,7 +129,8 @@ describe("replaceOwnedMemory", () => {
     expect(begin).toHaveBeenCalledOnce();
     expect(calls.some((query) => query.includes("status = 'active'") && query.includes("kind = 'confirmed'"))).toBe(true);
     expect(calls.some((query) => query.includes("status = 'superseded'"))).toBe(true);
-    expect(calls.at(-1)).toContain("INSERT INTO opening_memories");
+    expect(calls.some((query) => query.includes("INSERT INTO opening_memories"))).toBe(true);
+    expect(calls.some((query) => query.startsWith("UPDATE workspaces SET privacy_epoch"))).toBe(true);
     expect(replaced).toMatchObject({ id: nextMemoryId, kind: "confirmed", version: 3, status: "active", text: "先看定义" });
   });
 });

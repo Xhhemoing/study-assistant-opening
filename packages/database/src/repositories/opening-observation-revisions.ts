@@ -160,7 +160,11 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
         VALUES(${scope.workspaceId},${jobId},'opening.job.enqueue',${tx.json({ jobId, kind: "retest", ...payload })})`;
     }
     const applied = await result(record, "applied");
-    if (root.attempt_id) await fenceOpeningTutorAttemptHead(tx, String(root.workspace_id), String(root.attempt_id), String(root.id), id);
+    if (root.attempt_id) {
+      await fenceOpeningTutorAttemptHead(tx, String(root.workspace_id), String(root.attempt_id), String(root.id), id, {
+        headRevision: workspaceRevision,
+      });
+    }
     return applied;
   }) as Promise<ObservationRevisionResult>;
 }

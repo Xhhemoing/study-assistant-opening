@@ -11,6 +11,10 @@ export * from "./schema/identity";
 export * from "./schema/preferences";
 export * from "./schema/explorations";
 export * from "./repositories/library";
+export {
+  hasForgedOrProtectedBlock,
+  PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
+} from "./repositories/library-protected-blocks";
 export * from "./repositories/course-membership";
 export * from "./repositories/identity";
 export * from "./repositories/preferences";

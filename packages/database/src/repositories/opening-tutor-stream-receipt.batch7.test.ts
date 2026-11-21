@@ -23,9 +23,9 @@ const job = { id: jobId, workspace_id: workspace, conversation_id: "conversation
   attempt_id: null, context_anchor: null, source_ids: [] as string[], course_id: null as string | null };
 type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; phase2Status?: string; epoch?: number; token?: string; execution?: string | null;
   unavailableSource?: boolean; missingExposure?: boolean; failAt?: string; failCommitAtTx?: number; boundAttempt?: string; anchorAttempt?: string;
-  anchorSourceId?: string; courseId?: string | null; sourceIds?: string[]; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
+  anchorSourceId?: string; courseId?: string | null; sourceIds?: string[]; sourceVersions?: Record<string, number>; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
   derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
-  backedMemorySourceIds?: string[]; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string };
+  activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string };
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
@@ -49,7 +49,7 @@ function fixture(options: Options = {}) {
         : null;
       return options.missingJob ? [] : [{ ...job, status, claim_token: options.token ?? token, timing_execution_id: execValue,
         attempt_id: options.boundAttempt ?? null, context_anchor: anchor,
-        source_ids: options.sourceIds ?? [], course_id: options.courseId ?? null }];
+        source_ids: options.sourceIds ?? [], source_versions: options.sourceVersions ?? null, course_id: options.courseId ?? null }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
@@ -57,6 +57,9 @@ function fixture(options: Options = {}) {
       if (options.unavailableSource) return [];
       const requested = Array.isArray(values[1]) ? values[1] as string[] : [sourceId];
       return requested.map(id => ({ id, version: 0 }));
+    }
+    if (sql.startsWith("SELECT id FROM opening_memories")) {
+      return (options.activeGlobalMemoryIds ?? []).map(id => ({ id }));
     }
     if (sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id")) {
       return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id }));
@@ -125,7 +128,7 @@ describe("stream receipt release waits for current job authorization and assista
     // appended OR clauses. Equivalent SQL rewrites may require updating this test.
     expect(exposure.sql).toBe("SELECT id FROM opening_help_exposures WHERE id=? AND workspace_id=? AND owner_user_id=? AND turn_id=? AND exposure_origin='assistant'");
     expect(exposure.values).toEqual([receipt, workspace, owner, assistant]);
-    expect(f.calls.map(c => c.sql.split(" ").slice(0, 2).join(" "))).toEqual(["SELECT privacy_epoch", "SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,c.course_id", "SELECT 1", "SELECT id"]);
+    expect(f.calls.map(c => c.sql.split(" ").slice(0, 2).join(" "))).toEqual(["SELECT privacy_epoch", "SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id", "SELECT 1", "SELECT id"]);
   });
   it("waits for receipt release before resolving a running stream authorization", async () => {
     const f = fixture();
@@ -370,38 +373,91 @@ describe("stream receipt release waits for current job authorization and assista
       .toMatchObject({ status: "running" });
   });
 
-  it("allows active global memory lineage sources on course turns without course membership while still blocking spoofed or mock_exam sources", async () => {
+  it("allows active global memory lineage sources on course turns without course membership while blocking superseded, unbound, spoofed, or mock_exam sources", async () => {
     const memorySourceId = "12000000-0000-4000-8000-000000000099";
+    const memoryId = "12000000-0000-4000-8000-0000000000aa";
     const memoryRefs = [{ sourceId: memorySourceId, sourceVersion: 0 }];
     // Active global memory backed by an unclassified standalone workspace source succeeds across stream & completeTurn.
     const admitted = fixture({
-      courseId, sourceIds: [], membershipRemoved: true, backedMemorySourceIds: [memorySourceId],
+      courseId, sourceIds: [], membershipRemoved: true,
+      activeGlobalMemoryIds: [memoryId], backedMemorySourceIds: [memorySourceId],
     });
     await expect(admitted.repo.withStreamPublication(
-      scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] }, async () => {},
+      scope, jobId, {
+        ...context, contextSourceRefs: memoryRefs,
+        memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId],
+      }, async () => {},
     )).resolves.toBeUndefined();
     expect(await admitted.repo.readStream(
-      scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] },
+      scope, jobId, {
+        ...context, contextSourceRefs: memoryRefs,
+        memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId],
+      },
     )).toMatchObject({ status: "running" });
     await expect(admitted.repo.completeTurn({
       scope, jobId, assistantTurnId: assistant, text: "course answer with global memory", citations: [], candidates: [],
       contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
-    }, { memoryLineageSourceIds: [memorySourceId] })).resolves.toBeUndefined();
+    }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).resolves.toBeUndefined();
 
-    // Spoofed memoryLineageSourceIds (not backed by an active global memory) is rejected fail-closed.
-    const spoofed = fixture({ courseId, sourceIds: [], membershipRemoved: true, backedMemorySourceIds: [] });
-    await expect(spoofed.repo.readStream(
+    // Missing globalMemoryIds for memoryLineageSourceIds is rejected fail-closed.
+    const unbound = fixture({ courseId, sourceIds: [], membershipRemoved: true, backedMemorySourceIds: [memorySourceId] });
+    await expect(unbound.repo.readStream(
       scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] },
+    )).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // Superseded global memory M1 (no longer active, even if source still has another active memory) is rejected!
+    const superseded = fixture({
+      courseId, sourceIds: [], membershipRemoved: true,
+      activeGlobalMemoryIds: [], backedMemorySourceIds: [memorySourceId],
+    });
+    await expect(superseded.repo.readStream(
+      scope, jobId, {
+        ...context, contextSourceRefs: memoryRefs,
+        memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId],
+      },
+    )).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(superseded.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "superseded memory answer", citations: [], candidates: [],
+      contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
+    }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // Spoofed memoryLineageSourceIds (not backed by the exact active globalMemoryIds) is rejected fail-closed.
+    const spoofed = fixture({
+      courseId, sourceIds: [], membershipRemoved: true,
+      activeGlobalMemoryIds: [memoryId], backedMemorySourceIds: [],
+    });
+    await expect(spoofed.repo.readStream(
+      scope, jobId, {
+        ...context, contextSourceRefs: memoryRefs,
+        memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId],
+      },
     )).rejects.toMatchObject({ code: "CONFLICT" });
 
     // A global memory source classified as mock_exam is still rejected.
     const mockExamMemory = fixture({
       courseId, sourceIds: [], membershipRemoved: true,
-      backedMemorySourceIds: [memorySourceId], mockExamSourceIds: [memorySourceId],
+      activeGlobalMemoryIds: [memoryId], backedMemorySourceIds: [memorySourceId], mockExamSourceIds: [memorySourceId],
     });
     await expect(mockExamMemory.repo.readStream(
-      scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] },
+      scope, jobId, {
+        ...context, contextSourceRefs: memoryRefs,
+        memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId],
+      },
     )).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("passes turn source_versions snapshots to assertStreamSources in withStreamPublication and readStream", async () => {
+    const f = fixture({ sourceIds: [sourceId], sourceVersions: { [sourceId]: 0 } });
+    const snapshotPin = {
+      courseId: null, materialUse: "citation" as const,
+      sources: [{ sourceId, sourceVersion: 0, membershipId: null, purposeRevision: null, purpose: null }],
+    };
+    const snapshotContext = {
+      ...context, contextSourceRefs: [{ sourceId, sourceVersion: 0 }], materialPurposePin: snapshotPin,
+    };
+    await expect(f.repo.withStreamPublication(scope, jobId, snapshotContext, async () => {})).resolves.toBeUndefined();
+    expect(await f.repo.readStream(scope, jobId, snapshotContext)).toMatchObject({ status: "running" });
+    expect(f.calls.some(c => c.sql.includes("t.source_versions"))).toBe(true);
   });
 
   it("marks fallback stream sealing attempted once when withStreamPublication owns a Redis URL", async () => {

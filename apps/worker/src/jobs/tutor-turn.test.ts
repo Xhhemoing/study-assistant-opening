@@ -1748,12 +1748,16 @@ describe("tutor turn handler", () => {
           { sourceId: memoryOnlySourceId, sourceVersion: 0 },
         ]),
         memoryLineageSourceIds: [memoryOnlySourceId],
+        globalMemoryIds: ["00000000-0000-4000-8000-0000000000aa"],
       }),
     );
     expect(tutorJobs.withStreamPublication).toHaveBeenCalledWith(
       expect.anything(),
       claimedJob.id,
-      expect.objectContaining({ memoryLineageSourceIds: [memoryOnlySourceId] }),
+      expect.objectContaining({
+        memoryLineageSourceIds: [memoryOnlySourceId],
+        globalMemoryIds: ["00000000-0000-4000-8000-0000000000aa"],
+      }),
       expect.any(Function),
     );
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(
@@ -1763,7 +1767,10 @@ describe("tutor turn handler", () => {
           { sourceId: memoryOnlySourceId, sourceVersion: 0 },
         ]),
       }),
-      expect.objectContaining({ memoryLineageSourceIds: [memoryOnlySourceId] }),
+      expect.objectContaining({
+        memoryLineageSourceIds: [memoryOnlySourceId],
+        globalMemoryIds: ["00000000-0000-4000-8000-0000000000aa"],
+      }),
     );
   });
 });

@@ -52,7 +52,7 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
     executionClaimedAt: null, outcomeUnknownAt: null, releaseReason: null, resultRef: null, reconciledAt: null, pendingReconcileCents: 0, reservedAmountCents: 100, replayed: false,
   };
   const budget = {
-    reserve: vi.fn<TutorTurnDeps["budget"]["reserve"]>(async () => reservation),
+    reserve: vi.fn<TutorTurnDeps["budget"]["reserve"]>(async (_scope, input) => ({ ...reservation, requestId: input.requestId })),
     release: vi.fn<TutorTurnDeps["budget"]["release"]>(async () => reservation),
     settle: vi.fn<TutorTurnDeps["budget"]["settle"]>(async () => reservation),
     claimExecution: vi.fn<TutorTurnDeps["budget"]["claimExecution"]>(async () => true),

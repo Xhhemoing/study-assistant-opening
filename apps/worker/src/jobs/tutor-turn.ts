@@ -22,6 +22,7 @@ import {
   makeStudyLanguageSupport,
   studyIntentInstruction,
   instructionWithMemories,
+  isMemoryEligible,
   makeTutorInstruction,
   PageCitationClarifyError,
   preferCitationsForPage,
@@ -352,6 +353,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           .map(({ sourceId }) => sourceId.toLowerCase())
           .filter(sourceId => !explicitMaterialSourceIds.has(sourceId)),
       )].sort();
+      const globalMemoryIds = [...new Set(
+        memoryContext.memories
+          .filter(memory => memory.courseId == null && isMemoryEligible(memory, contextNow))
+          .map(memory => memory.id.toLowerCase()),
+      )].sort();
       const contextSourceRefs = mergeContextSourceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
         historySourceRefs, memoryContext.sourceRefs, learnerContext?.sourceRefs ?? [], attemptContext?.sourceRefs ?? [],
@@ -419,7 +425,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const streamContext = { privacyEpoch: jobEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
         executionId: claimed.executionId,
         ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
-        ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}) };
+        ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
+        ...(globalMemoryIds.length ? { globalMemoryIds } : {}) };
       const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
@@ -505,6 +512,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           },
         } : provider;
         const output = await runBudgetedCall({
+          requestFamily: tutorOperationId,
           provider: streamingProvider,
           modelSnapshot: model?.modelSnapshot,
           budget: scopedBudget,
@@ -639,6 +647,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         enqueueMetadata: Boolean(deps.stream),
       }, { materialPurposePin: retrieved?.purposePin,
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
+        ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
         ...(attemptContext ? { attemptContext: { target: attemptTarget, snapshot: attemptContext } } : {}) });
       // The answer and optional metadata outbox entry are durable. Release this
       // tutor worker slot; suggestions run in their own bounded queue.

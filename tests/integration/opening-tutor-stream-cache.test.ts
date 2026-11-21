@@ -1076,7 +1076,7 @@ it("allows global memory backed by an unclassified standalone source on a course
   const proposed = await memories.proposeMemory(scope, {
     text: "Learner prefers step-by-step derivations", sourceTurnIds: [originTurn.turnId], courseId: null, expiresAt: null,
   });
-  await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+  const confirmedMemory = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
 
   const courseConversation = await conversations.create(scope, { title: "Course turn", courseId: course.id });
   const turn = await conversations.appendSavedTurn({
@@ -1095,6 +1095,7 @@ it("allows global memory backed by an unclassified standalone source on a course
     ];
     const context = {
       privacyEpoch: 0, contextSourceRefs, memoryLineageSourceIds: [globalMemorySourceId],
+      globalMemoryIds: [confirmedMemory.id],
       exposureReceiptId: null, claimToken: claimed.claimToken, executionId: claimed.executionId, materialPurposePin,
     };
     await jobs.withStreamPublication(scope, turn.jobId, context, async () => {
@@ -1103,6 +1104,7 @@ it("allows global memory backed by an unclassified standalone source on a course
     });
     const cached = (await reader.read(scope.workspaceId, turn.jobId))!;
     expect(cached.memoryLineageSourceIds).toEqual([globalMemorySourceId]);
+    expect(cached.globalMemoryIds).toEqual([confirmedMemory.id]);
     expect(await jobs.readStream(scope, turn.jobId, cached)).toMatchObject({ status: "running" });
 
     // Once the standalone memory source is classified mock_exam, readStream/withStreamPublication/completeTurn reject.
@@ -1117,7 +1119,8 @@ it("allows global memory backed by an unclassified standalone source on a course
       scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
       text: "Must not persist after mock_exam classification", citations: [], candidates: [],
       contextSourceRefs, expectedPrivacyEpoch: 0, claimToken: claimed.claimToken,
-    }, { materialPurposePin, memoryLineageSourceIds: [globalMemorySourceId] })).rejects.toMatchObject({ code: "CONFLICT" });
+    }, { materialPurposePin, memoryLineageSourceIds: [globalMemorySourceId], globalMemoryIds: [confirmedMemory.id] }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
 
     // Removing the mock_exam classification restores completion for the valid course turn with global memory lineage.
     await courses.removeAssetMembership({
@@ -1127,9 +1130,93 @@ it("allows global memory backed by an unclassified standalone source on a course
       scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
       text: "Completed course answer with global memory", citations: [], candidates: [],
       contextSourceRefs, expectedPrivacyEpoch: 0, claimToken: claimed.claimToken,
-    }, { materialPurposePin, memoryLineageSourceIds: [globalMemorySourceId] })).resolves.toBeUndefined();
+    }, { materialPurposePin, memoryLineageSourceIds: [globalMemorySourceId], globalMemoryIds: [confirmedMemory.id] }))
+      .resolves.toBeUndefined();
     expect((await sql`SELECT status, timing_execution_id FROM opening_tutor_jobs WHERE id=${turn.jobId}`)[0])
       .toMatchObject({ status: "succeeded", timing_execution_id: null });
+
+    // Replacing global memory M1 with M2 on the same source mid-stream seals Redis and blocks readStream/completeTurn.
+    const secondTurn = await conversations.appendSavedTurn({
+      scope, conversationId: courseConversation.id, text: "Explain again with global memory", mode: "explain",
+      clientKey: randomUUID(), sourceIds: [courseSourceId], learningSessionId: null, currentPage: 1, chunkId: null,
+    });
+    const secondKey = tutorStreamKey(scope.workspaceId, secondTurn.jobId);
+    keys.push(secondKey);
+    const secondClaim = (await jobs.claim(secondTurn.jobId))!;
+    const secondContext = {
+      privacyEpoch: 0, contextSourceRefs, memoryLineageSourceIds: [globalMemorySourceId],
+      globalMemoryIds: [confirmedMemory.id],
+      exposureReceiptId: null, claimToken: secondClaim.claimToken, executionId: secondClaim.executionId, materialPurposePin,
+    };
+    await jobs.withStreamPublication(scope, secondTurn.jobId, secondContext, async () => {
+      await writer.begin(scope.workspaceId, secondTurn.jobId, secondContext);
+      expect(await writer.append(scope.workspaceId, secondTurn.jobId, "Using M1 text", secondClaim.executionId, 0)).toBe(1);
+    });
+    const secondCached = (await reader.read(scope.workspaceId, secondTurn.jobId))!;
+    const replacedMemory = await memories.replaceMemory(scope, {
+      id: confirmedMemory.id, expectedVersion: confirmedMemory.version,
+      text: "Corrected global memory M2", sourceTurnIds: [originTurn.turnId], clientKey: randomUUID(),
+    });
+    expect(replacedMemory.id).not.toBe(confirmedMemory.id);
+    await vi.waitFor(async () => {
+      expect(await redis.hget(secondKey, "sealed")).toBe("1");
+      expect(await redis.get(tutorStreamEpochKey(scope.workspaceId))).toBe("1");
+    });
+    expect(await writer.append(scope.workspaceId, secondTurn.jobId, "stale M1 tail", secondClaim.executionId, 0)).toBe(0);
+    await expect(jobs.readStream(scope, secondTurn.jobId, secondCached)).rejects.toThrow();
+    await expect(jobs.completeTurn({
+      scope, jobId: secondTurn.jobId, assistantTurnId: secondTurn.assistantTurnId,
+      text: "Must not persist superseded M1", citations: [], candidates: [],
+      contextSourceRefs, expectedPrivacyEpoch: 1, claimToken: secondClaim.claimToken,
+    }, { materialPurposePin, memoryLineageSourceIds: [globalMemorySourceId], globalMemoryIds: [confirmedMemory.id] }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+  } finally {
+    await fixture.close();
+  }
+});
+
+it("streams and completes a turn when opening_sources.version advances after submission", async () => {
+  const fixture = await createOpeningFixture();
+  const { scope, sql } = fixture;
+  const conversations = createOpeningConversationRepository(sql);
+  const jobs = createOpeningTutorJobsRepository(sql);
+  const chunks = createOpeningSourceChunksRepository(sql);
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: 100_000 });
+  const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+  const sourceId = randomUUID();
+  await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${sourceId},${scope.workspaceId},'advancing.txt','text/plain',24,${"9".repeat(64)},0,'uploaded','ready')`;
+  await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+    VALUES (${sourceId},0,${scope.workspaceId},'available')`;
+  await chunks.replaceChunks(scope, {
+    sourceId, sourceVersion: 0,
+    chunks: [{ page: 1, text: "Snapshot v0 content", slideLabel: null, startMs: null, endMs: null, imageObjectKey: null }],
+  });
+  const conversation = await conversations.create(scope, { title: "Streaming version advance", courseId: null });
+  const saved = await conversations.appendSavedTurn({
+    scope, conversationId: conversation.id, text: "Explain snapshot", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [sourceId], learningSessionId: null, currentPage: 1, chunkId: null,
+  });
+  keys.push(tutorStreamKey(scope.workspaceId, saved.jobId), tutorStreamEpochKey(scope.workspaceId));
+  // Advance source version after turn submission, before worker claims/streams the turn.
+  await sql`UPDATE opening_sources SET version = 1 WHERE id = ${sourceId}`;
+  const provider: NonNullable<TutorTurnDeps["provider"]> = {
+    complete: async (_input, _signal, emit) => {
+      await emit!("Streaming snapshot v0");
+      const snapshot = (await reader.read(scope.workspaceId, saved.jobId))!;
+      expect(snapshot).toMatchObject({ text: "Streaming snapshot v0", sequence: 1 });
+      expect(await jobs.readStream(scope, saved.jobId, snapshot)).toMatchObject({ status: "running" });
+      return { text: "Streaming snapshot v0", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    },
+  };
+  try {
+    await expect(createTutorTurnHandler({
+      tutorJobs: jobs, stream: writer, chunks, budget, provider,
+      retrieveContext: createOpeningMaterialRetriever(sql, budget, null),
+      privacy: createOpeningPrivacyRepository(sql),
+      config: { maxContextCharacters: 1000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+    })(saved.jobId)).resolves.toEqual({ skipped: false });
+    expect(await jobs.get(scope, saved.jobId)).toMatchObject({ status: "succeeded" });
   } finally {
     await fixture.close();
   }

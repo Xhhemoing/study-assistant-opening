@@ -81,6 +81,7 @@ export {
   ledgerActionForProviderError,
   replayDisposition,
   runBudgetedCall,
+  runBudgetedCallWithReceipt,
   settleCentsForActual,
   type BudgetCallOutcomeCode,
   type BudgetReplayDisposition,

@@ -3,6 +3,7 @@ import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { assertSourceTurnsOwned, lockOwnedWorkspace } from "./opening-memory-admission";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
+import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 export type ReplaceMemoryInput = {
   id: string;
@@ -29,7 +30,7 @@ export function replaceOwnedMemory(
   if (!text) throw new OpeningMemoryError("VALIDATION", "memory text is required");
   if (!input.sourceTurnIds.length) throw new OpeningMemoryError("VALIDATION", "corrected memory requires a source turn");
   if (input.clientKey.length < 8) throw new OpeningMemoryError("VALIDATION", "clientKey is too short");
-  return sql.begin(async (tx) => {
+  return withOpeningTutorStreamFenceCommit(sql, async (tx) => {
     await lockOwnedWorkspace(tx, scope);
     const rows = await tx`
       SELECT * FROM opening_memories
@@ -79,6 +80,8 @@ export function replaceOwnedMemory(
         gen_random_uuid(), ${scope.workspaceId}, ${currentMemory.courseId}, 'confirmed', ${text},
         ${tx.json(input.sourceTurnIds as never)}, ${currentMemory.version + 1}, NULL, 'active', ${input.clientKey}
       ) RETURNING *`;
+    // Superseding a confirmed memory invalidates in-flight Tutor streams that injected it.
+    await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
     return mapMemoryRow(inserted[0] as Record<string, unknown>);
   });
 }

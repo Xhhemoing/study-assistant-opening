@@ -296,6 +296,54 @@ describe("sm95 same-attempt explain context", () => {
     } finally { vi.unstubAllEnvs(); }
   });
 
+  it("advances Redis attempt-head on idle revision after a completed explanation so subsequent streaming on rev2 succeeds", async () => {
+    const f = await seed();
+    const { scope, sql } = fixture;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const headKey = tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id);
+    const keysToClean = [tutorStreamKey(scope.workspaceId, f.saved.jobId), tutorStreamEpochKey(scope.workspaceId), headKey, `${headKey}:rev`];
+    try {
+      // Complete a real streaming explanation on rev1 (f.graded.id), leaving attempt-head = rev1 in Redis and 0 running jobs.
+      const firstRun = handler(f, async emit => {
+        await emit!("rev1 explanation");
+      }, writer);
+      expect(await firstRun.run(f.saved.jobId)).toEqual({ skipped: false });
+      expect(await f.jobs.get(scope, f.saved.jobId)).toMatchObject({ status: "succeeded" });
+      expect(await redis.get(headKey)).toBe(f.graded.id);
+
+      // Revise the attempt to rev2 while zero Tutor jobs are running.
+      const revised = await f.correct();
+      await vi.waitFor(async () => {
+        expect(await redis.get(headKey)).toBe(revised.headObservationId);
+      });
+
+      // Start a new streaming explanation on rev2 and verify SSE deltas publish and read cleanly.
+      const secondTurn = await bindAttempt(f, f.attempt, "explain");
+      keysToClean.push(tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId));
+      const secondClaim = await secondTurn.claim();
+      const secondSnapshot = (await f.jobs.readAttemptContext(scope, secondClaim))!;
+      expect(secondSnapshot.headObservationId).toBe(revised.headObservationId);
+      const secondContext = {
+        privacyEpoch: secondSnapshot.privacyEpoch, contextSourceRefs: secondSnapshot.sourceRefs,
+        exposureReceiptId: null, claimToken: secondClaim.claimToken, executionId: secondClaim.executionId,
+        attemptFence: tutorAttemptFence(secondSnapshot),
+      };
+      await f.jobs.withStreamPublication(scope, secondTurn.saved.jobId, { ...secondContext, attemptContext: secondSnapshot }, async () => {
+        await writer.begin(scope.workspaceId, secondTurn.saved.jobId, secondContext);
+        expect(await writer.append(scope.workspaceId, secondTurn.saved.jobId, "rev2 explanation delta",
+          secondClaim.executionId, secondSnapshot.privacyEpoch, secondContext.attemptFence)).toBe(1);
+      });
+      const cached = (await reader.read(scope.workspaceId, secondTurn.saved.jobId))!;
+      expect(cached).toMatchObject({ text: "rev2 explanation delta", sequence: 1 });
+      expect(await f.jobs.readStream(scope, secondTurn.saved.jobId, cached)).toMatchObject({ status: "running" });
+      expect(await sql`SELECT status FROM opening_tutor_jobs WHERE id=${secondTurn.saved.jobId}`).toMatchObject([{ status: "running" }]);
+    } finally {
+      try { if (redis.status === "ready") await redis.del(...keysToClean); }
+      finally { redis.disconnect(); }
+    }
+  });
+
   it("streams and saves an explanation pinned to available source v1 after it advances to v2", async () => {
     const f = await seed();
     const { scope, sql } = fixture;

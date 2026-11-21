@@ -16,6 +16,7 @@ export type TutorStreamContext = {
   attemptFence?: TutorAttemptFence;
   materialPurposePin?: OpeningMaterialPurposePin;
   memoryLineageSourceIds?: string[];
+  globalMemoryIds?: string[];
 };
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
@@ -391,9 +392,18 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     }
     memoryLineageSourceIds = [...new Set(context.memoryLineageSourceIds.map(id => id.toLowerCase()))].sort();
   }
+  let globalMemoryIds: string[] | undefined;
+  if (context.globalMemoryIds !== undefined) {
+    if (!Array.isArray(context.globalMemoryIds)
+      || context.globalMemoryIds.some(id => !uuidSchema.safeParse(id).success)) {
+      throw new Error("invalid tutor stream cache");
+    }
+    globalMemoryIds = [...new Set(context.globalMemoryIds.map(id => id.toLowerCase()))].sort();
+  }
   return { ...context, ...(fence ? { attemptFence: fence } : {}),
     ...(materialPurposePin ? { materialPurposePin } : {}),
     ...(memoryLineageSourceIds ? { memoryLineageSourceIds } : {}),
+    ...(globalMemoryIds ? { globalMemoryIds } : {}),
     contextSourceRefs: refs, text: row.text, sequence };
 }
 

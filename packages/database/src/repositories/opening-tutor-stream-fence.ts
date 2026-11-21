@@ -57,11 +57,18 @@ export function hasAttemptedFallbackStreamSeal(error: unknown): boolean {
 type PostCommitFence = () => void;
 const postCommitFences = new WeakMap<object, PostCommitFence[]>();
 
-function enqueuePostCommitFence(tx: TransactionSql, task: PostCommitFence): boolean {
+function assertPostCommitFenceScope(tx: TransactionSql): PostCommitFence[] {
   const queue = postCommitFences.get(tx);
-  if (!queue) return false;
-  queue.push(task);
-  return true;
+  if (!queue) {
+    throw new Error(
+      "Tutor stream Redis fences must run inside withOpeningTutorStreamFenceCommit (or runWithNestedTutorStreamFences)",
+    );
+  }
+  return queue;
+}
+
+function enqueuePostCommitFence(tx: TransactionSql, task: PostCommitFence): void {
+  assertPostCommitFenceScope(tx).push(task);
 }
 
 /**
@@ -320,34 +327,68 @@ export async function fenceCancelledOpeningTutorStream(workspaceId: string, jobI
 }
 
 /** Call while holding the workspace history and attempt or observation root locks. */
-export async function fenceOpeningTutorAttemptHead(tx: TransactionSql, workspaceId: string, attemptId: string,
-  rootObservationId: string | null, headObservationId: string,
-  redisUrl = process.env.REDIS_URL?.trim()): Promise<void> {
-  // Only actively running executions can still publish attempt-bound stream deltas.
-  // Completed/terminal jobs never trigger Redis revocation, and PostgreSQL's
-  // attempt/observation head checks already fence readStream/withStreamPublication/completeTurn.
-  const [execution] = await tx`SELECT 1 FROM opening_tutor_jobs j
+export async function fenceOpeningTutorAttemptHead(
+  tx: TransactionSql,
+  workspaceId: string,
+  attemptId: string,
+  rootObservationId: string | null,
+  headObservationId: string,
+  redisUrlOrOptions?: string | { redisUrl?: string; headRevision?: number },
+): Promise<void> {
+  assertPostCommitFenceScope(tx);
+  const redisUrl = (typeof redisUrlOrOptions === "string"
+    ? redisUrlOrOptions
+    : redisUrlOrOptions?.redisUrl) ?? process.env.REDIS_URL?.trim();
+  const headRevision = typeof redisUrlOrOptions === "object" ? redisUrlOrOptions.headRevision : undefined;
+  // Query only actively running executions on this attempt (no lock on opening_tutor_jobs
+  // to preserve lock order with readStream Phase 2).
+  const runningExecutions = await tx`SELECT j.id, j.timing_execution_id FROM opening_tutor_jobs j
     JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
     WHERE j.workspace_id=${workspaceId}
       AND j.status='running'
       AND j.timing_execution_id IS NOT NULL
       AND (t.attempt_id=${attemptId} OR (t.attempt_id IS NULL AND lower(t.context_anchor->>'attemptId')=${attemptId}))
-    LIMIT 1`;
-  if (!execution || !redisUrl) return;
+    ORDER BY j.id`;
+  if (!redisUrl) return;
   const key = rootObservationId === null ? tutorStreamPreAnswerHeadKey(workspaceId, attemptId)
     : tutorStreamAttemptHeadKey(workspaceId, rootObservationId);
-  // Dispatch strictly after PostgreSQL commits (never before commit, never on rollback,
-  // and never blocking or failing learner answer submissions/revisions during a Redis outage).
+  const revKey = `${key}:rev`;
+  const streamKeys = runningExecutions.map(row => tutorStreamKey(workspaceId, String(row.id)));
+  const executionIds = runningExecutions.map(row => String(row.timing_execution_id));
+  // ALWAYS dispatch the post-commit monotonic Redis attempt-head update (even when zero
+  // Tutor jobs are currently running) so a stale prior head left in Redis by a completed turn
+  // never blocks subsequent streaming on the revised head until TTL expiry.
   enqueuePostCommitFence(tx, () => {
     void evalRevocationRedis(redisUrl, `
-      redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
-    `, 1, [key, headObservationId, TUTOR_STREAM_TTL_SECONDS]).catch(() => undefined);
+      local currentRev = tonumber(redis.call('GET', KEYS[2]) or '0')
+      local nextRev = tonumber(ARGV[3])
+      if not nextRev or nextRev >= currentRev then
+        redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+        if nextRev then
+          redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[2])
+        end
+      end
+      for i = 3, #KEYS do
+        local execution = redis.call('HGET', KEYS[i], 'executionId')
+        local expected = ARGV[i + 1]
+        if execution == expected then
+          redis.call('HSET', KEYS[i], 'sealed', '1')
+        elseif not execution then
+          redis.call('HSET', KEYS[i], 'executionId', expected, 'sealed', '1')
+          redis.call('EXPIRE', KEYS[i], ARGV[2])
+        end
+      end
+    `, 2 + streamKeys.length, [
+      key, revKey, ...streamKeys,
+      headObservationId, TUTOR_STREAM_TTL_SECONDS, headRevision ?? "", ...executionIds,
+    ]).catch(() => undefined);
   });
 }
 
 /** Call inside the revocation transaction (wrapped in withOpeningTutorStreamFenceCommit). */
 export async function advanceOpeningWorkspacePrivacyEpoch(tx: TransactionSql, scope: OpeningScope,
   redisUrl = process.env.REDIS_URL?.trim()): Promise<number> {
+  assertPostCommitFenceScope(tx);
   const [workspace] = await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1, updated_at=now()
     WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING id,privacy_epoch`;
   if (!workspace) throw new Error("Workspace disappeared while revoking tutor stream eligibility");

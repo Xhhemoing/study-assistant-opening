@@ -295,7 +295,11 @@ export async function insertOpeningLearningObservationInTx(tx: TransactionSql, s
     }
   }
   const observation = await qualify(mapLearningObservation(rows[0]));
-  if (attempt) await fenceOpeningTutorAttemptHead(tx, String(attempt.workspace_id), String(attempt.id), null, id);
+  if (attempt) {
+    await fenceOpeningTutorAttemptHead(tx, String(attempt.workspace_id), String(attempt.id), null, id, {
+      headRevision: workspaceRevision,
+    });
+  }
   return observation;
 }
 
