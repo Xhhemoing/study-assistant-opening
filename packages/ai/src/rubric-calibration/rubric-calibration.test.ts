@@ -34,6 +34,60 @@ function calibratedPoint(band: number, rawBand = band, countsTowardMastery = tru
   return { status: "calibrated", band, rawBand, countsTowardMastery };
 }
 
+describe("Rubric calibration input snapshots", () => {
+  it.each([1, 2])("rejects a shared-reference graph without reading a getter added on descriptor read %i", (mutationRead) => {
+    const evaluations = [
+      (extra: object) => evaluateAnchorCalibratedRubric({
+        submissionId: "shared-data",
+        dimension: "task_response",
+        text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+        mode: "formal_assessment",
+        assisted: false,
+        comparisons: consistentComparisonsForTarget("task_response", 6),
+        ...extra,
+      }).status === "calibrated",
+      (extra: object) => evaluateRubricCalibrationGate({
+        benchmarkItems: [4.5, 5, 6, 6.5, 7.5, 8].map((band) => ({
+          itemId: `gold-${band}`,
+          trueBand: band,
+          evaluation: calibratedPoint(band),
+        })),
+        counterfactualTriplets: [{
+          tripletId: "test-triplet",
+          substantiveConcise: calibratedPoint(6),
+          templatePaddedExpansion: calibratedPoint(6, 6.1, false),
+          equalLengthSubstantive: calibratedPoint(7.5),
+        }],
+        ...extra,
+      }).passed,
+    ];
+
+    for (const evaluate of evaluations) {
+      const sibling = { label: "shared" };
+      expect(evaluate({ a: sibling, c: { ref: sibling } })).toBe(true);
+      let descriptorReads = 0;
+      let getterRuns = 0;
+      const middle = new Proxy({ marker: true }, {
+        getOwnPropertyDescriptor(target, key) {
+          if (key === "marker" && ++descriptorReads === mutationRead) {
+            Object.defineProperty(sibling, "added", {
+              enumerable: true,
+              get() {
+                getterRuns += 1;
+                return "unread";
+              },
+            });
+          }
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      });
+      expect(evaluate({ a: sibling, b: middle, c: { ref: sibling } })).toBe(false);
+      expect(descriptorReads).toBe(mutationRead);
+      expect(getterRuns).toBe(0);
+    }
+  });
+});
+
 describe("AnchorCalibratedRubricV1 sentinel anchors & anti-padding detector", () => {
   it("provides ordered low/mid/high sentinel anchors for every rubric dimension", () => {
     expect(SENTINEL_ANCHOR_ESSAYS.map((essay) => essay.band)).toEqual([...SENTINEL_BANDS]);
@@ -212,7 +266,7 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
       },
     );
     const toctouRes = evaluateAnchorCalibratedRubric(toctouSubmissionProxy);
-    expect(submissionIdReads).toBe(1);
+    expect(submissionIdReads).toBe(2);
     expect(toctouRes.status).toBe("interval_only");
     expect(toctouRes.countsTowardMastery).toBe(false);
     expect(toctouRes.inconsistencyReasons).toEqual(["invalid_submission_input"]);
@@ -1020,7 +1074,7 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
     expect(mismatchedSubId.passed).toBe(false);
     expect(mismatchedSubId.failures).toContain("benchmark_cohort_mismatch");
 
-    // Round-10 [P2-B]: Single-pass read & Proxy/exotic rejection on evaluateRubricCalibrationGate input/thresholds.
+    // The descriptor recheck rejects a Proxy whose reports change between capture and verification.
     let expectedIdReads = 0;
     const statefulProxyInput = new Proxy(
       {
@@ -1047,7 +1101,7 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
       },
     );
     const proxyGateRes = evaluateRubricCalibrationGate(statefulProxyInput);
-    expect(expectedIdReads).toBe(1);
+    expect(expectedIdReads).toBe(2);
     expect(proxyGateRes.passed).toBe(false);
 
     const exoticThresholds = Object.setPrototypeOf(

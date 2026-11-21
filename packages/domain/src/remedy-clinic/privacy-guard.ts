@@ -1,6 +1,6 @@
 /**
  * Pure deterministic source-revocation and privacy-epoch guard for RemedyClinicSessionV1.
- * Zero node:* or persistence imports; safe in browser and worker runtimes.
+ * Safe in browser and worker runtimes.
  */
 
 export interface RemedySourceRef {
@@ -95,281 +95,240 @@ function isValidSourceVersion(version: unknown): version is string | number {
   return typeof version === "number" && Number.isFinite(version);
 }
 
-const GUARD_REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
-const GUARD_ARRAY_BUFFER_LEN_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
-const GUARD_DATA_VIEW_LEN_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
-const GUARD_SHARED_BUFFER_LEN_GET =
-  typeof SharedArrayBuffer !== "undefined"
-    ? Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength")?.get
-    : undefined;
-const GUARD_WEAK_REF_DEREF = typeof WeakRef !== "undefined" ? WeakRef.prototype.deref : undefined;
-const GUARD_FINALIZATION_UNREGISTER =
-  typeof FinalizationRegistry !== "undefined" ? FinalizationRegistry.prototype.unregister : undefined;
-const GUARD_GENERATOR_RETURN = (
-  Object.getPrototypeOf(Object.getPrototypeOf((function* () {})())) as { return?: (value?: unknown) => unknown } | null
-)?.return;
-const GUARD_ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
-const GUARD_WEAK_KEY = Object.freeze({});
-const VERIFIED_ACTIVE_SOURCE_SNAPSHOTS = new WeakSet<ReadonlyMap<string, ActiveSourceEntry>>();
+const MAX_ACTIVE_SOURCES_ENTRIES = 10_000;
+const MAP_SIZE_GET = Object.getOwnPropertyDescriptor(Map.prototype, "size")!.get!;
+const MAP_FOR_EACH = Map.prototype.forEach;
+const SET_SIZE_GET = Object.getOwnPropertyDescriptor(Set.prototype, "size")!.get!;
+const IS_ERROR = (Error as { isError?: (value: unknown) => boolean }).isError;
 
-function matchesGuardBrand(check: () => unknown): boolean {
+export interface ClinicDataShape {
+  readonly allowFunction?: true;
+  readonly allowMap?: true;
+  readonly fields?: Readonly<Record<string, ClinicDataShape>>;
+  readonly item?: ClinicDataShape;
+  readonly maxDepth?: number;
+}
+
+export const ACTIVE_SOURCES_SHAPE: ClinicDataShape = { allowMap: true, maxDepth: 32 };
+
+type DataCallback = (...args: never[]) => unknown;
+type ClinicDataSnapshot =
+  | { readonly ok: true; readonly value: unknown; readonly firstCallback?: DataCallback; readonly hasMap?: boolean }
+  | { readonly ok: false };
+
+interface ClinicDataNode {
+  readonly kind: "record" | "array" | "map";
+  readonly proto: object | null;
+  readonly entries: ReadonlyArray<readonly [string, unknown]>;
+}
+
+function hasCollectionSlot(value: object, sizeGetter: () => unknown): boolean {
   try {
-    check();
+    Reflect.apply(sizeGetter, value, []);
     return true;
   } catch {
     return false;
   }
 }
 
-function hasGuardExoticBrand(obj: object, proto: object | null, hasOwnConstructor: boolean): boolean {
-  try {
-    if (ArrayBuffer.isView(obj)) return true;
-    if (typeof GUARD_ERROR_IS_ERROR === "function") {
-      if (GUARD_ERROR_IS_ERROR(obj)) return true;
-    } else if (
-      (proto === Object.prototype || proto === null || proto === Array.prototype) &&
-      Object.getOwnPropertyDescriptor(obj, Symbol.toStringTag) === undefined &&
-      Object.prototype.toString.call(obj) === "[object Error]"
-    ) {
-      return true;
-    }
-    if (matchesGuardBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
-    if (matchesGuardBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
-    if (matchesGuardBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [GUARD_WEAK_KEY]))) return true;
-    if (matchesGuardBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [GUARD_WEAK_KEY]))) return true;
-    if (GUARD_WEAK_REF_DEREF && matchesGuardBrand(() => Reflect.apply(GUARD_WEAK_REF_DEREF, obj, []))) return true;
-    if (
-      GUARD_FINALIZATION_UNREGISTER &&
-      matchesGuardBrand(() => Reflect.apply(GUARD_FINALIZATION_UNREGISTER, obj, [GUARD_WEAK_KEY]))
-    ) {
-      return true;
-    }
-    if (matchesGuardBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
-    if (
-      GUARD_REGEXP_SOURCE_GET &&
-      obj !== RegExp.prototype &&
-      matchesGuardBrand(() => Reflect.apply(GUARD_REGEXP_SOURCE_GET, obj, []))
-    ) {
-      return true;
-    }
-    if (GUARD_ARRAY_BUFFER_LEN_GET && matchesGuardBrand(() => Reflect.apply(GUARD_ARRAY_BUFFER_LEN_GET, obj, []))) {
-      return true;
-    }
-    if (GUARD_DATA_VIEW_LEN_GET && matchesGuardBrand(() => Reflect.apply(GUARD_DATA_VIEW_LEN_GET, obj, []))) {
-      return true;
-    }
-    if (GUARD_SHARED_BUFFER_LEN_GET && matchesGuardBrand(() => Reflect.apply(GUARD_SHARED_BUFFER_LEN_GET, obj, []))) {
-      return true;
-    }
-    if (GUARD_GENERATOR_RETURN && matchesGuardBrand(() => Reflect.apply(GUARD_GENERATOR_RETURN, obj, [undefined]))) {
-      return true;
-    }
-    if (proto === Object.prototype && !hasOwnConstructor) {
-      try {
-        if (Reflect.apply(Promise.resolve, Object, [obj]) === obj) return true;
-      } catch {
-        // Not a Promise.
-      }
-    }
-    if (matchesGuardBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
-    if (matchesGuardBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
-    if (matchesGuardBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
-    if (matchesGuardBrand(() => Reflect.apply(Symbol.prototype.valueOf, obj, []))) return true;
-    if (matchesGuardBrand(() => Reflect.apply(BigInt.prototype.valueOf, obj, []))) return true;
-    return false;
-  } catch {
-    return true;
-  }
+function captureMapEntries(map: object): ClinicDataNode["entries"] | null {
+  const initialSize = Reflect.apply(MAP_SIZE_GET, map, []) as number;
+  if (initialSize > MAX_ACTIVE_SOURCES_ENTRIES || Reflect.ownKeys(map).length !== 0) return null;
+
+  const rawEntries: Array<readonly [unknown, unknown]> = [];
+  Reflect.apply(MAP_FOR_EACH, map, [
+    (value: unknown, key: unknown) => {
+      if (rawEntries.length === initialSize) throw new RangeError("Map size changed during capture");
+      rawEntries.push([key, value]);
+    },
+  ]);
+  if (rawEntries.length !== initialSize || rawEntries.some(([key]) => typeof key !== "string")) return null;
+  return rawEntries as ClinicDataNode["entries"];
 }
 
-function isPrimitiveValue(val: unknown): boolean {
-  return val === null || (typeof val !== "object" && typeof val !== "function");
+function readClinicDataNode(value: object, allowMap = false): ClinicDataNode | null {
+  const proto = Object.getPrototypeOf(value) as object | null;
+  if (allowMap && proto === Map.prototype) {
+    const entries = captureMapEntries(value);
+    return entries && { kind: "map", proto, entries };
+  }
+
+  const array = Array.isArray(value);
+  if (array ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  const length: unknown = descriptors["length"]?.value;
+  if (array && (typeof length !== "number" || !Number.isSafeInteger(length) || keys.length !== length + 1)) return null;
+
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const key of keys) {
+    if (array && key === "length") continue;
+    if (typeof key !== "string" || key === "__proto__" || (array && key !== String(entries.length))) return null;
+    const descriptor = descriptors[key]!;
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return null;
+    entries.push([key, descriptor.value]);
+  }
+  return { kind: array ? "array" : "record", proto, entries };
 }
 
-function snapshotOwnGuardRecord(value: unknown): Record<string, unknown> | null {
-  if (value === null || typeof value !== "object") return null;
-  try {
-    if (Array.isArray(value)) return null;
-    const proto = Object.getPrototypeOf(value) as object | null;
-    if (proto !== Object.prototype && proto !== null) return null;
-    const keys = Reflect.ownKeys(value);
-    const snap: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    let hasOwnConstructor = false;
-    for (const key of keys) {
-      if (typeof key !== "string" || key === "__proto__") return null;
-      if (key === "constructor") hasOwnConstructor = true;
-      const desc = Object.getOwnPropertyDescriptor(value, key);
-      if (
-        !desc ||
-        !desc.enumerable ||
-        !Object.hasOwn(desc, "value") ||
-        desc.get !== undefined ||
-        desc.set !== undefined
-      ) {
-        return null;
-      }
-      Object.defineProperty(snap, key, {
-        value: desc.value,
-        writable: false,
-        enumerable: true,
-        configurable: false,
-      });
-    }
-    if (hasGuardExoticBrand(value, proto, hasOwnConstructor)) return null;
-    return Object.freeze(snap);
-  } catch {
-    return null;
-  }
-}
-
-function snapshotPlainPrimitiveRecord(value: unknown): Record<string, unknown> | null {
-  const snap = snapshotOwnGuardRecord(value);
-  if (!snap) return null;
-  for (const key of Object.keys(snap)) {
-    if (!isPrimitiveValue(snap[key])) return null;
-  }
+function cloneErrorMessage(value: unknown): string | undefined {
   try {
     structuredClone(value);
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof Error && error.name === "DataCloneError") return error.message;
   }
-  return snap;
+  return undefined;
 }
 
-function isGenuinePlainMap(value: unknown): value is ReadonlyMap<unknown, unknown> {
-  if (value === null || typeof value !== "object") return false;
-  try {
-    if (Object.getPrototypeOf(value) !== Map.prototype) return false;
-    if (Reflect.ownKeys(value).length !== 0) return false;
-    Reflect.apply(Map.prototype.has, value, [undefined]);
-    return true;
-  } catch {
-    return false;
+const NON_DATA_CLONE_ERRORS = new Set([
+  cloneErrorMessage(new Proxy({}, {})),
+  cloneErrorMessage(new Proxy([], {})),
+  cloneErrorMessage(new Proxy(Object.create(null) as object, {})),
+  cloneErrorMessage(Object.setPrototypeOf((async function* () {})(), Object.prototype)),
+  cloneErrorMessage(Object.setPrototypeOf((function* () {})(), Object.prototype)),
+  cloneErrorMessage(Promise.resolve()),
+]);
+const PROXY_CALLBACK_SOURCE = Function.prototype.toString.call(new Proxy(() => undefined, {}));
+
+function passesNativeClone(raw: object, container: ClinicDataNode, firstCallback?: DataCallback): boolean {
+  if (firstCallback) {
+    // An allowed callback can make a plain container unclonable. Accept its diagnostic
+    // only when the engine distinguishes it from a root Proxy or exotic.
+    const expected = cloneErrorMessage(firstCallback);
+    return expected !== undefined && !NON_DATA_CLONE_ERRORS.has(expected) && cloneErrorMessage(raw) === expected;
   }
+  const clone = structuredClone(raw);
+  const expectedProto = container.kind === "record" ? Object.prototype : container.proto;
+  return Object.getPrototypeOf(clone) === expectedProto;
 }
 
-function snapshotDenseArray(value: unknown): readonly unknown[] | null {
-  try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
-    const lenDesc = Object.getOwnPropertyDescriptor(value, "length");
-    if (
-      !lenDesc ||
-      !Object.hasOwn(lenDesc, "value") ||
-      typeof lenDesc.value !== "number" ||
-      !Number.isInteger(lenDesc.value) ||
-      lenDesc.value < 0
-    ) {
-      return null;
-    }
-    const len = lenDesc.value;
-    if (Reflect.ownKeys(value).length !== len + 1) return null;
-    if (hasGuardExoticBrand(value, Array.prototype, false)) return null;
-    const out: unknown[] = new Array(len);
-    for (let i = 0; i < len; i += 1) {
-      const desc = Object.getOwnPropertyDescriptor(value, String(i));
-      if (
-        !desc ||
-        !desc.enumerable ||
-        !Object.hasOwn(desc, "value") ||
-        desc.get !== undefined ||
-        desc.set !== undefined
-      ) {
-        return null;
+/** Verify a descriptor graph in DFS post-order, then expose only the detached snapshot. */
+export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): ClinicDataSnapshot {
+  type CompleteNode = {
+    readonly raw: object;
+    readonly shape: ClinicDataShape | undefined;
+    readonly data: ClinicDataNode;
+    readonly snapshot: Extract<ClinicDataSnapshot, { ok: true }>;
+  };
+  const inStack = new WeakSet<object>();
+  const done = new WeakMap<object, CompleteNode>();
+  const postOrder: CompleteNode[] = [];
+
+  function visit(raw: unknown, policy: ClinicDataShape | undefined, remainingDepth: number): ClinicDataSnapshot {
+    if (typeof raw === "symbol") return { ok: false };
+    if (typeof raw === "function") {
+      // Callable Proxies and bound functions can share the same opaque source.
+      if (!policy?.allowFunction || Function.prototype.toString.call(raw) === PROXY_CALLBACK_SOURCE) {
+        return { ok: false };
       }
-      out[i] = desc.value;
+      return { ok: true, value: raw, firstCallback: raw as DataCallback };
     }
-    return Object.freeze(out);
-  } catch {
-    return null;
+    if (raw === null || typeof raw !== "object") return { ok: true, value: raw };
+    const depth = Math.min(remainingDepth, policy?.maxDepth ?? Infinity);
+    if (depth < 0 || inStack.has(raw)) return { ok: false };
+    const prior = done.get(raw);
+    if (prior) {
+      // Data-only aliases can occur in several slots. Special values are allowed
+      // only along the paths that explicitly opted into them.
+      return prior.shape === policy || (!prior.snapshot.firstCallback && !prior.snapshot.hasMap)
+        ? prior.snapshot
+        : { ok: false };
+    }
+
+    inStack.add(raw);
+    if (IS_ERROR?.(raw)) return { ok: false };
+    const data = readClinicDataNode(raw, policy?.allowMap);
+    if (!data) return { ok: false };
+    // Reassigned collection prototypes can hide entries outside the descriptor graph.
+    if (data.kind !== "map" && (hasCollectionSlot(raw, MAP_SIZE_GET) || hasCollectionSlot(raw, SET_SIZE_GET))) {
+      return { ok: false };
+    }
+    const copy: object = data.kind === "map"
+      ? new Map<string, unknown>()
+      : data.kind === "array"
+        ? []
+        : Object.create(data.proto) as object;
+    let firstCallback: DataCallback | undefined;
+    let hasMap = data.kind === "map";
+    for (const [key, child] of data.entries) {
+      const fields = policy?.fields;
+      const childPolicy = data.kind === "array"
+        ? policy?.item
+        : fields && Object.hasOwn(fields, key) ? fields[key] : undefined;
+      const childSnapshot = visit(child, childPolicy, depth - 1);
+      if (!childSnapshot.ok) return childSnapshot;
+      if (copy instanceof Map) {
+        copy.set(key, childSnapshot.value);
+      } else {
+        Object.defineProperty(copy, key, { value: childSnapshot.value, enumerable: true });
+      }
+      firstCallback ??= childSnapshot.firstCallback;
+      hasMap ||= childSnapshot.hasMap === true;
+    }
+    const snapshot = { ok: true as const, value: Object.freeze(copy), firstCallback, hasMap };
+    const complete = { raw, shape: policy, data, snapshot };
+    inStack.delete(raw);
+    done.set(raw, complete);
+    postOrder.push(complete);
+    return snapshot;
   }
-}
 
-const MAX_ACTIVE_SOURCES_DEPTH = 32;
+  const verified = new WeakSet<object>();
+  const verifiedList: CompleteNode[] = [];
+  function isVerifiedChild(child: unknown): boolean {
+    return child === null || typeof child !== "object" || verified.has(child);
+  }
 
-function walkActiveSourcesPlainValue(
-  value: unknown,
-  seen: Set<object>,
-  preOrder: object[],
-  depth: number,
-): boolean {
-  if (value === null || value === undefined) return true;
-  const kind = typeof value;
-  if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") return true;
-  if (kind !== "object") return false;
-  const obj = value as object;
-  if (seen.has(obj)) return true;
-  if (depth > MAX_ACTIVE_SOURCES_DEPTH) return false;
-  seen.add(obj);
-  preOrder.push(obj);
-  try {
-    const proto = Object.getPrototypeOf(obj) as object | null;
-    if (Array.isArray(obj)) {
-      if (proto !== Array.prototype) return false;
-      const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
-      if (
-        !lenDesc ||
-        !Object.hasOwn(lenDesc, "value") ||
-        typeof lenDesc.value !== "number" ||
-        !Number.isInteger(lenDesc.value) ||
-        lenDesc.value < 0
-      ) {
+  function remainsClosed(container: CompleteNode): boolean {
+    const { raw, data } = container;
+    if (Object.getPrototypeOf(raw) !== data.proto) return false;
+    if (data.kind === "map") {
+      // Capture a fixed readback of Map keys and values before comparing entries.
+      const entries = captureMapEntries(raw);
+      return entries !== null && entries.length === data.entries.length &&
+        entries.every(([key, child], i) => {
+          const [previousKey, previousChild] = data.entries[i]!;
+          return key === previousKey && Object.is(child, previousChild) && isVerifiedChild(child);
+        });
+    }
+
+    const array = data.kind === "array";
+    if (Reflect.ownKeys(raw).length !== data.entries.length + (array ? 1 : 0)) return false;
+    if (array && Object.getOwnPropertyDescriptor(raw, "length")?.value !== data.entries.length) return false;
+    for (const [key, child] of data.entries) {
+      const desc = Object.getOwnPropertyDescriptor(raw, key);
+      if (!desc?.enumerable || !Object.hasOwn(desc, "value") || !Object.is(desc.value, child) || !isVerifiedChild(child)) {
         return false;
       }
-      const len = lenDesc.value;
-      if (Reflect.ownKeys(obj).length !== len + 1) return false;
-      if (hasGuardExoticBrand(obj, Array.prototype, false)) return false;
-      const children: unknown[] = new Array(len);
-      for (let i = 0; i < len; i += 1) {
-        const desc = Object.getOwnPropertyDescriptor(obj, String(i));
-        if (
-          !desc ||
-          !desc.enumerable ||
-          !Object.hasOwn(desc, "value") ||
-          desc.get !== undefined ||
-          desc.set !== undefined
-        ) {
-          return false;
-        }
-        children[i] = desc.value;
-      }
-      for (let i = 0; i < len; i += 1) {
-        if (!walkActiveSourcesPlainValue(children[i], seen, preOrder, depth + 1)) return false;
-      }
-      return true;
-    }
-    if (proto !== Object.prototype && proto !== null) return false;
-    const keys = Reflect.ownKeys(obj);
-    let hasOwnCtor = false;
-    const children: unknown[] = [];
-    for (const key of keys) {
-      if (typeof key !== "string" || key === "__proto__") return false;
-      if (key === "constructor") hasOwnCtor = true;
-      const desc = Object.getOwnPropertyDescriptor(obj, key);
-      if (
-        !desc ||
-        !desc.enumerable ||
-        !Object.hasOwn(desc, "value") ||
-        desc.get !== undefined ||
-        desc.set !== undefined
-      ) {
-        return false;
-      }
-      children.push(desc.value);
-    }
-    if (hasGuardExoticBrand(obj, proto, hasOwnCtor)) return false;
-    for (let i = 0; i < children.length; i += 1) {
-      if (!walkActiveSourcesPlainValue(children[i], seen, preOrder, depth + 1)) return false;
     }
     return true;
-  } catch {
-    return false;
   }
+
+  try {
+    const snapshot = visit(value, shape, Infinity);
+    if (!snapshot.ok) return snapshot;
+    for (const node of postOrder) {
+      if (!remainsClosed(node)) return { ok: false };
+      // The current node may have run descriptor traps. Only previously checked,
+      // genuine containers are reread here, so the closure stays intact until cloning.
+      if (!verifiedList.every(remainsClosed)) return { ok: false };
+      if (!passesNativeClone(node.raw, node.data, node.snapshot.firstCallback)) return { ok: false };
+      verified.add(node.raw);
+      verifiedList.push(node);
+    }
+    return snapshot;
+  } catch {
+    return { ok: false };
+  }
+}
+
+function isPrimitiveValue(value: unknown): boolean {
+  return value === null || (typeof value !== "object" && typeof value !== "function");
 }
 
 /**
  * Plain-data schema parser for a single already-verified ActiveSourcesMap entry.
- * Called ONLY after the entire container graph has passed descriptor-walk and reverse-pre-order
- * structuredClone verification; malformed plain-data entries (e.g. null, arrays, non-finite numbers,
+ * Called after the source container has been verified and detached; malformed plain-data entries (e.g. null, arrays, non-finite numbers,
  * blank version, or non-boolean active/revoked such as {}, [], "yes") degrade ONLY that entry to
  * undefined while preserving valid sibling sources.
  */
@@ -407,99 +366,30 @@ export interface ActiveSourcesInspection {
 }
 
 /**
- * Unified JS-security vs plain-data-schema inspection of ActiveSourcesMap:
- * - JS security boundary (getters/setters, Proxy, Promise, Generator, exotics, functions, symbols,
- *   forged Map, non-string Map key, own "__proto__", excessive depth): aborts BEFORE structuredClone
- *   (zero getter executions) or catches any Proxy via unconditional reverse-pre-order structuredClone,
- *   failing closed at container level (`containerValid: false`, empty sources).
- * - Plain-data schema boundary (valid plain Record or genuine Map whose entries contain malformed
- *   plain-data values like `{ version: "v1", active: {} }`, `{ version: "v1", revoked: [] }`,
- *   `{ version: "v1", active: "yes" }`, `{ version: "" }`, `null`, `[]`, `true`, `NaN`): degrades ONLY
- *   that entry to inactive while preserving all valid sibling sources (`containerValid: true`).
+ * Verify the entire source container before parsing entries. Malformed plain-data values
+ * are omitted while invalid JavaScript graphs invalidate the source container.
  */
 export function inspectActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ActiveSourcesInspection {
-  if (!activeSourcesMap || typeof activeSourcesMap !== "object") {
-    return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
-  }
-  if (VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.has(activeSourcesMap as ReadonlyMap<string, ActiveSourceEntry>)) {
-    return {
-      containerValid: true,
-      sources: activeSourcesMap as ReadonlyMap<string, ActiveSourceEntry>,
-    };
-  }
+  const snapshot = snapshotClinicData(activeSourcesMap, ACTIVE_SOURCES_SHAPE);
+  return snapshot.ok
+    ? parseActiveSourcesSnapshot(snapshot.value)
+    : { containerValid: false, sources: new Map() };
+}
 
-  if (isGenuinePlainMap(activeSourcesMap)) {
-    const rawEntries: Array<readonly [string, unknown]> = [];
-    const seen = new Set<object>([activeSourcesMap]);
-    const preOrder: object[] = [activeSourcesMap];
-    let containerOk = true;
-    try {
-      Reflect.apply(Map.prototype.forEach, activeSourcesMap, [
-        (rawEntry: unknown, rawKey: unknown) => {
-          if (!containerOk) return;
-          if (typeof rawKey !== "string") {
-            containerOk = false;
-            return;
-          }
-          if (!walkActiveSourcesPlainValue(rawEntry, seen, preOrder, 1)) {
-            containerOk = false;
-            return;
-          }
-          rawEntries.push([rawKey, rawEntry]);
-        },
-      ]);
-      if (!containerOk) {
-        return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
-      }
-      for (let i = preOrder.length - 1; i >= 0; i -= 1) {
-        structuredClone(preOrder[i]);
-      }
-      const mapSnap = new Map<string, ActiveSourceEntry>();
-      for (let i = 0; i < rawEntries.length; i += 1) {
-        const pair = rawEntries[i]!;
-        const parsed = parsePlainActiveSourceEntry(pair[1]);
-        if (parsed !== undefined) {
-          mapSnap.set(pair[0], parsed);
-        }
-      }
-      VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(mapSnap);
-      return { containerValid: true, sources: mapSnap };
-    } catch {
-      return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
-    }
+/** Parse a detached source container from snapshotClinicData. */
+export function parseActiveSourcesSnapshot(value: unknown): ActiveSourcesInspection {
+  const sources = new Map<string, ActiveSourceEntry>();
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { containerValid: false, sources };
   }
-
-  const recordSnap = snapshotOwnGuardRecord(activeSourcesMap);
-  if (!recordSnap) {
-    return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
+  const entries = value instanceof Map
+    ? (value as ReadonlyMap<string, unknown>).entries()
+    : Object.entries(value);
+  for (const [key, entryValue] of entries) {
+    const entry = parsePlainActiveSourceEntry(entryValue);
+    if (entry !== undefined) sources.set(key, entry);
   }
-
-  const seen = new Set<object>([activeSourcesMap as object]);
-  const preOrder: object[] = [activeSourcesMap as object];
-  const keys = Object.keys(recordSnap);
-  for (let i = 0; i < keys.length; i += 1) {
-    if (!walkActiveSourcesPlainValue(recordSnap[keys[i]!], seen, preOrder, 1)) {
-      return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
-    }
-  }
-  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
-    try {
-      structuredClone(preOrder[i]);
-    } catch {
-      return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
-    }
-  }
-
-  const snapshot = new Map<string, ActiveSourceEntry>();
-  for (let i = 0; i < keys.length; i += 1) {
-    const key = keys[i]!;
-    const parsed = parsePlainActiveSourceEntry(recordSnap[key]);
-    if (parsed !== undefined) {
-      snapshot.set(key, parsed);
-    }
-  }
-  VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(snapshot);
-  return { containerValid: true, sources: snapshot };
+  return { containerValid: true, sources };
 }
 
 export function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyMap<string, ActiveSourceEntry> {
@@ -521,24 +411,11 @@ function isFrozenSourceRefActive(
   return entry.version === ref.sourceVersion;
 }
 
-function isSourceRefActiveAgainstVerified(
-  ref: RemedySourceRef,
-  verifiedSources: ReadonlyMap<string, ActiveSourceEntry>,
-): boolean {
-  const refSnap = snapshotPlainPrimitiveRecord(ref);
-  if (!refSnap) return false;
-  const sourceId = refSnap["sourceId"];
-  const sourceVersion = refSnap["sourceVersion"];
-  if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return false;
-  return isFrozenSourceRefActive({ sourceId, sourceVersion }, verifiedSources);
-}
-
 export function isSourceRefActive(
   ref: RemedySourceRef,
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
-  const verifiedSources = snapshotActiveSourcesMap(activeSourcesMap);
-  return isSourceRefActiveAgainstVerified(ref, verifiedSources);
+  return areSourceRefsActive([ref], activeSourcesMap);
 }
 
 export function readOwnDataIndex<T>(
@@ -557,60 +434,45 @@ export function readOwnDataIndex<T>(
 }
 
 export function isDenseArray<T>(value: unknown): value is readonly T[] {
-  return snapshotDenseArray(value) !== null;
+  const snapshot = snapshotClinicData(value);
+  return snapshot.ok && Array.isArray(snapshot.value);
 }
 
 export function areSourceRefsActive(
   sourceRefs: readonly RemedySourceRef[],
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
-  const refsRes = snapshotSourceRefsStrict(sourceRefs);
-  if (!refsRes.ok || refsRes.refs.length === 0) return false;
-  const verifiedSources = snapshotActiveSourcesMap(activeSourcesMap);
-  for (let i = 0; i < refsRes.refs.length; i += 1) {
-    if (!isFrozenSourceRefActive(refsRes.refs[i]!, verifiedSources)) return false;
-  }
-  return true;
+  const snapshot = snapshotClinicData(sourceRefs);
+  if (!snapshot.ok) return false;
+  const refs = parseSourceRefs(snapshot.value);
+  return refs !== null && areFrozenSourceRefsActive(refs, snapshotActiveSourcesMap(activeSourcesMap));
 }
 
-function snapshotSourceRefsStrict(
-  sourceRefs: unknown,
-): { readonly ok: true; readonly refs: readonly RemedySourceRef[] } | { readonly ok: false } {
-  const items = snapshotDenseArray(sourceRefs);
-  if (!items) return { ok: false };
-  const preOrder: object[] = [sourceRefs as object];
+/** Check detached source refs against a parsed, private source snapshot. */
+export function areFrozenSourceRefsActive(
+  refs: readonly RemedySourceRef[],
+  verifiedSources: ReadonlyMap<string, ActiveSourceEntry>,
+): boolean {
+  return refs.length > 0 && refs.every((ref) => isFrozenSourceRefActive(ref, verifiedSources));
+}
+
+function parseSourceRefs(items: unknown): readonly RemedySourceRef[] | null {
+  if (!Array.isArray(items)) return null;
   const cloned: RemedySourceRef[] = [];
-  for (let i = 0; i < items.length; i += 1) {
-    const item = items[i];
-    if (item === null || typeof item !== "object") return { ok: false };
-    preOrder.push(item as object);
-    const itemSnap = snapshotOwnGuardRecord(item);
-    if (!itemSnap) return { ok: false };
-    for (const key of Object.keys(itemSnap)) {
-      if (!isPrimitiveValue(itemSnap[key])) return { ok: false };
-    }
-    const sourceId = itemSnap["sourceId"];
-    const sourceVersion = itemSnap["sourceVersion"];
-    if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) {
-      return { ok: false };
-    }
+  for (const item of items as readonly unknown[]) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
+    if (!Object.values(item).every(isPrimitiveValue)) return null;
+    const sourceId: unknown = Object.getOwnPropertyDescriptor(item, "sourceId")?.value;
+    const sourceVersion: unknown = Object.getOwnPropertyDescriptor(item, "sourceVersion")?.value;
+    if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return null;
     cloned.push(Object.freeze({ sourceId, sourceVersion }));
   }
-  // Reverse-pre-order per-node structuredClone: catches self-detaching element Proxies
-  // before testing the outer array or earlier elements.
-  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
-    try {
-      structuredClone(preOrder[i]);
-    } catch {
-      return { ok: false };
-    }
-  }
-  return { ok: true, refs: Object.freeze(cloned) };
+  return Object.freeze(cloned);
 }
 
 export function cloneSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
-  const result = snapshotSourceRefsStrict(sourceRefs);
-  return result.ok ? result.refs : Object.freeze([]);
+  const snapshot = snapshotClinicData(sourceRefs);
+  return (snapshot.ok && parseSourceRefs(snapshot.value)) || Object.freeze([]);
 }
 
 const EMPTY_INVALID_CASE: ClinicEvidenceCase = Object.freeze({
@@ -626,25 +488,22 @@ const EMPTY_INVALID_CASE: ClinicEvidenceCase = Object.freeze({
 });
 
 export function cloneEvidenceCase(item: ClinicEvidenceCase): ClinicEvidenceCase {
-  const snap = snapshotOwnGuardRecord(item);
-  if (!snap) return EMPTY_INVALID_CASE;
+  const snapshot = snapshotClinicData(item);
+  return snapshot.ok ? parseEvidenceCase(snapshot.value) : EMPTY_INVALID_CASE;
+}
 
+function parseEvidenceCase(item: unknown): ClinicEvidenceCase {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return EMPTY_INVALID_CASE;
+  const snap = Object.assign(Object.create(null) as Record<string, unknown>, item);
   let frozenRefs: readonly RemedySourceRef[] = Object.freeze([]);
   for (const key of Object.keys(snap)) {
     if (key === "sourceRefs") {
-      const refsRes = snapshotSourceRefsStrict(snap[key]);
-      if (!refsRes.ok) return EMPTY_INVALID_CASE;
-      frozenRefs = refsRes.refs;
-      continue;
-    }
-    if (!isPrimitiveValue(snap[key])) {
+      const refs = parseSourceRefs(snap[key]);
+      if (!refs) return EMPTY_INVALID_CASE;
+      frozenRefs = refs;
+    } else if (!isPrimitiveValue(snap[key])) {
       return EMPTY_INVALID_CASE;
     }
-  }
-  try {
-    structuredClone(item);
-  } catch {
-    return EMPTY_INVALID_CASE;
   }
 
   const readStr = (key: string): string => (typeof snap[key] === "string" ? (snap[key] as string) : "");
@@ -667,17 +526,12 @@ export function computeEvidenceCoverage(cases: readonly ClinicEvidenceCase[]): E
   const roots = new Set<string>();
   const chapters = new Set<string>();
   const dates = new Set<string>();
-  const items = snapshotDenseArray(cases);
-  if (!items) {
+  const snapshot = snapshotClinicData(cases);
+  if (!snapshot.ok || !Array.isArray(snapshot.value)) {
     return { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 };
   }
-  let allCloneSafe = true;
-  for (const rawItem of items) {
-    const item = cloneEvidenceCase(rawItem as ClinicEvidenceCase);
-    if (item === EMPTY_INVALID_CASE) {
-      allCloneSafe = false;
-      continue;
-    }
+  for (const rawItem of snapshot.value as readonly unknown[]) {
+    const item = parseEvidenceCase(rawItem);
     if (
       !isNonBlankText(item.attemptId) ||
       !isNonBlankText(item.rootAttemptId) ||
@@ -697,13 +551,6 @@ export function computeEvidenceCoverage(cases: readonly ClinicEvidenceCase[]): E
     roots.add(item.rootAttemptId);
     chapters.add(item.chapterId);
     dates.add(item.localDate);
-  }
-  if (allCloneSafe) {
-    try {
-      structuredClone(cases);
-    } catch {
-      return { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 };
-    }
   }
   return {
     rootAttemptCount: roots.size,
@@ -782,7 +629,7 @@ function buildSpreadCandidatePool(ordered: readonly ClinicEvidenceCase[]): reado
     pool.push(item);
   };
 
-  // Phase 1: Guarantee chapter diversity across the full ordered list before any cap.
+  // Phase 1: Guarantee chapter diversity across the full ordered list before capping it.
   const seenChapters = new Set<string>();
   for (const item of ordered) {
     if (seenChapters.has(item.chapterId)) continue;
@@ -864,9 +711,9 @@ function constructFallbackSpreadTriple(
 export function selectSpreadRepresentativeCases(
   cases: readonly ClinicEvidenceCase[],
 ): readonly ClinicEvidenceCase[] {
-  const items = snapshotDenseArray(cases);
-  if (!items) return Object.freeze([]);
-  const safeCases = items.map((item) => cloneEvidenceCase(item as ClinicEvidenceCase));
+  const snapshot = snapshotClinicData(cases);
+  if (!snapshot.ok || !Array.isArray(snapshot.value)) return Object.freeze([]);
+  const safeCases = (snapshot.value as readonly unknown[]).map(parseEvidenceCase);
   if (safeCases.length <= SELECTED_DIFF_CASE_COUNT) {
     return Object.freeze(safeCases);
   }

@@ -481,108 +481,92 @@ function hasRubricExoticSlot(obj: object): boolean {
   }
 }
 
-function snapshotPlainRubricDataInner(
-  value: unknown,
-  memo: Map<object, unknown>,
-  preOrder: object[],
-): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  if (value === null || value === undefined) return { ok: true, value };
-  const kind = typeof value;
-  if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") {
-    return { ok: true, value };
+type RubricDataSnapshot = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
+
+function readRubricNode(obj: object): {
+  readonly array: boolean;
+  readonly entries: ReadonlyArray<readonly [string, unknown]>;
+} | null {
+  const array = Array.isArray(obj);
+  const proto = Object.getPrototypeOf(obj) as object | null;
+  if (array ? proto !== Array.prototype : proto !== Object.prototype && proto !== null) return null;
+
+  const descriptors = Object.getOwnPropertyDescriptors(obj);
+  const keys = Reflect.ownKeys(descriptors);
+  const length: unknown = descriptors["length"]?.value;
+  if (array && (typeof length !== "number" || !Number.isSafeInteger(length) || keys.length !== length + 1)) return null;
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const key of keys) {
+    if (array && key === "length") continue;
+    if (typeof key !== "string" || key === "__proto__" || (array && key !== String(entries.length))) return null;
+    const descriptor = descriptors[key]!;
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return null;
+    entries.push([key, descriptor.value]);
   }
-  if (kind !== "object") return { ok: false };
-  const obj = value as object;
-  if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
-  preOrder.push(obj);
+  return { array, entries };
+}
+
+/** Shared by the submission and benchmark gates. Business code only consumes the frozen copy. */
+export function snapshotPlainRubricData(value: unknown): RubricDataSnapshot {
+  const inStack = new WeakSet<object>();
+  const snapshots = new WeakMap<object, unknown>();
+  const postOrder: object[] = [];
+
+  function visit(raw: unknown): RubricDataSnapshot {
+    if (raw === null || (typeof raw !== "object" && typeof raw !== "function" && typeof raw !== "symbol")) {
+      return { ok: true, value: raw };
+    }
+    if (typeof raw !== "object" || inStack.has(raw)) return { ok: false };
+    if (snapshots.has(raw)) return { ok: true, value: snapshots.get(raw) };
+    inStack.add(raw);
+    if (hasRubricExoticSlot(raw)) return { ok: false };
+    const node = readRubricNode(raw);
+    if (!node) return { ok: false };
+
+    const copy: unknown[] | Record<string, unknown> = node.array
+      ? []
+      : Object.create(null) as Record<string, unknown>;
+    for (const [key, child] of node.entries) {
+      const snapshot = visit(child);
+      if (!snapshot.ok) return snapshot;
+      Object.defineProperty(copy, key, { value: snapshot.value, enumerable: true });
+    }
+    Object.freeze(copy);
+    snapshots.set(raw, copy);
+    inStack.delete(raw);
+    postOrder.push(raw);
+    return { ok: true, value: copy };
+  }
+
+  const verified = new WeakSet<object>();
+  const verifiedList: object[] = [];
+  function isClosed(container: ReturnType<typeof readRubricNode>): boolean {
+    return container !== null && container.entries.every(([, child]) => {
+      if (typeof child === "function" || typeof child === "symbol") return false;
+      return child === null || typeof child !== "object" || verified.has(child);
+    });
+  }
+
   try {
-    const proto = Object.getPrototypeOf(obj) as object | null;
-    if (Array.isArray(obj)) {
-      if (proto !== Array.prototype) return { ok: false };
-      const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
-      if (
-        !lenDesc ||
-        !Object.hasOwn(lenDesc, "value") ||
-        typeof lenDesc.value !== "number" ||
-        !Number.isInteger(lenDesc.value) ||
-        lenDesc.value < 0
-      ) {
+    const snapshot = visit(value);
+    if (!snapshot.ok) return snapshot;
+    for (const raw of postOrder) {
+      const node = readRubricNode(raw);
+      if (!node || !isClosed(node)) return { ok: false };
+      // Only the current node can run descriptor traps. Recheck the verified closure
+      // afterward so a shared child cannot carry an injected getter into the native clone.
+      if (!verifiedList.every((item) => isClosed(readRubricNode(item)))) return { ok: false };
+      const clone = structuredClone(raw);
+      if (Object.getPrototypeOf(clone) !== (node.array ? Array.prototype : Object.prototype)) {
         return { ok: false };
       }
-      const len = lenDesc.value;
-      if (Reflect.ownKeys(obj).length !== len + 1) return { ok: false };
-      if (hasRubricExoticSlot(obj)) return { ok: false };
-      const out: unknown[] = new Array(len);
-      memo.set(obj, out);
-      for (let i = 0; i < len; i += 1) {
-        const desc = Object.getOwnPropertyDescriptor(obj, String(i));
-        if (
-          !desc ||
-          !desc.enumerable ||
-          !Object.hasOwn(desc, "value") ||
-          desc.get !== undefined ||
-          desc.set !== undefined
-        ) {
-          return { ok: false };
-        }
-        const child = snapshotPlainRubricDataInner(desc.value, memo, preOrder);
-        if (!child.ok) return { ok: false };
-        out[i] = child.value;
-      }
-      return { ok: true, value: Object.freeze(out) };
+      verified.add(raw);
+      verifiedList.push(raw);
     }
-    if (proto !== Object.prototype && proto !== null) return { ok: false };
-    const keys = Reflect.ownKeys(obj);
-    const entries: Array<{ readonly key: string; readonly value: unknown }> = [];
-    for (const key of keys) {
-      if (typeof key !== "string" || key === "__proto__") return { ok: false };
-      const desc = Object.getOwnPropertyDescriptor(obj, key);
-      if (
-        !desc ||
-        !desc.enumerable ||
-        !Object.hasOwn(desc, "value") ||
-        desc.get !== undefined ||
-        desc.set !== undefined
-      ) {
-        return { ok: false };
-      }
-      entries.push({ key, value: desc.value });
-    }
-    if (hasRubricExoticSlot(obj)) return { ok: false };
-    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    memo.set(obj, out);
-    for (const entry of entries) {
-      const child = snapshotPlainRubricDataInner(entry.value, memo, preOrder);
-      if (!child.ok) return { ok: false };
-      Object.defineProperty(out, entry.key, {
-        value: child.value,
-        writable: false,
-        enumerable: true,
-        configurable: false,
-      });
-    }
-    return { ok: true, value: Object.freeze(out) };
+    return snapshot;
   } catch {
     return { ok: false };
   }
-}
-
-function snapshotPlainRubricData(
-  value: unknown,
-): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  const preOrder: object[] = [];
-  const res = snapshotPlainRubricDataInner(value, new Map(), preOrder);
-  if (!res.ok) return { ok: false };
-  // Reverse-pre-order per-node structuredClone: the last visited Proxy reference is tested
-  // directly before any ancestor or earlier sibling it could have mutated during trap execution.
-  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
-    try {
-      structuredClone(preOrder[i]);
-    } catch {
-      return { ok: false };
-    }
-  }
-  return res;
 }
 
 function hasIndependentCorroboration(frozenIds: unknown, ownSubmissionId: string): boolean {
@@ -600,8 +584,7 @@ function hasIndependentCorroboration(frozenIds: unknown, ownSubmissionId: string
 }
 
 export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): AnchorCalibratedRubricV1Result {
-  // Single-pass own-data descriptor + structuredClone snapshot of input (zero getter execution,
-  // zero Proxy tolerance, zero second reads on submissionId or corroboratingIndependentSubmissionIds).
+  // Snapshot the entire descriptor graph before reading business fields.
   const clonedInput = snapshotPlainRubricData(input);
   const snap =
     clonedInput.ok &&

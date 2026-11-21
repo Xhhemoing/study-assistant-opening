@@ -1,5 +1,5 @@
 import type { AnchorCalibratedRubricV1Result } from "./anchor-calibrated-rubric";
-import { snapHalfBand } from "./anchor-calibrated-rubric";
+import { snapHalfBand, snapshotPlainRubricData } from "./anchor-calibrated-rubric";
 
 /**
  * Four-Fold + 3-Way Anti-Padding Calibration Gate for AnchorCalibratedRubricV1.
@@ -178,154 +178,6 @@ function standardDeviation(values: readonly number[]): number {
   return Math.sqrt(sumSq / (values.length - 1));
 }
 
-const GATE_REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
-const GATE_ARRAY_BUFFER_LEN_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
-const GATE_DATA_VIEW_LEN_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
-const GATE_ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
-const GATE_WEAK_KEY = Object.freeze({});
-
-function matchesGateBrand(check: () => unknown): boolean {
-  try {
-    check();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function hasGateExoticSlot(obj: object): boolean {
-  try {
-    if (ArrayBuffer.isView(obj)) return true;
-    if (typeof GATE_ERROR_IS_ERROR === "function" && GATE_ERROR_IS_ERROR(obj)) return true;
-    if (matchesGateBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
-    if (matchesGateBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
-    if (matchesGateBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [GATE_WEAK_KEY]))) return true;
-    if (matchesGateBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [GATE_WEAK_KEY]))) return true;
-    if (matchesGateBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
-    if (GATE_REGEXP_SOURCE_GET && obj !== RegExp.prototype && matchesGateBrand(() => Reflect.apply(GATE_REGEXP_SOURCE_GET, obj, []))) return true;
-    if (GATE_ARRAY_BUFFER_LEN_GET && matchesGateBrand(() => Reflect.apply(GATE_ARRAY_BUFFER_LEN_GET, obj, []))) return true;
-    if (GATE_DATA_VIEW_LEN_GET && matchesGateBrand(() => Reflect.apply(GATE_DATA_VIEW_LEN_GET, obj, []))) return true;
-    if (matchesGateBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
-    if (matchesGateBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
-    if (matchesGateBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
-    return false;
-  } catch {
-    return true;
-  }
-}
-
-function snapshotPlainGateDataInner(
-  value: unknown,
-  memo: Map<object, unknown>,
-  preOrder: object[],
-): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  if (value === null || value === undefined) return { ok: true, value };
-  const kind = typeof value;
-  if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") {
-    return { ok: true, value };
-  }
-  if (kind !== "object") return { ok: false };
-  const obj = value as object;
-  if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
-  preOrder.push(obj);
-  try {
-    const proto = Object.getPrototypeOf(obj) as object | null;
-    if (Array.isArray(obj)) {
-      if (proto !== Array.prototype) return { ok: false };
-      const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
-      if (!lenDesc || !Object.hasOwn(lenDesc, "value") || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value) || lenDesc.value < 0) {
-        return { ok: false };
-      }
-      const len = lenDesc.value;
-      if (Reflect.ownKeys(obj).length !== len + 1) return { ok: false };
-      if (hasGateExoticSlot(obj)) return { ok: false };
-      const out: unknown[] = new Array(len);
-      memo.set(obj, out);
-      for (let i = 0; i < len; i += 1) {
-        const desc = Object.getOwnPropertyDescriptor(obj, String(i));
-        if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
-          return { ok: false };
-        }
-        const child = snapshotPlainGateDataInner(desc.value, memo, preOrder);
-        if (!child.ok) return { ok: false };
-        out[i] = child.value;
-      }
-      return { ok: true, value: Object.freeze(out) };
-    }
-    if (proto !== Object.prototype && proto !== null) return { ok: false };
-    const keys = Reflect.ownKeys(obj);
-    const entries: Array<{ readonly key: string; readonly value: unknown }> = [];
-    for (const key of keys) {
-      if (typeof key !== "string" || key === "__proto__") return { ok: false };
-      const desc = Object.getOwnPropertyDescriptor(obj, key);
-      if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
-        return { ok: false };
-      }
-      entries.push({ key, value: desc.value });
-    }
-    if (hasGateExoticSlot(obj)) return { ok: false };
-    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    memo.set(obj, out);
-    for (const entry of entries) {
-      const child = snapshotPlainGateDataInner(entry.value, memo, preOrder);
-      if (!child.ok) return { ok: false };
-      Object.defineProperty(out, entry.key, {
-        value: child.value,
-        writable: false,
-        enumerable: true,
-        configurable: false,
-      });
-    }
-    return { ok: true, value: Object.freeze(out) };
-  } catch {
-    return { ok: false };
-  }
-}
-
-function snapshotPlainGateData(value: unknown): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  const preOrder: object[] = [];
-  const res = snapshotPlainGateDataInner(value, new Map(), preOrder);
-  if (!res.ok) return { ok: false };
-  // Reverse-pre-order per-node structuredClone: catches self-detaching nested Proxies
-  // before touching any ancestor or earlier sibling they could have mutated.
-  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
-    try {
-      structuredClone(preOrder[i]);
-    } catch {
-      return { ok: false };
-    }
-  }
-  return res;
-}
-
-function snapshotShallowGateRecord(value: unknown): Record<string, unknown> | null {
-  if (value === null || typeof value !== "object") return null;
-  try {
-    if (Array.isArray(value)) return null;
-    const proto = Object.getPrototypeOf(value) as object | null;
-    if (proto !== Object.prototype && proto !== null) return null;
-    const keys = Reflect.ownKeys(value);
-    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    for (const key of keys) {
-      if (typeof key !== "string" || key === "__proto__") return null;
-      const desc = Object.getOwnPropertyDescriptor(value, key);
-      if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
-        return null;
-      }
-      Object.defineProperty(out, key, {
-        value: desc.value,
-        writable: false,
-        enumerable: true,
-        configurable: false,
-      });
-    }
-    if (hasGateExoticSlot(value)) return null;
-    return Object.freeze(out);
-  } catch {
-    return null;
-  }
-}
-
 function readOwnDataField(obj: unknown, key: string): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   if (obj === null || typeof obj !== "object" || key === "__proto__") return { ok: false };
   try {
@@ -340,42 +192,13 @@ function readOwnDataField(obj: unknown, key: string): { readonly ok: true; reado
 }
 
 function isPlainRecordObject(value: unknown): value is Record<string, unknown> {
-  return snapshotShallowGateRecord(value) !== null;
-}
-
-function snapshotDensePlainArray(value: unknown): readonly unknown[] | null {
-  try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
-    const lenDesc = Object.getOwnPropertyDescriptor(value, "length");
-    if (!lenDesc || !Object.hasOwn(lenDesc, "value") || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value) || lenDesc.value < 0) return null;
-    const len = lenDesc.value;
-    if (Reflect.ownKeys(value).length !== len + 1) return null;
-    if (hasGateExoticSlot(value)) return null;
-    const out: unknown[] = new Array(len);
-    for (let i = 0; i < len; i += 1) {
-      const desc = Object.getOwnPropertyDescriptor(value, String(i));
-      if (
-        !desc ||
-        !desc.enumerable ||
-        !Object.hasOwn(desc, "value") ||
-        desc.get !== undefined ||
-        desc.set !== undefined
-      ) {
-        return null;
-      }
-      out[i] = desc.value;
-    }
-    return out;
-  } catch {
-    return null;
-  }
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function parseUniqueNonBlankIdSet(rawIds: unknown): ReadonlySet<string> | null {
-  const cloned = snapshotPlainGateData(rawIds);
-  if (!cloned.ok || !Array.isArray(cloned.value) || cloned.value.length === 0) return null;
+  if (!Array.isArray(rawIds) || rawIds.length === 0) return null;
   const set = new Set<string>();
-  for (const entry of cloned.value) {
+  for (const entry of rawIds as readonly unknown[]) {
     if (typeof entry !== "string") return null;
     const trimmed = entry.trim();
     if (trimmed.length === 0 || set.has(trimmed)) return null;
@@ -450,14 +273,13 @@ function resolveTighteningThresholds(
     };
   }
 
-  const clonedOverrides = snapshotPlainGateData(rawOverrides);
-  if (!clonedOverrides.ok || clonedOverrides.value === null || typeof clonedOverrides.value !== "object" || Array.isArray(clonedOverrides.value)) {
+  if (!isPlainRecordObject(rawOverrides)) {
     return {
       thresholds: defaultResolvedThresholds(),
       valid: false,
     };
   }
-  const overrides = clonedOverrides.value as Record<string, unknown>;
+  const overrides = rawOverrides;
 
   let valid = true;
   const checkFinite = (
@@ -547,7 +369,7 @@ export function evaluateRubricCalibrationGate(input: {
   readonly expectedTripletIds?: readonly string[];
 }): RubricCalibrationGateReport {
   const failures = new Set<RubricCalibrationGateFailure>();
-  const clonedInput = snapshotPlainGateData(input);
+  const clonedInput = snapshotPlainRubricData(input);
   const inputSnap =
     clonedInput.ok && clonedInput.value !== null && typeof clonedInput.value === "object" && !Array.isArray(clonedInput.value)
       ? (clonedInput.value as Record<string, unknown>)
@@ -589,7 +411,7 @@ export function evaluateRubricCalibrationGate(input: {
     failures.add("invalid_threshold_configuration");
   }
 
-  const benchmarkArray = snapshotDensePlainArray(rawBenchmarkItems);
+  const benchmarkArray = Array.isArray(rawBenchmarkItems) ? rawBenchmarkItems as readonly unknown[] : null;
   const totalCount = benchmarkArray ? benchmarkArray.length : 0;
   if (!benchmarkArray) {
     failures.add("empty_benchmark");
@@ -757,7 +579,7 @@ export function evaluateRubricCalibrationGate(input: {
   }
 
   const counterfactualAudits: CounterfactualTripletAudit[] = [];
-  const tripletsArray = snapshotDensePlainArray(rawCounterfactualTriplets);
+  const tripletsArray = Array.isArray(rawCounterfactualTriplets) ? rawCounterfactualTriplets as readonly unknown[] : null;
   const hasExpectedTripletIds = rawExpectedTripletIds !== undefined;
   const expectedTripletSet = hasExpectedTripletIds
     ? parseUniqueNonBlankIdSet(rawExpectedTripletIds)

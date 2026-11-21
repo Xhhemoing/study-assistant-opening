@@ -229,6 +229,135 @@ describe("RemedyClinicGenerator 14-minute 3-step clinic & #469 probe distinguish
     makeAttempt({ attemptId: "a4", rootAttemptId: "r4", chapterId: "ch-3", localDate: "2026-11-05" }),
   ];
 
+  it("requires genuine input and probe array containers even when a probe fails schema validation", () => {
+    const valid1 = makeProbe({ probeId: "valid-1", input: { a: -2, b: 8 } });
+    const valid2 = makeProbe({ probeId: "valid-2", input: { a: -3, b: 12 } });
+    const candidateProbes = [
+      { probeId: "incomplete", evaluate: null } as unknown as typeof valid1,
+      valid1,
+      valid2,
+    ];
+    const input = {
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: DEFAULT_SOURCES,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: qualifyingAttempts,
+      candidateProbes,
+    };
+
+    const normal = generateRemedyClinic(input);
+    expect(normal.status).toBe("active");
+    expect(normal.verifiedProbeCount).toBe(2);
+    expect(generateRemedyClinic({
+      ...input,
+      candidateProbes: [
+        makeProbe({ probeId: "degenerate", input: { a: -4, b: 16 }, degenerate: true }),
+        valid1,
+        valid2,
+      ],
+    })).toMatchObject({
+      status: "active",
+      verifiedProbeCount: 2,
+      rejectedProbes: [expect.objectContaining({ probeId: "degenerate", reason: "not_distinguishable" })],
+    });
+    for (const invalid of [
+      new Proxy(input, {}),
+      { ...input, candidateProbes: new Proxy(candidateProbes, {}) },
+      { ...input, candidateProbes: [candidateProbes[0]!, new Proxy(valid1, {}), valid2] },
+    ]) {
+      expect(generateRemedyClinic(invalid)).toMatchObject({ status: "invalid_input", clinic: null });
+    }
+  });
+
+  it.each([1, 2])("rejects shared probe data without reading a getter added on descriptor read %i", (mutationRead) => {
+    const valid1 = makeProbe({ probeId: "valid-1", input: { a: -2, b: 8 } });
+    const valid2 = makeProbe({ probeId: "valid-2", input: { a: -3, b: 12 } });
+    const sibling = { label: "shared" };
+    let descriptorReads = 0;
+    let getterRuns = 0;
+    const middle = new Proxy({ marker: true }, {
+      getOwnPropertyDescriptor(target, key) {
+        if (key === "marker" && ++descriptorReads === mutationRead) {
+          Object.defineProperty(sibling, "added", {
+            enumerable: true,
+            configurable: true,
+            get() {
+              getterRuns += 1;
+              return "unread";
+            },
+          });
+        }
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const result = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: DEFAULT_SOURCES,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: qualifyingAttempts,
+      candidateProbes: [
+        { ...valid1, input: { ...valid1.input, aRef: sibling, bRef: middle, cRef: { ref: sibling } } },
+        valid1,
+        valid2,
+      ],
+    });
+    expect(descriptorReads).toBe(mutationRead);
+    expect(getterRuns).toBe(0);
+    expect(result).toMatchObject({ status: "invalid_input", clinic: null });
+  });
+
+  it("validates the coverage graph before skipping incomplete rows", () => {
+    const zeroCoverage = { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 };
+    const rows = [null, 123, { attemptId: "" }, ...qualifyingAttempts.slice(1)] as unknown as typeof qualifyingAttempts;
+    expect(computeEvidenceCoverage(rows)).toEqual({ rootAttemptCount: 3, chapterCount: 3, localDateCount: 3 });
+    expect(computeEvidenceCoverage(new Proxy(rows, {}))).toEqual(zeroCoverage);
+    expect(computeEvidenceCoverage([new Proxy(rows[2]!, {}), ...rows])).toEqual(zeroCoverage);
+    const cycle: { ref?: object } = {};
+    cycle.ref = cycle;
+    expect(computeEvidenceCoverage([...rows, { ...qualifyingAttempts[0]!, extra: cycle }])).toEqual(zeroCoverage);
+
+    let getterRuns = 0;
+    const withGetter = {
+      ...qualifyingAttempts[0]!,
+      extra: {
+        get unread() {
+          getterRuns += 1;
+          return true;
+        },
+      },
+    };
+    expect(computeEvidenceCoverage([...rows, withGetter])).toEqual(zeroCoverage);
+    expect(getterRuns).toBe(0);
+  });
+
+  it("captures Map entries before inspecting descriptor traps and rejects mutations", () => {
+    const sources = new Map<string, { version: string }>();
+    let descriptorReads = 0;
+    const growingEntry = (): { version: string } => new Proxy({ version: "v1" }, {
+      getOwnPropertyDescriptor(target, key) {
+        if (key === "version" && ++descriptorReads <= 4) {
+          sources.set(`added-${descriptorReads}`, growingEntry());
+        }
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    sources.set("src-ch-1", growingEntry());
+    expect(inspectActiveSourcesMap(sources)).toEqual({ containerValid: false, sources: new Map() });
+    expect(descriptorReads).toBeLessThan(4);
+  });
+
+  it("rejects a Map that exceeds the active source entry limit", () => {
+    const sources = new Map<string, string>();
+    for (let i = 0; i <= 10_000; i += 1) sources.set(String(i), "v1");
+    expect(inspectActiveSourcesMap(sources)).toEqual({ containerValid: false, sources: new Map() });
+  });
+
   it("emits a 14m 3-step clinic maximizing chapter/day spread and keeping Step 2 free of probe leaks", () => {
     const probes = [
       makeProbe({ probeId: "probe-transfer-1", input: { a: -2, b: 8 } }),
@@ -823,8 +952,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       candidateProbes: [getterProbe, probe2],
     });
     expect(getterInvoked).toBe(false);
-    expect(getterRes.status).toBe("insufficient_distinguishable_probes");
-    expect(getterRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+    expect(getterRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     // Partial probe revocation leaving >= 2 surviving probes must report partial_source_revoked_still_active.
     const thirdProbe = {
@@ -983,8 +1111,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       attempts,
       candidateProbes: [{ ...probe2, probeId: "probe-slot-hyp", hypotheses: getterHypArr }, makeProbe({ probeId: "probe-slot-ok", input: { a: -5, b: 20 } })],
     });
-    expect(slotHypRes.status).toBe("insufficient_distinguishable_probes");
-    expect(slotHypRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+    expect(slotHypRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     const getterRuleRefs: Array<{ sourceId: string; sourceVersion: string }> = new Array(1);
     Object.defineProperty(getterRuleRefs, "0", {
@@ -1008,7 +1135,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(slotRuleRes.status).toBe("invalid_input");
     expect(slotGetterCalls).toBe(0);
 
-    // 35-level shared diamond DAG + cyclic plain input pass in linear O(V+E) time without throwing.
+    // A shared diamond remains valid. A back edge invalidates the input graph.
     interface GraphInput {
       a: number;
       b: number;
@@ -1038,7 +1165,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       parseResponse: (r) => (typeof r === "string" ? r : null),
     });
 
-    const graphRes = generateRemedyClinic({
+    const graphInput = {
       learnerId: "learner-1",
       courseId: "course-alg-1",
       ruleId: RULE_ID,
@@ -1048,11 +1175,16 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       attempts,
       candidateProbes: [
         makeGraphProbe("probe-diamond-35", diamond),
-        makeGraphProbe("probe-cyclic-self", cyclic),
+        makeGraphProbe("probe-diamond-shared", { ...diamond, a: -3, b: 12 }),
       ],
-    });
+    };
+    const graphRes = generateRemedyClinic(graphInput);
     expect(graphRes.status).toBe("active");
     expect(graphRes.clinic!.steps[2].probes).toHaveLength(2);
+    expect(generateRemedyClinic({
+      ...graphInput,
+      candidateProbes: [...graphInput.candidateProbes, makeGraphProbe("probe-cyclic-self", cyclic)],
+    })).toMatchObject({ status: "invalid_input", clinic: null });
 
     // Round-7 [P1-1]: Reassigned-prototype Map with getter entry must be rejected without running the getter.
     let exoticMapGetterRan = false;
@@ -1081,11 +1213,10 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       candidateProbes: [exoticMapProbe, probe2],
     });
     expect(exoticMapGetterRan).toBe(false);
-    expect(exoticRes.status).toBe("insufficient_distinguishable_probes");
-    expect(exoticRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+    expect(exoticRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     // Round-9 [P1-4]: Own enumerable "__proto__" data property on hypothesis receiver or probe input
-    // MUST be rejected up front as invalid_probe_descriptor (never copied or passed to predict).
+    // MUST invalidate the input before predict runs.
     let protoPredictCalled = false;
     const protoHyp = {
       id: RULE_ID,
@@ -1119,8 +1250,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       candidateProbes: [protoDegenerateProbe, probe2],
     });
     expect(protoPredictCalled).toBe(false);
-    expect(protoRes.status).toBe("insufficient_distinguishable_probes");
-    expect(protoRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+    expect(protoRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     // Round-7 [P1-3]: observableKey receives the canonical frozen probe as `this` (reads this.requirementKey).
     const roundingProbe: ClinicCandidateProbe<InequalityInput, number> = {
@@ -1308,8 +1438,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       candidateProbes: [toStringTagProbe, probe2],
     });
     expect(toStringTagCalls).toBe(0);
-    expect(toStringTagRes.status).toBe("insufficient_distinguishable_probes");
-    expect(toStringTagRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+    expect(toStringTagRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     const toStringTagClinic = Object.defineProperty({ ...clinic }, Symbol.toStringTag, {
       enumerable: true,
@@ -1355,8 +1484,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       candidateProbes: [speciesPromiseProbe, probe2],
     });
     expect(speciesGetterCalls).toBe(0);
-    expect(speciesPromiseRes.status).toBe("insufficient_distinguishable_probes");
-    expect(speciesPromiseRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+    expect(speciesPromiseRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     // Round-8 [P1-2]: Prototype-reassigned Promise with constructor: null or constructor: 123 is rejected,
     // while genuine plain objects { constructor: null } and { constructor: 123 } are accepted.
@@ -1376,30 +1504,28 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       enumerable: true,
       configurable: true,
     });
-    const ctorPromiseRes = generateRemedyClinic({
-      learnerId: "learner-1",
-      courseId: "course-alg-1",
-      ruleId: RULE_ID,
-      currentPrivacyEpoch: 5,
-      activeSourcesMap: allSources,
-      verifyRuleViolation: verifyNegativeSignFlip,
-      attempts,
-      candidateProbes: [
-        {
-          ...makeProbe({ probeId: "probe-null-ctor-promise", input: { a: -2, b: 8 } }),
-          input: { a: -2, b: 8, p: nullCtorPromise } as unknown as InequalityInput,
-        },
-        {
-          ...makeProbe({ probeId: "probe-num-ctor-promise", input: { a: -3, b: 12 } }),
-          input: { a: -3, b: 12, p: numCtorPromise } as unknown as InequalityInput,
-        },
-      ],
-    });
-    expect(ctorPromiseRes.status).toBe("insufficient_distinguishable_probes");
-    expect(ctorPromiseRes.rejectedProbes.map((r) => r.reason)).toEqual([
-      "invalid_probe_descriptor",
-      "invalid_probe_descriptor",
-    ]);
+    for (const invalidProbe of [
+      {
+        ...makeProbe({ probeId: "probe-null-ctor-promise", input: { a: -2, b: 8 } }),
+        input: { a: -2, b: 8, p: nullCtorPromise } as unknown as InequalityInput,
+      },
+      {
+        ...makeProbe({ probeId: "probe-num-ctor-promise", input: { a: -3, b: 12 } }),
+        input: { a: -3, b: 12, p: numCtorPromise } as unknown as InequalityInput,
+      },
+    ]) {
+      const result = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts,
+        candidateProbes: [invalidProbe],
+      });
+      expect(result).toMatchObject({ status: "invalid_input", clinic: null });
+    }
 
     const plainNullCtorRes = generateRemedyClinic({
       learnerId: "learner-1",
@@ -1545,28 +1671,24 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       configurable: true,
     });
 
-    const exoticInputsRes = generateRemedyClinic({
-      learnerId: "learner-1",
-      courseId: "course-alg-1",
-      ruleId: RULE_ID,
-      currentPrivacyEpoch: 5,
-      activeSourcesMap: allSources,
-      verifyRuleViolation: verifyNegativeSignFlip,
-      attempts: baseAttempts,
-      candidateProbes: [
-        { ...makeProbe({ probeId: "p-proxy", input: { a: -2, b: 8 } }), input: { a: -2, b: 8, bad: throwingProxy } as unknown as InequalityInput },
-        { ...makeProbe({ probeId: "p-gen", input: { a: -3, b: 12 } }), input: { a: -3, b: 12, bad: reassignedGen } as unknown as InequalityInput },
-        { ...makeProbe({ probeId: "p-agen", input: { a: -4, b: 16 } }), input: { a: -4, b: 16, bad: reassignedAsyncGen } as unknown as InequalityInput },
-        { ...makeProbe({ probeId: "p-ownproto", input: { a: -5, b: 20 } }), input: inputWithOwnProto as unknown as InequalityInput },
-      ],
-    });
-    expect(exoticInputsRes.status).toBe("insufficient_distinguishable_probes");
-    expect(exoticInputsRes.rejectedProbes.map((r) => r.reason)).toEqual([
-      "invalid_probe_descriptor",
-      "invalid_probe_descriptor",
-      "invalid_probe_descriptor",
-      "invalid_probe_descriptor",
-    ]);
+    for (const invalidProbe of [
+      { ...makeProbe({ probeId: "p-proxy", input: { a: -2, b: 8 } }), input: { a: -2, b: 8, bad: throwingProxy } as unknown as InequalityInput },
+      { ...makeProbe({ probeId: "p-gen", input: { a: -3, b: 12 } }), input: { a: -3, b: 12, bad: reassignedGen } as unknown as InequalityInput },
+      { ...makeProbe({ probeId: "p-agen", input: { a: -4, b: 16 } }), input: { a: -4, b: 16, bad: reassignedAsyncGen } as unknown as InequalityInput },
+      { ...makeProbe({ probeId: "p-ownproto", input: { a: -5, b: 20 } }), input: inputWithOwnProto as unknown as InequalityInput },
+    ]) {
+      const result = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [invalidProbe],
+      });
+      expect(result).toMatchObject({ status: "invalid_input", clinic: null });
+    }
 
     // [P1-5] Rejected Promise with reassigned prototype (Object.prototype & null) MUST be rejected
     // WITHOUT attaching .then reactions (unhandledRejection is NOT suppressed).
@@ -1582,24 +1704,22 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     Object.setPrototypeOf(rejObjProto, Object.prototype);
     Object.setPrototypeOf(rejNullProto, null);
     try {
-      const rejRes = generateRemedyClinic({
-        learnerId: "learner-1",
-        courseId: "course-alg-1",
-        ruleId: RULE_ID,
-        currentPrivacyEpoch: 5,
-        activeSourcesMap: allSources,
-        verifyRuleViolation: verifyNegativeSignFlip,
-        attempts: baseAttempts,
-        candidateProbes: [
-          { ...makeProbe({ probeId: "p-rej-obj", input: { a: -2, b: 8 } }), input: { a: -2, b: 8, p: rejObjProto } as unknown as InequalityInput },
-          { ...makeProbe({ probeId: "p-rej-null", input: { a: -3, b: 12 } }), input: { a: -3, b: 12, p: rejNullProto } as unknown as InequalityInput },
-        ],
-      });
-      expect(rejRes.status).toBe("insufficient_distinguishable_probes");
-      expect(rejRes.rejectedProbes.map((r) => r.reason)).toEqual([
-        "invalid_probe_descriptor",
-        "invalid_probe_descriptor",
-      ]);
+      for (const invalidProbe of [
+        { ...makeProbe({ probeId: "p-rej-obj", input: { a: -2, b: 8 } }), input: { a: -2, b: 8, p: rejObjProto } as unknown as InequalityInput },
+        { ...makeProbe({ probeId: "p-rej-null", input: { a: -3, b: 12 } }), input: { a: -3, b: 12, p: rejNullProto } as unknown as InequalityInput },
+      ]) {
+        const result = generateRemedyClinic({
+          learnerId: "learner-1",
+          courseId: "course-alg-1",
+          ruleId: RULE_ID,
+          currentPrivacyEpoch: 5,
+          activeSourcesMap: allSources,
+          verifyRuleViolation: verifyNegativeSignFlip,
+          attempts: baseAttempts,
+          candidateProbes: [invalidProbe],
+        });
+        expect(result).toMatchObject({ status: "invalid_input", clinic: null });
+      }
       await new Promise((resolve) => setTimeout(resolve, 15));
       expect(unhandledReasons).toContain(errObjProto);
       expect(unhandledReasons).toContain(errNullProto);
@@ -1811,8 +1931,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       attempts: baseAttempts,
       candidateProbes: [proxySourceRefsProbe, probe2],
     });
-    expect(proxySourceRefsRes.status).toBe("insufficient_distinguishable_probes");
-    expect(proxySourceRefsRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+    expect(proxySourceRefsRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     const proxyAttemptsRes = generateRemedyClinic({
       learnerId: "learner-1",
@@ -1885,8 +2004,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
         attempts: [pAttempt.p as unknown as DiagnosedRootAttempt, baseAttempts[1]!, baseAttempts[2]!],
         candidateProbes: [probe1, probe2],
       });
-      expect(pAttemptRes.status).toBe("threshold_not_met");
-      expect(pAttemptRes.rejectedCounts.malformedAttempt).toBe(1);
+      expect(pAttemptRes).toMatchObject({ status: "invalid_input", clinic: null });
 
       const gAttemptRes = generateRemedyClinic({
         learnerId: "learner-1",
@@ -1898,8 +2016,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
         attempts: [gAttempt as unknown as DiagnosedRootAttempt, baseAttempts[1]!, baseAttempts[2]!],
         candidateProbes: [probe1, probe2],
       });
-      expect(gAttemptRes.status).toBe("threshold_not_met");
-      expect(gAttemptRes.rejectedCounts.malformedAttempt).toBe(1);
+      expect(gAttemptRes).toMatchObject({ status: "invalid_input", clinic: null });
 
       const pSourcesRes = generateRemedyClinic({
         learnerId: "learner-1",
@@ -1927,28 +2044,24 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       expect(gSourcesRes.status).toBe("invalid_input");
       expect(gSourcesRes.clinic).toBeNull();
 
-      const exoticProbeAndModelRes = generateRemedyClinic({
-        learnerId: "learner-1",
-        courseId: "course-alg-1",
-        ruleId: RULE_ID,
-        currentPrivacyEpoch: 5,
-        activeSourcesMap: allSources,
-        verifyRuleViolation: verifyNegativeSignFlip,
-        attempts: baseAttempts,
-        candidateProbes: [
-          pProbe.p as unknown as ClinicCandidateProbe<InequalityInput, string>,
-          gProbe as unknown as ClinicCandidateProbe<InequalityInput, string>,
-          { ...probe1, probeId: "r10-p-model", correctModel: pModel.p as unknown as typeof probe1.correctModel },
-          { ...probe1, probeId: "r10-g-model", correctModel: gModel as unknown as typeof probe1.correctModel },
-        ],
-      });
-      expect(exoticProbeAndModelRes.status).toBe("insufficient_distinguishable_probes");
-      expect(exoticProbeAndModelRes.rejectedProbes.map((r) => r.reason)).toEqual([
-        "invalid_probe_descriptor",
-        "invalid_probe_descriptor",
-        "invalid_probe_descriptor",
-        "invalid_probe_descriptor",
-      ]);
+      for (const invalidProbe of [
+        pProbe.p as unknown as ClinicCandidateProbe<InequalityInput, string>,
+        gProbe as unknown as ClinicCandidateProbe<InequalityInput, string>,
+        { ...probe1, probeId: "r10-p-model", correctModel: pModel.p as unknown as typeof probe1.correctModel },
+        { ...probe1, probeId: "r10-g-model", correctModel: gModel as unknown as typeof probe1.correctModel },
+      ]) {
+        const result = generateRemedyClinic({
+          learnerId: "learner-1",
+          courseId: "course-alg-1",
+          ruleId: RULE_ID,
+          currentPrivacyEpoch: 5,
+          activeSourcesMap: allSources,
+          verifyRuleViolation: verifyNegativeSignFlip,
+          attempts: baseAttempts,
+          candidateProbes: [invalidProbe],
+        });
+        expect(result).toMatchObject({ status: "invalid_input", clinic: null });
+      }
 
       await new Promise((resolve) => setTimeout(resolve, 15));
       expect(unhandledReasons).toContain(pAttempt.err);
@@ -1965,7 +2078,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     }
 
     // 3. Stateful Proxy candidateProbe returning revoked sourceRefs on read 1 and undefined on read 2
-    //    must be read ONCE and rejected as revoked_probe_source (never admitted with sourceRefs: undefined).
+    //    must invalidate the input before source-ref schema checks.
     let sourceRefDescReads = 0;
     const statefulProxyProbe = new Proxy(
       { ...makeProbe({ probeId: "r10-toctou-probe", input: { a: -5, b: 20 } }) },
@@ -2000,9 +2113,8 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       attempts: baseAttempts,
       candidateProbes: [statefulProxyProbe, probe2],
     });
-    expect(sourceRefDescReads).toBe(1);
-    expect(toctouRes.status).toBe("insufficient_distinguishable_probes");
-    expect(toctouRes.rejectedProbes[0]!.reason).toBe("revoked_probe_source");
+    expect(sourceRefDescReads).toBe(2);
+    expect(toctouRes).toMatchObject({ status: "invalid_input", clinic: null });
 
     // 4. Forged Map.prototype object and Proxy-wrapped / throwing activeSourcesMap fail closed with zero partial entries.
     const forgedMap = Object.assign(Object.create(Map.prototype) as Record<string, unknown>, {
@@ -2101,7 +2213,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     const probe2 = makeProbe({ probeId: "r11-p2", input: { a: -3, b: 12 } });
 
     // [P1-1] Element getter, array-slot getter, and stateful Proxy sourceRefs must execute ZERO getters
-    // and return invalid_probe_descriptor (never revoked_probe_source).
+    // and invalidate the input before source-ref schema checks.
     let getterRuns = 0;
     const elemGetterRef = Object.defineProperty({ sourceVersion: "v1" }, "sourceId", {
       enumerable: true,
@@ -2136,28 +2248,25 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       },
     });
 
-    const p1Res = generateRemedyClinic({
-      learnerId: "learner-1",
-      courseId: "course-alg-1",
-      ruleId: RULE_ID,
-      currentPrivacyEpoch: 5,
-      activeSourcesMap: allSources,
-      verifyRuleViolation: verifyNegativeSignFlip,
-      attempts: baseAttempts,
-      candidateProbes: [
-        { ...makeProbe({ probeId: "r11-elem-getter", input: { a: -2, b: 8 } }), sourceRefs: [elemGetterRef] },
-        { ...makeProbe({ probeId: "r11-slot-getter", input: { a: -3, b: 12 } }), sourceRefs: slotGetterRefs },
-        { ...makeProbe({ probeId: "r11-proxy-refs", input: { a: -4, b: 16 } }), sourceRefs: statefulProxyRefs },
-      ],
-    });
+    for (const invalidProbe of [
+      { ...makeProbe({ probeId: "r11-elem-getter", input: { a: -2, b: 8 } }), sourceRefs: [elemGetterRef] },
+      { ...makeProbe({ probeId: "r11-slot-getter", input: { a: -3, b: 12 } }), sourceRefs: slotGetterRefs },
+      { ...makeProbe({ probeId: "r11-proxy-refs", input: { a: -4, b: 16 } }), sourceRefs: statefulProxyRefs },
+    ]) {
+      const result = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [invalidProbe],
+      });
+      expect(result).toMatchObject({ status: "invalid_input", clinic: null });
+    }
     expect(getterRuns).toBe(0);
-    expect(proxyRefsDescReads).toBe(1);
-    expect(p1Res.status).toBe("insufficient_distinguishable_probes");
-    expect(p1Res.rejectedProbes.map((r) => r.reason)).toEqual([
-      "invalid_probe_descriptor",
-      "invalid_probe_descriptor",
-      "invalid_probe_descriptor",
-    ]);
+    expect(proxyRefsDescReads).toBe(2);
 
     // [P2-2] Reassigned-prototype AsyncGenerator passed as input, candidateProbe, correctModel, and hypothesis
     // MUST be rejected cleanly, while plain objects succeed with ZERO unhandledRejection events.
@@ -2207,35 +2316,32 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       const agProbe = makeAsyncGenObj({ ...probe1, probeId: "r11-ag-probe" });
       const agCorrectModel = makeAsyncGenObj({ ...probe1.correctModel });
       const agHyp = makeAsyncGenObj({ ...probe1.hypotheses[0]! });
-      const agContainersRes = generateRemedyClinic({
-        learnerId: "learner-1",
-        courseId: "course-alg-1",
-        ruleId: RULE_ID,
-        currentPrivacyEpoch: 5,
-        activeSourcesMap: allSources,
-        verifyRuleViolation: verifyNegativeSignFlip,
-        attempts: baseAttempts,
-        candidateProbes: [
-          agProbe as unknown as ClinicCandidateProbe<InequalityInput, string>,
-          { ...probe1, probeId: "r11-ag-correct", correctModel: agCorrectModel as unknown as typeof probe1.correctModel },
-          {
-            ...probe1,
-            probeId: "r11-ag-hyp",
-            hypotheses: [agHyp as unknown as (typeof probe1.hypotheses)[0], probe1.hypotheses[1]!],
-          },
-        ],
-      });
-      expect(agContainersRes.status).toBe("insufficient_distinguishable_probes");
-      expect(agContainersRes.rejectedProbes.map((r) => r.reason)).toEqual([
-        "invalid_probe_descriptor",
-        "invalid_probe_descriptor",
-        "invalid_probe_descriptor",
-      ]);
+      for (const invalidProbe of [
+        agProbe as unknown as ClinicCandidateProbe<InequalityInput, string>,
+        { ...probe1, probeId: "r11-ag-correct", correctModel: agCorrectModel as unknown as typeof probe1.correctModel },
+        {
+          ...probe1,
+          probeId: "r11-ag-hyp",
+          hypotheses: [agHyp as unknown as (typeof probe1.hypotheses)[0], probe1.hypotheses[1]!],
+        },
+      ]) {
+        const result = generateRemedyClinic({
+          learnerId: "learner-1",
+          courseId: "course-alg-1",
+          ruleId: RULE_ID,
+          currentPrivacyEpoch: 5,
+          activeSourcesMap: allSources,
+          verifyRuleViolation: verifyNegativeSignFlip,
+          attempts: baseAttempts,
+          candidateProbes: [invalidProbe],
+        });
+        expect(result).toMatchObject({ status: "invalid_input", clinic: null });
+      }
 
       await new Promise((resolve) => setTimeout(resolve, 15));
       expect(unhandledErrors).toEqual([]);
 
-      // [P2-1] privacy-guard direct exports: single-pass cloneEvidenceCase / selectSpreadRepresentativeCases
+      // [P2-1] privacy-guard direct exports: cloneEvidenceCase / selectSpreadRepresentativeCases
       // and Proxy / reassigned-Promise Record activeSourcesMap rejection.
       const baseClinic = plainOk.clinic!;
       const validCase = baseClinic.evidenceCases[0]!;
@@ -2250,7 +2356,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
         },
       );
       expect(cloneEvidenceCase(statefulCaseProxy).attemptId).toBe("");
-      expect(caseDescReads).toBe(1);
+      expect(caseDescReads).toBe(2);
 
       const errCase = new Error("r11-case-promise");
       const promiseCase = Promise.reject(errCase);
@@ -2269,7 +2375,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
           baseClinic.evidenceCases[1]!,
           baseClinic.evidenceCases[2]!,
         ]);
-        expect(spreadFromPromise[0]!.attemptId).toBe("");
+        expect(spreadFromPromise).toEqual([]);
 
         const proxyRecordSources = new Proxy({ ...allSources }, {}) as unknown as ActiveSourcesMap;
         expect(isSourceRefActive({ sourceId: "src-ch-1", sourceVersion: "v1" }, proxyRecordSources)).toBe(false);
