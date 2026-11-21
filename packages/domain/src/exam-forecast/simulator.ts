@@ -595,23 +595,90 @@ type PrecomputedUntimedSection = {
   readonly untimedMean: number;
 };
 
+const FLOAT64_VIEW = new DataView(new ArrayBuffer(8));
+const MIN_BINARY64_UNIT_EXPONENT = -1074;
+
+// Finite binary64 values are signed integer significands times a power of two.
+function decomposeFiniteFloat(value: number): { significand: number; exponent: number } {
+  FLOAT64_VIEW.setFloat64(0, value);
+  const hi = FLOAT64_VIEW.getUint32(0);
+  const lo = FLOAT64_VIEW.getUint32(4);
+  const sign = (hi >>> 31) === 0 ? 1 : -1;
+  const rawExponent = (hi >>> 20) & 0x7ff;
+  const fraction = (hi & 0xfffff) * 2 ** 32 + lo;
+  if (rawExponent === 0) {
+    return { significand: sign * fraction, exponent: MIN_BINARY64_UNIT_EXPONENT };
+  }
+  return { significand: sign * (2 ** 52 + fraction), exponent: rawExponent - 1075 };
+}
+
+function addToExponentBucket(buckets: bigint[], offset: number, significand: bigint): void {
+  const index = offset >> 5;
+  buckets[index] = (buckets[index] ?? 0n) + (significand << BigInt(offset & 31));
+}
+
+function foldExponentBuckets(buckets: readonly bigint[]): bigint {
+  let total = 0n;
+  let previousIndex = buckets.length - 1;
+  for (let index = previousIndex; index >= 0; index--) {
+    const coefficient = buckets[index];
+    if (coefficient === undefined || coefficient === 0n) continue;
+    total = (total << BigInt((previousIndex - index) * 32)) + coefficient;
+    previousIndex = index;
+  }
+  return total << BigInt(previousIndex * 32);
+}
+
+function exactRationalPow2ToNumber(num: bigint, den: bigint, pow2Offset: number): number {
+  if (num === 0n) return 0;
+  const sign = num < 0n ? -1 : 1;
+  const magnitude = num < 0n ? -num : num;
+  const bitLengthDiff = magnitude.toString(2).length - den.toString(2).length;
+  const belowPower = bitLengthDiff >= 0
+    ? magnitude < (den << BigInt(bitLengthDiff))
+    : (magnitude << BigInt(-bitLengthDiff)) < den;
+  const exponent = bitLengthDiff + pow2Offset - (belowPower ? 1 : 0);
+  if (exponent > 1023) return sign * Infinity;
+
+  // Round in units of one ULP, including the fixed spacing of subnormals.
+  const unitExponent = Math.max(MIN_BINARY64_UNIT_EXPONENT, exponent - 52);
+  const shift = pow2Offset - unitExponent;
+  const dividend = shift >= 0 ? magnitude << BigInt(shift) : magnitude;
+  const divisor = shift < 0 ? den << BigInt(-shift) : den;
+  let significand = dividend / divisor;
+  const twiceRemainder = (dividend % divisor) << 1n;
+  if (twiceRemainder > divisor || (twiceRemainder === divisor && (significand & 1n) === 1n)) {
+    significand += 1n;
+  }
+  // The rounded integer (including a carry to 2^53) is exactly representable.
+  return sign * Number(significand) * 2 ** unitExponent;
+}
+
 function computeDiscreteExpectation(
   states: Iterable<readonly [number, number]>,
   minClamp: number,
   maxClamp: number,
 ): number {
-  let totalProb = 0;
   let minScore = Infinity;
   let maxScore = -Infinity;
-  const positiveStates: Array<readonly [number, number]> = [];
+  // Radix 2^32 buckets aligned to 2^-1074 for probabilities and 2^-2148 for products.
+  const probBuckets = new Array<bigint>(68);
+  const numBuckets = new Array<bigint>(136);
   for (const [score, prob] of states) {
     if (!Number.isFinite(score) || !Number.isFinite(prob) || prob <= 0) continue;
-    totalProb += prob;
     if (score < minScore) minScore = score;
     if (score > maxScore) maxScore = score;
-    positiveStates.push([score, prob]);
+    const probability = decomposeFiniteFloat(prob);
+    const probSignificand = BigInt(probability.significand);
+    const probOffset = probability.exponent - MIN_BINARY64_UNIT_EXPONENT;
+    addToExponentBucket(probBuckets, probOffset, probSignificand);
+    if (score !== 0) {
+      const value = decomposeFiniteFloat(score);
+      const productOffset = probOffset + value.exponent - MIN_BINARY64_UNIT_EXPONENT;
+      addToExponentBucket(numBuckets, productOffset, BigInt(value.significand) * probSignificand);
+    }
   }
-  if (positiveStates.length === 0 || !(totalProb > 0) || !Number.isFinite(totalProb)) {
+  if (minScore === Infinity) {
     return clamp(0, minClamp, maxClamp);
   }
   const lowerBound = Math.max(minClamp, minScore);
@@ -619,25 +686,12 @@ function computeDiscreteExpectation(
   if (minScore === maxScore || lowerBound >= upperBound) {
     return clamp(minScore, minClamp, maxClamp);
   }
-  let posDirect = 0;
-  let negDirect = 0;
-  for (const [score, prob] of positiveStates) {
-    const term = (prob / totalProb) * score;
-    if (term >= 0) posDirect += term;
-    else negDirect += term;
-  }
-  const directMean = posDirect + negDirect;
-  if (Number.isFinite(posDirect) && Number.isFinite(negDirect) && Number.isFinite(directMean)) {
-    return clamp(directMean, lowerBound, upperBound);
-  }
-  let posScaled = 0;
-  let negScaled = 0;
-  for (const [score, prob] of positiveStates) {
-    const term = (prob / totalProb) * (score * 0.25);
-    if (term >= 0) posScaled += term;
-    else negScaled += term;
-  }
-  return clamp((posScaled + negScaled) * 4, lowerBound, upperBound);
+  const mean = exactRationalPow2ToNumber(
+    foldExponentBuckets(numBuckets),
+    foldExponentBuckets(probBuckets),
+    MIN_BINARY64_UNIT_EXPONENT,
+  );
+  return clamp(mean, lowerBound, upperBound);
 }
 
 function computeStaticUntimedSection(
@@ -1085,12 +1139,16 @@ function simulateRubricSectionDraw(input: {
 
 type PmfOpsBudget = { remaining: number };
 
-function addToPmfWithCap(pmf: Map<number, number>, key: number, prob: number): void {
+function assertPmfCapacity(size: number): void {
+  if (size >= MAX_PMF_CONVOLUTION_STATES) {
+    throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
+  }
+}
+
+function addToPmfWithCap(pmf: Map<number, number>, key: number, prob: number, otherStates = 0): void {
   const existing = pmf.get(key);
   if (existing === undefined) {
-    if (pmf.size >= MAX_PMF_CONVOLUTION_STATES) {
-      throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
-    }
+    assertPmfCapacity(pmf.size + otherStates);
     pmf.set(key, prob);
   } else {
     pmf.set(key, existing + prob);
@@ -1100,10 +1158,6 @@ function addToPmfWithCap(pmf: Map<number, number>, key: number, prob: number): v
 type ScaledFloat = { readonly m: number; readonly e: number };
 
 const SCALED_ZERO: ScaledFloat = { m: 0, e: 0 };
-const SCALED_F64_VIEW = new DataView(new ArrayBuffer(8));
-const TWO_POW_52 = 4_503_599_627_370_496;
-const TWO_POW_NEG_52 = Math.pow(2, -52);
-const TWO_POW_NEG_53 = Math.pow(2, -53);
 
 function normalizeScaledFloat(m: number, e: number): ScaledFloat {
   if (!Number.isFinite(m) || m === 0) return SCALED_ZERO;
@@ -1121,19 +1175,10 @@ function normalizeScaledFloat(m: number, e: number): ScaledFloat {
   return { m: sign * absM, e: exp };
 }
 
-function toScaledFloat(x: number): ScaledFloat {
-  if (x === 0) return SCALED_ZERO;
-  SCALED_F64_VIEW.setFloat64(0, x, false);
-  const hi = SCALED_F64_VIEW.getUint32(0, false);
-  const lo = SCALED_F64_VIEW.getUint32(4, false);
-  const sign = (hi >>> 31) !== 0 ? -1 : 1;
-  const rawExp = (hi >>> 20) & 0x7ff;
-  const fracHi = hi & 0xfffff;
-  const mantissaInt = fracHi * 4_294_967_296 + lo;
-  if (rawExp === 0) {
-    return normalizeScaledFloat(sign * (mantissaInt * TWO_POW_NEG_52), -1022);
-  }
-  return { m: sign * ((TWO_POW_52 + mantissaInt) * TWO_POW_NEG_53), e: rawExp - 1022 };
+function toScaledFloat(value: number): ScaledFloat {
+  if (value === 0) return SCALED_ZERO;
+  const { significand, exponent } = decomposeFiniteFloat(value);
+  return normalizeScaledFloat(significand * 2 ** -53, exponent + 53);
 }
 
 function mulScaledFloat(a: ScaledFloat, b: ScaledFloat): ScaledFloat {
@@ -1177,89 +1222,52 @@ function scaledFloatKey(sf: ScaledFloat): string {
   return sf.m === 0 ? "0" : `${sf.m}:${sf.e}`;
 }
 
+function advanceWeightedSum(sum: number | ScaledFloat, rawScore: number, weight: number): number | ScaledFloat {
+  const term = rawScore * weight;
+  const finiteTerm = Number.isFinite(term);
+  if (typeof sum === "number" && finiteTerm) {
+    const next = sum + term;
+    if (Number.isFinite(next)) return next;
+  }
+
+  // Preserve the binary64 rounding of the prefix and of every finite product.
+  const scaledSum = typeof sum === "number" ? toScaledFloat(sum) : sum;
+  const scaledTerm = finiteTerm ? toScaledFloat(term) : mulScaledFloat(toScaledFloat(rawScore), toScaledFloat(weight));
+  return addScaledFloat(scaledSum, scaledTerm);
+}
+
 function computeWeightedSumFromTerms(
   sections: readonly ExamSectionBlueprint[],
   scoreBySection: Readonly<Record<string, number>>,
   range: readonly [number, number],
 ): number {
-  let partial = 0;
-  let overflowed = false;
-  for (const sec of sections) {
-    const score = Object.hasOwn(scoreBySection, sec.sectionId) ? scoreBySection[sec.sectionId]! : 0;
-    const prod = sec.weight * score;
-    partial += prod;
-    if (!Number.isFinite(prod) || !Number.isFinite(partial)) {
-      overflowed = true;
-      break;
-    }
+  let sum: number | ScaledFloat = 0;
+  for (const section of sections) {
+    const score = Object.hasOwn(scoreBySection, section.sectionId) ? scoreBySection[section.sectionId]! : 0;
+    sum = advanceWeightedSum(sum, score, section.weight);
   }
-  if (!overflowed) return partial;
 
-  let scaledTotal = SCALED_ZERO;
-  for (const sec of sections) {
-    const score = Object.hasOwn(scoreBySection, sec.sectionId) ? scoreBySection[sec.sectionId]! : 0;
-    const prod = mulScaledFloat(toScaledFloat(sec.weight), toScaledFloat(score));
-    scaledTotal = addScaledFloat(scaledTotal, prod);
-  }
-  return clamp(scaledFloatToNumber(scaledTotal), range[0], range[1]);
+  return clamp(typeof sum === "number" ? sum : scaledFloatToNumber(sum), range[0], range[1]);
 }
 
-type ScaledPmfBucket = {
-  readonly value: ScaledFloat;
-  prob: number;
+type WeightedConvolutionResult = {
+  readonly finite: Map<number, number>;
+  readonly scaled: Map<string, { readonly val: ScaledFloat; prob: number }>;
 };
 
-type WeightedConvolutionResult =
-  | { readonly kind: "number"; readonly dist: ReadonlyMap<number, number> }
-  | { readonly kind: "scaled"; readonly dist: ReadonlyMap<string, ScaledPmfBucket> };
-
-function addScaledPmfBucket(
-  target: Map<string, ScaledPmfBucket>,
-  value: ScaledFloat,
-  prob: number,
-): void {
-  const key = scaledFloatKey(value);
-  const existing = target.get(key);
+function addWeightedPmfBucket(target: WeightedConvolutionResult, sum: number | ScaledFloat, prob: number): void {
+  if (typeof sum === "number") {
+    addToPmfWithCap(target.finite, sum, prob, target.scaled.size);
+    return;
+  }
+  const key = scaledFloatKey(sum);
+  const existing = target.scaled.get(key);
   if (existing === undefined) {
-    if (target.size >= MAX_PMF_CONVOLUTION_STATES) {
-      throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
-    }
-    target.set(key, { value, prob });
+    assertPmfCapacity(target.finite.size + target.scaled.size);
+    target.scaled.set(key, { val: sum, prob });
   } else {
     existing.prob += prob;
   }
-}
-
-function upgradeNumberDistToScaled(dist: ReadonlyMap<number, number>): Map<string, ScaledPmfBucket> {
-  const scaled = new Map<string, ScaledPmfBucket>();
-  for (const [val, prob] of dist.entries()) {
-    addScaledPmfBucket(scaled, toScaledFloat(val), prob);
-  }
-  return scaled;
-}
-
-function convolveSingleSectionScaled(
-  dist: ReadonlyMap<string, ScaledPmfBucket>,
-  section: ExamSectionBlueprint,
-  secDist: ReadonlyMap<number, number> | undefined,
-  continuousVal: number,
-): Map<string, ScaledPmfBucket> {
-  const next = new Map<string, ScaledPmfBucket>();
-  const weightSf = toScaledFloat(section.weight);
-  if (!secDist) {
-    const termSf = mulScaledFloat(weightSf, toScaledFloat(continuousVal));
-    for (const bucket of dist.values()) {
-      addScaledPmfBucket(next, addScaledFloat(bucket.value, termSf), bucket.prob);
-    }
-    return next;
-  }
-  for (const bucket of dist.values()) {
-    for (const [s1, p1] of secDist.entries()) {
-      const termSf = mulScaledFloat(weightSf, toScaledFloat(s1));
-      addScaledPmfBucket(next, addScaledFloat(bucket.value, termSf), bucket.prob * p1);
-    }
-  }
-  return next;
 }
 
 function convolveWeightedSections(
@@ -1272,51 +1280,22 @@ function convolveWeightedSections(
   let state = initial;
   for (const section of sections) {
     const secDist = untimedSectionDistributions.get(section.sectionId);
-    const continuousVal = secDist ? 0 : (untimedContinuousSections.get(section.sectionId) ?? 0);
-    const stepOps = secDist ? state.dist.size * secDist.size : state.dist.size;
-    opsBudget.remaining -= stepOps;
+    const outcomes = secDist ?? [[untimedContinuousSections.get(section.sectionId) ?? 0, 1] as const];
+    opsBudget.remaining -= (state.finite.size + state.scaled.size) * (secDist?.size ?? 1);
     if (opsBudget.remaining < 0) {
       throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
     }
-    if (state.kind === "scaled") {
-      state = { kind: "scaled", dist: convolveSingleSectionScaled(state.dist, section, secDist, continuousVal) };
-      continue;
-    }
-    const nextNum = new Map<number, number>();
-    let overflowed = false;
-    if (!secDist) {
-      const term = section.weight * continuousVal;
-      if (!Number.isFinite(term)) {
-        overflowed = true;
-      } else {
-        for (const [s, p] of state.dist.entries()) {
-          const sum = s + term;
-          if (!Number.isFinite(sum)) {
-            overflowed = true;
-            break;
-          }
-          addToPmfWithCap(nextNum, sum, p);
-        }
+
+    const next: WeightedConvolutionResult = { finite: new Map(), scaled: new Map() };
+    const convolvePath = (sum: number | ScaledFloat, prob: number): void => {
+      for (const [score, outcomeProb] of outcomes) {
+        const nextSum = advanceWeightedSum(sum, score, section.weight);
+        addWeightedPmfBucket(next, nextSum, prob * outcomeProb);
       }
-    } else {
-      outer: for (const [s0, p0] of state.dist.entries()) {
-        for (const [s1, p1] of secDist.entries()) {
-          const term = section.weight * s1;
-          const sum = s0 + term;
-          if (!Number.isFinite(term) || !Number.isFinite(sum)) {
-            overflowed = true;
-            break outer;
-          }
-          addToPmfWithCap(nextNum, sum, p0 * p1);
-        }
-      }
-    }
-    if (!overflowed) {
-      state = { kind: "number", dist: nextNum };
-    } else {
-      const upgraded = upgradeNumberDistToScaled(state.dist);
-      state = { kind: "scaled", dist: convolveSingleSectionScaled(upgraded, section, secDist, continuousVal) };
-    }
+    };
+    for (const [sum, prob] of state.finite) convolvePath(sum, prob);
+    for (const { val, prob } of state.scaled.values()) convolvePath(val, prob);
+    state = next;
   }
   return state;
 }
@@ -1329,20 +1308,14 @@ function addDistToUntimedOverallPmf(
 ): number {
   const [bpMin, bpMax] = blueprint.scoreRange;
   const snappedStates: Array<readonly [number, number]> = [];
-  if (result.kind === "number") {
-    for (const [score, p] of result.dist.entries()) {
-      const snapped = snapToScoreGrid(score, blueprint.scoreRange, blueprint.scoreStep, "nearest");
-      addToPmfWithCap(targetPmf, snapped, p * drawWeight);
-      snappedStates.push([snapped, p]);
-    }
-  } else {
-    for (const bucket of result.dist.values()) {
-      const rawVal = clamp(scaledFloatToNumber(bucket.value), bpMin, bpMax);
-      const snapped = snapToScoreGrid(rawVal, blueprint.scoreRange, blueprint.scoreStep, "nearest");
-      addToPmfWithCap(targetPmf, snapped, bucket.prob * drawWeight);
-      snappedStates.push([snapped, bucket.prob]);
-    }
-  }
+  const recordScore = (score: number, prob: number): void => {
+    const clamped = clamp(score, bpMin, bpMax);
+    const snapped = snapToScoreGrid(clamped, blueprint.scoreRange, blueprint.scoreStep, "nearest");
+    addToPmfWithCap(targetPmf, snapped, prob * drawWeight);
+    snappedStates.push([snapped, prob]);
+  };
+  for (const [score, prob] of result.finite) recordScore(score, prob);
+  for (const { val, prob } of result.scaled.values()) recordScore(scaledFloatToNumber(val), prob);
   return computeDiscreteExpectation(snappedStates, bpMin, bpMax);
 }
 
@@ -1459,8 +1432,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
 
   let hoistedWeightedPrefixLen = 0;
   let hoistedWeightedPrefixResult: WeightedConvolutionResult = {
-    kind: "number",
-    dist: new Map<number, number>([[0, 1]]),
+    finite: new Map([[0, 1]]),
+    scaled: new Map(),
   };
   let hoistedRemainingWeightedSections: readonly ExamSectionBlueprint[] = blueprint.sections;
   let allUntimedPmfHoisted = false;

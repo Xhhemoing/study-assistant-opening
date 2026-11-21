@@ -28,6 +28,7 @@ import {
   validateExamBlueprint,
   type CandidateStudyAction,
   type ExamEvidenceRecord,
+  type ExamSectionBlueprint,
   type SkillBeliefMap,
   type WholePaperCalibrationRecord,
 } from "./index";
@@ -4832,5 +4833,132 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     });
     expect(negCancelSim.sectionSummaries["sec"]!.untimedMeanScore).toBe(-0.25);
     expect(negCancelSim.untimedExpectedScore).toBe(-0.25);
+  });
+
+  it("enforces Round-16 per-path ScaledFloat & exact Kulisch expectation invariants", () => {
+    const tiny = Number.MIN_VALUE;
+    const huge = 1e308;
+    const makeSection = (
+      sectionId: string,
+      weight: number,
+      scores: readonly number[],
+      guesses = [0.5],
+      skillId = "fixed",
+    ): ExamSectionBlueprint => {
+      let min = Math.min(...scores);
+      let max = Math.max(...scores);
+      if (min === max) {
+        min = Math.min(0, min);
+        max = Math.max(1, max);
+      }
+      return {
+        sectionId,
+        label: sectionId,
+        scoringKind: "item_raw_table",
+        timeLimitMinutes: null,
+        weight,
+        scoreRange: [min, max],
+        scoreStep: max - min,
+        parts: [{ partId: "p", label: "P", weight: 1, skillIds: [skillId] }],
+        items: guesses.map((guess, index) => ({
+          itemId: `${sectionId}-${index}`,
+          sectionId,
+          partId: "p",
+          skillIds: [skillId],
+          guess,
+          lapse: 0,
+          timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+        })),
+        rawToBandTable: scores.map((score, raw) => ({ rawMin: raw, rawMax: raw, score })),
+      };
+    };
+    const skillIds = ["fixed", "varying"];
+    const belief = createSkillBelief({
+      workspaceId: "ws-1",
+      learnerId: "r16",
+      courseId: "r16",
+      confirmedSkillVersion: 1,
+      abilityMean: -1_000,
+      abilityVariance: 1,
+      lastDirectRecallAtMs: DAY_MS,
+    });
+    const simulate = (
+      sections: readonly ExamSectionBlueprint[],
+      scoreRange: readonly [number, number],
+      scoreStep: number,
+      covarianceDiagonal: readonly [number, number] = [0, 0],
+    ) => {
+      const itemCount = sections.reduce((count, section) => count + section.items!.length, 0);
+      return simulateExamPaper({
+        blueprint: {
+          ...createSharedFullPaperBlueprint({
+            blueprintId: "r16",
+            title: "R16",
+            totalTimeLimitMinutes: 60,
+            totalPoints: scoreRange[1],
+            skillIds,
+            thetaCovariance: [[covarianceDiagonal[0], 0], [0, covarianceDiagonal[1]]],
+            sections,
+          }),
+          scoreRange,
+          scoreStep,
+        },
+        learnerId: "r16",
+        beliefs: { fixed: belief, varying: belief },
+        evidence: [],
+        examAtMs: DAY_MS,
+        precomputedDraws: [0.75, 0.25].map((u) => ({
+          zLatent: [0, 0],
+          nuSpeed: 0,
+          itemUniforms: Array<number>(itemCount).fill(u),
+          itemTimeNormals: Array<number>(itemCount).fill(0),
+          rubricScoreNormals: [],
+          rubricTimeNormals: [],
+        })),
+      });
+    };
+
+    const tails = [
+      makeSection("half-a", tiny, [0.5, 0.5], [0.5], "varying"),
+      makeSection("half-b", tiny, [0.5, 0.5], [0.5], "varying"),
+    ];
+    const splitPaths = [makeSection("overflow", huge, [0, 2]), ...tails];
+    const expectedPmf = [{ score: 0, probability: 0.5 }, { score: tiny, probability: 0.5 }];
+    // The same draws exercise complete, prefix-only, and draw-local convolution.
+    for (const diagonal of [[0, 0], [0, 1], [1, 1]] as const) {
+      const result = simulate(splitPaths, [0, tiny], tiny, diagonal);
+      expect.soft(result.timedScores).toEqual([0, tiny]);
+      expect.soft(result.untimedScores).toEqual([0, tiny]);
+      expect.soft(result.untimedScoreDistribution).toEqual(expectedPmf);
+      expect.soft(result.untimedExpectedScore).toBe(0);
+    }
+
+    // Finite products overflow on addition, then cancel in the hoisted prefix.
+    // The scaled suffix still consumes the two binary64 products rounded to zero.
+    const cancelled = simulate([
+      makeSection("large-a", huge, [1, 1]),
+      makeSection("large-b", huge, [1, 1]),
+      makeSection("cancel", huge, [-2, -2]),
+      ...tails,
+    ], [0, tiny], tiny, [0, 1]);
+    expect.soft(cancelled.untimedScores).toEqual([0, 0]);
+    expect.soft(cancelled.untimedScoreDistribution).toEqual([{ score: 0, probability: 1 }]);
+
+    const h = 2 ** 80;
+    const mixed = simulate([
+      makeSection("mixed", 1, [-h, h, 2 * h], [0.5, 2 ** -60]),
+    ], [-h, 2 * h], h);
+    expect.soft(mixed.untimedScoreDistribution).toEqual([
+      { score: -h, probability: 0.5 },
+      { score: h, probability: 0.5 },
+      { score: 2 * h, probability: 2 ** -61 },
+    ]);
+    expect.soft(mixed.sectionSummaries.mixed!.untimedMeanScore).toBe(2 ** 20);
+    expect.soft(mixed.untimedExpectedScore).toBe(2 ** 20);
+
+    // The exact probability sum is 1 + tiny, putting the mean just below 1.5 * tiny.
+    const belowHalfway = simulate([makeSection("rare", 1, [0, 1.5], [tiny])], [0, 1.5], 1.5);
+    expect.soft(belowHalfway.sectionSummaries.rare!.untimedMeanScore).toBe(tiny);
+    expect.soft(belowHalfway.untimedExpectedScore).toBe(tiny);
   });
 });
