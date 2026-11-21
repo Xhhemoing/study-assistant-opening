@@ -169,17 +169,22 @@ The contract gate in `tests/contract/v3-open-core-boundary.test.ts` is the execu
 interpretation of this decision. It scans both Jingwei entries and the UI entry under
 `browser-ui`. It scans the native backup and contracts entries under `portable-runtime`.
 The cartridge SPI, lite SDK entries, and the two planned contracts subpaths join the
-portable scan when their entry files appear. Export still requires a separate blob
-allowlist.
+portable scan when their source or package export appears. Each candidate must provide
+a readable source file and a resolvable public package entry. For example, the Jingwei
+React scan starts from both its source file and every target of the package's
+`./react` export. Public package roots also contribute their legacy entry fields.
+Export still requires a separate blob allowlist.
 
 The analyzer checks that each selected entry is a readable file, then follows runtime
-and type-only edges across workspace packages and local modules. Triple-slash path
+and type-only edges across workspace packages and local modules. CommonJS calls to
+`require`, `module.require` and `module["require"]` follow the same rules. Triple-slash path
 references resolve relative to the declaring file. Ambient type directives resolve
 through in-repository `node_modules/@types` declarations, including their transitive
-references. The gate validates every `typesVersions` selector in ambient packages,
+references. The pinned TypeScript compiler parses every `typesVersions` selector in ambient packages,
 workspace packages, and relative directory imports. It scans unversioned declarations
 and every matching replacement. For workspace and directory entries, a mapping can
 match the declared runtime filename, its declaration filename, or its extensionless name.
+Package roots without `main`, `types` or `typings` also query `index`.
 Each replacement must resolve to a declaration inside its package. Runtime allowlists
 apply only to module imports.
 
@@ -193,7 +198,8 @@ edges resolve from both its requested directory and its physical directory. A pl
 lookup miss, including an unmapped package import such as `#helper`, can be satisfied
 by the other directory. Broken links, invalid manifest entries and boundary violations
 from either directory fail the check. The gate matches exact subpaths before wildcard
-patterns and reports the chain to each violation.
+patterns and reports the chain to each violation. Relative `imports` and `exports`
+targets must stay inside the owning package on both the requested and resolved paths.
 The in-memory cases cover mixed public and private conditional branches, alias cycles,
 Node built-ins, Wave P directories, dynamic calls, declaration files, and private
 manifests in an export candidate. The `requirePermissiveCandidateLicense` option selects
