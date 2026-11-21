@@ -78,6 +78,7 @@ describe("learner portability", () => {
     "parent:\n  - public: true\n    sealed: true",
     "{ public: [one, two }",
     "title: first\ntitle: duplicate",
+    'title: first\n"t\\u0069tle": duplicate',
     "alias: *unresolved",
   ])("fails closed on private or malformed frontmatter (%s)", frontmatter => {
     const markdown = `---\n${frontmatter}\n---\n# Note\n`;
@@ -88,8 +89,23 @@ describe("learner portability", () => {
     expect(() => exportLearnerZip(bundle)).toThrow(/YAML frontmatter/u);
   });
 
+  it.each([
+    ["inline fence with a line separator", '--- { title: "a\u2028b", sealed: true }\n---\n# note'],
+    ["commented document start", "---\n--- # metadata\nsealed: true\n---\n# note"],
+    ["commented document end", "---\n... # metadata\nsealed: true\n---\n# note"],
+    ["numeric key aliases", "---\n16: first\n0x10: second\n---\n# note"],
+    ["boolean key aliases", "---\ntrue: first\nTRUE: second\n---\n# note"],
+    ["Unicode line breaks in metadata", '---\ntitle: "a\u0085b\u2029c"\n---\n# note'],
+  ])("rejects ambiguous frontmatter with %s", (_description, markdown) => {
+    expect(() => importMarkdown("note.md", markdown)).toThrow(/YAML frontmatter/u);
+    expect(() => importObsidianNote("note.md", markdown)).toThrow(/YAML frontmatter/u);
+    const bundle = createLearnerPackage({ notes: [importMarkdown("note.md", "# Note\n")], decks: [], reviews: [] });
+    bundle.notes[0]!.markdown = markdown;
+    expect(() => exportLearnerZip(bundle)).toThrow(/YAML frontmatter/u);
+  });
+
   it("keeps valid flow and block frontmatter byte-for-byte through ZIP", () => {
-    const flow = '\uFEFF---\r\n{ "title": "Note", properties: { tags: [math, "algebra"] } }\r\n---\r\n# Matrix\r\n';
+    const flow = '\uFEFF--- \t\r\n{ "title": "Note", "16": first, "0x10": second, properties: { tags: [math, "algebra"] } }\r\n... \t\r\n# Matrix\u2028\r\n';
     const block = "---\nitems:\n- title: 'Matrix'\n  tags:\n    - math\nsummary: |\n  sealed: true is an example, not a field.\n---\n# Matrix\n";
     const notes = [importMarkdown("flow.md", flow), importObsidianNote("block.md", block)];
     const bundle = createLearnerPackage({ notes, decks: [], reviews: [] });

@@ -1,5 +1,9 @@
-const documentStart = /^---(?=[ \t]|$)[ \t]*(.*)$/u;
-const documentEnd = /^(?:---|\.\.\.)[ \t]*(?:[ \t]+#.*)?$/u;
+const leadingMarker = /^---(?=[\s\u0085]|$)/u;
+const documentMarker = /^(?:---|\.\.\.)(?=[\s\u0085]|$)/u;
+const openingFence = /^---[ \t]*$/u;
+const closingFence = /^(?:---|\.\.\.)[ \t]*$/u;
+const plainKey = /^[A-Za-z_][A-Za-z0-9_.-]*$/u;
+const scalarKeyword = /^(?:y|n|yes|no|on|off|true|false|null)$/iu;
 const privateKey = /^(?:sealed|0109|skillbelief(?:v1)?|openingcoursereservedquestions|<<)$/iu;
 const yamlEscapes: Readonly<Record<string, string>> = {
   "0": "\0", a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", e: "\x1b",
@@ -126,9 +130,11 @@ class FrontmatterReader {
   }
 
   private key(flow: boolean, keys: Set<string>): void {
-    const key = this.current === '"' || this.current === "'" ? this.quoted() : this.plain(flow);
+    const quoted = this.current === '"' || this.current === "'";
+    const key = quoted ? this.quoted() : this.plain(flow);
     this.skipHorizontal();
     if (!key || keys.has(key) || (flow ? this.current !== ":" : !this.indicator(":"))
+      || (!quoted && (!plainKey.test(key) || scalarKeyword.test(key)))
       || privateKey.test(key.normalize("NFKC").trim().replace(/[-_]/gu, ""))) invalid();
     keys.add(key);
     this.offset++;
@@ -243,13 +249,16 @@ class FrontmatterReader {
 }
 
 export function hasPortableFrontmatter(markdown: string): boolean {
-  const lines = markdown.replace(/^\uFEFF/u, "").split(/\r\n?|\n/u);
-  const start = documentStart.exec(lines[0] ?? "");
-  if (!start) return true;
-  const end = lines.findIndex((line, index) => index > 0 && documentEnd.test(line));
+  const raw = markdown.replace(/^\uFEFF/u, "");
+  if (!leadingMarker.test(raw)) return true;
+  const lines = raw.split(/\r?\n/u);
+  if (!openingFence.test(lines[0]!)) return false;
+  const end = lines.findIndex((line, index) => index > 0 && closingFence.test(line));
   if (end < 0) return false;
-  const body = [start[1], ...lines.slice(1, end)].join("\n");
-  if (/(?![\t\n])\p{Cc}/u.test(body)) return false;
+  const metadata = lines.slice(1, end);
+  if (metadata.some(line => documentMarker.test(line))) return false;
+  const body = metadata.join("\n");
+  if (/(?![\t\n])[\p{Cc}\u2028\u2029]/u.test(body)) return false;
   try {
     new FrontmatterReader(body).read();
     return true;

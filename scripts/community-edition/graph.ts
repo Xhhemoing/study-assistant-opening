@@ -163,7 +163,7 @@ export class CommunityGraph {
     }
   }
 
-  private specifier(spec: string, from: string, profile: Profile, chain: string[], typeOnly: boolean, activeAliases = new Set<string>()): void {
+  private specifier(spec: string, from: string, profile: Profile, chain: string[], typeOnly: boolean): void {
     if (spec.startsWith("./") || spec.startsWith("../") || spec === "." || spec === "..") {
       this.local(localPath(posix.dirname(from), spec, sourceOwner(from)), typeOnly, profile, chain);
       return;
@@ -172,15 +172,12 @@ export class CommunityGraph {
       const owner = this.owner(from);
       const manifest = this.manifest(owner);
       const match = isRecord(manifest.source.imports) && matchKey(manifest.source.imports, spec);
-      if (!match || activeAliases.has(spec)) throw new Error(`Unresolved or cyclic package import ${spec}`);
+      if (!match) throw new Error(`Unresolved package import ${spec}`);
       const expanded = expandConditions(match.value, match.capture, typeOnly);
       if (!expanded.targets.length) throw new Error(`Empty package import ${spec}`);
       manifest.imports.set(spec, expanded.map);
-      const active = new Set([...activeAliases, spec]);
       for (const target of expanded.targets) {
-        if (target.path.startsWith("./")) this.local(mappedPath(owner, target.path), target.typeOnly, profile, chain);
-        else if (target.path.startsWith(".")) throw new Error(`Invalid local package target ${target.path}`);
-        else this.specifier(target.path, from, profile, chain, target.typeOnly, active);
+        this.packageTarget(owner, target, profile, chain, "import");
       }
       return;
     }
@@ -211,22 +208,22 @@ export class CommunityGraph {
     this.visited.add(cacheKey);
     manifest.exports.set(key, expanded.map);
     for (const target of expanded.targets) {
-      this.packageExport(owner, target, profile, chain);
+      this.packageTarget(owner, target, profile, chain, "export");
     }
-    const legacy = key === "." ? this.legacyTargets(owner, manifest, profile, chain, new Set()) : [];
+    const legacy = key === "." ? this.legacyTargets(owner, manifest, profile, chain) : [];
     this.versionTargets(owner, manifest, [...expanded.targets, ...legacy].map(target => target.path), profile, chain);
   }
 
-  private packageExport(owner: string, target: Target, profile: Profile, chain: string[]): void {
+  private packageTarget(owner: string, target: Target, profile: Profile, chain: string[], kind: "import" | "export"): void {
     const file = mappedPath(owner, target.path);
     if (!sourceExtension.test(file) || this.snapshot.entries.get(file)?.type !== "blob") {
-      throw new Error(`Package export must name an exact source file with its extension: ${target.path}`);
+      throw new Error(`Package ${kind} must name an exact source file with its extension: ${target.path}`);
     }
-    if (!target.typeOnly && isDeclaration(file)) throw new Error(`Package export has no runtime source: ${target.path}`);
+    if (!target.typeOnly && isDeclaration(file)) throw new Error(`Package ${kind} has no runtime source: ${target.path}`);
     this.local(file, target.typeOnly, profile, chain);
   }
 
-  private legacyTargets(directory: string, manifest: ManifestProjection, profile: Profile, chain: string[], dirs: Set<string>): Target[] {
+  private legacyTargets(directory: string, manifest: ManifestProjection, profile: Profile, chain: string[]): Target[] {
     const targets: Target[] = [];
     for (const name of ["main", "module", "types", "typings", "browser"]) {
       const value = manifest.source[name];
@@ -235,7 +232,7 @@ export class CommunityGraph {
       for (const target of values) {
         if (typeof target !== "string") throw new Error(`Invalid ${name} field in ${directory}`);
         const typeOnly = name === "types" || name === "typings";
-        this.local(localPath(directory, target, directory), typeOnly, profile, chain, dirs);
+        this.local(localPath(directory, target, directory), typeOnly, profile, chain);
         targets.push({ path: target, typeOnly });
       }
       manifest.legacy[name] = value;
@@ -243,7 +240,7 @@ export class CommunityGraph {
     return targets;
   }
 
-  private local(file: string, typeOnly: boolean, profile: Profile, chain: string[], dirs = new Set<string>()): void {
+  private local(file: string, typeOnly: boolean, profile: Profile, chain: string[]): void {
     const exact = this.snapshot.entries.get(file);
     const found = new Set<string>();
     if (exact && exact.type !== "tree") found.add(file);
@@ -258,33 +255,14 @@ export class CommunityGraph {
         ?? extensionlessSources.map(replacement => file + replacement);
       for (const candidate of extensionCandidates) if (this.snapshot.entries.has(candidate)) found.add(candidate);
     }
-    for (const target of found) this.walk(target, profile, chain);
-    const directory = exact?.type === "tree" && this.directory(file, typeOnly, profile, chain, dirs);
-    if (!directory && ![...found].some(target => typeOnly || !isDeclaration(target))) throw new Error(`Unresolved ${file}`);
-  }
-
-  private directory(directory: string, typeOnly: boolean, profile: Profile, chain: string[], dirs: Set<string>): boolean {
-    if (dirs.has(directory)) throw new Error(`Cyclic directory entry ${directory}`);
-    const next = new Set([...dirs, directory]);
-    const manifest = this.snapshot.entries.has(`${directory}/package.json`) ? this.manifest(directory) : undefined;
-    const match = manifest && exportMapping(manifest.source, ".");
-    const index = `${directory}/index`;
-    const hasIndex = [...extensionlessSources, ...opaqueExtensions]
-      .some(extension => this.snapshot.entries.has(index + extension));
-    if (hasIndex) this.local(index, typeOnly, profile, chain, next);
-    if (!manifest) return hasIndex;
-    if (manifest.source.exports !== undefined && !match) throw new Error(`Missing directory root export ${directory}`);
-    const expanded = match ? expandConditions(match.value, match.capture, typeOnly) : undefined;
-    const legacy = this.legacyTargets(directory, manifest, profile, chain, next);
-    if (expanded) {
-      manifest.exports.set(".", expanded.map);
-      for (const target of expanded.targets) {
-        this.packageExport(directory, target, profile, chain);
+    if (exact?.type === "tree") {
+      for (const extension of [...extensionlessSources, ...opaqueExtensions]) {
+        const index = `${file}/index${extension}`;
+        if (this.snapshot.entries.has(index)) found.add(index);
       }
     }
-    const targets = [...(expanded?.targets ?? []), ...legacy];
-    this.versionTargets(directory, manifest, targets.map(target => target.path), profile, chain);
-    return hasIndex || targets.some(target => typeOnly || !target.typeOnly);
+    for (const target of found) this.walk(target, profile, chain);
+    if (![...found].some(target => typeOnly || !isDeclaration(target))) throw new Error(`Unresolved ${file}`);
   }
 
   private versionTargets(directory: string, manifest: ManifestProjection, names: string[], profile: Profile, chain: string[]): void {

@@ -205,6 +205,43 @@ describe("Community Edition extraction", () => {
     expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/exact source file with its extension/u);
   }));
 
+  it.each([
+    ["a string target", "./src/cartridge-sdk-lite/helper"],
+    ["a nested condition", { types: "./src/cartridge-sdk-lite/helper.ts", default: "./src/cartridge-sdk-lite/helper" }],
+  ])("requires exact local paths for package imports with %s", (_description, target) => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository, {
+      "packages/domain/package.json": print({
+        name: "@aistudy/domain", license: "UNLICENSED", version: "0.0.0", type: "module",
+        exports: { "./native": "./src/portability/native/index.ts", "./cartridge-sdk-lite": "./src/cartridge-sdk-lite/index.ts" },
+        imports: { "#helper": target },
+      }),
+      "packages/domain/src/cartridge-sdk-lite/index.ts": 'export * from "#helper";',
+      "packages/domain/src/cartridge-sdk-lite/helper.ts": "export const publicValue = 1;",
+    });
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Package import must name an exact source file/u);
+  }));
+
+  it("requires an index for a relative directory with package exports", () => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const group = "packages/domain/src/cartridge-sdk-lite/group";
+    const extras = {
+      "packages/domain/src/cartridge-sdk-lite/index.ts": 'export * from "./group";',
+      [group + "/package.json"]: print({ exports: "./actual.ts" }),
+      [group + "/actual.ts"]: "export const publicValue = 1;",
+    };
+    const commit = fixture(repository, extras);
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Unresolved .*\/group/u);
+
+    const index = group + "/index.ts";
+    write(repository, index, "export const publicValue = 2;");
+    git(repository, "add", "--", index);
+    const indexed = git(repository, "commit-tree", git(repository, "write-tree").toString("ascii").trim(), "-m", "directory index").toString("ascii").trim();
+    const result = exportCommunityEdition({ commit: indexed, repository, dryRun: true });
+    expect(result.files).toContain(index);
+    expect(result.files).not.toContain(group + "/actual.ts");
+  }));
+
   it.each(["cts", "mts"])("rejects extensionless relative lookups of .%s", extension => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
     const commit = fixture(repository, {
