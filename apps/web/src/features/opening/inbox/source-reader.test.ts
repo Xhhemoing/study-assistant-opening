@@ -103,6 +103,86 @@ describe("dedicated material reader", () => {
     expect(html).toContain("1:05");
     expect(html).toContain("尚不能同步确认该位置");
   });
+  it("auto-seeks video/audio media citations to [startMs, endMs], pauses at endMs, and allows manual resume", async () => {
+    const videoRecord: SourceRecord = { ...record, name: "微积分网课.mp4", mime: "video/mp4", version: 2 };
+    const reader = await render({
+      record: videoRecord,
+      latestRecord: videoRecord,
+      requestedVersion: 2,
+      startMs: 65_000,
+      endMs: 90_000,
+      keyframeChunkId: "kf-65",
+    });
+    const video = reader.querySelector<HTMLVideoElement>("video")!;
+    const player = reader.querySelector<HTMLElement>('[data-media-anchor-player="true"]')!;
+    expect(video).not.toBeNull();
+    expect(video.getAttribute("src")).toBe(`/api/opening/sources/${videoRecord.id}/download?version=2`);
+    expect(reader.textContent).toContain("1:05–1:30");
+    expect(reader.textContent).not.toContain("尚不能同步确认该位置");
+    expect(player.getAttribute("data-media-anchor-keyframe-id")).toBe("kf-65");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    const pauseSpy = vi.spyOn(video, "pause").mockImplementation(() => {});
+    const playSpy = vi.spyOn(video, "play").mockImplementation(() => Promise.resolve());
+
+    // Simulate metadata load -> auto-seeks to startMs / 1000 = 65s and keeps highlight active while paused.
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+    expect(video.currentTime).toBe(65);
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    // Mid-segment timeupdate does not pause.
+    video.currentTime = 75;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).not.toHaveBeenCalled();
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    // Reaching endMs = 90_000ms triggers automatic pause while KEEPING range highlight active.
+    video.currentTime = 90;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).toHaveBeenCalledOnce();
+    expect(reader.textContent).toContain("已播放到引用片段末尾");
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("paused_at_end");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    // Manual user resume releases the end bound and clears the jumped-range highlight.
+    await act(async () => { video.dispatchEvent(new Event("play")); });
+    video.currentTime = 110;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).toHaveBeenCalledOnce();
+    expect(reader.textContent).toContain("已继续播放后续内容");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+
+    // Clicking replay button seeks back to 65s, re-activates highlight, and re-arms the 90s auto-pause.
+    const replayButton = Array.from(reader.querySelectorAll("button")).find(b => b.textContent === "重播片段")!;
+    await click(replayButton);
+    expect(video.currentTime).toBe(65);
+    expect(playSpy).toHaveBeenCalledOnce();
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+    video.currentTime = 90.2;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).toHaveBeenCalledTimes(2);
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    // Manually seeking elsewhere clears the jumped-range highlight.
+    video.currentTime = 15;
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+  });
+  it("renders an audio player and rejects inverted [startMs, endMs] media ranges without seeking", async () => {
+    const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg", version: 1 };
+    const reader = await render({
+      record: audioRecord,
+      latestRecord: audioRecord,
+      requestedVersion: 1,
+      startMs: 30_000,
+      endMs: 10_000,
+    });
+    const audio = reader.querySelector<HTMLAudioElement>("audio")!;
+    expect(audio).not.toBeNull();
+    expect(audio.currentTime).toBe(0);
+    expect(reader.textContent).toContain("引用时间范围无效");
+  });
   it("keeps retryable parse failures actionable without pretending the original failed to upload", async () => {
     const html = (await render({ record: { ...record, parseState: "failed", error: { code: "PARSE_FAILED", message: "解析失败", retryable: true } }, onRetry: async () => {} })).outerHTML;
     expect(html).toContain("解析失败");

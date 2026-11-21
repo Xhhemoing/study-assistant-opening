@@ -88,7 +88,7 @@ export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
   }, [api, request, revision]);
   if (!request) return null;
   const close = () => { sequence.current++; setRequest(null); setRecord(null); setError(""); };
-  return record ? <SourceReader record={record} requestedVersion={request.target.version} page={request.target.page} startMs={request.target.startMs} slideLabel={request.target.slideLabel}
+  return record ? <SourceReader record={record} requestedVersion={request.target.version} page={request.target.page} startMs={request.target.startMs} endMs={request.target.endMs} keyframeChunkId={request.target.keyframeChunkId} slideLabel={request.target.slideLabel}
     returnPoint={request.returnPoint} courseId={request.courseId} originalConversationId={request.target.conversationId} questionProtected={request.questionProtected} onClose={close} onRetry={async () => {
       const current = sequence.current;
       await api.retryParse(record.id);
