@@ -1841,6 +1841,7 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "This label says evaluate (m/s) −4.",
     "Compute velocity change (m/s) −4.",
     "First compute velocity change (m/s) −4.",
+    "Please first compute velocity change (m/s) −4.",
     "Step 2 then calculate the speed (km/h) −4.",
     "先计算速度 (m/s) −4。",
     "Calculate speed (km/h) −4.",
@@ -1849,6 +1850,13 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "Speed change: (m/s) −4 approx. In the next exercise, m = 6 and s = 2.",
     "Speed change: (m/s) −4 approx. m = 6 and s = 2.",
     "Speed change: (m/s) −4 approx. 2) m = 6 and s = 2.",
+    "Speed change: (m/s) −4 approx. 2(b) Let m = 6 and s = 2.",
+    "Speed change: (m/s) −4 approx. 5, m = 6 and s = 2.",
+    "(m/s) −4, approx.2(b) m = 6 and s = 2.",
+    "(m/s) −4, approx. 2 [b] m = 6 and s = 2.",
+    "(m/s) −4, e.g. 2a) m = 6 and s = 2.",
+    "(m/s) −4, i.e.(b) m = 6 and s = 2.",
+    "(m/s) −4, cf. [2] m = 6 and s = 2.",
     "Speed change: (m/s) −4, e.g. In the next exercise, m = 6 and s = 2.",
     "(m/s) −4, i.e. 下一题中，m = 6，s = 2。",
     "(m/s) −4, cf. Then m = 6 and s = 2.",
@@ -1885,11 +1893,15 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
 
   it.each([
     "First evaluate (m/s) − 4, where m = 6 and s = 2.",
+    "Please first evaluate (m/s) − 4.",
+    "Then please also determine the expression [m/s] − 4.",
     "Now please simplify the expression (m/s) − 4.",
     "Evaluate (m/s) − 4, e.g., m = 6 and s = 2.",
     "Step 2 then determine the value of [m/s] − 4.",
     "(b) First evaluate (m/s) − 4.",
     "先计算 (m/s) − 4，其中 m = 6，s = 2。",
+    "请先计算 (m/s) − 4。",
+    "请先再计算表达式 (m/s) − 4。",
     "第十二步 然后请计算表达式 (m/s) − 4。",
     "Evaluate the expression (m/s) − 4, where m = 6 and s = 2.",
     "Find the value of (m/s) −4 when m = 6 and s = 2.",
@@ -1904,6 +1916,7 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "Evaluate (μl/s) − 4.",
     "(m/s) −4, where m = 6.5 and s = .2.",
     "(m/s) −4, where m = approx. +.6 and s = 2.",
+    "(m/s) −4, where m = approx. 5.2 and s = 2.",
     "(m/s) −4, e.g. m = 6 and s = 2.",
     "(m/s) −4, i.e., m = 6 and s = 2.",
     "(V/m) −4, cf. V = 6 and m = 2.",
@@ -1916,6 +1929,71 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       learnerId: "learner-1",
       issuedAtMs: T0,
       candidates: [makeMissVariantCandidate({ answerKey: "-4", freshVariantStem })],
+    })).toMatchObject({ ok: true });
+  });
+
+  it.each(["variant stem", "sibling card"] as const)("rejects nested sealed answers in a %s", surface => {
+    const sealedPayload = { exam: { items: [{ rubric: { answer: "violet" } }] } };
+    const safeStem = "What color does the indicator show?";
+    const leakedText = "The indicator turns violet.";
+    const candidate = makeMissVariantCandidate({
+      sealedPayload,
+      freshVariantStem: surface === "variant stem" ? leakedText : safeStem,
+    });
+    const candidates = surface === "variant stem" ? [candidate] : [
+      candidate,
+      { ...makeFlashcardCandidate(900), prompt: leakedText, backSummary: "Recall the indicator colors." },
+    ];
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-nested-secret",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates,
+    })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+  });
+
+  it.each([
+    ["recursive record", () => {
+      const record: Record<string, unknown> = {};
+      record.self = record;
+      return { sealedPayload: record };
+    }],
+    ["recursive array in another protected field", () => {
+      const array: unknown[] = [];
+      array.push(array);
+      return { gradingRubric: { nested: array } };
+    }],
+    ["over-depth payload", () => {
+      let nested: unknown = "violet";
+      for (let depth = 0; depth < 65; depth += 1) nested = { nested };
+      return { sealedPayload: nested };
+    }],
+    ["over-budget payload", () => ({ sealedPayload: Array.from({ length: 4_096 }, () => null) })],
+  ] as const)("rejects uninspectable protected data (%s) even when the stem has no answer", (_label, buildProtectedFields) => {
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-uninspectable-secret",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [makeMissVariantCandidate({
+        freshVariantStem: "What color does the indicator show?",
+        ...buildProtectedFields(),
+      })],
+    })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak", cardId: "miss-card-1" });
+  });
+
+  it("allows a repeated acyclic protected object when none of its values leak", () => {
+    const rubric = { answer: "violet" };
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-shared-secret",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [makeMissVariantCandidate({
+        freshVariantStem: "What color does the indicator show?",
+        sealedPayload: { exam: { items: [{ rubric }, { rubric }] } },
+      })],
     })).toMatchObject({ ok: true });
   });
 

@@ -508,9 +508,11 @@ const DIRECT_LEFT_VAR_CONNECTOR_END_RE =
 const ALGEBRAIC_SYMBOL_CHAR_RE = /^[\d.+\-*/^|'\u2032\u2019\u2212\u00D7\u00F7\u00B7\u221A!%_]$/;
 
 const LINE_BREAK_RE = /[\r\n\u2028\u2029]/;
-const INLINE_ABBREVIATION_END_RE = /(?<![\p{L}\p{N}_])(e\.g|i\.e|cf|vs|viz|approx)$/iu;
-const SENTENCE_START_AFTER_ABBREVIATION_RE =
-  /^(?:\s+(?:\p{Lu}\p{Ll}|(?:\(\d+\)|\d+[.)])\s)|\s*\p{Script=Han})/u;
+const ABBREVIATION_END_RE = /(?<![\p{L}\p{N}_])(e\.g|i\.e|cf|vs|viz|etc|approx)$/iu;
+const SENTENCE_START_AFTER_ABBREVIATION_RE = /^(?:\s+\p{Lu}\p{Ll}|\s*\p{Script=Han})/u;
+const ITEM_MARKER_AFTER_ABBREVIATION_RE =
+  /^\s*(?:(?:\d+\s*)?(?:\([a-z0-9]+\)|\[[a-z0-9]+\])|\d+[a-z][.)]|\d+\s*(?:\)|\.(?!\d)))/i;
+const POSTFIX_APPROXIMATION_RE = /\d\s+approx$/i;
 const APPROXIMATE_NUMBER_RE = /^\s*[+−-]?(?:\d|\.\d)/u;
 
 function isSentenceDelimiter(text: string, index: number): boolean {
@@ -521,20 +523,26 @@ function isSentenceDelimiter(text: string, index: number): boolean {
   if (ch === "!") {
     return text[index + 1] !== "=";
   }
-  if (ch !== "." || /\d/.test(text[index + 1] ?? "")) {
-    return false;
-  }
+  if (ch !== ".") return false;
   const before = text.slice(Math.max(0, index - 7), index);
   const after = text.slice(index + 1, index + 3).toLowerCase();
   // The first periods in e.g. and i.e. are internal to the abbreviations.
   if (after === "g." && /(?<![\p{L}\p{N}_])e$/iu.test(before)) return false;
   if (after === "e." && /(?<![\p{L}\p{N}_])i$/iu.test(before)) return false;
-  const abbreviation = INLINE_ABBREVIATION_END_RE.exec(before)?.[1]?.toLowerCase();
-  if (!abbreviation) return true;
+  const abbreviation = ABBREVIATION_END_RE.exec(before)?.[1]?.toLowerCase();
+  if (!abbreviation) return !/\d/.test(text[index + 1] ?? "");
+  if (abbreviation === "etc") return true;
 
   const remainder = text.slice(index + 1);
-  if (SENTENCE_START_AFTER_ABBREVIATION_RE.test(remainder)) return true;
-  return abbreviation === "approx" && !APPROXIMATE_NUMBER_RE.test(remainder);
+  if (
+    SENTENCE_START_AFTER_ABBREVIATION_RE.test(remainder) ||
+    ITEM_MARKER_AFTER_ABBREVIATION_RE.test(remainder)
+  ) {
+    return true;
+  }
+  return abbreviation === "approx" && (
+    POSTFIX_APPROXIMATION_RE.test(text.slice(0, index)) || !APPROXIMATE_NUMBER_RE.test(remainder)
+  );
 }
 
 function isClauseDelimiter(text: string, index: number): boolean {
@@ -766,16 +774,16 @@ const ENGLISH_MATH_OBJECT =
   "(?:expression|formula|quantity|quotient|difference|sum|product|term|equation|inequality|function|value)";
 const ENGLISH_MATH_DIRECTIVE_RE = new RegExp(
   "^(?:(?:(?:step|part|item|question|problem|exercise)\\s+[a-z0-9]+|\\([a-z0-9]+\\)|\\d+[.)])\\s+)?" +
-    "(?:(?:first|second|third|next|then|now|finally|lastly|also|hence|thus|therefore)\\s+)*" +
-    "(?:please\\s+)?(?:evaluate|simplify|compute|calculate|expand|factor|solve|prove|verify|check|find|determine)" +
+    "(?:(?:please|first|second|third|next|then|now|finally|lastly|also|hence|thus|therefore)\\s+)*" +
+    "(?:evaluate|simplify|compute|calculate|expand|factor|solve|prove|verify|check|find|determine)" +
     `(?:\\s+(?:(?:the\\s+)?value\\s+of(?:\\s+${ENGLISH_MATH_OBJECT})?|${ENGLISH_MATH_OBJECT}))?$`,
   "i",
 );
 
 const CJK_MATH_DIRECTIVE_RE = new RegExp(
   "^(?:第[一二三四五六七八九十\\d]+[步题问]\\s*)?" +
-    "(?:(?:首先|其次|先|接着|然后|最后|现在|再)\\s*)*" +
-    "(?:请\\s*)?(?:计算|求值|化简|展开|因式分解|解方程|求解|证明|验证|核算|[解求设令若当]|已知)" +
+    "(?:(?:请|首先|其次|先|接着|然后|最后|现在|再)\\s*)*" +
+    "(?:计算|求值|化简|展开|因式分解|解方程|求解|证明|验证|核算|[解求设令若当]|已知)" +
     "(?:\\s*(?:下列|以下|该|此|本)?(?:代数式|数学式|表达式|算式|式子|分式|方程|不等式|函数|值)" +
     "(?:的(?:数值|值|结果))?)?$",
   "u",
@@ -1441,34 +1449,81 @@ function normalizeComparableText(value: string): string {
   return canonicalizeMathNotation(value);
 }
 
-function collectSecretTexts(value: unknown, depth = 0): string[] {
-  if (value === null || value === undefined || depth > 4) return [];
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? [trimmed] : [];
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return [String(value)];
-  }
-  if (Array.isArray(value)) {
-    return value.flatMap(item => collectSecretTexts(item, depth + 1));
-  }
-  if (typeof value === "object") {
-    const results: string[] = [];
-    try {
-      const serialized = JSON.stringify(value);
-      if (serialized && serialized !== "{}" && serialized !== "[]") {
-        results.push(serialized);
+const MAX_PROTECTED_PAYLOAD_DEPTH = 64;
+const MAX_PROTECTED_PAYLOAD_NODES = 4_096;
+
+function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
+  const texts = new Set<string>();
+  const ancestors = new Set<object>();
+  let remainingNodes = MAX_PROTECTED_PAYLOAD_NODES;
+
+  // Build JSON text from the inspected properties so serialization cannot
+  // traverse unchecked values or execute getters and toJSON hooks.
+  function inspect(current: unknown, depth: number): string | undefined {
+    remainingNodes -= 1;
+    if (depth > MAX_PROTECTED_PAYLOAD_DEPTH || remainingNodes < 0) {
+      throw new RangeError("Protected payload exceeds inspection bounds");
+    }
+    if (current === undefined) return undefined;
+    if (current === null) return "null";
+    if (typeof current === "string" || typeof current === "number" || typeof current === "boolean") {
+      const text = String(current).trim();
+      if (text) texts.add(text);
+      return JSON.stringify(current);
+    }
+    if (typeof current !== "object" || ancestors.has(current)) {
+      throw new TypeError("Protected payload contains unsupported or cyclic data");
+    }
+
+    const arrayLength = Array.isArray(current) ? current.length : null;
+    const prototype: unknown = Object.getPrototypeOf(current);
+    if (prototype !== null && prototype !== (arrayLength === null ? Object.prototype : Array.prototype)) {
+      throw new TypeError("Protected payload must contain plain records and arrays");
+    }
+    const keys = Reflect.ownKeys(current);
+    if ((arrayLength ?? 0) > remainingNodes || keys.length - (arrayLength === null ? 0 : 1) > remainingNodes) {
+      throw new RangeError("Protected payload exceeds inspection bounds");
+    }
+
+    const parts = arrayLength === null ? [] : new Array<string>(arrayLength).fill("null");
+    let indexedChildren = 0;
+    ancestors.add(current);
+    for (const key of keys) {
+      if (arrayLength !== null && key === "length") continue;
+      const property = Object.getOwnPropertyDescriptor(current, key);
+      if (!property || !("value" in property)) {
+        throw new TypeError("Protected payload properties must be inspectable data");
       }
-    } catch {
-      // Ignore unserializable metadata.
+      const json = inspect(property.value, depth + 1);
+      if (typeof key !== "string") continue;
+      if (arrayLength !== null) {
+        const index = Number(key);
+        if (Number.isInteger(index) && index >= 0 && index < arrayLength && String(index) === key) {
+          parts[index] = json ?? "null";
+          indexedChildren += 1;
+        }
+      } else if (property.enumerable && json !== undefined) {
+        parts.push(`${JSON.stringify(key)}:${json}`);
+      }
     }
-    for (const nested of Object.values(value as Record<string, unknown>)) {
-      results.push(...collectSecretTexts(nested, depth + 1));
+    ancestors.delete(current);
+
+    if (arrayLength !== null) {
+      remainingNodes -= arrayLength - indexedChildren;
+      if (remainingNodes < 0) throw new RangeError("Protected payload exceeds inspection bounds");
+      return `[${parts.join(",")}]`;
     }
-    return results;
+    const json = `{${parts.join(",")}}`;
+    if (parts.length > 0) texts.add(json);
+    return json;
   }
-  return [];
+
+  try {
+    inspect(value, 0);
+    return texts;
+  } catch {
+    return null;
+  }
 }
 
 function canonicalizeForFingerprint(value: unknown): string {
@@ -1755,7 +1810,7 @@ function toLedgerRecord(
 
 function sanitizeLeaseCandidate(
   candidate: OfflineLeaseCardCandidate,
-  allProtectedSecrets: ReadonlyArray<string>,
+  allProtectedSecrets: ReadonlySet<string>,
 ):
   | { readonly ok: true; readonly card: OfflineLeaseCard }
   | {
@@ -1885,25 +1940,7 @@ function sanitizeLeaseCandidate(
         message: `Miss variant card ${candidateCardId} refused: freshVariantStem contains solution/answer directive markup.`,
       };
     }
-    const rawMissCandidate = candidate as Record<string, unknown>;
-    for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
-      if (!Object.prototype.hasOwnProperty.call(rawMissCandidate, forbiddenField)) continue;
-      const rawSecret = rawMissCandidate[forbiddenField];
-      const secretTexts = collectSecretTexts(rawSecret);
-      for (const secretText of secretTexts) {
-        if (containsAnswerLeak(candidate.freshVariantStem, secretText, { includeShortTokens: true })) {
-          return {
-            ok: false,
-            code: "miss_variant_answer_leak",
-            httpStatus: 422,
-            cardId: candidateCardId,
-            message: `Miss variant card ${candidateCardId} refused: freshVariantStem leaks ${forbiddenField}.`,
-          };
-        }
-      }
-    }
-    // Check miss-variant stem against ALL candidates' protected secrets in the lease
-    // so miss_variant #2 cannot expose miss_variant #1's (or any sibling's) answer.
+    // Check the stem against protected values from this card and its siblings.
     for (const secretText of allProtectedSecrets) {
       if (containsAnswerLeak(candidate.freshVariantStem, secretText, { includeShortTokens: true })) {
         return {
@@ -1911,7 +1948,7 @@ function sanitizeLeaseCandidate(
           code: "miss_variant_answer_leak",
           httpStatus: 422,
           cardId: candidateCardId,
-          message: `Miss variant card ${candidateCardId} refused: freshVariantStem leaks a sibling card's protected answer/sealed material.`,
+          message: `Miss variant card ${candidateCardId} refused: freshVariantStem leaks protected answer/sealed material.`,
         };
       }
     }
@@ -2071,17 +2108,24 @@ export function issueOfflineFlashcardLease(
 
   // Collect protected secrets across ALL candidates so every card (flashcard AND miss_variant)
   // is checked against both self and cross-card protected answers/sealed payloads.
-  const allProtectedSecretSet = new Set<string>();
+  const allProtectedSecrets = new Set<string>();
   for (const candidate of input.candidates) {
-    const rawCandidate = candidate as Record<string, unknown>;
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
-      if (!Object.prototype.hasOwnProperty.call(rawCandidate, forbiddenField)) continue;
-      for (const secretText of collectSecretTexts(rawCandidate[forbiddenField])) {
-        allProtectedSecretSet.add(secretText);
+      const property = Object.getOwnPropertyDescriptor(candidate, forbiddenField);
+      if (!property) continue;
+      const secretTexts = "value" in property ? collectSecretTexts(property.value) : null;
+      if (!secretTexts) {
+        return {
+          ok: false,
+          code: "miss_variant_answer_leak",
+          httpStatus: 422,
+          cardId: isSafeIdentifier(candidate.cardId) ? candidate.cardId : undefined,
+          message: `Offline lease refused: protected field ${forbiddenField} could not be fully inspected.`,
+        };
       }
+      for (const text of secretTexts) allProtectedSecrets.add(text);
     }
   }
-  const allProtectedSecrets = [...allProtectedSecretSet];
 
   const seenCardIds = new Set<string>();
   const sanitizedCards: OfflineLeaseCard[] = [];
