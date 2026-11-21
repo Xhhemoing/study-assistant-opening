@@ -253,4 +253,27 @@ describe("exam photo review repository integration", () => {
     expect(fresh.privacyEpoch).toBe(pending.privacyEpoch + 1);
     expect(fresh.review.id).not.toBe(pending.review.id);
   });
+
+  it.each(["pending", "unknown"] as const)("does not reuse an unresolved %s review from an earlier privacy epoch when called with a fresh client key", async status => {
+    const first = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "My explanation" }));
+    if (status === "unknown") await repository.fail(f.scope, first.review.id, "unknown");
+    const unrelated = await source();
+    await createOpeningPrivacyRepository(f.sql).recordExclusions(f.sql, f.scope, {
+      sourceIds: [unrelated], memoryId: randomUUID(), deletedAt: new Date(),
+    });
+    const fresh = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "My explanation" }));
+    expect(fresh.review.id).not.toBe(first.review.id);
+    expect(fresh.reusedUnresolved).toBeUndefined();
+    expect(fresh.privacyEpoch).toBe(first.privacyEpoch + 1);
+    expect(fresh.review.status).toBe("pending");
+    const reusedInNewEpoch = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "My explanation" }));
+    expect(reusedInNewEpoch.review.id).toBe(fresh.review.id);
+    expect(reusedInNewEpoch.reusedUnresolved).toBe(true);
+    const rows = await f.sql`SELECT id, status, privacy_epoch FROM opening_exam_reviews
+      WHERE workspace_id=${f.scope.workspaceId} ORDER BY privacy_epoch, id`;
+    expect(rows.map(row => ({ id: row.id, status: row.status, privacyEpoch: Number(row.privacy_epoch) }))).toEqual([
+      { id: first.review.id, status, privacyEpoch: first.privacyEpoch },
+      { id: fresh.review.id, status: "pending", privacyEpoch: fresh.privacyEpoch },
+    ]);
+  });
 });
