@@ -97,9 +97,15 @@ function normalizeCompactForLeakScan(text: string): string {
   );
 }
 
-/** Remove paired inline delimiters before math normalization collapses spaces around `*`. */
+/** Expose Markdown block boundaries and inline equation text before math compaction. */
 function stripEquationFormatting(text: string): string {
-  const parts = text.split(/(\\[()[\]]|\*+|_+|`+|~~|\$\$?)/u);
+  // Quotes and lists can nest. A checkbox belongs to the preceding list marker.
+  const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/gm;
+  const content = text
+    .replace(containerPrefix, "")
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")
+    .replace(/\r\n|[\r\n\u2028\u2029|]/g, ";");
+  const parts = content.split(/(\\[()[\]]|\*+|_+|`+|~~|\$\$?)/u);
   const openings = new Map<string, number[]>();
   for (let i = 1; i < parts.length; i += 2) {
     const marker = parts[i]!;

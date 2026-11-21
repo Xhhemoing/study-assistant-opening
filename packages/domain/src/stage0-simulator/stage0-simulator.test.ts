@@ -1030,6 +1030,41 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     }
   });
 
+  it("audits root equations at Markdown block boundaries without joining lines or cells", () => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0",
+    )!;
+    for (const [hint, leaks] of [
+      ["* **x = *4***.", true],
+      ["- **x = *4***.", true],
+      ["+ x = 4", true],
+      ["> **x = *4***.", true],
+      ["> * x = 4", true],
+      ["1. x = 4", true],
+      ["### x = 4", true],
+      ["* [ ] x = 4", true],
+      ["> - [x] 1. x = 4", true],
+      ["  >> 2) [X] ### **x = 4**", true],
+      ["| x = 4 |", true],
+      ["|left||**x = 4**|right|", true],
+      ["Step 2\r\nx = 4\n+ Next step", true],
+      ["x =\n4", false],
+      ["| x = | 4 |", false],
+      ["2 * x = 4", false],
+      ["2 - x = 4", false],
+      ["0 + x = 4", false],
+      ["y > x = 4", false],
+      ["-x = 4", false],
+      ["x**2 = 16", false],
+      ["y_x = 4", false],
+      ["x = 4/5", false],
+    ] as const) {
+      const turn = auditReleasedHint(episode, hint);
+      expect(turn.leaked, hint).toBe(leaks);
+      expect(turn.detectedLeakTokens, hint).toEqual(leaks ? ["x = 4"] : []);
+    }
+  });
+
   it("distinguishes standalone fractions from dates and slash chains in a calculus turn", () => {
     const episode = generateStage0Episodes(20261121, 1).find(
       (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",
