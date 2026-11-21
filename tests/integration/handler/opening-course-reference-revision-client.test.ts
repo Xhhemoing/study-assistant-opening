@@ -90,7 +90,7 @@ it("adopts through client → authenticated API → strict course read, preservi
   expect(old.requirements[0]!.referenceChecks).toEqual({ matched: 0, mismatched: 1, unsupported: 0 });
   expect(old.requirements[0]!.compilation).toMatchObject({ contentVersion: 1, revisionNumber: 1, saved: true });
   const edited = structuredClone(blocks); edited[1]!.content.text = "5";
-  await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber: 1, blocks: edited });
+  await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber: 1, blocks: edited, includeAnswerKeys: true });
   expect(await readWithoutWrites()).toEqual(old);
   const beforeAdopt = await historyAndCosts();
   const adopted = await api.adoptTeachingReferenceRevision(activityId, { expectedContentVersion: 1, expectedRevisionNumber: 1, revisionNumber: 2 });
@@ -108,7 +108,7 @@ it("adopts through client → authenticated API → strict course read, preservi
   // A genuinely reconfirmed requirement makes the old activity non-current.
   await course.confirm(courseId, { expectedRevisions: requirements.map(r => ({ id: r.id, revision: 1 })), requirements: requirements.map((r, i) => i ? r : { ...r, title: "修订后的运算要求" }), confirmScope: true });
   edited[1]!.content.text = "5.0";
-  await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber: 2, blocks: edited });
+  await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber: 2, blocks: edited, includeAnswerKeys: true });
   const beforeConflict = await workspaceContents();
   await expect(api.adoptTeachingReferenceRevision(activityId, { expectedContentVersion: 2, expectedRevisionNumber: 2, revisionNumber: 3 })).rejects.toMatchObject({ status: 409 });
   expect(await workspaceContents()).toBe(beforeConflict);

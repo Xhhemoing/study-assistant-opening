@@ -397,6 +397,7 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
         expectedRevisionNumber: current.currentRevisionNumber,
         blocks: blocks.map((b) => ({ id: b.id, type: b.type, content: b.content })),
         reason: "teaching-compile",
+        includeAnswerKeys: true,
       });
       return { documentId: unit.documentId, revisionNumber: updated.currentRevisionNumber };
     },
@@ -582,7 +583,7 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
           if (!revision) await library.updateDocumentInTx(tx, {
             workspaceId: scope.workspaceId, jobScope: scope, documentId: desiredGraph.documentId,
             expectedRevisionNumber: compiled.expectedDocumentRevision, blocks: compiled.blocks,
-            reason: "teaching-compile",
+            reason: "teaching-compile", includeAnswerKeys: true,
           }, compiled.revisionId);
         }
 

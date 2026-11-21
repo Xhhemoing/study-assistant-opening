@@ -11,6 +11,8 @@ import {
   type LibraryRepository,
   type OpeningJobScope,
 } from "@aistudy/database";
+import { createBackupRestoreRepository } from "../../packages/database/src/repositories/backup-restore";
+import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup";
 import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -1402,5 +1404,198 @@ describe("library repository foundation", () => {
     }
     expect(await repo.searchLibrary({ workspaceId: workspaceA, query: visible.content.text }))
       .toMatchObject([{ id: documentId, body: visible.content.text }]);
+  });
+
+  it("preserves hidden answer blocks across learner saves without leaking or allowing ID forgery", async () => {
+    const scope = await ownerScope();
+    const leadAnswer = { id: randomUUID(), type: "answer_key", content: { answer: "LEAD_ANSWER_SECRET" } };
+    const visibleA = { id: randomUUID(), type: "paragraph", content: { text: "PUBLIC_VISIBLE_A" } };
+    const midSolution = { id: randomUUID(), type: "solution", content: { solution: "MID_SOLUTION_SECRET" } };
+    const midNestedRoleKey = { id: randomUUID(), type: "text", content: { role: "answer_key", text: "NESTED_ROLE_KEY_SECRET" } };
+    const midNestedRoleSol = { id: randomUUID(), type: "text", content: { role: "solution", text: "NESTED_ROLE_SOL_SECRET" } };
+    const midNestedTypeKey = { id: randomUUID(), type: "text", content: { blockType: "answer_key", text: "NESTED_TYPE_KEY_SECRET" } };
+    const midNestedTypeSol = { id: randomUUID(), type: "text", content: { blockType: "solution", text: "NESTED_TYPE_SOL_SECRET" } };
+    const midProvenance = { id: randomUUID(), type: "paragraph", content: { text: "PROVENANCE_ANSWER_SECRET" } };
+    const visibleB = { id: randomUUID(), type: "paragraph", content: { text: "PUBLIC_VISIBLE_B" } };
+    const trailAnswer = { id: randomUUID(), type: "answer_key", content: { answer: "TRAIL_ANSWER_SECRET" } };
+
+    const allBlocks = [
+      leadAnswer,
+      visibleA,
+      midSolution,
+      midNestedRoleKey,
+      midNestedRoleSol,
+      midNestedTypeKey,
+      midNestedTypeSol,
+      midProvenance,
+      visibleB,
+      trailAnswer,
+    ];
+    const secretTexts = [
+      "LEAD_ANSWER_SECRET",
+      "MID_SOLUTION_SECRET",
+      "NESTED_ROLE_KEY_SECRET",
+      "NESTED_ROLE_SOL_SECRET",
+      "NESTED_TYPE_KEY_SECRET",
+      "NESTED_TYPE_SOL_SECRET",
+      "PROVENANCE_ANSWER_SECRET",
+      "TRAIL_ANSWER_SECRET",
+    ];
+
+    const created = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Original Note Title",
+      blocks: allBlocks,
+    });
+    await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+      VALUES(${created.id},${workspaceA},${sql.json([{ answerKeyBlockIds: [midProvenance.id.toUpperCase()] }])})`;
+
+    // 1. Editor loads redacted document (only visible blocks).
+    const loaded = await repo.getDocument({ workspaceId: workspaceA, documentId: created.id });
+    expect(loaded.blocks.map((b) => b.id)).toEqual([visibleA.id, visibleB.id]);
+
+    // 2. Title-only save submitting visible-only blocks preserves all protected blocks in exact slots.
+    const titleSaved = await repo.updateDocument({
+      workspaceId: workspaceA,
+      documentId: created.id,
+      expectedRevisionNumber: 1,
+      title: "Updated Note Title",
+      blocks: loaded.blocks,
+      reason: "manual-save",
+    });
+    expect(titleSaved.title).toBe("Updated Note Title");
+    expect(titleSaved.currentRevisionNumber).toBe(2);
+    expect(titleSaved.blocks.map((b) => b.id)).toEqual([visibleA.id, visibleB.id]);
+    for (const secret of secretTexts) {
+      expect(JSON.stringify(titleSaved)).not.toContain(secret);
+    }
+
+    const rev2Snapshot = await lifecycleSnapshot(created.id);
+    expect(rev2Snapshot.blocks.map((b) => b.id)).toEqual(allBlocks.map((b) => b.id));
+    expect(rev2Snapshot.revisions[1]!.blocks.map((b: { id: string }) => b.id)).toEqual(allBlocks.map((b) => b.id));
+
+    // 3. Body edit + insert + reorder preserves leading, anchored, and trailing protected slots.
+    const newLeadVisible = { id: randomUUID(), type: "paragraph", content: { text: "PUBLIC_INSERTED_START" } };
+    const editedB = { id: visibleB.id, type: "paragraph", content: { text: "PUBLIC_VISIBLE_B_EDITED" } };
+    const editedA = { id: visibleA.id, type: "paragraph", content: { text: "PUBLIC_VISIBLE_A_EDITED" } };
+    const reorderedSave = await repo.updateDocument({
+      workspaceId: workspaceA,
+      documentId: created.id,
+      expectedRevisionNumber: 2,
+      blocks: [newLeadVisible, editedB, editedA],
+    });
+    expect(reorderedSave.currentRevisionNumber).toBe(3);
+    expect(reorderedSave.blocks.map((b) => b.id)).toEqual([newLeadVisible.id, editedB.id, editedA.id]);
+    for (const secret of secretTexts) {
+      expect(JSON.stringify(reorderedSave)).not.toContain(secret);
+    }
+
+    const expectedRev3Order = [
+      leadAnswer.id,
+      newLeadVisible.id,
+      editedB.id,
+      trailAnswer.id,
+      editedA.id,
+      midSolution.id,
+      midNestedRoleKey.id,
+      midNestedRoleSol.id,
+      midNestedTypeKey.id,
+      midNestedTypeSol.id,
+      midProvenance.id,
+    ];
+    const rev3Snapshot = await lifecycleSnapshot(created.id);
+    expect(rev3Snapshot.blocks.map((b) => b.id)).toEqual(expectedRev3Order);
+    expect(rev3Snapshot.revisions[2]!.blocks.map((b: { id: string }) => b.id)).toEqual(expectedRev3Order);
+
+    // 4. Deleting editedB keeps trailAnswer in its rev-3 slot after newLeadVisible, and replacing the sole visible block keeps leading/trailing slots.
+    const newTrailVisible = { id: randomUUID(), type: "paragraph", content: { text: "PUBLIC_INSERTED_END" } };
+    const deletedPredecessorSave = await repo.updateDocument({
+      workspaceId: workspaceA,
+      documentId: created.id,
+      expectedRevisionNumber: 3,
+      blocks: [newLeadVisible, editedA, newTrailVisible],
+    });
+    expect(deletedPredecessorSave.currentRevisionNumber).toBe(4);
+    expect(deletedPredecessorSave.blocks.map((b) => b.id)).toEqual([newLeadVisible.id, editedA.id, newTrailVisible.id]);
+
+    const expectedRev4Order = [
+      leadAnswer.id,
+      newLeadVisible.id,
+      trailAnswer.id,
+      editedA.id,
+      midSolution.id,
+      midNestedRoleKey.id,
+      midNestedRoleSol.id,
+      midNestedTypeKey.id,
+      midNestedTypeSol.id,
+      midProvenance.id,
+      newTrailVisible.id,
+    ];
+    const rev4Snapshot = await lifecycleSnapshot(created.id);
+    expect(rev4Snapshot.blocks.map((b) => b.id)).toEqual(expectedRev4Order);
+    expect(rev4Snapshot.revisions[3]!.blocks.map((b: { id: string }) => b.id)).toEqual(expectedRev4Order);
+    expect(rev4Snapshot.blocks.find((b) => b.id === midProvenance.id)?.content).toEqual(midProvenance.content);
+
+    const slotLead = { id: randomUUID(), type: "answer_key", content: { answer: "SLOT_LEAD" } };
+    const slotMid = { id: randomUUID(), type: "paragraph", content: { text: "SLOT_MID" } };
+    const slotTrail = { id: randomUUID(), type: "solution", content: { solution: "SLOT_TRAIL" } };
+    const slotDoc = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Slot doc",
+      blocks: [slotLead, slotMid, slotTrail],
+    });
+    const slotReplacement = { id: randomUUID(), type: "paragraph", content: { text: "SLOT_REPLACEMENT" } };
+    await repo.updateDocument({
+      workspaceId: workspaceA,
+      documentId: slotDoc.id,
+      expectedRevisionNumber: 1,
+      blocks: [slotReplacement],
+    });
+    const slotAfter = await lifecycleSnapshot(slotDoc.id);
+    expect(slotAfter.blocks.map((b) => b.id)).toEqual([slotLead.id, slotReplacement.id, slotTrail.id]);
+    expect(slotAfter.revisions[1]!.blocks.map((b: { id: string }) => b.id)).toEqual([slotLead.id, slotReplacement.id, slotTrail.id]);
+
+    // 5. All learner reads, revisions, search, and backup exports redact hidden answer blocks; trusted read sees them.
+    const learnerDoc = await repo.getDocument({ workspaceId: workspaceA, documentId: created.id });
+    expect(learnerDoc.blocks.map((b) => b.id)).toEqual([newLeadVisible.id, editedA.id, newTrailVisible.id]);
+    const learnerRevisions = await repo.listRevisions({ workspaceId: workspaceA, documentId: created.id });
+    expect(learnerRevisions).toHaveLength(4);
+    const nativeBackup = await createBackupRestoreRepository(sql).exportWorkspace(scope);
+    const openingBackup = await readOpeningBackupRecords(sql, scope);
+    for (const secret of secretTexts) {
+      expect(JSON.stringify(learnerDoc)).not.toContain(secret);
+      expect(JSON.stringify(learnerRevisions)).not.toContain(secret);
+      expect(await repo.searchLibrary({ workspaceId: workspaceA, query: secret })).toEqual([]);
+      expect(JSON.stringify(nativeBackup)).not.toContain(secret);
+      expect(JSON.stringify(openingBackup)).not.toContain(secret);
+    }
+    expect(await repo.searchLibrary({ workspaceId: workspaceA, query: "PUBLIC_VISIBLE_A_EDITED" }))
+      .toMatchObject([{ id: created.id, title: "Updated Note Title" }]);
+    const trustedDoc = await repo.getDocument({ workspaceId: workspaceA, documentId: created.id, includeAnswerKeys: true });
+    expect(trustedDoc.blocks.map((b) => b.id)).toEqual(expectedRev4Order);
+
+    // 6. Client attempts to reuse/overwrite a protected block ID or forge a hidden answer block fail without mutation.
+    const forgeryPayloads: Array<{ blocks: Array<Record<string, unknown>>; redactAnswerKeys?: boolean }> = [
+      { blocks: [newLeadVisible, { id: leadAnswer.id, type: "paragraph", content: { text: "forged lead" } }] },
+      { blocks: [newLeadVisible, { id: midNestedRoleKey.id, type: "paragraph", content: { text: "forged nested" } }] },
+      { blocks: [newLeadVisible, { id: midProvenance.id.toUpperCase(), type: "paragraph", content: { text: "forged prov" } }] },
+      {
+        blocks: [newLeadVisible, { id: trailAnswer.id, type: "paragraph", content: { text: "legacy switch bypass" } }],
+        redactAnswerKeys: false,
+      },
+      { blocks: [newLeadVisible, { id: randomUUID(), type: "answer_key", content: { answer: "forged new key" } }] },
+      { blocks: [newLeadVisible, { id: randomUUID(), type: "paragraph", role: "answer_key", content: { text: "forged role" } }] },
+      { blocks: [newLeadVisible, { id: randomUUID(), type: "paragraph", content: { blockType: "solution", text: "forged content" } }] },
+    ];
+    for (const payload of forgeryPayloads) {
+      await expect(repo.updateDocument({
+        workspaceId: workspaceA,
+        documentId: created.id,
+        expectedRevisionNumber: 4,
+        blocks: payload.blocks as Parameters<LibraryRepository["updateDocument"]>[0]["blocks"],
+        ...(payload.redactAnswerKeys === false ? { redactAnswerKeys: false } : {}),
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+    }
+    expect(await lifecycleSnapshot(created.id)).toEqual(rev4Snapshot);
   });
 });

@@ -10,7 +10,7 @@ function isAnswerType(value: unknown): boolean {
 
 export function isBackupAnswerBlock(block: Row): boolean {
   const content = asObject(block.content);
-  return block.role === "answer_key" || isAnswerType(block.type) || isAnswerType(block.blockType)
+  return isAnswerType(block.role) || isAnswerType(block.type) || isAnswerType(block.blockType)
     || isAnswerType(content?.role) || isAnswerType(content?.blockType);
 }
 
