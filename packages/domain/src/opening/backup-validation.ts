@@ -89,10 +89,39 @@ function parseCitations(value: unknown): string[] | null {
   for (const citation of citations) {
     if (!isRecord(citation) || !isUuid(citation.sourceId)
       || typeof citation.sourceVersion !== "number"
-      || !Number.isSafeInteger(citation.sourceVersion) || citation.sourceVersion < 0) return null;
+      || !Number.isSafeInteger(citation.sourceVersion) || citation.sourceVersion < 0
+      || (citation.memoryOnly !== undefined && typeof citation.memoryOnly !== "boolean")) return null;
     refs.push(citation.sourceId);
   }
   return refs;
+}
+
+/** Assistant turn provenance can carry exact global-memory dependency IDs alongside versioned source refs. */
+export function turnMemoryDependencyMetadata(value: unknown): { memoryDependencyIds: string[] } | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "memoryDependencyIds") return null;
+  const ids = value.memoryDependencyIds;
+  if (!Array.isArray(ids) || ids.length === 0 || !ids.every(isUuid)) return null;
+  const normalized = ids.map(id => id.toLowerCase());
+  if (new Set(normalized).size !== normalized.length) return null;
+  return { memoryDependencyIds: normalized };
+}
+
+/** Extract exact global-memory dependency IDs from an opening_turns row. Returns null on malformed metadata. */
+export function turnMemoryDependencyIds(row: Record<string, unknown>): string[] | null {
+  if (row.context_source_refs === undefined || row.context_source_refs === null) return [];
+  if (!Array.isArray(row.context_source_refs)) return null;
+  let metadata: string[] | null = null;
+  for (const ref of row.context_source_refs) {
+    if (isRecord(ref) && "memoryDependencyIds" in ref) {
+      if (row.role !== "assistant" || metadata !== null) return null;
+      const parsed = turnMemoryDependencyMetadata(ref);
+      if (!parsed) return null;
+      metadata = parsed.memoryDependencyIds;
+    }
+  }
+  return metadata ?? [];
 }
 
 /** Note provenance can carry publication metadata alongside its versioned source refs. */
@@ -205,4 +234,16 @@ export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQu
 export function noteProvenanceSourceReferences(row: Record<string, unknown>): string[] | null {
   if (!Array.isArray(row.context_source_refs)) return null;
   return sourceReferences({ ...row, context_source_refs: row.context_source_refs.filter(ref => !notePublicationMetadata(ref)) });
+}
+
+export function turnSourceReferences(row: Record<string, unknown>): string[] | null {
+  if (row.context_source_refs === undefined || row.context_source_refs === null) {
+    return sourceReferences(row);
+  }
+  if (!Array.isArray(row.context_source_refs)) return null;
+  if (turnMemoryDependencyIds(row) === null) return null;
+  return sourceReferences({
+    ...row,
+    context_source_refs: row.context_source_refs.filter(ref => !turnMemoryDependencyMetadata(ref)),
+  });
 }

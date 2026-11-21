@@ -137,3 +137,91 @@ it("returns from cancel immediately without blocking on a hung post-commit Redis
     .resolves.toMatchObject({ id: canonicalJobId, status: "cancelled" });
   expect(fence.call).toHaveBeenCalledWith(canonicalWorkspaceId, canonicalJobId, "execution", "redis://localhost:6379");
 });
+
+it("strips memoryDependencyIds metadata when appending completed-turn candidates", async () => {
+  const docId = "11111111-1111-4111-8111-111111111111";
+  const docId2 = "22222222-2222-4222-8222-222222222222";
+  const memId = "33333333-3333-4333-8333-333333333333";
+  const conversationId = "44444444-4444-4444-8444-444444444444";
+  const assistantTurnId = "55555555-5555-4555-8555-555555555555";
+  const userTurnId = "66666666-6666-4666-8666-666666666666";
+
+  async function runWithRefs(contextSourceRefs: unknown) {
+    const insertedSourceIds: unknown[] = [];
+    const queries: string[] = [];
+    const flatten = (value: unknown, values: unknown[]): string => {
+      if (value && typeof value === "object" && "fragment" in value) {
+        const nested = value as { strings: TemplateStringsArray; values: unknown[] };
+        return nested.strings.reduce((acc, part, idx) => acc + part
+          + (idx < nested.strings.length - 1 ? flatten(nested.values[idx], values) : ""), "");
+      }
+      values.push(value);
+      return "?";
+    };
+    const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const fragment = { fragment: true, strings, values };
+      return {
+        ...fragment,
+        then: (resolve: (rows: unknown[]) => void, reject: (error: unknown) => void) => {
+          try {
+            const flatValues: unknown[] = [];
+            const query = flatten(fragment, flatValues);
+            queries.push(query);
+            if (query.includes("SELECT id FROM workspaces")) { resolve([{ id: canonicalWorkspaceId }]); return; }
+            if (query.includes("FROM opening_tutor_jobs j")) {
+              resolve([{
+                conversation_id: conversationId,
+                user_turn_id: userTurnId,
+                mode: "explain",
+                answer: "Saved answer",
+                question: "Saved question",
+                context_source_refs: contextSourceRefs,
+              }]);
+              return;
+            }
+            if (query.includes("INSERT INTO opening_assistant_candidates")) {
+              insertedSourceIds.push(flatValues[4]);
+              resolve([]);
+              return;
+            }
+            throw new Error(`unexpected query ${query}`);
+          } catch (error) {
+            reject(error);
+          }
+        },
+      };
+    }) as unknown as Sql;
+    sql.begin = ((callback: (tx: Sql) => unknown) => callback(sql)) as Sql["begin"];
+    sql.json = ((value: unknown) => value) as Sql["json"];
+
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const ok = await jobs.appendCompletedTurnCandidates({
+      scope: { workspaceId: canonicalWorkspaceId, ownerUserId: "owner" },
+      jobId: canonicalJobId,
+      assistantTurnId,
+      candidates: [{ kind: "memory", text: "Candidate fact", temporary: false }],
+    });
+    return { ok, insertedSourceIds, queries };
+  }
+
+  // 1. Memory-only turn (documentless global memory): source_ids must be [], never [null].
+  const memoryOnly = await runWithRefs([{ memoryDependencyIds: [memId] }]);
+  expect(memoryOnly.ok).toBe(true);
+  expect(memoryOnly.insertedSourceIds).toEqual([[]]);
+  expect(memoryOnly.queries.some(q => q.includes("FROM opening_memories m") && q.includes("clock_timestamp()"))).toBe(true);
+
+  // 2. Mixed document + memoryDependencyIds turn: source_ids keeps only canonical deduplicated document IDs.
+  const mixed = await runWithRefs([
+    { sourceId: docId.toUpperCase(), sourceVersion: 0, memoryOnly: true },
+    { sourceId: docId2, sourceVersion: 1 },
+    { sourceId: docId, sourceVersion: 1 },
+    { memoryDependencyIds: [memId] },
+  ]);
+  expect(mixed.ok).toBe(true);
+  expect(mixed.insertedSourceIds).toEqual([[docId, docId2]]);
+
+  // 3. Malformed context_source_refs fails closed without inserting candidates.
+  const malformed = await runWithRefs([{ memoryDependencyIds: [] }]);
+  expect(malformed.ok).toBe(false);
+  expect(malformed.insertedSourceIds).toEqual([]);
+});

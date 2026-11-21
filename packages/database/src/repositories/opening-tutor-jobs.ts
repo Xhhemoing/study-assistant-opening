@@ -13,7 +13,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
 import { courseSourcePurposeAllows, helpInputSnapshotSchema, openingMaterialPurposePinSchema, type CourseSourcePurpose, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
-import { contextSourceRefsIncluded, mergeContextSourceRefs, turnContextSourceRefs } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
@@ -440,6 +440,26 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
       AND (${input.expectedPrivacyEpoch ?? null}::integer IS NULL OR w.privacy_epoch=${input.expectedPrivacyEpoch ?? null})
       AND ${contextSourceRefsIncluded(db, input.scope.workspaceId, db`t.context_source_refs`)}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements(
+          CASE WHEN jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END
+        ) AS dep_elem
+        CROSS JOIN LATERAL jsonb_array_elements_text(
+          CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
+            AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+            THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
+        ) AS dep(id)
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM opening_memories m
+          WHERE m.id::text = lower(dep.id)
+            AND m.workspace_id = j.workspace_id
+            AND m.status = 'active'
+            AND m.course_id IS NULL
+            AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
+        )
+      )
       AND (${input.metadataLease === undefined} OR EXISTS (
         SELECT 1 FROM opening_jobs metadata WHERE metadata.id=${input.metadataLease?.id ?? null}::uuid
           AND metadata.workspace_id=j.workspace_id AND metadata.owner_user_id=w.owner_user_id
@@ -1326,7 +1346,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE`;
         const target = await findCompletedCandidateTarget(tx, input);
         if (!target) return false;
-        const sourceIds = [...new Set((target.context_source_refs as ContextSourceRef[]).map(ref => ref.sourceId))];
+        const parsedRefs = parseContextSourceRefs(target.context_source_refs);
+        if (!parsedRefs) return false;
+        const sourceIds = [...new Set(parsedRefs.map(ref => ref.sourceId))];
         for (const payload of input.candidates) {
           await tx`INSERT INTO opening_assistant_candidates
             (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
