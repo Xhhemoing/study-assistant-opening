@@ -1829,6 +1829,73 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     }
   });
 
+  it.each([
+    "题解 (m/s) −4。",
+    "注解 [m/s] - 4。",
+    "正解 (a) −4 = 0。",
+    "要求（m/s）− 4。",
+    "建设 (m/s) −4。",
+    "口令 (m/s) −4。",
+    "杜若 (m/s) −4。",
+    "便当 (m/s) −4。",
+    "This label says evaluate (m/s) −4.",
+    "Compute velocity change (m/s) −4.",
+    "Calculate speed (km/h) −4.",
+    "Answer (m/s) −4, where m = 6 and s = 2.",
+    "(m/s) −4. In the next exercise, m = 6 and s = 2.",
+    "(m/s) − 4？ 下一题中，m = 6, s = 2。",
+    "[m/s] - 4; in the next exercise, m = 6 and s = 2.",
+    "(m/s) −4\nIn the next exercise, m = 6 and s = 2.",
+    "(m/s) - 4\r\nm = 6 and s = 2.",
+    "(m/s)\n- 4, where m = 6 and s = 2.",
+    "(m/s) -\n4, where m = 6 and s = 2.",
+    "(m/s) −\n4, where m = 6 and s = 2.",
+    "m = 6. (m/s) −4, where s = 2.",
+    "(m/s) −4, where m => 6 and s => 2.",
+    "(l/s) −4.",
+    "(g/l) −4 ≈ −3.99.",
+    "(mol/l) −4。",
+    "([l/s]) −4。",
+    "(ml) −4.",
+    "(mg/dl) −4.",
+    "(kl/s) −4.",
+    "(µl/s) −4.",
+    "(ul/s) −4.",
+  ])("rejects a signed answer in %j", freshVariantStem => {
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-signed-prose",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [makeMissVariantCandidate({ answerKey: "-4", freshVariantStem })],
+    })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+  });
+
+  it.each([
+    "Evaluate the expression (m/s) − 4, where m = 6 and s = 2.",
+    "Find the value of (m/s) −4 when m = 6 and s = 2.",
+    "Evaluate the value of [l/s] - 4, where l = 8 and s = 2.",
+    "Example: Please simplify the following algebraic expression （m/s）− 4.",
+    "计算表达式 (m/s) − 4，其中 m = 6, s = 2。",
+    "求代数式 (a/b) − 4 的值",
+    "例：解方程 (m/s) −4 = 0。",
+    "若 (m/s) −4 = 0，则求 m。",
+    "求函数 (m/s) −4 的值。",
+    "Evaluate (l/s) − 4, where l = 6 and s = 2.",
+    "Evaluate (μl/s) − 4.",
+    "(m/s) −4, where m = 6.5 and s = .2.",
+    "(m/s) − 4, where, e.g., m = 6 and s = 2.",
+    "(m/s) −4，其中m = 6，s = 2。",
+  ])("allows algebraic subtraction in %j", freshVariantStem => {
+    expect(issueOfflineFlashcardLease({
+      leaseId: "lease-signed-algebra",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [makeMissVariantCandidate({ answerKey: "-4", freshVariantStem })],
+    })).toMatchObject({ ok: true });
+  });
+
   it("settles unordered outbox entries idempotently at serverReceiptAtMs, clamps easy->good, strips delayedCheck, and catches seq payload mismatch", () => {
     const minted = issueOfflineFlashcardLease({
       leaseId: "lease-settle-1",
