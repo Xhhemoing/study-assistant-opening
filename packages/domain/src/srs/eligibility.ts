@@ -2,6 +2,7 @@ import type { ReviewCard, ReviewQueueMode, ReviewState } from "@aistudy/contract
 import { computeCardRetrievability } from "./scheduler";
 
 export const DEFAULT_RECOVERY_SESSION_CARD_CAP = 200;
+export const RECOVERY_BACKLOG_CARD_THRESHOLD = 200;
 export const SALVAGEABLE_RETRIEVABILITY_MIN = 0.35;
 export const SALVAGEABLE_RETRIEVABILITY_MAX = 0.75;
 export const WORKSPACE_RECOVERY_CAP_RATIO = 0.3;
@@ -45,6 +46,8 @@ export type RecoveryTriageOptions = {
   highWeightThreshold?: number;
   /** Optional session card cap applied strictly AFTER global 5-band triage. */
   maxSessionCards?: number;
+  /** Force global 5-band FSRS-6.0 recovery triage even below `RECOVERY_BACKLOG_CARD_THRESHOLD`. */
+  recoveryTriage?: boolean;
 };
 
 export type TriagedReviewQueueItem = {
@@ -505,6 +508,14 @@ export function buildBacklogRehabilitationPlan(
   };
 }
 
+function compareQueueItems(a: ReviewQueueItem, b: ReviewQueueItem): number {
+  const dueCmp = compareDueAt(a, b);
+  if (dueCmp !== 0) return dueCmp;
+  const priorityCmp = b.goalPriority - a.goalPriority;
+  if (priorityCmp !== 0) return priorityCmp;
+  return a.card.id.localeCompare(b.card.id);
+}
+
 export function buildReviewQueue(
   items: readonly ReviewQueueItem[],
   mode: ReviewQueueMode,
@@ -512,7 +523,15 @@ export function buildReviewQueue(
   today: string,
   options?: RecoveryTriageOptions,
 ): ReviewQueueItem[] {
-  const plan = buildBacklogRehabilitationPlan(items, mode, now, today, options);
+  const eligible = items.filter((item) => isCardEligibleForMode(item.card, item.state, mode, now, today));
+  if (
+    eligible.length < RECOVERY_BACKLOG_CARD_THRESHOLD
+    && options?.recoveryTriage !== true
+    && options?.maxSessionCards === undefined
+  ) {
+    return eligible.slice().sort(compareQueueItems);
+  }
+  const plan = buildBacklogRehabilitationPlan(eligible, mode, now, today, options);
   const selected = options?.maxSessionCards !== undefined ? plan.sessionItems : plan.triaged;
   return selected.map((entry) => entry.item);
 }

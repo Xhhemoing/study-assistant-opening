@@ -1,14 +1,100 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { learningCardSessionCommandSchema, learningCardSessionSchema, type LearningCardSession, type Scope } from "@aistudy/contracts";
+import { learningActivityBudgetSchema, learningCardSessionCommandSchema, learningCardSessionSchema, type LearningCardSession, type Scope } from "@aistudy/contracts";
+import { resolveLocalDayBounds } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { createCardRepository } from "./cards";
 import { assertLearningGoalAction, readLearningGoal } from "./opening-learning-goals";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { reserveOpeningLearningActivityBudget } from "./opening-learning-capacity";
+import { readOpeningLearningCapacity, reserveOpeningLearningActivityBudget } from "./opening-learning-capacity";
 
 type Row = Record<string, unknown>;
 const object = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
+
+export type CardSessionRecoveryAllowanceInput = {
+  dailyExecutableMinutes: number;
+  freeUnreservedMinutes: number;
+  usedOrReservedCardSessionMinutes: number;
+  isBacklogRecovery: boolean;
+};
+
+/**
+ * Enforces the workspace-wide 30% daily card-recovery ceiling across all courses.
+ * For non-backlog maintenance on tight daily budgets (`15 <= dailyExecutable < 34`) with zero
+ * prior card usage today, permits one minimum 10-minute maintenance session; all backlog sessions,
+ * repeat sessions, and budgets >= 34m enforce the strict `floor(0.30 * dailyExecutableMinutes)` cap.
+ */
+export function computeCardSessionRecoveryAllowance(input: CardSessionRecoveryAllowanceInput): number {
+  if (
+    !Number.isFinite(input.dailyExecutableMinutes)
+    || !Number.isFinite(input.freeUnreservedMinutes)
+    || !Number.isFinite(input.usedOrReservedCardSessionMinutes)
+  ) {
+    return 0;
+  }
+  const dailyExecutable = Math.max(0, input.dailyExecutableMinutes);
+  const freeUnreserved = Math.max(0, input.freeUnreservedMinutes);
+  const usedCardMinutes = Math.max(0, input.usedOrReservedCardSessionMinutes);
+  const strictCap = Math.floor((dailyExecutable * 3) / 10);
+  const effectiveCap = !input.isBacklogRecovery && usedCardMinutes === 0 && dailyExecutable >= 15
+    ? Math.max(Math.min(10, Math.floor(dailyExecutable)), strictCap)
+    : strictCap;
+  return Math.max(0, Math.min(freeUnreserved, effectiveCap - usedCardMinutes));
+}
+
+function overlapsCapacityDay(
+  stored: { localDate: string; timeZone: string },
+  day: { localDate: string; timeZone: string },
+): boolean {
+  const a = resolveLocalDayBounds(stored.localDate, stored.timeZone);
+  const b = resolveLocalDayBounds(day.localDate, day.timeZone);
+  return a.dayStart < b.nextDayStart && b.dayStart < a.nextDayStart;
+}
+
+function sumCardSessionMinutesForDay(
+  activities: readonly Row[],
+  day: { localDate: string; timeZone: string; bounds: { dayStart: Date; nextDayStart: Date } },
+): number {
+  let total = 0;
+  for (const row of activities) {
+    const intent = object(row.create_intent);
+    const goal = object(row.goal_json);
+    if (intent.protocol !== "card-review-session-v1" && goal.cardReviewSession == null) continue;
+    const savedBudget = goal.learningBudget != null
+      ? learningActivityBudgetSchema.safeParse(goal.learningBudget)
+      : null;
+    if (savedBudget) {
+      if (!savedBudget.success) {
+        throw learningError("CONFLICT", "已有卡片活动的共同预算记录无法读取，请先核对活动。");
+      }
+      if (!overlapsCapacityDay(savedBudget.data, day)) continue;
+      total += savedBudget.data.minutes;
+      continue;
+    }
+    const createdMs = row.created_at instanceof Date
+      ? row.created_at.getTime()
+      : typeof row.created_at === "string"
+        ? Date.parse(row.created_at)
+        : Number.NaN;
+    if (
+      !Number.isFinite(createdMs)
+      || createdMs < day.bounds.dayStart.getTime()
+      || createdMs >= day.bounds.nextDayStart.getTime()
+    ) {
+      continue;
+    }
+    const cardGoal = object(goal.cardReviewSession);
+    const cardCheckpoint = object(object(row.checkpoint_json).cardReviewSession);
+    const fallbackMinutes = cardCheckpoint.stoppedAt
+      ? Number(cardCheckpoint.elapsedSeconds) / 60
+      : Number(cardGoal.budgetMinutes);
+    if (!Number.isFinite(fallbackMinutes) || fallbackMinutes < 0) {
+      throw learningError("CONFLICT", "已有卡片活动的学习时长无法确认，请先核对活动。");
+    }
+    total += fallbackMinutes;
+  }
+  return total;
+}
 export function mapLearningCardSession(row: Row): LearningCardSession {
   const goal = object(object(row.goal_json).cardReviewSession), state = object(object(row.checkpoint_json).cardReviewSession);
   const cardIds = Array.isArray(goal.orderedCardIds) ? goal.orderedCardIds : goal.cardIds;
@@ -50,6 +136,28 @@ export async function writeLearningCardSession(sql: Sql, scope: Scope, raw: unkn
       AND create_intent->>'protocol'='card-review-session-v1' AND status='active' LIMIT 1`;
     if (active.length) throw learningError("CONFLICT", "请先恢复或停止当前卡片会话，再开始下一次。");
     const cards = createCardRepository(tx as unknown as Sql);
+    const capacity = await readOpeningLearningCapacity(tx, scope, now);
+    if (capacity.budget !== null) {
+      const dailyExecutableMinutes = Math.max(0, capacity.budget.dailyMinutes - capacity.budget.bufferMinutes);
+      const usedOrReservedCardSessionMinutes = sumCardSessionMinutesForDay(capacity.activities, capacity);
+      const strictCap = Math.floor((dailyExecutableMinutes * 3) / 10);
+      const isBacklogRecovery = dailyExecutableMinutes < 34
+        && usedOrReservedCardSessionMinutes === 0
+        && input.budgetMinutes > strictCap
+        ? (await cards.listQueue({ ...scope, mode: "auto", now, timeZone: capacity.timeZone })).length > 200
+        : true;
+      const freeUnreservedMinutes = Math.max(0, dailyExecutableMinutes - capacity.usedMinutes);
+      const allowance = computeCardSessionRecoveryAllowance({
+        dailyExecutableMinutes,
+        freeUnreservedMinutes,
+        usedOrReservedCardSessionMinutes,
+        isBacklogRecovery,
+      });
+      if (input.budgetMinutes > allowance) {
+        const displayAllowance = Number.isInteger(allowance) ? allowance : Number(allowance.toFixed(2));
+        throw learningError("CONFLICT", `今日卡片恢复可用上限为 ${displayAllowance} 分钟（不超过每日可执行学习时长的 30%），请缩短本次时长。`);
+      }
+    }
     for (const cardId of sortedCardIds) {
       const card = await cards.getCard({ workspaceId: scope.workspaceId, cardId });
       if (card.ownerUserId !== scope.ownerUserId || card.archived || card.autoPaused || (card.pausedUntil && Date.parse(card.pausedUntil) > now.getTime())) throw learningError("CONFLICT", "所选卡片已暂停、归档或不可读取。");

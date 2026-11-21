@@ -139,6 +139,41 @@ describe("review eligibility and queue", () => {
     ]);
     expect(queue[0]?.state).toEqual(c.state);
   });
+
+  it("preserves ordinary dueAt ASC order below the 200-card backlog threshold unless recoveryTriage is enabled", () => {
+    const earlierLowPriority = {
+      card: card({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      state: fsrsState("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+        stability: 30,
+        daysAgo: 1,
+        dueAt: "2026-08-12T10:00:00.000Z",
+      }),
+      goalPriority: 0,
+    };
+    const laterHighPrioritySalvage = {
+      card: card({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }),
+      state: fsrsState("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", {
+        stability: 1.5,
+        daysAgo: 10,
+        dueAt: "2026-08-14T10:00:00.000Z",
+      }),
+      goalPriority: 8,
+    };
+    // Ordinary small queue (< 200 cards): keeps dueAt ASC order.
+    const ordinary = buildReviewQueue([laterHighPrioritySalvage, earlierLowPriority], "auto", NOW, TODAY);
+    expect(ordinary.map((item) => item.card.id)).toEqual([
+      earlierLowPriority.card.id,
+      laterHighPrioritySalvage.card.id,
+    ]);
+    // Explicit recoveryTriage: promotes Band-1 high-weight salvageable card ahead of Band-5 card.
+    const triaged = buildReviewQueue([laterHighPrioritySalvage, earlierLowPriority], "auto", NOW, TODAY, {
+      recoveryTriage: true,
+    });
+    expect(triaged.map((item) => item.card.id)).toEqual([
+      laterHighPrioritySalvage.card.id,
+      earlierLowPriority.card.id,
+    ]);
+  });
 });
 
 function uuidFor(index: number): string {

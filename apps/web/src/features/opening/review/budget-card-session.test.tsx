@@ -3,7 +3,9 @@ import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import type { LearningCardSession, ReviewCard, ReviewQueueItem, ReviewState } from "@aistudy/contracts";
+import { computeCardSessionRecoveryAllowance, writeLearningCardSession } from "@aistudy/database";
 import { buildReviewQueue } from "@aistudy/domain";
+import type { Sql } from "postgres";
 import { BudgetCardSession } from "./budget-card-session";
 import type { LearningManagementClient } from "../planning/learning-management-client";
 import type { OpeningCardsClient } from "../cards/cards-client";
@@ -101,6 +103,7 @@ function queueItem(
     goalPriority: number;
     courseId?: string | null;
     skillLabel?: string | null;
+    syllabusPointId?: string | null;
   },
   nowMs: number,
 ): ReviewQueueItem {
@@ -111,7 +114,7 @@ function queueItem(
     front: `Q-${cardId}`,
     back: `A-${cardId}`,
     sourceDocumentId: null,
-    syllabusPointId: null,
+    syllabusPointId: options.syllabusPointId ?? null,
     tags: ["review:concept"],
     courseId: options.courseId ?? null,
     skillLabel: options.skillLabel ?? null,
@@ -315,4 +318,366 @@ it("hydrates missing unreviewed resumed session cards from the free queue in exa
   expect(value.cards.listDue).toHaveBeenCalledWith("auto");
   expect(value.cards.listDue).toHaveBeenCalledWith("free");
   expect(host.querySelector('[data-testid="presented-order"]')?.textContent).toBe(`${cardB},${cardA}`);
+});
+
+it.each([
+  ["course-linked", "99999999-9999-4999-8999-999999999999"],
+  ["membership-linked (courseId null)", null],
+] as const)(
+  "preserves server [C, B, D, A] order when delayedCheckCovered card A overlaps B's knowledgeUnitKey (%s)",
+  async (_label, courseId) => {
+    const now = new Date();
+    const nowMs = now.getTime();
+    const sp1 = "10000000-0000-4000-8000-000000000001";
+    const sp2 = "10000000-0000-4000-8000-000000000002";
+    const sp3 = "10000000-0000-4000-8000-000000000003";
+    const cardA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const cardB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const cardC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const cardD = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+    const rawServerInputs: Array<ReviewQueueItem & { delayedCheckCovered?: boolean }> = [
+      {
+        ...queueItem(
+          cardA,
+          { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 8, courseId, skillLabel: "Limits", syllabusPointId: sp1 },
+          nowMs,
+        ),
+        delayedCheckCovered: true,
+      },
+      queueItem(
+        cardB,
+        { stability: 1.5, daysAgo: 10, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: null, syllabusPointId: sp1 },
+        nowMs,
+      ),
+      queueItem(
+        cardC,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 6, courseId, skillLabel: "Other", syllabusPointId: sp2 },
+        nowMs,
+      ),
+      queueItem(
+        cardD,
+        { stability: 30, daysAgo: 1, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: null, syllabusPointId: sp3 },
+        nowMs,
+      ),
+    ];
+
+    const serverTriagedPublic: ReviewQueueItem[] = buildReviewQueue(
+      rawServerInputs,
+      "auto",
+      now,
+      now.toISOString().slice(0, 10),
+      { recoveryTriage: true },
+    ).map(({ card, state, goalPriority }) => ({ card, state, goalPriority }));
+    expect(serverTriagedPublic.map((item) => item.card.id)).toEqual([cardC, cardB, cardD, cardA]);
+
+    const value = clients();
+    vi.mocked(value.cards.listDue).mockResolvedValue(serverTriagedPublic);
+    vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+      ...session,
+      cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+    }));
+
+    await render(value);
+    await act(async () => button("开始本次限时复习").click());
+
+    const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+    expect(startCall?.action).toBe("start");
+    if (startCall?.action === "start") {
+      expect(startCall.cardIds).toEqual([cardC, cardB, cardD, cardA]);
+    }
+  },
+);
+
+it("triages a raw dueAt-ASC 201-card queue even when all 200 Band-4 items and item #201 carry skillLabels", async () => {
+  const nowMs = Date.now();
+  const courseId = "99999999-9999-4999-8999-999999999999";
+  const makeUuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const dueItems: ReviewQueueItem[] = [];
+  for (let i = 1; i <= 200; i += 1) {
+    dueItems.push(queueItem(
+      makeUuid(i),
+      { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: `high-ret-${i}` },
+      nowMs,
+    ));
+  }
+  const criticalId = makeUuid(201);
+  dueItems.push(queueItem(
+    criticalId,
+    { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 8, courseId, skillLabel: "critical-skill" },
+    nowMs,
+  ));
+
+  const value = clients();
+  vi.mocked(value.cards.listDue).mockResolvedValue(dueItems);
+  vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+    ...session,
+    cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+  }));
+
+  await render(value);
+  await act(async () => button("开始本次限时复习").click());
+
+  const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+  expect(startCall?.action).toBe("start");
+  if (startCall?.action === "start") {
+    expect(startCall.cardIds).toHaveLength(200);
+    expect(startCall.cardIds[0]).toBe(criticalId);
+  }
+});
+
+it("freezes the load-time clock so waiting before clicking start does not drift server-triaged R across band boundaries", async () => {
+  vi.useFakeTimers();
+  try {
+    const loadTime = new Date("2026-08-15T23:59:55.000Z");
+    vi.setSystemTime(loadTime);
+    const courseId = "99999999-9999-4999-8999-999999999999";
+    const sp1 = "10000000-0000-4000-8000-000000000011";
+    const sp2 = "10000000-0000-4000-8000-000000000012";
+    const cardA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    const cardB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2";
+
+    // Card A's lastReview is 11.99995d ago at loadTime (R > 0.75, Band 4) and crosses to 12d (R <= 0.75, Band 1) 10s later.
+    const almostTwelveDaysAgo = new Date(loadTime.getTime() - (12 * 86_400_000 - 5_000)).toISOString();
+    const itemA = {
+      ...queueItem(cardA, { stability: 2.0, daysAgo: 12, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 9, courseId, skillLabel: "Boundary", syllabusPointId: sp1 }, loadTime.getTime()),
+      delayedCheckCovered: true,
+    };
+    itemA.state = {
+      ...itemA.state,
+      updatedAt: almostTwelveDaysAgo,
+      fsrs: { ...itemA.state.fsrs!, lastReview: almostTwelveDaysAgo },
+    };
+    const itemB = queueItem(cardB, { stability: 1.5, daysAgo: 10, dueAt: "2026-08-11T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: "StableBand1", syllabusPointId: sp2 }, loadTime.getTime());
+
+    const serverOrder = buildReviewQueue([itemA, itemB], "auto", loadTime, "2026-08-15", { recoveryTriage: true })
+      .map(({ card, state, goalPriority }) => ({ card, state, goalPriority }));
+    expect(serverOrder.map((entry) => entry.card.id)).toEqual([cardB, cardA]);
+
+    const value = clients();
+    vi.mocked(value.cards.listDue).mockResolvedValue(serverOrder);
+    vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+      ...session,
+      cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+    }));
+
+    await render(value);
+    // Advance clock past the 12-day boundary before the user clicks start.
+    vi.setSystemTime(new Date(loadTime.getTime() + 10_000));
+    await act(async () => button("开始本次限时复习").click());
+
+    const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+    expect(startCall?.action).toBe("start");
+    if (startCall?.action === "start") {
+      expect(startCall.cardIds).toEqual([cardB, cardA]);
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("computes card-session recovery allowance with workspace 30% cap, non-backlog maintenance floor, and fail-closed guards", () => {
+  expect(computeCardSessionRecoveryAllowance({
+    dailyExecutableMinutes: 60,
+    freeUnreservedMinutes: 60,
+    usedOrReservedCardSessionMinutes: 0,
+    isBacklogRecovery: false,
+  })).toBe(18);
+  expect(computeCardSessionRecoveryAllowance({
+    dailyExecutableMinutes: 60,
+    freeUnreservedMinutes: 50,
+    usedOrReservedCardSessionMinutes: 10,
+    isBacklogRecovery: false,
+  })).toBe(8);
+  expect(computeCardSessionRecoveryAllowance({
+    dailyExecutableMinutes: 30,
+    freeUnreservedMinutes: 30,
+    usedOrReservedCardSessionMinutes: 0,
+    isBacklogRecovery: false,
+  })).toBe(10);
+  expect(computeCardSessionRecoveryAllowance({
+    dailyExecutableMinutes: 30,
+    freeUnreservedMinutes: 30,
+    usedOrReservedCardSessionMinutes: 0,
+    isBacklogRecovery: true,
+  })).toBe(9);
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    expect(computeCardSessionRecoveryAllowance({
+      dailyExecutableMinutes: 60,
+      freeUnreservedMinutes: 60,
+      usedOrReservedCardSessionMinutes: bad,
+      isBacklogRecovery: false,
+    })).toBe(0);
+  }
+});
+
+it("enforces the workspace-wide 30% daily card-recovery cap at runtime in writeLearningCardSession before inserting", async () => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const ownerUserId = "22222222-2222-4222-8222-222222222222";
+  const cardId = "33333333-3333-4333-8333-333333333333";
+  const now = new Date("2026-11-02T09:00:00.000Z");
+
+  function mockCardSessionSql(options: {
+    dailyMinutes: number;
+    bufferMinutes?: number;
+    existingActivities?: Array<Record<string, unknown>>;
+    dueCardCount?: number;
+  }) {
+    let insertCount = 0;
+    let insertedRow: Record<string, unknown> | null = null;
+    const dueRows = Array.from({ length: options.dueCardCount ?? 1 }, (_, index) => ({
+      id: index === 0 ? cardId : `33333333-3333-4333-8333-${String(index + 1).padStart(12, "0")}`,
+      owner_user_id: ownerUserId,
+      front: "Q",
+      back: "A",
+      source_document_id: null,
+      syllabus_point_id: null,
+      tags: ["review:concept"],
+      course_id: null,
+      skill_label: null,
+      archived: false,
+      auto_paused: false,
+      content_version: 1,
+      paused_until: null,
+      maintain_until: null,
+      exclude_from_assessment: false,
+      created_at: "2026-10-01T00:00:00.000Z",
+      ease: 2.5,
+      interval_days: 1,
+      due_at: "2026-11-01T00:00:00.000Z",
+      reps: 0,
+      lapses: 0,
+      last_grade: null,
+      state_updated_at: "2026-11-01T00:00:00.000Z",
+      state_owner_user_id: ownerUserId,
+      goal_priority: 1,
+    }));
+
+    const tx = Object.assign(
+      async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?").replace(/\s+/g, " ").trim();
+        if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return [];
+        if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 0 }];
+        if (query.startsWith("SELECT p.learning_management,p.planning_settings FROM workspaces")) {
+          return [{
+            learning_management: {
+              dailyMinutes: options.dailyMinutes,
+              bufferMinutes: options.bufferMinutes ?? 0,
+              revision: 1,
+              updatedAt: "2026-11-01T00:00:00.000Z",
+            },
+            planning_settings: {
+              weekOneMonday: "2026-09-07",
+              periodTimes: {},
+              dailyWindow: { start: "08:00", end: "18:00" },
+              lunch: { start: "12:00", end: "13:00" },
+              dinner: { start: "18:00", end: "19:00" },
+              sleep: { start: "23:00", end: "07:00" },
+              timeZone: "UTC",
+            },
+          }];
+        }
+        if (query.startsWith("SELECT id FROM workspaces")) return [{ id: workspaceId }];
+        if (query.includes("client_key=") && query.startsWith("SELECT * FROM opening_teaching_activities")) return [];
+        if (query.includes("status='active' LIMIT 1")) return [];
+        if (query.startsWith("SELECT id,course_id,status,created_at,updated_at,create_intent,checkpoint_json,goal_json FROM opening_teaching_activities")) {
+          return options.existingActivities ?? [];
+        }
+        if (query.includes("course-route-v1")) return [];
+        if (query.startsWith("SELECT t.*,r.id AS retest_id FROM opening_tasks")) return [];
+        if (query.startsWith("SELECT day, accepted_blocks FROM opening_plan_state")) return [];
+        if (query.startsWith("SELECT id, version, input_snapshot FROM opening_plan_drafts")) return [];
+        if (query.includes("INNER JOIN card_review_states s")) return dueRows;
+        if (query.startsWith("SELECT c.* FROM cards c WHERE c.id =")) return [dueRows[0]];
+        if (query.startsWith("INSERT INTO opening_teaching_activities")) {
+          insertCount += 1;
+          insertedRow = {
+            id: values[0],
+            status: "active",
+            path_version: 1,
+            goal_json: values[3],
+            checkpoint_json: values[4],
+            create_intent: values[6],
+          };
+          return [];
+        }
+        if (query.startsWith("SELECT goal_json FROM opening_teaching_activities")) {
+          return insertedRow ? [{ goal_json: insertedRow.goal_json }] : [];
+        }
+        if (query.startsWith("SELECT create_intent,checkpoint_json,goal_json,course_id FROM opening_teaching_activities")) {
+          return insertedRow ? [insertedRow] : [];
+        }
+        if (query.startsWith("UPDATE opening_teaching_activities SET goal_json=")) {
+          if (insertedRow) {
+            insertedRow = {
+              ...insertedRow,
+              goal_json: { ...(insertedRow.goal_json as Record<string, unknown>), ...(values[0] as Record<string, unknown>) },
+            };
+          }
+          return [];
+        }
+        if (query.startsWith("SELECT * FROM opening_teaching_activities WHERE id=")) {
+          return insertedRow ? [insertedRow] : [];
+        }
+        return [];
+      },
+      { json: (val: unknown) => val },
+    );
+
+    const sql = {
+      begin: async <T,>(fn: (client: unknown) => Promise<T>) => fn(tx),
+    } as unknown as Sql;
+
+    return { sql, getInsertCount: () => insertCount };
+  }
+
+  const scope = { workspaceId, ownerUserId };
+  const startCmd = (budgetMinutes: number, key: string) => ({
+    action: "start" as const,
+    budgetMinutes,
+    cardIds: [cardId],
+    goalIds: [],
+    clientKey: key,
+  });
+
+  // 60m day -> 30% cap is 18m: 60m and 19m must fail with CONFLICT before INSERT.
+  const sixtyDay = mockCardSessionSql({ dailyMinutes: 60 });
+  await expect(writeLearningCardSession(sixtyDay.sql, scope, startCmd(60, "cap-test-60m-01"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(writeLearningCardSession(sixtyDay.sql, scope, startCmd(19, "cap-test-19m-01"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(sixtyDay.getInsertCount()).toBe(0);
+
+  // 60m day after a 10m stopped card session (600s) -> only 8m remaining: second 10m session fails before INSERT.
+  const crossCourse = mockCardSessionSql({
+    dailyMinutes: 60,
+    existingActivities: [{
+      id: "44444444-4444-4444-8444-444444444444",
+      course_id: null,
+      status: "paused",
+      created_at: "2026-11-02T08:00:00.000Z",
+      updated_at: "2026-11-02T08:10:00.000Z",
+      create_intent: { protocol: "card-review-session-v1" },
+      goal_json: {
+        cardReviewSession: { budgetMinutes: 10 },
+        learningBudget: { localDate: "2026-11-02", timeZone: "UTC", minutes: 10 },
+      },
+      checkpoint_json: {
+        cardReviewSession: { elapsedSeconds: 600, stoppedAt: "2026-11-02T08:10:00.000Z" },
+      },
+    }],
+  });
+  await expect(writeLearningCardSession(crossCourse.sql, scope, startCmd(10, "cap-test-second-10m"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(crossCourse.getInsertCount()).toBe(0);
+
+  // 30m day with 1 due card (non-backlog maintenance): first 10m session succeeds, 11m fails.
+  const thirtyNonBacklog = mockCardSessionSql({ dailyMinutes: 30, dueCardCount: 1 });
+  await expect(writeLearningCardSession(thirtyNonBacklog.sql, scope, startCmd(11, "cap-test-30m-11m"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(thirtyNonBacklog.getInsertCount()).toBe(0);
+  const allowed = await writeLearningCardSession(thirtyNonBacklog.sql, scope, startCmd(10, "cap-test-30m-10m"), now);
+  expect(allowed.budgetMinutes).toBe(10);
+  expect(thirtyNonBacklog.getInsertCount()).toBe(1);
+
+  // 30m day with 201 due cards (backlog recovery): strict 30% cap (9m) rejects 10m before INSERT.
+  const thirtyBacklog = mockCardSessionSql({ dailyMinutes: 30, dueCardCount: 201 });
+  await expect(writeLearningCardSession(thirtyBacklog.sql, scope, startCmd(10, "cap-test-30m-backlog"), now)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(thirtyBacklog.getInsertCount()).toBe(0);
 });

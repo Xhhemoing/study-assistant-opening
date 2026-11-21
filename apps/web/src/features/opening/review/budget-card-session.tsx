@@ -28,10 +28,99 @@ function sameCardIdSequence(a: readonly ReviewQueueItem[], b: readonly ReviewQue
   return true;
 }
 
-function skillCoverageKey(card: ReviewQueueItem["card"]): string | null {
+function compareDueAtAsc(a: ReviewQueueItem, b: ReviewQueueItem): number {
+  const aMs = Date.parse(a.state.dueAt);
+  const bMs = Date.parse(b.state.dueAt);
+  if (Number.isFinite(aMs) && Number.isFinite(bMs) && aMs !== bMs) {
+    return aMs - bMs;
+  }
+  const dueCmp = a.state.dueAt.localeCompare(b.state.dueAt);
+  if (dueCmp !== 0) return dueCmp;
+  const priorityCmp = b.goalPriority - a.goalPriority;
+  if (priorityCmp !== 0) return priorityCmp;
+  return a.card.id.localeCompare(b.card.id);
+}
+
+function isStrictDueAtAscOrder(items: readonly ReviewQueueItem[]): boolean {
+  for (let i = 1; i < items.length; i += 1) {
+    if (compareDueAtAsc(items[i - 1]!, items[i]!) > 0) return false;
+  }
+  return true;
+}
+
+function courseScopedSkillKey(card: ReviewQueueItem["card"]): string | null {
+  const courseId = card.courseId?.trim();
   const skill = card.skillLabel?.trim().toLowerCase();
-  if (!skill) return null;
-  return `${card.courseId?.trim() ?? ""}::${skill}`;
+  if (!courseId || !skill) return null;
+  return `${courseId}::${skill}`;
+}
+
+function bandOneCardIds(items: readonly TriageAwareQueueItem[], now: Date, today: string): Set<string> {
+  const sentinelId = "__band2_ceiling__";
+  const lastReview = new Date(now.getTime() - 3650 * 86_400_000).toISOString();
+  const dueAt = new Date(now.getTime() - 86_400_000).toISOString();
+  const sentinel: TriageAwareQueueItem = {
+    card: {
+      id: sentinelId,
+      ownerUserId: sentinelId,
+      front: "s",
+      back: "s",
+      sourceDocumentId: null,
+      syllabusPointId: null,
+      tags: [],
+      courseId: null,
+      skillLabel: null,
+      archived: false,
+      contentVersion: 1,
+      pausedUntil: null,
+      maintainUntil: null,
+      excludeFromAssessment: false,
+      createdAt: lastReview,
+    },
+    state: {
+      cardId: sentinelId,
+      ease: 2.5,
+      intervalDays: 0,
+      dueAt,
+      reps: 2,
+      lapses: 0,
+      lastGrade: "good",
+      updatedAt: lastReview,
+      srsVersion: "fsrs-5.4.2",
+      fsrs: {
+        stability: 0.01,
+        difficulty: 5,
+        elapsedDays: 1,
+        scheduledDays: 1,
+        learningSteps: 0,
+        reps: 2,
+        lapses: 0,
+        state: 2,
+        lastReview,
+      },
+    },
+    goalPriority: Number.MAX_SAFE_INTEGER,
+  };
+  const ranked = buildReviewQueue([...items, sentinel], "free", now, today, { recoveryTriage: true });
+  const ids = new Set<string>();
+  for (const entry of ranked) {
+    if (entry.card.id === sentinelId) break;
+    ids.add(entry.card.id);
+  }
+  return ids;
+}
+
+function addWithCourseSkillPeers(
+  target: Set<string>,
+  card: ReviewQueueItem["card"],
+  peersByCourseSkill: ReadonlyMap<string, readonly string[]>,
+): void {
+  target.add(card.id);
+  const scopedKey = courseScopedSkillKey(card);
+  if (!scopedKey) return;
+  for (const peerId of peersByCourseSkill.get(scopedKey) ?? []) {
+    target.add(peerId);
+  }
 }
 
 function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): ReviewQueueItem[] {
@@ -50,7 +139,14 @@ function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): Revie
   }
   if (!triagable.length) return fallback;
   const today = now.toISOString().slice(0, 10);
-  const baseline = buildReviewQueue(triagable, "free", now, today);
+  const strictDueAtAsc = isStrictDueAtAscOrder(triagable);
+
+  // Below the 200-card backlog threshold, preserve ordinary `dueAt ASC` order when already in it.
+  if (triagable.length < 200 && strictDueAtAsc) {
+    return [...triagable, ...fallback];
+  }
+
+  const baseline = buildReviewQueue(triagable, "free", now, today, { recoveryTriage: true });
   if (baseline.length !== triagable.length) {
     return [...baseline, ...fallback];
   }
@@ -58,56 +154,80 @@ function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): Revie
     return [...triagable, ...fallback];
   }
 
-  // Preserve valid server-triaged queues whose Band-5 tail includes server-side
-  // `delayedCheckCovered: true` demotions stripped by the public queue contract.
-  const baseRank = new Map(baseline.map((item, index) => [item.card.id, index]));
-  let maxRank = -1;
-  const movedBackIndices: number[] = [];
-  for (let i = 0; i < triagable.length; i += 1) {
-    const rank = baseRank.get(triagable[i]!.card.id) ?? -1;
-    if (rank < maxRank) {
-      movedBackIndices.push(i);
-    } else {
-      maxRank = rank;
+  // Raw dueAt-ASC backlog guard: if >200 cards arrive in strict dueAt-ASC order with zero
+  // Band-1 items in the first 200 and Band-1 items beyond 200, triage immediately.
+  if (triagable.length > 200 && strictDueAtAsc) {
+    const band1 = bandOneCardIds(triagable, now, today);
+    const headHasBand1 = triagable.slice(0, 200).some((entry) => band1.has(entry.card.id));
+    const tailHasBand1 = triagable.slice(200).some((entry) => band1.has(entry.card.id));
+    if (!headHasBand1 && tailHasBand1) {
+      return [...baseline, ...fallback];
     }
   }
 
-  if (movedBackIndices.length > 0) {
-    const allMatchable = movedBackIndices.every((index) => {
-      const entry = triagable[index]!;
-      return entry.delayedCheckCovered === true || skillCoverageKey(entry.card) !== null;
-    });
-    if (allMatchable) {
-      const firstMovedBack = movedBackIndices[0]!;
-      const coveredSkillKeys = new Set<string>();
-      const inferredDelayedIds = new Set<string>();
-      for (const index of movedBackIndices) {
-        const entry = triagable[index]!;
-        inferredDelayedIds.add(entry.card.id);
-        const key = skillCoverageKey(entry.card);
-        if (key) coveredSkillKeys.add(key);
-      }
-      for (let i = firstMovedBack; i < triagable.length; i += 1) {
-        const entry = triagable[i]!;
-        const key = skillCoverageKey(entry.card);
-        if (key && coveredSkillKeys.has(key)) {
-          inferredDelayedIds.add(entry.card.id);
+  // Exact monotone fixed-point solver: reconstructs whether `triagable` is a valid server
+  // `listCardQueue` output with server-side `delayedCheckCovered: true` Band-5 demotions.
+  const peersByCourseSkill = new Map<string, string[]>();
+  for (const entry of triagable) {
+    const scopedKey = courseScopedSkillKey(entry.card);
+    if (!scopedKey) continue;
+    const list = peersByCourseSkill.get(scopedKey);
+    if (list) list.push(entry.card.id);
+    else peersByCourseSkill.set(scopedKey, [entry.card.id]);
+  }
+
+  const inferredDelayedIds = new Set<string>();
+  for (let step = 0; step <= triagable.length; step += 1) {
+    const candidate = buildReviewQueue(
+      triagable.map((entry) => (
+        entry.delayedCheckCovered === true || inferredDelayedIds.has(entry.card.id)
+          ? { ...entry, delayedCheckCovered: true }
+          : entry
+      )),
+      "free",
+      now,
+      today,
+      { recoveryTriage: true },
+    );
+    if (sameCardIdSequence(candidate, triagable)) {
+      // Verify SQL group consistency across all cards sharing non-null (courseId, skillLabel).
+      const groupConsistent = new Set(inferredDelayedIds);
+      for (const entry of triagable) {
+        if (entry.delayedCheckCovered === true || inferredDelayedIds.has(entry.card.id)) {
+          addWithCourseSkillPeers(groupConsistent, entry.card, peersByCourseSkill);
         }
       }
-      const candidate = buildReviewQueue(
+      if (groupConsistent.size === inferredDelayedIds.size) {
+        return [...triagable, ...fallback];
+      }
+      const verified = buildReviewQueue(
         triagable.map((entry) => (
-          inferredDelayedIds.has(entry.card.id)
+          entry.delayedCheckCovered === true || groupConsistent.has(entry.card.id)
             ? { ...entry, delayedCheckCovered: true }
             : entry
         )),
         "free",
         now,
         today,
+        { recoveryTriage: true },
       );
-      if (sameCardIdSequence(candidate, triagable)) {
-        return [...triagable, ...fallback];
+      return sameCardIdSequence(verified, triagable) ? [...triagable, ...fallback] : [...baseline, ...fallback];
+    }
+
+    let mismatchIndex = -1;
+    for (let i = 0; i < triagable.length; i += 1) {
+      if (candidate[i]?.card.id !== triagable[i]?.card.id) {
+        mismatchIndex = i;
+        break;
       }
     }
+    if (mismatchIndex < 0) break;
+    const mismatch = candidate[mismatchIndex]!;
+    const hasSkillLabel = Boolean(mismatch.card.skillLabel?.trim());
+    if (!hasSkillLabel || inferredDelayedIds.has(mismatch.card.id)) {
+      break;
+    }
+    addWithCourseSkillPeers(inferredDelayedIds, mismatch.card, peersByCourseSkill);
   }
 
   return [...baseline, ...fallback];
@@ -119,7 +239,7 @@ export function BudgetCardSession({ initialActivityId, client: suppliedClient, c
   const [session, setSession] = useState<LearningCardSession | null>(null), [queue, setQueue] = useState<ReviewQueueItem[]>([]), [minutes, setMinutes] = useState("10");
   const [pending, setPending] = useState<Command | null>(() => readPending(namespace));
   const [elapsed, setElapsed] = useState(0), [reviewed, setReviewed] = useState<string[]>([]), [busy, setBusy] = useState(false), [gradeBusy, setGradeBusy] = useState(false), [loading, setLoading] = useState(true), [reload, setReload] = useState(0), [error, setError] = useState(""), [storageWarning, setStorageWarning] = useState(false);
-  const writing = useRef(false), active = useRef(true), elapsedRef = useRef(0), reviewedRef = useRef<string[]>([]), current = useRef(session); current.current = session;
+  const writing = useRef(false), active = useRef(true), elapsedRef = useRef(0), reviewedRef = useRef<string[]>([]), loadedAtRef = useRef<Date>(new Date()), current = useRef(session); current.current = session;
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   function owned() { return namespace === getVerifiedSessionNamespace(); }
   const ownedRef = useRef(owned); ownedRef.current = owned;
@@ -135,7 +255,7 @@ export function BudgetCardSession({ initialActivityId, client: suppliedClient, c
   useEffect(() => { let live = true; setLoading(true); setError("");
     const id = initialActivityId ?? (pending?.action === "stop" ? pending.activityId : undefined);
     if (id && !z.string().uuid().safeParse(id).success) { setError("卡片活动链接无效，请返回复习入口。"); setLoading(false); return; }
-    void Promise.all([cards.listDue("auto"), id ? client.cardSessions(id) : Promise.resolve([])]).then(([items, sessions]) => { if (!live || !ownedRef.current()) return; setQueue(items); if (id) { const exact = sessions.find(value => value.activityId === id); if (!exact) throw new Error("找不到原卡片活动，请核对账号与活动链接；不会新建替代活动。"); apply(exact); } }).catch(reason => { if (live) setError(userFacingMessage(reason, "卡片活动暂不可读取。")); }).finally(() => { if (live) setLoading(false); });
+    void Promise.all([cards.listDue("auto"), id ? client.cardSessions(id) : Promise.resolve([])]).then(([items, sessions]) => { if (!live || !ownedRef.current()) return; loadedAtRef.current = new Date(); setQueue(items); if (id) { const exact = sessions.find(value => value.activityId === id); if (!exact) throw new Error("找不到原卡片活动，请核对账号与活动链接；不会新建替代活动。"); apply(exact); } }).catch(reason => { if (live) setError(userFacingMessage(reason, "卡片活动暂不可读取。")); }).finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   // An unknown command is kept separately and is never cleared by this read.
   }, [cards, client, initialActivityId, reload, namespace]);
@@ -165,7 +285,7 @@ export function BudgetCardSession({ initialActivityId, client: suppliedClient, c
       setError("本次卡片时长须为 1–120 分钟。");
       return;
     }
-    const triaged = triageSessionQueue(queue, new Date());
+    const triaged = triageSessionQueue(queue, loadedAtRef.current);
     if (!triaged.length) {
       setError("当前没有可开始的到期卡片。");
       return;
