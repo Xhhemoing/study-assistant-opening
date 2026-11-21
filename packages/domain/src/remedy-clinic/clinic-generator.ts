@@ -1622,7 +1622,7 @@ export function revalidateRemedyClinic(
       if (!snap) continue;
       if (seenRoots.has(snap.rootAttemptId)) continue;
       if (snap.ruleId !== normalizedHeaderRuleId) continue;
-      if (!isValidPrivacyEpoch(snap.privacyEpoch) || snap.privacyEpoch > currentPrivacyEpoch) continue;
+      if (snap.privacyEpoch !== header.createdPrivacyEpoch) continue;
       if (!isValidLocalDate(snap.localDate)) continue;
       if (!areFrozenSourceRefsActive(snap.sourceRefs, activeSourcesSnapshot)) continue;
       seenRoots.add(snap.rootAttemptId);

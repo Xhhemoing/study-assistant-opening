@@ -700,18 +700,20 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     makeProbe({ probeId: "probe-2", input: { a: -3, b: 12 } }),
   ];
 
-  function createFourCaseClinic() {
+  const allCaseSources = {
+    "src-revokable": "v1",
+    "src-ch-1": "v1",
+    "src-ch-2": "v1",
+    "src-ch-3": "v1",
+  };
+
+  function createFourCaseClinic(privacyEpoch = 5) {
     const generated = generateRemedyClinic({
       learnerId: "learner-1",
       courseId: "course-alg-1",
       ruleId: RULE_ID,
-      currentPrivacyEpoch: 5,
-      activeSourcesMap: {
-        "src-revokable": "v1",
-        "src-ch-1": "v1",
-        "src-ch-2": "v1",
-        "src-ch-3": "v1",
-      },
+      currentPrivacyEpoch: privacyEpoch,
+      activeSourcesMap: allCaseSources,
       verifyRuleViolation: verifyNegativeSignFlip,
       candidateProbes: probes,
       attempts: [
@@ -744,11 +746,53 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
           localDate: "2026-11-06",
           sourceRefs: [{ sourceId: "src-ch-3", sourceVersion: "v1" }],
         }),
-      ],
+      ].map((attempt) => ({ ...attempt, privacyEpoch })),
     });
     expect(generated.status).toBe("active");
     return generated.clinic!;
   }
+
+  it("strips evidence from before the clinic's creation epoch, even when its source is active", () => {
+    const clinic = createFourCaseClinic(2);
+    const mixedEpochCases = clinic.evidenceCases.map((item) =>
+      item.rootAttemptId === "r-revoked" ? { ...item, privacyEpoch: 1 } : item,
+    );
+
+    const threeCases = mixedEpochCases.filter((item) => item.rootAttemptId !== "r-keep-3");
+    const revoked = revalidateRemedyClinic({ ...clinic, evidenceCases: threeCases }, allCaseSources, 2);
+    expect(revoked.status).toBe("stale_source_revoked");
+    expect(revoked.revocationSummary).toEqual({
+      reason: "insufficient_surviving_evidence",
+      strippedCaseCount: 1,
+    });
+    expect(revoked.coverage.rootAttemptCount).toBe(2);
+    expect(revoked.evidenceCases).toEqual([]);
+    expect(revoked.steps[0].selectedCases).toEqual([]);
+    expect(revoked.steps[0].diffs).toEqual([]);
+
+    const active = revalidateRemedyClinic({ ...clinic, evidenceCases: mixedEpochCases }, allCaseSources, 3);
+    const survivingRootIds = ["r-keep-1", "r-keep-2", "r-keep-3"];
+    expect(active.status).toBe("active");
+    expect(active.revocationSummary.strippedCaseCount).toBe(1);
+    expect(active.evidenceCases.map((item) => item.rootAttemptId)).toEqual(survivingRootIds);
+    expect(active.steps[0].selectedCases.map((item) => item.rootAttemptId)).toEqual(survivingRootIds);
+    expect(active.steps[0].diffs.map((item) => item.rootAttemptId)).toEqual(survivingRootIds);
+    expect(JSON.stringify(active)).not.toContain("TOP_SECRET_REVOKED_TEXT");
+  });
+
+  it("keeps creation-epoch evidence when revalidating against a later epoch with active sources", () => {
+    const clinic = createFourCaseClinic(2);
+    const revalidated = revalidateRemedyClinic(clinic, allCaseSources, 3);
+
+    expect(revalidated).toMatchObject({
+      status: "active",
+      createdPrivacyEpoch: 2,
+      validatedPrivacyEpoch: 3,
+      revocationSummary: { reason: "none", strippedCaseCount: 0 },
+    });
+    expect(revalidated.evidenceCases).toEqual(clinic.evidenceCases);
+    expect(revalidated.steps[0].diffs).toEqual(clinic.steps[0].diffs);
+  });
 
   it("strips revoked cases with zero remaining excerpt text and stays active when surviving cases preserve >=3x>=2x>=2", () => {
     const clinic = createFourCaseClinic();
