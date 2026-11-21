@@ -724,7 +724,7 @@ export function reconcileMovedPracticeArchives(
       for (const id of hidden) {
         const previous = cached?.drafts.find(draft => draft.id === id);
         const live = saved.drafts.find(draft => draft.id === id);
-        if (!live || JSON.stringify(live) !== JSON.stringify(previous)) hidden.delete(id);
+        if (!live || live.id === saved.activeId || JSON.stringify(live) !== JSON.stringify(previous)) hidden.delete(id);
       }
       if (memory.get(scope) === collection) cacheCollection(saved);
       return hidden;
@@ -813,7 +813,7 @@ export function moveArchivedPracticeDraft(
       rolledBack = true;
     } catch {
       // The destination is durable. Leave the source selection and archive intact for cleanup on reopen.
-      pendingArchiveCleanup.set(draftId, { source: archived, targetScope });
+      pendingArchiveCleanup.set(draftId, { source: parsePracticeDraft(archived, scope)!, targetScope });
     }
     if (rolledBack) throw new Error(moveError);
   }

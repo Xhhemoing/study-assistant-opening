@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { assertPracticeDraftSaved, emptyPracticeDraft, moveArchivedPracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceDraftHasUnsavedStorage, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeDraftCollection, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
+import { assertPracticeDraftSaved, emptyPracticeDraft, moveArchivedPracticeDraft, parsePracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceDraftHasUnsavedStorage, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeDraftCollection, reconcileMovedPracticeArchives, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
 import { runPracticeRequest } from "./practice-draft";
 
 const courseId = "11111111-1111-4111-8111-111111111111";
@@ -7,6 +7,11 @@ const sessionId = "22222222-2222-4222-8222-222222222222";
 const attemptId = "33333333-3333-4333-8333-333333333333";
 const observationId = "44444444-4444-4444-8444-444444444444";
 const newScope = () => practiceScope(courseId, "ordinary", { retestId: crypto.randomUUID(), skillLabel: "scope", prompt: crypto.randomUUID() });
+function matrixDraft(scope: string, sourceId: string, variant: number, answer = "matrix answer", course = courseId) {
+  const clientKey = `matrix-start:${crypto.randomUUID()}`;
+  return { ...emptyPracticeDraft(scope, { sourceId, matrixMode: true, matrixKey: "addition", matrixVariant: variant, answer }),
+    start: { sessionId, clientKey, createInput: { sessionId, clientKey, matrixExercise: { sourceId, exerciseKey: "addition" as const, variant } }, sessionInput: { courseId: course, sourceIds: [sourceId], skillLabel: "矩阵加法" } } };
+}
 function storage() {
   const data = new Map<string, string>();
   return { data, getItem: vi.fn((key: string) => data.get(key) ?? null), setItem: vi.fn((key: string, value: string) => { data.set(key, value); }) };
@@ -89,6 +94,62 @@ it.each([
   if (hasTarget) expect(cold.readPracticeDraft(target, disk, existing.id)).toEqual(existing);
   if (committed) expect(moveFailure).toBeUndefined();
   else expect(moveFailure).toEqual(new Error("草稿未切换，原答案已保留。请允许使用浏览器存储或释放空间后重试。"));
+});
+
+it("uses canonical source bytes when retrying cleanup after a moved matrix archive is edited", () => {
+  const course = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const source = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 2 });
+  const target = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 3 });
+  const original = emptyPracticeDraft(source, { matrixMode: true, sourceId, matrixKey: "addition", matrixVariant: 2 });
+  const archived = matrixDraft(source, sourceId, 3, "archived answer", course);
+  const sourceKey = `opening-practice:v2:${source}`;
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+
+  expect(parsePracticeDraft(archived, source)).not.toBeNull();
+  expect(writePracticeDraft(archived, disk)).toBe(true);
+  switchPracticeDraft(source, archived.id, original, disk);
+  disk.setItem.mockImplementationOnce(() => { throw new Error("edit denied"); });
+  expect(patchPracticeDraft(source, {}, { start: archived.start }, disk, archived.id).persisted).toBe(false);
+
+  let sourceWrites = 0;
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === sourceKey && ++sourceWrites > 1) throw new Error("source cleanup denied");
+    disk.data.set(key, value);
+  });
+  disk.removeItem.mockImplementation(() => { throw new Error("rollback denied"); });
+
+  expect(moveArchivedPracticeDraft(source, original.id, archived.id, target, disk).activeId).toBe(archived.id);
+  expect(patchPracticeDraft(target, {}, { fields: { answer: "edited destination" } }, disk, archived.id).persisted).toBe(true);
+
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+  const sourceCollection = readPracticeDraftCollection(source, disk)!;
+  expect(reconcileMovedPracticeArchives(sourceCollection, () => target, disk)).toEqual(new Set([archived.id]));
+  expect(readPracticeDraft(source, disk, archived.id)).toBeNull();
+});
+
+it("does not hide a moved archive after another editor makes it the source active draft", () => {
+  const course = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const source = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 2 });
+  const target = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 3 });
+  const original = emptyPracticeDraft(source, { matrixMode: true, sourceId, matrixKey: "addition", matrixVariant: 2 });
+  const archived = matrixDraft(source, sourceId, 3, "matrix answer", course);
+  const moved = parsePracticeDraft({ ...archived, scope: target }, target)!;
+  const sourceKey = `opening-practice:v2:${source}`;
+  const targetKey = `opening-practice:v2:${target}`;
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+
+  expect(parsePracticeDraft(archived, source)).not.toBeNull();
+  expect(writePracticeDraft(archived, disk)).toBe(true);
+  switchPracticeDraft(source, archived.id, original, disk);
+  const stale = readPracticeDraftCollection(source, disk)!;
+  const canonical = parsePracticeDraftCollection(stale, source)!;
+  disk.data.set(sourceKey, JSON.stringify({ ...canonical, activeId: archived.id }));
+  disk.data.set(targetKey, JSON.stringify({ version: 2, scope: target, activeId: moved.id, drafts: [moved] }));
+
+  expect(reconcileMovedPracticeArchives(stale, () => target, disk)).toEqual(new Set());
+  expect(readPracticeDraft(source, disk)?.id).toBe(archived.id);
 });
 
 it.each([

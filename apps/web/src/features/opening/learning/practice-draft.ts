@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { raiseAssistanceOnly, type DeliveredAssistance } from "./reference-check";
-import { assertPracticeDraftSaved, emptyPracticeDraft, initializePracticeDraft, isRecoverableManualDraft, moveArchivedPracticeDraft, patchPracticeDraft, practiceDraftHasUnsavedStorage, readPartitionedPracticeDraftCollection, readPracticeDraftCollection, reconcileMovedPracticeArchives, switchPracticeDraft, type DraftPatch, type PracticeDraft, type PracticeDraftCollection, type PracticeDraftScopes, type PracticeFields } from "./practice-draft-storage";
+import { assertPracticeDraftSaved, emptyPracticeDraft, initializePracticeDraft, isRecoverableManualDraft, moveArchivedPracticeDraft, parsePracticeDraft, patchPracticeDraft, practiceDraftHasUnsavedStorage, readPartitionedPracticeDraftCollection, readPracticeDraftCollection, reconcileMovedPracticeArchives, switchPracticeDraft, type DraftPatch, type PracticeDraft, type PracticeDraftCollection, type PracticeDraftScopes, type PracticeFields } from "./practice-draft-storage";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 export * from "./practice-draft-storage";
 
@@ -58,16 +58,19 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
       const restored = stored ?? initializePracticeDraft(fallback);
       if (targetScopeFor) {
         const hidden = reconcileMovedPracticeArchives(restored, targetScopeFor, storage);
-        setHiddenArchives(new Map(restored.drafts.filter(draft => hidden.has(draft.id)).map(draft => [draft.id, JSON.stringify(draft)])));
+        const current = readPracticeDraftCollection(scope, null)!;
+        setHiddenArchives(new Map(current.drafts.filter(draft => hidden.has(draft.id)).map(draft => [draft.id, JSON.stringify(parsePracticeDraft(draft, scope) ?? draft)])));
+        setCollection(current);
+      } else {
+        setCollection(restored);
       }
-      setCollection(targetScopeFor ? readPracticeDraftCollection(scope, null)! : restored);
       setStorageWarning(practiceDraftHasUnsavedStorage(scope));
       setLoadError(""); setReady(true);
     } catch (reason) { setLoadError(userFacingMessage(reason, "无法读取练习草稿")); setReady(false); }
   }, [scope, fallback, scopes, loadRevision, targetScopeFor]);
   const draft = collection.drafts.find(value => value.id === collection.activeId)!;
   const drafts = scopes?.manual === scope ? collection.drafts.filter(isRecoverableManualDraft)
-    : hiddenArchives?.size ? collection.drafts.filter(value => value.id === draft.id || !hiddenArchives.has(value.id) || hiddenArchives.get(value.id) !== JSON.stringify(value))
+    : hiddenArchives?.size ? collection.drafts.filter(value => value.id === draft.id || !hiddenArchives.has(value.id) || hiddenArchives.get(value.id) !== JSON.stringify(parsePracticeDraft(value, scope) ?? value))
       : collection.drafts;
   const patch = useCallback((change: DraftPatch | ((current: PracticeDraft) => DraftPatch)) => {
     if (!ready) throw new Error("练习草稿尚未读完，未修改已保存的内容。");
