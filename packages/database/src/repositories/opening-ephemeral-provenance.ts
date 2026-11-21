@@ -6,7 +6,7 @@ import { contextSourceRefsIncluded, mergeContextSourceRefs, parseContextSourceRe
 
 export type EphemeralProvenanceRepository = {
   resolveHistory(scope: OpeningScope, history: readonly { provenanceId?: string }[], epoch: number): Promise<ContextSourceRef[] | null>;
-  record(scope: OpeningScope, input: { requestId: string; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] | null }): Promise<string | null>;
+  record(scope: OpeningScope, input: { reservationId?: string; requestId: string; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] | null }): Promise<string | null>;
   recordQuery?(scope: OpeningScope, input: { requestId: string; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] }): Promise<string>;
   purgeExpiredQueries?(): Promise<number>;
 };
@@ -71,6 +71,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         const rows = await tx`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)
           SELECT id,workspace_id,${scope.ownerUserId},${input.privacyEpoch},${refs === null ? null : tx.json(refs)}
           FROM opening_budget_reservations WHERE request_id=${input.requestId} AND workspace_id=${scope.workspaceId} AND purpose='tutor'
+            AND (${input.reservationId ?? null}::uuid IS NULL OR id=${input.reservationId ?? null}::uuid)
           RETURNING id`;
         if (!rows.length) throw new EphemeralProvenanceError("NOT_FOUND", "call reservation not found");
         return refs === null ? null : String(rows[0]!.id);

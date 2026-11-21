@@ -63,7 +63,9 @@ function auditInstant(value: unknown): bigint | null {
  * only the latest acceptance, not every historical binding. The caller holds the
  * workspace history lock; gaps caused by other semantic writes are legitimate. */
 export function validateRetainedMaterialImportState(row: RetainedRow, sourceId: string, sourceVersion: number, watermark: number) {
-  const revision = Number(row.material_manifest_revision);
+  const parsedRevision = revisionSchema.default(0).safeParse(row.material_manifest_revision);
+  if (!parsedRevision.success) conflict("invalid material manifest revision");
+  const revision = parsedRevision.data;
   if (row.material_manifest == null) {
     if (revision !== 0 || row.material_reviewed_by != null || row.material_reviewed_at != null) conflict("audit or revision without manifest");
     return null;

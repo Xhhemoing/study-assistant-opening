@@ -493,13 +493,15 @@ function attemptView(attempt: ExamAttempt, state: ExamSprintState, pack: ExamPac
   const original = questionFor(pack, attempt.questionId);
   const { answer, explanation, hint, pool: _pool, partSnapshot: _partSnapshot, ...question } = original;
   const run = state.runs.find(item => item.id === attempt.runId);
-  const sealed = Boolean(run && isMock(run.mode) && !run.completedAt);
-  const reveal = !sealed && (attempt.answeredAt !== null || attempt.help.some(help => help.kind === "solution") || Boolean(run && isMock(run.mode) && run.completedAt));
+  const mock = run && isMock(run.mode);
+  const sealed = mock && !run.completedAt;
+  const reveal = mock ? !sealed && !run.restoredUngraded
+    : attempt.answeredAt !== null || attempt.help.some(help => help.kind === "solution");
   const { prediction, resultMetadata: _resultMetadata, ...publicAttempt } = structuredClone(attempt);
   return {
     ...publicAttempt, ...(!sealed && prediction ? { prediction } : {}), correct: sealed ? null : attempt.correct, question: structuredClone(question),
     feedback: reveal ? { answer, explanation } : null,
-    hint: !sealed && attempt.help.some(help => help.kind === "hint") ? hint : null,
+    hint: !mock && attempt.help.some(help => help.kind === "hint") ? hint : null,
     independent: !sealed && independent(attempt, state, pack, context),
   };
 }
@@ -551,7 +553,8 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
     const exposure = matching.find(item => item.id === conversion?.exposureId) ?? matching[0];
     return exposure ? [{ exposureId: exposure.id, lesson: structuredClone(lesson) }] : [];
   });
-  const { attempts: _attempts, ...publicState } = state;
+  const { attempts: _attempts, runs, ...publicState } = state;
+  const publicRuns = runs.map(({ restoredUngraded: _restoredUngraded, ...run }) => run);
   const distinctSources = (predicate: (record: ExamSourceRecord) => boolean) => new Set(currentSourceRecords(state, context).filter(predicate).map(record => record.sourceId)).size;
   const arrangementNote = active?.mode === "practice" ? activePracticeNote(active, state, pack, context)
     : selectQuestions(active ? { ...state, runs: state.runs.filter(run => run.id !== active.id),
@@ -568,7 +571,7 @@ export function examSprintOverview(state: ExamSprintState, pack: ExamPack, now: 
     reason: arrangementNote,
     lessonId: null, mode: "practice" });
   return {
-    pack: structuredClone(publicPack), state: { ...structuredClone(publicState), lessonExposures: structuredClone(state.lessonExposures ?? []) }, attempts, lessonContents,
+    pack: structuredClone(publicPack), state: structuredClone({ ...publicState, runs: publicRuns, lessonExposures: state.lessonExposures ?? [] }), attempts, lessonContents,
     activeRun: active ? structuredClone(active) : null,
     currentAttempt: current ? attempts.find(attempt => attempt.id === current.id) ?? null : null,
     skills, recommendations, workload: workload(state, pack, now, context),

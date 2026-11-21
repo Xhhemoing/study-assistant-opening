@@ -1,6 +1,7 @@
 import type { PlannedBlock, TaskItem, TimeBlock } from "@aistudy/contracts";
 import { availableTimeSlots } from "./planning-time";
-import { taskNotBeforeAt } from "./day-planner";
+import { carryOverTaskIds, taskNotBeforeAt } from "./day-planner";
+import { resolveLocalDayBounds } from "./local-day-bounds";
 
 /** Machine-readable reason codes for daily auto-draft explanations. */
 export type DailyDraftReasonCode =
@@ -32,6 +33,7 @@ export type BuildDailyDraftInputArgs = {
 export type BuildDailyDraftInputResult = {
   orderedTaskIds: string[];
   reasons: Record<string, DailyDraftReason>;
+  carryOverTaskIds: ReadonlySet<string>;
 };
 
 const REASON_LABELS: Record<DailyDraftReasonCode, string> = {
@@ -130,6 +132,12 @@ export function buildDailyDraftInput(
   const pending = [...byId.values()].filter(
     (task) => task.status === "pending" && !isRetestNotYetDue(task, localDate, timeZone),
   );
+  const dayEndMs = resolveLocalDayBounds(localDate, timeZone).nextDayStart.getTime();
+  const deadlineIds = pending
+    .filter((task) => deadline(task) <= dayEndMs)
+    .sort(compareTasks)
+    .map((task) => task.id);
+  const deadlineSet = new Set(deadlineIds);
 
   const carryIds: string[] = [];
   const carrySet = new Set<string>();
@@ -137,17 +145,20 @@ export function buildDailyDraftInput(
     const task = byId.get(block.taskId);
     if (!task || task.status !== "pending") continue;
     if (isRetestNotYetDue(task, localDate, timeZone)) continue;
-    if (carrySet.has(block.taskId)) continue;
+    if (deadlineSet.has(block.taskId) || carrySet.has(block.taskId)) continue;
     carrySet.add(block.taskId);
     carryIds.push(block.taskId);
   }
 
   const rest = pending
-    .filter((task) => !carrySet.has(task.id))
+    .filter((task) => !deadlineSet.has(task.id) && !carrySet.has(task.id))
     .sort(compareTasks)
     .map((task) => task.id);
 
-  const orderedTaskIds = [...carryIds, ...rest];
+  const orderedTaskIds = [...deadlineIds, ...carryIds, ...rest];
+  Object.defineProperty(orderedTaskIds, carryOverTaskIds, {
+    value: carrySet,
+  });
   const reasons: Record<string, DailyDraftReason> = {};
   for (const id of carryIds) {
     reasons[id] = {
@@ -180,7 +191,7 @@ export function buildDailyDraftInput(
     reasons[id] = overflowReason(task.minutes, maxSlot, due, nowMs);
   }
 
-  return { orderedTaskIds, reasons };
+  return { orderedTaskIds, reasons, carryOverTaskIds: carrySet };
 }
 
 export function dailyDraftClientKey(date: string): string {

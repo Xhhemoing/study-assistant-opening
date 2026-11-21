@@ -6,6 +6,7 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
 import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
+import { resolvedKnowledgeCoverage } from "./opening-knowledge-legacy-coverage";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
 type ChunkPublication = { sourceId: string; sourceVersion: number; warning?: ApiFailure };
 export type OpeningSourceChunksRepository = {
@@ -42,7 +43,7 @@ function chunkContent(chunks: NewSourceChunk[]): string[] {
 }
 
 async function backfillLegacyChunkDigest(tx: TransactionSql, scope: OpeningScope, sourceId: string, sourceVersion: number,
-  digest: string) {
+  digest: string, removedReadable = true, added: NewSourceChunk[] = []) {
   // The first readable change freezes the old chunk set, including uncited pages.
   // Legacy coverage may exist only in the succeeded build receipt or cited versions.
   await tx`UPDATE opening_course_knowledge graph
@@ -50,13 +51,9 @@ async function backfillLegacyChunkDigest(tx: TransactionSql, scope: OpeningScope
       COALESCE(graph.snapshot->'coveredSourceChunkDigests', '{}'::jsonb) || jsonb_build_object(${sourceId}::text, ${digest}::text))
     WHERE graph.workspace_id=${scope.workspaceId} AND graph.owner_user_id=${scope.ownerUserId}
       AND NOT (COALESCE(graph.snapshot->'coveredSourceChunkDigests', '{}'::jsonb) ? ${sourceId})
-      AND COALESCE(graph.snapshot->'coveredSourceVersions', (
-        SELECT CASE WHEN jsonb_typeof(j.result->'coveredSourceVersions')='object' THEN j.result->'coveredSourceVersions' END
-        FROM opening_jobs j WHERE j.workspace_id=graph.workspace_id AND j.owner_user_id=graph.owner_user_id
-          AND j.kind='build-course-knowledge' AND j.state='succeeded' AND j.payload->>'courseId'=graph.course_id::text
-          AND j.result->'version'=to_jsonb(graph.version)
-        ORDER BY j.updated_at DESC, j.created_at DESC, j.id DESC LIMIT 1
-      ), graph.source_versions)->>${sourceId}=${String(sourceVersion)}`;
+      AND ${resolvedKnowledgeCoverage(tx)}->>${sourceId}=${String(sourceVersion)}
+      AND (${removedReadable} OR EXISTS (SELECT 1 FROM unnest(${added.map(chunk => chunk.text)}::text[]) added(text)
+        WHERE added.text ~ '[^[:space:]]'))`;
 }
 
 async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: ChunkPublication, reconcile: (sourceId: string) => Promise<void>) {

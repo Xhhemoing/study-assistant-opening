@@ -16,7 +16,8 @@ export function validateOpeningBackupCards(tables: Record<string, Row[]>, errors
       errors.push("Opening card is invalid or requires native note backup"); continue;
     }
     const sourceIds = parseUuidArray(row.source_ids);
-    if (!sourceIds || sourceIds.length > 32 || sourceIds.some(id => !sources.has(id.toLowerCase()))) errors.push("card source lineage is missing or outside the backup");
+    if (!sourceIds || (row.origin_observation_root_id == null && sourceIds.length > 32)
+      || sourceIds.some(id => !sources.has(id.toLowerCase()))) errors.push("card source lineage is missing or outside the backup");
     if (row.course_id != null && (!isUuid(row.course_id) || !courseIds.has(row.course_id.toLowerCase()))) errors.push("card course is not included");
     if (cards.has(row.id.toLowerCase())) errors.push("card is duplicated");
     cards.set(row.id.toLowerCase(), row);
