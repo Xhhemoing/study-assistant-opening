@@ -1,7 +1,5 @@
-import {
-  cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction, isInspectableCartridgeObject,
-  readCartridgeDataProperty,
-} from "./clone-cartridge-data";
+import { cloneCartridgeData, readCartridgeDataProperty } from "./clone-cartridge-data";
+import { cloneProbeDefinition, isClonedProbeDefinition, isNonBlankString, ProbeDefinitionError } from "./probe-definition";
 
 /**
  * Distinguishable competing-misconception probe protocol.
@@ -95,33 +93,17 @@ export function isVerifiedProbeSnapshot<TObservable>(snapshot: VerifiedProbeSnap
 }
 
 /** Runtime guard: observable keys must be non-empty, non-whitespace strings. */
-export function isValidObservableKey(key: unknown): key is string {
-  return typeof key === "string" && key.trim().length > 0;
-}
-
-type ReadResult<T> = { ok: true; value: T } | { ok: false };
-
-function safeRead<T>(getter: () => T): ReadResult<T> {
-  try {
-    return { ok: true, value: getter() };
-  } catch {
-    return { ok: false };
-  }
-}
+export const isValidObservableKey = isNonBlankString;
 
 function predictKey<TInput, TObservable>(
-  input: ReadResult<TInput>,
-  encodeObservable: ((observable: TObservable) => string) | null,
-  predict: ((value: TInput) => TObservable) | null,
+  input: TInput,
+  encodeObservable: (observable: TObservable) => string,
+  predict: (value: TInput) => TObservable,
   issues: Set<ProbeDistinguishabilityIssue>,
 ): string | null {
-  if (!input.ok || !encodeObservable || !predict) {
-    issues.add("prediction_failed");
-    return null;
-  }
   try {
     const predictAndEncode = (): unknown => {
-      const inputCopy = structuredClone(input.value);
+      const inputCopy = structuredClone(input);
       return encodeObservable(cloneCartridgeData(predict(inputCopy)));
     };
     const first = predictAndEncode();
@@ -141,23 +123,45 @@ function predictKey<TInput, TObservable>(
   }
 }
 
-interface CapturedModel<TInput, TObservable> {
-  id: string;
-  predict: ((input: TInput) => TObservable) | null;
+function readProbeIdentity(spec: unknown, key: "probeId" | "requirementKey"): string {
+  try {
+    const value = readCartridgeDataProperty(spec, key);
+    return typeof value === "string" ? value : "";
+  } catch {
+    return "";
+  }
 }
 
-function captureModel<TInput, TObservable>(raw: unknown): CapturedModel<TInput, TObservable> {
-  if (!isInspectableCartridgeObject(raw)) return { id: "", predict: null };
-  const candidate = raw as Partial<ObservableModel<TInput, TObservable>>;
-  const idRead = safeRead(() => readCartridgeDataProperty(candidate, "id"));
-  const predictRead = safeRead(() => readCartridgeDataProperty(candidate, "predict"));
-  const predict = predictRead.ok ? predictRead.value : null;
-  return {
-    id: idRead.ok && typeof idRead.value === "string" ? idRead.value : "",
-    predict: isInspectableCartridgeFunction(predict)
-      ? (value: TInput) => Reflect.apply(predict, raw, [value])
-      : null,
-  };
+function invalidProbeSnapshot<TObservable>(
+  spec: unknown,
+  issue: ProbeDistinguishabilityIssue,
+): VerifiedProbeSnapshot<TObservable> {
+  const probeId = readProbeIdentity(spec, "probeId");
+  const report: ProbeDistinguishabilityReport = Object.freeze({
+    probeId,
+    distinguishable: false,
+    predictions: Object.freeze([]),
+    ambiguousPairs: Object.freeze([]),
+    degenerateAgainstCorrectModel: Object.freeze([]),
+    issues: Object.freeze([issue]),
+  });
+  const snapshot: VerifiedProbeSnapshot<TObservable> = Object.freeze({
+    probeId,
+    requirementKey: readProbeIdentity(spec, "requirementKey"),
+    report,
+    correctObservableKey: null,
+    observableKey: null,
+    parseResponse: null,
+  });
+  SNAPSHOT_STATE.set(snapshot as VerifiedProbeSnapshot<unknown>, Object.freeze({
+    distinguishable: false,
+    correctModelId: "",
+    correctObservableKey: null,
+    hypothesisByObservableKey: new Map<string, string>(),
+    observableKey: null,
+    parseResponse: null,
+  }));
+  return snapshot;
 }
 
 /**
@@ -168,80 +172,26 @@ function captureModel<TInput, TObservable>(raw: unknown): CapturedModel<TInput, 
 export function snapshotAndVerifyProbe<TInput, TObservable>(
   spec: DistinguishableProbeSpec<TInput, TObservable>,
 ): VerifiedProbeSnapshot<TObservable> {
+  let probe: DistinguishableProbeSpec<TInput, TObservable>;
+  try {
+    probe = isClonedProbeDefinition(spec) ? spec : cloneProbeDefinition(spec);
+  } catch (error) {
+    return invalidProbeSnapshot(spec, error instanceof ProbeDefinitionError ? error.issue : "prediction_failed");
+  }
+  const { probeId, requirementKey, input, correctModel, hypotheses } = probe;
+  const encodeObservable = (observable: TObservable) => probe.observableKey(observable);
+  const parseResponse = (response: unknown) => probe.parseResponse(response);
   const issues = new Set<ProbeDistinguishabilityIssue>();
-  if (!isInspectableCartridgeObject(spec)) {
-    issues.add("probe_identity_incomplete");
-    issues.add("no_competing_hypotheses");
-    const report: ProbeDistinguishabilityReport = Object.freeze({
-      probeId: "",
-      distinguishable: false,
-      predictions: Object.freeze([]),
-      ambiguousPairs: Object.freeze([]),
-      degenerateAgainstCorrectModel: Object.freeze([]),
-      issues: Object.freeze([...issues].sort()),
-    });
-    const snapshot: VerifiedProbeSnapshot<TObservable> = Object.freeze({
-      probeId: "",
-      requirementKey: "",
-      report,
-      correctObservableKey: null,
-      observableKey: null,
-      parseResponse: null,
-    });
-    SNAPSHOT_STATE.set(snapshot as VerifiedProbeSnapshot<unknown>, Object.freeze({
-      distinguishable: false,
-      correctModelId: "",
-      correctObservableKey: null,
-      hypothesisByObservableKey: new Map<string, string>(),
-      observableKey: null,
-      parseResponse: null,
-    }));
-    return snapshot;
-  }
+  const ids = [correctModel.id, ...hypotheses.map(model => model.id)];
+  if (new Set(ids).size !== ids.length) issues.add("duplicate_model_id");
 
-  const hypothesesRead = safeRead(() => copyCartridgeArray(readCartridgeDataProperty(spec, "hypotheses")));
-  const probeIdRead = safeRead(() => readCartridgeDataProperty(spec, "probeId"));
-  const requirementKeyRead = safeRead(() => readCartridgeDataProperty(spec, "requirementKey"));
-  const inputRead = safeRead(() => cloneCartridgeData(readCartridgeDataProperty(spec, "input")));
-  const correctRead = safeRead(() => readCartridgeDataProperty(spec, "correctModel"));
-  const encodeRead = safeRead(() => readCartridgeDataProperty(spec, "observableKey"));
-  const parseRead = safeRead(() => readCartridgeDataProperty(spec, "parseResponse"));
-
-  const probeId = probeIdRead.ok && typeof probeIdRead.value === "string" ? probeIdRead.value : "";
-  const requirementKey = requirementKeyRead.ok && typeof requirementKeyRead.value === "string" ? requirementKeyRead.value : "";
-  const encode = encodeRead.ok ? encodeRead.value : null;
-  const parse = parseRead.ok ? parseRead.value : null;
-  const encodeObservable = isInspectableCartridgeFunction(encode)
-    ? (observable: TObservable) => Reflect.apply(encode, spec, [observable])
-    : null;
-  const parseResponse = isInspectableCartridgeFunction(parse)
-    ? (response: unknown) => Reflect.apply(parse, spec, [response])
-    : null;
-
-  const correctModel = correctRead.ok ? captureModel<TInput, TObservable>(correctRead.value) : { id: "", predict: null };
-  if (!isValidObservableKey(probeId) || !isValidObservableKey(requirementKey) || !isValidObservableKey(correctModel.id)) {
-    issues.add("probe_identity_incomplete");
-  }
-  if (!parseResponse) issues.add("probe_identity_incomplete");
-  if (!inputRead.ok || !encodeObservable) issues.add("prediction_failed");
-
-  if (!hypothesesRead.ok) issues.add("prediction_failed");
-  const rawHypotheses = hypothesesRead.ok ? hypothesesRead.value : [];
-  const hypotheses = rawHypotheses.map(item => captureModel<TInput, TObservable>(item));
-  if (hypotheses.length === 0) issues.add("no_competing_hypotheses");
-
-  const ids = [correctModel.id, ...hypotheses.map(row => row.id)];
-  if (new Set(ids).size !== ids.length || ids.some(id => !isValidObservableKey(id))) {
-    issues.add("duplicate_model_id");
-  }
-
-  const correctKey = predictKey(inputRead, encodeObservable, correctModel.predict, issues);
+  const correctKey = predictKey(input, encodeObservable, value => correctModel.predict(value), issues);
   const predictions: ProbeModelPrediction[] = [
-    Object.freeze({ modelId: correctModel.id, role: "correct" as const, observableKey: correctKey }),
+    Object.freeze({ modelId: correctModel.id, role: correctModel.role, observableKey: correctKey }),
     ...hypotheses.map(hypothesis => Object.freeze({
       modelId: hypothesis.id,
-      role: "misconception" as const,
-      observableKey: predictKey(inputRead, encodeObservable, hypothesis.predict, issues),
+      role: hypothesis.role,
+      observableKey: predictKey(input, encodeObservable, value => hypothesis.predict(value), issues),
     })),
   ];
 
@@ -295,12 +245,12 @@ export function snapshotAndVerifyProbe<TInput, TObservable>(
     requirementKey,
     report,
     correctObservableKey,
-    observableKey: encodeObservable && Object.freeze((observable: TObservable) => {
+    observableKey: Object.freeze((observable: TObservable) => {
       const key = encodeObservable(cloneCartridgeData(observable));
       if (!isValidObservableKey(key)) throw new TypeError("Cartridge observable key must be a non-blank string");
       return key;
     }),
-    parseResponse: parseResponse && Object.freeze((response: unknown) =>
+    parseResponse: Object.freeze((response: unknown) =>
       cloneCartridgeData(parseResponse(cloneCartridgeData(response)))),
   });
   SNAPSHOT_STATE.set(snapshot as VerifiedProbeSnapshot<unknown>, Object.freeze({

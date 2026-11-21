@@ -2,8 +2,9 @@ import {
   callCartridgeDataMethod, cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction,
   isInspectableCartridgeObject, readCartridgeDataProperty,
 } from "./clone-cartridge-data";
-import { cloneProbeDefinition, deepFreeze } from "./probe-definition";
-import { verifyProbeDistinguishability, type DistinguishableProbeSpec, type ProbeDistinguishabilityReport } from "./probe-protocol";
+import { deepFreeze } from "./probe-definition";
+import type { DistinguishableProbeSpec, ProbeDistinguishabilityReport } from "./probe-protocol";
+import { inspectProbe, publishVerifiedProbe } from "./published-probe";
 import {
   CARTRIDGE_LEVEL_METHODS,
   cartridgeManifestSchema,
@@ -105,8 +106,7 @@ function validateEvidenceContracts(
       }
     }
     try {
-      const snapshot = deepFreeze(cloneProbeDefinition(probe));
-      const report = verifyProbeDistinguishability(snapshot);
+      const { snapshot: { report } } = inspectProbe(probe);
       reports.push(report);
       if (!report.distinguishable) {
         issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${report.issues.join(", ")}` });
@@ -212,11 +212,11 @@ function wrapCartridge(
         const result = callCartridgeDataMethod(cartridge, method, cloneCartridgeData(args));
         // Raw list/lookup identity is used during validation only.
         if (method === "getProbe") {
-          return result === null ? null : deepFreeze(cloneProbeDefinition(result));
+          return result === null ? null : publishVerifiedProbe(result);
         }
         if (method === "listProbes") {
           return Object.freeze(copyCartridgeArray(result as readonly unknown[])
-            .map(probe => deepFreeze(cloneProbeDefinition(probe))));
+            .map(publishVerifiedProbe));
         }
         return cloneCartridgeData(result);
       },

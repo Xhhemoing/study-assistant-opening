@@ -3,12 +3,8 @@ import {
   callCartridgeDataMethod, cloneCartridgeData, isInspectableCartridgeObject, readCartridgeDataProperty,
   isPlainCartridgeRecord,
 } from "./clone-cartridge-data";
-import { cloneProbeDefinition, deepFreeze } from "./probe-definition";
-import {
-  snapshotAndVerifyProbe,
-  type DistinguishableProbeSpec,
-  type ProbeDistinguishabilityReport,
-} from "./probe-protocol";
+import type { ProbeDistinguishabilityReport, VerifiedProbeSnapshot } from "./probe-protocol";
+import { readProbeRejection, readProbeSnapshot } from "./published-probe";
 import { getCartridge, type CartridgeRegistry } from "./registry";
 import { hasEvidenceCapability, type CartridgeCapabilityLevel, type CartridgeProbeEvaluation } from "./types";
 
@@ -172,16 +168,21 @@ export function qualifyCartridgeEmission(
   if (manifestVersion !== capturedEmission.cartridgeVersion) return reject("cartridge_version_mismatch");
   if (!hasEvidenceCapability(cartridge)) return reject("cartridge_level_below_evidence");
 
-  let probe: DistinguishableProbeSpec<unknown, unknown> | null;
+  let snapshot: VerifiedProbeSnapshot;
   try {
-    const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", [capturedEmission.probeId]);
-    probe = lookedUp === null ? null : deepFreeze(cloneProbeDefinition(lookedUp));
-  } catch {
+    const probe = callCartridgeDataMethod(cartridge, "getProbe", [capturedEmission.probeId]);
+    if (probe === null) return reject("cartridge_probe_unknown");
+    snapshot = readProbeSnapshot(probe);
+  } catch (error) {
+    const report = readProbeRejection(error);
+    if (report) {
+      result.distinguishability = report;
+      return reject(report.probeId === capturedEmission.probeId
+        ? "cartridge_probe_not_distinguishable"
+        : "cartridge_probe_identity_mismatch");
+    }
     return reject("cartridge_probe_lookup_failed");
   }
-  if (probe === null) return reject("cartridge_probe_unknown");
-
-  const snapshot = snapshotAndVerifyProbe(probe);
   result.distinguishability = snapshot.report;
   if (snapshot.probeId !== capturedEmission.probeId) return reject("cartridge_probe_identity_mismatch");
   if (!snapshot.report.distinguishable) return reject("cartridge_probe_not_distinguishable");

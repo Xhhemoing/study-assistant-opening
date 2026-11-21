@@ -411,6 +411,24 @@ describe("qualifyCartridgeEmission", () => {
     }
   });
 
+  it("does not inspect a Proxy thrown by a runtime probe lookup", () => {
+    const trap = vi.fn((): never => { throw new Error("Proxy trap invoked"); });
+    let registered = false;
+    const candidate = {
+      ...stack408Cartridge,
+      getProbe(probeId: string) {
+        if (registered) throw new Proxy(new Error("lookup failed"), { get: trap, getPrototypeOf: trap });
+        return stack408Cartridge.getProbe(probeId);
+      },
+    };
+    const localRegistry = createCartridgeRegistry([candidate]);
+    registered = true;
+    expect(qualifyCartridgeEmission(localRegistry, emit())).toMatchObject({
+      qualified: false, reasonCodes: ["cartridge_probe_lookup_failed"],
+    });
+    expect(trap).not.toHaveBeenCalled();
+  });
+
   it("rejects when a stateful probe drifts between verification snapshot and cartridge evaluation", () => {
     const baseProbe = stack408Cartridge.getProbe(TRACE_PROBE)!;
     let predictCount = 0;
@@ -420,7 +438,7 @@ describe("qualifyCartridgeEmission", () => {
         ...baseProbe.correctModel,
         predict: (input: unknown) => {
           predictCount += 1;
-          // Passes registration (calls 1-2) and gate snapshot (calls 3-4), then drifts on cartridge evaluateProbeResponse (calls 5-6).
+          // Passes registration (calls 1-2) and runtime lookup snapshot (calls 3-4), then drifts on cartridge evaluateProbeResponse (calls 5-6).
           if (predictCount <= 4) return baseProbe.correctModel.predict(input);
           return { outputs: ["999"], finalTop: 0 };
         },
