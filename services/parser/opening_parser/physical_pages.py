@@ -53,9 +53,9 @@ _VISUAL_CAPTION_REF_RE = re.compile(r"^(?:Figure|Fig\.?|Chart|Diagram|Scheme|图
 _SECTION_SEALED_RE = re.compile(
     r"^(?:"
     r"(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)\s*[:：.\-—]?\s*)?"
-    r"(?:(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Key\s+(?:to|TO)\s+(?:the\s+|THE\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+    r"(?:(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?\s+[Kk]ey|ANSWERS?\s+KEY|Key\s+(?:to|TO)\s+(?:the\s+|THE\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\s+(?:to|TO)\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\s+Questions?|REVIEW\s+QUESTIONS?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Self-Check\s+Exercises?|SELF-CHECK\s+EXERCISES?|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
-    r"|(?:Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|Answer\s+Section|ANSWER\s+SECTION|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+(?:and|AND)\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+    r"|(?:Selected\s+[Aa]nswers?|SELECTED\s+ANSWERS?|Model\s+[Aa]nswers|MODEL\s+ANSWERS|Official\s+[Ss]olutions|OFFICIAL\s+SOLUTIONS|Reference\s+[Ss]olutions|REFERENCE\s+SOLUTIONS|Answer\s+Section|ANSWER\s+SECTION|Solutions?\s+[Mm]anual|SOLUTIONS?\s+MANUAL|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+(?:and|AND)\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Answers|ANSWERS)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|【\s*(?:参考答案|标准答案|习题答案|习题解答|练习答案|练习解答|课后答案|课后练习答案|课后习题答案|课后解答|思考题答案|答案与解析|参考解答|详细解答|参考答案与解析|部分习题答案)\s*】\s*$"
     r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
@@ -67,24 +67,27 @@ _SECTION_SEALED_RE = re.compile(
 _INLINE_WITH_BODY_CHECK_RE = re.compile(r"[:：]\s*\S")
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
     r"^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.\-—]?\s*)?"
-    r"(?:Answers?\s+(?:to|TO)\s+|ANSWERS?\s+(?:to|TO)\s+|Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|"
-    r"Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|"
-    r"Solutions?\s+(?:to|TO)\s+|SOLUTIONS?\s+(?:to|TO)\s+|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|"
+    r"(?:Answers?\s+(?:to|TO)\s+|ANSWERS?\s+(?:to|TO)\s+|Selected\s+[Aa]nswers?|SELECTED\s+ANSWERS?|Model\s+[Aa]nswers|MODEL\s+ANSWERS|"
+    r"Official\s+[Ss]olutions|OFFICIAL\s+SOLUTIONS|Reference\s+[Ss]olutions|REFERENCE\s+SOLUTIONS|"
+    r"Solutions?\s+(?:to|TO)\s+|SOLUTIONS?\s+(?:to|TO)\s+|Solutions?\s+[Mm]anual|SOLUTIONS?\s+MANUAL|"
     r"Key\s+(?:to|TO)\s+|KEY\s+(?:to|TO)\s+|"
     r"Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|"
     r"Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|"
     r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)"
     r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.\-—]\s*"
-    r"(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)"
+    r"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?\s+[Kk]ey|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)"
     r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)"
 )
 
-# Single-item inline answers attached to an exercise (always requires explicit ':' / '：' or 【...】).
+_QUALIFIED_ANSWER_LABEL = r"(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)"
+_ENGLISH_SOLUTION_LABEL = r"(?:(?:Worked|Full|Sample|Official|Reference)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)"
+_CONTINUED_LABEL = r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?"
+
+# Single-item answers use a colon or a standalone qualified heading.
 _INLINE_SEALED_ALWAYS_RE = re.compile(
     r"^(?:"
-    r"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|"
-    r"(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?"
-    r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]"
+    rf"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*[:：]"
+    rf"|{_QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:[:：]|$)"
     r"|【\s*(?:参考答案|标准答案|正确答案|答案)\s*】"
     r"|(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案|答案与解析|答案)\s*(?:\d+(?:[.\-]\d+)*)?\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：]"
     r")"
@@ -93,23 +96,23 @@ _INLINE_SEALED_ALWAYS_RE = re.compile(
 # Inline solution/proof markers sealed ONLY outside worked_example context.
 _INLINE_SEALED_NON_EXAMPLE_RE = re.compile(
     r"^(?:"
-    r"(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|Solutions|SOLUTIONS)(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]"
+    rf"{_ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*[:：]"
     r"|【\s*(?:参考解答|详细解答|解答|详解|解析)\s*】"
     r"|(?:参考解答|详细解答|解答|详解|解析|解)\s*(?:\d+(?:[.\-]\d+)*)?\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：]"
     r")"
 )
 _STANDALONE_SOLUTION_HEADING_RE = re.compile(
-    r"^(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|解答|详细解答|参考解答|解析|详解)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*$"
+    rf"^(?!(?:Solutions|SOLUTIONS)\b)(?:{_ENGLISH_SOLUTION_LABEL}|解答|详细解答|参考解答|解析|详解){_CONTINUED_LABEL}\s*$"
 )
 
 _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE = re.compile(
     r"^(?:"
-    r"(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|Proof|PROOF)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|(?:\.(?:\s|$))|$)"
+    rf"(?!(?:(?:Official|Reference)\s+[Ss]olutions|(?:OFFICIAL|REFERENCE)\s+SOLUTIONS|Solutions|SOLUTIONS)\b)"
+    rf"(?:{_ENGLISH_SOLUTION_LABEL}|Proof|PROOF){_CONTINUED_LABEL}\s*(?:[:：]|\.(?:\s|$)|$)"
     r"|(?:详细解答|参考解答|解答|详解|解析|证明|证|解|分析)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r"|【\s*(?:解答|证明|证|解|详解|解析|分析)\s*】"
     r")"
 )
-
 _PROOF_RE = re.compile(
     r"^(?:"
     r"(?:Proof|PROOF|Sketch\s+of\s+Proof|Proof\s+Sketch)(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary)\s*[\d.]*)?(?:\s*\(\s*(?:continued|cont\.?)\s*\))?\s*(?:[:：.\-—]|$)"
@@ -262,6 +265,7 @@ class PhysicalPagesExtraction:
     section_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     inline_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     had_sealed_by_page: dict[int, bool] = field(default_factory=dict)
+    in_worked_example_by_page: dict[int, bool] = field(default_factory=dict)
 
 
 def _normalized_label(node):
@@ -513,7 +517,7 @@ def _caption_visual_kind(caption_text: str, page_visuals: set[str]) -> str | Non
 
 
 def _is_section_sealed_opener(stripped: str) -> bool:
-    if not _SECTION_SEALED_RE.match(stripped) or _MODEL_ANSWER_LABEL_RE.match(stripped):
+    if not _SECTION_SEALED_RE.match(stripped):
         return False
     # Inline "Answer Key: text" is inline_sealed unless it is header-only ("Answer Key:" or "Answer Key").
     if _INLINE_WITH_BODY_CHECK_RE.search(stripped):
@@ -922,13 +926,15 @@ def _seal_furniture_on_all_sealed_page(blocks: list[DiscourseBlock], entries: li
     return updated
 
 
-def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_seal_mode: str | None = None) -> PhysicalPagesExtraction:
+def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_seal_mode: str | None = None,
+                           initial_in_worked_example: bool = False) -> PhysicalPagesExtraction:
     page_order, raw_fragments, visual_sets = _collect_page_fragments(conversion)
     blocks_by_page: dict[int, list[DiscourseBlock]] = {}
     entries_by_page = {}
     end_seals: dict[int, str | None] = {}
+    worked_examples: dict[int, bool] = {}
     seal_mode = initial_seal_mode
-    in_worked_example = False
+    in_worked_example = initial_in_worked_example
     prev_page_number: int | None = None
     for page_number in page_order:
         if prev_page_number is not None and page_number != prev_page_number + 1:
@@ -944,6 +950,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         blocks_by_page[page_number] = blocks
         entries_by_page[page_number] = entries
         end_seals[page_number] = seal_mode
+        worked_examples[page_number] = in_worked_example
         prev_page_number = page_number
 
     _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals)
@@ -978,6 +985,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         section_sealed_by_page={page: mode == "section_sealed" for page, mode in end_seals.items()},
         inline_sealed_by_page={page: mode == "inline_sealed" for page, mode in end_seals.items()},
         had_sealed_by_page=had_sealed_by_page,
+        in_worked_example_by_page=worked_examples,
     )
 
 

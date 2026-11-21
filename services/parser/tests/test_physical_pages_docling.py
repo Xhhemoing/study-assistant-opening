@@ -94,6 +94,12 @@ def worker_pdf_cli_fixtures():
         "sentence_case_answer": (2, {1: "Exercise 1: Find x.\nModel answer: x = 3.", 2: "Public explanation."}, (2,), [
             (1, 2, None),
         ]),
+        "worked_example": (12, {10: "Worked Example 1: Find x.", 11: "Solution: Take the square root.", 12: "Exercise 2: Solve for y."}, (), [
+            (1, 10, None), (11, 12, None), (11, 12, None, True),
+        ]),
+        "vision_worked_example": (10, {9: "", 10: "Solution: Take the square root."}, (), [
+            (1, 10, None), (10, 10, None, True),
+        ]),
     }
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -101,19 +107,22 @@ def worker_pdf_cli_fixtures():
         pdf_path.write_bytes(b"%PDF-1.4\n")
         for name, (page_count, texts, picture_pages, ranges) in cases.items():
             outputs = {}
-            for start, end, seal in ranges:
+            for start, end, seal, *flags in ranges:
+                worked_example = bool(flags and flags[0])
                 conversion = worker_pdf_conversion({page: texts.get(page, "Public page.")
                                                     for page in range(start, end + 1)}, picture_pages)
                 argv = ["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", str(page_count),
                         "--page-start", str(start), "--page-end", str(end)]
                 if seal:
                     argv += ["--initial-seal-mode", seal]
+                if worked_example:
+                    argv += ["--initial-in-worked-example"]
                 stdout = io.StringIO()
                 with patch.object(cli, "pdf_page_count", return_value=page_count), \
                      patch.object(cli, "convert", return_value=conversion), redirect_stdout(stdout):
                     if cli.main(argv) != 0:
                         raise RuntimeError(f"could not generate {name} fixture for pages {start}-{end}")
-                outputs[f"{start}-{end}/{seal or ''}"] = json.loads(stdout.getvalue())
+                outputs[f"{start}-{end}/{seal or ''}{'/we' if worked_example else ''}"] = json.loads(stdout.getvalue())
             fixtures[name] = {"pageCount": page_count, "ranges": outputs}
     return fixtures
 
@@ -134,6 +143,11 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertIs(closed["inlineSealedAtEnd"], False)
         sentence_case = fixtures["sentence_case_answer"]["ranges"]["1-2/"]["pages"][0]
         self.assertEqual(sentence_case["text"], "Exercise 1: Find x.")
+        example = fixtures["worked_example"]["ranges"]
+        self.assertIs(example["1-10/"]["pages"][-1]["inWorkedExampleAtEnd"], True)
+        self.assertEqual(example["11-12/"]["pages"][0]["text"], "")
+        self.assertEqual(example["11-12//we"]["pages"][0]["text"], "Solution: Take the square root.")
+        self.assertIs(example["11-12//we"]["pages"][1]["inWorkedExampleAtEnd"], False)
 
     def test_converter_keeps_text_regions_without_native_cells_for_visual_routing(self):
         with patch.dict(os.environ, {"PARSER_OCR_MODEL_DIR": ""}), patch("docling.document_converter.DocumentConverter") as converter:
@@ -723,7 +737,8 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                     self.assertEqual(ext.texts_by_page[12], ["Public example."])
 
     def test_model_answer_section_headings_still_seal_the_following_page(self):
-        for title in ("Model Answer", "Model Answers:"):
+        for title in ("Model answers", "Model Answers:", "Selected answers", "Official solutions",
+                      "Reference solutions", "Answer key", "Solutions manual"):
             with self.subTest(title=title):
                 result = result_for(
                     [text_element(10, "Exercise 1: Find x.\n" + title + "\n1. x = 3.")],
@@ -736,6 +751,22 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertTrue(ext.section_sealed_by_page[10])
                 self.assertEqual(ext.texts_by_page[11], [])
                 self.assertEqual(ext.texts_by_page[12], ["Chapter 2: Vectors"])
+
+    def test_qualified_inline_answers_and_solution_headings(self):
+        for label in ("Sample solution:", "Model answer", "Model Answer", "MODEL ANSWER", "Reference answer",
+                      "Official answer", "Correct answer", "Sample answer", "Sample solution", "Worked solution",
+                      "Full solution", "Reference solution", "Official solution", "Solution"):
+            with self.subTest(label=label):
+                opener = "Worked Example 1: Find x." if "answer" in label.lower() else "Exercise 1: Find x."
+                separator = " " if label.endswith(":") else "\n"
+                example = "Worked Example 2: Simplify y.\nSample solution\ny = 7."
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(10, f"{opener}\n{label}{separator}x = 4.")], [text_element(11, example)], start_page=10,
+                ))
+                self.assertEqual(ext.texts_by_page[10], [opener])
+                self.assertFalse(ext.section_sealed_by_page[10])
+                self.assertFalse(ext.inline_sealed_by_page[10])
+                self.assertEqual(ext.texts_by_page[11], [example])
 
     def test_repeated_chinese_answer_labels_in_the_same_exercise_stay_inline(self):
         for label in ("答案：", "解答："):

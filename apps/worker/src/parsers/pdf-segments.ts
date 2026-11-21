@@ -47,7 +47,11 @@ export type PdfSegmentBatch = {
   segmentBytes: number;
 };
 
-type PdfSegmentContinuation = PdfSealMode | null | void | { resumeFromPage: number; nextSealMode: PdfSealMode | null };
+type PdfSegmentContinuation = PdfSealMode | null | void | {
+  nextSealMode: PdfSealMode | null;
+  nextInWorkedExample?: boolean;
+  resumeFromPage?: number;
+};
 type FailedPdfSegment = { pageStart: number; pageEnd: number; initialSealMode?: PdfSealMode };
 export type PdfSegmentParseResult = { pageCount: number; failedRanges: string[]; failedSegments?: FailedPdfSegment[] };
 
@@ -90,10 +94,11 @@ export async function watchPdfExecution(assertCurrent: () => Promise<void>, poll
 
 export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
-  runner: ParserRunner; segments?: OpeningPdfSegmentsRepository; signal: AbortSignal;
-  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean) =>
+  runner: ParserRunner; segments?: Pick<OpeningPdfSegmentsRepository, "read" | "save">; signal: AbortSignal;
+  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean, initialInWorkedExample?: boolean) =>
     PdfSegmentContinuation | Promise<PdfSegmentContinuation>;
   onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
+  onFailedSegment?: (segment: FailedPdfSegment) => void | Promise<void>;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
   maxPages?: number; maxSegmentBytes?: number; maxPageTextBytes?: number; maxBookBytes?: number;
 }): Promise<PdfSegmentParseResult> {
@@ -160,28 +165,29 @@ export async function parsePdfSegments(input: {
   // segments sequentially so 500-2,000 page books stay bounded in worker memory.
   const parserProfile = input.parserProfile ?? pdfParserProfile();
   let initialSealMode: PdfSealMode | undefined;
+  let initialInWorkedExample = false;
   let afterFailedSegment = false;
   let parsedPageCount = 0;
   const emitSegment = async (pageStart: number, pageEnd: number, parsed: ReturnType<typeof validateSegment>, cached: boolean) => {
     const { pages, segmentBytes, segmentTextBytes } = parsed;
-    const nextSealMode = pdfPageEndSeal(pages.at(-1));
+    const lastPage = pages.at(-1);
     await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
-    const workerEndSeal = await input.onPages?.(pages, initialSealMode, afterFailedSegment);
+    const workerEnd = await input.onPages?.(pages, initialSealMode, afterFailedSegment, initialInWorkedExample);
     afterFailedSegment = false;
-    if (workerEndSeal && typeof workerEndSeal === "object") {
-      const { resumeFromPage } = workerEndSeal;
-      if (!Number.isInteger(resumeFromPage) || resumeFromPage <= pageStart || resumeFromPage > pageEnd) {
-        throw new RangeError("invalid PDF segment resume page");
-      }
-      const consumed = pages.slice(0, resumeFromPage - pageStart);
-      cumulativeBookBytes += consumed.reduce((bytes, page) => bytes + Buffer.byteLength(page.text, "utf8"), 0);
-      parsedPageCount += consumed.length;
-      initialSealMode = workerEndSeal.nextSealMode ?? undefined;
-      return resumeFromPage;
+    const continuation = workerEnd && typeof workerEnd === "object" ? workerEnd : undefined;
+    const resumeFromPage = continuation?.resumeFromPage;
+    if (resumeFromPage !== undefined && (!Number.isInteger(resumeFromPage) || resumeFromPage <= pageStart || resumeFromPage > pageEnd)) {
+      throw new RangeError("invalid PDF segment resume page");
     }
-    cumulativeBookBytes += segmentTextBytes;
-    parsedPageCount += pages.length;
-    initialSealMode = workerEndSeal === undefined ? nextSealMode : workerEndSeal ?? undefined;
+    const consumed = resumeFromPage === undefined ? pages : pages.slice(0, resumeFromPage - pageStart);
+    cumulativeBookBytes += resumeFromPage === undefined ? segmentTextBytes
+      : consumed.reduce((bytes, page) => bytes + Buffer.byteLength(page.text, "utf8"), 0);
+    parsedPageCount += consumed.length;
+    initialSealMode = continuation ? continuation.nextSealMode ?? undefined
+      : workerEnd === undefined ? pdfPageEndSeal(lastPage) : typeof workerEnd === "string" ? workerEnd : undefined;
+    initialInWorkedExample = continuation?.nextInWorkedExample
+      ?? Boolean(resumeFromPage === undefined && lastPage?.inWorkedExampleAtEnd);
+    return resumeFromPage;
   };
   const failedSegments: FailedPdfSegment[] = [];
   for (let start = 1, end = Math.min(pageCount, size); start <= pageCount;) {
@@ -191,7 +197,7 @@ export async function parsePdfSegments(input: {
       sourceVersion: input.sourceVersion,
       // A recovered predecessor can change the text and ending state of a
       // previously cached range, even when the source version is unchanged.
-      parserProfile: initialSealMode ? parserProfile + "/from-" + initialSealMode : parserProfile,
+      parserProfile: parserProfile + (initialSealMode ? "/from-" + initialSealMode : "") + (initialInWorkedExample ? "/we" : ""),
       pageStart: start,
       pageEnd: end,
     };
@@ -211,6 +217,7 @@ export async function parsePdfSegments(input: {
           pageEnd: end,
           timeoutSeconds,
           initialSealMode,
+          initialInWorkedExample,
         }, input.signal);
         parsed = validateSegment(rawPages, start, end);
       } catch (caught) {
@@ -226,8 +233,11 @@ export async function parsePdfSegments(input: {
       const errorCode = error instanceof Error && error.name === "TimeoutError" ? "timeout"
         : error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError ? "invalid_output" : "conversion_failed";
       await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal);
-      failedSegments.push({ pageStart: start, pageEnd: end, initialSealMode });
-      initialSealMode = undefined;
+      const failure = { pageStart: start, pageEnd: end, initialSealMode };
+      failedSegments.push(failure);
+      await input.onFailedSegment?.(failure);
+      // Seeing an incomplete range cannot end a confirmed answer seal or extend an example.
+      initialInWorkedExample = false;
       afterFailedSegment = true;
     } else {
       if (!ready) {
@@ -246,6 +256,6 @@ export async function parsePdfSegments(input: {
   }
   input.signal.throwIfAborted();
   const failedRanges = failedSegments.map(({ pageStart, pageEnd }) => `${pageStart}-${pageEnd}`);
-  if (!parsedPageCount) throw new ConversionFailedError(`PDF segments failed (${failedRanges.join(", ")})`);
+  if (!parsedPageCount && !input.onFailedSegment) throw new ConversionFailedError(`PDF segments failed (${failedRanges.join(", ")})`);
   return { pageCount: parsedPageCount, failedRanges, ...(failedSegments.length ? { failedSegments } : {}) };
 }

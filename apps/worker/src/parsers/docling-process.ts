@@ -25,11 +25,13 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (page.inlineSealedAtEnd !== undefined && typeof page.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid inlineSealedAtEnd metadata");
     if (page.sectionSealedAtEnd && page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
     if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
+    if (page.inWorkedExampleAtEnd !== undefined && typeof page.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid inWorkedExampleAtEnd metadata");
     return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null,
       ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }),
       ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }),
       ...(page.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: page.inlineSealedAtEnd }),
-      ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }) };
+      ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }),
+      ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }) };
   });
   if (new Set(pages.map((page) => page.page)).size !== pages.length) throw new RangeError("duplicate page number");
   return pages;
@@ -41,6 +43,7 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
     const argv = ["-m", "opening_parser", "--input", input.path, "--mime", input.mime, "--max-pages", String(input.maxPages), "--timeout-seconds", String(timeoutSeconds)];
     if (input.pageStart !== undefined && input.pageEnd !== undefined) argv.push("--page-start", String(input.pageStart), "--page-end", String(input.pageEnd));
     if (input.initialSealMode !== undefined) argv.push("--initial-seal-mode", input.initialSealMode);
+    if (input.initialInWorkedExample) argv.push("--initial-in-worked-example");
     // The outer deadline includes imports/model initialization, which the
     // Python conversion thread timeout cannot cover.
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutSeconds * 1000)]);

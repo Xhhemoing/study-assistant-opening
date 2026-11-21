@@ -24,3 +24,11 @@ it("preserves optional sectionSealedAtEnd metadata and rejects non-boolean value
   expect(() => validatePdfSegmentPages([{ ...inlineSealedPage, sectionSealedAtEnd: true }], 1, 1)).toThrow();
   expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, hadSealedContent: "yes" }], 1, 1)).toThrow();
 });
+it("roundtrips explicit worked-example context on a cached physical page", () => {
+  const page = { page: 1, text: "Worked Example 1", imagePath: null };
+  for (const inWorkedExampleAtEnd of [true, false]) {
+    const annotated = { ...page, inWorkedExampleAtEnd };
+    expect(validatePdfSegmentPages([annotated], 1, 1)).toEqual([annotated]);
+  }
+  expect(() => validatePdfSegmentPages([{ ...page, inWorkedExampleAtEnd: "true" }], 1, 1)).toThrow();
+});

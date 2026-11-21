@@ -25,6 +25,7 @@ def parser():
     result.add_argument("--page-start", type=int)
     result.add_argument("--page-end", type=int)
     result.add_argument("--initial-seal-mode", choices=("section_sealed", "inline_sealed"))
+    result.add_argument("--initial-in-worked-example", action="store_true")
     result.add_argument("--inspect-pdf", action="store_true")
     return result
 
@@ -122,6 +123,8 @@ def main(argv=None):
         parser().error("invalid PDF physical page range")
     if args.initial_seal_mode is not None and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
         parser().error("initial seal mode requires a non-first PDF page range")
+    if args.initial_in_worked_example and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
+        parser().error("initial worked example requires a non-first PDF page range")
     if args.mime not in (PDF, PPTX):
         print("unsupported mime", file=sys.stderr)
         return 3
@@ -145,7 +148,8 @@ def main(argv=None):
         page_range = (args.page_start, args.page_end) if args.page_start is not None else None
         conversion = convert(path, args.timeout_seconds, page_range) if page_range else convert(path, args.timeout_seconds)
         pages = []
-        extraction = extract_physical_pages(conversion, initial_seal_mode=args.initial_seal_mode)
+        extraction = extract_physical_pages(conversion, initial_seal_mode=args.initial_seal_mode,
+                                            initial_in_worked_example=args.initial_in_worked_example)
         by_page = extraction.texts_by_page
         visual_kinds = extraction.visual_kinds_by_page if args.mime == PDF else {}
         sealed_by_page = extraction.section_sealed_by_page
@@ -166,6 +170,8 @@ def main(argv=None):
                 entry["inlineSealedAtEnd"] = inline_sealed_by_page[page_number]
             if had_sealed_by_page.get(page_number):
                 entry["hadSealedContent"] = True
+            if args.mime == PDF:
+                entry["inWorkedExampleAtEnd"] = extraction.in_worked_example_by_page[page_number]
             pages.append(entry)
         if len(pages) > args.max_pages:
             raise ValueError("max-pages would truncate pages")

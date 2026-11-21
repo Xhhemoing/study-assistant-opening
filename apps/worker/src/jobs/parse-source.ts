@@ -16,6 +16,7 @@ import type { OpeningScope } from "@aistudy/database";
 import type { NewSourceChunk, OpeningPdfChunkPublisher, OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
 import { parsePdfSegments, pdfPageEndSeal, watchPdfExecution, type PdfDiscourseBlock } from "../parsers/pdf-segments";
+import { pdfParserProfile } from "../parsers/ocr-health";
 import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
 import { createPdfPartialError } from "./pdf-partial-error";
 
@@ -53,9 +54,9 @@ function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading
 const SECTION_SEALED_RE = new RegExp(
   "^(?:" +
   "(?:(?:Appendix\\s+[A-Z0-9]+|APPENDIX\\s+[A-Z0-9]+|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*|Lecture\\s+(?:\\d+|[IVXLCDM]+)|LECTURE\\s+(?:\\d+|[IVXLCDM]+)|第\\s*[一二三四五六七八九十百千\\d]+\\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\\s*[A-Z0-9一二三四五六七八九十]+)\\s*[:：.\\-—]?\\s*)?" +
-  "(?:(?:Answer\\s+Key|ANSWER\\s+KEY|Answers?\\s+Key|ANSWERS?\\s+KEY|Key\\s+(?:to|TO)\\s+(?:the\\s+|THE\\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
+  "(?:(?:Answer\\s+[Kk]ey|ANSWER\\s+KEY|Answers?\\s+[Kk]ey|ANSWERS?\\s+KEY|Key\\s+(?:to|TO)\\s+(?:the\\s+|THE\\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
   "|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\\s+(?:to|TO)\\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*)\\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\\s+Questions?|REVIEW\\s+QUESTIONS?|Practice\\s+Problems?|PRACTICE\\s+PROBLEMS?|Self-Check\\s+Exercises?|SELF-CHECK\\s+EXERCISES?|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
-  "|(?:Selected\\s+Answers?|SELECTED\\s+ANSWERS?|Model\\s+Answers?|MODEL\\s+ANSWERS?|Official\\s+Solutions?|OFFICIAL\\s+SOLUTIONS?|Reference\\s+Solutions?|REFERENCE\\s+SOLUTIONS?|Answer\\s+Section|ANSWER\\s+SECTION|Solutions?\\s+Manual|SOLUTIONS?\\s+MANUAL|Answers?\\s+(?:and|AND)\\s+Solutions?|ANSWERS?\\s+AND\\s+SOLUTIONS?|Odd-Numbered\\s+Answers?|ODD-NUMBERED\\s+ANSWERS?|Even-Numbered\\s+Answers?|EVEN-NUMBERED\\s+ANSWERS?)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
+  "|(?:Selected\\s+[Aa]nswers?|SELECTED\\s+ANSWERS?|Model\\s+[Aa]nswers|MODEL\\s+ANSWERS|Official\\s+[Ss]olutions|OFFICIAL\\s+SOLUTIONS|Reference\\s+[Ss]olutions|REFERENCE\\s+SOLUTIONS|Answer\\s+Section|ANSWER\\s+SECTION|Solutions?\\s+[Mm]anual|SOLUTIONS?\\s+MANUAL|Answers?\\s+(?:and|AND)\\s+Solutions?|ANSWERS?\\s+AND\\s+SOLUTIONS?|Odd-Numbered\\s+Answers?|ODD-NUMBERED\\s+ANSWERS?|Even-Numbered\\s+Answers?|EVEN-NUMBERED\\s+ANSWERS?)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
   "|(?:Answers|ANSWERS)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
   "|【\\s*(?:参考答案|标准答案|习题答案|习题解答|练习答案|练习解答|课后答案|课后练习答案|课后习题答案|课后解答|思考题答案|答案与解析|参考解答|详细解答|参考答案与解析|部分习题答案)\\s*】\\s*$" +
   "|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\)))?\\s*(?:[:：]|$)" +
@@ -66,11 +67,16 @@ const SECTION_SEALED_RE = new RegExp(
   "u",
 );
 const INLINE_WITH_BODY_RE = /[:：]\s*\S/u;
-const QUALIFIED_MULTI_SECTION_RE = /^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.—-]?\s*)?(?:Answers?\s+(?:to|TO)\b|ANSWERS?\s+(?:TO|to)\b|Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|Solutions?\s+(?:to|TO)\b|SOLUTIONS?\s+(?:TO|to)\b|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|Key\s+(?:to|TO)\b|KEY\s+(?:TO|to)\b|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.—-]\s*(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)/u;
+const QUALIFIED_MULTI_SECTION_RE = /^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.—-]?\s*)?(?:Answers?\s+(?:to|TO)\b|ANSWERS?\s+(?:TO|to)\b|Selected\s+[Aa]nswers?|SELECTED\s+ANSWERS?|Model\s+[Aa]nswers|MODEL\s+ANSWERS|Official\s+[Ss]olutions|OFFICIAL\s+SOLUTIONS|Reference\s+[Ss]olutions|REFERENCE\s+SOLUTIONS|Solutions?\s+(?:to|TO)\b|SOLUTIONS?\s+(?:TO|to)\b|Solutions?\s+[Mm]anual|SOLUTIONS?\s+MANUAL|Key\s+(?:to|TO)\b|KEY\s+(?:TO|to)\b|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.—-]\s*(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?\s+[Kk]ey|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)/u;
+
+const QUALIFIED_ANSWER_LABEL = String.raw`(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)`;
+const ENGLISH_SOLUTION_LABEL = String.raw`(?:(?:Worked|Full|Sample|Official|Reference)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)`;
+const CONTINUED_LABEL = String.raw`(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?`;
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
-  "(?:Answer\\s+[Kk]ey|ANSWER\\s+KEY|(?:Official|Model|Correct|Sample|Reference)\\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\\s+ANSWER|Answers?|ANSWERS?)(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*[:：]" +
+  String.raw`(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*[:：]` +
+  String.raw`|${QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:[:：]|$)` +
   "|【\\s*(?:参考答案|标准答案|正确答案|答案)\\s*】" +
   "|(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案|答案与解析|答案)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*[:：]" +
   ")",
@@ -79,16 +85,19 @@ const INLINE_SEALED_ALWAYS_RE = new RegExp(
 
 const INLINE_SEALED_NON_EXAMPLE_RE = new RegExp(
   "^(?:" +
-  "(?:Worked\\s+Solution|WORKED\\s+SOLUTION|Full\\s+Solution|FULL\\s+SOLUTION|Sample\\s+Solution|SAMPLE\\s+SOLUTION|Solution|SOLUTION|Solutions|SOLUTIONS)(?:\\s+(?:to|TO)\\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\\s*\\d*(?:\\.\\d+)*)?(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*[:：]" +
+  String.raw`${ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*[:：]` +
   "|【\\s*(?:参考解答|详细解答|解答|详解|解析)\\s*】" +
   "|(?:参考解答|详细解答|解答|详解|解析|解)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*[:：]" +
   ")",
   "u",
 );
 
-const STANDALONE_SOLUTION_HEADING_RE = /^(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|解答|详细解答|参考解答|解析|详解)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*$/u;
+const STANDALONE_SOLUTION_HEADING_RE = new RegExp(String.raw`^(?!(?:Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|解答|详细解答|参考解答|解析|详解)${CONTINUED_LABEL}\s*$`, "u");
 const WORKED_EXAMPLE_RE = /^(?:(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+|$)|(?:\s*\([^)]+\))?\s*(?:[:：.—-]|$))|例题(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*(?:[:：.．—-]|$))|例(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*[:：]))/u;
-const WORKED_EXAMPLE_INTERNAL_RE = /^(?:(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|Proof|PROOF)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|(?:\.(?:\s|$))|$)|(?:详细解答|参考解答|解答|详解|解析|证明|证|解|分析)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)|【\s*(?:解答|证明|证|解|分析|详解|解析)\s*】)/u;
+const WORKED_EXAMPLE_INTERNAL_RE = new RegExp(
+  String.raw`^(?:(?!(?:(?:Official|Reference)\s+[Ss]olutions|(?:OFFICIAL|REFERENCE)\s+SOLUTIONS|Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|Proof|PROOF)${CONTINUED_LABEL}\s*(?:[:：]|\.(?:\s|$)|$)` +
+  String.raw`|(?:详细解答|参考解答|解答|详解|解析|证明|证|解|分析)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)|【\s*(?:解答|证明|证|解|分析|详解|解析)\s*】)`, "u",
+);
 const EXERCISE_OPENER_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problem\s+\d+|PROBLEM\s+\d+|Question\s+\d+|QUESTION\s+\d+)\b|(?:习题|练习题|练习|思考题|作业题))/u;
 const PUBLIC_BLOCK_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Axiom|AXIOM|Conjecture|CONJECTURE|Claim|CLAIM|Proof|PROOF|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+|SECTION\s+\d+|Part\s+\d+|PART\s+\d+|Figure\s+\d+|Fig\.?\s+\d+|Table\s+\d+)\b|(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|图\s*\d+|表\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))|\d+(?:\.\d+)+\s+\S)/u;
 const NON_ANSWER_AFTER_BLANK_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Proof|PROOF|Figures?|FIGURES?|Fig\.?|Tables?|TABLES?)\b|(?:习题|练习题|练习|问题|思考题|作业题|证明|图\s*\d+|表\s*\d+|第\s*\d+\s*题|题\s*\d+))/u;
@@ -103,14 +112,13 @@ const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Unit
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
 const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
 const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
-const MODEL_ANSWER_LABEL_RE = /^(?:Model\s+[Aa]nswer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]/u;
 const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/u;
 const SAVED_NATIVE_HEADER_RE = /^\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n/u;
 const TERMINAL_PUNCTUATION_RE = /[.。!?！？;；)）\]】□■∎]$/u;
 const NEXT_CONTINUATION_RE = /(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|[（(]\s*(?:下接下页|转下页|未完待续)\s*[）)]|接下页|转下页)$/iu;
 
 function isSectionSealedHeader(stripped: string): boolean {
-  if (!SECTION_SEALED_RE.test(stripped) || MODEL_ANSWER_LABEL_RE.test(stripped)) return false;
+  if (!SECTION_SEALED_RE.test(stripped)) return false;
   if (INLINE_WITH_BODY_RE.test(stripped)) return QUALIFIED_MULTI_SECTION_RE.test(stripped);
   return true;
 }
@@ -396,7 +404,8 @@ export type ParseSourceVisualPageResult = { text: string; imageObjectKey: string
 type RecognizeSourcePage = (input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult>;
 
 export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pick<OpeningSourceChunksRepository, "replaceChunks" | "listChunksAtVersion"> & OpeningPdfChunkPublisher; storage: Storage; runner: ParserRunner; tempDir: string;
-  segments?: OpeningPdfSegmentsRepository; segmentPages?: number; segmentTimeoutSeconds?: number; executionPollMs?: number;
+  segments?: Pick<OpeningPdfSegmentsRepository, "read" | "save"> & Partial<Pick<OpeningPdfSegmentsRepository, "assertCurrent">>;
+  segmentPages?: number; segmentTimeoutSeconds?: number; executionPollMs?: number;
   recognizePage?: RecognizeSourcePage;
   /** Yields one result per input in physical page order. Null means a cache miss with model routing unavailable. */
   recognizePages?: (inputs: readonly ParseSourceVisualPageInput[], cacheOnly: boolean) => AsyncGenerator<ParseSourceVisualPageResult | null, void, void>;
@@ -465,8 +474,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
     try {
       const assertCurrent = (isImage || source.mime === "application/pdf") && deps.assertCurrent
         ? () => deps.assertCurrent!(scope, { sourceId: source.id, sourceVersion: source.version })
-        : source.mime === "application/pdf" && deps.segments
-          ? () => deps.segments!.assertCurrent(scope, { sourceId: source.id, sourceVersion: source.version }) : undefined;
+        : source.mime === "application/pdf" && deps.segments?.assertCurrent
+          ? () => deps.segments!.assertCurrent!(scope, { sourceId: source.id, sourceVersion: source.version }) : undefined;
       if (assertCurrent) execution = await watchPdfExecution(assertCurrent, deps.executionPollMs);
       const signal = execution?.signal ?? new AbortController().signal;
       signal.throwIfAborted();
@@ -539,6 +548,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             target.afterAllSealedPage = false;
           }
         }
+        if (target.mode === "none" && !target.unknownAfterFailure && vision && !vision.unknownAfterFailure
+          && options.nativeOutSeal.inWorkedExample === options.incomingSeal.inWorkedExample) {
+          target.inWorkedExample = vision.inWorkedExample;
+        }
         if (target.mode !== "section_sealed" && vision?.mode === "inline_sealed"
           && (options.incomingSeal.mode !== "inline_sealed" || options.visionOpenedInlineAtEnd)) {
           target.mode = "inline_sealed";
@@ -575,50 +588,44 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             openedInlineAtEnd,
           };
         }
-        let transcription: string | undefined;
-        let description: string | undefined;
-        let uncertainties: string | undefined;
+        const transcriptions: string[] = [];
+        const descriptions: string[] = [];
+        const uncertainties: string[] = [];
         for (let i = 0; i < matches.length; i++) {
           const match = matches[i]!;
           const header = match[1]!;
           const bodyStart = (match.index ?? 0) + match[0].length;
           const bodyEnd = i + 1 < matches.length ? (matches[i + 1]!.index ?? rawVisionText.length) : rawVisionText.length;
           const body = rawVisionText.slice(bodyStart, bodyEnd).replace(/(?:\r?\n)+$/u, "");
-          if (header === VISION_TRANSCRIPTION_HEADER) transcription = body;
-          else if (header === VISION_DESCRIPTION_HEADER) description = body;
-          else if (header === VISION_UNCERTAINTIES_HEADER) uncertainties = body;
+          if (!body.trim()) continue;
+          if (header === VISION_TRANSCRIPTION_HEADER) transcriptions.push(body);
+          else if (header === VISION_DESCRIPTION_HEADER) descriptions.push(body);
+          else if (header === VISION_UNCERTAINTIES_HEADER) uncertainties.push(body);
         }
-        if (transcription?.trim()) {
-          const {
-            sealed: sealedTranscription,
-            visionDetectedSeal,
-            confirmedSeal,
-            reenteredSectionSealed,
-            openedInlineAtEnd,
-          } = sealVisionBodyWithTransitions(transcription, sealState, requirePublicHeading);
-          const hadSealedContent = anyNativeOrIncomingSeal || visionDetectedSeal;
-          if (!sealedTranscription.trim()) {
-            return { text: "", hadSealedContent, confirmedSeal, reenteredSectionSealed, openedInlineAtEnd };
+        const primary = transcriptions.length
+          ? sealVisionBodyWithTransitions(transcriptions.join("\n"), sealState, requirePublicHeading) : undefined;
+        let hadSealedContent = anyNativeOrIncomingSeal || Boolean(primary?.visionDetectedSeal);
+        let confirmedSeal = primary?.confirmedSeal ?? incomingMode !== "none";
+        let reenteredSectionSealed = Boolean(primary?.reenteredSectionSealed);
+        let openedInlineAtEnd = Boolean(primary?.openedInlineAtEnd);
+        for (const body of [...descriptions, ...uncertainties]) {
+          const auxiliarySeal = { ...sealState };
+          const check = sealVisionBodyWithTransitions(body, auxiliarySeal, false);
+          hadSealedContent ||= check.visionDetectedSeal;
+          confirmedSeal ||= check.confirmedSeal && (!sealState.unknownAfterFailure || auxiliarySeal.mode !== "none");
+          // Auxiliary text can introduce a seal, but only a transcription can release one.
+          if (auxiliarySeal.mode !== "none" && (sealState.mode !== "section_sealed" || auxiliarySeal.mode === "section_sealed")) {
+            Object.assign(sealState, auxiliarySeal);
+            reenteredSectionSealed ||= check.reenteredSectionSealed;
+            openedInlineAtEnd ||= check.openedInlineAtEnd;
           }
-          const parts = [`${VISION_TRANSCRIPTION_HEADER}\n${sealedTranscription}`];
-          // Suppress model-authored diagram descriptions/uncertainties whenever any content
-          // on the physical page was sealed (incoming, within Vision, or native Docling).
-          if (!hadSealedContent) {
-            if (description?.trim()) parts.push(`${VISION_DESCRIPTION_HEADER}\n${description}`);
-            if (uncertainties?.trim()) parts.push(`${VISION_UNCERTAINTIES_HEADER}\n${uncertainties}`);
-          }
-          return { text: parts.join("\n\n"), hadSealedContent, confirmedSeal, reenteredSectionSealed, openedInlineAtEnd };
         }
-        if (anyNativeOrIncomingSeal) {
-          // A preceding blank page can suppress attachments without confirming a seal.
-          return { text: "", hadSealedContent: true, confirmedSeal: incomingMode !== "none", reenteredSectionSealed: false, openedInlineAtEnd: false };
+        const parts = primary?.sealed.trim() ? [`${VISION_TRANSCRIPTION_HEADER}\n${primary.sealed}`] : [];
+        if (!hadSealedContent) {
+          if (descriptions.length) parts.push(`${VISION_DESCRIPTION_HEADER}\n${descriptions.join("\n\n")}`);
+          if (parts.length && uncertainties.length) parts.push(`${VISION_UNCERTAINTIES_HEADER}\n${uncertainties.join("\n\n")}`);
         }
-        const parts = [];
-        if (description?.trim()) {
-          parts.push(`${VISION_DESCRIPTION_HEADER}\n${description}`);
-          if (uncertainties?.trim()) parts.push(`${VISION_UNCERTAINTIES_HEADER}\n${uncertainties}`);
-        }
-        return { text: parts.join("\n\n"), hadSealedContent: false, confirmedSeal: false, reenteredSectionSealed: false, openedInlineAtEnd: false };
+        return { text: parts.join("\n\n"), hadSealedContent, confirmedSeal, reenteredSectionSealed, openedInlineAtEnd };
       };
       const sanitizeSavedChunk = (
         saved: NewSourceChunk,
@@ -684,7 +691,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           hasVisionMarker: true, visionWasSealed: visionSealed.confirmedSeal,
         };
       };
-      const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState, doclingIncomingSeal?: PdfSealMode) => {
+      const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState,
+        doclingIncomingSeal?: PdfSealMode, doclingIncomingWorkedExample?: boolean) => {
         const hadRawText = Boolean(rawPage.text.trim());
         const doclingSealedBlank = isPdf && rawPage.text === "" && Array.isArray(rawPage.visualKinds) && rawPage.visualKinds.length === 0;
         const closedInlineAnswer = rawPage.inlineSealedAtEnd === false && !rawPage.sectionSealedAtEnd;
@@ -704,6 +712,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           ? sealTextWithState(rawPage.text, nativeOutSeal, rawPage.page, rawPage.discourseBlocks)
           : rawPage.text;
         const doclingHadSealedContent = !isImage && Boolean(rawPage.hadSealedContent);
+        if (rawPage.inWorkedExampleAtEnd !== undefined && doclingIncomingWorkedExample === incomingSeal.inWorkedExample
+          && nativeOutSeal.inWorkedExample === incomingSeal.inWorkedExample && !nativeOutSeal.unknownAfterFailure
+          && nativeOutSeal.mode === "none" && (hadRawText || doclingHadSealedContent)) {
+          nativeOutSeal.inWorkedExample = rawPage.inWorkedExampleAtEnd;
+        }
         // With no native fragments, the end flag only echoes Docling's incoming seal.
         const doclingEndSeal = isPdf && (hadRawText || doclingHadSealedContent || doclingSealedBlank)
           ? pdfPageEndSeal(rawPage)
@@ -796,6 +809,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         liveSealState: SealState,
         recognizePage: ((input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>) | undefined =
           visualRecognitionUnavailable ? undefined : deps.recognizePage,
+        reportVisionSeal?: () => void,
       ): Promise<NewSourceChunk | undefined> => {
         signal.throwIfAborted();
         hasSealedContent ||= hadNativeSeal || savedVisionWasSealed;
@@ -827,6 +841,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               : { text: result.text, hadSealedContent: false, confirmedSeal: false, reenteredSectionSealed: false, openedInlineAtEnd: false };
             const sealedVisionText = visionSealed.text;
             const pageHadSealed = visionSealed.hadSealedContent;
+            if (pageHadSealed) reportVisionSeal?.();
             hasSealedContent ||= visionSealed.confirmedSeal;
             reconcileEndSealState(liveSealState, {
               hasNativeText: hadRawText,
@@ -849,7 +864,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               const nativeLength = page.text ? nativeHeader.length + page.text.length + 2 : 0;
               if (isPdf && nativeLength + visionHeader.length + sealedVisionText.length > PDF_CHUNK_TEXT_LIMIT) {
                 cappedTextPages.add(page.page);
-                if (saved?.text.trim()) {
+                if (saved?.text.trim() && !pageHadSealed) {
                   return saved;
                 }
                 if (!page.text.trim()) {
@@ -877,13 +892,46 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       let pageCount: number;
       const publication = { sourceId: source.id, sourceVersion: source.version };
       if (isPdf) {
+        const parserProfile = pdfParserProfile();
+        const pageSealIdentity = (page: number) => ({ ...publication, parserProfile: `${parserProfile}/page-seal`, pageStart: page, pageEnd: page });
+        const readPageSeal = async (page: number) => {
+          const record = await deps.segments?.read(scope, pageSealIdentity(page));
+          if (record?.state === "ready" && record.pages.length === 1 && record.pages[0]?.page === page) return record.pages[0];
+        };
+        const inspectSavedPdfChunk = (chunk: NewSourceChunk, incomingSeal: SealState) => {
+          const marker = SAVED_VISION_MARKER_RE.exec(chunk.text);
+          const native = marker ? chunk.text.slice(0, marker.index) : chunk.text;
+          const vision = marker ? chunk.text.slice(marker.index + marker[0].length) : "";
+          const nativeBody = native.replace(SAVED_NATIVE_HEADER_RE, "").trimEnd();
+          const nativeOutSeal = { ...incomingSeal };
+          const nativeChanged = sealTextWithState(nativeBody, nativeOutSeal) !== nativeBody;
+          const visionOutSeal = { ...incomingSeal };
+          const visionCheck = vision.trim() ? sealVisionText(vision, visionOutSeal, nativeChanged) : undefined;
+          const endSeal = { ...incomingSeal };
+          reconcileEndSealState(endSeal, {
+            hasNativeText: Boolean(nativeBody.trim()), incomingSeal, nativeOutSeal,
+            visionOutSeal: visionCheck ? visionOutSeal : undefined,
+            visionReenteredSection: visionCheck?.reenteredSectionSealed,
+            visionOpenedInlineAtEnd: visionCheck?.openedInlineAtEnd,
+          });
+          const incomingContaminated = incomingSeal.mode !== "none" || incomingSeal.unknownAfterFailure;
+          const visionWithoutImage = Boolean(marker && !chunk.imageObjectKey?.trim());
+          if (visionWithoutImage && endSeal.mode === "none") endSeal.unknownAfterFailure = true;
+          const unsafe = nativeChanged || nativeOutSeal.mode !== "none" || Boolean(visionCheck?.hadSealedContent)
+            || visionWithoutImage || Boolean(incomingContaminated && chunk.imageObjectKey);
+          return { unsafe, endSeal };
+        };
         const previousCappedPages = readCappedPdfPages(source.pdfTextCap ??
           (source.error?.code === "PARSE_PARTIAL" ? source.error.message : undefined));
         const lowQualityPages: number[] = [];
         const preservePages: number[] = [];
         const withheldAfterFailurePages: number[] = [];
         let usablePages = 0;
-        const pdfSealState: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
+        const cleanSeal: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
+        const pdfSealState = { ...cleanSeal };
+        let failedTailSeal = { ...cleanSeal };
+        let failedTailKnownPublic = false;
+        let lastFailedPage = 0;
         const recognizePages = deps.recognizePages;
         const recognizeSingleFromBatch = recognizePages
           ? async (input: ParseSourceVisualPageInput): Promise<ParseSourceVisualPageResult | null> => {
@@ -899,38 +947,64 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const stagePath = path.join(workDir, "chunks.ndjson");
         const stage = await open(stagePath, "wx", 0o600);
         const result = await parsePdfSegments({ path: temp, ...publication, scope, runner: deps.runner,
-          segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds,
-          onPages: async (pages, initialDoclingSeal, afterFailedSegment) => {
-            // Read this segment's saved text plus the last failed page, if any.
-            const previousPage = afterFailedSegment ? pages[0]!.page - 1 : undefined;
-            const pageNumbers = deps.segments ? pages.map(page => page.page) : [];
-            if (previousPage !== undefined) pageNumbers.push(previousPage);
-            const existing = pageNumbers.length
-              ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pageNumbers)
+          segments: deps.segments, signal, parserProfile, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds,
+          onFailedSegment: async ({ pageStart, pageEnd, initialSealMode }) => {
+            const pages = Array.from({ length: pageEnd - pageStart + 1 }, (_, index) => pageStart + index);
+            const existing = await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages);
+            const saved = new Map(existing.map(chunk => [chunk.page, chunk]));
+            if (lastFailedPage !== pageStart - 1 || initialSealMode === "section_sealed"
+              || (initialSealMode && failedTailSeal.mode === "none")) {
+              failedTailSeal = { ...cleanSeal, mode: initialSealMode ?? "none" };
+            }
+            for (const page of pages) {
+              signal.throwIfAborted();
+              const marker = await readPageSeal(page);
+              const chunk = saved.get(page);
+              const check = chunk && inspectSavedPdfChunk(chunk, failedTailSeal);
+              if (check) failedTailSeal = check.endSeal;
+              const knownSeal = pdfPageEndSeal(marker);
+              if (knownSeal || marker?.hadSealedContent) {
+                failedTailSeal = {
+                  ...cleanSeal,
+                  mode: failedTailSeal.mode === "section_sealed" ? "section_sealed" : knownSeal ?? "none",
+                  unknownAfterFailure: !knownSeal && failedTailSeal.mode !== "section_sealed",
+                };
+              }
+              const withhold = Boolean(check?.unsafe || marker?.hadSealedContent || knownSeal);
+              failedTailKnownPublic = Boolean(deps.segments && chunk?.text.trim() && !withhold
+                && failedTailSeal.mode === "none" && !failedTailSeal.unknownAfterFailure);
+              if (withhold && chunk) {
+                withheldAfterFailurePages.push(page);
+                continue;
+              }
+              preservePages.push(page);
+              if (previousCappedPages.has(page)) cappedTextPages.add(page);
+            }
+            lastFailedPage = pageEnd;
+          },
+          onPages: async (pages, initialDoclingSeal, afterFailedSegment, initialDoclingWorkedExample) => {
+            if (afterFailedSegment) {
+              const sectionSealed = pdfSealState.mode === "section_sealed" || failedTailSeal.mode === "section_sealed";
+              Object.assign(pdfSealState, cleanSeal, {
+                mode: sectionSealed ? "section_sealed" : "none",
+                unknownAfterFailure: !sectionSealed && !failedTailKnownPublic,
+              });
+            }
+            const existing = deps.segments
+              ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages.map(page => page.page))
               : [];
             const published = new Map(existing.map(({ page, slideLabel, startMs, endMs, text, imageObjectKey }) =>
               [page, { page, slideLabel, startMs, endMs, text, imageObjectKey }]));
-            if (previousPage !== undefined) {
-              const previous = published.get(previousPage);
-              const clean: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
-              let knownPublic = false;
-              if (pdfSealState.mode === "none" && previous?.text.trim()) {
-                const checkSeal = { ...clean };
-                const hasVision = SAVED_VISION_MARKER_RE.test(previous.text);
-                // Only Vision needs the image key as evidence that its output was unsealed.
-                knownPublic = sealTextWithState(previous.text, checkSeal) === previous.text && checkSeal.mode === "none"
-                  && (!hasVision || (Boolean(previous.imageObjectKey?.trim())
-                    && !sealVisionText(previous.text, { ...clean }, false).hadSealedContent));
-              }
-              Object.assign(pdfSealState, clean, { unknownAfterFailure: !knownPublic });
-            }
             const drySealState: SealState = { ...pdfSealState };
             let doclingIncomingSeal = initialDoclingSeal;
+            let doclingIncomingWorkedExample = initialDoclingWorkedExample;
             const planned = pages.map(rawPage => {
               const seed = doclingIncomingSeal;
-              const prep = preparePage(rawPage, published.get(rawPage.page), drySealState, seed);
+              const workedExample = doclingIncomingWorkedExample;
+              const prep = preparePage(rawPage, published.get(rawPage.page), drySealState, seed, workedExample);
               doclingIncomingSeal = pdfPageEndSeal(rawPage);
-              return { rawPage, doclingIncomingSeal: seed, visualInput: prep.visual && !prep.reusable ? prep.visual : undefined };
+              doclingIncomingWorkedExample = rawPage.inWorkedExampleAtEnd;
+              return { rawPage, doclingIncomingSeal: seed, workedExample, visualInput: prep.visual && !prep.reusable ? prep.visual : undefined };
             });
             const recognition = recognizePages?.(
               planned.flatMap(({ visualInput }) => visualInput ? [visualInput] : []), visualRecognitionUnavailable,
@@ -941,14 +1015,16 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               return next.value;
             } : undefined;
             try {
-              for (const [index, { rawPage, doclingIncomingSeal, visualInput }] of planned.entries()) {
+              for (const [index, { rawPage, doclingIncomingSeal, workedExample, visualInput }] of planned.entries()) {
                 signal.throwIfAborted();
                 const actualSealMode = pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? undefined : pdfSealState.mode;
-                if (index > 0 && doclingIncomingSeal && actualSealMode !== doclingIncomingSeal) {
-                  // Docling may have removed text and visual kinds from the remaining pages.
-                  return { resumeFromPage: rawPage.page, nextSealMode: actualSealMode ?? null };
+                const actualWorkedExample = pdfSealState.inWorkedExample && !pdfSealState.unknownAfterFailure;
+                if (index > 0 && ((doclingIncomingSeal && actualSealMode !== doclingIncomingSeal)
+                  || (workedExample !== undefined && workedExample !== actualWorkedExample))) {
+                  // Docling may have filtered the remaining pages under a different context.
+                  return { resumeFromPage: rawPage.page, nextSealMode: actualSealMode ?? null, nextInWorkedExample: actualWorkedExample };
                 }
-                const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState, doclingIncomingSeal);
+                const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState, doclingIncomingSeal, workedExample);
                 let prefetched: { value: ParseSourceVisualPageResult | null } | undefined;
                 if (visualInput && recognizePage) {
                   try {
@@ -965,7 +1041,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                   ? recognizeSingleFromBatch
                   : deps.recognizePage ?? recognizeSingleFromBatch;
                 const pageRecognize = prefetched ? async () => prefetched.value : visualInput ? undefined : singlePageRecognition;
-                let chunk = await consumePage(effectivePrepared, pdfSealState, pageRecognize);
+                let visionHadSeal = false;
+                let chunk = await consumePage(effectivePrepared, pdfSealState, pageRecognize, () => { visionHadSeal = true; });
+                if (preparedPage.nativeContaminatedOnPage || preparedPage.savedVisionWasSealed || visionHadSeal || pdfSealState.mode !== "none") {
+                  await deps.segments?.save(scope, pageSealIdentity(rawPage.page), { state: "ready", pages: [{
+                    page: rawPage.page, text: "", imagePath: null, hadSealedContent: true,
+                    ...(pdfSealState.mode === "section_sealed" ? { sectionSealedAtEnd: true }
+                      : pdfSealState.mode === "inline_sealed" ? { inlineSealedAtEnd: true } : {}),
+                  }] }, signal);
+                }
                 if (!chunk) {
                   if (preparedPage.withheldAfterFailure) {
                     withheldAfterFailurePages.push(rawPage.page);
@@ -997,37 +1081,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 usablePages++;
               }
             } finally { await recognition?.return(); }
-            return pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? null : pdfSealState.mode;
+            return {
+              nextSealMode: pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? null : pdfSealState.mode,
+              nextInWorkedExample: !pdfSealState.unknownAfterFailure && pdfSealState.inWorkedExample,
+            };
           },
         }).finally(() => stage.close());
         pageCount = result.pageCount;
-        for (const { pageStart, pageEnd, initialSealMode } of result.failedSegments ?? []) {
-          const pages = Array.from({ length: pageEnd - pageStart + 1 }, (_, index) => pageStart + index);
-          const withheld = new Set<number>();
-          if (initialSealMode) {
-            const incomingSeal: SealState = { mode: initialSealMode, inWorkedExample: false, afterAllSealedPage: false };
-            const existing = await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages);
-            for (const chunk of existing) {
-              if (chunk.page === null) continue;
-              const marker = SAVED_VISION_MARKER_RE.exec(chunk.text);
-              const native = marker ? chunk.text.slice(0, marker.index) : chunk.text;
-              const vision = marker ? chunk.text.slice(marker.index + marker[0].length) : "";
-              const nativeBody = native.replace(SAVED_NATIVE_HEADER_RE, "").trimEnd();
-              // Retaining the row would retain its original text and image as-is.
-              if (chunk.imageObjectKey || sealTextWithState(nativeBody, { ...incomingSeal }) !== nativeBody
-                || (vision && sealVisionText(vision, { ...incomingSeal }, false).text !== vision)) {
-                withheld.add(chunk.page);
-              }
-            }
-          }
-          for (const page of pages) {
-            if (withheld.has(page)) {
-              withheldAfterFailurePages.push(page);
-              continue;
-            }
-            preservePages.push(page);
-            if (previousCappedPages.has(page)) cappedTextPages.add(page);
-          }
+        if (!pageCount && !withheldAfterFailurePages.length) {
+          throw new ConversionFailedError(`PDF segments failed (${result.failedRanges.join(", ")})`);
         }
         const failedRanges = [...result.failedRanges, ...skippedVisionPages.map(String)];
         const pdfTextCap = [...cappedTextPages];
