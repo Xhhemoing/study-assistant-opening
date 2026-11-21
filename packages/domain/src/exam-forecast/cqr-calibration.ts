@@ -260,11 +260,31 @@ function observedPassesJointTarget(
   return 0;
 }
 
+function assertValidExamBlueprint(blueprint: ExamBlueprintV1): void {
+  const missingFields = validateExamBlueprint(blueprint);
+  if (missingFields.length > 0) {
+    throw new RangeError(`Invalid exam blueprint: ${missingFields.join(", ")}`);
+  }
+}
+
 function validateSimulationForBlueprint(simulation: PaperSimulationSummary, blueprint: ExamBlueprintV1): number {
   if (simulation.blueprintId !== blueprint.blueprintId) {
     throw new RangeError(
       `Simulation blueprint "${simulation.blueprintId}" does not match expected blueprint "${blueprint.blueprintId}"`,
     );
+  }
+  const [minScore, maxScore] = blueprint.scoreRange;
+  for (const [field, val] of [
+    ["q10", simulation.q10],
+    ["q90", simulation.q90],
+    ["timedExpectedScore", simulation.timedExpectedScore],
+  ] as const) {
+    if (typeof val !== "number" || !Number.isFinite(val) || val < minScore || val > maxScore) {
+      throw new RangeError(`simulation.${field} must be finite within blueprint.scoreRange`);
+    }
+  }
+  if (simulation.q10 > simulation.q90) {
+    throw new RangeError("simulation.q10 must be <= simulation.q90");
   }
   const n = simulation.timedScores.length;
   if (n === 0 || simulation.drawSectionScores.length !== n) {
@@ -356,6 +376,7 @@ export function calibrateJointPassTargets(input: {
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
   readonly targetKind?: ForecastTargetKind;
 }): JointPassProbabilityEstimate[] {
+  assertValidExamBlueprint(input.blueprint);
   validateSimulationForBlueprint(input.simulation, input.blueprint);
   input.targets.forEach(assertFiniteJointPassTarget);
   const cutoffMs = input.examAtMs ?? input.simulation.examAtMs;
@@ -496,10 +517,7 @@ export function computeConformalBandInterval(input: {
   readonly excludeLearnerId?: string;
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
 }): ConformalBandIntervalResult {
-  const missingFields = validateExamBlueprint(input.blueprint);
-  if (missingFields.length > 0) {
-    throw new RangeError(`Invalid exam blueprint: ${missingFields.join(", ")}`);
-  }
+  assertValidExamBlueprint(input.blueprint);
   validateSimulationForBlueprint(input.simulation, input.blueprint);
   const cutoffMs = input.examAtMs ?? input.simulation.examAtMs;
   const targetKind: ForecastTargetKind = input.targetKind ?? "same_blueprint_mock";

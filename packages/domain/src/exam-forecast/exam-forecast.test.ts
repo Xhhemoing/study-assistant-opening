@@ -2863,4 +2863,161 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       }),
     ).toThrow(RangeError);
   });
+
+  it("enforces all Round-9 3 P1 & 2 P2 invariants", () => {
+    // [R9 P1-1] Bound score grid step count, reject non-finite values, and preserve large-offset exactness in snapToScoreGrid.
+    expect(() => snapToScoreGrid(5, [0, 1e300], 1e-20, "nearest")).toThrow(RangeError);
+    expect(() => snapToScoreGrid(0.5, [0, 1.000000000006], 1e-16, "nearest")).toThrow(RangeError);
+    expect(() => snapToScoreGrid(Number.NaN, [0, 9], 0.5, "nearest")).toThrow(RangeError);
+    expect(() => snapToScoreGrid(Number.POSITIVE_INFINITY, [0, 9], 0.5, "ceil")).toThrow(RangeError);
+    expect(() => snapToScoreGrid(Number.NEGATIVE_INFINITY, [0, 9], 0.5, "floor")).toThrow(RangeError);
+    expect(snapToScoreGrid(1e13 + 6, [1e13, 1e13 + 10], 1, "ceil")).toBe(1e13 + 6);
+    expect(snapToScoreGrid(0.0000006, [0, 0.0000006], 0.0000001, "ceil")).toBe(0.0000006);
+    expect(snapToScoreGrid(0.00000059, [0, 0.0000006], 0.0000001, "floor")).toBe(0.0000005);
+    const excessiveGridBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      blueprintId: "excessive-grid-bp",
+      aggregationMode: "weighted_sum" as const,
+      scoreRange: [0, 1e9] as const,
+      scoreStep: 1,
+    };
+    expect(validateExamBlueprint(excessiveGridBp)).toContain("scoreStep");
+
+    // [R9 P1-2 & P2-1] Bound cross-section PMF convolution against coprime OOM while hoisting deterministic overall PMFs across simulateExamPaper & evaluateCrnActionRoi.
+    const makeDeterministicWeightedSections = (itemCountPerSection: number, weights: readonly [number, number, number, number]) =>
+      (["s0", "s1", "s2", "s3"] as const).map((sectionId, sIdx) => ({
+        sectionId,
+        label: sectionId.toUpperCase(),
+        scoringKind: "item_raw_table" as const,
+        timeLimitMinutes: null,
+        weight: weights[sIdx]!,
+        scoreRange: [0, itemCountPerSection] as const,
+        scoreStep: 1,
+        parts: [{ partId: `${sectionId}-p1`, label: "P1", weight: 1, skillIds: ["k0"] }],
+        items: Array.from({ length: itemCountPerSection }, (_, i) => ({
+          itemId: `${sectionId}-q${i + 1}`,
+          sectionId,
+          partId: `${sectionId}-p1`,
+          skillIds: ["k0"],
+          guess: 0.1,
+          lapse: 0.02,
+          points: 1,
+          timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+        })),
+        rawToBandTable: Array.from({ length: itemCountPerSection + 1 }, (_, raw) => ({
+          rawMin: raw,
+          rawMax: raw,
+          score: raw,
+        })),
+      }));
+
+    const irrationalBp = createSharedFullPaperBlueprint({
+      blueprintId: "irrational-pmf-blowup",
+      title: "Irrational PMF Blowup",
+      totalTimeLimitMinutes: 240,
+      totalPoints: 100,
+      skillIds: ["k0"],
+      thetaCovariance: [[0]],
+      sections: makeDeterministicWeightedSections(100, [
+        Math.SQRT2 / 10,
+        Math.E / 10,
+        Math.PI / 10,
+        Math.LN2 / 10,
+      ]),
+    });
+    expect(() =>
+      simulateExamPaper({
+        blueprint: irrationalBp,
+        learnerId: "l",
+        beliefs: {},
+        evidence: [],
+        examAtMs: DAY_MS,
+        numDraws: 1,
+        seed: 3,
+      }),
+    ).toThrow(RangeError);
+
+    const heavyHoistedBp = createSharedFullPaperBlueprint({
+      blueprintId: "heavy-4x500-hoisted",
+      title: "Heavy 4x500 Hoisted",
+      totalTimeLimitMinutes: 300,
+      totalPoints: 2_000,
+      skillIds: ["k0"],
+      thetaCovariance: [[0]],
+      sections: makeDeterministicWeightedSections(500, [1, 1, 1, 1]),
+    });
+    const heavySim = simulateExamPaper({
+      blueprint: heavyHoistedBp,
+      learnerId: "l",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 1_000,
+      seed: 4,
+    });
+    expect(heavySim.numDraws).toBe(1_000);
+    expect(Number.isFinite(heavySim.untimedExpectedScore)).toBe(true);
+    const heavyCrn = evaluateCrnActionRoi({
+      blueprint: heavyHoistedBp,
+      learnerId: "l",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      baselineActions: [],
+      candidateAction: {
+        actionId: "k0-boost",
+        title: "Boost K0",
+        durationHours: 1,
+        kind: "skill_repair",
+        skillEffects: { k0: { abilityDelta: 0.4 } },
+      },
+      crnSeed: 4,
+      numDraws: 1_000,
+    });
+    expect(heavyCrn.pairedMeanGain).toBeGreaterThanOrEqual(0);
+
+    // [R9 P1-3 & P2-2] Validate simulation quantiles/mean in CQR calibration & validate blueprint upfront in calibrateJointPassTargets.
+    const beliefs = makeIeltsBeliefs({ abilityMean: 0.4, logStability: Math.log(14), lastDirectRecallAtMs: 0 });
+    const evidence = makeIndependentSectionEvidence(1_000);
+    const baseSim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      numDraws: 20,
+      seed: 5,
+    });
+    const cal5 = makeCalibrationRecords(5);
+    for (const badSim of [
+      { ...baseSim, q10: Number.NaN },
+      { ...baseSim, q90: Number.POSITIVE_INFINITY },
+      { ...baseSim, timedExpectedScore: 99 },
+      { ...baseSim, q10: 8.0, q90: 6.0 },
+    ]) {
+      expect(() =>
+        computeConformalBandInterval({
+          simulation: badSim,
+          blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+          calibrationRecords: cal5,
+        }),
+      ).toThrow(RangeError);
+      expect(() =>
+        calibrateJointPassTargets({
+          simulation: badSim,
+          blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+          calibrationRecords: cal5,
+          targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+        }),
+      ).toThrow(RangeError);
+    }
+    expect(() =>
+      calibrateJointPassTargets({
+        simulation: baseSim,
+        blueprint: { ...IELTS_ACADEMIC_V1_BLUEPRINT, sections: [] },
+        calibrationRecords: cal5,
+        targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+      }),
+    ).toThrow(RangeError);
+  });
 });

@@ -57,12 +57,36 @@ export const MAX_SECTION_ITEMS = 500;
 export const MAX_BLUEPRINT_ITEMS = 2_000;
 export const MAX_ITEM_POINTS = 1_000;
 export const MAX_SECTION_TOTAL_POINTS = 2_000;
+export const MAX_SCORE_GRID_STEPS = 1_000_000;
+
+function decimalPlaces(value: number): number | null {
+  const str = value.toString();
+  if (/[^0-9eE+\-.]/.test(str)) return null;
+  const match = /^[-+]?\d+(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(str);
+  if (!match) return null;
+  const fracLen = match[1]?.length ?? 0;
+  const exp = match[2] ? Number.parseInt(match[2], 10) : 0;
+  return Math.max(0, fracLen - exp);
+}
 
 function gridPointAt(minScore: number, step: number, index: number): number {
   const raw = minScore + index * step;
+  if (!Number.isFinite(raw)) {
+    throw new RangeError("Score grid point overflowed finite precision");
+  }
   if (raw === 0) return 0;
-  const rounded = Number(raw.toPrecision(12));
-  return Object.is(rounded, -0) ? 0 : rounded;
+  if (step < 1 && Math.abs(raw) < 1e9) {
+    const dStep = decimalPlaces(step);
+    const dMin = decimalPlaces(minScore);
+    if (dStep !== null && dMin !== null) {
+      const dec = Math.max(dStep, dMin);
+      if (dec <= 12) {
+        const cleaned = Number(raw.toFixed(dec));
+        return cleaned === 0 ? 0 : cleaned;
+      }
+    }
+  }
+  return Object.is(raw, -0) ? 0 : raw;
 }
 
 export function snapToScoreGrid(
@@ -78,18 +102,25 @@ export function snapToScoreGrid(
   if (!Number.isFinite(step) || step <= 0) {
     throw new RangeError("Score step must be finite and positive");
   }
-  let maxK = Math.floor((maxScore - minScore) / step + 1e-12);
-  while (maxK >= 0 && gridPointAt(minScore, step, maxK) > maxScore) {
+  if (!Number.isFinite(value)) {
+    throw new RangeError("Score value must be finite");
+  }
+  const rawSteps = (maxScore - minScore) / step;
+  if (!Number.isFinite(rawSteps) || rawSteps > MAX_SCORE_GRID_STEPS) {
+    throw new RangeError(`Score grid step count exceeds limit (${MAX_SCORE_GRID_STEPS})`);
+  }
+  let maxK = Math.floor(rawSteps + 1e-12);
+  for (let iter = 0; iter < 2 && maxK >= 0 && gridPointAt(minScore, step, maxK) > maxScore; iter += 1) {
     maxK -= 1;
   }
-  if (maxK < 0) {
+  if (maxK < 0 || gridPointAt(minScore, step, maxK) > maxScore) {
     throw new RangeError("Score range contains no valid grid point");
   }
-  const minGrid = gridPointAt(minScore, step, 0) < minScore ? minScore : gridPointAt(minScore, step, 0);
+  const minPoint = gridPointAt(minScore, step, 0);
+  const minGrid = minPoint < minScore ? minScore : minPoint;
   if (minGrid > maxScore) {
     throw new RangeError("Score range contains no valid grid point");
   }
-  if (!Number.isFinite(value)) return minGrid;
 
   const relUnits = (value - minScore) / step;
   const rawK =
@@ -100,13 +131,16 @@ export function snapToScoreGrid(
         : Math.floor(relUnits + 0.5);
   let k = Math.min(maxK, Math.max(0, rawK));
   let snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
-  while (snapped > maxScore && k > 0) {
+  for (let iter = 0; iter < 2 && snapped > maxScore && k > 0; iter += 1) {
     k -= 1;
     snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
   }
-  while (snapped < minScore && k < maxK) {
+  for (let iter = 0; iter < 2 && snapped < minScore && k < maxK; iter += 1) {
     k += 1;
     snapped = gridPointAt(minScore, step, k);
+  }
+  if (snapped < minScore || snapped > maxScore) {
+    throw new RangeError("Snapped score exceeds valid score range");
   }
   return snapped;
 }
@@ -454,8 +488,17 @@ const CANONICAL_IELTS_SECTIONS = [
 export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
   const missing: string[] = [];
   if (blueprint.schemaVersion !== 1 || !blueprint.blueprintId.trim()) missing.push("blueprintId");
-  if (!isValidScoreRange(blueprint.scoreRange)) missing.push("scoreRange");
-  if (!Number.isFinite(blueprint.scoreStep) || blueprint.scoreStep <= 0) missing.push("scoreStep");
+  const bpRangeValid = isValidScoreRange(blueprint.scoreRange);
+  if (!bpRangeValid) missing.push("scoreRange");
+  const bpStepValid = Number.isFinite(blueprint.scoreStep) && blueprint.scoreStep > 0;
+  if (!bpStepValid) {
+    missing.push("scoreStep");
+  } else if (bpRangeValid) {
+    const gridSteps = (blueprint.scoreRange[1] - blueprint.scoreRange[0]) / blueprint.scoreStep;
+    if (!Number.isFinite(gridSteps) || gridSteps > MAX_SCORE_GRID_STEPS) {
+      missing.push("scoreStep");
+    }
+  }
   if (blueprint.skillIds.length === 0) missing.push("skillIds");
   if (blueprint.sections.length === 0) missing.push("sections");
   if (blueprint.clockMode === "shared_full_paper") {
@@ -520,8 +563,16 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
         missing.push(`sections.${section.sectionId}.timeLimitMinutes`);
       }
     }
-    if (!isValidScoreRange(section.scoreRange)) missing.push(`sections.${section.sectionId}.scoreRange`);
-    if (!Number.isFinite(section.scoreStep) || section.scoreStep <= 0) missing.push(`sections.${section.sectionId}.scoreStep`);
+    const secRangeValid = isValidScoreRange(section.scoreRange);
+    if (!secRangeValid) missing.push(`sections.${section.sectionId}.scoreRange`);
+    if (!Number.isFinite(section.scoreStep) || section.scoreStep <= 0) {
+      missing.push(`sections.${section.sectionId}.scoreStep`);
+    } else if (secRangeValid) {
+      const secGridSteps = (section.scoreRange[1] - section.scoreRange[0]) / section.scoreStep;
+      if (!Number.isFinite(secGridSteps) || secGridSteps > MAX_SCORE_GRID_STEPS) {
+        missing.push(`sections.${section.sectionId}.scoreStep`);
+      }
+    }
     if (!Number.isFinite(section.weight) || section.weight < 0) missing.push(`sections.${section.sectionId}.weight`);
     if (section.parts.length === 0) missing.push(`sections.${section.sectionId}.parts`);
     if (section.scoringKind === "item_raw_table") {
