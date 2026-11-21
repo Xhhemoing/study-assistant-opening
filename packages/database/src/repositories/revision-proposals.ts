@@ -18,6 +18,15 @@ import {
   type RevisionProposalSupportState,
 } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
+import {
+  collectProtectedBlockIds,
+  excludeAnswerKeys,
+  hasForgedOrProtectedBlock,
+  isBackupAnswerBlock,
+  mergePreservedProtectedBlocks,
+  PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
+  readDocumentAnswerKeyIds,
+} from "./library-protected-blocks";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { openingNoteReadable } from "./opening-note-provenance";
 
@@ -115,9 +124,63 @@ function validateBlocks(blocks: RevisionProposalBlock[]): void {
   const parsed = blocks.map((block) => revisionProposalBlockSchema.parse(block));
   const ids = new Set<string>();
   for (const block of parsed) {
-    if (ids.has(block.id)) throw new RevisionProposalRepositoryError("VALIDATION", `Duplicate block id: ${block.id}`);
-    ids.add(block.id);
+    const idKey = block.id.toLowerCase();
+    if (ids.has(idKey)) throw new RevisionProposalRepositoryError("VALIDATION", `Duplicate block id: ${block.id}`);
+    ids.add(idKey);
   }
+}
+function assertProposalBlocksSafe(rawBlocks: readonly unknown[], protectedIds: ReadonlySet<string>): void {
+  if (hasForgedOrProtectedBlock(rawBlocks, protectedIds)) {
+    throw new RevisionProposalRepositoryError("VALIDATION", PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE);
+  }
+}
+function assertSelectedBlockIdsSafe(selectedIds: readonly string[], protectedIds: ReadonlySet<string>): void {
+  for (const id of selectedIds) {
+    if (protectedIds.has(id.toLowerCase())) {
+      throw new RevisionProposalRepositoryError("VALIDATION", PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE);
+    }
+  }
+}
+function redactProposal(
+  proposal: RevisionProposalRecord,
+  protectedIds: ReadonlySet<string>,
+): RevisionProposalRecord {
+  const hiddenIds = new Set<string>(protectedIds);
+  const collectHidden = (blocks: readonly RevisionProposalBlock[]) => {
+    for (const block of blocks) {
+      if (isBackupAnswerBlock(block as unknown as Record<string, unknown>)) {
+        hiddenIds.add(block.id.toLowerCase());
+      }
+    }
+  };
+  collectHidden(proposal.baseBlocks);
+  collectHidden(proposal.proposedBlocks);
+  if (proposal.conflict) collectHidden(proposal.conflict.currentBlocks);
+  for (const entry of proposal.diff) {
+    if (
+      (entry.base && isBackupAnswerBlock(entry.base as unknown as Record<string, unknown>))
+      || (entry.proposed && isBackupAnswerBlock(entry.proposed as unknown as Record<string, unknown>))
+    ) {
+      hiddenIds.add(entry.blockId.toLowerCase());
+    }
+  }
+  const isVisible = excludeAnswerKeys([...hiddenIds]);
+  return {
+    ...proposal,
+    baseBlocks: proposal.baseBlocks.filter(isVisible),
+    proposedBlocks: proposal.proposedBlocks.filter(isVisible),
+    diff: proposal.diff.filter((entry) =>
+      !hiddenIds.has(entry.blockId.toLowerCase())
+      && (!entry.base || isVisible(entry.base))
+      && (!entry.proposed || isVisible(entry.proposed)),
+    ),
+    conflict: proposal.conflict
+      ? {
+          ...proposal.conflict,
+          currentBlocks: proposal.conflict.currentBlocks.filter(isVisible),
+        }
+      : null,
+  };
 }
 function errorFromSql(error: unknown): never {
   if (error instanceof RevisionProposalRepositoryError) throw error;
@@ -162,9 +225,32 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
     await ensureDocumentReadable(db, workspaceId, rows[0]!.document_id as string);
     return rows[0] as Row;
   }
-  async function documentBlocks(db: Sql, workspaceId: string, documentId: string): Promise<RevisionProposalBlock[]> {
-    const rows = await db`SELECT id,type,position,content FROM library_blocks WHERE workspace_id=${workspaceId} AND document_id=${documentId} ORDER BY position`;
+  async function documentBlocks(
+    db: Sql,
+    workspaceId: string,
+    documentId: string,
+    lock: "none" | "share" | "update" = "none",
+  ): Promise<RevisionProposalBlock[]> {
+    const rows = lock === "update"
+      ? await db`SELECT id,type,position,content FROM library_blocks WHERE workspace_id=${workspaceId} AND document_id=${documentId} ORDER BY position ASC, id ASC FOR UPDATE`
+      : lock === "share"
+        ? await db`SELECT id,type,position,content FROM library_blocks WHERE workspace_id=${workspaceId} AND document_id=${documentId} ORDER BY position ASC, id ASC FOR SHARE`
+        : await db`SELECT id,type,position,content FROM library_blocks WHERE workspace_id=${workspaceId} AND document_id=${documentId} ORDER BY position ASC, id ASC`;
     return rows.map((row) => ({ id: row.id as string, type: row.type as string, position: row.position as number, content: row.content as Record<string, unknown> }));
+  }
+  async function loadProtectedBlockPolicy(
+    db: Sql,
+    workspaceId: string,
+    documentId: string,
+    lock: "none" | "share" | "update" = "none",
+  ) {
+    const existingBlocks = await documentBlocks(db, workspaceId, documentId, lock);
+    const answerKeys = await readDocumentAnswerKeyIds(db, workspaceId, [documentId]);
+    const answerKeyIds = answerKeys.get(documentId.toLowerCase()) ?? [];
+    const isVisible = excludeAnswerKeys(answerKeyIds);
+    const protectedIds = collectProtectedBlockIds(existingBlocks, answerKeyIds);
+    const visibleBlocks = existingBlocks.filter(isVisible);
+    return { existingBlocks, visibleBlocks, isVisible, protectedIds };
   }
   async function documentRow(db: Sql, workspaceId: string, documentId: string, lock = false): Promise<Row> {
     await ensureDocumentReadable(db, workspaceId, documentId);
@@ -179,7 +265,9 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
     return rows[0] as Row;
   }
   async function mapResult(row: Row, db: Sql = sql): Promise<RevisionProposalReviewResult> {
-    const proposal = map(row);
+    const rawProposal = map(row);
+    const policy = await loadProtectedBlockPolicy(db, rawProposal.workspaceId, rawProposal.documentId);
+    const proposal = redactProposal(rawProposal, policy.protectedIds);
     if (proposal.status === "rejected") return { proposal, document: null };
 
     let documentRowValue: Row | null = null;
@@ -194,7 +282,7 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
       return { proposal, document: null };
     }
 
-    return { proposal, document: mapDocument(documentRowValue, await documentBlocks(db, proposal.workspaceId, proposal.documentId)) };
+    return { proposal, document: mapDocument(documentRowValue, policy.visibleBlocks) };
   }
   async function appendRevision(db: Sql, input: { workspaceId: string; documentId: string; document: Row; title: string; blocks: RevisionProposalBlock[]; reason: string }): Promise<number> {
     assertValidRevisionBlocks(input.blocks);
@@ -216,31 +304,37 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
       validateBlocks(proposedBlocks);
       return sql.begin(async (tx) => {
         await ensureWorkspace(input.workspaceId, tx);
-        // Lock the document before reading blocks so the full base snapshot is coherent.
+        // Lock the document and its blocks before reading so the redacted base snapshot and protected IDs are coherent.
         const document = await documentRow(tx, input.workspaceId, input.documentId, true);
         const baseRevisionNumber = input.baseRevisionNumber;
         if (!Number.isInteger(baseRevisionNumber) || baseRevisionNumber <= 0) throw new RevisionProposalRepositoryError("VALIDATION", "baseRevisionNumber must be positive");
         if (baseRevisionNumber !== document.current_revision_number) throw new RevisionProposalRepositoryError("CONFLICT", "Proposal base revision must be current");
-        const baseBlocks = await documentBlocks(tx, input.workspaceId, input.documentId);
+        const policy = await loadProtectedBlockPolicy(tx, input.workspaceId, input.documentId, "share");
+        assertProposalBlocksSafe(input.proposedBlocks, policy.protectedIds);
+        assertProposalBlocksSafe(proposedBlocks, policy.protectedIds);
+        const baseBlocks = policy.visibleBlocks;
         const provenance = revisionProposalProvenanceSchema.parse(input.provenance ?? { origin: source.kind === "ai" ? "ai" : "manual", actorUserId: null, sourceDocumentId: null, sourceRevisionNumber: baseRevisionNumber });
         const id = input.proposalId ?? randomUUID(); assertUuid(id, "proposalId");
         const diff = diffRevisionBlocks(baseBlocks, proposedBlocks);
         const rows = await tx`INSERT INTO revision_proposals(id,workspace_id,document_id,base_revision_number,base_title,base_blocks,proposed_title,proposed_blocks,diff,source,provenance,support_state) VALUES(${id},${input.workspaceId},${input.documentId},${baseRevisionNumber},${document.title as string},${tx.json(baseBlocks as never)},${input.proposedTitle ?? null},${tx.json(proposedBlocks as never)},${tx.json(diff as never)},${tx.json(source as never)},${tx.json(provenance as never)},${supportState}) RETURNING *`;
-        return map(rows[0] as Row);
+        return redactProposal(map(rows[0] as Row), policy.protectedIds);
       }).catch(errorFromSql);
     },
     async list(input) {
       return sql.begin(async (tx) => {
         await ensureWorkspace(input.workspaceId, tx);
         await documentRow(tx, input.workspaceId, input.documentId);
+        const policy = await loadProtectedBlockPolicy(tx, input.workspaceId, input.documentId);
         const rows = await tx`SELECT * FROM revision_proposals WHERE workspace_id=${input.workspaceId} AND document_id=${input.documentId} ORDER BY created_at ASC,id ASC`;
-        return rows.map((row) => map(row as Row));
+        return rows.map((row) => redactProposal(map(row as Row), policy.protectedIds));
       });
     },
     async get(input) {
       return sql.begin(async (tx) => {
         await ensureWorkspace(input.workspaceId, tx);
-        return map(await findProposal(input.workspaceId, input.proposalId, tx));
+        const proposal = map(await findProposal(input.workspaceId, input.proposalId, tx));
+        const policy = await loadProtectedBlockPolicy(tx, input.workspaceId, proposal.documentId);
+        return redactProposal(proposal, policy.protectedIds);
       });
     },
     async review(input) {
@@ -256,20 +350,26 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
           return mapResult(rows[0] as Row, tx);
         }
         const document = await documentRow(tx, input.workspaceId, proposal.documentId, true);
-        let nextBlocks: RevisionProposalBlock[];
+        const policy = await loadProtectedBlockPolicy(tx, input.workspaceId, proposal.documentId, "update");
+        assertProposalBlocksSafe(proposal.proposedBlocks, policy.protectedIds);
+        const visibleProposal = redactProposal(proposal, policy.protectedIds);
+        let nextVisibleBlocks: RevisionProposalBlock[];
         if (input.action === "accept") {
-          nextBlocks = proposal.proposedBlocks.map((block, position) => ({ ...block, position }));
+          nextVisibleBlocks = proposal.proposedBlocks.map((block, position) => ({ ...block, position }));
         } else {
           const selected = input.selectedProposalBlockIds ?? [];
-          nextBlocks = selectProposalBlocks(await documentBlocks(tx, input.workspaceId, proposal.documentId), proposal.proposedBlocks, selected, proposal.diff);
+          assertSelectedBlockIdsSafe(selected, policy.protectedIds);
+          nextVisibleBlocks = selectProposalBlocks(policy.visibleBlocks, proposal.proposedBlocks, selected, visibleProposal.diff);
         }
-        assertValidRevisionBlocks(nextBlocks);
+        assertValidRevisionBlocks(nextVisibleBlocks);
+        assertProposalBlocksSafe(nextVisibleBlocks, policy.protectedIds);
         if (document.current_revision_number !== proposal.baseRevisionNumber) {
-          const conflict = { currentRevisionNumber: document.current_revision_number as number, currentTitle: document.title as string, currentBlocks: await documentBlocks(tx, input.workspaceId, proposal.documentId), conflictedAt: new Date().toISOString() };
+          const conflict = { currentRevisionNumber: document.current_revision_number as number, currentTitle: document.title as string, currentBlocks: policy.visibleBlocks, conflictedAt: new Date().toISOString() };
           const rows = await tx`UPDATE revision_proposals SET status='conflicted',review_action=${input.action},reviewer_user_id=${input.actorUserId},reviewed_at=now(),current_conflict=${tx.json(conflict as never)},updated_at=now() WHERE id=${proposal.id} RETURNING *`;
           return mapResult(rows[0] as Row, tx);
         }
-        const revision = await appendRevision(tx, { workspaceId: input.workspaceId, documentId: proposal.documentId, document, title: proposal.proposedTitle ?? proposal.baseTitle, blocks: nextBlocks!, reason: `revision-proposal:${input.action}` });
+        const persistedBlocks = mergePreservedProtectedBlocks(policy.existingBlocks, nextVisibleBlocks, policy.isVisible);
+        const revision = await appendRevision(tx, { workspaceId: input.workspaceId, documentId: proposal.documentId, document, title: proposal.proposedTitle ?? proposal.baseTitle, blocks: persistedBlocks, reason: `revision-proposal:${input.action}` });
         const rows = await tx`UPDATE revision_proposals SET status='accepted',review_action=${input.action},reviewer_user_id=${input.actorUserId},reviewed_at=now(),resulting_revision_number=${revision},updated_at=now() WHERE id=${proposal.id} RETURNING *`;
         return mapResult(rows[0] as Row, tx);
       }).catch(errorFromSql);
@@ -287,9 +387,15 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
         }
         const document = await documentRow(tx, input.workspaceId, proposal.documentId, true);
         if (document.current_revision_number !== input.expectedCurrentRevisionNumber) throw new RevisionProposalRepositoryError("CONFLICT", "Current revision changed; reload before resolving");
-        const blocks = preserveBothBlocks(await documentBlocks(tx, input.workspaceId, proposal.documentId), proposal.proposedBlocks, input.selectedProposalBlockIds, proposal.diff);
-        assertValidRevisionBlocks(blocks);
-        const revision = await appendRevision(tx, { workspaceId: input.workspaceId, documentId: proposal.documentId, document, title: proposal.proposedTitle ?? proposal.baseTitle, blocks, reason: "revision-proposal:preserve_both" });
+        const policy = await loadProtectedBlockPolicy(tx, input.workspaceId, proposal.documentId, "update");
+        assertProposalBlocksSafe(proposal.proposedBlocks, policy.protectedIds);
+        assertSelectedBlockIdsSafe(input.selectedProposalBlockIds, policy.protectedIds);
+        const visibleProposal = redactProposal(proposal, policy.protectedIds);
+        const nextVisibleBlocks = preserveBothBlocks(policy.visibleBlocks, proposal.proposedBlocks, input.selectedProposalBlockIds, visibleProposal.diff);
+        assertValidRevisionBlocks(nextVisibleBlocks);
+        assertProposalBlocksSafe(nextVisibleBlocks, policy.protectedIds);
+        const persistedBlocks = mergePreservedProtectedBlocks(policy.existingBlocks, nextVisibleBlocks, policy.isVisible);
+        const revision = await appendRevision(tx, { workspaceId: input.workspaceId, documentId: proposal.documentId, document, title: proposal.proposedTitle ?? proposal.baseTitle, blocks: persistedBlocks, reason: "revision-proposal:preserve_both" });
         const rows = await tx`UPDATE revision_proposals SET status='accepted',review_action='preserve_both',reviewer_user_id=${input.actorUserId},reviewed_at=now(),resulting_revision_number=${revision},current_conflict=NULL,updated_at=now() WHERE id=${proposal.id} RETURNING *`;
         return mapResult(rows[0] as Row, tx);
       }).catch(errorFromSql);

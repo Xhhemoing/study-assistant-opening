@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { applyMigrations, createRevisionProposalRepository, createSqlClient, lockWorkspaceLearningHistory, type RevisionProposalRepository } from "@aistudy/database";
+import { applyMigrations, createLibraryRepository, createRevisionProposalRepository, createSqlClient, lockWorkspaceLearningHistory, type RevisionProposalRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -265,5 +265,366 @@ describe("revision proposal repository", () => {
     expect(rejected.proposal.review?.action).toBe("reject");
     expect(repeated.proposal).toEqual(rejected.proposal);
     expect(revisions.map((row) => row.revision_number)).toEqual([1]);
+  });
+
+  describe("protected answer-block redaction and preservation", () => {
+    const source = { kind: "user" as const, provider: null, model: null, sourceId: null, metadata: {} };
+
+    async function seedProtectedDocument() {
+      const library = createLibraryRepository(sql);
+      const leadAnswer = { id: randomUUID(), type: "answer_key", content: { answer: "RP_LEAD_ANSWER_SECRET" } };
+      const visibleA = { id: randomUUID(), type: "paragraph", content: { text: "RP_PUBLIC_A" } };
+      const midSolution = { id: randomUUID(), type: "solution", content: { solution: "RP_MID_SOLUTION_SECRET" } };
+      const midNestedRoleKey = { id: randomUUID(), type: "text", content: { role: "answer_key", text: "RP_NESTED_ROLE_SECRET" } };
+      const midNestedTypeSol = { id: randomUUID(), type: "text", content: { blockType: "solution", text: "RP_NESTED_TYPE_SECRET" } };
+      const midProvenance = { id: randomUUID(), type: "paragraph", content: { text: "RP_PROVENANCE_SECRET" } };
+      const visibleB = { id: randomUUID(), type: "paragraph", content: { text: "RP_PUBLIC_B" } };
+      const trailAnswer = { id: randomUUID(), type: "answer_key", content: { answer: "RP_TRAIL_ANSWER_SECRET" } };
+      const allBlocks = [
+        leadAnswer,
+        visibleA,
+        midSolution,
+        midNestedRoleKey,
+        midNestedTypeSol,
+        midProvenance,
+        visibleB,
+        trailAnswer,
+      ];
+      const secrets = [
+        "RP_LEAD_ANSWER_SECRET",
+        "RP_MID_SOLUTION_SECRET",
+        "RP_NESTED_ROLE_SECRET",
+        "RP_NESTED_TYPE_SECRET",
+        "RP_PROVENANCE_SECRET",
+        "RP_TRAIL_ANSWER_SECRET",
+      ];
+      const doc = await library.createDocument({
+        workspaceId,
+        title: "Protected Lesson Note",
+        lifecycle: "confirmed",
+        blocks: allBlocks,
+      });
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${doc.id},${workspaceId},${sql.json([{ answerKeyBlockIds: [midProvenance.id.toUpperCase()] }])})`;
+      return {
+        library,
+        doc,
+        leadAnswer,
+        visibleA,
+        midSolution,
+        midNestedRoleKey,
+        midNestedTypeSol,
+        midProvenance,
+        visibleB,
+        trailAnswer,
+        allBlocks,
+        secrets,
+      };
+    }
+
+    it("redacts hidden answer blocks from created, listed, fetched, and legacy proposals", async () => {
+      const fx = await seedProtectedDocument();
+      const created = await repository.create({
+        workspaceId,
+        documentId: fx.doc.id,
+        baseRevisionNumber: 1,
+        proposedTitle: "Edited Lesson Note",
+        proposedBlocks: [
+          { id: fx.visibleA.id, type: "paragraph", position: 0, content: { text: "RP_PUBLIC_A_PROPOSED" } },
+          { id: fx.visibleB.id, type: "paragraph", position: 1, content: { text: "RP_PUBLIC_B" } },
+        ],
+        source,
+        supportState: "supported",
+      });
+
+      expect(created.baseBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, fx.visibleB.id]);
+      expect(created.diff.map((d) => d.blockId)).toEqual([fx.visibleA.id, fx.visibleB.id]);
+
+      const [stored] = await sql`SELECT base_blocks, proposed_blocks, diff FROM revision_proposals WHERE id=${created.id}`;
+      const listed = await repository.list({ workspaceId, documentId: fx.doc.id });
+      const fetched = await repository.get({ workspaceId, proposalId: created.id });
+
+      for (const secret of fx.secrets) {
+        expect(JSON.stringify(created)).not.toContain(secret);
+        expect(JSON.stringify(stored)).not.toContain(secret);
+        expect(JSON.stringify(listed)).not.toContain(secret);
+        expect(JSON.stringify(fetched)).not.toContain(secret);
+      }
+
+      // Legacy DB row persisted prior to redaction must still be redacted on list/get.
+      const legacyId = randomUUID();
+      const legacyBase = fx.allBlocks.map((b, position) => ({ ...b, position }));
+      const legacyConflict = {
+        currentRevisionNumber: 1,
+        currentTitle: "Protected Lesson Note",
+        currentBlocks: legacyBase,
+        conflictedAt: new Date().toISOString(),
+      };
+      const legacyDiff = [
+        { blockId: fx.leadAnswer.id, kind: "removed", base: legacyBase[0], proposed: null },
+        { blockId: fx.midProvenance.id, kind: "changed", base: legacyBase[5], proposed: { ...legacyBase[5]!, content: { text: "FORGED" } } },
+        { blockId: fx.visibleA.id, kind: "unchanged", base: legacyBase[1], proposed: legacyBase[1] },
+      ];
+      await sql`INSERT INTO revision_proposals(
+        id,workspace_id,document_id,base_revision_number,base_title,base_blocks,proposed_title,proposed_blocks,diff,source,provenance,support_state,status,review_action,reviewer_user_id,reviewed_at,current_conflict
+      ) VALUES (
+        ${legacyId},${workspaceId},${fx.doc.id},1,'Protected Lesson Note',${sql.json(legacyBase as never)},'Legacy',${sql.json(legacyBase as never)},${sql.json(legacyDiff as never)},${sql.json(source as never)},${sql.json({ origin: "manual", actorUserId: userId, sourceDocumentId: null, sourceRevisionNumber: 1 } as never)},'supported','conflicted','accept',${userId},now(),${sql.json(legacyConflict as never)}
+      )`;
+
+      const legacyFetched = await repository.get({ workspaceId, proposalId: legacyId });
+      const legacyListed = (await repository.list({ workspaceId, documentId: fx.doc.id })).find((p) => p.id === legacyId)!;
+      for (const view of [legacyFetched, legacyListed]) {
+        expect(view.baseBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, fx.visibleB.id]);
+        expect(view.proposedBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, fx.visibleB.id]);
+        expect(view.diff.map((d) => d.blockId)).toEqual([fx.visibleA.id]);
+        expect(view.conflict?.currentBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, fx.visibleB.id]);
+        for (const secret of fx.secrets) {
+          expect(JSON.stringify(view)).not.toContain(secret);
+        }
+      }
+    });
+
+    it("rejects forging answer blocks or reusing protected IDs on create, review, and resolveConflict", async () => {
+      const fx = await seedProtectedDocument();
+      const cleanBlock = { id: fx.visibleA.id, type: "paragraph", position: 0, content: { text: "clean" } };
+      const forgeryPayloads: Array<Array<Record<string, unknown>>> = [
+        [cleanBlock, { id: randomUUID(), type: "answer_key", position: 1, content: { answer: "forged" } }],
+        [cleanBlock, { id: randomUUID(), type: "solution", position: 1, content: { solution: "forged" } }],
+        [cleanBlock, { id: randomUUID(), type: "paragraph", role: "answer_key", position: 1, content: { text: "forged" } }],
+        [cleanBlock, { id: randomUUID(), type: "paragraph", blockType: "solution", position: 1, content: { text: "forged" } }],
+        [cleanBlock, { id: randomUUID(), type: "text", position: 1, content: { role: "answer_key", text: "forged" } }],
+        [cleanBlock, { id: randomUUID(), type: "text", position: 1, content: { blockType: "solution", text: "forged" } }],
+        [cleanBlock, { id: fx.leadAnswer.id, type: "paragraph", position: 1, content: { text: "overwrite lead" } }],
+        [cleanBlock, { id: fx.midNestedRoleKey.id, type: "paragraph", position: 1, content: { text: "overwrite nested" } }],
+        [cleanBlock, { id: fx.midProvenance.id.toUpperCase(), type: "paragraph", position: 1, content: { text: "overwrite provenance" } }],
+      ];
+
+      for (const proposedBlocks of forgeryPayloads) {
+        await expect(repository.create({
+          workspaceId,
+          documentId: fx.doc.id,
+          baseRevisionNumber: 1,
+          proposedBlocks: proposedBlocks as Parameters<RevisionProposalRepository["create"]>[0]["proposedBlocks"],
+          source,
+          supportState: "supported",
+        })).rejects.toMatchObject({ code: "VALIDATION" });
+      }
+      expect((await sql`SELECT count(*)::int AS count FROM revision_proposals WHERE document_id=${fx.doc.id}`)[0]!.count).toBe(0);
+
+      // A legacy pending proposal with a forged/protected block cannot be accepted or partially accepted.
+      const forgedPendingId = randomUUID();
+      const forgedProposed = [
+        cleanBlock,
+        { id: fx.leadAnswer.id, type: "paragraph", position: 1, content: { text: "hijacked" } },
+      ];
+      await sql`INSERT INTO revision_proposals(
+        id,workspace_id,document_id,base_revision_number,base_title,base_blocks,proposed_title,proposed_blocks,diff,source,provenance,support_state
+      ) VALUES (
+        ${forgedPendingId},${workspaceId},${fx.doc.id},1,'Protected Lesson Note',${sql.json([cleanBlock] as never)},'Hijack',${sql.json(forgedProposed as never)},${sql.json([] as never)},${sql.json(source as never)},${sql.json({ origin: "manual", actorUserId: userId, sourceDocumentId: null, sourceRevisionNumber: 1 } as never)},'supported'
+      )`;
+
+      await expect(repository.review({
+        workspaceId,
+        proposalId: forgedPendingId,
+        action: "accept",
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+      await expect(repository.review({
+        workspaceId,
+        proposalId: forgedPendingId,
+        action: "partial_accept",
+        selectedProposalBlockIds: [fx.visibleA.id],
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+
+      // Attempting partial_accept selecting a protected block ID from a legacy diff is also rejected.
+      const cleanPending = await repository.create({
+        workspaceId,
+        documentId: fx.doc.id,
+        baseRevisionNumber: 1,
+        proposedBlocks: [cleanBlock],
+        source,
+        supportState: "supported",
+      });
+      await expect(repository.review({
+        workspaceId,
+        proposalId: cleanPending.id,
+        action: "partial_accept",
+        selectedProposalBlockIds: [fx.midProvenance.id.toUpperCase()],
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+
+      // A conflicted proposal whose proposed block ID later becomes protected cannot be resolved.
+      const lateProtectedId = randomUUID();
+      const lateProposal = await repository.create({
+        workspaceId,
+        documentId: fx.doc.id,
+        baseRevisionNumber: 1,
+        proposedBlocks: [cleanBlock, { id: lateProtectedId, type: "paragraph", position: 1, content: { text: "later protected" } }],
+        source,
+        supportState: "supported",
+      });
+      await fx.library.updateDocument({
+        workspaceId,
+        documentId: fx.doc.id,
+        expectedRevisionNumber: 1,
+        blocks: [
+          { id: fx.visibleA.id, type: "paragraph", content: { text: "RP_PUBLIC_A_CONCURRENT" } },
+          { id: fx.visibleB.id, type: "paragraph", content: { text: "RP_PUBLIC_B" } },
+        ],
+      });
+      const conflicted = await repository.review({
+        workspaceId,
+        proposalId: lateProposal.id,
+        action: "accept",
+        actorUserId: userId,
+      });
+      expect(conflicted.proposal.status).toBe("conflicted");
+      await sql`UPDATE opening_note_provenance
+        SET context_source_refs = context_source_refs || ${sql.json([{ answerKeyBlockIds: [lateProtectedId] }])}::jsonb
+        WHERE document_id=${fx.doc.id}`;
+      await expect(repository.resolveConflict({
+        workspaceId,
+        proposalId: lateProposal.id,
+        action: "preserve_both",
+        selectedProposalBlockIds: [lateProtectedId],
+        expectedCurrentRevisionNumber: 2,
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+
+      const liveBlocks = await sql`SELECT id FROM library_blocks WHERE document_id=${fx.doc.id} ORDER BY position`;
+      expect(liveBlocks.map((b) => b.id)).toEqual(fx.allBlocks.map((b) => b.id));
+    });
+
+    it("preserves all hidden answer blocks across accept, partial_accept, and preserve_both without leaking them", async () => {
+      const fx = await seedProtectedDocument();
+      const addedBlockId = randomUUID();
+
+      // 1. Full accept replacing visibleA, removing visibleB, adding addedBlockId.
+      const acceptProposal = await repository.create({
+        workspaceId,
+        documentId: fx.doc.id,
+        baseRevisionNumber: 1,
+        proposedTitle: "Accepted Title",
+        proposedBlocks: [
+          { id: fx.visibleA.id, type: "paragraph", position: 0, content: { text: "RP_PUBLIC_A_ACCEPTED" } },
+          { id: addedBlockId, type: "paragraph", position: 1, content: { text: "RP_PUBLIC_ADDED" } },
+        ],
+        source,
+        supportState: "supported",
+      });
+      const accepted = await repository.review({
+        workspaceId,
+        proposalId: acceptProposal.id,
+        action: "accept",
+        actorUserId: userId,
+      });
+      expect(accepted.proposal.status).toBe("accepted");
+      expect(accepted.document?.currentRevisionNumber).toBe(2);
+      expect(accepted.document?.blocks.map((b) => b.id)).toEqual([fx.visibleA.id, addedBlockId]);
+      for (const secret of fx.secrets) {
+        expect(JSON.stringify(accepted)).not.toContain(secret);
+      }
+
+      const expectedRev2Order = [
+        fx.leadAnswer.id,
+        fx.visibleA.id,
+        fx.midSolution.id,
+        fx.midNestedRoleKey.id,
+        fx.midNestedTypeSol.id,
+        fx.midProvenance.id,
+        addedBlockId,
+        fx.trailAnswer.id,
+      ];
+      const rev2Live = await sql`SELECT id, position FROM library_blocks WHERE document_id=${fx.doc.id} ORDER BY position`;
+      const [rev2Snap] = await sql`SELECT blocks FROM library_revisions WHERE document_id=${fx.doc.id} AND revision_number=2`;
+      expect(rev2Live.map((b) => b.id)).toEqual(expectedRev2Order);
+      expect(rev2Live.map((b) => b.position)).toEqual(expectedRev2Order.map((_, idx) => idx));
+      expect((rev2Snap!.blocks as Array<{ id: string }>).map((b) => b.id)).toEqual(expectedRev2Order);
+
+      // 2. Partial accept editing only visibleA keeps addedBlockId and all hidden blocks intact.
+      const partialProposal = await repository.create({
+        workspaceId,
+        documentId: fx.doc.id,
+        baseRevisionNumber: 2,
+        proposedBlocks: [
+          { id: fx.visibleA.id, type: "paragraph", position: 0, content: { text: "RP_PUBLIC_A_PARTIAL" } },
+        ],
+        source,
+        supportState: "partial",
+      });
+      const partialAccepted = await repository.review({
+        workspaceId,
+        proposalId: partialProposal.id,
+        action: "partial_accept",
+        selectedProposalBlockIds: [fx.visibleA.id],
+        actorUserId: userId,
+      });
+      expect(partialAccepted.proposal.status).toBe("accepted");
+      expect(partialAccepted.document?.currentRevisionNumber).toBe(3);
+      expect(partialAccepted.document?.blocks.map((b) => b.id)).toEqual([fx.visibleA.id, addedBlockId]);
+      for (const secret of fx.secrets) {
+        expect(JSON.stringify(partialAccepted)).not.toContain(secret);
+      }
+      const rev3Live = await sql`SELECT id FROM library_blocks WHERE document_id=${fx.doc.id} ORDER BY position`;
+      expect(rev3Live.map((b) => b.id)).toEqual(expectedRev2Order);
+
+      // 3. Conflict + preserve_both keeps conflict snapshot redacted and preserves all hidden blocks on resolution.
+      const conflictBaseProposal = await repository.create({
+        workspaceId,
+        documentId: fx.doc.id,
+        baseRevisionNumber: 3,
+        proposedBlocks: [
+          { id: fx.visibleA.id, type: "paragraph", position: 0, content: { text: "RP_PUBLIC_A_PRESERVE_BOTH" } },
+          { id: addedBlockId, type: "paragraph", position: 1, content: { text: "RP_PUBLIC_ADDED" } },
+        ],
+        source,
+        supportState: "supported",
+      });
+      await fx.library.updateDocument({
+        workspaceId,
+        documentId: fx.doc.id,
+        expectedRevisionNumber: 3,
+        blocks: [
+          { id: fx.visibleA.id, type: "paragraph", content: { text: "RP_PUBLIC_A_CONCURRENT_V4" } },
+          { id: addedBlockId, type: "paragraph", content: { text: "RP_PUBLIC_ADDED" } },
+        ],
+      });
+      const conflicted = await repository.review({
+        workspaceId,
+        proposalId: conflictBaseProposal.id,
+        action: "accept",
+        actorUserId: userId,
+      });
+      expect(conflicted.proposal.status).toBe("conflicted");
+      expect(conflicted.proposal.conflict?.currentBlocks.map((b) => b.id)).toEqual([fx.visibleA.id, addedBlockId]);
+      const [storedConflict] = await sql`SELECT current_conflict FROM revision_proposals WHERE id=${conflictBaseProposal.id}`;
+      for (const secret of fx.secrets) {
+        expect(JSON.stringify(conflicted)).not.toContain(secret);
+        expect(JSON.stringify(storedConflict)).not.toContain(secret);
+      }
+
+      const resolved = await repository.resolveConflict({
+        workspaceId,
+        proposalId: conflictBaseProposal.id,
+        action: "preserve_both",
+        selectedProposalBlockIds: [fx.visibleA.id],
+        expectedCurrentRevisionNumber: 4,
+        actorUserId: userId,
+      });
+      expect(resolved.proposal.status).toBe("accepted");
+      expect(resolved.document?.currentRevisionNumber).toBe(5);
+      expect(resolved.document?.blocks).toHaveLength(3);
+      for (const secret of fx.secrets) {
+        expect(JSON.stringify(resolved)).not.toContain(secret);
+      }
+
+      const trustedDoc = await fx.library.getDocument({ workspaceId, documentId: fx.doc.id, includeAnswerKeys: true });
+      for (const hidden of [fx.leadAnswer, fx.midSolution, fx.midNestedRoleKey, fx.midNestedTypeSol, fx.midProvenance, fx.trailAnswer]) {
+        expect(trustedDoc.blocks.find((b) => b.id === hidden.id)?.content).toEqual(hidden.content);
+      }
+      const [rev5Snap] = await sql`SELECT blocks FROM library_revisions WHERE document_id=${fx.doc.id} AND revision_number=5`;
+      expect((rev5Snap!.blocks as Array<{ id: string }>).length).toBe(trustedDoc.blocks.length);
+    });
   });
 });

@@ -12,6 +12,8 @@ import {
   createOpeningKnowledgeRepository,
   createCardRepository,
   createBackupRestoreRepository,
+  hasForgedOrProtectedBlock,
+  PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
   CourseMembershipError,
   ExplorationRepositoryError,
   IdentityError,
@@ -155,6 +157,14 @@ export async function getRevisionProposalForPrincipal(runtime: AuthRuntime, prin
 export async function createRevisionProposalForPrincipal(runtime: AuthRuntime, principal: Principal, documentId: string, body: unknown) {
   const parsed = createRevisionProposalRequestSchema.parse(body);
   const document = await getDocumentForPrincipal(runtime, principal, documentId);
+  if (
+    body
+    && typeof body === "object"
+    && Array.isArray((body as { proposedBlocks?: unknown }).proposedBlocks)
+    && hasForgedOrProtectedBlock((body as { proposedBlocks: unknown[] }).proposedBlocks, new Set())
+  ) {
+    throw new ApiError("VALIDATION", PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE, 400);
+  }
   const provenance = {
     ...parsed.provenance,
     actorUserId: principal.userId,
