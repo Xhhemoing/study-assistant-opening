@@ -1,14 +1,17 @@
 import {
+  ALLOWED_SCRATCHPAD_MIME_TYPES,
   COMPANION_ALLOWED_ACTIONS,
   COMPANION_COOKIE_PATH,
   COMPANION_PAIRING_TTL_MS,
   COMPANION_USER_CODE_ALPHABET,
+  MAX_SCRATCHPAD_PAGE_BYTES,
   type AppendCompanionScratchpadPageInput,
   type AppendCompanionScratchpadPageResult,
   type AuthorizeCompanionActionInput,
   type AuthorizeCompanionActionResult,
   type CompanionAllowedAction,
   type CompanionPairingOffer,
+  type CompanionScratchpadMimeType,
   type CompanionScratchpadPage,
   type CompanionScratchpadState,
   type CompanionSession,
@@ -28,6 +31,7 @@ const USER_CODE_LENGTH = 8;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
 
 const ALLOWED_ACTION_SET: ReadonlySet<string> = new Set<string>(COMPANION_ALLOWED_ACTIONS);
+const ALLOWED_MIME_TYPE_SET: ReadonlySet<string> = new Set<string>(ALLOWED_SCRATCHPAD_MIME_TYPES);
 const USER_CODE_CHAR_SET: ReadonlySet<string> = new Set(COMPANION_USER_CODE_ALPHABET.split(""));
 
 const SHA256_K = [
@@ -158,7 +162,9 @@ export function normalizeOrigin(rawOrigin: string): string | null {
   return parsed.origin.toLowerCase();
 }
 
-const MULTI_PART_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+// Verified PSL delegated 2-label ccSLDs (note: `gov.ca` is intentionally excluded because
+// `gov.ca` is a single registrable domain in PSL, not a delegated public suffix).
+const VERIFIED_MULTI_PART_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
   "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk", "nhs.uk", "police.uk",
   "com.cn", "edu.cn", "gov.cn", "org.cn", "net.cn", "ac.cn",
   "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
@@ -166,34 +172,39 @@ const MULTI_PART_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
   "com.hk", "edu.hk", "gov.hk", "org.hk", "net.hk",
   "com.tw", "edu.tw", "gov.tw", "org.tw", "net.tw",
   "com.sg", "edu.sg", "gov.sg", "org.sg", "net.sg",
-  "co.kr", "or.kr", "ac.kr", "go.kr", "re.kr",
-  "co.in", "org.in", "ac.in", "gov.in", "net.in", "edu.in",
-  "com.br", "org.br", "gov.br", "edu.br", "net.br",
-  "co.nz", "org.nz", "ac.nz", "govt.nz", "net.nz",
-  "co.za", "org.za", "ac.za", "gov.za",
-  "com.mx", "org.mx", "edu.mx", "gob.mx",
-  "com.tr", "org.tr", "edu.tr", "gov.tr",
-  "com.my", "edu.my", "gov.my", "org.my",
-  "co.id", "ac.id", "go.id", "or.id",
-  "co.il", "ac.il", "gov.il", "org.il",
-  "com.ar", "org.ar", "edu.ar", "gov.ar",
+  "co.kr", "or.kr", "ac.kr", "go.kr", "re.kr", "ne.kr",
+  "co.in", "org.in", "ac.in", "gov.in", "net.in", "edu.in", "res.in", "gen.in", "firm.in", "ind.in",
+  "com.br", "org.br", "gov.br", "edu.br", "net.br", "ind.br",
+  "co.nz", "org.nz", "ac.nz", "govt.nz", "net.nz", "geek.nz", "kiwi.nz", "maori.nz", "iwi.nz", "cri.nz", "school.nz",
+  "co.za", "org.za", "ac.za", "gov.za", "net.za", "edu.za", "nom.za",
+  "com.mx", "org.mx", "edu.mx", "gob.mx", "net.mx",
+  "com.tr", "org.tr", "edu.tr", "gov.tr", "net.tr", "gen.tr",
+  "com.my", "edu.my", "gov.my", "org.my", "net.my",
+  "co.id", "ac.id", "go.id", "or.id", "web.id", "sch.id",
+  "co.il", "ac.il", "gov.il", "org.il", "net.il", "muni.il",
+  "com.ar", "org.ar", "edu.ar", "gov.ar", "gob.ar", "net.ar",
   "com.pl", "net.pl", "org.pl", "edu.pl", "gov.pl",
-  "com.ua", "org.ua", "edu.ua", "gov.ua",
-  "gc.ca", "gov.ca",
+  "com.ua", "org.ua", "edu.ua", "gov.ua", "net.ua",
+  "asso.fr", "nom.fr", "gouv.fr",
+  "com.es", "nom.es", "org.es", "gob.es", "edu.es",
+  "gc.ca",
+]);
+
+const STANDARD_CC_SLD_LABELS: ReadonlySet<string> = new Set([
+  "co", "com", "org", "net", "edu", "ac", "gov", "govt", "gob", "gouv", "mil", "sch",
+  "or", "ne", "go", "lg", "ed", "gr", "nom", "asso", "ind", "res", "gen", "firm",
+  "id", "geek", "kiwi", "maori", "iwi", "cri",
 ]);
 
 const IPV4_LITERAL_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const TWO_LETTER_CCTLD_RE = /^[a-z]{2}$/;
 
 function normalizeHostname(origin: string): string {
   return new URL(origin).hostname.toLowerCase().replace(/\.$/, "");
 }
 
-/**
- * Extracts the RFC 6265 / Fetch registrable site (eTLD+1) from a normalized HTTPS origin.
- * Returns `null` for IP literals, `localhost`/`*.localhost`, single-label hosts, or bare public suffixes.
- */
-export function extractRegistrableSite(rawOrigin: string): string | null {
+function getHostLabels(rawOrigin: string): ReadonlyArray<string> | null {
   const normalizedOrigin = normalizeOrigin(rawOrigin);
   if (!normalizedOrigin) return null;
   const host = normalizeHostname(normalizedOrigin);
@@ -211,11 +222,34 @@ export function extractRegistrableSite(rawOrigin: string): string | null {
   if (labels.length < 2 || labels.some(label => !DNS_LABEL_RE.test(label))) {
     return null;
   }
-  const lastTwo = `${labels[labels.length - 2]}.${labels[labels.length - 1]}`;
-  if (MULTI_PART_PUBLIC_SUFFIXES.has(lastTwo)) {
+  return labels;
+}
+
+/**
+ * Extracts the RFC 6265 / Fetch registrable site (eTLD+1) from a normalized HTTPS origin.
+ * Returns `null` for IP literals, `localhost`/`*.localhost`, single-label hosts, or bare
+ * public suffixes (including bare `<sld>.<cc>` suffixes on 2-letter ccTLDs).
+ */
+export function extractRegistrableSite(rawOrigin: string): string | null {
+  const labels = getHostLabels(rawOrigin);
+  if (!labels) return null;
+  const tld = labels[labels.length - 1]!;
+  const sld = labels[labels.length - 2]!;
+  const lastTwo = `${sld}.${tld}`;
+
+  if (VERIFIED_MULTI_PART_PUBLIC_SUFFIXES.has(lastTwo)) {
     if (labels.length < 3) return null;
     return `${labels[labels.length - 3]}.${lastTwo}`;
   }
+
+  // Reject bare 2-label `<standard-sld>.<cc>` on 2-letter ccTLDs as potential public suffixes.
+  if (TWO_LETTER_CCTLD_RE.test(tld) && STANDARD_CC_SLD_LABELS.has(sld) && labels.length === 2) {
+    return null;
+  }
+
+  // For non-delegated or unverified `<sld>.<cc>` (including `gov.ca` or unknown ccSLDs),
+  // collapse to `lastTwo` so sibling hosts (`a.gov.ca` vs `b.gov.ca`, `a.co.th` vs `b.co.th`)
+  // fail closed as same-site rather than falsely passing isolation!
   return lastTwo;
 }
 
@@ -223,17 +257,35 @@ export function extractRegistrableSite(rawOrigin: string): string | null {
  * Enforces RFC 6265 cross-site cookie isolation between primary and companion HTTPS origins:
  * - Both origins must be valid HTTPS origins with extractable registrable domains (eTLD+1).
  * - Rejects IP literals, localhost, same-host different-port pairs, parent/child subdomains,
- *   AND sibling subdomains sharing the same registrable site (e.g. `app.aistudy.example` vs
- *   `scratchpad.aistudy.example` share `Domain=aistudy.example` and `SameSite=Strict` scope).
+ *   sibling subdomains sharing the same registrable site, and unverified ccTLD SLDs unless
+ *   distinct at both 2-label and 3-label levels.
  */
 export function areCompanionOriginsIsolated(
   primaryOrigin: string,
   companionOrigin: string,
 ): boolean {
+  const primaryLabels = getHostLabels(primaryOrigin);
+  const companionLabels = getHostLabels(companionOrigin);
+  if (!primaryLabels || !companionLabels) return false;
+
   const primarySite = extractRegistrableSite(primaryOrigin);
   const companionSite = extractRegistrableSite(companionOrigin);
   if (!primarySite || !companionSite) return false;
-  return primarySite !== companionSite;
+  if (primarySite === companionSite) return false;
+
+  // Extra fail-closed guard for unverified 2-letter ccTLD short SLDs:
+  // if both origins share the exact same 2-label suffix and that suffix is NOT in our
+  // verified PSL table, reject even if 3-label suffixes differ.
+  const primaryLastTwo = `${primaryLabels[primaryLabels.length - 2]}.${primaryLabels[primaryLabels.length - 1]}`;
+  const companionLastTwo = `${companionLabels[companionLabels.length - 2]}.${companionLabels[companionLabels.length - 1]}`;
+  if (
+    primaryLastTwo === companionLastTwo &&
+    !VERIFIED_MULTI_PART_PUBLIC_SUFFIXES.has(primaryLastTwo)
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -277,10 +329,52 @@ function hashDeviceCode(deviceCode: string): string {
   return sha256Utf8Hex(`aistudy:companion-device-code:v1:${deviceCode}`);
 }
 
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function encodeBase64Utf8(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  let output = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i] ?? 0;
+    const b1 = i + 1 < bytes.length ? (bytes[i + 1] ?? 0) : 0;
+    const b2 = i + 2 < bytes.length ? (bytes[i + 2] ?? 0) : 0;
+    const triple = (b0 << 16) | (b1 << 8) | b2;
+    output += BASE64_CHARS[(triple >>> 18) & 0x3f];
+    output += BASE64_CHARS[(triple >>> 12) & 0x3f];
+    output += i + 1 < bytes.length ? BASE64_CHARS[(triple >>> 6) & 0x3f] : "=";
+    output += i + 2 < bytes.length ? BASE64_CHARS[triple & 0x3f] : "=";
+  }
+  return output;
+}
+
+function encodeHexUtf8(input: string): string {
+  return [...new TextEncoder().encode(input)]
+    .map(byte => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function collectDecodedVariants(raw: string): { readonly ok: true; readonly values: ReadonlyArray<string> } | { readonly ok: false } {
+  const variants = new Set<string>([raw]);
+  let current = raw;
+  for (let pass = 0; pass < 2; pass += 1) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      return { ok: false };
+    }
+    variants.add(decoded);
+    if (decoded === current) break;
+    current = decoded;
+  }
+  return { ok: true, values: [...variants] };
+}
+
 /**
  * Parses a companion pairing QR URL and extracts the ephemeral secret strictly from
- * the URL fragment (`#k=<fragmentSecret>`). Rejects any URL where `k` appears in the
- * query string or path so server logs / HTTP Referer leaks fail closed.
+ * the URL fragment (`#k=<fragmentSecret>`). Rejects any URL where `k` or the secret
+ * (raw, percent-encoded, base64/base64url, or hex-encoded) appears in the path or query
+ * string, and fails closed on malformed `%` escape sequences.
  */
 export function parseCompanionQrUrl(
   qrUrl: string,
@@ -303,12 +397,14 @@ export function parseCompanionQrUrl(
       message: "QR URL must not contain embedded userinfo credentials.",
     };
   }
-  if (parsed.searchParams.has("k")) {
-    return {
-      ok: false,
-      code: "secret_outside_fragment",
-      message: "QR URL must never place the ephemeral secret in the query string.",
-    };
+  for (const key of parsed.searchParams.keys()) {
+    if (key.toLowerCase() === "k") {
+      return {
+        ok: false,
+        code: "secret_outside_fragment",
+        message: "QR URL must never place the ephemeral secret in the query string.",
+      };
+    }
   }
   if (!parsed.hash.startsWith("#")) {
     return {
@@ -326,16 +422,61 @@ export function parseCompanionQrUrl(
       message: "QR URL fragment #k=<fragmentSecret> is missing or too short.",
     };
   }
-  if (
-    parsed.pathname.includes(fragmentSecret) ||
-    parsed.search.includes(fragmentSecret)
-  ) {
+
+  const decodedPath = collectDecodedVariants(parsed.pathname);
+  const decodedSearch = collectDecodedVariants(parsed.search);
+  if (!decodedPath.ok || !decodedSearch.ok) {
     return {
       ok: false,
-      code: "secret_outside_fragment",
-      message: "QR URL leaked the ephemeral secret into the pathname or query string.",
+      code: "invalid_qr_url",
+      message: "QR URL contains malformed percent-encoding in pathname or query string.",
     };
   }
+
+  const base64Secret = encodeBase64Utf8(fragmentSecret);
+  const base64UrlSecret = base64Secret.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const hexSecret = encodeHexUtf8(fragmentSecret);
+  const secretVariants = [
+    fragmentSecret,
+    encodeURIComponent(fragmentSecret),
+    base64Secret,
+    base64UrlSecret,
+    hexSecret,
+  ];
+
+  const candidateSurfaces: string[] = [
+    ...decodedPath.values,
+    ...decodedSearch.values,
+  ];
+  for (const [key, value] of parsed.searchParams.entries()) {
+    const decodedKey = collectDecodedVariants(key);
+    const decodedValue = collectDecodedVariants(value);
+    if (!decodedKey.ok || !decodedValue.ok) {
+      return {
+        ok: false,
+        code: "invalid_qr_url",
+        message: "QR URL contains malformed percent-encoding in query parameters.",
+      };
+    }
+    candidateSurfaces.push(...decodedKey.values, ...decodedValue.values);
+  }
+
+  for (const surface of candidateSurfaces) {
+    const lowerSurface = surface.toLowerCase();
+    for (const variant of secretVariants) {
+      if (
+        surface.includes(variant) ||
+        (variant === hexSecret && lowerSurface.includes(hexSecret))
+      ) {
+        return {
+          ok: false,
+          code: "secret_outside_fragment",
+          message: "QR URL leaked the ephemeral secret into the pathname or query string.",
+        };
+      }
+    }
+  }
+
   return {
     ok: true,
     origin: parsed.origin.toLowerCase(),
@@ -790,6 +931,11 @@ export function appendCompanionScratchpadPage(
   }
 
   const effectiveUploadedAtMs = input.uploadedAtMs ?? input.nowMs;
+  const normalizedMimeType = isNonEmptyString(input.mimeType)
+    ? input.mimeType.trim().toLowerCase()
+    : "";
+  const validMimeType =
+    !normalizedMimeType.includes(";") && ALLOWED_MIME_TYPE_SET.has(normalizedMimeType);
 
   if (
     !Number.isSafeInteger(input.pageNumber) ||
@@ -797,8 +943,10 @@ export function appendCompanionScratchpadPage(
     !isNonEmptyString(input.objectKey) ||
     !isNonEmptyString(input.sha256) ||
     !SHA256_HEX_RE.test(input.sha256.trim()) ||
+    !validMimeType ||
     !Number.isSafeInteger(input.byteLength) ||
     input.byteLength <= 0 ||
+    input.byteLength > MAX_SCRATCHPAD_PAGE_BYTES ||
     !isValidTimestamp(effectiveUploadedAtMs)
   ) {
     return {
@@ -806,7 +954,7 @@ export function appendCompanionScratchpadPage(
       code: "invalid_page_payload",
       httpStatus: 400,
       state,
-      message: "Scratchpad page requires positive pageNumber, objectKey, 64-char hex sha256, positive byteLength, and valid timestamp.",
+      message: `Scratchpad page requires positive pageNumber, objectKey, 64-char hex sha256, allowlisted mimeType (${ALLOWED_SCRATCHPAD_MIME_TYPES.join(", ")}), 0 < byteLength <= ${MAX_SCRATCHPAD_PAGE_BYTES}, and valid timestamp.`,
     };
   }
 
@@ -815,6 +963,7 @@ export function appendCompanionScratchpadPage(
     pageNumber: input.pageNumber,
     objectKey: input.objectKey.trim(),
     sha256: input.sha256.trim().toLowerCase(),
+    mimeType: normalizedMimeType as CompanionScratchpadMimeType,
     byteLength: input.byteLength,
     uploadedAtMs: effectiveUploadedAtMs,
     uploadedInRevision: nextRevision,

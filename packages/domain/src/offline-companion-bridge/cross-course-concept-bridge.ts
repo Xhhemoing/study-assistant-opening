@@ -123,6 +123,8 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     targetInCourseState,
   } = input;
 
+  const canonicalTargetCourseId = targetCourseId.trim();
+  const canonicalTargetConceptId = targetConceptId.trim();
   const ignoredNonDirectEdges: IgnoredNonDirectBridgeEdge[] = [];
   const decoupledEdges: DecoupledConceptBridgeEdge[] = [];
   const survivingBySourceKey = new Map<
@@ -130,6 +132,8 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     {
       edge: CrossCourseConceptEdge;
       edgeId: string;
+      canonicalSourceCourseId: string;
+      canonicalSourceConceptId: string;
       directOnlyMastery: number;
       evidenceSource: "direct_counts" | "certified_direct_only_probability";
     }
@@ -137,8 +141,17 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
 
   for (const edge of edges) {
     const edgeId = resolveEdgeId(edge);
+    const canonicalSourceCourseId = edge.sourceCourseId.trim();
+    const canonicalSourceConceptId = edge.sourceConceptId.trim();
+    const canonicalEdgeTargetCourseId = edge.targetCourseId.trim();
+    const canonicalEdgeTargetConceptId = edge.targetConceptId.trim();
 
-    if (edge.targetCourseId !== targetCourseId || edge.targetConceptId !== targetConceptId) {
+    if (
+      !canonicalTargetCourseId ||
+      !canonicalTargetConceptId ||
+      canonicalEdgeTargetCourseId !== canonicalTargetCourseId ||
+      canonicalEdgeTargetConceptId !== canonicalTargetConceptId
+    ) {
       ignoredNonDirectEdges.push({
         edgeId,
         sourceCourseId: edge.sourceCourseId,
@@ -150,7 +163,7 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
       continue;
     }
 
-    if (edge.sourceCourseId === targetCourseId) {
+    if (canonicalSourceCourseId === canonicalTargetCourseId) {
       ignoredNonDirectEdges.push({
         edgeId,
         sourceCourseId: edge.sourceCourseId,
@@ -164,15 +177,19 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
 
     const decoupleReasons: CrossCourseDecoupleReason[] = [];
 
+    if (!canonicalSourceCourseId || !canonicalSourceConceptId) {
+      decoupleReasons.push("invalid_edge_parameters");
+    }
+
     if ((edge.hopCount !== undefined && edge.hopCount !== 1) || edge.derivedFromBridge === true) {
       decoupleReasons.push("multi_hop_rejected");
     }
 
-    if (activeCourseSharingEnabled[edge.sourceCourseId] !== true) {
+    if (activeCourseSharingEnabled[canonicalSourceCourseId] !== true) {
       decoupleReasons.push("course_sharing_disabled");
     }
 
-    const liveEpoch = coursePrivacyEpochs[edge.sourceCourseId];
+    const liveEpoch = coursePrivacyEpochs[canonicalSourceCourseId];
     if (
       liveEpoch === undefined ||
       !Number.isFinite(liveEpoch) ||
@@ -229,14 +246,16 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
       continue;
     }
 
-    // Deduplicate identical `(sourceCourseId, sourceConceptId)` edges deterministically
-    // so repeating the same neighbor cannot inflate its alignment weight.
-    const sourceKey = `${edge.sourceCourseId}::${edge.sourceConceptId}`;
+    // Deduplicate identical canonical `(sourceCourseId, sourceConceptId)` edges deterministically
+    // so repeating the same neighbor (or whitespace-padded aliases) cannot inflate alignment weight.
+    const sourceKey = `${canonicalSourceCourseId}::${canonicalSourceConceptId}`;
     const existing = survivingBySourceKey.get(sourceKey);
     if (!existing || edge.alignmentWeight > existing.edge.alignmentWeight) {
       survivingBySourceKey.set(sourceKey, {
         edge,
         edgeId,
+        canonicalSourceCourseId,
+        canonicalSourceConceptId,
         directOnlyMastery: directResolution.directOnlyMastery,
         evidenceSource: directResolution.evidenceSource,
       });
@@ -272,7 +291,14 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
   let rawDeltaBeta = 0;
   const acceptedEdges: AcceptedConceptBridgeEdge[] = [];
 
-  for (const { edge, edgeId, directOnlyMastery, evidenceSource } of surviving) {
+  for (const {
+    edge,
+    edgeId,
+    canonicalSourceCourseId,
+    canonicalSourceConceptId,
+    directOnlyMastery,
+    evidenceSource,
+  } of surviving) {
     const effectiveWeight = Math.min(bridgeCap, edge.alignmentWeight * scale);
     const edgeDeltaAlpha = effectiveWeight * directOnlyMastery;
     const edgeDeltaBeta = effectiveWeight * (1 - directOnlyMastery);
@@ -280,8 +306,8 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     rawDeltaBeta += edgeDeltaBeta;
     acceptedEdges.push({
       edgeId,
-      sourceCourseId: edge.sourceCourseId,
-      sourceConceptId: edge.sourceConceptId,
+      sourceCourseId: canonicalSourceCourseId,
+      sourceConceptId: canonicalSourceConceptId,
       alignmentWeight: edge.alignmentWeight,
       sourceDirectOnlyMasteryProbability: directOnlyMastery,
       sourceMasteryProbability: directOnlyMastery,

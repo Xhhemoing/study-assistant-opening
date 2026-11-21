@@ -15,6 +15,7 @@ import {
   type OfflineOutboxEntryInput,
   type OfflineOutboxItemResult,
   type OfflineOutboxLedgerEntry,
+  type OfflineOutboxPayloadSummary,
   type OfflineRawRating,
   type OfflineSettledReceipt,
   type ReconcileOfflineLeaseOutboxInput,
@@ -80,10 +81,49 @@ function extractLeakSegments(normalizedSecret: string): string[] {
   return [...segments];
 }
 
-function stemLeaksSecretText(normalizedStem: string, secretText: string): boolean {
+const SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE =
+  /^(?:[+-]?\d+(?:\.\d+)?(?:\/\d+)?|[+-]?(?:pi|inf|infty|sqrt\([^)]+\)|[a-z]\^\d+)(?:\/[a-z0-9]+)?|[+-]?\d+(?:\/\d+)?\s*(?:pi|sqrt\([^)]+\))|[a-z0-9]+\/[a-z0-9]+|[+-]?\d+[a-z](?:\^\d+)?)$/i;
+
+const SINGLE_CHOICE_LETTER_RE = /^[a-z]$/i;
+
+function containsStandaloneNumericOrSymbolicToken(haystack: string, token: string): boolean {
+  const escaped = escapeRegExp(token);
+  const pattern = new RegExp(`(?<![a-z0-9]|\\d\\.)${escaped}(?![a-z0-9]|\\.\\d)`, "i");
+  return pattern.test(haystack);
+}
+
+function containsSingleChoiceReveal(rawText: string, choiceLetter: string): boolean {
+  const escaped = escapeRegExp(choiceLetter);
+  const patterns = [
+    new RegExp(
+      `(?:correct(?:\\s+(?:option|choice|answer))?|choice|option|key|ans(?:wer)?|选|答案|正确选项)\\s*(?:is|[:：=]|为|是)?\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?:$|[^a-z0-9])`,
+      "i",
+    ),
+    new RegExp(`=\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?:$|[^a-z0-9])`, "i"),
+    new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "i"),
+  ];
+  return patterns.some(pattern => pattern.test(rawText));
+}
+
+/**
+ * Checks whether a candidate stem/text leaks a secret answer/solution value, including:
+ * - exact normalized equality
+ * - non-trivial substring or multi-segment solution excerpts
+ * - whitespace-tolerant algebraic equations (e.g. `x=5` / `x = 5`)
+ * - short single-token numeric/symbolic answers (e.g. `"42"`, `"-7"`, `"0.5"`, `"pi/2"`, `"1"`)
+ * - single-letter choice answer reveals (e.g. `"Correct option is B"`, `"(B)"`)
+ */
+export function containsAnswerLeak(
+  rawText: string,
+  secretText: string,
+  options: { readonly includeShortTokens?: boolean } = {},
+): boolean {
+  const normalizedStem = normalizeComparableText(rawText);
   const normalizedSecret = normalizeComparableText(secretText);
-  if (!normalizedSecret) return false;
+  if (!normalizedStem || !normalizedSecret) return false;
   if (normalizedStem === normalizedSecret) return true;
+
+  const includeShortTokens = options.includeShortTokens ?? true;
 
   for (const segment of extractLeakSegments(normalizedSecret)) {
     if (segment.length >= 6 && normalizedStem.includes(segment)) {
@@ -99,6 +139,17 @@ function stemLeaksSecretText(normalizedStem: string, secretText: string): boolea
         const eqRegexSource = escapeRegExp(compactEq).replace(/=/g, "\\s*=\\s*");
         const eqPattern = new RegExp(`(?:^|[^a-z0-9])${eqRegexSource}(?:$|[^a-z0-9])`, "i");
         if (eqPattern.test(normalizedStem)) {
+          return true;
+        }
+      }
+    }
+    if (includeShortTokens && tokenCount === 1) {
+      if (SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE.test(segment)) {
+        if (containsStandaloneNumericOrSymbolicToken(normalizedStem, segment)) {
+          return true;
+        }
+      } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
+        if (containsSingleChoiceReveal(rawText, segment)) {
           return true;
         }
       }
@@ -279,6 +330,7 @@ function cloneServerSnapshot(snapshot: ServerFlashcardSnapshot): ServerFlashcard
 function cloneLedgerEntry(entry: OfflineOutboxLedgerEntry): OfflineOutboxLedgerEntry {
   return {
     ...entry,
+    ...(entry.payloadSummary ? { payloadSummary: { ...entry.payloadSummary } } : {}),
     receipt: {
       ...entry.receipt,
       strippedClientFlags: [...entry.receipt.strippedClientFlags],
@@ -327,6 +379,7 @@ function toLedgerRecord(
 
 function sanitizeLeaseCandidate(
   candidate: OfflineLeaseCardCandidate,
+  siblingSecretTexts: ReadonlyArray<string>,
 ):
   | { readonly ok: true; readonly card: OfflineLeaseCard }
   | {
@@ -374,10 +427,8 @@ function sanitizeLeaseCandidate(
         message: `Flashcard ${candidateCardId} requires non-empty prompt and backSummary.`,
       };
     }
-    // Defense-in-depth: fail closed if a flashcard candidate carries any forbidden
-    // exam/miss-variant secret fields (`sealedPayload`, `answerKey`, `canonicalSolution`,
-    // `gradingRubric`, `referenceAnswer`) so sealed problem material cannot bypass sanitization
-    // by being mislabeled as `cardKind: "flashcard"`.
+    // Fail closed if a flashcard candidate carries any forbidden exam/miss-variant secret fields
+    // (`sealedPayload`, `answerKey`, `canonicalSolution`, `gradingRubric`, `referenceAnswer`).
     const rawCandidate = candidate as Record<string, unknown>;
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
       const value = rawCandidate[forbiddenField];
@@ -391,14 +442,32 @@ function sanitizeLeaseCandidate(
         };
       }
     }
-    if (containsSolutionDirectiveMarker(candidate.prompt)) {
+    // Check BOTH prompt AND backSummary against solution/answer-key directives and sibling secret payloads.
+    if (
+      containsSolutionDirectiveMarker(candidate.prompt) ||
+      containsSolutionDirectiveMarker(candidate.backSummary)
+    ) {
       return {
         ok: false,
         code: "miss_variant_answer_leak",
         httpStatus: 422,
         cardId: candidateCardId,
-        message: `Flashcard ${candidateCardId} refused: prompt contains solution/answer directive markup.`,
+        message: `Flashcard ${candidateCardId} refused: prompt or backSummary contains solution/answer directive markup.`,
       };
+    }
+    for (const siblingSecret of siblingSecretTexts) {
+      if (
+        containsAnswerLeak(candidate.prompt, siblingSecret, { includeShortTokens: false }) ||
+        containsAnswerLeak(candidate.backSummary, siblingSecret, { includeShortTokens: false })
+      ) {
+        return {
+          ok: false,
+          code: "miss_variant_answer_leak",
+          httpStatus: 422,
+          cardId: candidateCardId,
+          message: `Flashcard ${candidateCardId} refused: prompt or backSummary leaks sibling sealed/answer material.`,
+        };
+      }
     }
     const sanitized: OfflineLeasedStandardFlashcard = {
       cardId: candidateCardId.trim(),
@@ -430,12 +499,11 @@ function sanitizeLeaseCandidate(
         message: `Miss variant card ${candidateCardId} refused: freshVariantStem contains solution/answer directive markup.`,
       };
     }
-    const normalizedStem = normalizeComparableText(candidate.freshVariantStem);
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
       const rawSecret = (candidate as Record<string, unknown>)[forbiddenField];
       const secretTexts = collectSecretTexts(rawSecret);
       for (const secretText of secretTexts) {
-        if (stemLeaksSecretText(normalizedStem, secretText)) {
+        if (containsAnswerLeak(candidate.freshVariantStem, secretText, { includeShortTokens: true })) {
           return {
             ok: false,
             code: "miss_variant_answer_leak",
@@ -588,10 +656,19 @@ export function issueOfflineFlashcardLease(
     }
   }
 
+  const siblingSecretTexts: string[] = [];
+  for (const candidate of input.candidates) {
+    if (candidate.cardKind !== "miss_variant") continue;
+    const rawCandidate = candidate as Record<string, unknown>;
+    for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
+      siblingSecretTexts.push(...collectSecretTexts(rawCandidate[forbiddenField]));
+    }
+  }
+
   const seenCardIds = new Set<string>();
   const sanitizedCards: OfflineLeaseCard[] = [];
   for (const candidate of input.candidates) {
-    const sanitized = sanitizeLeaseCandidate(candidate);
+    const sanitized = sanitizeLeaseCandidate(candidate, siblingSecretTexts);
     if (!sanitized.ok) {
       return sanitized;
     }
@@ -678,6 +755,39 @@ function scheduleServerReceiptFsrs(
     updatedAtMs: serverReceiptAtMs,
     fsrs: serializeFsrsCard(nextCard),
   };
+}
+
+function buildPayloadSummary(entry: OfflineOutboxEntryInput): OfflineOutboxPayloadSummary {
+  return {
+    cardId: entry.cardId,
+    rating: entry.rating,
+    expectedCardRevision: entry.expectedCardRevision,
+    clientReviewedAtMs: entry.clientReviewedAtMs ?? null,
+  };
+}
+
+function payloadMatchesLedgerEntry(
+  entry: OfflineOutboxEntryInput,
+  payloadFingerprint: string,
+  ledgerEntry: OfflineOutboxLedgerEntry,
+): boolean {
+  if (ledgerEntry.payloadFingerprint !== payloadFingerprint) return false;
+  const summary = ledgerEntry.payloadSummary;
+  if (summary) {
+    if (
+      summary.cardId !== entry.cardId ||
+      summary.rating !== entry.rating ||
+      summary.expectedCardRevision !== entry.expectedCardRevision ||
+      summary.clientReviewedAtMs !== (entry.clientReviewedAtMs ?? null)
+    ) {
+      return false;
+    }
+  }
+  return (
+    ledgerEntry.receipt.cardId === entry.cardId &&
+    ledgerEntry.receipt.rawRating === entry.rating &&
+    ledgerEntry.receipt.previousRevision === entry.expectedCardRevision
+  );
 }
 
 function detectStrippedClientFlags(entry: OfflineOutboxEntryInput): ReadonlyArray<string> {
@@ -790,6 +900,10 @@ export function reconcileOfflineLeaseOutbox(
     });
 
   const results: OfflineOutboxItemResult[] = [];
+  const seenSeqInBatch = new Map<
+    string,
+    { readonly payloadFingerprint: string; readonly payloadSummary: OfflineOutboxPayloadSummary }
+  >();
   let settledCount = 0;
   let replayedCount = 0;
   let conflictCount = 0;
@@ -821,13 +935,16 @@ export function reconcileOfflineLeaseOutbox(
     }
 
     const payloadFingerprint = computeOfflineOutboxPayloadFingerprint(entry);
+    const payloadSummary = buildPayloadSummary(entry);
     const idempotencyKey = offlineOutboxIdempotencyKey(lease.leaseId, entry.seq);
     const existingLedgerEntry = workingLedger[idempotencyKey];
 
     // Idempotency check runs BEFORE desktop race checks so retries of already-settled
-    // `(leaseId, seq)` entries always return cached receipt without false 409s.
+    // `(leaseId, seq)` entries return the cached receipt ONLY when the full payload
+    // (fingerprint + cardId/rating/expectedCardRevision/clientReviewedAtMs) matches identically;
+    // any mismatch fails closed with `409 seq_payload_mismatch`.
     if (existingLedgerEntry) {
-      if (existingLedgerEntry.payloadFingerprint === payloadFingerprint) {
+      if (payloadMatchesLedgerEntry(entry, payloadFingerprint, existingLedgerEntry)) {
         replayedCount += 1;
         const cachedReceipt = cloneLedgerEntry(existingLedgerEntry).receipt;
         results.push({
@@ -860,6 +977,26 @@ export function reconcileOfflineLeaseOutbox(
         });
       }
       continue;
+    }
+
+    const priorBatchSeq = seenSeqInBatch.get(idempotencyKey);
+    if (priorBatchSeq) {
+      if (priorBatchSeq.payloadFingerprint !== payloadFingerprint) {
+        conflictCount += 1;
+        results.push({
+          leaseId: lease.leaseId,
+          seq: entry.seq,
+          cardId: entry.cardId,
+          outcome: "seq_payload_mismatch",
+          httpStatus: 409,
+          payloadFingerprint,
+          expectedPayloadFingerprint: priorBatchSeq.payloadFingerprint,
+          reason: `Conflicting in-batch reuse of (${lease.leaseId}, seq=${entry.seq}).`,
+        });
+        continue;
+      }
+    } else {
+      seenSeqInBatch.set(idempotencyKey, { payloadFingerprint, payloadSummary });
     }
 
     if (
@@ -977,10 +1114,12 @@ export function reconcileOfflineLeaseOutbox(
       leaseId: lease.leaseId,
       seq: entry.seq,
       payloadFingerprint,
+      payloadSummary,
       receipt: cloneLedgerEntry({
         leaseId: lease.leaseId,
         seq: entry.seq,
         payloadFingerprint,
+        payloadSummary,
         receipt,
       }).receipt,
     };

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ALLOWED_SCRATCHPAD_MIME_TYPES,
   BASE_PRIOR_ALPHA,
   BASE_PRIOR_BETA,
   COMPANION_ALLOWED_ACTIONS,
@@ -10,6 +11,7 @@ import {
   MAX_BRIDGE_PSEUDO_OBSERVATIONS,
   MAX_BRIDGE_WEIGHT,
   MAX_OFFLINE_LEASE_CARDS,
+  MAX_SCRATCHPAD_PAGE_BYTES,
   MIN_BRIDGE_PRIOR_MEAN,
   MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE,
   OFFLINE_LEASE_TTL_MS,
@@ -17,6 +19,7 @@ import {
   areCompanionOriginsIsolated,
   authorizeCompanionAction,
   computeCrossCourseWeakPrior,
+  containsAnswerLeak,
   createCompanionPairingOffer,
   createCompanionScratchpadDraft,
   createInitialOfflineFsrsSnapshot,
@@ -59,7 +62,7 @@ function makeMissVariantCandidate(overrides: Record<string, unknown> = {}): Offl
     cardRevision: 3,
     lastServerReviewedAtMs: T0 - 7_200_000,
     freshVariantId: "variant-fresh-99",
-    freshVariantStem: "Compute the determinant of [[2, 1], [5, 3]] without looking at notes.",
+    freshVariantStem: "Compute the determinant of [[4, 3], [5, 6]] without looking at notes.",
     answerKey: "1",
     canonicalSolution: "det = 2*3 - 1*5 = 1",
     gradingRubric: "Award full credit for showing 2*3 - 1*5 = 1",
@@ -344,6 +347,75 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       expect(directiveFlashcard.httpStatus).toBe(422);
       expect(directiveFlashcard.code).toBe("miss_variant_answer_leak");
     }
+
+    // [P1-1] Check backSummary on flashcards against directives AND sibling sealed/answer secrets,
+    // AND check short single-token answers ("42", "-7", "0.5", "pi/2", "x=5", choice "B") in miss_variant stems!
+    const backSummaryDirective = issueOfflineFlashcardLease({
+      leaseId: "lease-fc-backsummary-directive",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        {
+          ...makeFlashcardCandidate(1),
+          backSummary: "Answer: 42",
+        },
+      ],
+    });
+    expect(backSummaryDirective.ok).toBe(false);
+    if (!backSummaryDirective.ok) {
+      expect(backSummaryDirective.httpStatus).toBe(422);
+      expect(backSummaryDirective.code).toBe("miss_variant_answer_leak");
+    }
+
+    const backSummarySiblingLeak = issueOfflineFlashcardLease({
+      leaseId: "lease-fc-backsummary-sibling-leak",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate(),
+        {
+          ...makeFlashcardCandidate(2),
+          backSummary: "Remember SEALED_SECRET_TOKEN_XYZ from the exam.",
+        },
+      ],
+    });
+    expect(backSummarySiblingLeak.ok).toBe(false);
+    if (!backSummarySiblingLeak.ok) {
+      expect(backSummarySiblingLeak.httpStatus).toBe(422);
+      expect(backSummarySiblingLeak.code).toBe("miss_variant_answer_leak");
+    }
+
+    expect(containsAnswerLeak("Compute the trace of M (result 42).", "42")).toBe(true);
+    expect(containsAnswerLeak("Evaluate f(2), expected -7.", "-7")).toBe(true);
+    expect(containsAnswerLeak("Compute probability (0.5).", "0.5")).toBe(true);
+    expect(containsAnswerLeak("Evaluate arcsin(1) using pi/2.", "pi/2")).toBe(true);
+    expect(containsAnswerLeak("Solve 3x = 15 (check x=5).", "x=5")).toBe(true);
+    expect(containsAnswerLeak("Which eigenvalue is largest? Correct option is B.", "B")).toBe(true);
+    expect(containsAnswerLeak("Which eigenvalue is largest? (B)", "B")).toBe(true);
+
+    for (const [idx, shortLeak] of [
+      { answerKey: "42", freshVariantStem: "Compute the trace of M (expected 42)." },
+      { answerKey: "-7", freshVariantStem: "Find f(3) without computing -7 first." },
+      { answerKey: "0.5", freshVariantStem: "Compute the probability (0.5)." },
+      { answerKey: "pi/2", freshVariantStem: "Evaluate the angle around pi/2." },
+      { answerKey: "x=5", freshVariantStem: "Solve 3x = 15 (hint x = 5)." },
+      { answerKey: "B", freshVariantStem: "Which basis is orthogonal? (B)" },
+    ].entries()) {
+      const shortRejected = issueOfflineFlashcardLease({
+        leaseId: `lease-miss-short-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [makeMissVariantCandidate(shortLeak)],
+      });
+      expect(shortRejected.ok).toBe(false);
+      if (!shortRejected.ok) {
+        expect(shortRejected.httpStatus).toBe(422);
+        expect(shortRejected.code).toBe("miss_variant_answer_leak");
+      }
+    }
   });
 
   it("settles unordered outbox entries idempotently at serverReceiptAtMs, clamps easy->good, strips delayedCheck, and catches seq payload mismatch", () => {
@@ -482,7 +554,61 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     expect(secondPass.results[1]?.httpStatus).toBe(409);
     expect(secondPass.updatedServerCards["card-1"]).toEqual(firstPass.updatedServerCards["card-1"]);
     expect(secondPass.updatedServerCards["card-2"]).toEqual(firstPass.updatedServerCards["card-2"]);
-    expect(firstPass.nextProcessedLedger[offlineOutboxIdempotencyKey("lease-settle-1", 1)]).toBeDefined();
+    expect(firstPass.nextProcessedLedger[offlineOutboxIdempotencyKey("lease-settle-1", 1)]?.payloadSummary).toEqual({
+      cardId: "card-1",
+      rating: "easy",
+      expectedCardRevision: 1,
+      clientReviewedAtMs: forgedFutureClientMs,
+    });
+
+    // [P1-2] Verify ANY single field difference (cardId, expectedCardRevision, clientReviewedAtMs)
+    // on a repeated (leaseId, seq) fails closed with 409 seq_payload_mismatch.
+    for (const mutatedEntry of [
+      {
+        leaseId: "lease-settle-1",
+        seq: 1,
+        cardId: "card-2", // different cardId reusing seq=1
+        expectedCardRevision: 1,
+        rating: "easy" as const,
+        clientReviewedAtMs: forgedFutureClientMs,
+        delayedCheck: true,
+        promoteMastery: true,
+      },
+      {
+        leaseId: "lease-settle-1",
+        seq: 1,
+        cardId: "card-1",
+        expectedCardRevision: 2, // different expectedCardRevision
+        rating: "easy" as const,
+        clientReviewedAtMs: forgedFutureClientMs,
+        delayedCheck: true,
+        promoteMastery: true,
+      },
+      {
+        leaseId: "lease-settle-1",
+        seq: 1,
+        cardId: "card-1",
+        expectedCardRevision: 1,
+        rating: "easy" as const,
+        clientReviewedAtMs: forgedFutureClientMs + 1, // different clientReviewedAtMs
+        delayedCheck: true,
+        promoteMastery: true,
+      },
+    ]) {
+      const conflictCheck = reconcileOfflineLeaseOutbox({
+        lease: minted.lease,
+        serverCards: firstPass.updatedServerCards,
+        processedLedger: firstPass.nextProcessedLedger,
+        serverReceiptAtMs: receiptAtMs + 120_000,
+        entries: [mutatedEntry],
+      });
+      expect(conflictCheck.ok).toBe(true);
+      if (!conflictCheck.ok) throw new Error("expected conflict response");
+      expect(conflictCheck.results[0]).toMatchObject({
+        outcome: "seq_payload_mismatch",
+        httpStatus: 409,
+      });
+    }
   });
 
   it("rejects desktop review race (409 reviewed_elsewhere) and expired/superseded/revoked leases without mutating FSRS", () => {
@@ -737,6 +863,10 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     expect(extractRegistrableSite("https://app.aistudy.example")).toBe("aistudy.example");
     expect(extractRegistrableSite("https://app.aistudy.co.uk")).toBe("aistudy.co.uk");
     expect(extractRegistrableSite("https://portal.uni.edu.cn")).toBe("uni.edu.cn");
+    expect(extractRegistrableSite("https://a.gov.ca")).toBe("gov.ca");
+    expect(extractRegistrableSite("https://a.co.nz")).toBe("a.co.nz");
+    expect(extractRegistrableSite("https://co.nz")).toBeNull();
+    expect(extractRegistrableSite("https://co.th")).toBeNull();
     expect(extractRegistrableSite("https://co.uk")).toBeNull();
     expect(extractRegistrableSite("https://127.0.0.1:8443")).toBeNull();
     expect(extractRegistrableSite("https://localhost:3000")).toBeNull();
@@ -750,12 +880,18 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     expect(
       areCompanionOriginsIsolated("https://a.uni.edu.cn", "https://companion.other.edu.cn"),
     ).toBe(true);
+    expect(
+      areCompanionOriginsIsolated("https://a.co.nz", "https://b.co.nz"),
+    ).toBe(true);
 
-    // [P1-2] Sibling subdomains, same-host different-port, parent/child suffixes, multi-part
-    // public-suffix siblings, IP literals, and localhost MUST all be rejected!
+    // [P1-2 / P1-3] Sibling subdomains, same-host different-port, parent/child suffixes, multi-part
+    // public-suffix siblings, `gov.ca` siblings, unverified ccSLD siblings, IP literals, and localhost MUST all be rejected!
     expect(areCompanionOriginsIsolated("https://app.aistudy.example", "https://scratchpad.aistudy.example")).toBe(false);
     expect(areCompanionOriginsIsolated("https://app.aistudy.co.uk", "https://scratchpad.aistudy.co.uk")).toBe(false);
     expect(areCompanionOriginsIsolated("https://a.uni.edu.cn", "https://b.uni.edu.cn")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://a.gov.ca", "https://b.gov.ca")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://x.a.co.nz", "https://y.a.co.nz")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://a.co.th", "https://b.co.th")).toBe(false);
     expect(areCompanionOriginsIsolated("https://app.aistudy.example:443", "https://app.aistudy.example:8443")).toBe(false);
     expect(areCompanionOriginsIsolated("https://aistudy.example", "https://scratchpad.aistudy.example")).toBe(false);
     expect(areCompanionOriginsIsolated("https://app.aistudy.example", "https://sub.app.aistudy.example")).toBe(false);
@@ -837,6 +973,24 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     expect(
       parseCompanionQrUrl(`https://user:pass@companion.aistudy-sandbox.example/companion/pair#k=${FRAGMENT_SECRET}`).ok,
     ).toBe(false);
+    // [P2-1] Reject percent-encoded, hex-encoded, base64url-encoded secret copies in path/query,
+    // and fail closed on malformed `%` escape sequences.
+    const percentEncodedSecret = `%65${FRAGMENT_SECRET.slice(1)}`;
+    const hexEncodedSecret = [...new TextEncoder().encode(FRAGMENT_SECRET)]
+      .map(byte => byte.toString(16).padStart(2, "0"))
+      .join("");
+    expect(
+      parseCompanionQrUrl(`${COMPANION_ORIGIN}/companion/pair/${percentEncodedSecret}#k=${FRAGMENT_SECRET}`),
+    ).toMatchObject({ ok: false, code: "secret_outside_fragment" });
+    expect(
+      parseCompanionQrUrl(`${COMPANION_ORIGIN}/companion/pair?ref=${percentEncodedSecret}#k=${FRAGMENT_SECRET}`),
+    ).toMatchObject({ ok: false, code: "secret_outside_fragment" });
+    expect(
+      parseCompanionQrUrl(`${COMPANION_ORIGIN}/companion/pair?blob=${hexEncodedSecret}#k=${FRAGMENT_SECRET}`),
+    ).toMatchObject({ ok: false, code: "secret_outside_fragment" });
+    expect(
+      parseCompanionQrUrl(`${COMPANION_ORIGIN}/companion/pair/%E0%A4%A#k=${FRAGMENT_SECRET}`),
+    ).toMatchObject({ ok: false, code: "invalid_qr_url" });
 
     const proof = deriveCompanionFragmentSecretProof(FRAGMENT_SECRET, DEVICE_CODE);
 
@@ -1101,6 +1255,14 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     expect(draft0.draftRevision).toBe(0);
 
     // [P1-5] Mandatory session + requestOrigin + nowMs authorization on appendCompanionScratchpadPage.
+    expect(ALLOWED_SCRATCHPAD_MIME_TYPES).toEqual([
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "application/pdf",
+    ]);
+    expect(MAX_SCRATCHPAD_PAGE_BYTES).toBe(15 * 1024 * 1024);
+
     const missingSessionUpload = appendCompanionScratchpadPage(draft0, {
       session: undefined as unknown as typeof session,
       requestOrigin: COMPANION_ORIGIN,
@@ -1108,6 +1270,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       pageNumber: 1,
       objectKey: "scratchpad/attempt-42/p1.png",
       sha256: shaA,
+      mimeType: "image/png",
       byteLength: 42_000,
     });
     expect(missingSessionUpload).toMatchObject({
@@ -1124,6 +1287,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       pageNumber: 1,
       objectKey: "scratchpad/attempt-42/p1.png",
       sha256: shaA,
+      mimeType: "image/png",
       byteLength: 42_000,
     });
     expect(wrongOriginUpload).toMatchObject({
@@ -1139,6 +1303,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       pageNumber: 1,
       objectKey: "scratchpad/attempt-42/p1.png",
       sha256: shaA,
+      mimeType: "image/png",
       byteLength: 42_000,
     });
     expect(revokedUpload).toMatchObject({
@@ -1147,6 +1312,31 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       httpStatus: 403,
     });
 
+    // [P2-2] Reject disallowed MIME types, parameterized MIME types, and oversized byteLength.
+    for (const invalidUpload of [
+      { mimeType: "image/svg+xml", byteLength: 1024 },
+      { mimeType: "text/html", byteLength: 1024 },
+      { mimeType: "image/png; charset=utf-8", byteLength: 1024 },
+      { mimeType: "image/png", byteLength: MAX_SCRATCHPAD_PAGE_BYTES + 1 },
+      { mimeType: "image/png", byteLength: 0 },
+    ]) {
+      const badPage = appendCompanionScratchpadPage(draft0, {
+        session,
+        requestOrigin: COMPANION_ORIGIN,
+        nowMs: T0 + 19_500,
+        pageNumber: 1,
+        objectKey: "scratchpad/attempt-42/p1.png",
+        sha256: shaA,
+        mimeType: invalidUpload.mimeType,
+        byteLength: invalidUpload.byteLength,
+      });
+      expect(badPage).toMatchObject({
+        ok: false,
+        code: "invalid_page_payload",
+        httpStatus: 400,
+      });
+    }
+
     const up1 = appendCompanionScratchpadPage(draft0, {
       session,
       requestOrigin: COMPANION_ORIGIN,
@@ -1154,11 +1344,13 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       pageNumber: 1,
       objectKey: "scratchpad/attempt-42/p1.png",
       sha256: shaA,
+      mimeType: "IMAGE/PNG",
       byteLength: 42_000,
     });
     expect(up1.ok).toBe(true);
     if (!up1.ok) throw new Error("expected page 1");
     expect(up1.draftRevision).toBe(1);
+    expect(up1.page.mimeType).toBe("image/png");
 
     // Tablet races page 2 before desktop clicks submit using stale preview revision 1.
     const up2 = appendCompanionScratchpadPage(up1.state, {
@@ -1166,8 +1358,9 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       requestOrigin: COMPANION_ORIGIN,
       nowMs: T0 + 25_000,
       pageNumber: 2,
-      objectKey: "scratchpad/attempt-42/p2.png",
+      objectKey: "scratchpad/attempt-42/p2.pdf",
       sha256: shaB,
+      mimeType: "application/pdf",
       byteLength: 55_000,
     });
     expect(up2.ok).toBe(true);
@@ -1204,8 +1397,9 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       requestOrigin: COMPANION_ORIGIN,
       nowMs: T0 + 40_000,
       pageNumber: 3,
-      objectKey: "scratchpad/attempt-42/p3.png",
+      objectKey: "scratchpad/attempt-42/p3.webp",
       sha256: shaC,
+      mimeType: "image/webp",
       byteLength: 10_000,
     });
     expect(postFreezeUpload).toMatchObject({
@@ -1547,6 +1741,19 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           supportingSourceIds: [],
         },
         {
+          edgeId: "same-course-padded",
+          sourceCourseId: "  course-target  ",
+          sourceConceptId: "vectors-2",
+          targetCourseId: "course-target",
+          targetConceptId: "span",
+          alignmentWeight: 0.3,
+          sourceDirectOnlyMasteryProbability: 1,
+          certifiedDirectObservationCount: 10,
+          sourceDirectObservationCount: 10,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        {
           edgeId: "multi-hop-flagged",
           sourceCourseId: "course-a",
           sourceConceptId: "hop2",
@@ -1649,6 +1856,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
 
     expect(result.ignoredNonDirectEdges).toEqual([
       expect.objectContaining({ edgeId: "same-course", reason: "same_course_edge" }),
+      expect.objectContaining({ edgeId: "same-course-padded", reason: "same_course_edge" }),
     ]);
     expect(result.decoupledEdges).toEqual([
       expect.objectContaining({ edgeId: "multi-hop-flagged", reason: "multi_hop_rejected" }),

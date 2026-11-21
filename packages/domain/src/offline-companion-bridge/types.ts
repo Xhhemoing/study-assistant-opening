@@ -251,10 +251,18 @@ export type OfflineOutboxItemResult =
       readonly reason: string;
     };
 
+export interface OfflineOutboxPayloadSummary {
+  readonly cardId: string;
+  readonly rating: OfflineRawRating;
+  readonly expectedCardRevision: number;
+  readonly clientReviewedAtMs: number | null;
+}
+
 export interface OfflineOutboxLedgerEntry {
   readonly leaseId: string;
   readonly seq: number;
   readonly payloadFingerprint: string;
+  readonly payloadSummary?: OfflineOutboxPayloadSummary;
   readonly receipt: OfflineSettledReceipt;
 }
 
@@ -303,6 +311,16 @@ export type ReconcileOfflineLeaseOutboxResult =
 export const COMPANION_PAIRING_TTL_MS = 90_000; // 90 seconds
 export const COMPANION_USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 export const COMPANION_COOKIE_PATH = "/api/companion/scratchpad";
+export const MAX_SCRATCHPAD_PAGE_BYTES = 15 * 1024 * 1024; // 15 MiB
+
+export const ALLOWED_SCRATCHPAD_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "application/pdf",
+] as const;
+
+export type CompanionScratchpadMimeType = (typeof ALLOWED_SCRATCHPAD_MIME_TYPES)[number];
 
 export const COMPANION_ALLOWED_ACTIONS = [
   "upload_page",
@@ -470,6 +488,7 @@ export interface CompanionScratchpadPage {
   readonly pageNumber: number;
   readonly objectKey: string;
   readonly sha256: string;
+  readonly mimeType: CompanionScratchpadMimeType;
   readonly byteLength: number;
   readonly uploadedAtMs: number;
   readonly uploadedInRevision: number;
@@ -494,6 +513,7 @@ export interface AppendCompanionScratchpadPageInput {
   readonly pageNumber: number;
   readonly objectKey: string;
   readonly sha256: string;
+  readonly mimeType: string;
   readonly byteLength: number;
   readonly uploadedAtMs?: number;
 }
