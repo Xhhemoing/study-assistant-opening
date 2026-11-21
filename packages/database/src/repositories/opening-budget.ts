@@ -337,7 +337,8 @@ async function insertRollbackFences(tx: TransactionSql, keys: string[], row: {
 
 function isRollbackFence(row: BudgetReservationRecord) {
   return row.state === "released" && row.releaseReason === "not_sent" && row.amountCents === 0
-    && row.reservedAmountCents === null && row.modelSnapshot === null;
+    && row.reservedAmountCents === null && row.modelSnapshot === null
+    && row.executionClaimedAt === null && row.outcomeUnknownAt === null;
 }
 
 // fallbackStartsFamily records the real fallback attempt on its suffix key and
@@ -345,7 +346,8 @@ function isRollbackFence(row: BudgetReservationRecord) {
 // the released/not_sent replay disposition without being reusable fences.
 function isTerminalRollbackFence(row: BudgetReservationRecord) {
   return row.state === "released" && row.releaseReason === "not_sent" && row.amountCents === 0
-    && row.reservedAmountCents === 0 && row.modelSnapshot === null;
+    && row.reservedAmountCents === 0 && row.modelSnapshot === null
+    && row.executionClaimedAt === null && row.outcomeUnknownAt === null;
 }
 
 function attemptsOf(tx: TransactionSql, family: string) {
@@ -545,13 +547,13 @@ export function createOpeningBudgetRepository(
       }
       const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
       try {
-      return await sql.begin(async (tx) => {
+      // Lazy reconcile in a short autonomous transaction BEFORE opening the main
+      // reserve transaction so reserve() never holds an out-of-order request_id
+      // row lock across insertRollbackFences (avoiding 40P01 with claimExecution).
+      await sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-
-        // Sample after the lock: a waiting transaction can cross the local midnight.
         const instant = await readBudgetClock(tx);
-        // Lazy reconcile: stale reserved rows become completed (pessimistic billing).
         const cutoff = new Date(instant.getTime() - unknownAgeMs);
         // Full amount stays charged, but the row is observably provisional
         // (reconciled_at + pending_reconcile_cents) with an audit event; it is
@@ -572,6 +574,13 @@ export function createOpeningBudgetRepository(
           SELECT id, workspace_id, 'ttl_reconciled', amount_cents, amount_cents, 'reserved', ${instant} FROM reconciled
           ON CONFLICT (reservation_id, kind) DO NOTHING
         `;
+      });
+      return await sql.begin(async (tx) => {
+        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
+
+        // Sample after the lock: a waiting transaction can cross the local midnight.
+        const instant = await readBudgetClock(tx);
 
         const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options, instant);
 
@@ -666,7 +675,8 @@ export function createOpeningBudgetRepository(
           const [usage] = await tx`
             SELECT COALESCE(sum(amount_cents) FILTER (WHERE state <> 'released'), 0) AS cents,
               count(*) FILTER (WHERE NOT (state = 'released' AND COALESCE(release_reason = 'not_sent', false)
-                AND amount_cents = 0 AND reserved_amount_cents IS NULL AND model_snapshot IS NULL))::int AS calls,
+                AND amount_cents = 0 AND COALESCE(reserved_amount_cents, 0) = 0 AND model_snapshot IS NULL
+                AND execution_claimed_at IS NULL AND outcome_unknown_at IS NULL))::int AS calls,
               count(*) FILTER (WHERE outcome_unknown_at IS NOT NULL)::int AS unknown_calls
             FROM opening_budget_reservations
             WHERE workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parent.id}

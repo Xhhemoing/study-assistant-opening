@@ -135,8 +135,35 @@ it('recovers a receipt saved before settlement crashed without another provider 
   s.setFailSettlement(false);
   await expect(s.adapter(input, signal)).resolves.toHaveLength(1);
   expect(s.provider).toHaveBeenCalledTimes(1);
-  const [row] = await f.sql`SELECT state, amount_cents, result_ref FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`;
-  expect(row).toEqual({ state: 'completed', amount_cents: 1, result_ref: `transcribe:${s.job.id}:0` });
+  const [row] = await f.sql`SELECT id, state, amount_cents, result_ref, settlement_cost_basis FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(row).toEqual({ id: expect.any(String), state: 'completed', amount_cents: 1, result_ref: `transcribe:${s.job.id}:0`, settlement_cost_basis: 'media_usage_upper_bound' });
+  expect(await s.budget.listPendingReconcile(f.scope)).toEqual([
+    expect.objectContaining({ id: row!.id, settlementCostBasis: 'media_usage_upper_bound' }),
+  ]);
+  await expect(s.budget.settle(f.scope, row!.id, 2, { costBasis: 'vendor_receipt' })).resolves.toMatchObject({
+    id: row!.id, amountCents: 2, settlementCostBasis: 'vendor_receipt',
+  });
+  expect(await s.budget.listPendingReconcile(f.scope)).toHaveLength(0);
+  await expect(s.adapter(input, signal)).resolves.toHaveLength(1);
+  expect(s.provider).toHaveBeenCalledTimes(1);
+});
+
+it('repairs result_ref after vendor_receipt reconciliation and rejects wrong-basis rows', async () => {
+  const s = await setup();
+  const input = { ...s.input, durationMs: 1000 };
+  const key = `transcribe:${s.job.id}:0`;
+  s.loseSaveAcknowledgement();
+  await expect(s.adapter(input, signal)).rejects.toThrow('checkpoint save acknowledgement lost');
+  const [pending] = await s.budget.listPendingReconcile(f.scope);
+  expect(pending).toMatchObject({ settlementCostBasis: 'media_usage_upper_bound', resultRef: null });
+  await s.budget.settle(f.scope, pending!.id, 3, { costBasis: 'vendor_receipt' });
+  const retry = await s.manualRetry();
+  await expect(retry(input, signal)).resolves.toHaveLength(1);
+  const [repaired] = await f.sql`SELECT amount_cents, result_ref, settlement_cost_basis FROM opening_budget_reservations WHERE id=${pending!.id}`;
+  expect(repaired).toEqual({ amount_cents: 3, result_ref: key, settlement_cost_basis: 'vendor_receipt' });
+
+  await f.sql`UPDATE opening_budget_reservations SET settlement_cost_basis='usage_pricing' WHERE id=${pending!.id}`;
+  await expect(retry(input, signal)).rejects.toMatchObject({ code: 'NOT_FOUND' });
 });
 
 it('recovers a free-tier receipt after TTL reconciliation and audits the late receipt only once', async () => {

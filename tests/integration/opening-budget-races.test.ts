@@ -501,6 +501,66 @@ describe("opening budget races (two independent connections, deterministic barri
     for (const row of fences) expect(row.state).toBe("released");
   });
 
+  it("commits lazy TTL reconciliation before reserve opens its transaction to avoid 40P01 with claimExecution", async () => {
+    const key = "stale-fallback-vs-claim";
+    const primary = `eph:${key}`;
+    const fallback = `${primary}:fallback`;
+    const scopeA = fixture.scope;
+    const scopeB = fixture.otherScope;
+    const encodedA = `eph-v2:${scopeA.workspaceId}:${Buffer.from(key, "utf16le").toString("base64url")}`;
+    const parentAStale = `study-ephemeral:${scopeA.workspaceId}:${key}:fallback`;
+    const parentA = `study-ephemeral:${scopeA.workspaceId}:${key}`;
+    const parentB = `study-ephemeral:${scopeB.workspaceId}:${key}`;
+    const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100 });
+
+    await fixture.sql`INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
+      VALUES (${scopeA.workspaceId}, ${parentAStale}, 100, 2), (${scopeB.workspaceId}, ${parentB}, 100, 2)`;
+    const [staleFallback] = await fixture.sql<{ id: string }[]>`
+      INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, parent_interaction_id, created_at)
+      VALUES (${scopeA.workspaceId}, 'tutor', 10, 10, ${fallback}, ${parentAStale}, now() - interval '1 hour')
+      RETURNING id
+    `;
+    const [livePrimary] = await fixture.sql<{ id: string }[]>`
+      INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, parent_interaction_id)
+      VALUES (${scopeB.workspaceId}, 'tutor', 10, 10, ${primary}, ${parentB})
+      RETURNING id
+    `;
+
+    // Hold B's lower-key claim lock while inserting B's higher-key after-fence only after A waits on B.
+    const primaryLocked = latch();
+    const insertAfterFence = latch();
+    const claimB = track(a.sql.begin(async tx => {
+      await tx`SELECT id FROM workspaces WHERE id = ${scopeB.workspaceId} FOR UPDATE`;
+      await tx`UPDATE opening_budget_reservations SET execution_claimed_at = now(), updated_at = now()
+        WHERE id = ${livePrimary!.id} AND state = 'reserved' AND execution_claimed_at IS NULL`;
+      primaryLocked.open();
+      await insertAfterFence.wait;
+      await tx`INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, request_id, parent_interaction_id, state, release_reason)
+        VALUES (${scopeB.workspaceId}, 'tutor', 0, ${fallback}, ${parentB}, 'released', 'not_sent')
+        ON CONFLICT (request_id) DO NOTHING`;
+    }));
+    await Promise.race([primaryLocked.wait, claimB]);
+
+    const reserveA = track(budgetB.reserve(scopeA, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: primary,
+      requestFamily: primary,
+      alternateRequestFamily: encodedA,
+      parentBudget: { id: parentA, budgetCents: 100 },
+    }));
+    try {
+      await waitUntilBlocked(fixture.sql, b.pid, a.pid, "reserveA after-fence on primary", /INSERT INTO opening_budget_reservations/);
+    } finally {
+      insertAfterFence.open();
+    }
+
+    await expect(claimB).resolves.toBeUndefined();
+    await expect(reserveA).resolves.toMatchObject({ requestId: encodedA, state: "reserved" });
+    const [reconciled] = await fixture.sql`SELECT state, pending_reconcile_cents, reconciled_at FROM opening_budget_reservations WHERE id = ${staleFallback!.id}`;
+    expect(reconciled).toMatchObject({ state: "completed", pending_reconcile_cents: 10, reconciled_at: expect.any(Date) });
+  });
+
   it("rolls back before-fences when claimExecution loses the row claim race", async () => {
     const key = "claim-savepoint-rollback";
     const fallback = `eph:${key}:fallback`;

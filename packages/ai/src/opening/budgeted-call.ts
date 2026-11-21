@@ -138,7 +138,11 @@ export type BudgetedCallOptions = {
   /** Optional persisted result reference stored on settle and replayed later. */
   resultRef?: string;
   /** Save a recoverable response. Authoritative usage is settled even if this fails. */
-  persistResult?: (output: ProviderOutput, receipt: { reservationId: string; settledCents: number | null }) => Promise<void>;
+  persistResult?: (output: ProviderOutput, receipt: {
+    reservationId: string;
+    settledCents: number | null;
+    costBasis?: "usage_pricing" | "media_usage_upper_bound";
+  }) => Promise<void>;
   /**
    * Free-tier model: reserve at zero cost under this per-day request cap
    * (reservedCents must then be 0). Paid models leave it unset.
@@ -356,10 +360,15 @@ export async function runBudgetedCallWithReceipt(options: BudgetedCallOptions): 
     const diagnostic = readGradingDiagnostic(output);
     if (diagnostic?.attemptedFetch != null) transport = { attemptedFetch: diagnostic.attemptedFetch, httpStatus: diagnostic.httpStatus };
     phase = "usage";
+    const media = hasMediaInput(options.input);
     const settlement = output.inputTokens === null || output.outputTokens === null ? null : await price(output);
     phase = "persist";
     try {
-      await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
+      await options.persistResult?.(output, {
+        reservationId: reservation.id,
+        settledCents: settlement?.settledCents ?? null,
+        ...(settlement && media ? { costBasis: "media_usage_upper_bound" as const } : {}),
+      });
     } catch (error) {
       // The charge belongs in the ledger even when no result reference is safe to publish.
       return await accountFailure(error, () => settlement

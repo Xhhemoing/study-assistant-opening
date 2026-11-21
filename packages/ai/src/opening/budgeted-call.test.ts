@@ -522,18 +522,28 @@ it("sends configured media under its byte bound and identifies usage pricing as 
   const { api } = fakeBudget();
   let sent = 0;
   let settlementMeta: unknown;
+  let persistedReceipt: unknown;
   const snapshot = { id: "visual", providerId: "p", modelName: "v", inputCentsPerMillion: 1, outputCentsPerMillion: 1,
     mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 10, mediaInputCentsPerMillion: 2 };
   await runBudgetedCall({ ...options, parentBudget: { id: "media-parent" }, modelSnapshot: snapshot,
     budget: { ...api, settle: async (_id: string, _cost: number, meta?: unknown) => { settlementMeta = meta; } },
     provider: { complete: async () => { sent++; return output; } },
+    persistResult: async (_output, receipt) => { persistedReceipt = receipt; },
     input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
   });
   expect(sent).toBe(1);
+  expect(persistedReceipt).toEqual({ reservationId: "res-1", settledCents: 120, costBasis: "media_usage_upper_bound" });
   expect(settlementMeta).toEqual({ costBasis: "media_usage_upper_bound" });
+  await runBudgetedCall({ ...options, requestId: "req-2", parentBudget: { id: "media-parent" }, modelSnapshot: snapshot,
+    budget: api,
+    provider: { complete: async () => { sent++; return { ...output, inputTokens: null }; } },
+    persistResult: async (_output, receipt) => { persistedReceipt = receipt; },
+    input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
+  });
+  expect(persistedReceipt).toEqual({ reservationId: "res-2", settledCents: null });
   await expect(runBudgetedCall({ ...options, parentBudget: { id: "media-parent" }, modelSnapshot: { ...snapshot, mediaMaxInputBytes: 1 },
     budget: api, provider: { complete: async () => { sent++; return output; } },
     input: { ...options.input, imageParts: [{ data: "data:image/png;base64,aGVsbG8=", mediaType: "image/png" }] },
   })).rejects.toMatchObject({ code: "BUDGET_MEDIA_INPUT_TOO_LARGE" });
-  expect(sent).toBe(1);
+  expect(sent).toBe(2);
 });
