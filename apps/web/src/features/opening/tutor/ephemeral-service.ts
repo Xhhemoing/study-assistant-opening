@@ -36,7 +36,7 @@ import {
   isBudgetReplayError,
   reservationCentsForInput,
   reservationTerms,
-  runBudgetedCall,
+  runBudgetedCallWithReceipt,
   withModelFallback,
   type BudgetedRepository,
   type ReservationTerms,
@@ -221,6 +221,11 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const imageOnlySources = isImageOnlySourceChunks(chunks);
       const preferPage = selectedPage ?? (imageOnlySources ? 1 : undefined);
       const requestId = input.clientKey ? `eph:${input.clientKey}` : deps.requestKey?.() ?? `eph:${randomUUID()}`;
+      // Preserve the key older deployments can read. The ledger uses this
+      // encoded family when the globally unique key belongs to another turn.
+      const alternateRequestFamily = input.clientKey
+        ? `eph-v2:${scope.workspaceId}:${Buffer.from(input.clientKey, "utf16le").toString("base64url")}`
+        : undefined;
       const parentBudget: ParentInteractionBudget = { id: `study-ephemeral:${scope.workspaceId}:${input.clientKey ?? requestId}` };
       const retrievalInput = {
         // The repository validates ownership for this selected course; materialUse
@@ -233,6 +238,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         maxCharacters: deps.config.maxContextCharacters,
         preferChunkId: selectedChunk ?? undefined,
         preferPage,
+        // Embedding has one exact attempt and keeps its original replay key.
         operationId: requestId,
         parentBudget,
         signal,
@@ -283,6 +289,9 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         const fallback = isNotSentFailure(error) && deps.resolveFallbackModel ? await deps.resolveFallbackModel(scope, input.mode) : null;
         if (!fallback) throw error;
         selected = fallback;
+        // Tell the ledger this is the fallback route. The ledger keeps this
+        // suffix as the real attempt when it starts a family, while fencing
+        // the canonical and alternate keys for older readers.
         selectedRequestId = `${requestId}:fallback`;
       }
       if (imageOnlySources && selected?.supportsVision !== true) {
@@ -302,7 +311,6 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         imageParts,
         ...(onTextDelta ? { outputFormat: "markdown" as const } : {}),
       };
-      let completedRequestId = requestId;
       const confirmedNotSentFailures = new Set<unknown>();
       const callWith = async (model: ResolvedTaskModel | undefined, callRequestId: string) => {
         const terms: ReservationTerms = model
@@ -315,7 +323,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
               };
             })();
         let releasedNotSent = false;
-        const output = await runBudgetedCall({
+        return runBudgetedCallWithReceipt({
           provider: model?.provider ?? deps.provider,
           modelSnapshot: model?.modelSnapshot ?? deps.modelSnapshot,
           budget: {
@@ -329,7 +337,8 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           input: providerInput,
           parentBudget,
           requestId: callRequestId,
-          // Ephemeral turns persist provenance keyed by requestId.
+          requestFamily: requestId,
+          alternateRequestFamily,
           resultRef: `ephemeral:${requestId}`,
           reservedCents: terms.reservedCents,
           // Paid calls settle at least 1 cent; free-tier calls settle at zero.
@@ -357,12 +366,10 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           }
           throw error;
         });
-        completedRequestId = callRequestId;
-        return output;
       };
-      let output: ProviderOutput;
+      let completed: Awaited<ReturnType<typeof callWith>>;
       try {
-        output = selected && deps.resolveFallbackModel && selectedRequestId === requestId
+        completed = selected && deps.resolveFallbackModel && selectedRequestId === requestId
           ? await withModelFallback({
               primary: async () => selected!,
               fallback: () => deps.resolveFallbackModel!(scope, input.mode),
@@ -384,12 +391,14 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw error;
       }
       await assertMaterialsCurrent();
-      const validated = providerOutputSchema.parse(output);
+      const validated = providerOutputSchema.parse(completed.output);
       const streamedCitations = onTextDelta ? tutorCitationsFromMarkdown(validated.text, context) : null;
       if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
       let provenanceId: string | null = null;
       try {
-        provenanceId = await deps.provenance?.record(scope, { requestId: completedRequestId, privacyEpoch: privacy.epoch, contextSourceRefs }) ?? null;
+        provenanceId = await deps.provenance?.record(scope, {
+          reservationId: completed.reservation.id, requestId: completed.reservation.requestId, privacyEpoch: privacy.epoch, contextSourceRefs,
+        }) ?? null;
       } catch (error) {
         if (error instanceof EphemeralProvenanceError) {
           throw new EphemeralServiceError(error.code, error.code === "PRIVACY_CHANGED" ? "隐私设置已变化，本轮内容未保存。请确认材料后重新提问。" : "临时来源凭据不可用。", error.code === "NOT_FOUND" ? 404 : 409);

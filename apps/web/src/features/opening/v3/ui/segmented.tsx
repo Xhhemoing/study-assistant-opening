@@ -13,7 +13,7 @@ export function Segmented<T extends string>({ name, value, options, onChange, la
         return (
           <label key={option.value} className={`${ui.segmentItem} relative inline-flex cursor-pointer items-center justify-center whitespace-nowrap has-[:checked]:font-medium has-[:checked]:text-text has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-focus-ring`}>
             <input type="radio" name={name} value={option.value} checked={checked} onChange={() => runIndicatorTransition(group.current, () => onChange(option.value))} className="sr-only" />
-            {checked && <span data-pill aria-hidden="true" className="absolute inset-0 rounded-pill bg-surface shadow-card" />}
+            {checked && <span data-pill aria-hidden="true" className="keycap absolute inset-0 rounded-pill" />}
             <span className="relative">{option.label}</span>
           </label>
         );

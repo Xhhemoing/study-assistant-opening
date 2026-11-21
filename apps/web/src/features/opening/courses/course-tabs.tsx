@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronDown } from "lucide-react";
 import { Children, cloneElement, isValidElement, useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import { courseSection, courseSections, courseTabHref, courseTabs, readCourseTab, type CourseTab } from "./course-tabs-route";
@@ -8,7 +9,7 @@ type PanelProps = { name: CourseTab; hidden?: boolean; secondary?: boolean; chil
 
 export function CoursePanel({ name, hidden, secondary, children }: PanelProps) {
   const label = courseTabs.find(tab => tab.id === name)?.label;
-  return <section hidden={hidden} aria-label={label} data-course-tab={name} className="space-y-6">{secondary ? <details className="space-y-4"><summary className="cursor-pointer py-3 text-sm font-medium">{label}</summary>{children}</details> : children}</section>;
+  return <section hidden={hidden} aria-label={label} data-course-tab={name} className="space-y-6">{secondary ? <details className="group space-y-4 rounded-card border border-line bg-surface px-4 py-3 shadow-card"><summary className="flex cursor-pointer list-none items-center justify-between gap-2 py-1 text-sm font-medium text-text [&::-webkit-details-marker]:hidden"><span>{label}</span><ChevronDown size={15} aria-hidden="true" className="shrink-0 text-text-3 transition-transform duration-200 ease-out-strong group-open:rotate-180" /></summary>{children}</details> : children}</section>;
 }
 
 /** Link navigation preserves mounted forms and recognizes bookmarked legacy sections. */
@@ -45,8 +46,8 @@ export function CourseTabs({ courseId, children, conversationId, grouped = false
   const tabs = grouped ? courseSections : courseTabs.filter(tab => tab.id !== "units");
   const active = grouped ? courseSection(location.tab) : location.tab === "units" ? "overview" : location.tab;
   return <>
-    <nav aria-label="课程分区" className="flex gap-1 overflow-x-auto border-b border-line">
-      {tabs.map(tab => <a key={tab.id} href={courseTabHref(courseId, tab.id, location.search)} onClick={event => navigate(event, tab.id)} aria-current={active === tab.id ? "page" : undefined} className={`min-h-11 shrink-0 flex-1 whitespace-nowrap border-b-2 px-3 py-3 text-center text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${active === tab.id ? "border-ink text-accent" : "border-transparent text-text-2 hover:text-text"}`}>{tab.label}</a>)}
+    <nav aria-label="课程分区" className="well-recessed no-scrollbar flex items-center gap-1 overflow-x-auto rounded-xl p-1">
+      {tabs.map(tab => <a key={tab.id} href={courseTabHref(courseId, tab.id, location.search)} onClick={event => navigate(event, tab.id)} aria-current={active === tab.id ? "page" : undefined} className={`min-h-9 shrink-0 flex-1 whitespace-nowrap rounded-lg px-3.5 py-2 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-150 ease-out-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${active === tab.id ? "bg-surface text-text shadow-card" : "text-text-2 hover:text-text"}`}>{tab.label}</a>)}
     </nav>
     {Children.map(children, child => isValidElement<PanelProps>(child) ? cloneElement(child, { hidden: grouped ? courseSection(child.props.name) !== active : child.props.name !== location.tab }) : child)}
   </>;

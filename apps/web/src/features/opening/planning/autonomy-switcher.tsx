@@ -2,6 +2,7 @@
 
 import type { OpeningAdaptivePrefs } from "@aistudy/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import type { OpeningApi } from "../client/api";
 import { inputClass, secondaryButtonClass } from "../design/ui";
 import { userFacingMessage } from "../../../lib/user-facing-error";
@@ -62,15 +63,17 @@ export function AutonomySwitcher({ api, onChanged }: {
     } finally { saving.current = false; if (request === epoch.current) setPending(false); }
   }
 
-  return <section className="space-y-2 border-b border-line px-4 py-3" aria-label="安排方式">
-    <p className="text-xs font-medium text-text">安排方式</p>
-    <div className="flex gap-2" role="group" aria-label="选择安排方式">
-      {(["manual", "copilot"] as const).map((autonomy) => <button key={autonomy} type="button" className={secondaryButtonClass} aria-pressed={prefs?.autonomy === autonomy} disabled={pending || !prefs} onClick={() => void change(autonomy)}>{autonomy === "manual" ? "手工" : "副驾驶"}</button>)}
+  return <section className="space-y-2.5 border-b border-line/70 px-5 py-3.5" aria-label="安排方式">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <p className="text-xs font-semibold text-text">安排方式</p>
+      <div className="well-recessed inline-flex rounded-xl p-1" role="group" aria-label="选择安排方式">
+        {(["manual", "copilot"] as const).map((autonomy) => <button key={autonomy} type="button" className={`min-h-8 rounded-lg px-3 text-xs font-medium transition-[color,background-color,box-shadow,transform] duration-150 ease-out-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 active:scale-[0.98] disabled:opacity-50 ${prefs?.autonomy === autonomy ? "bg-surface text-text shadow-card" : "text-text-2 hover:text-text"}`} aria-pressed={prefs?.autonomy === autonomy} disabled={pending || !prefs} onClick={() => void change(autonomy)}>{autonomy === "manual" ? "手工" : "副驾驶"}</button>)}
+      </div>
     </div>
-    <p className="text-xs leading-5 text-text-3">{prefs?.autonomy === "manual" ? "由你安排任务；仍可手动生成草案。" : prefs?.autonomy === "coach" ? prefs.coachAutoAcceptEnabled ? "教练可在预算内确认今日首份自动草案；已有确认安排仍由你调整。" : "当前教练偏好仍需逐次确认安排。" : "系统给出草案，由你选择并确认。"}</p>
-    <details className="text-xs text-text-2"><summary className="min-h-11 cursor-pointer py-2">教练自动安排</summary><div className="mt-2 space-y-2">
-      <p className="leading-6">启用后，可自动确认预算内的今日首份规则草案。不会替换已确认计划；安排未开始且任务未改动时可整批撤销。卡片复习仍需确认。切到手工或副驾驶即停止自动确认。</p>
-      <label className="flex flex-wrap items-center gap-2">每日时间预算（分钟）<input type="number" min={10} max={600} step={1} className={`${inputClass} w-24`} value={budget} disabled={pending} onChange={event => setBudget(event.target.value)} /></label>
+    <p className="text-xs leading-5 text-text-3">{prefs?.autonomy === "manual" ? "由你安排任务；仍可手动生成草案。" : prefs?.autonomy === "coach" ? prefs.coachAutoAcceptEnabled ? "在今日页确认后，教练按预算安排首份草案。已有安排可手动调整。" : "当前教练偏好仍需逐次确认安排。" : "系统给出草案，由你选择并确认。"}</p>
+    <details className="group text-xs text-text-2"><summary className="flex min-h-10 cursor-pointer list-none items-center justify-between py-1.5 font-medium hover:text-text [&::-webkit-details-marker]:hidden"><span>教练预算安排</span><ChevronDown size={14} aria-hidden="true" className="text-text-3 transition-transform duration-200 ease-out-strong group-open:rotate-180" /></summary><div className="mt-2 space-y-2.5 rounded-xl border border-line bg-surface-2/60 p-3">
+      <p className="leading-6">启用后，可在今日页确认预算内的首份草案。安排尚未开始且任务未改动时，可整批撤销。卡片复习仍由你确认。</p>
+      <label className="flex flex-wrap items-center gap-2">每日时间预算（分钟）<input type="number" min={10} max={600} step={1} className={`${inputClass} w-24 tabular-nums`} value={budget} disabled={pending} onChange={event => setBudget(event.target.value)} /></label>
       <button type="button" className={secondaryButtonClass} disabled={pending || !prefs} onClick={() => void enableCoach()}>{prefs?.autonomy === "coach" && prefs.coachAutoAcceptEnabled ? "保存教练预算" : "启用教练"}</button>
     </div></details>
     {error ? <div><p className="text-xs text-danger" role="alert">{error}</p><button type="button" className={`${secondaryButtonClass} mt-1`} disabled={pending} onClick={() => void read()}>重新读取安排偏好</button></div> : null}

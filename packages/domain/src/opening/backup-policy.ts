@@ -1,3 +1,6 @@
+import { validateBackupWorkspaceAssets } from "./backup-workspace-assets";
+import { OPENING_BACKUP_TABLE_SET } from "./backup-inventory";
+import { findForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
 import { validateBackupLearningGoals } from "./backup-learning-goals";
 import { validateBackupStudy } from "./backup-study";
 import { validateBackupRetestProtocols } from "./backup-retest-protocol";
@@ -7,8 +10,9 @@ import { validateBackupPlanControl } from "./backup-plan-control";
 import { validateBackupDayAdjustment } from "./backup-day-adjustment";
 import { validateBackupPlanFeedback } from "./backup-plan-feedback";
 import { validateBackupSystemQuery } from "./backup-system-query";
-import { LEARNING_STATE_TABLES, validateBackupLearningState } from "./backup-learning-state";
-import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
+import { validateBackupLearningState } from "./backup-learning-state";
+import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, libraryBlockSourceReferences,
+  libraryRevisionSourceReferences, noteProvenanceSourceReferences, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
 export type OpeningMemoryDeletions = {
@@ -41,36 +45,6 @@ export type RestorePreview = {
   errors: string[];
   recordCounts: Record<string, number>;
 };
-
-const TABLE_ALLOWLIST = [
-  ...LEARNING_STATE_TABLES,
-  "course_goals", "course_goal_links", "goal_time_windows", "course_requirements",
-  "course_requirement_evidence_links", "opening_learning_asset_links",
-  "cards", "card_review_states", "learning_events",
-  "opening_sources", "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
-  "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
-  "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events",
-  "opening_source_chunks",
-  "opening_conversations",
-  "opening_turns",
-  "opening_teaching_activities",
-  "opening_teaching_units",
-  "opening_teaching_activity_specs",
-  "opening_learning_sessions",
-  "opening_problem_refs",
-  "opening_help_exposures",
-  "opening_learning_observations",
-  "opening_skill_evidence",
-  "opening_assistant_candidates",
-  "opening_memories",
-  "opening_privacy_exclusions",
-  "opening_tasks", "opening_plan_feedback", "opening_retest_activities",
-  "opening_timetable_sessions",
-  "opening_hard_blocks",
-  "opening_plan_state",
-  "opening_plan_drafts",
-  "opening_plan_acceptances", "opening_suggestion_feedback",
-] as const;
 
 function validateWorkspaceHistory(
   tables: Record<string, Record<string, unknown>[]>,
@@ -115,6 +89,19 @@ function validateWorkspaceHistory(
  * preserve pre-restore cursors; the executor still owns scope checks and the target transaction.
  */
 export function normalizeOpeningRestoreHistory(backup: OpeningBackup): OpeningBackup {
+  // Earlier v1 exports carried teaching metadata without the library inventory.
+  // Recreate only the referenced document identities. No body or revision is recoverable.
+  if (backup.tables.library_documents === undefined) {
+    const documents = new Set<string>();
+    for (const table of ["opening_teaching_units", "opening_teaching_activity_specs"]) {
+      for (const row of backup.tables[table] ?? []) {
+        if (isRecord(row) && isUuid(row.document_id)) documents.add(row.document_id.toLowerCase());
+      }
+    }
+    if (documents.size) backup = { ...backup, tables: { ...backup.tables, library_documents: [...documents].sort().map(id => ({
+      id, workspace_id: backup.workspaceId, title: "Recovered teaching document", lifecycle: "scratch", current_revision_number: 0,
+    })) } };
+  }
   if ("opening_workspace_history_revisions" in backup.tables) return backup;
   const observations = backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined;
   if (observations?.some(row => "workspace_history_revision" in row)) return backup;
@@ -276,6 +263,8 @@ export function validateOpeningRestore(
   if (!isRecord(backup) || backup.format !== "opening-backup" || backup.version !== 1) {
     return reject("unknown backup version");
   }
+  const forbidden = findForbiddenBackupTable(backup);
+  if (forbidden) return reject(`table ${forbidden} is not allowlisted`);
   if (!isUuid(backup.workspaceId) || !Number.isSafeInteger(backup.privacyEpoch)
     || (backup.privacyEpoch as number) < 0 || !isJournal(backup.deletionJournal)
     || !isJournal(currentDeletionJournal) || !isTables(backup.tables)
@@ -311,7 +300,7 @@ export function validateOpeningRestore(
     .filter((row) => isUuid(row.id) && isUuid(row.workspace_id) && row.workspace_id.toLowerCase() === workspaceId)
     .map((row) => [(row.id as string).toLowerCase(), row]));
   for (const [name, rows] of Object.entries(tables)) {
-    if (!TABLE_ALLOWLIST.includes(name as (typeof TABLE_ALLOWLIST)[number])) {
+    if (!OPENING_BACKUP_TABLE_SET.has(name)) {
       errors.push(`table ${name} is not allowlisted`);
       continue;
     }
@@ -340,8 +329,15 @@ export function validateOpeningRestore(
           errors.push("assistant candidate source turn is missing or invalid");
         }
       }
-      const refs = sourceReferences(row, name === "opening_problem_refs" || name === "opening_learning_item_versions");
+      const libraryContent = name === "library_blocks" || name === "library_revisions";
+      const refs = name === "library_blocks" ? libraryBlockSourceReferences(row)
+        : name === "library_revisions" ? libraryRevisionSourceReferences(row.blocks)
+        : name === "opening_note_provenance" ? noteProvenanceSourceReferences(row)
+          : sourceReferences(row, name === "opening_problem_refs" || name === "opening_learning_item_versions");
       if (refs === null) errors.push(`table ${name} has invalid source lineage`);
+      if (libraryContent && refs?.some(id => !ownedSources.has(id))) {
+        errors.push(`table ${name} references a source missing from the backup`);
+      }
       if (name === "opening_sources") {
         if (!isUuid(row.id)) errors.push("source identity is missing or invalid");
         else if (deleted.has(row.id.toLowerCase())) errors.push("deleted source cannot be restored");
@@ -375,6 +371,7 @@ export function validateOpeningRestore(
       }
     }
   }
+  validateBackupWorkspaceAssets(tables, errors);
   validateWorkspaceHistory(tables, errors);
   validateRetestReferences(tables, errors);
   validateBackupRetestProtocols(tables, errors);

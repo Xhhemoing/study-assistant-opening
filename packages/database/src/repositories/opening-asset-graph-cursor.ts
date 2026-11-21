@@ -94,6 +94,7 @@ export function computeAssetGraphQueryDigest(query: AssetGraphQuery): string {
         ? { kind: "workspace" }
         : { kind: query.context.kind, id: query.context.id },
     lens: query.lens,
+    includeKnowledgeEdgeDetails: query.includeKnowledgeEdgeDetails === true ? true : undefined,
     focus: query.op === "roots" ? null : query.focus,
     direction: query.op === "neighbors" ? query.direction : null,
     kinds: query.op === "roots" && query.kinds ? [...query.kinds].sort() : null,

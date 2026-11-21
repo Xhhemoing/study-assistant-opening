@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { courseRouteActionResultSchema, courseRouteConfirmSchema, courseRouteNextSchema, courseRouteSnapshotSchema, courseRouteStartSchema, courseRouteRetestScheduleSchema, courseRouteRetestReceiptSchema, courseRouteTaskContextSchema, courseRouteVerificationReadSchema, courseRouteVerificationConfirmSchema, type CourseRouteVerificationConfirm, type CourseRouteConfirm, type CourseRouteNext, type CourseRouteStart, type CourseRouteRetestSchedule } from "@aistudy/contracts";
+import { courseRouteActionResultSchema, courseRouteConfirmSchema, courseRouteNextSchema, courseRouteSnapshotSchema, courseRouteStartSchema, courseRouteRetestScheduleSchema, courseRouteRetestReceiptSchema, courseRouteTaskContextSchema, courseRouteVerificationReadSchema, courseRouteVerificationConfirmSchema, type CourseRouteVerificationConfirm, type CourseRouteConfirm, type CourseRouteNext, type CourseRouteStart, type CourseRouteRetestSchedule, type CourseRouteTaskReadOptions } from "@aistudy/contracts";
 import { createSessionFetch } from "../../auth/session-expiry";
 export class CourseRouteRequestError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 export function courseRouteHref(courseId: string, href: string): string {
@@ -29,7 +29,13 @@ export function createCourseRouteClient(transport: typeof fetch = (input, init) 
     start: async (courseId: string, input: CourseRouteStart) => action(courseId, "/start", courseRouteStartSchema.parse(input)),
     next: async (courseId: string, input: CourseRouteNext) => action(courseId, "/next", courseRouteNextSchema.parse(input)),
     async scheduleRetest(courseId: string, input: CourseRouteRetestSchedule) { const receipt = await request(courseId, "/retest", courseRouteRetestReceiptSchema, "POST", courseRouteRetestScheduleSchema.parse(input)); if (receipt.courseId !== courseId || receipt.href !== `/opening/courses/${courseId}/study?task=${receipt.taskId}`) throw new Error("复测安排结果与本课程不匹配。"); return receipt; },
-    async task(courseId: string, taskId: string) { const result = await request(courseId, `/task?taskId=${encodeURIComponent(taskId)}`, courseRouteTaskContextSchema); if (result.managed && (result.courseId !== courseId || result.taskId !== taskId)) throw new Error("路线任务不属于当前课程。"); return result; },
+    async task(courseId: string, taskId: string, { includeRetestId = false }: CourseRouteTaskReadOptions = {}) {
+      const params = new URLSearchParams({ taskId });
+      if (includeRetestId) params.set("includeRetestId", "true");
+      const result = await request(courseId, `/task?${params}`, courseRouteTaskContextSchema);
+      if (result.managed && (result.courseId !== courseId || result.taskId !== taskId)) throw new Error("路线任务不属于当前课程。");
+      return result;
+    },
     async verification(courseId: string, activityId: string) { const result = await request(courseId, `/verification?activityId=${encodeURIComponent(activityId)}`, courseRouteVerificationReadSchema); if (result.courseId !== courseId || result.activityId !== activityId) throw new Error("核对题目不属于当前课程活动。"); return result; },
     async confirmVerification(courseId: string, input: CourseRouteVerificationConfirm) { const result = await request(courseId, "/verification", courseRouteSnapshotSchema, "POST", courseRouteVerificationConfirmSchema.parse(input)); if (result.courseId !== courseId) throw new Error("确认结果不属于当前课程。"); return result; },
   };

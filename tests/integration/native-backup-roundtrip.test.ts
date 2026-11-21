@@ -12,6 +12,7 @@ import {
   createPromotionRepository,
   createSqlClient,
   listMigrationFiles,
+  readOpeningBackupRecords,
   BackupRestoreError,
 } from "@aistudy/database";
 import { defaultGoalAbilities } from "@aistudy/domain";
@@ -50,6 +51,28 @@ describe("native backup round-trip", () => {
 
   afterAll(async () => {
     await sql.end({ timeout: 5 });
+  });
+
+  it("omits answers marked only in block content from learner exports and revision snapshots", async () => {
+    const owner = await identity.createUserWithWorkspace({
+      email: `backup-${randomUUID()}@example.com`, displayName: "Backup", passwordHash: "scrypt$not-used",
+    });
+    const scope = { workspaceId: owner.workspace.id, ownerUserId: owner.user.id };
+    const visible = { id: randomUUID(), type: "paragraph", content: { text: "Public lesson" } };
+    await library.createDocument({ workspaceId: scope.workspaceId, title: "Lesson", blocks: [
+      visible,
+      { id: randomUUID(), type: "text", content: { role: "answer_key", text: "Private answer" } },
+      { id: randomUUID(), type: "text", content: { blockType: "solution", text: "Private solution" } },
+    ] });
+
+    const { records } = await backups.exportWorkspace(scope);
+    const { tables } = await readOpeningBackupRecords(sql, scope);
+    for (const blocks of [records.blocks, tables.library_blocks]) {
+      expect(blocks).toMatchObject([visible]);
+    }
+    for (const revisions of [records.revisions, tables.library_revisions]) {
+      expect(revisions).toMatchObject([{ blocks: [visible] }]);
+    }
   });
 
   it("restores identities, relations, revisions, and file hashes into a wiped workspace", async () => {
@@ -94,6 +117,57 @@ describe("native backup round-trip", () => {
     const event = await events.get({ workspaceId: owner.workspace.id, eventId: seeded.eventId });
     expect(event.id).toBe(seeded.eventId);
     expect(packed.files[0]?.sha256).toBe(packed.files[0]?.sha256);
+  });
+
+  it("drops all corrections of an excluded review and restores the retained chain into an empty workspace", async () => {
+    const owner = await identity.createUserWithWorkspace({
+      email: `corrections-${randomUUID()}@example.com`, displayName: "Backup", passwordHash: "scrypt$not-used",
+    });
+    const scope = { workspaceId: owner.workspace.id, ownerUserId: owner.user.id };
+    const { workspaceId, ownerUserId } = scope;
+    const source = randomUUID(), hiddenCard = randomUUID(), visibleCard = randomUUID();
+    await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,upload_state,parse_state)
+      VALUES(${source},${workspaceId},'Study source','text/plain',1,${"0".repeat(64)},'uploaded','ready')`;
+    await sql`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,source_ids) VALUES
+      (${hiddenCard},${workspaceId},${ownerUserId},'Private prompt','Private answer',${[source]}),
+      (${visibleCard},${workspaceId},${ownerUserId},'Public prompt','Public answer','{}')`;
+
+    async function reviewChain(card: string, note: string) {
+      const review = randomUUID(), correction = randomUUID(), followup = randomUUID();
+      await sql`INSERT INTO learning_events (id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+        VALUES(${review},${workspaceId},${ownerUserId},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+      for (const [id, parent] of [[correction, review], [followup, correction]] as const) {
+        await sql`INSERT INTO learning_events (id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,corrects_event_id,payload)
+          VALUES(${id},${workspaceId},${ownerUserId},'correction',1,${id},now(),${parent},${sql.json({ note })})`;
+      }
+      return [review, correction, followup];
+    }
+
+    const hiddenChain = await reviewChain(hiddenCard, "Private correction text");
+    const visibleChain = await reviewChain(visibleCard, "Retained correction text");
+    expect((await backups.exportWorkspace(scope)).counts.events).toBe(6);
+    await sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id,deleted_at) VALUES(${workspaceId},${source},now())`;
+    const packed = await backups.exportWorkspace(scope);
+    expect(packed.records.events.map(row => row.id)).toEqual(visibleChain);
+    expect(JSON.stringify(packed)).not.toContain("Private correction text");
+
+    const target = await identity.createUserWithWorkspace({
+      email: `target-${randomUUID()}@example.com`, displayName: "Backup target", passwordHash: "scrypt$not-used",
+    });
+    // Restore must also work for archives in which children precede parents.
+    packed.records.events.reverse();
+    await sql`TRUNCATE learning_events`;
+    await sql`DELETE FROM cards WHERE workspace_id=${workspaceId}`;
+    const restored = await backups.restoreWorkspace({
+      workspaceId: target.workspace.id, ownerUserId: target.user.id, packed, conflictPolicy: "reject",
+    });
+    expect(restored.applied).toMatchObject({ cards: 1, events: 3 });
+    const retained = await sql`SELECT id,corrects_event_id FROM learning_events WHERE workspace_id=${target.workspace.id}`;
+    expect(retained).toHaveLength(3);
+    expect(retained).toEqual(expect.arrayContaining(visibleChain.map((id, index) => ({
+      id, corrects_event_id: visibleChain[index - 1] ?? null,
+    }))));
+    for (const id of hiddenChain) expect(retained.map(row => row.id)).not.toContain(id);
   });
 
   it("does not overwrite existing ids and rolls back a failed restore", async () => {

@@ -79,12 +79,12 @@ export function UploadDropzone({ compact = false, disabled = false, multiple = t
         aria-disabled={disabled}
         aria-label={compact ? "添加资料" : "上传材料"}
         title={compact ? `可拖入文件，或点击添加。支持类型：${supportedUploadTypesLabel(accept)}` : undefined}
-        className={`group ${compact ? "inline-flex min-h-10 items-center rounded-lg border px-3 py-2" : "rounded-xl border-2 border-dashed px-4 py-5 text-center"} transition-[border-color,background-color,box-shadow] duration-150 motion-reduce:transition-none ${
+        className={`group ${compact ? "inline-flex min-h-10 items-center rounded-lg border px-3 py-2" : "rounded-card border-2 border-dashed px-4 py-6 text-center"} transition-[border-color,background-color,box-shadow,transform] duration-150 ease-out-strong motion-reduce:transition-none ${
           disabled
             ? "cursor-not-allowed border-line bg-bg opacity-60"
             : dragging
-              ? "cursor-copy border-accent bg-accent-soft shadow-sm shadow-emerald-900/10"
-              : "cursor-pointer border-line-strong bg-surface hover:border-line-strong hover:bg-bg"
+              ? "scale-[1.008] cursor-copy border-accent bg-accent-soft shadow-card ring-2 ring-accent/20"
+              : "cursor-pointer border-line-strong bg-surface hover:border-accent/50 hover:bg-surface-2/40"
         }`}
         onClick={openPicker}
         onDragEnter={onDragEnter}

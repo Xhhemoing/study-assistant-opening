@@ -38,7 +38,7 @@ async function current(tx: TransactionSql, scope: Scope, cardId: string, activit
     || intent.privacyEpoch !== ctx.privacyEpoch || !isDeepStrictEqual(intent.sourceVersions, ctx.sourceVersions)
     || row.course_id !== ctx.card.courseId) throw conflict("这张卡片或复习进度有更新，请回到复习列表继续。");
   if (["generating", "queued"].includes(String(row.generate_status)) && Date.now() - Date.parse(String(row.created_at)) > 600_000) {
-    await tx`UPDATE opening_teaching_activities SET generate_status='unknown',updated_at=now() WHERE id=${activityId}`;
+    await tx`UPDATE opening_teaching_activities SET generate_status='unknown' WHERE id=${activityId}`;
     row.generate_status = "unknown";
   }
   return { ...ctx, row };
@@ -140,7 +140,7 @@ export function createOpeningCardVariantRepository(sql: Sql) {
           sourceRefs: Object.entries(ctx.sourceVersions).map(([sourceId, version]) => ({ sourceId, version })), verificationStatus: "needs_check" });
         const [revision] = await tx`SELECT id FROM library_revisions WHERE document_id=${unit.documentId} AND revision_number=${unit.currentRevisionNumber} AND workspace_id=${scope.workspaceId}`;
         const [saved] = await tx`UPDATE opening_teaching_activities SET generate_status='ready',
-          create_intent=create_intent || ${tx.json({ variantPrompt: proposal.prompt, estimatedMinutes: proposal.estimatedMinutes, variantBlockId: blocks[0]!.id, variantRevisionId: String(revision!.id), variantContentVersion: 1 })},updated_at=now()
+          create_intent=create_intent || ${tx.json({ variantPrompt: proposal.prompt, estimatedMinutes: proposal.estimatedMinutes, variantBlockId: blocks[0]!.id, variantRevisionId: String(revision!.id), variantContentVersion: 1 })}
           WHERE id=${activityId} RETURNING *`;
         return publicReview(tx, scope, saved!);
       });
@@ -148,7 +148,7 @@ export function createOpeningCardVariantRepository(sql: Sql) {
     async fail(scope: Scope, cardId: string, activityId: string, status: "failed" | "unknown") {
       return sql.begin(async tx => {
         const ctx = await current(tx, scope, cardId, activityId);
-        if (ctx.row.generate_status === "generating") await tx`UPDATE opening_teaching_activities SET generate_status=${status},updated_at=now() WHERE id=${activityId}`;
+        if (ctx.row.generate_status === "generating") await tx`UPDATE opening_teaching_activities SET generate_status=${status} WHERE id=${activityId}`;
       });
     },
   };

@@ -11,6 +11,10 @@ export * from "./schema/identity";
 export * from "./schema/preferences";
 export * from "./schema/explorations";
 export * from "./repositories/library";
+export {
+  hasForgedOrProtectedBlock,
+  PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
+} from "./repositories/library-protected-blocks";
 export * from "./repositories/course-membership";
 export * from "./repositories/identity";
 export * from "./repositories/preferences";
@@ -121,6 +125,7 @@ export { readOpeningCourseLearningSummary } from "./repositories/opening-learnin
 export * from "./schema/opening-knowledge";
 export {
   createOpeningKnowledgeRepository,
+  knowledgeChunkDigests,
   OpeningKnowledgeError,
   type OpeningKnowledgeRepository,
   type OpeningKnowledgeRecord,

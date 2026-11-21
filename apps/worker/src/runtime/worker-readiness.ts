@@ -56,8 +56,9 @@ export function createWorkerReadiness(file: string, identity: { role: string; qu
       const temporary = `${target}.${process.pid}.tmp`;
       try {
         mkdirSync(path.dirname(target), { recursive: true });
+        const checkedAt = Date.now();
         writeFileSync(temporary, JSON.stringify({ version: 1, pid: process.pid, supervisorPid: process.ppid,
-          ...identity, queueKinds: [...identity.queueKinds].sort(), checkedAt: Date.now(), expiresAt: Date.now() + 15_000 }), { mode: 0o644 });
+          ...identity, queueKinds: [...identity.queueKinds].sort(), checkedAt, expiresAt: checkedAt + 15_000 }), { mode: 0o644 });
         renameSync(temporary, target);
       } finally { rmSync(temporary, { force: true }); }
     },

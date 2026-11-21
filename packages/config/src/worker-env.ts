@@ -15,7 +15,7 @@ const DEVELOPMENT_DEFAULTS = {
 type RequiredKey = keyof typeof DEVELOPMENT_DEFAULTS;
 const REQUIRED_KEYS = Object.keys(DEVELOPMENT_DEFAULTS) as RequiredKey[];
 
-export type WorkerRole = "all" | "learning" | "parser";
+export type WorkerRole = "all" | "learning" | "parser" | "teaching" | "logistics";
 
 export type WorkerEnv = {
   nodeEnv: "development" | "test" | "production";
@@ -34,9 +34,10 @@ export function loadWorkerEnv(source: NodeJS.ProcessEnv = process.env): WorkerEn
   loadWorkerStartupConfig(source);
   const nodeEnv = source.NODE_ENV === "production" ? "production" : source.NODE_ENV === "test" ? "test" : "development";
   const issues: string[] = [];
-  const workerRole = source.WORKER_ROLE?.trim() || "all";
-  if (!["all", "learning", "parser"].includes(workerRole)) {
-    issues.push("WORKER_ROLE: must be all, learning or parser");
+  const rawRole = source.WORKER_ROLE?.trim() || "all";
+  const workerRole = rawRole === "tutor" ? "teaching" : rawRole;
+  if (!["all", "learning", "parser", "teaching", "logistics"].includes(workerRole)) {
+    issues.push("WORKER_ROLE: must be all, learning, parser, logistics, teaching or tutor");
   }
   const value = (key: RequiredKey): string => {
     const raw = source[key]?.trim();

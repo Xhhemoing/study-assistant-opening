@@ -127,6 +127,14 @@ describe("auth form submission", () => {
     expect(html).toContain("登录成功");
   });
 
+  it.each([{ returnTo: "https://outside.example" }, { returnTo: "//outside.example" }, { returnTo: ["/library", "/login"] }])("uses the home fallback for an unsafe return destination %j", async ({ returnTo }) => {
+    vi.mocked(fetch).mockResolvedValue({ ok: true } as Response);
+    const form = AuthForm({ mode: "login", returnTo });
+    await form.props.onSubmit(submitEvent().event);
+    expect(replace).toHaveBeenCalledWith("/");
+    expect(stateUpdates[3]).toHaveBeenCalledWith("/");
+  });
+
   it("does not resend credentials if client navigation throws after authentication", async () => {
     vi.mocked(fetch).mockResolvedValue({ ok: true } as Response);
     replace.mockImplementationOnce(() => { throw new Error("router unavailable"); });

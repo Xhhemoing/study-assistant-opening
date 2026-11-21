@@ -50,9 +50,10 @@ it.each(["before_send", "after_output"] as const)("preserves gateway fee semanti
   await expect(handler(job, payload)).rejects.toThrow("course rebound");
   expect(provider.complete).toHaveBeenCalledTimes(phase === "before_send" ? 0 : 1);
   expect(release).toHaveBeenCalledTimes(phase === "before_send" ? 1 : 0);
-  expect(markUnknown).toHaveBeenCalledTimes(phase === "after_output" ? 1 : 0);
-  expect(settle).not.toHaveBeenCalled();
-  f.repository.ledger.mockResolvedValue("unknown" as never);
+  expect(markUnknown).not.toHaveBeenCalled();
+  if (phase === "after_output") expect(settle).toHaveBeenCalledExactlyOnceWith(id, 1);
+  else expect(settle).not.toHaveBeenCalled();
+  f.repository.ledger.mockResolvedValue(phase === "after_output" ? "completed" : "unknown");
   await expect(handler(job, payload)).rejects.toThrow("不会重发");
   expect(provider.complete).toHaveBeenCalledTimes(phase === "before_send" ? 0 : 1);
 });

@@ -17,10 +17,12 @@ export {
   actualCentsForOutput,
   estimateUsage,
   extractUsage,
+  parseProviderUsage,
   reservationCentsForInput,
   usageFromOutput,
   type OpeningPricing,
   type OpeningUsage,
+  type ParsedProviderUsage,
 } from "./opening/usage";
 
 export { ROLE_POLICIES, getRolePolicy, type RolePolicy } from "./roles";
@@ -79,6 +81,7 @@ export {
   ledgerActionForProviderError,
   replayDisposition,
   runBudgetedCall,
+  runBudgetedCallWithReceipt,
   settleCentsForActual,
   type BudgetCallOutcomeCode,
   type BudgetReplayDisposition,

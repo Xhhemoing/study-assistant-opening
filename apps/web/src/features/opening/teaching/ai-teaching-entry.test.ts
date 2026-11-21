@@ -12,8 +12,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { TeachingActivity } from "@aistudy/contracts";
+import type { PlanDraft, TeachingActivity } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
+import { CLOSED_CAPABILITIES } from "@aistudy/config/public";
+import { OpeningCapabilitiesContext } from "../capabilities/capabilities-provider";
 import { openingNavigation } from "../shell/navigation";
 import { TeachingActivityEmpty } from "./activity-panel";
 import { TeachingLoopTrialEmpty } from "./teaching-loop-trial-empty";
@@ -73,11 +75,9 @@ const webSrc = resolve(__dirname, "../../..");
 const read = (p: string) => readFileSync(resolve(webSrc, p), "utf8");
 
 describe("AI 主讲 entry path", () => {
-  it("Today is the first core entry and notes is a separate core entry after the assistant", () => {
-    const core = openingNavigation().filter((i) => i.group === "core").map((i) => i.href);
-    expect(core[0]).toBe("/opening/today");
-    expect(core).toContain("/opening/library");
-    expect(core.indexOf("/opening/library")).toBeGreaterThan(core.indexOf("/opening/today"));
+  it("keeps Today first with separate Explore and Library entries in V2", () => {
+    const core = openingNavigation({ studySessionV2: true }).filter(i => i.group === "core").map(i => i.href);
+    expect(core).toEqual(["/opening/today", "/opening/courses", "/opening/agent", "/opening/library"]);
   });
 
   it("/opening/today passes the authenticated server state to the new learning entry", async () => {
@@ -107,6 +107,32 @@ describe("AI 主讲 entry path", () => {
     expect(entry?.getAttribute("href")).toBe(`/opening/courses/course-1/study?activity=${activity.id}`);
     expect(entry?.textContent).toContain(activity.intentSummary);
     expect(container.querySelector("[data-teaching-continue-entry]")).toBeNull();
+  });
+
+  it("offers the opted-in coach decision on Today and only accepts on click", async () => {
+    const draft: PlanDraft = { id: activity.id, date: "2026-11-19", origin: "auto_draft", status: "draft", version: 2, baseVersion: 0, blocks: [], unscheduledTaskIds: [] };
+    const client = {
+      listTeachingActivities: vi.fn().mockResolvedValue([]),
+      listTasks: vi.fn().mockResolvedValue({ tasks: [] }),
+      getToday: vi.fn().mockResolvedValue({ date: draft.date, acceptedVersion: 0, blocks: [], hardBlocks: [], dailyDraft: draft }),
+      getActionDigest: vi.fn().mockResolvedValue({ primary: [], pendingConfirmationCount: 0 }),
+      getAdaptivePrefs: vi.fn().mockResolvedValue({ prefs: { autonomy: "coach", coachAutoAcceptEnabled: true } }),
+      getCoachAcceptance: vi.fn().mockResolvedValue(null),
+      acceptCoachPlan: vi.fn().mockResolvedValue({ acceptance: { scheduledMinutes: 20, createdTaskIds: [] } }),
+    };
+    await act(async () => root.render(createElement(OpeningCapabilitiesContext.Provider, {
+      value: { ...CLOSED_CAPABILITIES, adaptivePlanning: true },
+    }, createElement(TodayDashboard, { state: { kind: "ready" }, api: client as unknown as OpeningApi }))));
+    const coach = container.querySelector('[aria-label="教练安排摘要"]');
+    const confirm = coach?.querySelector("button");
+    expect(confirm?.textContent).toBe("按预算安排今日草案");
+    expect(client.getToday).toHaveBeenCalledTimes(1);
+    expect(client.getToday.mock.calls[0]).toHaveLength(1);
+    expect(client.acceptCoachPlan).not.toHaveBeenCalled();
+    await act(async () => confirm!.click());
+    expect(client.acceptCoachPlan).toHaveBeenCalledExactlyOnceWith({
+      draftId: draft.id, expectedDraftVersion: draft.version, clientKey: `coach:${draft.id}:${draft.version}`,
+    });
   });
 
   it("Today offers a course entry after confirming there is no activity to continue", async () => {

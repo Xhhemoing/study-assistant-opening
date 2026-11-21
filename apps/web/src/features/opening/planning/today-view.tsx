@@ -123,7 +123,7 @@ export function TodayPlanView({
   const [planning, setPlanning] = useState(false), [all, setAll] = useState(false), [doneView, setDoneView] = useState(false);
   const [nowTick, setNowTick] = useState(() => new Date());
   const [coachSettingsRevision, setCoachSettingsRevision] = useState(0);
-  const refresh = useCallback(async (options?: { refreshSuggestions?: boolean }) => {
+  const refresh = useCallback(async (options?: Parameters<OpeningApi["getToday"]>[1]) => {
     const epoch = ++readEpoch.current;
     setLoadState("loading"); setError(""); setPlanWarning(""); setPlanState("loading");
     await readTodayData(api, date, {
@@ -210,38 +210,39 @@ export function TodayPlanView({
   const selectablePending = groups.confirmed.length + groups.dueRetests.length + groups.overdue.length + groups.other.length;
   const upcomingHint = upcomingRetestHint(queueTasks, nowTick, timeZone, groups.upcomingRetestCount);
   return <TaskPlanningTimeZoneContext.Provider value={timeZone}><section className="flex min-h-full flex-col bg-surface" aria-label="今日计划">
-    {adaptivePlanning ? <AutonomySwitcher api={api} onChanged={() => { setCoachSettingsRevision(value => value + 1); void refresh({ refreshSuggestions: true }); }} /> : null}
-    <div className="border-b border-line/70 px-5 pb-3 pt-4"><div className="flex items-center justify-between"><h2 className="text-sm font-semibold text-text">今天还要做</h2><button type="button" aria-label="安排时间" aria-expanded={planning} aria-controls="opening-plan-editor" className={secondaryButtonClass} disabled={!plan || planState !== "ready" || loadState !== "ready"} onClick={() => setPlanning(!planning)}><CalendarDays size={15} aria-hidden /></button></div><p className="mt-1 text-xs text-text-3">{loadState === "ready" ? `当前可选 ${remaining.length} 项${remaining.length > 0 && remaining.every(task => task.estimateMinutes != null) ? ` · 预计 ${remaining.reduce((sum, task) => sum + (task.estimateMinutes ?? 0), 0)} 分钟` : ""}` : loadState === "error" ? "任务读取失败" : "正在读取任务"}</p></div>
+    {adaptivePlanning ? <AutonomySwitcher api={api} onChanged={() => { setCoachSettingsRevision(value => value + 1); void refresh(); }} /> : null}
+    <div className="border-b border-line/70 px-5 pb-3.5 pt-4"><div className="flex items-center justify-between"><h2 className="text-sm font-semibold text-text">今天还要做</h2><button type="button" aria-label="安排时间" aria-expanded={planning} aria-controls="opening-plan-editor" className={secondaryButtonClass} disabled={!plan || planState !== "ready" || loadState !== "ready"} onClick={() => setPlanning(!planning)}><CalendarDays size={15} aria-hidden /></button></div><p className="mt-1 text-xs tabular-nums text-text-3">{loadState === "ready" ? `当前可选 ${remaining.length} 项${remaining.length > 0 && remaining.every(task => task.estimateMinutes != null) ? ` · 预计 ${remaining.reduce((sum, task) => sum + (task.estimateMinutes ?? 0), 0)} 分钟` : ""}` : loadState === "error" ? "任务读取失败" : "正在读取任务"}</p></div>
     {loadState === "ready" ? <QuickAddTask api={api} disabled={pending} onAdded={() => { void refresh(); }} /> : null}
-    {planning ? <div id="opening-plan-editor" className="space-y-3 border-b border-line bg-surface px-4 py-4">
+    {planning ? <div id="opening-plan-editor" className="mx-4 my-3 space-y-3 rounded-card border border-line bg-surface-2/60 p-4 shadow-card">
       <h3 className="text-xs font-semibold text-text">安排可用时间</h3>
-      <label className="block text-xs text-text-2">开始<input aria-label="可用时间开始" type="datetime-local" value={freeStart} onChange={(event) => setFreeStart(event.target.value)} className={`${inputClass} mt-1`} disabled={pending} /></label>
-      <label className="block text-xs text-text-2">结束<input aria-label="可用时间结束" type="datetime-local" value={freeEnd} onChange={(event) => setFreeEnd(event.target.value)} className={`${inputClass} mt-1`} disabled={pending} /></label>
+      <label className="block text-xs text-text-2">开始<input aria-label="可用时间开始" type="datetime-local" value={freeStart} onChange={(event) => setFreeStart(event.target.value)} className={`${inputClass} mt-1 tabular-nums`} disabled={pending} /></label>
+      <label className="block text-xs text-text-2">结束<input aria-label="可用时间结束" type="datetime-local" value={freeEnd} onChange={(event) => setFreeEnd(event.target.value)} className={`${inputClass} mt-1 tabular-nums`} disabled={pending} /></label>
       <button type="button" onClick={() => void propose()} disabled={pending || Boolean(draft) || !plan || planState !== "ready" || loadState !== "ready" || !canProposePlan({ start: freeStart, end: freeEnd })} className={`${buttonClass} w-full`}>{pending ? "正在处理…" : "生成计划"}</button>
-      {plan?.blocks.length ? <details><summary className="min-h-10 cursor-pointer py-2 text-xs text-text-2">已确认安排 · {plan.blocks.length} 个时间块</summary><ul className="space-y-2 text-xs leading-5 text-text-2">{plan.blocks.map((block) => <li key={`${block.taskId}-${block.start}`}><span className="font-medium text-text">{tasks.find((task) => task.id === block.taskId)?.title ?? "学习任务"}</span><p>{timeLabel(block.start)}–{timeLabel(block.end)}</p><p>{block.reason}</p></li>)}</ul></details> : null}
-      {draft ? <div className="space-y-3 border-t border-line pt-3"><p className="text-xs font-semibold text-text">计划变更预览</p><p className="text-xs leading-5 text-text-2">当前 {plan?.blocks.length ?? 0} 个时间块 → 草案 {draft.blocks.length} 个时间块；未安排 {draft.unscheduledTaskIds.length} 项。</p>
-        <ul className="space-y-2 text-xs leading-5 text-text-2">{draft.blocks.map((block) => <li key={`${block.taskId}-${block.start}`}><span className="font-medium text-text">{tasks.find((task) => task.id === block.taskId)?.title ?? "学习任务"}</span><p>{timeLabel(block.start)}–{timeLabel(block.end)}</p><p>{block.reason}</p></li>)}</ul>
+      {plan?.blocks.length ? <details className="group"><summary className="flex min-h-10 cursor-pointer list-none items-center justify-between py-2 text-xs tabular-nums text-text-2 hover:text-text [&::-webkit-details-marker]:hidden"><span>已确认安排 · {plan.blocks.length} 个时间块</span><ChevronDown size={14} aria-hidden="true" className="text-text-3 transition-transform duration-200 ease-out-strong group-open:rotate-180" /></summary><ul className="space-y-2 pt-1 text-xs leading-5 text-text-2">{plan.blocks.map((block) => <li key={`${block.taskId}-${block.start}`} className="rounded-xl border border-line bg-surface p-2.5"><span className="font-medium text-text">{tasks.find((task) => task.id === block.taskId)?.title ?? "学习任务"}</span><p className="tabular-nums text-text-3">{timeLabel(block.start)}–{timeLabel(block.end)}</p><p>{block.reason}</p></li>)}</ul></details> : null}
+      {draft ? <div className="space-y-3 border-t border-line pt-3"><p className="text-xs font-semibold text-text">计划变更预览</p><p className="text-xs leading-5 tabular-nums text-text-2">当前 {plan?.blocks.length ?? 0} 个时间块 → 草案 {draft.blocks.length} 个时间块；未安排 {draft.unscheduledTaskIds.length} 项。</p>
+        <ul className="space-y-2 text-xs leading-5 text-text-2">{draft.blocks.map((block) => <li key={`${block.taskId}-${block.start}`} className="rounded-xl border border-line bg-surface p-2.5"><span className="font-medium text-text">{tasks.find((task) => task.id === block.taskId)?.title ?? "学习任务"}</span><p className="tabular-nums text-text-3">{timeLabel(block.start)}–{timeLabel(block.end)}</p><p>{block.reason}</p></li>)}</ul>
         {draftIsStale ? <p className="text-xs leading-5 text-warn">计划或日期已变化。请取消当前建议，重新生成后确认。</p> : null}
         <div className="flex flex-wrap gap-2"><button type="button" onClick={() => void accept()} disabled={loadState !== "ready" || planState !== "ready" || !canAcceptPlan({ pending, stale: draftIsStale })} className={buttonClass}>确认变更</button><button type="button" onClick={() => void reject()} disabled={pending} className={secondaryButtonClass}>取消草案</button></div>
       </div> : null}
     </div> : null}
-    <div className="mx-4 my-3 flex rounded-lg bg-surface-2 p-0.5" role="group" aria-label="队列筛选">{[false, true].map((completed) => <button key={String(completed)} type="button" aria-pressed={doneView === completed} onClick={() => { setDoneView(completed); setAll(false); }} className={`min-h-10 flex-1 rounded-md px-2 text-xs font-medium transition-[color,background-color,box-shadow] duration-200 ease-out-expo focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 motion-reduce:transition-none md:min-h-8 ${doneView === completed ? "bg-surface text-text shadow-sm shadow-zinc-900/10" : "text-text-2 hover:text-text"}`}>{completed ? `已结束 ${done.length}` : `待办 ${selectablePending}`}</button>)}</div>
-    {error ? <div className="mx-3 mb-3 border border-danger/20 bg-danger/10 p-3"><p className="text-xs leading-5 text-danger" role="alert">{error}</p><button type="button" onClick={() => void refresh()} disabled={loadState === "loading" || pending} className={`${secondaryButtonClass} mt-2`}>重新读取</button></div> : null}
-    {planWarning ? <div className="mx-4 mb-3 rounded-lg border border-warn/20 bg-warn-soft p-3"><p className="text-xs leading-5 text-warn" role="status">{planWarning}</p><button type="button" className={`${secondaryButtonClass} mt-2`} disabled={pending || loadState === "loading"} onClick={() => void refresh()}>重试读取安排</button></div> : null}
-    {doneView && loadState === "ready" ? <p className="mx-4 mb-2 text-xs text-text-3">已完成 {completedCount} 项 · 已跳过 {skippedCount} 项；跳过不计为完成。</p> : null}
-    {!doneView && loadState === "ready" && upcomingHint ? <p className="mx-4 mb-2 text-xs leading-5 text-text-3" role="status">{upcomingHint}</p> : null}
+    <div className="well-recessed mx-4 my-3 flex rounded-xl p-1" role="group" aria-label="队列筛选">{[false, true].map((completed) => <button key={String(completed)} type="button" aria-pressed={doneView === completed} onClick={() => { setDoneView(completed); setAll(false); }} className={`min-h-10 flex-1 rounded-lg px-2.5 text-xs font-medium tabular-nums transition-[color,background-color,box-shadow,transform] duration-150 ease-out-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 active:scale-[0.985] motion-reduce:transition-none md:min-h-8 ${doneView === completed ? "bg-surface text-text shadow-card" : "text-text-2 hover:text-text"}`}>{completed ? `已结束 ${done.length}` : `待办 ${selectablePending}`}</button>)}</div>
+    {error ? <div className="mx-4 mb-3 rounded-xl border border-danger/25 bg-danger-soft p-3.5"><p className="text-xs leading-5 text-danger" role="alert">{error}</p><button type="button" onClick={() => void refresh()} disabled={loadState === "loading" || pending} className={`${secondaryButtonClass} mt-2`}>重新读取</button></div> : null}
+    {planWarning ? <div className="mx-4 mb-3 rounded-xl border border-warn/25 bg-warn-soft p-3.5"><p className="text-xs leading-5 text-warn" role="status">{planWarning}</p><button type="button" className={`${secondaryButtonClass} mt-2`} disabled={pending || loadState === "loading"} onClick={() => void refresh()}>重试读取安排</button></div> : null}
+    {doneView && loadState === "ready" ? <p className="mx-4 mb-2 text-xs tabular-nums text-text-3">已完成 {completedCount} 项 · 已跳过 {skippedCount} 项；跳过不计为完成。</p> : null}
+    {!doneView && loadState === "ready" && upcomingHint ? <p className="mx-4 mb-2 text-xs leading-5 tabular-nums text-text-3" role="status">{upcomingHint}</p> : null}
     {doneView
       ? <TodayTaskList tasks={done} state={loadState} focusTaskId={undefined} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll={all} doneView api={api} />
       : <TodayGroupedQueue groups={groups} state={loadState} focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} api={api} />}
-    {doneView && done.length > 3 ? <button type="button" className={`${secondaryButtonClass} mx-3 mt-2`} aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起列表" : `查看全部 ${done.length} 项`}<ChevronDown size={12} aria-hidden /></button> : null}
+    {doneView && done.length > 3 ? <button type="button" className={`${secondaryButtonClass} mx-4 mt-2 tabular-nums`} aria-expanded={all} onClick={() => setAll(!all)}>{all ? "收起列表" : `查看全部 ${done.length} 项`}<ChevronDown size={12} aria-hidden className={`transition-transform duration-200 ${all ? "rotate-180" : ""}`} /></button> : null}
     <div id="action-digest" tabIndex={-1} className="scroll-mt-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
       {hasLoadedTasks ? <ActionDigest api={api} onChanged={refresh} onAdjust={() => setPlanning(true)} /> : null}
     </div>
     {hasLoadedTasks && plan ? <fieldset disabled={pending || loadState !== "ready" || planState !== "ready"} className="min-w-0 disabled:opacity-60">
       {adaptivePlanning && plan.replanOffer?.offer ? <LocalReplanCard key={`${date}:${plan.acceptedVersion}`} api={api} date={date} acceptedVersion={plan.acceptedVersion} blocks={plan.blocks} tasks={tasks} reason={plan.replanOffer.reason} dismissalKey={plan.replanOffer.dismissalKey} timeZone={timeZone} onChanged={refresh} /> : null}
       {adaptivePlanning ? <CoachPlanControl date={date} draft={plan.dailyDraft ?? null} api={api} onChanged={refresh} settingsRevision={coachSettingsRevision} /> : null}
+      {!plan.dailyDraft && !plan.dailyDraftSkippedReason ? <button type="button" className={`${secondaryButtonClass} mx-4 my-3`} onClick={() => void refresh({ prepareDraft: true })}>生成今日推荐草案</button> : null}
       <DailyDraftCard key={date} api={api} date={date} acceptedVersion={plan.acceptedVersion} dailyDraft={plan.dailyDraft ?? null} dailyDraftSkippedReason={plan.dailyDraftSkippedReason ?? null} unplannedPendingCount={plan.unplannedPendingCount} tasks={tasks} onChanged={refresh} adaptivePlanning={adaptivePlanning} hasNewerSuggestion={plan.hasNewerSuggestion} onRefreshSuggestions={() => refresh({ refreshSuggestions: true })} />
-      <details className="mx-4 mt-4 rounded-xl border border-line bg-surface"><summary className="min-h-11 cursor-pointer px-3 py-3 text-xs font-medium text-text-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">今日安排与进度</summary><TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /></details>
+      <details className="group mx-4 mt-4 overflow-hidden rounded-card border border-line bg-surface shadow-card"><summary className="flex min-h-11 cursor-pointer list-none items-center justify-between px-4 py-3 text-xs font-medium text-text-2 transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 [&::-webkit-details-marker]:hidden"><span>今日安排与进度</span><ChevronDown size={14} aria-hidden="true" className="text-text-3 transition-transform duration-200 ease-out-strong group-open:rotate-180" /></summary><TodayPlanOverview tasks={tasks} plan={plan} onArrange={() => setPlanning(true)} /></details>
     </fieldset> : null}
     {hasLoadedTasks ? <TodayStudyTools key={date} disabled={pending || loadState !== "ready" || planState !== "ready"} api={api} date={date} plan={plan} tasks={tasks} onChanged={refresh} /> : null}
     <div className="mt-auto px-4 pb-4 pt-6" />
@@ -272,8 +273,8 @@ export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSe
     return <div className="px-4 py-6"><p className="text-sm text-text-2">暂无待完成任务。</p><p className="mt-2 text-xs leading-6 text-text-3">继续探索或整理笔记，无需先创建任务。也可用上方快速添加。</p></div>;
   }
   return <div className="space-y-3" aria-label="分组学习队列">
-    {groups.deferred.length ? <details className="mx-4 rounded-lg border border-line p-3">
-      <summary className="cursor-pointer text-xs text-text-2">已推迟 {groups.deferred.length} 项</summary>
+    {groups.deferred.length ? <details className="group mx-4 rounded-xl border border-line bg-surface-2/40 p-3">
+      <summary className="flex cursor-pointer list-none items-center justify-between text-xs tabular-nums text-text-2 hover:text-text [&::-webkit-details-marker]:hidden"><span>已推迟 {groups.deferred.length} 项</span><ChevronDown size={14} aria-hidden="true" className="text-text-3 transition-transform duration-200 ease-out-strong group-open:rotate-180" /></summary>
       <ul className="mt-3 space-y-3">{groups.deferred.map(task => <li key={task.id}>
         <p className="mb-2 text-xs text-text-2">{task.title}</p>
         {api ? <TaskStatusControl task={task} api={api} disabled={false} /> : null}
@@ -281,11 +282,11 @@ export function TodayGroupedQueue({ groups, state, focusTaskId, selectedId, onSe
     </details> : null}
     {sections.map((section) => (
       <div key={section.key}>
-        <h3 className="px-4 pb-1 text-xs font-semibold text-text-3">{QUEUE_GROUP_LABELS[section.key]} · {groups[section.key].length}</h3>
+        <h3 className="px-4 pb-1.5 text-xs font-semibold tabular-nums text-text-3">{QUEUE_GROUP_LABELS[section.key]} · {groups[section.key].length}</h3>
         <TodayTaskList tasks={section.tasks} state="ready" focusTaskId={focusTaskId} selectedId={selectedId} onSelect={onSelect} plan={plan} showAll doneView={false} api={api} />
       </div>
     ))}
-    {total > 5 ? <button type="button" className={`${secondaryButtonClass} mx-4`} aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "收起任务" : `查看其余 ${total - 5} 项任务`}<ChevronDown size={14} aria-hidden="true" /></button> : null}
+    {total > 5 ? <button type="button" className={`${secondaryButtonClass} mx-4 tabular-nums`} aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? "收起任务" : `查看其余 ${total - 5} 项任务`}<ChevronDown size={14} aria-hidden="true" className={`transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} /></button> : null}
   </div>;
 }
 
@@ -299,18 +300,18 @@ export function TodayTaskList({ tasks, state, focusTaskId, selectedId, onSelect,
   if (state === "error") return <p className="px-4 py-5 text-xs text-danger">任务暂时无法读取，请重试。</p>;
   const visibleTasks = doneView ? tasks.slice(0, showAll ? undefined : 3) : showAll ? [...tasks.filter((task) => task.id === focusTaskId), ...tasks.filter((task) => task.status === "pending" && task.id !== focusTaskId)] : visibleTodayTasks(tasks, focusTaskId);
   if (!visibleTasks.length) return <div className="px-4 py-6"><p className="text-sm text-text-2">{doneView ? "尚无已结束任务。" : "暂无待完成任务。"}</p><p className="mt-2 text-xs leading-6 text-text-3">继续探索或整理笔记，无需先创建任务。</p></div>;
-  return <ul className="border-y border-line/60" aria-label="学习任务列表">{visibleTasks.map((task) => {
+  return <ul className="divide-y divide-line/60 border-y border-line/60" aria-label="学习任务列表">{visibleTasks.map((task) => {
     const block = plan?.blocks.find((entry) => entry.taskId === task.id), active = task.id === selectedId;
     const showStatus = !doneView && task.status === "pending" && api;
-    return <li key={task.id} id={`task-${task.id}`} ref={task.id === focusTaskId ? focusRef : undefined} tabIndex={task.id === focusTaskId ? -1 : undefined} className="scroll-mt-6 border-b border-line/50 last:border-0 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50">
-      <div className="flex flex-col" data-today-task-row="true">
-        <button type="button" aria-pressed={active} onClick={() => onSelect?.({ ...task, reason: block?.reason }, "user")} className={`group flex min-h-[80px] w-full items-start gap-3 border-l-2 px-4 py-3.5 text-left transition-[color,background-color,border-color,transform] duration-200 ease-out-expo focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/50 active:scale-[0.99] motion-reduce:transition-none motion-reduce:active:scale-100 ${active ? "border-accent bg-gradient-to-r from-accent-soft/80 to-transparent" : "border-transparent hover:border-line hover:bg-surface-2"}`}>
-          {task.status === "done" ? <CircleCheck size={16} className="mt-0.5 shrink-0 text-accent" aria-hidden /> : <Circle size={16} className={`mt-0.5 shrink-0 transition-colors duration-200 ${active ? "text-accent" : "text-text-3 group-hover:text-text-3"}`} aria-hidden />}
-          <span className="min-w-0 flex-1"><span className="line-clamp-2 break-words text-[13px] font-medium leading-6 text-text">{task.title}</span><span className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text-3">{task.estimateMinutes != null ? <><Clock3 size={12} aria-hidden />预计 {task.estimateMinutes} 分钟<span aria-hidden>/</span></> : null}{task.status === "done" ? "已完成" : task.status === "skipped" ? "已跳过" : block ? `${timeLabel(block.start)}–${timeLabel(block.end)}` : "待安排"}</span></span>
-          {active ? <ArrowRight size={14} className="mt-1 shrink-0 text-accent motion-safe:animate-enter" aria-hidden /> : null}
+    return <li key={task.id} id={`task-${task.id}`} ref={task.id === focusTaskId ? focusRef : undefined} tabIndex={task.id === focusTaskId ? -1 : undefined} className="scroll-mt-6 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent/50">
+      <div className={`flex flex-col transition-colors duration-150 ${active ? "bg-accent-soft/50 ring-1 ring-inset ring-accent/20" : "hover:bg-surface-2/70"}`} data-today-task-row="true">
+        <button type="button" aria-pressed={active} onClick={() => onSelect?.({ ...task, reason: block?.reason }, "user")} className="group flex min-h-[76px] w-full items-start gap-3 px-4 py-3.5 text-left transition-transform duration-150 ease-out-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/50 active:scale-[0.995] motion-reduce:transition-none motion-reduce:active:scale-100">
+          {task.status === "done" ? <CircleCheck size={16} className="mt-1 shrink-0 text-accent" aria-hidden /> : <Circle size={16} className={`mt-1 shrink-0 transition-colors duration-150 ${active ? "text-accent" : "text-text-3 group-hover:text-text-2"}`} aria-hidden />}
+          <span className="min-w-0 flex-1"><span className="line-clamp-2 break-words text-[13px] font-medium leading-6 text-text">{task.title}</span><span className="mt-1.5 flex flex-wrap items-center gap-2 text-xs tabular-nums text-text-3">{task.estimateMinutes != null ? <><Clock3 size={12} aria-hidden />预计 {task.estimateMinutes} 分钟<span aria-hidden>/</span></> : null}{task.status === "done" ? "已完成" : task.status === "skipped" ? "已跳过" : block ? `${timeLabel(block.start)}–${timeLabel(block.end)}` : "待安排"}</span></span>
+          {active ? <ArrowRight size={14} className="mt-1.5 shrink-0 text-accent motion-safe:animate-enter" aria-hidden /> : null}
         </button>
         {showStatus ? (
-          <div className="border-l-2 border-transparent px-4 pb-3" data-today-task-status="true">
+          <div className="px-4 pb-3" data-today-task-status="true">
             <TaskRowActions task={task} />
             <TaskStatusControl
               key={`${task.id}:${task.version ?? "unknown"}`}

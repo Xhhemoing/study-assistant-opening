@@ -9,19 +9,16 @@ import { ConversationCompanionProvider } from "../assistant/conversation-compani
 import { OpeningCapabilityNotice, useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CitationReaderHost } from "../inbox/citation-reader-host";
 import { AppShell, type ShellNav } from "../v3/shell/app-shell";
-import { FEATURES, type Feature } from "../v3/shell/features";
-import { navigationIsActive, openingNavigation } from "./navigation";
+import { shellNavigationFeatures } from "../v3/shell/features";
+import { navigationIsActive } from "./navigation";
 import { StatusToastProvider } from "../v3/ui/toast";
 import { OpeningAccountMenu } from "./account-menu";
 import { ConnectionNotice } from "./connection-notice";
 import { useRecentConversations } from "./recent-conversations";
 import { useDueReviewCount } from "./review-count";
 import { NavigationShortcutsHint } from "./navigation-shortcuts-hint";
+import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
 import { WorkspaceLayoutContext } from "./workspace-layout-context";
-
-const navigationFeature = (href: string, label: string, placement: "core" | "tool"): Feature => ({
-  ...FEATURES.find(item => item.route === href)!, label, placement,
-});
 
 /**
  * 生产壳层（UI v3）：v3 AppShell 负责导航、外观层与页面过渡；这里只接业务数据与全局能力：
@@ -29,6 +26,7 @@ const navigationFeature = (href: string, label: string, placement: "core" | "too
  * 专注由用户主动进入（账户菜单），不再进入学习页时自动隐藏导航。
  */
 export function OpeningShellV3({ children }: { children: ReactNode }) {
+  useEffect(() => subscribeOpeningPrivacyChange(() => undefined), []);
   const pathname = usePathname();
   const search = useSearchParams().toString();
   const router = useRouter();
@@ -41,12 +39,12 @@ export function OpeningShellV3({ children }: { children: ReactNode }) {
   const { recent, unavailable: recentUnavailable } = useRecentConversations(pathname);
   const dueCount = useDueReviewCount(pathname);
   const { studySessionV2 } = useOpeningCapabilities();
-  const navigation = openingNavigation({ studySessionV2 });
+  const navigation = shellNavigationFeatures({ studySessionV2 });
   const shellNav: ShellNav = {
     label: "学习工作台导航",
     mobileLabel: "学习工作台导航（移动端）",
-    core: navigation.filter(item => item.group === "core").map(item => navigationFeature(item.href, item.label, "core")),
-    tools: navigation.filter(item => item.group === "tools").map(item => navigationFeature(item.href, item.label, "tool")),
+    core: navigation.filter(item => item.placement === "core"),
+    tools: navigation.filter(item => item.placement === "tool"),
     system: [],
     isActive: (item, path) => navigationIsActive(item.route, path, search, { studySessionV2 }),
   };

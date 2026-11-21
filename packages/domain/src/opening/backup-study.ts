@@ -107,10 +107,14 @@ export function validateBackupStudy(tables: Tables, errors: string[]): void {
     } else if (row.acknowledged_at != null) errors.push("Study exposure acknowledgement cannot precede release");
   }
   // A restored compile must never choose a fresh budget after its originating user turn was lost.
+  const turnsByLowerId = new Map(
+    rows(tables, "opening_turns").flatMap(row => (typeof row.id === "string" && isUuid(row.id) ? [[row.id.toLowerCase(), row] as const] : [])),
+  );
   for (const row of activities.values()) {
     const source = isRecord(row.create_intent) ? row.create_intent.sourceTurnId : undefined;
     if (source === undefined) continue;
-    const turn = turns.get(source), conversation = conversations.get(turn?.conversation_id);
+    const turn = typeof source === "string" && isUuid(source) ? turnsByLowerId.get(source.toLowerCase()) : undefined;
+    const conversation = conversations.get(turn?.conversation_id);
     if (!turn || turn.role !== "user" || !conversation || !sameScope(row, conversation)
       || (row.course_id ?? null) !== (conversation.course_id ?? null)) errors.push("Teaching source user turn lineage is missing or foreign");
   }

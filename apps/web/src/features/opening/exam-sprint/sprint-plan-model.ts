@@ -2,6 +2,10 @@ import type { PlanDraft, PlannedBlock, TaskItem } from "@aistudy/contracts";
 import { courseStudyHref, courseStudyTasks } from "../courses/course-study-model";
 import { selectableSuggestedKeys } from "../planning/daily-draft-selection";
 
+export function sprintCourseMapHref(courseId: string): string {
+  return `/opening/map?context=course&id=${encodeURIComponent(`course/${courseId}`)}`;
+}
+
 export function sprintTaskHref(task: TaskItem): string {
   if (task.suggestionKind === "review_cards") return "/opening/review?tab=cards";
   if (!task.courseId) return `/opening/settings/planning?task=${encodeURIComponent(task.id)}#task-${encodeURIComponent(task.id)}`;
