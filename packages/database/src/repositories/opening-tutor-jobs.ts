@@ -13,7 +13,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
 import { courseSourcePurposeAllows, helpInputSnapshotSchema, openingMaterialPurposePinSchema, type CourseSourcePurpose, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
-import { contextSourceRefsIncluded, mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, memoryTransitiveDependenciesActive, mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
@@ -107,50 +107,7 @@ async function assertGlobalMemoriesUnexpiredInTx(
       AND status='active'
       AND course_id IS NULL
       AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
-      AND NOT EXISTS (
-        WITH RECURSIVE mem_deps(dep_id) AS (
-          SELECT lower(dep.id)
-          FROM jsonb_array_elements_text(
-            CASE WHEN jsonb_typeof(opening_memories.source_turn_ids) = 'array' THEN opening_memories.source_turn_ids ELSE '[]'::jsonb END
-          ) AS st(turn_id)
-          JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = opening_memories.workspace_id
-          CROSS JOIN LATERAL jsonb_array_elements(
-            CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-          ) AS dep_elem
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-              AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-              THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-          ) AS dep(id)
-          UNION
-          SELECT lower(dep.id)
-          FROM mem_deps prev
-          JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = opening_memories.workspace_id
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-          ) AS st(turn_id)
-          JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = opening_memories.workspace_id
-          CROSS JOIN LATERAL jsonb_array_elements(
-            CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-          ) AS dep_elem
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-              AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-              THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-          ) AS dep(id)
-        )
-        SELECT 1
-        FROM mem_deps d
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM opening_memories dep_m
-          WHERE dep_m.id::text = d.dep_id
-            AND dep_m.workspace_id = opening_memories.workspace_id
-            AND dep_m.status = 'active'
-            AND dep_m.course_id IS NULL
-            AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
-        )
-      )
+      AND ${memoryTransitiveDependenciesActive(tx, "")}
     ORDER BY id`;
   if (active.length !== ids.length) {
     throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
@@ -290,50 +247,7 @@ async function assertStreamMaterialAdmission(
         AND status='active'
         AND course_id IS NULL
         AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
-        AND NOT EXISTS (
-          WITH RECURSIVE mem_deps(dep_id) AS (
-            SELECT lower(dep.id)
-            FROM jsonb_array_elements_text(
-              CASE WHEN jsonb_typeof(opening_memories.source_turn_ids) = 'array' THEN opening_memories.source_turn_ids ELSE '[]'::jsonb END
-            ) AS st(turn_id)
-            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = opening_memories.workspace_id
-            CROSS JOIN LATERAL jsonb_array_elements(
-              CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-            ) AS dep_elem
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-              CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-            ) AS dep(id)
-            UNION
-            SELECT lower(dep.id)
-            FROM mem_deps prev
-            JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = opening_memories.workspace_id
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-              CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-            ) AS st(turn_id)
-            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = opening_memories.workspace_id
-            CROSS JOIN LATERAL jsonb_array_elements(
-              CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-            ) AS dep_elem
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-              CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-            ) AS dep(id)
-          )
-          SELECT 1
-          FROM mem_deps d
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM opening_memories dep_m
-            WHERE dep_m.id::text = d.dep_id
-              AND dep_m.workspace_id = opening_memories.workspace_id
-              AND dep_m.status = 'active'
-              AND dep_m.course_id IS NULL
-              AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
-          )
-        )
+        AND ${memoryTransitiveDependenciesActive(tx, "")}
       ORDER BY id FOR SHARE`;
     if (activeMemories.length !== globalMemoryIdList.length) {
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
@@ -1258,50 +1172,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           AND m.status = 'active'
           AND m.course_id IS NULL
           AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-          AND NOT EXISTS (
-            WITH RECURSIVE mem_deps(dep_id) AS (
-              SELECT lower(dep.id)
-              FROM jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
-              ) AS st(turn_id)
-              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL jsonb_array_elements(
-                CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-              ) AS dep_elem
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                  AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                  THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-              ) AS dep(id)
-              UNION
-              SELECT lower(dep.id)
-              FROM mem_deps prev
-              JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-              ) AS st(turn_id)
-              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL jsonb_array_elements(
-                CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-              ) AS dep_elem
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                  AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                  THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-              ) AS dep(id)
-            )
-            SELECT 1
-            FROM mem_deps d
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM opening_memories dep_m
-              WHERE dep_m.id::text = d.dep_id
-                AND dep_m.workspace_id = m.workspace_id
-                AND dep_m.status = 'active'
-                AND dep_m.course_id IS NULL
-                AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
-            )
-          )
+          AND ${memoryTransitiveDependenciesActive(sql, "m")}
         ORDER BY m.id`;
       if (active.length !== ids.length) {
         throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });

@@ -37,6 +37,7 @@ function fixture(options: Options = {}) {
       txEvents.push("clear-execution-fence");
       return [];
     }
+    if (sql.startsWith("NOT EXISTS ( WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
     if (!sql.startsWith("SELECT")) return "fragment";
     calls.push({ sql, values });
     if (options.failAt && sql.startsWith(options.failAt)) throw failure;
@@ -563,8 +564,12 @@ describe("stream receipt release waits for current job authorization and assista
     const sseLastMemIdx = sse.calls.findLastIndex(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"));
     expect(sseLastMemIdx).toBeGreaterThan(sseSourcesIdx);
     expect(sseLastMemIdx).toBe(sse.calls.length - 1);
-    expect(f.calls[lastMemIdx]?.sql).toContain("WITH RECURSIVE mem_deps(dep_id)");
-    expect(sse.calls[sseLastMemIdx]?.sql).toContain("WITH RECURSIVE mem_deps(dep_id)");
+    await expect(f.calls[lastMemIdx]?.values.at(-1)).resolves.toMatchObject({
+      fragmentSql: expect.stringContaining("WITH RECURSIVE mem_deps(dep_id)"),
+    });
+    await expect(sse.calls[sseLastMemIdx]?.values.at(-1)).resolves.toMatchObject({
+      fragmentSql: expect.stringContaining("WITH RECURSIVE mem_deps(dep_id)"),
+    });
   });
 
   it("matches restored uppercase opening_memories.source_turn_ids case-insensitively during memoryOnly admission", async () => {
