@@ -68,7 +68,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v14-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v15-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -850,7 +850,7 @@ describe("bounded resumable PDF parser", () => {
       visionCalls.length = 0;
       const cached = await runCliScenario("same_segment_answer_key", { segmentData, recognizePages, savedChunks: first.publishedChunks });
       expect(cached.requests).toEqual([]);
-      expect(cached.segmentReads.map(({ pageStart, pageEnd }) => [pageStart, pageEnd])).toEqual([[1, 10], [11, 20], [14, 20], [21, 23]]);
+      expect(cached.segmentReads.filter(({ parserProfile }) => !parserProfile.startsWith("pdf-publication-")).map(({ pageStart, pageEnd }) => [pageStart, pageEnd])).toEqual([[1, 10], [11, 20], [14, 20], [21, 23]]);
       expect(visionCalls).toEqual([[1, false], [13, true], [14, true]]);
       expect(cached.publishedChunks.filter(chunk => chunk.page >= 12 && chunk.page <= 15))
         .toEqual(first.publishedChunks.filter(chunk => chunk.page >= 12 && chunk.page <= 15));
@@ -879,10 +879,10 @@ describe("bounded resumable PDF parser", () => {
 
     it("seals sentence-case answer labels in both native and Vision text", async () => {
       const result = await runCliScenario("sentence_case_answer", {
-        recognizePage: async () => ({ text: "Public diagram.\nCorrect answer： x = 3.", imageObjectKey: "vision/diagram" }),
+        recognizePage: async () => ({ text: "Chapter 2: Vectors\nCorrect answer： x = 3.", imageObjectKey: "vision/diagram" }),
       });
       expect(result.publishedChunks.map(chunk => chunk.text)).toEqual([
-        "Exercise 1: Find x.", "[原生提取]\nPublic explanation.\n\n[视觉转写与描述]\nPublic diagram.",
+        "Exercise 1: Find x.", "[视觉转写与描述]\nChapter 2: Vectors",
       ]);
       expect(result.publishedChunks[1]?.imageObjectKey).toBeNull();
     });
@@ -894,7 +894,7 @@ describe("bounded resumable PDF parser", () => {
       expect(first.publishedChunks.at(-2)?.text).toBe("Solution: Take the square root.");
       const retry = await runCliScenario("worked_example", { segmentData, savedChunks: first.publishedChunks });
       expect(retry.requests).toEqual([]);
-      expect(retry.segmentReads.at(-1)?.parserProfile).toMatch(/\/we$/u);
+      expect(retry.segmentReads.filter(({ parserProfile }) => !parserProfile.startsWith("pdf-publication-")).at(-1)?.parserProfile).toMatch(/\/we$/u);
       expect(retry.publishedChunks).toEqual(first.publishedChunks);
     });
 
@@ -953,7 +953,7 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(first.publishedChunks[0]?.text).toContain("Chapter 1: Geometry");
     expect(first.publishedChunks.map(chunk => chunk.page)).toEqual([1, 3]);
-    expect(segmentData.get(`${pdfParserProfile()}/page-seal/1-1`)).toMatchObject({
+    expect(segmentData.get(`pdf-publication-page-seal-v1/1-1`)).toMatchObject({
       state: "ready", pages: [{ page: 1, text: "", sectionSealedAtEnd: true, hadSealedContent: true }],
     });
     const retry = await runPdfScenario({ pages, segmentData, savedChunks: first.publishedChunks, segmentPages: 1, failedStarts: [1] });
@@ -961,12 +961,111 @@ describe("bounded resumable PDF parser", () => {
     expect(retry.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
   });
 
+  it.each(["Appendix A: Model Answer", "APPENDIX A: OFFICIAL SOLUTION", "Chapter 3: Reference Solution",
+    "Section 1.2: Sample answer", "Lecture 4: Selected answers", "Part II: Correct Answer",
+    "Unit 1: Odd-numbered solutions", "附录 A：Model answer", "第 3 章：Reference answer: x = 4."])(
+    "treats %s as an answer section across pages", async title => {
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: title + "\nx = 4." },
+        { page: 2, text: "5 units." },
+        { page: 3, text: "Chapter 5: Vectors" },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 2, seed: "section_sealed" });
+      expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
+    },
+  );
+
+  it.each([{ kinds: [] as VisualPageKind[] }, { kinds: ["picture" as const] }])(
+    "restores an archived Vision seal on native-cache replay and after changing the OCR profile (visual kinds: $kinds)", async ({ kinds }) => {
+    const pages = [
+      { page: 1, text: "Chapter 1: Geometry", visualKinds: [...kinds] },
+      { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" },
+    ];
+    const segmentData = new Map<string, PdfSegment>();
+    const first = await runPdfScenario({ pages, segmentData, savedChunks: [{
+      page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey: "old/key",
+      text: "[原生提取]\nChapter 1: Geometry\n\n[视觉转写与描述]\nAnswer Key\nx = 3.",
+    }] });
+    expect(first.publishedChunks.map(chunk => chunk.page)).toEqual([1, 3]);
+
+    const cached = await runPdfScenario({ pages, segmentData, savedChunks: first.publishedChunks });
+    expect(cached.requests).toEqual([]);
+    expect(cached.publishedChunks).toEqual(first.publishedChunks);
+
+    vi.stubEnv("PARSER_OCR_MODEL_DIR", process.env.PARSER_OCR_MODEL_DIR ? "" : "ocr-profile-test");
+    try {
+      const changedProfile = await runPdfScenario({ pages, segmentData, savedChunks: cached.publishedChunks,
+        segmentPages: 1, failedStarts: [1],
+      });
+      expect(changedProfile.requests.slice(0, 2)).toEqual([{ start: 1 }, { start: 1 }]);
+      expect(changedProfile.preservePages).toEqual([]);
+      expect(changedProfile.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps unknown pages separate from confirmed seals and replaces a confirmed marker after clean raw Vision", async () => {
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [{ page: 1, text: "Public page." }, { page: 2, text: "", visualKinds: ["scan" as const] },
+      { page: 3, text: "5 units." }, { page: 4, text: "Chapter 2: Vectors" }];
+    const failed = await runPdfScenario({ pages, segmentData, segmentPages: 1, failedStarts: [1],
+      recognizePage: async () => ({ text: "5 units.", imageObjectKey: "vision/unknown" }),
+    });
+    expect(failed.publishedChunks.map(chunk => chunk.page)).toEqual([4]);
+    expect(segmentData.has("pdf-publication-page-seal-v1/2-2")).toBe(false);
+    expect(segmentData.has("pdf-publication-page-seal-v1/3-3")).toBe(false);
+
+    const sealed = await runPdfScenario({ pages, segmentData, segmentPages: 1,
+      recognizePage: async () => ({ text: "Answer Key", imageObjectKey: "vision/sealed" }),
+    });
+    expect(sealed.publishedChunks.map(chunk => chunk.page)).toEqual([1, 4]);
+    expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
+      state: "ready", pages: [{ hadSealedContent: true, sectionSealedAtEnd: true }],
+    });
+    const recovered = await runPdfScenario({ pages, segmentData, segmentPages: 1,
+      recognizePage: async () => ({ text: "Chapter 1: Geometry", imageObjectKey: "vision/recovered" }),
+    });
+    expect(recovered.publishedChunks.map(chunk => chunk.page)).toEqual([1, 2, 3, 4]);
+    expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
+      state: "ready", pages: [{ hadSealedContent: false }],
+    });
+    const failedAgain = await runPdfScenario({ pages, segmentData, savedChunks: recovered.publishedChunks,
+      segmentPages: 2, failedStarts: [1],
+    });
+    expect(failedAgain.preservePages).toEqual([1, 2]);
+    expect(failedAgain.publishedChunks.map(chunk => chunk.page)).toEqual([3, 4]);
+  });
+
+  it("publishes the current native text and clears its marker after a clean recovery", async () => {
+    const segmentData = new Map<string, PdfSegment>([["pdf-publication-page-seal-v1/1-1", {
+      state: "ready", pages: [{ page: 1, text: "", imagePath: null, hadSealedContent: true, sectionSealedAtEnd: true }],
+    }]]);
+    const result = await runPdfScenario({ segmentData, pages: [{ page: 1, text: "Public recovered text." }], savedChunks: [{
+      page: 1, slideLabel: null, startMs: null, endMs: null, text: "5 units.", imageObjectKey: null,
+    }] });
+    expect(result.publishedChunks.map(({ text }) => text)).toEqual(["Public recovered text."]);
+    expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toEqual({
+      state: "ready", pages: [{ page: 1, text: "", imagePath: null, hadSealedContent: false }],
+    });
+  });
+
+  it.each([false, true])("withdraws old answers when a failure follows an unreadable scan (scan also fails: %s)", async scanFails => {
+    const pages = [{ page: 1, text: "", visualKinds: ["scan" as const] },
+      { page: 2, text: "5 units." }, { page: 3, text: "6 units." }, { page: 4, text: "Chapter 2: Vectors" }];
+    const result = await runPdfScenario({ pages, segmentPages: 1, failedStarts: scanFails ? [1, 2] : [2],
+      savedChunks: [{ ...pages[1]!, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null }],
+    });
+    expect(result.preservePages).toEqual([]);
+    expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([4]);
+  });
+
   it("requires a segment store before saved prose can clear an unknown failed page", async () => {
     const result = await runPdfScenario({ withoutSegments: true, segmentPages: 1, failedStarts: [1],
       pages: [{ page: 1, text: "Public prefix." }, { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" }],
       savedChunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, text: "Public prefix.", imageObjectKey: null }],
     });
-    expect(result.preservePages).toEqual([1]);
+    expect(result.preservePages).toEqual([]);
     expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
   });
 
@@ -1007,7 +1106,7 @@ describe("bounded resumable PDF parser", () => {
     ["【图表观察描述，非原文或解答】", true], ["【图表观察描述，非原文或解答】", false],
     ["【识别不确定，不能据此判定正确】", true], ["【识别不确定，不能据此判定正确】", false],
   ] as const)("withholds a Vision answer in %s (public transcription: %s)", async (header, hasTranscription) => {
-    const transcript = "【原图忠实转写，尚需核对】\nPublic transcription.";
+    const transcript = "【原图忠实转写，尚需核对】\nExercise 1: Find x.";
     const result = await runPdfScenario({ pages: [{ page: 1, text: "", visualKinds: ["scan"] },
       { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" }], segmentPages: 1,
       recognizePage: async () => ({ text: `${hasTranscription ? `${transcript}\n` : ""}${header}\nModel answer: x =\n${header}\n5 units`, imageObjectKey: "vision/answer" }),
@@ -1017,6 +1116,46 @@ describe("bounded resumable PDF parser", () => {
       ...(hasTranscription ? [{ page: 1, text: `[视觉转写与描述]\n${transcript}`, imageObjectKey: null }] : []),
       { page: 3, text: "Chapter 2: Vectors", imageObjectKey: null },
     ]);
+  });
+
+  it.each(["live", "saved"] as const)("redacts unheaded native and transcription text when %s Vision detects an answer", async origin => {
+    const answer = "x = 3.";
+    const chapter = "Chapter 2: Vectors";
+    const header = "【原图忠实转写，尚需核对】";
+    const aux = "【图表观察描述，非原文或解答】";
+    const imageObjectKey = "vision/mixed-answer";
+    const exercise = "Exercise 1: Solve x + 2 = 5.";
+    for (const text of [answer, exercise, [exercise, answer].join("\n")]) {
+      for (const vision of [
+        answer + "\nModel answer: " + answer,
+        [header, answer, aux, "Model answer: " + answer].join("\n"),
+        [header, aux, "Model answer: " + answer].join("\n"),
+      ]) {
+        const result = await runPdfScenario({ pages: [{ page: 1, text, visualKinds: ["picture"] }, { page: 2, text: chapter }],
+          ...(origin === "live" ? { recognizePage: async () => ({ text: vision, imageObjectKey }) } : {
+            savedChunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey,
+              text: "[原生提取]\n" + text + "\n\n[视觉转写与描述]\n" + vision }],
+          }),
+        });
+        expect(result.publishedChunks.map(({ text }) => text)).toEqual(text === answer ? [chapter] : [exercise, chapter]);
+        expect(result.publishedChunks.every(chunk => chunk.imageObjectKey === null)).toBe(true);
+      }
+    }
+  });
+
+  it("keeps the transcription's public opener without its unheaded answer when auxiliary Vision confirms the seal", async () => {
+    const exercise = "Exercise 1: Solve x + 2 = 5.";
+    const header = "【原图忠实转写，尚需核对】";
+    const result = await runPdfScenario({
+      pages: [{ page: 1, text: "x = 3.", visualKinds: ["picture"] }],
+      recognizePage: async () => ({
+        text: [header, exercise, "x = 3.", "【识别不确定，不能据此判定正确】", "Model answer: x = 3."].join("\n"),
+        imageObjectKey: "vision/mixed-answer",
+      }),
+    });
+    expect(result.publishedChunks).toMatchObject([{
+      text: ["[视觉转写与描述]", header, exercise].join("\n"), imageObjectKey: null,
+    }]);
   });
 
   it("preserves standalone worked-example solutions and exits section sealing on non-answer headings and chapters", async () => {
@@ -1625,7 +1764,7 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(first.requests).toEqual([{ start: 1 }, { start: 1 }, { start: 11 }]);
     expect(first.publishedChunks.map(chunk => chunk.text)).toEqual(["Chapter 2: Vectors"]);
-    expect(first.preservePages).toEqual(Array.from({ length: 10 }, (_, index) => index + 1));
+    expect(first.preservePages).toEqual([]);
     expect(first.pdfWarning).toMatchObject({ code: "PARSE_PARTIAL" });
 
     const recovered = await runPdfScenario({ pages, segmentData });
@@ -1801,7 +1940,7 @@ describe("bounded resumable PDF parser", () => {
             };
           } else if (input.physicalPage === 5) {
             yield {
-              text: "【原图忠实转写，尚需核对】\nPublic stem.\n\nAnswer Key\n1. x = 2\n\n【图表观察描述，非原文或解答】\nAnswer table sketch.",
+              text: "【原图忠实转写，尚需核对】\nChapter 1: Geometry\n\nAnswer Key\n1. x = 2\n\n【图表观察描述，非原文或解答】\nAnswer table sketch.",
               imageObjectKey: "vision/p5-partial-secret",
             };
           }
@@ -1818,7 +1957,7 @@ describe("bounded resumable PDF parser", () => {
     expect(liveWrapped.publishedChunks[1]?.text).toContain("Triangle ABC.");
     expect(liveWrapped.publishedChunks[1]?.text).toContain("Right angle at C.");
     expect(liveWrapped.publishedChunks[1]?.imageObjectKey).toBe("vision/clean-diagram");
-    expect(liveWrapped.publishedChunks[2]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic stem.");
+    expect(liveWrapped.publishedChunks[2]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nChapter 1: Geometry");
     expect(liveWrapped.publishedChunks[2]?.text).not.toContain("Answer table sketch.");
     expect(liveWrapped.publishedChunks[2]?.imageObjectKey).toBeNull();
 
@@ -1886,7 +2025,7 @@ describe("bounded resumable PDF parser", () => {
             };
           } else if (input.physicalPage === 2) {
             yield {
-              text: "【原图忠实转写，尚需核对】\nPublic stem.\nAnswer Key\n1. x = 2\nEnd of Answers.\n\n【图表观察描述，非原文或解答】\nFull page shows x = 2.\n\n【识别不确定，不能据此判定正确】\nUncertain 2.",
+              text: "【原图忠实转写，尚需核对】\nChapter 1: Geometry\nAnswer Key\n1. x = 2\nEnd of Answers.\n\n【图表观察描述，非原文或解答】\nFull page shows x = 2.\n\n【识别不确定，不能据此判定正确】\nUncertain 2.",
               imageObjectKey: "vision/p2-self-closed-seal",
             };
           } else if (input.physicalPage === 3) {
@@ -1902,7 +2041,7 @@ describe("bounded resumable PDF parser", () => {
     expect(live.publishedChunks.map(c => c.page)).toEqual([1, 2, 3]);
     expect(live.publishedChunks[0]?.text).toBe("Find x.");
     expect(live.publishedChunks[0]?.imageObjectKey).toBeNull();
-    expect(live.publishedChunks[1]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic stem.");
+    expect(live.publishedChunks[1]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nChapter 1: Geometry");
     expect(live.publishedChunks[1]?.text).not.toContain("Shows x = 2.");
     expect(live.publishedChunks[1]?.text).not.toContain("Full page shows x = 2.");
     expect(live.publishedChunks[1]?.text).not.toContain("Uncertain 2.");
@@ -1918,7 +2057,7 @@ describe("bounded resumable PDF parser", () => {
         { page: 4, text: "Lecture 4: Answer Key\n1. a = 3", visualKinds: [] },
         { page: 5, text: "2. b = 4", visualKinds: [] },
         { page: 6, text: "Lecture 5: Singular Values", visualKinds: [] },
-        { page: 7, text: "Public problem.", visualKinds: ["scan"] },
+        { page: 7, text: "Chapter 1: Geometry", visualKinds: ["scan"] },
       ],
       savedChunks: [
         {
@@ -1926,14 +2065,14 @@ describe("bounded resumable PDF parser", () => {
           slideLabel: null,
           startMs: null,
           endMs: null,
-          text: "[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic problem.\nAnswer Key\n1. x = 9\nEnd of Answers.\n\n【图表观察描述，非原文或解答】\nAnswer plot.",
+          text: "[视觉转写与描述]\n【原图忠实转写，尚需核对】\nChapter 1: Geometry\nAnswer Key\n1. x = 9\nEnd of Answers.\n\n【图表观察描述，非原文或解答】\nAnswer plot.",
           imageObjectKey: "vision/p7-stale",
         },
       ],
     });
     expect(lectureAnswerAndSavedSelfClosed.publishedChunks.map(c => c.page)).toEqual([3, 6, 7]);
     expect(lectureAnswerAndSavedSelfClosed.publishedChunks[0]?.text).toBe("第 3 讲 特征值\n定义：Ax = λx。");
-    expect(lectureAnswerAndSavedSelfClosed.publishedChunks[2]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic problem.");
+    expect(lectureAnswerAndSavedSelfClosed.publishedChunks[2]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nChapter 1: Geometry");
     expect(lectureAnswerAndSavedSelfClosed.publishedChunks[2]?.imageObjectKey).toBeNull();
   });
 
@@ -2013,7 +2152,7 @@ describe("bounded resumable PDF parser", () => {
           slideLabel: null,
           startMs: null,
           endMs: null,
-          text: "[视觉转写与描述]\nPublic stem.",
+          text: "[视觉转写与描述]\nChapter 1: Geometry",
           imageObjectKey: null,
         },
       ],
@@ -2021,7 +2160,7 @@ describe("bounded resumable PDF parser", () => {
         for (const input of inputs) {
           replayedPages.push(input.physicalPage);
           if (input.physicalPage === 1) {
-            yield { text: "Public stem.\n\nAnswer Key\n1. x = 2", imageObjectKey: "vision/p1-cached" };
+            yield { text: "Chapter 1: Geometry\n\nAnswer Key\n1. x = 2", imageObjectKey: "vision/p1-cached" };
           }
         }
       },
@@ -2029,7 +2168,7 @@ describe("bounded resumable PDF parser", () => {
     expect(replayedPages).toEqual([1]);
     expect(scannedResumeWithNullKey.pdfWarning).toBeUndefined();
     expect(scannedResumeWithNullKey.publishedChunks.map(c => c.page)).toEqual([1, 3]);
-    expect(scannedResumeWithNullKey.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nPublic stem.");
+    expect(scannedResumeWithNullKey.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nChapter 1: Geometry");
     expect(scannedResumeWithNullKey.publishedChunks[0]?.imageObjectKey).toBeNull();
   });
 
@@ -2170,19 +2309,19 @@ describe("bounded resumable PDF parser", () => {
           slideLabel: null,
           startMs: null,
           endMs: null,
-          text: "[视觉转写与描述]\nPublic stem.",
+          text: "[视觉转写与描述]\nChapter 1: Geometry",
           imageObjectKey: null,
         },
       ],
       recognizePages: async function* (inputs) {
         for (const input of inputs) {
           if (input.physicalPage === 1) yield null;
-          else if (input.physicalPage === 2) yield { text: "Public stem.\nAnswer Key\n1. x = 2", imageObjectKey: "vision/p2-cached" };
+          else if (input.physicalPage === 2) yield { text: "Chapter 1: Geometry\nAnswer Key\n1. x = 2", imageObjectKey: "vision/p2-cached" };
         }
       },
     });
     expect(partialDegradationBatch.publishedChunks.map(c => c.page)).toEqual([2, 4]);
-    expect(partialDegradationBatch.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nPublic stem.");
+    expect(partialDegradationBatch.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nChapter 1: Geometry");
     expect(partialDegradationBatch.publishedChunks[0]?.imageObjectKey).toBeNull();
   });
 });

@@ -170,8 +170,8 @@ def main(argv=None):
                 entry["inlineSealedAtEnd"] = inline_sealed_by_page[page_number]
             if had_sealed_by_page.get(page_number):
                 entry["hadSealedContent"] = True
-            if args.mime == PDF:
-                entry["inWorkedExampleAtEnd"] = extraction.in_worked_example_by_page[page_number]
+            if args.mime == PDF and extraction.in_worked_example_by_page.get(page_number):
+                entry["inWorkedExampleAtEnd"] = True
             pages.append(entry)
         if len(pages) > args.max_pages:
             raise ValueError("max-pages would truncate pages")

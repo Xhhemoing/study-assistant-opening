@@ -147,7 +147,23 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertIs(example["1-10/"]["pages"][-1]["inWorkedExampleAtEnd"], True)
         self.assertEqual(example["11-12/"]["pages"][0]["text"], "")
         self.assertEqual(example["11-12//we"]["pages"][0]["text"], "Solution: Take the square root.")
-        self.assertIs(example["11-12//we"]["pages"][1]["inWorkedExampleAtEnd"], False)
+        self.assertNotIn("inWorkedExampleAtEnd", example["11-12//we"]["pages"][1])
+
+    def test_container_prefixed_singular_labels_keep_the_next_page_sealed(self):
+        for heading in (
+            "Appendix A: Model Answer", "APPENDIX A: OFFICIAL SOLUTION",
+            "Chapter 3: Reference Solution", "Section 1.2: Sample answer",
+            "Lecture 4: Selected answers", "Part II: Correct Answer",
+            "Unit 1: Odd-numbered solutions", "附录 A：Model answer",
+            "第 3 章：Reference answer: x = 4.",
+        ):
+            with self.subTest(heading=heading):
+                conversion = worker_pdf_conversion(
+                    {1: f"{heading}\nx = 4.", 2: "5 units.", 3: "Chapter 5: Vectors"}, (),
+                )
+                extracted = physical_pages.extract_physical_pages(conversion)
+                self.assertTrue(extracted.section_sealed_by_page[1])
+                self.assertEqual(extracted.texts_by_page, {1: [], 2: [], 3: ["Chapter 5: Vectors"]})
 
     def test_converter_keeps_text_regions_without_native_cells_for_visual_routing(self):
         with patch.dict(os.environ, {"PARSER_OCR_MODEL_DIR": ""}), patch("docling.document_converter.DocumentConverter") as converter:

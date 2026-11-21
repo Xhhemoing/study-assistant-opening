@@ -50,9 +50,16 @@ _VISUAL_CAPTION_REF_RE = re.compile(r"^(?:Figure|Fig\.?|Chart|Diagram|Scheme|图
 
 # Dedicated multi-problem Answer-Key / Solutions section headings (case-sensitive for English to
 # avoid matching lowercase wrapped prose like "solution." or bare chemistry "Solutions").
+_SEALED_SECTION_CONTAINER = r"(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|(?:Lecture|LECTURE|Part|PART|Unit|UNIT)\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)"
+_CONTAINER_SEALED_HEADING = (
+    rf"{_SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+)"
+    r"(?:Answers?\s+[Kk]ey|ANSWERS?\s+KEY|(?:(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Odd-numbered|Even-Numbered|Even-numbered)\s+)?(?:[Aa]nswers?|[Ss]olutions?)|(?:(?:MODEL|SELECTED|OFFICIAL|REFERENCE|CORRECT|SAMPLE|ODD-NUMBERED|EVEN-NUMBERED)\s+)?(?:ANSWERS?|SOLUTIONS?)|参考答案|标准答案|参考解答|详细解答|答案|解答)"
+    r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+)
+
 _SECTION_SEALED_RE = re.compile(
     r"^(?:"
-    r"(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)\s*[:：.\-—]?\s*)?"
+    rf"(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
     r"(?:(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?\s+[Kk]ey|ANSWERS?\s+KEY|Key\s+(?:to|TO)\s+(?:the\s+|THE\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\s+(?:to|TO)\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\s+Questions?|REVIEW\s+QUESTIONS?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Self-Check\s+Exercises?|SELF-CHECK\s+EXERCISES?|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Selected\s+[Aa]nswers?|SELECTED\s+ANSWERS?|Model\s+[Aa]nswers|MODEL\s+ANSWERS|Official\s+[Ss]olutions|OFFICIAL\s+SOLUTIONS|Reference\s+[Ss]olutions|REFERENCE\s+SOLUTIONS|Answer\s+Section|ANSWER\s+SECTION|Solutions?\s+[Mm]anual|SOLUTIONS?\s+MANUAL|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+(?:and|AND)\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
@@ -61,12 +68,12 @@ _SECTION_SEALED_RE = re.compile(
     r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r"|(?:习题\s*)?(?:答案|解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r")"
-    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)(?:\s*[:：.\-—]\s*|\s+)(?:Solutions|SOLUTIONS)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+    rf"|{_CONTAINER_SEALED_HEADING}"
     r")"
 )
 _INLINE_WITH_BODY_CHECK_RE = re.compile(r"[:：]\s*\S")
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
-    r"^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.\-—]?\s*)?"
+    rf"^(?:(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
     r"(?:Answers?\s+(?:to|TO)\s+|ANSWERS?\s+(?:to|TO)\s+|Selected\s+[Aa]nswers?|SELECTED\s+ANSWERS?|Model\s+[Aa]nswers|MODEL\s+ANSWERS|"
     r"Official\s+[Ss]olutions|OFFICIAL\s+SOLUTIONS|Reference\s+[Ss]olutions|REFERENCE\s+SOLUTIONS|"
     r"Solutions?\s+(?:to|TO)\s+|SOLUTIONS?\s+(?:to|TO)\s+|Solutions?\s+[Mm]anual|SOLUTIONS?\s+MANUAL|"
@@ -74,9 +81,7 @@ _QUALIFIED_MULTI_SECTION_RE = re.compile(
     r"Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|"
     r"Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|"
     r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)"
-    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.\-—]\s*"
-    r"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?\s+[Kk]ey|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)"
-    r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)"
+    rf"|{_CONTAINER_SEALED_HEADING})"
 )
 
 _QUALIFIED_ANSWER_LABEL = r"(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)"

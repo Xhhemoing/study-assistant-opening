@@ -71,6 +71,18 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
           : { state: "failed", errorCode: row.error_code as "conversion_failed" | "timeout" | "invalid_output" };
       });
     },
+    async readPageSeals(scope: OpeningJobScope, input: PdfSegmentIdentity): Promise<PdfSegmentPage[]> {
+      validateIdentity(input);
+      return sql.begin(async tx => {
+        await assertSource(tx, scope, input);
+        const rows = await tx<{ page_start: number; pages: unknown }[]>`SELECT page_start, pages
+          FROM opening_pdf_parse_segments
+          WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND source_version=${input.sourceVersion}
+          AND parser_profile=${input.parserProfile} AND page_start BETWEEN ${input.pageStart} AND ${input.pageEnd}
+          AND page_end=page_start AND state='ready'`;
+        return rows.flatMap(row => validatePdfSegmentPages(row.pages, row.page_start, row.page_start));
+      });
+    },
     async save(scope: OpeningJobScope, input: PdfSegmentIdentity, segment: PdfSegment, signal?: AbortSignal): Promise<void> {
       validateIdentity(input);
       const pages = segment.state === "ready" ? validatePdfSegmentPages(segment.pages, input.pageStart, input.pageEnd) : null;
@@ -83,7 +95,8 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
             ${segment.state},${pages ? tx.json(pages) : null},${segment.state === "failed" ? segment.errorCode : null})
           ON CONFLICT(source_id,source_version,parser_profile,page_start,page_end) DO UPDATE
             SET state=EXCLUDED.state,pages=EXCLUDED.pages,error_code=EXCLUDED.error_code,updated_at=now()
-            WHERE opening_pdf_parse_segments.state <> 'ready'`;
+            WHERE opening_pdf_parse_segments.state <> 'ready'
+               OR EXCLUDED.parser_profile = 'pdf-publication-page-seal-v1'`;
         // An abort while the SQL command was in flight rolls back the segment.
         signal?.throwIfAborted();
       });
