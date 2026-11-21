@@ -1096,6 +1096,7 @@ describe("opening signed upload service", () => {
     let canonicalId = "";
     let pendingKeys: string[] = [];
     let exclusionCreated = false;
+    let privacyEpoch = 0;
     let notBefore: Date | null = null;
     const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
       const query = parts.join("?").replace(/\s+/g, " ").trim();
@@ -1107,8 +1108,11 @@ describe("opening signed upload service", () => {
       if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) {
         return exclusionCreated ? [{ id: "00000000-0000-4000-8000-000000000099", source_id: canonicalId, pending_object_keys: pendingKeys, cleanup_not_before: notBefore }] : [];
       }
+      if (query.startsWith("UPDATE workspaces SET privacy_epoch")) {
+        return [{ id: principal.workspaceId, privacy_epoch: ++privacyEpoch }];
+      }
       if (query.startsWith("SELECT m.id") || query.startsWith("UPDATE opening_course_knowledge")
-        || query.startsWith("UPDATE workspaces SET privacy_epoch")
+        || query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")
         || query.startsWith("SELECT version FROM opening_source_versions") || query.startsWith("SELECT image_object_key")
         || query.startsWith("DELETE FROM course_asset_memberships") || query.startsWith("UPDATE opening_source_versions")) {
         return [];
@@ -1162,6 +1166,7 @@ describe("opening signed upload service", () => {
     expect(s3.objects.has(upperKey)).toBe(false);
     expect(s3.objects.has(mixedKey)).toBe(false);
     expect(pendingKeys).toEqual([storage.stagingKey(canonicalId)]);
+    expect(privacyEpoch).toBe(1);
   });
 
   it("defers S3 deletion and release on connector reservations until cleanup_not_before expires", async () => {
@@ -1257,6 +1262,7 @@ describe("opening signed upload service", () => {
     let canonicalId = "";
     let pendingKeys: string[] = [];
     let exclusionCreated = false;
+    let privacyEpoch = 0;
     const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
       const query = parts.join("?").replace(/\s+/g, " ").trim();
       if (query === "" || query === "FOR UPDATE") return query;
@@ -1267,8 +1273,11 @@ describe("opening signed upload service", () => {
       if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) {
         return exclusionCreated ? [{ id: "00000000-0000-4000-8000-000000000099", source_id: canonicalId, pending_object_keys: pendingKeys, cleanup_not_before: null }] : [];
       }
+      if (query.startsWith("UPDATE workspaces SET privacy_epoch")) {
+        return [{ id: principal.workspaceId, privacy_epoch: ++privacyEpoch }];
+      }
       if (query.startsWith("SELECT m.id") || query.startsWith("UPDATE opening_course_knowledge")
-        || query.startsWith("UPDATE workspaces SET privacy_epoch")
+        || query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")
         || query.startsWith("SELECT version FROM opening_source_versions") || query.startsWith("SELECT image_object_key")
         || query.startsWith("DELETE FROM course_asset_memberships") || query.startsWith("UPDATE opening_source_versions")) {
         return [];
@@ -1335,6 +1344,7 @@ describe("opening signed upload service", () => {
     expect(succeededRetry).toMatchObject({ sourceId: canonicalId, deleted: true, cleanupPending: 0, retryAfter: null });
     expect(s3.objects.has(mixedKey)).toBe(false);
     expect(pendingKeys).toEqual([]);
+    expect(privacyEpoch).toBe(1);
   });
 
   it("discovers and deletes mixed-case staging objects on a second delete after an earlier listing failure", async () => {
@@ -1353,6 +1363,7 @@ describe("opening signed upload service", () => {
     let canonicalId = "";
     let pendingKeys: string[] = [];
     let exclusionCreated = false;
+    let privacyEpoch = 0;
     const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
       const query = parts.join("?").replace(/\s+/g, " ").trim();
       if (query === "" || query === "FOR UPDATE") return query;
@@ -1369,8 +1380,11 @@ describe("opening signed upload service", () => {
           cleanup_not_before: null,
         }] : [];
       }
+      if (query.startsWith("UPDATE workspaces SET privacy_epoch")) {
+        return [{ id: principal.workspaceId, privacy_epoch: ++privacyEpoch }];
+      }
       if (query.startsWith("SELECT m.id") || query.startsWith("UPDATE opening_course_knowledge")
-        || query.startsWith("UPDATE workspaces SET privacy_epoch")
+        || query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")
         || query.startsWith("SELECT version FROM opening_source_versions") || query.startsWith("SELECT image_object_key")
         || query.startsWith("DELETE FROM course_asset_memberships") || query.startsWith("UPDATE opening_source_versions")) {
         return [];
@@ -1451,6 +1465,7 @@ describe("opening signed upload service", () => {
     expect(cleanDelete).toMatchObject({ sourceId: canonicalId, deleted: true, cleanupPending: 0, retryAfter: null });
     expect(s3.objects.has(mixedKey)).toBe(false);
     expect(pendingKeys).toEqual([]);
+    expect(privacyEpoch).toBe(1);
   });
 
   it("persists discovered mixed-case staging keys before S3 remove when retry_cleanup encounters an empty legacy receipt", async () => {
