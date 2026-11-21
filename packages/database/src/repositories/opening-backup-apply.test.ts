@@ -156,3 +156,26 @@ it("keeps new link provenance and replay history while restoring their behavior 
   expect(normalizeOpeningImportedEvaluation("course_requirement_evidence_links", evidence)).toEqual({ ...evidence, active: false });
   expect(evidence.active).toBe(true);
 });
+
+it("rejects temporary UUIDv8 connector reservation rows inside executeOpeningRestoreApply", async () => {
+  const reservationId = `${sourceId.slice(0, 14)}8${sourceId.slice(15)}`;
+  const withReservation = draft();
+  withReservation.deletionJournal = [{ sourceId, deletedAt: "2026-09-23T00:00:00.000Z" }];
+  withReservation.tables.opening_sources = [];
+  withReservation.objects = [];
+  withReservation.tables.opening_privacy_exclusions = [{
+    id: reservationId,
+    workspace_id: workspaceId,
+    source_id: sourceId,
+    memory_id: null,
+    deleted_at: "2026-09-23T00:00:00.000Z",
+  }];
+  const denied = await executeOpeningRestoreApply({} as never, {
+    confirmLocalRestore: true,
+    backup: withReservation,
+    currentDeletionJournal: withReservation.deletionJournal,
+    emptyNamespaceCounts: zeroCounts(),
+  });
+  expect(denied.ok).toBe(false);
+  expect(denied.mutated).toBe(false);
+});

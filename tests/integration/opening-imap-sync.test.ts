@@ -1,37 +1,43 @@
-﻿import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapFlow } from "imapflow";
+import type { ImapCursor } from "@aistudy/contracts";
 import {
+  CONNECTOR_PUT_TIMEOUT_MS,
+  CONNECTOR_RESERVATION_GRACE_MS,
+  createOpeningConnectionsRepository,
   createOpeningImportsRepository,
-  createOpeningPrivacyRepository,
-  createOpeningSourceRepository,
+  createOpeningSourceActionsRepository,
+  type OpeningStorage,
 } from "@aistudy/database";
+import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
+import { readOpeningSourceQuotaUsage } from "../../packages/database/src/repositories/opening-source-quota";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
-import { syncMailbox } from "../../apps/worker/src/connectors/imap-sync";
+import { attachImapClientErrorGuard, syncMailbox, MAX_MAIL_BYTES } from "../../apps/worker/src/connectors/imap-sync";
 import { importIdentityKey } from "../../apps/worker/src/connectors/import-identity";
 
 let f: OpeningFixture;
 let server: OpeningImapServer;
 let objectByKey = new Map<string, Uint8Array>();
 let failFinalUpload = false;
+let failImmediateDeletes = false;
+const initialMail = {
+  uid: 11,
+  source: [
+    "From: teacher@example.edu",
+    "To: student@example.edu",
+    "Subject: Lesson",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "hello lesson",
+    "",
+  ].join("\r\n"),
+};
 
 beforeAll(async () => {
   f = await createOpeningFixture();
-  server = await startOpeningImapServer([
-    {
-      uid: 11,
-      source: [
-        "From: teacher@example.edu",
-        "To: student@example.edu",
-        "Subject: Lesson",
-        "Content-Type: text/plain; charset=utf-8",
-        "",
-        "hello lesson",
-        "",
-      ].join("\r\n"),
-    },
-  ]);
+  server = await startOpeningImapServer([initialMail]);
 });
 
 afterAll(async () => {
@@ -51,16 +57,21 @@ function seedConnection(version = 1) {
 }
 
 function makeClient() {
-  return new ImapFlow({
+  return attachImapClientErrorGuard(new ImapFlow({
     host: "127.0.0.1",
     port: server.port,
     secure: false,
+    logger: false,
     auth: { user: "fixture", pass: "fixture" },
     tls: { rejectUnauthorized: true },
-  });
+  }));
 }
 
-async function runSync() {
+async function runSync(options: { cursor?: ImapCursor | null; onUpload?: (bytes: Uint8Array) => Promise<void>;
+  imports?: ReturnType<typeof createOpeningImportsRepository> } = {}) {
+  const imports = options.imports ?? createOpeningImportsRepository(f.sql);
+  const cursor = options.cursor === undefined
+    ? await imports.readImapCursor(f.scope, fixtureConnection.id, "INBOX") : options.cursor;
   const client = makeClient();
   try {
     await client.connect();
@@ -69,15 +80,20 @@ async function runSync() {
       connectionId: fixtureConnection.id,
       connectionVersion: fixtureConnection.version,
       folder: "INBOX",
-      cursor: { folder: "INBOX", uidValidity: "42", lastUid: 0 },
+      cursor,
       since: new Date("2026-01-01T00:00:00.000Z"),
       client,
-      imports: createOpeningImportsRepository(f.sql),
-      sources: createOpeningSourceRepository(f.sql),
-      privacy: createOpeningPrivacyRepository(f.sql),
-      upload: async ({ key, bytes }) => {
-        if (key.includes("/v") && failFinalUpload) throw new Error("storage unavailable");
-        objectByKey.set(key, bytes);
+      imports,
+      storage: {
+        upload: async ({ key, bytes }) => {
+          objectByKey.set(key, bytes);
+          if (failFinalUpload) throw new Error("storage unavailable");
+          await options.onUpload?.(bytes);
+        },
+        remove: async key => {
+          if (failImmediateDeletes) throw new Error("storage cleanup unavailable");
+          objectByKey.delete(key);
+        },
       },
     });
   } finally {
@@ -92,10 +108,14 @@ async function runSync() {
 let fixtureConnection: { id: string; version: number };
 
 beforeEach(async () => {
+  await server.waitForConnectionsClosed();
   expect(server.activeConnectionCount()).toBe(0);
+  server.mails.splice(0, server.mails.length, initialMail);
   objectByKey = new Map();
   failFinalUpload = false;
-  await f.sql`TRUNCATE opening_import_receipts, opening_import_cursors, opening_jobs, opening_outbox, opening_source_versions, opening_sources RESTART IDENTITY CASCADE`;
+  failImmediateDeletes = false;
+  await f.sql`TRUNCATE opening_import_receipts, opening_import_cursors, opening_jobs, opening_outbox,
+    opening_source_versions, opening_sources, opening_privacy_exclusions RESTART IDENTITY CASCADE`;
   await f.sql`DELETE FROM opening_connections WHERE workspace_id=${f.scope.workspaceId}`;
   fixtureConnection = await seedConnection();
 });
@@ -139,17 +159,236 @@ describe("isolated standard IMAP sync gate", () => {
     expect(firstSources[0]?.count).toBe(1);
 
     const replay = await runSync();
-    expect(replay).toMatchObject({ imported: 0, skipped: 1, cursor: { lastUid: 11 } });
+    expect(replay).toMatchObject({ imported: 0, cursor: { lastUid: 11 } });
     const secondSources = await f.sql`SELECT count(*)::int AS count FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
     expect(secondSources[0]?.count).toBe(1);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
+  });
+
+  it("commits only one source and parse job for concurrent deliveries of the same UID", async () => {
+    let uploads = 0;
+    const onUpload = async () => { uploads += 1; };
+    const results = await Promise.all([runSync({ cursor: null, onUpload }), runSync({ cursor: null, onUpload })]);
+    expect(results.map(result => result.imported).sort()).toEqual([0, 1]);
+    expect(uploads).toBe(1);
+    const [source] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    expect([...objectByKey.keys()]).toEqual([`opening/sources/${source!.id}/v0`]);
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
+  });
+
+  it("rejects a stale duplicate cursor without touching storage or charging an orphan", async () => {
+    server.mails.push({ ...initialMail, uid: 12 });
+    await runSync();
+    const usage = () => readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 1024);
+    const before = await usage();
+    const onUpload = vi.fn();
+    failImmediateDeletes = true;
+    await expect(runSync({ cursor: null, onUpload })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(onUpload).not.toHaveBeenCalled();
+    expect(await usage()).toEqual(before);
+    expect(await f.sql`SELECT 1 FROM opening_privacy_exclusions`).toEqual([]);
+  });
+
+  it("recovers the exact reservation after the publisher loses database access immediately after PUT", async () => {
+    const imports = createOpeningImportsRepository(f.sql);
+    const offline = new Error("publisher database connection lost");
+    // The PUT callback returns success. Inject a connection exception in the
+    // following publication transaction and keep compensation offline.
+    await f.sql`CREATE FUNCTION fixture_import_disconnect() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'publisher database connection lost' USING ERRCODE='08006'; END $$`;
+    try {
+      await f.sql`CREATE TRIGGER fixture_import_disconnect BEFORE INSERT ON opening_import_receipts
+        FOR EACH ROW EXECUTE FUNCTION fixture_import_disconnect()`;
+      vi.spyOn(imports, "removeUnpublishedSource").mockRejectedValue(offline);
+      await expect(runSync({ imports, onUpload: async bytes => {
+        const [reservation] = await f.sql`SELECT e.pending_object_keys, v.bytes FROM opening_privacy_exclusions e
+          JOIN opening_source_versions v USING (workspace_id, source_id) WHERE e.workspace_id=${f.scope.workspaceId}`;
+        expect(reservation?.pending_object_keys).toEqual([...objectByKey.keys()]);
+        expect(Number(reservation?.bytes)).toBe(bytes.byteLength);
+      } })).rejects.toMatchObject({ errors: [{ code: "08006" }, offline] });
+    } finally {
+      await f.sql`DROP FUNCTION fixture_import_disconnect() CASCADE`;
+    }
+    const actions = createOpeningSourceActionsRepository(f.sql);
+    const pending = await actions.listPending(f.scope, new Date());
+    expect(pending).toHaveLength(1);
+    const sourceId = pending[0]!.sourceId;
+    const key = `opening/sources/${sourceId}/v0`;
+    expect([...objectByKey.keys()]).toEqual([key]);
+    expect((await actions.cleanup(f.scope, sourceId)).keys).toEqual([key]);
+    const usage = () => readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 1024);
+    expect(await usage()).toEqual({ bytes: BigInt(Buffer.byteLength(initialMail.source)), objects: 1n });
+    expect(await f.sql`SELECT 1 FROM opening_sources`).toEqual([]);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts`).toEqual([]);
+    objectByKey.delete(key);
+    await expect(actions.cleaned(f.scope, sourceId, key)).resolves.toBe(false);
+    expect(await usage()).toEqual({ bytes: BigInt(Buffer.byteLength(initialMail.source)), objects: 1n });
+    const afterGrace = new Date(Date.now() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
+    await expect(actions.cleaned(f.scope, sourceId, key, afterGrace)).resolves.toBe(true);
+    expect(await usage()).toEqual({ bytes: 0n, objects: 0n });
+    await expect(actions.cleanup(f.scope, sourceId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${sourceId}`).toEqual([]);
+  });
+
+  it("recovers an orphaned IMAP reservation end-to-end via OpeningSourceService.actOnSource and guards removeUnpublishedSource", async () => {
+    const imports = createOpeningImportsRepository(f.sql);
+    await f.sql`CREATE FUNCTION fixture_import_disconnect_service() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'publisher database connection lost' USING ERRCODE='08006'; END $$`;
+    try {
+      await f.sql`CREATE TRIGGER fixture_import_disconnect_service BEFORE INSERT ON opening_import_receipts
+        FOR EACH ROW EXECUTE FUNCTION fixture_import_disconnect_service()`;
+      vi.spyOn(imports, "removeUnpublishedSource").mockRejectedValueOnce(new Error("offline"));
+      await expect(runSync({ imports })).rejects.toBeInstanceOf(AggregateError);
+    } finally {
+      await f.sql`DROP FUNCTION fixture_import_disconnect_service() CASCADE`;
+    }
+
+    const storage = {
+      stagingKey: (id: string) => `opening/staging/${id}`,
+      finalKey: (id: string, version: number) => `opening/sources/${id}/v${version}`,
+      deleteObject: async (key: string) => { objectByKey.delete(key); },
+      objectExists: async (key: string) => objectByKey.has(key),
+    } as OpeningStorage;
+    const service = createOpeningSourceService(f.sql, storage);
+    const principal = { workspaceId: f.scope.workspaceId, userId: f.scope.ownerUserId, sessionId: "fixture" };
+    const pending = await service.listSourceDeletions(principal);
+    expect(pending).toHaveLength(1);
+    const orphanId = pending[0]!.sourceId;
+    const orphanKey = `opening/sources/${orphanId}/v0`;
+    expect(objectByKey.has(orphanKey)).toBe(true);
+
+    const deferred = await service.actOnSource(principal, orphanId, { action: "retry_cleanup" });
+    expect(deferred).toMatchObject({
+      sourceId: orphanId, aiExcluded: true, deleted: true, cleanupPending: 1,
+    });
+    expect(deferred.retryAfter).toBeTruthy();
+    expect(objectByKey.has(orphanKey)).toBe(true);
+
+    const expiredService = createOpeningSourceService(f.sql, storage, {
+      now: () => new Date(Date.now() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS + 1_000),
+    });
+    expect(await expiredService.actOnSource(principal, orphanId, { action: "retry_cleanup" })).toEqual({
+      sourceId: orphanId, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null,
+    });
+    expect(objectByKey.has(orphanKey)).toBe(false);
+    expect(await service.listSourceDeletions(principal)).toEqual([]);
+    expect(await readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 1024)).toEqual({ bytes: 0n, objects: 0n });
+    await expect(expiredService.actOnSource(principal, orphanId, { action: "retry_cleanup" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // Committed sources must never be removed by removeUnpublishedSource even if no reservation exists,
+    // while an unpublished fresh UUID with no retained rows cleans up a late-landing key.
+    await expect(runSync()).resolves.toMatchObject({ imported: 1 });
+    const [committed] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    const committedId = String(committed!.id);
+    const committedKey = `opening/sources/${committedId}/v0`;
+    const removeSpy = vi.fn(async (key: string) => { objectByKey.delete(key); });
+    const identity = { connectionId: fixtureConnection.id, container: "INBOX", generation: "42", remoteId: "11" };
+    await imports.removeUnpublishedSource(f.scope, identity, committedId, committedKey, 10, () => removeSpy(committedKey));
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(objectByKey.has(committedKey)).toBe(true);
+
+    const lateId = randomUUID();
+    const lateKey = `opening/sources/${lateId}/v0`;
+    objectByKey.set(lateKey, Buffer.from("late"));
+    await imports.removeUnpublishedSource(f.scope, identity, lateId, lateKey, 4, () => removeSpy(lateKey));
+    expect(removeSpy).toHaveBeenCalledWith(lateKey);
+    expect(objectByKey.has(lateKey)).toBe(false);
+  });
+
+  it("discards the message and staged object when revocation wins before publication", async () => {
+    await expect(runSync({ onUpload: async () => {
+      await createOpeningConnectionsRepository(f.sql).revoke(f.scope, fixtureConnection.id, fixtureConnection.version, "integration-revoke");
+    } })).rejects.toMatchObject({ code: "CONFLICT", message: "connection is revoked" });
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
+    expect(objectByKey.size).toBe(0);
+  });
+
+  it("journals an object when revocation wins and every immediate delete fails", async () => {
+    failImmediateDeletes = true;
+    await expect(runSync({ onUpload: async () => {
+      await createOpeningConnectionsRepository(f.sql).revoke(f.scope, fixtureConnection.id, fixtureConnection.version, "integration-revoke");
+    } })).rejects.toBeInstanceOf(AggregateError);
+
+    const [journal] = await f.sql`SELECT source_id, pending_object_keys, asset_deleted_at
+      FROM opening_privacy_exclusions WHERE workspace_id=${f.scope.workspaceId}
+        AND cardinality(pending_object_keys)>0`;
+    expect(journal).toMatchObject({ asset_deleted_at: expect.anything(), pending_object_keys: expect.any(Array) });
+    const key = String((journal!.pending_object_keys as string[])[0]);
+    expect(objectByKey.has(key)).toBe(true);
+    const [orphan] = await f.sql`SELECT bytes FROM opening_source_versions
+      WHERE workspace_id=${f.scope.workspaceId} AND source_id=${journal!.source_id} AND version=0`;
+    expect(orphan).toMatchObject({ bytes: expect.anything() });
+    await expect(readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 2 * 1024 ** 3))
+      .resolves.toEqual({ bytes: BigInt(String(orphan!.bytes)), objects: 1n });
+    expect(await f.sql`SELECT state FROM opening_connections WHERE id=${fixtureConnection.id}`)
+      .toEqual([{ state: "revoked" }]);
+
+    failImmediateDeletes = false;
+    const actions = createOpeningSourceActionsRepository(f.sql);
+    const cleanup = await actions.cleanup(f.scope, String(journal!.source_id));
+    const afterGrace = new Date(Date.now() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
+    for (const pendingKey of cleanup.keys) {
+      objectByKey.delete(pendingKey);
+      await actions.cleaned(f.scope, String(journal!.source_id), pendingKey, afterGrace);
+    }
+    await expect(actions.cleanup(f.scope, String(journal!.source_id))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(f.sql`SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${journal!.source_id}`).resolves.toHaveLength(0);
+    await expect(f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${journal!.source_id}`).resolves.toHaveLength(0);
+    await expect(readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 2 * 1024 ** 3))
+      .resolves.toEqual({ bytes: 0n, objects: 0n });
+    expect(objectByKey.has(key)).toBe(false);
+  });
+
+  it("imports both unordered UIDs on rollover, starting below the previous generation's cursor", async () => {
+    server.mails.unshift({ ...server.mails[0]!, uid: 12, source: "Subject: UID 12\r\n\r\nnext" });
+    const imports = createOpeningImportsRepository(f.sql);
+    await imports.advanceImapCursor(f.scope, {
+      connectionId: fixtureConnection.id,
+      connectionVersion: fixtureConnection.version,
+      cursor: { expected: null, next: { folder: "INBOX", uidValidity: "41", lastUid: 90 } },
+    });
+    const next = { folder: "INBOX", uidValidity: "42", lastUid: 12 };
+    const imported: string[] = [];
+    await expect(runSync({ onUpload: async bytes => { imported.push(Buffer.from(bytes).toString("utf8")); } }))
+      .resolves.toMatchObject({ imported: 2, cursor: next });
+    expect(imported).toEqual([server.mails[1]!.source, server.mails[0]!.source]);
+    await expect(imports.readImapCursor(f.scope, fixtureConnection.id, "INBOX")).resolves.toEqual(next);
+    await expect(runSync()).resolves.toMatchObject({ imported: 0, cursor: next });
+  });
+
+  it("imports the lowest 100 UIDs first and exhausts a descending mailbox on the second sync", { timeout: 25_000 }, async () => {
+    const uids = Array.from({ length: 105 }, (_, index) => index + 11);
+    server.mails.splice(0, 1, ...uids.toReversed().map(uid => ({
+      uid, source: `Subject: UID ${uid}\r\n\r\nmessage`,
+    })));
+    const imported: number[] = [];
+    const onUpload = async (bytes: Uint8Array) => {
+      const raw = Buffer.from(bytes).toString("utf8");
+      imported.push(Number(/^Subject: UID (\d+)/.exec(raw)?.[1]));
+    };
+    await expect(runSync({ onUpload })).resolves.toMatchObject({ imported: 100, cursor: { lastUid: 110 } });
+    expect(imported).toEqual(uids.slice(0, 100));
+    await expect(runSync({ onUpload })).resolves.toMatchObject({ imported: 5, cursor: { lastUid: 115 } });
+    expect(imported).toEqual(uids);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`)
+      .toHaveLength(uids.length);
   });
 
   it("does not advance a UID cursor or create a receipt when final upload fails", async () => {
     failFinalUpload = true;
     await expect(runSync()).rejects.toThrow("storage unavailable");
     expect(server.activeConnectionCount()).toBe(0);
-    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(0);
+    expect(objectByKey.size).toBe(0);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
     expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
   });
@@ -163,6 +402,21 @@ describe("isolated standard IMAP sync gate", () => {
     await expect(runSync()).resolves.toMatchObject({ imported: 1, skipped: 0, cursor: { lastUid: 11 } });
     expect(server.activeConnectionCount()).toBe(0);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
+  });
+
+  it("rolls back source publication, parse dispatch and the cursor when receipt insertion fails", async () => {
+    await f.sql`ALTER TABLE opening_import_receipts ADD CONSTRAINT integration_reject_import CHECK (false) NOT VALID`;
+    try {
+      await expect(runSync()).rejects.toMatchObject({ code: "23514", constraint_name: "integration_reject_import" });
+      expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
+      expect(objectByKey.size).toBe(0);
+    } finally {
+      await f.sql`ALTER TABLE opening_import_receipts DROP CONSTRAINT integration_reject_import`;
+    }
   });
 
   it("isolates mailbox generations and workspace ownership through import receipts", async () => {
@@ -195,5 +449,18 @@ describe("isolated standard IMAP sync gate", () => {
       sourceId,
     })).rejects.toMatchObject({ code: "CONFLICT" });
     expect(await f.sql`SELECT state FROM opening_connections WHERE id=${fixtureConnection.id}`).toMatchObject([{ state: "revoked" }]);
+  });
+
+  it("rejects oversized mail from wire RFC822.SIZE without publishing or buffering body", async () => {
+    server.mails.splice(0, server.mails.length, {
+      ...initialMail,
+      uid: 12,
+      advertisedSize: MAX_MAIL_BYTES + 1,
+    });
+    await expect(runSync()).rejects.toThrow("mail exceeds limit");
+    expect(server.activeConnectionCount()).toBe(0);
+    expect(objectByKey.size).toBe(0);
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
   });
 });

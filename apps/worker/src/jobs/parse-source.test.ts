@@ -630,4 +630,157 @@ describe("parse source handler", () => {
     expect(d.runs()).toBe(0);
     expect(d.replaceInput()).toBeUndefined();
   });
+
+  it("falls back to verified historical mixed-case object keys on parse and retry when canonical finalKey is absent", async () => {
+    const hexSourceId = "00000000-0000-4000-8000-0000000000ab";
+    const mixedId = hexSourceId.toUpperCase();
+    const canonicalKey = `opening/sources/${hexSourceId}/v7`;
+    const legacyKey = `opening/sources/${mixedId}/v7`;
+    const textBytes = Buffer.from("Hello legacy markdown");
+    const presignedKeys: string[] = [];
+    const hexSource = source({ id: hexSourceId, mime: "text/plain", bytes: textBytes.byteLength, sha256: digest(textBytes) });
+    const d = await deps({ source: hexSource });
+
+    const resolveLegacyFinalKey = vi.fn(async () => legacyKey);
+    const handler = createParseSourceHandler({
+      sources: {
+        get: async () => hexSource,
+        markParseState: async () => hexSource,
+        resolveLegacyFinalKey,
+      },
+      chunks: {
+        replaceChunks: async () => {},
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === legacyKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === legacyKey) return `data:text/plain;base64,${textBytes.toString("base64")}`;
+          return "data:text/plain,not-found";
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(handler({ ...job, key: `parse:${hexSourceId}:v7:retry:abc` }, { sourceId: hexSourceId })).resolves.toEqual({ pages: 1 });
+    expect(resolveLegacyFinalKey).toHaveBeenCalledWith(scope, hexSourceId, canonicalKey);
+    expect(presignedKeys).toEqual([legacyKey]);
+
+    presignedKeys.length = 0;
+    const rejectingHandler = createParseSourceHandler({
+      sources: {
+        get: async () => hexSource,
+        markParseState: async () => hexSource,
+        resolveLegacyFinalKey: vi.fn(async () => null),
+      },
+      chunks: {
+        replaceChunks: async () => {},
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async () => false,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          throw new Error("missing object in storage");
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+    await expect(rejectingHandler({ ...job, key: `parse:${hexSourceId}:v7:retry:def` }, {
+      sourceId: hexSourceId,
+      objectKey: `opening/sources/other-source/../${mixedId}/v7`,
+    })).rejects.toThrow("missing object in storage");
+    expect(presignedKeys).toEqual([canonicalKey]);
+  });
+
+  it("never substitutes a v1 mixed-case object when parsing or retrying v2", async () => {
+    const hexSourceId = "00000000-0000-4000-8000-0000000000cd";
+    const mixedId = hexSourceId.toUpperCase();
+    const v1Bytes = Buffer.from("stale-v1");
+    const v2Bytes = Buffer.from("fresh-v2");
+    const v1MixedKey = `opening/sources/${mixedId}/v1`;
+    const v2CanonicalKey = `opening/sources/${hexSourceId}/v2`;
+    const v2MixedKey = `opening/sources/${mixedId}/v2`;
+    const presignedKeys: string[] = [];
+    const chunksPublished: unknown[] = [];
+    const v2Source = source({
+      id: hexSourceId,
+      version: 2,
+      mime: "text/plain",
+      bytes: v2Bytes.byteLength,
+      sha256: digest(v2Bytes),
+    });
+    const d = await deps({ source: v2Source });
+
+    const handler = createParseSourceHandler({
+      sources: {
+        get: async () => v2Source,
+        markParseState: async () => v2Source,
+        resolveLegacyFinalKey: vi.fn(async (_s, _id, canonical) => (canonical === v2CanonicalKey ? v1MixedKey : null)),
+      },
+      chunks: {
+        replaceChunks: async (_scope, input) => { chunksPublished.push(input); },
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === v1MixedKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === v1MixedKey) return `data:text/plain;base64,${v1Bytes.toString("base64")}`;
+          throw new Error("v2 object missing in storage");
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(handler({ ...job, key: v1MixedKey }, {
+      sourceId: hexSourceId,
+      sourceVersion: 2,
+      objectKey: v1MixedKey,
+    })).rejects.toThrow("v2 object missing in storage");
+    expect(presignedKeys).toEqual([v2CanonicalKey]);
+    expect(chunksPublished).toEqual([]);
+
+    presignedKeys.length = 0;
+    const mixedV2Handler = createParseSourceHandler({
+      sources: {
+        get: async () => v2Source,
+        markParseState: async () => v2Source,
+        resolveLegacyFinalKey: vi.fn(async () => v2MixedKey),
+      },
+      chunks: {
+        replaceChunks: async (_scope, input) => { chunksPublished.push(input); },
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === v1MixedKey || key === v2MixedKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === v2MixedKey) return `data:text/plain;base64,${v2Bytes.toString("base64")}`;
+          throw new Error(`unexpected key: ${key}`);
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(mixedV2Handler({ ...job, key: v1MixedKey }, {
+      sourceId: hexSourceId,
+      sourceVersion: 2,
+      objectKey: v1MixedKey,
+    })).resolves.toEqual({ pages: 1 });
+    expect(presignedKeys).toEqual([v2MixedKey]);
+  });
 });

@@ -180,8 +180,15 @@ export async function readOpeningBackupTableRows(
       )
     ORDER BY m.id`);
   tables.opening_privacy_exclusions = asRows(await tx`
-    SELECT id, workspace_id, source_id, memory_id, deleted_at, asset_deleted_at
-    FROM opening_privacy_exclusions WHERE workspace_id = ${id} ORDER BY source_id`);
+    SELECT e.id, e.workspace_id, e.source_id, e.memory_id, e.deleted_at, e.asset_deleted_at
+    FROM opening_privacy_exclusions e
+    WHERE e.workspace_id = ${id}
+      AND NOT (
+        e.source_id IS NOT NULL
+        AND e.memory_id IS NULL
+        AND e.id::text = overlay(e.source_id::text placing '8' from 15 for 1)
+      )
+    ORDER BY e.source_id`);
   tables.opening_tasks = asRows(await tx`
     SELECT id, workspace_id, owner_user_id, title, minutes, due_at, due_text, priority, status, version,
       candidate_id, client_key, course_id, skill_label, requirement_key, origin, not_before, close_source, created_at, updated_at

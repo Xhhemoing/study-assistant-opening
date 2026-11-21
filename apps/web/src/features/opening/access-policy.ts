@@ -2,6 +2,11 @@
 
 export const OPENING_TEST_FIXTURE_ORIGIN = "http://opening-fixture.test";
 
+/** This endpoint authenticates DingTalk's signed payload independently of browser sessions. */
+export function isDingTalkWebhook(method: string, pathname: string): boolean {
+  return method === "POST" && pathname === "/api/opening/connections/dingtalk/events";
+}
+
 export function allowsPublicTryChallenge(env: NodeJS.ProcessEnv = process.env): boolean {
   return !["0", "false", "no"].includes(env.OPENING_PUBLIC_TRY?.trim().toLowerCase() ?? "");
 }
