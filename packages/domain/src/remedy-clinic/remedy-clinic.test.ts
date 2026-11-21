@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { DistinguishableProbeSpec } from "../opening/cartridges/probe-protocol";
 import {
+  areSourceRefsActive,
   generateRemedyClinic,
+  isSourceRefActive,
   revalidateRemedyClinic,
   type ActiveSourcesMap,
   type ClinicCandidateProbe,
   type DiagnosedRootAttempt,
 } from "./index";
+import { cloneEvidenceCase, cloneSourceRefs } from "./privacy-guard";
 
 const RULE_ID = "inequality_negative_sign_flip";
 
@@ -1732,5 +1735,330 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(epochRegressedReval.revocationSummary.reason).toBe("invalid_privacy_epoch");
     expect(epochRegressedReval.steps[1].prompt).toContain("privacy verification state");
     expect(epochRegressedReval.steps[1].prompt).not.toContain("underlying source was updated or removed");
+
+    // [P2-B] Revalidating an already-revoked invalid_privacy_epoch clinic preserves reason and placeholder copy.
+    const revalAlreadyRevoked = revalidateRemedyClinic(epochRegressedReval, allSources, 6);
+    expect(revalAlreadyRevoked.status).toBe("stale_source_revoked");
+    expect(revalAlreadyRevoked.revocationSummary.reason).toBe("invalid_privacy_epoch");
+    expect(revalAlreadyRevoked.steps[1].prompt).toContain("privacy verification state");
+  });
+
+  it("defeats Round-10 Proxy .length traps, multi-read Proxy TOCTOU, exotic containers, forged Maps, and direct privacy-guard traps", async () => {
+    const allSources = {
+      "src-ch-1": { version: "v1", active: true },
+      "src-ch-2": { version: "v1", active: true },
+      "src-ch-3": { version: "v1", active: true },
+    };
+    const baseAttempts = [
+      makeAttempt({ attemptId: "a1", rootAttemptId: "r1", chapterId: "ch-1", localDate: "2026-10-01", sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a2", rootAttemptId: "r2", chapterId: "ch-2", localDate: "2026-10-03", sourceRefs: [{ sourceId: "src-ch-2", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a3", rootAttemptId: "r3", chapterId: "ch-3", localDate: "2026-10-05", sourceRefs: [{ sourceId: "src-ch-3", sourceVersion: "v1" }] }),
+    ];
+    const probe1 = makeProbe({ probeId: "r10-p1", input: { a: -2, b: 8 } });
+    const probe2 = makeProbe({ probeId: "r10-p2", input: { a: -3, b: 12 } });
+    const baseRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [probe1, probe2],
+    });
+    expect(baseRes.status).toBe("active");
+    const clinic = baseRes.clinic!;
+
+    // 1. Proxy arrays with throwing get("length") trap (or read-1=3, read-2=throw) on probe.sourceRefs,
+    //    input.attempts, clinic.steps, and clinic.evidenceCases must NEVER throw uncaught.
+    const makeThrowingLenProxy = <T>(arr: readonly T[], throwOnSecondRead = false): T[] => {
+      let reads = 0;
+      return new Proxy([...arr], {
+        get(target, prop, receiver) {
+          if (prop === "length") {
+            reads += 1;
+            if (!throwOnSecondRead || reads >= 2) throw new Error("length-trap-boom");
+            return target.length;
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+    };
+
+    const proxySourceRefsProbe = {
+      ...makeProbe({ probeId: "r10-proxy-refs", input: { a: -4, b: 16 } }),
+      sourceRefs: makeThrowingLenProxy([{ sourceId: "src-ch-1", sourceVersion: "v1" }]),
+    };
+    const proxySourceRefsRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [proxySourceRefsProbe, probe2],
+    });
+    expect(proxySourceRefsRes.status).toBe("insufficient_distinguishable_probes");
+    expect(proxySourceRefsRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+
+    const proxyAttemptsRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: makeThrowingLenProxy(baseAttempts, true),
+      candidateProbes: [probe1, probe2],
+    });
+    expect(proxyAttemptsRes.status).toBe("invalid_input");
+    expect(proxyAttemptsRes.clinic).toBeNull();
+
+    const proxyStepsReval = revalidateRemedyClinic(
+      { ...clinic, steps: makeThrowingLenProxy(clinic.steps) as unknown as typeof clinic.steps },
+      allSources,
+      6,
+    );
+    expect(proxyStepsReval.status).toBe("stale_source_revoked");
+
+    const proxyCasesReval = revalidateRemedyClinic(
+      { ...clinic, evidenceCases: makeThrowingLenProxy(clinic.evidenceCases) },
+      allSources,
+      6,
+    );
+    expect(proxyCasesReval.status).toBe("stale_source_revoked");
+
+    // 2. Prototype-reassigned rejected Promise (verifying unhandledRejection is NOT suppressed!) and
+    //    Generator carrying valid properties passed as attempt, activeSourcesMap Record, candidateProbe,
+    //    and correctModel are ALL rejected.
+    const unhandledReasons: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandledReasons.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const makeReassignedRejectedPromise = (tag: string, props: Record<string, unknown>) => {
+      const err = new Error(`r10-unhandled-${tag}`);
+      const p = Promise.reject(err);
+      Object.setPrototypeOf(p, Object.prototype);
+      Object.assign(p, props);
+      return { p, err };
+    };
+    const makeReassignedGenerator = (props: Record<string, unknown>) => {
+      const g = (function* () {
+        yield 1;
+      })();
+      Object.setPrototypeOf(g, Object.prototype);
+      Object.assign(g, props);
+      return g;
+    };
+
+    const pAttempt = makeReassignedRejectedPromise("attempt", { ...baseAttempts[0]! });
+    const pSources = makeReassignedRejectedPromise("sources", { ...allSources });
+    const pProbe = makeReassignedRejectedPromise("probe", { ...probe1 });
+    const pModel = makeReassignedRejectedPromise("model", { ...probe1.correctModel });
+    const gAttempt = makeReassignedGenerator({ ...baseAttempts[0]! });
+    const gSources = makeReassignedGenerator({ ...allSources });
+    const gProbe = makeReassignedGenerator({ ...probe1 });
+    const gModel = makeReassignedGenerator({ ...probe1.correctModel });
+
+    try {
+      const pAttemptRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: [pAttempt.p as unknown as DiagnosedRootAttempt, baseAttempts[1]!, baseAttempts[2]!],
+        candidateProbes: [probe1, probe2],
+      });
+      expect(pAttemptRes.status).toBe("threshold_not_met");
+      expect(pAttemptRes.rejectedCounts.malformedAttempt).toBe(1);
+
+      const gAttemptRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: [gAttempt as unknown as DiagnosedRootAttempt, baseAttempts[1]!, baseAttempts[2]!],
+        candidateProbes: [probe1, probe2],
+      });
+      expect(gAttemptRes.status).toBe("threshold_not_met");
+      expect(gAttemptRes.rejectedCounts.malformedAttempt).toBe(1);
+
+      const pSourcesRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: pSources.p as unknown as ActiveSourcesMap,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [probe1, probe2],
+      });
+      expect(pSourcesRes.status).toBe("threshold_not_met");
+      expect(pSourcesRes.rejectedCounts.revokedSource).toBe(3);
+
+      const gSourcesRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: gSources as unknown as ActiveSourcesMap,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [probe1, probe2],
+      });
+      expect(gSourcesRes.status).toBe("threshold_not_met");
+      expect(gSourcesRes.rejectedCounts.revokedSource).toBe(3);
+
+      const exoticProbeAndModelRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [
+          pProbe.p as unknown as ClinicCandidateProbe<InequalityInput, string>,
+          gProbe as unknown as ClinicCandidateProbe<InequalityInput, string>,
+          { ...probe1, probeId: "r10-p-model", correctModel: pModel.p as unknown as typeof probe1.correctModel },
+          { ...probe1, probeId: "r10-g-model", correctModel: gModel as unknown as typeof probe1.correctModel },
+        ],
+      });
+      expect(exoticProbeAndModelRes.status).toBe("insufficient_distinguishable_probes");
+      expect(exoticProbeAndModelRes.rejectedProbes.map((r) => r.reason)).toEqual([
+        "invalid_probe_descriptor",
+        "invalid_probe_descriptor",
+        "invalid_probe_descriptor",
+        "invalid_probe_descriptor",
+      ]);
+
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      expect(unhandledReasons).toContain(pAttempt.err);
+      expect(unhandledReasons).toContain(pSources.err);
+      expect(unhandledReasons).toContain(pProbe.err);
+      expect(unhandledReasons).toContain(pModel.err);
+    } finally {
+      for (const item of [pAttempt.p, pSources.p, pProbe.p, pModel.p]) {
+        Object.setPrototypeOf(item, Promise.prototype);
+        item.catch(() => {});
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    // 3. Stateful Proxy candidateProbe returning revoked sourceRefs on read 1 and undefined on read 2
+    //    must be read ONCE and rejected as revoked_probe_source (never admitted with sourceRefs: undefined).
+    let sourceRefDescReads = 0;
+    const statefulProxyProbe = new Proxy(
+      { ...makeProbe({ probeId: "r10-toctou-probe", input: { a: -5, b: 20 } }) },
+      {
+        ownKeys(target) {
+          return [...Reflect.ownKeys(target), "sourceRefs"];
+        },
+        getOwnPropertyDescriptor(target, prop) {
+          if (prop === "sourceRefs") {
+            sourceRefDescReads += 1;
+            return {
+              value:
+                sourceRefDescReads === 1
+                  ? [{ sourceId: "src-revoked-secret", sourceVersion: "v1" }]
+                  : undefined,
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            };
+          }
+          return Reflect.getOwnPropertyDescriptor(target, prop);
+        },
+      },
+    );
+    const toctouRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [statefulProxyProbe, probe2],
+    });
+    expect(sourceRefDescReads).toBe(1);
+    expect(toctouRes.status).toBe("insufficient_distinguishable_probes");
+    expect(toctouRes.rejectedProbes[0]!.reason).toBe("revoked_probe_source");
+
+    // 4. Forged Map.prototype object and Proxy-wrapped / throwing activeSourcesMap fail closed with zero partial entries.
+    const forgedMap = Object.assign(Object.create(Map.prototype) as Record<string, unknown>, {
+      entries() {
+        return [
+          ["src-ch-1", "v1"],
+          ["src-ch-2", "v1"],
+          ["src-ch-3", "v1"],
+        ];
+      },
+      get() {
+        return "v1";
+      },
+    }) as unknown as ActiveSourcesMap;
+    const forgedMapRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: forgedMap,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [probe1, probe2],
+    });
+    expect(forgedMapRes.status).toBe("threshold_not_met");
+    expect(forgedMapRes.rejectedCounts.revokedSource).toBe(3);
+
+    const realMap = new Map<string, { readonly version: string; readonly active: boolean }>([
+      ["src-ch-1", { version: "v1", active: true }],
+      ["src-ch-2", { version: "v1", active: true }],
+      ["src-ch-3", { version: "v1", active: true }],
+    ]);
+    const proxyMap = new Proxy(realMap, {}) as unknown as ActiveSourcesMap;
+    const proxyMapReval = revalidateRemedyClinic(clinic, proxyMap, 6);
+    expect(proxyMapReval.status).toBe("stale_source_revoked");
+
+    // Genuine Map with a getter entry mid-iteration must fail closed (zero partial survival).
+    const throwingEntry = Object.defineProperty({ version: "v1" }, "active", {
+      enumerable: true,
+      get() {
+        throw new Error("mid-iter-boom");
+      },
+    });
+    const poisonMap = new Map<string, unknown>([
+      ["src-ch-1", "v1"],
+      ["src-ch-2", "v1"],
+      ["src-ch-3", "v1"],
+      ["src-poison", throwingEntry],
+    ]) as unknown as ActiveSourcesMap;
+    const poisonMapReval = revalidateRemedyClinic(clinic, poisonMap, 6);
+    expect(poisonMapReval.status).toBe("stale_source_revoked");
+
+    // 5. Direct privacy-guard exports fail closed against throwing Proxy and forged Map.
+    expect(isSourceRefActive({ sourceId: "src-ch-1", sourceVersion: "v1" }, forgedMap)).toBe(false);
+    expect(
+      areSourceRefsActive(
+        makeThrowingLenProxy([{ sourceId: "src-ch-1", sourceVersion: "v1" }]),
+        allSources,
+      ),
+    ).toBe(false);
+    expect(
+      cloneSourceRefs(makeThrowingLenProxy([{ sourceId: "src-ch-1", sourceVersion: "v1" }])),
+    ).toEqual([]);
+    const throwingCaseProxy = new Proxy(clinic.evidenceCases[0]!, {
+      getPrototypeOf() {
+        throw new Error("case-proxy-boom");
+      },
+    });
+    expect(cloneEvidenceCase(throwingCaseProxy).attemptId).toBe("");
   });
 });

@@ -95,33 +95,150 @@ function isValidSourceVersion(version: unknown): version is string | number {
   return typeof version === "number" && Number.isFinite(version);
 }
 
+function safeGetOwnData(
+  obj: unknown,
+  key: string,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  if (obj === null || typeof obj !== "object" || key === "__proto__") return { ok: false };
+  try {
+    const desc = Object.getOwnPropertyDescriptor(obj, key);
+    if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+      return { ok: false };
+    }
+    return { ok: true, value: desc.value };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function isPlainOwnRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  try {
+    if (Array.isArray(value)) return false;
+    const proto = Object.getPrototypeOf(value) as object | null;
+    if (proto !== Object.prototype && proto !== null) return false;
+    const keys = Reflect.ownKeys(value);
+    for (const key of keys) {
+      if (typeof key !== "string" || key === "__proto__") return false;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isGenuinePlainMap(value: unknown): value is ReadonlyMap<unknown, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  try {
+    if (Object.getPrototypeOf(value) !== Map.prototype) return false;
+    if (Reflect.ownKeys(value).length !== 0) return false;
+    Reflect.apply(Map.prototype.has, value, [undefined]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function snapshotDenseArray(value: unknown): readonly unknown[] | null {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const lenDesc = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      !lenDesc ||
+      !Object.hasOwn(lenDesc, "value") ||
+      typeof lenDesc.value !== "number" ||
+      !Number.isInteger(lenDesc.value) ||
+      lenDesc.value < 0
+    ) {
+      return null;
+    }
+    const len = lenDesc.value;
+    if (Reflect.ownKeys(value).length !== len + 1) return null;
+    const out: unknown[] = new Array(len);
+    for (let i = 0; i < len; i += 1) {
+      const desc = Object.getOwnPropertyDescriptor(value, String(i));
+      if (
+        !desc ||
+        !desc.enumerable ||
+        !Object.hasOwn(desc, "value") ||
+        desc.get !== undefined ||
+        desc.set !== undefined
+      ) {
+        return null;
+      }
+      out[i] = desc.value;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 function lookupActiveSource(
   activeSourcesMap: ActiveSourcesMap,
   sourceId: string,
 ): ActiveSourceEntry | undefined {
   if (!activeSourcesMap || typeof activeSourcesMap !== "object") return undefined;
-  if (activeSourcesMap instanceof Map) {
-    return activeSourcesMap.get(sourceId);
+  try {
+    if (isGenuinePlainMap(activeSourcesMap)) {
+      return Reflect.apply(Map.prototype.get, activeSourcesMap, [sourceId]) as ActiveSourceEntry | undefined;
+    }
+    const proto = Object.getPrototypeOf(activeSourcesMap) as object | null;
+    if (proto !== Object.prototype && proto !== null) return undefined;
+    if (sourceId === "__proto__") return undefined;
+    const slot = safeGetOwnData(activeSourcesMap, sourceId);
+    return slot.ok ? (slot.value as ActiveSourceEntry) : undefined;
+  } catch {
+    return undefined;
   }
-  const record = activeSourcesMap as Readonly<Record<string, ActiveSourceEntry>>;
-  return Object.hasOwn(record, sourceId) ? record[sourceId] : undefined;
+}
+
+function isPlainPrimitiveRecord(value: unknown): value is Record<string, unknown> {
+  if (!isPlainOwnRecord(value)) return false;
+  try {
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") return false;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || !Object.hasOwn(desc, "value")) return false;
+      const v = desc.value;
+      if (v !== null && (typeof v === "object" || typeof v === "function")) return false;
+    }
+    structuredClone(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function isSourceRefActive(
   ref: RemedySourceRef,
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
-  if (!ref || typeof ref !== "object") return false;
+  if (!isPlainPrimitiveRecord(ref)) return false;
   if (!activeSourcesMap || typeof activeSourcesMap !== "object") return false;
-  if (!isNonBlankText(ref.sourceId) || !isValidSourceVersion(ref.sourceVersion)) return false;
-  const entry = lookupActiveSource(activeSourcesMap, ref.sourceId);
+  const sourceIdSlot = safeGetOwnData(ref, "sourceId");
+  const sourceVersionSlot = safeGetOwnData(ref, "sourceVersion");
+  if (!sourceIdSlot.ok || !sourceVersionSlot.ok) return false;
+  const sourceId = sourceIdSlot.value;
+  const sourceVersion = sourceVersionSlot.value;
+  if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return false;
+  const entry = lookupActiveSource(activeSourcesMap, sourceId);
   if (entry === undefined) return false;
   if (typeof entry === "string" || typeof entry === "number") {
-    return entry === ref.sourceVersion;
+    return entry === sourceVersion;
   }
-  if (!entry || typeof entry !== "object") return false;
-  if (entry.revoked === true || entry.active === false) return false;
-  return entry.version === ref.sourceVersion;
+  if (!isPlainPrimitiveRecord(entry)) return false;
+  const revokedSlot = safeGetOwnData(entry, "revoked");
+  const activeSlot = safeGetOwnData(entry, "active");
+  const versionSlot = safeGetOwnData(entry, "version");
+  if ((revokedSlot.ok && revokedSlot.value === true) || (activeSlot.ok && activeSlot.value === false)) {
+    return false;
+  }
+  return versionSlot.ok && versionSlot.value === sourceVersion;
 }
 
 export function readOwnDataIndex<T>(
@@ -140,52 +257,89 @@ export function readOwnDataIndex<T>(
 }
 
 export function isDenseArray<T>(value: unknown): value is readonly T[] {
-  try {
-    if (!Array.isArray(value)) return false;
-    const len = value.length;
-    for (let i = 0; i < len; i += 1) {
-      if (!readOwnDataIndex(value, i).ok) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
+  return snapshotDenseArray(value) !== null;
 }
 
 export function areSourceRefsActive(
   sourceRefs: readonly RemedySourceRef[],
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
-  if (!Array.isArray(sourceRefs) || sourceRefs.length === 0) return false;
-  for (let i = 0; i < sourceRefs.length; i += 1) {
-    const slot = readOwnDataIndex(sourceRefs, i);
-    if (!slot.ok || !slot.value || !isSourceRefActive(slot.value, activeSourcesMap)) return false;
+  const items = snapshotDenseArray(sourceRefs);
+  if (!items || items.length === 0) return false;
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (!item || !isSourceRefActive(item as RemedySourceRef, activeSourcesMap)) return false;
+  }
+  try {
+    structuredClone(sourceRefs);
+  } catch {
+    return false;
   }
   return true;
 }
 
 export function cloneSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
-  if (!Array.isArray(sourceRefs)) return Object.freeze([]);
+  const items = snapshotDenseArray(sourceRefs);
+  if (!items) return Object.freeze([]);
   const cloned: RemedySourceRef[] = [];
-  for (let i = 0; i < sourceRefs.length; i += 1) {
-    const slot = readOwnDataIndex(sourceRefs, i);
-    if (!slot.ok || !slot.value || typeof slot.value !== "object") continue;
-    cloned.push(Object.freeze({ sourceId: slot.value.sourceId, sourceVersion: slot.value.sourceVersion }));
+  let safeToCloneCheck = true;
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i];
+    if (item === null || item === undefined) continue;
+    if (!isPlainPrimitiveRecord(item)) {
+      safeToCloneCheck = false;
+      continue;
+    }
+    const sourceIdSlot = safeGetOwnData(item, "sourceId");
+    const sourceVersionSlot = safeGetOwnData(item, "sourceVersion");
+    if (!sourceIdSlot.ok || !sourceVersionSlot.ok) continue;
+    if (
+      typeof sourceIdSlot.value !== "string" ||
+      (typeof sourceVersionSlot.value !== "string" && typeof sourceVersionSlot.value !== "number")
+    ) {
+      continue;
+    }
+    cloned.push(Object.freeze({ sourceId: sourceIdSlot.value, sourceVersion: sourceVersionSlot.value }));
+  }
+  if (!safeToCloneCheck) return Object.freeze([]);
+  try {
+    structuredClone(sourceRefs);
+  } catch {
+    return Object.freeze([]);
   }
   return Object.freeze(cloned);
 }
 
 export function cloneEvidenceCase(item: ClinicEvidenceCase): ClinicEvidenceCase {
+  if (!isPlainOwnRecord(item)) {
+    return Object.freeze({
+      attemptId: "",
+      rootAttemptId: "",
+      chapterId: "",
+      localDate: "",
+      ruleId: "",
+      excerpt: "",
+      invariantSummary: "",
+      sourceRefs: Object.freeze([]),
+      privacyEpoch: -1,
+    });
+  }
+  const readStr = (key: string): string => {
+    const slot = safeGetOwnData(item, key);
+    return slot.ok && typeof slot.value === "string" ? slot.value : "";
+  };
+  const epochSlot = safeGetOwnData(item, "privacyEpoch");
+  const refsSlot = safeGetOwnData(item, "sourceRefs");
   return Object.freeze({
-    attemptId: item.attemptId,
-    rootAttemptId: item.rootAttemptId,
-    chapterId: item.chapterId,
-    localDate: item.localDate,
-    ruleId: item.ruleId,
-    excerpt: item.excerpt,
-    invariantSummary: item.invariantSummary,
-    sourceRefs: cloneSourceRefs(item.sourceRefs),
-    privacyEpoch: item.privacyEpoch,
+    attemptId: readStr("attemptId"),
+    rootAttemptId: readStr("rootAttemptId"),
+    chapterId: readStr("chapterId"),
+    localDate: readStr("localDate"),
+    ruleId: readStr("ruleId"),
+    excerpt: readStr("excerpt"),
+    invariantSummary: readStr("invariantSummary"),
+    sourceRefs: refsSlot.ok ? cloneSourceRefs(refsSlot.value as readonly RemedySourceRef[]) : Object.freeze([]),
+    privacyEpoch: epochSlot.ok && typeof epochSlot.value === "number" ? epochSlot.value : -1,
   });
 }
 

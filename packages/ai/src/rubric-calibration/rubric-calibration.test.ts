@@ -843,5 +843,47 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
     });
     expect(mismatchedSubId.passed).toBe(false);
     expect(mismatchedSubId.failures).toContain("benchmark_cohort_mismatch");
+
+    // Round-10 [P2-B]: Single-pass read & Proxy/exotic rejection on evaluateRubricCalibrationGate input/thresholds.
+    let expectedIdReads = 0;
+    const statefulProxyInput = new Proxy(
+      {
+        benchmarkItems: validBenchmark,
+        counterfactualTriplets: passingCounterfactuals,
+        thresholds: { lowTailMaxBand: 5.0 },
+      },
+      {
+        ownKeys(target) {
+          return [...Reflect.ownKeys(target), "expectedBenchmarkItemIds"];
+        },
+        getOwnPropertyDescriptor(target, prop) {
+          if (prop === "expectedBenchmarkItemIds") {
+            expectedIdReads += 1;
+            return {
+              value: expectedIdReads === 1 ? ["g1", "g2", "g3", "g4", "g5", "g6", "missing"] : undefined,
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            };
+          }
+          return Reflect.getOwnPropertyDescriptor(target, prop);
+        },
+      },
+    );
+    const proxyGateRes = evaluateRubricCalibrationGate(statefulProxyInput);
+    expect(expectedIdReads).toBe(1);
+    expect(proxyGateRes.passed).toBe(false);
+
+    const exoticThresholds = Object.setPrototypeOf(
+      Object.assign(new Map(), { minQwk: 0.7 }),
+      Object.prototype,
+    ) as unknown as { minQwk: number };
+    const exoticThresholdsRes = evaluateRubricCalibrationGate({
+      benchmarkItems: validBenchmark,
+      counterfactualTriplets: passingCounterfactuals,
+      thresholds: exoticThresholds,
+    });
+    expect(exoticThresholdsRes.passed).toBe(false);
+    expect(exoticThresholdsRes.failures).toContain("invalid_threshold_configuration");
   });
 });

@@ -168,8 +168,151 @@ function standardDeviation(values: readonly number[]): number {
   return Math.sqrt(sumSq / (values.length - 1));
 }
 
+const GATE_REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
+const GATE_ARRAY_BUFFER_LEN_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+const GATE_DATA_VIEW_LEN_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
+const GATE_ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
+const GATE_WEAK_KEY = Object.freeze({});
+
+function matchesGateBrand(check: () => unknown): boolean {
+  try {
+    check();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasGateExoticSlot(obj: object): boolean {
+  try {
+    if (ArrayBuffer.isView(obj)) return true;
+    if (typeof GATE_ERROR_IS_ERROR === "function" && GATE_ERROR_IS_ERROR(obj)) return true;
+    if (matchesGateBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
+    if (matchesGateBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
+    if (matchesGateBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [GATE_WEAK_KEY]))) return true;
+    if (matchesGateBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [GATE_WEAK_KEY]))) return true;
+    if (matchesGateBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
+    if (GATE_REGEXP_SOURCE_GET && obj !== RegExp.prototype && matchesGateBrand(() => Reflect.apply(GATE_REGEXP_SOURCE_GET, obj, []))) return true;
+    if (GATE_ARRAY_BUFFER_LEN_GET && matchesGateBrand(() => Reflect.apply(GATE_ARRAY_BUFFER_LEN_GET, obj, []))) return true;
+    if (GATE_DATA_VIEW_LEN_GET && matchesGateBrand(() => Reflect.apply(GATE_DATA_VIEW_LEN_GET, obj, []))) return true;
+    if (matchesGateBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
+    if (matchesGateBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
+    if (matchesGateBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function snapshotPlainGateDataInner(
+  value: unknown,
+  memo: Map<object, unknown>,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  if (value === null || value === undefined) return { ok: true, value };
+  const kind = typeof value;
+  if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") {
+    return { ok: true, value };
+  }
+  if (kind !== "object") return { ok: false };
+  const obj = value as object;
+  if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
+  try {
+    const proto = Object.getPrototypeOf(obj) as object | null;
+    if (Array.isArray(obj)) {
+      if (proto !== Array.prototype) return { ok: false };
+      const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
+      if (!lenDesc || !Object.hasOwn(lenDesc, "value") || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value) || lenDesc.value < 0) {
+        return { ok: false };
+      }
+      const len = lenDesc.value;
+      if (Reflect.ownKeys(obj).length !== len + 1) return { ok: false };
+      if (hasGateExoticSlot(obj)) return { ok: false };
+      const out: unknown[] = new Array(len);
+      memo.set(obj, out);
+      for (let i = 0; i < len; i += 1) {
+        const desc = Object.getOwnPropertyDescriptor(obj, String(i));
+        if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+          return { ok: false };
+        }
+        const child = snapshotPlainGateDataInner(desc.value, memo);
+        if (!child.ok) return { ok: false };
+        out[i] = child.value;
+      }
+      return { ok: true, value: Object.freeze(out) };
+    }
+    if (proto !== Object.prototype && proto !== null) return { ok: false };
+    const keys = Reflect.ownKeys(obj);
+    const entries: Array<{ readonly key: string; readonly value: unknown }> = [];
+    for (const key of keys) {
+      if (typeof key !== "string" || key === "__proto__") return { ok: false };
+      const desc = Object.getOwnPropertyDescriptor(obj, key);
+      if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+        return { ok: false };
+      }
+      entries.push({ key, value: desc.value });
+    }
+    if (hasGateExoticSlot(obj)) return { ok: false };
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    memo.set(obj, out);
+    for (const entry of entries) {
+      const child = snapshotPlainGateDataInner(entry.value, memo);
+      if (!child.ok) return { ok: false };
+      Object.defineProperty(out, entry.key, {
+        value: child.value,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+    }
+    return { ok: true, value: Object.freeze(out) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function snapshotPlainGateData(value: unknown): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  const res = snapshotPlainGateDataInner(value, new Map());
+  if (!res.ok) return { ok: false };
+  if (value !== null && typeof value === "object") {
+    try {
+      structuredClone(value);
+    } catch {
+      return { ok: false };
+    }
+  }
+  return res;
+}
+
+function snapshotShallowGateRecord(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== "object") return null;
+  try {
+    if (Array.isArray(value)) return null;
+    const proto = Object.getPrototypeOf(value) as object | null;
+    if (proto !== Object.prototype && proto !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of keys) {
+      if (typeof key !== "string" || key === "__proto__") return null;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+        return null;
+      }
+      Object.defineProperty(out, key, {
+        value: desc.value,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+    }
+    if (hasGateExoticSlot(value)) return null;
+    return Object.freeze(out);
+  } catch {
+    return null;
+  }
+}
+
 function readOwnDataField(obj: unknown, key: string): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  if (obj === null || typeof obj !== "object") return { ok: false };
+  if (obj === null || typeof obj !== "object" || key === "__proto__") return { ok: false };
   try {
     const desc = Object.getOwnPropertyDescriptor(obj, key);
     if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
@@ -182,31 +325,17 @@ function readOwnDataField(obj: unknown, key: string): { readonly ok: true; reado
 }
 
 function isPlainRecordObject(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object") return false;
-  try {
-    if (Array.isArray(value)) return false;
-    const proto = Object.getPrototypeOf(value) as object | null;
-    if (proto !== Object.prototype && proto !== null) return false;
-    for (const key of Reflect.ownKeys(value)) {
-      if (typeof key !== "string" || key === "__proto__") return false;
-      const desc = Object.getOwnPropertyDescriptor(value, key);
-      if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
-        return false;
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
+  return snapshotShallowGateRecord(value) !== null;
 }
 
 function snapshotDensePlainArray(value: unknown): readonly unknown[] | null {
   try {
     if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
     const lenDesc = Object.getOwnPropertyDescriptor(value, "length");
-    if (!lenDesc || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value)) return null;
+    if (!lenDesc || !Object.hasOwn(lenDesc, "value") || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value) || lenDesc.value < 0) return null;
     const len = lenDesc.value;
     if (Reflect.ownKeys(value).length !== len + 1) return null;
+    if (hasGateExoticSlot(value)) return null;
     const out: unknown[] = new Array(len);
     for (let i = 0; i < len; i += 1) {
       const desc = Object.getOwnPropertyDescriptor(value, String(i));
@@ -228,10 +357,10 @@ function snapshotDensePlainArray(value: unknown): readonly unknown[] | null {
 }
 
 function parseUniqueNonBlankIdSet(rawIds: unknown): ReadonlySet<string> | null {
-  const items = snapshotDensePlainArray(rawIds);
-  if (!items || items.length === 0) return null;
+  const cloned = snapshotPlainGateData(rawIds);
+  if (!cloned.ok || !Array.isArray(cloned.value) || cloned.value.length === 0) return null;
   const set = new Set<string>();
-  for (const entry of items) {
+  for (const entry of cloned.value) {
     if (typeof entry !== "string") return null;
     const trimmed = entry.trim();
     if (trimmed.length === 0 || set.has(trimmed)) return null;
@@ -281,9 +410,9 @@ interface ResolvedCalibrationThresholds {
 }
 
 function resolveTighteningThresholds(
-  overrides: RubricCalibrationGateThresholds | undefined,
+  rawOverrides: unknown,
 ): { readonly thresholds: ResolvedCalibrationThresholds; readonly valid: boolean } {
-  if (!overrides) {
+  if (rawOverrides === undefined) {
     return {
       thresholds: {
         ...DEFAULT_CALIBRATION_THRESHOLDS,
@@ -294,9 +423,22 @@ function resolveTighteningThresholds(
     };
   }
 
+  const clonedOverrides = snapshotPlainGateData(rawOverrides);
+  if (!clonedOverrides.ok || clonedOverrides.value === null || typeof clonedOverrides.value !== "object" || Array.isArray(clonedOverrides.value)) {
+    return {
+      thresholds: {
+        ...DEFAULT_CALIBRATION_THRESHOLDS,
+        customLowTailMaxBand: null,
+        customHighTailMinBand: null,
+      },
+      valid: false,
+    };
+  }
+  const overrides = clonedOverrides.value as Record<string, unknown>;
+
   let valid = true;
   const checkFinite = (
-    value: number | undefined,
+    value: unknown,
     fallback: number,
     minAllowed: number,
     maxAllowed: number,
@@ -311,41 +453,43 @@ function resolveTighteningThresholds(
 
   const minQwk = Math.max(
     DEFAULT_CALIBRATION_THRESHOLDS.minQwk,
-    checkFinite(overrides.minQwk, DEFAULT_CALIBRATION_THRESHOLDS.minQwk, -1, 1),
+    checkFinite(overrides["minQwk"], DEFAULT_CALIBRATION_THRESHOLDS.minQwk, -1, 1),
   );
   const maxAbsSmd = Math.min(
     DEFAULT_CALIBRATION_THRESHOLDS.maxAbsSmd,
-    checkFinite(overrides.maxAbsSmd, DEFAULT_CALIBRATION_THRESHOLDS.maxAbsSmd, 0, Number.MAX_SAFE_INTEGER),
+    checkFinite(overrides["maxAbsSmd"], DEFAULT_CALIBRATION_THRESHOLDS.maxAbsSmd, 0, Number.MAX_SAFE_INTEGER),
   );
   const maxAbsBiasLow = Math.min(
     DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasLow,
-    checkFinite(overrides.maxAbsBiasLow, DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasLow, 0, 9),
+    checkFinite(overrides["maxAbsBiasLow"], DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasLow, 0, 9),
   );
   const maxAbsBiasHigh = Math.min(
     DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasHigh,
-    checkFinite(overrides.maxAbsBiasHigh, DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasHigh, 0, 9),
+    checkFinite(overrides["maxAbsBiasHigh"], DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasHigh, 0, 9),
   );
   const minSdRatio = Math.max(
     DEFAULT_CALIBRATION_THRESHOLDS.minSdRatio,
-    checkFinite(overrides.minSdRatio, DEFAULT_CALIBRATION_THRESHOLDS.minSdRatio, 0, Number.MAX_SAFE_INTEGER),
+    checkFinite(overrides["minSdRatio"], DEFAULT_CALIBRATION_THRESHOLDS.minSdRatio, 0, Number.MAX_SAFE_INTEGER),
   );
   const minAdmissibleCoverage = Math.max(
     DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage,
-    checkFinite(overrides.minAdmissibleCoverage, DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage, 0, 1),
+    checkFinite(overrides["minAdmissibleCoverage"], DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage, 0, 1),
   );
 
+  const rawCustomLow = overrides["lowTailMaxBand"];
+  const rawCustomHigh = overrides["highTailMinBand"];
   // Default tail cutoffs are always mandatory; custom cutoffs are validated and enforced additionally.
   const customLowTailMaxBand =
-    overrides.lowTailMaxBand === undefined
+    rawCustomLow === undefined
       ? null
-      : checkFinite(overrides.lowTailMaxBand, DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand, 0, 9);
+      : checkFinite(rawCustomLow, DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand, 0, 9);
   const customHighTailMinBand =
-    overrides.highTailMinBand === undefined
+    rawCustomHigh === undefined
       ? null
-      : checkFinite(overrides.highTailMinBand, DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand, 0, 9);
+      : checkFinite(rawCustomHigh, DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand, 0, 9);
   const maxPaddingGain = Math.min(
     DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain,
-    checkFinite(overrides.maxPaddingGain, DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain, 0, 9),
+    checkFinite(overrides["maxPaddingGain"], DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain, 0, 9),
   );
 
   const effectiveCustomLow = customLowTailMaxBand ?? DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand;
@@ -379,13 +523,50 @@ export function evaluateRubricCalibrationGate(input: {
   readonly expectedBenchmarkItemIds?: readonly string[];
   readonly expectedTripletIds?: readonly string[];
 }): RubricCalibrationGateReport {
-  const { thresholds: t, valid: thresholdsValid } = resolveTighteningThresholds(input.thresholds);
   const failures = new Set<RubricCalibrationGateFailure>();
+  const clonedInput = snapshotPlainGateData(input);
+  const inputSnap =
+    clonedInput.ok && clonedInput.value !== null && typeof clonedInput.value === "object" && !Array.isArray(clonedInput.value)
+      ? (clonedInput.value as Record<string, unknown>)
+      : null;
+  if (!inputSnap) {
+    failures.add("invalid_threshold_configuration");
+    failures.add("empty_benchmark");
+    failures.add("duplicate_or_invalid_benchmark_item_id");
+    failures.add("missing_counterfactual_triplets");
+    return {
+      passed: false,
+      metrics: {
+        totalCount: 0,
+        admissibleCount: 0,
+        admissibleCoverage: 0,
+        lowTailCount: 0,
+        highTailCount: 0,
+        qwk: null,
+        smd: null,
+        biasLow: null,
+        biasHigh: null,
+        sdTrue: null,
+        sdPred: null,
+        sdRatio: null,
+      },
+      counterfactualAudits: [],
+      failures: [...failures],
+    };
+  }
+
+  const rawThresholds = inputSnap["thresholds"];
+  const rawBenchmarkItems = inputSnap["benchmarkItems"];
+  const rawCounterfactualTriplets = inputSnap["counterfactualTriplets"];
+  const rawExpectedBenchmarkIds = inputSnap["expectedBenchmarkItemIds"];
+  const rawExpectedTripletIds = inputSnap["expectedTripletIds"];
+
+  const { thresholds: t, valid: thresholdsValid } = resolveTighteningThresholds(rawThresholds);
   if (!thresholdsValid) {
     failures.add("invalid_threshold_configuration");
   }
 
-  const benchmarkArray = snapshotDensePlainArray(input.benchmarkItems);
+  const benchmarkArray = snapshotDensePlainArray(rawBenchmarkItems);
   const totalCount = benchmarkArray ? benchmarkArray.length : 0;
   if (!benchmarkArray) {
     failures.add("empty_benchmark");
@@ -394,9 +575,9 @@ export function evaluateRubricCalibrationGate(input: {
     failures.add("empty_benchmark");
   }
 
-  const hasExpectedBenchmarkIds = input.expectedBenchmarkItemIds !== undefined;
+  const hasExpectedBenchmarkIds = rawExpectedBenchmarkIds !== undefined;
   const expectedBenchmarkSet = hasExpectedBenchmarkIds
-    ? parseUniqueNonBlankIdSet(input.expectedBenchmarkItemIds)
+    ? parseUniqueNonBlankIdSet(rawExpectedBenchmarkIds)
     : null;
   if (hasExpectedBenchmarkIds && !expectedBenchmarkSet) {
     failures.add("benchmark_cohort_mismatch");
@@ -553,10 +734,10 @@ export function evaluateRubricCalibrationGate(input: {
   }
 
   const counterfactualAudits: CounterfactualTripletAudit[] = [];
-  const tripletsArray = snapshotDensePlainArray(input.counterfactualTriplets);
-  const hasExpectedTripletIds = input.expectedTripletIds !== undefined;
+  const tripletsArray = snapshotDensePlainArray(rawCounterfactualTriplets);
+  const hasExpectedTripletIds = rawExpectedTripletIds !== undefined;
   const expectedTripletSet = hasExpectedTripletIds
-    ? parseUniqueNonBlankIdSet(input.expectedTripletIds)
+    ? parseUniqueNonBlankIdSet(rawExpectedTripletIds)
     : null;
   if (hasExpectedTripletIds && !expectedTripletSet) {
     failures.add("triplet_cohort_mismatch");
