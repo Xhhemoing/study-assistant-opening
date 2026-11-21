@@ -28,6 +28,7 @@ import {
   formatBandScore,
   formatTimeBox,
   matchesAssistedFingerprint,
+  normalizeAssistedTextKey,
   segmentParagraphWithSpans,
   type DraftViewMode,
 } from "./workbench-model";
@@ -87,19 +88,24 @@ function collectAssistedWritingSources(
   return sources;
 }
 
+function collectReceiptUpgradeRewrites(receipt: IeltsRubricReceipt): string[] {
+  const rewrites: string[] = [];
+  for (const code of IELTS_CRITERIA) {
+    for (const span of receipt.criteria[code].evidenceSpans) {
+      if (span.upgradeRewrite.trim()) rewrites.push(span.upgradeRewrite);
+    }
+  }
+  return rewrites;
+}
+
 function collectFixtureSampleSources(fixture: IeltsWorkbenchFixture): string[] {
   const sources: string[] = [];
   const d1 = draftEditorText(fixture.draft1).trim();
   const d2 = draftEditorText(fixture.draft2).trim();
   if (d1) sources.push(d1);
   if (d2) sources.push(d2);
-  for (const receipt of [fixture.draft1Receipt, fixture.draft2Receipt]) {
-    for (const code of IELTS_CRITERIA) {
-      for (const span of receipt.criteria[code].evidenceSpans) {
-        if (span.upgradeRewrite.trim()) sources.push(span.upgradeRewrite);
-      }
-    }
-  }
+  sources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
+  sources.push(...collectReceiptUpgradeRewrites(fixture.draft2Receipt));
   return sources;
 }
 
@@ -219,6 +225,10 @@ export function IeltsDraftCritiqueWorkbench({
   const [localAssistedSources, setLocalAssistedSources] = useState<readonly string[]>(
     () => initialAssistedSources,
   );
+  const [deferredPostSubmit, setDeferredPostSubmit] = useState<{
+    readonly evaluatedKey: string;
+    readonly sources: readonly string[];
+  } | null>(null);
 
   if (evaluation.authorityFingerprint !== authorityFingerprint) {
     setEvaluation({ ...authoritative, cachedFingerprint: null });
@@ -243,6 +253,7 @@ export function IeltsDraftCritiqueWorkbench({
       if (!isOwnWriteBack) {
         setHintsRevealed(false);
         setResetPastAuthorityFingerprint(null);
+        setDeferredPostSubmit(null);
       }
       setComposerText(
         hasPreloadedSubmission ? draftEditorText(fixture.draft2) : (initialDraft ?? ""),
@@ -396,12 +407,16 @@ export function IeltsDraftCritiqueWorkbench({
   }
 
   function handleRevealScaffold() {
-    const sampleSources = collectFixtureSampleSources(fixture);
+    const sampleSources = [
+      ...collectFixtureSampleSources(fixture),
+      ...(deferredPostSubmit?.sources ?? []),
+    ];
     const currentTrimmed = composerText.trim();
     if (currentTrimmed) sampleSources.push(currentTrimmed);
     setHintsRevealed(true);
     setAttemptAssistedLatched(true);
     setComposerAssisted(true);
+    setDeferredPostSubmit(null);
     if (sampleSources.length > 0) {
       setLocalAssistedSources((current) => [...new Set([...current, ...sampleSources])]);
     }
@@ -409,11 +424,24 @@ export function IeltsDraftCritiqueWorkbench({
 
   function handleAnalyzeRevision() {
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
+    const composerKey = normalizeAssistedTextKey(composerText);
+    const shouldPromoteDeferred =
+      deferredPostSubmit !== null &&
+      deferredPostSubmit.sources.length > 0 &&
+      composerKey !== deferredPostSubmit.evaluatedKey;
+    const activeFingerprints = shouldPromoteDeferred
+      ? collectAssistedFingerprints([
+          ...localAssistedSources,
+          ...authoritativeAssistedSources,
+          ...(hasSubmitted ? collectAssistedWritingSources(draft2, draft2Receipt) : []),
+          ...deferredPostSubmit.sources,
+        ])
+      : stickyAssistedFingerprints;
     const nextAssisted =
       isDemoPreview ||
       composerAssisted ||
       attemptAssistedLatched ||
-      matchesAssistedFingerprint(composerText, stickyAssistedFingerprints);
+      matchesAssistedFingerprint(composerText, activeFingerprints);
     const baseDraft: IeltsEssayDraft = hasSubmitted
       ? draft2
       : {
@@ -458,19 +486,48 @@ export function IeltsDraftCritiqueWorkbench({
       return;
     }
 
+    const wasUnsubmitted = !hasSubmitted;
     setComposerNeedsText(false);
     setHasSubmitted(true);
     setRevisionCount(nextCount);
+    const newlyTrackedSources: string[] = shouldPromoteDeferred
+      ? [...deferredPostSubmit.sources]
+      : [];
     if (updatedDraft.assisted) {
       setAttemptAssistedLatched(true);
       setComposerAssisted(true);
       const trimmedSource = composerText.trim();
       if (trimmedSource) {
-        setLocalAssistedSources((current) =>
-          current.includes(trimmedSource) ? current : [...current, trimmedSource],
-        );
+        newlyTrackedSources.push(trimmedSource);
       }
     }
+    if (newlyTrackedSources.length > 0) {
+      setLocalAssistedSources((current) => [...new Set([...current, ...newlyTrackedSources])]);
+    }
+    // Once a submission renders critique cards and unlocks draft1/exemplar rewrites,
+    // defer those newly displayed guidance texts keyed to the just-evaluated submission so the
+    // current submission is never retroactively tainted, while any subsequent edit or reset retry checks them.
+    const nextPostSubmitSources: string[] = [
+      ...collectReceiptUpgradeRewrites(evaluated.receipt),
+    ];
+    if (wasUnsubmitted) {
+      const d1Text = draftEditorText(fixture.draft1).trim();
+      if (d1Text) nextPostSubmitSources.push(d1Text);
+      nextPostSubmitSources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
+    }
+    setDeferredPostSubmit(
+      nextPostSubmitSources.length > 0
+        ? {
+            evaluatedKey: composerKey,
+            sources: [
+              ...new Set([
+                ...(shouldPromoteDeferred ? [] : (deferredPostSubmit?.sources ?? [])),
+                ...nextPostSubmitSources,
+              ]),
+            ],
+          }
+        : null,
+    );
     setEvaluation({
       ...authoritative,
       draft2: updatedDraft,
@@ -505,7 +562,7 @@ export function IeltsDraftCritiqueWorkbench({
       setSelectedSpanId(null);
       return;
     }
-    const retainedSources: string[] = [];
+    const retainedSources: string[] = [...(deferredPostSubmit?.sources ?? [])];
     if (hintsRevealed || attemptAssistedLatched || effectiveComposerAssisted) {
       const currentTrimmed = composerText.trim();
       if (currentTrimmed) retainedSources.push(currentTrimmed);
@@ -513,9 +570,16 @@ export function IeltsDraftCritiqueWorkbench({
     if (hintsRevealed) {
       retainedSources.push(...collectFixtureSampleSources(fixture));
     }
+    if (hasSubmitted) {
+      const d1Text = draftEditorText(fixture.draft1).trim();
+      if (d1Text) retainedSources.push(d1Text);
+      retainedSources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
+      retainedSources.push(...collectReceiptUpgradeRewrites(draft2Receipt));
+    }
     if (retainedSources.length > 0) {
       setLocalAssistedSources((current) => [...new Set([...current, ...retainedSources])]);
     }
+    setDeferredPostSubmit(null);
     setHasSubmitted(false);
     setHintsRevealed(false);
     setAttemptAssistedLatched(false);
@@ -953,7 +1017,28 @@ export function IeltsDraftCritiqueWorkbench({
                     placeholder={`在此独立撰写你的二稿改写（空行分段，建议 ${fixture.targetWordCount}+ 词）...`}
                     onChange={(event) => {
                       const nextValue = event.target.value;
-                      if (matchesAssistedFingerprint(nextValue, stickyAssistedFingerprints)) {
+                      const nextKey = normalizeAssistedTextKey(nextValue);
+                      const shouldPromoteDeferred =
+                        deferredPostSubmit !== null &&
+                        deferredPostSubmit.sources.length > 0 &&
+                        nextKey !== deferredPostSubmit.evaluatedKey;
+                      const activeFingerprints = shouldPromoteDeferred
+                        ? collectAssistedFingerprints([
+                            ...localAssistedSources,
+                            ...authoritativeAssistedSources,
+                            ...(hasSubmitted
+                              ? collectAssistedWritingSources(draft2, draft2Receipt)
+                              : []),
+                            ...deferredPostSubmit.sources,
+                          ])
+                        : stickyAssistedFingerprints;
+                      if (shouldPromoteDeferred) {
+                        setLocalAssistedSources((current) => [
+                          ...new Set([...current, ...deferredPostSubmit.sources]),
+                        ]);
+                        setDeferredPostSubmit(null);
+                      }
+                      if (matchesAssistedFingerprint(nextValue, activeFingerprints)) {
                         setAttemptAssistedLatched(true);
                         setComposerAssisted(true);
                       }

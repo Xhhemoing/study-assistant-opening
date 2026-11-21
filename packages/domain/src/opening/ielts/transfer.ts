@@ -201,6 +201,18 @@ function assessPromptTopicRelevance(
   }
 
   if (revisedWordCount < 160) {
+    const minShortMatches = keywordCount >= 2 ? 2 : 1;
+    if (overlapCount < minShortMatches) {
+      return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
+    }
+    if (revisedWordCount >= 60 && spec.contrastFacets) {
+      const [leftFacet, rightFacet] = spec.contrastFacets;
+      const coversLeft = [...leftFacet].some((kw) => revisedStems.has(kw));
+      const coversRight = [...rightFacet].some((kw) => revisedStems.has(kw));
+      if (!coversLeft || !coversRight) {
+        return { isOffTopic: false, isTangential: true, keywordCount, overlapCount };
+      }
+    }
     return { isOffTopic: false, isTangential: false, keywordCount, overlapCount };
   }
 

@@ -20,6 +20,7 @@ import {
   SPEAKING_SIGNAL_RATING_META,
   collectAssistedFingerprints,
   matchesAssistedFingerprint,
+  normalizeAssistedTextKey,
 } from "./workbench-model";
 
 export type IeltsSpeakingTransferCardProps = {
@@ -167,6 +168,10 @@ function SpeakingAttempt({
     if (seedReceiptAssistedSource) initial.push(seedReceiptAssistedSource);
     return [...new Set(initial)];
   });
+  const [deferredPostSubmit, setDeferredPostSubmit] = useState<{
+    readonly evaluatedKey: string;
+    readonly sources: readonly string[];
+  } | null>(null);
 
   if (seedReceipt?.assisted && external.receiptSnapshot !== seenAssistedReceiptSnapshot) {
     setSeenAssistedReceiptSnapshot(external.receiptSnapshot);
@@ -276,8 +281,23 @@ function SpeakingAttempt({
     : null;
   const paceMeta = receipt ? SPEAKING_PACE_META[receipt.paceStatus] : null;
 
+  const displayedPostSubmitSources = useMemo(() => {
+    if (!hasSubstantiveSubmission) return [];
+    const rewrites = (receipt?.evidenceQuotes ?? [])
+      .map((quote) => quote.upgradeRewrite.trim())
+      .filter(Boolean);
+    return [...new Set([...seed.argumentBridgeCues.filter((cue) => cue.trim().length > 0), ...rewrites])];
+  }, [hasSubstantiveSubmission, receipt, seed.argumentBridgeCues]);
+  const pendingPostSubmitSources = useMemo(
+    () => [...new Set([...(deferredPostSubmit?.sources ?? []), ...displayedPostSubmitSources])],
+    [deferredPostSubmit, displayedPostSubmitSources],
+  );
+  const pendingPostSubmitKey =
+    deferredPostSubmit?.evaluatedKey ??
+    (hasSubstantiveSubmission && receipt ? normalizeAssistedTextKey(receipt.sourceTranscript) : "");
+
   function handleRevealScaffold() {
-    const nextSources = [...scaffoldSources];
+    const nextSources = [...scaffoldSources, ...pendingPostSubmitSources];
     const currentTrimmed = transcript.trim();
     if (currentTrimmed) nextSources.push(currentTrimmed);
     setHintsRevealed(true);
@@ -285,6 +305,7 @@ function SpeakingAttempt({
     if (nextSources.length > 0) {
       setAssistedSources((current) => [...new Set([...current, ...nextSources])]);
     }
+    setDeferredPostSubmit(null);
     setEditedAnswer((current) => ({ ...(current ?? answer), assisted: true }));
     setLocalEvaluation(null);
   }
@@ -298,9 +319,13 @@ function SpeakingAttempt({
     if (hintsRevealed && scaffoldSources.length > 0) {
       retainedSources.push(...scaffoldSources);
     }
+    if (pendingPostSubmitSources.length > 0) {
+      retainedSources.push(...pendingPostSubmitSources);
+    }
     if (retainedSources.length > 0) {
       setAssistedSources((current) => [...new Set([...current, ...retainedSources])]);
     }
+    setDeferredPostSubmit(null);
     setEditedAnswer({ transcript: "", durationInput: "", assisted: false });
     setLocalEvaluation(null);
     setHintsRevealed(false);
@@ -310,12 +335,24 @@ function SpeakingAttempt({
   }
 
   function handleEvaluate() {
+    const currentKey = normalizeAssistedTextKey(transcript);
+    const shouldPromotePending =
+      pendingPostSubmitSources.length > 0 && currentKey !== pendingPostSubmitKey;
+    const evalSources = shouldPromotePending
+      ? [...new Set([...assistedSources, ...pendingPostSubmitSources])]
+      : assistedSources;
+    const matchedPromoted =
+      shouldPromotePending &&
+      matchesAssistedFingerprint(transcript, collectAssistedFingerprints(evalSources));
+    const effectiveAssisted = isDemoPreview || assisted || matchedPromoted;
+
     const nextReceipt = evaluateSpeakingRetelling({
       seed,
       transcript,
       durationSeconds: parsedDuration,
-      assisted: isDemoPreview || assisted,
+      assisted: effectiveAssisted,
     });
+    const nextAssistedSources: string[] = shouldPromotePending ? [...pendingPostSubmitSources] : [];
     if (nextReceipt.assisted) {
       setAttemptAssistedLatched(true);
       setEditedAnswer((current) =>
@@ -323,10 +360,37 @@ function SpeakingAttempt({
       );
       const trimmedTranscript = transcript.trim();
       if (trimmedTranscript) {
-        setAssistedSources((current) =>
-          current.includes(trimmedTranscript) ? current : [...current, trimmedTranscript],
-        );
+        nextAssistedSources.push(trimmedTranscript);
       }
+    }
+    if (nextAssistedSources.length > 0) {
+      setAssistedSources((current) => [...new Set([...current, ...nextAssistedSources])]);
+    }
+    // A substantive submission displays argumentBridgeCues and evidence quote rewrites on screen.
+    // Defer them keyed to the just-evaluated transcript so the current attempt is never retroactively
+    // tainted, while every subsequent edit or reset retry checks against them persistently.
+    if (nextReceipt.wordCount > 0) {
+      const nextDisplayed = [
+        ...seed.argumentBridgeCues.filter((cue) => cue.trim().length > 0),
+        ...nextReceipt.evidenceQuotes
+          .map((quote) => quote.upgradeRewrite.trim())
+          .filter(Boolean),
+      ];
+      setDeferredPostSubmit(
+        nextDisplayed.length > 0
+          ? {
+              evaluatedKey: normalizeAssistedTextKey(nextReceipt.sourceTranscript),
+              sources: [
+                ...new Set([
+                  ...(shouldPromotePending ? [] : (deferredPostSubmit?.sources ?? [])),
+                  ...nextDisplayed,
+                ]),
+              ],
+            }
+          : null,
+      );
+    } else if (shouldPromotePending) {
+      setDeferredPostSubmit(null);
     }
     setLocalEvaluation({
       authority,
@@ -452,9 +516,19 @@ function SpeakingAttempt({
             value={transcript}
             onChange={(event) => {
               const nextTranscript = event.target.value;
+              const nextKey = normalizeAssistedTextKey(nextTranscript);
+              const shouldPromotePending =
+                pendingPostSubmitSources.length > 0 && nextKey !== pendingPostSubmitKey;
+              const activeFingerprints = shouldPromotePending
+                ? collectAssistedFingerprints([...assistedSources, ...pendingPostSubmitSources])
+                : assistedFingerprints;
+              if (shouldPromotePending) {
+                setAssistedSources((current) => [...new Set([...current, ...pendingPostSubmitSources])]);
+                setDeferredPostSubmit(null);
+              }
               const matchedAssisted = matchesAssistedFingerprint(
                 nextTranscript,
-                assistedFingerprints,
+                activeFingerprints,
               );
               if (matchedAssisted) {
                 setAttemptAssistedLatched(true);

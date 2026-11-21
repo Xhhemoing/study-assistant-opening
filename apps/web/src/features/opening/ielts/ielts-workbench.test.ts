@@ -2,13 +2,19 @@
 import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { evaluateRevisedDraftDeterministically, evaluateSpeakingRetelling } from "./domain-bridge";
+import {
+  buildSpeakingPart3Seed,
+  evaluateRevisedDraftDeterministically,
+  evaluateSpeakingRetelling,
+} from "./domain-bridge";
 import {
   IELTS_WRITING_SPEAKING_FIXTURE,
   IeltsDraftCritiqueWorkbench,
   IeltsSpeakingTransferCard,
+  collectAssistedFingerprints,
   formatBandScore,
   formatTimeBox,
+  matchesAssistedFingerprint,
   normalizeAssistedTextKey,
   segmentParagraphWithSpans,
 } from "./index";
@@ -48,7 +54,7 @@ function writingButton(label: string): HTMLButtonElement {
 
 const GENUINE_ORIGINAL_WRITING_ESSAY = [
   "City councils across fast-growing metropolitan regions must decide whether public capital belongs in rail transit systems or wider road corridors for private vehicles. Despite widespread household attachment to automobiles, directing capital toward modern electric trains offers stronger long-term fiscal viability and cleaner urban neighbourhoods than pouring concrete into extra highway lanes.",
-  "Modern underground and suburban rail corridors can transport tens of thousands of office workers and university students hourly without demolishing historic streets or paving over parks. Consequently, encouraging commuters to replace daily solo car trips with punctual train journeys helps alleviate chronic congestion while lowering per-capita emissions throughout dense residential zones. Reliable urban rail schedules also support downtown shops and cut repair bills on worn asphalt.",
+  "Modern underground and suburban rail corridors can transport tens of thousands of office workers and university students hourly without demolishing historic streets or paving over parks. Consequently, encouraging commuters to replace daily solo car trips with punctual train journeys reduces per-capita emissions and helps cities alleviate chronic congestion throughout dense residential zones. Reliable urban rail schedules also support downtown shops and cut repair bills on worn asphalt.",
   "Admittedly, households settled in distant outer towns frequently lack nearby train platforms and rely on personal cars after dusk. While expanding motorways can ease journey delays for a brief season, induced traffic demand soon encourages fresh car trips onto every widened lane, which undermines those temporary speed improvements. Pairing regional rail stations with dependable feeder buses resolves outer-suburban gaps without repeating that cycle.",
   "Ultimately, combining backbone rail transit with accessible feeder buses delivers durable mobility that extra road lanes never sustain. Policymakers should therefore focus public transport spending on modern rail networks rather than endless motorway widening.",
 ].join("\n\n");
@@ -57,7 +63,7 @@ const GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT =
   "To be honest, elected mayors often struggle because commuters notice freshly paved lanes right before polling day, whereas major subway lines require years of digging and upfront funding. " +
   "That said, backing urban trains helps cities alleviate chronic congestion and lower per-capita emissions across crowded residential districts. " +
   "Admittedly, households in outer towns still rely on personal vehicles where stations sit miles away, so local planners should pair core lines with frequent feeder buses. " +
-  "In the long run, protecting long-term fiscal viability requires choosing efficient rail networks instead of endless asphalt projects that only trigger induced traffic demand.";
+  "Overall, cities can only protect long-term fiscal viability when councils fund dependable rail corridors instead of endless asphalt projects that trigger induced traffic demand.";
 
 describe("workbench-model helpers", () => {
   it("formats band scores and time-box labels cleanly", () => {
@@ -150,6 +156,77 @@ describe("workbench-model helpers", () => {
     const obfuscated =
       "High-capacity ra\uFE0Fil helps alle\u200Bviate chro\u200Dnic con\u{E0100}gestion acro\u2060ss de\uFEFFnse distri\u0301cts.";
     expect(normalizeAssistedTextKey(obfuscated)).toBe(normalizeAssistedTextKey(clean));
+  });
+
+  it("detects copied exemplar paragraphs, near-verbatim passages, and 9-word shingles without flagging short connectors or original prose", () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const writingFingerprints = collectAssistedFingerprints([
+      fixture.draft1.paragraphs.join("\n\n"),
+      fixture.draft2.paragraphs.join("\n\n"),
+      ...Object.values(fixture.draft1Receipt.criteria).flatMap((c) =>
+        c.evidenceSpans.map((span) => span.upgradeRewrite),
+      ),
+      ...Object.values(fixture.draft2Receipt.criteria).flatMap((c) =>
+        c.evidenceSpans.map((span) => span.upgradeRewrite),
+      ),
+    ]);
+    const originalParagraphs = GENUINE_ORIGINAL_WRITING_ESSAY.split("\n\n");
+
+    // 1 verbatim paragraph from 4-paragraph draft2 surrounded by 3 brand-new original paragraphs MUST be detected.
+    const hybridDraft2Copy = [
+      originalParagraphs[0]!,
+      fixture.draft2.paragraphs[1]!,
+      originalParagraphs[2]!,
+      originalParagraphs[3]!,
+    ].join("\n\n");
+    expect(matchesAssistedFingerprint(hybridDraft2Copy, writingFingerprints)).toBe(true);
+
+    // 1 verbatim paragraph from 4-paragraph draft1 surrounded by 3 brand-new original paragraphs MUST be detected.
+    const hybridDraft1Copy = [
+      originalParagraphs[0]!,
+      originalParagraphs[1]!,
+      fixture.draft1.paragraphs[2]!,
+      originalParagraphs[3]!,
+    ].join("\n\n");
+    expect(matchesAssistedFingerprint(hybridDraft1Copy, writingFingerprints)).toBe(true);
+
+    // Near-verbatim substantive sentence copy with minor word swaps breaking 9-word shingles (>= 80% local containment).
+    const nearVerbatimRewrite = [
+      originalParagraphs[0]!,
+      "As metropolitan populations expand swiftly, municipal authorities face a tough allocation choice between widening road corridors and financing urban rail transit.",
+      originalParagraphs[2]!,
+      originalParagraphs[3]!,
+    ].join("\n\n");
+    expect(matchesAssistedFingerprint(nearVerbatimRewrite, writingFingerprints)).toBe(true);
+
+    // Short 7-word cue fingerprint catches verbatim reuse of a 7-word cue.
+    const shortCueFingerprints = collectAssistedFingerprints([
+      "Prioritise electrified commuter corridors over motorway widening",
+    ]);
+    expect(
+      matchesAssistedFingerprint(
+        "Municipal planners should prioritise electrified commuter corridors over motorway widening to sustain growth.",
+        shortCueFingerprints,
+      ),
+    ).toBe(true);
+
+    // Common short IELTS connectors (< 7 words) and genuinely original prose MUST NOT false-positive.
+    for (const connector of [
+      "On the other hand",
+      "In conclusion",
+      "For example",
+      "In the long run",
+      "On the other hand, in conclusion, for example, cities must plan carefully.",
+    ]) {
+      expect(matchesAssistedFingerprint(connector, writingFingerprints)).toBe(false);
+    }
+    expect(matchesAssistedFingerprint(GENUINE_ORIGINAL_WRITING_ESSAY, writingFingerprints)).toBe(false);
+
+    const speakingFingerprints = collectAssistedFingerprints([
+      fixture.initialSpeakingTranscript,
+      ...fixture.speakingSeed.argumentBridgeCues,
+    ]);
+    expect(matchesAssistedFingerprint(GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT, speakingFingerprints)).toBe(false);
   });
 });
 
@@ -975,6 +1052,99 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')?.disabled).toBe(false);
     expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(false);
   });
+
+  it("tracks post-submit draft1 and critique rewrites and flags a single copied exemplar paragraph surrounded by original prose", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onRevisionEvaluated = vi.fn();
+    await act(async () =>
+      root.render(createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated })),
+    );
+
+    // Attempt #1: submit a short independent draft WITHOUT clicking [data-reveal-scaffold].
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    await act(async () =>
+      setNativeInputValue(
+        textarea,
+        "Municipal budgets should support electric suburban trains so daily commuters face fewer delays.",
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(1);
+    const firstReceipt = onRevisionEvaluated.mock.lastCall?.[0]?.receipt;
+    expect(firstReceipt?.sourceDraft?.assisted).toBe(false);
+    const displayedCritiqueRewrite = firstReceipt?.criteria.LR.evidenceSpans[0]?.upgradeRewrite;
+    expect(displayedCritiqueRewrite).toBeTruthy();
+
+    // Reset and submit 3 distinct paragraphs + 1 copied paragraph from unlocked draft1.
+    const fillerParagraphs = [
+      "Urban infrastructure budgets require careful trade-offs between long-lived electric rail corridors and incremental asphalt widening across fast-expanding metropolitan districts.",
+      "Public planners often weigh construction lead times against commuter throughput when deciding how regional ministries distribute annual transport capital.",
+      "Coordinating local shuttle fleets with suburban transit hubs lets residents reach city workplaces without expanding downtown parking lots.",
+    ];
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const resetTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const resetCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(resetCheckbox.checked).toBe(false);
+    expect(resetCheckbox.disabled).toBe(false);
+
+    const oneCopiedDraft1Paragraph = [
+      fillerParagraphs[0]!,
+      fixture.draft1.paragraphs[1]!,
+      fillerParagraphs[1]!,
+      fillerParagraphs[2]!,
+    ].join("\n\n");
+    await act(async () => setNativeInputValue(resetTextarea, oneCopiedDraft1Paragraph));
+    expect(resetCheckbox.checked).toBe(true);
+    expect(resetCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+
+    // Reset and paste a post-submit critique upgradeRewrite embedded inside distinct paragraphs.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const rewriteTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const rewriteCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () =>
+      setNativeInputValue(
+        rewriteTextarea,
+        [fillerParagraphs[0]!, `${fillerParagraphs[1]!} ${displayedCritiqueRewrite}`, fillerParagraphs[2]!].join("\n\n"),
+      ),
+    );
+    expect(rewriteCheckbox.checked).toBe(true);
+    expect(rewriteCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+
+    // Reset and submit genuinely fresh original prose -> verified mastery!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const cleanTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const cleanCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => setNativeInputValue(cleanTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
+    expect(cleanCheckbox.checked).toBe(false);
+    expect(cleanCheckbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: false }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "rubric_verified_evidence",
+        masteryQualified: true,
+        countsTowardMastery: true,
+      }),
+    });
+  });
 });
 
 describe("IeltsSpeakingTransferCard", () => {
@@ -1742,6 +1912,150 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(textarea.value).toBe("");
     expect(checkbox.disabled).toBe(false);
     expect(checkbox.checked).toBe(false);
+  });
+
+  it("tracks post-submit argumentBridgeCues and quote rewrites on custom seeds without a sampleTranscript across edits and resets", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const customSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: fixture.promptId,
+          topic: "urban public transport funding",
+          coreClaim:
+            "Municipal councils should prioritise electrified urban rail networks over continual motorway expansion for sustainable commuter capacity.",
+          supportingReason:
+            "High-capacity trains alleviate chronic congestion and reduce per-capita emissions without carving extra highway lanes through residential blocks.",
+          counterPerspective:
+            "Admittedly, distant suburban households still rely on feeder buses to connect comfortably with major transit corridors.",
+          activeCollocations: fixture.coreArgument.activeCollocations,
+        },
+        fixture.draft2.draftId,
+      ),
+      seedId: "custom-post-submit-cue-seed",
+      requiresVerifiedReceipt: true,
+      verifiedWritingReceipt: fixture.draft2Receipt,
+    };
+
+    const onEvaluated = vi.fn();
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          seed: customSeed,
+          onEvaluated,
+        }),
+      ),
+    );
+
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const durationInput = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const evaluateBtn = () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!;
+
+    // Before first submission, cues are hidden and no sampleTranscript exists.
+    expect(host.textContent).not.toContain(customSeed.argumentBridgeCues[0]!);
+    expect(host.querySelector("[data-speaking-sample-transcript]")).toBeNull();
+
+    // Attempt #1: submit short non-empty speech WITHOUT clicking [data-reveal-scaffold].
+    await act(async () => {
+      setNativeInputValue(
+        textarea,
+        "I think city planners need reliable public trains to keep rush-hour commuting dependable.",
+      );
+      setNativeInputValue(durationInput, "25");
+    });
+    await act(async () => evaluateBtn().click());
+    const firstReceipt = onEvaluated.mock.lastCall?.[0];
+    expect(firstReceipt).toMatchObject({
+      assisted: false,
+      paceStatus: "too_short",
+      epistemicStatus: "practice_feedback",
+    });
+    // Cues and quote upgradeRewrite are now visible on screen after submit #1!
+    expect(host.textContent).toContain(customSeed.argumentBridgeCues[0]!);
+    const displayedQuoteRewrite = firstReceipt?.evidenceQuotes[0]?.upgradeRewrite;
+    expect(displayedQuoteRewrite).toContain("Personally, I think the core tension");
+
+    // Path A: Directly editing after submit #1 (without reset) to paste a displayed cue locks assistance.
+    const cueSentence =
+      "Municipal councils should prioritise electrified urban rail networks over continual motorway expansion for sustainable commuter capacity.";
+    await act(async () => {
+      setNativeInputValue(
+        textarea,
+        `${cueSentence} Voters often focus on immediate road repaving before elections rather than multi-year underground rail construction across busy urban neighbourhoods.`,
+      );
+      setNativeInputValue(durationInput, "76");
+    });
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+
+    // Path B: Reset -> paste a displayed argumentBridgeCue -> MUST lock assistance and block mastery!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    expect(textarea.value).toBe("");
+    expect(durationInput.value).toBe("");
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+
+    await act(async () => {
+      setNativeInputValue(
+        textarea,
+        "High-capacity trains alleviate chronic congestion and reduce per-capita emissions without carving extra highway lanes through residential blocks. " +
+          "Regional ministries also have to coordinate shuttle routes so outer commuters can reach platforms smoothly during busy weekday evenings.",
+      );
+      setNativeInputValue(durationInput, "76");
+    });
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+
+    // Path C: Reset -> paste the post-submit evidenceQuote upgradeRewrite -> MUST also lock assistance!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => {
+      setNativeInputValue(
+        textarea,
+        `${displayedQuoteRewrite} Local authorities must balance immediate commuter convenience against multi-decade fiscal resilience for growing metropolitan districts.`,
+      );
+      setNativeInputValue(durationInput, "76");
+    });
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+
+    // Path D: Reset -> submit genuinely fresh original 76s response -> earns rubric_verified_evidence!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+    await act(async () => {
+      setNativeInputValue(textarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
+      setNativeInputValue(durationInput, "76");
+    });
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
+    });
   });
 });
 

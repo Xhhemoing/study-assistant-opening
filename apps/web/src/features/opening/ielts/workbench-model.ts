@@ -222,26 +222,174 @@ export function normalizeAssistedTextKey(text: string): string {
   );
 }
 
+const ASSISTED_PASSAGE_STOP_WORDS = new Set([
+  "the", "and", "for", "that", "this", "with", "from", "have", "has", "had",
+  "are", "was", "were", "will", "would", "could", "should", "into", "onto",
+  "about", "more", "most", "some", "many", "such", "very", "also", "than",
+  "then", "they", "them", "their", "there", "these", "those", "only", "just",
+  "can", "not", "but", "all", "one", "two", "its", "our", "you", "your",
+  "to", "of", "in", "on", "at", "by", "as", "is", "be", "an", "or", "if",
+  "it", "so", "no", "up", "do", "we", "he", "she", "who", "when", "where",
+  "which", "what", "while", "how", "why",
+]);
+
+const PASSAGE_PARAGRAPH_BREAK = /\n\s*\n+/u;
+const PASSAGE_SENTENCE_BREAK = /(?<=[.!?。！？])\s+|\n+/u;
+
+export type AssistedPassage = {
+  readonly key: string;
+  readonly tokens: readonly string[];
+  readonly tokenSet: ReadonlySet<string>;
+  readonly contentTokenSet: ReadonlySet<string>;
+};
+
 export type AssistedFingerprint = {
   readonly key: string;
   readonly tokens: readonly string[];
   readonly tokenSet: ReadonlySet<string>;
   readonly shingles: ReadonlySet<string>;
+  readonly shingles9: ReadonlySet<string>;
+  readonly shortCueShingles7: ReadonlySet<string>;
+  readonly passages: readonly AssistedPassage[];
 };
+
+function buildContiguousShingles(tokens: readonly string[], size: number): Set<string> {
+  const result = new Set<string>();
+  if (tokens.length < size) return result;
+  for (let i = 0; i <= tokens.length - size; i += 1) {
+    result.add(tokens.slice(i, i + size).join(" "));
+  }
+  return result;
+}
+
+function collectContentTokens(tokens: readonly string[]): Set<string> {
+  const content = new Set<string>();
+  for (const token of tokens) {
+    if (token.length >= 3 && !ASSISTED_PASSAGE_STOP_WORDS.has(token)) {
+      content.add(token);
+    }
+  }
+  return content;
+}
+
+function extractSubstantivePassages(text: string): {
+  readonly passages: AssistedPassage[];
+  readonly shortCueShingles7: Set<string>;
+} {
+  const seen = new Set<string>();
+  const passages: AssistedPassage[] = [];
+  const shortCueShingles7 = new Set<string>();
+
+  const rawChunks: string[] = [];
+  for (const paragraph of text.split(PASSAGE_PARAGRAPH_BREAK)) {
+    const trimmedParagraph = paragraph.trim();
+    if (!trimmedParagraph) continue;
+    rawChunks.push(trimmedParagraph);
+    for (const sentence of trimmedParagraph.split(PASSAGE_SENTENCE_BREAK)) {
+      const trimmedSentence = sentence.trim();
+      if (trimmedSentence && trimmedSentence !== trimmedParagraph) {
+        rawChunks.push(trimmedSentence);
+      }
+    }
+  }
+
+  for (const chunk of rawChunks) {
+    const chunkKey = normalizeAssistedTextKey(chunk);
+    if (!chunkKey || seen.has(chunkKey)) continue;
+    seen.add(chunkKey);
+    const chunkTokens = chunkKey.split(" ").filter(Boolean);
+    if (chunkTokens.length >= 7 && chunkTokens.length < 9) {
+      for (const shingle of buildContiguousShingles(chunkTokens, 7)) {
+        shortCueShingles7.add(shingle);
+      }
+    }
+    const contentTokenSet = collectContentTokens(chunkTokens);
+    const isSubstantive =
+      chunkTokens.length >= 10 ||
+      (contentTokenSet.size >= 8 && chunkKey.length >= 45);
+    if (isSubstantive) {
+      passages.push({
+        key: chunkKey,
+        tokens: chunkTokens,
+        tokenSet: new Set(chunkTokens),
+        contentTokenSet,
+      });
+    }
+  }
+
+  return { passages, shortCueShingles7 };
+}
+
+function hasHighLocalPassageContainment(
+  candidateTokens: readonly string[],
+  passage: AssistedPassage,
+): boolean {
+  const requiredRatio = 0.8;
+  const targetSize = passage.tokenSet.size;
+  const contentTargetSize = passage.contentTokenSet.size;
+  if (targetSize === 0 || candidateTokens.length === 0) return false;
+
+  // Strictly local sliding window bounded near the passage's own length avoids
+  // whole-essay/whole-paragraph bag-of-words false positives while catching
+  // near-verbatim sentence or paragraph copies even when minor edits break 9-word shingles.
+  const windowSize = Math.min(
+    candidateTokens.length,
+    Math.max(passage.tokens.length + 3, Math.ceil(passage.tokens.length * 1.25)),
+  );
+  if (windowSize < Math.ceil(targetSize * requiredRatio)) {
+    return false;
+  }
+  const windowCounts = new Map<string, number>();
+  let matchedDistinct = 0;
+  let matchedContentDistinct = 0;
+  for (let i = 0; i < candidateTokens.length; i += 1) {
+    const added = candidateTokens[i]!;
+    if (passage.tokenSet.has(added)) {
+      const prev = windowCounts.get(added) ?? 0;
+      windowCounts.set(added, prev + 1);
+      if (prev === 0) {
+        matchedDistinct += 1;
+        if (passage.contentTokenSet.has(added)) matchedContentDistinct += 1;
+      }
+    }
+    if (i >= windowSize) {
+      const removed = candidateTokens[i - windowSize]!;
+      if (passage.tokenSet.has(removed)) {
+        const next = (windowCounts.get(removed) ?? 1) - 1;
+        if (next <= 0) {
+          windowCounts.delete(removed);
+          matchedDistinct -= 1;
+          if (passage.contentTokenSet.has(removed)) matchedContentDistinct -= 1;
+        } else {
+          windowCounts.set(removed, next);
+        }
+      }
+    }
+    if (
+      matchedDistinct / targetSize >= requiredRatio &&
+      (contentTargetSize === 0 || matchedContentDistinct / contentTargetSize >= requiredRatio)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function buildAssistedFingerprint(text: string): AssistedFingerprint | null {
   const key = normalizeAssistedTextKey(text);
   if (!key) return null;
   const tokens = key.split(" ").filter(Boolean);
   const tokenSet = new Set(tokens);
-  const shingles = new Set<string>();
   const shingleSize = tokens.length >= 5 ? 5 : 4;
-  if (tokens.length >= shingleSize) {
-    for (let i = 0; i <= tokens.length - shingleSize; i += 1) {
-      shingles.add(tokens.slice(i, i + shingleSize).join(" "));
+  const shingles = buildContiguousShingles(tokens, shingleSize);
+  const shingles9 = buildContiguousShingles(tokens, 9);
+  const { passages, shortCueShingles7 } = extractSubstantivePassages(text);
+  if (tokens.length >= 7 && tokens.length < 9) {
+    for (const shingle of buildContiguousShingles(tokens, 7)) {
+      shortCueShingles7.add(shingle);
     }
   }
-  return { key, tokens, tokenSet, shingles };
+  return { key, tokens, tokenSet, shingles, shingles9, shortCueShingles7, passages };
 }
 
 export function collectAssistedFingerprints(texts: readonly string[]): AssistedFingerprint[] {
@@ -256,10 +404,13 @@ export function collectAssistedFingerprints(texts: readonly string[]): AssistedF
 }
 
 /**
- * Checks whether a candidate submission matches or closely copies any recorded
- * assisted/sample fingerprint via exact normalized lexical equality, verbatim
- * exemplar substring reuse (>= 8 words), high token Jaccard similarity (>= 0.55),
- * or high contiguous shingle overlap (>= 0.40).
+ * Checks whether a candidate submission matches or reuses any recorded
+ * assisted/sample fingerprint via:
+ * - exact normalized lexical equality (Unicode/invisible-char safe),
+ * - verbatim exemplar substring reuse (>= 8 words),
+ * - shared 9-word contiguous normalized shingles (or 7-word shingles for 7–8 word cues),
+ * - verbatim or near-verbatim substantive paragraph/sentence reuse (>= 80% local token containment),
+ * - whole-response high token Jaccard (>= 0.55) or 5-gram overlap (>= 0.40 / >= 0.55).
  */
 export function matchesAssistedFingerprint(
   candidateText: string,
@@ -269,9 +420,29 @@ export function matchesAssistedFingerprint(
   const candidate = buildAssistedFingerprint(candidateText);
   if (!candidate) return false;
 
+  const candidateShingles7 = buildContiguousShingles(candidate.tokens, 7);
+
   for (const fp of fingerprints) {
     if (candidate.key === fp.key) return true;
     if (fp.tokens.length >= 8 && candidate.key.includes(fp.key)) return true;
+
+    if (fp.shingles9.size > 0 && candidate.shingles9.size > 0) {
+      for (const shingle of fp.shingles9) {
+        if (candidate.shingles9.has(shingle)) return true;
+      }
+    }
+    if (fp.shortCueShingles7.size > 0 && candidateShingles7.size > 0) {
+      for (const shingle of fp.shortCueShingles7) {
+        if (candidateShingles7.has(shingle)) return true;
+      }
+    }
+
+    for (const passage of fp.passages) {
+      if (candidate.key.includes(passage.key)) return true;
+      if (hasHighLocalPassageContainment(candidate.tokens, passage)) {
+        return true;
+      }
+    }
 
     if (fp.tokens.length >= 12 && candidate.tokens.length >= 12) {
       let intersection = 0;

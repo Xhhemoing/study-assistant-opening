@@ -2080,4 +2080,92 @@ describe("Writing topic-relevance band grounding", () => {
     expect(evaluated.receipt.criteria.TR.band).toBeGreaterThanOrEqual(6);
     expect(evaluated.receipt.overallBand).toBeGreaterThanOrEqual(6);
   });
+
+  it("caps short (< 160 words) off-topic drafts with 1 incidental prompt keyword while allowing short genuinely on-topic drafts", () => {
+    const museumPrompt =
+      "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?";
+    const shortMuseumOffTopic: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-short-museum-1kw",
+      promptId: "museum-admission-fees-v1",
+      paragraphs: [
+        "Artisanal sourdough fermentation rewards steady kitchen discipline when rye flour mixes slowly with cool spring water across crisp mornings. Therefore, observant bakers measure hydration ratios carefully before shaping rustic loaves for local cafes.",
+        "Consequently, botanical conservatories nurture fragile alpine orchids harvested from misty limestone ridges by controlling pine bark drainage and gentle humidity. Yesterday I passed a quiet museum courtyard while carrying wildflower sketches home for my notebook.",
+      ],
+    };
+    const shortMuseumWords = countDraftWords(shortMuseumOffTopic.paragraphs);
+    expect(shortMuseumWords).toBeGreaterThanOrEqual(60);
+    expect(shortMuseumWords).toBeLessThan(160);
+
+    const shortMuseumResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: shortMuseumOffTopic,
+      targets: TARGETS,
+      promptStatement: museumPrompt,
+      receiptId: "r-short-museum-1kw",
+    });
+    expect(shortMuseumResult.transferReport.summary.transferredCount).toBe(0);
+    expect(shortMuseumResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(shortMuseumResult.receipt.criteria.CC.band).toBeLessThanOrEqual(4.5);
+    expect(shortMuseumResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(shortMuseumResult.receipt.masteryQualified).toBe(false);
+    expect(shortMuseumResult.receipt.countsTowardMastery).toBe(false);
+    expect(shortMuseumResult.receipt.epistemicStatus).toBe("practice_feedback");
+
+    const shortRailOffTopic: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-short-rail-1kw",
+      paragraphs: [
+        "Classical baroque luthiers age seasoned spruce timber inside dry wooden lofts before carving delicate arched ribs and maple bridges. Therefore, careful varnish layering protects warm acoustic resonance across intimate winter chamber recitals.",
+        "Consequently, artisanal sourdough bakers monitor hydration ratios and wild yeast activity across quiet urban bakeries while preserving handmade culinary traditions for curious hobbyists.",
+      ],
+    };
+    const shortRailWords = countDraftWords(shortRailOffTopic.paragraphs);
+    expect(shortRailWords).toBeGreaterThanOrEqual(50);
+    expect(shortRailWords).toBeLessThan(160);
+
+    for (const promptStatement of [
+      undefined,
+      "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?",
+    ]) {
+      const shortRailResult = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: shortRailOffTopic,
+        targets: TARGETS,
+        promptStatement,
+        receiptId: promptStatement ? "r-short-rail-1kw-stmt" : "r-short-rail-1kw-nostmt",
+      });
+      expect(shortRailResult.transferReport.summary.transferredCount).toBe(0);
+      expect(shortRailResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+      expect(shortRailResult.receipt.criteria.CC.band).toBeLessThanOrEqual(4.5);
+      expect(shortRailResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+      expect(shortRailResult.receipt.masteryQualified).toBe(false);
+      expect(shortRailResult.receipt.countsTowardMastery).toBe(false);
+      expect(shortRailResult.receipt.epistemicStatus).toBe("practice_feedback");
+    }
+
+    // A short (< 160 words) genuinely on-topic draft addressing both contrast facets is NOT capped as off-topic.
+    const shortOnTopicMuseum: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-short-museum-on-topic",
+      promptId: "museum-admission-fees-v1",
+      paragraphs: [
+        "National museums should charge modest entrance fees to international visitors instead of offering universal free admission to everyone. Conservation laboratories and historic galleries require steady funding, and overseas tourists already budget for flights and accommodation.",
+        "Admittedly, free admission lowers barriers for visiting students and low-income families, so museums should keep concession waivers and free weekly evenings while charging standard tickets to adult international visitors.",
+      ],
+    };
+    const shortOnTopicWords = countDraftWords(shortOnTopicMuseum.paragraphs);
+    expect(shortOnTopicWords).toBeGreaterThanOrEqual(60);
+    expect(shortOnTopicWords).toBeLessThan(160);
+
+    const shortOnTopicResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: shortOnTopicMuseum,
+      targets: [],
+      promptStatement: museumPrompt,
+      receiptId: "r-short-museum-on-topic",
+    });
+    expect(shortOnTopicResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(5.5);
+    expect(shortOnTopicResult.receipt.overallBand).toBeGreaterThanOrEqual(5.5);
+  });
 });
