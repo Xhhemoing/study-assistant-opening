@@ -2,7 +2,7 @@ const leadingMarker = /^---(?=[\s\u0085]|$)/u;
 const documentMarker = /^(?:---|\.\.\.)(?=[\s\u0085]|$)/u;
 const openingFence = /^---[ \t]*$/u;
 const closingFence = /^(?:---|\.\.\.)[ \t]*$/u;
-const plainKey = /^[A-Za-z_][A-Za-z0-9_.-]*$/u;
+const plainKey = /^[\p{L}_][\p{L}\p{M}\p{N}_.-]*(?: [\p{L}\p{M}\p{N}_.-]+)*$/u;
 const scalarKeyword = /^(?:y|n|yes|no|on|off|true|false|null)$/iu;
 const privateKey = /^(?:sealed|0109|skillbelief(?:v1)?|openingcoursereservedquestions|<<)$/iu;
 const yamlEscapes: Readonly<Record<string, string>> = {
@@ -135,7 +135,7 @@ class FrontmatterReader {
     this.skipHorizontal();
     if (!key || keys.has(key) || (flow ? this.current !== ":" : !this.indicator(":"))
       || (!quoted && (!plainKey.test(key) || scalarKeyword.test(key)))
-      || privateKey.test(key.normalize("NFKC").trim().replace(/[-_]/gu, ""))) invalid();
+      || privateKey.test(key.normalize("NFKC").replace(/[-_\s]/gu, ""))) invalid();
     keys.add(key);
     this.offset++;
   }
@@ -251,7 +251,7 @@ class FrontmatterReader {
 export function hasPortableFrontmatter(markdown: string): boolean {
   const raw = markdown.replace(/^\uFEFF/u, "");
   if (!leadingMarker.test(raw)) return true;
-  const lines = raw.split(/\r?\n/u);
+  const lines = raw.split(/\r\n?|\n/u);
   if (!openingFence.test(lines[0]!)) return false;
   const end = lines.findIndex((line, index) => index > 0 && closingFence.test(line));
   if (end < 0) return false;

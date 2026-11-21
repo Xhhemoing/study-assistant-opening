@@ -18,12 +18,13 @@ export function isSafeGitPath(file: string): boolean {
     && !/[\\:\p{Cc}<>"|?*]|[. ]$/u.test(part));
 }
 
-export function isPublicSource(file: string): boolean {
+export function isPublicFile(file: string): boolean {
   return isSafeGitPath(file) && sourceRoots.some(root => file.startsWith(root))
-    && !file.split("/").some(part => closedProduct.test(part) || closedSegment.test(part.replace(/(?:\.d)?\.[cm]?[jt]sx?$/u, "")))
+    && !file.split("/").some(part => closedProduct.test(part) || closedSegment.test(part.replace(/\.(?:json|(?:d\.)?[cm]?[jt]sx?)$/u, "")))
     && !/(?:^|\/)opening\/(?:cartridges|exam-sprint|share|teachback-arena|span-[^/]+)\//iu.test(file)
     && !/(?:^|\/)(?:fixtures|__fixtures__|__tests__|seeds|migrations)\//iu.test(file)
-    && !/\.(?:test|spec)\.[cm]?[jt]sx?$/iu.test(file) && sourceExtension.test(file);
+    && !/\.(?:test|spec)\.(?:json|[cm]?[jt]sx?)$/iu.test(file)
+    && (sourceExtension.test(file) || (file.endsWith(".json") && !/^package(?:-lock)?\.json$/iu.test(posix.basename(file))));
 }
 
 export function sourceOwner(file: string): string {
@@ -70,7 +71,7 @@ export class GitSnapshot {
 
     const oids = [...new Set([...this.entries].filter(([file, entry]) => this.isRegular(entry) && (
       workspaceManifests.has(file) || file === "package-lock.json" || file === "package.json" || file === apacheLicensePath
-      || isPublicSource(file) || (sourceRoots.some(root => file.startsWith(root)) && posix.basename(file) === "package.json")
+      || isPublicFile(file) || (sourceRoots.some(root => file.startsWith(root)) && posix.basename(file) === "package.json")
     )).map(([, entry]) => entry.oid))];
     if (oids.length === 0) return;
     const result = git(["cat-file", "--batch"], oids.join("\n") + "\n");

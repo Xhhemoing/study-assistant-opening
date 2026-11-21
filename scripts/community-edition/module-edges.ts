@@ -30,6 +30,10 @@ function isPropertyName(node: ts.Identifier): boolean {
     || ts.isMethodSignature(parent) || ts.isPropertyAccessExpression(parent)) && parent.name === node;
 }
 
+function allTypeSpecifiers(elements: readonly { isTypeOnly: boolean }[]): boolean {
+  return elements.length > 0 && elements.every(element => element.isTypeOnly);
+}
+
 export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   const source = ts.createSourceFile(file, text, { languageVersion: ts.ScriptTarget.Latest, jsDocParsingMode: ts.JSDocParsingMode.ParseAll }, true);
   const nodes: ts.Node[] = [];
@@ -117,9 +121,22 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   }
 
   for (const node of nodes) {
-    if (ts.isImportDeclaration(node)) edge(node.moduleSpecifier, node, node.importClause?.isTypeOnly ? "type" : "module");
-    if (ts.isExportDeclaration(node) && node.moduleSpecifier) edge(node.moduleSpecifier, node, node.isTypeOnly ? "type" : "module");
-    if (ts.isExternalModuleReference(node)) edge(node.expression, node, "module");
+    if (ts.isImportDeclaration(node)) {
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings;
+      const typeOnly = clause?.isTypeOnly
+        || (!clause?.name && bindings && ts.isNamedImports(bindings) && allTypeSpecifiers(bindings.elements));
+      edge(node.moduleSpecifier, node, typeOnly ? "type" : "module");
+    }
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      const clause = node.exportClause;
+      const typeOnly = node.isTypeOnly || (clause && ts.isNamedExports(clause) && allTypeSpecifiers(clause.elements));
+      edge(node.moduleSpecifier, node, typeOnly ? "type" : "module");
+    }
+    if (ts.isExternalModuleReference(node)) {
+      const typeOnly = ts.isImportEqualsDeclaration(node.parent) && node.parent.isTypeOnly;
+      edge(node.expression, node, typeOnly ? "type" : "module");
+    }
     if (ts.isImportTypeNode(node)) edge(ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined, node, "type");
     if (ts.isJSDocImportTag(node)) edge(node.moduleSpecifier, node, "type");
     if (ts.isCallExpression(node)) {

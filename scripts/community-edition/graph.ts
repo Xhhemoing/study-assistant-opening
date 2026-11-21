@@ -2,10 +2,14 @@ import { isBuiltin } from "node:module";
 import { posix } from "node:path";
 import ts from "typescript";
 import { readModuleEdges } from "./module-edges.ts";
-import { GitSnapshot, isPublicSource, isRecord, isSafeGitPath, sourceExtension, sourceOwner } from "./snapshot.ts";
+import { GitSnapshot, isPublicFile, isRecord, isSafeGitPath, sourceExtension, sourceOwner } from "./snapshot.ts";
 
 type Profile = "browser-ui" | "portable-runtime";
 type Target = { path: string; typeOnly: boolean };
+type PackageMatch = { value: unknown; capture?: string };
+type RuntimeCondition = "import" | "default";
+type SelectedTarget = { path: string; condition: RuntimeCondition };
+type ProjectedTarget = { types: string } & Partial<Record<RuntimeCondition, string>>;
 type Json = Record<string, unknown>;
 
 const publicEntries = [
@@ -32,7 +36,7 @@ const substitutes: Record<string, string[]> = {
 };
 const isDeclaration = (file: string) => declarations.some(ext => file.endsWith(ext));
 
-function matchKey(map: Json, spec: string): { value: unknown; capture?: string } | undefined {
+function matchKey(map: Json, spec: string): PackageMatch | undefined {
   if (Object.hasOwn(map, spec)) return { value: map[spec] };
   const keys = Object.keys(map).filter(key => {
     const star = key.indexOf("*");
@@ -45,20 +49,28 @@ function matchKey(map: Json, spec: string): { value: unknown; capture?: string }
   return { value: map[key], capture: spec.slice(star, spec.length - (key.length - star - 1)) };
 }
 
-function expandConditions(value: unknown, capture?: string, typeOnly = false): { map: unknown; targets: Target[] } {
+function selectTarget(
+  value: unknown, capture: string | undefined, types: boolean, condition: RuntimeCondition = "default",
+): SelectedTarget | null | undefined {
   if (typeof value === "string") {
-    const path = capture === undefined ? value : value.replaceAll("*", () => capture);
-    return { map: path, targets: [{ path, typeOnly }] };
+    return { path: capture === undefined ? value : value.replaceAll("*", () => capture), condition };
   }
-  if (value === null) return { map: value, targets: [] };
-  if (Array.isArray(value) || isRecord(value)) {
-    const children = Object.entries(value).map(([name, child]) => [name,
-      expandConditions(child, capture, typeOnly || name === "types" || name.startsWith("types@"))] as const);
-    return { map: Array.isArray(value) ? children.map(([, child]) => child.map)
-      : Object.fromEntries(children.map(([name, child]) => [name, child.map])),
-    targets: children.flatMap(([, child]) => child.targets) };
+  if (value === null) return null;
+  if (Array.isArray(value)) {
+    for (const branch of value) {
+      const target = selectTarget(branch, capture, types, condition);
+      if (target) return target;
+    }
+    return undefined;
   }
-  throw new Error("Invalid conditional package target");
+  if (!isRecord(value)) throw new Error("Invalid conditional package target");
+  for (const [name, branch] of Object.entries(value)) {
+    if (types && name.startsWith("types@")) throw new Error(`Unsupported versioned types condition ${name}`);
+    if (name !== "import" && name !== "default" && !(types && name === "types")) continue;
+    const target = selectTarget(branch, capture, types, name === "import" ? "import" : condition);
+    if (target !== undefined) return target;
+  }
+  return undefined;
 }
 
 function exportMapping(manifest: Json, key: string) {
@@ -85,8 +97,8 @@ function mappedPath(directory: string, target: string): string {
 
 type ManifestProjection = {
   source: Json;
-  exports: Map<string, unknown>;
-  imports: Map<string, unknown>;
+  exports: Map<string, ProjectedTarget>;
+  imports: Map<string, ProjectedTarget>;
   versions: Map<string, Map<string, string[]>>;
   legacy: Json;
 };
@@ -138,13 +150,18 @@ export class CommunityGraph {
     this.dependencies.set(from, deps);
   }
 
-  private walk(file: string, profile: Profile, chain: string[]): void {
+  private walk(file: string, profile: Profile, chain: string[], allowJson = false): void {
+    const json = file.endsWith(".json");
+    if (!isPublicFile(file) || (json && !allowJson)) throw new Error(`Closed or unlisted source: ${[...chain, file].join(" -> ")}`);
     const key = `${profile}:${file}`;
     if (this.visited.has(key)) return;
-    if (!isPublicSource(file)) throw new Error(`Closed or unlisted source: ${[...chain, file].join(" -> ")}`);
     this.visited.add(key);
     this.files.add(file);
     this.owner(file);
+    if (json) {
+      JSON.parse(this.snapshot.text(file));
+      return;
+    }
     let edges = this.targetCache.get(file);
     if (!edges) {
       edges = readModuleEdges(file, this.snapshot.text(file));
@@ -173,12 +190,8 @@ export class CommunityGraph {
       const manifest = this.manifest(owner);
       const match = isRecord(manifest.source.imports) && matchKey(manifest.source.imports, spec);
       if (!match) throw new Error(`Unresolved package import ${spec}`);
-      const expanded = expandConditions(match.value, match.capture, typeOnly);
-      if (!expanded.targets.length) throw new Error(`Empty package import ${spec}`);
-      manifest.imports.set(spec, expanded.map);
-      for (const target of expanded.targets) {
-        this.packageTarget(owner, target, profile, chain, "import");
-      }
+      const target = this.projectTarget(owner, match, "import", typeOnly, profile, chain);
+      manifest.imports.set(spec, { ...manifest.imports.get(spec), ...target });
       return;
     }
     if (entries.has(spec)) {
@@ -201,26 +214,42 @@ export class CommunityGraph {
     const manifest = this.manifest(owner);
     const match = exportMapping(manifest.source, key);
     if (!match) throw new Error(`Missing public export ${spec}`);
-    const expanded = expandConditions(match.value, match.capture, typeOnly);
-    if (!expanded.targets.some(target => typeOnly || !target.typeOnly)) throw new Error(`Missing runtime export ${spec}`);
     const cacheKey = `export:${profile}:${spec}:${typeOnly}`;
     if (this.visited.has(cacheKey)) return;
     this.visited.add(cacheKey);
-    manifest.exports.set(key, expanded.map);
-    for (const target of expanded.targets) {
-      this.packageTarget(owner, target, profile, chain, "export");
-    }
+    const target = this.projectTarget(owner, match, "export", typeOnly, profile, chain);
+    manifest.exports.set(key, { ...manifest.exports.get(key), ...target });
     const legacy = key === "." ? this.legacyTargets(owner, manifest, profile, chain) : [];
-    this.versionTargets(owner, manifest, [...expanded.targets, ...legacy].map(target => target.path), profile, chain);
+    this.versionTargets(owner, manifest, [...Object.values(target), ...legacy.map(entry => entry.path)], profile, chain);
+  }
+
+  private projectTarget(
+    owner: string, match: PackageMatch, kind: "import" | "export", typeOnly: boolean, profile: Profile, chain: string[],
+  ): ProjectedTarget {
+    const types = selectTarget(match.value, match.capture, true);
+    if (!types) throw new Error(`Package ${kind} has no active type target`);
+    // The type branch comes first so the flattened map preserves the candidate's
+    // selected TS target even when the original runtime branch precedes "types".
+    const projection: ProjectedTarget = { types: types.path };
+    if (!typeOnly) {
+      const runtime = selectTarget(match.value, match.capture, false);
+      if (!runtime) throw new Error(`Package ${kind} has no active runtime target`);
+      this.packageTarget(owner, { path: runtime.path, typeOnly: false }, profile, chain, kind);
+      projection[runtime.condition] = runtime.path;
+    }
+    this.packageTarget(owner, { path: types.path, typeOnly: true }, profile, chain, kind);
+    return projection;
   }
 
   private packageTarget(owner: string, target: Target, profile: Profile, chain: string[], kind: "import" | "export"): void {
     const file = mappedPath(owner, target.path);
-    if (!sourceExtension.test(file) || this.snapshot.entries.get(file)?.type !== "blob") {
+    const json = file.endsWith(".json");
+    if ((!sourceExtension.test(file) && !json) || this.snapshot.entries.get(file)?.type !== "blob") {
       throw new Error(`Package ${kind} must name an exact source file with its extension: ${target.path}`);
     }
     if (!target.typeOnly && isDeclaration(file)) throw new Error(`Package ${kind} has no runtime source: ${target.path}`);
-    this.local(file, target.typeOnly, profile, chain);
+    if (json) this.walk(file, profile, chain, true);
+    else this.local(file, target.typeOnly, profile, chain);
   }
 
   private legacyTargets(directory: string, manifest: ManifestProjection, profile: Profile, chain: string[]): Target[] {
@@ -256,6 +285,9 @@ export class CommunityGraph {
       for (const candidate of extensionCandidates) if (this.snapshot.entries.has(candidate)) found.add(candidate);
     }
     if (exact?.type === "tree") {
+      if (this.snapshot.entries.has(`${file}/package.json`)) {
+        throw new Error(`Relative directory ${file} has a package.json. Import an explicit file.`);
+      }
       for (const extension of [...extensionlessSources, ...opaqueExtensions]) {
         const index = `${file}/index${extension}`;
         if (this.snapshot.entries.has(index)) found.add(index);

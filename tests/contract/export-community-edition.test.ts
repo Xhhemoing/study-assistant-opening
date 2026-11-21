@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { exportCommunityEdition, queryCartridgeLiteCapability } from "../../scripts/export-community-edition";
 
@@ -29,6 +30,19 @@ function inLocalTemp(run: (directory: string) => void): void {
 }
 
 const print = (value: unknown) => JSON.stringify(value, null, 2) + "\n";
+const bundlerOptions: ts.CompilerOptions = {
+  module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, resolveJsonModule: true,
+};
+const resolveBundler = (spec: string, from: string) =>
+  ts.resolveModuleName(spec, from, bundlerOptions, ts.sys, undefined, undefined, ts.ModuleKind.ESNext)
+    .resolvedModule?.resolvedFileName;
+const sdkEntry = "packages/domain/src/cartridge-sdk-lite/index.ts";
+const sdkDirectory = path.posix.dirname(sdkEntry);
+const domainManifest = (imports: Record<string, unknown>) => print({
+  name: "@aistudy/domain", license: "UNLICENSED", version: "0.0.0", type: "module",
+  exports: { "./native": "./src/portability/native/index.ts", "./cartridge-sdk-lite": "./src/cartridge-sdk-lite/index.ts" },
+  imports,
+});
 
 function write(root: string, file: string, content: string | Buffer): void {
   const output = path.join(root, file);
@@ -211,35 +225,144 @@ describe("Community Edition extraction", () => {
   ])("requires exact local paths for package imports with %s", (_description, target) => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
     const commit = fixture(repository, {
-      "packages/domain/package.json": print({
-        name: "@aistudy/domain", license: "UNLICENSED", version: "0.0.0", type: "module",
-        exports: { "./native": "./src/portability/native/index.ts", "./cartridge-sdk-lite": "./src/cartridge-sdk-lite/index.ts" },
-        imports: { "#helper": target },
-      }),
-      "packages/domain/src/cartridge-sdk-lite/index.ts": 'export * from "#helper";',
+      "packages/domain/package.json": domainManifest({ "#helper": target }),
+      [sdkEntry]: 'export * from "#helper";',
       "packages/domain/src/cartridge-sdk-lite/helper.ts": "export const publicValue = 1;",
     });
     expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Package import must name an exact source file/u);
   }));
 
-  it("requires an index for a relative directory with package exports", () => inLocalTemp(directory => {
+  it.each([
+    ["main", "entry"], ["types", "entry"], ["typings", "entry"], ["module", "index"], ["exports", "index"],
+  ])("rejects a relative directory governed by %s and preserves explicit file resolution", (field, selected) => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
-    const group = "packages/domain/src/cartridge-sdk-lite/group";
+    const group = sdkDirectory + "/group";
     const extras = {
-      "packages/domain/src/cartridge-sdk-lite/index.ts": 'export * from "./group";',
-      [group + "/package.json"]: print({ exports: "./actual.ts" }),
-      [group + "/actual.ts"]: "export const publicValue = 1;",
+      [sdkEntry]: 'export * from "./group";',
+      [group + "/package.json"]: print({ [field]: "./entry.js" }),
+      [group + "/entry.ts"]: "export const publicValue = 1;",
+      [group + "/index.ts"]: "export const publicValue = 2;",
     };
     const commit = fixture(repository, extras);
-    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Unresolved .*\/group/u);
+    const from = path.join(repository, sdkEntry);
+    expect(path.normalize(resolveBundler("./group", from)!)).toBe(path.join(repository, group, selected + ".ts"));
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/relative directory.*package\.json/iu);
+    write(repository, sdkEntry, 'export * from "./group/entry.js";');
+    git(repository, "add", "--", sdkEntry);
+    const explicit = git(repository, "commit-tree", git(repository, "write-tree").toString("ascii").trim(), "-m", "explicit file").toString("ascii").trim();
+    const targetDirectory = path.join(directory, "edition");
+    const result = exportCommunityEdition({ commit: explicit, repository, targetDirectory });
+    const resolved = resolveBundler("./group/entry.js", path.join(targetDirectory, sdkEntry));
+    expect(path.normalize(resolved!)).toBe(path.join(targetDirectory, group, "entry.ts"));
+    expect(result.files).toContain(group + "/entry.ts");
+    expect(result.files).not.toContain(group + "/index.ts");
+  }));
 
-    const index = group + "/index.ts";
-    write(repository, index, "export const publicValue = 2;");
-    git(repository, "add", "--", index);
-    const indexed = git(repository, "commit-tree", git(repository, "write-tree").toString("ascii").trim(), "-m", "directory index").toString("ascii").trim();
-    const result = exportCommunityEdition({ commit: indexed, repository, dryRun: true });
-    expect(result.files).toContain(index);
-    expect(result.files).not.toContain(group + "/actual.ts");
+  it.each([
+    ['import { x } from "#foo"; export { x };', { worker: "./src/cartridge-sdk-lite/foo.ts" }, /active type target/u],
+    ['import type { X } from "#foo"; export type { X };', { deno: "./src/cartridge-sdk-lite/foo.ts" }, /active type target/u],
+    ['import { x } from "#foo"; export { x };', { types: "./src/cartridge-sdk-lite/foo.d.ts" }, /active runtime target/u],
+    ['export * from "#foo";', "./src/cartridge-sdk-lite/foo.d.mts", /no runtime source/u],
+    ['export { x } from "#foo";', "./src/cartridge-sdk-lite/foo.d.cts", /no runtime source/u],
+    ['void import("#foo");', { types: "./src/cartridge-sdk-lite/foo.d.ts" }, /active runtime target/u],
+    ['import "#foo";', { types: "./src/cartridge-sdk-lite/foo.d.ts" }, /active runtime target/u],
+    ['require("#foo");', { types: "./src/cartridge-sdk-lite/foo.d.ts" }, /active runtime target/u],
+  ] as const)("rejects package imports without the target needed by %s", (source, mapping, reason) => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository, {
+      "packages/domain/package.json": domainManifest({ "#foo": mapping }),
+      [sdkEntry]: source,
+      [sdkDirectory + "/foo.ts"]: "export const x = 1; export type X = string;",
+      ...Object.fromEntries([".d.ts", ".d.mts", ".d.cts"].map(ext => [
+        sdkDirectory + "/foo" + ext, "export declare const x: number; export type X = string;",
+      ])),
+    });
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(reason);
+  }));
+
+  it.each([
+    [{ "custom-inactive": "./src/index.ts" }, /active type target/u],
+    [{ types: "./src/index.ts" }, /active runtime target/u],
+    [{ "types@>=5": "./src/types.ts", default: "./src/index.ts" }, /unsupported versioned types condition/iu],
+  ] as const)("requires active type and runtime targets for public workspace exports", (mapping, reason) => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository, {
+      "packages/ui/package.json": print({
+        name: "@aistudy/ui", license: "UNLICENSED", version: "0.0.0", type: "module", exports: { ".": mapping },
+      }),
+      "packages/ui/src/types.ts": "export type Example = string;",
+    });
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(reason);
+  }));
+
+  it("allows type-only syntax and preserves first-match conditional order", () => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const from = path.join(repository, sdkEntry);
+    const typeTarget = "./src/cartridge-sdk-lite/only-types.d.ts";
+    const runtimeTarget = "./src/cartridge-sdk-lite/runtime.ts";
+    const actual = sdkDirectory + "/runtime.ts";
+    const commit = fixture(repository, {
+      "packages/domain/package.json": domainManifest({
+        "#type": { types: typeTarget },
+        "#ordered": { worker: "./src/private.ts", default: runtimeTarget, types: typeTarget, import: "./src/shadowed.ts" },
+      }),
+      [sdkEntry]: [
+        'import type { X } from "#type";',
+        'import { type X as Y } from "#type";',
+        'export { type X as Z } from "#type";',
+        'export * from "#ordered";',
+        'import { type x } from "#ordered";',
+        'export type { X, Y };',
+      ].join("\n"),
+      [sdkDirectory + "/only-types.d.ts"]: "export type X = string;",
+      [actual]: "export const x = 1;",
+      "packages/domain/src/private.ts": 'import "@aistudy/ai";',
+      "packages/domain/src/shadowed.ts": 'import "@aistudy/ai";',
+    });
+    expect(path.normalize(resolveBundler("#ordered", from)!)).toBe(path.join(repository, actual));
+    const targetDirectory = path.join(directory, "edition");
+    const result = exportCommunityEdition({ commit, repository, targetDirectory });
+    expect(result.files).not.toContain("packages/domain/src/private.ts");
+    expect(result.files).not.toContain("packages/domain/src/shadowed.ts");
+    const generated = JSON.parse(readFileSync(path.join(targetDirectory, "packages/domain/package.json"), "utf8"));
+    expect(generated.imports["#type"]).toEqual({ types: typeTarget });
+    expect(generated.imports["#ordered"]).toEqual({ types: runtimeTarget, default: runtimeTarget });
+    for (const spec of ["#type", "#ordered"]) {
+      const after = resolveBundler(spec, path.join(targetDirectory, sdkEntry));
+      expect(path.relative(targetDirectory, after!)).toBe(path.relative(repository, resolveBundler(spec, from)!));
+    }
+  }));
+
+  it.each(["#data/*.json", "#data/*"])("exports and compiles explicit JSON through %s", pattern => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const json = sdkDirectory + "/data/config.json";
+    const commit = fixture(repository, {
+      "packages/domain/package.json": domainManifest({
+        [pattern]: "./src/cartridge-sdk-lite/data/" + (pattern.endsWith(".json") ? "*.json" : "*"),
+      }),
+      [sdkEntry]: 'import config from "#data/config.json"; export const enabled: boolean = config.enabled;',
+      [json]: '{ "enabled": true }\n',
+      [sdkDirectory + "/data/unreferenced.json"]: '{ "enabled": false }\n',
+    });
+    const targetDirectory = path.join(directory, "edition");
+    const result = exportCommunityEdition({ commit, repository, targetDirectory });
+    const from = path.join(targetDirectory, sdkEntry);
+    expect(result.files).toContain(json);
+    expect(result.files).not.toContain(sdkDirectory + "/data/unreferenced.json");
+    expect(readFileSync(path.join(targetDirectory, json))).toEqual(git(repository, "show", commit + ":" + json));
+    expect(path.normalize(resolveBundler("#data/config.json", from)!)).toBe(path.join(targetDirectory, json));
+    const program = ts.createProgram([from], { ...bundlerOptions, strict: true, noEmit: true, types: [] });
+    expect(ts.getPreEmitDiagnostics(program).map(diagnostic => diagnostic.messageText)).toEqual([]);
+  }));
+
+  it("keeps closed JSON outside the export even when a wildcard matches", () => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository, {
+      "packages/domain/package.json": domainManifest({ "#data/*": "./src/cartridge-sdk-lite/data/*" }),
+      [sdkEntry]: 'import "#data/ai-policy.json";',
+      [sdkDirectory + "/data/ai-policy.json"]: "{}",
+    });
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Closed or unlisted source/u);
   }));
 
   it.each(["cts", "mts"])("rejects extensionless relative lookups of .%s", extension => inLocalTemp(directory => {
@@ -273,13 +396,13 @@ describe("Community Edition extraction", () => {
     expect(readdirSync(directory)).toEqual(["source"]);
   }));
 
-  it("checks every condition and each matching versioned declaration", () => inLocalTemp(directory => {
+  it("checks selected conditions and each matching versioned declaration", () => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
     const targetDirectory = path.join(directory, "edition");
     const owner = "packages/jingwei";
     const manifest = { name: "@aistudy/jingwei", license: "UNLICENSED", version: "0.0.0", type: "module",
       exports: { ".": "./src/index.ts", "./react": "./src/react/index.ts" },
-      imports: { "#helper": { default: "./src/helper.ts", browser: "./src/browser.ts" } },
+      imports: { "#helper": { types: "./src/helper.ts", import: "./src/browser.ts", default: "./src/helper.ts" } },
       typesVersions: { ">=5": { "src/index": ["src/versioned.d.ts"] } },
     };
     const extras = {

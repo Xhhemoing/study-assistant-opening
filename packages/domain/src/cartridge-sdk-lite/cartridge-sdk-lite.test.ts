@@ -96,12 +96,30 @@ describe("learner portability", () => {
     ["numeric key aliases", "---\n16: first\n0x10: second\n---\n# note"],
     ["boolean key aliases", "---\ntrue: first\nTRUE: second\n---\n# note"],
     ["Unicode line breaks in metadata", '---\ntitle: "a\u0085b\u2029c"\n---\n# note'],
+    ["private CR-only mapping", "---\rsealed: true\r---\r# Note"],
+    ["ambiguous CR-only mapping", "---\r16: first\r0x10: second\r---\r# Note"],
+    ["private keys through ordinary objects", "---\n{ __proto__: { constructor: [{ Skill Belief V1: true }] } }\n---\n"],
   ])("rejects ambiguous frontmatter with %s", (_description, markdown) => {
     expect(() => importMarkdown("note.md", markdown)).toThrow(/YAML frontmatter/u);
     expect(() => importObsidianNote("note.md", markdown)).toThrow(/YAML frontmatter/u);
     const bundle = createLearnerPackage({ notes: [importMarkdown("note.md", "# Note\n")], decks: [], reviews: [] });
     bundle.notes[0]!.markdown = markdown;
     expect(() => exportLearnerZip(bundle)).toThrow(/YAML frontmatter/u);
+  });
+
+  it.each(["16", "0x10", "0o20", "0b10000", "-1", "3.14", "1_000", "2026-11-21", "true", "yes", "null", "~", "<<", "+.inf", ".nan"])(
+    "rejects ambiguous unquoted scalar key %s", key => {
+      expect(() => importMarkdown("note.md", "---\n" + key + ": value\n---\n")).toThrow(/YAML frontmatter/u);
+    },
+  );
+
+  it.each(["\n", "\r", "\r\n"])("round-trips Unicode and spaced public keys with %j line endings", newline => {
+    const markdown = ["\uFEFF---", "课程: 数学", "course name: Algebra", 'details: { "yes": "string", 学习 进度: 3 }',
+      "---", "# 课程", ""].join(newline);
+    const note = importObsidianNote("note.md", markdown);
+    expect(exportMarkdown(importMarkdown(note.path, markdown))).toBe(markdown);
+    const archive = exportLearnerZip(createLearnerPackage({ notes: [note], decks: [], reviews: [] }));
+    expect(importLearnerZip(archive).notes.map(exportMarkdown)).toEqual([markdown]);
   });
 
   it("keeps valid flow and block frontmatter byte-for-byte through ZIP", () => {
