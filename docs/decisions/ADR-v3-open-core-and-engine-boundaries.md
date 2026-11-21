@@ -173,7 +173,12 @@ portable scan when their entry files appear. Export still requires a separate bl
 allowlist.
 
 The analyzer checks that each selected entry is a readable file, then follows runtime
-and type-only edges across workspace packages and local modules. It matches exact
+and type-only edges across workspace packages and local modules. Triple-slash path
+references resolve relative to the declaring file. Triple-slash type references
+also enter the graph. For directory imports the gate checks root export conditions,
+legacy runtime and declaration entries, browser mappings, and applicable index files.
+Missing entries, references outside the repository, and directory entry cycles fail
+the check. It matches exact
 subpaths before wildcard patterns and reports a chain from the entry to each violation.
 The in-memory cases cover mixed public and private conditional branches, alias cycles,
 Node built-ins, Wave P directories, dynamic calls, declaration files, and private

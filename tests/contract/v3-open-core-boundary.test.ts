@@ -8,7 +8,10 @@ type PackageJson = {
   name?: string;
   license?: string;
   main?: string;
+  module?: string;
   types?: string;
+  typings?: string;
+  browser?: string | Record<string, string | false>;
   exports?: unknown;
   imports?: Record<string, unknown>;
 };
@@ -20,6 +23,7 @@ type Edge = {
   spec: string;
   line: number;
   kind: EdgeKind;
+  reference?: "path" | "types";
 };
 
 export type BoundaryViolation = {
@@ -68,6 +72,7 @@ const CLOSED_DIRECTORY_NAMES = new Set([
 
 const slash = (value: string) => value.replaceAll("\\", "/");
 const normalizeFile = (file: string) => path.normalize(path.resolve(file));
+const rootedPath = (spec: string) => spec.startsWith("/") || /^[a-z]:/iu.test(spec);
 
 function isClosedFile(file: string, root: string): boolean {
   const relative = slash(path.relative(root, file)).toLowerCase();
@@ -111,6 +116,22 @@ function parseEdges(file: string, text: string): Edge[] {
   // TypeScript infers ScriptKind from the filename, including TSX and JS variants.
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const edges: Edge[] = [];
+  for (const ref of source.referencedFiles) {
+    const name = slash(ref.fileName);
+    const relative = !rootedPath(name) && !name.startsWith("./") && !name.startsWith("../");
+    edges.push({
+      spec: relative ? "./" + name : name,
+      line: source.getLineAndCharacterOfPosition(ref.pos).line + 1,
+      kind: "type", reference: "path",
+    });
+  }
+  for (const ref of source.typeReferenceDirectives) {
+    edges.push({
+      spec: slash(ref.fileName),
+      line: source.getLineAndCharacterOfPosition(ref.pos).line + 1,
+      kind: "type", reference: "types",
+    });
+  }
   const line = (node: ts.Node) => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
   function addEdge(node: ts.Node, argument: ts.Node | undefined, kind: EdgeKind) {
     const spec = argument && ts.isStringLiteralLike(argument) ? slash(argument.text) : "<dynamic-non-literal>";
@@ -223,21 +244,56 @@ class ModuleGraph {
     return undefined;
   }
 
-  private resolvePath(base: string, spec: string): Resolution[] {
+  private resolvePath(
+    base: string, spec: string, lookup: "module" | "file-reference" | "package-root" = "module", seenDirs = new Set<string>(),
+  ): Resolution[] {
     const relative = path.relative(this.root, base);
-    if (relative.split(path.sep)[0] === ".." || path.isAbsolute(relative)) return [{ violation: spec }];
-    const extension = path.extname(base);
+    if (relative.split(path.sep)[0] === ".." || path.isAbsolute(relative) || seenDirs.has(base)) return [{ violation: spec }];
+    const extension = /\.d\.[cm]?ts$/u.exec(base)?.[0] ?? path.extname(base);
     let candidates: string[];
-    if (SOURCE_EXTENSIONS.includes(extension)) {
+    if (lookup === "file-reference") {
+      // A path directive names a file. A same-named directory cannot satisfy it.
+      if (!relative || (extension && !SOURCE_EXTENSIONS.includes(extension))) return [{ violation: spec }];
+      candidates = extension ? [base] : [".ts", ".tsx", ".d.ts"].map(ext => base + ext);
+    } else if (!relative || lookup === "package-root") {
+      candidates = [];
+    } else if (SOURCE_EXTENSIONS.includes(extension)) {
       const stem = base.slice(0, -extension.length);
       candidates = [base, ...(SOURCE_SUBSTITUTIONS[extension] ?? []).map(ext => stem + ext)];
     } else {
       candidates = SOURCE_EXTENSIONS.map(ext => base + ext);
+    }
+    const manifest = lookup === "file-reference" ? null : this.loadManifest(base);
+    // Relative CommonJS directory imports can still load index when exports exists.
+    if (lookup !== "file-reference" && (manifest?.exports === undefined || !manifest.main)) {
       candidates.push(...SOURCE_EXTENSIONS.map(ext => path.join(base, "index" + ext)));
     }
-    // An emitted file and its source/declarations can expose different dependencies.
-    const files = candidates.filter(file => this.readText(file) !== undefined);
-    return files.length ? files.map(file => ({ file })) : [{ violation: spec }];
+    const results: Resolution[] = candidates.filter(file => this.readText(file) !== undefined).map(file => ({ file }));
+    if (manifest) {
+      const seen = new Set(seenDirs).add(base);
+      if (manifest.exports !== undefined) {
+        results.push(...this.resolveExports(base, manifest.exports, ".", spec, seen));
+      }
+      const targets = collectConditionalTargets([manifest.main, manifest.module, manifest.types, manifest.typings, manifest.browser]);
+      for (const target of new Set(targets.map(slash))) {
+        if (rootedPath(target)) results.push({ violation: target });
+        else results.push(...this.resolvePath(path.resolve(base, target), target, "module", seen));
+      }
+    }
+    return results.length ? results : [{ violation: spec }];
+  }
+
+  private resolveExports(root: string, exports: unknown, subpath: string, spec: string, seenDirs: Set<string>): Resolution[] {
+    let targets: string[] | undefined;
+    if (isStringRecord(exports) && Object.keys(exports).some(key => key.startsWith("."))) {
+      targets = matchPatternMap(exports, subpath)?.targets;
+    } else if (subpath === ".") {
+      targets = collectConditionalTargets(exports);
+    }
+    if (!targets?.length) return [{ violation: spec }];
+    return [...new Set(targets.map(slash))].flatMap(target => target.startsWith("./")
+      ? this.resolvePath(path.resolve(root, target), target, "module", seenDirs)
+      : [{ violation: target }]);
   }
 
   private resolvePackage(spec: string): Resolution[] {
@@ -246,23 +302,22 @@ class ModuleGraph {
     const manifest = root && this.loadManifest(root);
     if (!root || !manifest) return [{ violation: spec }];
     const subpath = rest ? "." + rest : ".";
-    const exports = manifest.exports;
-    let targets: string[];
-    if (isStringRecord(exports) && Object.keys(exports).some(key => key.startsWith("."))) {
-      targets = matchPatternMap(exports, subpath)?.targets ?? [];
-    } else if (exports !== undefined) {
-      targets = subpath === "." ? collectConditionalTargets(exports) : [];
-    } else {
-      targets = subpath === "." ? collectConditionalTargets([manifest.types, manifest.main]) : [subpath];
+    if (manifest.exports === undefined) {
+      return this.resolvePath(path.resolve(root, subpath), spec, subpath === "." ? "package-root" : "module");
     }
-    if (!targets.length) return [{ violation: spec }];
-    return [...new Set(targets.map(slash))].flatMap(target => {
-      if (exports !== undefined && !target.startsWith("./")) return [{ violation: target }];
-      return this.resolvePath(path.resolve(root, target), target);
-    });
+    return this.resolveExports(root, manifest.exports, subpath, spec, new Set([root]));
   }
 
-  resolveImport(spec: string, from: string, seenSpecs = new Set<string>()): Resolution[] {
+  resolveEdge(edge: Edge, from: string): Resolution[] {
+    if (edge.reference === "path") {
+      if (rootedPath(edge.spec)) return [{ violation: edge.spec }];
+      return this.resolvePath(path.resolve(path.dirname(from), edge.spec), edge.spec, "file-reference");
+    }
+    if (edge.reference === "types" && edge.spec.startsWith("node:")) return [{ violation: edge.spec }];
+    return this.resolveImport(edge.spec, from);
+  }
+
+  private resolveImport(spec: string, from: string, seenSpecs = new Set<string>()): Resolution[] {
     if (this.profile === "portable-runtime" && PORTABLE_NODE_MODULES.has(spec)) return [];
     if (spec.startsWith("node:") || BUILTINS.has(spec) || CLOSED_PACKAGE_SPECS.some(pattern => pattern.test(spec))) {
       return [{ violation: spec }];
@@ -328,7 +383,7 @@ export function analyzeModuleGraph(entries: readonly string[], options: GraphOpt
       for (const edge of parseEdges(current.file, text)) {
         const kind = edge.kind === "runtime" ? "" : ` [${edge.kind}]`;
         const hop = `${graph.label(current.file)}:${edge.line} -> ${edge.spec}${kind}`;
-        for (const target of graph.resolveImport(edge.spec, current.file)) {
+        for (const target of graph.resolveEdge(edge, current.file)) {
           if ("violation" in target) {
             violations.push({ entry: entryLabel, target: target.violation, chain: [...current.chain, hop, target.violation] });
           } else if (!visited.has(target.file)) {
@@ -476,6 +531,126 @@ describe("v3 Open-Core public candidate boundary", () => {
     expect(violations).toHaveLength(1);
     expect(violations[0]).toMatchObject({ entry: "index.ts", target });
     expect(violations[0].chain).toContain(`index.ts:1 -> ${target} [${kind}]`);
+  });
+
+  it.each([
+    ["epistemic/closed.d.ts", "./epistemic/closed.d.ts"],
+    ["./epistemic/closed.d.mts", "./epistemic/closed.d.mts"],
+    ["../epistemic/closed.d.cts", "../epistemic/closed.d.cts"],
+  ])("follows declaration path references relative to the declaring file: %s", (reference, spec) => {
+    const file = reference.startsWith("../") ? reference.slice(3) : "types/" + reference.replace(/^\.\//u, "");
+    const { violations } = virtualAnalyze({
+      "index.ts": 'export type * from "./types/public.d.ts";',
+      "types/public.d.ts": `// Public declarations\n/// <reference path="${reference}" />`,
+      [file]: "export type T = number;",
+    }, "index.ts");
+    expect(violations).toHaveLength(1);
+    expect(violations[0].target).toBe(file);
+    expect(violations[0].chain).toContain(`types/public.d.ts:2 -> ${spec} [type]`);
+  });
+
+  it("accepts a portable declaration and rejects missing, absolute and escaping reference paths", () => {
+    const references = ["public.d.ts", "missing.d.ts", "../../outside.d.ts", "/outside.d.ts", "X:relative.d.ts", "X:/absolute.d.ts"];
+    const { violations } = virtualAnalyze({
+      "types/index.d.ts": references.map(ref => `/// <reference path="${ref}" />`).join("\n"),
+      "types/public.d.ts": "export {};",
+      "types/missing.d.ts/index.ts": "export {};",
+    }, "types/index.d.ts");
+    expect(violations.map(v => v.target)).toEqual(["./missing.d.ts", ...references.slice(2)]);
+  });
+
+  it.each(["browser-ui", "portable-runtime"] as const)("rejects unlisted ambient type packages under %s", profile => {
+    const names = ["node", "pg", "unknown-ambient", "node:crypto"];
+    const { violations } = virtualAnalyze({
+      "index.d.ts": names.map(name => `/// <reference types="${name}" />`).join("\n"),
+    }, "index.d.ts", undefined, profile);
+    expect(violations.map(v => v.target)).toEqual(names);
+    for (const [i, v] of violations.entries()) expect(v.chain).toContain(`index.d.ts:${i + 1} -> ${names[i]} [type]`);
+  });
+
+  it.each(['require("./helper")', 'import "./helper"'])("reads directory main alongside a clean index for %s", code => {
+    const { violations } = virtualAnalyze({
+      "index.ts": code,
+      "helper/package.json": JSON.stringify({ main: "./runtime.cjs" }),
+      "helper/index.js": "export {};",
+      "helper/runtime.cjs": 'require("pg");',
+    }, "index.ts");
+    expect(violations.map(v => v.target)).toEqual(["pg"]);
+    expect(violations[0].chain).toContain("helper/runtime.cjs");
+  });
+
+  it.each([true, false])("scans all root exports and legacy directory entries (subpath map: %s)", withSubpath => {
+    const conditions = { types: "./public.d.ts", default: [{ browser: "./client.js" }, "./runtime.cjs"] };
+    const { violations } = virtualAnalyze({
+      "index.ts": 'import "./helper";',
+      "helper/package.json": JSON.stringify({
+        exports: withSubpath ? { ".": conditions, "./other": "./unrelated.js" } : conditions,
+        main: "legacy.cjs", browser: { "./legacy.cjs": "./browser.js", "./disabled.js": false },
+      }),
+      "helper/public.d.ts": "export {};",
+      "helper/client.js": 'import "node:fs";',
+      "helper/runtime.cjs": 'require("pg");',
+      "helper/legacy.cjs": 'require("jose");',
+      "helper/browser.js": 'import "server-only";',
+    }, "index.ts");
+    expect(violations.map(v => v.target).sort()).toEqual(["jose", "node:fs", "pg", "server-only"]);
+  });
+
+  it("rejects a directory without a root export despite its valid legacy main and index", () => {
+    const { violations } = virtualAnalyze({
+      "index.ts": 'import "./helper";',
+      "helper/package.json": JSON.stringify({ exports: { "./sub": "./index.js" }, main: "./index.js" }),
+      "helper/index.js": "export {};",
+    }, "index.ts");
+    expect(violations.map(v => v.target)).toEqual(["./helper"]);
+  });
+
+  it("reports every broken legacy directory target alongside a transitive violation from index", () => {
+    const { violations } = virtualAnalyze({
+      "index.ts": 'import "./helper";',
+      "helper/package.json": JSON.stringify({ main: "./missing.cjs", module: "../../escaped.mjs", browser: "./browser.js" }),
+      "helper/index.js": 'import "pg";',
+    }, "index.ts");
+    expect(violations.map(v => v.target).sort()).toEqual(["../../escaped.mjs", "./browser.js", "./missing.cjs", "pg"]);
+  });
+
+  it("checks the CommonJS directory index when exports is defined without a legacy main", () => {
+    const { violations } = virtualAnalyze({
+      "index.ts": 'require("./helper");',
+      "helper/package.json": JSON.stringify({ exports: "./public.js" }),
+      "helper/public.js": "export {};",
+      "helper/index.js": 'require("pg");',
+    }, "index.ts");
+    expect(violations.map(v => v.target)).toEqual(["pg"]);
+  });
+
+  it("rejects a missing workspace package entry despite a same-named sibling file", () => {
+    const { violations } = virtualAnalyze({
+      "index.ts": 'import "@aistudy/lite";',
+      "lite/package.json": JSON.stringify({ name: "@aistudy/lite" }),
+      "lite.ts": "export {};",
+    }, "index.ts");
+    expect(violations.map(v => v.target)).toEqual(["@aistudy/lite"]);
+  });
+
+  it.each(["./helper", "@aistudy/lite"])("scans module and typings entries without exports for %s", spec => {
+    const { violations } = virtualAnalyze({
+      "index.ts": `import "${spec}";`,
+      "helper/package.json": JSON.stringify({ name: "@aistudy/lite", module: "./esm.mjs", typings: "./decl.d.cts" }),
+      "helper/esm.mjs": 'import "pg";',
+      "helper/decl.d.cts": 'export type T = import("jose").T;',
+    }, "index.ts");
+    expect(violations.map(v => v.target).sort()).toEqual(["jose", "pg"]);
+  });
+
+  it("rejects a self-referential directory main and still walks independent entries", () => {
+    const { violations } = virtualAnalyze({
+      "index.ts": 'import "./helper";',
+      "helper/package.json": JSON.stringify({ main: ".", types: "./decl.d.ts" }),
+      "helper/decl.d.ts": 'export type T = import("pg").T;',
+      "helper/index.ts": "export {};",
+    }, "index.ts");
+    expect(violations.map(v => v.target).sort()).toEqual([".", "pg"]);
   });
 
   it("walks every conditional export and import branch, including missing siblings", () => {
