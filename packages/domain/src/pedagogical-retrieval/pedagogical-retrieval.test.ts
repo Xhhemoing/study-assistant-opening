@@ -663,7 +663,8 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
 
   it.each([
     ["## Answer Key\n", "forty-two"],
-    ["## Answer Key | notes\n--- | ---\n", "forty-two"],
+    ["## Answer Key `x | y`\n", "forty-two"],
+    ["## Answer Key \\| notes\n", "forty-two"],
     ["> [!solution]", "> forty-two"],
     [":::solution", "forty-two\n[00:02-00:03] :::"],
     ["<details>", "forty-two</details>"],
@@ -679,10 +680,45 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     });
   });
 
-  it("keeps column protection on an ambiguous table row parsed as a timed list item", () => {
-    const text = "Answer Key | Note\n--- | ---\n[00:00-00:01] - forty-two | note";
-    const block = parsePedagogicalAst(text).find(candidate => candidate.text.includes("forty-two"));
-    expect(block).toMatchObject({ visibility: "sealed", startMs: 0, endMs: 1000 });
+  it.each(["-", "*", "+", "1."])("keeps a timestamped %s marker in a pipe-less table row", marker => {
+    const text = ["Answer Key | Note", "--- | ---", `[00:00-00:01] ${marker} forty-two`, "forty-three"].join("\n");
+    const blocks = parsePedagogicalAst(text);
+    for (const secret of ["forty-two", "forty-three"]) {
+      expect(blocks.find(block => block.text.includes(secret))).toMatchObject({
+        visibility: "sealed", startMs: null, endMs: null,
+      });
+    }
+  });
+
+  it.each(["- note", "* note", "+ note", "1. note", "## Lecture"])(
+    "preserves table column protection after a timestamped row starting with %s", firstCell => {
+      const text = ["Time | Answer Key", "--- | ---", `[00:00-00:01] ${firstCell} | forty-two`,
+        "[00:01-00:02] | forty-three", "t1 | forty-four", "", "[00:02-00:03] Public afterward"].join("\n");
+      const blocks = parsePedagogicalAst(text);
+      for (const secret of ["forty-two", "forty-three", "forty-four"]) {
+        expect(blocks.find(block => block.text.includes(secret))).toMatchObject({
+          text: secret, visibility: "sealed", startMs: null, endMs: null, startOffset: text.indexOf(secret),
+        });
+      }
+      expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: 2000, endMs: 3000 });
+    },
+  );
+
+  it("applies the first column's protection to a pipe-less timed block that ends the table", () => {
+    const text = ["Answer Key | Note", "--- | ---", "[00:00-00:01] ## forty-two", "",
+      "[00:01-00:02] Public afterward"].join("\n");
+    const blocks = parsePedagogicalAst(text);
+    expect(blocks.find(block => block.text.includes("forty-two"))).toMatchObject({
+      visibility: "sealed", startMs: 0, endMs: 1000,
+    });
+    expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: 1000, endMs: 2000 });
+  });
+
+  it("recognizes a timed heading with a pipe outside a table before a delimiter-like line", () => {
+    const text = "[00:00-00:01] ## Answer Key | notes\n--- | ---\n\n[00:01-00:02] forty-two";
+    expect(parsePedagogicalAst(text).find(block => block.text.includes("forty-two"))).toMatchObject({
+      visibility: "sealed", startMs: 1000, endMs: 2000,
+    });
   });
 
   it("does not interpret protected markup quoted in a table code span as a container", () => {

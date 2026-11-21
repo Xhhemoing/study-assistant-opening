@@ -517,18 +517,6 @@ function tableColumnVisibility(label: string): PedagogicalVisibility {
   return "public";
 }
 
-function timedTableRowVisibility(raw: string, columns: readonly PedagogicalVisibility[]): PedagogicalVisibility {
-  if (columns.every(visibility => visibility === "public")) return "public";
-  const { cells, hasSeparator } = parseTableRowCells({ raw, start: 0 });
-  if (!hasSeparator) return "public";
-  let visibility: PedagogicalVisibility = "public";
-  for (const [index, cell] of cells.entries()) {
-    const column = columns[index];
-    if (column && raw.slice(cell.start, cell.end).trim()) visibility = maxVisibility(visibility, column);
-  }
-  return visibility;
-}
-
 function matchFenceOpening(line: string): RegExpExecArray | null {
   const match = /^[ ]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
   return match && !(match[1]![0] === "`" && match[2]!.includes("`")) ? match : null;
@@ -1092,7 +1080,7 @@ interface TranscriptRegion {
 function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTiming | null> {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
-  let tableColumns: PedagogicalVisibility[] | undefined;
+  let tableFirstColumn: PedagogicalVisibility | undefined;
   return lines.map(({ raw }, index) => {
     if (fence) {
       const timing = fence.literal ? null : parseInlineTranscriptCue(raw);
@@ -1110,15 +1098,16 @@ function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTimi
     const timedBlock = interruptsPipeTable(cueBody) ||
       (latex !== null && (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null));
     let visibilityFloor: PedagogicalVisibility = "public";
-    if (tableColumns) {
+    if (tableFirstColumn !== undefined) {
       const continuation = continueMarkdownContainers(raw, containers);
       if (continuation.depth === containers.length && isPipeTableBodyRow(continuation.body)) {
         if (!timedBlock) return null;
-        // A timed block can also look like a literal pipe-separated row.
-        // Retain its existing column protection when using the timed interpretation.
-        visibilityFloor = timedTableRowVisibility(continuation.body, tableColumns);
+        // List markers after a literal timestamp and explicit cell separators belong to the table.
+        if (LIST_ITEM_RE.test(cueBody) && !THEMATIC_BREAK_RE.test(cueBody)) return null;
+        if (parseTableRowCells({ raw: continuation.body, start: 0 }).hasSeparator) return null;
+        visibilityFloor = tableFirstColumn;
       }
-      tableColumns = undefined;
+      tableFirstColumn = undefined;
     }
 
     const documentLine = readMarkdownContainerLine(raw, containers);
@@ -1127,9 +1116,10 @@ function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTimi
     const headerCells = !timedBlock && delimiter?.depth === documentLine.containers.length
       ? pipeTableHeaderCells({ raw: documentLine.body, start: 0 }, delimiter.body)
       : null;
-    if (headerCells) {
+    const firstCell = headerCells?.[0];
+    if (firstCell) {
       containers = documentLine.containers;
-      tableColumns = headerCells.map(cell => tableColumnVisibility(documentLine.body.slice(cell.start, cell.end)));
+      tableFirstColumn = tableColumnVisibility(documentLine.body.slice(firstCell.start, firstCell.end));
       return null;
     }
 
