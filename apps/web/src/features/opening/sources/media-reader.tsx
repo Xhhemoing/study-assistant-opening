@@ -143,17 +143,17 @@ export function MediaReader({
         </p>
       </div>
       {kind === "parse_failed_original_saved" || kind === "parse_unsupported_original_saved" || kind === "empty" ? null : (
-        <ul className="max-h-64 space-y-2 overflow-y-auto text-xs leading-5 text-text-2" aria-label="媒体时间轴">
+        <ul className="max-h-72 space-y-2.5 overflow-y-auto pr-1 text-xs leading-5 text-text-2" aria-label="媒体时间轴">
           {(payload?.segments ?? []).map((segment, index) => (
-            <li key={`${segment.startMs}-${segment.endMs}-${index}`} className="rounded-md border border-line bg-surface px-3 py-2">
+            <li key={`${segment.startMs}-${segment.endMs}-${index}`} className="rounded-xl border border-line bg-surface px-3.5 py-2.5 shadow-card transition-colors hover:border-line-strong">
               <button
                 type="button"
-                className="inline-flex min-h-11 items-center font-medium text-accent underline-offset-2 hover:underline"
+                className="inline-flex min-h-8 items-center rounded-pill bg-accent-soft px-2.5 py-1 text-xs font-medium tabular-nums text-accent transition-colors hover:bg-accent/15"
                 onClick={() => onSeek?.(segment.startMs)}
               >
                 {formatMs(segment.startMs)}–{formatMs(segment.endMs)}
               </button>
-              <p className="mt-1 line-clamp-3 break-words font-reading text-sm leading-6 text-text">{segment.text || "（无文本）"}</p>
+              <p className="mt-1.5 line-clamp-3 break-words font-reading text-sm leading-6 text-text">{segment.text || "（无文本）"}</p>
               {segment.frameChunkIds.length === 0 && (source?.mime.startsWith("video/") ?? true) ? (
                 <p className="mt-1 text-xs text-warn">本段无关键帧</p>
               ) : null}

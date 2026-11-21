@@ -162,4 +162,42 @@ describe("durable parent interaction budget", () => {
     expect(await repo.listPendingReconcile(fixture.scope)).toHaveLength(0);
     await expect(repo.settle(fixture.scope, reserved.id, 25, { costBasis: "vendor_receipt" })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
+
+  it("does not count terminal fallback rollback fences toward parent maxProviderCalls", async () => {
+    const repo = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+    const clientKey = randomUUID();
+    const requestFamily = `eph:${clientKey}`;
+    const alternateRequestFamily = `eph-v2:${fixture.scope.workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
+    const parentBudget = { id: `study-ephemeral:${fixture.scope.workspaceId}:${clientKey}`, budgetCents: 100, maxProviderCalls: 2 };
+    const first = await repo.reserve(fixture.scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: `${requestFamily}:fallback`,
+      requestFamily,
+      alternateRequestFamily,
+      parentBudget,
+    });
+    const rows = await fixture.sql`SELECT request_id, reserved_amount_cents FROM opening_budget_reservations
+      WHERE workspace_id=${fixture.scope.workspaceId} AND parent_interaction_id=${parentBudget.id}`;
+    expect(rows).toHaveLength(4);
+    expect(rows.filter(r => r.reserved_amount_cents === 0)).toHaveLength(3);
+    await repo.release(fixture.scope, first.requestId);
+
+    const second = await repo.reserve(fixture.scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: randomUUID(),
+      requestFamily: null,
+      parentBudget,
+    });
+    expect(second.state).toBe("reserved");
+
+    await expect(repo.reserve(fixture.scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: randomUUID(),
+      requestFamily: null,
+      parentBudget,
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_CALL_LIMIT" });
+  });
 });

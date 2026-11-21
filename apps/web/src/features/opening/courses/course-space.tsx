@@ -13,9 +13,9 @@ export function CourseSpaceHeader({ courseId, title, archived = false }: { cours
   const current = study ? currentCourseActivity(study.activities, courseId) : null;
   const next = study ? courseStudyTasks(study.tasks, courseId)[0] : null;
   const href = current ? courseStudyHref(courseId, current.id) : next ? `${courseStudyHref(courseId)}?task=${encodeURIComponent(next.id)}` : courseStudyHref(courseId);
-  return <PageHeader title={title} actions={<div className="flex flex-wrap items-center gap-3">
-    {study?.goal?.targetDate ? <span className="text-sm text-text-2">目标 <time dateTime={study.goal.targetDate}>{study.goal.targetDate}</time></span> : null}
-    {!archived ? <Link className={ui.primary} href={objectHref(href)}>{current ? "继续" : next ? "开始下一项" : "开始学习"}</Link> : <span className="text-sm text-text-2">已归档</span>}
+  return <PageHeader title={title} actions={<div className="flex flex-wrap items-center gap-2.5">
+    {study?.goal?.targetDate ? <span className="inline-flex items-center gap-1 rounded-pill border border-line bg-surface-2/70 px-2.5 py-1 text-xs tabular-nums text-text-2">目标 <time dateTime={study.goal.targetDate}>{study.goal.targetDate}</time></span> : null}
+    {!archived ? <Link className={ui.primary} href={objectHref(href)}>{current ? "继续" : next ? "开始下一项" : "开始学习"}</Link> : <span className="rounded-pill border border-line bg-surface-2/70 px-2.5 py-1 text-xs text-text-2">已归档</span>}
     {!archived ? <Link className={ui.secondary} href={objectHref(`/opening/sprint?courseId=${encodeURIComponent(courseId)}`)}>考前冲刺</Link> : null}
     <Link className={ui.quiet} href="/opening/courses">全部课程</Link>
   </div>} />;

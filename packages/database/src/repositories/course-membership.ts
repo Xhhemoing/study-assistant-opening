@@ -14,6 +14,7 @@ import {
   LibraryError,
   type DocumentRecord,
 } from "./library";
+import { mapOpeningSourceError } from "./opening-sources";
 
 const ASSET_TYPES = new Set(assetTypeSchema.options);
 const ROLES = new Set(["core", "optional", "reference", "archive"] as const);
@@ -679,7 +680,7 @@ export function createCourseMembershipRepository(
               version: Number(row.version),
               uploadState: row.upload_state as SourceRecord["uploadState"],
               parseState: row.parse_state as SourceRecord["parseState"],
-              error: (row.error as SourceRecord["error"]) ?? null,
+              error: mapOpeningSourceError(row.error),
               createdAt: new Date(row.created_at as string | Date).toISOString(),
             };
           }

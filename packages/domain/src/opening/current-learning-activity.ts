@@ -1,11 +1,15 @@
 /** Minimal projection shared by server readers and browser course entry. */
 export type CurrentLearningActivity = {
   id: string; courseId: string | null; status: string; updatedAt: string;
+  learnerEngagedAt?: string | null;
   /** Static lessons have persisted session content rather than compiled blocks. */
   placeholder: boolean;
 };
-export function compareCurrentLearningActivities(a: Pick<CurrentLearningActivity, "updatedAt" | "id">, b: Pick<CurrentLearningActivity, "updatedAt" | "id">): number {
-  return Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || b.id.localeCompare(a.id);
+type ActivityOrder = Pick<CurrentLearningActivity, "updatedAt" | "id" | "learnerEngagedAt">;
+export function compareCurrentLearningActivities(a: ActivityOrder, b: ActivityOrder): number {
+  const aFact = a.learnerEngagedAt ? Date.parse(a.learnerEngagedAt) : -Infinity;
+  const bFact = b.learnerEngagedAt ? Date.parse(b.learnerEngagedAt) : -Infinity;
+  return (bFact - aFact) || Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || b.id.localeCompare(a.id);
 }
 /** All explicit identities must agree. An unavailable identity never becomes a latest lookup. */
 export function selectCurrentLearningActivity<T extends CurrentLearningActivity>(rows: readonly T[], courseId: string,

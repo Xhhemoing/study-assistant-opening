@@ -393,7 +393,7 @@ export function BlockCommands({
         onAskExplanation={onAskExplanation}
       />
       {error ? (
-        <p className={`mt-2 text-xs ${tone.danger}`} role="alert" data-command-error="true">
+        <p className="mt-2 text-xs text-danger" role="alert" data-command-error="true">
           {error}
         </p>
       ) : null}

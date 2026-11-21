@@ -93,7 +93,7 @@ export async function readOpeningLearnerSnapshotCourses(sql: Sql | TransactionSq
           THEN element->'evidenceChunkIds' ELSE '[]'::jsonb END) chunk(id)
         WHERE NOT EXISTS (SELECT 1 FROM admitted a WHERE a.course_id=c.id AND a.chunks ? chunk.id
           AND k.source_versions->>a.id::text=a.version::text)
-      ) THEN k.snapshot ELSE NULL END AS knowledge_snapshot
+      ) THEN k.snapshot - 'coveredSourceChunkDigests' ELSE NULL END AS knowledge_snapshot
     FROM courses c
     JOIN workspaces w ON w.id=c.workspace_id AND w.owner_user_id=${scope.ownerUserId}
     LEFT JOIN opening_course_knowledge k ON k.course_id=c.id AND k.workspace_id=c.workspace_id

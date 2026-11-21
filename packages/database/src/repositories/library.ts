@@ -1,4 +1,12 @@
 import { openingNoteReadable } from "./opening-note-provenance";
+import {
+  collectProtectedBlockIds,
+  excludeAnswerKeys,
+  hasForgedOrProtectedBlock,
+  mergePreservedProtectedBlocks,
+  PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
+  readDocumentAnswerKeyIds,
+} from "./library-protected-blocks";
 import { randomUUID } from "node:crypto";
 import {
   assetLifecycleSchema,
@@ -135,12 +143,20 @@ export type LibraryRepository = {
     workspaceId: string;
     documentId: string;
     includeDeleted?: boolean;
+    /** Legacy redaction switch. `false` never disables the learner default. */
+    redactAnswerKeys?: boolean;
+    /** Server-only opt-in for trusted composition and inspection callers. */
+    includeAnswerKeys?: boolean;
   }): Promise<DocumentRecord>;
 
   getBlock(input: {
     workspaceId: string;
     blockId: string;
     includeDeleted?: boolean;
+    /** Server-only opt-in for trusted composition and inspection callers. */
+    includeAnswerKeys?: boolean;
+    /** Legacy redaction switch. `false` never disables the learner default. */
+    redactAnswerKeys?: boolean;
   }): Promise<{
     id: string;
     documentId: string;
@@ -152,6 +168,10 @@ export type LibraryRepository = {
 
   listDocuments(input: {
     workspaceId: string;
+    /** Legacy redaction switch. `false` never disables the learner default. */
+    redactAnswerKeys?: boolean;
+    /** Server-only opt-in for trusted composition and inspection callers. */
+    includeAnswerKeys?: boolean;
   }): Promise<DocumentRecord[]>;
 
   updateDocument(input: {
@@ -163,6 +183,10 @@ export type LibraryRepository = {
     lifecycle?: AssetLifecycle;
     blocks: BlockInput[];
     reason?: string;
+    /** Legacy redaction switch. `false` never disables the learner default. */
+    redactAnswerKeys?: boolean;
+    /** Server-only opt-in for trusted composition callers that author full blocks including answer keys. */
+    includeAnswerKeys?: boolean;
   }): Promise<DocumentRecord>;
 
   /** Server-only composition: caller owns the transaction and commit. */
@@ -246,6 +270,10 @@ export type LibraryRepository = {
     workspaceId: string;
     query: string;
     limit?: number;
+    /** Server-only opt-in for trusted composition and inspection callers. */
+    includeAnswerKeys?: boolean;
+    /** Legacy redaction switch. `false` never disables the learner default. */
+    redactAnswerKeys?: boolean;
   }): Promise<SearchLibraryRow[]>;
 };
 
@@ -290,10 +318,11 @@ function normalizeBlocks(blocks: BlockInput[]): RevisionBlockSnapshot[] {
   const seen = new Set<string>();
   return blocks.map((block, position) => {
     assertUuid(block.id, "block.id");
-    if (seen.has(block.id)) {
+    const idKey = block.id.toLowerCase();
+    if (seen.has(idKey)) {
       throw new LibraryError("VALIDATION", `Duplicate block id: ${block.id}`);
     }
-    seen.add(block.id);
+    seen.add(idKey);
     if (!block.type || !block.type.trim()) {
       throw new LibraryError("VALIDATION", "Block type is required");
     }
@@ -372,7 +401,65 @@ function mapRevisionRow(row: {
   };
 }
 
+type AnswerKeyReadOptions = { includeAnswerKeys?: boolean; redactAnswerKeys?: boolean };
+
+function shouldRedactAnswerKeys(input: AnswerKeyReadOptions): boolean {
+  return input.redactAnswerKeys === true || input.includeAnswerKeys !== true;
+}
+
+function visibleSearchBlockCondition(client: SqlClient, input: AnswerKeyReadOptions) {
+  if (!shouldRedactAnswerKeys(input)) return client`TRUE`;
+  return client`NOT (
+    b.type IN ('answer_key', 'solution')
+    OR COALESCE(b.content->>'role' IN ('answer_key', 'solution'), FALSE)
+    OR COALESCE(b.content->>'blockType' IN ('answer_key', 'solution'), FALSE)
+    OR EXISTS (
+      SELECT 1
+      FROM opening_teaching_activity_specs answer_spec
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(answer_spec.block_order) = 'array'
+          THEN answer_spec.block_order ELSE '[]'::jsonb END
+      ) answer_ref
+      WHERE answer_spec.workspace_id = d.workspace_id
+        AND answer_spec.document_id = d.id
+        AND (
+          answer_ref->>'role' = 'answer_key'
+          OR answer_ref->>'blockType' IN ('answer_key', 'solution')
+        )
+        AND lower(answer_ref->>'blockId') = lower(b.id::text)
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM opening_note_provenance answer_note
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(answer_note.context_source_refs) = 'array'
+          THEN answer_note.context_source_refs ELSE '[]'::jsonb END
+      ) provenance_ref
+      CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(provenance_ref->'answerKeyBlockIds') = 'array'
+          THEN provenance_ref->'answerKeyBlockIds' ELSE '[]'::jsonb END
+      ) answer_id
+      WHERE answer_note.workspace_id = d.workspace_id
+        AND answer_note.document_id = d.id
+        AND lower(answer_id) = lower(b.id::text)
+    )
+  )`;
+}
+
+function assertClientBlocksDoNotForgeProtected(
+  rawBlocks: readonly BlockInput[],
+  protectedIds: ReadonlySet<string>,
+): void {
+  if (hasForgedOrProtectedBlock(rawBlocks, protectedIds)) {
+    throw new LibraryError("VALIDATION", PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE);
+  }
+}
+
 export function createLibraryRepository(sql: SqlClient): LibraryRepository {
+  function readAnswerKeys(workspaceId: string, documentIds: string[], client: SqlClient = sql) {
+    return readDocumentAnswerKeyIds(client, workspaceId, documentIds);
+  }
+
   async function ensureWorkspace(workspaceId: string, client: SqlClient = sql): Promise<void> {
     assertUuid(workspaceId, "workspaceId");
     const rows = await client`
@@ -684,6 +771,9 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         includeDeleted: input.includeDeleted,
       });
       const blocks = await loadBlocks(input.workspaceId, input.documentId);
+      const answerKeys = shouldRedactAnswerKeys(input)
+        ? await readAnswerKeys(input.workspaceId, [input.documentId])
+        : undefined;
       return mapDocRow(
         row as {
           id: string;
@@ -696,7 +786,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           updated_at: Date | string;
           deleted_at: Date | string | null;
         },
-        blocks,
+        answerKeys ? blocks.filter(excludeAnswerKeys(answerKeys.get(input.documentId.toLowerCase()))) : blocks,
       );
     },
 
@@ -729,13 +819,19 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         workspaceId: input.workspaceId,
         documentId: row.document_id as string,
         includeDeleted: input.includeDeleted,
+        includeAnswerKeys: input.includeAnswerKeys,
+        redactAnswerKeys: input.redactAnswerKeys,
       });
+      const visibleBlock = document.blocks.find((block) => block.id.toLowerCase() === String(row.id).toLowerCase());
+      if (!visibleBlock) {
+        throw new LibraryError("NOT_FOUND", `Block not found: ${input.blockId}`);
+      }
       return {
         id: row.id as string,
         documentId: row.document_id as string,
-        type: row.type as string,
-        position: row.position as number,
-        content: row.content as Record<string, unknown>,
+        type: visibleBlock.type,
+        position: visibleBlock.position,
+        content: visibleBlock.content,
         document,
       };
     },
@@ -750,7 +846,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           AND ${openingNoteReadable(sql, input.workspaceId, sql`library_documents.id`)}
         ORDER BY updated_at DESC, id ASC
       `;
-      return Promise.all(rows.map(async (row) => {
+      const documents = await Promise.all(rows.map(async (row) => {
         const documentId = row.id as string;
         const blocks = await loadBlocks(input.workspaceId, documentId);
         return mapDocRow(
@@ -767,6 +863,11 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           },
           blocks,
         );
+      }));
+      if (!shouldRedactAnswerKeys(input)) return documents;
+      const answerKeys = await readAnswerKeys(input.workspaceId, documents.map(document => document.id));
+      return documents.map(document => ({
+        ...document, blocks: document.blocks.filter(excludeAnswerKeys(answerKeys.get(document.id.toLowerCase()))),
       }));
     },
 
@@ -854,6 +955,36 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
         }
 
         const nextRevision = currentRevisionNumber + 1;
+        const redactAnswerKeys = shouldRedactAnswerKeys(input);
+        let persistedBlocks = blocks;
+        let returnedBlocks = blocks;
+        if (redactAnswerKeys) {
+          const existingRows = await tx<{
+            id: string;
+            type: string;
+            position: number;
+            content: Record<string, unknown>;
+          }[]>`
+            SELECT id, type, position, content
+            FROM library_blocks
+            WHERE workspace_id = ${input.workspaceId} AND document_id = ${input.documentId}
+            ORDER BY position ASC, id ASC
+            FOR UPDATE
+          `;
+          const existingBlocks: RevisionBlockSnapshot[] = existingRows.map((r) => ({
+            id: r.id,
+            type: r.type,
+            position: r.position,
+            content: r.content,
+          }));
+          const answerKeys = await readAnswerKeys(input.workspaceId, [input.documentId], tx as unknown as SqlClient);
+          const answerKeyIds = answerKeys.get(input.documentId.toLowerCase()) ?? [];
+          const isVisibleExisting = excludeAnswerKeys(answerKeyIds);
+          const protectedIds = collectProtectedBlockIds(existingBlocks, answerKeyIds);
+          assertClientBlocksDoNotForgeProtected(input.blocks, protectedIds);
+          persistedBlocks = mergePreservedProtectedBlocks(existingBlocks, blocks, isVisibleExisting);
+          returnedBlocks = persistedBlocks.filter(isVisibleExisting);
+        }
 
         const updated = await tx`
           UPDATE library_documents
@@ -869,7 +1000,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           tx,
           input.workspaceId,
           input.documentId,
-          blocks,
+          persistedBlocks,
         );
         await insertRevision(tx, {
           workspaceId: input.workspaceId,
@@ -879,10 +1010,10 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           title: nextTitle,
           lifecycle: nextLifecycle,
           reason: input.reason ?? "edit",
-          blocks,
+          blocks: persistedBlocks,
           revisionId,
         });
-        return mapDocRow(updated[0] as Parameters<typeof mapDocRow>[0], blocks);
+        return mapDocRow(updated[0] as Parameters<typeof mapDocRow>[0], returnedBlocks);
     },
 
     async softDeleteDocument(input) {
@@ -947,8 +1078,10 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           AND workspace_id = ${input.workspaceId}
         ORDER BY revision_number ASC
       `;
-      return rows.map((row) =>
-        mapRevisionRow(
+      const answerKeys = await readAnswerKeys(input.workspaceId, [input.documentId]);
+      const isVisibleBlock = excludeAnswerKeys(answerKeys.get(input.documentId.toLowerCase()));
+      return rows.map((row) => {
+        const revision = mapRevisionRow(
           row as {
             id: string;
             workspace_id: string;
@@ -961,8 +1094,9 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
             blocks: RevisionBlockSnapshot[];
             created_at: Date | string;
           },
-        ),
-      );
+        );
+        return { ...revision, blocks: revision.blocks.filter(isVisibleBlock) };
+      });
     },
 
     async getRevision(input) {
@@ -1312,6 +1446,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
       if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
         throw new LibraryError("VALIDATION", "Search limit must be an integer between 1 and 50");
       }
+      const answerKeyFilter = visibleSearchBlockCondition(sql, input);
       const documentConditions = tokens.map((token) => {
         const pattern = wrapLikePattern(token);
         return sql`(
@@ -1320,6 +1455,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           OR EXISTS (
             SELECT 1 FROM library_blocks b
             WHERE b.document_id = d.id
+              AND ${answerKeyFilter}
               AND (
                 to_tsvector('simple', b.content::text) @@ plainto_tsquery('simple', ${token})
                 OR b.content::text ILIKE ${pattern}
@@ -1365,6 +1501,7 @@ export function createLibraryRepository(sql: SqlClient): LibraryRepository {
           SELECT jsonb_agg(jsonb_build_object('content', b.content) ORDER BY b.position) AS rows
           FROM library_blocks b
           WHERE b.workspace_id = d.workspace_id AND b.document_id = d.id
+            AND ${answerKeyFilter}
         ) blocks ON true
         LEFT JOIN LATERAL (
           SELECT jsonb_agg(jsonb_build_object('key', p.key, 'value', p.value)) AS rows

@@ -159,13 +159,13 @@ export function StudyToolsPanel({ panels, activePanel, onPanelChange, children, 
       <div ref={content} hidden={Boolean(selected && !wide)} className={selected && !wide ? "hidden" : `min-w-0 ${contentClassName} ${fillHeight ? "min-h-0 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]" : ""}`} data-study-content="true">{children}</div>
       <dialog ref={dialog} data-study-companion="true" id={`${id}-companion`} aria-label="学习辅助区"
         onCancel={event => { if (event.target !== event.currentTarget) return; event.preventDefault(); onPanelChange(null); }}
-        className={`static m-0 hidden min-h-0 w-full min-w-0 max-w-none flex-col overflow-hidden border-0 bg-surface p-0 text-text open:flex ${wide ? "border-l border-line pl-4" : ""} ${fillHeight ? "h-full" : ""}`}>
-        <div className="mb-3 flex shrink-0 items-start justify-between gap-1">
-          <div role="tablist" aria-label="学习辅助区" className="flex min-w-0 flex-wrap gap-1">
+        className={`static m-0 hidden min-h-0 w-full min-w-0 max-w-none flex-col overflow-hidden border-0 bg-surface p-0 text-text open:flex ${wide ? "border-l border-line/80 pl-4 pr-1 pt-1" : ""} ${fillHeight ? "h-full" : ""}`}>
+        <div className="mb-3 flex shrink-0 items-center justify-between gap-2">
+          <div role="tablist" aria-label="学习辅助区" className="well-recessed flex min-w-0 flex-wrap items-center gap-1 rounded-xl p-1">
             {panels.map((panel, index) => <button key={panel.id} id={`${id}-tab-${panel.id}`} type="button" role="tab"
               aria-selected={selected?.id === panel.id} aria-controls={`${id}-panel-${panel.mountKey ?? panel.id}`}
               tabIndex={selected?.id === panel.id ? 0 : -1}
-              className={`${ui.quiet} ${selected?.id === panel.id ? "bg-surface-2 font-semibold text-text" : ""}`}
+              className={`min-h-8 rounded-lg px-3 py-1 text-xs font-medium transition-[background-color,color,box-shadow] duration-150 ease-out-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${selected?.id === panel.id ? "bg-surface font-semibold text-text shadow-card" : "text-text-2 hover:text-text"}`}
               onKeyDown={event => navigateTab(event, index)} onClick={() => onPanelChange(panel.id)}>{panel.label}</button>)}
           </div>
           <button type="button" className={`${ui.icon} shrink-0`} aria-label="关闭学习工具" onClick={() => onPanelChange(null)}><X size={16} aria-hidden /></button>

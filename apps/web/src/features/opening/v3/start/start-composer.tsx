@@ -1,6 +1,6 @@
 "use client";
 import { useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { ArrowUp, Camera, Paperclip, X } from "lucide-react";
+import { ArrowRight, ArrowUp, Camera, Paperclip, X } from "lucide-react";
 import { TransitionLink } from "../motion/view-transition";
 import { motion } from "../motion";
 import { NAV_TOOLS, featureHref } from "../shell/features";
@@ -48,7 +48,7 @@ export function StartComposer({ greeting, suggestions, examples = [], context, o
   return (
     <div className={`mx-auto flex min-h-full w-full max-w-[680px] flex-col justify-center gap-5 px-4 py-10 ${motion.stagger}`}>
       <h1 className="sr-only">开始</h1>
-      <p className="bg-linear-to-r from-ai-1 via-ai-2 to-ai-3 bg-clip-text pb-1 text-hero font-semibold tracking-[-0.02em] text-transparent">{greeting}</p>
+      <p className="pb-1 text-hero font-semibold tracking-[-0.02em] text-text">{greeting}</p>
 
       <form onSubmit={submit} className="rounded-sheet glass p-3 pb-2 transition-[box-shadow] duration-(--duration-state) [view-transition-name:composer] focus-within:shadow-[0_0_0_4px_var(--color-surface-2)]">
         <label htmlFor="start-input" className="sr-only">提问</label>
@@ -73,7 +73,7 @@ export function StartComposer({ greeting, suggestions, examples = [], context, o
             </span>
           ))}
           <button type="submit" aria-label="发送" disabled={!canSend}
-            className="ml-auto grid size-9 place-items-center rounded-pill bg-ink text-on-ink transition-[opacity,transform] duration-(--duration-state) ease-spring enabled:active:scale-95 disabled:scale-90 disabled:opacity-35">
+            className="keycap-ink ml-auto grid size-9 place-items-center rounded-pill bg-ink text-on-ink transition-[opacity,transform] duration-(--duration-state) ease-spring enabled:active:scale-95 disabled:scale-90 disabled:opacity-35">
             <ArrowUp size={18} aria-hidden="true" />
           </button>
         </div>
@@ -83,13 +83,13 @@ export function StartComposer({ greeting, suggestions, examples = [], context, o
         <div className="space-y-1">
         {suggestions[0] && (
           <TransitionLink href={suggestions[0].href} direction="forward" vtSource="object-title"
-            className="group flex items-center gap-3 rounded-panel border border-line bg-surface/80 px-4 py-3 transition-[border-color,box-shadow,transform,background-color] duration-(--duration-micro) hover:bg-surface hover:shadow-float active:scale-[0.995]">
+            className="group flex items-center gap-3 rounded-panel border border-line bg-surface/80 px-4 py-3 shadow-card transition-[border-color,box-shadow,transform,background-color] duration-(--duration-micro) hover:bg-surface hover:shadow-float active:scale-[0.995]">
             <span className="min-w-0 flex-1">
-              <span className="block text-cap text-text-2">先做这个{suggestions[0].minutes ? ` · 约 ${suggestions[0].minutes} 分钟` : ""}</span>
+              <span className="block text-cap tabular-nums text-text-2">先做这个{suggestions[0].minutes ? ` · 约 ${suggestions[0].minutes} 分钟` : ""}</span>
               <span data-vt-title className="block truncate text-ui-lg font-medium text-text">{suggestions[0].label}</span>
               {suggestions[0].reason ? <span className="block truncate text-meta text-text-2">{suggestions[0].reason}</span> : null}
             </span>
-            <span aria-hidden="true" className="grid size-9 shrink-0 place-items-center rounded-pill bg-ink text-on-ink transition-transform duration-(--duration-micro) group-hover:translate-x-0.5">→</span>
+            <span aria-hidden="true" className="keycap-ink grid size-9 shrink-0 place-items-center rounded-pill bg-ink text-on-ink transition-transform duration-(--duration-micro) group-hover:translate-x-0.5"><ArrowRight size={16} aria-hidden="true" /></span>
           </TransitionLink>
         )}
         <ul aria-label="其他继续" className={`flex flex-wrap gap-2 pt-1 ${motion.stagger}`}>

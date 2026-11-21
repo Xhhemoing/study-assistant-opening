@@ -100,7 +100,9 @@ describe("teaching blind solve protocol", () => {
     const f = fixture();
     f.persist.mockRejectedValue(new Error("job claim changed"));
     await expect(solveTeachingBlind(f.input)).rejects.toThrow("job claim changed");
-    expect(f.budget.settle).not.toHaveBeenCalled(); expect(f.budget.markUnknown).toHaveBeenCalledTimes(1);
+    expect(f.budget.settle).toHaveBeenCalledExactlyOnceWith("ledger-1", 1);
+    expect(f.budget.markUnknown).not.toHaveBeenCalled();
+    expect(f.budget.release).not.toHaveBeenCalled();
     expect(f.complete).toHaveBeenCalledTimes(1);
   });
   it("provider errors remain unknown and never retry", async () => {

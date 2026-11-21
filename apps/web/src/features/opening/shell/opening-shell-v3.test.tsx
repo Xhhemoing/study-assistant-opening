@@ -65,7 +65,7 @@ describe("production V3 shell business wiring", () => {
         </OpeningCapabilitiesContext.Provider>,
       ));
       const expected = studySessionV2
-        ? [["/opening/today", "今日"], ["/opening/courses", "课程"], ["/opening/library", "资料"]]
+        ? [["/opening/today", "今日"], ["/opening/courses", "课程"], ["/opening/agent", "探索"], ["/opening/library", "资料"]]
         : [["/opening/today", "学习"], ["/opening/review", "复习"], ["/opening/library", "资料"]];
       for (const label of ["学习工作台导航", "学习工作台导航（移动端）"]) {
         const nav = host.querySelector(`nav[aria-label="${label}"]`)!;
@@ -76,6 +76,19 @@ describe("production V3 shell business wiring", () => {
           expect(link.getAttribute("aria-current")).toBe(index === (studySessionV2 ? 1 : 0) ? "page" : null);
         });
       }
+    }
+  });
+
+  it.each(["/opening/agent", "/opening/assistant"])("selects Explore for %s on desktop and mobile", async pathname => {
+    data.pathname = pathname;
+    await act(async () => root.render(
+      <OpeningCapabilitiesContext.Provider value={{ ...CLOSED_CAPABILITIES, studySessionV2: true }}>
+        <OpeningShellV3><p>探索工作区</p></OpeningShellV3>
+      </OpeningCapabilitiesContext.Provider>,
+    ));
+    for (const label of ["学习工作台导航", "学习工作台导航（移动端）"]) {
+      const selected = host.querySelectorAll(`nav[aria-label="${label}"] a[aria-current="page"]`);
+      expect([...selected].map(link => link.getAttribute("href"))).toEqual(["/opening/agent"]);
     }
   });
 

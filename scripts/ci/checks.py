@@ -67,12 +67,16 @@ def require_success(needs, name):
         raise ValueError(f"Required job {name} did not succeed")
 
 
-def check_gate(needs, workers):
+def check_gate(needs, workers, is_draft=False):
     require_success(needs, "changes")
     mode = needs["changes"].get("outputs", {}).get("docs_only")
     if mode == "true":
         require_success(needs, "docs")
     elif mode == "false":
+        if is_draft:
+            require_success(needs, "fast-draft-check")
+            raise ValueError("Draft fast-draft-check passed. Mark the PR Ready for Review "
+                             "to run the full CI required for merge.")
         for name in workers:
             require_success(needs, name)
     else:
@@ -87,7 +91,10 @@ def main():
     if args.mode == "gate":
         if not args.workers:
             raise ValueError("No required workers configured")
-        check_gate(json.loads(os.environ["CI_NEEDS"]), args.workers)
+        draft = os.environ.get("CI_IS_DRAFT")
+        if draft not in ("true", "false"):
+            raise ValueError("CI_IS_DRAFT must be 'true' or 'false'")
+        check_gate(json.loads(os.environ["CI_NEEDS"]), args.workers, is_draft=draft == "true")
         print("Required CI gate passed")
         return
     base, head = os.environ.get("DIFF_BASE", ""), os.environ.get("DIFF_HEAD", "")

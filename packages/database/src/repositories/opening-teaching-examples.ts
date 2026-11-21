@@ -211,13 +211,13 @@ export function createOpeningTeachingExamplesRepository(sql: Sql) {
         const blockOrder = [...current.blockOrder, { blockId: exampleId, position, role: "example", blockType: "example" },
           { blockId: solutionId, position: position + 1, role: "teach", blockType: "steps" }];
         await createLibraryRepository(sql).updateDocumentInTx(tx, { workspaceId: scope.workspaceId, jobScope: scope,
-          documentId: payload.request.target.documentId, expectedRevisionNumber: payload.request.target.revisionNumber, blocks, reason: operationKey(id) });
+          documentId: payload.request.target.documentId, expectedRevisionNumber: payload.request.target.revisionNumber, blocks, reason: operationKey(id), includeAnswerKeys: true });
         const revision = payload.request.target.revisionNumber + 1, version = payload.request.target.contentVersion + 1;
         await tx`UPDATE opening_teaching_activity_specs SET revision_number=${revision},version=${version},block_order=${tx.json(blockOrder)},verification_status='needs_check',updated_at=now()
           WHERE id=${String(current.row.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         await tx`UPDATE opening_teaching_units SET current_revision_number=${revision},updated_at=now()
           WHERE id=${String(current.row.teaching_unit_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-        const changed = await tx`UPDATE opening_teaching_activities SET content_version=${version},updated_at=now()
+        const changed = await tx`UPDATE opening_teaching_activities SET content_version=${version}
           WHERE id=${payload.request.target.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND content_version=${payload.request.target.contentVersion} RETURNING id`;
         if (!changed.length) throw conflict("例题内容版本冲突。");
         // No prompt exposure is fabricated. The appended example is already revealed teaching, not an issued assessment.

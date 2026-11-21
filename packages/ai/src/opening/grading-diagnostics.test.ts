@@ -42,7 +42,11 @@ it.each(["parse", "persist", "settle", "usage"] as const)("identifies %s from th
     code: phase === "parse" ? "PROVIDER_RESPONSE" : "UNKNOWN", attemptedFetch: true, httpStatus: 200 });
   expect(fetchImpl).toHaveBeenCalledTimes(1);
   expect(budget.release).not.toHaveBeenCalled();
-  if (phase === "parse" || phase === "persist") expect(budget.markUnknown).toHaveBeenCalledExactlyOnceWith("reservation");
+  if (phase === "parse") expect(budget.markUnknown).toHaveBeenCalledExactlyOnceWith("reservation");
+  if (phase === "persist") {
+    expect(budget.markUnknown).not.toHaveBeenCalled();
+    expect(budget.settle).toHaveBeenCalledExactlyOnceWith("reservation", 1);
+  }
 });
 
 it("logs only fixed diagnostic fields and canonical operation identities", () => {

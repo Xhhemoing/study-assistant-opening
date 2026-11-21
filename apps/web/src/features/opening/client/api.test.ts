@@ -351,16 +351,18 @@ describe("openingApi integration helpers", () => {
     ).rejects.toMatchObject({ name: "OpeningApiError", status: 409, code: "CONFLICT", reason: "stale_version" });
   });
 
-  it("keeps hasNewerSuggestion on the Today read", async () => {
+  it("uses GET to read Today and POST to prepare or refresh suggestions", async () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse({ date: "2026-10-15", acceptedVersion: 0, blocks: [], hardBlocks: [], hasNewerSuggestion: true }),
     );
     const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
     await expect(api.getToday("2026-10-15")).resolves.toMatchObject({ hasNewerSuggestion: true });
+    await api.getToday("2026-10-15", { prepareDraft: true });
     await api.getToday("2026-10-15", { refreshSuggestions: true });
-    expect(fetchImpl.mock.calls.map((call) => String((call as unknown[])[0]))).toEqual([
-      "/api/opening/today?date=2026-10-15",
-      "/api/opening/today?date=2026-10-15&refresh=suggestions",
+    expect(fetchImpl.mock.calls).toEqual([
+      ["/api/opening/today?date=2026-10-15", expect.objectContaining({ method: "GET" })],
+      ["/api/opening/today?date=2026-10-15", expect.objectContaining({ method: "POST" })],
+      ["/api/opening/today?date=2026-10-15&refresh=suggestions", expect.objectContaining({ method: "POST" })],
     ]);
   });
 

@@ -443,6 +443,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               } as ReservationTerms;
             })();
         return runBudgetedCall({
+          requestFamily: tutorOperationId,
           provider: model?.provider ?? deps.provider,
           modelSnapshot: model?.modelSnapshot,
           budget: scopedBudget,
