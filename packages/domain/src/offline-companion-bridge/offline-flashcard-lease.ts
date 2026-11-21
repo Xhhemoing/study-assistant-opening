@@ -88,21 +88,53 @@ function normalizeLeakSyntax(text: string): string {
 }
 
 function normalizeGroupedDecimals(text: string): string {
-  // Only complete numeric lists give their commas the meaning of separators.
-  const openBrackets: { index: number; close: string; nested: boolean }[] = [];
+  type ContainerFrame = {
+    index: number;
+    close: string;
+    itemStart: number;
+    nestedItem: boolean;
+    hasSeparator: boolean;
+    validItems: boolean;
+  };
+  // Each frame validates only its top-level items. A completed child counts
+  // as one item in its parent when surrounded by whitespace and separators.
+  const openBrackets: ContainerFrame[] = [];
   const tupleBrackets = new Set<number>();
-  for (const bracket of text.matchAll(DECIMAL_CONTEXT_BRACKET_RE)) {
+  const isNumericItem = (frame: ContainerFrame, end: number): boolean => {
+    if (!frame.validItems) return false;
+    const item = text.slice(frame.itemStart, end).trim();
+    return frame.nestedItem ? item === "" : NUMERIC_TUPLE_ITEM_RE.test(item);
+  };
+  for (const delimiter of text.matchAll(DECIMAL_CONTEXT_DELIMITER_RE)) {
+    const token = delimiter[0];
+    const offset = delimiter.index;
     const open = openBrackets.at(-1);
-    const close = DECIMAL_CONTAINER_CLOSER.get(bracket[0]);
+    const close = DECIMAL_CONTAINER_CLOSER.get(token);
     if (close !== undefined) {
-      if (open) open.nested = true;
-      openBrackets.push({ index: bracket.index, close, nested: false });
-    } else if (open?.close === bracket[0]) {
-      openBrackets.pop();
-      if (!open.nested && NUMERIC_TUPLE_RE.test(text.slice(open.index + 1, bracket.index))) {
-        tupleBrackets.add(open.index);
-        tupleBrackets.add(bracket.index);
-      }
+      openBrackets.push({ index: offset, close, itemStart: offset + 1, nestedItem: false, hasSeparator: false, validItems: true });
+      continue;
+    }
+    if (!open) continue;
+    if (token === "," || token === ";") {
+      open.validItems = isNumericItem(open, offset);
+      open.hasSeparator = true;
+      open.itemStart = offset + 1;
+      open.nestedItem = false;
+      continue;
+    }
+    if (open.close !== token) continue;
+    openBrackets.pop();
+
+    const numericTuple = open.hasSeparator && isNumericItem(open, offset);
+    if (numericTuple) {
+      tupleBrackets.add(open.index);
+      tupleBrackets.add(offset);
+    }
+    const parent = openBrackets.at(-1);
+    if (parent?.validItems) {
+      parent.validItems = numericTuple && !parent.nestedItem && text.slice(parent.itemStart, open.index).trim() === "";
+      parent.itemStart = offset + 1;
+      parent.nestedItem = true;
     }
   }
 
@@ -1346,11 +1378,12 @@ const LOCALE_SPACE_GROUPED_DECIMAL = standaloneNumericSource(
 );
 const TUPLE_NUMBER = `(?:[+−-]\\s*)?(?:${UNGROUPED_DECIMAL}|` +
   `(?:${SPACE_GROUPED_INTEGER}|${APOSTROPHE_GROUPED_INTEGER})(?:${DECIMAL_FRACTION})?${OPTIONAL_DECIMAL_EXPONENT})`;
-const NUMERIC_TUPLE_RE = new RegExp(`^\\s*${TUPLE_NUMBER}(?:\\s*[,;]\\s*${TUPLE_NUMBER})+\\s*$`, "u");
+const NUMERIC_TUPLE_ITEM_RE = new RegExp(`^${TUPLE_NUMBER}$`, "u");
 const DECIMAL_CONTAINER_CLOSER = new Map([["(", ")"], ["[", "]"], ["{", "}"], ["<", ">"], ["⟨", "⟩"], ["〈", "〉"]]);
 // An angle opener is a tuple delimiter only when it encloses a numeric list.
 const DECIMAL_CONTEXT_BRACKET_RE =
   /(?<!\\)(?:[()[\]{}⟨⟩〈〉>]|<(?=\s*[+−-]?(?:\d|\.\d)[\d.'_’eE\s+−-]*[,;]\s*[+−-]?(?:\d|\.\d)[\d.,;'_’eE\s+−-]*>))/gu;
+const DECIMAL_CONTEXT_DELIMITER_RE = new RegExp(DECIMAL_CONTEXT_BRACKET_RE.source + "|[,;]", "gu");
 const GROUPED_DECIMAL_OR_BRACKET_RE = new RegExp(
   DECIMAL_CONTEXT_BRACKET_RE.source + "|" + LOCALE_SPACE_GROUPED_DECIMAL + "|" + standaloneNumericSource(
     `(?:\\d{1,3}(?:\\.\\d{3})+|${APOSTROPHE_GROUPED_INTEGER}),${DECIMAL_DIGITS}${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)`,
@@ -1530,17 +1563,20 @@ const NEXT_OPTION_RE = new RegExp(
 const ARTICLE_STOP_WORD_RE = new RegExp("^(?:" +
   "for|in|on|at|to|of|by|with|from|into|onto|upon|over|under|after|before|between|among|through|during|" +
   "without|within|about|against|per|via|as|up|off|out|across|along|past|around|inside|outside|despite|except|towards?|" +
+  "like|unlike|besides|beside|beyond|behind|above|below|beneath|amid|amidst|amongst|throughout|concerning|regarding|" +
+  "including|excluding|following|given|barring|pending|worth|" +
   "is|was|are|were|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|equals?|" +
   "and|or|but|nor|yet|so|if|then|else|when|while|where|whereas|because|since|unless|until|till|although|though|than|whether|" +
   "that|which|who|whom|whose|what|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
   "me|my|mine|this|these|those|the|an|another|each|every|all|both|any|either|neither|some|several|many|much|no|none|" +
   "instead|apart|aside|away|regardless|irrespective|only|alone|already|" +
   "also|too|again|once|twice|here|there|now|today|tomorrow|yesterday|tonight|otherwise|therefore|however|thus|hence|" +
+  "just|even|still|not|never|always|often|sometimes|usually|ever|seldom|rarely|hardly|barely|scarcely|same|such|" +
   "versus|vs|plus|minus|modulo|mod|times)$");
 const ARTICLE_MODIFIER_WORD_RE = new RegExp("^(?:" +
   "zeroth|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|" +
   "[a-z]+(?:teenth|tieth|illionth)|hundredth|thousandth|next|last|[a-z]+ly|almost|pairwise|" +
-  "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|just|even|still)$");
+  "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|more|less|most|least)$");
 const ARTICLE_LY_NOUN_RE =
   /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly)$/;
 const ARTICLE_QUANTITY_TOKEN = /\d(?:[^\s.,;:!?()[\]{}<>]|\.(?=\d))*/u.source;
