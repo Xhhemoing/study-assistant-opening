@@ -190,6 +190,38 @@ export function formatTimeBox(spentSeconds: number, boxSeconds: number): string 
   return `${spentMin} / ${boxMin} 分钟`;
 }
 
+const INVISIBLE_AND_COMBINING_CHARS =
+  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Mn}\p{Me}\uFE00-\uFE0F\u{E0100}-\u{E01EF}\u200B-\u200D\u2060\uFEFF]+/gu;
+
+/**
+ * Normalizes Writing/Speaking text into a canonical lexical key for sticky
+ * assistance tracking. Strips all Unicode Default_Ignorable, Format, Combining,
+ * and Variation Selector characters AFTER NFKC normalization and BEFORE lexical
+ * token extraction so invisible characters can never split tokens.
+ */
+export function normalizeAssistedTextKey(text: string): string {
+  const masked = maskIeltsMarkup(text)
+    .normalize("NFKC")
+    .normalize("NFD")
+    .replace(INVISIBLE_AND_COMBINING_CHARS, "")
+    .toLowerCase();
+  const tokens = masked
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.filter((token) => /[a-z]/u.test(token));
+  if (tokens && tokens.length > 0) {
+    return tokens.join(" ");
+  }
+  return (
+    masked.replace(/\s+/gu, "") ||
+    text
+      .normalize("NFKC")
+      .normalize("NFD")
+      .replace(INVISIBLE_AND_COMBINING_CHARS, "")
+      .toLowerCase()
+      .replace(/\s+/gu, "")
+  );
+}
+
 export type ParagraphHighlightSegment =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "span"; readonly text: string; readonly span: IeltsSpanEvidence };

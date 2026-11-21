@@ -23,6 +23,7 @@ export {
   UPGRADE_CATEGORY_LABELS,
   formatBandScore,
   formatTimeBox,
+  normalizeAssistedTextKey,
   segmentParagraphWithSpans,
   type CriterionVisualStyle,
   type DraftViewMode,

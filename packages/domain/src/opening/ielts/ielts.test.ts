@@ -1895,3 +1895,92 @@ describe("IELTS source boundaries", () => {
     expect(invalid.ok).toBe(false);
   });
 });
+
+describe("Writing topic-relevance band grounding", () => {
+  const offTopicParagraphs = [
+    "Artisanal sourdough baking relies on patient wild fermentation rather than commercial yeast packets. When stoneground rye flour blends with cool spring water at moderate kitchen temperatures, wild lactobacilli slowly produce gentle organic acids that deepen aroma and extend loaf freshness across several crisp mornings. Experienced bakers monitor hydration ratios carefully because subtle shifts in grain protein transform crumb elasticity, blistered crust caramelisation, and savoury tang.",
+    "Beyond home kitchens, botanical conservatories preserve rare alpine orchids harvested from misty limestone ridges across northern mountain ranges. Curators regulate greenhouse humidity, filtered sunlight, mineral misting, and pine bark substrates so delicate root tendrils survive harsh seasonal frost cycles without fungal decay. Detailed herbarium notebooks record petal pigmentation, moth pollination timing, nectar chemistry, and seedling germination rates for visiting botanists.",
+    "Classical baroque luthiers similarly prize seasoned spruce soundboards rested inside quiet timber lofts for decades before carving arched ribs and decorative rose inlays. Careful amber varnish layering protects fragile wooden soundboxes against dry winter hearths while preserving warm harmonic resonance during intimate chamber recitals. Dedicated apprentices spend years sharpening gouges, matching flamed maple grain patterns, carving ebony pegs, and tuning gut strings by ear.",
+    "Ultimately, traditional craft disciplines ranging from hearth bread fermentation to alpine botanical stewardship and historical string instrument making reward attentive observation, tactile patience, steady curiosity, and deep respect for raw natural materials. Passing these enduring artisanal skills down through quiet studio workshops keeps cultural craftsmanship thriving for curious enthusiasts who treasure handmade precision, acoustic warmth, and seasonal rhythm over rapid factory output.",
+  ];
+
+  it("caps Task Response below Band 5.0 and overall band at <= 4.5 for a varied 250-word off-topic essay with zero prompt overlap", () => {
+    expect(countDraftWords(offTopicParagraphs)).toBeGreaterThanOrEqual(250);
+    const offTopicDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-off-topic-250",
+      paragraphs: offTopicParagraphs,
+    };
+
+    const withoutStatement = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: offTopicDraft,
+      targets: TARGETS,
+      receiptId: "r-off-topic-no-stmt",
+    });
+    expect(withoutStatement.transferReport.summary.hasLowEntropyStuffing).toBe(false);
+    expect(withoutStatement.transferReport.summary.transferredCount).toBe(0);
+    expect(withoutStatement.receipt.criteria.TR.band).toBeLessThan(5);
+    expect(withoutStatement.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(withoutStatement.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(withoutStatement.receipt.masteryQualified).toBe(false);
+    expect(withoutStatement.receipt.countsTowardMastery).toBe(false);
+    expect(withoutStatement.receipt.epistemicStatus).toBe("practice_feedback");
+
+    const withStatement = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: offTopicDraft,
+      targets: TARGETS,
+      promptStatement:
+        "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?",
+      receiptId: "r-off-topic-with-stmt",
+    });
+    expect(withStatement.receipt.criteria.TR.band).toBeLessThan(5);
+    expect(withStatement.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(withStatement.receipt.criteria.TR.summary).toContain("偏离题干");
+  });
+
+  it("caps off-topic essays against an explicit promptStatement even when targets are empty", () => {
+    const customPromptDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-museum-off-topic",
+      promptId: "museum-admission-fees-v1",
+      paragraphs: offTopicParagraphs,
+    };
+    const evaluated = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: customPromptDraft,
+      targets: [],
+      promptStatement:
+        "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?",
+      receiptId: "r-off-topic-custom-prompt",
+    });
+    expect(evaluated.receipt.criteria.TR.band).toBe(4);
+    expect(evaluated.receipt.overallBand).toBeLessThanOrEqual(4.5);
+  });
+
+  it("does not apply an off-topic cap to a genuine 250-word on-topic essay even with zero exact target matches", () => {
+    const onTopicWithoutTargets: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-on-topic-plain",
+      paragraphs: [
+        "Growing cities face mounting pressure over whether municipal budgets belong in metropolitan rail lines or wider highways for private cars. Although drivers enjoy door-to-door flexibility when new lanes open, devoting major funding to trains produces stronger mobility and cleaner air for dense neighbourhoods over decades.",
+        "Electric commuter trains carry far larger passenger volumes across a narrow corridor than multi-lane arterial roads can handle during weekday rush hours. When office workers and students shift from solo driving to reliable trains, street gridlock eases noticeably and tailpipe pollution declines around schools, clinics, and busy shopping hubs.",
+        "Critics note that suburban households living miles from major stations still depend on personal vehicles for evening errands and weekend travel. Even so, widening expressways soon fills fresh lanes with additional drivers, whereas pairing core rail corridors with frequent neighbourhood shuttle routes links outer districts directly to city centres.",
+        "For these reasons, city planners should anchor transport spending in modern rail transit and local bus links rather than endless asphalt expansion. Balanced rail networks keep commuting dependable, curb urban smog, and protect taxpayers from recurring highway upkeep expenses.",
+      ],
+    };
+    expect(countDraftWords(onTopicWithoutTargets.paragraphs)).toBeGreaterThanOrEqual(180);
+    const evaluated = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: onTopicWithoutTargets,
+      targets: TARGETS,
+      promptStatement:
+        "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?",
+      receiptId: "r-on-topic-plain",
+    });
+    expect(evaluated.transferReport.summary.transferredCount).toBe(0);
+    expect(evaluated.receipt.criteria.TR.band).toBeGreaterThanOrEqual(6);
+    expect(evaluated.receipt.overallBand).toBeGreaterThanOrEqual(6);
+  });
+});

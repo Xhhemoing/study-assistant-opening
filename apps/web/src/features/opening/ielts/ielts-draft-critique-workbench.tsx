@@ -3,12 +3,12 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   IELTS_CRITERIA,
+  IELTS_CRITERION_META,
   analyzeCrossDraftTransfer,
   countDraftWords,
   evaluateRevisedDraftDeterministically,
   getWritingDraftSource,
   getWritingTransferSource,
-  maskIeltsMarkup,
   type IeltsCriterion,
   type IeltsCrossDraftTransferReport,
   type IeltsEssayDraft,
@@ -26,6 +26,7 @@ import {
   UPGRADE_CATEGORY_LABELS,
   formatBandScore,
   formatTimeBox,
+  normalizeAssistedTextKey,
   segmentParagraphWithSpans,
   type DraftViewMode,
 } from "./workbench-model";
@@ -33,6 +34,8 @@ import {
 export type IeltsDraftCritiqueWorkbenchProps = {
   readonly fixture?: IeltsWorkbenchFixture;
   readonly initialView?: DraftViewMode;
+  readonly initialDraft?: string;
+  readonly demoFixtureMode?: boolean;
   readonly onRevisionEvaluated?: (payload: {
     readonly revisedDraft: IeltsEssayDraft;
     readonly receipt: IeltsRubricReceipt;
@@ -67,25 +70,8 @@ function draftEditorText(draft: IeltsEssayDraft): string {
   return draft.paragraphs.join("\n\n").replace(/\r\n?/gu, "\n");
 }
 
-function normalizeLexicalTextKey(text: string): string {
-  const masked = maskIeltsMarkup(text)
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/\p{Cf}+/gu, "");
-  const tokens = masked
-    .match(/[\p{L}\p{N}]+/gu)
-    ?.filter((token) => /[a-z]/u.test(token));
-  if (tokens && tokens.length > 0) {
-    return tokens.join(" ");
-  }
-  return (
-    masked.replace(/\s+/gu, "") ||
-    text.normalize("NFKC").toLowerCase().replace(/[\s\p{Cf}]+/gu, "")
-  );
-}
-
 function writingTextKey(paragraphs: readonly string[]): string {
-  return normalizeLexicalTextKey(paragraphs.join("\n"));
+  return normalizeAssistedTextKey(paragraphs.join("\n"));
 }
 
 function collectAssistedWritingKeys(
@@ -127,17 +113,38 @@ function evaluationFingerprint(
 const PARAGRAPH_BREAK = /\n\s*\n+/u;
 
 export function IeltsDraftCritiqueWorkbench({
-  fixture = IELTS_WRITING_SPEAKING_FIXTURE,
+  fixture: providedFixture,
   initialView = "draft2",
+  initialDraft,
+  demoFixtureMode = false,
   onRevisionEvaluated,
 }: IeltsDraftCritiqueWorkbenchProps) {
-  const attemptKey = JSON.stringify([
-    fixture.promptId,
-    draftIdentity(fixture.draft1),
-    fixture.draft1Receipt.receiptId,
-    draftIdentity(fixture.draft2),
-    fixture.draft2Receipt.receiptId,
-  ]);
+  const hasExternalFixture = providedFixture !== undefined;
+  const fixture = providedFixture ?? IELTS_WRITING_SPEAKING_FIXTURE;
+  const isDemoPreview = demoFixtureMode === true;
+  const hasPreloadedSubmission =
+    isDemoPreview || (hasExternalFixture && countDraftWords(fixture.draft2.paragraphs) > 0);
+
+  const attemptKey = JSON.stringify(
+    hasPreloadedSubmission
+      ? [
+          isDemoPreview,
+          hasExternalFixture,
+          fixture.promptId,
+          draftIdentity(fixture.draft1),
+          fixture.draft1Receipt.receiptId,
+          draftIdentity(fixture.draft2),
+          fixture.draft2Receipt.receiptId,
+        ]
+      : [
+          isDemoPreview,
+          hasExternalFixture,
+          fixture.promptId,
+          draftIdentity(fixture.draft1),
+          fixture.draft1Receipt.receiptId,
+          initialDraft ?? "",
+        ],
+  );
   const tabsIdPrefix = useId();
   const tabRefs = useRef<Partial<Record<DraftViewMode, HTMLButtonElement | null>>>({});
 
@@ -145,7 +152,12 @@ export function IeltsDraftCritiqueWorkbench({
   const [criterionFilter, setCriterionFilter] = useState<IeltsCriterion | "ALL">("ALL");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
 
-  const authorityFingerprint = evaluationFingerprint(fixture, fixture.draft2, fixture.draft2Receipt, fixture.transferReport);
+  const authorityFingerprint = evaluationFingerprint(
+    fixture,
+    fixture.draft2,
+    fixture.draft2Receipt,
+    fixture.transferReport,
+  );
   const authoritative = {
     attemptKey,
     authorityFingerprint,
@@ -155,23 +167,39 @@ export function IeltsDraftCritiqueWorkbench({
   };
   const [evaluation, setEvaluation] = useState({
     ...authoritative,
-    cachedFingerprint: authorityFingerprint as string | null,
+    cachedFingerprint: hasPreloadedSubmission ? (authorityFingerprint as string | null) : null,
   });
   const { draft2, draft2Receipt, transferReport: savedReport } = evaluation;
 
-  const authoritativeAssistedKeys = collectAssistedWritingKeys(fixture.draft2, fixture.draft2Receipt);
-  const authoritativeDraft2Key = writingTextKey(fixture.draft2.paragraphs);
-  const [composerOpen, setComposerOpen] = useState(false);
-  const [composerText, setComposerText] = useState(() => draftEditorText(fixture.draft2));
-  const [composerAssisted, setComposerAssisted] = useState(
-    () =>
-      fixture.draft2.assisted ||
-      (authoritativeDraft2Key !== "" && authoritativeAssistedKeys.includes(authoritativeDraft2Key)),
+  const authoritativeAssistedKeys = hasPreloadedSubmission
+    ? collectAssistedWritingKeys(fixture.draft2, fixture.draft2Receipt)
+    : [];
+  const authoritativeDraft2Key = hasPreloadedSubmission
+    ? writingTextKey(fixture.draft2.paragraphs)
+    : "";
+  const initiallyLatched =
+    hasPreloadedSubmission &&
+    (fixture.draft2.assisted ||
+      Boolean(fixture.draft2Receipt.sourceDraft?.assisted) ||
+      (authoritativeDraft2Key !== "" && authoritativeAssistedKeys.includes(authoritativeDraft2Key)));
+
+  const [hasSubmitted, setHasSubmitted] = useState(hasPreloadedSubmission);
+  const [hintsRevealed, setHintsRevealed] = useState(false);
+  const [attemptAssistedLatched, setAttemptAssistedLatched] = useState(initiallyLatched);
+  const [resetPastAuthorityFingerprint, setResetPastAuthorityFingerprint] = useState<string | null>(
+    null,
   );
+  const [composerOpen, setComposerOpen] = useState(!hasPreloadedSubmission);
+  const [composerText, setComposerText] = useState(() =>
+    hasPreloadedSubmission ? draftEditorText(fixture.draft2) : (initialDraft ?? ""),
+  );
+  const [composerAssisted, setComposerAssisted] = useState(() => initiallyLatched);
   const [composerNeedsText, setComposerNeedsText] = useState(false);
   const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
   const [revisionCount, setRevisionCount] = useState(0);
-  const [localAssistedTexts, setLocalAssistedTexts] = useState<readonly string[]>(() => authoritativeAssistedKeys);
+  const [localAssistedTexts, setLocalAssistedTexts] = useState<readonly string[]>(
+    () => authoritativeAssistedKeys,
+  );
 
   if (evaluation.authorityFingerprint !== authorityFingerprint) {
     setEvaluation({ ...authoritative, cachedFingerprint: null });
@@ -179,28 +207,41 @@ export function IeltsDraftCritiqueWorkbench({
     setSelectedSpanId(null);
     if (evaluation.attemptKey !== attemptKey) {
       const isOwnWriteBack =
-        revisionCount > 0 && (
-          fixture.draft2.draftId === evaluation.draft2.draftId ||
-          fixture.draft2Receipt.receiptId === evaluation.draft2Receipt.receiptId
-        );
+        revisionCount > 0 &&
+        hasExternalFixture &&
+        (fixture.draft2.draftId === evaluation.draft2.draftId ||
+          fixture.draft2Receipt.receiptId === evaluation.draft2Receipt.receiptId);
       const nextAssistedTexts = isOwnWriteBack
         ? [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])]
         : authoritativeAssistedKeys;
+      const nextLatched = isOwnWriteBack
+        ? attemptAssistedLatched || initiallyLatched
+        : initiallyLatched;
       setLocalAssistedTexts(nextAssistedTexts);
-      setComposerText(draftEditorText(fixture.draft2));
+      setAttemptAssistedLatched(nextLatched);
+      setHasSubmitted(hasPreloadedSubmission);
+      if (!isOwnWriteBack) {
+        setHintsRevealed(false);
+        setResetPastAuthorityFingerprint(null);
+      }
+      setComposerText(
+        hasPreloadedSubmission ? draftEditorText(fixture.draft2) : (initialDraft ?? ""),
+      );
       setComposerAssisted(
-        fixture.draft2.assisted ||
+        nextLatched ||
           (authoritativeDraft2Key !== "" && nextAssistedTexts.includes(authoritativeDraft2Key)),
       );
       setViewMode(initialView);
       setCriterionFilter("ALL");
-      setComposerOpen(false);
+      setComposerOpen(!hasPreloadedSubmission);
       setRevisionCount(0);
-    } else if (authoritativeAssistedKeys.some((key) => !localAssistedTexts.includes(key))) {
-      const nextAssistedTexts = [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])];
-      setLocalAssistedTexts(nextAssistedTexts);
-      const currentComposerKey = writingTextKey(composerText.split(PARAGRAPH_BREAK));
-      if (currentComposerKey !== "" && nextAssistedTexts.includes(currentComposerKey)) {
+    } else if (hasPreloadedSubmission && authorityFingerprint !== resetPastAuthorityFingerprint) {
+      if (authoritativeAssistedKeys.some((key) => !localAssistedTexts.includes(key))) {
+        const nextAssistedTexts = [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])];
+        setLocalAssistedTexts(nextAssistedTexts);
+      }
+      if (fixture.draft2.assisted || Boolean(fixture.draft2Receipt.sourceDraft?.assisted)) {
+        setAttemptAssistedLatched(true);
         setComposerAssisted(true);
       }
     }
@@ -209,46 +250,81 @@ export function IeltsDraftCritiqueWorkbench({
   const stickyAssistedTexts = new Set([
     ...localAssistedTexts,
     ...authoritativeAssistedKeys,
-    ...collectAssistedWritingKeys(draft2, draft2Receipt),
+    ...(hasSubmitted ? collectAssistedWritingKeys(draft2, draft2Receipt) : []),
   ]);
-  const draft2TextKey = writingTextKey(draft2.paragraphs);
+  const draft2TextKey = hasSubmitted ? writingTextKey(draft2.paragraphs) : "";
   const draft2EffectivelyAssisted =
-    draft2.assisted || (draft2TextKey !== "" && stickyAssistedTexts.has(draft2TextKey));
+    attemptAssistedLatched ||
+    (hasSubmitted && draft2.assisted) ||
+    (draft2TextKey !== "" && stickyAssistedTexts.has(draft2TextKey));
   const composerParagraphs = composerText.split(PARAGRAPH_BREAK);
   const composerTextKey = writingTextKey(composerParagraphs);
-  const isComposerStickyAssisted = composerTextKey !== "" && stickyAssistedTexts.has(composerTextKey);
+  const isComposerMatchingAssistedText =
+    composerTextKey !== "" && stickyAssistedTexts.has(composerTextKey);
+  const isComposerStickyAssisted = attemptAssistedLatched || isComposerMatchingAssistedText;
   const effectiveComposerAssisted = composerAssisted || isComposerStickyAssisted;
 
   const draftSource = stableSerialize(getWritingDraftSource(draft2));
   const transferSource = stableSerialize(getWritingTransferSource(fixture.draft1, fixture.targets));
   const { transferReport, matchesSavedEvaluation } = useMemo(() => {
-    const matchesReport = savedReport.fromDraftId === fixture.draft1.draftId && savedReport.toDraftId === draft2.draftId &&
-      stableSerialize(savedReport.sourceDraft) === draftSource && stableSerialize(savedReport.transferSource) === transferSource;
+    const matchesReport =
+      savedReport.fromDraftId === fixture.draft1.draftId &&
+      savedReport.toDraftId === draft2.draftId &&
+      stableSerialize(savedReport.sourceDraft) === draftSource &&
+      stableSerialize(savedReport.transferSource) === transferSource;
     return {
-      transferReport: matchesReport ? savedReport :
-        analyzeCrossDraftTransfer({ draft1: fixture.draft1, draft2, targets: fixture.targets }),
-      matchesSavedEvaluation: matchesReport &&
+      transferReport: matchesReport
+        ? savedReport
+        : analyzeCrossDraftTransfer({
+            draft1: fixture.draft1,
+            draft2,
+            targets: fixture.targets,
+            promptStatement: fixture.promptStatementEn,
+          }),
+      matchesSavedEvaluation:
+        matchesReport &&
         stableSerialize(draft2Receipt.sourceDraft) === draftSource &&
         stableSerialize(draft2Receipt.transferSource) === transferSource,
     };
-  }, [fixture.draft1, fixture.targets, draft2, draft2Receipt, savedReport, draftSource, transferSource]);
+  }, [
+    fixture.draft1,
+    fixture.targets,
+    fixture.promptStatementEn,
+    draft2,
+    draft2Receipt,
+    savedReport,
+    draftSource,
+    transferSource,
+  ]);
   const activeDraft = viewMode === "draft1" ? fixture.draft1 : draft2;
   const activeReceipt = viewMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
   const activeDraftAssisted = viewMode === "draft1" ? activeDraft.assisted : draft2EffectivelyAssisted;
-  const canShowVerifiedReceipt = activeReceipt.masteryQualified && activeReceipt.countsTowardMastery && !activeDraftAssisted &&
-    activeReceipt.promptId === activeDraft.promptId && activeReceipt.draftId === activeDraft.draftId &&
-    activeReceipt.draftVersion === activeDraft.version && (viewMode === "draft1"
+  const canShowVerifiedReceipt =
+    !isDemoPreview &&
+    hasSubmitted &&
+    activeReceipt.masteryQualified &&
+    activeReceipt.countsTowardMastery &&
+    !activeDraftAssisted &&
+    activeReceipt.promptId === activeDraft.promptId &&
+    activeReceipt.draftId === activeDraft.draftId &&
+    activeReceipt.draftVersion === activeDraft.version &&
+    (viewMode === "draft1"
       ? stableSerialize(activeReceipt.sourceDraft) === stableSerialize(getWritingDraftSource(activeDraft))
       : matchesSavedEvaluation && transferReport.summary.masteryQualified);
-  const epistemicStatus = activeReceipt.epistemicStatus === "rubric_verified_evidence" && !canShowVerifiedReceipt
-    ? "practice_feedback"
-    : activeReceipt.epistemicStatus;
+  const epistemicStatus =
+    activeReceipt.epistemicStatus === "rubric_verified_evidence" && !canShowVerifiedReceipt
+      ? "practice_feedback"
+      : activeReceipt.epistemicStatus;
   const epistemicMeta = EPISTEMIC_BADGE_META[epistemicStatus];
 
-  const activeWordCount = useMemo(
-    () => countDraftWords(activeDraft.paragraphs),
-    [activeDraft.paragraphs],
-  );
+  const activeWordCount = useMemo(() => {
+    if (!hasSubmitted) {
+      return viewMode === "draft1"
+        ? countDraftWords(fixture.draft1.paragraphs)
+        : countDraftWords(composerText.split(PARAGRAPH_BREAK));
+    }
+    return countDraftWords(activeDraft.paragraphs);
+  }, [hasSubmitted, viewMode, fixture.draft1.paragraphs, composerText, activeDraft.paragraphs]);
 
   const visibleCriteria = useMemo(
     () =>
@@ -295,14 +371,38 @@ export function IeltsDraftCritiqueWorkbench({
     }
   }
 
+  function handleRevealScaffold() {
+    setHintsRevealed(true);
+    setAttemptAssistedLatched(true);
+    setComposerAssisted(true);
+  }
+
   function handleAnalyzeRevision() {
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
     const nextTextKey = writingTextKey(paragraphs);
     const nextAssisted =
-      composerAssisted || (nextTextKey !== "" && stickyAssistedTexts.has(nextTextKey));
-    const composerDraft = { ...draft2, paragraphs, assisted: nextAssisted };
-    const fingerprint = evaluationFingerprint(fixture, composerDraft, draft2Receipt, transferReport);
-    if (matchesSavedEvaluation && fingerprint === evaluation.cachedFingerprint) {
+      isDemoPreview ||
+      composerAssisted ||
+      attemptAssistedLatched ||
+      (nextTextKey !== "" && stickyAssistedTexts.has(nextTextKey));
+    const baseDraft: IeltsEssayDraft = hasSubmitted
+      ? draft2
+      : {
+          ...fixture.draft2,
+          version: Math.max(2, fixture.draft1.version + 1),
+          basedOnVersion: fixture.draft1.version,
+          paragraphs: [],
+          assisted: false,
+          timeSpentSeconds: 0,
+        };
+    const composerDraft = { ...baseDraft, paragraphs, assisted: nextAssisted };
+    const fingerprint = evaluationFingerprint(
+      fixture,
+      composerDraft,
+      draft2Receipt,
+      transferReport,
+    );
+    if (hasSubmitted && matchesSavedEvaluation && fingerprint === evaluation.cachedFingerprint) {
       setComposerNeedsText(false);
       activateTab("draft2");
       return;
@@ -312,7 +412,7 @@ export function IeltsDraftCritiqueWorkbench({
     const updatedDraft: IeltsEssayDraft = {
       ...composerDraft,
       draftId: `${fixture.draft2.draftId}-rev-${nextCount}`,
-      version: Math.max(2, draft2.version),
+      version: Math.max(2, baseDraft.version),
       createdAt: new Date().toISOString(),
     };
 
@@ -320,6 +420,7 @@ export function IeltsDraftCritiqueWorkbench({
       baselineDraft: fixture.draft1,
       revisedDraft: updatedDraft,
       targets: fixture.targets,
+      promptStatement: fixture.promptStatementEn,
       receiptId: `receipt-live-${nextCount}`,
     });
 
@@ -329,8 +430,10 @@ export function IeltsDraftCritiqueWorkbench({
     }
 
     setComposerNeedsText(false);
+    setHasSubmitted(true);
     setRevisionCount(nextCount);
     if (updatedDraft.assisted) {
+      setAttemptAssistedLatched(true);
       setComposerAssisted(true);
       if (nextTextKey) {
         setLocalAssistedTexts((current) =>
@@ -343,7 +446,12 @@ export function IeltsDraftCritiqueWorkbench({
       draft2: updatedDraft,
       draft2Receipt: evaluated.receipt,
       transferReport: evaluated.transferReport,
-      cachedFingerprint: evaluationFingerprint(fixture, updatedDraft, evaluated.receipt, evaluated.transferReport),
+      cachedFingerprint: evaluationFingerprint(
+        fixture,
+        updatedDraft,
+        evaluated.receipt,
+        evaluated.transferReport,
+      ),
     });
     activateTab("draft2");
     onRevisionEvaluated?.({
@@ -353,18 +461,30 @@ export function IeltsDraftCritiqueWorkbench({
     });
   }
 
-  function handleResetRevision() {
-    const resetTextKey = writingTextKey(fixture.draft2.paragraphs);
-    setEvaluation({
-      ...authoritative,
-      cachedFingerprint: evaluation.cachedFingerprint === authorityFingerprint ? authorityFingerprint : null,
-    });
-    setComposerText(draftEditorText(fixture.draft2));
-    setComposerAssisted(
-      fixture.draft2.assisted || (resetTextKey !== "" && stickyAssistedTexts.has(resetTextKey)),
-    );
+  function handleResetForFreshAttempt() {
+    if (isDemoPreview) {
+      setEvaluation({
+        ...authoritative,
+        cachedFingerprint:
+          evaluation.cachedFingerprint === authorityFingerprint ? authorityFingerprint : null,
+      });
+      setComposerText(draftEditorText(fixture.draft2));
+      setComposerAssisted(fixture.draft2.assisted);
+      setAttemptAssistedLatched(fixture.draft2.assisted);
+      setComposerNeedsText(false);
+      setSelectedSpanId(null);
+      return;
+    }
+    setHasSubmitted(false);
+    setHintsRevealed(false);
+    setAttemptAssistedLatched(false);
+    setComposerAssisted(false);
+    setComposerText("");
     setComposerNeedsText(false);
     setSelectedSpanId(null);
+    setComposerOpen(true);
+    setResetPastAuthorityFingerprint(authorityFingerprint);
+    activateTab("draft2");
   }
 
   return (
@@ -388,34 +508,64 @@ export function IeltsDraftCritiqueWorkbench({
           </div>
 
           <div className="flex shrink-0 flex-col items-end gap-2">
-            <div className="flex items-baseline gap-2 rounded-tile border border-line bg-surface-2/60 px-4 py-2.5">
-              <span className="text-meta text-text-2">综合估分</span>
-              <span
-                data-overall-band
-                className="text-display font-semibold tabular-nums text-text"
-              >
-                Band {formatBandScore(activeReceipt.overallBand)}
-              </span>
-            </div>
+            {hasSubmitted ? (
+              <>
+                <div className="flex items-baseline gap-2 rounded-tile border border-line bg-surface-2/60 px-4 py-2.5">
+                  <span className="text-meta text-text-2">
+                    {isDemoPreview ? "示例估分" : "综合估分"}
+                  </span>
+                  <span
+                    data-overall-band
+                    className="text-display font-semibold tabular-nums text-text"
+                  >
+                    Band {formatBandScore(activeReceipt.overallBand)}
+                  </span>
+                </div>
 
-            <div
-              data-epistemic-badge={epistemicStatus}
-              className={`inline-flex items-center gap-2 rounded-pill border px-3 py-1 text-meta font-medium ${epistemicMeta.badgeClass}`}
-            >
-              <span
-                aria-hidden="true"
-                className={`size-2 rounded-pill ${epistemicMeta.dotClass}`}
-              />
-              <span>{epistemicMeta.writingLabel}</span>
-            </div>
+                <div
+                  data-epistemic-badge={epistemicStatus}
+                  data-demo-preview={isDemoPreview ? "true" : undefined}
+                  className={`inline-flex items-center gap-2 rounded-pill border px-3 py-1 text-meta font-medium ${epistemicMeta.badgeClass}`}
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`size-2 rounded-pill ${epistemicMeta.dotClass}`}
+                  />
+                  <span>
+                    {isDemoPreview
+                      ? "示例预览 · 仅作参考，不计入正式掌握度"
+                      : epistemicMeta.writingLabel}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <div
+                data-submission-state="unsubmitted"
+                className="inline-flex items-center gap-2 rounded-pill border border-line-strong bg-surface-2 px-3 py-1.5 text-meta font-medium text-text-2"
+              >
+                <span aria-hidden="true" className="size-2 rounded-pill bg-text-3" />
+                <span>
+                  {attemptAssistedLatched
+                    ? "已查看提示脚手架 · 本次为含辅助练习"
+                    : "尚未提交 · 独立作答中"}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
         <p className="mt-3 border-t border-line pt-3 text-meta text-text-2">
-          {epistemicStatus === activeReceipt.epistemicStatus ? activeReceipt.epistemicReason :
-            activeDraftAssisted
-              ? "本次作答包含提示或脚手架辅助，仅作练习诊断反馈，不计入正式掌握度。"
-              : transferReport.summary.disqualificationReason ?? "本轮迁移证据已更新，请重新分析改写。"}
+          {!hasSubmitted
+            ? attemptAssistedLatched
+              ? "你已展开提示与改写范例，本次作答已锁定为含辅助练习，不计入正式掌握度；如需开始新的独立作答，请点击「清空重做」。"
+              : "请先在下方编辑区独立完成二稿改写并提交评估。提交后才会解锁四维量规证据、原文高亮定位与升级改写建议。"
+            : isDemoPreview
+              ? "当前为示例预览模式，仅展示范文与量规批改结构，不代表你已完成独立作答或获得正式掌握度。"
+              : epistemicStatus === activeReceipt.epistemicStatus
+                ? activeReceipt.epistemicReason
+                : activeDraftAssisted
+                  ? "本次作答包含提示或脚手架辅助，仅作练习诊断反馈，不计入正式掌握度。"
+                  : transferReport.summary.disqualificationReason ?? "本轮迁移证据已更新，请重新分析改写。"}
         </p>
       </header>
 
@@ -468,12 +618,14 @@ export function IeltsDraftCritiqueWorkbench({
               >
                 {activeWordCount} 词 · 目标 {fixture.targetWordCount}+
               </span>
-              <span
-                data-time-box
-                className="rounded-pill border border-line bg-surface-2 px-3 py-1 text-text-2"
-              >
-                计时 {formatTimeBox(activeDraft.timeSpentSeconds, activeDraft.timeBoxSeconds)}
-              </span>
+              {hasSubmitted && (
+                <span
+                  data-time-box
+                  className="rounded-pill border border-line bg-surface-2 px-3 py-1 text-text-2"
+                >
+                  计时 {formatTimeBox(activeDraft.timeSpentSeconds, activeDraft.timeBoxSeconds)}
+                </span>
+              )}
             </div>
           </div>
 
@@ -520,11 +672,31 @@ export function IeltsDraftCritiqueWorkbench({
 
           {/* Manuscript Paper Sheets & Comparison Tabpanels (all 3 mounted for valid aria-controls) */}
           {(["draft1", "draft2"] as const).map((sheetMode) => {
+            const isActiveSheet = viewMode === sheetMode;
+
+            if (!hasSubmitted && sheetMode === "draft2") {
+              return (
+                <article
+                  key={sheetMode}
+                  id={panelDomId(sheetMode)}
+                  role="tabpanel"
+                  aria-labelledby={tabDomId(sheetMode)}
+                  hidden={!isActiveSheet}
+                  tabIndex={isActiveSheet ? 0 : -1}
+                  className="rounded-panel border border-dashed border-line-strong bg-surface p-6 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
+                >
+                  <p className="text-ui font-medium text-text">待独立提交二稿</p>
+                  <p className="mt-1.5 text-meta text-text-2">
+                    当前不预置完成版范文或升级改写示例。请在下方编辑区撰写你的二稿并点击「提交并评估改写」，系统将即时生成四维量规定位与跨稿迁移清单。
+                  </p>
+                </article>
+              );
+            }
+
             const sheetDraft = sheetMode === "draft1" ? fixture.draft1 : draft2;
             const sheetReceipt =
               sheetMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
-            const sheetSpans = collectAllSpans(sheetReceipt);
-            const isActiveSheet = viewMode === sheetMode;
+            const sheetSpans = hasSubmitted ? collectAllSpans(sheetReceipt) : [];
 
             return (
               <article
@@ -547,7 +719,9 @@ export function IeltsDraftCritiqueWorkbench({
                         : "独立作答"}
                     </span>
                   </div>
-                  <span className="text-cap text-text-3">点击高亮句段可联动右侧诊断</span>
+                  <span className="text-cap text-text-3">
+                    {hasSubmitted ? "点击高亮句段可联动右侧诊断" : "一稿底稿参考（不含范文改写）"}
+                  </span>
                 </div>
 
                 <div className="space-y-5 font-reading text-read leading-7 text-text">
@@ -616,61 +790,69 @@ export function IeltsDraftCritiqueWorkbench({
             <div className="flex items-center justify-between border-b border-line pb-3">
               <h2 className="text-ui-lg font-semibold text-text">逐段改写对照</h2>
               <span className="text-meta text-text-2">
-                共 {transferReport.paragraphDiffs.length} 段 · 一稿 → 二稿
+                {hasSubmitted
+                  ? `共 ${transferReport.paragraphDiffs.length} 段 · 一稿 → 二稿`
+                  : "提交二稿后生成逐段对照"}
               </span>
             </div>
 
-            <div className="space-y-4">
-              {transferReport.paragraphDiffs.map((diff) => (
-                <div
-                  key={diff.paragraphIndex}
-                  className="rounded-tile border border-line bg-bg p-4"
-                >
-                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-cap font-semibold text-text-2">
-                        P{diff.paragraphIndex + 1}
-                      </span>
-                      <span className="rounded-pill border border-line bg-surface px-2.5 py-0.5 text-cap text-text-2">
-                        {DIFF_STATUS_LABEL[diff.status]}
-                      </span>
-                    </div>
-                    <span className="text-cap tabular-nums text-text-2">
-                      词数变化：{diff.wordDelta >= 0 ? `+${diff.wordDelta}` : diff.wordDelta} 词
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    <div className="rounded-ctl border border-line bg-surface p-3">
-                      <p className="mb-1.5 text-cap font-medium text-text-3">一稿原文</p>
-                      <p className="font-reading text-ui-lg leading-6 text-text-2">
-                        {diff.draft1Text || "（该段在一稿中为空）"}
-                      </p>
-                    </div>
-                    <div className="rounded-ctl border border-accent/25 bg-surface p-3">
-                      <p className="mb-1.5 text-cap font-medium text-accent">二稿改写</p>
-                      <p className="font-reading text-ui-lg leading-6 text-text">
-                        {diff.draft2Text || "（该段在二稿中已合并或删去）"}
-                      </p>
-                    </div>
-                  </div>
-
-                  {diff.addedTerms.length > 0 && (
-                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                      <span className="text-cap text-text-3">新增核心词：</span>
-                      {diff.addedTerms.slice(0, 6).map((term) => (
-                        <span
-                          key={term}
-                          className="rounded-pill border border-accent/25 bg-accent-soft px-2 py-0.5 text-cap text-accent"
-                        >
-                          {term}
+            {hasSubmitted ? (
+              <div className="space-y-4">
+                {transferReport.paragraphDiffs.map((diff) => (
+                  <div
+                    key={diff.paragraphIndex}
+                    className="rounded-tile border border-line bg-bg p-4"
+                  >
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-cap font-semibold text-text-2">
+                          P{diff.paragraphIndex + 1}
                         </span>
-                      ))}
+                        <span className="rounded-pill border border-line bg-surface px-2.5 py-0.5 text-cap text-text-2">
+                          {DIFF_STATUS_LABEL[diff.status]}
+                        </span>
+                      </div>
+                      <span className="text-cap tabular-nums text-text-2">
+                        词数变化：{diff.wordDelta >= 0 ? `+${diff.wordDelta}` : diff.wordDelta} 词
+                      </span>
                     </div>
-                  )}
-                </div>
-              ))}
-            </div>
+
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <div className="rounded-ctl border border-line bg-surface p-3">
+                        <p className="mb-1.5 text-cap font-medium text-text-3">一稿原文</p>
+                        <p className="font-reading text-ui-lg leading-6 text-text-2">
+                          {diff.draft1Text || "（该段在一稿中为空）"}
+                        </p>
+                      </div>
+                      <div className="rounded-ctl border border-accent/25 bg-surface p-3">
+                        <p className="mb-1.5 text-cap font-medium text-accent">二稿改写</p>
+                        <p className="font-reading text-ui-lg leading-6 text-text">
+                          {diff.draft2Text || "（该段在二稿中已合并或删去）"}
+                        </p>
+                      </div>
+                    </div>
+
+                    {diff.addedTerms.length > 0 && (
+                      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                        <span className="text-cap text-text-3">新增核心词：</span>
+                        {diff.addedTerms.slice(0, 6).map((term) => (
+                          <span
+                            key={term}
+                            className="rounded-pill border border-accent/25 bg-accent-soft px-2 py-0.5 text-cap text-accent"
+                          >
+                            {term}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-meta text-text-2">
+                完成并提交你的二稿后，此处将展示一稿与二稿的逐段改写差异与新增核心词。
+              </p>
+            )}
           </section>
 
           {/* Inline Revision Composer */}
@@ -682,7 +864,7 @@ export function IeltsDraftCritiqueWorkbench({
               <div>
                 <h2 className="text-ui-lg font-semibold text-text">在线精修二稿</h2>
                 <p className="text-meta text-text-2">
-                  直接修改段落后重新评估，系统会实时对照一稿检查目标搭配与句式是否真正迁移。
+                  直接撰写或修改段落后提交评估，系统会对照一稿检查目标搭配与句式是否真正迁移。
                 </p>
               </div>
               <button
@@ -707,17 +889,81 @@ export function IeltsDraftCritiqueWorkbench({
                     aria-describedby={composerNeedsText ? composerGuidanceId : undefined}
                     rows={8}
                     value={composerText}
+                    placeholder={`在此独立撰写你的二稿改写（空行分段，建议 ${fixture.targetWordCount}+ 词）...`}
                     onChange={(event) => {
-                      setComposerText(event.target.value);
+                      const nextValue = event.target.value;
+                      const nextKey = writingTextKey(nextValue.split(PARAGRAPH_BREAK));
+                      if (nextKey !== "" && stickyAssistedTexts.has(nextKey)) {
+                        setAttemptAssistedLatched(true);
+                        setComposerAssisted(true);
+                      }
+                      setComposerText(nextValue);
                       setComposerNeedsText(false);
                     }}
-                    className="block w-full rounded-ctl border border-line-strong bg-bg px-3.5 py-2.5 font-reading text-read leading-6 text-text focus:border-text focus:outline-none"
+                    className="block w-full rounded-ctl border border-line-strong bg-bg px-3.5 py-2.5 font-reading text-read leading-6 text-text placeholder:text-text-3 focus:border-text focus:outline-none"
                   />
                 </label>
                 {composerNeedsText && (
                   <p id={composerGuidanceId} role="alert" className="text-meta text-danger">
                     请先写几句英文再重新分析。只有标点或没有英文单词的内容无法分析。
                   </p>
+                )}
+
+                {!isDemoPreview && !hasSubmitted && (
+                  <div className="space-y-2 rounded-ctl border border-line bg-surface-2/60 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-cap text-text-2">
+                        需要脚手架思路或升级改写示例？展开后本次尝试将不可逆地标记为含辅助练习。
+                      </span>
+                      <button
+                        type="button"
+                        data-reveal-scaffold
+                        disabled={hintsRevealed}
+                        onClick={handleRevealScaffold}
+                        className="rounded-pill border border-line-strong bg-surface px-3 py-1 text-cap font-medium text-text hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {hintsRevealed
+                          ? "已展开提示 / 改写范例（本次已标记为含辅助）"
+                          : "查看提示 / 改写范例（将标记本次作答为含辅助）"}
+                      </button>
+                    </div>
+
+                    {hintsRevealed && (
+                      <div
+                        data-writing-scaffold="true"
+                        className="space-y-2 border-t border-line pt-2.5 text-meta"
+                      >
+                        <p className="text-cap font-medium text-warn">
+                          提示脚手架已展开 · 本次作答已锁定为含辅助练习，不计入正式掌握度
+                        </p>
+                        <ul className="space-y-1.5 text-text-2">
+                          {fixture.targets.map((target) => (
+                            <li key={target.id}>
+                              <strong className="font-medium text-text">{target.label}：</strong>
+                              {target.guidance}
+                            </li>
+                          ))}
+                        </ul>
+                        <div className="space-y-1.5 border-t border-line pt-2">
+                          <p className="text-cap font-medium text-text-3">参考改写句段</p>
+                          {IELTS_CRITERIA.flatMap((code) =>
+                            fixture.draft1Receipt.criteria[code].evidenceSpans.map((span) => (
+                              <p
+                                key={span.id}
+                                data-exemplar-rewrite={span.id}
+                                className="font-reading text-meta text-text"
+                              >
+                                <span className="mr-1.5 font-sans text-cap font-semibold text-accent">
+                                  {code}
+                                </span>
+                                {span.upgradeRewrite}
+                              </p>
+                            )),
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -738,7 +984,7 @@ export function IeltsDraftCritiqueWorkbench({
                     />
                     <span>
                       {isComposerStickyAssisted
-                        ? "本次改写已含提示辅助，不计入正式掌握度（修改段落内容后可取消勾选）"
+                        ? "本次作答已含提示辅助，已锁定为练习诊断（点击「清空重做」可开始新的独立作答）"
                         : "本次改写参考了范文或提示（勾选后仅作练习诊断，不计入正式掌握度）"}
                     </span>
                   </label>
@@ -746,17 +992,19 @@ export function IeltsDraftCritiqueWorkbench({
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={handleResetRevision}
+                      data-reset-attempt
+                      onClick={handleResetForFreshAttempt}
                       className="rounded-pill px-3 py-1.5 text-meta text-text-2 hover:bg-surface-2 hover:text-text"
                     >
-                      恢复示例二稿
+                      {isDemoPreview ? "恢复示例二稿" : "清空重做（开始独立作答）"}
                     </button>
                     <button
                       type="button"
+                      data-submit-writing
                       onClick={handleAnalyzeRevision}
                       className="rounded-pill bg-ink px-4 py-1.5 text-meta font-medium text-on-ink hover:bg-ink/90"
                     >
-                      重新分析改写
+                      {hasSubmitted ? "重新分析改写" : "提交并评估改写"}
                     </button>
                   </div>
                 </div>
@@ -791,7 +1039,7 @@ export function IeltsDraftCritiqueWorkbench({
                     <p className="text-cap text-text-2">{style.zhLabel}</p>
                   </div>
                   <span className="text-title font-semibold tabular-nums text-text">
-                    {formatBandScore(assessment.band)}
+                    {hasSubmitted ? formatBandScore(assessment.band) : "—"}
                   </span>
                 </button>
               );
@@ -799,7 +1047,7 @@ export function IeltsDraftCritiqueWorkbench({
           </div>
 
           {/* Memorized Template Warning Banner */}
-          {activeReceipt.memorizedTemplateFlags.length > 0 && (
+          {hasSubmitted && activeReceipt.memorizedTemplateFlags.length > 0 && (
             <section
               role="alert"
               aria-label="模板套话提醒"
@@ -827,7 +1075,9 @@ export function IeltsDraftCritiqueWorkbench({
               <h2 className="text-ui-lg font-semibold text-text">
                 四维官方量规依据（TR / CC / LR / GRA）
               </h2>
-              <span className="text-cap text-text-3">每项均附原文定位</span>
+              <span className="text-cap text-text-3">
+                {hasSubmitted ? "每项均附原文定位" : "提交后生成原文定位与改写建议"}
+              </span>
             </div>
 
             {visibleCriteria.map((code) => {
@@ -855,54 +1105,67 @@ export function IeltsDraftCritiqueWorkbench({
                           </span>
                         </h3>
                       </div>
-                      <span className="text-ui-lg font-semibold tabular-nums text-text">
-                        Band {formatBandScore(assessment.band)}
-                      </span>
+                      {hasSubmitted && (
+                        <span className="text-ui-lg font-semibold tabular-nums text-text">
+                          Band {formatBandScore(assessment.band)}
+                        </span>
+                      )}
                     </div>
 
-                    <p className="text-meta text-text-2">{assessment.summary}</p>
+                    {hasSubmitted ? (
+                      <>
+                        <p className="text-meta text-text-2">{assessment.summary}</p>
 
-                    <div className="space-y-2.5">
-                      {assessment.evidenceSpans.map((span) => {
-                        const isFocused = selectedSpanId === span.id;
-                        return (
-                          <div
-                            key={span.id}
-                            className={`rounded-ctl border p-3 transition-colors ${
-                              isFocused
-                                ? "border-text bg-surface-2"
-                                : "border-line bg-bg"
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (viewMode === "compare") setViewMode("draft2");
-                                setSelectedSpanId(span.id);
-                              }}
-                              className="w-full text-left"
-                            >
-                              <p className="mb-1 text-cap font-medium text-text-3">
-                                原文引证 · P{span.paragraphIndex + 1}
-                              </p>
-                              <blockquote className="border-l-2 border-line-strong pl-2.5 font-reading text-ui text-text">
-                                &ldquo;{span.excerpt}&rdquo;
-                              </blockquote>
-                            </button>
-                            <p className="mt-2 text-meta text-text-2">
-                              <strong className="font-medium text-text">诊断：</strong>
-                              {span.diagnosis}
-                            </p>
-                            <p className="mt-1 text-meta text-text-2">
-                              <strong className="font-medium text-accent">升级改写：</strong>
-                              <span className="font-reading text-text">
-                                {span.upgradeRewrite}
-                              </span>
-                            </p>
-                          </div>
-                        );
-                      })}
-                    </div>
+                        <div className="space-y-2.5">
+                          {assessment.evidenceSpans.map((span) => {
+                            const isFocused = selectedSpanId === span.id;
+                            return (
+                              <div
+                                key={span.id}
+                                className={`rounded-ctl border p-3 transition-colors ${
+                                  isFocused
+                                    ? "border-text bg-surface-2"
+                                    : "border-line bg-bg"
+                                }`}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (viewMode === "compare") setViewMode("draft2");
+                                    setSelectedSpanId(span.id);
+                                  }}
+                                  className="w-full text-left"
+                                >
+                                  <p className="mb-1 text-cap font-medium text-text-3">
+                                    原文引证 · P{span.paragraphIndex + 1}
+                                  </p>
+                                  <blockquote className="border-l-2 border-line-strong pl-2.5 font-reading text-ui text-text">
+                                    &ldquo;{span.excerpt}&rdquo;
+                                  </blockquote>
+                                </button>
+                                <p className="mt-2 text-meta text-text-2">
+                                  <strong className="font-medium text-text">诊断：</strong>
+                                  {span.diagnosis}
+                                </p>
+                                <p
+                                  data-exemplar-rewrite={span.id}
+                                  className="mt-1 text-meta text-text-2"
+                                >
+                                  <strong className="font-medium text-accent">升级改写：</strong>
+                                  <span className="font-reading text-text">
+                                    {span.upgradeRewrite}
+                                  </span>
+                                </p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-meta text-text-2">
+                        {IELTS_CRITERION_META[code].focusSummary}
+                      </p>
+                    )}
                   </div>
                 </article>
               );
@@ -925,60 +1188,96 @@ export function IeltsDraftCritiqueWorkbench({
                 data-transfer-summary
                 className="rounded-pill border border-line bg-surface-2 px-3 py-1 text-meta font-medium tabular-nums text-text"
               >
-                已迁移 {transferReport.summary.transferredCount} /{" "}
-                {transferReport.summary.totalTargets}
+                已迁移 {hasSubmitted ? transferReport.summary.transferredCount : 0} /{" "}
+                {hasSubmitted ? transferReport.summary.totalTargets : fixture.targets.length}
               </span>
             </div>
 
-            <ul className="space-y-2.5">
-              {transferReport.items.map((item) => {
-                const statusMeta = TRANSFER_STATUS_META[item.status];
-                const critStyle = CRITERION_STYLES[item.criterion];
-                return (
-                  <li
-                    key={item.targetId}
-                    data-transfer-item={item.targetId}
-                    data-transfer-status={item.status}
-                    className="rounded-tile border border-line bg-bg p-3"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span
-                          className={`rounded-pill border px-2 py-0.5 text-micro font-semibold ${critStyle.badgeClass}`}
-                        >
-                          {item.criterion}
-                        </span>
-                        <span className="rounded-pill border border-line bg-surface px-2 py-0.5 text-micro text-text-2">
-                          {UPGRADE_CATEGORY_LABELS[item.category]}
-                        </span>
-                        <span className="text-ui font-medium text-text">{item.label}</span>
-                      </div>
-
-                      <span
-                        className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${statusMeta.badgeClass}`}
-                      >
-                        {statusMeta.label}
-                      </span>
-                    </div>
-
-                    <p className="mt-1.5 text-meta text-text-2">{item.explanation}</p>
-
-                    {item.revisedMatched.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {item.revisedMatched.map((phrase) => (
+            {hasSubmitted ? (
+              <ul className="space-y-2.5">
+                {transferReport.items.map((item) => {
+                  const statusMeta = TRANSFER_STATUS_META[item.status];
+                  const critStyle = CRITERION_STYLES[item.criterion];
+                  return (
+                    <li
+                      key={item.targetId}
+                      data-transfer-item={item.targetId}
+                      data-transfer-status={item.status}
+                      className="rounded-tile border border-line bg-bg p-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <span
-                            key={phrase}
-                            className="rounded-pill border border-accent/25 bg-accent-soft px-2 py-0.5 font-reading text-cap text-accent"
+                            className={`rounded-pill border px-2 py-0.5 text-micro font-semibold ${critStyle.badgeClass}`}
                           >
-                            {phrase}
+                            {item.criterion}
                           </span>
-                        ))}
+                          <span className="rounded-pill border border-line bg-surface px-2 py-0.5 text-micro text-text-2">
+                            {UPGRADE_CATEGORY_LABELS[item.category]}
+                          </span>
+                          <span className="text-ui font-medium text-text">{item.label}</span>
+                        </div>
+
+                        <span
+                          className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${statusMeta.badgeClass}`}
+                        >
+                          {statusMeta.label}
+                        </span>
                       </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
+
+                      <p className="mt-1.5 text-meta text-text-2">{item.explanation}</p>
+
+                      {item.revisedMatched.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {item.revisedMatched.map((phrase) => (
+                            <span
+                              key={phrase}
+                              className="rounded-pill border border-accent/25 bg-accent-soft px-2 py-0.5 font-reading text-cap text-accent"
+                            >
+                              {phrase}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <ul className="space-y-2.5">
+                {fixture.targets.map((target) => {
+                  const statusMeta = TRANSFER_STATUS_META.pending;
+                  const critStyle = CRITERION_STYLES[target.criterion];
+                  return (
+                    <li
+                      key={target.id}
+                      data-transfer-item={target.id}
+                      data-transfer-status="pending"
+                      className="rounded-tile border border-line bg-bg p-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span
+                            className={`rounded-pill border px-2 py-0.5 text-micro font-semibold ${critStyle.badgeClass}`}
+                          >
+                            {target.criterion}
+                          </span>
+                          <span className="rounded-pill border border-line bg-surface px-2 py-0.5 text-micro text-text-2">
+                            {UPGRADE_CATEGORY_LABELS[target.category]}
+                          </span>
+                          <span className="text-ui font-medium text-text">{target.label}</span>
+                        </div>
+                        <span
+                          className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${statusMeta.badgeClass}`}
+                        >
+                          {statusMeta.label}
+                        </span>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </section>
         </aside>
       </div>

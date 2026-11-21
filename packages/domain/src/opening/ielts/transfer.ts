@@ -33,6 +33,122 @@ const STOP_WORDS = new Set([
   "can", "not", "but", "all", "one", "two", "its", "our", "you", "your",
 ]);
 
+const TOPIC_SCAFFOLD_STOP_WORDS = new Set([
+  ...STOP_WORDS,
+  "when", "where", "which", "who", "whom", "whose", "what", "why", "how",
+  "per", "via", "upon", "either", "neither", "nor", "yet", "thus", "hence",
+  "must", "might", "shall", "each", "any", "few", "own", "once", "soon",
+  "people", "person", "believe", "think", "argue", "claim", "contend", "suggest",
+  "agree", "disagree", "extent", "opinion", "view", "views", "discuss", "both",
+  "side", "sides", "question", "topic", "essay", "draft", "writing", "speaking",
+  "task", "prompt", "ielts", "nowadays", "today", "modern", "rapid", "development",
+  "important", "problem", "issue", "good", "better", "best", "bad", "worse", "worst",
+  "great", "greater", "useful", "helpful", "easier", "faster", "cleaner", "convenient",
+  "much", "less", "fewer", "often", "usually", "typically", "always", "never", "still",
+  "already", "even", "rather", "instead", "however", "therefore", "consequently",
+  "ultimately", "admittedly", "furthermore", "moreover", "nevertheless", "although",
+  "though", "whereas", "while", "because", "since", "unless", "until", "whether",
+  "despite", "firstly", "secondly", "thirdly", "finally", "overall", "nutshell",
+  "other", "another", "different", "same", "certain", "various", "several",
+  "make", "making", "take", "taking", "took", "give", "giving", "gave",
+  "does", "doing", "did", "done", "been", "being", "become", "becoming", "became",
+  "remain", "remaining", "seem", "seeming", "need", "want", "help", "helping",
+  "allow", "allowing", "create", "creating", "offer", "offering", "provide", "providing",
+  "support", "supporting", "require", "requiring", "include", "including",
+  "consider", "considering", "decide", "deciding", "keep", "keeping", "play", "playing",
+  "bring", "bringing", "show", "showing", "find", "finding", "know", "knowing",
+  "feel", "feeling", "live", "living", "use", "using", "used", "get", "getting",
+  "time", "times", "year", "years", "future", "past", "present", "long", "short", "term",
+  "high", "low", "big", "large", "small", "wide", "wider", "full", "quick", "quickly",
+  "rapidly", "immediately", "briefly", "gradually", "steadily", "directly", "primarily",
+  "mainly", "largely", "mostly", "simply", "clearly", "really", "actually", "way", "part",
+  "point", "fact", "case", "hand", "example", "instance", "reason", "result", "effect",
+  "impact", "benefit", "factor", "change", "solution", "approach", "choice", "option",
+  "thing", "well", "again", "away", "back", "down", "here", "over", "under", "without",
+  "between", "among", "around", "across", "through", "during", "before", "after",
+  "against", "toward", "within", "every", "coin", "double", "edged", "sword", "denying",
+  "heated", "sparked", "concerned", "stand", "last", "least", "carry", "buy",
+  "government", "public", "private", "money", "spend", "spending", "build", "building",
+  "family", "citizen", "resident", "authority", "society", "country", "nation", "national",
+  "local", "global", "world", "life", "daily", "community", "area", "place", "region",
+  "district", "expand", "expanding", "invest", "investing", "undermine", "alleviate",
+  "chronic", "demand", "induced",
+  "test", "demo", "fixture", "sample", "custom", "fresh", "attempt", "version",
+  "second", "first", "third",
+]);
+
+function stemTopicToken(word: string): string {
+  if (word.length <= 3) return word;
+  if (word.endsWith("ies") && word.length >= 5) return `${word.slice(0, -3)}y`;
+  if (word.endsWith("ing") && word.length >= 6) return word.slice(0, -3);
+  if (word.endsWith("ed") && word.length >= 5) return word.slice(0, -2);
+  if (word.endsWith("es") && word.length >= 5 && /(?:s|x|z|ch|sh)es$/u.test(word)) {
+    return word.slice(0, -2);
+  }
+  if (word.endsWith("s") && !word.endsWith("ss") && word.length >= 4) return word.slice(0, -1);
+  return word;
+}
+
+function collectTopicStems(
+  text: string,
+  stopWords: ReadonlySet<string>,
+  minLength: number,
+  into: Set<string>,
+): void {
+  const tokens = text.toLowerCase().match(/[a-z]+/gu) ?? [];
+  for (const token of tokens) {
+    if (token.length < minLength || stopWords.has(token)) continue;
+    const stem = stemTopicToken(token);
+    if (stem.length < 3 || stopWords.has(stem)) continue;
+    into.add(stem);
+  }
+}
+
+function extractPromptTopicKeywords(
+  promptStatement: string | undefined,
+  promptId: string,
+  targets: readonly IeltsUpgradeTarget[],
+  baselineProse: readonly string[],
+  samePrompt: boolean,
+): Set<string> {
+  const strict = new Set<string>();
+  const addAll = (stopWords: ReadonlySet<string>, targetSet: Set<string>) => {
+    if (promptStatement?.trim()) {
+      collectTopicStems(promptStatement, stopWords, 3, targetSet);
+    }
+    collectTopicStems(promptId, stopWords, 3, targetSet);
+    for (const target of targets) {
+      for (const pattern of target.targetPatterns) {
+        collectTopicStems(pattern, stopWords, 3, targetSet);
+      }
+    }
+    if (samePrompt) {
+      collectTopicStems(baselineProse.join(" "), stopWords, 4, targetSet);
+    }
+  };
+
+  addAll(TOPIC_SCAFFOLD_STOP_WORDS, strict);
+  if (strict.size > 0) return strict;
+
+  const fallback = new Set<string>();
+  addAll(STOP_WORDS, fallback);
+  return fallback;
+}
+
+function countTopicKeywordOverlap(
+  revisedProse: readonly string[],
+  topicKeywords: ReadonlySet<string>,
+): number {
+  if (topicKeywords.size === 0) return 0;
+  const revisedStems = new Set<string>();
+  collectTopicStems(revisedProse.join(" "), STOP_WORDS, 3, revisedStems);
+  let overlap = 0;
+  for (const keyword of topicKeywords) {
+    if (revisedStems.has(keyword)) overlap += 1;
+  }
+  return overlap;
+}
+
 const CLAUSE_VERB_CUE =
   /\b(is|are|was|were|be|been|being|am|can|could|may|might|must|shall|should|will|would|do|does|did|have|has|had|make|makes|made|offer|offers|offered|help|helps|helped|deliver|delivers|delivered|address|addresses|addressed|encourage|encourages|encouraged|undermine|undermines|undermined|resolve|resolves|resolved|require|requires|required|support|supports|supported|reduce|reduces|reduced|improve|improves|improved|provide|provides|provided|create|creates|created|allow|allows|allowed|show|shows|showed|suggest|suggests|contend|believe|argue|think|claim|need|needs|face|faces|lack|lacks|anchor|anchors|shift|shifts|ease|eases|cut|cuts|lower|lowers|curb|curbs|build|builds|spend|spends|invest|invests|expand|expands|rely|relies|trigger|triggers|sustain|sustains|prioritise|prioritises|prioritize|prioritizes|remain|remains|become|becomes|became|dominate|dominates|transport|transports|pair|pairs|pairing)\b/iu;
 
@@ -547,6 +663,7 @@ export type AnalyzeCrossDraftTransferInput = {
   readonly draft1: IeltsEssayDraft;
   readonly draft2: IeltsEssayDraft;
   readonly targets: readonly IeltsUpgradeTarget[];
+  readonly promptStatement?: string;
 };
 
 type TransferAnalysis = Omit<IeltsCrossDraftTransferReport, "summary" | "memorizedTemplateHits"> & {
@@ -593,7 +710,12 @@ function analyzeTransfer(
   revisedProse: readonly string[],
   revisedParagraphs: readonly (readonly GroundedSentence[])[],
   revisedWordCount: number,
-): { report: TransferAnalysis; creditedOccurrences: ReadonlyMap<IeltsCriterion, WritingCandidate> } {
+): {
+  report: TransferAnalysis;
+  creditedOccurrences: ReadonlyMap<IeltsCriterion, WritingCandidate>;
+  topicKeywordCount: number;
+  topicOverlapCount: number;
+} {
   const samePrompt = input.draft1.promptId === input.draft2.promptId;
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
   const advancingLineage = lineage === "advancing_revision";
@@ -800,6 +922,21 @@ function analyzeTransfer(
   const totalTargets = items.length;
   const transferRate = totalTargets > 0 ? transferredCount / totalTargets : 0;
 
+  const topicKeywords = extractPromptTopicKeywords(
+    input.promptStatement,
+    input.draft2.promptId,
+    targets,
+    baselineProse,
+    samePrompt,
+  );
+  const topicKeywordCount = topicKeywords.size;
+  const topicOverlapCount = countTopicKeywordOverlap(revisedProse, topicKeywords);
+  const isOffTopic =
+    revisedWordCount > 0 &&
+    topicKeywordCount > 0 &&
+    topicOverlapCount === 0 &&
+    transferredCount === 0;
+
   let disqualificationReason: string | undefined;
   if (revisedWordCount === 0) {
     disqualificationReason = "请先提交至少一段写作正文，再复核改写。";
@@ -811,6 +948,8 @@ function analyzeTransfer(
       : "题目已更换，须完成独立新题迁移复核后才可计入正式掌握度。";
   } else if (totalTargets === 0) {
     disqualificationReason = "当前未配置目标迁移项，无法确认跨草稿迁移，暂作为练习诊断反馈。";
+  } else if (isOffTopic) {
+    disqualificationReason = "当前内容未覆盖题干核心主题词，疑似偏题，仅作练习诊断反馈，不计入正式掌握度。";
   } else if (!hasSubstantiveRevision) {
     disqualificationReason = "修订稿相对初稿缺少实质性句法或内容改写，仅保留为练习诊断反馈，不计入正式掌握度。";
   } else if (hasLowEntropyStuffing) {
@@ -850,7 +989,7 @@ function analyzeTransfer(
       disqualificationReason,
     },
   };
-  return { report, creditedOccurrences };
+  return { report, creditedOccurrences, topicKeywordCount, topicOverlapCount };
 }
 
 type ParagraphEvidence = {
@@ -865,6 +1004,7 @@ export type EvaluateRevisedDraftInput = {
   readonly revisedDraft: IeltsEssayDraft;
   readonly targets: readonly IeltsUpgradeTarget[];
   readonly receiptId: string;
+  readonly promptStatement?: string;
   readonly freshPromptTransfer?: boolean;
   readonly createdAt?: string;
 };
@@ -886,10 +1026,16 @@ export function evaluateRevisedDraftDeterministically(
   const revisedProse = maskIeltsParagraphs(paragraphs);
   const segmentedParagraphs = revisedProse.map(segmentIeltsText);
   const wordCount = countProseWords(revisedProse.join("\n"));
-  const { report: transferReport, creditedOccurrences } = analyzeTransfer({
+  const {
+    report: transferReport,
+    creditedOccurrences,
+    topicKeywordCount,
+    topicOverlapCount,
+  } = analyzeTransfer({
     draft1: input.baselineDraft,
     draft2: input.revisedDraft,
     targets: input.targets,
+    promptStatement: input.promptStatement,
   }, freshPrompt, revisedProse, segmentedParagraphs, wordCount);
 
   if (wordCount === 0) {
@@ -959,6 +1105,17 @@ export function evaluateRevisedDraftDeterministically(
       ? 1.0
       : 0;
 
+  const isOffTopic =
+    topicKeywordCount > 0 &&
+    topicOverlapCount === 0 &&
+    transferReport.summary.transferredCount === 0;
+  const isTangential =
+    !isOffTopic &&
+    wordCount >= 180 &&
+    topicKeywordCount >= 5 &&
+    topicOverlapCount <= 1 &&
+    transferReport.summary.transferredCount === 0;
+
   const criterionTransfers = (criterion: IeltsCriterion) =>
     transferReport.items.filter((item) => item.criterion === criterion);
 
@@ -968,7 +1125,7 @@ export function evaluateRevisedDraftDeterministically(
     const regressed = related.filter((r) => r.status === "regressed").length;
     const cliches = related.filter((r) => r.status === "memorized_cliche").length;
     const lengthBonus =
-      wordCount >= 240 && !transferReport.summary.hasLowEntropyStuffing
+      wordCount >= 240 && !transferReport.summary.hasLowEntropyStuffing && !isOffTopic && !isTangential
         ? 0.5
         : wordCount < 160
           ? -0.5
@@ -984,7 +1141,13 @@ export function evaluateRevisedDraftDeterministically(
       criterion === "LR" || criterion === "TR"
         ? base - templatePenalty
         : base - templatePenalty * 0.5;
-    return clampToIeltsBand(penalized);
+    let capped = penalized;
+    if (isOffTopic) {
+      capped = Math.min(capped, criterion === "TR" ? 4.0 : 4.5);
+    } else if (isTangential) {
+      capped = Math.min(capped, criterion === "TR" ? 4.5 : 5.5);
+    }
+    return clampToIeltsBand(capped);
   };
 
   function findCriterionEvidence(
@@ -1052,9 +1215,13 @@ export function evaluateRevisedDraftDeterministically(
     ...trLoc,
     criterion: "TR",
     diagnosis:
-      creditedOccurrences.has("TR")
-        ? "核心立场与反方权衡已落地，论证不再停留在单边泛谈。"
-        : "该段论证可进一步回应反方前提（如短期道路扩容的边际效益递减），增强立场深度。",
+      isOffTopic
+        ? "当前作答未覆盖题干核心主题词，疑似偏题；任务回应与综合估分已按偏题规则封顶，请紧扣题干争议重写作答。"
+        : isTangential
+          ? "当前作答与题干主题词汇重合度极低，疑似跑题或泛谈，任务回应分数已受限。"
+          : creditedOccurrences.has("TR")
+            ? "核心立场与反方权衡已落地，论证不再停留在单边泛谈。"
+            : "该段论证可进一步回应反方前提（如短期道路扩容的边际效益递减），增强立场深度。",
     upgradeRewrite:
       "Admittedly, widening arterial roads may ease bottlenecks temporarily, yet induced traffic demand typically erodes those gains within a few years.",
   };
@@ -1102,9 +1269,13 @@ export function evaluateRevisedDraftDeterministically(
       criterion: "TR",
       band: trBand,
       summary:
-        trBand >= 7
-          ? "立场一贯且兼顾反方权衡，任务回应充分。"
-          : "立场明确，但反方回应与例证展开仍有提升空间。",
+        isOffTopic
+          ? "内容偏离题干核心主题（与题干关键词零重合），任务回应与综合估分已按偏题封顶。"
+          : isTangential
+            ? "论证与题干核心主题关联薄弱，任务回应分数已受限。"
+            : trBand >= 7
+              ? "立场一贯且兼顾反方权衡，任务回应充分。"
+              : "立场明确，但反方回应与例证展开仍有提升空间。",
       evidenceSpans: [trSpan],
     },
     {

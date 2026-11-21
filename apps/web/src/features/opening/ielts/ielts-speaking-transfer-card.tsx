@@ -5,7 +5,6 @@ import {
   evaluateSpeakingRetelling,
   getSpeakingEvaluationContext,
   getSpeakingTargets,
-  maskIeltsMarkup,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPart3Seed,
 } from "./domain-bridge";
@@ -15,6 +14,7 @@ import {
   SPEAKING_PACE_META,
   SPEAKING_SIGNAL_ORDER,
   SPEAKING_SIGNAL_RATING_META,
+  normalizeAssistedTextKey,
 } from "./workbench-model";
 
 export type IeltsSpeakingTransferCardProps = {
@@ -22,6 +22,8 @@ export type IeltsSpeakingTransferCardProps = {
   readonly initialTranscript?: string;
   readonly initialDurationSeconds?: number;
   readonly initialReceipt?: IeltsSpeakingFeedbackReceipt;
+  readonly sampleTranscript?: string;
+  readonly demoFixtureMode?: boolean;
   readonly onEvaluated?: (receipt: IeltsSpeakingFeedbackReceipt) => void;
 };
 
@@ -34,48 +36,51 @@ function snapshotReceipt(receipt: IeltsSpeakingFeedbackReceipt): string {
   });
 }
 
-function normalizeTranscriptKey(transcript: string): string {
-  const masked = maskIeltsMarkup(transcript)
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/\p{Cf}+/gu, "");
-  const tokens = masked
-    .match(/[\p{L}\p{N}]+/gu)
-    ?.filter((token) => /[a-z]/u.test(token));
-  if (tokens && tokens.length > 0) {
-    return tokens.join(" ");
-  }
-  return (
-    masked.replace(/\s+/gu, "") ||
-    transcript.normalize("NFKC").toLowerCase().replace(/[\s\p{Cf}]+/gu, "")
-  );
-}
-
 export function IeltsSpeakingTransferCard({
   seed: providedSeed,
   initialTranscript,
   initialDurationSeconds,
   initialReceipt,
+  sampleTranscript,
+  demoFixtureMode = false,
   onEvaluated,
 }: IeltsSpeakingTransferCardProps) {
   const demo = IELTS_WRITING_SPEAKING_FIXTURE;
   const seed = providedSeed ?? demo.speakingSeed;
-  const useDemo = providedSeed === undefined && initialTranscript === undefined &&
-    initialDurationSeconds === undefined && initialReceipt === undefined;
-  const startingTranscript = useDemo ? demo.initialSpeakingTranscript : initialTranscript ?? "";
-  const candidateReceipt = useDemo ? demo.initialSpeakingReceipt : initialReceipt;
+  const isDemoPreview = demoFixtureMode === true;
+  const useDemoFixture =
+    isDemoPreview &&
+    providedSeed === undefined &&
+    initialTranscript === undefined &&
+    initialDurationSeconds === undefined &&
+    initialReceipt === undefined;
+  const startingTranscript = useDemoFixture
+    ? demo.initialSpeakingTranscript
+    : (initialTranscript ?? "");
+  const startingDuration = useDemoFixture
+    ? demo.initialSpeakingDurationSeconds
+    : initialDurationSeconds;
+  const candidateReceipt = useDemoFixture ? demo.initialSpeakingReceipt : initialReceipt;
+  const scaffoldSampleTranscript =
+    sampleTranscript ?? (providedSeed === undefined ? demo.initialSpeakingTranscript : undefined);
   const attemptKey = JSON.stringify([
-    seed.seedId, seed.cartridgeId, seed.sourcePromptId, seed.sourceDraftId,
+    isDemoPreview,
+    seed.seedId,
+    seed.cartridgeId,
+    seed.sourcePromptId,
+    seed.sourceDraftId,
   ]);
   return (
     <SpeakingAttempt
       key={attemptKey}
       seed={seed}
+      isDemoPreview={isDemoPreview}
+      scaffoldSampleTranscript={scaffoldSampleTranscript}
       startingTranscript={startingTranscript}
       seedReceipt={candidateReceipt?.seedId === seed.seedId ? candidateReceipt : null}
       external={{
-        transcript: initialTranscript,
-        durationSeconds: initialDurationSeconds,
+        transcript: useDemoFixture ? demo.initialSpeakingTranscript : initialTranscript,
+        durationSeconds: startingDuration,
         receiptSnapshot: candidateReceipt && snapshotReceipt(candidateReceipt),
       }}
       onEvaluated={onEvaluated}
@@ -91,12 +96,16 @@ type ExternalSpeakingInput = {
 
 function SpeakingAttempt({
   seed,
+  isDemoPreview,
+  scaffoldSampleTranscript,
   startingTranscript,
   seedReceipt,
   external,
   onEvaluated,
 }: {
   readonly seed: IeltsSpeakingPart3Seed;
+  readonly isDemoPreview: boolean;
+  readonly scaffoldSampleTranscript: string | undefined;
   readonly startingTranscript: string;
   readonly seedReceipt: IeltsSpeakingFeedbackReceipt | null;
   readonly external: ExternalSpeakingInput;
@@ -113,30 +122,52 @@ function SpeakingAttempt({
     receiptSnapshot: string;
     receipt: IeltsSpeakingFeedbackReceipt;
   } | null>(null);
+  const [hintsRevealed, setHintsRevealed] = useState(false);
   const seedReceiptAssistedKey = seedReceipt?.assisted
-    ? normalizeTranscriptKey(seedReceipt.sourceTranscript)
+    ? normalizeAssistedTextKey(seedReceipt.sourceTranscript)
     : "";
+  const [attemptAssistedLatched, setAttemptAssistedLatched] = useState(
+    () => Boolean(seedReceipt?.assisted),
+  );
+  const [seenAssistedReceiptSnapshot, setSeenAssistedReceiptSnapshot] = useState<
+    string | undefined
+  >(() => (seedReceipt?.assisted ? external.receiptSnapshot : undefined));
+  const [clearedPersistedReceiptSnapshot, setClearedPersistedReceiptSnapshot] = useState<
+    string | undefined
+  >(undefined);
   const [assistedTranscripts, setAssistedTranscripts] = useState<readonly string[]>(() =>
     seedReceiptAssistedKey ? [seedReceiptAssistedKey] : [],
   );
-  if (seedReceiptAssistedKey && !assistedTranscripts.includes(seedReceiptAssistedKey)) {
-    setAssistedTranscripts([...assistedTranscripts, seedReceiptAssistedKey]);
-    if (
-      editedAnswer &&
-      !editedAnswer.assisted &&
-      normalizeTranscriptKey(editedAnswer.transcript) === seedReceiptAssistedKey
-    ) {
+
+  if (seedReceipt?.assisted && external.receiptSnapshot !== seenAssistedReceiptSnapshot) {
+    setSeenAssistedReceiptSnapshot(external.receiptSnapshot);
+    setAttemptAssistedLatched(true);
+    if (seedReceiptAssistedKey && !assistedTranscripts.includes(seedReceiptAssistedKey)) {
+      setAssistedTranscripts([...assistedTranscripts, seedReceiptAssistedKey]);
+    }
+    if (editedAnswer && !editedAnswer.assisted) {
       setEditedAnswer({ ...editedAnswer, assisted: true });
     }
+  } else if (seedReceiptAssistedKey && !assistedTranscripts.includes(seedReceiptAssistedKey)) {
+    setAssistedTranscripts([...assistedTranscripts, seedReceiptAssistedKey]);
   }
-  const matchingReceipt = seedReceipt?.sourceTranscript === startingTranscript &&
-    (external.durationSeconds === undefined || external.durationSeconds === seedReceipt.durationSeconds)
-    ? seedReceipt : null;
-  const startingTranscriptKey = normalizeTranscriptKey(startingTranscript);
-  const isStartingStickyAssisted = startingTranscriptKey !== "" && (
-    seedReceiptAssistedKey === startingTranscriptKey ||
-    assistedTranscripts.includes(startingTranscriptKey)
-  );
+
+  const isPersistedReceiptCleared =
+    clearedPersistedReceiptSnapshot !== undefined &&
+    clearedPersistedReceiptSnapshot === external.receiptSnapshot;
+  const matchingReceipt =
+    !isPersistedReceiptCleared &&
+    seedReceipt?.sourceTranscript === startingTranscript &&
+    (external.durationSeconds === undefined ||
+      external.durationSeconds === seedReceipt.durationSeconds)
+      ? seedReceipt
+      : null;
+  const startingTranscriptKey = normalizeAssistedTextKey(startingTranscript);
+  const isStartingStickyAssisted =
+    attemptAssistedLatched ||
+    (startingTranscriptKey !== "" &&
+      (seedReceiptAssistedKey === startingTranscriptKey ||
+        assistedTranscripts.includes(startingTranscriptKey)));
   const answer = editedAnswer ?? {
     transcript: startingTranscript,
     durationInput: String(external.durationSeconds ?? matchingReceipt?.durationSeconds ?? ""),
@@ -144,12 +175,13 @@ function SpeakingAttempt({
   };
   const { transcript, durationInput } = answer;
   const parsedDuration = durationInput.trim() === "" ? Number.NaN : Number(durationInput);
-  const receiptDuration = Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : null;
-  const transcriptKey = normalizeTranscriptKey(transcript);
-  const isStickyAssisted = transcriptKey !== "" && (
-    seedReceiptAssistedKey === transcriptKey ||
-    assistedTranscripts.includes(transcriptKey)
-  );
+  const receiptDuration =
+    Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : null;
+  const transcriptKey = normalizeAssistedTextKey(transcript);
+  const isMatchingAssistedText =
+    transcriptKey !== "" &&
+    (seedReceiptAssistedKey === transcriptKey || assistedTranscripts.includes(transcriptKey));
+  const isStickyAssisted = attemptAssistedLatched || isMatchingAssistedText;
   const assisted = answer.assisted || isStickyAssisted;
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
@@ -158,16 +190,19 @@ function SpeakingAttempt({
   if (localEvaluation) {
     const baseline = localEvaluation.external;
     const receiptChanged = baseline.receiptSnapshot !== external.receiptSnapshot;
-    const hostOwnsAnswer = external.receiptSnapshot === localEvaluation.receiptSnapshot &&
+    const hostOwnsAnswer =
+      external.receiptSnapshot === localEvaluation.receiptSnapshot &&
       external.transcript === localEvaluation.receipt.sourceTranscript &&
       (external.durationSeconds ?? null) === localEvaluation.receipt.durationSeconds;
     if (hostOwnsAnswer) {
       setEditedAnswer(null);
       setLocalEvaluation(null);
-    } else if (localEvaluation.authority !== authority ||
+    } else if (
+      localEvaluation.authority !== authority ||
       baseline.transcript !== external.transcript ||
       !Object.is(baseline.durationSeconds, external.durationSeconds) ||
-      (receiptChanged && localEvaluation.receiptSnapshot !== external.receiptSnapshot)) {
+      (receiptChanged && localEvaluation.receiptSnapshot !== external.receiptSnapshot)
+    ) {
       setLocalEvaluation(null);
     } else {
       evaluatedReceipt = localEvaluation.receipt;
@@ -179,30 +214,61 @@ function SpeakingAttempt({
     ? [...evaluatedReceipt.transferredCollocations, ...evaluatedReceipt.pendingCollocations]
     : [];
   const evaluatedContext = evaluatedReceipt?.evaluationContext;
-  const receipt = evaluatedReceipt?.seedId === seed.seedId &&
+  const receipt =
+    evaluatedReceipt?.seedId === seed.seedId &&
     evaluatedReceipt.sourceTranscript === transcript &&
     evaluatedReceipt.durationSeconds === receiptDuration &&
     evaluatedReceipt.assisted === assisted &&
     evaluatedContext?.timeWindowSeconds.min === context.timeWindowSeconds.min &&
     evaluatedContext.timeWindowSeconds.max === context.timeWindowSeconds.max &&
     evaluatedContext.writingReceiptEligible === context.writingReceiptEligible &&
-    evaluatedTargets.length === targets.length && targets.every((target) => evaluatedTargets.includes(target)) &&
+    evaluatedTargets.length === targets.length &&
+    targets.every((target) => evaluatedTargets.includes(target)) &&
     (evaluatedReceipt.epistemicStatus !== "rubric_verified_evidence" ||
-      (!evaluatedReceipt.assisted && evaluatedReceipt.masteryQualified &&
-        evaluatedReceipt.countsTowardMastery && context.writingReceiptEligible))
-    ? evaluatedReceipt
+      (!evaluatedReceipt.assisted &&
+        evaluatedReceipt.masteryQualified &&
+        evaluatedReceipt.countsTowardMastery &&
+        context.writingReceiptEligible))
+      ? evaluatedReceipt
+      : null;
+
+  const hasSubstantiveSubmission = receipt !== null && receipt.wordCount > 0;
+  const displayedEpistemicStatus =
+    receipt === null
+      ? null
+      : isDemoPreview
+        ? "practice_feedback"
+        : receipt.epistemicStatus;
+  const epistemicMeta = displayedEpistemicStatus
+    ? EPISTEMIC_BADGE_META[displayedEpistemicStatus]
     : null;
-  const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;
   const paceMeta = receipt ? SPEAKING_PACE_META[receipt.paceStatus] : null;
+
+  function handleRevealScaffold() {
+    setHintsRevealed(true);
+    setAttemptAssistedLatched(true);
+    setEditedAnswer((current) => ({ ...(current ?? answer), assisted: true }));
+    setLocalEvaluation(null);
+  }
+
+  function handleResetForFreshAttempt() {
+    setEditedAnswer({ transcript: "", durationInput: "", assisted: false });
+    setLocalEvaluation(null);
+    setHintsRevealed(false);
+    setAttemptAssistedLatched(false);
+    setSeenAssistedReceiptSnapshot(seedReceipt?.assisted ? external.receiptSnapshot : undefined);
+    setClearedPersistedReceiptSnapshot(external.receiptSnapshot);
+  }
 
   function handleEvaluate() {
     const nextReceipt = evaluateSpeakingRetelling({
       seed,
       transcript,
       durationSeconds: parsedDuration,
-      assisted,
+      assisted: isDemoPreview || assisted,
     });
     if (nextReceipt.assisted) {
+      setAttemptAssistedLatched(true);
       setEditedAnswer((current) =>
         current && !current.assisted ? { ...current, assisted: true } : current,
       );
@@ -212,7 +278,12 @@ function SpeakingAttempt({
         );
       }
     }
-    setLocalEvaluation({ authority, external, receiptSnapshot: snapshotReceipt(nextReceipt), receipt: nextReceipt });
+    setLocalEvaluation({
+      authority,
+      external,
+      receiptSnapshot: snapshotReceipt(nextReceipt),
+      receipt: nextReceipt,
+    });
     onEvaluated?.(nextReceipt);
   }
 
@@ -240,13 +311,19 @@ function SpeakingAttempt({
           >
             转写练习反馈 / 迁移检核
           </span>
-          {receipt && epistemicMeta && (
+          {receipt && epistemicMeta && displayedEpistemicStatus && (
             <span
-              data-speaking-epistemic={receipt.epistemicStatus}
+              data-speaking-epistemic={displayedEpistemicStatus}
+              data-demo-preview={isDemoPreview ? "true" : undefined}
               className={`inline-flex items-center gap-1.5 rounded-pill border px-3 py-1 text-meta font-medium ${epistemicMeta.badgeClass}`}
             >
-              <span aria-hidden="true" className={`size-2 rounded-pill ${epistemicMeta.dotClass}`} />
-              {epistemicMeta.speakingLabel}
+              <span
+                aria-hidden="true"
+                className={`size-2 rounded-pill ${epistemicMeta.dotClass}`}
+              />
+              {isDemoPreview
+                ? "示例预览 · 仅作参考，不计入正式掌握度"
+                : epistemicMeta.speakingLabel}
             </span>
           )}
         </div>
@@ -269,14 +346,16 @@ function SpeakingAttempt({
         </p>
         <p className="text-meta text-text-2">{seed.followUpQuestionZh}</p>
 
-        <ul className="mt-2 space-y-1 border-t border-line pt-2.5 text-meta text-text-2">
-          {seed.argumentBridgeCues.map((cue, idx) => (
-            <li key={idx} className="flex gap-2">
-              <span className="font-mono text-cap text-text-3">{idx + 1}.</span>
-              <span>{cue}</span>
-            </li>
-          ))}
-        </ul>
+        {(hasSubstantiveSubmission || isDemoPreview) && (
+          <ul className="mt-2 space-y-1 border-t border-line pt-2.5 text-meta text-text-2">
+            {seed.argumentBridgeCues.map((cue, idx) => (
+              <li key={idx} className="flex gap-2">
+                <span className="font-mono text-cap text-text-3">{idx + 1}.</span>
+                <span>{cue}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {/* Active Target Spoken Expressions */}
@@ -322,8 +401,19 @@ function SpeakingAttempt({
             rows={5}
             value={transcript}
             onChange={(event) => {
-              const transcript = event.target.value;
-              setEditedAnswer((current) => ({ ...(current ?? answer), transcript }));
+              const nextTranscript = event.target.value;
+              const nextKey = normalizeAssistedTextKey(nextTranscript);
+              const matchedAssisted =
+                nextKey !== "" &&
+                (seedReceiptAssistedKey === nextKey || assistedTranscripts.includes(nextKey));
+              if (matchedAssisted) {
+                setAttemptAssistedLatched(true);
+              }
+              setEditedAnswer((current) => ({
+                ...(current ?? answer),
+                transcript: nextTranscript,
+                assisted: (current ?? answer).assisted || matchedAssisted,
+              }));
               setLocalEvaluation(null);
             }}
             placeholder={`先口头计时说 ${seed.timeWindowSeconds.min}–${seed.timeWindowSeconds.max} 秒，再粘贴转写稿或记录你的关键表达...`}
@@ -342,8 +432,11 @@ function SpeakingAttempt({
                 max={180}
                 value={durationInput}
                 onChange={(event) => {
-                  const durationInput = event.target.value;
-                  setEditedAnswer((current) => ({ ...(current ?? answer), durationInput }));
+                  const nextDuration = event.target.value;
+                  setEditedAnswer((current) => ({
+                    ...(current ?? answer),
+                    durationInput: nextDuration,
+                  }));
                   setLocalEvaluation(null);
                 }}
                 className="w-20 rounded-ctl border border-line-strong bg-surface px-2.5 py-1 text-center tabular-nums text-text"
@@ -363,27 +456,94 @@ function SpeakingAttempt({
                 onChange={(event) => {
                   if (isStickyAssisted) return;
                   const nextAssisted = event.target.checked;
-                  setEditedAnswer((current) => ({ ...(current ?? answer), assisted: nextAssisted }));
+                  setEditedAnswer((current) => ({
+                    ...(current ?? answer),
+                    assisted: nextAssisted,
+                  }));
                   setLocalEvaluation(null);
                 }}
                 className="size-4 accent-ink disabled:cursor-not-allowed disabled:opacity-60"
               />
               <span>
                 {isStickyAssisted
-                  ? "当前转写已含稿件辅助，不计入正式掌握度（修改转写内容后可取消勾选）"
+                  ? "本次作答已含提示/稿件辅助，已锁定为练习诊断（点击「清空重做」可开始新的独立作答）"
                   : "对照了写作稿件（不计入正式掌握度）"}
               </span>
             </label>
           </div>
 
-          <button
-            type="button"
-            onClick={handleEvaluate}
-            className="rounded-pill bg-ink px-4 py-1.5 text-meta font-medium text-on-ink hover:bg-ink/90"
-          >
-            生成口语反馈
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-speaking-evaluate
+              onClick={handleEvaluate}
+              className="rounded-pill bg-ink px-4 py-1.5 text-meta font-medium text-on-ink hover:bg-ink/90"
+            >
+              生成口语反馈
+            </button>
+            {!isDemoPreview && (
+              <button
+                type="button"
+                data-reset-attempt
+                onClick={handleResetForFreshAttempt}
+                className="rounded-pill px-3 py-1.5 text-meta text-text-2 hover:bg-surface-2 hover:text-text"
+              >
+                清空重做（开始独立作答）
+              </button>
+            )}
+          </div>
         </div>
+
+        {!isDemoPreview && !hasSubstantiveSubmission && (
+          <div className="space-y-2 border-t border-line pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-cap text-text-2">
+                需要口语破题提示或示范转写？展开后本次尝试将不可逆地标记为含辅助练习。
+              </span>
+              <button
+                type="button"
+                data-reveal-scaffold
+                disabled={hintsRevealed}
+                onClick={handleRevealScaffold}
+                className="rounded-pill border border-line-strong bg-surface px-3 py-1 text-cap font-medium text-text hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {hintsRevealed
+                  ? "已展开提示 / 示范转写（本次已标记为含辅助）"
+                  : "查看提示 / 示范转写（将标记本次作答为含辅助）"}
+              </button>
+            </div>
+
+            {hintsRevealed && (
+              <div
+                data-speaking-scaffold="true"
+                className="space-y-2 rounded-ctl border border-line bg-surface p-3 text-meta"
+              >
+                <p className="text-cap font-medium text-warn">
+                  提示与示范脚手架已展开 · 本次口语作答已锁定为含辅助练习，不计入正式掌握度
+                </p>
+                <ul className="space-y-1 text-text-2">
+                  {seed.argumentBridgeCues.map((cue, idx) => (
+                    <li key={idx} className="flex gap-2">
+                      <span className="font-mono text-cap text-text-3">{idx + 1}.</span>
+                      <span>{cue}</span>
+                    </li>
+                  ))}
+                </ul>
+                {scaffoldSampleTranscript && (
+                  <div className="border-t border-line pt-2">
+                    <p className="mb-1 text-cap font-medium text-text-3">示范转写参考</p>
+                    <p
+                      data-speaking-sample-transcript
+                      className="font-reading text-meta leading-6 text-text"
+                    >
+                      {scaffoldSampleTranscript}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {receipt && paceMeta && (
@@ -404,7 +564,11 @@ function SpeakingAttempt({
             </div>
           </div>
 
-          <p className="text-meta text-text-2">{receipt.epistemicReason}</p>
+          <p className="text-meta text-text-2">
+            {isDemoPreview
+              ? "当前为示例预览模式，仅展示口语迁移检核样例，不代表你已完成独立作答或获得正式掌握度。"
+              : receipt.epistemicReason}
+          </p>
 
           {receipt.memorizedTemplateHits.length > 0 && (
             <div
@@ -471,14 +635,16 @@ function SpeakingAttempt({
             </div>
           )}
 
-          <div className="rounded-ctl border border-line bg-surface-2/60 p-3 text-cap text-text-2">
-            <p className="font-medium text-text">口语中建议避开的生硬书面衔接：</p>
-            <ul className="mt-1 list-disc space-y-0.5 pl-4">
-              {seed.avoidWrittenClunkyPhrases.map((phrase) => (
-                <li key={phrase}>{phrase}</li>
-              ))}
-            </ul>
-          </div>
+          {hasSubstantiveSubmission && (
+            <div className="rounded-ctl border border-line bg-surface-2/60 p-3 text-cap text-text-2">
+              <p className="font-medium text-text">口语中建议避开的生硬书面衔接：</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                {seed.avoidWrittenClunkyPhrases.map((phrase) => (
+                  <li key={phrase}>{phrase}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </section>
