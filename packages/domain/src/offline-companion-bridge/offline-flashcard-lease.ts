@@ -100,10 +100,11 @@ function normalizeGroupedDecimals(text: string): string {
   // as one item in its parent when surrounded by whitespace and separators.
   const openBrackets: ContainerFrame[] = [];
   const tupleBrackets = new Set<number>();
-  const isNumericItem = (frame: ContainerFrame, end: number): boolean => {
+  const isNumericItem = (frame: ContainerFrame, end: number, allowEmpty = false): boolean => {
     if (!frame.validItems) return false;
     const item = text.slice(frame.itemStart, end).trim();
-    return frame.nestedItem ? item === "" : NUMERIC_TUPLE_ITEM_RE.test(item);
+    if (frame.nestedItem) return item === "";
+    return (allowEmpty && item === "") || NUMERIC_TUPLE_ITEM_RE.test(item);
   };
   for (const delimiter of text.matchAll(DECIMAL_CONTEXT_DELIMITER_RE)) {
     const token = delimiter[0];
@@ -125,14 +126,14 @@ function normalizeGroupedDecimals(text: string): string {
     if (open.close !== token) continue;
     openBrackets.pop();
 
-    const numericTuple = open.hasSeparator && isNumericItem(open, offset);
-    if (numericTuple) {
+    const numericContainer = isNumericItem(open, offset, !open.hasSeparator);
+    if (numericContainer && open.hasSeparator) {
       tupleBrackets.add(open.index);
       tupleBrackets.add(offset);
     }
     const parent = openBrackets.at(-1);
     if (parent?.validItems) {
-      parent.validItems = numericTuple && !parent.nestedItem && text.slice(parent.itemStart, open.index).trim() === "";
+      parent.validItems = numericContainer && !parent.nestedItem && text.slice(parent.itemStart, open.index).trim() === "";
       parent.itemStart = offset + 1;
       parent.nestedItem = true;
     }
@@ -1564,35 +1565,52 @@ const ARTICLE_STOP_WORD_RE = new RegExp("^(?:" +
   "for|in|on|at|to|of|by|with|from|into|onto|upon|over|under|after|before|between|among|through|during|" +
   "without|within|about|against|per|via|as|up|off|out|across|along|past|around|inside|outside|despite|except|towards?|" +
   "like|unlike|besides|beside|beyond|behind|above|below|beneath|amid|amidst|amongst|throughout|concerning|regarding|" +
-  "including|excluding|following|given|barring|pending|worth|" +
+  "including|excluding|following|barring|pending|worth|" +
   "is|was|are|were|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|equals?|" +
   "and|or|but|nor|yet|so|if|then|else|when|while|where|whereas|because|since|unless|until|till|although|though|than|whether|" +
-  "that|which|who|whom|whose|what|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
+  "that|which|who|whom|whose|what|i|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
+  "myself|yourself|himself|herself|itself|ourselves|yourselves|themselves|" +
   "me|my|mine|this|these|those|the|an|another|each|every|all|both|any|either|neither|some|several|many|much|no|none|" +
   "instead|apart|aside|away|regardless|irrespective|only|alone|already|" +
   "also|too|again|once|twice|here|there|now|today|tomorrow|yesterday|tonight|otherwise|therefore|however|thus|hence|" +
-  "just|even|still|not|never|always|often|sometimes|usually|ever|seldom|rarely|hardly|barely|scarcely|same|such|" +
+  "whenever|wherever|whatever|whichever|whoever|whomever|moreover|furthermore|nevertheless|nonetheless|meanwhile|" +
+  "henceforth|thereafter|thereby|therein|thereof|whereby|wherein|whereof|lest|albeit|" +
+  "just|even|not|never|always|often|sometimes|usually|ever|seldom|rarely|hardly|barely|scarcely|same|such|" +
   "versus|vs|plus|minus|modulo|mod|times)$");
 const ARTICLE_MODIFIER_WORD_RE = new RegExp("^(?:" +
   "zeroth|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|" +
   "[a-z]+(?:teenth|tieth|illionth)|hundredth|thousandth|next|last|[a-z]+ly|almost|pairwise|" +
-  "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|more|less|most|least)$");
+  "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|more|less|most|least|" +
+  "still|given|provided|assuming|supposing|considering)$");
 const ARTICLE_LY_NOUN_RE =
   /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly)$/;
 const ARTICLE_QUANTITY_TOKEN = /\d(?:[^\s.,;:!?()[\]{}<>]|\.(?=\d))*/u.source;
 const ARTICLE_QUANTITY = `${ARTICLE_QUANTITY_TOKEN}(?:[ \\t]+(?:by|[x×*])[ \\t]+${ARTICLE_QUANTITY_TOKEN})*`;
+const ARTICLE_CARDINAL_RE = new RegExp("^(?:" +
+  DECIMAL_DIGITS + "|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|" +
+  "thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|" +
+  "eighty|ninety|hundred|thousand|million|billion|trillion|quadrillion|quintillion)$");
+const ARTICLE_CARDINAL_ADJUNCT_RE = /^[ \t]+(?:more|less|last|other|another|by|at|of|or|and|times)\b/i;
+const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
 
 function startsArticleNounPhrase(text: string): boolean {
   const tokens = new RegExp(`[ \\t]+(?:${ARTICLE_QUANTITY}(?=[ \\t])|([a-z]+)(?:-[a-z]+)*\\b)`, "iyu");
   let modifiers = 0;
+  let afterTemporalModifier = false;
   for (let match = tokens.exec(text); match !== null; match = tokens.exec(text)) {
+    const token = match[0].trim().toLowerCase();
+    if (ARTICLE_CARDINAL_RE.test(token) && ARTICLE_CARDINAL_ADJUNCT_RE.test(text.slice(tokens.lastIndex))) return false;
+
     const word = match[1]?.toLowerCase();
-    if (word !== undefined) {
-      if (match[0].trim().length < 2 || ARTICLE_STOP_WORD_RE.test(word)) return false;
+    // A repetition word after "next" or "last" needs a head, as in "next time step".
+    const repetitionModifier = afterTemporalModifier && ARTICLE_REPETITION_NOUN_RE.test(token);
+    if (word !== undefined && !repetitionModifier) {
+      if (token.length < 2 || ARTICLE_STOP_WORD_RE.test(word)) return false;
       if (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word)) return true;
     }
     if (modifiers === 3) return false;
     modifiers += 1;
+    afterTemporalModifier = token === "next" || token === "last";
   }
   return false;
 }
