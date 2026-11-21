@@ -508,7 +508,10 @@ const DIRECT_LEFT_VAR_CONNECTOR_END_RE =
 const ALGEBRAIC_SYMBOL_CHAR_RE = /^[\d.+\-*/^|'\u2032\u2019\u2212\u00D7\u00F7\u00B7\u221A!%_]$/;
 
 const LINE_BREAK_RE = /[\r\n\u2028\u2029]/;
-const INLINE_ABBREVIATION_END_RE = /(?<![\p{L}\p{N}_])(?:e\.g|i\.e|cf|vs|viz|approx)$/iu;
+const INLINE_ABBREVIATION_END_RE = /(?<![\p{L}\p{N}_])(e\.g|i\.e|cf|vs|viz|approx)$/iu;
+const SENTENCE_START_AFTER_ABBREVIATION_RE =
+  /^(?:\s+(?:\p{Lu}\p{Ll}|(?:\(\d+\)|\d+[.)])\s)|\s*\p{Script=Han})/u;
+const APPROXIMATE_NUMBER_RE = /^\s*[+−-]?(?:\d|\.\d)/u;
 
 function isSentenceDelimiter(text: string, index: number): boolean {
   const ch = text[index];
@@ -526,7 +529,12 @@ function isSentenceDelimiter(text: string, index: number): boolean {
   // The first periods in e.g. and i.e. are internal to the abbreviations.
   if (after === "g." && /(?<![\p{L}\p{N}_])e$/iu.test(before)) return false;
   if (after === "e." && /(?<![\p{L}\p{N}_])i$/iu.test(before)) return false;
-  return !INLINE_ABBREVIATION_END_RE.test(before);
+  const abbreviation = INLINE_ABBREVIATION_END_RE.exec(before)?.[1]?.toLowerCase();
+  if (!abbreviation) return true;
+
+  const remainder = text.slice(index + 1);
+  if (SENTENCE_START_AFTER_ABBREVIATION_RE.test(remainder)) return true;
+  return abbreviation === "approx" && !APPROXIMATE_NUMBER_RE.test(remainder);
 }
 
 function isClauseDelimiter(text: string, index: number): boolean {
@@ -757,13 +765,21 @@ const ENGLISH_MATH_OBJECT =
   "(?:(?:algebraic|mathematical|numeric(?:al)?|rational)\\s+)?" +
   "(?:expression|formula|quantity|quotient|difference|sum|product|term|equation|inequality|function|value)";
 const ENGLISH_MATH_DIRECTIVE_RE = new RegExp(
-  "^(?:please\\s+)?(?:evaluate|simplify|compute|calculate|expand|factor|solve|prove|verify|check|find)" +
+  "^(?:(?:(?:step|part|item|question|problem|exercise)\\s+[a-z0-9]+|\\([a-z0-9]+\\)|\\d+[.)])\\s+)?" +
+    "(?:(?:first|second|third|next|then|now|finally|lastly|also|hence|thus|therefore)\\s+)*" +
+    "(?:please\\s+)?(?:evaluate|simplify|compute|calculate|expand|factor|solve|prove|verify|check|find|determine)" +
     `(?:\\s+(?:(?:the\\s+)?value\\s+of(?:\\s+${ENGLISH_MATH_OBJECT})?|${ENGLISH_MATH_OBJECT}))?$`,
   "i",
 );
 
-const CJK_MATH_DIRECTIVE_RE =
-  /^(?:请\s*)?(?:计算|求值|化简|展开|因式分解|解方程|求解|证明|验证|核算|[解求设令若当]|已知)(?:\s*(?:下列|以下|该|此|本)?(?:代数式|数学式|表达式|算式|式子|分式|方程|不等式|函数|值)(?:的(?:数值|值|结果))?)?$/u;
+const CJK_MATH_DIRECTIVE_RE = new RegExp(
+  "^(?:第[一二三四五六七八九十\\d]+[步题问]\\s*)?" +
+    "(?:(?:首先|其次|先|接着|然后|最后|现在|再)\\s*)*" +
+    "(?:请\\s*)?(?:计算|求值|化简|展开|因式分解|解方程|求解|证明|验证|核算|[解求设令若当]|已知)" +
+    "(?:\\s*(?:下列|以下|该|此|本)?(?:代数式|数学式|表达式|算式|式子|分式|方程|不等式|函数|值)" +
+    "(?:的(?:数值|值|结果))?)?$",
+  "u",
+);
 
 const MATH_OPERATOR_BEFORE_GROUP_RE =
   /(?:[+\-\u2212*\u00D7\u00B7\u22C5/\u00F7\u2215\u2044^=<>\u2264\u2265\u2260\u2248\u2261([]|\\(?:le|leq|ge|geq|ne|neq|approx|equiv|cdot|times))\s*$/i;
@@ -845,14 +861,21 @@ const UNIT_CONNECTOR_CHAR_RE = /^[*/\u00D7\u00F7\u00B7\u22C5\u2219\u2217\u2215\u
 const UNIT_LETTER_RE = /^[A-Za-zμ]$/u;
 const UNIT_EXPONENT_RE = /^(?:\^\s*(?:\(\s*[-−]?\d+\s*\)|[-−]?\d+)|[-−]?\d+)/u;
 
-function hasMathDirective(prefix: string): boolean {
-  const afterOpeningBracket = 1 + Math.max(prefix.lastIndexOf("("), prefix.lastIndexOf("["));
-  const phrase = prefix.slice(afterOpeningBracket).trim();
+function isMathDirectivePhrase(phrase: string): boolean {
   return (
     ENGLISH_MATH_DIRECTIVE_RE.test(phrase) ||
     /^(?:let|if|when|where|given)$/i.test(phrase) ||
     CJK_MATH_DIRECTIVE_RE.test(phrase)
   );
+}
+
+function hasMathDirective(prefix: string): boolean {
+  const clause = prefix.trim();
+  if (isMathDirectivePhrase(clause)) return true;
+
+  // Test the entire clause first so a step marker such as (b) stays intact.
+  const lastOpeningBracket = Math.max(clause.lastIndexOf("("), clause.lastIndexOf("["));
+  return lastOpeningBracket !== -1 && isMathDirectivePhrase(clause.slice(lastOpeningBracket + 1).trimStart());
 }
 
 function hasNonMathProseBeforeGroup(prefix: string): boolean {
