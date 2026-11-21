@@ -158,13 +158,12 @@ function classifyLabel(
   return { kind: entry.kind, visibility: maxVisibility(baseVisibility, fallbackVisibility) };
 }
 
-function isTableDelimiterRow(line: string): boolean {
+function tableDelimiterColumnCount(line: string): number {
   const trimmed = line.trim();
-  if (!trimmed.includes("|") || !trimmed.includes("-")) return false;
+  if (!trimmed.includes("|") || !trimmed.includes("-")) return 0;
   const stripped = trimmed.replace(/^\|/, "").replace(/\|$/, "");
   const cells = stripped.split("|");
-  if (cells.length === 0) return false;
-  return cells.every(cell => /^\s*:?-{3,}:?\s*$/.test(cell));
+  return cells.every(cell => /^\s*:?-{3,}:?\s*$/.test(cell)) ? cells.length : 0;
 }
 
 function parseTimestampToMs(raw: string): number | null {
@@ -367,7 +366,7 @@ function sanitizeHeaderLabel(
 }
 
 function parseTableRowCells(
-  sourceLine: SourceLine,
+  sourceLine: Pick<SourceLine, "raw" | "start">,
   protectedSpans: readonly { readonly start: number; readonly end: number }[] = [],
   leadingEmptyCell = false,
 ): Array<{ readonly start: number; readonly end: number }> {
@@ -382,7 +381,7 @@ function parseTableRowCells(
       pipePositions.push(idx);
     }
   }
-  if (pipePositions.length === 0) return [];
+  if (pipePositions.length === 0) return [{ start: sourceLine.start, end: sourceLine.start + raw.length }];
   const trimmedLeft = raw.trimStart();
   const trimmedRight = raw.trimEnd();
   const hasLeadingPipe = !leadingEmptyCell && trimmedLeft.startsWith("|");
@@ -429,72 +428,144 @@ const BLOCKQUOTE_PREFIX_RE = /^[ \t]*>[ \t]?/;
 const CALLOUT_HEADER_RE = /^\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
 const CALLOUT_RE = /^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
 
-function stripContainerPrefixes(line: string): { body: string; quoted: boolean } {
-  let rest = line;
-  let quoted = false;
-  while (rest) {
-    const quote = BLOCKQUOTE_PREFIX_RE.exec(rest);
+type MarkdownContainer = "quote" | number; // List items store their continuation indentation.
+
+function continueMarkdownContainers(line: string, containers: readonly MarkdownContainer[]) {
+  let body = line;
+  let depth = 0;
+  for (const container of containers) {
+    if (container === "quote") {
+      const quote = BLOCKQUOTE_PREFIX_RE.exec(body);
+      if (!quote) break;
+      body = body.slice(quote[0].length);
+    } else {
+      const { length, padding } = listContinuationPrefix(body, container);
+      if (!length && body.trim()) break;
+      body = " ".repeat(padding) + body.slice(length);
+    }
+    depth++;
+  }
+  return { body, depth };
+}
+
+function readMarkdownContainerLine(line: string, previous: readonly MarkdownContainer[] = []) {
+  const { body: continuedBody, depth } = continueMarkdownContainers(line, previous);
+  let body = continuedBody;
+  const containers = previous.slice(0, depth);
+  while (body) {
+    const quote = BLOCKQUOTE_PREFIX_RE.exec(body);
     if (quote) {
-      quoted = true;
-      rest = rest.slice(quote[0].length);
+      containers.push("quote");
+      body = body.slice(quote[0].length);
       continue;
     }
-    const list = LIST_ITEM_RE.exec(rest);
-    if (!list) break;
-    rest = rest.slice(list[0].length);
+    const list = LIST_ITEM_RE.exec(body);
+    if (!list || THEMATIC_BREAK_RE.test(body)) break;
+    containers.push(listContentIndent(list[1]!));
+    body = body.slice(list[0].length);
   }
-  return { body: rest, quoted };
+  return { body, containers, continuedDepth: depth };
 }
 
 function innermostQuoteBody(line: string): string | null {
-  const { body, quoted } = stripContainerPrefixes(line);
-  return quoted ? body : null;
+  const { body, containers } = readMarkdownContainerLine(line);
+  return containers.includes("quote") ? body : null;
 }
 
-function isPipeTableRow(line: string): boolean {
-  return line.includes("|") && !/^[ \t]{0,3}(?:`{3,}|~{3,}|:{3,}|#{1,6}[ \t])/.test(line);
+const HTML_BLOCK_START_RE =
+  /^[ ]{0,3}<(?:\?|!(?:--|\[CDATA\[|[A-Z])|\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|script|search|section|style|summary|table|tbody|td|textarea|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$))/i;
+const STANDALONE_HTML_TAG_RE = /^[ ]{0,3}<\/?[A-Za-z][\w-]*(?:[ \t]+[^<>]*?)?\/?>[ \t]*$/;
+
+function isPipeTableBodyRow(line: string): boolean {
+  return Boolean(line.trim()) &&
+    !/^[ \t]{0,3}(?:\x60{3,}|~{3,}|:{3,}|#{1,6}(?:[ \t]|$)|>)/.test(line) &&
+    !THEMATIC_BREAK_RE.test(line) && !LIST_ITEM_RE.test(line) &&
+    !HTML_BLOCK_START_RE.test(line) && !STANDALONE_HTML_TAG_RE.test(line);
+}
+
+function isPipeTableHeader(line: string): boolean {
+  return line.includes("|") && isPipeTableBodyRow(line) &&
+    !/^(?:\$\$|\\\[|\\begin\{)/.test(line.trimStart());
 }
 
 function isPipeTableStart(header: string, delimiter?: string): boolean {
-  return isPipeTableRow(header) && delimiter !== undefined && isTableDelimiterRow(delimiter);
+  if (delimiter === undefined || !isPipeTableHeader(header)) return false;
+  const columns = tableDelimiterColumnCount(delimiter);
+  return columns > 0 && columns === parseTableRowCells({ raw: header, start: 0 }).length;
 }
 
 function matchFenceOpening(line: string): RegExpExecArray | null {
-  const match = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+  const match = /^[ ]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
   return match && !(match[1]![0] === "`" && match[2]!.includes("`")) ? match : null;
 }
 
 function closesFence(line: string, opener: string): boolean {
-  const match = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+  const match = /^[ ]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
   return match !== undefined && match[0] === opener[0] && match.length >= opener.length;
 }
 
-function transcriptCueSeparator(previous: string, next: string): string {
-  const previousLine = previous.slice(previous.lastIndexOf("\n") + 1);
-  const nextLine = next.split(/\r?\n/, 1)[0]!;
-  const continuesQuote = innermostQuoteBody(previousLine) !== null && innermostQuoteBody(nextLine) !== null;
-  const continuesTable = isPipeTableRow(previousLine) && isPipeTableRow(nextLine);
-  return continuesQuote || continuesTable || SETEXT_UNDERLINE_RE.test(nextLine) ? "\n" : "\n\n";
+function createTranscriptCueSeparator() {
+  let containers: MarkdownContainer[] = [];
+  let previousBody = "";
+  let inTable = false;
+  return (text: string, next?: string): string => {
+    const lines = text.split(/\r?\n/);
+    for (const line of lines) {
+      const current = readMarkdownContainerLine(line, containers);
+      const sameContainer = current.continuedDepth === containers.length &&
+        current.continuedDepth === current.containers.length;
+      inTable = sameContainer && (
+        (inTable && isPipeTableBodyRow(current.body)) || isPipeTableStart(previousBody, current.body)
+      );
+      containers = current.containers;
+      previousBody = current.body;
+    }
+    if (next === undefined) return "";
+    const nextLine = next.split(/\r?\n/, 1)[0]!;
+    const continued = continueMarkdownContainers(nextLine, containers);
+    const continuesTable = continued.depth === containers.length && (
+      (inTable && isPipeTableBodyRow(continued.body)) || isPipeTableStart(previousBody, continued.body)
+    );
+    const continuesQuote = innermostQuoteBody(lines.at(-1)!) !== null && innermostQuoteBody(nextLine) !== null;
+    const continuesSetext = continued.depth === containers.length && SETEXT_UNDERLINE_RE.test(continued.body);
+    const continuesPipeParagraph = continued.depth === containers.length &&
+      isPipeTableHeader(previousBody) && isPipeTableHeader(continued.body);
+    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph) return "\n";
+
+    // The synthetic paragraph break also ends any table.
+    previousBody = "";
+    inTable = false;
+    return "\n\n";
+  };
 }
 
 function nextMarkdownColumn(column: number, character: string): number {
   return character === "\t" ? column + (4 - column % 4) : column + 1;
 }
 
-function listContinuationPrefixLength(line: string, indent: number): number {
+function listContentIndent(prefix: string): number {
+  let column = 0;
+  for (const character of prefix) column = nextMarkdownColumn(column, character);
+  return column;
+}
+
+function listContinuationPrefix(line: string, indent: number): { length: number; padding: number } {
   let column = 0;
   let length = 0;
   while (column < indent && (line[length] === " " || line[length] === "\t")) {
     column = nextMarkdownColumn(column, line[length]!);
     length++;
   }
-  return column >= indent ? length : 0;
+  // A tab consumed at the list boundary can still contribute indentation to the inner block.
+  return column >= indent ? { length, padding: column - indent } : { length: 0, padding: 0 };
 }
 
 // Malformed math should stop at the paragraph or Markdown container boundary
 // so the main parser can still visit protected sections and blocks.
 function findMathBoundary(text: string, afterOpen: number, through = text.length): number {
   let boundary = text.length;
+  let containers: MarkdownContainer[] = [];
+  let paragraphStart: number | undefined;
   let newline = text.indexOf("\n", afterOpen);
   while (newline >= 0 && newline < through) {
     const lineStart = newline + 1;
@@ -503,8 +574,14 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     const line = text.slice(lineStart, lineEnd).replace(/\r$/, "");
     const nextLineEnd = nextNewline === -1 ? -1 : text.indexOf("\n", nextNewline + 1);
     const nextLine = nextNewline === -1 ? "" : text.slice(nextNewline + 1, nextLineEnd === -1 ? text.length : nextLineEnd).replace(/\r$/, "");
-    const body = stripContainerPrefixes(line).body.trimStart();
+    const current = readMarkdownContainerLine(line, containers);
+    if (current.continuedDepth !== containers.length || current.continuedDepth !== current.containers.length) {
+      paragraphStart = undefined;
+    }
+    containers = current.containers;
+    const body = current.body.trimStart();
     const latex = /^\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(body);
+    const beforeLine = text[newline - 1] === "\r" ? newline - 1 : newline;
     if (
       !line.trim() ||
       /^(?:#{1,6}(?:[ \t]|$)|:{3,}|\x60{3,}|~{3,})/.test(body) ||
@@ -512,11 +589,20 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
       DETAILS_OPEN_RE.test(body) ||
       (latex && classifyLabel(latex[1], "public") !== null) ||
       parseInlineTranscriptCue(line) !== null ||
-      THEMATIC_BREAK_RE.test(line) ||
-      (!/^[ \t]*(?:\$\$|\\\]|\\end\{)/.test(line) && SETEXT_UNDERLINE_RE.test(nextLine))
+      THEMATIC_BREAK_RE.test(line)
     ) {
-      boundary = text[newline - 1] === "\r" ? newline - 1 : newline;
+      boundary = beforeLine;
       break;
+    }
+    if (body && !/^(?:\$\$|\\\[|\\\]|\\end\{)/.test(body) && !/^(?: {4}| {0,3}\t)/.test(current.body)) {
+      paragraphStart ??= beforeLine;
+      const underline = continueMarkdownContainers(nextLine, containers);
+      if (underline.depth === containers.length && SETEXT_UNDERLINE_RE.test(underline.body)) {
+        boundary = paragraphStart;
+        break;
+      }
+    } else {
+      paragraphStart = undefined;
     }
     newline = nextNewline;
   }
@@ -788,7 +874,9 @@ function parsePrefixedInnerBlocks(
   outerVisibility: PedagogicalVisibility,
   propagateSectionVisibility: boolean,
   innerSealProofs: boolean,
-  prefixLength = (line: SourceLine, _index: number) => BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0,
+  readPrefix = (line: SourceLine, _index: number) => ({
+    length: BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0, padding: 0,
+  }),
 ): MappedInnerBlock[] {
   const bodyParts: string[] = [];
   const charOrigStart: number[] = [];
@@ -798,22 +886,23 @@ function parsePrefixedInnerBlocks(
 
   for (let idx = startLineIdx; idx <= endLineIdx; idx++) {
     const curLine = lines[idx]!;
-    let prefixLen: number;
-    if (idx === startLineIdx && firstLineSliceStart !== null) {
-      prefixLen = firstLineSliceStart - curLine.start;
-    } else {
-      prefixLen = prefixLength(curLine, idx);
-    }
-    const stripped = curLine.raw.slice(prefixLen);
+    const { length, padding } = idx === startLineIdx && firstLineSliceStart !== null
+      ? { length: firstLineSliceStart - curLine.start, padding: 0 }
+      : readPrefix(curLine, idx);
+    const stripped = curLine.raw.slice(length);
     if (!(idx === startLineIdx && firstLineSliceStart !== null)) {
       vLineToOrigLine.set(vCursor, curLine);
     }
-    for (let c = 0; c < stripped.length; c++) {
-      charOrigStart.push(curLine.start + prefixLen + c);
-      charOrigEnd.push(curLine.start + prefixLen + c + 1);
+    for (let column = 0; column < padding; column++) {
+      charOrigStart.push(curLine.start + length - 1);
+      charOrigEnd.push(curLine.start + length);
     }
-    bodyParts.push(stripped);
-    vCursor += stripped.length;
+    for (let c = 0; c < stripped.length; c++) {
+      charOrigStart.push(curLine.start + length + c);
+      charOrigEnd.push(curLine.start + length + c + 1);
+    }
+    bodyParts.push(" ".repeat(padding), stripped);
+    vCursor += padding + stripped.length;
 
     if (idx < endLineIdx) {
       bodyParts.push("\n");
@@ -929,34 +1018,40 @@ interface TranscriptRegion {
 }
 
 function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTiming | null> {
+  let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
   let inDocumentTable = false;
   return lines.map(({ raw }, index) => {
     if (fence) {
       const timing = fence.literal ? null : parseInlineTranscriptCue(raw);
-      if (closesFence(timing ? raw.slice(timing.prefixLength) : raw, fence.opener)) fence = undefined;
-      return timing;
+      const continuation = continueMarkdownContainers(raw.slice(timing?.prefixLength ?? 0), containers);
+      if (continuation.depth === containers.length) {
+        if (closesFence(continuation.body, fence.opener)) fence = undefined;
+        return timing;
+      }
+      // A fenced block ends with its list or quote even without a closing marker.
+      fence = undefined;
     }
     if (inDocumentTable) {
-      if (isPipeTableRow(raw)) return null;
+      const continuation = continueMarkdownContainers(raw, containers);
+      if (continuation.depth === containers.length && isPipeTableBodyRow(continuation.body)) return null;
       inDocumentTable = false;
     }
-    const documentFence = matchFenceOpening(raw);
-    if (documentFence) {
-      fence = { opener: documentFence[1]!, literal: true };
-      return null;
-    }
-    if (
-      isPipeTableStart(raw, lines[index + 1]?.raw) &&
-      !LIST_ITEM_RE.test(raw) &&
-      !/^(?:>|\$\$|\\\[|\\begin\{|<details\b)/i.test(raw.trimStart())
-    ) {
+
+    const documentLine = readMarkdownContainerLine(raw, containers);
+    const next = lines[index + 1];
+    const delimiter = next && continueMarkdownContainers(next.raw, documentLine.containers);
+    if (delimiter?.depth === documentLine.containers.length && isPipeTableStart(documentLine.body, delimiter.body)) {
+      containers = documentLine.containers;
       inDocumentTable = true;
       return null;
     }
+
     const timing = parseInlineTranscriptCue(raw);
-    const cueFence = timing && matchFenceOpening(raw.slice(timing.prefixLength));
-    if (cueFence) fence = { opener: cueFence[1]!, literal: false };
+    const line = timing ? readMarkdownContainerLine(raw.slice(timing.prefixLength), containers) : documentLine;
+    containers = line.containers;
+    const opener = matchFenceOpening(line.body)?.[1];
+    if (opener) fence = { opener, literal: !timing };
     return timing;
   });
 }
@@ -972,22 +1067,22 @@ function parseInlineCuedDocument(
   const parts: string[] = [];
   const regions: TranscriptRegion[] = [];
   const timedRows = new Set<number>();
+  const cueSeparator = createTranscriptCueSeparator();
   let offset = 0;
   for (const [index, line] of lines.entries()) {
     const timing = timings[index];
+    const next = timings[index + 1];
+    const body = line.raw.slice(timing?.prefixLength ?? 0);
+    const separator = cueSeparator(body, timing && next ? lines[index + 1]!.raw.slice(next.prefixLength) : undefined);
     if (timing || captionRowStarts?.has(line.start)) timedRows.add(offset);
     if (timing) {
-      const body = line.raw.slice(timing.prefixLength);
-      const next = timings[index + 1];
-      const separator = next
-        ? transcriptCueSeparator(body, lines[index + 1]!.raw.slice(next.prefixLength))
-        : source.slice(line.contentEnd, line.end);
+      const lineEnding = next ? separator : source.slice(line.contentEnd, line.end);
       regions.push({
         start: offset, end: offset + body.length, sourceStart: line.start + timing.prefixLength,
         cue: { timing, lineStart: line.start },
       });
-      parts.push(body, separator);
-      offset += body.length + separator.length;
+      parts.push(body, lineEnding);
+      offset += body.length + lineEnding.length;
     } else {
       const previous = regions.at(-1);
       const end = offset + line.end - line.start;
@@ -1957,8 +2052,7 @@ function parsePedagogicalAstInternal(
     // owned by a quoted paragraph inside the item.
     const listMatch = LIST_ITEM_RE.exec(raw);
     if (listMatch) {
-      let contentIndent = 0;
-      for (const character of listMatch[1]!) contentIndent = nextMarkdownColumn(contentIndent, character);
+      const contentIndent = listContentIndent(listMatch[1]!);
       const quote: QuoteParagraph = { open: false };
       const firstQuote = innermostQuoteBody(raw.slice(listMatch[0].length));
       if (firstQuote !== null) updateQuotedParagraph(quote, firstQuote);
@@ -1970,12 +2064,12 @@ function parsePedagogicalAstInternal(
           quote.fence = undefined;
           continue;
         }
-        const prefixLength = listContinuationPrefixLength(candidate, contentIndent);
+        const { length, padding } = listContinuationPrefix(candidate, contentIndent);
         const next = lines[j + 1]?.raw;
-        if (!prefixLength) {
+        if (!length) {
           if (!continuesLazyQuote(quote, candidate, next)) break;
         } else {
-          const body = candidate.slice(prefixLength);
+          const body = " ".repeat(padding) + candidate.slice(length);
           const quoted = innermostQuoteBody(body);
           if (quoted !== null) updateQuotedParagraph(quote, quoted);
           else if (!continuesLazyQuote(quote, body, next)) {
@@ -1994,7 +2088,9 @@ function parsePedagogicalAstInternal(
         activeVis,
         propagateSectionVisibility,
         sealProofs,
-        (bodyLine, index) => index === i ? listMatch[0].length : listContinuationPrefixLength(bodyLine.raw, contentIndent),
+        (bodyLine, index) => index === i
+          ? { length: listMatch[0].length, padding: 0 }
+          : listContinuationPrefix(bodyLine.raw, contentIndent),
       );
       const end = lines[endLineIdx]!.contentEnd;
       emitContainerWithExtraction("prose", activeVis, false, line.start, end, end, undefined, false, innerBlocks);
@@ -2005,7 +2101,7 @@ function parsePedagogicalAstInternal(
     // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
     if (isPipeTableStart(raw, lines[i + 1]?.raw)) {
       let j = i + 2;
-      while (j < lines.length && isPipeTableRow(lines[j]!.raw)) j++;
+      while (j < lines.length && isPipeTableBodyRow(lines[j]!.raw)) j++;
       const endLineIdx = j - 1;
       const activeVis = getActiveSectionVisibility();
       const tableStart = line.start;
@@ -2501,19 +2597,14 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
   const cueStarts: number[] = [];
   const captionRowStarts = new Set<number>();
   const textParts: string[] = [];
+  const cueSeparator = createTranscriptCueSeparator();
   let virtualOffset = 0;
-  let previousCue = "";
-  for (const cue of input.cues) {
-    if (textParts.length) {
-      const separator = transcriptCueSeparator(previousCue, cue.text);
-      virtualOffset += separator.length;
-      textParts.push(separator);
-    }
+  for (const [index, cue] of input.cues.entries()) {
     cueStarts.push(virtualOffset);
     for (const { start } of splitLinesWithOffsets(cue.text)) captionRowStarts.add(virtualOffset + start);
-    textParts.push(cue.text);
-    virtualOffset += cue.text.length;
-    previousCue = cue.text;
+    const separator = cueSeparator(cue.text, input.cues[index + 1]?.text);
+    textParts.push(cue.text, separator);
+    virtualOffset += cue.text.length + separator.length;
   }
   const text = textParts.join("");
   const readRange = readAstRanges(parsePedagogicalAstInternal(
