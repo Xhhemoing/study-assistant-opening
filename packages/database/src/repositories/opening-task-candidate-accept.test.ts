@@ -1,8 +1,12 @@
 import type { ConversationPlanMetadata } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { consumeOpeningConversationPlanCandidate, conversationPlanSuggestion } from "./opening-conversation-plan";
+import { acceptOpeningPlan } from "./opening-plan-accept";
 import { insertOpeningTaskWithOutcome } from "./opening-retest-task";
+
+vi.mock("./opening-learning-management-draft", () => ({ assertOpeningLearningManagementDraft: vi.fn() }));
+vi.mock("./opening-local-replan-validation", () => ({ validateOpeningLocalReplan: vi.fn() }));
 
 const scope = { workspaceId: "11111111-1111-4111-8111-111111111111", ownerUserId: "22222222-2222-4222-8222-222222222222" };
 const metadata: ConversationPlanMetadata = {
@@ -11,6 +15,14 @@ const metadata: ConversationPlanMetadata = {
   sourceIds: [], title: "Do the exercise", minutes: 15, courseId: null, dueText: null,
 };
 const payload = { kind: "task", title: metadata.title, minutes: metadata.minutes, dueText: metadata.dueText };
+const day = "2026-11-21";
+const draftId = "77777777-7777-4777-8777-777777777777";
+const draft = {
+  id: draftId, day, origin: "agent", status: "draft", base_version: 0, hard_blocks_fingerprint: "",
+  strategy_version: "local-replan-v1", input_snapshot: { conversationPlan: metadata },
+  suggested_tasks: [conversationPlanSuggestion(metadata)],
+  blocks: [{ taskId: metadata.taskId, start: `${day}T10:00:00Z`, end: `${day}T10:15:00Z`, reason: "Practice" }],
+};
 
 function deferred() {
   let release!: () => void;
@@ -18,7 +30,7 @@ function deferred() {
   return { promise, release };
 }
 
-function blockedAcceptance(blockedRow: "candidate" | "task" | "course", hasMemoryDependencies = true) {
+function blockedAcceptance(blockedRow: "candidate" | "task" | "course" | "planTaskInsert" | "planReceiptInsert", hasMemoryDependencies = true) {
   const waiting = deferred();
   const lock = deferred();
   const writes: string[] = [];
@@ -54,12 +66,25 @@ function blockedAcceptance(blockedRow: "candidate" | "task" | "course", hasMemor
       }
       return [];
     }
-    if (query.startsWith("INSERT INTO opening_tasks") || query.startsWith("UPDATE opening_assistant_candidates")) {
-      if (blockedRow === "course" && query.startsWith("INSERT INTO opening_tasks")) {
+    if (query.startsWith("SELECT day FROM opening_plan_drafts")) return [{ day }];
+    if (query.startsWith("SELECT accepted_version, accepted_blocks")) {
+      return [{ accepted_version: 0, accepted_blocks: [], hard_blocks_fingerprint: "" }];
+    }
+    if (query.startsWith("SELECT * FROM opening_plan_drafts")) return [draft];
+    if (query.startsWith("SELECT draft_id, payload_hash") || query.startsWith("SELECT pg_advisory_xact_lock")
+      || query.includes("opening_workspace_history_revisions")) return [];
+    const insertsTask = query.startsWith("INSERT INTO opening_tasks");
+    const insertsReceipt = query.startsWith("INSERT INTO opening_plan_acceptances");
+    if (insertsTask || insertsReceipt || query.startsWith("UPDATE opening_assistant_candidates")
+      || query.startsWith("INSERT INTO opening_plan_state") || query.startsWith("UPDATE opening_plan_state")
+      || query.startsWith("UPDATE opening_plan_drafts")) {
+      if ((insertsTask && (blockedRow === "course" || blockedRow === "planTaskInsert"))
+        || (insertsReceipt && blockedRow === "planReceiptInsert")) {
         waiting.release();
         await lock.promise;
       }
       writes.push(query);
+      if (query.startsWith("UPDATE opening_plan_drafts")) return [{ ...draft, status: "accepted", version: 1 }];
       return [{ id: metadata.taskId, title: payload.title, minutes: payload.minutes, priority: 0, status: "pending", version: 1 }];
     }
     throw new Error(`Unexpected SQL: ${query}`);
@@ -138,5 +163,32 @@ describe("task candidate acceptance after a row lock wait", () => {
     await expect(accept(fixture.sql)).resolves.toBeDefined();
     expect(fixture.probes).toEqual([]);
     expect(fixture.writes).toHaveLength(2);
+  });
+});
+
+describe("conversation-plan acceptance after a write lock wait", () => {
+  it.each([
+    { blockedWrite: "planTaskInsert", laterWrites: [] },
+    {
+      blockedWrite: "planReceiptInsert",
+      laterWrites: ["UPDATE opening_plan_state", "UPDATE opening_plan_drafts", "INSERT INTO opening_plan_acceptances"],
+    },
+  ] as const)("rolls back all writes when memory expires during $blockedWrite", async ({ blockedWrite, laterWrites }) => {
+    const fixture = blockedAcceptance(blockedWrite);
+    const result = acceptOpeningPlan(fixture.sql, scope, { draftId, expectedBaseVersion: 0, clientKey: "accept-plan" },
+      new Date(`${day}T09:00:00Z`));
+    try {
+      await Promise.race([fixture.waiting, result]);
+      expect(fixture.probes).toContain(true);
+      fixture.expireAncestor();
+    } finally {
+      fixture.rollBackLockHolder();
+    }
+    await expect(result).rejects.toMatchObject({ code: "VALIDATION", message: "task candidate memory dependency is no longer active" });
+    expect(fixture.probes.at(-1)).toBe(false);
+    expect(fixture.writes).toEqual([
+      "INSERT INTO opening_plan_state", "INSERT INTO opening_tasks", "UPDATE opening_assistant_candidates", ...laterWrites,
+    ].map(prefix => expect.stringContaining(prefix)));
+    expect(fixture.committedWrites).toEqual([]);
   });
 });

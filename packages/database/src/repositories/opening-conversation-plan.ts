@@ -68,7 +68,7 @@ async function readLockedConversationPlanMetadata(tx: TransactionSql, scope: Sco
 /** One candidate row serializes this path with the existing direct task-accept path. */
 export async function consumeOpeningConversationPlanCandidate(
   tx: TransactionSql, scope: Scope, raw: unknown, suggestion: SuggestedTask,
-): Promise<{ taskId: string; version: 1 }> {
+): Promise<{ taskId: string; version: 1; dependencyTurnId: string | null }> {
   const { metadata, dependencyTurnId } = await readLockedConversationPlanMetadata(tx, scope, raw);
   if (suggestion.id !== metadata.taskId || suggestion.key !== `conversation:${metadata.candidateId}`
     || suggestion.title !== metadata.title || suggestion.minutes !== metadata.minutes
@@ -92,7 +92,8 @@ export async function consumeOpeningConversationPlanCandidate(
     task_result_ref=${tx.json({ kind: "task", id: metadata.taskId })}
     WHERE id=${metadata.candidateId} AND workspace_id=${scope.workspaceId} AND status='pending' RETURNING id`;
   if (!updated.length) throw new OpeningPlanError("CONFLICT", "对话建议已处理，请重新读取。", "task_changed");
-  return { taskId: metadata.taskId, version: 1 };
+  await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependencyTurnId);
+  return { taskId: metadata.taskId, version: 1, dependencyTurnId };
 }
 
 export function conversationPlanSuggestion(metadata: ConversationPlanMetadata): SuggestedTask {
