@@ -101,46 +101,102 @@ function normalizeCompactForLeakScan(text: string): string {
 function stripEquationFormatting(text: string): string {
   // Quotes and lists can nest. A checkbox belongs to the preceding list marker.
   const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/gm;
-  const content = text
+  return text
     .replace(containerPrefix, "")
     .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")
-    .replace(/\r\n|[\r\n\u2028\u2029|]/g, ";");
-  const parts = content.split(/(\\[()[\]]|\*+|_+|`+|~~|\$\$?)/u);
-  const openings = new Map<string, number[]>();
-  for (let i = 1; i < parts.length; i += 2) {
+    .split(/\r\n|[\r\n\u2028\u2029]/u)
+    .map(stripEquationLine)
+    .join(";");
+}
+
+const mathSpanClosers = new Map([["$", "$"], ["$$", "$$"], ["\\(", "\\)"], ["\\[", "\\]"]]);
+
+/** Index exact-length code fences and TeX pairs without rescanning for each opener. */
+function equationSpanEnds(parts: readonly string[]): Map<number, number> {
+  const nextFence = new Map<string, { index: number; cell: number; count: number; pairedInCell: boolean }>();
+  const spanEnds = new Map<number, number>();
+  let cell = 0;
+  for (let i = parts.length - 2; i > 0; i -= 2) {
     const marker = parts[i]!;
-    if (marker === "\\(" || marker === "\\[") {
-      openings.set(marker === "\\(" ? "\\)" : "\\]", [i]);
+    if (marker === "|") {
+      cell++;
       continue;
     }
+    // A backslash escapes the first opening tick, but is literal inside code.
+    const escapedTick = marker.startsWith("\\`");
+    const fence = escapedTick ? marker.slice(1) : marker;
+    const closer = fence.startsWith("`")
+      ? (escapedTick ? fence.slice(1) : fence)
+      : mathSpanClosers.get(marker);
+    const end = closer ? nextFence.get(closer) : undefined;
+    // With an odd run of matching fences, prefer the complete pair in the
+    // later cell. A dangling fence in this cell must not consume its opener.
+    const keepLaterPair = end && end.cell !== cell && end.pairedInCell && end.count % 2 === 0;
+    if (end && !keepLaterPair) spanEnds.set(i, end.index);
+    nextFence.set(fence, {
+      index: i, cell, count: (nextFence.get(fence)?.count ?? 0) + 1, pairedInCell: end?.cell === cell,
+    });
+  }
+  return spanEnds;
+}
 
-    const before = parts[i - 1]!;
-    const after = parts[i + 1]!;
-    const emphasis = /^[*_~]/.test(marker);
-    // Emphasis touches its content. Keep markers attached to an outer operand
-    // so multiplication and identifier continuations reach the boundary check.
-    const canOpen = !emphasis || (!/[\p{L}\p{M}\p{N})\]}]$/u.test(before) && !/^\s/.test(after));
-    const canClose = !emphasis || (!/\s$/.test(before) && !/^[\p{L}\p{M}\p{N}([{]/u.test(after));
-    // A single emphasis run may close multiple openers or close in stages.
-    // Other delimiters pair by their full marker, including code-span length.
-    const kind = /^[*_]/.test(marker) ? marker[0]! : marker;
-    const stack = openings.get(kind) ?? [];
-    let remaining = marker.length;
-    while (canClose && remaining > 0 && stack.length > 0) {
-      const opening = stack[stack.length - 1]!;
-      const opener = parts[opening]!;
-      const paired = Math.min(opener.length, remaining);
-      parts[opening] = opener.slice(paired);
-      remaining -= paired;
-      if (!parts[opening]) stack.pop();
-    }
-    parts[i] = marker.slice(marker.length - remaining);
-    if (remaining > 0 && !marker.startsWith("\\") && canOpen) {
-      stack.push(i);
-      openings.set(kind, stack);
+function stripEquationLine(line: string): string {
+  const parts = line.split(/(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u);
+  if (parts.length === 1) return line;
+  const spanEnds = equationSpanEnds(parts);
+  const cellOpeners = new Map<string, number[]>();
+  for (let i = 1; i < parts.length; i += 2) {
+    const marker = parts[i]!;
+    const end = spanEnds.get(i);
+    if (end !== undefined) {
+      // Audit the span text in isolation. Its pipes and markers belong to
+      // its content, while emphasis around the whole span stays in this cell.
+      const spanOpeners = new Map<string, number[]>();
+      for (let j = i + 2; j < end; j += 2) stripEquationMarker(parts, j, spanOpeners);
+      parts[i] = marker.startsWith("\\`") ? "\\`" : "";
+      parts[end] = parts[end]!.startsWith("\\`") ? "\\" : "";
+      i = end;
+    } else if (marker === "|") {
+      cellOpeners.clear();
+      parts[i] = ";";
+    } else {
+      stripEquationMarker(parts, i, cellOpeners);
     }
   }
   return parts.join("");
+}
+
+function stripEquationMarker(parts: string[], i: number, openings: Map<string, number[]>): void {
+  const marker = parts[i]!;
+  if (marker === "\\(" || marker === "\\[") {
+    openings.set(mathSpanClosers.get(marker)!, [i]);
+    return;
+  }
+  const emphasis = /^[*_~]/.test(marker);
+  if (!emphasis && !/^(?:`+|\$\$?|\\[)\]])$/.test(marker)) return;
+  const before = parts[i - 1]!;
+  const after = parts[i + 1]!;
+  // Emphasis touches its content. Keep markers attached to an outer operand
+  // so multiplication and identifier continuations reach the boundary check.
+  const canOpen = !emphasis || (!/[\p{L}\p{M}\p{N})\]}]$/u.test(before) && !/^\s/.test(after));
+  const canClose = !emphasis || (!/\s$/.test(before) && !/^[\p{L}\p{M}\p{N}([{]/u.test(after));
+  // A single emphasis run may close multiple openers or close in stages.
+  const kind = emphasis ? marker[0]! : marker;
+  const stack = openings.get(kind) ?? [];
+  let remaining = marker.length;
+  while (canClose && remaining > 0 && stack.length > 0) {
+    const opening = stack[stack.length - 1]!;
+    const opener = parts[opening]!;
+    const paired = Math.min(opener.length, remaining);
+    parts[opening] = opener.slice(paired);
+    remaining -= paired;
+    if (!parts[opening]) stack.pop();
+  }
+  parts[i] = marker.slice(marker.length - remaining);
+  if (remaining > 0 && !marker.startsWith("\\") && canOpen) {
+    stack.push(i);
+    openings.set(kind, stack);
+  }
 }
 
 /**
