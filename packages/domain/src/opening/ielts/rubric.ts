@@ -523,7 +523,19 @@ export function createValidatedRubricReceipt(
       const { startOffset, endOffset, excerpt } = span;
       let located: ReturnType<typeof locateGroundedExcerpt> = null;
       if (startOffset === undefined && endOffset === undefined) {
-        located = locateGroundedExcerpt(paragraphText, excerpt);
+        const proseLocated = locateGroundedExcerpt(prose[span.paragraphIndex]!, excerpt);
+        if (proseLocated) {
+          const boundaries = graphemeBoundaries(paragraphText);
+          if (
+            boundaries.floor(proseLocated.startOffset) === proseLocated.startOffset &&
+            boundaries.floor(proseLocated.endOffset) === proseLocated.endOffset
+          ) {
+            located = {
+              ...proseLocated,
+              matchedText: paragraphText.slice(proseLocated.startOffset, proseLocated.endOffset),
+            };
+          }
+        }
       } else if (
         startOffset !== undefined && Number.isInteger(startOffset) &&
         endOffset !== undefined && Number.isInteger(endOffset) &&

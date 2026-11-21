@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, createElement } from "react";
+import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { evaluateRevisedDraftDeterministically, evaluateSpeakingRetelling } from "./domain-bridge";
@@ -73,6 +73,24 @@ describe("workbench-model helpers", () => {
 
     const filteredOut = segmentParagraphWithSpans(paragraph, spans, "TR");
     expect(filteredOut).toEqual([{ kind: "text", text: paragraph }]);
+  });
+
+  it("falls back to grounded grapheme-safe offsets when a span offset slice is stale", () => {
+    const paragraph = "Urban rail can alleviate chronic congestion across dense districts.";
+    const spans = [{
+      id: "stale-offset",
+      paragraphIndex: 0,
+      excerpt: "alleviate chronic congestion",
+      startOffset: 0,
+      endOffset: 5,
+      criterion: "LR" as const,
+      diagnosis: "精准学术搭配。",
+      upgradeRewrite: "alleviate chronic urban congestion",
+    }];
+
+    const segments = segmentParagraphWithSpans(paragraph, spans, "ALL");
+    expect(segments.find((segment) => segment.kind === "span")?.text)
+      .toBe("alleviate chronic congestion");
   });
 });
 
@@ -436,6 +454,44 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
+  it("keeps freshly generated Speaking feedback after a controlled host persists the receipt", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    function ControlledHost() {
+      const [receipt, setReceipt] = useState<typeof fixture.initialSpeakingReceipt>();
+      return createElement(IeltsSpeakingTransferCard, {
+        seed: fixture.speakingSeed,
+        initialTranscript: fixture.initialSpeakingTranscript,
+        initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+        initialReceipt: receipt,
+        onEvaluated: setReceipt,
+      });
+    }
+
+    await act(async () => root.render(createElement(ControlledHost)));
+    await act(async () => {
+      setNativeInputValue(
+        host.querySelector<HTMLTextAreaElement>("textarea")!,
+        `${fixture.initialSpeakingTranscript} Actually, rail remains the practical choice.`,
+      );
+    });
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+
+    expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
+    expect(host.querySelector('[data-speaking-pace="on_target"]')).not.toBeNull();
+  });
+
+  it("never shows verified Speaking evidence for an assisted initial receipt", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed: fixture.speakingSeed,
+      initialTranscript: fixture.initialSpeakingTranscript,
+      initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+      initialReceipt: { ...fixture.initialSpeakingReceipt, assisted: true },
+    })));
+
+    expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).toBeNull();
+  });
+
   it.each(["seed", "receipt"] as const)("restores Speaking inputs when the external %s changes", async (change) => {
     const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
     const seed = change === "seed" ? { ...fixture.speakingSeed, seedId: "second-speaking-attempt" } : fixture.speakingSeed;

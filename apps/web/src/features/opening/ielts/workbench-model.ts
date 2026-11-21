@@ -204,12 +204,17 @@ export function segmentParagraphWithSpans(
   const eligible = spans
     .filter((span) => criterionFilter === "ALL" || span.criterion === criterionFilter)
     .map((span) => {
+      const grounded = locateGroundedExcerpt(paragraph, span.excerpt);
       if (
         typeof span.startOffset === "number" &&
         typeof span.endOffset === "number" &&
         span.startOffset >= 0 &&
         span.endOffset > span.startOffset &&
-        span.endOffset <= paragraph.length
+        span.endOffset <= paragraph.length &&
+        paragraph.slice(span.startOffset, span.endOffset) === span.excerpt &&
+        paragraph.slice(span.startOffset, span.endOffset).trim().length > 0 &&
+        grounded?.startOffset === span.startOffset &&
+        grounded.endOffset === span.endOffset
       ) {
         return { span, start: span.startOffset, end: span.endOffset };
       }

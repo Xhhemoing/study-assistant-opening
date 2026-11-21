@@ -863,11 +863,13 @@ type ParagraphEvidence = {
 function evidenceSnippet(
   source: Pick<GroundedTextSpan, "text" | "startOffset">,
   paragraphIndex: number,
+  rawParagraph: string,
   match?: MatchRange,
   citationBounds?: MatchRange,
 ): ParagraphEvidence {
   const { text, startOffset } = source;
-  const boundaries = graphemeBoundaries(text);
+  const rawText = rawParagraph.slice(startOffset, startOffset + text.length);
+  const boundaries = graphemeBoundaries(rawText);
   const requiredStart = boundaries.floor(match?.start ?? 0);
   const requiredEnd = boundaries.ceil(match?.end ?? 0);
   const minStart = boundaries.ceil((citationBounds?.start ?? startOffset) - startOffset);
@@ -881,17 +883,17 @@ function evidenceSnippet(
   if (end === start) end = boundaries.ceil(windowEnd);
 
   // Prefer word edges if they leave the matched occurrence intact.
-  if (start > 0 && !/\s/u.test(text[start - 1]!)) {
-    const firstSpace = text.indexOf(" ", start);
+  if (start > 0 && !/\s/u.test(rawText[start - 1]!)) {
+    const firstSpace = rawText.indexOf(" ", start);
     if (firstSpace >= start && firstSpace < requiredStart) start = boundaries.ceil(firstSpace + 1);
   }
-  if (end < text.length) {
-    const lastSpace = text.lastIndexOf(" ", end - 1);
+  if (end < rawText.length) {
+    const lastSpace = rawText.lastIndexOf(" ", end - 1);
     if (lastSpace > start + 40 && lastSpace >= requiredEnd) end = boundaries.floor(lastSpace);
   }
   return {
     paragraphIndex,
-    excerpt: text.slice(start, end),
+    excerpt: rawText.slice(start, end),
     startOffset: startOffset + start,
     endOffset: startOffset + end,
   };
@@ -899,6 +901,7 @@ function evidenceSnippet(
 
 function findParagraphEvidence(
   paragraphs: readonly (readonly GroundedSentence[])[],
+  rawParagraphs: readonly string[],
   patterns: readonly string[],
   fallbackPosition: number,
 ): ParagraphEvidence {
@@ -909,12 +912,16 @@ function findParagraphEvidence(
     for (const sentence of sentences) {
       for (const pattern of patterns) {
         const [match] = findPatternRanges(sentence.text, pattern);
-        if (match) return evidenceSnippet(sentence, paragraphIndex, match);
+        if (match) return evidenceSnippet(sentence, paragraphIndex, rawParagraphs[paragraphIndex]!, match);
       }
     }
   }
   const fallback = nonEmpty[Math.min(fallbackPosition, nonEmpty.length - 1)]!;
-  return evidenceSnippet(fallback.sentences[0]!, fallback.paragraphIndex);
+  return evidenceSnippet(
+    fallback.sentences[0]!,
+    fallback.paragraphIndex,
+    rawParagraphs[fallback.paragraphIndex]!,
+  );
 }
 
 export type EvaluateRevisedDraftInput = {
@@ -1004,9 +1011,9 @@ export function evaluateRevisedDraftDeterministically(
     fallbackPosition: number,
   ): ParagraphEvidence {
     const occurrence = creditedOccurrences.get(criterion);
-    if (!occurrence) return findParagraphEvidence(segmentedParagraphs, patterns, fallbackPosition);
+    if (!occurrence) return findParagraphEvidence(segmentedParagraphs, paragraphs, patterns, fallbackPosition);
     const { sentence, paragraphIndex, start, end, citationBounds } = occurrence;
-    return evidenceSnippet(sentence, paragraphIndex, {
+    return evidenceSnippet(sentence, paragraphIndex, paragraphs[paragraphIndex]!, {
       start: start - sentence.startOffset,
       end: end - sentence.startOffset,
     }, citationBounds);
@@ -1029,7 +1036,7 @@ export function evaluateRevisedDraftDeterministically(
     const source = segmentedParagraphs[paragraphIndex]!.find(
       (sentence) => sentence.startOffset <= startOffset && sentence.endOffset >= endOffset,
     ) ?? { text: paragraphs[paragraphIndex]!, startOffset: 0 };
-    lrLoc = evidenceSnippet(source, paragraphIndex, {
+    lrLoc = evidenceSnippet(source, paragraphIndex, paragraphs[paragraphIndex]!, {
       start: startOffset - source.startOffset,
       end: endOffset - source.startOffset,
     });

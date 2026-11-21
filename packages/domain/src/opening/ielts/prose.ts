@@ -1,8 +1,9 @@
 const MARKUP_TOKEN =
-  /<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<\?[\s\S]*?(?:\?>|$)|<!DOCTYPE\s+(?:"[^"]*"|'[^']*'|\[[^\]]*\]|[^"'[>])*>|<(\/?)([\p{L}_:][\p{L}\p{M}\p{N}_.:-]*)(?:\s+[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>="'`]+))?)*\s*\/?>/giu;
+  /<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<\?[\s\S]*?(?:\?>|$)|<!DOCTYPE\s+(?:"[^"]*"|'[^']*'|\[[^\]]*\]|[^"'[>])*>|<(\/?)([\p{L}_:][\p{L}\p{M}\p{N}_.:-]*)(?:(?:\s+|(?<=["']))[^\s"'<>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>="'`]+))?)*\s*\/?>/giu;
 
 const NON_PROSE_ELEMENTS = new Set([
-  "button", "details", "dialog", "fieldset", "form", "optgroup", "option", "select", "template",
+  "audio", "button", "canvas", "details", "dialog", "fieldset", "form", "iframe", "noscript", "object",
+  "optgroup", "option", "select", "template", "video",
 ]);
 const RAW_TEXT_ELEMENTS = new Set(["script", "style", "textarea", "title"]);
 
@@ -13,10 +14,10 @@ export function maskIeltsMarkup(text: string): string {
   let output = "";
   let end = 0;
   for (let token = tokens.exec(text); token; token = tokens.exec(text)) {
-    const [markup, closing, tag] = token;
+    const [, closing, tag] = token;
     const name = tag?.toLowerCase();
     output += containers.length ? " ".repeat(token.index - end) : text.slice(end, token.index);
-    if (name && !closing && !markup.endsWith("/>") && RAW_TEXT_ELEMENTS.has(name)) {
+    if (name && !closing && RAW_TEXT_ELEMENTS.has(name)) {
       const close = new RegExp(`</${name}\\s*>`, "giu");
       close.lastIndex = tokens.lastIndex;
       tokens.lastIndex = close.exec(text) ? close.lastIndex : text.length;
@@ -24,7 +25,7 @@ export function maskIeltsMarkup(text: string): string {
       if (closing) {
         const opener = containers.lastIndexOf(name);
         if (opener !== -1) containers.length = opener;
-      } else if (!markup.endsWith("/>")) {
+      } else {
         containers.push(name);
       }
     }

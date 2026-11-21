@@ -88,7 +88,7 @@ function SpeakingAttempt({
   const { transcript, durationInput, assisted } = answer;
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
-  const authority = JSON.stringify([startingTranscript, startingDuration, targets, context, matchingReceipt]);
+  const authority = JSON.stringify([targets, context]);
   const evaluatedReceipt = localEvaluation?.authority === authority
     ? localEvaluation.receipt
     : editedAnswer ? null : matchingReceipt;
@@ -102,7 +102,8 @@ function SpeakingAttempt({
     evaluatedContext.writingReceiptEligible === context.writingReceiptEligible &&
     evaluatedTargets.length === targets.length && targets.every((target) => evaluatedTargets.includes(target)) &&
     (evaluatedReceipt.epistemicStatus !== "rubric_verified_evidence" ||
-      (evaluatedReceipt.masteryQualified && evaluatedReceipt.countsTowardMastery && context.writingReceiptEligible))
+      (!evaluatedReceipt.assisted && evaluatedReceipt.masteryQualified &&
+        evaluatedReceipt.countsTowardMastery && context.writingReceiptEligible))
     ? evaluatedReceipt
     : null;
   const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;

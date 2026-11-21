@@ -938,6 +938,23 @@ describe("Writing transfer review regressions", () => {
     },
   );
 
+  it("keeps deterministic Writing evidence grounded around multi-code-unit markup graphemes", () => {
+    const comment = `<!-- ${"a".repeat(95)}\r\n😀👩🏾‍💻e\u0301 -->`;
+    const revisedDraft = {
+      ...DRAFT_2,
+      paragraphs: [
+        `Urban rail helps commuters  ${comment} every day.`,
+      ],
+    };
+
+    expect(() => evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft,
+      targets: TARGETS,
+      receiptId: "r-markup-graphemes",
+    })).not.toThrow();
+  });
+
   it("does not count interior noun lists as substantive rewriting", () => {
     const report = analyzeCrossDraftTransfer({
       draft1: {
@@ -1163,6 +1180,52 @@ describe("Writing lineage and evidence regressions", () => {
 
   it("excludes a markup block spanning Writing paragraphs", () => {
     expect(countDraftWords(["<script>", "Only hidden words", "</script>"])).toBe(0);
+  });
+
+  it.each([
+    "<script src=https://example.com/>Monitor per-capita emissions.</script>",
+    "<form action=https://example.com/>Submit answer</form>",
+    "<textarea name=notes/>hidden words</textarea>",
+    "<details id=d/>hidden words</details>",
+    "<details/>hidden words</details>",
+    '<input type="text"disabled>',
+    '<div title="Local planners should monitor per-capita emissions across the district."class="x"></div>',
+    "<noscript>Fallback words stay hidden.</noscript>",
+    "<iframe>Embedded words stay hidden.</iframe>",
+    "<template>Template fallback stays hidden.</template>",
+    "<object>Object fallback stays hidden.</object>",
+    "<canvas>Canvas fallback stays hidden.</canvas>",
+    "<audio>Audio fallback stays hidden.</audio>",
+    "<video>Video fallback stays hidden.</video>",
+  ])("masks non-prose HTML containers and HTML5 attribute edge cases (%s)", (markup) => {
+    expect(countDraftWords([markup])).toBe(0);
+  });
+
+  it("grounds an un-offsetted excerpt in prose instead of a duplicate attribute value", () => {
+    const paragraph = '<div title="alleviate chronic congestion">Urban rail helps alleviate chronic congestion across cities.</div>';
+    const assessments = buildValidDraft2Assessments().map((assessment) =>
+      assessment.criterion === "LR"
+        ? {
+            ...assessment,
+            evidenceSpans: [{ ...assessment.evidenceSpans[0]!, paragraphIndex: 0, excerpt: "alleviate chronic congestion" }],
+          }
+        : assessment,
+    );
+    const validated = createValidatedRubricReceipt({
+      receiptId: "r-attribute-prose",
+      taskMode: "writing_task2",
+      draft: { ...DRAFT_2, paragraphs: [paragraph, ...DRAFT_2.paragraphs.slice(1)] },
+      assessments,
+      crossDraftTransferVerified: true,
+    });
+
+    expect(validated.ok).toBe(true);
+    if (validated.ok) {
+      const span = validated.receipt.criteria.LR.evidenceSpans[0]!;
+      expect(span.excerpt).toBe("alleviate chronic congestion");
+      expect(paragraph.slice(span.startOffset, span.endOffset)).toBe(span.excerpt);
+      expect(span.startOffset).toBeGreaterThan(paragraph.indexOf(">") + 1);
+    }
   });
 
   it("does not use markup-only baselines for fresh-prompt Writing transfer", () => {

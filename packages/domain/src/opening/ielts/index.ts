@@ -35,6 +35,8 @@ export type {
   IeltsUpgradeTarget,
   IeltsUpgradeTransferItem,
   IeltsWritingCoreArgument,
+  IeltsWritingDraftSource,
+  IeltsWritingTransferSource,
 } from "./types";
 
 export {
