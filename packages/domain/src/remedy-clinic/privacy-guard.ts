@@ -284,47 +284,82 @@ function snapshotDenseArray(value: unknown): readonly unknown[] | null {
   }
 }
 
-function isPlainGetterFreeValue(value: unknown, seen: Set<object> = new Set()): boolean {
+const MAX_ACTIVE_SOURCES_DEPTH = 32;
+
+function walkActiveSourcesPlainValue(
+  value: unknown,
+  seen: Set<object>,
+  preOrder: object[],
+  depth: number,
+): boolean {
   if (value === null || value === undefined) return true;
   const kind = typeof value;
   if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") return true;
   if (kind !== "object") return false;
   const obj = value as object;
   if (seen.has(obj)) return true;
+  if (depth > MAX_ACTIVE_SOURCES_DEPTH) return false;
   seen.add(obj);
+  preOrder.push(obj);
   try {
     const proto = Object.getPrototypeOf(obj) as object | null;
     if (Array.isArray(obj)) {
       if (proto !== Array.prototype) return false;
       const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
-      if (!lenDesc || !Object.hasOwn(lenDesc, "value") || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value) || lenDesc.value < 0) {
+      if (
+        !lenDesc ||
+        !Object.hasOwn(lenDesc, "value") ||
+        typeof lenDesc.value !== "number" ||
+        !Number.isInteger(lenDesc.value) ||
+        lenDesc.value < 0
+      ) {
         return false;
       }
       const len = lenDesc.value;
       if (Reflect.ownKeys(obj).length !== len + 1) return false;
       if (hasGuardExoticBrand(obj, Array.prototype, false)) return false;
+      const children: unknown[] = new Array(len);
       for (let i = 0; i < len; i += 1) {
         const desc = Object.getOwnPropertyDescriptor(obj, String(i));
-        if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+        if (
+          !desc ||
+          !desc.enumerable ||
+          !Object.hasOwn(desc, "value") ||
+          desc.get !== undefined ||
+          desc.set !== undefined
+        ) {
           return false;
         }
-        if (!isPlainGetterFreeValue(desc.value, seen)) return false;
+        children[i] = desc.value;
+      }
+      for (let i = 0; i < len; i += 1) {
+        if (!walkActiveSourcesPlainValue(children[i], seen, preOrder, depth + 1)) return false;
       }
       return true;
     }
     if (proto !== Object.prototype && proto !== null) return false;
     const keys = Reflect.ownKeys(obj);
     let hasOwnCtor = false;
+    const children: unknown[] = [];
     for (const key of keys) {
       if (typeof key !== "string" || key === "__proto__") return false;
       if (key === "constructor") hasOwnCtor = true;
       const desc = Object.getOwnPropertyDescriptor(obj, key);
-      if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+      if (
+        !desc ||
+        !desc.enumerable ||
+        !Object.hasOwn(desc, "value") ||
+        desc.get !== undefined ||
+        desc.set !== undefined
+      ) {
         return false;
       }
-      if (!isPlainGetterFreeValue(desc.value, seen)) return false;
+      children.push(desc.value);
     }
     if (hasGuardExoticBrand(obj, proto, hasOwnCtor)) return false;
+    for (let i = 0; i < children.length; i += 1) {
+      if (!walkActiveSourcesPlainValue(children[i], seen, preOrder, depth + 1)) return false;
+    }
     return true;
   } catch {
     return false;
@@ -332,165 +367,158 @@ function isPlainGetterFreeValue(value: unknown, seen: Set<object> = new Set()): 
 }
 
 /**
- * Entry-level isolated parser for a single ActiveSourcesMap value.
- * Never executes getters and NEVER throws; invalid/exotic/Proxy/non-boolean-flag entries
- * degrade ONLY that entry to `entry: undefined` (inactive) while preserving valid sibling sources.
+ * Plain-data schema parser for a single already-verified ActiveSourcesMap entry.
+ * Called ONLY after the entire container graph has passed descriptor-walk and reverse-pre-order
+ * structuredClone verification; malformed plain-data entries (e.g. null, arrays, non-finite numbers,
+ * blank version, or non-boolean active/revoked such as {}, [], "yes") degrade ONLY that entry to
+ * undefined while preserving valid sibling sources.
  */
-function parseEntrySnap(
-  rawEntry: unknown,
-): { readonly entry: ActiveSourceEntry | undefined; readonly safeForOuterClone: boolean } {
-  if (rawEntry === null || rawEntry === undefined) {
-    return { entry: undefined, safeForOuterClone: true };
+function parsePlainActiveSourceEntry(rawEntry: unknown): ActiveSourceEntry | undefined {
+  if (typeof rawEntry === "string" || typeof rawEntry === "number") {
+    return isValidSourceVersion(rawEntry) ? rawEntry : undefined;
   }
-  const kind = typeof rawEntry;
-  if (kind === "string" || kind === "number") {
-    return {
-      entry: isValidSourceVersion(rawEntry) ? rawEntry : undefined,
-      safeForOuterClone: true,
-    };
+  if (rawEntry === null || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
+    return undefined;
   }
-  if (kind === "boolean" || kind === "bigint") {
-    return { entry: undefined, safeForOuterClone: true };
-  }
-  if (kind !== "object") {
-    return { entry: undefined, safeForOuterClone: false };
-  }
-
-  const snap = snapshotOwnGuardRecord(rawEntry);
-  if (!snap) {
-    return { entry: undefined, safeForOuterClone: false };
-  }
-
-  let allPrimitiveProps = true;
-  for (const key of Object.keys(snap)) {
-    if (!isPrimitiveValue(snap[key])) {
-      allPrimitiveProps = false;
-      break;
-    }
-  }
-  if (!allPrimitiveProps) {
-    // Object-valued field (e.g. { version: "v1", active: {} } or { version: "v1", revoked: [] }):
-    // reject ONLY this entry as inactive; mark safeForOuterClone only if nested tree is getter-free & cloneable.
-    let safeForOuterClone = false;
-    if (isPlainGetterFreeValue(rawEntry)) {
-      try {
-        structuredClone(rawEntry);
-        safeForOuterClone = true;
-      } catch {
-        safeForOuterClone = false;
-      }
-    }
-    return { entry: undefined, safeForOuterClone };
-  }
-
-  // All own property values are primitives: verify per-entry structuredClone (rejects Proxy/Promise/Generator).
-  try {
-    structuredClone(rawEntry);
-  } catch {
-    return { entry: undefined, safeForOuterClone: false };
-  }
-
-  const version = snap["version"];
+  const versionDesc = Object.getOwnPropertyDescriptor(rawEntry, "version");
+  const version = versionDesc && Object.hasOwn(versionDesc, "value") ? versionDesc.value : undefined;
   if (!isValidSourceVersion(version)) {
-    return { entry: undefined, safeForOuterClone: true };
+    return undefined;
   }
-  const hasActive = Object.prototype.hasOwnProperty.call(snap, "active");
-  const hasRevoked = Object.prototype.hasOwnProperty.call(snap, "revoked");
-  const active = hasActive ? snap["active"] : undefined;
-  const revoked = hasRevoked ? snap["revoked"] : undefined;
+  const activeDesc = Object.getOwnPropertyDescriptor(rawEntry, "active");
+  const revokedDesc = Object.getOwnPropertyDescriptor(rawEntry, "revoked");
+  const hasActive = activeDesc !== undefined;
+  const hasRevoked = revokedDesc !== undefined;
+  const active = hasActive && Object.hasOwn(activeDesc, "value") ? activeDesc.value : undefined;
+  const revoked = hasRevoked && Object.hasOwn(revokedDesc, "value") ? revokedDesc.value : undefined;
   if ((hasActive && typeof active !== "boolean") || (hasRevoked && typeof revoked !== "boolean")) {
-    return { entry: undefined, safeForOuterClone: true };
+    return undefined;
   }
-  return {
-    entry: Object.freeze({
-      version,
-      ...(typeof active === "boolean" ? { active } : {}),
-      ...(typeof revoked === "boolean" ? { revoked } : {}),
-    }),
-    safeForOuterClone: true,
-  };
+  return Object.freeze({
+    version,
+    ...(typeof active === "boolean" ? { active } : {}),
+    ...(typeof revoked === "boolean" ? { revoked } : {}),
+  });
+}
+
+export interface ActiveSourcesInspection {
+  readonly containerValid: boolean;
+  readonly sources: ReadonlyMap<string, ActiveSourceEntry>;
 }
 
 /**
- * Single-pass, Proxy/Promise/Generator/forged-Map-rejecting snapshot of ActiveSourcesMap.
- * Malformed outer containers (forged Map, outer Proxy/Promise/Generator, outer record getter,
- * or non-string Map key) return an empty Map; malformed individual entry values (e.g. non-boolean
- * active/revoked including object-valued {}, [], or entry-level getters/exotics) isolate and drop
- * ONLY that entry without revoking valid sibling sources.
+ * Unified JS-security vs plain-data-schema inspection of ActiveSourcesMap:
+ * - JS security boundary (getters/setters, Proxy, Promise, Generator, exotics, functions, symbols,
+ *   forged Map, non-string Map key, own "__proto__", excessive depth): aborts BEFORE structuredClone
+ *   (zero getter executions) or catches any Proxy via unconditional reverse-pre-order structuredClone,
+ *   failing closed at container level (`containerValid: false`, empty sources).
+ * - Plain-data schema boundary (valid plain Record or genuine Map whose entries contain malformed
+ *   plain-data values like `{ version: "v1", active: {} }`, `{ version: "v1", revoked: [] }`,
+ *   `{ version: "v1", active: "yes" }`, `{ version: "" }`, `null`, `[]`, `true`, `NaN`): degrades ONLY
+ *   that entry to inactive while preserving all valid sibling sources (`containerValid: true`).
  */
-export function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyMap<string, ActiveSourceEntry> {
+export function inspectActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ActiveSourcesInspection {
   if (!activeSourcesMap || typeof activeSourcesMap !== "object") {
-    const empty = new Map<string, ActiveSourceEntry>();
-    VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
-    return empty;
+    return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
   }
   if (VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.has(activeSourcesMap as ReadonlyMap<string, ActiveSourceEntry>)) {
-    return activeSourcesMap as ReadonlyMap<string, ActiveSourceEntry>;
+    return {
+      containerValid: true,
+      sources: activeSourcesMap as ReadonlyMap<string, ActiveSourceEntry>,
+    };
   }
 
   if (isGenuinePlainMap(activeSourcesMap)) {
-    const mapSnap = new Map<string, ActiveSourceEntry>();
-    let invalidKey = false;
-    let allEntriesSafeForOuterClone = true;
+    const rawEntries: Array<readonly [string, unknown]> = [];
+    const seen = new Set<object>([activeSourcesMap]);
+    const preOrder: object[] = [activeSourcesMap];
+    let containerOk = true;
     try {
       Reflect.apply(Map.prototype.forEach, activeSourcesMap, [
         (rawEntry: unknown, rawKey: unknown) => {
-          if (invalidKey) return;
+          if (!containerOk) return;
           if (typeof rawKey !== "string") {
-            invalidKey = true;
+            containerOk = false;
             return;
           }
-          const parsed = parseEntrySnap(rawEntry);
-          if (!parsed.safeForOuterClone) allEntriesSafeForOuterClone = false;
-          if (parsed.entry !== undefined) {
-            mapSnap.set(rawKey, parsed.entry);
+          if (!walkActiveSourcesPlainValue(rawEntry, seen, preOrder, 1)) {
+            containerOk = false;
+            return;
           }
+          rawEntries.push([rawKey, rawEntry]);
         },
       ]);
-      if (invalidKey) {
-        const empty = new Map<string, ActiveSourceEntry>();
-        VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
-        return empty;
+      if (!containerOk) {
+        return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
       }
-      if (allEntriesSafeForOuterClone) {
-        structuredClone(activeSourcesMap);
+      for (let i = preOrder.length - 1; i >= 0; i -= 1) {
+        structuredClone(preOrder[i]);
+      }
+      const mapSnap = new Map<string, ActiveSourceEntry>();
+      for (let i = 0; i < rawEntries.length; i += 1) {
+        const pair = rawEntries[i]!;
+        const parsed = parsePlainActiveSourceEntry(pair[1]);
+        if (parsed !== undefined) {
+          mapSnap.set(pair[0], parsed);
+        }
       }
       VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(mapSnap);
-      return mapSnap;
+      return { containerValid: true, sources: mapSnap };
     } catch {
-      const empty = new Map<string, ActiveSourceEntry>();
-      VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
-      return empty;
+      return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
     }
   }
 
   const recordSnap = snapshotOwnGuardRecord(activeSourcesMap);
   if (!recordSnap) {
-    const empty = new Map<string, ActiveSourceEntry>();
-    VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
-    return empty;
+    return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
+  }
+
+  const seen = new Set<object>([activeSourcesMap as object]);
+  const preOrder: object[] = [activeSourcesMap as object];
+  const keys = Object.keys(recordSnap);
+  for (let i = 0; i < keys.length; i += 1) {
+    if (!walkActiveSourcesPlainValue(recordSnap[keys[i]!], seen, preOrder, 1)) {
+      return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
+    }
+  }
+  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
+    try {
+      structuredClone(preOrder[i]);
+    } catch {
+      return { containerValid: false, sources: new Map<string, ActiveSourceEntry>() };
+    }
   }
 
   const snapshot = new Map<string, ActiveSourceEntry>();
-  let allEntriesSafeForOuterClone = true;
-  for (const key of Object.keys(recordSnap)) {
-    const parsed = parseEntrySnap(recordSnap[key]);
-    if (!parsed.safeForOuterClone) allEntriesSafeForOuterClone = false;
-    if (parsed.entry !== undefined) {
-      snapshot.set(key, parsed.entry);
-    }
-  }
-  if (allEntriesSafeForOuterClone) {
-    try {
-      structuredClone(activeSourcesMap);
-    } catch {
-      const empty = new Map<string, ActiveSourceEntry>();
-      VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(empty);
-      return empty;
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i]!;
+    const parsed = parsePlainActiveSourceEntry(recordSnap[key]);
+    if (parsed !== undefined) {
+      snapshot.set(key, parsed);
     }
   }
   VERIFIED_ACTIVE_SOURCE_SNAPSHOTS.add(snapshot);
-  return snapshot;
+  return { containerValid: true, sources: snapshot };
+}
+
+export function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyMap<string, ActiveSourceEntry> {
+  return inspectActiveSourcesMap(activeSourcesMap).sources;
+}
+
+function isFrozenSourceRefActive(
+  ref: RemedySourceRef,
+  verifiedSources: ReadonlyMap<string, ActiveSourceEntry>,
+): boolean {
+  const entry = verifiedSources.get(ref.sourceId);
+  if (entry === undefined) return false;
+  if (typeof entry === "string" || typeof entry === "number") {
+    return entry === ref.sourceVersion;
+  }
+  if (entry.revoked === true || entry.active === false) {
+    return false;
+  }
+  return entry.version === ref.sourceVersion;
 }
 
 function isSourceRefActiveAgainstVerified(
@@ -502,15 +530,7 @@ function isSourceRefActiveAgainstVerified(
   const sourceId = refSnap["sourceId"];
   const sourceVersion = refSnap["sourceVersion"];
   if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return false;
-  const entry = verifiedSources.get(sourceId);
-  if (entry === undefined) return false;
-  if (typeof entry === "string" || typeof entry === "number") {
-    return entry === sourceVersion;
-  }
-  if (entry.revoked === true || entry.active === false) {
-    return false;
-  }
-  return entry.version === sourceVersion;
+  return isFrozenSourceRefActive({ sourceId, sourceVersion }, verifiedSources);
 }
 
 export function isSourceRefActive(
@@ -544,17 +564,11 @@ export function areSourceRefsActive(
   sourceRefs: readonly RemedySourceRef[],
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
-  const items = snapshotDenseArray(sourceRefs);
-  if (!items || items.length === 0) return false;
+  const refsRes = snapshotSourceRefsStrict(sourceRefs);
+  if (!refsRes.ok || refsRes.refs.length === 0) return false;
   const verifiedSources = snapshotActiveSourcesMap(activeSourcesMap);
-  for (let i = 0; i < items.length; i += 1) {
-    const item = items[i];
-    if (!item || !isSourceRefActiveAgainstVerified(item as RemedySourceRef, verifiedSources)) return false;
-  }
-  try {
-    structuredClone(sourceRefs);
-  } catch {
-    return false;
+  for (let i = 0; i < refsRes.refs.length; i += 1) {
+    if (!isFrozenSourceRefActive(refsRes.refs[i]!, verifiedSources)) return false;
   }
   return true;
 }
@@ -564,26 +578,32 @@ function snapshotSourceRefsStrict(
 ): { readonly ok: true; readonly refs: readonly RemedySourceRef[] } | { readonly ok: false } {
   const items = snapshotDenseArray(sourceRefs);
   if (!items) return { ok: false };
+  const preOrder: object[] = [sourceRefs as object];
   const cloned: RemedySourceRef[] = [];
   for (let i = 0; i < items.length; i += 1) {
     const item = items[i];
-    if (item === null || item === undefined) continue;
-    const itemSnap = snapshotPlainPrimitiveRecord(item);
+    if (item === null || typeof item !== "object") return { ok: false };
+    preOrder.push(item as object);
+    const itemSnap = snapshotOwnGuardRecord(item);
     if (!itemSnap) return { ok: false };
+    for (const key of Object.keys(itemSnap)) {
+      if (!isPrimitiveValue(itemSnap[key])) return { ok: false };
+    }
     const sourceId = itemSnap["sourceId"];
     const sourceVersion = itemSnap["sourceVersion"];
-    if (
-      typeof sourceId !== "string" ||
-      (typeof sourceVersion !== "string" && typeof sourceVersion !== "number")
-    ) {
-      continue;
+    if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) {
+      return { ok: false };
     }
     cloned.push(Object.freeze({ sourceId, sourceVersion }));
   }
-  try {
-    structuredClone(sourceRefs);
-  } catch {
-    return { ok: false };
+  // Reverse-pre-order per-node structuredClone: catches self-detaching element Proxies
+  // before testing the outer array or earlier elements.
+  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
+    try {
+      structuredClone(preOrder[i]);
+    } catch {
+      return { ok: false };
+    }
   }
   return { ok: true, refs: Object.freeze(cloned) };
 }
@@ -651,20 +671,39 @@ export function computeEvidenceCoverage(cases: readonly ClinicEvidenceCase[]): E
   if (!items) {
     return { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 };
   }
+  let allCloneSafe = true;
   for (const rawItem of items) {
     const item = cloneEvidenceCase(rawItem as ClinicEvidenceCase);
+    if (item === EMPTY_INVALID_CASE) {
+      allCloneSafe = false;
+      continue;
+    }
     if (
       !isNonBlankText(item.attemptId) ||
       !isNonBlankText(item.rootAttemptId) ||
       !isNonBlankText(item.chapterId) ||
       !isValidLocalDate(item.localDate) ||
-      !isNonBlankText(item.ruleId)
+      !isNonBlankText(item.ruleId) ||
+      !isNonBlankText(item.excerpt) ||
+      !isNonBlankText(item.invariantSummary) ||
+      !isValidPrivacyEpoch(item.privacyEpoch) ||
+      item.sourceRefs.length === 0 ||
+      !item.sourceRefs.every(
+        (ref) => isNonBlankText(ref.sourceId) && isValidSourceVersion(ref.sourceVersion),
+      )
     ) {
       continue;
     }
     roots.add(item.rootAttemptId);
     chapters.add(item.chapterId);
     dates.add(item.localDate);
+  }
+  if (allCloneSafe) {
+    try {
+      structuredClone(cases);
+    } catch {
+      return { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 };
+    }
   }
   return {
     rootAttemptCount: roots.size,

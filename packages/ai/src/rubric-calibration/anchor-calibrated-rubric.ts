@@ -473,6 +473,8 @@ function hasRubricExoticSlot(obj: object): boolean {
     if (matchesRubricBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
     if (matchesRubricBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
     if (matchesRubricBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Symbol.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(BigInt.prototype.valueOf, obj, []))) return true;
     return false;
   } catch {
     return true;
@@ -482,6 +484,7 @@ function hasRubricExoticSlot(obj: object): boolean {
 function snapshotPlainRubricDataInner(
   value: unknown,
   memo: Map<object, unknown>,
+  preOrder: object[],
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   if (value === null || value === undefined) return { ok: true, value };
   const kind = typeof value;
@@ -491,6 +494,7 @@ function snapshotPlainRubricDataInner(
   if (kind !== "object") return { ok: false };
   const obj = value as object;
   if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
+  preOrder.push(obj);
   try {
     const proto = Object.getPrototypeOf(obj) as object | null;
     if (Array.isArray(obj)) {
@@ -521,7 +525,7 @@ function snapshotPlainRubricDataInner(
         ) {
           return { ok: false };
         }
-        const child = snapshotPlainRubricDataInner(desc.value, memo);
+        const child = snapshotPlainRubricDataInner(desc.value, memo, preOrder);
         if (!child.ok) return { ok: false };
         out[i] = child.value;
       }
@@ -548,7 +552,7 @@ function snapshotPlainRubricDataInner(
     const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     memo.set(obj, out);
     for (const entry of entries) {
-      const child = snapshotPlainRubricDataInner(entry.value, memo);
+      const child = snapshotPlainRubricDataInner(entry.value, memo, preOrder);
       if (!child.ok) return { ok: false };
       Object.defineProperty(out, entry.key, {
         value: child.value,
@@ -566,11 +570,14 @@ function snapshotPlainRubricDataInner(
 function snapshotPlainRubricData(
   value: unknown,
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  const res = snapshotPlainRubricDataInner(value, new Map());
+  const preOrder: object[] = [];
+  const res = snapshotPlainRubricDataInner(value, new Map(), preOrder);
   if (!res.ok) return { ok: false };
-  if (value !== null && typeof value === "object") {
+  // Reverse-pre-order per-node structuredClone: the last visited Proxy reference is tested
+  // directly before any ancestor or earlier sibling it could have mutated during trap execution.
+  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
     try {
-      structuredClone(value);
+      structuredClone(preOrder[i]);
     } catch {
       return { ok: false };
     }

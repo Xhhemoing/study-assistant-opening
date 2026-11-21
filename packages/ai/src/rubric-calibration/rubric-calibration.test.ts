@@ -216,6 +216,51 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     expect(toctouRes.status).toBe("interval_only");
     expect(toctouRes.countsTowardMastery).toBe(false);
     expect(toctouRes.inconsistencyReasons).toEqual(["invalid_submission_input"]);
+
+    // Round-14 [P1-1]: Self-detaching nested Proxy on corroboratingIndependentSubmissionIds that
+    // mutates its parent to detach itself AND installs an ancestor getter MUST still fail closed
+    // via reverse-pre-order structuredClone with ZERO ancestor getter executions.
+    let ancestorGetterRuns = 0;
+    const detachParent: {
+      submissionId: string;
+      dimension: "task_response";
+      text: string;
+      mode: "formal_assessment";
+      assisted: boolean;
+      comparisons: ReturnType<typeof consistentComparisonsForTarget>;
+      corroboratingIndependentSubmissionIds: string[];
+    } = {
+      submissionId: "sub-self",
+      dimension: "task_response",
+      text: cleanText,
+      mode: "formal_assessment",
+      assisted: false,
+      comparisons: consistentComparisonsForTarget("task_response", 6.5),
+      corroboratingIndependentSubmissionIds: [],
+    };
+    let detachedOnce = false;
+    detachParent.corroboratingIndependentSubmissionIds = new Proxy(["sub-fake-independent"], {
+      getOwnPropertyDescriptor(target, prop) {
+        if (!detachedOnce && prop === "0") {
+          detachedOnce = true;
+          detachParent.corroboratingIndependentSubmissionIds = [];
+          Object.defineProperty(detachParent, "injectedTrap", {
+            enumerable: true,
+            configurable: true,
+            get() {
+              ancestorGetterRuns += 1;
+              return "should-never-run";
+            },
+          });
+        }
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      },
+    });
+    const detachRes = evaluateAnchorCalibratedRubric(detachParent);
+    expect(ancestorGetterRuns).toBe(0);
+    expect(detachRes.status).toBe("interval_only");
+    expect(detachRes.countsTowardMastery).toBe(false);
+    expect(detachRes.inconsistencyReasons).toEqual(["invalid_submission_input"]);
   });
 
   it("fails closed to interval_only without fabricating a band on forward/reverse swap contradiction", () => {
@@ -1026,5 +1071,39 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
         maxAbsBiasHigh: 5,
       });
     }).toThrow(TypeError);
+
+    // Round-14 [P1-1]: Self-detaching nested Proxy inside evaluateRubricCalibrationGate input
+    // cannot hide itself from reverse-pre-order structuredClone or trigger an injected ancestor getter.
+    let gateAncestorGetterRuns = 0;
+    const gateDetachParent: {
+      benchmarkItems: typeof validBenchmark;
+      counterfactualTriplets: typeof passingCounterfactuals;
+      expectedBenchmarkItemIds: string[];
+    } = {
+      benchmarkItems: validBenchmark,
+      counterfactualTriplets: passingCounterfactuals,
+      expectedBenchmarkItemIds: [],
+    };
+    let gateDetached = false;
+    gateDetachParent.expectedBenchmarkItemIds = new Proxy(["g1", "g2", "g3", "g4", "g5", "g6"], {
+      getOwnPropertyDescriptor(target, prop) {
+        if (!gateDetached && prop === "0") {
+          gateDetached = true;
+          gateDetachParent.expectedBenchmarkItemIds = ["g1", "g2", "g3", "g4", "g5", "g6"];
+          Object.defineProperty(gateDetachParent, "injectedTrap", {
+            enumerable: true,
+            configurable: true,
+            get() {
+              gateAncestorGetterRuns += 1;
+              return "boom";
+            },
+          });
+        }
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      },
+    });
+    const gateDetachRes = evaluateRubricCalibrationGate(gateDetachParent);
+    expect(gateAncestorGetterRuns).toBe(0);
+    expect(gateDetachRes.passed).toBe(false);
   });
 });

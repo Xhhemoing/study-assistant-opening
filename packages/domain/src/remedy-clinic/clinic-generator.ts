@@ -9,6 +9,7 @@ import {
   buildSelfDiffEntries,
   compareUtf16,
   computeEvidenceCoverage,
+  inspectActiveSourcesMap,
   isNonBlankText,
   isValidLocalDate,
   isValidPrivacyEpoch,
@@ -598,6 +599,7 @@ function isPlainDenseArrayHeader(obj: unknown): obj is unknown[] {
 function cloneAndFreezePlainDataInner(
   value: unknown,
   memo: Map<object, unknown>,
+  preOrder: object[],
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   if (value === null || value === undefined) return { ok: true, value };
   const kind = typeof value;
@@ -610,6 +612,7 @@ function cloneAndFreezePlainDataInner(
 
   const obj = value as object;
   if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
+  preOrder.push(obj);
 
   const protoRes = safeGetPrototypeOf(obj);
   if (!protoRes.ok) return { ok: false };
@@ -622,7 +625,7 @@ function cloneAndFreezePlainDataInner(
     const out: unknown[] = new Array(len);
     memo.set(obj, out);
     for (let i = 0; i < len; i += 1) {
-      const child = cloneAndFreezePlainDataInner(items[i], memo);
+      const child = cloneAndFreezePlainDataInner(items[i], memo, preOrder);
       if (!child.ok) return { ok: false };
       Object.defineProperty(out, String(i), {
         value: child.value,
@@ -662,7 +665,7 @@ function cloneAndFreezePlainDataInner(
     proto === null ? (Object.create(null) as Record<string, unknown>) : {};
   memo.set(obj, out);
   for (const entry of validatedEntries) {
-    const child = cloneAndFreezePlainDataInner(entry.value, memo);
+    const child = cloneAndFreezePlainDataInner(entry.value, memo, preOrder);
     if (!child.ok) return { ok: false };
     Object.defineProperty(out, entry.key, {
       value: child.value,
@@ -679,11 +682,14 @@ function cloneAndFreezePlainData(
   value: unknown,
   memo: Map<object, unknown> = new Map(),
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  const cloned = cloneAndFreezePlainDataInner(value, memo);
+  const preOrder: object[] = [];
+  const cloned = cloneAndFreezePlainDataInner(value, memo, preOrder);
   if (!cloned.ok) return { ok: false };
-  if (value !== null && typeof value === "object") {
+  // Reverse-pre-order per-node structuredClone: catches self-detaching nested Proxies
+  // before touching any ancestor or earlier sibling they could have mutated.
+  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
     try {
-      structuredClone(value);
+      structuredClone(preOrder[i]);
     } catch {
       return { ok: false };
     }
@@ -712,13 +718,14 @@ type SourceRefsSnapshotResult =
 
 /**
  * Single-pass sourceRefs validator: verifies dense plain array and plain primitive element records
- * BEFORE running structuredClone (zero getter execution, zero second reads).
+ * BEFORE running reverse-pre-order structuredClone (zero getter execution, zero second reads).
  */
 function snapshotSourceRefsWithKind(sourceRefs: unknown): SourceRefsSnapshotResult {
   const items = snapshotDenseOwnArray(sourceRefs);
   if (!items) return { kind: "invalid_descriptor" };
 
   let hasNullRef = false;
+  const preOrder: object[] = [sourceRefs as object];
   const frozen: RemedySourceRef[] = [];
   for (let i = 0; i < items.length; i += 1) {
     const el = items[i];
@@ -726,6 +733,8 @@ function snapshotSourceRefsWithKind(sourceRefs: unknown): SourceRefsSnapshotResu
       hasNullRef = true;
       continue;
     }
+    if (typeof el !== "object") return { kind: "invalid_descriptor" };
+    preOrder.push(el as object);
     const rec = snapshotOwnRecord(el);
     if (!rec) return { kind: "invalid_descriptor" };
     for (const key of Object.keys(rec)) {
@@ -742,11 +751,14 @@ function snapshotSourceRefsWithKind(sourceRefs: unknown): SourceRefsSnapshotResu
     frozen.push(Object.freeze({ sourceId, sourceVersion }));
   }
 
-  // Every reachable element is verified getter-free plain data; structuredClone rejects Proxy/Promise/Generator.
-  try {
-    structuredClone(sourceRefs);
-  } catch {
-    return { kind: "invalid_descriptor" };
+  // Every reachable element is verified getter-free plain data; reverse-pre-order structuredClone
+  // rejects Proxy/Promise/Generator (including self-detaching element Proxies).
+  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
+    try {
+      structuredClone(preOrder[i]);
+    } catch {
+      return { kind: "invalid_descriptor" };
+    }
   }
 
   if (items.length === 0 || hasNullRef) {
@@ -780,16 +792,13 @@ function isolateProbeModel<TInput, TObservable>(
   const frozenReceiver: Record<string, unknown> = {};
   const memo = new Map<object, unknown>();
   memo.set(rawModel as object, frozenReceiver);
-  const valuesToCloneCheck: unknown[] = [];
+  const preOrder: object[] = [];
 
   for (const key of Object.keys(modelSnap)) {
     if (key === "predict") continue;
     const rawVal = modelSnap[key];
-    const cloned = cloneAndFreezePlainDataInner(rawVal, memo);
+    const cloned = cloneAndFreezePlainDataInner(rawVal, memo, preOrder);
     if (!cloned.ok) return null;
-    if (rawVal !== null && typeof rawVal === "object") {
-      valuesToCloneCheck.push(rawVal);
-    }
     Object.defineProperty(frozenReceiver, key, {
       value: cloned.value,
       writable: false,
@@ -797,9 +806,9 @@ function isolateProbeModel<TInput, TObservable>(
       configurable: false,
     });
   }
-  if (valuesToCloneCheck.length > 0) {
+  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
     try {
-      structuredClone(valuesToCloneCheck);
+      structuredClone(preOrder[i]);
     } catch {
       return null;
     }
@@ -1312,7 +1321,9 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
 
   const verifyRuleFn = inputSnap["verifyRuleViolation"];
   const verifyProbeFn = verifyClinicProbeDistinguishability;
-  const activeSourcesSnapshot = snapshotActiveSourcesMap(inputSnap["activeSourcesMap"] as ActiveSourcesMap);
+  const activeSourcesCheck = inspectActiveSourcesMap(inputSnap["activeSourcesMap"] as ActiveSourcesMap);
+  if (!activeSourcesCheck.containerValid) return invalidResult();
+  const activeSourcesSnapshot = activeSourcesCheck.sources;
   const frozenLearnerId = typeof inputSnap["learnerId"] === "string" ? inputSnap["learnerId"] : "";
   const frozenCourseId = typeof inputSnap["courseId"] === "string" ? inputSnap["courseId"] : "";
   const frozenRuleId = typeof inputSnap["ruleId"] === "string" ? inputSnap["ruleId"].trim() : "";
@@ -1479,9 +1490,10 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     }
   }
 
-  // Once all child containers are verified getter-free, verify top-level input itself is not
-  // an AsyncGenerator, Generator, Promise, or Proxy.
-  if (allProbesPrepared && allAttemptsPlain && allEmbeddingPlain && activeSourcesSnapshot.size > 0) {
+  // Once all child containers are verified getter-free (activeSourcesMap is already proven
+  // containerValid and getter-free above), verify top-level input itself is not an AsyncGenerator,
+  // Generator, Promise, or Proxy.
+  if (allProbesPrepared && allAttemptsPlain && allEmbeddingPlain) {
     const KNOWN_INPUT_KEYS = new Set([
       "clinicId",
       "learnerId",
@@ -1962,11 +1974,13 @@ function isValidDistinguishableReport(
 
 function isValidDelayedRecheck(rawDelayedRecheck: unknown, expectedRuleId: string): boolean {
   if (!isPlainRecordOwnDataOnly(rawDelayedRecheck)) return false;
+  const recheckRuleId = readOwnDataProp(rawDelayedRecheck, "ruleId");
   return (
     readOwnDataProp(rawDelayedRecheck, "required") === true &&
     readOwnDataProp(rawDelayedRecheck, "scheduledOutsideSessionMinutes") === true &&
     readOwnDataProp(rawDelayedRecheck, "minDelayHours") === CLINIC_DELAYED_RECHECK_MIN_HOURS &&
-    readOwnDataProp(rawDelayedRecheck, "ruleId") === expectedRuleId &&
+    typeof recheckRuleId === "string" &&
+    recheckRuleId.trim() === expectedRuleId &&
     readOwnDataProp(rawDelayedRecheck, "countsTowardMasteryUntilPassed") === false
   );
 }
@@ -2103,7 +2117,7 @@ export function revalidateRemedyClinic(
     status: rawStatus === "active" ? "active" : "stale_source_revoked",
     learnerId: typeof rawLearnerId === "string" ? rawLearnerId : "",
     courseId: typeof rawCourseId === "string" ? rawCourseId : "",
-    ruleId: typeof rawRuleId === "string" ? rawRuleId : "",
+    ruleId: typeof rawRuleId === "string" ? rawRuleId.trim() : "",
     hasRuleSourceRefs,
     ruleSourceRefs: hasRuleSourceRefs ? freezeSourceRefs(rawRuleSourceRefs) : null,
     createdPrivacyEpoch: typeof rawCreatedEpoch === "number" ? rawCreatedEpoch : -1,

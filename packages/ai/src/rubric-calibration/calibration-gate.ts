@@ -217,6 +217,7 @@ function hasGateExoticSlot(obj: object): boolean {
 function snapshotPlainGateDataInner(
   value: unknown,
   memo: Map<object, unknown>,
+  preOrder: object[],
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   if (value === null || value === undefined) return { ok: true, value };
   const kind = typeof value;
@@ -226,6 +227,7 @@ function snapshotPlainGateDataInner(
   if (kind !== "object") return { ok: false };
   const obj = value as object;
   if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
+  preOrder.push(obj);
   try {
     const proto = Object.getPrototypeOf(obj) as object | null;
     if (Array.isArray(obj)) {
@@ -244,7 +246,7 @@ function snapshotPlainGateDataInner(
         if (!desc || !desc.enumerable || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
           return { ok: false };
         }
-        const child = snapshotPlainGateDataInner(desc.value, memo);
+        const child = snapshotPlainGateDataInner(desc.value, memo, preOrder);
         if (!child.ok) return { ok: false };
         out[i] = child.value;
       }
@@ -265,7 +267,7 @@ function snapshotPlainGateDataInner(
     const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     memo.set(obj, out);
     for (const entry of entries) {
-      const child = snapshotPlainGateDataInner(entry.value, memo);
+      const child = snapshotPlainGateDataInner(entry.value, memo, preOrder);
       if (!child.ok) return { ok: false };
       Object.defineProperty(out, entry.key, {
         value: child.value,
@@ -281,11 +283,14 @@ function snapshotPlainGateDataInner(
 }
 
 function snapshotPlainGateData(value: unknown): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
-  const res = snapshotPlainGateDataInner(value, new Map());
+  const preOrder: object[] = [];
+  const res = snapshotPlainGateDataInner(value, new Map(), preOrder);
   if (!res.ok) return { ok: false };
-  if (value !== null && typeof value === "object") {
+  // Reverse-pre-order per-node structuredClone: catches self-detaching nested Proxies
+  // before touching any ancestor or earlier sibling they could have mutated.
+  for (let i = preOrder.length - 1; i >= 0; i -= 1) {
     try {
-      structuredClone(value);
+      structuredClone(preOrder[i]);
     } catch {
       return { ok: false };
     }
