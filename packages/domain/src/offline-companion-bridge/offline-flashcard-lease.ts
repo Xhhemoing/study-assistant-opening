@@ -146,6 +146,7 @@ const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\u221A\s*([a-z0-9]+(?:\.[a-z0-9]+)?)/gi, "sqrt($1)"],
   [/\u221A/g, "sqrt"],
   [/\bsqrt\s*([0-9]+(?:\.[0-9]+)?)/gi, "sqrt($1)"],
+  [/\u2032/g, "'"],
 ];
 
 const MATH_OPERAND_LOOKAHEAD =
@@ -157,7 +158,7 @@ const SPACED_UNARY_SIGN_RE = new RegExp(
 );
 
 const SPACED_UNICODE_MINUS_UNARY_RE = new RegExp(
-  `(?<![\\d)\\]}|]\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
+  `(?<![\\d)\\]}|'\\u2032\\u2019]\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
   "giu",
 );
 
@@ -186,6 +187,11 @@ export function canonicalizeMathNotation(value: string): string {
   return text;
 }
 
+const CJK_SCRIPT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const NON_CJK_WORD_CHAR =
+  "(?:(?![\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}])[\\p{L}\\p{N}_])";
+const NON_CJK_WORD_CHAR_RE = new RegExp(`^${NON_CJK_WORD_CHAR}$`, "u");
+
 function containsStandaloneNumericOrSymbolicToken(haystack: string, token: string): boolean {
   const escaped = escapeRegExp(token);
   const pattern = new RegExp(
@@ -193,6 +199,31 @@ function containsStandaloneNumericOrSymbolicToken(haystack: string, token: strin
     "iu",
   );
   return pattern.test(haystack);
+}
+
+function containsUnicodeWordBoundedToken(haystack: string, token: string): boolean {
+  const escaped = escapeRegExp(token);
+  const pattern = new RegExp(
+    `(?<!${NON_CJK_WORD_CHAR})${escaped}(?!${NON_CJK_WORD_CHAR})`,
+    "iu",
+  );
+  return pattern.test(haystack);
+}
+
+function containsCjkBoundedSubstring(haystack: string, needle: string): boolean {
+  const chars = [...needle];
+  const firstChar = chars[0];
+  const lastChar = chars[chars.length - 1];
+  if (!firstChar || !lastChar) return false;
+  const needsLeadingBoundary = NON_CJK_WORD_CHAR_RE.test(firstChar);
+  const needsTrailingBoundary = NON_CJK_WORD_CHAR_RE.test(lastChar);
+  if (!needsLeadingBoundary && !needsTrailingBoundary) {
+    return haystack.includes(needle);
+  }
+  const escaped = escapeRegExp(needle);
+  const prefix = needsLeadingBoundary ? `(?<!${NON_CJK_WORD_CHAR})` : "";
+  const suffix = needsTrailingBoundary ? `(?!${NON_CJK_WORD_CHAR})` : "";
+  return new RegExp(`${prefix}${escaped}${suffix}`, "iu").test(haystack);
 }
 
 function containsSingleChoiceReveal(rawText: string, choiceLetter: string): boolean {
@@ -209,9 +240,10 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
 }
 
 const COMPOUND_BINARY_ADD_SUB_RE =
-  /(?<=[0-9a-zA-Z\p{Script=Greek})\]}|'\u2032!%])\s*([+-])\s*(?=[0-9a-zA-Z\p{Script=Greek}([{|\u221A\\])/gu;
+  /(?<=[0-9a-zA-Z\p{Script=Greek})\]}|'\u2032\u2019!%])\s*([+-])\s*(?=[0-9a-zA-Z\p{Script=Greek}([{|\u221A\\])/gu;
 
-const MATH_EXPR_ATOM_CHARS = "[\\p{N}a-z\\p{Script=Greek}()\\[\\]{}|'\\u2032.,_!%\\\\\\u221A]";
+const MATH_EXPR_ATOM_CHARS =
+  "[\\p{N}a-z\\p{Script=Greek}()\\[\\]{}|'\\u2032\\u2019.,_!%\\\\\\u221A]";
 
 const COMPOUND_MATH_EXPR_RE = new RegExp(
   `^(?:[+-]|\\+-|-\\+)?${MATH_EXPR_ATOM_CHARS}+(?:[+\\-*\\/^]${MATH_EXPR_ATOM_CHARS}+)+$`,
@@ -317,17 +349,27 @@ export function containsAnswerLeak(
         }
       }
     }
-    if (includeShortTokens && tokenCount === 1) {
-      if (
-        SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE.test(segment) ||
-        UNICODE_MATH_SYMBOL_RE.test(segment)
-      ) {
-        if (containsStandaloneNumericOrSymbolicToken(normalizedStem, segment)) {
+    if (includeShortTokens) {
+      if (segment.length >= 1 && segment.length < 6 && CJK_SCRIPT_RE.test(segment)) {
+        if (containsCjkBoundedSubstring(normalizedStem, segment)) {
           return true;
         }
-      } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
-        if (containsSingleChoiceReveal(rawText, segment)) {
-          return true;
+      } else if (tokenCount === 1) {
+        if (
+          SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE.test(segment) ||
+          UNICODE_MATH_SYMBOL_RE.test(segment)
+        ) {
+          if (containsStandaloneNumericOrSymbolicToken(normalizedStem, segment)) {
+            return true;
+          }
+        } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
+          if (containsSingleChoiceReveal(rawText, segment)) {
+            return true;
+          }
+        } else if (segment.length >= 2 && segment.length < 6 && /[\p{L}\p{N}]/u.test(segment)) {
+          if (containsUnicodeWordBoundedToken(normalizedStem, segment)) {
+            return true;
+          }
         }
       }
     }
@@ -636,6 +678,14 @@ function isValidLedgerEntry(value: unknown): value is OfflineOutboxLedgerEntry {
   );
 }
 
+function isValidOptionalClientReviewedAtMs(value: unknown): value is number | null | undefined {
+  return (
+    value === undefined ||
+    value === null ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
 function toServerCardRecord(
   cards:
     | Readonly<Record<string, ServerFlashcardSnapshot>>
@@ -654,6 +704,11 @@ function toServerCardRecord(
       throw new TypeError(`serverCards entry for cardId "${cardId}" is structurally invalid.`);
     }
     const canonicalId = canonicalizeIdentifier(cardId);
+    if (Object.prototype.hasOwnProperty.call(out, canonicalId)) {
+      throw new TypeError(
+        `serverCards contains duplicate/conflicting canonical cardId "${canonicalId}" (from key "${cardId}").`,
+      );
+    }
     setOwnRecordProperty(out, canonicalId, cloneServerSnapshot({ ...snapshot, cardId: canonicalId }));
   }
   return out;
@@ -679,6 +734,11 @@ function toLedgerRecord(
       throw new TypeError(`processedLedger entry for key "${ledgerKey}" is structurally invalid.`);
     }
     const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
+    if (Object.prototype.hasOwnProperty.call(out, canonicalKey)) {
+      throw new TypeError(
+        `processedLedger contains duplicate/conflicting canonical key "${canonicalKey}" (from key "${ledgerKey}").`,
+      );
+    }
     setOwnRecordProperty(out, canonicalKey, cloneLedgerEntry(entry));
   }
   return out;
@@ -1271,7 +1331,13 @@ export function reconcileOfflineLeaseOutbox(
   const leasedCardById = new Map<string, OfflineLeaseCard>();
   for (const card of lease.cards) {
     if (!isSafeIdentifier(card.cardId)) continue;
-    leasedCardById.set(canonicalizeIdentifier(card.cardId), card);
+    const canonicalCardId = canonicalizeIdentifier(card.cardId);
+    if (leasedCardById.has(canonicalCardId)) {
+      throw new TypeError(
+        `Lease ${canonicalLeaseId} contains duplicate/conflicting canonical cardId "${canonicalCardId}".`,
+      );
+    }
+    leasedCardById.set(canonicalCardId, card);
   }
 
   // Deterministic ordering: settle valid positive seq entries in ascending seq order
@@ -1351,6 +1417,23 @@ export function reconcileOfflineLeaseOutbox(
 
     const canonicalEntryCardId = canonicalizeIdentifier(entry.cardId);
 
+    if (
+      !isNonNegativeSafeInteger(entry.expectedCardRevision) ||
+      !VALID_RAW_RATINGS.has(entry.rating) ||
+      !isValidOptionalClientReviewedAtMs(entry.clientReviewedAtMs)
+    ) {
+      results.push({
+        leaseId: canonicalLeaseId,
+        seq: entry.seq,
+        cardId: canonicalEntryCardId,
+        outcome: "invalid_entry",
+        httpStatus: 400,
+        reason:
+          "Outbox entry requires valid cardId, non-negative expectedCardRevision, valid rating, and finite or null clientReviewedAtMs.",
+      });
+      continue;
+    }
+
     const payloadFingerprint = computeOfflineOutboxPayloadFingerprint(entry);
     const payloadSummary = buildPayloadSummary(entry);
     const idempotencyKey = offlineOutboxIdempotencyKey(canonicalLeaseId, entry.seq);
@@ -1414,21 +1497,6 @@ export function reconcileOfflineLeaseOutbox(
       }
     } else {
       seenSeqInBatch.set(idempotencyKey, { payloadFingerprint, payloadSummary });
-    }
-
-    if (
-      !isNonNegativeSafeInteger(entry.expectedCardRevision) ||
-      !VALID_RAW_RATINGS.has(entry.rating)
-    ) {
-      results.push({
-        leaseId: canonicalLeaseId,
-        seq: entry.seq,
-        cardId: canonicalEntryCardId,
-        outcome: "invalid_entry",
-        httpStatus: 400,
-        reason: "Outbox entry requires valid cardId, non-negative expectedCardRevision, and valid rating.",
-      });
-      continue;
     }
 
     const leasedCard = leasedCardById.get(canonicalEntryCardId);

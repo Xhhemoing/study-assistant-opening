@@ -897,6 +897,252 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       }),
     ).toThrow(TypeError);
 
+    // [Round-11 P1-1] Non-finite or non-number clientReviewedAtMs (NaN, Infinity, -Infinity, string)
+    // MUST fail closed with 400 invalid_entry BEFORE settling so nextProcessedLedger is NEVER poisoned
+    // and subsequent reconciliations succeed cleanly!
+    const badClientClockRes = reconcileOfflineLeaseOutbox({
+      lease: safeLease.lease,
+      serverCards: { "card-1": validCard1Snap },
+      serverReceiptAtMs: T0 + 60_000,
+      entries: [
+        {
+          leaseId: "lease-r9-settle-guard",
+          seq: 1,
+          cardId: "card-1",
+          expectedCardRevision: 1,
+          rating: "good",
+          clientReviewedAtMs: Number.NaN,
+        },
+        {
+          leaseId: "lease-r9-settle-guard",
+          seq: 2,
+          cardId: "card-1",
+          expectedCardRevision: 1,
+          rating: "good",
+          clientReviewedAtMs: Number.POSITIVE_INFINITY,
+        },
+        {
+          leaseId: "lease-r9-settle-guard",
+          seq: 3,
+          cardId: "card-1",
+          expectedCardRevision: 1,
+          rating: "good",
+          clientReviewedAtMs: Number.NEGATIVE_INFINITY,
+        },
+        {
+          leaseId: "lease-r9-settle-guard",
+          seq: 4,
+          cardId: "card-1",
+          expectedCardRevision: 1,
+          rating: "good",
+          clientReviewedAtMs: "2026-11-21" as unknown as number,
+        },
+      ],
+    });
+    expect(badClientClockRes.ok).toBe(true);
+    if (!badClientClockRes.ok) throw new Error("expected bad client clock response");
+    expect(badClientClockRes.settledCount).toBe(0);
+    expect(badClientClockRes.results).toHaveLength(4);
+    expect(badClientClockRes.results.every(r => r.outcome === "invalid_entry" && r.httpStatus === 400)).toBe(true);
+    expect(Object.keys(badClientClockRes.nextProcessedLedger)).toHaveLength(0);
+
+    // Follow-up reconciliation with a valid entry (clientReviewedAtMs omitted -> normalized to null)
+    // succeeds cleanly, and a subsequent reconciliation loading nextProcessedLedger does NOT throw!
+    const followUpValidSettle = reconcileOfflineLeaseOutbox({
+      lease: safeLease.lease,
+      serverCards: badClientClockRes.updatedServerCards,
+      processedLedger: badClientClockRes.nextProcessedLedger,
+      serverReceiptAtMs: T0 + 120_000,
+      entries: [
+        {
+          leaseId: "lease-r9-settle-guard",
+          seq: 1,
+          cardId: "card-1",
+          expectedCardRevision: 1,
+          rating: "good",
+        },
+      ],
+    });
+    expect(followUpValidSettle.ok).toBe(true);
+    if (!followUpValidSettle.ok) throw new Error("expected follow-up valid settle");
+    expect(followUpValidSettle.settledCount).toBe(1);
+    expect(
+      followUpValidSettle.nextProcessedLedger["lease-r9-settle-guard:1"]?.payloadSummary?.clientReviewedAtMs,
+    ).toBeNull();
+
+    const followUpReload = reconcileOfflineLeaseOutbox({
+      lease: safeLease.lease,
+      serverCards: followUpValidSettle.updatedServerCards,
+      processedLedger: followUpValidSettle.nextProcessedLedger,
+      serverReceiptAtMs: T0 + 180_000,
+      entries: [
+        {
+          leaseId: "lease-r9-settle-guard",
+          seq: 1,
+          cardId: "card-1",
+          expectedCardRevision: 1,
+          rating: "good",
+        },
+      ],
+    });
+    expect(followUpReload.ok).toBe(true);
+    if (!followUpReload.ok) throw new Error("expected clean reload replay");
+    expect(followUpReload.replayedCount).toBe(1);
+
+    // [Round-11 P1-2] Conflicting case-alias UUID keys in serverCards OR processedLedger MUST throw
+    // TypeError fail-closed instead of letting a later stale snapshot overwrite a newer revision!
+    const aliasUuidUpper = "550E8400-E29B-41D4-A716-446655440000";
+    const aliasUuidLower = "550e8400-e29b-41d4-a716-446655440000";
+    const aliasSnapRev3 = createInitialOfflineFsrsSnapshot(aliasUuidUpper, T0 - 3_600_000, 3);
+    const aliasSnapRev1 = createInitialOfflineFsrsSnapshot(aliasUuidLower, T0 - 3_600_000, 1);
+
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: {
+          [aliasUuidUpper]: aliasSnapRev3,
+          [aliasUuidLower]: aliasSnapRev1,
+        },
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
+
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: new Map([
+          [aliasUuidUpper, aliasSnapRev3],
+          [aliasUuidLower, aliasSnapRev1],
+        ]),
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
+
+    const aliasLedgerUpper = {
+      ...legacyCtorLedgerEntry,
+      leaseId: aliasUuidUpper,
+      seq: 1,
+      receipt: { ...legacyCtorLedgerEntry.receipt, leaseId: aliasUuidUpper, cardId: aliasUuidUpper },
+    };
+    const aliasLedgerLower = {
+      ...legacyCtorLedgerEntry,
+      leaseId: aliasUuidLower,
+      seq: 1,
+      receipt: { ...legacyCtorLedgerEntry.receipt, leaseId: aliasUuidLower, cardId: aliasUuidLower },
+    };
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: { "card-1": validCard1Snap },
+        processedLedger: {
+          [`${aliasUuidUpper}:1`]: aliasLedgerUpper,
+          [`${aliasUuidLower}:1`]: aliasLedgerLower,
+        },
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
+
+    // [Round-11 P1-3] Short plain-text protected answers (< 6 chars: "Paris", "Mars", "ATP", "ox", "1914", "πr")
+    // AND short CJK answers ("巴黎", "线粒体", "光合作用", "秦") MUST be caught at Unicode/script boundaries
+    // without false-positiving on embedded substrings ("par" vs "compare"/"paragraph", "art" vs "part"/"start",
+    // "A" vs "A student solved the problem")!
+    expect(containsAnswerLeak("Use Paris as the example.", "Paris")).toBe(true);
+    expect(containsAnswerLeak("答案是Paris。", "Paris")).toBe(true);
+    expect(containsAnswerLeak("Visit Mars on the next mission.", "Mars")).toBe(true);
+    expect(containsAnswerLeak("Cells synthesize ATP for energy.", "ATP")).toBe(true);
+    expect(containsAnswerLeak("The ox pulled the plow.", "ox")).toBe(true);
+    expect(containsAnswerLeak("In 1914, the conflict began.", "1914")).toBe(true);
+    expect(containsAnswerLeak("Compute semicircle length πr directly.", "πr")).toBe(true);
+    expect(containsAnswerLeak("Answer: art.", "art")).toBe(true);
+    expect(containsAnswerLeak("例如巴黎盆地的地形特征", "巴黎")).toBe(true);
+    expect(containsAnswerLeak("简述线粒体的结构特点", "线粒体")).toBe(true);
+    expect(containsAnswerLeak("绿色植物进行光合作用的场所", "光合作用")).toBe(true);
+    expect(containsAnswerLeak("统一六国的是秦朝", "秦")).toBe(true);
+
+    // Zero false positives on embedded words or indefinite article "A":
+    expect(containsAnswerLeak("Compare the two paragraphs carefully.", "par")).toBe(false);
+    expect(containsAnswerLeak("Start from part two of the proof.", "art")).toBe(false);
+    expect(containsAnswerLeak("Oxygen reacts with iron oxide in a box.", "ox")).toBe(false);
+    expect(containsAnswerLeak("Parisian architecture influenced Europe.", "Paris")).toBe(false);
+    expect(containsAnswerLeak("A student solved the problem cleanly.", "A")).toBe(false);
+    expect(containsAnswerLeak("Read the pirate story.", "πr")).toBe(false);
+
+    for (const [idx, shortTextCase] of [
+      { answerKey: "Paris", stem: "Use Paris as the example city." },
+      { answerKey: "ATP", stem: "Cells store chemical energy in ATP." },
+      { answerKey: "巴黎", stem: "例如巴黎盆地的气候类型。" },
+      { answerKey: "线粒体", stem: "比较线粒体与叶绿体的结构。" },
+    ].entries()) {
+      const shortTextMiss = issueOfflineFlashcardLease({
+        leaseId: `lease-r11-short-miss-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: shortTextCase.answerKey,
+            freshVariantStem: shortTextCase.stem,
+          }),
+        ],
+      });
+      expect(shortTextMiss.ok).toBe(false);
+      if (!shortTextMiss.ok) {
+        expect(shortTextMiss.httpStatus).toBe(422);
+        expect(shortTextMiss.code).toBe("miss_variant_answer_leak");
+      }
+
+      const shortTextFc = issueOfflineFlashcardLease({
+        leaseId: `lease-r11-short-fc-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({ answerKey: shortTextCase.answerKey }),
+          {
+            ...makeFlashcardCandidate(700 + idx),
+            prompt: "Review chapter concept.",
+            backSummary: shortTextCase.stem,
+          },
+        ],
+      });
+      expect(shortTextFc.ok).toBe(false);
+      if (!shortTextFc.ok) {
+        expect(shortTextFc.httpStatus).toBe(422);
+        expect(shortTextFc.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    const benignParLease = issueOfflineFlashcardLease({
+      leaseId: "lease-r11-benign-par",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({
+          answerKey: "par",
+          freshVariantStem: "Compare the two paragraphs and start from part one.",
+        }),
+      ],
+    });
+    expect(benignParLease.ok).toBe(true);
+
+    // [Round-11 P2] Binary Unicode minus (`\u2212`) after prime marks (`'`, `′`, `’`) MUST NOT
+    // collapse into unary `-4`, while compound prime expressions (`x′ − y′` <-> `x′-y′`, `f'(x) − g'(x)`)
+    // MUST still match symmetrically!
+    expect(containsAnswerLeak("Solve x\u2032 \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve x' \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve x\u2019 \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve f'(x) \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Evaluate x\u2032 \u2212 y\u2032 here.", "x\u2032-y\u2032")).toBe(true);
+    expect(containsAnswerLeak("Evaluate x\u2032-y\u2032 here.", "x\u2032 \u2212 y\u2032")).toBe(true);
+    expect(containsAnswerLeak("Evaluate x\u2032 \u2212 y\u2032 here.", "x'-y'")).toBe(true);
+    expect(containsAnswerLeak("Evaluate f'(x) \u2212 g'(x) here.", "f'(x)-g'(x)")).toBe(true);
+    expect(containsAnswerLeak("Evaluate f'(x)-g'(x) here.", "f'(x) \u2212 g'(x)")).toBe(true);
+    expect(containsAnswerLeak("Evaluate x\u2019 \u2212 y\u2019 here.", "x\u2019-y\u2019")).toBe(true);
+
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
       { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },
