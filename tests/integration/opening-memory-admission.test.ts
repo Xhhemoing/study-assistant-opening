@@ -1,11 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createCourseMembershipRepository,
+  createOpeningBudgetRepository,
+  createOpeningConversationRepository,
   createOpeningMemoryRepository,
+  createOpeningPrivacyRepository,
+  createOpeningSourceChunksRepository,
+  createOpeningTutorJobsRepository,
   OpeningMemoryError,
   withOpeningTutorStreamFenceCommit,
 } from "@aistudy/database";
 import { memoriesForContext } from "@aistudy/domain";
+import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { closeRace, openRaceSession, track } from "./opening-race-helpers";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
@@ -357,4 +365,143 @@ it("reenters held history/business locks through actual proposal effects and rol
   })).rejects.toMatchObject({ code: "22012" });
   expect(await memoryGraph()).toEqual(old);
   expect(await historyGraph()).toEqual(history);
+});
+
+it("never lets an active global memory exempt a detached course source shared with conversation history or learner context", async () => {
+  const courses = createCourseMembershipRepository(fixture.sql);
+  const conversations = createOpeningConversationRepository(fixture.sql);
+  const chunks = createOpeningSourceChunksRepository(fixture.sql);
+  const jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+  const course = await courses.createCourse({
+    workspaceId: fixture.scope.workspaceId,
+    title: "Shared lineage admission course",
+    slug: randomUUID(),
+  });
+  const sharedSourceId = randomUUID();
+  await fixture.sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${sharedSourceId},${fixture.scope.workspaceId},'shared.txt','text/plain',16,${"c".repeat(64)},0,'uploaded','ready')`;
+  await fixture.sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+    VALUES (${sharedSourceId},0,${fixture.scope.workspaceId},'available')`;
+  await chunks.replaceChunks(fixture.scope, {
+    sourceId: sharedSourceId,
+    sourceVersion: 0,
+    chunks: [{ page: 1, text: "Detached course material", slideLabel: null, startMs: null, endMs: null, imageObjectKey: null }],
+  });
+  await courses.addAssetMembership({
+    workspaceId: fixture.scope.workspaceId,
+    courseId: course.id,
+    assetType: "source",
+    assetId: sharedSourceId,
+    role: "core",
+    sortOrder: 0,
+    visibility: "course",
+    purpose: "teaching",
+  });
+
+  // Turn 1 inside the course conversation uses sharedSourceId and completes.
+  const courseConversation = await conversations.create(fixture.scope, { title: "Course history", courseId: course.id });
+  const priorTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope,
+    conversationId: courseConversation.id,
+    text: "Summarize shared material",
+    mode: "explain",
+    clientKey: randomUUID(),
+    sourceIds: [sharedSourceId],
+    learningSessionId: null,
+    currentPage: 1,
+    chunkId: null,
+  });
+  await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${priorTurn.turnId}, ${priorTurn.assistantTurnId})`;
+  await fixture.sql`UPDATE opening_turns SET status = 'complete', text = 'Prior answer using shared material',
+    context_source_refs = ${fixture.sql.json([{ sourceId: sharedSourceId, sourceVersion: 0 }])} WHERE id = ${priorTurn.assistantTurnId}`;
+  await fixture.sql`UPDATE opening_tutor_jobs SET status = 'succeeded' WHERE id = ${priorTurn.jobId}`;
+
+  // Active global memory also cites the same turn / source lineage.
+  const proposed = await memories.proposeMemory(fixture.scope, {
+    text: "Learner likes step-by-step summaries",
+    sourceTurnIds: [priorTurn.turnId],
+    courseId: null,
+    expiresAt: null,
+  });
+  await memories.confirm(fixture.scope, proposed.id, proposed.version, randomUUID());
+
+  // Detach sharedSourceId from the course.
+  await courses.removeAssetMembership({
+    workspaceId: fixture.scope.workspaceId,
+    courseId: course.id,
+    assetType: "source",
+    assetId: sharedSourceId,
+  });
+
+  // 1) Shared with conversation history: must fail closed before provider dispatch!
+  const followUp = await conversations.appendSavedTurn({
+    scope: fixture.scope,
+    conversationId: courseConversation.id,
+    text: "Follow up on what we just covered",
+    mode: "explain",
+    clientKey: randomUUID(),
+    sourceIds: [],
+    learningSessionId: null,
+    currentPage: null,
+    chunkId: null,
+  });
+  const providerComplete = vi.fn(async () => ({
+    text: "must never be dispatched",
+    citedChunkIds: [],
+    candidates: [],
+    requestId: null,
+    inputTokens: 1,
+    outputTokens: 1,
+  }));
+  await expect(createTutorTurnHandler({
+    tutorJobs: jobs,
+    chunks,
+    budget,
+    provider: { complete: providerComplete },
+    memories: { listContext: (scope, now) => memories.listContext(scope, now) },
+    privacy: createOpeningPrivacyRepository(fixture.sql),
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    config: { maxContextCharacters: 2000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  })(followUp.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(providerComplete).not.toHaveBeenCalled();
+
+  // 2) Shared with learnerContext in a fresh course conversation (no prior history): must ALSO fail closed!
+  const freshCourseConversation = await conversations.create(fixture.scope, { title: "Fresh course learner ctx", courseId: course.id });
+  const learnerTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope,
+    conversationId: freshCourseConversation.id,
+    text: "What should I review next?",
+    mode: "explain",
+    clientKey: randomUUID(),
+    sourceIds: [],
+    learningSessionId: null,
+    currentPage: null,
+    chunkId: null,
+  });
+  await expect(createTutorTurnHandler({
+    tutorJobs: jobs,
+    chunks,
+    budget,
+    provider: { complete: providerComplete },
+    memories: { listContext: (scope, now) => memories.listContext(scope, now) },
+    learnerContext: {
+      read: async () => ({
+        courseId: course.id,
+        title: "Shared lineage admission course",
+        asOf: "2026-11-21T00:00:00Z",
+        privacyEpoch: 0,
+        goal: null,
+        weaknesses: [],
+        recentMistakes: [],
+        observationIds: [],
+        sourceRefs: [{ sourceId: sharedSourceId, sourceVersion: 0 }],
+      }),
+      assertCurrent: async () => {},
+    },
+    privacy: createOpeningPrivacyRepository(fixture.sql),
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    config: { maxContextCharacters: 2000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  })(learnerTurn.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(providerComplete).not.toHaveBeenCalled();
 });

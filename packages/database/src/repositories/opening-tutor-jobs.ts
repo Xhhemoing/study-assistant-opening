@@ -165,6 +165,7 @@ async function assertStreamMaterialAdmission(
   const explicitSourceIds = new Set([
     ...pinnedSourceIds,
     ...turnSourceIds.map(sourceId => sourceId.toLowerCase()),
+    ...verifiedAttemptSourceIds,
     ...(typeof anchor?.sourceId === "string" ? [anchor.sourceId.toLowerCase()] : []),
   ]);
   const derivedSourceIds = [...new Set([
@@ -202,12 +203,13 @@ async function assertStreamMaterialAdmission(
   }
   if (globalMemoryIdList.length) {
     // Lock and verify every exact injected global memory is still active and unexpired (never superseded/rejected/expired).
+    // Use post-lock clock_timestamp() rather than transaction-start now() so waiting on workspace/job locks cannot admit expired temporary memory.
     const activeMemories = await tx`SELECT id FROM opening_memories
       WHERE workspace_id=${scope.workspaceId}
         AND id=ANY(${globalMemoryIdList}::uuid[])
         AND status='active'
         AND course_id IS NULL
-        AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > now()))
+        AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
       ORDER BY id FOR SHARE`;
     if (activeMemories.length !== globalMemoryIdList.length) {
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
@@ -229,7 +231,7 @@ async function assertStreamMaterialAdmission(
           AND m.id = ANY(${globalMemoryIdList}::uuid[])
           AND m.status = 'active'
           AND m.course_id IS NULL
-          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > now()))
+          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
           AND EXISTS (
             SELECT 1
             FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
@@ -1019,11 +1021,75 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           AND m.id = ANY(${ids}::uuid[])
           AND m.status = 'active'
           AND m.course_id IS NULL
-          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > now()))
+          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
         ORDER BY m.id`;
       if (active.length !== ids.length) {
         throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
       }
+    },
+
+    /**
+     * Final atomic send gate before external provider dispatch.
+     * Locks workspaces -> opening_tutor_jobs FOR SHARE in canonical lock order, verifying
+     * running status, claim_token, timing_execution_id, privacy_epoch, attempt context,
+     * material admission, and post-lock clock_timestamp() global memory eligibility.
+     */
+    async assertSendAuthorized(
+      scope: OpeningScope,
+      id: string,
+      context: {
+        expectedPrivacyEpoch?: number;
+        claimToken?: string;
+        executionId?: string;
+        contextSourceRefs: ContextSourceRef[];
+        materialPurposePin?: OpeningMaterialPurposePin;
+        memoryLineageSourceIds?: readonly string[];
+        globalMemoryIds?: readonly string[];
+        attemptContext?: TutorAttemptContext;
+      },
+    ): Promise<void> {
+      await sql.begin(async tx => {
+        if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
+        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        if (!workspace) {
+          throw Object.assign(new Error("tutor job workspace is no longer available"), { code: "CONFLICT" });
+        }
+        if (context.expectedPrivacyEpoch !== undefined && Number(workspace.privacy_epoch) !== context.expectedPrivacyEpoch) {
+          throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
+        }
+        const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id
+          FROM opening_tutor_jobs j
+          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+          WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+            AND j.status='running'
+            AND j.claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
+            AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid
+            AND (j.claim_token IS NULL OR j.timing_execution_id IS NOT NULL)
+          FOR SHARE OF j`;
+        if (!job) {
+          throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+        }
+        if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
+          if (!context.attemptContext) {
+            throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
+          }
+          await assertTutorAttemptContext(tx, scope,
+            { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+        }
+        await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+          context.contextSourceRefs, context.attemptContext?.sourceRefs, {
+            memoryLineageSourceIds: context.memoryLineageSourceIds,
+            globalMemoryIds: context.globalMemoryIds,
+          });
+        if (context.contextSourceRefs.length) {
+          await assertStreamSources(
+            tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
+            job.source_versions as Record<string, unknown> | null | undefined,
+          );
+        }
+      });
     },
 
     /** Complete the answer, lineage and inert help receipt in one transaction. */

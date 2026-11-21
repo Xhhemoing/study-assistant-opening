@@ -1341,6 +1341,47 @@ it("enforces temporary global memory expiry at beforeSend, stream publication/re
       config: { maxContextCharacters: 1000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
     })(beforeSendTurn.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(providerComplete).not.toHaveBeenCalled();
+
+    // 3. Post-lock clock_timestamp() enforcement: a readStream / assertSendAuthorized transaction that starts BEFORE
+    //    expires_at and waits on a workspace FOR UPDATE lock until AFTER expires_at MUST reject (not admit via tx-start now()).
+    const shortLived = await memories.proposeMemory(scope, {
+      text: "Expires while waiting on lock", sourceTurnIds: [originTurn.turnId], courseId: null,
+      expiresAt: new Date(Date.now() + 250).toISOString(),
+    });
+    const lockTurn = await conversations.appendSavedTurn({
+      scope, conversationId: originConversation.id, text: "Check post-lock expiry", mode: "explain",
+      clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+    });
+    const lockClaim = (await jobs.claim(lockTurn.jobId))!;
+    const holder = openRaceSession();
+    const waiter = openRaceSession();
+    const lockAcquired = deferred();
+    const releaseLock = deferred();
+    try {
+      await Promise.all([holder.ready, waiter.ready]);
+      const holdTx = track(holder.sql.begin(async tx => {
+        await tx`SELECT id FROM workspaces WHERE id = ${scope.workspaceId} FOR UPDATE`;
+        lockAcquired.resolve();
+        await releaseLock.promise;
+      }));
+      await lockAcquired.promise;
+      // Start assertSendAuthorized BEFORE expires_at; it blocks on workspaces FOR SHARE until releaseLock resolves.
+      const sendCheck = track(createOpeningTutorJobsRepository(waiter.sql).assertSendAuthorized(scope, lockTurn.jobId, {
+        expectedPrivacyEpoch: 1,
+        claimToken: lockClaim.claimToken,
+        executionId: lockClaim.executionId,
+        contextSourceRefs: [],
+        globalMemoryIds: [shortLived.id],
+      }));
+      await waitUntilBlocked(sql, waiter.pid, holder.pid);
+      await new Promise(resolve => setTimeout(resolve, 400));
+      releaseLock.resolve();
+      await holdTx;
+      await expect(sendCheck).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      releaseLock.resolve();
+      await Promise.all([closeRace(holder.sql), closeRace(waiter.sql)]);
+    }
   } finally {
     await fixture.close();
   }

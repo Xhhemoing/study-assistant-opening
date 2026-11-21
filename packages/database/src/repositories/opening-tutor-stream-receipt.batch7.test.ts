@@ -401,10 +401,10 @@ describe("stream receipt release waits for current job authorization and assista
       scope, jobId, assistantTurnId: assistant, text: "course answer with global memory", citations: [], candidates: [],
       contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
     }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).resolves.toBeUndefined();
-    expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > now()"))).toBe(true);
-    expect(admitted.calls.some(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > now()"))).toBe(true);
+    expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"))).toBe(true);
+    expect(admitted.calls.some(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, [memoryId])).resolves.toBeUndefined();
-    expect(admitted.outerCalls.some(sql => sql.startsWith("SELECT m.id FROM opening_memories m") && sql.includes("m.expires_at > now()"))).toBe(true);
+    expect(admitted.outerCalls.some(sql => sql.startsWith("SELECT m.id FROM opening_memories m") && sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, ["not-a-uuid"])).rejects.toMatchObject({ code: "CONFLICT" });
 
     // Missing globalMemoryIds for memoryLineageSourceIds is rejected fail-closed.
@@ -486,5 +486,38 @@ describe("stream receipt release waits for current job authorization and assista
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("assertSendAuthorized locks workspaces and opening_tutor_jobs FOR SHARE before checking clock_timestamp() temporary memories, epoch, and execution fence", async () => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ab";
+    const ok = fixture({ activeGlobalMemoryIds: [memoryId] });
+    await expect(ok.repo.assertSendAuthorized(scope, jobId, {
+      expectedPrivacyEpoch: 2, claimToken: token, executionId: execution,
+      contextSourceRefs: [], globalMemoryIds: [memoryId],
+    })).resolves.toBeUndefined();
+    const wsIdx = ok.calls.findIndex(c => c.sql.startsWith("SELECT privacy_epoch FROM workspaces") && c.sql.includes("FOR SHARE"));
+    const jobIdx = ok.calls.findIndex(c => c.sql.startsWith("SELECT j.user_turn_id,t.attempt_id") && c.sql.includes("timing_execution_id") && c.sql.includes("FOR SHARE OF j"));
+    const memIdx = ok.calls.findIndex(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"));
+    expect(wsIdx).toBeGreaterThanOrEqual(0);
+    expect(jobIdx).toBeGreaterThan(wsIdx);
+    expect(memIdx).toBeGreaterThan(jobIdx);
+
+    const driftedEpoch = fixture({ epoch: 3, activeGlobalMemoryIds: [memoryId] });
+    await expect(driftedEpoch.repo.assertSendAuthorized(scope, jobId, {
+      expectedPrivacyEpoch: 2, claimToken: token, executionId: execution,
+      contextSourceRefs: [], globalMemoryIds: [memoryId],
+    })).rejects.toMatchObject({ code: "PRIVACY_EPOCH_MISMATCH" });
+
+    const missingJob = fixture({ missingJob: true, activeGlobalMemoryIds: [memoryId] });
+    await expect(missingJob.repo.assertSendAuthorized(scope, jobId, {
+      expectedPrivacyEpoch: 2, claimToken: token, executionId: execution,
+      contextSourceRefs: [], globalMemoryIds: [memoryId],
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const expiredMemory = fixture({ activeGlobalMemoryIds: [] });
+    await expect(expiredMemory.repo.assertSendAuthorized(scope, jobId, {
+      expectedPrivacyEpoch: 2, claimToken: token, executionId: execution,
+      contextSourceRefs: [], globalMemoryIds: [memoryId],
+    })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

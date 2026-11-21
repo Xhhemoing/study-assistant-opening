@@ -29,6 +29,17 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
       originalAnswer: null, currentAnswer: null, rootObservationId: null, headObservationId: null, workSource: null, effectiveGrading: null, sourceRefs: [] })),
     assertAttemptContext: vi.fn<OpeningTutorJobsRepository["assertAttemptContext"]>(async () => {}),
     assertGlobalMemoriesCurrent: vi.fn<OpeningTutorJobsRepository["assertGlobalMemoriesCurrent"]>(async () => {}),
+    assertSendAuthorized: vi.fn<OpeningTutorJobsRepository["assertSendAuthorized"]>(async (scope, jobId, ctx) => {
+      const current = await tutorJobs.get(scope, jobId);
+      if (
+        current?.status !== "running"
+        || current.claimToken !== ctx.claimToken
+        || (ctx.executionId !== undefined && current.executionId !== ctx.executionId)
+        || (ctx.claimToken !== undefined && current.executionId === null)
+      ) {
+        throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+      }
+    }),
     freezeHelpInputSnapshot: vi.fn<OpeningTutorJobsRepository["freezeHelpInputSnapshot"]>(async (): Promise<HelpInputSnapshot> => ({ userTurnId: claimedJob.userTurnId, assistantTurnId: claimedJob.assistantTurnId, tutorMode: "explain", studyIntent: null })),
     completeTurn: vi.fn<OpeningTutorJobsRepository["completeTurn"]>(async () => {}),
     canAppendCompletedTurnCandidates: vi.fn<OpeningTutorJobsRepository["canAppendCompletedTurnCandidates"]>(async () => true),
@@ -78,6 +89,25 @@ describe("sm95 typed attempt context", () => {
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, attemptId: claimedJob.userTurnId });
     tutorJobs.assertAttemptContext.mockImplementationOnce(async () => {
       tutorJobs.get.mockResolvedValue({ ...current, claimToken: "00000000-0000-4000-8000-000000000008" });
+    });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it("aborts before paid send when timing_execution_id is fenced or privacy_epoch advances before the final send gate", async () => {
+    const { deps, tutorJobs, budget, provider } = setup({ sourceIds: [], chunks: [] });
+    const claimToken = "00000000-0000-4000-8000-000000000007";
+    const executionId = "00000000-0000-4000-8000-000000000009";
+    const current = { ...claimedJob, claimToken, executionId };
+    tutorJobs.claim.mockResolvedValue(current);
+    tutorJobs.get.mockResolvedValue(current);
+    tutorJobs.heartbeat.mockResolvedValue(true);
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, attemptId: claimedJob.userTurnId });
+    tutorJobs.assertAttemptContext.mockImplementationOnce(async () => {
+      // Simulate advanceOpeningWorkspacePrivacyEpoch clearing timing_execution_id while status stays running.
+      tutorJobs.get.mockResolvedValue({ ...current, executionId: undefined });
     });
 
     await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });

@@ -12,7 +12,7 @@ import {
   type StudyContextAnchor,
   type TutorLearnerContext,
 } from "@aistudy/contracts";
-import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, renumberInlineCitations, resolveCitations, selectContext, type SystemQueryService, tutorCitationsFromMarkdown } from "@aistudy/ai";
+import { OpeningProviderError, OpeningModelRoutingError, BudgetedCallError, canProposeTask, onFailedResponseUsage, renumberInlineCitations, resolveCitations, selectContext, type ProviderTextDelta, type SystemQueryService, tutorCitationsFromMarkdown } from "@aistudy/ai";
 import {
   assertCitationsForPage,
   classifyTutorHelpKind,
@@ -341,17 +341,20 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         : { memories: [], sourceRefs: [] };
       const learnerContext = await deps.learnerContext?.read(scope, { courseId: turn.courseId ?? turn.contextAnchor?.courseId,
         sourceIds: allowedSourceIds }) ?? null;
-      const explicitMaterialSourceIds = new Set(
+      const nonMemorySourceIds = new Set(
         [
           ...allowedSourceIds,
           ...context.map(({ sourceId }) => sourceId),
+          ...historySourceRefs.map(({ sourceId }) => sourceId),
+          ...(learnerContext?.sourceRefs ?? []).map(({ sourceId }) => sourceId),
+          ...(attemptContext?.sourceRefs ?? []).map(({ sourceId }) => sourceId),
           ...(turn.contextAnchor?.sourceId ? [turn.contextAnchor.sourceId] : []),
         ].map(sourceId => sourceId.toLowerCase()),
       );
       const memoryLineageSourceIds = [...new Set(
         memoryContext.sourceRefs
           .map(({ sourceId }) => sourceId.toLowerCase())
-          .filter(sourceId => !explicitMaterialSourceIds.has(sourceId)),
+          .filter(sourceId => !nonMemorySourceIds.has(sourceId)),
       )].sort();
       const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow));
       const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
@@ -503,10 +506,17 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             })();
         const provider = model?.provider ?? deps.provider;
         let publicationFailure: { reason: unknown } | undefined;
-        const streamingProvider = provider && deps.stream && input.outputFormat === "markdown" ? {
-          complete: async (providerInput: ProviderInput) => {
+        const streamingProvider: BudgetedProvider | null = provider && deps.stream && input.outputFormat === "markdown" ? {
+          complete: async (providerInput, callerSignal, callerOnTextDelta) => {
             const result = await withTutorDeltaBatches(
-              (signal, onTextDelta) => provider.complete(providerInput, signal, onTextDelta),
+              (signal, onTextDelta) => {
+                const failedUsage = callerOnTextDelta?.[onFailedResponseUsage];
+                const forwarded: ProviderTextDelta = failedUsage
+                  ? Object.assign((delta: string) => onTextDelta(delta), { [onFailedResponseUsage]: failedUsage })
+                  : onTextDelta;
+                const combinedSignal = callerSignal ? AbortSignal.any([callerSignal, signal]) : signal;
+                return provider.complete(providerInput, combinedSignal, forwarded);
+              },
               authorizeAndPublish,
             );
             publicationFailure = result.publicationFailure;
@@ -530,6 +540,40 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             await assertAttemptCurrent();
             await assertMaterialsCurrent();
             if (learnerContext) await deps.learnerContext!.assertCurrent(scope, learnerContext);
+            if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+            await assertMaterialsCurrent();
+            // Final atomic DB send gate before provider dispatch: locks workspaces + opening_tutor_jobs FOR SHARE
+            // and verifies running status, claim_token, timing_execution_id, privacy_epoch, attempt context,
+            // material admission, and post-lock clock_timestamp() global memory eligibility.
+            if (deps.tutorJobs.assertSendAuthorized) {
+              await deps.tutorJobs.assertSendAuthorized(scope, claimed.id, {
+                ...(jobEpoch !== null ? { expectedPrivacyEpoch: jobEpoch } : {}),
+                claimToken: claimed.claimToken,
+                executionId: claimed.executionId,
+                contextSourceRefs,
+                ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
+                ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
+                ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+                ...(attemptContext ? { attemptContext } : {}),
+              });
+            } else {
+              if (globalMemoryIds.length) {
+                await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds);
+              }
+              if (deps.privacy && jobEpoch !== null) {
+                assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
+              }
+              const current = await deps.tutorJobs.get(scope, claimed.id);
+              if (
+                current?.status !== "running"
+                || current.claimToken !== claimed.claimToken
+                || (claimed.executionId !== undefined && current.executionId !== claimed.executionId)
+                || (claimed.claimToken !== undefined && current.executionId === null)
+              ) {
+                throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+              }
+            }
+            // Final synchronous wall-clock expiry check with zero async gap before provider dispatch.
             if (injectedTemporaryMemories.length) {
               const sendNow = Date.now();
               if (injectedTemporaryMemories.some(memory => {
@@ -538,15 +582,6 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               })) {
                 throw Object.assign(new Error("injected temporary memory expired before send"), { code: "CONFLICT" });
               }
-            }
-            if (globalMemoryIds.length) {
-              await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds);
-            }
-            if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
-            await assertMaterialsCurrent();
-            const current = await deps.tutorJobs.get(scope, claimed.id);
-            if (current?.status !== "running" || current.claimToken !== claimed.claimToken) {
-              throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
             }
           },
         });
