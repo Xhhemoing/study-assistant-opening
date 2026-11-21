@@ -1349,4 +1349,33 @@ describe("library repository foundation", () => {
     expect(second.applied).toEqual([]);
     expect(second.alreadyApplied).toContain("0001_library.sql");
   });
+  it("redacts answer blocks and historical answer ids by default across document reads", async () => {
+    const visibleId = randomUUID();
+    const answerId = randomUUID();
+    const historicalId = randomUUID();
+    const document = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Learner document",
+      blocks: [
+        { id: visibleId, type: "paragraph", content: { text: "visible body" } },
+        { id: answerId, type: "answer_key", content: { answer: "PRIVATE_ANSWER" } },
+        { id: historicalId, type: "paragraph", content: { text: "PRIVATE_HISTORICAL" } },
+      ],
+    });
+    await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+      VALUES(${document.id},${workspaceA},${sql.json([{ answerKeyBlockIds: [historicalId.toUpperCase()] }])})`;
+
+    const redacted = await repo.getDocument({ workspaceId: workspaceA, documentId: document.id });
+    expect(redacted.blocks.map((block) => block.id)).toEqual([visibleId]);
+    expect((await repo.listDocuments({ workspaceId: workspaceA }))[0]?.blocks.map((block) => block.id)).toEqual([visibleId]);
+    await expect(repo.getBlock({ workspaceId: workspaceA, blockId: answerId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(repo.getBlock({ workspaceId: workspaceA, blockId: historicalId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const trusted = await repo.getDocument({ workspaceId: workspaceA, documentId: document.id, includeAnswerKeys: true });
+    expect(trusted.blocks.map((block) => block.id)).toEqual([visibleId, answerId, historicalId]);
+    expect((await repo.listDocuments({ workspaceId: workspaceA, includeAnswerKeys: true }))[0]?.blocks.map((block) => block.id))
+      .toEqual([visibleId, answerId, historicalId]);
+    expect((await repo.getBlock({ workspaceId: workspaceA, blockId: answerId, includeAnswerKeys: true })).content)
+      .toEqual({ answer: "PRIVATE_ANSWER" });
+  });
 });

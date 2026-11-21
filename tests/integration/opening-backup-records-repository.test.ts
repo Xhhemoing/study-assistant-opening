@@ -12,6 +12,8 @@ afterEach(async () => { await fixture?.dispose(); });
 it("exports durable tables and version metadata with owner isolation and no object locators", async () => {
   const own = await seedBackupGraph(fixture.sql, fixture.scope);
   const other = await seedBackupGraph(fixture.sql, fixture.otherScope);
+  const pdfWarning = { code: "PARSE_PARTIAL", retryable: true, pdfTextCap: [3, 7] };
+  await fixture.sql`UPDATE opening_sources SET error = ${fixture.sql.json(pdfWarning)} WHERE id = ${own.source}`;
   const wrongOwner = { ...fixture.scope, ownerUserId: fixture.otherScope.ownerUserId };
   const impostor = backupRows(fixture.sql, wrongOwner);
   await impostor.conversation();
@@ -31,6 +33,7 @@ it("exports durable tables and version metadata with owner isolation and no obje
   expect(snapshot.privacyEpoch).toBe(1);
   expect(snapshot.deletionJournal).toHaveLength(1);
   expect(snapshot.tables.opening_sources[0]).toMatchObject({ id: own.source, bytes: sourceBytes.length });
+  expect(snapshot.tables.opening_sources.find((row) => row.id === own.source)?.error).toEqual(pdfWarning);
   expect(snapshot.tables.opening_source_chunks[0]).not.toHaveProperty("image_object_key");
   expect(JSON.stringify(snapshot)).not.toContain("private/locator");
   expect(JSON.stringify(snapshot)).not.toContain(other.source);

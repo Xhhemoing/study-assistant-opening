@@ -86,13 +86,14 @@ describe.skipIf(!enabled)("opening restore apply executor (empty workspace UUID 
             ? [{
                 id: sourceId,
                 workspace_id: workspaceId,
-                name: "q03-apply.bin",
-                mime: "application/octet-stream",
+                name: "q03-apply.pdf",
+                mime: "application/pdf",
                 bytes: body.byteLength,
                 sha256,
                 version: 1,
                 upload_state: "uploaded",
                 parse_state: "ready",
+                error: { code: "PARSE_PARTIAL", retryable: true, pdfTextCap: [3, 7] },
               }]
             : [],
         ]),
@@ -139,10 +140,11 @@ describe.skipIf(!enabled)("opening restore apply executor (empty workspace UUID 
     expect(digest.sha256).toBe(sha256);
 
     const [row] = await sql`
-      SELECT id::text AS id, name, upload_state FROM opening_sources
+      SELECT id::text AS id, name, upload_state, error FROM opening_sources
       WHERE workspace_id = ${workspaceId} AND id = ${sourceId}
     `;
-    expect(row).toMatchObject({ id: sourceId, name: "q03-apply.bin", upload_state: "uploaded" });
+    expect(row).toMatchObject({ id: sourceId, name: "q03-apply.pdf", upload_state: "uploaded",
+      error: { code: "PARSE_PARTIAL", retryable: true, pdfTextCap: [3, 7] } });
 
     const after = await readOpeningRestoreNamespaceCounts(sql, workspaceId);
     expect(after.opening_sources).toBe(1);
