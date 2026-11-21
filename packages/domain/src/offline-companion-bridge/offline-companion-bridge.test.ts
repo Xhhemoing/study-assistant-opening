@@ -2351,6 +2351,82 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     });
   });
 
+  describe.each(["variant stem", "sibling card back"] as const)("formatted scalars and decoded answers in a %s", surface => {
+    const greekCommands = ["\\mathbf{\\pi}", "\\mathrm{\\theta}"];
+    const scalarOnly = { canonicalSolution: undefined, gradingRubric: undefined, referenceAnswer: undefined, sealedPayload: {} };
+    const overDecodeLimit = Array.from({ length: 8 }).reduce<string>(
+      body => JSON.stringify({ nested: body }),
+      "[17,42]",
+    );
+
+    it.each([
+      ...["B", "**B**", "___B___", "$B$", "[*$ B $*]", "\\mathbf{B}", "The marked response [*$ B $*]."]
+        .map(text => ({ secret: { answerKey: "B" }, text, ok: false })),
+      ...["A ticket costs $5. ", "Prices are $5 and $10. ", "A ticket costs $12.50. ", "A ticket costs $1,000. "]
+        .flatMap(prefix => ["The marked response [*$ B $*].", "[$ B $]", "[$B$]", "$B$", "**$B$**"]
+          .map(text => ({ secret: { answerKey: "B" }, text: prefix + text, ok: false }))),
+      { secret: { answerKey: "B" }, text: "Prices are $5 and $10. Review item_b.", ok: true },
+      { secret: { answerKey: "B" }, text: "A ticket costs $5 [*$ B $*].", ok: false },
+      { secret: { answerKey: "42" }, text: "The marked response [___42___].", ok: false },
+      { secret: { answerKey: "42" }, text: "$42$", ok: false },
+      { secret: { answerKey: "\\mathbf{B}" }, text: "The marked response [B].", ok: false },
+      ...["\\pi", "π", "pi"].flatMap(answerKey =>
+        ["$\\pi$", "π", "pi", "A ticket costs $5. The marked response [_$\\pi$_]."]
+          .map(text => ({ secret: { answerKey }, text, ok: false }))),
+      ...["\\theta", "θ", "theta", "\\vartheta"].flatMap(answerKey =>
+        ["$\\theta$", "ϑ", "theta"].map(text => ({ secret: { answerKey }, text, ok: false }))),
+      ...[
+        ["\\Gamma", "Γ"], ["\\varepsilon", "ϵ"], ["\\varpi", "ϖ"], ["\\varrho", "ϱ"],
+        ["\\varsigma", "ς"], ["\\varphi", "ϕ"],
+      ].map(([answerKey, label]) => ({ secret: { answerKey }, text: `The marked response [${label}].`, ok: false })),
+      ...[
+        { answerKey: JSON.stringify(greekCommands) },
+        { sealedPayload: { order: greekCommands } },
+        { sealedPayload: { order: JSON.stringify(greekCommands) } },
+        { sealedPayload: { order: ["π", "θ"] } },
+      ].flatMap(secret => [
+        { secret, text: "The selected value is π.", ok: false },
+        { secret, text: "Use pi and theta.", ok: false },
+        { secret, text: "Use $\\pi$ and $\\theta$.", ok: false },
+        { secret, text: "Compare $\\theta$ and $\\pi$.", ok: true },
+        { secret, text: "Compare $\\theta$ and $\\pi$. The selected value is [___pi___].", ok: false },
+        { secret, text: "Compute alpha_pi + pi_1.", ok: true },
+      ]),
+      ...[
+        { answerKey: "[17,42]" },
+        { sealedPayload: { order: "[17,42]" } },
+        { sealedPayload: { order: [17, 42] } },
+        { sealedPayload: ['{"nested":"[17,42]"}'] },
+        { answerKey: JSON.stringify(JSON.stringify([17, 42])) },
+      ].flatMap(secret => [
+        { secret, text: "The selected value is 42.", ok: false },
+        { secret, text: "Use 17 and 42.", ok: false },
+        { secret, text: "Use the variable n42 and the index 170.", ok: true },
+      ]),
+      { secret: { answerKey: '[true,"red",42]' }, text: "The selected value is true.", ok: false },
+      { secret: { sealedPayload: { order: '{"nested":"[false,97]"}' } }, text: "The selected value is false.", ok: false },
+      { secret: { sealedPayload: { order: overDecodeLimit } }, text: "Review the ordering.", ok: false },
+    ])("sets ok=$ok for $text with $secret", ({ secret, text, ok }) => {
+      const variant = makeMissVariantCandidate({
+        ...scalarOnly,
+        answerKey: undefined,
+        ...secret,
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), backSummary: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-formatted-scalar-and-decoded-answer",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+  });
+
   it("rejects a candidate with an inherited protected getter without invoking it", () => {
     let getterCalled = false;
     const candidate = makeMissVariantCandidate({ freshVariantStem: "The indicator turns violet." });
