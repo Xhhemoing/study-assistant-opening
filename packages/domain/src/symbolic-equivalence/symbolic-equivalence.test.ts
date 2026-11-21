@@ -968,6 +968,38 @@ describe("bounded symbolic equivalence", () => {
       status: "inequivalent",
       reason: "natural_domain_mismatch",
     });
+
+    // Round-18 P1-2: float underflow to 0 from exp(-40)^12 must not synthesize false undefined_domain or natural_domain_mismatch
+    const underflowMatrixRes = verifyMatrixExpressionEquivalence(
+      "\\begin{pmatrix} ((\\exp(-40)^{12})^2)^0 & x & y \\end{pmatrix}",
+      "\\begin{pmatrix} 1 & x & y \\end{pmatrix}",
+    );
+    expect(underflowMatrixRes.status).not.toBe("inequivalent");
+    expect(verifyScalarEquivalence("((\\exp(-40)^{12})^2)^0", "1").status).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} (x-x)^0 & y \\end{pmatrix}",
+        "\\begin{pmatrix} (x-x)^0 & y+1 \\end{pmatrix}",
+      ).status,
+    ).toBe("unverified");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} (x-x)^0 & y \\end{pmatrix}",
+        "\\begin{pmatrix} 1 & y \\end{pmatrix}",
+      ),
+    ).toMatchObject({
+      status: "inequivalent",
+      reason: "natural_domain_mismatch",
+    });
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} x/(x^2-x) & y \\end{pmatrix}",
+        "\\begin{pmatrix} 1/(x-1) & y \\end{pmatrix}",
+      ),
+    ).toMatchObject({
+      status: "inequivalent",
+      reason: "natural_domain_mismatch",
+    });
   });
 });
 

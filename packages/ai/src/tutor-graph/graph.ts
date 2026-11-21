@@ -302,6 +302,38 @@ function blockedByBudgetResult(
   };
 }
 
+type PureFallbackChoice =
+  | { kind: "approved"; caps: PublicTeachingCaps; text: string }
+  | { kind: "stopped" }
+  | { kind: "rejected" };
+
+function selectVerifiedPureFallback(
+  releaseCaps: TutorGraphInput["releaseCaps"],
+  verifyStopSignal?: AbortSignal,
+): PureFallbackChoice {
+  const candidates: ReadonlyArray<{ text: string; rationale: string }> = [
+    { text: PURE_SAFE_CONSERVATIVE_PROMPT, rationale: "请先整体复查关键条件与每一步推导依据" },
+    { text: "Attempt recorded.", rationale: "Attempt recorded." },
+    { text: "Step recorded.", rationale: "Step recorded." },
+  ];
+  for (const candidate of candidates) {
+    const candidateCaps: PublicTeachingCaps = {
+      questionStem: "",
+      learnerSteps: [],
+      movePlan: { move: "concept_cue", rationale: candidate.rationale },
+      publicBlocks: [{ kind: "question", text: candidate.text }],
+    };
+    const candidateReleased = guardRelease(candidateCaps, { steps: [] }, releaseCaps);
+    if (isStopped(releaseCaps.stopSignal) || isStopped(verifyStopSignal)) {
+      return { kind: "stopped" };
+    }
+    if (candidateReleased !== undefined) {
+      return { kind: "approved", caps: candidateCaps, text: candidate.text };
+    }
+  }
+  return { kind: "rejected" };
+}
+
 export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   const budget = input.budget;
   if (!budget) {
@@ -385,39 +417,21 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     );
   }
 
-  let verifiedPureFallback: { caps: PublicTeachingCaps; text: string } | null = null;
   if (isPureTurn) {
-    const pureFallbackCandidates: ReadonlyArray<{ text: string; rationale: string }> = [
-      { text: PURE_SAFE_CONSERVATIVE_PROMPT, rationale: "请先整体复查关键条件与每一步推导依据" },
-      { text: "Attempt recorded.", rationale: "Attempt recorded." },
-      { text: "Step recorded.", rationale: "Step recorded." },
-    ];
-    for (const candidate of pureFallbackCandidates) {
-      const candidateCaps: PublicTeachingCaps = {
-        questionStem: "",
-        learnerSteps: [],
-        movePlan: { move: "concept_cue", rationale: candidate.rationale },
-        publicBlocks: [{ kind: "question", text: candidate.text }],
+    const preflightFallback = selectVerifiedPureFallback(input.releaseCaps, input.verifyCaps.stopSignal);
+    if (preflightFallback.kind === "stopped") {
+      return {
+        state: "stopped",
+        providerCalls: 0,
+        verification: { steps: [] },
+        leakageBits: budget.leakageBits,
+        helpState: budget.state,
+        cooldownUntilMs: budget.cooldownUntilMs,
+        releaseApproved: false,
+        reason: "cancelled",
       };
-      const candidateReleased = guardRelease(candidateCaps, { steps: [] }, input.releaseCaps);
-      if (isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal)) {
-        return {
-          state: "stopped",
-          providerCalls: 0,
-          verification: { steps: [] },
-          leakageBits: budget.leakageBits,
-          helpState: budget.state,
-          cooldownUntilMs: budget.cooldownUntilMs,
-          releaseApproved: false,
-          reason: "cancelled",
-        };
-      }
-      if (candidateReleased !== undefined) {
-        verifiedPureFallback = { caps: candidateCaps, text: candidate.text };
-        break;
-      }
     }
-    if (!verifiedPureFallback) {
+    if (preflightFallback.kind === "rejected") {
       return {
         state: "unverified",
         providerCalls: 0,
@@ -462,6 +476,37 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       releaseApproved: false,
       reason: "cancelled",
     };
+  }
+
+  // Re-validate pure fallback candidates AFTER verify() completes and BEFORE inspecting verification correctness.
+  let verifiedPureFallback: { caps: PublicTeachingCaps; text: string } | null = null;
+  if (isPureTurn) {
+    const postVerifyFallback = selectVerifiedPureFallback(input.releaseCaps, input.verifyCaps.stopSignal);
+    if (postVerifyFallback.kind === "stopped") {
+      return {
+        state: "stopped",
+        providerCalls: 0,
+        verification: { steps: [] },
+        leakageBits: budget.leakageBits,
+        helpState: budget.state,
+        cooldownUntilMs: budget.cooldownUntilMs,
+        releaseApproved: false,
+        reason: "cancelled",
+      };
+    }
+    if (postVerifyFallback.kind === "rejected") {
+      return {
+        state: "unverified",
+        providerCalls: 0,
+        verification: { steps: [] },
+        leakageBits: budget.leakageBits,
+        helpState: budget.state,
+        cooldownUntilMs: budget.cooldownUntilMs,
+        releaseApproved: false,
+        reason: "release_guard_rejected",
+      };
+    }
+    verifiedPureFallback = { caps: postVerifyFallback.caps, text: postVerifyFallback.text };
   }
 
   const propagatedSteps = propagateSteps(verification.steps, verification.firstError);

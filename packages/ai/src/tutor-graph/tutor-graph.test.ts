@@ -842,6 +842,58 @@ describe("TutorGraph fast path", () => {
     expect(rejectRightBudget.leakageBits).toBe(0);
     expect(rejectWrongBudget.leakageBits).toBe(0);
 
+    // Round-18 P1-1: stateful post-verify guard tightening re-validates fallbacks before branching on correctness
+    const midTurnBlocked = new Set<string>();
+    const midFallbackBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const midFallbackRes = runTutorGraph({
+      questionStem: "积分",
+      submission: { steps: [{ id: "s1", text: "attempt" }] },
+      budget: midFallbackBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => {
+          midTurnBlocked.add("推导依据");
+          return { steps: [{ id: "s1", text: "a", status: "invalid" }] };
+        },
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: (text) => Array.from(midTurnBlocked).some((needle) => text.includes(needle)),
+      },
+    });
+    expect(midFallbackRes.state).toBe("released");
+    expect(midFallbackRes.releaseApproved).toBe(true);
+    expect(midFallbackRes.releasedText).toBe("Attempt recorded.");
+    expect(midFallbackBudget.leakageBits).toBe(1);
+    expect(JSON.stringify(midFallbackRes)).not.toContain("推导依据");
+
+    const makeMidTurnAllRejectRun = (status: "valid" | "invalid") => {
+      let blockEverything = false;
+      const b = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const res = runTutorGraph({
+        questionStem: "积分",
+        submission: { steps: [{ id: "s1", text: status }] },
+        budget: b,
+        attemptSubmitted: true,
+        verifyCaps: {
+          verify: () => {
+            blockEverything = true;
+            return { steps: [{ id: "s1", text: "a", status }] };
+          },
+          assertCurrent: () => undefined,
+        },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => blockEverything },
+      });
+      return { res, leakageBits: b.leakageBits };
+    };
+    const midRejectRight = makeMidTurnAllRejectRun("valid");
+    const midRejectWrong = makeMidTurnAllRejectRun("invalid");
+    expect(midRejectRight.res).toMatchObject({ state: "unverified", releaseApproved: false, reason: "release_guard_rejected" });
+    expect(midRejectRight.res).toEqual(midRejectWrong.res);
+    expect(midRejectRight.leakageBits).toBe(0);
+    expect(midRejectWrong.leakageBits).toBe(0);
+
     expect(zeroBitOutcomes.size).toBe(1);
     expect(oneBitOutcomes.size).toBe(2);
 
