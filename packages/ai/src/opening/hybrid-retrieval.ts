@@ -41,6 +41,7 @@ function codePointUtf8Bytes(cp: number): number {
 
 const BEGIN_ENV_RE = /\\begin\{([A-Za-z][A-Za-z0-9*]*)\}/y;
 const END_ENV_RE = /\\end\{([A-Za-z][A-Za-z0-9*]*)\}/y;
+const LATEX_CMD_RE = /\\[A-Za-z]+/g;
 const CURRENCY_PROSE_WORD_RE = /\b(?:and|or|to|for|per|with|from|in|of|at|is|are|was|were|cost|costs|price|prices|usd|cad|aud|eur|cents?|dollars?)\b/i;
 const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 
@@ -68,10 +69,9 @@ function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
   const next = text[closeIdx + 1] ?? "";
   if (/\s/.test(prev) || (next >= "0" && next <= "9")) return true;
   const inner = text.slice(dollarIndex + 1, closeIdx);
-  if (CURRENCY_PROSE_WORD_RE.test(inner)) return true;
   if (MATH_COMMAND_OR_OP_RE.test(inner)) return false;
-  if (/,\s/.test(inner)) return false;
-  return /^\d+(?:,\d{3})*(?:\.\d+)?$/.test(inner);
+  if (CURRENCY_PROSE_WORD_RE.test(inner.replace(LATEX_CMD_RE, " "))) return true;
+  return false;
 }
 
 function isBlankLineBreakAt(text: string, newlineIndex: number): boolean {

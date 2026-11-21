@@ -113,6 +113,27 @@ describe("material hybrid retrieval", () => {
     const segCurrency = segmentMaterialChunks([chunk("currency", currency)], 40);
     expect(segCurrency.map(s => s.chunk.text).join("")).toBe(currency);
     expect(segCurrency.every(s => encoder.encode(s.chunk.text).length <= 40)).toBe(true);
+
+    const setMembership = "If " + "u".repeat(65) + "$1 \\in A$ and $0 \\to \\infty$, done.";
+    const segSet = segmentMaterialChunks([chunk("set", setMembership)], 80);
+    expect(segSet.map(s => s.chunk.text).join("")).toBe(setMembership);
+    expect(segSet.some(s => s.chunk.text.includes("$1 \\in A$"))).toBe(true);
+    expect(segSet.some(s => s.chunk.text.includes("$0 \\to \\infty$"))).toBe(true);
+
+    const singleZero = "For $0$: " + "v".repeat(60) + " ($x + y = z$)";
+    const segZero = segmentMaterialChunks([chunk("zero", singleZero)], 75);
+    expect(segZero.map(s => s.chunk.text).join("")).toBe(singleZero);
+    expect(segZero.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
+
+    const singleOne = "设$1$，且" + "w".repeat(60) + "$f(x) = x^2 + 1$。";
+    const segOne = segmentMaterialChunks([chunk("one", singleOne)], 75);
+    expect(segOne.map(s => s.chunk.text).join("")).toBe(singleOne);
+    expect(segOne.some(s => s.chunk.text.includes("$f(x) = x^2 + 1$"))).toBe(true);
+
+    const pricesList = "Prices: $10, $20, and $30 " + "p".repeat(50);
+    const segPrices = segmentMaterialChunks([chunk("prices", pricesList)], 32);
+    expect(segPrices.map(s => s.chunk.text).join("")).toBe(pricesList);
+    expect(segPrices.every(s => encoder.encode(s.chunk.text).length <= 32)).toBe(true);
   });
 
   it("scans pathological backslash and mismatched-env inputs in linear O(N) time", () => {

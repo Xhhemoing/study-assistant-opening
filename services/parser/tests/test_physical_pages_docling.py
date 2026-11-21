@@ -7,6 +7,7 @@ TableItem export, including the upstream merge that corrupts charspans.
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from docling.datamodel.base_models import AssembledUnit, Cluster, ConversionStatus, InputFormat, Page, Table, TextElement
@@ -271,15 +272,64 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             [
                 text_element(11, "Answers to Exercises", 1, DocItemLabel.PAGE_HEADER),
                 text_element(11, "1.1 x = 3", 2),
-                text_element(11, "", 3),
             ],
         )
-        # Simulate defensive text=None and OCR cells on an all-sealed page.
-        object.__setattr__(result.pages[0].assembled.elements[2], "text", None)
-        result.pages[0].cells = [type("Cell", (), {"text": "1.1 x = 3", "from_ocr": True})()]
         pub = cli.texts_by_page(result)
         self.assertEqual(pub[11], [])
         self.assertEqual(cli.visual_kinds_by_page(result, pub)[11], [])
+
+        # Test visual_kinds_by_page resilience to text=None, Table elements, and OCR cells using lightweight doubles
+        # (never mutating read-only Pydantic Page.cells or passing text=None into ReadingOrderModel).
+        stub_page = SimpleNamespace(
+            page_no=11,
+            cells=[SimpleNamespace(text="1.1 x = 3", from_ocr=True), SimpleNamespace(text=None, from_ocr=False)],
+            assembled=SimpleNamespace(elements=[
+                SimpleNamespace(page_no=11, text=None, orig=None, table_cells=[SimpleNamespace(text="1.1 | 3")], label="table", children=[], cluster=None),
+            ]),
+            parsed_page=SimpleNamespace(bitmap_resources=[]),
+            predictions=SimpleNamespace(layout=SimpleNamespace(clusters=[])),
+        )
+        stub_conv = SimpleNamespace(document=SimpleNamespace(pages=[11]), pages=[stub_page])
+        self.assertEqual(cli.visual_kinds_by_page(stub_conv, {11: []})[11], [])
+
+    def test_end_of_chapter_answers_cross_page_worked_example_and_allcaps_markdown_sealing(self):
+        result = result_for(
+            [
+                text_element(11, "Example 1: Compute the integral.", 1),
+            ],
+            [
+                text_element(12, "Solution: Integrate term by term.", 1),
+                text_element(12, "例题 1：计算矩阵的秩。\n解答：\n由初等行变换可得。", 2),
+                text_element(12, "参考答案\n1. x = 3", 3),
+            ],
+            [
+                text_element(13, "Chapter 2: Vector Spaces", 1, DocItemLabel.SECTION_HEADER),
+                text_element(13, "Definition 2.1: A vector space over F.", 2),
+                text_element(13, "**ANSWERS TO SELECTED EXERCISES**\n1.1 x = 3", 3),
+            ],
+            [
+                text_element(14, "**课后答案**：1. x = 3\n**练习答案**：2. y = 4", 1),
+                text_element(14, "Theorem 2.2: Basis size is invariant.", 2),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+        self.assertIn("Integrate term by term.", "\n".join(pub[12]))
+        self.assertIn("由初等行变换可得。", "\n".join(pub[12]))
+        self.assertNotIn("x = 3", "\n".join(pub[12]))
+        self.assertEqual(blocks[12][0].kind, "worked_example")
+        self.assertEqual(blocks[12][1].kind, "worked_example")
+
+        p13_pub = "\n".join(pub[13])
+        self.assertIn("Chapter 2: Vector Spaces", p13_pub)
+        self.assertIn("Definition 2.1: A vector space over F.", p13_pub)
+        self.assertNotIn("ANSWERS TO SELECTED EXERCISES", p13_pub)
+        self.assertNotIn("1.1 x = 3", p13_pub)
+
+        p14_pub = "\n".join(pub[14])
+        self.assertNotIn("课后答案", p14_pub)
+        self.assertNotIn("练习答案", p14_pub)
+        self.assertIn("Theorem 2.2: Basis size is invariant.", p14_pub)
 
     def test_astral_math_charspans_align_exactly_with_public_texts(self):
         result = result_for([

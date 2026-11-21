@@ -28,8 +28,10 @@ export type PdfDiscourseBlock = {
   kind: AcademicDiscourseKind;
   text: string;
   pageNumber: number;
-  charStart: number;
-  charEnd: number;
+  charStart: number | null;
+  charEnd: number | null;
+  rawCharStart?: number | null;
+  rawCharEnd?: number | null;
   continuedFromPrevPage: boolean;
   continuesOnNextPage: boolean;
   visibilityHint: DiscourseVisibilityHint;

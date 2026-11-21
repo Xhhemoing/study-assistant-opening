@@ -30,56 +30,85 @@ type AnnotatedParsedPage = ParsedPage & {
   discourseBlocks?: ReadonlyArray<Partial<PdfDiscourseBlock>>;
 };
 
-type SealState = {
+export type SealState = {
   mode: "none" | "section_sealed" | "inline_sealed";
   inWorkedExample: boolean;
+  afterAllSealedPage: boolean;
 };
 
-const HEADING_PREFIX_RE = /^(?:#{1,6}\s+|\*\*|__)+/u;
+function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading: boolean } {
+  const trimmed = line.trim();
+  const isMarkdownHeading = /^#{1,6}\s+\S/u.test(trimmed);
+  let s = trimmed.replace(/^(?:#{1,6}\s+)+/u, "").trim();
+  while (s.length >= 4 && ((s.startsWith("**") && s.endsWith("**")) || (s.startsWith("__") && s.endsWith("__")))) {
+    s = s.slice(2, -2).trim();
+  }
+  s = s.replace(/^(?:\*\*([^*\n]+?)\*\*|__([^_\n]+?)__)(\s*[:：]?)/u, "$1$2$3");
+  return { stripped: s, isMarkdownHeading };
+}
 
 const SECTION_SEALED_RE = new RegExp(
   "^(?:" +
-  "(?:Answer\\s+Key|ANSWER\\s+KEY|Answers?\\s+Key|Key\\s+to\\s+(?:the\\s+)?(?:Exercises|Problems|Questions)|KEY\\s+TO\\s+(?:THE\\s+)?(?:EXERCISES|PROBLEMS|QUESTIONS))(?:\\s*\\(\\s*(?:continued|cont\\.?)\\s*\\))?\\s*(?:[:：]|$)" +
-  "|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\\s+to\\s+(?:(?:Selected|Odd-Numbered|Even-Numbered|All|Chapter\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*)\\s+)*(?:Exercises?|Problems?|Questions?|Review\\s+Questions?|Practice\\s+Problems?)(?:\\s*\\(\\s*(?:continued|cont\\.?)\\s*\\))?\\s*(?:[:：]|$)" +
-  "|(?:Selected\\s+Answers?|SELECTED\\s+ANSWERS?|Model\\s+Answers?|MODEL\\s+ANSWERS?|Official\\s+Solutions?|OFFICIAL\\s+SOLUTIONS?|Reference\\s+Solutions?|REFERENCE\\s+SOLUTIONS?|Answer\\s+Section|ANSWER\\s+SECTION|Solutions?\\s+Manual|SOLUTIONS?\\s+MANUAL)(?:\\s*\\(\\s*(?:continued|cont\\.?)\\s*\\))?\\s*(?:[:：]|$)" +
-  "|(?:Answers|ANSWERS)(?:\\s*\\(\\s*(?:continued|cont\\.?)\\s*\\))?\\s*(?:[:：]|$)" +
-  "|【\\s*(?:参考答案|标准答案|习题答案|练习答案|课后答案|课后习题答案|答案与解析|参考解答|详细解答|参考答案与解析)\\s*】\\s*$" +
-  "|(?:参考答案|标准答案|习题答案|练习答案|课后答案|课后习题答案|答案与解析|参考解答|详细解答|参考答案与解析)(?:\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\)))?\\s*(?:[:：]|$)" +
+  "(?:(?:Appendix\\s+[A-Z0-9]+|APPENDIX\\s+[A-Z0-9]+|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*|第\\s*[一二三四五六七八九十百千\\d]+\\s*[章节篇部]|附录\\s*[A-Z0-9一二三四五六七八九十]+)\\s*[:：.\\-—]?\\s*)?" +
+  "(?:(?:Answer\\s+Key|ANSWER\\s+KEY|Answers?\\s+Key|ANSWERS?\\s+KEY|Key\\s+(?:to|TO)\\s+(?:the\\s+|THE\\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
+  "|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\\s+(?:to|TO)\\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*)\\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\\s+Questions?|REVIEW\\s+QUESTIONS?|Practice\\s+Problems?|PRACTICE\\s+PROBLEMS?|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
+  "|(?:Selected\\s+Answers?|SELECTED\\s+ANSWERS?|Model\\s+Answers?|MODEL\\s+ANSWERS?|Official\\s+Solutions?|OFFICIAL\\s+SOLUTIONS?|Reference\\s+Solutions?|REFERENCE\\s+SOLUTIONS?|Answer\\s+Section|ANSWER\\s+SECTION|Solutions?\\s+Manual|SOLUTIONS?\\s+MANUAL|Answers?\\s+(?:and|AND)\\s+Solutions?|ANSWERS?\\s+(?:and|AND)\\s+SOLUTIONS?|Odd-Numbered\\s+Answers?|ODD-NUMBERED\\s+ANSWERS?|Even-Numbered\\s+Answers?|EVEN-NUMBERED\\s+ANSWERS?)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
+  "|(?:Answers|ANSWERS)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
+  "|【\\s*(?:参考答案|标准答案|习题答案|练习答案|课后答案|课后练习答案|课后习题答案|思考题答案|答案与解析|参考解答|详细解答|参考答案与解析|部分习题答案)\\s*】\\s*$" +
+  "|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|习题答案|练习答案|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\)))?\\s*(?:[:：]|$)" +
   "|(?:习题\\s*)?(?:答案|解答)(?:\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\)))?\\s*(?:[:：]|$)" +
-  ")",
+  "))",
   "u",
 );
 const INLINE_WITH_BODY_RE = /[:：]\s*\S/u;
-const QUALIFIED_MULTI_SECTION_RE = /^(?:Answers?\s+to\s+|Selected\s+Answers?|Model\s+Answers?|Official\s+Solutions?|Reference\s+Solutions?|Solutions?\s+to\s+|Solutions?\s+Manual|Key\s+to\s+|参考答案与解析|答案与解析|课后习题答案|习题答案)/u;
+const QUALIFIED_MULTI_SECTION_RE = /^(?:(?:Appendix\s+[A-Z0-9]+|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部])\s*[:：.—-]?\s*)?(?:Answers?\s+to\b|Selected\s+Answers?|Model\s+Answers?|Official\s+Solutions?|Reference\s+Solutions?|Solutions?\s+to\b|Solutions?\s+Manual|Key\s+to\b|Answers?\s+and\s+Solutions?|Odd-Numbered\s+Answers?|Even-Numbered\s+Answers?|参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案)/iu;
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
-  "(?:Answer\\s+Key|ANSWER\\s+KEY|Official\\s+Answer|OFFICIAL\\s+ANSWER|Model\\s+Answer|MODEL\\s+ANSWER|Correct\\s+Answer|CORRECT\\s+ANSWER|Answer|ANSWER|Answers|ANSWERS)(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?)\\s*\\))?\\s*[:：]" +
+  "(?:Answer\\s+Key|ANSWER\\s+KEY|Official\\s+Answer|OFFICIAL\\s+ANSWER|Model\\s+Answer|MODEL\\s+ANSWER|Correct\\s+Answer|CORRECT\\s+ANSWER|Answer|ANSWER|Answers|ANSWERS)(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTINUED)\\s*\\))?\\s*[:：]" +
   "|【\\s*(?:参考答案|标准答案|正确答案|答案)\\s*】" +
-  "|(?:参考答案|标准答案|正确答案|习题答案|答案)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*[:：]" +
+  "|(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后答案|练习答案|习题答案|答案与解析|答案)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*[:：]" +
   ")",
   "u",
 );
 
 const INLINE_SEALED_NON_EXAMPLE_RE = new RegExp(
   "^(?:" +
-  "(?:Worked\\s+Solution|WORKED\\s+SOLUTION|Full\\s+Solution|FULL\\s+SOLUTION|Sample\\s+Solution|SAMPLE\\s+SOLUTION|Solution|SOLUTION|Solutions|SOLUTIONS)(?:\\s+to\\s+(?:Exercise|Problem|Question)\\s*\\d*(?:\\.\\d+)*)?(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?)\\s*\\))?\\s*[:：]" +
+  "(?:Worked\\s+Solution|WORKED\\s+SOLUTION|Full\\s+Solution|FULL\\s+SOLUTION|Sample\\s+Solution|SAMPLE\\s+SOLUTION|Solution|SOLUTION|Solutions|SOLUTIONS)(?:\\s+to\\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\\s*\\d*(?:\\.\\d+)*)?(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTINUED)\\s*\\))?\\s*[:：]" +
   "|【\\s*(?:参考解答|详细解答|解答|详解|解析)\\s*】" +
   "|(?:参考解答|详细解答|解答|详解|解析|解)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*[:：]" +
   ")",
   "u",
 );
 
-const WORKED_EXAMPLE_RE = /^(?:(?:Worked\s+Example|Example)(?:\s+\d+(?:[.-]\d+)*(?:\s*\([^)]+\))?(?:\s*[:：.\-—]|\s+|$)|(?:\s*\([^)]+\))?\s*(?:[:：.\-—]|$))|例题(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．\-—]|\s+|$)|\s*(?:[:：.．\-—]|$))|例(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．\-—]|\s+|$)|\s*[:：]))/u;
-const WORKED_EXAMPLE_INTERNAL_RE = /^(?:(?:Worked\s+Solution|WORKED\s+SOLUTION|Solution|SOLUTION|Proof|PROOF)(?:\s*\(\s*(?:continued|cont\.?)\s*\))?\s*[:：]|(?:解答|证明|证|解|分析)\s*[:：]|【\s*(?:解答|证明|证|解|分析)\s*】)/u;
-const PUBLIC_BLOCK_OPENER_RE = /^(?:(?:Definition|Notation|Terminology|Convention|Theorem|Lemma|Proposition|Corollary|Axiom|Conjecture|Claim|Proof|Exercises?|Practice\s+Problems?|Problem\s+\d+|Question\s+\d+|Chapter\s+\d+|Section\s+\d+|Part\s+\d+|Figure\s+\d+|Fig\.?\s+\d+|Table\s+\d+)\b|(?:定义|定理|引理|推论|命题|公理|猜想|证明|习题|练习题|练习|思考题|作业题|图\s*\d+|表\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分])|#{1,6}\s+\S|\d+(?:\.\d+)+\s+\S)/u;
-const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Bibliography|References|Works\s+Cited|Index|Subject\s+Index|Author\s+Index|Glossary|Notation\s+Index|Acknowledgements?|About\s+the\s+Authors?)|(?:参考文献|索引|名词索引|主题索引|符号表|后记|致谢)|Appendix\s+[A-Z0-9]+(?:\s*[:.\-—]\s*(?!.*(?:Answer|Solution)).*)?$|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.\-—]\s*(?!.*(?:答案|解答)).*)?$)(?:\s*[:：.\-—]|$)/iu;
+const STANDALONE_SOLUTION_HEADING_RE = /^(?:Worked\s+Solution|Full\s+Solution|Sample\s+Solution|Solution|解答|详细解答|参考解答|解析|详解)(?:\s*\([^)]+\))?\s*$/iu;
+const WORKED_EXAMPLE_RE = /^(?:(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+|$)|(?:\s*\([^)]+\))?\s*(?:[:：.—-]|$))|例题(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*(?:[:：.．—-]|$))|例(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*[:：]))/u;
+const WORKED_EXAMPLE_INTERNAL_RE = /^(?:(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|Proof|PROOF)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|(?:\.(?:\s|$))|$)|(?:详细解答|参考解答|解答|详解|解析|证明|证|解|分析)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)|【\s*(?:解答|证明|证|解|分析|详解|解析)\s*】)/u;
+const PUBLIC_BLOCK_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Axiom|AXIOM|Conjecture|CONJECTURE|Claim|CLAIM|Proof|PROOF|Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problem\s+\d+|PROBLEM\s+\d+|Question\s+\d+|QUESTION\s+\d+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+|SECTION\s+\d+|Part\s+\d+|PART\s+\d+|Figure\s+\d+|Fig\.?\s+\d+|Table\s+\d+)\b|(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|习题|练习题|练习|思考题|作业题|图\s*\d+|表\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])|\d+(?:\.\d+)+\s+\S)/u;
+const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Bibliography|References|Works\s+Cited|Index|Subject\s+Index|Author\s+Index|Glossary|Notation\s+Index|Acknowledgements?|About\s+the\s+Authors?)|(?:参考文献|索引|名词索引|主题索引|符号表|后记|致谢)|Appendix\s+[A-Z0-9]+(?:\s*[:.—-]\s*(?!.*(?:Answer|Solution)).*)?$|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.—-]\s*(?!.*(?:答案|解答)).*)?$)(?:\s*[:：.—-]|$)/iu;
+const SECTION_SEALED_SUBHEADER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT|Section|SECTION)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review|REVIEW|Practice|PRACTICE|Self-Check|SELF-CHECK)\b|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*$|(?:习题|练习题|练习|思考题|作业题|自测题|第\s*[一二三四五六七八九十百千\d]+\s*[题小题])|(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])/u;
+const TEXTBOOK_STRUCTURAL_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Axiom|AXIOM|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Conjecture|CONJECTURE|Claim|CLAIM)\b|(?:Lecture|LECTURE)\s+(?:\d+|[IVXLCDM]+)\b|(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*)?(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+\S|$)|(?:定义|记号|术语|约定|公理|定理|引理|推论|命题|猜想|例题)(?:\b|\s*\d|\s*[:：]|$)|例\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*讲\b)/u;
+const TITLED_NON_ANSWER_CONTAINER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*(?:[:：.—-]\s*|\s+)(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|\(?cont))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)\S.*$|(?:Section|SECTION)\s+\d+(?:\.\d+)*\s*(?:[:：.—-]\s+|\s+(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|is\b|are\b|was\b|see\b|\(?cont)))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)(?=[A-Za-z\u4e00-\u9fff])\S.*$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*(?:[:：.—-]\s*)?(?!\s*(?:参考|标准|课后|习题|练习)?(?:答案|解答)|习题|练习|思考题|（续）|\(续\))(?!.*(?:参考答案|标准答案|课后答案|习题答案|练习答案|答案与解析|参考解答))\S.*$)/iu;
+const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+\)|\(\s*[a-zA-Z]\s*\)|[a-zA-Z][.)]|第\s*[一二三四五六七八九十百千\d]+\s*[题小题]|[（(]\s*[一二三四五六七八九十]+\s*[)）])(?:\s+|$)|(?:Chapter|CHAPTER|Section|SECTION|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*$)/u;
+const TITLE_CASE_SECTION_HEADING_RE = /^\d+(?:\.\d+)+\s+[A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9,&-]+){0,8}$/u;
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
 const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
 
 function isSectionSealedHeader(stripped: string): boolean {
   if (!SECTION_SEALED_RE.test(stripped)) return false;
   if (INLINE_WITH_BODY_RE.test(stripped)) return QUALIFIED_MULTI_SECTION_RE.test(stripped);
+  return true;
+}
+
+function isSectionSealedExit(stripped: string, isMarkdownHeading: boolean): boolean {
+  if (isSectionSealedHeader(stripped)) return false;
+  if (MAJOR_NON_ANSWER_HEADING_RE.test(stripped)) return true;
+  if (TEXTBOOK_STRUCTURAL_OPENER_RE.test(stripped)) return true;
+  if (TITLED_NON_ANSWER_CONTAINER_RE.test(stripped)) return true;
+  if (!isMarkdownHeading) return false;
+  if (INLINE_SEALED_ALWAYS_RE.test(stripped) || INLINE_SEALED_NON_EXAMPLE_RE.test(stripped)) return false;
+  if (STANDALONE_SOLUTION_HEADING_RE.test(stripped) || SECTION_SEALED_SUBHEADER_RE.test(stripped)) return false;
+  if (/\b(?:Answers?|Solutions?|Answer\s+Key)\s*$/iu.test(stripped) || /(?:答案|解答)\s*$/u.test(stripped)) return false;
   return true;
 }
 
@@ -102,17 +131,41 @@ function stripSealedSolutionLines(text: string, state: SealState): string {
       continue;
     }
 
-    const stripped = trimmed.replace(HEADING_PREFIX_RE, "");
+    const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
 
     if (state.mode === "section_sealed") {
-      if (MAJOR_NON_ANSWER_HEADING_RE.test(stripped)) {
+      if (isSectionSealedExit(stripped, isMarkdownHeading)) {
         state.mode = "none";
-        state.inWorkedExample = false;
+        state.inWorkedExample = WORKED_EXAMPLE_RE.test(stripped);
         kept.push(line);
       } else {
         changed = true;
         if (SECTION_SEALED_TERMINATOR_RE.test(trimmed)) state.mode = "none";
       }
+      continue;
+    }
+
+    if (state.afterAllSealedPage) {
+      state.afterAllSealedPage = false;
+      if (
+        !isMarkdownHeading
+        && !isSectionSealedExit(stripped, isMarkdownHeading)
+        && !PUBLIC_BLOCK_OPENER_RE.test(stripped)
+        && !WORKED_EXAMPLE_RE.test(stripped)
+        && !TITLE_CASE_SECTION_HEADING_RE.test(stripped)
+        && UNHEADED_ANSWER_CONTINUATION_RE.test(stripped)
+      ) {
+        state.mode = "section_sealed";
+        state.inWorkedExample = false;
+        changed = true;
+        if (SECTION_SEALED_TERMINATOR_RE.test(trimmed)) state.mode = "none";
+        continue;
+      }
+    }
+
+    if (state.inWorkedExample && WORKED_EXAMPLE_INTERNAL_RE.test(stripped)) {
+      state.mode = "none";
+      kept.push(line);
       continue;
     }
 
@@ -132,12 +185,7 @@ function stripSealedSolutionLines(text: string, state: SealState): string {
       continue;
     }
 
-    if (state.inWorkedExample && WORKED_EXAMPLE_INTERNAL_RE.test(stripped)) {
-      kept.push(line);
-      continue;
-    }
-
-    if (!state.inWorkedExample && INLINE_SEALED_NON_EXAMPLE_RE.test(stripped)) {
+    if (!state.inWorkedExample && (INLINE_SEALED_NON_EXAMPLE_RE.test(stripped) || STANDALONE_SOLUTION_HEADING_RE.test(stripped))) {
       state.mode = "inline_sealed";
       changed = true;
       if (INLINE_SEALED_TERMINATOR_RE.test(trimmed)) state.mode = "none";
@@ -151,7 +199,11 @@ function stripSealedSolutionLines(text: string, state: SealState): string {
       continue;
     }
 
-    if (PUBLIC_BLOCK_OPENER_RE.test(stripped) || MAJOR_NON_ANSWER_HEADING_RE.test(stripped)) {
+    if (
+      PUBLIC_BLOCK_OPENER_RE.test(stripped)
+      || MAJOR_NON_ANSWER_HEADING_RE.test(stripped)
+      || (isMarkdownHeading && !STANDALONE_SOLUTION_HEADING_RE.test(stripped))
+    ) {
       state.mode = "none";
       state.inWorkedExample = false;
       kept.push(line);
@@ -172,7 +224,7 @@ function stripSealedSolutionLines(text: string, state: SealState): string {
   return kept.join("\n");
 }
 
-function sealTextWithState(
+export function sealTextWithState(
   rawText: string,
   state: SealState,
   pageNumber?: number,
@@ -185,11 +237,16 @@ function sealTextWithState(
     for (const block of discourseBlocks) {
       if (typeof block.pageNumber === "number" && pageNumber !== undefined && block.pageNumber !== pageNumber) continue;
       if (block.kind !== "solution_sealed" && block.visibilityHint !== "sealed") continue;
-      const start = block.charStart;
-      const end = block.charEnd;
-      if (typeof start === "number" && typeof end === "number" && Number.isInteger(start) && Number.isInteger(end) && start >= 0 && start < end && end <= codePoints.length) {
-        if (typeof block.text === "string" && codePoints.slice(start, end).join("") !== block.text) continue;
-        spans.push([start, end]);
+      const candidates: Array<[unknown, unknown]> = [
+        [block.rawCharStart, block.rawCharEnd],
+        [block.charStart, block.charEnd],
+      ];
+      for (const [start, end] of candidates) {
+        if (typeof start === "number" && typeof end === "number" && Number.isInteger(start) && Number.isInteger(end) && start >= 0 && start < end && end <= codePoints.length) {
+          if (typeof block.text === "string" && codePoints.slice(start, end).join("") !== block.text) continue;
+          spans.push([start, end]);
+          break;
+        }
       }
     }
     if (spans.length > 0) {
@@ -359,11 +416,12 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       let visualRecognitionUnavailable = !deps.recognizePage && !(isPdf && deps.recognizePages);
       const skippedVisionPages: number[] = [];
       const cappedTextPages = new Set<number>();
+      const VISION_MARKER = "[视觉转写与描述]\n";
       const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState) => {
         const hadRawText = Boolean(rawPage.text.trim());
         const doclingSealedBlank = isPdf && rawPage.text === "" && Array.isArray(rawPage.visualKinds) && rawPage.visualKinds.length === 0;
-        if (doclingSealedBlank) {
-          sealState.mode = "section_sealed";
+        if (doclingSealedBlank && sealState.mode === "none") {
+          sealState.afterAllSealedPage = true;
           sealState.inWorkedExample = false;
         }
         const incomingSeal: SealState = { ...sealState };
@@ -398,9 +456,16 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           }
         }
         const reusable = sanitizedSaved && (!visual || sanitizedSaved.imageObjectKey) ? sanitizedSaved : undefined;
-        return { page, visual, saved: sanitizedSaved, reusable, pageSealState: { ...sealState }, sealedAllText };
+        if (reusable && !isImage) {
+          const visionIndex = reusable.text.indexOf(VISION_MARKER);
+          if (visionIndex >= 0) {
+            sealTextWithState(reusable.text.slice(visionIndex + VISION_MARKER.length), sealState);
+          }
+        }
+        return { page, visual, originalSaved: saved, saved: sanitizedSaved, reusable, sealedAllText };
       };
-      const consumePage = async ({ page, visual, saved, reusable, pageSealState, sealedAllText }: ReturnType<typeof preparePage>,
+      const consumePage = async ({ page, visual, saved, reusable, sealedAllText }: ReturnType<typeof preparePage>,
+        liveSealState: SealState,
         recognizePage: ((input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>) | undefined =
           visualRecognitionUnavailable ? undefined : deps.recognizePage,
       ): Promise<NewSourceChunk | undefined> => {
@@ -409,6 +474,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         if (reusable) return reusable;
         let text = page.text;
         let imageObjectKey: string | null = null;
+        let visionHandled = false;
         if (isImage && !deps.recognizePage) throw new Error(`visual recognition is required for physical page ${page.page}`);
         if (visual && recognizePage) {
           await assertCurrent?.();
@@ -425,7 +491,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             visualRecognitionUnavailable = true;
           } else {
             if (!result || typeof result.text !== "string" || !result.text.trim() || typeof result.imageObjectKey !== "string" || !result.imageObjectKey.trim()) throw new Error(`visual recognition returned no readable content or image for physical page ${page.page}`);
-            const sealedVisionText = !isImage ? sealTextWithState(result.text, { ...pageSealState }) : result.text;
+            visionHandled = true;
+            const sealedVisionText = !isImage ? sealTextWithState(result.text, liveSealState) : result.text;
             if (!isImage && !sealedVisionText.trim()) {
               if (!page.text.trim()) return undefined;
             } else {
@@ -447,7 +514,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             }
           }
         }
-        if (isPdf && visual && imageObjectKey === null && !cappedTextPages.has(page.page)) {
+        if (isPdf && visual && imageObjectKey === null && !visionHandled && !cappedTextPages.has(page.page)) {
           skippedVisionPages.push(page.page);
           if (saved) return saved;
         }
@@ -463,7 +530,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const lowQualityPages: number[] = [];
         const preservePages: number[] = [];
         let usablePages = 0;
-        const pdfSealState: SealState = { mode: "none", inWorkedExample: false };
+        const pdfSealState: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
         const stagePath = path.join(workDir, "chunks.ndjson");
         const stage = await open(stagePath, "wx", 0o600);
         const result = await parsePdfSegments({ path: temp, ...publication, scope, runner: deps.runner,
@@ -475,9 +542,13 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               : [];
             const published = new Map(existing.map(({ page, slideLabel, startMs, endMs, text, imageObjectKey }) =>
               [page, { page, slideLabel, startMs, endMs, text, imageObjectKey }]));
-            const prepared = pages.map(page => preparePage(page, published.get(page.page), pdfSealState));
+            const drySealState: SealState = { ...pdfSealState };
+            const planned = pages.map(rawPage => {
+              const prep = preparePage(rawPage, published.get(rawPage.page), drySealState);
+              return { rawPage, visualInput: prep.visual && !prep.reusable ? prep.visual : undefined };
+            });
             const recognition = deps.recognizePages?.(
-              prepared.flatMap(({ visual, reusable }) => visual && !reusable ? [visual] : []), visualRecognitionUnavailable,
+              planned.flatMap(({ visualInput }) => visualInput ? [visualInput] : []), visualRecognitionUnavailable,
             );
             const recognizePage = recognition ? async () => {
               const next = await recognition.next();
@@ -485,17 +556,25 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               return next.value;
             } : undefined;
             try {
-              for (const preparedPage of prepared) {
-                let chunk = await consumePage(preparedPage, recognizePage);
+              for (const { rawPage, visualInput } of planned) {
+                const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState);
+                let pageRecognize = visualInput
+                  ? recognizePage
+                  : (!visualRecognitionUnavailable && deps.recognizePage ? deps.recognizePage : undefined);
+                if (visualInput && recognizePage && (!preparedPage.visual || preparedPage.reusable || preparedPage.sealedAllText)) {
+                  await recognizePage();
+                  pageRecognize = undefined;
+                }
+                let chunk = await consumePage(preparedPage, pdfSealState, pageRecognize);
                 if (!chunk) continue;
                 const { page, text: nativeText } = preparedPage.page;
-                if (chunk === preparedPage.saved &&
+                if ((chunk === preparedPage.saved || chunk === preparedPage.originalSaved) &&
                   (previousCappedPages.has(page) ||
                     (nativeText.length > PDF_CHUNK_TEXT_LIMIT && chunk.text.length <= PDF_CHUNK_TEXT_LIMIT))) {
                   cappedTextPages.add(page);
                 }
                 if (chunk.text.length > PDF_CHUNK_TEXT_LIMIT) {
-                  if (chunk === preparedPage.saved) {
+                  if (chunk === preparedPage.originalSaved) {
                     // Existing rows can fit PostgreSQL's code-point limit but exceed the UTF-16 bound.
                     preservePages.push(page);
                     if (checkPdfPageQuality(chunk.text).quality === "low_quality") lowQualityPages.push(page);
@@ -536,10 +615,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const pages: ParsedPage[] = isImage ? [{ page: 1, text: "", imagePath: null, visualKinds: ["scan"] }]
           : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
         pageCount = pages.length;
-        const docSealState: SealState = { mode: "none", inWorkedExample: false };
+        const docSealState: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
         const chunks: NewSourceChunk[] = [];
         for (const page of pages) {
-          const chunk = await consumePage(preparePage(page, undefined, docSealState));
+          const chunk = await consumePage(preparePage(page, undefined, docSealState), docSealState);
           if (chunk) chunks.push(chunk);
         }
         signal.throwIfAborted();

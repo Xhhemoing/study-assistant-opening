@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, PdfSegment, PdfSegmentIdentity, PdfSegmentPage } from "@aistudy/database";
-import { createParseSourceHandler } from "../jobs/parse-source";
+import { createParseSourceHandler, sealTextWithState } from "../jobs/parse-source";
 import { BoundsExceededError } from "./docling-process";
 import { MAX_PDF_BOOK_PAGES, parsePdfSegments, watchPdfExecution, type PdfSegmentBatch } from "./pdf-segments";
 import { pdfParserProfile } from "./ocr-health";
@@ -460,7 +460,7 @@ describe("bounded resumable PDF parser", () => {
 
       const publishedChunks: NewSourceChunk[] = [];
       const recognizePage = vi.fn(async ({ physicalPage }: { physicalPage: number }) => {
-        if (physicalPage === 2) return { text: "Answers to Selected Exercises\n1.1 x = 3\n1.2 y = 4", imageObjectKey: "vision/p2-secret" };
+        if (physicalPage === 2) return { text: "Answers to Selected Exercises\n1.1 x = 3\n1.2 y = 4\nEnd of Answers.", imageObjectKey: "vision/p2-secret" };
         throw new Error(`unexpected vision call on page ${physicalPage}`);
       });
 
@@ -579,5 +579,222 @@ describe("bounded resumable PDF parser", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  async function runPdfScenario(options: {
+    pages: Array<{
+      page: number;
+      text: string;
+      visualKinds?: Array<"scan" | "figure" | "table" | "formula" | "handwriting">;
+      discourseBlocks?: Array<Record<string, unknown>>;
+    }>;
+    savedChunks?: NewSourceChunk[];
+    recognizePages?: (
+      inputs: Array<{ physicalPage: number; nativeText: string; visualKinds: string[] }>,
+    ) => AsyncGenerator<{ text: string; imageObjectKey: string } | null>;
+  }) {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-r3-"));
+    try {
+      const pdfBytes = Buffer.from("%PDF-1.4\n% round3\n");
+      const sha256 = createHash("sha256").update(pdfBytes).digest("hex");
+      const pdfSource: SourceRecord = {
+        id: "00000000-0000-4000-8000-000000000041",
+        workspaceId: "00000000-0000-4000-8000-000000000042",
+        name: "round3.pdf",
+        mime: "application/pdf",
+        bytes: pdfBytes.byteLength,
+        sha256,
+        version: 0,
+        uploadState: "uploaded",
+        parseState: "queued",
+        error: null,
+        createdAt: new Date().toISOString(),
+      };
+      const jobRecord = {
+        id: "00000000-0000-4000-8000-000000000043",
+        workspaceId: pdfSource.workspaceId,
+        ownerUserId: "00000000-0000-4000-8000-000000000044",
+        key: "parse-pdf-r3",
+        kind: "parse",
+        payload: { sourceId: pdfSource.id, sourceVersion: 0 },
+        result: null,
+        state: "running",
+        claimToken: "claim-r3",
+        privacyEpoch: 0,
+      } as OpeningJobRecord;
+
+      const publishedChunks: NewSourceChunk[] = [];
+      let preservePages: number[] = [];
+      let pdfWarning: unknown = undefined;
+      const savedMap = new Map((options.savedChunks ?? []).map(chunk => [chunk.page, chunk]));
+      const segmentData = new Map<string, PdfSegment>();
+      const segments: OpeningPdfSegmentsRepository = {
+        assertCurrent: async () => {},
+        read: async (_scope, identity) => segmentData.get(`${identity.pageStart}-${identity.pageEnd}`) ?? null,
+        save: async (_scope, identity, value) => { segmentData.set(`${identity.pageStart}-${identity.pageEnd}`, value); },
+      };
+
+      const handler = createParseSourceHandler({
+        sources: { get: async () => pdfSource, markParseState: async () => pdfSource },
+        chunks: {
+          replaceChunks: async () => {},
+          replacePdfChunks: async (_scope, publication) => {
+            for await (const chunk of publication.chunks) publishedChunks.push(chunk);
+            preservePages = publication.preservePages;
+            pdfWarning = publication.warning;
+          },
+          listChunksAtVersion: async (_scope, _sourceId, _sourceVersion, pageNumbers) =>
+            pageNumbers.flatMap(page => {
+              const saved = savedMap.get(page);
+              return saved ? [{ ...saved, sourceId: pdfSource.id, sourceVersion: 0, workspaceId: pdfSource.workspaceId, id: `chunk-${page}`, createdAt: new Date().toISOString() }] : [];
+            }),
+        },
+        segments,
+        storage: {
+          finalKey: () => "sources/test/0/original",
+          presignGet: async () => `data:application/pdf;base64,${pdfBytes.toString("base64")}`,
+        },
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) {
+            return { exitCode: 0, stdout: JSON.stringify({ pageCount: options.pages.length }) };
+          }
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const end = Number(argv[argv.indexOf("--page-end") + 1]);
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              pages: options.pages
+                .filter(p => p.page >= start && p.page <= end)
+                .map(p => ({ page: p.page, text: p.text, imagePath: null, visualKinds: p.visualKinds ?? [], ...(p.discourseBlocks ? { discourseBlocks: p.discourseBlocks } : {}) })),
+            }),
+          };
+        },
+        ...(options.recognizePages
+          ? { recognizePages: inputs => options.recognizePages!(inputs) }
+          : {}),
+        assertCurrent: async () => {},
+        tempDir,
+      });
+
+      const outcome = await handler(jobRecord, { sourceId: pdfSource.id, sourceVersion: 0 });
+      return { outcome, publishedChunks, preservePages, pdfWarning };
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  it("preserves standalone worked-example solutions and exits section sealing on non-answer headings and chapters", async () => {
+    const { publishedChunks } = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Example 1: Compute x + 1.\n\n解答：\nx = 2.\n\n**ANSWERS TO SELECTED EXERCISES**\n1. x = 3" },
+        { page: 2, text: "2. y = 4\nChapter 2: Vector Spaces\nDefinition 2.1: Closure under addition." },
+        { page: 3, text: "**练习答案**：\n1. 对\n第二章 微积分\n定理 2.1：极限唯一。" },
+        { page: 4, text: "**Answer**: x = 3\n## Next Topic\nPublic proof note." },
+      ],
+    });
+
+    expect(publishedChunks.map(c => c.page)).toEqual([1, 2, 3, 4]);
+    expect(publishedChunks[0]?.text).toBe("Example 1: Compute x + 1.\n\n解答：\nx = 2.");
+    expect(publishedChunks[1]?.text).toBe("Chapter 2: Vector Spaces\nDefinition 2.1: Closure under addition.");
+    expect(publishedChunks[2]?.text).toBe("第二章 微积分\n定理 2.1：极限唯一。");
+    expect(publishedChunks[3]?.text).toBe("## Next Topic\nPublic proof note.");
+  });
+
+  it("treats docling-blank pages as soft continuations so Chapter 2 stays public while unheaded answers stay sealed", async () => {
+    const titledChapterAfterBlank = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: [] },
+        { page: 2, text: "Chapter 2: Vector Spaces\nLet V be a vector space.", visualKinds: [] },
+      ],
+    });
+    expect(titledChapterAfterBlank.publishedChunks.map(c => c.page)).toEqual([2]);
+    expect(titledChapterAfterBlank.publishedChunks[0]?.text).toBe("Chapter 2: Vector Spaces\nLet V be a vector space.");
+
+    const unheadedAnswersAfterBlank = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: [] },
+        { page: 2, text: "11. x = 3\n12. y = 4", visualKinds: [] },
+        { page: 3, text: "Definition 3.1: Orthogonal basis.", visualKinds: [] },
+      ],
+    });
+    expect(unheadedAnswersAfterBlank.publishedChunks.map(c => c.page)).toEqual([3]);
+    expect(unheadedAnswersAfterBlank.publishedChunks[0]?.text).toBe("Definition 3.1: Orthogonal basis.");
+  });
+
+  it("propagates sealing state sequentially across Vision scan pages and does not count sealed mixed-page Vision as skipped", async () => {
+    const sequentialScan = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Exercises 1:\nFind x.", visualKinds: [] },
+        { page: 2, text: "", visualKinds: ["scan"] },
+        { page: 3, text: "", visualKinds: ["scan"] },
+        { page: 4, text: "4. w = 4", visualKinds: [] },
+        { page: 5, text: "Chapter 2: Vector Spaces\nPublic intro.", visualKinds: [] },
+      ],
+      recognizePages: async function* (inputs) {
+        for (const input of inputs) {
+          if (input.physicalPage === 2) yield { text: "Answer Key\n1. x = 1", imageObjectKey: "img-2" };
+          else if (input.physicalPage === 3) yield { text: "2. y = 2\n3. z = 3", imageObjectKey: "img-3" };
+        }
+      },
+    });
+    expect(sequentialScan.publishedChunks.map(c => c.page)).toEqual([1, 5]);
+    expect(sequentialScan.outcome).toEqual({ pages: 5 });
+
+    const mixedSealedVision = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Theorem 1: Continuous functions on [a,b] are bounded.", visualKinds: ["picture"] },
+      ],
+      recognizePages: async function* () {
+        yield { text: "Answer Key\n1. x = 2", imageObjectKey: "img-sealed" };
+      },
+    });
+    expect(mixedSealedVision.outcome).toEqual({ pages: 1 });
+    expect(mixedSealedVision.pdfWarning).toBeUndefined();
+    expect(mixedSealedVision.publishedChunks).toHaveLength(1);
+    expect(mixedSealedVision.publishedChunks[0]?.imageObjectKey).toBeNull();
+    expect(mixedSealedVision.publishedChunks[0]?.text).toBe("Theorem 1: Continuous functions on [a,b] are bounded.");
+  });
+
+  it("sanitizes oversized stale saved chunks instead of keeping them in preservePages and strips rawCharStart/rawCharEnd spans", async () => {
+    const oversizedPublic = "A".repeat(100_050);
+    const staleSaved: NewSourceChunk = {
+      page: 1,
+      slideLabel: null,
+      startMs: null,
+      endMs: null,
+      text: `${oversizedPublic}\nAnswer Key\n1. x = 2`,
+      imageObjectKey: null,
+    };
+    const sanitized = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Public fallback", visualKinds: [] },
+      ],
+      savedChunks: [staleSaved],
+    });
+    expect(sanitized.preservePages).toEqual([]);
+    expect(sanitized.publishedChunks).toHaveLength(1);
+    expect(sanitized.publishedChunks[0]?.text.length).toBe(100_000);
+    expect(sanitized.publishedChunks[0]?.text).not.toContain("Answer Key");
+
+    const rawSpanText = sealTextWithState(
+      "Problem 1.\n\n𝑥 = 2.\nTheorem 1.",
+      { mode: "none", inWorkedExample: false, afterAllSealedPage: false },
+      1,
+      [
+        {
+          kind: "solution_sealed",
+          text: "𝑥 = 2.",
+          pageNumber: 1,
+          charStart: null,
+          charEnd: null,
+          rawCharStart: 12,
+          rawCharEnd: 18,
+          continuedFromPrevPage: false,
+          continuesOnNextPage: false,
+          visibilityHint: "sealed",
+        },
+      ],
+    );
+    expect(rawSpanText).toBe("Problem 1.\n\nTheorem 1.");
   });
 });
