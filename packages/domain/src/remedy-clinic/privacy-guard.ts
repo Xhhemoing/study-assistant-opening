@@ -56,6 +56,10 @@ export const SELECTED_DIFF_CASE_COUNT = 3;
 
 const LOCAL_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+export function compareUtf16(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export function isNonBlankText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -124,19 +128,28 @@ export function readOwnDataIndex<T>(
   arr: readonly T[],
   index: number,
 ): { readonly ok: true; readonly value: T } | { readonly ok: false } {
-  const desc = Object.getOwnPropertyDescriptor(arr, String(index));
-  if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+  try {
+    const desc = Object.getOwnPropertyDescriptor(arr, String(index));
+    if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+      return { ok: false };
+    }
+    return { ok: true, value: desc.value as T };
+  } catch {
     return { ok: false };
   }
-  return { ok: true, value: desc.value as T };
 }
 
 export function isDenseArray<T>(value: unknown): value is readonly T[] {
-  if (!Array.isArray(value)) return false;
-  for (let i = 0; i < value.length; i += 1) {
-    if (!readOwnDataIndex(value, i).ok) return false;
+  try {
+    if (!Array.isArray(value)) return false;
+    const len = value.length;
+    for (let i = 0; i < len; i += 1) {
+      if (!readOwnDataIndex(value, i).ok) return false;
+    }
+    return true;
+  } catch {
+    return false;
   }
-  return true;
 }
 
 export function areSourceRefsActive(
@@ -246,7 +259,7 @@ function isBetterTriple(candidate: TripleScore, best: TripleScore): boolean {
   if (candidate.chapterCount !== best.chapterCount) return candidate.chapterCount > best.chapterCount;
   if (candidate.dateCount !== best.dateCount) return candidate.dateCount > best.dateCount;
   if (candidate.dateSpanDays !== best.dateSpanDays) return candidate.dateSpanDays > best.dateSpanDays;
-  return candidate.tieKey.localeCompare(best.tieKey) < 0;
+  return compareUtf16(candidate.tieKey, best.tieKey) < 0;
 }
 
 const SPREAD_POOL_CAP = 36;
@@ -349,7 +362,10 @@ export function selectSpreadRepresentativeCases(
   }
 
   const ordered = [...cases].sort(
-    (x, y) => x.localDate.localeCompare(y.localDate) || x.chapterId.localeCompare(y.chapterId) || x.rootAttemptId.localeCompare(y.rootAttemptId),
+    (x, y) =>
+      compareUtf16(x.localDate, y.localDate) ||
+      compareUtf16(x.chapterId, y.chapterId) ||
+      compareUtf16(x.rootAttemptId, y.rootAttemptId),
   );
   const pool = buildSpreadCandidatePool(ordered);
 

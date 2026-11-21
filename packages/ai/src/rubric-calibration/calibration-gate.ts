@@ -9,7 +9,9 @@ import { snapHalfBand } from "./anchor-calibrated-rubric";
 export type RubricCalibrationPoint = Pick<
   AnchorCalibratedRubricV1Result,
   "status" | "band" | "rawBand" | "countsTowardMastery"
->;
+> & {
+  readonly submissionId?: string;
+};
 
 export interface GoldRubricBenchmarkItem {
   readonly itemId: string;
@@ -39,6 +41,8 @@ export interface RubricCalibrationGateThresholds {
 export type RubricCalibrationGateFailure =
   | "invalid_threshold_configuration"
   | "empty_benchmark"
+  | "duplicate_or_invalid_benchmark_item_id"
+  | "benchmark_cohort_mismatch"
   | "admissible_coverage_below_threshold"
   | "missing_low_tail_samples"
   | "missing_high_tail_samples"
@@ -48,6 +52,8 @@ export type RubricCalibrationGateFailure =
   | "high_tail_bias_exceeds_threshold"
   | "sd_ratio_compression_detected"
   | "missing_counterfactual_triplets"
+  | "duplicate_or_invalid_triplet_id"
+  | "triplet_cohort_mismatch"
   | "counterfactual_missing_point_score"
   | "counterfactual_padding_gain_exceeds_limit"
   | "counterfactual_padded_not_below_equal_length_substantive"
@@ -162,17 +168,101 @@ function standardDeviation(values: readonly number[]): number {
   return Math.sqrt(sumSq / (values.length - 1));
 }
 
-function extractPointScore(point: RubricCalibrationPoint): number | null {
-  if (point.status !== "calibrated") return null;
-  const score = point.band ?? point.rawBand;
-  if (score === null || !Number.isFinite(score) || score < 0 || score > 9) return null;
+function readOwnDataField(obj: unknown, key: string): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  if (obj === null || typeof obj !== "object") return { ok: false };
+  try {
+    const desc = Object.getOwnPropertyDescriptor(obj, key);
+    if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+      return { ok: false };
+    }
+    return { ok: true, value: desc.value };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function isPlainRecordObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  try {
+    if (Array.isArray(value)) return false;
+    const proto = Object.getPrototypeOf(value) as object | null;
+    if (proto !== Object.prototype && proto !== null) return false;
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string" || key === "__proto__") return false;
+      const desc = Object.getOwnPropertyDescriptor(value, key);
+      if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function snapshotDensePlainArray(value: unknown): readonly unknown[] | null {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const lenDesc = Object.getOwnPropertyDescriptor(value, "length");
+    if (!lenDesc || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value)) return null;
+    const len = lenDesc.value;
+    if (Reflect.ownKeys(value).length !== len + 1) return null;
+    const out: unknown[] = new Array(len);
+    for (let i = 0; i < len; i += 1) {
+      const desc = Object.getOwnPropertyDescriptor(value, String(i));
+      if (
+        !desc ||
+        !desc.enumerable ||
+        !Object.hasOwn(desc, "value") ||
+        desc.get !== undefined ||
+        desc.set !== undefined
+      ) {
+        return null;
+      }
+      out[i] = desc.value;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function parseUniqueNonBlankIdSet(rawIds: unknown): ReadonlySet<string> | null {
+  const items = snapshotDensePlainArray(rawIds);
+  if (!items || items.length === 0) return null;
+  const set = new Set<string>();
+  for (const entry of items) {
+    if (typeof entry !== "string") return null;
+    const trimmed = entry.trim();
+    if (trimmed.length === 0 || set.has(trimmed)) return null;
+    set.add(trimmed);
+  }
+  return set;
+}
+
+function extractPointScore(point: unknown): number | null {
+  if (!isPlainRecordObject(point)) return null;
+  const statusField = readOwnDataField(point, "status");
+  if (!statusField.ok || statusField.value !== "calibrated") return null;
+  const bandField = readOwnDataField(point, "band");
+  const rawBandField = readOwnDataField(point, "rawBand");
+  const bandVal = bandField.ok ? bandField.value : null;
+  const rawBandVal = rawBandField.ok ? rawBandField.value : null;
+  const score = bandVal ?? rawBandVal;
+  if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 9) return null;
   return score;
 }
 
-function extractCounterfactualScore(point: RubricCalibrationPoint): number | null {
-  if (point.status !== "calibrated") return null;
-  const score = point.rawBand ?? point.band;
-  if (score === null || !Number.isFinite(score) || score < 0 || score > 9) return null;
+function extractCounterfactualScore(point: unknown): number | null {
+  if (!isPlainRecordObject(point)) return null;
+  const statusField = readOwnDataField(point, "status");
+  if (!statusField.ok || statusField.value !== "calibrated") return null;
+  const rawBandField = readOwnDataField(point, "rawBand");
+  const bandField = readOwnDataField(point, "band");
+  const rawBandVal = rawBandField.ok ? rawBandField.value : null;
+  const bandVal = bandField.ok ? bandField.value : null;
+  const score = rawBandVal ?? bandVal;
+  if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 9) return null;
   return score;
 }
 
@@ -286,6 +376,8 @@ export function evaluateRubricCalibrationGate(input: {
   readonly benchmarkItems: readonly GoldRubricBenchmarkItem[];
   readonly counterfactualTriplets: readonly EvaluatedCounterfactualTriplet[];
   readonly thresholds?: RubricCalibrationGateThresholds;
+  readonly expectedBenchmarkItemIds?: readonly string[];
+  readonly expectedTripletIds?: readonly string[];
 }): RubricCalibrationGateReport {
   const { thresholds: t, valid: thresholdsValid } = resolveTighteningThresholds(input.thresholds);
   const failures = new Set<RubricCalibrationGateFailure>();
@@ -293,17 +385,96 @@ export function evaluateRubricCalibrationGate(input: {
     failures.add("invalid_threshold_configuration");
   }
 
-  const totalCount = input.benchmarkItems.length;
-  if (totalCount === 0) {
+  const benchmarkArray = snapshotDensePlainArray(input.benchmarkItems);
+  const totalCount = benchmarkArray ? benchmarkArray.length : 0;
+  if (!benchmarkArray) {
+    failures.add("empty_benchmark");
+    failures.add("duplicate_or_invalid_benchmark_item_id");
+  } else if (totalCount === 0) {
     failures.add("empty_benchmark");
   }
 
+  const hasExpectedBenchmarkIds = input.expectedBenchmarkItemIds !== undefined;
+  const expectedBenchmarkSet = hasExpectedBenchmarkIds
+    ? parseUniqueNonBlankIdSet(input.expectedBenchmarkItemIds)
+    : null;
+  if (hasExpectedBenchmarkIds && !expectedBenchmarkSet) {
+    failures.add("benchmark_cohort_mismatch");
+  }
+
+  const benchmarkIdCounts = new Map<string, number>();
+  const parsedBenchmarks: Array<{
+    readonly itemId: string | null;
+    readonly trueBand: number | null;
+    readonly evaluation: unknown;
+  }> = [];
+  if (benchmarkArray) {
+    for (const rawItem of benchmarkArray) {
+      if (!isPlainRecordObject(rawItem)) {
+        failures.add("duplicate_or_invalid_benchmark_item_id");
+        parsedBenchmarks.push({ itemId: null, trueBand: null, evaluation: null });
+        continue;
+      }
+      const idField = readOwnDataField(rawItem, "itemId");
+      const rawId = idField.ok && typeof idField.value === "string" ? idField.value.trim() : "";
+      if (rawId.length === 0) {
+        failures.add("duplicate_or_invalid_benchmark_item_id");
+        parsedBenchmarks.push({ itemId: null, trueBand: null, evaluation: null });
+        continue;
+      }
+      benchmarkIdCounts.set(rawId, (benchmarkIdCounts.get(rawId) ?? 0) + 1);
+      const trueBandField = readOwnDataField(rawItem, "trueBand");
+      const trueBandVal =
+        trueBandField.ok && typeof trueBandField.value === "number" ? trueBandField.value : Number.NaN;
+      const evalField = readOwnDataField(rawItem, "evaluation");
+      parsedBenchmarks.push({
+        itemId: rawId,
+        trueBand: trueBandVal,
+        evaluation: evalField.ok ? evalField.value : null,
+      });
+    }
+  }
+
+  const seenValidBenchmarkIds = new Set<string>();
   const admissiblePairs: Array<{ trueBand: number; predBand: number }> = [];
-  for (const item of input.benchmarkItems) {
-    if (!Number.isFinite(item.trueBand) || item.trueBand < 0 || item.trueBand > 9) continue;
+  for (const item of parsedBenchmarks) {
+    if (item.itemId === null) continue;
+    if ((benchmarkIdCounts.get(item.itemId) ?? 0) > 1) {
+      failures.add("duplicate_or_invalid_benchmark_item_id");
+      continue;
+    }
+    seenValidBenchmarkIds.add(item.itemId);
+    if (hasExpectedBenchmarkIds && isPlainRecordObject(item.evaluation)) {
+      const subIdField = readOwnDataField(item.evaluation, "submissionId");
+      if (subIdField.ok && typeof subIdField.value === "string" && subIdField.value.trim().length > 0) {
+        if (subIdField.value.trim() !== item.itemId) {
+          failures.add("benchmark_cohort_mismatch");
+        }
+      }
+    }
+    if (item.trueBand === null || !Number.isFinite(item.trueBand) || item.trueBand < 0 || item.trueBand > 9) {
+      continue;
+    }
     const predBand = extractPointScore(item.evaluation);
     if (predBand !== null) {
       admissiblePairs.push({ trueBand: item.trueBand, predBand });
+    }
+  }
+
+  if (expectedBenchmarkSet) {
+    let exactMatch =
+      seenValidBenchmarkIds.size === expectedBenchmarkSet.size &&
+      totalCount === expectedBenchmarkSet.size;
+    if (exactMatch) {
+      for (const expectedId of expectedBenchmarkSet) {
+        if (!seenValidBenchmarkIds.has(expectedId)) {
+          exactMatch = false;
+          break;
+        }
+      }
+    }
+    if (!exactMatch) {
+      failures.add("benchmark_cohort_mismatch");
     }
   }
 
@@ -382,24 +553,77 @@ export function evaluateRubricCalibrationGate(input: {
   }
 
   const counterfactualAudits: CounterfactualTripletAudit[] = [];
-  if (input.counterfactualTriplets.length === 0) {
+  const tripletsArray = snapshotDensePlainArray(input.counterfactualTriplets);
+  const hasExpectedTripletIds = input.expectedTripletIds !== undefined;
+  const expectedTripletSet = hasExpectedTripletIds
+    ? parseUniqueNonBlankIdSet(input.expectedTripletIds)
+    : null;
+  if (hasExpectedTripletIds && !expectedTripletSet) {
+    failures.add("triplet_cohort_mismatch");
+  }
+
+  const seenValidTripletIds = new Set<string>();
+  if (!tripletsArray) {
+    failures.add("missing_counterfactual_triplets");
+    failures.add("duplicate_or_invalid_triplet_id");
+  } else if (tripletsArray.length === 0) {
     failures.add("missing_counterfactual_triplets");
   } else {
-    for (const triplet of input.counterfactualTriplets) {
+    const tripletIdCounts = new Map<string, number>();
+    const parsedTriplets: Array<{
+      readonly tripletId: string | null;
+      readonly concise: unknown;
+      readonly padded: unknown;
+      readonly equalLength: unknown;
+    }> = [];
+    for (const rawTriplet of tripletsArray) {
+      if (!isPlainRecordObject(rawTriplet)) {
+        failures.add("duplicate_or_invalid_triplet_id");
+        parsedTriplets.push({ tripletId: null, concise: null, padded: null, equalLength: null });
+        continue;
+      }
+      const idField = readOwnDataField(rawTriplet, "tripletId");
+      const rawId = idField.ok && typeof idField.value === "string" ? idField.value.trim() : "";
+      if (rawId.length === 0) {
+        failures.add("duplicate_or_invalid_triplet_id");
+        parsedTriplets.push({ tripletId: null, concise: null, padded: null, equalLength: null });
+        continue;
+      }
+      tripletIdCounts.set(rawId, (tripletIdCounts.get(rawId) ?? 0) + 1);
+      const conciseField = readOwnDataField(rawTriplet, "substantiveConcise");
+      const paddedField = readOwnDataField(rawTriplet, "templatePaddedExpansion");
+      const equalField = readOwnDataField(rawTriplet, "equalLengthSubstantive");
+      parsedTriplets.push({
+        tripletId: rawId,
+        concise: conciseField.ok ? conciseField.value : null,
+        padded: paddedField.ok ? paddedField.value : null,
+        equalLength: equalField.ok ? equalField.value : null,
+      });
+    }
+
+    for (const triplet of parsedTriplets) {
       const tripletFailures: RubricCalibrationGateFailure[] = [];
-      if (triplet.templatePaddedExpansion.countsTowardMastery !== false) {
+      if (triplet.tripletId === null || (tripletIdCounts.get(triplet.tripletId) ?? 0) > 1) {
+        tripletFailures.push("duplicate_or_invalid_triplet_id");
+        failures.add("duplicate_or_invalid_triplet_id");
+      } else {
+        seenValidTripletIds.add(triplet.tripletId);
+      }
+
+      const paddedMasteryField = readOwnDataField(triplet.padded, "countsTowardMastery");
+      if (!paddedMasteryField.ok || paddedMasteryField.value !== false) {
         tripletFailures.push("counterfactual_padded_counts_toward_mastery");
         failures.add("counterfactual_padded_counts_toward_mastery");
       }
-      const conciseScore = extractCounterfactualScore(triplet.substantiveConcise);
-      const paddedScore = extractCounterfactualScore(triplet.templatePaddedExpansion);
-      const equalLengthScore = extractCounterfactualScore(triplet.equalLengthSubstantive);
+      const conciseScore = extractCounterfactualScore(triplet.concise);
+      const paddedScore = extractCounterfactualScore(triplet.padded);
+      const equalLengthScore = extractCounterfactualScore(triplet.equalLength);
 
       if (conciseScore === null || paddedScore === null || equalLengthScore === null) {
         tripletFailures.push("counterfactual_missing_point_score");
         failures.add("counterfactual_missing_point_score");
         counterfactualAudits.push({
-          tripletId: triplet.tripletId,
+          tripletId: triplet.tripletId ?? "",
           passed: false,
           conciseScore,
           paddedScore,
@@ -421,7 +645,7 @@ export function evaluateRubricCalibrationGate(input: {
       }
 
       counterfactualAudits.push({
-        tripletId: triplet.tripletId,
+        tripletId: triplet.tripletId ?? "",
         passed: tripletFailures.length === 0,
         conciseScore,
         paddedScore,
@@ -429,6 +653,24 @@ export function evaluateRubricCalibrationGate(input: {
         paddingGain,
         failures: tripletFailures,
       });
+    }
+  }
+
+  if (expectedTripletSet) {
+    let exactTripletMatch =
+      tripletsArray !== null &&
+      seenValidTripletIds.size === expectedTripletSet.size &&
+      tripletsArray.length === expectedTripletSet.size;
+    if (exactTripletMatch) {
+      for (const expectedId of expectedTripletSet) {
+        if (!seenValidTripletIds.has(expectedId)) {
+          exactTripletMatch = false;
+          break;
+        }
+      }
+    }
+    if (!exactTripletMatch) {
+      failures.add("triplet_cohort_mismatch");
     }
   }
 

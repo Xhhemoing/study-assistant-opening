@@ -337,10 +337,35 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     expect(astralLetterText.totalClicheOccurrences).toBe(0);
     expect(astralLetterText.isTemplatePadded).toBe(false);
 
-    // Custom [4.10, 4.20] anchors whose snapped band (4.0) escapes [4.10, 4.20] must fail closed to interval_only.
+    // Sub-0.5-band spacing ([4.10, 4.20]) is rejected up front as invalid_anchor_definitions.
+    const subHalfBandAnchors = [
+      { ...baseAnchors[0]!, anchorId: "nar-410", band: 4.1 as unknown as (typeof baseAnchors)[0]["band"], thetaAnchor: -1 },
+      { ...baseAnchors[1]!, anchorId: "nar-420", band: 4.2 as unknown as (typeof baseAnchors)[1]["band"], thetaAnchor: 1 },
+    ];
+    const subHalfBandRes = evaluateAnchorCalibratedRubric({
+      submissionId: "sub-half-band-anchors",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: subHalfBandAnchors,
+      comparisons: [
+        { anchorId: "nar-410", forwardChoice: "A", reverseChoice: "B" },
+        { anchorId: "nar-420", forwardChoice: "B", reverseChoice: "A" },
+      ],
+    });
+    expect(subHalfBandRes.status).toBe("interval_only");
+    expect(subHalfBandRes.band).toBeNull();
+    expect(subHalfBandRes.countsTowardMastery).toBe(false);
+    expect(subHalfBandRes.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+
+    // Well-conditioned anchors ([4.10@-2, 4.60@0, 5.10@0.25, 5.60@0.5]) whose snapped band (4.0) escapes [4.10, 4.60]
+    // still fail closed to interval_only with projection_outside_evidence_bracket.
     const narrowEscapeAnchors = [
-      { ...baseAnchors[0]!, anchorId: "nar-410", band: 4.10 as unknown as typeof baseAnchors[0]["band"], thetaAnchor: -1 },
-      { ...baseAnchors[1]!, anchorId: "nar-420", band: 4.20 as unknown as typeof baseAnchors[1]["band"], thetaAnchor: 1 },
+      { ...baseAnchors[0]!, anchorId: "esc-410", band: 4.1 as unknown as (typeof baseAnchors)[0]["band"], thetaAnchor: -2 },
+      { ...baseAnchors[1]!, anchorId: "esc-460", band: 4.6 as unknown as (typeof baseAnchors)[1]["band"], thetaAnchor: 0 },
+      { ...baseAnchors[2]!, anchorId: "esc-510", band: 5.1 as unknown as (typeof baseAnchors)[2]["band"], thetaAnchor: 0.25 },
+      { ...baseAnchors[3]!, anchorId: "esc-560", band: 5.6 as unknown as (typeof baseAnchors)[3]["band"], thetaAnchor: 0.5 },
     ];
     const narrowEscapeRes = evaluateAnchorCalibratedRubric({
       submissionId: "narrow-bracket-escape",
@@ -350,15 +375,102 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
       assisted: false,
       anchors: narrowEscapeAnchors,
       comparisons: [
-        { anchorId: "nar-410", forwardChoice: "A", reverseChoice: "B" },
-        { anchorId: "nar-420", forwardChoice: "B", reverseChoice: "A" },
+        { anchorId: "esc-410", forwardChoice: "A", reverseChoice: "B" },
+        { anchorId: "esc-460", forwardChoice: "B", reverseChoice: "A" },
+        { anchorId: "esc-510", forwardChoice: "B", reverseChoice: "A" },
+        { anchorId: "esc-560", forwardChoice: "B", reverseChoice: "A" },
       ],
     });
     expect(narrowEscapeRes.status).toBe("interval_only");
     expect(narrowEscapeRes.band).toBeNull();
-    expect(narrowEscapeRes.bandRange).toEqual([4.10, 4.20]);
+    expect(narrowEscapeRes.bandRange).toEqual([4.1, 4.6]);
     expect(narrowEscapeRes.countsTowardMastery).toBe(false);
     expect(narrowEscapeRes.inconsistencyReasons).toEqual(["projection_outside_evidence_bracket"]);
+
+    // Round-9 [P1-3 Bug A]: Cross-dimension custom anchors (lexical_resource on task_response) fail closed.
+    const lexicalAnchors = getSentinelAnchorsForDimension("lexical_resource");
+    const crossDimRes = evaluateAnchorCalibratedRubric({
+      submissionId: "cross-dim-anchors",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: lexicalAnchors,
+      comparisons: consistentComparisonsForTarget("lexical_resource", 6.0),
+    });
+    expect(crossDimRes.status).toBe("interval_only");
+    expect(crossDimRes.band).toBeNull();
+    expect(crossDimRes.countsTowardMastery).toBe(false);
+    expect(crossDimRes.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+
+    // Round-9 [P1-3 Bug B]: Ill-conditioned theta gap [4.5@0, 5.0@1e-10] fails closed with invalid_anchor_definitions.
+    const illConditionedAnchors = [
+      { ...baseAnchors[0]!, anchorId: "ic-45", band: 4.5 as const, thetaAnchor: 0 },
+      { ...baseAnchors[1]!, anchorId: "ic-50", band: 5.0 as const, thetaAnchor: 1e-10 },
+    ];
+    const illCondRes = evaluateAnchorCalibratedRubric({
+      submissionId: "ill-conditioned-anchors",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: illConditionedAnchors,
+      comparisons: [
+        { anchorId: "ic-45", forwardChoice: "A", reverseChoice: "B" },
+        { anchorId: "ic-50", forwardChoice: "A", reverseChoice: "B" },
+      ],
+    });
+    expect(illCondRes.status).toBe("interval_only");
+    expect(illCondRes.band).toBeNull();
+    expect(illCondRes.countsTowardMastery).toBe(false);
+    expect(illCondRes.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+
+    // Round-9 [P1-3 Bug B]: Unanchored tail extrapolation (all wins above max anchor 5.0 -> open [5.0, 9.0] tail,
+    // or all losses below min anchor 7.5 -> open [0, 7.5] tail) must NOT certify mastery.
+    const lowOnlyAnchors = [
+      { ...baseAnchors[0]!, anchorId: "lo-45", band: 4.5 as const, thetaAnchor: 0 },
+      { ...baseAnchors[1]!, anchorId: "lo-50", band: 5.0 as const, thetaAnchor: 1 },
+    ];
+    const unanchoredHighTailRes = evaluateAnchorCalibratedRubric({
+      submissionId: "unanchored-high-tail",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[5]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: lowOnlyAnchors,
+      comparisons: [
+        { anchorId: "lo-45", forwardChoice: "A", reverseChoice: "B" },
+        { anchorId: "lo-50", forwardChoice: "A", reverseChoice: "B" },
+      ],
+    });
+    expect(unanchoredHighTailRes.status).toBe("interval_only");
+    expect(unanchoredHighTailRes.band).toBeNull();
+    expect(unanchoredHighTailRes.bandRange).toEqual([5.0, 9.0]);
+    expect(unanchoredHighTailRes.countsTowardMastery).toBe(false);
+    expect(unanchoredHighTailRes.inconsistencyReasons).toEqual(["unanchored_tail_extrapolation"]);
+    expect(unanchoredHighTailRes.masteryExclusionReasons).toContain("unanchored_tail_extrapolation");
+
+    const highOnlyAnchors = [
+      { ...baseAnchors[4]!, anchorId: "hi-75", band: 7.5 as const, thetaAnchor: 5 },
+      { ...baseAnchors[5]!, anchorId: "hi-80", band: 8.0 as const, thetaAnchor: 7 },
+    ];
+    const unanchoredLowTailRes = evaluateAnchorCalibratedRubric({
+      submissionId: "unanchored-low-tail",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[0]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: highOnlyAnchors,
+      comparisons: [
+        { anchorId: "hi-75", forwardChoice: "B", reverseChoice: "A" },
+        { anchorId: "hi-80", forwardChoice: "B", reverseChoice: "A" },
+      ],
+    });
+    expect(unanchoredLowTailRes.status).toBe("interval_only");
+    expect(unanchoredLowTailRes.band).toBeNull();
+    expect(unanchoredLowTailRes.bandRange).toEqual([0, 7.5]);
+    expect(unanchoredLowTailRes.countsTowardMastery).toBe(false);
+    expect(unanchoredLowTailRes.inconsistencyReasons).toEqual(["unanchored_tail_extrapolation"]);
 
     // Out-of-range custom thetaAnchor (e.g. 100 / 101) fails closed and never projects outside evidence bracket.
     const extremeThetaAnchors = [
@@ -669,5 +781,67 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
     expect(hiddenTailAttempt.passed).toBe(false);
     expect(hiddenTailAttempt.metrics.biasLow).toBeCloseTo(0.5, 10);
     expect(hiddenTailAttempt.failures).toContain("low_tail_bias_exceeds_threshold");
+  });
+
+  it("enforces unique benchmark/triplet IDs and exact cohort membership when expected IDs are supplied (Round-9 P1-2)", () => {
+    // Duplicate itemId "b1" at 4.5 and 8.0 must NEVER pass even when every point matches trueBand.
+    const dupBenchmark = evaluateRubricCalibrationGate({
+      benchmarkItems: [
+        { itemId: "b1", trueBand: 4.5, evaluation: calibratedPoint(4.5) },
+        { itemId: "b1", trueBand: 8.0, evaluation: calibratedPoint(8.0) },
+      ],
+      counterfactualTriplets: passingCounterfactuals,
+    });
+    expect(dupBenchmark.passed).toBe(false);
+    expect(dupBenchmark.failures).toContain("duplicate_or_invalid_benchmark_item_id");
+    expect(dupBenchmark.metrics.admissibleCount).toBe(0);
+
+    // Duplicate tripletId fails closed.
+    const validBenchmark = [
+      { itemId: "g1", trueBand: 4.5, evaluation: { ...calibratedPoint(4.5), submissionId: "g1" } },
+      { itemId: "g2", trueBand: 5.0, evaluation: { ...calibratedPoint(5.0), submissionId: "g2" } },
+      { itemId: "g3", trueBand: 6.0, evaluation: { ...calibratedPoint(6.0), submissionId: "g3" } },
+      { itemId: "g4", trueBand: 6.5, evaluation: { ...calibratedPoint(6.5), submissionId: "g4" } },
+      { itemId: "g5", trueBand: 7.5, evaluation: { ...calibratedPoint(7.5), submissionId: "g5" } },
+      { itemId: "g6", trueBand: 8.0, evaluation: { ...calibratedPoint(8.0), submissionId: "g6" } },
+    ];
+    const dupTriplet = evaluateRubricCalibrationGate({
+      benchmarkItems: validBenchmark,
+      counterfactualTriplets: [passingCounterfactuals[0]!, passingCounterfactuals[0]!],
+    });
+    expect(dupTriplet.passed).toBe(false);
+    expect(dupTriplet.failures).toContain("duplicate_or_invalid_triplet_id");
+
+    // Exact expectedBenchmarkItemIds + expectedTripletIds match passes.
+    const exactCohort = evaluateRubricCalibrationGate({
+      benchmarkItems: validBenchmark,
+      counterfactualTriplets: passingCounterfactuals,
+      expectedBenchmarkItemIds: ["g1", "g2", "g3", "g4", "g5", "g6"],
+      expectedTripletIds: [passingCounterfactuals[0]!.tripletId],
+    });
+    expect(exactCohort.passed).toBe(true);
+    expect(exactCohort.failures).toEqual([]);
+
+    // Missing or extra benchmark item fails with benchmark_cohort_mismatch.
+    const missingCohortItem = evaluateRubricCalibrationGate({
+      benchmarkItems: validBenchmark,
+      counterfactualTriplets: passingCounterfactuals,
+      expectedBenchmarkItemIds: ["g1", "g2", "g3", "g4", "g5", "g6", "g7"],
+      expectedTripletIds: ["other-triplet-id"],
+    });
+    expect(missingCohortItem.passed).toBe(false);
+    expect(missingCohortItem.failures).toContain("benchmark_cohort_mismatch");
+    expect(missingCohortItem.failures).toContain("triplet_cohort_mismatch");
+
+    // Mismatched evaluation.submissionId against itemId fails with benchmark_cohort_mismatch.
+    const mismatchedSubId = evaluateRubricCalibrationGate({
+      benchmarkItems: validBenchmark.map((item, idx) =>
+        idx === 0 ? { ...item, evaluation: { ...item.evaluation, submissionId: "wrong-sub" } } : item,
+      ),
+      counterfactualTriplets: passingCounterfactuals,
+      expectedBenchmarkItemIds: ["g1", "g2", "g3", "g4", "g5", "g6"],
+    });
+    expect(mismatchedSubId.passed).toBe(false);
+    expect(mismatchedSubId.failures).toContain("benchmark_cohort_mismatch");
   });
 });

@@ -19,6 +19,8 @@ export {
 } from "./privacy-guard";
 
 export {
+  CLINIC_DELAYED_RECHECK_MIN_HOURS,
+  CLINIC_RUBRIC_MIN_QWK,
   REMEDY_CLINIC_TOTAL_MINUTES,
   REQUIRED_TRANSFER_PROBE_COUNT,
   STEP1_SELF_DIFF_MINUTES,
@@ -28,7 +30,9 @@ export {
   revalidateRemedyClinic,
   type ClinicCandidateProbe,
   type ClinicCandidateRejectionCounts,
+  type ClinicDelayedRecheckContract,
   type ClinicRevocationReason,
+  type ClinicRubricCalibrationGuard,
   type DiagnosedRootAttempt,
   type DistinguishableTransferProbesStep,
   type EmbeddingRecallCandidate,

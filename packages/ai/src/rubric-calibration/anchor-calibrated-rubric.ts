@@ -44,13 +44,15 @@ export type RubricInconsistencyReason =
   | "non_adjacent_monotonicity_violation"
   | "adjacent_monotonicity_violation"
   | "non_finite_projection"
-  | "projection_outside_evidence_bracket";
+  | "projection_outside_evidence_bracket"
+  | "unanchored_tail_extrapolation";
 
 export type MasteryExclusionReason =
   | "practice_feedback_only"
   | "assisted_submission"
   | "interval_only_inconsistent"
-  | "template_padding_detected";
+  | "template_padding_detected"
+  | "unanchored_tail_extrapolation";
 
 export interface TemplatePaddingReport {
   readonly isTemplatePadded: boolean;
@@ -122,6 +124,13 @@ const MIN_BAND = 0;
 const MAX_BAND = 9;
 const MAX_ABS_THETA_ANCHOR = 20;
 const BRACKET_EPSILON = 1e-9;
+const MIN_ANCHOR_BAND_GAP = 0.5;
+const MIN_ANCHOR_THETA_GAP = 0.2;
+const MIN_ANCHOR_SLOPE = 0.05;
+const MAX_ANCHOR_SLOPE = 5.0;
+const MAX_UNANCHORED_TAIL_WIDTH = 2.0;
+const MAX_LOW_TAIL_ANCHOR_BAND = 5.5;
+const MIN_HIGH_TAIL_ANCHOR_BAND = 7.0;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -365,6 +374,7 @@ function projectThetaToBand(
 
 function validateAndSortAnchors(
   sourceAnchors: readonly DimensionSentinelAnchor[],
+  expectedDimension: RubricDimension,
 ): readonly DimensionSentinelAnchor[] | null {
   if (!Array.isArray(sourceAnchors) || sourceAnchors.length < 2) return null;
   const seenIds = new Set<string>();
@@ -372,6 +382,7 @@ function validateAndSortAnchors(
     if (!Object.hasOwn(sourceAnchors, i)) return null;
     const anchor = sourceAnchors[i];
     if (!anchor || typeof anchor.anchorId !== "string" || anchor.anchorId.trim().length === 0) return null;
+    if (anchor.dimension !== expectedDimension) return null;
     if (seenIds.has(anchor.anchorId)) return null;
     seenIds.add(anchor.anchorId);
     if (
@@ -396,7 +407,19 @@ function validateAndSortAnchors(
     const prev = sorted[i - 1];
     const curr = sorted[i];
     if (!prev || !curr) return null;
-    if (!(curr.band > prev.band) || !(curr.thetaAnchor > prev.thetaAnchor)) return null;
+    const bandGap = curr.band - prev.band;
+    const thetaGap = curr.thetaAnchor - prev.thetaAnchor;
+    if (bandGap < MIN_ANCHOR_BAND_GAP - BRACKET_EPSILON || thetaGap < MIN_ANCHOR_THETA_GAP - BRACKET_EPSILON) {
+      return null;
+    }
+    const slope = bandGap / thetaGap;
+    if (
+      !Number.isFinite(slope) ||
+      slope < MIN_ANCHOR_SLOPE - BRACKET_EPSILON ||
+      slope > MAX_ANCHOR_SLOPE + BRACKET_EPSILON
+    ) {
+      return null;
+    }
   }
   return sorted;
 }
@@ -404,7 +427,7 @@ function validateAndSortAnchors(
 export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): AnchorCalibratedRubricV1Result {
   const sourceAnchors = input.anchors ?? getSentinelAnchorsForDimension(input.dimension);
   const paddingReport = detectTemplatePadding(input.text);
-  const anchors = validateAndSortAnchors(sourceAnchors);
+  const anchors = validateAndSortAnchors(sourceAnchors, input.dimension);
 
   if (!anchors) {
     const masteryExclusionReasons: MasteryExclusionReason[] = [];
@@ -554,11 +577,38 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
       band < bandRange[0] - BRACKET_EPSILON ||
       band > bandRange[1] + BRACKET_EPSILON);
 
-  if (nonFinite || outsideBracket) {
+  const allWins = outcomes.every((o) => o === 1);
+  const allLosses = outcomes.every((o) => o === 0);
+  const firstAnchor = anchors[0]!;
+  const lastAnchor = anchors[anchors.length - 1]!;
+  const openTailWidth = bandRange[1] - bandRange[0];
+  const unanchoredHighTail =
+    allWins &&
+    (lastAnchor.band < MIN_HIGH_TAIL_ANCHOR_BAND - BRACKET_EPSILON ||
+      openTailWidth > MAX_UNANCHORED_TAIL_WIDTH + BRACKET_EPSILON);
+  const unanchoredLowTail =
+    allLosses &&
+    firstAnchor.band > MAX_LOW_TAIL_ANCHOR_BAND + BRACKET_EPSILON &&
+    openTailWidth > MAX_UNANCHORED_TAIL_WIDTH + BRACKET_EPSILON;
+  const clampedTailExtrapolation =
+    (allWins && rawUnclamped > MAX_BAND + BRACKET_EPSILON) ||
+    (allLosses && rawUnclamped < MIN_BAND - BRACKET_EPSILON);
+  const unanchoredTailExtrapolation =
+    !nonFinite && (unanchoredHighTail || unanchoredLowTail || clampedTailExtrapolation);
+
+  if (nonFinite || outsideBracket || unanchoredTailExtrapolation) {
     const fallbackExclusions: MasteryExclusionReason[] = [...masteryExclusionReasons];
     if (!fallbackExclusions.includes("interval_only_inconsistent")) {
       fallbackExclusions.push("interval_only_inconsistent");
     }
+    if (unanchoredTailExtrapolation && !fallbackExclusions.includes("unanchored_tail_extrapolation")) {
+      fallbackExclusions.push("unanchored_tail_extrapolation");
+    }
+    const fallbackReason: RubricInconsistencyReason = nonFinite
+      ? "non_finite_projection"
+      : outsideBracket
+        ? "projection_outside_evidence_bracket"
+        : "unanchored_tail_extrapolation";
     return {
       schemaVersion: 1,
       submissionId: input.submissionId,
@@ -570,7 +620,7 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
       bandRange,
       countsTowardMastery: false,
       masteryExclusionReasons: fallbackExclusions,
-      inconsistencyReasons: [nonFinite ? "non_finite_projection" : "projection_outside_evidence_bracket"],
+      inconsistencyReasons: [fallbackReason],
       paddingReport,
       anchorComparisons: resolved,
     };

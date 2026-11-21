@@ -1,11 +1,13 @@
-import {
-  verifyProbeDistinguishability,
-  type DistinguishableProbeSpec,
-  type ProbeDistinguishabilityReport,
+import type {
+  DistinguishableProbeSpec,
+  ProbeDistinguishabilityIssue,
+  ProbeDistinguishabilityReport,
+  ProbeModelPrediction,
 } from "../opening/cartridges/probe-protocol";
 import {
   areSourceRefsActive,
   buildSelfDiffEntries,
+  compareUtf16,
   computeEvidenceCoverage,
   isDenseArray,
   isNonBlankText,
@@ -33,6 +35,22 @@ export const STEP1_SELF_DIFF_MINUTES = 4 as const;
 export const STEP2_INVARIANT_RESTATEMENT_MINUTES = 3 as const;
 export const STEP3_TRANSFER_PROBES_MINUTES = 7 as const;
 export const REQUIRED_TRANSFER_PROBE_COUNT = 2 as const;
+export const CLINIC_RUBRIC_MIN_QWK = 0.7 as const;
+export const CLINIC_DELAYED_RECHECK_MIN_HOURS = 24 as const;
+
+export interface ClinicRubricCalibrationGuard {
+  readonly calibrated: boolean;
+  readonly agreementPassed?: boolean;
+  readonly qwk?: number | null;
+}
+
+export interface ClinicDelayedRecheckContract {
+  readonly required: true;
+  readonly scheduledOutsideSessionMinutes: true;
+  readonly minDelayHours: 24;
+  readonly ruleId: string;
+  readonly countsTowardMasteryUntilPassed: false;
+}
 
 export interface DiagnosedRootAttempt {
   readonly attemptId: string;
@@ -48,6 +66,9 @@ export interface DiagnosedRootAttempt {
   readonly privacyEpoch: number;
   readonly assisted: boolean;
   readonly occurredAtMs?: number;
+  readonly swapConsistent?: boolean;
+  readonly templatePadded?: boolean;
+  readonly calibrationVerified?: boolean;
 }
 
 export interface EmbeddingRecallCandidate {
@@ -136,6 +157,7 @@ export interface RemedyClinicSessionV1 {
     InvariantRuleRestatementStep,
     DistinguishableTransferProbesStep,
   ];
+  readonly delayedRecheck: ClinicDelayedRecheckContract;
   readonly revocationSummary: {
     readonly strippedCaseCount: number;
     readonly strippedProbeCount?: number;
@@ -150,6 +172,7 @@ export interface ClinicCandidateRejectionCounts {
   readonly malformedAttempt: number;
   readonly revokedSource: number;
   readonly ruleIdMismatch: number;
+  readonly rubricGuardRejected: number;
   readonly verifierRejected: number;
   readonly duplicateRoot: number;
   readonly transitiveClosureBlocked: number;
@@ -168,6 +191,7 @@ export interface GenerateRemedyClinicInput<TInput = unknown, TObservable = unkno
   readonly embeddingRecallCandidates?: readonly EmbeddingRecallCandidate[];
   readonly verifyRuleViolation: (attempt: DiagnosedRootAttempt) => boolean;
   readonly candidateProbes: readonly ClinicCandidateProbe<TInput, TObservable>[];
+  readonly rubricCalibration?: ClinicRubricCalibrationGuard;
 }
 
 export interface GenerateRemedyClinicResult {
@@ -175,6 +199,8 @@ export interface GenerateRemedyClinicResult {
     | "active"
     | "threshold_not_met"
     | "insufficient_distinguishable_probes"
+    | "uncalibrated_rubric"
+    | "low_rubric_agreement"
     | "invalid_input";
   readonly clinic: RemedyClinicSessionV1 | null;
   readonly coverage: EvidenceCoverage;
@@ -191,10 +217,32 @@ function emptyRejections(): ClinicCandidateRejectionCounts {
     malformedAttempt: 0,
     revokedSource: 0,
     ruleIdMismatch: 0,
+    rubricGuardRejected: 0,
     verifierRejected: 0,
     duplicateRoot: 0,
     transitiveClosureBlocked: 0,
   };
+}
+
+function buildDelayedRecheck(ruleId: string): ClinicDelayedRecheckContract {
+  return Object.freeze({
+    required: true as const,
+    scheduledOutsideSessionMinutes: true as const,
+    minDelayHours: CLINIC_DELAYED_RECHECK_MIN_HOURS,
+    ruleId,
+    countsTowardMasteryUntilPassed: false as const,
+  });
+}
+
+function resolveRevokedStep2Placeholder(reason: ClinicRevocationReason): string {
+  switch (reason) {
+    case "invalid_privacy_epoch":
+      return "This remedy clinic is unavailable because the privacy verification state is invalid or out of date.";
+    case "insufficient_surviving_probes":
+      return "This remedy clinic is unavailable because its transfer probes are no longer available or valid.";
+    default:
+      return "This remedy clinic is no longer available because an underlying source was updated or removed.";
+  }
 }
 
 function safeVerifyRuleViolation(
@@ -208,8 +256,6 @@ function safeVerifyRuleViolation(
   }
 }
 
-const REVOKED_CLINIC_STEP2_PLACEHOLDER =
-  "This remedy clinic is no longer available because an underlying source was updated or removed.";
 const MACHINE_IDENTIFIER_PATTERN = /^[a-z0-9]+(?:[_:-][a-z0-9]+)+$/i;
 
 function resolveLearnerRuleLabel(ruleId: string, ruleTitle?: string): string {
@@ -246,7 +292,6 @@ function buildRestatementStep(ruleId: string, ruleTitle?: string): InvariantRule
   });
 }
 
-const NOOP_CALLBACK = (): void => {};
 const REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
 const ARRAY_BUFFER_BYTE_LENGTH_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
 const DATA_VIEW_BYTE_LENGTH_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
@@ -254,16 +299,11 @@ const SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET =
   typeof SharedArrayBuffer !== "undefined"
     ? Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength")?.get
     : undefined;
+const WEAK_REF_DEREF = typeof WeakRef !== "undefined" ? WeakRef.prototype.deref : undefined;
+const FINALIZATION_REGISTRY_UNREGISTER =
+  typeof FinalizationRegistry !== "undefined" ? FinalizationRegistry.prototype.unregister : undefined;
 const ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
 const WEAK_PROBE_KEY = Object.freeze({});
-const SPECIES_NON_OBJECT_ERROR_MESSAGE = (() => {
-  try {
-    Reflect.apply(Promise.prototype.finally, { constructor: null }, [NOOP_CALLBACK]);
-  } catch (err) {
-    return err instanceof TypeError ? err.message : "";
-  }
-  return "";
-})();
 
 function matchesBrand(check: () => unknown): boolean {
   try {
@@ -274,164 +314,200 @@ function matchesBrand(check: () => unknown): boolean {
   }
 }
 
-/**
- * Zero-getter, zero-mutation Promise internal-slot brand check.
- * Precondition: obj already verified to have proto === Object.prototype | null | Array.prototype
- * and no own symbol keys or accessor getters.
- */
-function hasPromiseInternalSlot(obj: object): boolean {
-  if (Array.isArray(obj)) return false;
-  const proto = Object.getPrototypeOf(obj) as object | null;
-  if (proto !== Object.prototype && proto !== null) return true;
-
-  const ctorDesc = Object.getOwnPropertyDescriptor(obj, "constructor");
-  if (ctorDesc && (ctorDesc.get !== undefined || ctorDesc.set !== undefined || !Object.hasOwn(ctorDesc, "value"))) {
-    return true;
+function safeHasOwn(obj: object, key: PropertyKey): boolean {
+  try {
+    return Object.hasOwn(obj, key);
+  } catch {
+    return false;
   }
-  const hasOwnCtor = ctorDesc !== undefined;
-  const ctorVal = ctorDesc?.value;
+}
 
-  // Case A: No own constructor, or own constructor is undefined / Object (no user [Symbol.species]).
-  if (!hasOwnCtor || ctorVal === undefined || ctorVal === Object) {
-    return matchesBrand(() => Reflect.apply(Promise.prototype.then, obj, [NOOP_CALLBACK, NOOP_CALLBACK]));
+function safeIsArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return false;
   }
+}
 
-  // Case B: Non-callable object constructor. Per ECMA-262 PromiseResolve(C, x), if IsPromise(obj)
-  // and obj.constructor === C, returns obj at Step 2b BEFORE touching [Symbol.species] or NewPromiseCapability;
-  // if !IsPromise(obj), NewPromiseCapability throws TypeError immediately on non-callable C.
-  if (typeof ctorVal === "object" && ctorVal !== null) {
-    try {
-      return Reflect.apply(Promise.resolve, ctorVal, [obj]) === obj;
-    } catch {
+function safeGetPrototypeOf(obj: object): { readonly ok: true; readonly proto: object | null } | { readonly ok: false } {
+  try {
+    return { ok: true, proto: Object.getPrototypeOf(obj) as object | null };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function safeOwnKeys(obj: object): readonly PropertyKey[] | null {
+  try {
+    return Reflect.ownKeys(obj);
+  } catch {
+    return null;
+  }
+}
+
+function safeGetOwnPropertyDescriptor(
+  obj: object,
+  key: PropertyKey,
+): { readonly ok: true; readonly desc: PropertyDescriptor | undefined } | { readonly ok: false } {
+  try {
+    return { ok: true, desc: Object.getOwnPropertyDescriptor(obj, key) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function allOwnValuesArePrimitives(obj: object, keys: readonly PropertyKey[]): boolean {
+  for (const key of keys) {
+    const descRes = safeGetOwnPropertyDescriptor(obj, key);
+    if (!descRes.ok || !descRes.desc || !Object.hasOwn(descRes.desc, "value")) return false;
+    const val = descRes.desc.value;
+    if (val !== null && (typeof val === "object" || typeof val === "function")) {
       return false;
     }
   }
-
-  // Case C: Untrusted function constructor !== Object — fail closed without invoking it.
-  if (typeof ctorVal === "function") {
-    return true;
-  }
-
-  // Case D: null or primitive constructor — distinguish IsPromise Step 2 failure from SpeciesConstructor Step 3 failure.
-  let expectedSpeciesErrMsg = SPECIES_NON_OBJECT_ERROR_MESSAGE;
-  if (ctorVal !== null) {
-    try {
-      Reflect.apply(Promise.prototype.finally, { constructor: ctorVal }, [NOOP_CALLBACK]);
-    } catch (sampleErr) {
-      if (sampleErr instanceof TypeError) expectedSpeciesErrMsg = sampleErr.message;
-    }
-  }
-  try {
-    Reflect.apply(Promise.prototype.then, obj, [NOOP_CALLBACK, NOOP_CALLBACK]);
-    return true;
-  } catch (err) {
-    return (
-      err instanceof TypeError &&
-      expectedSpeciesErrMsg !== "" &&
-      err.message === expectedSpeciesErrMsg
-    );
-  }
+  return true;
 }
 
 /**
  * Detect exotic built-in internal slots (Map, Set, Date, RegExp, ArrayBuffer, TypedArray,
- * DataView, WeakMap, WeakSet, Promise, Error, boxed primitives, SharedArrayBuffer) even when
- * the object's prototype has been reassigned via Object.setPrototypeOf(..., Object.prototype | null).
- * Call ONLY after verifying prototype and own keys (no symbol keys / no accessors).
+ * DataView, WeakMap, WeakSet, WeakRef, FinalizationRegistry, Promise, Generator, AsyncGenerator,
+ * Error, boxed primitives, SharedArrayBuffer, Proxy) even when prototype is reassigned.
+ * Never attaches Promise reactions or invokes getters.
+ * Call ONLY after verifying prototype and own keys (no symbol keys / no accessors / no "__proto__").
  */
-function hasExoticInternalSlots(obj: object): boolean {
-  if (ArrayBuffer.isView(obj)) return true;
-  if (typeof ERROR_IS_ERROR === "function") {
-    if (ERROR_IS_ERROR(obj)) return true;
-  } else {
-    const proto = Object.getPrototypeOf(obj) as object | null;
+function hasExoticInternalSlots(obj: object, verifiedOwnKeys?: readonly PropertyKey[]): boolean {
+  try {
+    if (ArrayBuffer.isView(obj)) return true;
+    if (typeof ERROR_IS_ERROR === "function") {
+      if (ERROR_IS_ERROR(obj)) return true;
+    } else {
+      const protoRes = safeGetPrototypeOf(obj);
+      if (!protoRes.ok) return true;
+      const tagDescRes = safeGetOwnPropertyDescriptor(obj, Symbol.toStringTag);
+      if (!tagDescRes.ok) return true;
+      if (
+        (protoRes.proto === Object.prototype || protoRes.proto === null || protoRes.proto === Array.prototype) &&
+        tagDescRes.desc === undefined &&
+        Object.prototype.toString.call(obj) === "[object Error]"
+      ) {
+        return true;
+      }
+    }
+    if (matchesBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
+    if (matchesBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
+    if (matchesBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [WEAK_PROBE_KEY]))) return true;
+    if (matchesBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [WEAK_PROBE_KEY]))) return true;
+    if (WEAK_REF_DEREF && matchesBrand(() => Reflect.apply(WEAK_REF_DEREF, obj, []))) return true;
     if (
-      (proto === Object.prototype || proto === null || proto === Array.prototype) &&
-      Object.getOwnPropertyDescriptor(obj, Symbol.toStringTag) === undefined &&
-      Object.prototype.toString.call(obj) === "[object Error]"
+      FINALIZATION_REGISTRY_UNREGISTER &&
+      matchesBrand(() => Reflect.apply(FINALIZATION_REGISTRY_UNREGISTER, obj, [WEAK_PROBE_KEY]))
     ) {
       return true;
     }
-  }
-  if (matchesBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
-  if (matchesBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
-  if (matchesBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [WEAK_PROBE_KEY]))) return true;
-  if (matchesBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [WEAK_PROBE_KEY]))) return true;
-  if (matchesBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
-  if (
-    REGEXP_SOURCE_GET &&
-    obj !== RegExp.prototype &&
-    matchesBrand(() => Reflect.apply(REGEXP_SOURCE_GET, obj, []))
-  ) {
+    if (matchesBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
+    if (
+      REGEXP_SOURCE_GET &&
+      obj !== RegExp.prototype &&
+      matchesBrand(() => Reflect.apply(REGEXP_SOURCE_GET, obj, []))
+    ) {
+      return true;
+    }
+    if (ARRAY_BUFFER_BYTE_LENGTH_GET && matchesBrand(() => Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GET, obj, []))) {
+      return true;
+    }
+    if (DATA_VIEW_BYTE_LENGTH_GET && matchesBrand(() => Reflect.apply(DATA_VIEW_BYTE_LENGTH_GET, obj, []))) {
+      return true;
+    }
+    if (
+      SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET &&
+      matchesBrand(() => Reflect.apply(SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET, obj, []))
+    ) {
+      return true;
+    }
+    if (matchesBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
+    if (matchesBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
+    if (matchesBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
+    if (matchesBrand(() => Reflect.apply(Symbol.prototype.valueOf, obj, []))) return true;
+    if (matchesBrand(() => Reflect.apply(BigInt.prototype.valueOf, obj, []))) return true;
+
+    // When all own property values are primitives, structuredClone visits zero child objects
+    // while rejecting Proxy (zero traps), Promise (zero [[PromiseIsHandled]] mutation),
+    // Generator, and AsyncGenerator in native runtime checks.
+    const keys = verifiedOwnKeys ?? safeOwnKeys(obj);
+    if (!keys) return true;
+    if (allOwnValuesArePrimitives(obj, keys)) {
+      try {
+        structuredClone(obj);
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  } catch {
     return true;
   }
-  if (ARRAY_BUFFER_BYTE_LENGTH_GET && matchesBrand(() => Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GET, obj, []))) {
-    return true;
-  }
-  if (DATA_VIEW_BYTE_LENGTH_GET && matchesBrand(() => Reflect.apply(DATA_VIEW_BYTE_LENGTH_GET, obj, []))) {
-    return true;
-  }
-  if (
-    SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET &&
-    matchesBrand(() => Reflect.apply(SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET, obj, []))
-  ) {
-    return true;
-  }
-  if (hasPromiseInternalSlot(obj)) return true;
-  if (matchesBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
-  if (matchesBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
-  if (matchesBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
-  if (matchesBrand(() => Reflect.apply(Symbol.prototype.valueOf, obj, []))) return true;
-  if (matchesBrand(() => Reflect.apply(BigInt.prototype.valueOf, obj, []))) return true;
-  return false;
 }
 
 function isPlainRecordOwnDataOnly(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value) as object | null;
-  if (proto !== Object.prototype && proto !== null) return false;
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string") return false;
-    const desc = Object.getOwnPropertyDescriptor(value, key);
-    if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+  if (value === null || typeof value !== "object" || safeIsArray(value)) return false;
+  const protoRes = safeGetPrototypeOf(value);
+  if (!protoRes.ok || (protoRes.proto !== Object.prototype && protoRes.proto !== null)) return false;
+  const keys = safeOwnKeys(value);
+  if (!keys) return false;
+  for (const key of keys) {
+    if (typeof key !== "string" || key === "__proto__") return false;
+    const descRes = safeGetOwnPropertyDescriptor(value, key);
+    if (
+      !descRes.ok ||
+      !descRes.desc ||
+      !Object.hasOwn(descRes.desc, "value") ||
+      descRes.desc.get !== undefined ||
+      descRes.desc.set !== undefined
+    ) {
       return false;
     }
   }
-  if (hasExoticInternalSlots(value)) return false;
+  if (hasExoticInternalSlots(value, keys)) return false;
   return true;
 }
 
 function isPlainDenseArrayHeader(obj: unknown): obj is unknown[] {
-  if (!Array.isArray(obj)) return false;
-  if (Object.getPrototypeOf(obj) !== Array.prototype) return false;
-  const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
-  if (!lenDesc || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value)) return false;
-  const len = lenDesc.value;
-  const keys = Reflect.ownKeys(obj);
-  if (keys.length !== len + 1) return false;
+  if (!safeIsArray(obj)) return false;
+  const protoRes = safeGetPrototypeOf(obj);
+  if (!protoRes.ok || protoRes.proto !== Array.prototype) return false;
+  const lenDescRes = safeGetOwnPropertyDescriptor(obj, "length");
+  if (!lenDescRes.ok || !lenDescRes.desc || typeof lenDescRes.desc.value !== "number" || !Number.isInteger(lenDescRes.desc.value)) {
+    return false;
+  }
+  const len = lenDescRes.desc.value;
+  const keys = safeOwnKeys(obj);
+  if (!keys || keys.length !== len + 1) return false;
   for (let i = 0; i < len; i += 1) {
-    const desc = Object.getOwnPropertyDescriptor(obj, String(i));
+    const descRes = safeGetOwnPropertyDescriptor(obj, String(i));
     if (
-      !desc ||
-      !desc.enumerable ||
-      !Object.hasOwn(desc, "value") ||
-      desc.get !== undefined ||
-      desc.set !== undefined
+      !descRes.ok ||
+      !descRes.desc ||
+      !descRes.desc.enumerable ||
+      !Object.hasOwn(descRes.desc, "value") ||
+      descRes.desc.get !== undefined ||
+      descRes.desc.set !== undefined
     ) {
       return false;
     }
   }
-  return !hasExoticInternalSlots(obj);
+  return !hasExoticInternalSlots(obj, keys);
 }
 
 /**
  * Single-pass, exotic-brand-rejecting, descriptor-materializing plain-data clone & deep-freeze.
- * Replaces structuredClone completely: zero getter execution, O(V + E) on shared DAGs, cyclic
- * plain-object safe, and safe for own "__proto__" data properties via Object.defineProperty.
+ * Guarded against throwing Proxy traps, rejects own "__proto__" keys, and verifies the root
+ * via structuredClone AFTER confirming every reachable node is getter-free so Proxy, Promise
+ * (without mutating [[PromiseIsHandled]]), Generator, and AsyncGenerator are rejected cleanly.
  */
-function cloneAndFreezePlainData(
+function cloneAndFreezePlainDataInner(
   value: unknown,
-  memo: Map<object, unknown> = new Map(),
+  memo: Map<object, unknown>,
 ): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
   if (value === null || value === undefined) return { ok: true, value };
   const kind = typeof value;
@@ -445,16 +521,21 @@ function cloneAndFreezePlainData(
   const obj = value as object;
   if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
 
-  const proto = Object.getPrototypeOf(obj) as object | null;
-  if (Array.isArray(obj)) {
+  const protoRes = safeGetPrototypeOf(obj);
+  if (!protoRes.ok) return { ok: false };
+  const proto = protoRes.proto;
+
+  if (safeIsArray(obj)) {
     if (!isPlainDenseArrayHeader(obj)) return { ok: false };
-    const len = obj.length;
+    const lenDescRes = safeGetOwnPropertyDescriptor(obj, "length");
+    if (!lenDescRes.ok || !lenDescRes.desc || typeof lenDescRes.desc.value !== "number") return { ok: false };
+    const len = lenDescRes.desc.value;
     const out: unknown[] = new Array(len);
     memo.set(obj, out);
     for (let i = 0; i < len; i += 1) {
-      const desc = Object.getOwnPropertyDescriptor(obj, String(i));
-      if (!desc || !Object.hasOwn(desc, "value")) return { ok: false };
-      const child = cloneAndFreezePlainData(desc.value, memo);
+      const descRes = safeGetOwnPropertyDescriptor(obj, String(i));
+      if (!descRes.ok || !descRes.desc || !Object.hasOwn(descRes.desc, "value")) return { ok: false };
+      const child = cloneAndFreezePlainDataInner(descRes.desc.value, memo);
       if (!child.ok) return { ok: false };
       Object.defineProperty(out, String(i), {
         value: child.value,
@@ -468,29 +549,31 @@ function cloneAndFreezePlainData(
   }
 
   if (proto !== Object.prototype && proto !== null) return { ok: false };
-  const ownKeys = Reflect.ownKeys(obj);
+  const ownKeys = safeOwnKeys(obj);
+  if (!ownKeys) return { ok: false };
   const validatedEntries: Array<{ readonly key: string; readonly value: unknown; readonly enumerable: boolean }> = [];
   for (const key of ownKeys) {
-    if (typeof key !== "string") return { ok: false };
-    const desc = Object.getOwnPropertyDescriptor(obj, key);
+    if (typeof key !== "string" || key === "__proto__") return { ok: false };
+    const descRes = safeGetOwnPropertyDescriptor(obj, key);
     if (
-      !desc ||
-      !desc.enumerable ||
-      !Object.hasOwn(desc, "value") ||
-      desc.get !== undefined ||
-      desc.set !== undefined
+      !descRes.ok ||
+      !descRes.desc ||
+      !descRes.desc.enumerable ||
+      !Object.hasOwn(descRes.desc, "value") ||
+      descRes.desc.get !== undefined ||
+      descRes.desc.set !== undefined
     ) {
       return { ok: false };
     }
-    validatedEntries.push({ key, value: desc.value, enumerable: desc.enumerable });
+    validatedEntries.push({ key, value: descRes.desc.value, enumerable: descRes.desc.enumerable });
   }
-  if (hasExoticInternalSlots(obj)) return { ok: false };
+  if (hasExoticInternalSlots(obj, ownKeys)) return { ok: false };
 
   const out: Record<string, unknown> =
     proto === null ? (Object.create(null) as Record<string, unknown>) : {};
   memo.set(obj, out);
   for (const entry of validatedEntries) {
-    const child = cloneAndFreezePlainData(entry.value, memo);
+    const child = cloneAndFreezePlainDataInner(entry.value, memo);
     if (!child.ok) return { ok: false };
     Object.defineProperty(out, entry.key, {
       value: child.value,
@@ -503,12 +586,34 @@ function cloneAndFreezePlainData(
   return { ok: true, value: out };
 }
 
+function cloneAndFreezePlainData(
+  value: unknown,
+  memo: Map<object, unknown> = new Map(),
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  const cloned = cloneAndFreezePlainDataInner(value, memo);
+  if (!cloned.ok) return { ok: false };
+  if (value !== null && typeof value === "object") {
+    try {
+      structuredClone(value);
+    } catch {
+      return { ok: false };
+    }
+  }
+  return cloned;
+}
+
 function readOwnDataProp(obj: object, key: string): unknown {
-  const desc = Object.getOwnPropertyDescriptor(obj, key);
-  if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+  const descRes = safeGetOwnPropertyDescriptor(obj, key);
+  if (
+    !descRes.ok ||
+    !descRes.desc ||
+    !Object.hasOwn(descRes.desc, "value") ||
+    descRes.desc.get !== undefined ||
+    descRes.desc.set !== undefined
+  ) {
     return undefined;
   }
-  return desc.value;
+  return descRes.desc.value;
 }
 
 function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyMap<string, ActiveSourceEntry> {
@@ -527,18 +632,28 @@ function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyM
       ...(typeof revoked === "boolean" ? { revoked } : {}),
     });
   };
-  if (activeSourcesMap instanceof Map) {
-    for (const [k, v] of activeSourcesMap.entries()) {
-      if (typeof k !== "string") continue;
-      const cloned = copyEntry(v);
-      if (cloned !== undefined) snapshot.set(k, cloned);
+  try {
+    if (activeSourcesMap instanceof Map) {
+      for (const [k, v] of activeSourcesMap.entries()) {
+        if (typeof k !== "string") continue;
+        const cloned = copyEntry(v);
+        if (cloned !== undefined) snapshot.set(k, cloned);
+      }
+      return snapshot;
     }
+  } catch {
     return snapshot;
   }
   if (!isPlainRecordOwnDataOnly(activeSourcesMap)) return snapshot;
-  for (const key of Object.keys(activeSourcesMap)) {
-    const raw = readOwnDataProp(activeSourcesMap, key) as ActiveSourceEntry;
-    const cloned = copyEntry(raw);
+  const keys = safeOwnKeys(activeSourcesMap);
+  if (!keys) return snapshot;
+  for (const key of keys) {
+    if (typeof key !== "string") continue;
+    const descRes = safeGetOwnPropertyDescriptor(activeSourcesMap, key);
+    if (!descRes.ok || !descRes.desc || !descRes.desc.enumerable || !Object.hasOwn(descRes.desc, "value")) {
+      continue;
+    }
+    const cloned = copyEntry(descRes.desc.value as ActiveSourceEntry);
     if (cloned !== undefined) snapshot.set(key, cloned);
   }
   return snapshot;
@@ -570,27 +685,48 @@ function isolateProbeModel<TInput, TObservable>(
   const rawPredict = readOwnDataProp(rawModel, "predict");
   if (typeof rawPredict !== "function") return null;
 
-  const modelProto = Object.getPrototypeOf(rawModel) as object | null;
+  const modelProtoRes = safeGetPrototypeOf(rawModel);
+  if (!modelProtoRes.ok) return null;
   const frozenReceiver: Record<string, unknown> =
-    modelProto === null ? (Object.create(null) as Record<string, unknown>) : {};
+    modelProtoRes.proto === null ? (Object.create(null) as Record<string, unknown>) : {};
   const memo = new Map<object, unknown>();
   memo.set(rawModel, frozenReceiver);
 
-  for (const key of Reflect.ownKeys(rawModel)) {
-    if (typeof key !== "string") return null;
+  const ownKeys = safeOwnKeys(rawModel);
+  if (!ownKeys) return null;
+  const valuesToCloneCheck: unknown[] = [];
+
+  for (const key of ownKeys) {
+    if (typeof key !== "string" || key === "__proto__") return null;
     if (key === "predict") continue;
-    const desc = Object.getOwnPropertyDescriptor(rawModel, key);
-    if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+    const descRes = safeGetOwnPropertyDescriptor(rawModel, key);
+    if (
+      !descRes.ok ||
+      !descRes.desc ||
+      !Object.hasOwn(descRes.desc, "value") ||
+      descRes.desc.get !== undefined ||
+      descRes.desc.set !== undefined
+    ) {
       return null;
     }
-    const cloned = cloneAndFreezePlainData(desc.value, memo);
+    const cloned = cloneAndFreezePlainDataInner(descRes.desc.value, memo);
     if (!cloned.ok) return null;
+    if (descRes.desc.value !== null && typeof descRes.desc.value === "object") {
+      valuesToCloneCheck.push(descRes.desc.value);
+    }
     Object.defineProperty(frozenReceiver, key, {
       value: cloned.value,
       writable: false,
-      enumerable: desc.enumerable,
+      enumerable: descRes.desc.enumerable,
       configurable: false,
     });
+  }
+  if (valuesToCloneCheck.length > 0) {
+    try {
+      structuredClone(valuesToCloneCheck);
+    } catch {
+      return null;
+    }
   }
   Object.freeze(frozenReceiver);
 
@@ -613,6 +749,179 @@ function isolateProbeModel<TInput, TObservable>(
   return Object.freeze(base);
 }
 
+function normalizePromptKey(prompt: string): string {
+  return prompt.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function predictClinicObservableKey<TInput, TObservable>(
+  input: TInput,
+  encodeObservable: (observable: TObservable) => string,
+  predict: (value: TInput) => TObservable,
+  issues: Set<ProbeDistinguishabilityIssue>,
+): string | null {
+  try {
+    const predictAndEncode = (): unknown => {
+      const inputCopy = structuredClone(input);
+      const rawObservable = predict(inputCopy);
+      const clonedObservable = cloneAndFreezePlainData(rawObservable);
+      if (!clonedObservable.ok) {
+        throw new TypeError("Non-plain observable output");
+      }
+      return encodeObservable(clonedObservable.value as TObservable);
+    };
+    const first = predictAndEncode();
+    const second = predictAndEncode();
+    if (!isNonBlankText(first) || !isNonBlankText(second)) {
+      issues.add("invalid_observable_key");
+      return null;
+    }
+    if (first !== second) {
+      issues.add("nondeterministic_prediction");
+      return null;
+    }
+    return first;
+  } catch {
+    issues.add("prediction_failed");
+    return null;
+  }
+}
+
+function buildInvalidProbeReport(
+  probeId: string,
+  issue: ProbeDistinguishabilityIssue,
+): ProbeDistinguishabilityReport {
+  return Object.freeze({
+    probeId,
+    distinguishable: false,
+    predictions: Object.freeze([]),
+    ambiguousPairs: Object.freeze([]),
+    degenerateAgainstCorrectModel: Object.freeze([]),
+    issues: Object.freeze([issue]),
+  });
+}
+
+/**
+ * Runtime-agnostic closed-core H_i != H_j / H_i != M* probe distinguishability verifier.
+ * Works identically in browser, worker, default, and node runtimes with zero node:* imports.
+ */
+function verifyClinicProbeDistinguishability<TInput, TObservable>(
+  spec: DistinguishableProbeSpec<TInput, TObservable>,
+): ProbeDistinguishabilityReport {
+  const probeId = typeof spec.probeId === "string" ? spec.probeId : "";
+  if (
+    !isNonBlankText(spec.probeId) ||
+    !isNonBlankText(spec.requirementKey) ||
+    !isNonBlankText(spec.prompt) ||
+    typeof spec.observableKey !== "function" ||
+    typeof spec.parseResponse !== "function"
+  ) {
+    return buildInvalidProbeReport(probeId, "probe_identity_incomplete");
+  }
+
+  const { correctModel, hypotheses } = spec;
+  if (
+    !correctModel ||
+    correctModel.role !== "correct" ||
+    !isNonBlankText(correctModel.id) ||
+    !isNonBlankText(correctModel.label) ||
+    typeof correctModel.predict !== "function"
+  ) {
+    return buildInvalidProbeReport(probeId, "probe_identity_incomplete");
+  }
+
+  if (!Array.isArray(hypotheses) || hypotheses.length === 0) {
+    return buildInvalidProbeReport(probeId, "no_competing_hypotheses");
+  }
+  for (const hyp of hypotheses) {
+    if (
+      !hyp ||
+      hyp.role !== "misconception" ||
+      !isNonBlankText(hyp.id) ||
+      !isNonBlankText(hyp.label) ||
+      !isNonBlankText(hyp.description) ||
+      typeof hyp.predict !== "function"
+    ) {
+      return buildInvalidProbeReport(probeId, "probe_identity_incomplete");
+    }
+  }
+
+  const issues = new Set<ProbeDistinguishabilityIssue>();
+  const modelIds = [correctModel.id, ...hypotheses.map((h) => h.id)];
+  if (new Set(modelIds).size !== modelIds.length) {
+    issues.add("duplicate_model_id");
+  }
+
+  const encodeObservable = (observable: TObservable): string => spec.observableKey(observable);
+  const correctKey = predictClinicObservableKey(
+    spec.input,
+    encodeObservable,
+    (value) => correctModel.predict(value),
+    issues,
+  );
+
+  const predictions: ProbeModelPrediction[] = [
+    Object.freeze({ modelId: correctModel.id, role: correctModel.role, observableKey: correctKey }),
+    ...hypotheses.map((hypothesis) =>
+      Object.freeze({
+        modelId: hypothesis.id,
+        role: hypothesis.role,
+        observableKey: predictClinicObservableKey(
+          spec.input,
+          encodeObservable,
+          (value) => hypothesis.predict(value),
+          issues,
+        ),
+      }),
+    ),
+  ];
+
+  const ambiguousPairs: Array<ProbeDistinguishabilityReport["ambiguousPairs"][number]> = [];
+  const degenerateAgainstCorrectModel: Array<
+    ProbeDistinguishabilityReport["degenerateAgainstCorrectModel"][number]
+  > = [];
+  const hypothesesByKey = new Map<string, string[]>();
+
+  for (let i = 1; i < predictions.length; i += 1) {
+    const entry = predictions[i]!;
+    if (entry.observableKey === null) continue;
+    if (entry.observableKey === correctKey) {
+      degenerateAgainstCorrectModel.push(
+        Object.freeze({ hypothesisId: entry.modelId, observableKey: entry.observableKey }),
+      );
+    }
+    const previous = hypothesesByKey.get(entry.observableKey);
+    if (!previous) {
+      hypothesesByKey.set(entry.observableKey, [entry.modelId]);
+      continue;
+    }
+    for (const other of previous) {
+      const [a, b] = compareUtf16(other, entry.modelId) < 0 ? [other, entry.modelId] : [entry.modelId, other];
+      ambiguousPairs.push(Object.freeze({ a, b, observableKey: entry.observableKey }));
+    }
+    previous.push(entry.modelId);
+  }
+
+  if (ambiguousPairs.length > 0) issues.add("ambiguous_hypothesis_pair");
+  if (degenerateAgainstCorrectModel.length > 0) issues.add("degenerate_against_correct_model");
+
+  const sortedAmbiguous = [...ambiguousPairs].sort(
+    (x, y) => compareUtf16(x.a, y.a) || compareUtf16(x.b, y.b),
+  );
+  const sortedDegenerate = [...degenerateAgainstCorrectModel].sort((x, y) =>
+    compareUtf16(x.hypothesisId, y.hypothesisId),
+  );
+  const sortedIssues = [...issues].sort(compareUtf16);
+
+  return Object.freeze({
+    probeId,
+    distinguishable: sortedIssues.length === 0,
+    predictions: Object.freeze(predictions),
+    ambiguousPairs: Object.freeze(sortedAmbiguous),
+    degenerateAgainstCorrectModel: Object.freeze(sortedDegenerate),
+    issues: Object.freeze(sortedIssues),
+  });
+}
+
 function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | null {
   if (!isPlainRecordOwnDataOnly(rawAttempt)) return null;
   const attemptId = readOwnDataProp(rawAttempt, "attemptId");
@@ -628,6 +937,9 @@ function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | n
   const privacyEpoch = readOwnDataProp(rawAttempt, "privacyEpoch");
   const assisted = readOwnDataProp(rawAttempt, "assisted");
   const occurredAtMs = readOwnDataProp(rawAttempt, "occurredAtMs");
+  const swapConsistent = readOwnDataProp(rawAttempt, "swapConsistent");
+  const templatePadded = readOwnDataProp(rawAttempt, "templatePadded");
+  const calibrationVerified = readOwnDataProp(rawAttempt, "calibrationVerified");
 
   if (
     typeof attemptId !== "string" ||
@@ -640,7 +952,10 @@ function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | n
     typeof excerpt !== "string" ||
     typeof invariantSummary !== "string" ||
     typeof privacyEpoch !== "number" ||
-    typeof assisted !== "boolean"
+    typeof assisted !== "boolean" ||
+    (swapConsistent !== undefined && typeof swapConsistent !== "boolean") ||
+    (templatePadded !== undefined && typeof templatePadded !== "boolean") ||
+    (calibrationVerified !== undefined && typeof calibrationVerified !== "boolean")
   ) {
     return null;
   }
@@ -661,6 +976,9 @@ function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | n
     privacyEpoch,
     assisted,
     ...(typeof occurredAtMs === "number" && Number.isFinite(occurredAtMs) ? { occurredAtMs } : {}),
+    ...(typeof swapConsistent === "boolean" ? { swapConsistent } : {}),
+    ...(typeof templatePadded === "boolean" ? { templatePadded } : {}),
+    ...(typeof calibrationVerified === "boolean" ? { calibrationVerified } : {}),
   });
 }
 
@@ -699,7 +1017,7 @@ function prepareCandidateProbe<TInput, TObservable>(
   const rawRequirementKey = readOwnDataProp(probe, "requirementKey");
   const rawPrompt = readOwnDataProp(probe, "prompt");
   const rawTargetMisconceptionId = readOwnDataProp(probe, "targetMisconceptionId");
-  const hasExplicitSourceRefs = Object.hasOwn(probe, "sourceRefs") && readOwnDataProp(probe, "sourceRefs") !== undefined;
+  const hasExplicitSourceRefs = safeHasOwn(probe, "sourceRefs") && readOwnDataProp(probe, "sourceRefs") !== undefined;
   const rawSourceRefs = hasExplicitSourceRefs ? readOwnDataProp(probe, "sourceRefs") : undefined;
   const rawInput = readOwnDataProp(probe, "input");
   const rawCorrectModel = readOwnDataProp(probe, "correctModel");
@@ -802,6 +1120,8 @@ function prepareCandidateProbe<TInput, TObservable>(
     probeId: string;
     requirementKey: string;
     prompt: string;
+    targetMisconceptionId?: string;
+    sourceRefs?: readonly RemedySourceRef[];
     input: TInput;
     correctModel: DistinguishableProbeSpec<TInput, TObservable>["correctModel"];
     hypotheses: DistinguishableProbeSpec<TInput, TObservable>["hypotheses"];
@@ -811,6 +1131,10 @@ function prepareCandidateProbe<TInput, TObservable>(
     probeId: frozenProbeId,
     requirementKey: frozenRequirementKey,
     prompt: frozenPrompt,
+    ...(frozenTargetMisconceptionId !== undefined
+      ? { targetMisconceptionId: frozenTargetMisconceptionId }
+      : {}),
+    ...(frozenSourceRefs !== undefined ? { sourceRefs: frozenSourceRefs } : {}),
     input: frozenInput,
     correctModel: frozenCorrectModel,
     hypotheses: frozenHypotheses,
@@ -845,7 +1169,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
 
   // Snapshot and freeze all top-level rule inputs, active sources, and callbacks BEFORE running any callback.
   const verifyRuleFn = input.verifyRuleViolation;
-  const verifyProbeFn = verifyProbeDistinguishability;
+  const verifyProbeFn = verifyClinicProbeDistinguishability;
   const activeSourcesSnapshot = snapshotActiveSourcesMap(input.activeSourcesMap);
   const frozenLearnerId = typeof input.learnerId === "string" ? input.learnerId : "";
   const frozenCourseId = typeof input.courseId === "string" ? input.courseId : "";
@@ -855,8 +1179,35 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   const frozenEpoch = input.currentPrivacyEpoch;
   const hasExplicitRuleSourceRefs = input.ruleSourceRefs !== undefined;
   const frozenRuleSourceRefs = hasExplicitRuleSourceRefs ? freezeSourceRefs(input.ruleSourceRefs) : undefined;
+  const hasRubricCalibration = input.rubricCalibration !== undefined;
+  let rubricGuardStatus: "ok" | "invalid" | "uncalibrated_rubric" | "low_rubric_agreement" = "ok";
+  if (hasRubricCalibration) {
+    const rawCalibration = input.rubricCalibration;
+    if (!isPlainRecordOwnDataOnly(rawCalibration)) {
+      rubricGuardStatus = "invalid";
+    } else {
+      const calibratedVal = readOwnDataProp(rawCalibration, "calibrated");
+      const agreementVal = readOwnDataProp(rawCalibration, "agreementPassed");
+      const qwkVal = readOwnDataProp(rawCalibration, "qwk");
+      if (
+        typeof calibratedVal !== "boolean" ||
+        (agreementVal !== undefined && typeof agreementVal !== "boolean")
+      ) {
+        rubricGuardStatus = "invalid";
+      } else if (calibratedVal === false) {
+        rubricGuardStatus = "uncalibrated_rubric";
+      } else if (
+        agreementVal === false ||
+        (qwkVal !== undefined &&
+          (typeof qwkVal !== "number" || !Number.isFinite(qwkVal) || qwkVal < CLINIC_RUBRIC_MIN_QWK))
+      ) {
+        rubricGuardStatus = "low_rubric_agreement";
+      }
+    }
+  }
 
   if (
+    rubricGuardStatus === "invalid" ||
     !isNonBlankText(frozenLearnerId) ||
     !isNonBlankText(frozenCourseId) ||
     !isNonBlankText(frozenRuleId) ||
@@ -869,6 +1220,17 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   ) {
     return {
       status: "invalid_input",
+      clinic: null,
+      coverage: zeroCoverage,
+      rejectedCounts: emptyRejections(),
+      verifiedProbeCount: 0,
+      rejectedProbes: [],
+    };
+  }
+
+  if (rubricGuardStatus === "uncalibrated_rubric" || rubricGuardStatus === "low_rubric_agreement") {
+    return {
+      status: rubricGuardStatus,
       clinic: null,
       coverage: zeroCoverage,
       rejectedCounts: emptyRejections(),
@@ -910,6 +1272,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     malformedAttempt: 0,
     revokedSource: 0,
     ruleIdMismatch: 0,
+    rubricGuardRejected: 0,
     verifierRejected: 0,
     duplicateRoot: 0,
     transitiveClosureBlocked: 0,
@@ -969,6 +1332,14 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       counters.revokedSource++;
       continue;
     }
+    if (
+      attempt.swapConsistent === false ||
+      attempt.templatePadded === true ||
+      attempt.calibrationVerified === false
+    ) {
+      counters.rubricGuardRejected++;
+      continue;
+    }
     // Strict exact ruleId clustering: never merge via A≈B, B≈C embedding transitive closure.
     if (attempt.ruleId !== frozenRuleId) {
       counters.ruleIdMismatch++;
@@ -985,7 +1356,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
 
   // Deterministic earliest-attempt selection per rootAttemptId so retries count at most once.
   verifiedCandidates.sort((a, b) => {
-    const dateOrder = a.localDate.localeCompare(b.localDate);
+    const dateOrder = compareUtf16(a.localDate, b.localDate);
     if (dateOrder !== 0) return dateOrder;
     const timeA = typeof a.occurredAtMs === "number" && Number.isFinite(a.occurredAtMs)
       ? a.occurredAtMs
@@ -994,7 +1365,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       ? b.occurredAtMs
       : Number.POSITIVE_INFINITY;
     if (timeA !== timeB) return timeA - timeB;
-    return a.attemptId.localeCompare(b.attemptId);
+    return compareUtf16(a.attemptId, b.attemptId);
   });
 
   const seenRoots = new Set<string>();
@@ -1062,7 +1433,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       rejectedProbes.push({ probeId, reason: "duplicate_probe_id", report });
       continue;
     }
-    const normalizedPrompt = frozenPrompt.trim().replace(/\s+/g, " ").toLowerCase();
+    const normalizedPrompt = normalizePromptKey(frozenPrompt);
     if (acceptedProbePrompts.has(normalizedPrompt)) {
       rejectedProbes.push({ probeId, reason: "duplicate_probe_prompt", report });
       continue;
@@ -1129,6 +1500,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
         probes: Object.freeze([probe1, probe2]),
       }),
     ] as const),
+    delayedRecheck: buildDelayedRecheck(frozenRuleId),
     revocationSummary: Object.freeze({
       strippedCaseCount: 0,
       reason: "none" as const,
@@ -1192,7 +1564,7 @@ function buildRevokedClinicFromHeader(
         durationMinutes: STEP2_INVARIANT_RESTATEMENT_MINUTES,
         ruleId: header.ruleId,
         ruleTitle: "",
-        prompt: REVOKED_CLINIC_STEP2_PLACEHOLDER,
+        prompt: resolveRevokedStep2Placeholder(reason),
         checklist: Object.freeze([]),
       }),
       Object.freeze({
@@ -1202,6 +1574,7 @@ function buildRevokedClinicFromHeader(
         probes: Object.freeze([]),
       }),
     ] as const),
+    delayedRecheck: buildDelayedRecheck(header.ruleId),
     revocationSummary: Object.freeze({
       strippedCaseCount,
       reason,
@@ -1250,6 +1623,77 @@ function snapshotEvidenceCaseForRevalidation(rawCase: unknown): ClinicEvidenceCa
   });
 }
 
+function isValidDistinguishableReport(
+  report: unknown,
+  expectedProbeId: string,
+  expectedCompetingModelIds: readonly string[],
+): report is ProbeDistinguishabilityReport {
+  if (!isPlainRecordOwnDataOnly(report)) return false;
+  if (readOwnDataProp(report, "probeId") !== expectedProbeId) return false;
+  if (readOwnDataProp(report, "distinguishable") !== true) return false;
+
+  const issues = readOwnDataProp(report, "issues");
+  const ambiguousPairs = readOwnDataProp(report, "ambiguousPairs");
+  const degenerate = readOwnDataProp(report, "degenerateAgainstCorrectModel");
+  const predictions = readOwnDataProp(report, "predictions");
+
+  if (
+    !isPlainDenseArrayHeader(issues) ||
+    issues.length !== 0 ||
+    !isPlainDenseArrayHeader(ambiguousPairs) ||
+    ambiguousPairs.length !== 0 ||
+    !isPlainDenseArrayHeader(degenerate) ||
+    degenerate.length !== 0 ||
+    !isPlainDenseArrayHeader(predictions) ||
+    predictions.length < 2 ||
+    predictions.length !== expectedCompetingModelIds.length
+  ) {
+    return false;
+  }
+
+  let correctCount = 0;
+  let misconceptionCount = 0;
+  const seenModelIds = new Set<string>();
+  const seenObservableKeys = new Set<string>();
+
+  for (let i = 0; i < predictions.length; i += 1) {
+    const slot = readOwnDataIndex(predictions, i);
+    if (!slot.ok || !isPlainRecordOwnDataOnly(slot.value)) return false;
+    const modelId = readOwnDataProp(slot.value, "modelId");
+    const role = readOwnDataProp(slot.value, "role");
+    const observableKey = readOwnDataProp(slot.value, "observableKey");
+
+    if (!isNonBlankText(modelId) || modelId !== expectedCompetingModelIds[i] || seenModelIds.has(modelId)) {
+      return false;
+    }
+    if (role === "correct") {
+      correctCount += 1;
+    } else if (role === "misconception") {
+      misconceptionCount += 1;
+    } else {
+      return false;
+    }
+    if (!isNonBlankText(observableKey) || seenObservableKeys.has(observableKey)) {
+      return false;
+    }
+    seenModelIds.add(modelId);
+    seenObservableKeys.add(observableKey);
+  }
+
+  return correctCount === 1 && misconceptionCount >= 1;
+}
+
+function isValidDelayedRecheck(rawDelayedRecheck: unknown, expectedRuleId: string): boolean {
+  if (!isPlainRecordOwnDataOnly(rawDelayedRecheck)) return false;
+  return (
+    readOwnDataProp(rawDelayedRecheck, "required") === true &&
+    readOwnDataProp(rawDelayedRecheck, "scheduledOutsideSessionMinutes") === true &&
+    readOwnDataProp(rawDelayedRecheck, "minDelayHours") === CLINIC_DELAYED_RECHECK_MIN_HOURS &&
+    readOwnDataProp(rawDelayedRecheck, "ruleId") === expectedRuleId &&
+    readOwnDataProp(rawDelayedRecheck, "countsTowardMasteryUntilPassed") === false
+  );
+}
+
 function snapshotProbeForRevalidation(
   rawProbe: unknown,
   activeSources: ReadonlyMap<string, ActiveSourceEntry>,
@@ -1260,15 +1704,15 @@ function snapshotProbeForRevalidation(
   const prompt = readOwnDataProp(rawProbe, "prompt");
   const targetMisconceptionId = readOwnDataProp(rawProbe, "targetMisconceptionId");
   const hasExplicitSourceRefs =
-    Object.hasOwn(rawProbe, "sourceRefs") && readOwnDataProp(rawProbe, "sourceRefs") !== undefined;
+    safeHasOwn(rawProbe, "sourceRefs") && readOwnDataProp(rawProbe, "sourceRefs") !== undefined;
   const rawSourceRefs = hasExplicitSourceRefs ? readOwnDataProp(rawProbe, "sourceRefs") : undefined;
   const rawCompetingModelIds = readOwnDataProp(rawProbe, "competingModelIds");
   const report = readOwnDataProp(rawProbe, "report");
 
   if (
-    typeof probeId !== "string" ||
-    typeof requirementKey !== "string" ||
-    typeof prompt !== "string" ||
+    !isNonBlankText(probeId) ||
+    !isNonBlankText(requirementKey) ||
+    !isNonBlankText(prompt) ||
     (targetMisconceptionId !== undefined && typeof targetMisconceptionId !== "string") ||
     !isPlainRecordOwnDataOnly(report)
   ) {
@@ -1276,7 +1720,10 @@ function snapshotProbeForRevalidation(
   }
 
   const frozenCompetingModelIds = snapshotStringArray(rawCompetingModelIds);
-  if (!frozenCompetingModelIds) return null;
+  if (!frozenCompetingModelIds || frozenCompetingModelIds.length < 2) return null;
+  for (const modelId of frozenCompetingModelIds) {
+    if (!isNonBlankText(modelId)) return null;
+  }
 
   let validatedSourceRefs: readonly RemedySourceRef[] | undefined;
   if (hasExplicitSourceRefs) {
@@ -1286,7 +1733,9 @@ function snapshotProbeForRevalidation(
   }
 
   const clonedReport = cloneAndFreezePlainData(report);
-  if (!clonedReport.ok) return null;
+  if (!clonedReport.ok || !isValidDistinguishableReport(clonedReport.value, probeId, frozenCompetingModelIds)) {
+    return null;
+  }
 
   return Object.freeze({
     probeId,
@@ -1295,7 +1744,7 @@ function snapshotProbeForRevalidation(
     ...(targetMisconceptionId !== undefined ? { targetMisconceptionId } : {}),
     ...(validatedSourceRefs !== undefined ? { sourceRefs: validatedSourceRefs } : {}),
     competingModelIds: frozenCompetingModelIds,
-    report: clonedReport.value as ProbeDistinguishabilityReport,
+    report: clonedReport.value,
   });
 }
 
@@ -1322,10 +1771,11 @@ export function revalidateRemedyClinic(
   const rawCreatedEpoch = clinicIsPlain ? readOwnDataProp(clinic, "createdPrivacyEpoch") : -1;
   const rawValidatedEpoch = clinicIsPlain ? readOwnDataProp(clinic, "validatedPrivacyEpoch") : -1;
   const hasRuleSourceRefs =
-    clinicIsPlain && Object.hasOwn(clinic, "ruleSourceRefs") && readOwnDataProp(clinic, "ruleSourceRefs") !== undefined;
+    clinicIsPlain && safeHasOwn(clinic, "ruleSourceRefs") && readOwnDataProp(clinic, "ruleSourceRefs") !== undefined;
   const rawRuleSourceRefs = hasRuleSourceRefs ? readOwnDataProp(clinic, "ruleSourceRefs") : undefined;
   const rawEvidenceCases = clinicIsPlain ? readOwnDataProp(clinic, "evidenceCases") : undefined;
   const rawSteps = clinicIsPlain ? readOwnDataProp(clinic, "steps") : undefined;
+  const rawDelayedRecheck = clinicIsPlain ? readOwnDataProp(clinic, "delayedRecheck") : undefined;
   const rawRevSummary = clinicIsPlain ? readOwnDataProp(clinic, "revocationSummary") : undefined;
   const priorStrippedCaseCount =
     isPlainRecordOwnDataOnly(rawRevSummary) && typeof readOwnDataProp(rawRevSummary, "strippedCaseCount") === "number"
@@ -1345,7 +1795,7 @@ export function revalidateRemedyClinic(
     priorStrippedCaseCount,
   };
 
-  const totalEvidenceCases = Array.isArray(rawEvidenceCases) ? rawEvidenceCases.length : 0;
+  const totalEvidenceCases = safeIsArray(rawEvidenceCases) ? rawEvidenceCases.length : 0;
 
   if (
     !clinicIsPlain ||
@@ -1393,8 +1843,18 @@ export function revalidateRemedyClinic(
     }
   }
 
+  if (!isValidDelayedRecheck(rawDelayedRecheck, header.ruleId)) {
+    return buildRevokedClinicFromHeader(
+      header,
+      currentPrivacyEpoch,
+      zeroCoverage,
+      totalEvidenceCases,
+      "insufficient_surviving_evidence",
+    );
+  }
+
   // Snapshot clinic.steps strictly via own data indices 0, 1, 2 (zero iterator/getter invocation).
-  if (!Array.isArray(rawSteps) || rawSteps.length !== 3) {
+  if (!safeIsArray(rawSteps) || rawSteps.length !== 3) {
     return buildRevokedClinicFromHeader(
       header,
       currentPrivacyEpoch,
@@ -1448,7 +1908,7 @@ export function revalidateRemedyClinic(
   // Single-pass snapshot + validation of evidenceCases (never read any case or sourceRefs twice).
   const seenRoots = new Set<string>();
   const survivingCases: ClinicEvidenceCase[] = [];
-  if (Array.isArray(rawEvidenceCases)) {
+  if (safeIsArray(rawEvidenceCases)) {
     for (let i = 0; i < rawEvidenceCases.length; i += 1) {
       const slot = readOwnDataIndex(rawEvidenceCases, i);
       if (!slot.ok) continue;
@@ -1477,16 +1937,22 @@ export function revalidateRemedyClinic(
     );
   }
 
-  // Single-pass snapshot + validation of Step 3 probes (including competingModelIds and sourceRefs).
+  // Single-pass snapshot + validation of Step 3 probes (unique probeId/prompt, valid report, active sourceRefs).
   const rawStep3Probes = readOwnDataProp(step2Slot.value, "probes");
-  const totalProbes = Array.isArray(rawStep3Probes) ? rawStep3Probes.length : 0;
+  const totalProbes = safeIsArray(rawStep3Probes) ? rawStep3Probes.length : 0;
   const survivingProbes: VerifiedClinicTransferProbe[] = [];
-  if (Array.isArray(rawStep3Probes)) {
+  const seenProbeIds = new Set<string>();
+  const seenProbePrompts = new Set<string>();
+  if (safeIsArray(rawStep3Probes)) {
     for (let i = 0; i < rawStep3Probes.length; i += 1) {
       const slot = readOwnDataIndex(rawStep3Probes, i);
       if (!slot.ok) continue;
       const snapProbe = snapshotProbeForRevalidation(slot.value, activeSourcesSnapshot);
       if (!snapProbe) continue;
+      const promptKey = normalizePromptKey(snapProbe.prompt);
+      if (seenProbeIds.has(snapProbe.probeId) || seenProbePrompts.has(promptKey)) continue;
+      seenProbeIds.add(snapProbe.probeId);
+      seenProbePrompts.add(promptKey);
       survivingProbes.push(snapProbe);
     }
   }
@@ -1531,6 +1997,7 @@ export function revalidateRemedyClinic(
         probes: Object.freeze(survivingProbes.slice(0, REQUIRED_TRANSFER_PROBE_COUNT)),
       }),
     ] as const),
+    delayedRecheck: buildDelayedRecheck(header.ruleId),
     revocationSummary: Object.freeze({
       strippedCaseCount,
       ...(strippedProbeCount > 0 ? { strippedProbeCount } : {}),

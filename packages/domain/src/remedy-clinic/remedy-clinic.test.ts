@@ -4,6 +4,7 @@ import {
   generateRemedyClinic,
   revalidateRemedyClinic,
   type ActiveSourcesMap,
+  type ClinicCandidateProbe,
   type DiagnosedRootAttempt,
 } from "./index";
 
@@ -1069,17 +1070,17 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(exoticRes.status).toBe("insufficient_distinguishable_probes");
     expect(exoticRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
 
-    // Round-7 [P1-2]: Own enumerable "__proto__" data property on hypothesis receiver is preserved via defineProperty.
+    // Round-9 [P1-4]: Own enumerable "__proto__" data property on hypothesis receiver or probe input
+    // MUST be rejected up front as invalid_probe_descriptor (never copied or passed to predict).
+    let protoPredictCalled = false;
     const protoHyp = {
       id: RULE_ID,
-      label: "Own __proto__ fallback hypothesis",
+      label: "Own __proto__ hypothesis",
       role: "misconception" as const,
-      description: "Reads own __proto__ data property to match correct model (degenerate).",
-      predict(this: Record<string, unknown>) {
-        const ownProto = Object.getOwnPropertyDescriptor(this, "__proto__")?.value as
-          | { fallback?: string }
-          | undefined;
-        return ownProto?.fallback ?? "distinct-misconception";
+      description: "Carries forbidden own __proto__ property.",
+      predict() {
+        protoPredictCalled = true;
+        return "x >= -4";
       },
     };
     Object.defineProperty(protoHyp, "__proto__", {
@@ -1103,8 +1104,9 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       attempts,
       candidateProbes: [protoDegenerateProbe, probe2],
     });
+    expect(protoPredictCalled).toBe(false);
     expect(protoRes.status).toBe("insufficient_distinguishable_probes");
-    expect(protoRes.rejectedProbes[0]!.reason).toBe("not_distinguishable");
+    expect(protoRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
 
     // Round-7 [P1-3]: observableKey receives the canonical frozen probe as `this` (reads this.requirementKey).
     const roundingProbe: DistinguishableProbeSpec<InequalityInput, number> = {
@@ -1405,5 +1407,330 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     });
     expect(plainNullCtorRes.status).toBe("active");
     expect(plainNullCtorRes.clinic!.steps[2].probes).toHaveLength(2);
+  });
+
+  it("enforces Round-9 P1-1..P1-9 and P2-1 guardrails, exotic rejections, revalidation, metadata, UTF-16 sort, and copy", async () => {
+    const allSources = {
+      "src-ch-1": "v1",
+      "src-ch-2": "v1",
+      "src-ch-3": "v1",
+    };
+    const baseAttempts = [
+      makeAttempt({ attemptId: "a1", rootAttemptId: "r1", chapterId: "ch-1", localDate: "2026-10-01", sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a2", rootAttemptId: "r2", chapterId: "ch-2", localDate: "2026-10-03", sourceRefs: [{ sourceId: "src-ch-2", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a3", rootAttemptId: "r3", chapterId: "ch-3", localDate: "2026-10-05", sourceRefs: [{ sourceId: "src-ch-3", sourceVersion: "v1" }] }),
+    ];
+    const probe1 = makeProbe({ probeId: "r9-p1", input: { a: -2, b: 8 } });
+    const probe2 = makeProbe({ probeId: "r9-p2", input: { a: -3, b: 12 } });
+
+    // [P1-1] Rubric calibration / agreement guardrails, attempt quality flags, and delayedRecheck contract.
+    const uncalRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [probe1, probe2],
+      rubricCalibration: { calibrated: false },
+    });
+    expect(uncalRes.status).toBe("uncalibrated_rubric");
+    expect(uncalRes.clinic).toBeNull();
+
+    for (const badAgreement of [
+      { calibrated: true, agreementPassed: false, qwk: 0.85 },
+      { calibrated: true, qwk: 0.69 },
+      { calibrated: true, qwk: null },
+      { calibrated: true, qwk: Number.NaN },
+    ]) {
+      const lowAgRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [probe1, probe2],
+        rubricCalibration: badAgreement,
+      });
+      expect(lowAgRes.status).toBe("low_rubric_agreement");
+      expect(lowAgRes.clinic).toBeNull();
+    }
+
+    const filteredAttemptsRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: [
+        { ...baseAttempts[0]!, swapConsistent: false },
+        { ...baseAttempts[1]!, templatePadded: true },
+        { ...baseAttempts[2]!, calibrationVerified: false },
+      ],
+      candidateProbes: [probe1, probe2],
+      rubricCalibration: { calibrated: true, agreementPassed: true, qwk: 0.82 },
+    });
+    expect(filteredAttemptsRes.status).toBe("threshold_not_met");
+    expect(filteredAttemptsRes.rejectedCounts.rubricGuardRejected).toBe(3);
+
+    const activeRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [probe1, probe2],
+      rubricCalibration: { calibrated: true, agreementPassed: true, qwk: 0.82 },
+    });
+    expect(activeRes.status).toBe("active");
+    const clinic = activeRes.clinic!;
+    expect(clinic.totalMinutes).toBe(14);
+    expect(Object.isFrozen(clinic.delayedRecheck)).toBe(true);
+    expect(clinic.delayedRecheck).toEqual({
+      required: true,
+      scheduledOutsideSessionMinutes: true,
+      minDelayHours: 24,
+      ruleId: RULE_ID,
+      countsTowardMasteryUntilPassed: false,
+    });
+    const tamperedRecheckReval = revalidateRemedyClinic(
+      { ...clinic, delayedRecheck: { ...clinic.delayedRecheck, required: false as unknown as true } },
+      allSources,
+      6,
+    );
+    expect(tamperedRecheckReval.status).toBe("stale_source_revoked");
+
+    // [P1-4] Throwing Proxy getPrototypeOf trap, reassigned-prototype Generator/AsyncGenerator, own "__proto__" in input.
+    const throwingProxy = new Proxy(
+      {},
+      {
+        getPrototypeOf() {
+          throw new Error("proxy-trap-boom");
+        },
+      },
+    );
+    const reassignedGen = (function* () {
+      yield 1;
+    })();
+    Object.setPrototypeOf(reassignedGen, Object.prototype);
+    const reassignedAsyncGen = (async function* () {
+      yield 1;
+    })();
+    Object.setPrototypeOf(reassignedAsyncGen, Object.prototype);
+    const inputWithOwnProto = Object.defineProperty({ a: -2, b: 8 }, "__proto__", {
+      value: { polluted: true },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+
+    const exoticInputsRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [
+        { ...makeProbe({ probeId: "p-proxy", input: { a: -2, b: 8 } }), input: { a: -2, b: 8, bad: throwingProxy } as unknown as InequalityInput },
+        { ...makeProbe({ probeId: "p-gen", input: { a: -3, b: 12 } }), input: { a: -3, b: 12, bad: reassignedGen } as unknown as InequalityInput },
+        { ...makeProbe({ probeId: "p-agen", input: { a: -4, b: 16 } }), input: { a: -4, b: 16, bad: reassignedAsyncGen } as unknown as InequalityInput },
+        { ...makeProbe({ probeId: "p-ownproto", input: { a: -5, b: 20 } }), input: inputWithOwnProto as unknown as InequalityInput },
+      ],
+    });
+    expect(exoticInputsRes.status).toBe("insufficient_distinguishable_probes");
+    expect(exoticInputsRes.rejectedProbes.map((r) => r.reason)).toEqual([
+      "invalid_probe_descriptor",
+      "invalid_probe_descriptor",
+      "invalid_probe_descriptor",
+      "invalid_probe_descriptor",
+    ]);
+
+    // [P1-5] Rejected Promise with reassigned prototype (Object.prototype & null) MUST be rejected
+    // WITHOUT attaching .then reactions (unhandledRejection is NOT suppressed).
+    const unhandledReasons: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandledReasons.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const errObjProto = new Error("unhandled-obj-proto");
+    const errNullProto = new Error("unhandled-null-proto");
+    const rejObjProto = Promise.reject(errObjProto);
+    const rejNullProto = Promise.reject(errNullProto);
+    Object.setPrototypeOf(rejObjProto, Object.prototype);
+    Object.setPrototypeOf(rejNullProto, null);
+    try {
+      const rejRes = generateRemedyClinic({
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: allSources,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: baseAttempts,
+        candidateProbes: [
+          { ...makeProbe({ probeId: "p-rej-obj", input: { a: -2, b: 8 } }), input: { a: -2, b: 8, p: rejObjProto } as unknown as InequalityInput },
+          { ...makeProbe({ probeId: "p-rej-null", input: { a: -3, b: 12 } }), input: { a: -3, b: 12, p: rejNullProto } as unknown as InequalityInput },
+        ],
+      });
+      expect(rejRes.status).toBe("insufficient_distinguishable_probes");
+      expect(rejRes.rejectedProbes.map((r) => r.reason)).toEqual([
+        "invalid_probe_descriptor",
+        "invalid_probe_descriptor",
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      expect(unhandledReasons).toContain(errObjProto);
+      expect(unhandledReasons).toContain(errNullProto);
+    } finally {
+      Object.setPrototypeOf(rejObjProto, Promise.prototype);
+      Object.setPrototypeOf(rejNullProto, Promise.prototype);
+      rejObjProto.catch(() => {});
+      rejNullProto.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    // [P1-6] Self-contained closed-core probe verifier rejects nondeterminism and exotic predict returns cleanly.
+    let flips = 0;
+    const nondetProbe: DistinguishableProbeSpec<InequalityInput, string> = {
+      ...makeProbe({ probeId: "p-nondet", input: { a: -2, b: 8 } }),
+      correctModel: {
+        id: "M_star",
+        label: "Flaky model",
+        role: "correct",
+        predict: () => `v-${++flips}`,
+      },
+    };
+    const exoticReturnProbe: DistinguishableProbeSpec<InequalityInput, unknown> = {
+      ...makeProbe({ probeId: "p-exotic-return", input: { a: -3, b: 12 } }),
+      correctModel: {
+        id: "M_star",
+        label: "Returns exotic generator",
+        role: "correct",
+        predict: () => reassignedGen,
+      },
+      observableKey: (v) => String(v),
+    };
+    const builtinVerifierRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [nondetProbe, exoticReturnProbe],
+    });
+    expect(builtinVerifierRes.status).toBe("insufficient_distinguishable_probes");
+    expect(builtinVerifierRes.rejectedProbes[0]!.report!.issues).toContain("nondeterministic_prediction");
+    expect(builtinVerifierRes.rejectedProbes[1]!.report!.issues).toContain("prediction_failed");
+
+    // [P1-7] revalidateRemedyClinic rejects duplicate probes [p, p] and malformed report: {}.
+    const dupProbeReval = revalidateRemedyClinic(
+      {
+        ...clinic,
+        steps: [
+          clinic.steps[0],
+          clinic.steps[1],
+          { ...clinic.steps[2], probes: [clinic.steps[2].probes[0]!, clinic.steps[2].probes[0]!] },
+        ] as typeof clinic.steps,
+      },
+      allSources,
+      6,
+    );
+    expect(dupProbeReval.status).toBe("stale_source_revoked");
+    expect(dupProbeReval.revocationSummary.reason).toBe("insufficient_surviving_probes");
+    expect(dupProbeReval.steps[1].prompt).toContain("transfer probes");
+
+    const emptyReportReval = revalidateRemedyClinic(
+      {
+        ...clinic,
+        steps: [
+          clinic.steps[0],
+          clinic.steps[1],
+          {
+            ...clinic.steps[2],
+            probes: [
+              { ...clinic.steps[2].probes[0]!, report: {} as typeof clinic.steps[2]["probes"][0]["report"] },
+              clinic.steps[2].probes[1]!,
+            ],
+          },
+        ] as typeof clinic.steps,
+      },
+      allSources,
+      6,
+    );
+    expect(emptyReportReval.status).toBe("stale_source_revoked");
+    expect(emptyReportReval.revocationSummary.reason).toBe("insufficient_surviving_probes");
+
+    // [P1-8] observableKey receiver preserves frozen targetMisconceptionId & sourceRefs.
+    const metaProbe: ClinicCandidateProbe<InequalityInput, number> = {
+      probeId: "probe-target-meta",
+      requirementKey: "alg.ineq",
+      prompt: "Meta receiver rounding probe",
+      targetMisconceptionId: "h1",
+      sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }],
+      input: { a: -2, b: 8 },
+      correctModel: { id: "M_star", label: "Correct", role: "correct", predict: () => 1.1 },
+      hypotheses: [
+        { id: "h1", label: "Target misconception", role: "misconception", description: "1.2", predict: () => 1.2 },
+        { id: "h2", label: "Other", role: "misconception", description: "3.0", predict: () => 3.0 },
+      ],
+      observableKey(
+        this: { targetMisconceptionId?: string; sourceRefs?: readonly { sourceId: string }[] },
+        obs: number,
+      ) {
+        return this?.targetMisconceptionId === "h1" && this?.sourceRefs?.[0]?.sourceId === "src-ch-1"
+          ? String(Math.round(obs))
+          : String(obs);
+      },
+      parseResponse: (r) => (typeof r === "number" ? r : null),
+    };
+    const metaRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [metaProbe, probe2],
+    });
+    expect(metaRes.status).toBe("insufficient_distinguishable_probes");
+    expect(metaRes.rejectedProbes[0]!.reason).toBe("not_distinguishable");
+
+    // [P1-9] Same-date same-time attempts "ä" vs "z" follow deterministic UTF-16 code-unit order ('z' < 'ä').
+    const utf16Res = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: [
+        makeAttempt({ attemptId: "ä", rootAttemptId: "r-tie", chapterId: "ch-1", localDate: "2026-10-01", occurredAtMs: 1000, sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+        makeAttempt({ attemptId: "z", rootAttemptId: "r-tie", chapterId: "ch-1", localDate: "2026-10-01", occurredAtMs: 1000, sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+        baseAttempts[1]!,
+        baseAttempts[2]!,
+      ],
+      candidateProbes: [probe1, probe2],
+    });
+    expect(utf16Res.status).toBe("active");
+    const chosenTieCase = utf16Res.clinic!.evidenceCases.find((c) => c.rootAttemptId === "r-tie");
+    expect(chosenTieCase!.attemptId).toBe("z");
+
+    // [P2-1] invalid_privacy_epoch produces accurate privacy-state placeholder copy (not source-updated copy).
+    const epochRegressedReval = revalidateRemedyClinic(clinic, allSources, 4);
+    expect(epochRegressedReval.status).toBe("stale_source_revoked");
+    expect(epochRegressedReval.revocationSummary.reason).toBe("invalid_privacy_epoch");
+    expect(epochRegressedReval.steps[1].prompt).toContain("privacy verification state");
+    expect(epochRegressedReval.steps[1].prompt).not.toContain("underlying source was updated or removed");
   });
 });
