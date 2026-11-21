@@ -19,6 +19,19 @@ it("reads the exact origin and uses the server's route revision and effective ob
 it("keeps the original conversation when the next route returns a study URL", async () => { const api = client(); const navigate = vi.fn(); vi.mocked(api.next).mockResolvedValueOnce({ kind: "ready", activity, resumed: false, requirementId: id, action: "diagnose", href: `/opening/courses/${courseId}/study?activity=${id}#lesson` }); await render(api, activity, { originalConversationId: conversation, onNavigate: navigate }); await act(async () => button("核对结果并安排下一步").click()); expect(navigate).toHaveBeenCalledWith(`/opening/courses/${courseId}/study?activity=${id}&conversation=${conversation}#lesson`); });
 it.each(["network", "timeout"])("retains the identical next command after %s and remount", async mode => { const { CourseRouteRequestError } = await import("./course-route-client"); const api = client(); vi.mocked(api.next).mockRejectedValueOnce(mode === "timeout" ? new CourseRouteRequestError("请求超时", 408) : new TypeError("lost")); await render(api); await act(async () => button("核对结果并安排下一步").click()); const original = vi.mocked(api.next).mock.calls[0]; await act(async () => root.unmount()); root = createRoot(host); await render(api); await act(async () => button("重新确认这次下一步").click()); expect(vi.mocked(api.next).mock.calls[1]).toEqual(original); expect(api.read).toHaveBeenCalledTimes(1); });
 it("does not post when the exact origin has no current route context", async () => { const api = client(); vi.mocked(api.read).mockResolvedValue({ ...snapshot, currentRoute: null } as never); await render(api); await act(async () => button("核对结果并安排下一步").click()); expect(api.next).not.toHaveBeenCalled(); expect(host.textContent).toContain("路线绑定"); });
+it("rereads a superseded recommendation and lets the general route action use the new head", async () => {
+  const api = client();
+  const olderObservationId = "22222222-2222-4222-8222-222222222222";
+  const onEvidenceChanged = () => root.render(<CourseRouteNextControl activity={activity} client={api} summaryStep={null} />);
+  await act(async () => root.render(<CourseRouteNextControl activity={activity} client={api}
+    summaryStep={{ kind: "assisted_check", observationId: olderObservationId }} onEvidenceChanged={onEvidenceChanged} />));
+  await act(async () => button("独立试做同类题").click());
+  expect(api.next).not.toHaveBeenCalled();
+  expect(host.querySelector('[role="status"]')?.textContent).toContain("作答结果已更新");
+  await act(async () => button("重新读取小结").click());
+  await act(async () => button("核对结果并安排下一步").click());
+  expect(api.next).toHaveBeenCalledExactlyOnceWith(courseId, expect.objectContaining({ observationId: snapshot.observationId }));
+});
 it("does not create a pending write when the origin read times out", async () => {
   const { CourseRouteRequestError } = await import("./course-route-client");
   const api = client(); vi.mocked(api.read).mockRejectedValueOnce(new CourseRouteRequestError("读取超时", 408));

@@ -46,9 +46,11 @@ it("never auto-accepts a historical coach preference without explicit opt-in", a
   render(component); await settle(); render(component);
   expect(client.acceptCoachPlan).not.toHaveBeenCalled();
 });
-it("runs one idempotent POST after explicit opt-in and refreshes the queue", async () => {
+it("keeps opted-in coach reads read-only until the learner confirms the draft", async () => {
   const client = api(true), changed = vi.fn(), component = () => CoachPlanControl({ date: draft.date, draft, api: client, onChanged: changed });
-  render(component); await settle(); render(component); await settle();
+  render(component); await settle();
+  expect(client.acceptCoachPlan).not.toHaveBeenCalled();
+  click(render(component), "按预算安排今日草案"); await settle();
   expect(client.acceptCoachPlan).toHaveBeenCalledExactlyOnceWith({ draftId: id, expectedDraftVersion: 0, clientKey: `coach:${id}:0` });
   expect(changed).toHaveBeenCalledOnce();
   expect(text(render(component))).toContain("新增1项任务");
@@ -56,8 +58,9 @@ it("runs one idempotent POST after explicit opt-in and refreshes the queue", asy
 it("reads after an unknown result without automatically repeating the write", async () => {
   const client = api(true); client.acceptCoachPlan.mockRejectedValue(new Error("network lost"));
   const component = () => CoachPlanControl({ date: draft.date, draft, api: client, onChanged: vi.fn() });
-  render(component); await settle(); click(render(component), "重新核对安排"); await settle();
-  expect(client.getCoachAcceptance).toHaveBeenCalledTimes(2);
+  render(component); await settle(); click(render(component), "按预算安排今日草案"); await settle();
+  click(render(component), "重新核对安排"); await settle();
+  expect(client.getCoachAcceptance).toHaveBeenCalledTimes(3);
   expect(client.acceptCoachPlan).toHaveBeenCalledTimes(1);
 });
 it("requires a second confirmation and binds undo to the accepted version", async () => {

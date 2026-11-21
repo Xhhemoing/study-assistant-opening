@@ -589,10 +589,11 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(openingAdaptivePrefsResponseSchema, body);
     },
 
-    /** `refreshSuggestions` replaces an open draft whose suggestions are out of date (hasNewerSuggestion). */
-    async getToday(date: string, options: { refreshSuggestions?: boolean } = {}): Promise<TodayPlanRead> {
+    /** Draft generation and replacement are explicit POSTs. Ordinary plan reads are GETs. */
+    async getToday(date: string, options: { prepareDraft?: boolean; refreshSuggestions?: boolean } = {}): Promise<TodayPlanRead> {
       const refresh = options.refreshSuggestions ? "&refresh=suggestions" : "";
-      const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method: "GET" }, fetchImpl);
+      const method = options.prepareDraft || options.refreshSuggestions ? "POST" : "GET";
+      const body = await request(`/api/opening/today?date=${encodeURIComponent(date)}${refresh}`, { method }, fetchImpl);
       return parseOpeningResponse(todayPlanSchema, body);
     },
 

@@ -214,7 +214,7 @@ export function QuickAddTask({
   }
 
   return (
-    <div className="border-b border-line px-4 py-3">
+    <div className="px-4 pt-3">
       {!open ? (
         <button
           type="button"
@@ -225,7 +225,7 @@ export function QuickAddTask({
           {unknown ? "继续核对添加结果" : "快速添加任务"}
         </button>
       ) : (
-        <form className="space-y-3" onSubmit={(event) => void onSubmit(event)} aria-label="快速添加任务">
+        <form className="space-y-3 rounded-card border border-line bg-surface-2/60 p-4 shadow-card" onSubmit={(event) => void onSubmit(event)} aria-label="快速添加任务">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-xs font-semibold text-text">快速添加</h3>
             <button
@@ -254,7 +254,7 @@ export function QuickAddTask({
               placeholder="例如：整理错题"
             />
           </label>
-          <fieldset disabled={busy || unknown || disabled} className="space-y-1">
+          <fieldset disabled={busy || unknown || disabled} className="space-y-1.5">
             <legend className="text-xs text-text-2">预计时长</legend>
             <div className="flex flex-wrap gap-2" role="group" aria-label="预计时长">
               {QUICK_ADD_MINUTES.map((minutes) => (
@@ -262,7 +262,7 @@ export function QuickAddTask({
                   key={minutes}
                   type="button"
                   aria-pressed={draft.minutes === minutes}
-                  className={draft.minutes === minutes ? buttonClass : secondaryButtonClass}
+                  className={`${draft.minutes === minutes ? buttonClass : secondaryButtonClass} tabular-nums`}
                   onClick={() => setDraft((current) => ({ ...current, minutes }))}
                 >
                   {minutes} 分钟
@@ -278,7 +278,7 @@ export function QuickAddTask({
                 value={draft.dueDate}
                 disabled={busy || unknown || disabled}
                 onChange={(event) => setDraft((current) => ({ ...current, dueDate: event.target.value }))}
-                className={`${inputClass} mt-1`}
+                className={`${inputClass} mt-1 tabular-nums`}
               />
             </label>
             <label className="block text-xs text-text-2">
@@ -288,12 +288,12 @@ export function QuickAddTask({
                 value={draft.dueTime}
                 disabled={busy || unknown || disabled || !draft.dueDate}
                 onChange={(event) => setDraft((current) => ({ ...current, dueTime: event.target.value }))}
-                className={`${inputClass} mt-1`}
+                className={`${inputClass} mt-1 tabular-nums`}
               />
             </label>
           </div>
           {dueWithinDayLabel(draft.dueDate, draft.dueTime) ? (
-            <p className="text-xs leading-5 text-text-3">未填具体时刻时，截止为当日内（当日 23:59）。没有确定时间不造截止。</p>
+            <p className="text-xs leading-5 tabular-nums text-text-3">未填具体时刻时，截止为当日内（当日 23:59）。没有确定时间不造截止。</p>
           ) : !draft.dueDate ? (
             <p className="text-xs leading-5 text-text-3">没有确定时间不造截止。新任务进入「其他待办」，不改变已确认计划。</p>
           ) : null}

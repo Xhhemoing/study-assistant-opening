@@ -12,12 +12,15 @@ import {
 } from "@aistudy/contracts";
 import {
   assertOwnedActivity,
+  createOpeningCourseReadySourcesRepository,
   createOpeningLearningAttemptRepository,
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
   listDeliveredHelpByActivity,
   listObservationHeadsByActivity,
   probeLearningSourcesAvailability,
+  readOpeningCourseEvidence,
+  readOpeningCourseRouteActivityObservationId,
   reconcileTeachingGenerate,
   sanitizeCheckpointForRestore,
 } from "@aistudy/database";
@@ -35,9 +38,11 @@ import {
   readOpenProblemIds,
   resumeSummarySkipped,
   summarizeTeachingBlockCoverage,
+  toSnapshotEvidence,
 } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { ApiError } from "../../auth/service";
+import { activitySummaryNextStep } from "./activity-summary-next-step";
 
 function mapError(error: unknown): never {
   if (error && typeof error === "object" && "code" in error) {
@@ -63,14 +68,47 @@ export function createOpeningTeachingResumeService(
   const content = createOpeningTeachingContentRepository(sql);
   const attemptsRepo = createOpeningLearningAttemptRepository(sql);
 
+  async function readSummaryNextStep(scope: Scope, activity: TeachingActivity) {
+    if (!activity.courseId || activity.status !== "completed") return undefined;
+    const attempts = await attemptsRepo.listByActivity(scope, activity.id);
+    const currentAttempts = new Map(attempts.filter(attempt =>
+      attempt.contextAnchor?.contentVersion === activity.contentVersion
+      || (!activity.routeManaged && activity.contentVersion === 0 && attempt.matrixExercise && attempt.contextAnchor?.contentVersion == null),
+    ).map(attempt => [attempt.id, attempt]));
+    if (!currentAttempts.size) return undefined;
+    const evidence = await readOpeningCourseEvidence(sql, scope, activity.courseId);
+    const observations = evidence.observations.filter(row => row.attemptId && currentAttempts.has(row.attemptId));
+    const requirement = activity.learnerFocus?.requirementKey;
+    const step = activitySummaryNextStep(toSnapshotEvidence({ ...evidence, observations }, new Date()).observations
+      .filter(row => requirement === undefined || row.requirementKey === requirement));
+    if (!step) return undefined;
+    if (activity.routeManaged) {
+      // Route commands bind to the latest effective head. Keep the general
+      // route action available when a newer answer supersedes this recommendation.
+      const routeHead = await readOpeningCourseRouteActivityObservationId(sql, scope, activity.courseId, activity.id);
+      return routeHead === step.observationId ? step : undefined;
+    }
+    if (step.kind !== "assisted_check") return step;
+    const attemptId = observations.find(row => row.id === step.observationId)?.attemptId;
+    const attempt = attemptId ? currentAttempts.get(attemptId) : undefined;
+    const sourceId = attempt?.contextAnchor?.sourceId;
+    if (!attempt?.matrixExercise || !sourceId) return step;
+    const [readySource] = await createOpeningCourseReadySourcesRepository(sql)
+      .admitSourceIds(scope, activity.courseId, [sourceId], "practice");
+    if (!readySource) return step;
+    const { exerciseKey, variant } = attempt.matrixExercise;
+    return { ...step, matrixPractice: { sourceId, exerciseKey, variant: (variant + 1) % 9 } };
+  }
+
   return {
     async getSummary(scope: Scope, activityIdRaw: string) {
       const activityId = uuidSchema.parse(activityIdRaw);
       try {
         const activity = await assertOwnedActivity(sql, scope, activityId);
-        const [init, facts] = await Promise.all([
+        const [init, facts, nextStep] = await Promise.all([
           content.getClientInit(scope, activityId),
           activities.readSummaryFacts(scope, activityId),
+          readSummaryNextStep(scope, activity),
         ]);
         const taskId = uuidSchema.safeParse(facts.taskId);
         return teachingActivitySummarySchema.parse({
@@ -78,6 +116,7 @@ export function createOpeningTeachingResumeService(
           attempts: facts.attempts,
           openQuestions: facts.openQuestions,
           taskId: taskId.success ? taskId.data : null,
+          ...(nextStep ? { nextStep } : {}),
         });
       } catch (error) { mapError(error); }
     },
