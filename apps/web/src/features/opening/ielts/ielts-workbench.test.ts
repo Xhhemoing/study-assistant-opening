@@ -525,6 +525,28 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
   });
 
+  it("withholds the Draft 1 badge after the prompt text changes under the same prompt ID", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const draft1Receipt = {
+      ...fixture.draft1Receipt,
+      epistemicStatus: "rubric_verified_evidence" as const,
+      masteryQualified: true,
+      countsTowardMastery: true,
+    };
+    const render = (promptStatementEn: string) => act(async () => root.render(createElement(
+      IeltsDraftCritiqueWorkbench,
+      { fixture: { ...fixture, draft1Receipt, promptStatementEn }, initialView: "draft1" },
+    )));
+    await render(fixture.promptStatementEn);
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("一稿");
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+    await render("Should cities invest in urban rail rather than widening roads?");
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("一稿");
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
+  });
+
   it("asks for English text when a punctuation-only revision is submitted", async () => {
     const onRevisionEvaluated = vi.fn();
     await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated })));

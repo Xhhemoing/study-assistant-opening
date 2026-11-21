@@ -11,12 +11,13 @@ import {
 import {
   clampToIeltsBand,
   countDraftWords,
-  createValidatedRubricReceipt,
+  createGroundedRubricReceipt,
   detectMemorizedTemplates,
   getWritingTransferLineage,
   hasMemorizedTemplateStuffing,
   isValidIeltsBand,
   resolveIeltsEpistemicStatus,
+  type CreateRubricReceiptInput,
 } from "./rubric";
 import {
   IELTS_CARTRIDGE_ID,
@@ -31,6 +32,7 @@ import {
   type IeltsEvidenceSourceKind,
   type IeltsParagraphDiff,
   type IeltsRubricReceipt,
+  type IeltsRubricValidationResult,
   type IeltsSpanEvidence,
   type IeltsTransferStatus,
   type IeltsUpgradeCategory,
@@ -1629,7 +1631,7 @@ export function evaluateRevisedDraftDeterministically(
     },
   ];
 
-  const validated = createValidatedRubricReceipt({
+  const validated = createGroundedRubricReceipt({
     receiptId: input.receiptId,
     taskMode: "writing_task2",
     draft: input.revisedDraft,
@@ -1721,7 +1723,7 @@ export type ValidateWritingRubricReceiptOptions = {
  * Fail-closed structural, provenance, and cross-draft transfer validation for a
  * serialized or externally supplied IELTS Writing Task 2 rubric receipt.
  * Never trusts self-reported evidenceSource or mastery flags: recomputes
- * analyzeCrossDraftTransfer and createValidatedRubricReceipt against sourceDraft
+ * transfer analysis and rubric grounding against sourceDraft
  * and transferSource.
  */
 export function validateWritingRubricReceipt(
@@ -1794,6 +1796,17 @@ export function validateWritingRubricReceipt(
   let validatedTargets: IeltsUpgradeTarget[] | undefined;
   const expectedPromptStatement = options?.promptStatement?.trim() || undefined;
   let promptStatement = expectedPromptStatement;
+  const receiptPromptStatement = rawReceipt.promptStatement;
+  if (receiptPromptStatement !== undefined) {
+    if (!isNonBlankString(receiptPromptStatement)) {
+      issues.push("promptStatement must be a non-blank string");
+    } else {
+      promptStatement = receiptPromptStatement.trim();
+      if (expectedPromptStatement !== undefined && promptStatement !== expectedPromptStatement) {
+        issues.push("promptStatement does not match the expected prompt");
+      }
+    }
+  }
 
   if (rawReceipt.transferSource !== undefined) {
     if (!isPlainRecord(rawReceipt.transferSource)) {
@@ -1803,7 +1816,7 @@ export function validateWritingRubricReceipt(
       if (storedPromptStatement !== undefined) {
         if (!isNonBlankString(storedPromptStatement)) {
           issues.push("transferSource.promptStatement must be a non-blank string");
-        } else if (expectedPromptStatement !== undefined && storedPromptStatement.trim() !== expectedPromptStatement) {
+        } else if (promptStatement !== undefined && storedPromptStatement.trim() !== promptStatement) {
           issues.push("transferSource.promptStatement does not match the expected prompt");
         } else {
           promptStatement = storedPromptStatement.trim();
@@ -2017,7 +2030,7 @@ export function validateWritingRubricReceipt(
     issues.push(`verified ${receipt.evidenceSource} receipt requires transferSource`);
   }
 
-  const recomputed = createValidatedRubricReceipt({
+  const recomputed = createGroundedRubricReceipt({
     receiptId: receipt.receiptId,
     taskMode: "writing_task2",
     draft: sourceAsEssayDraft,
@@ -2080,6 +2093,34 @@ export function validateWritingRubricReceipt(
     return { ok: false, issues };
   }
   return { ok: true, receipt };
+}
+
+/** Issues only receipts that can pass the same validation used during continuity restore. */
+export function createValidatedRubricReceipt(
+  input: CreateRubricReceiptInput,
+): IeltsRubricValidationResult {
+  const candidate = createGroundedRubricReceipt(input);
+  if (!candidate.ok) return candidate;
+  const checked = validateWritingRubricReceipt(candidate.receipt);
+  if (checked.ok) return candidate;
+
+  // An incomplete or unverified transfer still supports a grounded practice receipt.
+  if (candidate.receipt.masteryQualified) {
+    const practice = createGroundedRubricReceipt({
+      ...input,
+      crossDraftTransferVerified: false,
+      freshPromptTransfer: false,
+    });
+    if (!practice.ok) return practice;
+    const checkedPractice = validateWritingRubricReceipt(practice.receipt);
+    if (checkedPractice.ok) return practice;
+    return invalidRubricReceipt(checkedPractice.issues);
+  }
+  return invalidRubricReceipt(checked.issues);
+}
+
+function invalidRubricReceipt(issues: readonly string[]): IeltsRubricValidationResult {
+  return { ok: false, errors: issues.map((message) => ({ code: "INVALID_RECEIPT", message })) };
 }
 
 export function isVerifiedWritingReceipt(

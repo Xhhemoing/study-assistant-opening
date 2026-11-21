@@ -45,7 +45,6 @@ export {
   computeOverallIeltsBand,
   countDraftWords,
   countEnglishWords,
-  createValidatedRubricReceipt,
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
   isValidIeltsBand,
@@ -61,6 +60,7 @@ export type {
 
 export {
   analyzeCrossDraftTransfer,
+  createValidatedRubricReceipt,
   detectLowEntropyStuffing,
   diffEssayParagraphs,
   evaluateRevisedDraftDeterministically,
@@ -103,6 +103,7 @@ export {
 } from "./cartridge";
 
 export type {
+  IeltsContinuityOptions,
   IeltsContinuityStage,
   IeltsContinuityState,
   IeltsRequirementKey,

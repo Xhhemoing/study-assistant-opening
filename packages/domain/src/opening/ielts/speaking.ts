@@ -456,18 +456,21 @@ export function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean
   );
 }
 
-export function getSpeakingEvaluationContext(seed: IeltsSpeakingPart3Seed) {
-  const { min, max } = seed.timeWindowSeconds;
-  return { timeWindowSeconds: { min, max }, writingReceiptEligible: hasRequiredWritingReceipt(seed) };
-}
+type SpeakingEvaluationContext = Required<NonNullable<IeltsSpeakingFeedbackReceipt["evaluationContext"]>>;
 
-type SpeakingEvaluationContext = ReturnType<typeof getSpeakingEvaluationContext>;
+export function getSpeakingEvaluationContext(seed: IeltsSpeakingPart3Seed): SpeakingEvaluationContext {
+  const { min, max } = seed.timeWindowSeconds;
+  return {
+    timeWindowSeconds: { min, max },
+    writingReceiptEligible: hasRequiredWritingReceipt(seed),
+    targetSpokenCollocations: [...getSpeakingTargets(seed.targetSpokenCollocations).values()],
+  };
+}
 
 function analyzeSpeakingRetelling(
   rawTranscript: string,
   durationSeconds: number | null,
   assisted: boolean,
-  targetCollocations: readonly string[],
   evaluationContext: SpeakingEvaluationContext,
 ) {
   const prose = maskIeltsMarkup(rawTranscript);
@@ -479,7 +482,7 @@ function analyzeSpeakingRetelling(
   const memorizedTemplateHits = detectMemorizedTemplates(paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
   const hasLowEntropy = detectLowEntropyStuffing(paragraphs, [sentences]);
-  const targets = getSpeakingTargets(targetCollocations);
+  const targets = getSpeakingTargets(evaluationContext.targetSpokenCollocations);
   const { allocated, hasBareTargetPaste } = allocateSpeakingEvidence(sentences, targets);
 
   const transferredCollocations: string[] = [];
@@ -522,16 +525,21 @@ function analyzeSpeakingRetelling(
 /** Recomputes the mastery claim and its transferred/pending partition from the transcript. */
 export function hasVerifiedSpeakingRetelling(
   receipt: IeltsSpeakingFeedbackReceipt,
-  targetCollocations: readonly string[],
   context: SpeakingEvaluationContext,
 ): boolean {
-  const retelling = analyzeSpeakingRetelling(
-    receipt.sourceTranscript, receipt.durationSeconds, receipt.assisted, targetCollocations, context,
-  );
   const matchesCollocations = (stored: readonly string[], expected: readonly string[]) =>
     isDenseIeltsArray(stored, isNonBlankIeltsString) &&
     stored.length === expected.length &&
     expected.every((expression) => stored.includes(expression));
+  const targets = context.targetSpokenCollocations;
+  const storedTargets = receipt.evaluationContext?.targetSpokenCollocations;
+  if (!matchesCollocations(targets, [...getSpeakingTargets(targets).values()]) ||
+      (storedTargets !== undefined && !matchesCollocations(storedTargets, targets))) {
+    return false;
+  }
+  const retelling = analyzeSpeakingRetelling(
+    receipt.sourceTranscript, receipt.durationSeconds, receipt.assisted, context,
+  );
   return retelling.masteryQualified &&
     retelling.wordCount === receipt.wordCount &&
     retelling.paceStatus === receipt.paceStatus &&
@@ -560,7 +568,7 @@ export function evaluateSpeakingRetelling(
     matchedSentenceByCollocation, hasBareTargetPaste, requiredTransferred, hasEnoughTransfer,
     hasEnoughWords, hasStiffWrittenConnector, masteryQualified,
   } = analyzeSpeakingRetelling(
-    rawTranscript, safeDurationSeconds, input.assisted, input.seed.targetSpokenCollocations, evaluationContext,
+    rawTranscript, safeDurationSeconds, input.assisted, evaluationContext,
   );
   const hasSpokenSignpost =
     /\b(personally|to be honest|that said|on the other hand|in the long run|the main reason|admittedly|for instance|for example|on top of that)\b/iu.test(

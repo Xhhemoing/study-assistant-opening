@@ -429,7 +429,7 @@ export type CreateRubricReceiptInput = {
  * Validates all 4 IELTS criteria (TR/CC/LR/GRA), strict 4.0-9.0 (0.5 step) bands,
  * mandatory paragraph-grounded textual evidence spans, and honest epistemic status.
  */
-export function createValidatedRubricReceipt(
+export function createGroundedRubricReceipt(
   input: CreateRubricReceiptInput,
 ): IeltsRubricValidationResult {
   const errors: IeltsRubricValidationError[] = [];
@@ -596,28 +596,29 @@ export function createValidatedRubricReceipt(
   }
 
   const memorizedTemplateFlags = detectMemorizedTemplates(paragraphs);
-  const lineage = getWritingTransferLineage(input.baselineDraft, input.draft);
-  const hasBaselineText = lineage !== null && countDraftWords(input.baselineDraft?.paragraphs ?? []) > 0;
+  const baseline = input.baselineDraft;
+  const promptStatement = input.promptStatement?.trim();
+  const transferSource =
+    baseline?.draftId !== undefined && baseline.assisted !== undefined && input.transferTargets &&
+    countDraftWords(baseline.paragraphs) > 0
+      ? getWritingTransferSource(
+          { ...baseline, draftId: baseline.draftId, assisted: baseline.assisted },
+          input.transferTargets,
+          promptStatement,
+        )
+      : undefined;
+  const lineage = getWritingTransferLineage(baseline, input.draft);
+  const hasTransferSource = transferSource !== undefined && transferSource.targets.length > 0;
   const epistemic = resolveIeltsEpistemicStatus({
     draftVersion: input.draft.version,
     assisted: input.draft.assisted,
-    crossDraftTransferVerified: lineage === "advancing_revision" && hasBaselineText && input.crossDraftTransferVerified,
-    freshPromptTransfer: lineage === "fresh_prompt" && hasBaselineText && input.freshPromptTransfer,
+    crossDraftTransferVerified: lineage === "advancing_revision" && hasTransferSource && input.crossDraftTransferVerified,
+    freshPromptTransfer: lineage === "fresh_prompt" && hasTransferSource && input.freshPromptTransfer,
     memorizedTemplateHits: memorizedTemplateFlags,
     wordCount,
     minVerifiedWords: input.minVerifiedWords,
     disqualificationReason: input.disqualificationReason,
   });
-
-  const baseline = input.baselineDraft;
-  const transferSource =
-    baseline?.draftId !== undefined && baseline.assisted !== undefined && input.transferTargets
-      ? getWritingTransferSource(
-          { ...baseline, draftId: baseline.draftId, assisted: baseline.assisted },
-          input.transferTargets,
-          input.promptStatement,
-        )
-      : undefined;
   const receipt: IeltsRubricReceipt = {
     receiptId: input.receiptId,
     cartridgeId: IELTS_CARTRIDGE_ID,
@@ -626,6 +627,7 @@ export function createValidatedRubricReceipt(
     draftId: input.draft.draftId,
     draftVersion: input.draft.version,
     sourceDraft: getWritingDraftSource(input.draft),
+    ...(promptStatement ? { promptStatement } : {}),
     transferSource,
     overallBand: computeOverallIeltsBand(bandMap),
     criteria: groundedCriteria,

@@ -125,6 +125,7 @@ export type IeltsRubricReceipt = {
   readonly draftId: string;
   readonly draftVersion: number;
   readonly sourceDraft?: IeltsWritingDraftSource;
+  readonly promptStatement?: string;
   readonly transferSource?: IeltsWritingTransferSource;
   readonly overallBand: IeltsBandScore;
   readonly criteria: Readonly<Record<IeltsCriterion, IeltsCriterionAssessment>>;
@@ -143,6 +144,7 @@ export type IeltsRubricValidationError = {
     | "INVALID_BAND"
     | "MISSING_CRITERION"
     | "INVALID_LIST"
+    | "INVALID_RECEIPT"
     | "MISSING_EVIDENCE_SPANS"
     | "EMPTY_SPAN_FIELD"
     | "PARAGRAPH_OUT_OF_RANGE"
@@ -310,6 +312,8 @@ export type IeltsSpeakingFeedbackReceipt = {
   readonly evaluationContext?: {
     readonly timeWindowSeconds: IeltsSpeakingPart3Seed["timeWindowSeconds"];
     readonly writingReceiptEligible: boolean;
+    /** Full normalized target set from the seed, including uncredited targets. */
+    readonly targetSpokenCollocations?: readonly string[];
   };
   readonly taskMode: "speaking_part3";
   readonly feedbackMode: "transcript_practice_feedback";

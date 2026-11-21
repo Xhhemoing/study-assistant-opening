@@ -4,7 +4,6 @@ import { useMemo, useState } from "react";
 import {
   evaluateSpeakingRetelling,
   getSpeakingEvaluationContext,
-  getSpeakingTargets,
   hasVerifiedSpeakingRetelling,
   type IeltsRubricReceipt,
   type IeltsSpeakingFeedbackReceipt,
@@ -232,7 +231,7 @@ function isSpeakingReceiptVisibleForAttempt(
       (!receipt.assisted &&
         receipt.masteryQualified &&
         receipt.countsTowardMastery &&
-        hasVerifiedSpeakingRetelling(receipt, targets, context)))
+        hasVerifiedSpeakingRetelling(receipt, context)))
   );
 }
 
@@ -260,9 +259,9 @@ function SpeakingAttempt({
       .filter((text) => typeof text === "string" && text.trim().length > 0),
     [scaffoldSampleTranscript, seed.argumentBridgeCues],
   );
-  const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
-  const authority = JSON.stringify([targets, context]);
+  const targets = context.targetSpokenCollocations;
+  const authority = JSON.stringify(context);
   const seedReceiptAssistedSource = seedReceipt?.assisted ? seedReceipt.sourceTranscript.trim() : "";
 
   const [editedAnswer, setEditedAnswer] = useState<{

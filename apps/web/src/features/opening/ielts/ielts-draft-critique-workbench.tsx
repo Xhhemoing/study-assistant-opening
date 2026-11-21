@@ -550,6 +550,11 @@ function WritingWorkbenchPromptSession({
   const activeDraft = viewMode === "draft1" ? fixture.draft1 : draft2;
   const activeReceipt = viewMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
   const activeDraftAssisted = viewMode === "draft1" ? activeDraft.assisted : draft2EffectivelyAssisted;
+  const receiptPromptStatement = activeReceipt.promptStatement;
+  const transferPromptStatement = activeReceipt.transferSource?.promptStatement;
+  const matchesPromptStatement =
+    (receiptPromptStatement === undefined || receiptPromptStatement === promptStatement) &&
+    (transferPromptStatement === undefined || transferPromptStatement === promptStatement);
   const canShowVerifiedReceipt =
     !isDemoPreview &&
     hasSubmitted &&
@@ -563,8 +568,11 @@ function WritingWorkbenchPromptSession({
     activeReceipt.promptId === activeDraft.promptId &&
     activeReceipt.draftId === activeDraft.draftId &&
     activeReceipt.draftVersion === activeDraft.version &&
+    matchesPromptStatement &&
     (viewMode === "draft1"
-      ? stableSerialize(activeReceipt.sourceDraft) === stableSerialize(getWritingDraftSource(activeDraft))
+      ? promptStatement !== undefined &&
+        (receiptPromptStatement === promptStatement || transferPromptStatement === promptStatement) &&
+        stableSerialize(activeReceipt.sourceDraft) === stableSerialize(getWritingDraftSource(activeDraft))
       : matchesSavedEvaluation && transferReport.summary.masteryQualified);
   const epistemicStatus =
     activeReceipt.epistemicStatus === "rubric_verified_evidence" && !canShowVerifiedReceipt
