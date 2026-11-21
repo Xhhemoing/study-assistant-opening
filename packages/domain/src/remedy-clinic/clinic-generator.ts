@@ -1051,13 +1051,13 @@ function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | n
   const frozenSourceRefs = freezeSourceRefs(rawSourceRefs);
 
   return Object.freeze({
-    attemptId,
-    rootAttemptId,
+    attemptId: attemptId.trim(),
+    rootAttemptId: rootAttemptId.trim(),
     learnerId,
     courseId,
-    chapterId,
+    chapterId: chapterId.trim(),
     localDate,
-    ruleId,
+    ruleId: ruleId.trim(),
     excerpt,
     invariantSummary,
     sourceRefs: frozenSourceRefs ?? Object.freeze([]),
@@ -1315,7 +1315,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   const activeSourcesSnapshot = snapshotActiveSourcesMap(inputSnap["activeSourcesMap"] as ActiveSourcesMap);
   const frozenLearnerId = typeof inputSnap["learnerId"] === "string" ? inputSnap["learnerId"] : "";
   const frozenCourseId = typeof inputSnap["courseId"] === "string" ? inputSnap["courseId"] : "";
-  const frozenRuleId = typeof inputSnap["ruleId"] === "string" ? inputSnap["ruleId"] : "";
+  const frozenRuleId = typeof inputSnap["ruleId"] === "string" ? inputSnap["ruleId"].trim() : "";
   const frozenRuleTitle = typeof inputSnap["ruleTitle"] === "string" ? inputSnap["ruleTitle"] : undefined;
   const frozenClinicIdInput = typeof inputSnap["clinicId"] === "string" ? inputSnap["clinicId"] : undefined;
   const frozenEpoch = inputSnap["currentPrivacyEpoch"];

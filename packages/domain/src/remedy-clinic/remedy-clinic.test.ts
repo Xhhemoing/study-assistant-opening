@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DistinguishableProbeSpec } from "../opening/cartridges/probe-protocol";
 import {
   areSourceRefsActive,
+  computeEvidenceCoverage,
   generateRemedyClinic,
   isSourceRefActive,
   revalidateRemedyClinic,
@@ -2032,21 +2033,33 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     const proxyMapReval = revalidateRemedyClinic(clinic, proxyMap, 6);
     expect(proxyMapReval.status).toBe("stale_source_revoked");
 
-    // Genuine Map with a getter entry mid-iteration must fail closed (zero partial survival).
-    const throwingEntry = Object.defineProperty({ version: "v1" }, "active", {
+    // Outer record getter on activeSourcesMap must fail closed with zero partial survival and zero getter runs.
+    let outerMapGetterRuns = 0;
+    const poisonRecord = {
+      "src-ch-1": "v1",
+      "src-ch-2": "v1",
+      "src-ch-3": "v1",
+    };
+    Object.defineProperty(poisonRecord, "src-poison", {
       enumerable: true,
       get() {
+        outerMapGetterRuns += 1;
         throw new Error("mid-iter-boom");
       },
     });
-    const poisonMap = new Map<string, unknown>([
+    const poisonRecordReval = revalidateRemedyClinic(clinic, poisonRecord as unknown as ActiveSourcesMap, 6);
+    expect(outerMapGetterRuns).toBe(0);
+    expect(poisonRecordReval.status).toBe("stale_source_revoked");
+
+    // Genuine Map with a non-string key must fail closed at container level (zero partial survival).
+    const badKeyMap = new Map<unknown, unknown>([
       ["src-ch-1", "v1"],
       ["src-ch-2", "v1"],
       ["src-ch-3", "v1"],
-      ["src-poison", throwingEntry],
+      [new Proxy({}, {}), "v1"],
     ]) as unknown as ActiveSourcesMap;
-    const poisonMapReval = revalidateRemedyClinic(clinic, poisonMap, 6);
-    expect(poisonMapReval.status).toBe("stale_source_revoked");
+    const badKeyMapReval = revalidateRemedyClinic(clinic, badKeyMap, 6);
+    expect(badKeyMapReval.status).toBe("stale_source_revoked");
 
     // 5. Direct privacy-guard exports fail closed against throwing Proxy and forged Map.
     expect(isSourceRefActive({ sourceId: "src-ch-1", sourceVersion: "v1" }, forgedMap)).toBe(false);
@@ -2451,5 +2464,107 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       expect(blankRootReval.coverage.rootAttemptCount).toBe(2);
       expect(blankRootReval.revocationSummary.reason).toBe("insufficient_surviving_evidence");
     }
+
+    // Round-13 [P1-2]: Entry-level isolation for non-boolean/object-valued active or revoked flags
+    // (e.g. { version: "v1", active: {} }, { version: "v1", revoked: [] }, entry getter) drops ONLY
+    // that entry while preserving valid sibling sources in BOTH Record and Map activeSourcesMap.
+    let entryGetterRuns = 0;
+    const getterFlagEntry = Object.defineProperty({ version: "v1" }, "active", {
+      enumerable: true,
+      get() {
+        entryGetterRuns += 1;
+        return true;
+      },
+    });
+    const recordWithBadSibling = {
+      "src-ch-1": { version: "v1", active: true },
+      "src-ch-2": { version: "v1", active: true },
+      "src-ch-3": { version: "v1", active: true },
+      "src-bad-obj": { version: "v1", active: {} },
+      "src-bad-arr": { version: "v1", revoked: [] },
+      "src-bad-getter": getterFlagEntry,
+    } as unknown as ActiveSourcesMap;
+    const mapWithBadSibling = new Map<string, unknown>([
+      ["src-ch-1", { version: "v1", active: true }],
+      ["src-ch-2", { version: "v1", active: true }],
+      ["src-ch-3", { version: "v1", active: true }],
+      ["src-bad-obj", { version: "v1", active: {} }],
+      ["src-bad-arr", { version: "v1", revoked: [] }],
+      ["src-bad-getter", getterFlagEntry],
+    ]) as unknown as ActiveSourcesMap;
+
+    for (const sourcesWithBadSibling of [recordWithBadSibling, mapWithBadSibling]) {
+      expect(isSourceRefActive({ sourceId: "src-bad-obj", sourceVersion: "v1" }, sourcesWithBadSibling)).toBe(false);
+      expect(isSourceRefActive({ sourceId: "src-bad-arr", sourceVersion: "v1" }, sourcesWithBadSibling)).toBe(false);
+      expect(isSourceRefActive({ sourceId: "src-bad-getter", sourceVersion: "v1" }, sourcesWithBadSibling)).toBe(false);
+      expect(isSourceRefActive({ sourceId: "src-ch-1", sourceVersion: "v1" }, sourcesWithBadSibling)).toBe(true);
+      const siblingReval = revalidateRemedyClinic(clinic, sourcesWithBadSibling, 6);
+      expect(siblingReval.status).toBe("active");
+      expect(siblingReval.evidenceCases).toHaveLength(3);
+    }
+    expect(entryGetterRuns).toBe(0);
+
+    // Round-13 [P1-3 Defect A]: computeEvidenceCoverage excludes any invalid row completely so a blank-root row
+    // on a 2nd chapter/day CANNOT inflate chapterCount or localDateCount.
+    const invalidRowCoverage = computeEvidenceCoverage([
+      { ...clinic.evidenceCases[0]!, rootAttemptId: "r1", chapterId: "ch-1", localDate: "2026-10-01" },
+      { ...clinic.evidenceCases[1]!, rootAttemptId: "r2", chapterId: "ch-1", localDate: "2026-10-01" },
+      { ...clinic.evidenceCases[2]!, rootAttemptId: "r3", chapterId: "ch-1", localDate: "2026-10-01" },
+      { ...clinic.evidenceCases[2]!, rootAttemptId: "   ", chapterId: "ch-2", localDate: "2026-10-09" },
+    ]);
+    expect(invalidRowCoverage).toEqual({
+      rootAttemptCount: 3,
+      chapterCount: 1,
+      localDateCount: 1,
+    });
+
+    // Round-13 [P1-3 Defect B]: Whitespace-padded rootAttemptId " r1 " deduplicates identically with "r1"
+    // in generateRemedyClinic so a retry carrying the sole 2nd chapter/day cannot bypass deduplication.
+    const whitespaceRetryAttempts = [
+      makeAttempt({ attemptId: "a1", rootAttemptId: "r1", chapterId: "ch-1", localDate: "2026-10-01", sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a2", rootAttemptId: "r2", chapterId: "ch-1", localDate: "2026-10-01", sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a3", rootAttemptId: "r3", chapterId: "ch-1", localDate: "2026-10-01", sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a4", rootAttemptId: " r1 ", chapterId: "ch-2", localDate: "2026-10-09", sourceRefs: [{ sourceId: "src-ch-2", sourceVersion: "v1" }] }),
+    ];
+    const whitespaceRetryRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: whitespaceRetryAttempts,
+      candidateProbes: [probe1, probe2],
+    });
+    expect(whitespaceRetryRes.status).toBe("threshold_not_met");
+    expect(whitespaceRetryRes.rejectedCounts.duplicateRoot).toBe(1);
+    expect(whitespaceRetryRes.coverage).toEqual({
+      rootAttemptCount: 3,
+      chapterCount: 1,
+      localDateCount: 1,
+    });
+
+    // Trimmed canonical IDs emitted by generateRemedyClinic survive revalidateRemedyClinic unchanged.
+    const paddedValidAttempts = [
+      makeAttempt({ attemptId: " a1 ", rootAttemptId: " r1 ", chapterId: " ch-1 ", localDate: "2026-10-01", ruleId: ` ${RULE_ID} `, sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: " a2 ", rootAttemptId: " r2 ", chapterId: " ch-2 ", localDate: "2026-10-03", ruleId: ` ${RULE_ID} `, sourceRefs: [{ sourceId: "src-ch-2", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: " a3 ", rootAttemptId: " r3 ", chapterId: " ch-3 ", localDate: "2026-10-05", ruleId: ` ${RULE_ID} `, sourceRefs: [{ sourceId: "src-ch-3", sourceVersion: "v1" }] }),
+    ];
+    const paddedGenRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: ` ${RULE_ID} `,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: paddedValidAttempts,
+      candidateProbes: [probe1, probe2],
+    });
+    expect(paddedGenRes.status).toBe("active");
+    expect(paddedGenRes.clinic!.ruleId).toBe(RULE_ID);
+    expect(paddedGenRes.clinic!.evidenceCases.map((c) => c.rootAttemptId)).toEqual(["r1", "r2", "r3"]);
+    const paddedReval = revalidateRemedyClinic(paddedGenRes.clinic!, allSources, 5);
+    expect(paddedReval.status).toBe("active");
+    expect(paddedReval.evidenceCases.map((c) => c.rootAttemptId)).toEqual(["r1", "r2", "r3"]);
   });
 });

@@ -109,23 +109,8 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
       expect(corroborated.inconsistencyReasons).toEqual([]);
     }
 
-    // Empty, self-only, whitespace, getter-bearing, or Proxy corroboration lists MUST NOT unlock mastery.
-    let corrobGetterRuns = 0;
-    const getterCorrobIds = Object.defineProperty([] as string[], "0", {
-      enumerable: true,
-      get() {
-        corrobGetterRuns += 1;
-        return "sub-independent-2";
-      },
-    });
-    for (const invalidCorrob of [
-      [],
-      ["sub-self"],
-      ["   "],
-      ["sub-independent-2", ""],
-      getterCorrobIds,
-      new Proxy(["sub-independent-2"], {}),
-    ]) {
+    // Empty, self-only, or whitespace plain corroboration lists calibrate normally but MUST NOT unlock mastery.
+    for (const invalidCorrob of [[], ["sub-self"], ["   "], ["sub-independent-2", ""]]) {
       const res = evaluateAnchorCalibratedRubric({
         submissionId: "sub-self",
         dimension: "task_response",
@@ -139,7 +124,98 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
       expect(res.countsTowardMastery).toBe(false);
       expect(res.masteryExclusionReasons).toEqual(["single_draft_uncorroborated"]);
     }
+
+    // Round-13 [P1-1]: Getter or Proxy on corroboratingIndependentSubmissionIds or outer input/submissionId
+    // MUST fail closed with ZERO getter executions and zero second-read TOCTOU.
+    let corrobGetterRuns = 0;
+    const getterCorrobIds = Object.defineProperty([] as string[], "0", {
+      enumerable: true,
+      get() {
+        corrobGetterRuns += 1;
+        return "sub-independent-2";
+      },
+    });
+    const getterCorrobRes = evaluateAnchorCalibratedRubric({
+      submissionId: "sub-self",
+      dimension: "task_response",
+      text: cleanText,
+      mode: "formal_assessment",
+      assisted: false,
+      comparisons: consistentComparisonsForTarget("task_response", 6.5),
+      corroboratingIndependentSubmissionIds: getterCorrobIds,
+    });
     expect(corrobGetterRuns).toBe(0);
+    expect(getterCorrobRes.status).toBe("interval_only");
+    expect(getterCorrobRes.countsTowardMastery).toBe(false);
+    expect(getterCorrobRes.inconsistencyReasons).toEqual(["invalid_submission_input"]);
+
+    const proxyCorrobRes = evaluateAnchorCalibratedRubric({
+      submissionId: "sub-self",
+      dimension: "task_response",
+      text: cleanText,
+      mode: "formal_assessment",
+      assisted: false,
+      comparisons: consistentComparisonsForTarget("task_response", 6.5),
+      corroboratingIndependentSubmissionIds: new Proxy(["sub-independent-2"], {}),
+    });
+    expect(proxyCorrobRes.status).toBe("interval_only");
+    expect(proxyCorrobRes.countsTowardMastery).toBe(false);
+    expect(proxyCorrobRes.inconsistencyReasons).toEqual(["invalid_submission_input"]);
+
+    // Outer getter on corroboratingIndependentSubmissionIds or stateful Proxy flipping submissionId across reads.
+    let outerCorrobGetterRuns = 0;
+    const outerGetterInput = {
+      submissionId: "sub-A",
+      dimension: "task_response" as const,
+      text: cleanText,
+      mode: "formal_assessment" as const,
+      assisted: false,
+      comparisons: consistentComparisonsForTarget("task_response", 6.5),
+    };
+    Object.defineProperty(outerGetterInput, "corroboratingIndependentSubmissionIds", {
+      enumerable: true,
+      get() {
+        outerCorrobGetterRuns += 1;
+        return ["sub-B"];
+      },
+    });
+    const outerGetterRes = evaluateAnchorCalibratedRubric(outerGetterInput);
+    expect(outerCorrobGetterRuns).toBe(0);
+    expect(outerGetterRes.status).toBe("interval_only");
+    expect(outerGetterRes.countsTowardMastery).toBe(false);
+    expect(outerGetterRes.inconsistencyReasons).toEqual(["invalid_submission_input"]);
+
+    let submissionIdReads = 0;
+    const toctouSubmissionProxy = new Proxy(
+      {
+        submissionId: "sub-A",
+        dimension: "task_response" as const,
+        text: cleanText,
+        mode: "formal_assessment" as const,
+        assisted: false,
+        comparisons: consistentComparisonsForTarget("task_response", 6.5),
+        corroboratingIndependentSubmissionIds: ["sub-B"],
+      },
+      {
+        getOwnPropertyDescriptor(target, prop) {
+          if (prop === "submissionId") {
+            submissionIdReads += 1;
+            return {
+              value: submissionIdReads === 1 ? "sub-A" : "sub-B",
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            };
+          }
+          return Reflect.getOwnPropertyDescriptor(target, prop);
+        },
+      },
+    );
+    const toctouRes = evaluateAnchorCalibratedRubric(toctouSubmissionProxy);
+    expect(submissionIdReads).toBe(1);
+    expect(toctouRes.status).toBe("interval_only");
+    expect(toctouRes.countsTowardMastery).toBe(false);
+    expect(toctouRes.inconsistencyReasons).toEqual(["invalid_submission_input"]);
   });
 
   it("fails closed to interval_only without fabricating a band on forward/reverse swap contradiction", () => {

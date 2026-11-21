@@ -1,4 +1,5 @@
 import {
+  RUBRIC_DIMENSIONS,
   getSentinelAnchorsForDimension,
   type DimensionSentinelAnchor,
   type RubricDimension,
@@ -37,6 +38,7 @@ export interface RubricSubmissionInput {
 }
 
 export type RubricInconsistencyReason =
+  | "invalid_submission_input"
   | "invalid_anchor_definitions"
   | "insufficient_anchor_coverage"
   | "missing_reverse_comparison"
@@ -90,7 +92,7 @@ export interface AnchorCalibratedRubricV1Result {
   readonly theta: number | null;
   /** Non-fabricated [lowerBand, upperBand] bracket derived from consistent anchor bounds. */
   readonly bandRange: readonly [number, number];
-  /** True ONLY when calibrated, formal_assessment, unassisted, and not template-padded. */
+  /** True ONLY when calibrated, formal_assessment, unassisted, not template-padded, and corroborated by >= 1 distinct corroboratingIndependentSubmissionIds. */
   readonly countsTowardMastery: boolean;
   readonly masteryExclusionReasons: readonly MasteryExclusionReason[];
   readonly inconsistencyReasons: readonly RubricInconsistencyReason[];
@@ -430,69 +432,242 @@ function validateAndSortAnchors(
   return sorted;
 }
 
-function hasIndependentCorroboration(rawIds: unknown, rawSubmissionId: unknown): boolean {
-  if (typeof rawSubmissionId !== "string") return false;
-  const ownId = rawSubmissionId.trim();
-  if (ownId.length === 0) return false;
+const RUBRIC_REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
+const RUBRIC_ARRAY_BUFFER_LEN_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+const RUBRIC_DATA_VIEW_LEN_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
+const RUBRIC_ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
+const RUBRIC_WEAK_KEY = Object.freeze({});
+const VALID_RUBRIC_DIMENSIONS: ReadonlySet<string> = new Set(RUBRIC_DIMENSIONS);
+
+function matchesRubricBrand(check: () => unknown): boolean {
   try {
-    if (!Array.isArray(rawIds) || Object.getPrototypeOf(rawIds) !== Array.prototype) return false;
-    const lenDesc = Object.getOwnPropertyDescriptor(rawIds, "length");
-    if (
-      !lenDesc ||
-      !Object.hasOwn(lenDesc, "value") ||
-      typeof lenDesc.value !== "number" ||
-      !Number.isInteger(lenDesc.value) ||
-      lenDesc.value <= 0
-    ) {
-      return false;
-    }
-    const len = lenDesc.value;
-    if (Reflect.ownKeys(rawIds).length !== len + 1) return false;
-    const distinctOtherIds = new Set<string>();
-    for (let i = 0; i < len; i += 1) {
-      const desc = Object.getOwnPropertyDescriptor(rawIds, String(i));
-      if (
-        !desc ||
-        !desc.enumerable ||
-        !Object.hasOwn(desc, "value") ||
-        desc.get !== undefined ||
-        desc.set !== undefined ||
-        typeof desc.value !== "string"
-      ) {
-        return false;
-      }
-      const trimmed = desc.value.trim();
-      if (trimmed.length === 0) return false;
-      if (trimmed !== ownId) distinctOtherIds.add(trimmed);
-    }
-    structuredClone(rawIds);
-    return distinctOtherIds.size >= 1;
+    check();
+    return true;
   } catch {
     return false;
   }
 }
 
+function hasRubricExoticSlot(obj: object): boolean {
+  try {
+    if (ArrayBuffer.isView(obj)) return true;
+    if (typeof RUBRIC_ERROR_IS_ERROR === "function" && RUBRIC_ERROR_IS_ERROR(obj)) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [RUBRIC_WEAK_KEY]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [RUBRIC_WEAK_KEY]))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
+    if (
+      RUBRIC_REGEXP_SOURCE_GET &&
+      obj !== RegExp.prototype &&
+      matchesRubricBrand(() => Reflect.apply(RUBRIC_REGEXP_SOURCE_GET, obj, []))
+    ) {
+      return true;
+    }
+    if (RUBRIC_ARRAY_BUFFER_LEN_GET && matchesRubricBrand(() => Reflect.apply(RUBRIC_ARRAY_BUFFER_LEN_GET, obj, []))) {
+      return true;
+    }
+    if (RUBRIC_DATA_VIEW_LEN_GET && matchesRubricBrand(() => Reflect.apply(RUBRIC_DATA_VIEW_LEN_GET, obj, []))) {
+      return true;
+    }
+    if (matchesRubricBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
+    if (matchesRubricBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function snapshotPlainRubricDataInner(
+  value: unknown,
+  memo: Map<object, unknown>,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  if (value === null || value === undefined) return { ok: true, value };
+  const kind = typeof value;
+  if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") {
+    return { ok: true, value };
+  }
+  if (kind !== "object") return { ok: false };
+  const obj = value as object;
+  if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
+  try {
+    const proto = Object.getPrototypeOf(obj) as object | null;
+    if (Array.isArray(obj)) {
+      if (proto !== Array.prototype) return { ok: false };
+      const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
+      if (
+        !lenDesc ||
+        !Object.hasOwn(lenDesc, "value") ||
+        typeof lenDesc.value !== "number" ||
+        !Number.isInteger(lenDesc.value) ||
+        lenDesc.value < 0
+      ) {
+        return { ok: false };
+      }
+      const len = lenDesc.value;
+      if (Reflect.ownKeys(obj).length !== len + 1) return { ok: false };
+      if (hasRubricExoticSlot(obj)) return { ok: false };
+      const out: unknown[] = new Array(len);
+      memo.set(obj, out);
+      for (let i = 0; i < len; i += 1) {
+        const desc = Object.getOwnPropertyDescriptor(obj, String(i));
+        if (
+          !desc ||
+          !desc.enumerable ||
+          !Object.hasOwn(desc, "value") ||
+          desc.get !== undefined ||
+          desc.set !== undefined
+        ) {
+          return { ok: false };
+        }
+        const child = snapshotPlainRubricDataInner(desc.value, memo);
+        if (!child.ok) return { ok: false };
+        out[i] = child.value;
+      }
+      return { ok: true, value: Object.freeze(out) };
+    }
+    if (proto !== Object.prototype && proto !== null) return { ok: false };
+    const keys = Reflect.ownKeys(obj);
+    const entries: Array<{ readonly key: string; readonly value: unknown }> = [];
+    for (const key of keys) {
+      if (typeof key !== "string" || key === "__proto__") return { ok: false };
+      const desc = Object.getOwnPropertyDescriptor(obj, key);
+      if (
+        !desc ||
+        !desc.enumerable ||
+        !Object.hasOwn(desc, "value") ||
+        desc.get !== undefined ||
+        desc.set !== undefined
+      ) {
+        return { ok: false };
+      }
+      entries.push({ key, value: desc.value });
+    }
+    if (hasRubricExoticSlot(obj)) return { ok: false };
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    memo.set(obj, out);
+    for (const entry of entries) {
+      const child = snapshotPlainRubricDataInner(entry.value, memo);
+      if (!child.ok) return { ok: false };
+      Object.defineProperty(out, entry.key, {
+        value: child.value,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+    }
+    return { ok: true, value: Object.freeze(out) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function snapshotPlainRubricData(
+  value: unknown,
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  const res = snapshotPlainRubricDataInner(value, new Map());
+  if (!res.ok) return { ok: false };
+  if (value !== null && typeof value === "object") {
+    try {
+      structuredClone(value);
+    } catch {
+      return { ok: false };
+    }
+  }
+  return res;
+}
+
+function hasIndependentCorroboration(frozenIds: unknown, ownSubmissionId: string): boolean {
+  const ownId = ownSubmissionId.trim();
+  if (ownId.length === 0 || !Array.isArray(frozenIds) || frozenIds.length === 0) return false;
+  const distinctOtherIds = new Set<string>();
+  for (let i = 0; i < frozenIds.length; i += 1) {
+    const entry = frozenIds[i];
+    if (typeof entry !== "string") return false;
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) return false;
+    if (trimmed !== ownId) distinctOtherIds.add(trimmed);
+  }
+  return distinctOtherIds.size >= 1;
+}
+
 export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): AnchorCalibratedRubricV1Result {
-  const sourceAnchors = input.anchors ?? getSentinelAnchorsForDimension(input.dimension);
-  const paddingReport = detectTemplatePadding(input.text);
-  const anchors = validateAndSortAnchors(sourceAnchors, input.dimension);
-  const hasCorroboration = hasIndependentCorroboration(
-    input.corroboratingIndependentSubmissionIds,
-    input.submissionId,
-  );
+  // Single-pass own-data descriptor + structuredClone snapshot of input (zero getter execution,
+  // zero Proxy tolerance, zero second reads on submissionId or corroboratingIndependentSubmissionIds).
+  const clonedInput = snapshotPlainRubricData(input);
+  const snap =
+    clonedInput.ok &&
+    clonedInput.value !== null &&
+    typeof clonedInput.value === "object" &&
+    !Array.isArray(clonedInput.value)
+      ? (clonedInput.value as Record<string, unknown>)
+      : null;
+
+  const submissionId = snap && typeof snap["submissionId"] === "string" ? snap["submissionId"] : "";
+  const rawDimension = snap ? snap["dimension"] : undefined;
+  const rawText = snap ? snap["text"] : undefined;
+  const rawMode = snap ? snap["mode"] : undefined;
+  const rawAssisted = snap ? snap["assisted"] : undefined;
+  const rawComparisons = snap ? snap["comparisons"] : undefined;
+  const rawAnchors = snap ? snap["anchors"] : undefined;
+  const rawCorroboration = snap ? snap["corroboratingIndependentSubmissionIds"] : undefined;
+
+  if (
+    !snap ||
+    typeof rawDimension !== "string" ||
+    !VALID_RUBRIC_DIMENSIONS.has(rawDimension) ||
+    typeof rawText !== "string" ||
+    (rawMode !== "practice_feedback" && rawMode !== "formal_assessment") ||
+    typeof rawAssisted !== "boolean" ||
+    !Array.isArray(rawComparisons)
+  ) {
+    const safeDimension: RubricDimension =
+      typeof rawDimension === "string" && VALID_RUBRIC_DIMENSIONS.has(rawDimension)
+        ? (rawDimension as RubricDimension)
+        : "task_response";
+    return {
+      schemaVersion: 1,
+      submissionId,
+      dimension: safeDimension,
+      status: "interval_only",
+      band: null,
+      rawBand: null,
+      theta: null,
+      bandRange: [MIN_BAND, MAX_BAND],
+      countsTowardMastery: false,
+      masteryExclusionReasons: ["interval_only_inconsistent", "single_draft_uncorroborated"],
+      inconsistencyReasons: ["invalid_submission_input"],
+      paddingReport: detectTemplatePadding(typeof rawText === "string" ? rawText : ""),
+      anchorComparisons: [],
+    };
+  }
+
+  const dimension = rawDimension as RubricDimension;
+  const text = rawText;
+  const mode = rawMode;
+  const assisted = rawAssisted;
+  const comparisons = rawComparisons as readonly PairwiseSwapComparison[];
+  const sourceAnchors =
+    rawAnchors === undefined
+      ? getSentinelAnchorsForDimension(dimension)
+      : (rawAnchors as readonly DimensionSentinelAnchor[]);
+  const paddingReport = detectTemplatePadding(text);
+  const anchors = validateAndSortAnchors(sourceAnchors, dimension);
+  const hasCorroboration = hasIndependentCorroboration(rawCorroboration, submissionId);
 
   if (!anchors) {
     const masteryExclusionReasons: MasteryExclusionReason[] = [];
-    if (input.mode === "practice_feedback") masteryExclusionReasons.push("practice_feedback_only");
-    if (input.assisted) masteryExclusionReasons.push("assisted_submission");
+    if (mode === "practice_feedback") masteryExclusionReasons.push("practice_feedback_only");
+    if (assisted) masteryExclusionReasons.push("assisted_submission");
     masteryExclusionReasons.push("interval_only_inconsistent");
     if (paddingReport.isTemplatePadded) masteryExclusionReasons.push("template_padding_detected");
     if (!hasCorroboration) masteryExclusionReasons.push("single_draft_uncorroborated");
 
     return {
       schemaVersion: 1,
-      submissionId: input.submissionId,
-      dimension: input.dimension,
+      submissionId,
+      dimension,
       status: "interval_only",
       band: null,
       rawBand: null,
@@ -512,7 +687,11 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
   const duplicateAnchorIds = new Set<string>();
   const validAnchorIds = new Set(anchors.map((a) => a.anchorId));
 
-  for (const comparison of input.comparisons) {
+  for (const comparison of comparisons) {
+    if (!comparison || typeof comparison !== "object" || typeof comparison.anchorId !== "string") {
+      reasons.add("unknown_anchor_id");
+      continue;
+    }
     if (!validAnchorIds.has(comparison.anchorId)) {
       reasons.add("unknown_anchor_id");
       continue;
@@ -587,8 +766,8 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
   const isConsistentAndMonotone = inconsistencyReasons.length === 0;
 
   const masteryExclusionReasons: MasteryExclusionReason[] = [];
-  if (input.mode === "practice_feedback") masteryExclusionReasons.push("practice_feedback_only");
-  if (input.assisted) masteryExclusionReasons.push("assisted_submission");
+  if (mode === "practice_feedback") masteryExclusionReasons.push("practice_feedback_only");
+  if (assisted) masteryExclusionReasons.push("assisted_submission");
   if (!isConsistentAndMonotone) masteryExclusionReasons.push("interval_only_inconsistent");
   if (paddingReport.isTemplatePadded) masteryExclusionReasons.push("template_padding_detected");
   if (!hasCorroboration) masteryExclusionReasons.push("single_draft_uncorroborated");
@@ -596,8 +775,8 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
   if (!isConsistentAndMonotone) {
     return {
       schemaVersion: 1,
-      submissionId: input.submissionId,
-      dimension: input.dimension,
+      submissionId,
+      dimension,
       status: "interval_only",
       band: null,
       rawBand: null,
@@ -665,8 +844,8 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
         : "unanchored_tail_extrapolation";
     return {
       schemaVersion: 1,
-      submissionId: input.submissionId,
-      dimension: input.dimension,
+      submissionId,
+      dimension,
       status: "interval_only",
       band: null,
       rawBand: null,
@@ -682,8 +861,8 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
 
   return {
     schemaVersion: 1,
-    submissionId: input.submissionId,
-    dimension: input.dimension,
+    submissionId,
+    dimension,
     status: "calibrated",
     band,
     rawBand,
