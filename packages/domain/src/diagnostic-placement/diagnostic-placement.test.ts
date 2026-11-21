@@ -202,9 +202,18 @@ describe("Shadow-CAT 6-10 item MI placement & honest route classification", () =
       { skillId: "B", chapterId: "c1" },
       { skillId: "C", chapterId: "c1", prerequisiteIds: ["A", "B"] },
     ];
+    const baseSynthetic = buildKstPriorSnapshot(createKstStateSpace(skills));
+    const syntheticW = {
+      [canonicalStateKey([])]: 0,
+      [canonicalStateKey(["A"])]: 0.5,
+      [canonicalStateKey(["B"])]: 0.5,
+      [canonicalStateKey(["A", "B"])]: 0,
+      [canonicalStateKey(["A", "B", "C"])]: 0,
+    };
     const synthetic = {
-      ...buildKstPriorSnapshot(createKstStateSpace(skills)),
-      wByState: { [canonicalStateKey([])]: 0, [canonicalStateKey(["A"])]: 0.5, [canonicalStateKey(["B"])]: 0.5, [canonicalStateKey(["A", "B"])]: 0, [canonicalStateKey(["A", "B", "C"])]: 0 },
+      ...baseSynthetic,
+      wByState: syntheticW,
+      componentJointWeights: [{ ...baseSynthetic.componentJointWeights[0]!, wByState: syntheticW }],
       piBySkill: { A: 0.5, B: 0.5, C: 0 },
       outerFringeBySkill: { A: 0.5, B: 0.5, C: 0 },
       parentsSatisfiedBySkill: { A: 1, B: 1, C: 0 },
@@ -1320,6 +1329,227 @@ describe("Round-7 DAG snapshot certification, 8-12/900s Wave P limits, merge-onl
       expect(sel.status).toBe("selected");
       session.recordResponse({ observationId: `nul-${i}`, itemId: sel.probe!.itemId, correct: true });
     }
+    expect(session.getSessionSummary().administeredCount).toBe(8);
+  });
+});
+
+describe("Round-8 outer-fringe gating, joint snapshot consistency, observed-merge preflight & MRV DFS", () => {
+  const makeChain = (prefix: string, chapterId: string, len: number): DiagnosticSkillNode[] =>
+    Array.from({ length: len }, (_, i) => ({
+      skillId: `${prefix}_${i}`,
+      chapterId,
+      ...(i > 0 ? { prerequisiteIds: [`${prefix}_${i - 1}`] } : {}),
+    }));
+
+  it("[P1-1] gates inferred_ready strictly on outerFringeProb >= readyThreshold (A->B priors 0.9, 0.5 => outerFringe 9/19 < 0.7)", () => {
+    const skills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1", priorMastery: 0.9 },
+      { skillId: "B", chapterId: "c1", prerequisiteIds: ["A"], priorMastery: 0.5 },
+    ];
+    const space = createKstStateSpace(skills);
+    const snap = buildKstPriorSnapshot(space);
+    expect(snap.parentsSatisfiedBySkill["B"]).toBeCloseTo(18 / 19, 12);
+    expect(snap.outerFringeBySkill["B"]).toBeCloseTo(9 / 19, 12);
+    expect(snap.piBySkill["B"]).toBeCloseTo(9 / 19, 12);
+
+    const routes = classifyPlacementRoutes(space, skills, { readyThreshold: 0.7, skipThreshold: 0.85 });
+    const bRoute = routes.find(r => r.skillId === "B")!;
+    expect(bRoute.parentsSatisfiedProbability).toBeCloseTo(18 / 19, 12);
+    expect(bRoute.outerFringeProbability).toBeCloseTo(9 / 19, 12);
+    expect(bRoute.route).toBe("prerequisite_gap_blocked");
+
+    // Once threshold drops <= 9/19, outerFringeProb satisfies readyThreshold -> inferred_ready
+    const relaxedRoutes = classifyPlacementRoutes(snap, skills, { readyThreshold: 0.45, skipThreshold: 0.85 });
+    expect(relaxedRoutes.find(r => r.skillId === "B")!.route).toBe("inferred_ready");
+  });
+
+  it("[P1-2 & Neon P2-1/P2-2] rejects tampered summary probabilities, tampered wByState, prerequisitesBySkill/skills mismatch & empty snapshots", () => {
+    const abSkills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1" },
+      { skillId: "B", chapterId: "c1", prerequisiteIds: ["A"] },
+    ];
+    const snap = buildKstPriorSnapshot(createKstStateSpace(abSkills));
+    expect(snap.piBySkill["B"]).toBeCloseTo(1 / 3, 12);
+    expect(snap.parentsSatisfiedBySkill["B"]).toBeCloseTo(2 / 3, 12);
+    expect(snap.outerFringeBySkill["B"]).toBeCloseTo(1 / 3, 12);
+
+    // GPT P1-2: Leave componentJointWeights + wByState + prerequisitesBySkill intact, tamper summary fields
+    const tampered = {
+      ...snap,
+      piBySkill: { ...snap.piBySkill, B: 0.1 },
+      parentsSatisfiedBySkill: { ...snap.parentsSatisfiedBySkill, B: 0.9 },
+      outerFringeBySkill: { ...snap.outerFringeBySkill, B: 0.8 },
+    };
+    expect(() => validateKstSnapshot(tampered)).toThrow(DiagnosticPlacementError);
+    expect(() => validateKstSnapshot(tampered, abSkills)).toThrow(DiagnosticPlacementError);
+    expect(() => classifyPlacementRoutes(tampered, abSkills)).toThrow(DiagnosticPlacementError);
+
+    // Even when prerequisitesBySkill is absent, piBySkill & wByState must match componentJointWeights within 1e-9
+    const withoutPrereqs = { ...snap, prerequisitesBySkill: undefined };
+    expect(() => validateKstSnapshot({ ...withoutPrereqs, piBySkill: { ...snap.piBySkill, B: 0.1 } })).toThrow(DiagnosticPlacementError);
+    expect(() => validateKstSnapshot({
+      ...withoutPrereqs,
+      wByState: { "[]": 0.4, '["A"]': 0.3, '["A","B"]': 0.3 },
+    })).toThrow(DiagnosticPlacementError);
+
+    // Neon P2-1: snapshot.prerequisitesBySkill disagrees with explicit skills DAG
+    const reversedSkills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1", prerequisiteIds: ["B"] },
+      { skillId: "B", chapterId: "c1" },
+    ];
+    expect(() => validateKstSnapshot(snap, reversedSkills)).toThrow(DiagnosticPlacementError);
+    expect(() => classifyPlacementRoutes(snap, reversedSkills)).toThrow(DiagnosticPlacementError);
+
+    // Neon P2-2: 1-arg validateKstSnapshot rejects empty piBySkill / componentJointWeights claiming exact 999 states
+    expect(() => validateKstSnapshot({
+      ...snap,
+      approximationMode: "exact",
+      totalFeasibleStateCount: 999,
+      totalFeasibleStateCountExact: "999",
+      wByState: null,
+      componentJointWeights: [],
+      piBySkill: {},
+      outerFringeBySkill: {},
+      parentsSatisfiedBySkill: {},
+      skillCovariance: {},
+      prerequisitesBySkill: undefined,
+    })).toThrow(DiagnosticPlacementError);
+  });
+
+  it("[P1-3] skips component merge in recordResponse overrun preflight when observation does not merge KST components (assisted: true)", () => {
+    // Three independent 28-state chains: 28^2 = 784 <= 20_000, 28^3 = 21_952 > 20_000
+    const skills = [
+      ...makeChain("A", "c0", 27),
+      ...makeChain("B", "c1", 27),
+      ...makeChain("C", "cFinal", 27),
+    ];
+    const pAB: DiagnosticProbeItem = { itemId: "p-ab", familyId: "fam-ab", chapterId: "c0", requiredSkillIds: ["A_1", "B_1"], slip: 0.02, guess: 0.02, estimatedSeconds: 1 };
+    const singles: DiagnosticProbeItem[] = Array.from({ length: 6 }, (_, i) => ({
+      itemId: `p-s-${i}`,
+      familyId: `fam-s-${i}`,
+      chapterId: `c${i + 1}`,
+      requiredSkillIds: [`A_${i + 2}`],
+      slip: 0.15,
+      guess: 0.15,
+      estimatedSeconds: 1,
+    }));
+    const pBC: DiagnosticProbeItem = { itemId: "p-bc", familyId: "fam-bc", chapterId: "cFinal", requiredSkillIds: ["B_2", "C_2"], slip: 0.15, guess: 0.15, estimatedSeconds: 1 };
+    const pFallbackSingle: DiagnosticProbeItem = { itemId: "p-c-fallback", familyId: "fam-cf", chapterId: "cFinal", requiredSkillIds: ["C_0"], slip: 0.15, guess: 0.15, estimatedSeconds: 3 };
+    const chapterQuotas: Record<string, number> = { c0: 1, c1: 1, c2: 1, c3: 1, c4: 1, c5: 1, c6: 1, cFinal: 1 };
+
+    const makeSess = () => new DiagnosticPlacementSession({
+      skills,
+      candidatePool: [pAB, ...singles, pBC, pFallbackSingle],
+      config: { minItems: 8, maxItems: 8, totalBudgetSeconds: 10, chapterQuotas },
+    });
+
+    // 1) Assisted 2s overrun on AB does NOT merge A+B, so BC (1s) finishes in 2 + 6 + 1 = 9s <= 10s
+    const assistedSess = makeSess();
+    const sel = assistedSess.selectNextProbe();
+    expect(sel.status).toBe("selected");
+    expect(sel.probe?.itemId).toBe("p-ab");
+    const rec = assistedSess.recordResponse({ observationId: "obs-ab-assisted", itemId: "p-ab", correct: true, elapsedSeconds: 2, assisted: true });
+    expect(rec.applied).toBe(false);
+    expect(rec.remainingBudgetSeconds).toBe(8);
+    expect(assistedSess.stateSpace.components).toHaveLength(3);
+    for (let step = 1; step < 8; step++) {
+      const next = assistedSess.selectNextProbe();
+      expect(next.status).toBe("selected");
+      assistedSess.recordResponse({ observationId: `obs-r8-step-${step}`, itemId: next.probe!.itemId, correct: true });
+    }
+    expect(assistedSess.getSessionSummary().administeredCount).toBe(8);
+
+    // 2) Unassisted 2s overrun on AB merges A+B, blocking BC and leaving only 3s fallback (2 + 6 + 3 = 11s > 10s) -> INFEASIBLE
+    const unassistedSess = makeSess();
+    expect(unassistedSess.selectNextProbe().probe?.itemId).toBe("p-ab");
+    try {
+      unassistedSess.recordResponse({ observationId: "obs-ab-unassisted", itemId: "p-ab", correct: true, elapsedSeconds: 2 });
+      expect.unreachable("should throw INFEASIBLE when unassisted AB merge + 2s overrun makes completion > 10s");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("INFEASIBLE");
+    }
+    expect(unassistedSess.getSessionSummary().remainingBudgetSeconds).toBe(10);
+    expect(unassistedSess.getSessionSummary().administeredCount).toBe(0);
+  });
+
+  it("[P2-1] propagates mandatory MRV chapters AC & BD before 22^3 multi-choice branches so AB cannot exhaust feasible single fallback", () => {
+    // 4 chains of 15 skills => 16 states each (16^3 = 4096 <= 20_000, 16^4 = 65_536 > 20_000)
+    // Plus 6 independent 2-state chains E..J so cM1..cM3 carry 22 distinct non-colliding pairs with shared ZERO-cap families
+    const skills: DiagnosticSkillNode[] = [
+      ...makeChain("A", "cOpt", 15),
+      ...makeChain("B", "cAC", 15),
+      ...makeChain("C", "cBD", 15),
+      ...makeChain("D", "cS1", 15),
+      { skillId: "E", chapterId: "cM1" },
+      { skillId: "F", chapterId: "cM2" },
+      { skillId: "G", chapterId: "cM3" },
+      { skillId: "H", chapterId: "cS2" },
+      { skillId: "DEAD", chapterId: "cZero" },
+    ];
+
+    const pool: DiagnosticProbeItem[] = [
+      // cOpt has cheap higher-MI AB (blocked cumulatively by mandatory AC+BD!) and slightly costlier single A
+      { itemId: "opt-ab", familyId: "fam-opt-ab", chapterId: "cOpt", requiredSkillIds: ["A_1", "B_1"], slip: 0.02, guess: 0.02, estimatedSeconds: 1 },
+      { itemId: "opt-a-single", familyId: "fam-opt-a", chapterId: "cOpt", requiredSkillIds: ["A_2"], slip: 0.15, guess: 0.15, estimatedSeconds: 3 },
+      // Mandatory AC and BD chapters (sole probe each -> MRV = 1)
+      { itemId: "mand-ac", familyId: "fam-ac", chapterId: "cAC", requiredSkillIds: ["A_3", "C_3"], slip: 0.08, guess: 0.08, estimatedSeconds: 10 },
+      { itemId: "mand-bd", familyId: "fam-bd", chapterId: "cBD", requiredSkillIds: ["B_3", "D_3"], slip: 0.08, guess: 0.08, estimatedSeconds: 10 },
+      // Two single-only chapters
+      { itemId: "s1", familyId: "fam-s1", chapterId: "cS1", requiredSkillIds: ["D_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 2 },
+      { itemId: "s2", familyId: "fam-s2", chapterId: "cS2", requiredSkillIds: ["H"], slip: 0.1, guess: 0.1, estimatedSeconds: 2 },
+    ];
+
+    // 3 chapters (cM1, cM2, cM3), each with 22 distinct merge probes sharing families across active chapters
+    // so non-conflicting dedup cannot collapse them (each appears 3 times with headroom > 0).
+    const mergePairs: Array<[string, string]> = [
+      ["A_4", "E"],
+      ["C_4", "E"],
+      ["A_5", "F"],
+      ["C_5", "F"],
+      ["B_4", "G"],
+      ["D_4", "G"],
+      ["B_5", "H"],
+      ["D_5", "H"],
+    ];
+    for (const ch of ["cM1", "cM2", "cM3"] as const) {
+      for (let i = 0; i < 22; i++) {
+        const fam = `fam-m-shared-${i}`;
+        const pair = mergePairs[i % mergePairs.length]!;
+        pool.push({
+          itemId: `${ch}-m-${i}`,
+          familyId: fam,
+          chapterId: ch,
+          requiredSkillIds: pair,
+          slip: 0.1,
+          guess: 0.1,
+          estimatedSeconds: 2 + (i % 3),
+        });
+      }
+    }
+
+    const session = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: {
+        minItems: 8,
+        maxItems: 8,
+        totalBudgetSeconds: 60,
+        chapterQuotas: { cOpt: 1, cAC: 1, cBD: 1, cM1: 1, cM2: 1, cM3: 1, cS1: 1, cS2: 1 },
+      },
+    });
+
+    const chosen: string[] = [];
+    for (let step = 0; step < 8; step++) {
+      const sel = session.selectNextProbe();
+      expect(sel.status).toBe("selected");
+      chosen.push(sel.probe!.itemId);
+      session.recordResponse({ observationId: `mrv-obs-${step}`, itemId: sel.probe!.itemId, correct: true });
+    }
+    expect(chosen).not.toContain("opt-ab");
+    expect(chosen).toContain("opt-a-single");
+    expect(chosen).toContain("mand-ac");
+    expect(chosen).toContain("mand-bd");
     expect(session.getSessionSummary().administeredCount).toBe(8);
   });
 });
