@@ -32,7 +32,7 @@ function stub(ancestor: "none" | "active" | "expired" | "revoked" | "superseded"
 describe("admitTaskCandidate", () => {
   it("keeps ordinary candidates on the non-recursive path", async () => {
     const { tx, queries } = stub("none");
-    await expect(admitTaskCandidate(tx, scope, candidateId)).resolves.toBeUndefined();
+    await expect(admitTaskCandidate(tx, scope, candidateId)).resolves.toBeNull();
     expect(queries.some(q => q.includes("WITH RECURSIVE"))).toBe(false);
   });
 
@@ -47,6 +47,6 @@ describe("admitTaskCandidate", () => {
 
   it("admits a candidate with usable memory ancestry", async () => {
     const { tx } = stub("active");
-    await expect(admitTaskCandidate(tx, scope, candidateId)).resolves.toBeUndefined();
+    await expect(admitTaskCandidate(tx, scope, candidateId)).resolves.toBe(turnId);
   });
 });

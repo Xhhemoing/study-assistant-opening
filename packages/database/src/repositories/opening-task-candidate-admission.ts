@@ -6,7 +6,7 @@ import { includedTurn } from "./opening-backup-record-predicates";
 import { readTurnsWithActiveMemoryDependencies, turnHasMemoryDependencies, turnPinnedSourceRefs } from "./opening-context-provenance";
 
 /** Share locks admit parallel accepts but serialize against owner/privacy deletion. */
-export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope, id: string): Promise<void> {
+export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope, id: string): Promise<string | null> {
   const owners = await tx`
     SELECT id FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
     FOR SHARE`;
@@ -61,10 +61,18 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
         )
       ) AND ${includedTurn(tx, scope.workspaceId, scope.ownerUserId, "t")}`;
   if (!admitted.length) throw new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
-  if (candidate.has_memory_dependencies) {
-    const active = await readTurnsWithActiveMemoryDependencies(tx, scope.workspaceId, [candidate.source_turn_id]);
-    if (!active.has(candidate.source_turn_id)) {
-      throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
-    }
+  const dependencyTurnId = candidate.has_memory_dependencies ? candidate.source_turn_id : null;
+  await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependencyTurnId);
+  return dependencyTurnId;
+}
+
+/** Read-only so callers can repeat admission after locking the candidate. */
+export async function assertTaskCandidateMemoryDependencies(
+  tx: TransactionSql, workspaceId: string, dependencyTurnId: string | null,
+): Promise<void> {
+  if (dependencyTurnId === null) return;
+  const active = await readTurnsWithActiveMemoryDependencies(tx, workspaceId, [dependencyTurnId]);
+  if (!active.has(dependencyTurnId)) {
+    throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
   }
 }
