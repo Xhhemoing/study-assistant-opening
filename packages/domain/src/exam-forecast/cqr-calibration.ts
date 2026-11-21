@@ -260,24 +260,51 @@ function observedPassesJointTarget(
   return 0;
 }
 
+function validateSimulationForBlueprint(simulation: PaperSimulationSummary, blueprint: ExamBlueprintV1): number {
+  if (simulation.blueprintId !== blueprint.blueprintId) {
+    throw new RangeError(
+      `Simulation blueprint "${simulation.blueprintId}" does not match expected blueprint "${blueprint.blueprintId}"`,
+    );
+  }
+  const n = simulation.timedScores.length;
+  if (n === 0 || simulation.drawSectionScores.length !== n) {
+    throw new RangeError("simulation must contain non-empty matching draws");
+  }
+  for (let i = 0; i < n; i++) {
+    const overall = simulation.timedScores[i];
+    if (overall === undefined || !Number.isFinite(overall)) {
+      throw new RangeError("simulation.timedScores must contain finite numbers");
+    }
+    const secMap = simulation.drawSectionScores[i];
+    if (!secMap || typeof secMap !== "object") {
+      throw new RangeError("simulation.drawSectionScores entries must be objects");
+    }
+    for (const section of blueprint.sections) {
+      if (!Object.hasOwn(secMap, section.sectionId)) {
+        throw new RangeError(`Simulation draw ${i} is missing section score "${section.sectionId}"`);
+      }
+      const secScore = secMap[section.sectionId];
+      if (secScore === undefined || !Number.isFinite(secScore)) {
+        throw new RangeError(`Simulation draw ${i} has non-finite score for section "${section.sectionId}"`);
+      }
+    }
+  }
+  return n;
+}
+
 function rawJointPassFromSimulation(
   simulation: PaperSimulationSummary,
   blueprint: ExamBlueprintV1,
   target: JointPassTarget,
 ): number {
   assertFiniteJointPassTarget(target);
-  const n = simulation.timedScores.length;
-  if (n === 0 || simulation.drawSectionScores.length !== n) {
-    throw new RangeError("simulation must contain non-empty matching draws");
-  }
+  const n = validateSimulationForBlueprint(simulation, blueprint);
   let passed = 0;
   for (let i = 0; i < n; i++) {
     const overall = simulation.timedScores[i]!;
     if (overall < target.targetOverall) continue;
     const secMap = simulation.drawSectionScores[i]!;
-    const allSectionsPass = blueprint.sections.every(
-      (section) => (Object.hasOwn(secMap, section.sectionId) ? secMap[section.sectionId]! : 0) >= target.targetMinSection,
-    );
+    const allSectionsPass = blueprint.sections.every((section) => secMap[section.sectionId]! >= target.targetMinSection);
     if (allSectionsPass) passed += 1;
   }
   return passed / n;
@@ -329,7 +356,9 @@ export function calibrateJointPassTargets(input: {
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
   readonly targetKind?: ForecastTargetKind;
 }): JointPassProbabilityEstimate[] {
+  validateSimulationForBlueprint(input.simulation, input.blueprint);
   input.targets.forEach(assertFiniteJointPassTarget);
+  const cutoffMs = input.examAtMs ?? input.simulation.examAtMs;
   const minSamples = Math.max(1, Math.round(input.minCalibrationSamples ?? 4));
   const excludedLearner = input.excludeLearnerId?.trim();
   const excludedFamilies = input.excludePaperFamilyIds
@@ -347,8 +376,7 @@ export function calibrateJointPassTargets(input: {
     for (const rec of input.calibrationRecords) {
       if (rec.blueprintId !== input.blueprint.blueprintId) continue;
       if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) continue;
-      if (!Number.isFinite(rec.recordedAtMs)) continue;
-      if (input.examAtMs !== undefined && (!Number.isFinite(input.examAtMs) || rec.recordedAtMs > input.examAtMs)) {
+      if (!Number.isFinite(rec.recordedAtMs) || !Number.isFinite(cutoffMs) || rec.recordedAtMs > cutoffMs) {
         continue;
       }
       if (rec.targetKind !== effectiveTargetKind || rec.evidenceKind !== requiredEvidenceKind) continue;
@@ -408,6 +436,84 @@ export function calibrateJointPassTargets(input: {
     restored[item.idx] = { ...item.est, calibratedProbability: item.calibrated };
   }
   return restored;
+}
+
+export type ConformalBandIntervalResult =
+  | {
+      readonly status: "ready";
+      readonly n: number;
+      readonly k: number;
+      readonly conformalMargin: number;
+      readonly low: number;
+      readonly high: number;
+      readonly width: number;
+      readonly pointEstimate: number;
+      readonly validCalibrations: readonly WholePaperCalibrationRecord[];
+    }
+  | {
+      readonly status: "insufficient_calibration";
+      readonly n: number;
+      readonly k: number;
+      readonly validCalibrations: readonly WholePaperCalibrationRecord[];
+    };
+
+function computeIntervalFromCalibrations(
+  simulation: PaperSimulationSummary,
+  blueprint: ExamBlueprintV1,
+  validCalibrations: readonly WholePaperCalibrationRecord[],
+): ConformalBandIntervalResult {
+  const n = validCalibrations.length;
+  const k = Math.ceil(TARGET_COVERAGE * (n + 1));
+  if (n < 4 || k > n) {
+    return { status: "insufficient_calibration", n, k, validCalibrations };
+  }
+  const residuals = validCalibrations.map(cqrWorstCaseNonconformity).sort((a, b) => a - b);
+  const rK = residuals[k - 1] ?? 0;
+
+  const rawLow = simulation.q10 - rK;
+  const rawHigh = simulation.q90 + rK;
+  const safeLow = rawLow <= rawHigh ? rawLow : (rawLow + rawHigh) / 2;
+  const safeHigh = rawLow <= rawHigh ? rawHigh : (rawLow + rawHigh) / 2;
+  const low = snapToScoreGrid(safeLow, blueprint.scoreRange, blueprint.scoreStep, "floor");
+  const high = snapToScoreGrid(safeHigh, blueprint.scoreRange, blueprint.scoreStep, "ceil");
+  const rawWidth = Math.max(0, high - low);
+  const width = rawWidth === 0 ? 0 : Number(rawWidth.toPrecision(12));
+  const pointEstimate = snapToScoreGrid(
+    simulation.timedExpectedScore,
+    blueprint.scoreRange,
+    blueprint.scoreStep,
+    "nearest",
+  );
+  return { status: "ready", n, k, conformalMargin: rK, low, high, width, pointEstimate, validCalibrations };
+}
+
+export function computeConformalBandInterval(input: {
+  readonly simulation: PaperSimulationSummary;
+  readonly blueprint: ExamBlueprintV1;
+  readonly calibrationRecords: readonly WholePaperCalibrationRecord[];
+  readonly targetKind?: ForecastTargetKind;
+  readonly examAtMs?: number;
+  readonly excludeLearnerId?: string;
+  readonly excludePaperFamilyIds?: ReadonlySet<string>;
+}): ConformalBandIntervalResult {
+  const missingFields = validateExamBlueprint(input.blueprint);
+  if (missingFields.length > 0) {
+    throw new RangeError(`Invalid exam blueprint: ${missingFields.join(", ")}`);
+  }
+  validateSimulationForBlueprint(input.simulation, input.blueprint);
+  const cutoffMs = input.examAtMs ?? input.simulation.examAtMs;
+  const targetKind: ForecastTargetKind = input.targetKind ?? "same_blueprint_mock";
+  const validCalibrations = filterIndependentCalibrationRecords({
+    records: input.calibrationRecords,
+    blueprintId: input.blueprint.blueprintId,
+    targetKind,
+    scoreRange: input.blueprint.scoreRange,
+    sectionRanges: sectionRangesMap(input.blueprint),
+    examAtMs: cutoffMs,
+    excludeLearnerId: input.excludeLearnerId,
+    excludePaperFamilyIds: input.excludePaperFamilyIds,
+  });
+  return computeIntervalFromCalibrations(input.simulation, input.blueprint, validCalibrations);
 }
 
 export function evaluateExamForecast(input: {
@@ -547,16 +653,11 @@ export function evaluateExamForecast(input: {
     seed: input.seed,
   });
 
-  const residuals = validCalibrations.map(cqrWorstCaseNonconformity).sort((a, b) => a - b);
-  const rK = residuals[k - 1] ?? 0;
-
-  const rawLow = simulation.q10 - rK;
-  const rawHigh = simulation.q90 + rK;
-  const safeLow = rawLow <= rawHigh ? rawLow : (rawLow + rawHigh) / 2;
-  const safeHigh = rawLow <= rawHigh ? rawHigh : (rawLow + rawHigh) / 2;
-  const low = snapToScoreGrid(safeLow, input.blueprint.scoreRange, input.blueprint.scoreStep, "floor");
-  const high = snapToScoreGrid(safeHigh, input.blueprint.scoreRange, input.blueprint.scoreStep, "ceil");
-  const width = Math.round((high - low) * 1_000_000) / 1_000_000;
+  const interval = computeIntervalFromCalibrations(simulation, input.blueprint, validCalibrations);
+  if (interval.status !== "ready") {
+    throw new RangeError("Unexpected insufficient calibration after pre-check");
+  }
+  const { k: effectiveK, conformalMargin: rK, low, high, width, pointEstimate } = interval;
 
   if (width > maxInformativeWidth) {
     const allSectionIds = input.blueprint.sections.map((s) => s.sectionId);
@@ -580,13 +681,6 @@ export function evaluateExamForecast(input: {
       officialExamCalibrated: false,
     };
   }
-
-  const pointEstimate = snapToScoreGrid(
-    simulation.timedExpectedScore,
-    input.blueprint.scoreRange,
-    input.blueprint.scoreStep,
-    "nearest",
-  );
 
   const combinedTargets: JointPassTarget[] = [
     ...(input.jointPassLadder ?? []),
@@ -637,6 +731,6 @@ export function evaluateExamForecast(input: {
     },
     ...(jointPassTarget ? { jointPassTarget } : {}),
     ...(jointPassLadder ? { jointPassLadder } : {}),
-    calibrationReceipt: { n, k, nonconformityRadius: rK, maxInformativeWidth },
+    calibrationReceipt: { n, k: effectiveK, nonconformityRadius: rK, maxInformativeWidth },
   };
 }

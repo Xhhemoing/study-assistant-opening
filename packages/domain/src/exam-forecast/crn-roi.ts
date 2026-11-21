@@ -9,6 +9,7 @@ import {
   sectionRangesMap,
   simulateExamPaper,
   validateNumDraws,
+  validatePrecomputedDraws,
   type PaperRandomDraw,
   type SkillDeltaOverride,
 } from "./simulator";
@@ -34,8 +35,17 @@ function composeActionSetEffects(actions: readonly CandidateStudyAction[]): {
     const trimmedId = action.actionId.trim();
     if (!trimmedId || seenActionIds.has(trimmedId)) continue;
     seenActionIds.add(trimmedId);
+    if (action.expectedSpeedShift !== undefined && !Number.isFinite(action.expectedSpeedShift)) {
+      throw new RangeError("action.expectedSpeedShift must be finite when provided");
+    }
     speedShift += action.expectedSpeedShift ?? 0;
     for (const [skillId, delta] of Object.entries(action.skillEffects ?? {})) {
+      if (delta.abilityDelta !== undefined && !Number.isFinite(delta.abilityDelta)) {
+        throw new RangeError("action.skillEffects.abilityDelta must be finite when provided");
+      }
+      if (delta.logStabilityDelta !== undefined && !Number.isFinite(delta.logStabilityDelta)) {
+        throw new RangeError("action.skillEffects.logStabilityDelta must be finite when provided");
+      }
       const current = skillOverrides.get(skillId) ?? { abilityDelta: 0, logStabilityDelta: 0 };
       current.abilityDelta += delta.abilityDelta ?? 0;
       current.logStabilityDelta += delta.logStabilityDelta ?? 0;
@@ -43,6 +53,10 @@ function composeActionSetEffects(actions: readonly CandidateStudyAction[]): {
     }
   }
   return { skillOverrides, speedShift };
+}
+
+function compareCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export type EvaluateCrnActionRoiInput = {
@@ -79,6 +93,9 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
     throw new RangeError("candidateAction.durationHours must be positive and finite");
   }
   const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, DEFAULT_EXAM_SIMULATION_DRAWS);
+  if (input.precomputedDraws !== undefined) {
+    validatePrecomputedDraws(input.blueprint, input.precomputedDraws);
+  }
   const draws =
     input.precomputedDraws ?? generatePaperRandomDraws(input.blueprint, numDraws, input.crnSeed);
 
@@ -281,7 +298,7 @@ export function buildUnifiedDecisionSnapshot(input: {
           precomputedDraws: draws,
         }),
       )
-      .sort((a, b) => b.roiBandPerHour - a.roiBandPerHour || a.actionId.localeCompare(b.actionId));
+      .sort((a, b) => b.roiBandPerHour - a.roiBandPerHour || compareCodeUnits(a.actionId, b.actionId));
 
     if (forecast.status === "calibrated_forecast_ready") {
       let remainingStudyMinutes = executableMinutes - allocatedRecoveryMinutes;

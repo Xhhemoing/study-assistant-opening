@@ -53,24 +53,62 @@ export function roundHalfUp05(score: number): number {
   return Math.floor(clamped * 2 + 0.5) / 2;
 }
 
+export const MAX_SECTION_ITEMS = 500;
+export const MAX_BLUEPRINT_ITEMS = 2_000;
+export const MAX_ITEM_POINTS = 1_000;
+export const MAX_SECTION_TOTAL_POINTS = 2_000;
+
+function gridPointAt(minScore: number, step: number, index: number): number {
+  const raw = minScore + index * step;
+  if (raw === 0) return 0;
+  const rounded = Number(raw.toPrecision(12));
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
 export function snapToScoreGrid(
   value: number,
   range: readonly [number, number],
   step: number,
   direction: "nearest" | "floor" | "ceil",
 ): number {
-  const safeStep = Number.isFinite(step) && step > 0 ? step : 0.5;
   const [minScore, maxScore] = range;
-  if (!Number.isFinite(value)) return minScore;
-  const units = value / safeStep;
-  const snappedUnits =
+  if (range.length !== 2 || !Number.isFinite(minScore) || !Number.isFinite(maxScore) || minScore > maxScore) {
+    throw new RangeError("Score range must satisfy finite min <= max");
+  }
+  if (!Number.isFinite(step) || step <= 0) {
+    throw new RangeError("Score step must be finite and positive");
+  }
+  let maxK = Math.floor((maxScore - minScore) / step + 1e-12);
+  while (maxK >= 0 && gridPointAt(minScore, step, maxK) > maxScore) {
+    maxK -= 1;
+  }
+  if (maxK < 0) {
+    throw new RangeError("Score range contains no valid grid point");
+  }
+  const minGrid = gridPointAt(minScore, step, 0) < minScore ? minScore : gridPointAt(minScore, step, 0);
+  if (minGrid > maxScore) {
+    throw new RangeError("Score range contains no valid grid point");
+  }
+  if (!Number.isFinite(value)) return minGrid;
+
+  const relUnits = (value - minScore) / step;
+  const rawK =
     direction === "floor"
-      ? Math.floor(units + 1e-12)
+      ? Math.floor(relUnits + 1e-12)
       : direction === "ceil"
-        ? Math.ceil(units - 1e-12)
-        : Math.floor(units + 0.5);
-  const clamped = Math.min(maxScore, Math.max(minScore, snappedUnits * safeStep));
-  return Math.round(clamped * 1_000_000) / 1_000_000;
+        ? Math.ceil(relUnits - 1e-12)
+        : Math.floor(relUnits + 0.5);
+  let k = Math.min(maxK, Math.max(0, rawK));
+  let snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
+  while (snapped > maxScore && k > 0) {
+    k -= 1;
+    snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
+  }
+  while (snapped < minScore && k < maxK) {
+    k += 1;
+    snapped = gridPointAt(minScore, step, k);
+  }
+  return snapped;
 }
 
 export function computeWritingBand(
@@ -295,29 +333,35 @@ function hasCompleteRawTable(section: ExamSectionBlueprint): boolean {
   const table = section.rawToBandTable;
   const items = section.items;
   if (!table || table.length === 0 || !items || items.length === 0) return false;
+  if (items.length > MAX_SECTION_ITEMS) return false;
   if (!isValidScoreRange(section.scoreRange)) return false;
   const [minScore, maxScore] = section.scoreRange;
   let maxRaw = 0;
   for (const item of items) {
     const pts = item.points ?? 1;
-    if (!Number.isSafeInteger(pts) || pts < 1 || pts > 10_000) return false;
+    if (!Number.isSafeInteger(pts) || pts < 1 || pts > MAX_ITEM_POINTS) return false;
     maxRaw += pts;
-    if (!Number.isSafeInteger(maxRaw) || maxRaw > 100_000) return false;
+    if (!Number.isSafeInteger(maxRaw) || maxRaw > MAX_SECTION_TOTAL_POINTS) return false;
   }
-  const normalizedRows: Array<{ readonly rawMin: number; readonly rawMax: number }> = [];
+  const normalizedRows: Array<{ readonly rawMin: number; readonly rawMax: number; readonly score: number }> = [];
   for (const row of table) {
     if (!Number.isSafeInteger(row.rawMin) || !Number.isSafeInteger(row.rawMax) || row.rawMin > row.rawMax) {
       return false;
     }
     if (!Number.isFinite(row.score) || row.score < minScore || row.score > maxScore) return false;
-    normalizedRows.push({ rawMin: row.rawMin, rawMax: row.rawMax });
+    normalizedRows.push({ rawMin: row.rawMin, rawMax: row.rawMax, score: row.score });
   }
   normalizedRows.sort((a, b) => a.rawMin - b.rawMin || a.rawMax - b.rawMax);
   if (normalizedRows[0]!.rawMin !== 0) return false;
   for (let i = 1; i < normalizedRows.length; i++) {
     if (normalizedRows[i]!.rawMin !== normalizedRows[i - 1]!.rawMax + 1) return false;
+    if (normalizedRows[i]!.score < normalizedRows[i - 1]!.score) return false;
   }
   return normalizedRows[normalizedRows.length - 1]!.rawMax === maxRaw;
+}
+
+function overflowSafeMidpoint(a: number, b: number): number {
+  return Math.sign(a) === Math.sign(b) ? a + 0.5 * (b - a) : 0.5 * a + 0.5 * b;
 }
 
 /** Cholesky factor L such that L * L^T ≈ matrix. Rejects asymmetric or non-PSD matrices. */
@@ -337,7 +381,8 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
     for (let j = 0; j < i; j++) {
       const a = matrix[i]![j]!;
       const b = matrix[j]![i]!;
-      const symTol = 1e-10 * Math.sqrt(Math.max(0, matrix[i]![i]!)) * Math.sqrt(Math.max(0, matrix[j]![j]!));
+      const symTol =
+        (1e-10 * Math.sqrt(Math.max(0, matrix[i]![i]!))) * Math.sqrt(Math.max(0, matrix[j]![j]!));
       if (!Number.isFinite(symTol) || Math.abs(a - b) > symTol) {
         throw new RangeError("thetaCovariance must be finite and symmetric");
       }
@@ -347,7 +392,7 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
   for (let i = 0; i < n; i++) {
     const diagEntry = matrix[i]![i]!;
     for (let j = 0; j <= i; j++) {
-      const symEntry = i === j ? diagEntry : 0.5 * (matrix[i]![j]! + matrix[j]![i]!);
+      const symEntry = i === j ? diagEntry : overflowSafeMidpoint(matrix[i]![j]!, matrix[j]![i]!);
       let sum = symEntry;
       for (let k = 0; k < j; k++) sum -= lower[i]![k]! * lower[j]![k]!;
       if (i === j) {
@@ -362,7 +407,8 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
       } else {
         const diag = lower[j]![j]!;
         if (diag === 0) {
-          const localOffDiagTol = 1e-10 * Math.sqrt(Math.max(0, diagEntry)) * Math.sqrt(Math.max(0, matrix[j]![j]!));
+          const localOffDiagTol =
+            (1e-10 * Math.sqrt(Math.max(0, diagEntry))) * Math.sqrt(Math.max(0, matrix[j]![j]!));
           if (!Number.isFinite(localOffDiagTol) || Math.abs(sum) > localOffDiagTol) {
             throw new RangeError("thetaCovariance must be positive semidefinite");
           }
@@ -463,6 +509,7 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
   }
   const seenSectionIds = new Set<string>();
   const skillSet = new Set(blueprint.skillIds);
+  let totalBlueprintItems = 0;
   for (const section of blueprint.sections) {
     if (seenSectionIds.has(section.sectionId)) {
       missing.push(`sections.${section.sectionId}.duplicate`);
@@ -481,6 +528,13 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
       if (!section.items || section.items.length === 0) {
         missing.push(`sections.${section.sectionId}.items`);
       } else {
+        if (section.items.length > MAX_SECTION_ITEMS) {
+          missing.push(`sections.${section.sectionId}.items.count`);
+        }
+        totalBlueprintItems += section.items.length;
+        if (totalBlueprintItems > MAX_BLUEPRINT_ITEMS) {
+          missing.push(`sections.${section.sectionId}.items.totalCount`);
+        }
         let totalRawPoints = 0;
         for (const item of section.items) {
           if (item.skillIds.length === 0 || item.skillIds.some((id) => !skillSet.has(id))) {
@@ -492,12 +546,12 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
             break;
           }
           const pts = item.points ?? 1;
-          if (!Number.isSafeInteger(pts) || pts < 1 || pts > 10_000) {
+          if (!Number.isSafeInteger(pts) || pts < 1 || pts > MAX_ITEM_POINTS) {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.points`);
             break;
           }
           totalRawPoints += pts;
-          if (!Number.isSafeInteger(totalRawPoints) || totalRawPoints > 100_000) {
+          if (!Number.isSafeInteger(totalRawPoints) || totalRawPoints > MAX_SECTION_TOTAL_POINTS) {
             missing.push(`sections.${section.sectionId}.items.totalPoints`);
             break;
           }
@@ -531,7 +585,7 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
       }
     }
   }
-  return missing;
+  return [...new Set(missing)];
 }
 
 /** Factory for shared full-paper 180-min / 150-pt blueprints (e.g. Math or CS 408). */

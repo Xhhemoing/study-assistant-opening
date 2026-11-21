@@ -223,6 +223,97 @@ export type PaperRandomDraw = {
   readonly rubricTimeNormals: readonly number[];
 };
 
+export const MAX_SIMULATION_DP_CELLS = 5_000_000;
+export const MAX_SIMULATION_ITEM_EVALS = 25_000_000;
+
+export function assertSimulationWorkloadWithinBounds(
+  blueprint: ExamBlueprintV1,
+  numDraws: number,
+  deterministicItemSections?: ReadonlySet<string>,
+): void {
+  const validDraws = validateNumDraws(numDraws);
+  let totalItems = 0;
+  let totalDpCells = 0;
+  for (const section of blueprint.sections) {
+    if (section.scoringKind !== "item_raw_table" || !section.items) continue;
+    const itemCount = section.items.length;
+    totalItems += itemCount;
+    let secPoints = 0;
+    for (const item of section.items) {
+      secPoints += item.points ?? 1;
+    }
+    const dpPerRun = itemCount * (secPoints + 1);
+    const runs = deterministicItemSections?.has(section.sectionId) ? 1 : validDraws;
+    totalDpCells += runs * dpPerRun;
+    if (totalDpCells > MAX_SIMULATION_DP_CELLS) {
+      throw new RangeError(`Simulation DP workload exceeds limit (${MAX_SIMULATION_DP_CELLS} cells)`);
+    }
+  }
+  if (validDraws * totalItems > MAX_SIMULATION_ITEM_EVALS) {
+    throw new RangeError(`Simulation item evaluation workload exceeds limit (${MAX_SIMULATION_ITEM_EVALS})`);
+  }
+}
+
+export function validatePrecomputedDraws(blueprint: ExamBlueprintV1, draws: readonly PaperRandomDraw[]): void {
+  const nSkills = blueprint.skillIds.length;
+  const totalItems = blueprint.sections.reduce((sum, s) => sum + (s.items?.length ?? 0), 0);
+  const totalParts = blueprint.sections.reduce((sum, s) => sum + s.parts.length, 0);
+  const consumedRubricParts = blueprint.sections
+    .filter((s) => s.scoringKind !== "item_raw_table")
+    .reduce((sum, s) => sum + s.parts.length, 0);
+
+  for (let d = 0; d < draws.length; d++) {
+    const draw = draws[d];
+    if (!draw || typeof draw !== "object") {
+      throw new RangeError(`precomputedDraws[${d}] must be an object`);
+    }
+    if (!Number.isFinite(draw.nuSpeed)) {
+      throw new RangeError(`precomputedDraws[${d}].nuSpeed must be finite`);
+    }
+    if (!Array.isArray(draw.zLatent) || draw.zLatent.length !== nSkills) {
+      throw new RangeError(`precomputedDraws[${d}].zLatent length must equal ${nSkills}`);
+    }
+    for (const z of draw.zLatent) {
+      if (typeof z !== "number" || !Number.isFinite(z)) {
+        throw new RangeError(`precomputedDraws[${d}].zLatent values must be finite numbers`);
+      }
+    }
+    if (!Array.isArray(draw.itemUniforms) || draw.itemUniforms.length !== totalItems) {
+      throw new RangeError(`precomputedDraws[${d}].itemUniforms length must equal ${totalItems}`);
+    }
+    for (const u of draw.itemUniforms) {
+      if (typeof u !== "number" || !Number.isFinite(u) || u < 0 || u >= 1) {
+        throw new RangeError(`precomputedDraws[${d}].itemUniforms values must be finite in [0, 1)`);
+      }
+    }
+    if (!Array.isArray(draw.itemTimeNormals) || draw.itemTimeNormals.length !== totalItems) {
+      throw new RangeError(`precomputedDraws[${d}].itemTimeNormals length must equal ${totalItems}`);
+    }
+    for (const t of draw.itemTimeNormals) {
+      if (typeof t !== "number" || !Number.isFinite(t)) {
+        throw new RangeError(`precomputedDraws[${d}].itemTimeNormals values must be finite numbers`);
+      }
+    }
+    const validRubricLen = (len: number): boolean => len === consumedRubricParts || len === totalParts;
+    if (!Array.isArray(draw.rubricScoreNormals) || !validRubricLen(draw.rubricScoreNormals.length)) {
+      throw new RangeError(`precomputedDraws[${d}].rubricScoreNormals length mismatch`);
+    }
+    for (const r of draw.rubricScoreNormals) {
+      if (typeof r !== "number" || !Number.isFinite(r)) {
+        throw new RangeError(`precomputedDraws[${d}].rubricScoreNormals values must be finite numbers`);
+      }
+    }
+    if (!Array.isArray(draw.rubricTimeNormals) || !validRubricLen(draw.rubricTimeNormals.length)) {
+      throw new RangeError(`precomputedDraws[${d}].rubricTimeNormals length mismatch`);
+    }
+    for (const rt of draw.rubricTimeNormals) {
+      if (typeof rt !== "number" || !Number.isFinite(rt)) {
+        throw new RangeError(`precomputedDraws[${d}].rubricTimeNormals values must be finite numbers`);
+      }
+    }
+  }
+}
+
 export function generatePaperRandomDraws(
   blueprint: ExamBlueprintV1,
   numDraws: number,
@@ -233,6 +324,9 @@ export function generatePaperRandomDraws(
   const nSkills = blueprint.skillIds.length;
   const totalItems = blueprint.sections.reduce((sum, s) => sum + (s.items?.length ?? 0), 0);
   const totalParts = blueprint.sections.reduce((sum, s) => sum + s.parts.length, 0);
+  if (validDraws * totalItems > MAX_SIMULATION_ITEM_EVALS) {
+    throw new RangeError(`Draw generation workload exceeds item limit (${MAX_SIMULATION_ITEM_EVALS})`);
+  }
   const rng = createSeededRng(seed);
   const draws: PaperRandomDraw[] = [];
   for (let d = 0; d < validDraws; d++) {
@@ -273,6 +367,9 @@ export function convolveLordWingersky(
     return pts;
   });
   const maxPoints = itemPoints.reduce((a, b) => a + b, 0);
+  if (probabilities.length * (maxPoints + 1) > MAX_SIMULATION_DP_CELLS) {
+    throw new RangeError(`Lord-Wingersky DP exceeds max cell budget (${MAX_SIMULATION_DP_CELLS})`);
+  }
   const dp = new Array<number>(maxPoints + 1).fill(0);
   dp[0] = 1;
   let runningMax = 0;
@@ -446,6 +543,12 @@ function buildDecayedSkillParams(
   for (const skillId of blueprint.skillIds) {
     const belief = readLearnerBelief(beliefs, skillId, trimmedLearnerId);
     const override = readSkillOverride(skillOverrides, skillId);
+    if (override?.abilityDelta !== undefined && !Number.isFinite(override.abilityDelta)) {
+      throw new RangeError(`Non-finite abilityDelta override for skill "${skillId}"`);
+    }
+    if (override?.logStabilityDelta !== undefined && !Number.isFinite(override.logStabilityDelta)) {
+      throw new RangeError(`Non-finite logStabilityDelta override for skill "${skillId}"`);
+    }
     if (!belief) {
       rd.push(0.5);
       mu.push(override?.abilityDelta ?? 0);
@@ -478,6 +581,28 @@ function collapseRawDistributionToScoreMap(
   return map;
 }
 
+type PrecomputedUntimedSection = {
+  readonly untimedDist: ReadonlyMap<number, number>;
+  readonly untimedMean: number;
+};
+
+function computeStaticUntimedSection(
+  section: ExamSectionBlueprint,
+  staticMasteryBySkill: Readonly<Record<string, number>>,
+): PrecomputedUntimedSection {
+  const items = section.items ?? [];
+  const itemProbs: number[] = [];
+  const itemPoints: number[] = [];
+  for (const item of items) {
+    itemProbs.push(itemSuccessProbability(item, staticMasteryBySkill));
+    itemPoints.push(item.points ?? 1);
+  }
+  const untimedDist = collapseRawDistributionToScoreMap(convolveLordWingersky(itemProbs, itemPoints), section);
+  let untimedMean = 0;
+  for (const [score, prob] of untimedDist.entries()) untimedMean += score * prob;
+  return { untimedDist, untimedMean };
+}
+
 type DrawItemSectionInput = {
   readonly section: ExamSectionBlueprint;
   readonly mBySkill: Readonly<Record<string, number>>;
@@ -487,6 +612,7 @@ type DrawItemSectionInput = {
   readonly sectionLimitSec: number;
   readonly initialClockUsedSec: number;
   readonly captureCensored: boolean;
+  readonly precomputedUntimed?: PrecomputedUntimedSection;
 };
 
 type DrawItemSectionResult = {
@@ -512,15 +638,21 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
   let rawUntimed = 0;
   let anyCensored = false;
   let censoredCount = 0;
-  const itemProbs: number[] = [];
-  const itemPoints: number[] = [];
+  const itemProbs: number[] | null = input.precomputedUntimed ? null : [];
+  const itemPoints: number[] | null = input.precomputedUntimed ? null : [];
   const censoredItems: SimulatedItemOutcome[] = [];
   const partCensoredCounts = new Map<string, number>();
   const partTotalCounts = new Map<string, number>();
 
   for (const item of items) {
-    const u = input.draw.itemUniforms[itemCursor] ?? 0.5;
-    const eps = input.draw.itemTimeNormals[itemCursor] ?? 0;
+    const u = input.draw.itemUniforms[itemCursor];
+    const eps = input.draw.itemTimeNormals[itemCursor];
+    if (u === undefined || !Number.isFinite(u) || u < 0 || u >= 1) {
+      throw new RangeError(`Missing or out-of-range itemUniforms at index ${itemCursor}`);
+    }
+    if (eps === undefined || !Number.isFinite(eps)) {
+      throw new RangeError(`Missing or non-finite itemTimeNormals at index ${itemCursor}`);
+    }
     itemCursor += 1;
 
     const pSuccess = itemSuccessProbability(item, input.mBySkill);
@@ -528,8 +660,10 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
     if (!Number.isFinite(pts) || !Number.isInteger(pts) || pts < 0) {
       throw new RangeError("Item points must be finite non-negative integers");
     }
-    itemProbs.push(pSuccess);
-    itemPoints.push(pts);
+    if (itemProbs && itemPoints) {
+      itemProbs.push(pSuccess);
+      itemPoints.push(pts);
+    }
 
     const untimedCorrect = u < pSuccess;
     if (untimedCorrect) rawUntimed += pts;
@@ -564,9 +698,16 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
   const matchedUntimedScore = input.section.rawToBandTable
     ? rawScoreToBand(rawUntimed, input.section.rawToBandTable)
     : rawUntimed;
-  const untimedDist = collapseRawDistributionToScoreMap(convolveLordWingersky(itemProbs, itemPoints), input.section);
-  let untimedMean = 0;
-  for (const [score, prob] of untimedDist.entries()) untimedMean += score * prob;
+  let untimedDist: ReadonlyMap<number, number>;
+  let untimedMean: number;
+  if (input.precomputedUntimed) {
+    untimedDist = input.precomputedUntimed.untimedDist;
+    untimedMean = input.precomputedUntimed.untimedMean;
+  } else {
+    untimedDist = collapseRawDistributionToScoreMap(convolveLordWingersky(itemProbs!, itemPoints!), input.section);
+    untimedMean = 0;
+    for (const [score, prob] of untimedDist.entries()) untimedMean += score * prob;
+  }
 
   return {
     nextItemCursor: itemCursor,
@@ -636,8 +777,14 @@ function simulateRubricSectionDraw(input: {
   const speakingShift = input.section.sectionId === "speaking" ? input.rubricSummary.speakingFluencyShift : 0;
 
   for (const part of input.section.parts) {
-    const epsScore = input.draw.rubricScoreNormals[rubricCursor] ?? 0;
-    const epsTime = input.draw.rubricTimeNormals[rubricCursor] ?? 0;
+    const epsScore = input.draw.rubricScoreNormals[rubricCursor];
+    const epsTime = input.draw.rubricTimeNormals[rubricCursor];
+    if (epsScore === undefined || !Number.isFinite(epsScore)) {
+      throw new RangeError(`Missing or non-finite rubricScoreNormals at index ${rubricCursor}`);
+    }
+    if (epsTime === undefined || !Number.isFinite(epsTime)) {
+      throw new RangeError(`Missing or non-finite rubricTimeNormals at index ${rubricCursor}`);
+    }
     rubricCursor += 1;
     const partAnchor = input.rubricSummary.partAnchors.get(input.section.sectionId)?.get(part.partId) ?? sectionAnchor;
     partTotalCounts.set(part.partId, (partTotalCounts.get(part.partId) ?? 0) + 1);
@@ -795,7 +942,48 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   if (!trimmedLearnerId) {
     throw new RangeError("learnerId must be a non-empty string");
   }
+  const speedShift = input.speedShift ?? 0;
+  if (!Number.isFinite(speedShift)) {
+    throw new RangeError("speedShift must be finite");
+  }
   const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, DEFAULT_EXAM_SIMULATION_DRAWS);
+  if (input.precomputedDraws !== undefined) {
+    validatePrecomputedDraws(blueprint, input.precomputedDraws);
+  }
+  const skillParams = buildDecayedSkillParams(blueprint, beliefs, trimmedLearnerId, examAtMs, input.skillOverrides);
+  const skillIndexById = new Map<string, number>();
+  const isSkillDeterministic: boolean[] = [];
+  const staticMasteryBySkill: Record<string, number> = Object.create(null) as Record<string, number>;
+  for (let k = 0; k < blueprint.skillIds.length; k++) {
+    const sid = blueprint.skillIds[k]!;
+    skillIndexById.set(sid, k);
+    const covZero = input.precomputedDraws === undefined && (blueprint.thetaCovariance[k]?.[k] ?? 0) === 0;
+    const isDet = skillParams.sd[k]! === 0 || covZero;
+    isSkillDeterministic.push(isDet);
+    if (isDet) {
+      defineRecordEntry(staticMasteryBySkill, sid, clamp(skillParams.rd[k]! * sigmoid(skillParams.mu[k]!), 0, 1));
+    }
+  }
+  const deterministicItemSections = new Set<string>();
+  for (const section of blueprint.sections) {
+    if (section.scoringKind !== "item_raw_table" || !section.items) continue;
+    const allDet = section.items.every((item) =>
+      item.skillIds.every((id) => {
+        const idx = skillIndexById.get(id);
+        return idx === undefined || isSkillDeterministic[idx] === true;
+      }),
+    );
+    if (allDet) deterministicItemSections.add(section.sectionId);
+  }
+  assertSimulationWorkloadWithinBounds(blueprint, numDraws, deterministicItemSections);
+
+  const precomputedUntimedSections = new Map<string, PrecomputedUntimedSection>();
+  for (const section of blueprint.sections) {
+    if (deterministicItemSections.has(section.sectionId)) {
+      precomputedUntimedSections.set(section.sectionId, computeStaticUntimedSection(section, staticMasteryBySkill));
+    }
+  }
+
   const draws = input.precomputedDraws ?? generatePaperRandomDraws(blueprint, numDraws, input.seed ?? 20261121);
   const ranges = sectionRangesMap(blueprint);
   const partIds = sectionPartIdsMap(blueprint);
@@ -806,8 +994,6 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     sectionParts: partIds,
   });
   const rubricSummary = summarizeRubricAndTimingEvidence(admitted, ranges, partIds);
-  const skillParams = buildDecayedSkillParams(blueprint, beliefs, trimmedLearnerId, examAtMs, input.skillOverrides);
-  const speedShift = input.speedShift ?? 0;
 
   const timedScores: number[] = [];
   const untimedScores: number[] = [];
@@ -929,6 +1115,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           sectionLimitSec,
           initialClockUsedSec: blueprint.clockMode === "shared_full_paper" ? sharedClockUsedSec : 0,
           captureCensored: sampleRightCensoredItems.length === 0,
+          precomputedUntimed: precomputedUntimedSections.get(section.sectionId),
         });
         itemCursor = res.nextItemCursor;
         if (blueprint.clockMode === "shared_full_paper") sharedClockUsedSec = res.finalClockUsedSec;

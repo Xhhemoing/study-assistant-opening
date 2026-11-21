@@ -4,6 +4,7 @@ import {
   buildUnifiedDecisionSnapshot,
   calibrateJointPassTargets,
   choleskyDecompose,
+  computeConformalBandInterval,
   computeIeltsOverallBand,
   computeWritingBand,
   convolveLordWingersky,
@@ -23,6 +24,7 @@ import {
   rawScoreToBand,
   roundHalfUp05,
   simulateExamPaper,
+  snapToScoreGrid,
   validateExamBlueprint,
   type CandidateStudyAction,
   type ExamEvidenceRecord,
@@ -2506,6 +2508,358 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
         blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
         calibrationRecords: cal5,
         targets: [{ targetOverall: Number.NaN, targetMinSection: 6.5 }],
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it("enforces all Round-8 4 P1 & 4 P2 invariants", () => {
+    const beliefs = makeIeltsBeliefs({ abilityMean: 0.4, logStability: Math.log(14), lastDirectRecallAtMs: 0 });
+    const evidence = makeIndependentSectionEvidence(1_000);
+
+    // [R8 P1-1] Require monotonically non-decreasing rawToBandTable scores across raw scores.
+    const invertedBandBp = createSharedFullPaperBlueprint({
+      blueprintId: "inverted-raw-band",
+      title: "Inverted Raw Band",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 9,
+      skillIds: ["s1"],
+      sections: [
+        {
+          sectionId: "mcq",
+          label: "MCQ",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 9],
+          scoreStep: 1,
+          parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["s1"] }],
+          items: [
+            {
+              itemId: "q1",
+              sectionId: "mcq",
+              partId: "p1",
+              skillIds: ["s1"],
+              guess: 0,
+              lapse: 0,
+              points: 1,
+              timeModel: { mu: 4, speedLoading: 0.1, skillLoading: {}, sigma: 0.1 },
+            },
+          ],
+          rawToBandTable: [
+            { rawMin: 0, rawMax: 0, score: 9 },
+            { rawMin: 1, rawMax: 1, score: 0 },
+          ],
+        },
+      ],
+    });
+    expect(validateExamBlueprint(invertedBandBp)).toContain("sections.mcq.rawToBandTable");
+    expect(() =>
+      simulateExamPaper({ blueprint: invertedBandBp, learnerId: "l", beliefs: {}, evidence: [], examAtMs: DAY_MS }),
+    ).toThrow(RangeError);
+
+    // [R8 P1-2] Validate precomputedDraws dimensions and uniform [0, 1) bounds upfront.
+    const baseValidDraw = {
+      zLatent: Array.from({ length: IELTS_ACADEMIC_SKILL_IDS.length }, () => 0),
+      nuSpeed: 0,
+      itemUniforms: Array.from({ length: 80 }, () => 0.5),
+      itemTimeNormals: Array.from({ length: 80 }, () => 0),
+      rubricScoreNormals: Array.from({ length: 5 }, () => 0),
+      rubricTimeNormals: Array.from({ length: 5 }, () => 0),
+    };
+    for (const badDraw of [
+      { ...baseValidDraw, itemUniforms: [] },
+      { ...baseValidDraw, itemUniforms: Array.from({ length: 80 }, () => -1) },
+      { ...baseValidDraw, itemUniforms: Array.from({ length: 80 }, () => 1) },
+      { ...baseValidDraw, rubricScoreNormals: [] },
+    ]) {
+      expect(() =>
+        simulateExamPaper({
+          blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+          learnerId: "learner-target",
+          beliefs,
+          evidence,
+          examAtMs: DAY_MS,
+          precomputedDraws: [badDraw],
+        }),
+      ).toThrow(RangeError);
+      expect(() =>
+        evaluateCrnActionRoi({
+          blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+          learnerId: "learner-target",
+          beliefs,
+          evidence,
+          examAtMs: DAY_MS,
+          baselineActions: [],
+          candidateAction: { actionId: "a", title: "A", durationHours: 1, kind: "skill_repair" },
+          crnSeed: 1,
+          precomputedDraws: [badDraw],
+        }),
+      ).toThrow(RangeError);
+    }
+
+    // [R8 P1-3] Reject cross-blueprint simulation and incomplete drawSectionScores in calibration.
+    const greBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "gre-r8-bp",
+        title: "GRE R8",
+        totalTimeLimitMinutes: 120,
+        totalPoints: 340,
+        skillIds: ["v"],
+        sections: [
+          {
+            sectionId: "verbal",
+            label: "Verbal",
+            scoringKind: "rubric_band",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [130, 170],
+            scoreStep: 1,
+            parts: [{ partId: "vp", label: "VP", weight: 1, skillIds: ["v"], timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+          },
+        ],
+      }),
+      scoreRange: [260, 340] as const,
+    };
+    const greSim = simulateExamPaper({ blueprint: greBp, learnerId: "l", beliefs: {}, evidence: [], examAtMs: DAY_MS, numDraws: 10, seed: 2 });
+    const cal5 = makeCalibrationRecords(5);
+    expect(() =>
+      calibrateJointPassTargets({
+        simulation: greSim,
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        calibrationRecords: cal5,
+        targets: [{ targetOverall: 7, targetMinSection: 0 }],
+      }),
+    ).toThrow(RangeError);
+    expect(() =>
+      computeConformalBandInterval({
+        simulation: greSim,
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        calibrationRecords: cal5,
+      }),
+    ).toThrow(RangeError);
+
+    // [R8 P1-4] Enforce blueprint caps & pre-allocation simulation DP/eval bounds, while hoisting deterministic DP once.
+    const tooManyItemsBp = createSharedFullPaperBlueprint({
+      blueprintId: "too-many-items",
+      title: "Too Many Items",
+      totalTimeLimitMinutes: 60,
+      totalPoints: 600,
+      skillIds: ["s1"],
+      sections: [
+        {
+          sectionId: "mcq",
+          label: "MCQ",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 600],
+          scoreStep: 1,
+          parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["s1"] }],
+          items: Array.from({ length: 501 }, (_, idx) => ({
+            itemId: `q-${idx}`,
+            sectionId: "mcq",
+            partId: "p1",
+            skillIds: ["s1"],
+            guess: 0,
+            lapse: 0,
+            points: 1,
+            timeModel: { mu: 2, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+          })),
+          rawToBandTable: [{ rawMin: 0, rawMax: 501, score: 1 }],
+        },
+      ],
+    });
+    expect(validateExamBlueprint(tooManyItemsBp)).toContain("sections.mcq.items.count");
+
+    const heavyStochasticBp = createSharedFullPaperBlueprint({
+      blueprintId: "heavy-stochastic-dp",
+      title: "Heavy Stochastic DP",
+      totalTimeLimitMinutes: 60,
+      totalPoints: 2_000,
+      skillIds: ["s1"],
+      sections: [
+        {
+          sectionId: "mcq",
+          label: "MCQ",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 2_000],
+          scoreStep: 1,
+          parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["s1"] }],
+          items: Array.from({ length: 500 }, (_, idx) => ({
+            itemId: `h-${idx}`,
+            sectionId: "mcq",
+            partId: "p1",
+            skillIds: ["s1"],
+            guess: 0.1,
+            lapse: 0.05,
+            points: 4,
+            timeModel: { mu: 1, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+          })),
+          rawToBandTable: [
+            { rawMin: 0, rawMax: 1_000, score: 0 },
+            { rawMin: 1_001, rawMax: 2_000, score: 2_000 },
+          ],
+        },
+      ],
+    });
+    expect(validateExamBlueprint(heavyStochasticBp)).toEqual([]);
+    expect(() =>
+      simulateExamPaper({ blueprint: heavyStochasticBp, learnerId: "l", beliefs: {}, evidence: [], examAtMs: DAY_MS }),
+    ).toThrow(RangeError);
+    expect(() =>
+      convolveLordWingersky(
+        Array.from({ length: 500 }, () => 0.5),
+        Array.from({ length: 500 }, () => 25),
+      ),
+    ).toThrow(RangeError);
+
+    const deterministicHeavyBp = createSharedFullPaperBlueprint({
+      blueprintId: "deterministic-hoist-dp",
+      title: "Deterministic DP Hoist",
+      totalTimeLimitMinutes: 600,
+      totalPoints: 100,
+      skillIds: ["s1"],
+      thetaCovariance: [[0]],
+      sections: [
+        {
+          sectionId: "mcq",
+          label: "MCQ",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 100],
+          scoreStep: 1,
+          parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["s1"] }],
+          items: Array.from({ length: 100 }, (_, idx) => ({
+            itemId: `d-${idx}`,
+            sectionId: "mcq",
+            partId: "p1",
+            skillIds: ["s1"],
+            guess: 0.2,
+            lapse: 0.05,
+            points: 1,
+            timeModel: { mu: 1, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+          })),
+          rawToBandTable: Array.from({ length: 101 }, (_, raw) => ({ rawMin: raw, rawMax: raw, score: raw })),
+        },
+      ],
+    });
+    const hoistedSim = simulateExamPaper({
+      blueprint: deterministicHeavyBp,
+      learnerId: "l",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 1_000,
+      seed: 9,
+    });
+    expect(hoistedSim.numDraws).toBe(1_000);
+    expect(Number.isFinite(hoistedSim.untimedExpectedScore)).toBe(true);
+
+    // [R8 P2-1] Overflow-safe Cholesky midpoint and tolerance for v = 2 ** 1023.
+    const bigV = 2 ** 1023;
+    const hugeValidPsd = choleskyDecompose([
+      [bigV, bigV],
+      [bigV, bigV],
+    ]);
+    expect(Number.isFinite(hugeValidPsd[0]![0])).toBe(true);
+    expect(Number.isFinite(hugeValidPsd[1]![0])).toBe(true);
+    expect(Number.isFinite(hugeValidPsd[1]![1])).toBe(true);
+    expect(hugeValidPsd[1]![0]! / hugeValidPsd[0]![0]!).toBeCloseTo(1, 12);
+    expect(hugeValidPsd[1]![1]! / hugeValidPsd[0]![0]!).toBeLessThan(1e-6);
+
+    const evenBigV = 2 ** 1022;
+    expect(() =>
+      choleskyDecompose([
+        [evenBigV, evenBigV, evenBigV],
+        [evenBigV, evenBigV, -evenBigV],
+        [evenBigV, -evenBigV, bigV],
+      ]),
+    ).toThrow(RangeError);
+
+    // [R8 P2-2] Preserve fine step precision and strict [minScore, maxScore] bounds in snapToScoreGrid.
+    expect(snapToScoreGrid(0.0000006, [0, 0.0000006], 0.0000001, "ceil")).toBeLessThanOrEqual(0.0000006);
+    expect(snapToScoreGrid(0.0000006, [0, 0.0000006], 0.0000001, "ceil")).toBe(0.0000006);
+    expect(snapToScoreGrid(0.00000059, [0, 0.0000006], 0.0000001, "floor")).toBe(0.0000005);
+
+    // [R8 P2-3] Locale-independent UTF-16 code-unit tie-breaking ("z" < "ä") in CRN action ranking.
+    const tiedÄ: CandidateStudyAction = {
+      actionId: "ä",
+      title: "Tie A-umlaut",
+      durationHours: 1,
+      kind: "skill_repair",
+      skillEffects: { "ielts.reading.inference": { abilityDelta: 1.0 } },
+    };
+    const tiedZ: CandidateStudyAction = {
+      actionId: "z",
+      title: "Tie Z",
+      durationHours: 1,
+      kind: "skill_repair",
+      skillEffects: { "ielts.reading.inference": { abilityDelta: 1.0 } },
+    };
+    const tieSnap = buildUnifiedDecisionSnapshot({
+      decisionId: "dec-tie",
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      calibrationRecords: cal5,
+      examAtMs: DAY_MS,
+      crnSeed: 11,
+      horizonHours: 48,
+      executableMinutes: 60,
+      candidateActions: [tiedÄ, tiedZ],
+      numDraws: 30,
+    });
+    expect(tieSnap.rankedActions.map((r) => r.actionId)).toEqual(["z", "ä"]);
+    expect(tieSnap.selectedActionIds).toEqual(["z"]);
+
+    // [R8 P2-4 + Neon P2-1/P2-3] Standalone computeConformalBandInterval & direct calibrateJointPassTargets enforce cutoff & finite overrides.
+    const sim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      numDraws: 30,
+      seed: 12,
+    });
+    const futureCalOnly = cal5.map((r) => ({ ...r, recordedAtMs: DAY_MS + 1 }));
+    const blockedConformal = computeConformalBandInterval({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: futureCalOnly,
+      examAtMs: DAY_MS,
+    });
+    expect(blockedConformal.status).toBe("insufficient_calibration");
+    expect(blockedConformal.n).toBe(0);
+    const readyConformal = computeConformalBandInterval({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: cal5,
+      examAtMs: DAY_MS,
+    });
+    expect(readyConformal.status).toBe("ready");
+    if (readyConformal.status === "ready") {
+      expect(readyConformal.low).toBeLessThanOrEqual(readyConformal.high);
+    }
+    const implicitCutoffJoint = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: futureCalOnly,
+      targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+    });
+    expect(implicitCutoffJoint[0]!.calibrationSampleCount).toBe(0);
+    expect(() =>
+      simulateExamPaper({
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        learnerId: "learner-target",
+        beliefs,
+        evidence,
+        examAtMs: DAY_MS,
+        skillOverrides: { "ielts.reading.inference": { abilityDelta: Number.NaN } },
       }),
     ).toThrow(RangeError);
   });
