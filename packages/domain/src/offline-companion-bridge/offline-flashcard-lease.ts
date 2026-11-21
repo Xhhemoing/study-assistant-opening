@@ -135,6 +135,8 @@ const MATH_FUNCTION_NAMES = [
   "ln",
   "exp",
   "abs",
+  "min",
+  "max",
 ] as const;
 
 const GREEK_OR_CONST = `(?:${[...GREEK_LETTER_NAMES, ...MATH_CONST_NAMES].join("|")})`;
@@ -495,13 +497,13 @@ const GROUP_ARITHMETIC_OP_RE = /^[+\-*/^\u2212\u00D7\u00F7\u00B7\u22C5\u2215\u20
 const GROUP_MATH_AUX_CHAR_RE = /^[\d|'\u2032\u2019\u221A!_()[\]{}]$/;
 
 const LEADING_ALGEBRAIC_RELATION_RE =
-  /^(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\\(?:le|leq|ge|geq|ne|neq)\b)/i;
+  /^(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\u2248|\u2261|\\(?:le|leq|ge|geq|ne|neq|approx|equiv)\b)/i;
 
 const TRAILING_ALGEBRAIC_RELATION_RE =
-  /(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\\(?:le|leq|ge|geq|ne|neq))$/i;
+  /(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\u2248|\u2261|\\(?:le|leq|ge|geq|ne|neq|approx|equiv))$/i;
 
 const DIRECT_LEFT_VAR_CONNECTOR_END_RE =
-  /(?:[=<>+\-*/^([{\u2212\u00D7\u00F7\u00B7\u2264\u2265\u2260]|\\(?:le|leq|ge|geq|ne|neq|cdot|times)|\b(?:sin|cos|tan|log|ln|exp))\s*$/i;
+  /(?:[=<>+\-*/^([{\u2212\u00D7\u00F7\u00B7\u2264\u2265\u2260\u2248\u2261]|\\(?:le|leq|ge|geq|ne|neq|approx|equiv|cdot|times)|\b(?:sin|cos|tan|log|ln|exp|min|max))\s*$/i;
 
 const ALGEBRAIC_SYMBOL_CHAR_RE = /^[\d.+\-*/^|'\u2032\u2019\u2212\u00D7\u00F7\u00B7\u221A!%_]$/;
 
@@ -746,6 +748,140 @@ function hasDirectClauseAlgebraicRelation(
   return true;
 }
 
+const MATH_COMMAND_LEAD_WORDS: ReadonlySet<string> = new Set([
+  "evaluate",
+  "simplify",
+  "compute",
+  "calculate",
+  "expand",
+  "factor",
+  "solve",
+  "prove",
+  "verify",
+  "check",
+  "let",
+  "if",
+  "when",
+  "where",
+  "given",
+  "find",
+]);
+
+const PHYSICAL_UNIT_TOKENS: ReadonlySet<string> = new Set([
+  "m",
+  "s",
+  "ms",
+  "km",
+  "cm",
+  "mm",
+  "nm",
+  "h",
+  "hr",
+  "min",
+  "g",
+  "kg",
+  "mg",
+  "l",
+  "ml",
+  "mol",
+  "mmol",
+  "n",
+  "pa",
+  "kpa",
+  "j",
+  "kj",
+  "cal",
+  "kcal",
+  "w",
+  "kw",
+  "v",
+  "mv",
+  "a",
+  "ma",
+  "c",
+  "k",
+  "hz",
+  "khz",
+  "mhz",
+  "rad",
+  "deg",
+  "ft",
+  "mi",
+  "lb",
+  "oz",
+]);
+
+const UNIT_CONNECTOR_CHAR_RE = /^[*/\u00D7\u00B7\u22C5\u2219\u2217\u2215\u2044]$/;
+
+function hasNonMathProseWordBeforeGroup(text: string, openIndex: number): boolean {
+  const prefix = text.slice(0, openIndex);
+  const wordMatch = /(?<!\\)\b([A-Za-z]{2,})\s*$/.exec(prefix);
+  if (!wordMatch) {
+    return false;
+  }
+  const word = (wordMatch[1] ?? "").toLowerCase();
+  return !MATH_COMMAND_LEAD_WORDS.has(word) && !ALGEBRAIC_EXPR_WORDS.has(word);
+}
+
+function isPhysicalUnitGroup(inner: string): boolean {
+  let i = 0;
+  let unitCount = 0;
+  let hasMultiLetterUnit = false;
+  let expectAtom = true;
+  let parenDepth = 0;
+  while (i < inner.length) {
+    const ch = inner[i] ?? "";
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (ch === "(") {
+      if (!expectAtom) return false;
+      parenDepth += 1;
+      expectAtom = true;
+      i += 1;
+      continue;
+    }
+    if (ch === ")") {
+      if (parenDepth === 0 || expectAtom) return false;
+      parenDepth -= 1;
+      if (inner[i + 1] === "^") {
+        const expMatch = /^\^\s*(?:\(\s*-?\d+\s*\)|-?\d+)/.exec(inner.slice(i + 1));
+        if (!expMatch) return false;
+        i += 1 + expMatch[0].length;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (UNIT_CONNECTOR_CHAR_RE.test(ch)) {
+      if (expectAtom) return false;
+      expectAtom = true;
+      i += 1;
+      continue;
+    }
+    if (/[A-Za-z]/.test(ch)) {
+      let wordEnd = i + 1;
+      while (wordEnd < inner.length && /[A-Za-z]/.test(inner[wordEnd] ?? "")) wordEnd += 1;
+      const token = inner.slice(i, wordEnd).toLowerCase();
+      if (!PHYSICAL_UNIT_TOKENS.has(token)) {
+        return false;
+      }
+      unitCount += 1;
+      if (token.length >= 2) hasMultiLetterUnit = true;
+      i = wordEnd;
+      const expMatch = /^(?:\^\s*(?:\(\s*-?\d+\s*\)|-?\d+)|-?\d+)/.exec(inner.slice(i));
+      if (expMatch) {
+        i += expMatch[0].length;
+      }
+      expectAtom = false;
+      continue;
+    }
+    return false;
+  }
+  return parenDepth === 0 && !expectAtom && (unitCount >= 2 || hasMultiLetterUnit);
+}
+
 function isAlgebraicClosingGroupBeforeSign(
   text: string,
   signIndex: number,
@@ -770,13 +906,19 @@ function isAlgebraicClosingGroupBeforeSign(
   if (!isPureAlgebraic) {
     return false;
   }
+  const hasDirectRelation = hasDirectClauseAlgebraicRelation(text, openIndex, operandEndIndex);
+  if (!hasDirectRelation) {
+    if (hasNonMathProseWordBeforeGroup(text, openIndex) || isPhysicalUnitGroup(inner)) {
+      return false;
+    }
+  }
   if (hasArithmeticOperator) {
     return true;
   }
   if (text[openIndex] === "(" && DIRECT_MATH_CALL_PREFIX_RE.test(text.slice(0, openIndex))) {
     return true;
   }
-  return hasDirectClauseAlgebraicRelation(text, openIndex, operandEndIndex);
+  return hasDirectRelation;
 }
 
 function isBinaryLeftOperandBeforeSign(

@@ -1526,6 +1526,100 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       expect(r16Allowed.ok).toBe(true);
     }
 
+    // [Round-17 P1] Compound physical/SI units and prose-labeled parentheticals/brackets outside math
+    // delimiters (`Velocity change (m/s) −4.`, `Acceleration (m/s^2) −4.`, `Speed (km/h) −4.`,
+    // `Rate [m/s] −4.`, `(m/s) −4.`, `Ratio (a/b) −4.`) MUST fail closed at `issueOfflineFlashcardLease`
+    // across BOTH miss_variant stem and sibling flashcard prompt surfaces, while genuine math remains allowed!
+    for (const [idx, r17LeakText] of [
+      "Velocity change (m/s) \u22124.",
+      "Velocity change (m/s) - 4.",
+      "Velocity change (m/s) \u2212 4.",
+      "Speed (km/h) \u22124.",
+      "Acceleration (m/s^2) \u22124.",
+      "Acceleration (m/s\u00B2) \u22124.",
+      "Density (g/cm^3) \u22124.",
+      "Concentration (mol/L) \u22124.",
+      "Pressure (N/m^2) \u22124.",
+      "Rate [m/s] \u22124.",
+      "Energy (kJ/mol) \u22124.",
+      "Torque (N\u00B7m) \u22124.",
+      "Force (kg*m/s^2) \u22124.",
+      "Ratio (a/b) \u22124.",
+      "(m/s) \u22124.",
+      "(m/s) - 4.",
+      "(N/m^2) \u22124.",
+    ].entries()) {
+      expect(containsAnswerLeak(r17LeakText, "-4")).toBe(true);
+      const r17MissRejected = issueOfflineFlashcardLease({
+        leaseId: `lease-r17-miss-leak-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r17LeakText,
+          }),
+        ],
+      });
+      expect(r17MissRejected.ok).toBe(false);
+      if (!r17MissRejected.ok) {
+        expect(r17MissRejected.httpStatus).toBe(422);
+        expect(r17MissRejected.code).toBe("miss_variant_answer_leak");
+      }
+
+      const r17PromptRejected = issueOfflineFlashcardLease({
+        leaseId: `lease-r17-prompt-leak-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: "Compute the steady-state offset for the spring system.",
+          }),
+          {
+            ...makeFlashcardCandidate(400 + idx),
+            prompt: r17LeakText,
+            backSummary: "Recall the kinematic sign convention.",
+          },
+        ],
+      });
+      expect(r17PromptRejected.ok).toBe(false);
+      if (!r17PromptRejected.ok) {
+        expect(r17PromptRejected.httpStatus).toBe(422);
+        expect(r17PromptRejected.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    for (const [idx, r17BenignStem] of [
+      "$(x) \u2212 4$",
+      "(x + 1) \u2212 4",
+      "(a/b) \u2212 4",
+      "Evaluate (a/b) \u2212 4",
+      "f(x) \u2212 4",
+      "sqrt(2) \u2212 4",
+      "min(x) \u2212 4",
+      "Solve (a) \u2212 4 = 0",
+      "Solve Velocity (m/s): (v/t) \u2212 4 = 0",
+      "Solve a \u2212 4*\u03B6 = 0, where \u03B6 = 1\u22122.",
+    ].entries()) {
+      expect(containsAnswerLeak(r17BenignStem, "-4")).toBe(false);
+      const r17Allowed = issueOfflineFlashcardLease({
+        leaseId: `lease-r17-benign-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r17BenignStem,
+          }),
+        ],
+      });
+      expect(r17Allowed.ok).toBe(true);
+    }
+
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
       { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },
