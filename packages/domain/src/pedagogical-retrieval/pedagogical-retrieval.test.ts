@@ -759,6 +759,131 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(indexableChunks.some(chunk => chunk.text.includes("forty-four"))).toBe(true);
   });
 
+  it.each([
+    { title: ["Answer Key | Unit 1", "Practice | Problems"], visibility: "sealed" },
+    { title: ["Unit 1", "Answer Key"], visibility: "sealed" },
+    { title: ["Answer Key"], visibility: "sealed" },
+    { title: ["Hints"], visibility: "hint_gated" },
+  ])("separates a protected Setext title from a table ($title)", ({ title, visibility }) => {
+    const bodies = ["Topic | Note", "--- | ---", ...title, "---", "forty-two"];
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const timing = (index: number) => ({ startMs: index * 1000, endMs: (index + 1) * 1000 });
+    const timedLine = (body: string, index: number) => `[startMs=${timing(index).startMs},endMs=${timing(index).endMs}] ${body}`;
+    const mixed = [bodies[0], bodies[1], timedLine(title[0]!, 0), ...title.slice(1), "---", timedLine("forty-two", 1)].join("\n");
+    const inline = bodies.map(timedLine).join("\n");
+    for (const { chunks, anchor } of [
+      { chunks: chunkPedagogicalDocument({ ...source, text: mixed }), anchor: timing(1) },
+      { chunks: chunkPedagogicalDocument({ ...source, text: inline }), anchor: timing(bodies.length - 1) },
+      { chunks: chunkTranscriptCues({
+        ...source, cues: bodies.map((text, index) => ({ text, ...timing(index) })),
+      }), anchor: timing(bodies.length - 1) },
+    ]) {
+      expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({ visibility, ...anchor });
+      for (const allowHintGated of [false, true]) {
+        const { indexableChunks } = partitionPedagogicalChunks(chunks, { allowHintGated });
+        expect(indexableChunks.some(chunk => chunk.text.includes("forty-two")))
+          .toBe(allowHintGated && visibility === "hint_gated");
+      }
+    }
+  });
+
+  it.each([
+    { header: "Topic | Answer Key", preceding: ["[!note] | reference"], row: "x | forty-two" },
+    { header: "Answer Key | Note", preceding: [], row: "- forty-two" },
+    { header: "Answer Key | Note", preceding: [], row: "forty-two | note" },
+  ])("preserves column privacy and cue anchors for literal table rows ($row)", ({ header, preceding, row }) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const bodies = [header, "--- | ---", ...preceding, row];
+    const cues = bodies.map((text, index) => ({ text, startMs: index * 1000, endMs: (index + 1) * 1000 }));
+    const timed = cues.map(({ text, startMs, endMs }) => `[startMs=${startMs},endMs=${endMs}] ${text}`);
+    const { startMs: rowStart, endMs: rowEnd } = cues.at(-1)!;
+    for (const { chunks, startMs, endMs } of [
+      { chunks: chunkPedagogicalDocument({
+        ...source, text: [header, "--- | ---", ...timed.slice(2, -1),
+          row.startsWith("- ") ? timed.at(-1)! : row].join("\n"),
+      }),
+        startMs: null, endMs: null },
+      { chunks: chunkPedagogicalDocument({ ...source, text: timed.join("\n") }), startMs: rowStart, endMs: rowEnd },
+      { chunks: chunkTranscriptCues({ ...source, cues }), startMs: rowStart, endMs: rowEnd },
+    ]) {
+      expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({ visibility: "sealed", startMs, endMs });
+      for (const allowHintGated of [false, true]) {
+        const { indexableChunks } = partitionPedagogicalChunks(chunks, { allowHintGated });
+        expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(false);
+      }
+    }
+  });
+
+  it.each([
+    ["\n", "sealed"],
+    ["\n\n", "public"],
+  ])("forms a table with a timed delimiter only when adjacent to the document header (%j)", (separator, visibility) => {
+    const text = "Topic | Answer Key" + separator + "[00:00-00:01] --- | ---\n[00:01-00:02] x | forty-two";
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      visibility, startMs: 1000, endMs: 2000,
+    });
+    for (const allowHintGated of [false, true]) {
+      const { indexableChunks } = partitionPedagogicalChunks(chunks, { allowHintGated });
+      expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(visibility === "public");
+    }
+  });
+
+  it("keeps cue anchors when only the header and body row carry timestamps", () => {
+    const text = "[00:00-00:01] Topic | Answer Key\n--- | ---\n[00:01-00:02] x | forty-two";
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    expect(chunks.find(chunk => chunk.text.includes("Topic"))).toMatchObject({ startMs: 0, endMs: 1000 });
+    expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      visibility: "sealed", startMs: 1000, endMs: 2000,
+    });
+  });
+
+  it("keeps a protected title that begins inside a multiline cue or on an untimed line", () => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const mixed = ["Topic | Note", "--- | ---", "Answer Key | Unit 1",
+      "[00:00-00:01] Practice | Problems", "---", "[00:01-00:02] forty-two"].join("\n");
+    const cues = [
+      { text: "Topic | Note\n--- | ---\nAnswer Key | Unit 1", startMs: 0, endMs: 500 },
+      { text: "Practice | Problems\n---", startMs: 500, endMs: 1000 },
+      { text: "forty-two", startMs: 1000, endMs: 2000 },
+    ];
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text: mixed }),
+      chunkTranscriptCues({ ...source, cues }),
+    ]) {
+      expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+        visibility: "sealed", startMs: 1000, endMs: 2000,
+      });
+      expect(partitionPedagogicalChunks(chunks, { allowHintGated: true }).indexableChunks.some(
+        chunk => chunk.text.includes("forty-two"),
+      )).toBe(false);
+    }
+  });
+
+  it.each([
+    { bodies: ["> Topic | Answer Key", "> --- | ---", "> ## Lecture | forty-two"], secretAt: 2 },
+    { bodies: ["> Answer Key | Note", "> --- | ---", "> - forty-two"], secretAt: 2 },
+    { bodies: ["Topic | Answer Key", "--- | ---", "x | forty-two", "Hints", "---", "guidance"], secretAt: 2 },
+    { bodies: ["Topic | Answer Key", "--- | ---", "public note", "x | forty-two", "Hints", "---", "guidance"], secretAt: 3 },
+  ])("retains sealed table columns at timed boundaries ($bodies)", ({ bodies, secretAt }) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const cues = bodies.map((text, index) => ({ text, startMs: index * 1000, endMs: (index + 1) * 1000 }));
+    const inline = cues.map(({ text, startMs, endMs }) => `[startMs=${startMs},endMs=${endMs}] ${text}`).join("\n");
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text: inline }), chunkTranscriptCues({ ...source, cues })]) {
+      expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+        visibility: "sealed", startMs: cues[secretAt]!.startMs, endMs: cues[secretAt]!.endMs,
+      });
+      for (const allowHintGated of [false, true]) {
+        const { indexableChunks } = partitionPedagogicalChunks(chunks, { allowHintGated });
+        expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(false);
+        if (bodies.at(-1) === "guidance") {
+          expect(chunks.find(chunk => chunk.text.includes("guidance"))?.visibility).toBe("hint_gated");
+          expect(indexableChunks.some(chunk => chunk.text.includes("guidance"))).toBe(allowHintGated);
+        }
+      }
+    }
+  });
+
   it("applies the first column's protection to a pipe-less timed block that ends the table", () => {
     const text = ["Answer Key | Note", "--- | ---", "[00:00-00:01] ## forty-two", "",
       "[00:01-00:02] Public afterward"].join("\n");

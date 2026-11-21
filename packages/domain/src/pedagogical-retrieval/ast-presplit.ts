@@ -529,18 +529,72 @@ function timedTableRowVisibility(raw: string, columns: readonly PedagogicalVisib
   return visibility;
 }
 
+function getTableColumnVisibilities(header: string, cells: readonly { start: number; end: number }[], start = 0) {
+  return cells.map(cell => tableColumnVisibility(header.slice(cell.start - start, cell.end - start)));
+}
+
+type ReadMarkdownLine = (index: number) => string | undefined;
+
+function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
+  let checkedBefore = -1;
+  let checkedContainers: readonly MarkdownContainer[] = [];
+  let checkedColumns: readonly PedagogicalVisibility[] | undefined;
+  return (
+    start: number,
+    { body, containers }: ReturnType<typeof readMarkdownContainerLine>,
+    columns?: readonly PedagogicalVisibility[],
+  ): number | undefined => {
+    // A suffix of a checked, unprotected paragraph cannot introduce a protected title.
+    if (start < checkedBefore && columns === checkedColumns && containers.length === checkedContainers.length &&
+      containers.every((container, index) => container === checkedContainers[index])) return undefined;
+
+    let firstProtectedTitleLine = Infinity;
+    const readLine: ReadMarkdownLine = index => {
+      const raw = readRaw(index);
+      if (raw === undefined) return undefined;
+      const line = continueMarkdownContainers(raw, containers);
+      if (index !== start && line.depth !== containers.length) return undefined;
+      const titleLine = index === start ? body : line.body;
+      if (columns && tableColumnVisibility(titleLine) !== "public") {
+        firstProtectedTitleLine = Math.min(firstProtectedTitleLine, index);
+      }
+      // Data rows cannot become an earlier part of a later hint heading and lose column protection.
+      if (columns && index < firstProtectedTitleLine &&
+        timedTableRowVisibility(index === start ? raw : line.body, columns) !== "public") return undefined;
+      return titleLine;
+    };
+    const paragraph = readSetextParagraph(readLine, start);
+    if (paragraph.level !== undefined) {
+      const title: string[] = [];
+      for (let index = start; index < paragraph.index; index++) title.push(readLine(index)!);
+      if (tableColumnVisibility(title.join("\n")) !== "public") return paragraph.index;
+    }
+    checkedBefore = paragraph.index;
+    checkedContainers = containers;
+    checkedColumns = columns;
+    return undefined;
+  };
+}
+
 function startsTimedTableBoundary(
   body: string,
   containers: readonly MarkdownContainer[],
-  nextRaw?: string,
 ): boolean {
-  if (interruptsPipeTable(body) || CALLOUT_HEADER_RE.test(body.trimStart())) return true;
+  if (interruptsPipeTable(body)) return true;
+  if (containers.at(-1) === "quote" && CALLOUT_HEADER_RE.test(body.trimStart())) return true;
   const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}[ \t]*$/.exec(body);
-  if (latex && (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null)) return true;
-  if (nextRaw === undefined || !SEALED_HEADING_RE.test(body) || /^(?: {4}| {0,3}\t)/.test(body)) return false;
-  const nextTiming = parseInlineTranscriptCue(nextRaw);
-  const underline = continueMarkdownContainers(nextRaw.slice(nextTiming?.prefixLength ?? 0), containers);
-  return underline.depth === containers.length && SETEXT_UNDERLINE_RE.test(underline.body);
+  return latex !== null && (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null);
+}
+
+function isListLikeTableRow(line: string): boolean {
+  return LIST_ITEM_RE.test(line) && !THEMATIC_BREAK_RE.test(line);
+}
+
+function isCaptionTableBodyRow(line: string): boolean {
+  if (isPipeTableBodyRow(line)) return true;
+  if (!isListLikeTableRow(line)) return false;
+  const projected = readMarkdownContainerLine(line);
+  return !startsTimedTableBoundary(projected.body, projected.containers);
 }
 
 function matchFenceOpening(line: string): RegExpExecArray | null {
@@ -553,37 +607,78 @@ function closesFence(line: string, opener: string): boolean {
   return match !== undefined && match[0] === opener[0] && match.length >= opener.length;
 }
 
-function createTranscriptCueSeparator() {
+function createTranscriptCueSeparator(
+  cueTexts: readonly string[],
+  preserveBoundaryVisibility?: (cueIndex: number, visibility: PedagogicalVisibility) => void,
+) {
+  const lines: string[] = [];
+  const cueLineStarts = cueTexts.map(text => {
+    const start = lines.length;
+    for (const line of text.split(/\r?\n/)) lines.push(line);
+    return start;
+  });
   let containers: MarkdownContainer[] = [];
   let previousBody = "";
-  let inTable = false;
-  return (text: string, next?: string): string => {
-    const lines = text.split(/\r?\n/);
-    for (const line of lines) {
+  let tableColumns: PedagogicalVisibility[] | undefined;
+  let setextThrough = -1;
+  const protectedUnderline = createProtectedSetextLookup(index => lines[index]);
+  return (cueIndex: number, joinNext = true, breakBefore = false): string => {
+    const start = cueLineStarts[cueIndex]!;
+    const end = cueLineStarts[cueIndex + 1] ?? lines.length;
+    if (breakBefore) {
+      containers = readMarkdownContainerLine("", containers).containers;
+      previousBody = "";
+      tableColumns = undefined;
+      const underline = protectedUnderline(start, readMarkdownContainerLine(lines[start]!, containers));
+      if (underline !== undefined) setextThrough = underline;
+    }
+    for (let index = start; index < end; index++) {
+      const line = lines[index]!;
+      const continuation = continueMarkdownContainers(line, containers);
       const current = readMarkdownContainerLine(line, containers);
+      if (tableColumns && continuation.depth === containers.length && isCaptionTableBodyRow(continuation.body)) {
+        const underline = protectedUnderline(index, current, tableColumns);
+        if (underline === undefined) {
+          previousBody = continuation.body;
+          continue;
+        }
+        setextThrough = underline;
+        preserveBoundaryVisibility?.(cueIndex, timedTableRowVisibility(continuation.body, tableColumns));
+      }
       const sameContainer = current.continuedDepth === containers.length &&
         current.continuedDepth === current.containers.length;
-      inTable = sameContainer && (
-        (inTable && isPipeTableBodyRow(current.body)) || isPipeTableStart(previousBody, current.body)
-      );
+      const headerCells = sameContainer ? pipeTableHeaderCells({ raw: previousBody, start: 0 }, current.body) : null;
+      tableColumns = headerCells ? getTableColumnVisibilities(previousBody, headerCells) : undefined;
       containers = current.containers;
       previousBody = current.body;
     }
-    if (next === undefined) return "";
-    const nextLine = next.split(/\r?\n/, 1)[0]!;
+    const nextLine = lines[end];
+    if (!joinNext || nextLine === undefined) return "";
     const continued = continueMarkdownContainers(nextLine, containers);
+    if (tableColumns && continued.depth === containers.length) {
+      const next = readMarkdownContainerLine(nextLine, containers);
+      const underline = protectedUnderline(end, next, tableColumns);
+      if (startsTimedTableBoundary(next.body, next.containers) || underline !== undefined) {
+        if (underline !== undefined) setextThrough = underline;
+        preserveBoundaryVisibility?.(cueIndex + 1, timedTableRowVisibility(continued.body, tableColumns));
+        previousBody = "";
+        tableColumns = undefined;
+        return "\n\n";
+      }
+    }
     const continuesTable = continued.depth === containers.length && (
-      (inTable && isPipeTableBodyRow(continued.body)) || isPipeTableStart(previousBody, continued.body)
+      (tableColumns !== undefined && isCaptionTableBodyRow(continued.body)) || isPipeTableStart(previousBody, continued.body)
     );
-    const continuesQuote = innermostQuoteBody(lines.at(-1)!) !== null && innermostQuoteBody(nextLine) !== null;
-    const continuesSetext = continued.depth === containers.length && SETEXT_UNDERLINE_RE.test(continued.body);
+    const continuesQuote = innermostQuoteBody(lines[end - 1]!) !== null && innermostQuoteBody(nextLine) !== null;
+    const continuesSetext = end <= setextThrough ||
+      (continued.depth === containers.length && SETEXT_UNDERLINE_RE.test(continued.body));
     const continuesPipeParagraph = continued.depth === containers.length &&
       isPipeParagraphLine(previousBody) && isPipeParagraphLine(continued.body);
     if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph) return "\n";
 
     // The synthetic paragraph break also ends any table.
     previousBody = "";
-    inTable = false;
+    tableColumns = undefined;
     return "\n\n";
   };
 }
@@ -768,20 +863,21 @@ function findBlockquoteEnd(
   return lines.length;
 }
 
-function findSetextUnderline(lines: readonly SourceLine[], firstLine: number) {
-  const titleStart = lines[firstLine]!.raw;
+function readSetextParagraph(readLine: ReadMarkdownLine, firstLine: number): { index: number; level?: number } {
+  const titleStart = readLine(firstLine);
   if (
-    startsSpecialBlock(lines, firstLine) ||
+    titleStart === undefined ||
+    startsSpecialLine(titleStart, readLine(firstLine + 1)) ||
     /^(?: {4}| {0,3}\t)/.test(titleStart)
-  ) return null;
+  ) return { index: firstLine };
 
-  for (let index = firstLine + 1; index < lines.length; index++) {
-    const raw = lines[index]!.raw;
+  for (let index = firstLine + 1; ; index++) {
+    const raw = readLine(index);
+    if (raw === undefined) return { index };
     const underline = SETEXT_UNDERLINE_RE.exec(raw);
     if (underline) return { index, level: underline[1]![0] === "=" ? 1 : 2 };
-    if (startsSpecialBlock(lines, index)) break;
+    if (startsSpecialLine(raw, readLine(index + 1))) return { index };
   }
-  return null;
 }
 
 interface InlineConstructSpan {
@@ -960,6 +1056,7 @@ function parsePrefixedInnerBlocks(
   outerVisibility: PedagogicalVisibility,
   propagateSectionVisibility: boolean,
   innerSealProofs: boolean,
+  captionRowStarts?: ReadonlySet<number>,
   readPrefix = (line: SourceLine, _index: number) => ({
     length: BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0, padding: 0,
   }),
@@ -968,6 +1065,7 @@ function parsePrefixedInnerBlocks(
   const charOrigStart: number[] = [];
   const charOrigEnd: number[] = [];
   const vLineToOrigLine = new Map<number, SourceLine>();
+  const projectedCaptionRows = captionRowStarts && new Set<number>();
   let vCursor = 0;
 
   for (let idx = startLineIdx; idx <= endLineIdx; idx++) {
@@ -976,6 +1074,7 @@ function parsePrefixedInnerBlocks(
       ? { length: firstLineSliceStart - curLine.start, padding: 0 }
       : readPrefix(curLine, idx);
     const stripped = curLine.raw.slice(length);
+    if (captionRowStarts?.has(curLine.start)) projectedCaptionRows?.add(vCursor);
     if (!(idx === startLineIdx && firstLineSliceStart !== null)) {
       vLineToOrigLine.set(vCursor, curLine);
     }
@@ -1008,6 +1107,7 @@ function parsePrefixedInnerBlocks(
       propagateSectionVisibility,
     },
     innerSealProofs,
+    projectedCaptionRows,
   );
 
   return innerAst.map(b => {
@@ -1103,47 +1203,85 @@ interface TranscriptRegion {
   readonly cue?: { readonly timing: InlineCueTiming; readonly lineStart: number };
 }
 
-function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTiming | null> {
+function scanInlineCueTimings(
+  lines: readonly SourceLine[],
+  captionRowStarts?: ReadonlySet<number>,
+) {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
-  let tableColumns: PedagogicalVisibility[] | undefined;
-  return lines.map(({ raw }, index) => {
+  let table: { columns: PedagogicalVisibility[]; timed: boolean; delimiterIndex: number } | undefined;
+  const cueTimings = lines.map(line => parseInlineTranscriptCue(line.raw));
+  const cueCounts = [0];
+  for (const timing of cueTimings) cueCounts.push(cueCounts.at(-1)! + (timing ? 1 : 0));
+  const readCueBody = (index: number) => {
+    const raw = lines[index]?.raw;
+    return raw?.slice(cueTimings[index]?.prefixLength ?? 0);
+  };
+  const protectedUnderline = createProtectedSetextLookup(readCueBody);
+  const tableBreaks = new Set<number>();
+  const timings = lines.map(({ raw, start }, index) => {
+    const timing = cueTimings[index]!;
     if (fence) {
-      const timing = fence.literal ? null : parseInlineTranscriptCue(raw);
-      const continuation = continueMarkdownContainers(raw.slice(timing?.prefixLength ?? 0), containers);
+      const fenceTiming = fence.literal ? null : timing;
+      const continuation = continueMarkdownContainers(raw.slice(fenceTiming?.prefixLength ?? 0), containers);
       if (continuation.depth === containers.length) {
         if (closesFence(continuation.body, fence.opener)) fence = undefined;
-        return timing;
+        return fenceTiming;
       }
       // A fenced block ends with its list or quote even without a closing marker.
       fence = undefined;
     }
-    const timing = parseInlineTranscriptCue(raw);
+    if (table?.delimiterIndex === index) return table.timed ? timing : null;
     const cueBody = timing ? raw.slice(timing.prefixLength) : "";
     const cueLine = timing && readMarkdownContainerLine(cueBody, containers);
+    const documentLine = readMarkdownContainerLine(raw, containers);
     const next = lines[index + 1];
-    const explicitBoundary = cueLine !== null && startsTimedTableBoundary(cueLine.body, cueLine.containers, next?.raw);
+    let explicitBoundary = cueLine !== null && startsTimedTableBoundary(cueLine.body, cueLine.containers);
     let precedingTableVisibility: PedagogicalVisibility | undefined;
-    if (tableColumns) {
-      const continuation = continueMarkdownContainers(raw, containers);
-      if (continuation.depth === containers.length && isPipeTableBodyRow(continuation.body)) {
-        // Literal rows keep their column positions. Explicit blocks end the table even when they contain pipes.
-        if (!explicitBoundary) return null;
-        precedingTableVisibility = timedTableRowVisibility(continuation.body, tableColumns);
+    if (table) {
+      const projectedRow = table.timed && timing;
+      const continuation = continueMarkdownContainers(projectedRow ? cueBody : raw, containers);
+      const captionRow = (projectedRow || captionRowStarts?.has(start)) && isCaptionTableBodyRow(continuation.body);
+      const canContinue = isPipeTableBodyRow(continuation.body) || captionRow;
+      if (continuation.depth === containers.length && (canContinue || projectedRow)) {
+        const candidate = cueLine ?? documentLine;
+        const underline = !explicitBoundary
+          ? protectedUnderline(index, candidate, table.columns)
+          : undefined;
+        explicitBoundary ||= underline !== undefined && cueCounts[underline + 1]! > cueCounts[index]!;
+        if (!explicitBoundary && canContinue) return table.timed ? timing : null;
+        if (explicitBoundary) {
+          tableBreaks.add(index);
+          precedingTableVisibility = timedTableRowVisibility(continuation.body, table.columns);
+        }
       }
-      tableColumns = undefined;
+      table = undefined;
     }
 
-    const documentLine = readMarkdownContainerLine(raw, containers);
     const delimiter = next && continueMarkdownContainers(next.raw, documentLine.containers);
-    const headerCells = !explicitBoundary && !interruptsPipeTable(cueBody) &&
+    const literalHeader = !explicitBoundary && !interruptsPipeTable(cueBody) &&
       delimiter?.depth === documentLine.containers.length
       ? pipeTableHeaderCells({ raw: documentLine.body, start: 0 }, delimiter.body)
       : null;
-    if (headerCells) {
-      containers = documentLine.containers;
-      tableColumns = headerCells.map(cell => tableColumnVisibility(documentLine.body.slice(cell.start, cell.end)));
-      return null;
+    const projectedHeader = cueLine ?? documentLine;
+    const nextTiming = cueTimings[index + 1];
+    const projectedDelimiter = next && continueMarkdownContainers(
+      next.raw.slice(nextTiming?.prefixLength ?? 0), projectedHeader.containers,
+    );
+    const timedHeader = !explicitBoundary && (timing || nextTiming) &&
+      projectedDelimiter?.depth === projectedHeader.containers.length
+      ? pipeTableHeaderCells({ raw: projectedHeader.body, start: 0 }, projectedDelimiter.body)
+      : null;
+    const cells = timedHeader ?? literalHeader;
+    if (cells) {
+      const header = timedHeader ? projectedHeader : documentLine;
+      containers = header.containers;
+      table = {
+        columns: getTableColumnVisibilities(header.body, cells),
+        timed: timedHeader !== null,
+        delimiterIndex: index + 1,
+      };
+      return table.timed ? timing : null;
     }
 
     const line = cueLine ?? documentLine;
@@ -1152,12 +1290,14 @@ function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTimi
     if (opener) fence = { opener, literal: !timing };
     return timing && precedingTableVisibility !== undefined ? { ...timing, precedingTableVisibility } : timing;
   });
+  return { timings, tableBreaks };
 }
 
 function parseInlineCuedDocument(
   source: string,
   lines: readonly SourceLine[],
   timings: readonly (InlineCueTiming | null)[],
+  tableBreaks: ReadonlySet<number>,
   options: AstParseOptions,
   sealProofs: boolean,
   captionRowStarts?: ReadonlySet<number>,
@@ -1165,23 +1305,25 @@ function parseInlineCuedDocument(
   const parts: string[] = [];
   const regions: TranscriptRegion[] = [];
   const timedRows = new Set<number>();
-  const cueSeparator = createTranscriptCueSeparator();
+  const bodies = lines.map((line, index) => line.raw.slice(timings[index]?.prefixLength ?? 0));
+  const cueSeparator = createTranscriptCueSeparator(bodies);
   let offset = 0;
   for (const [index, line] of lines.entries()) {
     const timing = timings[index];
     const next = timings[index + 1];
-    const body = line.raw.slice(timing?.prefixLength ?? 0);
-    if (timing?.precedingTableVisibility !== undefined) {
+    const body = bodies[index]!;
+    const breakBefore = tableBreaks.has(index);
+    if (breakBefore) {
       // An unwrapped Setext title still looks like a table row until its underline.
       // Keep the boundary in the projected Markdown without changing source offsets.
       parts.push("\n");
       offset++;
-      cueSeparator("");
     }
-    const separator = cueSeparator(body, timing && next ? lines[index + 1]!.raw.slice(next.prefixLength) : undefined);
+    const joinNext = Boolean(timing && next && !tableBreaks.has(index + 1));
+    const separator = cueSeparator(index, joinNext, breakBefore);
     if (timing || captionRowStarts?.has(line.start)) timedRows.add(offset);
     if (timing) {
-      const lineEnding = next ? separator : source.slice(line.contentEnd, line.end);
+      const lineEnding = joinNext ? separator : source.slice(line.contentEnd, line.end);
       regions.push({
         start: offset, end: offset + body.length, sourceStart: line.start + timing.prefixLength,
         cue: { timing, lineStart: line.start },
@@ -1191,7 +1333,7 @@ function parseInlineCuedDocument(
     } else {
       const previous = regions.at(-1);
       const end = offset + line.end - line.start;
-      if (previous && !previous.cue) previous.end = end;
+      if (previous && !previous.cue && !breakBefore) previous.end = end;
       else regions.push({ start: offset, end, sourceStart: line.start });
       parts.push(source.slice(line.start, line.end));
       offset = end;
@@ -1270,8 +1412,11 @@ function parsePedagogicalAstInternal(
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
-  const timings = scanInlineCueTimings(lines);
-  if (timings.some(Boolean)) return parseInlineCuedDocument(text, lines, timings, options, sealProofs, captionRowStarts);
+  const { timings, tableBreaks } = scanInlineCueTimings(lines, captionRowStarts);
+  if (timings.some(Boolean)) {
+    return parseInlineCuedDocument(text, lines, timings, tableBreaks, options, sealProofs, captionRowStarts);
+  }
+  const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(index => lines[index]?.raw);
   const blocks: PedagogicalAstBlock[] = [];
   const headingStack: Array<{ readonly level: number; readonly visibility: PedagogicalVisibility }> = [];
   const getActiveSectionVisibility = (): PedagogicalVisibility =>
@@ -1620,9 +1765,9 @@ function parsePedagogicalAstInternal(
 
     // 1. Heading (and monotonic heading-stack section visibility propagation)
     const headingMatch = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/.exec(raw);
-    const setext = headingMatch ? null : findSetextUnderline(lines, i);
-    if (headingMatch || setext) {
-      const level = headingMatch ? headingMatch[1]!.length : setext!.level;
+    const setext = headingMatch ? null : readSetextParagraph(index => lines[index]?.raw, i);
+    const level = headingMatch?.[1]?.length ?? setext?.level;
+    if (level !== undefined) {
       const headingLastIndex = setext?.index ?? i;
       const headingEnd = lines[headingLastIndex]!.contentEnd;
       const headingTextStart = headingMatch
@@ -2086,6 +2231,7 @@ function parsePedagogicalAstInternal(
             classified.visibility,
             propagateSectionVisibility,
             classified.kind === "exercise",
+            captionRowStarts,
           );
           const higherBlocks = innerBlocks.filter(
             b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
@@ -2138,6 +2284,7 @@ function parsePedagogicalAstInternal(
           activeVis,
           propagateSectionVisibility,
           sealProofs,
+          captionRowStarts,
         );
         if (innerBlocks.some(b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis])) {
           emitContainerWithExtraction(
@@ -2199,6 +2346,7 @@ function parsePedagogicalAstInternal(
         activeVis,
         propagateSectionVisibility,
         sealProofs,
+        captionRowStarts,
         (bodyLine, index) => index === i
           ? { length: listMatch[0].length, padding: 0 }
           : listContinuationPrefix(bodyLine.raw, contentIndent),
@@ -2212,7 +2360,17 @@ function parsePedagogicalAstInternal(
     // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
     if (tableHeaderCells) {
       let j = i + 2;
-      while (j < lines.length && isPipeTableBodyRow(lines[j]!.raw)) j++;
+      const columns = getTableColumnVisibilities(raw, tableHeaderCells, line.start);
+      while (j < lines.length) {
+        const row = lines[j]!;
+        const isCaptionRow = captionRowStarts?.has(row.start);
+        if (!isPipeTableBodyRow(row.raw) && !(isCaptionRow && isCaptionTableBodyRow(row.raw))) break;
+        if (isCaptionRow && protectedCaptionUnderline) {
+          const candidate = readMarkdownContainerLine(row.raw);
+          if (protectedCaptionUnderline(j, candidate, columns) !== undefined) break;
+        }
+        j++;
+      }
       const endLineIdx = j - 1;
       const activeVis = getActiveSectionVisibility();
       const tableStart = line.start;
@@ -2708,12 +2866,15 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
   const cueStarts: number[] = [];
   const captionRowStarts = new Set<number>();
   const textParts: string[] = [];
-  const cueSeparator = createTranscriptCueSeparator();
+  const boundaryVisibilities = new Map<number, PedagogicalVisibility>();
+  const cueSeparator = createTranscriptCueSeparator(input.cues.map(cue => cue.text), (index, visibility) => {
+    boundaryVisibilities.set(index, maxVisibility(boundaryVisibilities.get(index) ?? "public", visibility));
+  });
   let virtualOffset = 0;
   for (const [index, cue] of input.cues.entries()) {
     cueStarts.push(virtualOffset);
     for (const { start } of splitLinesWithOffsets(cue.text)) captionRowStarts.add(virtualOffset + start);
-    const separator = cueSeparator(cue.text, input.cues[index + 1]?.text);
+    const separator = cueSeparator(index);
     textParts.push(cue.text, separator);
     virtualOffset += cue.text.length + separator.length;
   }
@@ -2740,7 +2901,10 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
     originalOffset += cue.text.length + 1;
     if (!cue.text) continue;
 
-    const visibilityFloor = maxVisibility(defaultVisibility, cue.visibility ?? defaultVisibility);
+    const visibilityFloor = maxVisibility(
+      maxVisibility(defaultVisibility, cue.visibility ?? defaultVisibility),
+      boundaryVisibilities.get(cueIndex) ?? "public",
+    );
     const spans = splitCueVisibility(text, start, end, visibilityFloor, readRange);
 
     for (const span of spans) {
