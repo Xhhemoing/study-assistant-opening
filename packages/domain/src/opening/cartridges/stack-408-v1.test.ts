@@ -281,6 +281,20 @@ describe("408.stack.v1 probes", () => {
     expect(probe.parseResponse({ verdict: "infeasible", firstViolationIndex: 2 })).toBeNull();
     expect(reads).toBe(0);
   });
+
+  it("keeps feasibility parsing bound to the verified input snapshot", () => {
+    const input = { pushOrder: [1, 2, 3, 4], candidatePops: [2, 4, 1, 3] };
+    const probe = createStackFeasibilityProbe("mutable-input", input, "判断。");
+    expect(verifyProbeDistinguishability(probe).distinguishable).toBe(true);
+    input.candidatePops.length = 1;
+    input.pushOrder.length = 1;
+
+    expect(probe.input).toEqual({ pushOrder: [1, 2, 3, 4], candidatePops: [2, 4, 1, 3] });
+
+    expect(probe.parseResponse({ verdict: "infeasible", firstViolationIndex: 2 })).toEqual({
+      verdict: "infeasible", firstViolationIndex: 2,
+    });
+  });
 });
 
 describe("408.stack.v1 continuity (L1)", () => {

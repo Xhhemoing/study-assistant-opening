@@ -321,6 +321,14 @@ const fifoDescription = "把栈当作队列：出栈取最早入栈的元素。"
 const offByOneDescription = "栈顶指针顺序混淆：在 top 初值为 -1 时使用 data[top++] = x。";
 const bypassDescription = "绕过后进先出约束：认为任意已入栈元素都可直接出栈，因此任何排列都是合法出栈序列。";
 
+function captureFactoryInput<T>(input: T): T | null {
+  try {
+    return deepFreeze(cloneCartridgeData(input));
+  } catch {
+    return null;
+  }
+}
+
 export const stackTraceHypotheses: readonly MisconceptionHypothesis<StackTraceInput, StackTraceObservable>[] = deepFreeze([
   { id: H_FIFO_QUEUE_CONFUSION, role: "misconception", label: "队列混淆", description: fifoDescription,
     predict: simulateFifoQueueConfusionTrace },
@@ -343,7 +351,8 @@ export function createStackTraceProbe(
   input: StackTraceInput,
   prompt: string,
 ): DistinguishableProbeSpec<StackTraceInput, StackTraceObservable> {
-  return { probeId, requirementKey, prompt, input,
+  const capturedInput = captureFactoryInput(input);
+  return { probeId, requirementKey, prompt, input: capturedInput ?? deepFreeze({ capacity: 0, ops: [] }),
     correctModel: { id: "M_CORRECT_LIFO", role: "correct", label: "正确 LIFO 栈", predict: simulateCorrectStackTrace },
     hypotheses: stackTraceHypotheses, observableKey: traceKey, parseResponse: parseStackTraceResponse };
 }
@@ -353,10 +362,12 @@ export function createStackFeasibilityProbe(
   input: StackFeasibilityInput,
   prompt: string,
 ): DistinguishableProbeSpec<StackFeasibilityInput, StackFeasibilityObservable> {
-  return { probeId, requirementKey: "408.ds.stack.pop-sequence-feasibility", prompt, input,
+  const capturedInput = captureFactoryInput(input);
+  return { probeId, requirementKey: "408.ds.stack.pop-sequence-feasibility", prompt,
+    input: capturedInput ?? deepFreeze({ pushOrder: [], candidatePops: [] }),
     correctModel: { id: "M_CORRECT_LIFO", role: "correct", label: "正确 LIFO 栈", predict: simulateCorrectFeasibility },
     hypotheses: stackFeasibilityHypotheses, observableKey: feasibilityKey,
-    parseResponse: response => parseStackFeasibilityResponse(response, input) };
+    parseResponse: response => capturedInput === null ? null : parseStackFeasibilityResponse(response, capturedInput) };
 }
 
 const push = (value: number): StackOp => ({ op: "push", value });

@@ -279,8 +279,20 @@ export function evaluateCartridgeEvidenceEligibility(
   cartridge?: { registry: CartridgeRegistry; emission: CartridgeObservationEmission } | null,
 ): { eligibility: EvidenceEligibility; qualification: CartridgeEvidenceQualification | null } {
   const eligibility = evaluateEvidenceEligibility(observation, context);
-  if (!cartridge) return { eligibility, qualification: null };
-  const qualification = qualifyCartridgeEmission(cartridge.registry, cartridge.emission,
-    { outcome: observation.outcome ?? null, requirementKey: observation.requirementKey ?? null });
+  if (cartridge === null || cartridge === undefined) return { eligibility, qualification: null };
+  let qualification: CartridgeEvidenceQualification;
+  try {
+    if (!isPlainCartridgeRecord(cartridge)) throw new TypeError("Cartridge evidence wrapper requires a plain record");
+    const registryProperty = Object.getOwnPropertyDescriptor(cartridge, "registry");
+    const emissionProperty = Object.getOwnPropertyDescriptor(cartridge, "emission");
+    if (!registryProperty || !Object.hasOwn(registryProperty, "value")
+      || !emissionProperty || !Object.hasOwn(emissionProperty, "value")) {
+      throw new TypeError("Cartridge evidence wrapper requires data properties");
+    }
+    qualification = qualifyCartridgeEmission(registryProperty.value, emissionProperty.value,
+      { outcome: observation.outcome ?? null, requirementKey: observation.requirementKey ?? null });
+  } catch {
+    qualification = malformedCartridgeEmission();
+  }
   return { eligibility: applyCartridgeEvidenceGate(eligibility, qualification), qualification };
 }

@@ -544,6 +544,49 @@ describe("CartridgeRegistry", () => {
       "evidence_probe_lookup_mismatch", "evidence_probe_id_duplicate", "evidence_probe_lookup_mismatch"]);
   });
 
+  it("rejects duplicate probe ids introduced after registration", () => {
+    const first = stack408Cartridge.getProbe(traceProbeId)!;
+    const duplicate = { ...first, prompt: `${first.prompt}（重复定义）` };
+    let runtime = false;
+    const candidate = {
+      ...stack408Cartridge,
+      listProbes: () => runtime ? [first, duplicate] : [first],
+      getProbe: () => first,
+    };
+    const registered = createCartridgeRegistry([candidate]).getCartridge(candidate.manifest.id)!;
+    runtime = true;
+
+    expect(() => registered.listProbes()).toThrow(TypeError);
+    expect(() => registered.getProbe(traceProbeId)).toThrow(TypeError);
+  });
+
+  it("rejects a runtime list and lookup definition disagreement", () => {
+    const listed = stack408Cartridge.getProbe(traceProbeId)!;
+    const lookedUp = { ...listed, prompt: `${listed.prompt}（lookup 漂移）` };
+    let runtime = false;
+    const candidate = {
+      ...stack408Cartridge,
+      listProbes: () => [listed],
+      getProbe: () => runtime ? lookedUp : listed,
+    };
+    const registered = createCartridgeRegistry([candidate]).getCartridge(candidate.manifest.id)!;
+    runtime = true;
+
+    expect(() => registered.listProbes()).toThrow(TypeError);
+    expect(() => registered.getProbe(traceProbeId)).toThrow(TypeError);
+  });
+
+  it("preserves ProbeDefinitionError issues in registration reports", () => {
+    const first = stack408Cartridge.getProbe(traceProbeId)!;
+    const invalid = { ...first, hypotheses: [] };
+    const report = validateCartridge({ ...stack408Cartridge, listProbes: () => [invalid], getProbe: () => invalid });
+
+    expect(report).toMatchObject({
+      ok: false,
+      issues: [{ code: "evidence_probe_not_distinguishable", detail: expect.stringContaining("no_competing_hypotheses") }],
+    });
+  });
+
   it("converts exceptions from getProbe and getters into structured registration rejections", () => {
     const throwingLookup = {
       ...stack408Cartridge,

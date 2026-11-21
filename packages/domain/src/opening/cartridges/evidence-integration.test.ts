@@ -526,6 +526,18 @@ describe("applyCartridgeEvidenceGate", () => {
     expect(gated.qualification?.reasonCodes).toEqual(["cartridge_outcome_conflict"]);
     expect(gated.eligibility.verifiedCorrect).toBe("unknown");
   });
+
+  it.each(["primitive", "Proxy", "getter"] as const)(
+    "fails closed for a malformed outer cartridge wrapper (%s)", kind => {
+      const wrapper = kind === "primitive" ? 42
+        : kind === "Proxy" ? new Proxy({ registry, emission: emit() }, { get() { throw new Error("unexpected read"); } })
+        : { get registry() { throw new Error("unexpected read"); }, emission: emit() };
+      const result = evaluateCartridgeEvidenceEligibility(stackObservation, context, wrapper as never);
+
+      expect(result.qualification).toMatchObject({ qualified: false, reasonCodes: ["cartridge_evaluation_failed"] });
+      expect(result.eligibility.verifiedCorrect).toBe("unknown");
+    },
+  );
 });
 
 describe("assembleLearnerState with cartridge evidence", () => {

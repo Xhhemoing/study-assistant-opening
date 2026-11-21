@@ -2,9 +2,9 @@ import {
   callCartridgeDataMethod, cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction,
   isInspectableCartridgeObject, readCartridgeDataProperty,
 } from "./clone-cartridge-data";
-import { deepFreeze } from "./probe-definition";
+import { cloneProbeDefinition, deepFreeze, ProbeDefinitionError } from "./probe-definition";
 import type { DistinguishableProbeSpec, ProbeDistinguishabilityReport } from "./probe-protocol";
-import { inspectProbe, publishVerifiedProbe } from "./published-probe";
+import { inspectProbe, markProbeRejection, publishInspectedProbe } from "./published-probe";
 import {
   CARTRIDGE_LEVEL_METHODS,
   cartridgeManifestSchema,
@@ -112,7 +112,8 @@ function validateEvidenceContracts(
         issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${report.issues.join(", ")}` });
       }
     } catch (error) {
-      issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${safeErrorDetail(error)}` });
+      const detail = error instanceof ProbeDefinitionError ? error.issue : safeErrorDetail(error);
+      issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${detail}` });
       reports.push(deepFreeze<ProbeDistinguishabilityReport>({
         probeId, distinguishable: false, predictions: [], ambiguousPairs: [],
         degenerateAgainstCorrectModel: [], issues: ["prediction_failed"],
@@ -184,6 +185,77 @@ function wrapCartridge(
   pinnedEvidenceContract: Readonly<CartridgeEvidenceContract> | undefined,
 ): AnyTeachingCartridge {
   const { level } = pinnedManifest;
+  type RuntimeProbe = DistinguishableProbeSpec<unknown, unknown>;
+  type InspectedRuntimeProbe = {
+    raw: unknown;
+    probe: RuntimeProbe;
+    definitionSignature: string;
+    signature: string;
+    snapshot: ReturnType<typeof inspectProbe>["snapshot"];
+  };
+
+  const canonicalRecord = (value: object, excluded: readonly string[]): Record<string, unknown> => {
+    const record: Record<string, unknown> = {};
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== "string") throw new TypeError("Cartridge probe requires string keys");
+      if (!excluded.includes(key)) record[key] = readCartridgeDataProperty(value, key);
+    }
+    return record;
+  };
+
+  const canonicalDefinition = (probe: RuntimeProbe) => ({
+    data: canonicalRecord(probe, ["correctModel", "hypotheses", "observableKey", "parseResponse"]),
+    correctModel: canonicalRecord(probe.correctModel, ["predict"]),
+    hypotheses: probe.hypotheses.map(hypothesis => canonicalRecord(hypothesis, ["predict"])),
+  });
+
+  const inspectRuntimeProbe = (raw: unknown): InspectedRuntimeProbe => {
+    const { probe, snapshot } = inspectProbe(raw);
+    const definition = canonicalDefinition(probe);
+    const definitionSignature = JSON.stringify(cloneCartridgeData(definition));
+    const signature = JSON.stringify(cloneCartridgeData({
+      definition,
+      report: snapshot.report,
+      correctObservableKey: snapshot.correctObservableKey,
+    }));
+    return { raw, probe, definitionSignature, signature, snapshot };
+  };
+
+  const assertLookupAgreement = (listed: InspectedRuntimeProbe, lookedUp: unknown, probeId: string): void => {
+    if (lookedUp === null) throw new TypeError(`Cartridge getProbe(${probeId}) returned null for a listed probe`);
+    if (lookedUp === listed.raw) {
+      const lookupDefinition = canonicalDefinition(cloneProbeDefinition(lookedUp));
+      if (JSON.stringify(cloneCartridgeData(lookupDefinition)) !== listed.definitionSignature) {
+        throw new TypeError(`Cartridge getProbe(${probeId}) disagrees with listProbes()`);
+      }
+      return;
+    }
+    const inspectedLookup = inspectRuntimeProbe(lookedUp);
+    if (inspectedLookup.probe.probeId !== probeId || inspectedLookup.signature !== listed.signature) {
+      throw new TypeError(`Cartridge getProbe(${probeId}) disagrees with listProbes()`);
+    }
+  };
+
+  const readRuntimeProbeCatalog = (): InspectedRuntimeProbe[] => {
+    const rawProbes = copyCartridgeArray(callCartridgeDataMethod(cartridge, "listProbes", []) as readonly unknown[]);
+    if (rawProbes.length === 0) throw new TypeError("L4_EVIDENCE requires at least one probe");
+    const seen = new Set<string>();
+    const inspected: InspectedRuntimeProbe[] = [];
+    for (const rawProbe of rawProbes) {
+      const listed = inspectRuntimeProbe(rawProbe);
+      const probeId = listed.probe.probeId;
+      if (typeof probeId !== "string" || probeId.length === 0) {
+        throw new TypeError("Cartridge probe requires a non-blank probeId");
+      }
+      if (seen.has(probeId)) throw new TypeError(`Cartridge listProbes() returned duplicate probe id ${probeId}`);
+      seen.add(probeId);
+      const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", [probeId]);
+      assertLookupAgreement(listed, lookedUp, probeId);
+      inspected.push(listed);
+    }
+    return inspected;
+  };
+
   const facade: AnyTeachingCartridge = {
     manifest: pinnedManifest,
     serializeContinuityState(state) {
@@ -209,15 +281,25 @@ function wrapCartridge(
     Object.defineProperty(facade, method, {
       enumerable: true,
       value(...args: unknown[]): unknown {
-        const result = callCartridgeDataMethod(cartridge, method, cloneCartridgeData(args));
-        // Raw list/lookup identity is used during validation only.
         if (method === "getProbe") {
-          return result === null ? null : publishVerifiedProbe(result);
+          const requestedId = args[0];
+          const catalog = readRuntimeProbeCatalog();
+          const listed = catalog.find(candidate => candidate.probe.probeId === requestedId);
+          if (listed) return publishInspectedProbe(listed.probe, listed.snapshot);
+          const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", cloneCartridgeData(args));
+          if (lookedUp === null) return null;
+          const inspectedLookup = inspectRuntimeProbe(lookedUp);
+          if (inspectedLookup.probe.probeId !== requestedId) {
+            const error = new TypeError(`Cartridge getProbe(${String(requestedId)}) returned a different probe id`);
+            throw markProbeRejection(error, inspectedLookup.snapshot.report);
+          }
+          return publishInspectedProbe(inspectedLookup.probe, inspectedLookup.snapshot);
         }
         if (method === "listProbes") {
-          return Object.freeze(copyCartridgeArray(result as readonly unknown[])
-            .map(publishVerifiedProbe));
+          return Object.freeze(readRuntimeProbeCatalog()
+            .map(candidate => publishInspectedProbe(candidate.probe, candidate.snapshot)));
         }
+        const result = callCartridgeDataMethod(cartridge, method, cloneCartridgeData(args));
         return cloneCartridgeData(result);
       },
     });

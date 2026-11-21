@@ -18,21 +18,30 @@ export function readProbeRejection(error: unknown): ProbeDistinguishabilityRepor
   return error !== null && typeof error === "object" ? rejectionReports.get(error) : undefined;
 }
 
+export function markProbeRejection(error: Error, report: ProbeDistinguishabilityReport): Error {
+  rejectionReports.set(error, report);
+  return error;
+}
+
 export function inspectProbe(value: unknown) {
   const probe = cloneProbeDefinition(value);
   return { probe, snapshot: snapshotAndVerifyProbe(probe) };
 }
 
-export function publishVerifiedProbe(value: unknown): Probe {
-  const { probe, snapshot } = inspectProbe(value);
+export function publishInspectedProbe(probe: Probe, snapshot: VerifiedProbeSnapshot): Probe {
   const { report } = snapshot;
   if (!report.distinguishable) {
     const error = new TypeError(`Cartridge probe ${report.probeId} is not distinguishable: ${report.issues.join(", ")}`);
-    rejectionReports.set(error, report);
+    markProbeRejection(error, report);
     throw error;
   }
   publishedSnapshots.set(probe, snapshot);
   return probe;
+}
+
+export function publishVerifiedProbe(value: unknown): Probe {
+  const { probe, snapshot } = inspectProbe(value);
+  return publishInspectedProbe(probe, snapshot);
 }
 
 export function readProbeSnapshot(probe: Probe): VerifiedProbeSnapshot {
