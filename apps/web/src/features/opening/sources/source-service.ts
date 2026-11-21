@@ -265,21 +265,16 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const currentTime = now();
       let stagingDiscoveryFailed = false;
       let discoveredStagingKeys: string[] = [];
-      const discoverStagingKeys = async () => {
-        if (typeof storage.listMatchingStagingKeys !== "function") return;
+      if (input.action !== "exclude" && typeof storage.listMatchingStagingKeys === "function") {
         try {
           discoveredStagingKeys = await storage.listMatchingStagingKeys(sourceId);
         } catch {
           stagingDiscoveryFailed = true;
         }
-      };
-      if (input.action === "delete") await discoverStagingKeys();
-      const result = input.action === "retry_cleanup"
-        ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId) }
-        : await actions.apply(scope, id, input, storage, currentTime, { extraKeys: discoveredStagingKeys });
-      if (input.action === "retry_cleanup" && !result.cleanup.connectorReservation) {
-        await discoverStagingKeys();
       }
+      const result = input.action === "retry_cleanup"
+        ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId, { extraKeys: discoveredStagingKeys, keys: storage }) }
+        : await actions.apply(scope, id, input, storage, currentTime, { extraKeys: discoveredStagingKeys });
       if (input.action !== "retry_cleanup") {
         try {
           await createOpeningKnowledgeRepository(sql).reconcileCoursesForSource(scope, {

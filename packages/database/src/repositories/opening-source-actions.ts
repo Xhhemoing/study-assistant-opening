@@ -6,6 +6,14 @@ import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } fr
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 
 type Keys = { stagingKey(id: string): string; finalKey(id: string, version: number): string };
+type StagingKeyProvider = Pick<Keys, "stagingKey">;
+export type CleanupOptions = {
+  extraKeys?: readonly string[];
+  keys?: StagingKeyProvider;
+};
+const defaultStagingKeys: StagingKeyProvider = {
+  stagingKey: (id: string) => `opening/staging/${id}`,
+};
 export const CONNECTOR_PUT_TIMEOUT_MS = 30_000;
 export const CONNECTOR_RESERVATION_GRACE_MS = 60_000;
 type Cleanup = { keys: string[]; notBefore: string | null; connectorReservation?: boolean };
@@ -31,7 +39,7 @@ function isConnectorReservationRow(row: Record<string, unknown>): boolean {
   return String(row.id).toLowerCase() === connectorReservationId(String(row.source_id));
 }
 
-function validExtraObjectKeys(canonicalId: string, keys: Keys, extraKeys?: readonly string[]): string[] {
+function validExtraObjectKeys(canonicalId: string, keys: StagingKeyProvider, extraKeys?: readonly string[]): string[] {
   if (!extraKeys?.length) return [];
   const ownPrefix = `opening/sources/${canonicalId}/`;
   const ownStagingKeyLower = keys.stagingKey(canonicalId).toLowerCase();
@@ -39,6 +47,26 @@ function validExtraObjectKeys(canonicalId: string, keys: Keys, extraKeys?: reado
     const lowerExtra = extraKey.toLowerCase();
     return !extraKey.includes("..") && (lowerExtra === ownStagingKeyLower || lowerExtra.startsWith(ownPrefix));
   });
+}
+
+async function mergeExtraPendingKeys(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  row: Record<string, unknown>,
+  canonicalId: string,
+  keys: StagingKeyProvider,
+  extraKeys?: readonly string[],
+): Promise<void> {
+  if (String(row.id ?? "").toLowerCase() === connectorReservationId(canonicalId)) return;
+  const validExtra = validExtraObjectKeys(canonicalId, keys, extraKeys);
+  if (!validExtra.length) return;
+  const existingKeys = (row.pending_object_keys as string[] | null) ?? [];
+  const mergedKeys = [...new Set([...existingKeys, ...validExtra])];
+  if (mergedKeys.length > existingKeys.length) {
+    await tx`UPDATE opening_privacy_exclusions SET pending_object_keys=${mergedKeys}
+      WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId} AND asset_deleted_at IS NOT NULL`;
+    row.pending_object_keys = mergedKeys;
+  }
 }
 
 function cleanup(row: Record<string, unknown>): Cleanup {
@@ -92,7 +120,12 @@ export async function releaseConnectorReservation(
   return (await tryReleaseConnectorReservation(tx, scope, id, key, options)) === "released";
 }
 
-async function claimCleanup(tx: TransactionSql, scope: OpeningScope, id: string): Promise<Cleanup> {
+async function claimCleanup(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  id: string,
+  options?: CleanupOptions,
+): Promise<Cleanup> {
   const canonicalInputId = id.toLowerCase();
   const [row] = await tx`SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions
     WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalInputId} AND asset_deleted_at IS NOT NULL FOR UPDATE`;
@@ -103,6 +136,15 @@ async function claimCleanup(tx: TransactionSql, scope: OpeningScope, id: string)
     // session lock is gone and its reservation row is still present.
     const [lock] = await tx`SELECT pg_try_advisory_xact_lock(hashtextextended(${canonicalId}, 0)) AS acquired`;
     if (!lock?.acquired) throw new OpeningSourceError("CONFLICT", "Connector upload in progress");
+  } else {
+    await mergeExtraPendingKeys(
+      tx,
+      scope,
+      row,
+      canonicalId,
+      options?.keys ?? defaultStagingKeys,
+      options?.extraKeys,
+    );
   }
   return cleanup(row);
 }
@@ -141,16 +183,7 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
             if (String(receipt.id).toLowerCase() === connectorReservationId(receiptSourceId)) {
               return { deleted: true, cleanup: await claimCleanup(tx, scope, receiptSourceId) };
             }
-            const validExtra = validExtraObjectKeys(receiptSourceId, keys, options?.extraKeys);
-            if (validExtra.length) {
-              const existingKeys = (receipt.pending_object_keys as string[] | null) ?? [];
-              const mergedKeys = [...new Set([...existingKeys, ...validExtra])];
-              if (mergedKeys.length > existingKeys.length) {
-                await tx`UPDATE opening_privacy_exclusions SET pending_object_keys=${mergedKeys}
-                  WHERE workspace_id=${scope.workspaceId} AND source_id=${receiptSourceId} AND asset_deleted_at IS NOT NULL`;
-                receipt.pending_object_keys = mergedKeys;
-              }
-            }
+            await mergeExtraPendingKeys(tx, scope, receipt, receiptSourceId, keys, options?.extraKeys);
             return { deleted: true, cleanup: cleanup(receipt) };
           }
           throw new OpeningSourceError("NOT_FOUND", "Source not found");
@@ -223,10 +256,10 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
       });
     },
 
-    async cleanup(scope: OpeningScope, id: string): Promise<Cleanup> {
+    async cleanup(scope: OpeningScope, id: string, options?: CleanupOptions): Promise<Cleanup> {
       return sql.begin(async tx => {
         await owner(tx, scope);
-        return claimCleanup(tx, scope, id);
+        return claimCleanup(tx, scope, id, options);
       });
     },
 

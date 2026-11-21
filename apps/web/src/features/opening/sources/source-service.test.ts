@@ -1283,6 +1283,10 @@ describe("opening signed upload service", () => {
         pendingKeys = values[1] as string[];
         return [];
       }
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=?")) {
+        pendingKeys = values[0] as string[];
+        return [];
+      }
       if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
         return pendingKeys.length ? [{ id: "00000000-0000-4000-8000-000000000099", source_id: canonicalId, pending_object_keys: pendingKeys, cleanup_not_before: null }] : [];
       }
@@ -1305,7 +1309,7 @@ describe("opening signed upload service", () => {
       sha256: pdfSha,
     });
     canonicalId = ticket.source.id;
-    const mixedKey = `opening/staging/${canonicalId.slice(0, 6).toUpperCase()}${canonicalId.slice(6)}`;
+    const mixedKey = `opening/staging/${canonicalId.replace(/[a-f]/, ch => ch.toUpperCase())}`;
     s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
 
     // Listing error on delete still removes DB source, but leaves staging receipt pending.
@@ -1407,7 +1411,7 @@ describe("opening signed upload service", () => {
       sha256: pdfSha,
     });
     canonicalId = ticket.source.id;
-    const mixedKey = `opening/staging/${canonicalId.slice(0, 6).toUpperCase()}${canonicalId.slice(6)}`;
+    const mixedKey = `opening/staging/${canonicalId.replace(/[a-f]/, ch => ch.toUpperCase())}`;
     s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
 
     // First delete fails listing -> source removed in DB, staging receipt remains pending.
@@ -1445,6 +1449,76 @@ describe("opening signed upload service", () => {
     expect(cleanDelete).toMatchObject({ sourceId: canonicalId, deleted: true, cleanupPending: 0, retryAfter: null });
     expect(s3.objects.has(mixedKey)).toBe(false);
     expect(pendingKeys).toEqual([]);
+  });
+
+  it("persists discovered mixed-case staging keys before S3 remove when retry_cleanup encounters an empty legacy receipt", async () => {
+    const baseSql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    const storage: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+      listMatchingStagingKeys: async (canonicalId) =>
+        [...s3.objects.keys()].filter(key => key.toLowerCase() === `opening/staging/${canonicalId.toLowerCase()}`),
+    };
+    const sourceId = "00000000-0000-4000-8000-0000000000e1";
+    const mixedKey = `opening/staging/${sourceId.slice(0, 6).toUpperCase()}${sourceId.slice(6)}`;
+    s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
+
+    // Legacy deletion receipt with empty pending_object_keys = [].
+    let pendingKeys: string[] = [];
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return [{
+          id: "00000000-0000-4000-8000-000000000099",
+          source_id: sourceId,
+          pending_object_keys: pendingKeys,
+          cleanup_not_before: null,
+        }];
+      }
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=?")) {
+        pendingKeys = [...(values[0] as string[])];
+        return [];
+      }
+      if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove")) {
+        pendingKeys = pendingKeys.filter(k => k !== values[0]);
+        return [];
+      }
+      return (baseSql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof baseSql, {
+      json: baseSql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const realDelete = storage.deleteObject;
+    storage.deleteObject = async () => { throw new Error("storage unavailable"); };
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage);
+
+    const failedRetry = await svc.actOnSource(principal, sourceId, { action: "retry_cleanup" });
+    expect(failedRetry).toEqual({
+      sourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 1,
+      retryAfter: null,
+    });
+    expect(pendingKeys).toEqual([mixedKey]);
+    expect(s3.objects.has(mixedKey)).toBe(true);
+
+    storage.deleteObject = realDelete;
+    const clearedRetry = await svc.actOnSource(principal, sourceId, { action: "retry_cleanup" });
+    expect(clearedRetry).toEqual({
+      sourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 0,
+      retryAfter: null,
+    });
+    expect(pendingKeys).toEqual([]);
+    expect(s3.objects.has(mixedKey)).toBe(false);
   });
 
 });
