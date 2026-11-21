@@ -3,7 +3,9 @@ import {
   BASE_PRIOR_BETA,
   MAX_BRIDGE_PRIOR_MEAN,
   MAX_BRIDGE_PSEUDO_OBSERVATIONS,
+  MAX_BRIDGE_WEIGHT,
   MIN_BRIDGE_PRIOR_MEAN,
+  MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE,
   type AcceptedConceptBridgeEdge,
   type ComputeCrossCourseWeakPriorInput,
   type CrossCourseConceptEdge,
@@ -34,16 +36,19 @@ function resolveDirectOnlyMastery(
     }
   | {
       readonly ok: false;
-      readonly reason: "bridged_prior_contamination" | "invalid_edge_parameters";
+      readonly reason:
+        | "bridged_prior_contamination"
+        | "insufficient_direct_evidence"
+        | "invalid_edge_parameters";
     } {
   // Path 1: Raw direct in-course counts (`sourceDirectSuccessCount / sourceDirectObservationCount`).
   // Completely immune to any bridged prior that may have been mixed into `sourceMasteryProbability`.
   if (edge.sourceDirectSuccessCount !== undefined) {
     if (
-      !Number.isFinite(edge.sourceDirectSuccessCount) ||
+      !Number.isSafeInteger(edge.sourceDirectSuccessCount) ||
       edge.sourceDirectSuccessCount < 0 ||
-      !Number.isFinite(edge.sourceDirectObservationCount) ||
-      edge.sourceDirectObservationCount <= 0 ||
+      !Number.isSafeInteger(edge.sourceDirectObservationCount) ||
+      edge.sourceDirectObservationCount < MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE ||
       edge.sourceDirectSuccessCount > edge.sourceDirectObservationCount
     ) {
       return { ok: false, reason: "invalid_edge_parameters" };
@@ -55,12 +60,21 @@ function resolveDirectOnlyMastery(
     };
   }
 
-  // Path 2: Certified direct-only probability (only when explicitly uncontaminated by bridged priors).
+  // Path 2: Certified direct-only probability (only when explicitly uncontaminated by bridged priors
+  // AND backed by a safe integer `certifiedDirectObservationCount >= 3`).
   if (edge.includesBridgedPrior === true) {
     return { ok: false, reason: "bridged_prior_contamination" };
   }
 
   if (edge.sourceDirectOnlyMasteryProbability !== undefined) {
+    if (
+      edge.certifiedDirectObservationCount === undefined ||
+      !Number.isSafeInteger(edge.certifiedDirectObservationCount) ||
+      edge.certifiedDirectObservationCount < MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE ||
+      edge.certifiedDirectObservationCount > edge.sourceDirectObservationCount
+    ) {
+      return { ok: false, reason: "insufficient_direct_evidence" };
+    }
     if (
       !Number.isFinite(edge.sourceDirectOnlyMasteryProbability) ||
       edge.sourceDirectOnlyMasteryProbability < 0 ||
@@ -82,15 +96,15 @@ function resolveDirectOnlyMastery(
 
 /**
  * Computes a strictly 1-hop, read-time privacy-epoch checked, bounded weak Beta prior
- * `Beta(1 + deltaAlpha, 1 + deltaBeta)` with `deltaAlpha + deltaBeta <= 1`
- * (`posteriorMean` strictly in `[1/3, 2/3]`).
+ * `Beta(1 + deltaAlpha, 1 + deltaBeta)` with `deltaAlpha + deltaBeta <= 0.30`
+ * (`posteriorMean` strictly in `[1 / 2.3, 1.3 / 2.3]`, shrunk within `[0.35, 0.65]`).
  *
  * Invariants:
  * 1. Zero multi-hop propagation: only direct edges targeting `(targetCourseId, targetConceptId)`
- *    from a different `sourceCourseId` with positive direct in-course observations AND
+ *    from a different `sourceCourseId` with `>= 3` safe-integer direct in-course observations AND
  *    direct-only mastery (`sourceDirectSuccessCount / sourceDirectObservationCount` or
- *    uncontaminated `sourceDirectOnlyMasteryProbability`) can contribute. Mixed posteriors
- *    incorporating imported bridged priors are rejected to prevent 2-hop relay.
+ *    uncontaminated `sourceDirectOnlyMasteryProbability` with `certifiedDirectObservationCount >= 3`)
+ *    can contribute. Mixed posteriors incorporating imported bridged priors are rejected to prevent 2-hop relay.
  * 2. Instant lossless revocation: disabling source sharing, bumping source `privacy_epoch`,
  *    or revoking any supporting source ID immediately decouples the edge at read time,
  *    reverting to exact uniform `Beta(1, 1)` (`posteriorMean === 0.5`) when no edges remain,
@@ -172,11 +186,17 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
       decoupleReasons.push("supporting_source_revoked");
     }
 
-    const hasDirectObservations =
+    const hasAnyDirectObservation =
       Number.isFinite(edge.sourceDirectObservationCount) &&
       edge.sourceDirectObservationCount > 0;
-    if (!hasDirectObservations) {
+    const hasSufficientDirectObservations =
+      Number.isSafeInteger(edge.sourceDirectObservationCount) &&
+      edge.sourceDirectObservationCount >= MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE;
+
+    if (!hasAnyDirectObservation) {
       decoupleReasons.push("no_direct_source_observations");
+    } else if (!hasSufficientDirectObservations) {
+      decoupleReasons.push("insufficient_direct_evidence");
     }
 
     if (
@@ -187,7 +207,9 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
       decoupleReasons.push("invalid_edge_parameters");
     }
 
-    const directResolution = hasDirectObservations ? resolveDirectOnlyMastery(edge) : null;
+    const directResolution = hasSufficientDirectObservations
+      ? resolveDirectOnlyMastery(edge)
+      : null;
     if (directResolution && !directResolution.ok) {
       if (!decoupleReasons.includes(directResolution.reason)) {
         decoupleReasons.push(directResolution.reason);
@@ -242,18 +264,16 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     };
   }
 
+  const bridgeCap = Math.min(MAX_BRIDGE_WEIGHT, MAX_BRIDGE_PSEUDO_OBSERVATIONS);
   const totalRawWeight = surviving.reduce((sum, item) => sum + item.edge.alignmentWeight, 0);
-  const scale =
-    totalRawWeight > MAX_BRIDGE_PSEUDO_OBSERVATIONS
-      ? MAX_BRIDGE_PSEUDO_OBSERVATIONS / totalRawWeight
-      : 1;
+  const scale = totalRawWeight > bridgeCap ? bridgeCap / totalRawWeight : 1;
 
   let rawDeltaAlpha = 0;
   let rawDeltaBeta = 0;
   const acceptedEdges: AcceptedConceptBridgeEdge[] = [];
 
   for (const { edge, edgeId, directOnlyMastery, evidenceSource } of surviving) {
-    const effectiveWeight = edge.alignmentWeight * scale;
+    const effectiveWeight = Math.min(bridgeCap, edge.alignmentWeight * scale);
     const edgeDeltaAlpha = effectiveWeight * directOnlyMastery;
     const edgeDeltaBeta = effectiveWeight * (1 - directOnlyMastery);
     rawDeltaAlpha += edgeDeltaAlpha;
@@ -274,15 +294,12 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     });
   }
 
-  // Numerical safety guard against floating-point overshoot beyond 1 equivalent observation.
+  // Numerical safety guard against floating-point overshoot beyond `bridgeCap` (0.30).
   const totalDelta = rawDeltaAlpha + rawDeltaBeta;
-  const norm =
-    totalDelta > MAX_BRIDGE_PSEUDO_OBSERVATIONS
-      ? MAX_BRIDGE_PSEUDO_OBSERVATIONS / totalDelta
-      : 1;
+  const norm = totalDelta > bridgeCap ? bridgeCap / totalDelta : 1;
   const deltaAlpha = Math.max(0, rawDeltaAlpha * norm);
   const deltaBeta = Math.max(0, rawDeltaBeta * norm);
-  const equivalentObservations = Math.min(MAX_BRIDGE_PSEUDO_OBSERVATIONS, deltaAlpha + deltaBeta);
+  const equivalentObservations = Math.min(bridgeCap, deltaAlpha + deltaBeta);
 
   const alpha = BASE_PRIOR_ALPHA + deltaAlpha;
   const beta = BASE_PRIOR_BETA + deltaBeta;

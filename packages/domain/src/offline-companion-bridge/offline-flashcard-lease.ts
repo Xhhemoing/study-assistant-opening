@@ -50,8 +50,10 @@ const SOLUTION_DIRECTIVE_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:^|\n)\s*`{3,}\s*(?:solution|answer|rubric|key|grading)\b/i,
   /<\s*(?:details|summary)\b/i,
   /\[\s*(?:answer|ans|solution|sol|key|rubric|canonical\s+solution|reference\s+answer)\s*[:：=]/i,
-  /(?:^|[\s,.;!?()[\]])(?:answer|ans|solution|canonical\s+solution|reference\s+answer|answer\s+key|grading\s+rubric)\s*[:：=]/i,
-  /(?:参考答案|标准答案|正确答案|答案|解析|解答|解题过程|评分标准)\s*[:：]/,
+  /(?:\*\*|__)\s*(?:answer|ans|solution|canonical\s+solution|reference\s+answer|answer\s+key|grading\s+rubric)\s*[:：=]?\s*(?:\*\*|__)/i,
+  /(?:\*|_)\s*(?:answer|ans|solution|canonical\s+solution|reference\s+answer|answer\s+key|grading\s+rubric)\s*(?:[:：=]\s*(?:\*|_)|(?:\*|_)\s*[:：=])/i,
+  /(?:^|[\s,.;!?()[\]*_])(?:answer|ans|solution|canonical\s+solution|reference\s+answer|answer\s+key|grading\s+rubric)\s*(?:\*{1,3}|_{1,3})?\s*[:：=]/i,
+  /(?:\*{1,3}|_{1,3})?(?:参考答案|标准答案|正确答案|答案|解析|解答|解题过程|评分标准|解)(?:\*{1,3}|_{1,3})?\s*[:：=]/,
 ];
 
 function escapeRegExp(value: string): string {
@@ -370,6 +372,32 @@ function sanitizeLeaseCandidate(
         httpStatus: 400,
         cardId: candidateCardId,
         message: `Flashcard ${candidateCardId} requires non-empty prompt and backSummary.`,
+      };
+    }
+    // Defense-in-depth: fail closed if a flashcard candidate carries any forbidden
+    // exam/miss-variant secret fields (`sealedPayload`, `answerKey`, `canonicalSolution`,
+    // `gradingRubric`, `referenceAnswer`) so sealed problem material cannot bypass sanitization
+    // by being mislabeled as `cardKind: "flashcard"`.
+    const rawCandidate = candidate as Record<string, unknown>;
+    for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
+      const value = rawCandidate[forbiddenField];
+      if (value !== undefined && value !== null) {
+        return {
+          ok: false,
+          code: "miss_variant_answer_leak",
+          httpStatus: 422,
+          cardId: candidateCardId,
+          message: `Flashcard ${candidateCardId} refused: forbidden sealed/answer field ${forbiddenField} is not permitted on flashcard lease candidates.`,
+        };
+      }
+    }
+    if (containsSolutionDirectiveMarker(candidate.prompt)) {
+      return {
+        ok: false,
+        code: "miss_variant_answer_leak",
+        httpStatus: 422,
+        cardId: candidateCardId,
+        message: `Flashcard ${candidateCardId} refused: prompt contains solution/answer directive markup.`,
       };
     }
     const sanitized: OfflineLeasedStandardFlashcard = {

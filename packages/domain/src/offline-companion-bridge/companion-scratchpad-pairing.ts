@@ -158,35 +158,82 @@ export function normalizeOrigin(rawOrigin: string): string | null {
   return parsed.origin.toLowerCase();
 }
 
+const MULTI_PART_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk", "nhs.uk", "police.uk",
+  "com.cn", "edu.cn", "gov.cn", "org.cn", "net.cn", "ac.cn",
+  "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
+  "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp", "ed.jp", "gr.jp", "lg.jp",
+  "com.hk", "edu.hk", "gov.hk", "org.hk", "net.hk",
+  "com.tw", "edu.tw", "gov.tw", "org.tw", "net.tw",
+  "com.sg", "edu.sg", "gov.sg", "org.sg", "net.sg",
+  "co.kr", "or.kr", "ac.kr", "go.kr", "re.kr",
+  "co.in", "org.in", "ac.in", "gov.in", "net.in", "edu.in",
+  "com.br", "org.br", "gov.br", "edu.br", "net.br",
+  "co.nz", "org.nz", "ac.nz", "govt.nz", "net.nz",
+  "co.za", "org.za", "ac.za", "gov.za",
+  "com.mx", "org.mx", "edu.mx", "gob.mx",
+  "com.tr", "org.tr", "edu.tr", "gov.tr",
+  "com.my", "edu.my", "gov.my", "org.my",
+  "co.id", "ac.id", "go.id", "or.id",
+  "co.il", "ac.il", "gov.il", "org.il",
+  "com.ar", "org.ar", "edu.ar", "gov.ar",
+  "com.pl", "net.pl", "org.pl", "edu.pl", "gov.pl",
+  "com.ua", "org.ua", "edu.ua", "gov.ua",
+  "gc.ca", "gov.ca",
+]);
+
+const IPV4_LITERAL_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+const DNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+
 function normalizeHostname(origin: string): string {
   return new URL(origin).hostname.toLowerCase().replace(/\.$/, "");
 }
 
 /**
- * Enforces RFC 6265 cookie isolation between primary and companion HTTPS origins:
- * - Both origins must be valid HTTPS origins.
- * - Hostnames must be strictly distinct (different ports on the same host share cookies).
- * - Neither hostname may be a parent/child suffix of the other (`a.b.com` vs `b.com`)
- *   so parent `Domain=` cookies cannot leak across origins.
+ * Extracts the RFC 6265 / Fetch registrable site (eTLD+1) from a normalized HTTPS origin.
+ * Returns `null` for IP literals, `localhost`/`*.localhost`, single-label hosts, or bare public suffixes.
+ */
+export function extractRegistrableSite(rawOrigin: string): string | null {
+  const normalizedOrigin = normalizeOrigin(rawOrigin);
+  if (!normalizedOrigin) return null;
+  const host = normalizeHostname(normalizedOrigin);
+  if (
+    !host ||
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.includes(":") ||
+    host.startsWith("[") ||
+    IPV4_LITERAL_RE.test(host)
+  ) {
+    return null;
+  }
+  const labels = host.split(".");
+  if (labels.length < 2 || labels.some(label => !DNS_LABEL_RE.test(label))) {
+    return null;
+  }
+  const lastTwo = `${labels[labels.length - 2]}.${labels[labels.length - 1]}`;
+  if (MULTI_PART_PUBLIC_SUFFIXES.has(lastTwo)) {
+    if (labels.length < 3) return null;
+    return `${labels[labels.length - 3]}.${lastTwo}`;
+  }
+  return lastTwo;
+}
+
+/**
+ * Enforces RFC 6265 cross-site cookie isolation between primary and companion HTTPS origins:
+ * - Both origins must be valid HTTPS origins with extractable registrable domains (eTLD+1).
+ * - Rejects IP literals, localhost, same-host different-port pairs, parent/child subdomains,
+ *   AND sibling subdomains sharing the same registrable site (e.g. `app.aistudy.example` vs
+ *   `scratchpad.aistudy.example` share `Domain=aistudy.example` and `SameSite=Strict` scope).
  */
 export function areCompanionOriginsIsolated(
   primaryOrigin: string,
   companionOrigin: string,
 ): boolean {
-  const normalizedPrimary = normalizeOrigin(primaryOrigin);
-  const normalizedCompanion = normalizeOrigin(companionOrigin);
-  if (!normalizedPrimary || !normalizedCompanion) return false;
-  const primaryHost = normalizeHostname(normalizedPrimary);
-  const companionHost = normalizeHostname(normalizedCompanion);
-  if (!primaryHost || !companionHost) return false;
-  if (primaryHost === companionHost) return false;
-  if (
-    companionHost.endsWith(`.${primaryHost}`) ||
-    primaryHost.endsWith(`.${companionHost}`)
-  ) {
-    return false;
-  }
-  return true;
+  const primarySite = extractRegistrableSite(primaryOrigin);
+  const companionSite = extractRegistrableSite(companionOrigin);
+  if (!primarySite || !companionSite) return false;
+  return primarySite !== companionSite;
 }
 
 /**
@@ -248,6 +295,13 @@ export function parseCompanionQrUrl(
   }
   if (parsed.protocol !== "https:") {
     return { ok: false, code: "invalid_qr_url", message: "QR URL must use https." };
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    return {
+      ok: false,
+      code: "invalid_qr_url",
+      message: "QR URL must not contain embedded userinfo credentials.",
+    };
   }
   if (parsed.searchParams.has("k")) {
     return {
@@ -617,16 +671,14 @@ export function authorizeCompanionAction(
     };
   }
 
-  if (requestOrigin !== undefined) {
-    const normalizedRequestOrigin = normalizeOrigin(requestOrigin);
-    if (!normalizedRequestOrigin || normalizedRequestOrigin !== session.allowedOrigin) {
-      return {
-        allowed: false,
-        httpStatus: 403,
-        reason: "companion_capability_forbidden",
-        message: "Companion request origin does not match the session's isolated origin.",
-      };
-    }
+  const normalizedRequestOrigin = normalizeOrigin(requestOrigin);
+  if (!normalizedRequestOrigin || normalizedRequestOrigin !== session.allowedOrigin) {
+    return {
+      allowed: false,
+      httpStatus: 403,
+      reason: "companion_capability_forbidden",
+      message: "Companion request origin does not match the session's isolated origin.",
+    };
   }
 
   if (attemptId !== session.scopedAttemptId) {

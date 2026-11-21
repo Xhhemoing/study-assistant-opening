@@ -442,8 +442,8 @@ export interface AuthorizeCompanionActionInput {
   readonly session: CompanionSession;
   readonly action: CompanionAction | (string & {});
   readonly attemptId: string;
+  readonly requestOrigin: string;
   readonly nowMs: number;
-  readonly requestOrigin?: string;
 }
 
 export type CompanionAuthorizationFailureReason =
@@ -547,9 +547,15 @@ export type FreezeCompanionScratchpadResult =
 
 export const BASE_PRIOR_ALPHA = 1;
 export const BASE_PRIOR_BETA = 1;
-export const MAX_BRIDGE_PSEUDO_OBSERVATIONS = 1;
-export const MAX_BRIDGE_PRIOR_MEAN = 2 / 3;
-export const MIN_BRIDGE_PRIOR_MEAN = 1 / 3;
+export const MAX_BRIDGE_WEIGHT = 0.3;
+export const MAX_BRIDGE_PSEUDO_OBSERVATIONS = 0.3;
+export const MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE = 3;
+export const MAX_BRIDGE_PRIOR_MEAN =
+  (BASE_PRIOR_ALPHA + MAX_BRIDGE_PSEUDO_OBSERVATIONS) /
+  (BASE_PRIOR_ALPHA + BASE_PRIOR_BETA + MAX_BRIDGE_PSEUDO_OBSERVATIONS);
+export const MIN_BRIDGE_PRIOR_MEAN =
+  BASE_PRIOR_ALPHA /
+  (BASE_PRIOR_ALPHA + BASE_PRIOR_BETA + MAX_BRIDGE_PSEUDO_OBSERVATIONS);
 
 export interface CrossCourseConceptEdge {
   readonly edgeId?: string;
@@ -559,16 +565,22 @@ export interface CrossCourseConceptEdge {
   readonly targetConceptId: string;
   readonly alignmentWeight: number;
   /**
-   * Direct in-course success count (in `[0, sourceDirectObservationCount]`).
+   * Direct in-course success count (safe integer in `[0, sourceDirectObservationCount]`).
    * Preferred input: bridge probability is computed strictly as
    * `sourceDirectSuccessCount / sourceDirectObservationCount` without any bridged prior.
    */
   readonly sourceDirectSuccessCount?: number;
   /**
    * Direct-only mastery probability certified free of any cross-course bridged priors
-   * (used only when `sourceDirectSuccessCount` is omitted and `includesBridgedPrior !== true`).
+   * (used only when `sourceDirectSuccessCount` is omitted, `includesBridgedPrior !== true`,
+   * and `certifiedDirectObservationCount` is a safe integer `>= 3`).
    */
   readonly sourceDirectOnlyMasteryProbability?: number;
+  /**
+   * Safe integer count (`>= 3`) of direct in-course observations certifying
+   * `sourceDirectOnlyMasteryProbability` when raw `sourceDirectSuccessCount` is omitted.
+   */
+  readonly certifiedDirectObservationCount?: number;
   /**
    * Legacy / mixed posterior probability that may include imported cross-course priors.
    * Never admitted directly into 1-hop bridge computation to prevent 2-hop relay.
@@ -587,6 +599,7 @@ export type CrossCourseDecoupleReason =
   | "privacy_epoch_mismatch"
   | "supporting_source_revoked"
   | "no_direct_source_observations"
+  | "insufficient_direct_evidence"
   | "bridged_prior_contamination"
   | "multi_hop_rejected"
   | "invalid_edge_parameters";

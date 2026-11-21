@@ -8,8 +8,10 @@ import {
   FORBIDDEN_MISS_VARIANT_FIELDS,
   MAX_BRIDGE_PRIOR_MEAN,
   MAX_BRIDGE_PSEUDO_OBSERVATIONS,
+  MAX_BRIDGE_WEIGHT,
   MAX_OFFLINE_LEASE_CARDS,
   MIN_BRIDGE_PRIOR_MEAN,
+  MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE,
   OFFLINE_LEASE_TTL_MS,
   appendCompanionScratchpadPage,
   areCompanionOriginsIsolated,
@@ -19,6 +21,7 @@ import {
   createCompanionScratchpadDraft,
   createInitialOfflineFsrsSnapshot,
   deriveCompanionFragmentSecretProof,
+  extractRegistrableSite,
   formatCompanionUserCodeFromBytes,
   freezeCompanionScratchpadForSubmit,
   hasForbiddenMissVariantFields,
@@ -255,6 +258,24 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       {
         freshVariantStem: "计算行列式的值。答案：1",
       },
+      {
+        freshVariantStem: "Solve 2x = 6. **Answer:** 3",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6. **Solution**: x = 3",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6. __Answer__ 3",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6. *Answer:* 3",
+      },
+      {
+        freshVariantStem: "计算行列式。答案=1",
+      },
+      {
+        freshVariantStem: "计算行列式。解：det = 1",
+      },
     ];
     for (const [idx, leakOverrides] of embeddedLeaks.entries()) {
       const rejected = issueOfflineFlashcardLease({
@@ -269,6 +290,59 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         expect(rejected.httpStatus).toBe(422);
         expect(rejected.code).toBe("miss_variant_answer_leak");
       }
+    }
+
+    // Benign prose mentioning "*answer*" without a solution directive must NOT false-positive.
+    const benignMiss = issueOfflineFlashcardLease({
+      leaseId: "lease-miss-benign-italics",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({
+          freshVariantStem: "Use the *answer* from part (a) to compute the trace of B.",
+        }),
+      ],
+    });
+    expect(benignMiss.ok).toBe(true);
+
+    // Defense-in-depth: "flashcard" candidates carrying sealed/answer-key fields or directive prompts MUST fail closed.
+    for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
+      const rejectedFlashcard = issueOfflineFlashcardLease({
+        leaseId: `lease-fc-forbidden-${forbiddenField}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          {
+            ...makeFlashcardCandidate(1),
+            [forbiddenField]: forbiddenField === "sealedPayload" ? { secret: "tok" } : "secret-val",
+          },
+        ],
+      });
+      expect(rejectedFlashcard.ok).toBe(false);
+      if (!rejectedFlashcard.ok) {
+        expect(rejectedFlashcard.httpStatus).toBe(422);
+        expect(rejectedFlashcard.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    const directiveFlashcard = issueOfflineFlashcardLease({
+      leaseId: "lease-fc-directive",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        {
+          ...makeFlashcardCandidate(1),
+          prompt: "Compute 2x = 6. **Answer:** 3",
+        },
+      ],
+    });
+    expect(directiveFlashcard.ok).toBe(false);
+    if (!directiveFlashcard.ok) {
+      expect(directiveFlashcard.httpStatus).toBe(422);
+      expect(directiveFlashcard.code).toBe("miss_variant_answer_leak");
     }
   });
 
@@ -651,20 +725,44 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
 
 describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / Lane R4-B)", () => {
   const PRIMARY_ORIGIN = "https://app.aistudy.example";
-  const COMPANION_ORIGIN = "https://scratchpad.aistudy.example";
+  const COMPANION_ORIGIN = "https://companion.aistudy-sandbox.example";
   const DEVICE_CODE = "dev_code_9f8a7b6c5d4e3f2a1b0c";
   const FRAGMENT_SECRET = "ephemeral_frag_secret_77aa88bb99cc";
   const RAW_USER_CODE = "ab23 cd45";
 
-  it("enforces origin isolation, fragment-only QR secret, ambiguous-char user code rejection, 90s TTL, and single-use replay revocation", () => {
+  it("enforces RFC 6265 registrable-site isolation, fragment-only QR secret, ambiguous-char user code rejection, 90s TTL, and authenticated single-use replay revocation", () => {
     expect(COMPANION_PAIRING_TTL_MS).toBe(90_000);
     expect(normalizeOrigin("HTTPS://App.AIStudy.Example:443")).toBe("https://app.aistudy.example");
     expect(normalizeOrigin("http://app.aistudy.example")).toBeNull();
+    expect(extractRegistrableSite("https://app.aistudy.example")).toBe("aistudy.example");
+    expect(extractRegistrableSite("https://app.aistudy.co.uk")).toBe("aistudy.co.uk");
+    expect(extractRegistrableSite("https://portal.uni.edu.cn")).toBe("uni.edu.cn");
+    expect(extractRegistrableSite("https://co.uk")).toBeNull();
+    expect(extractRegistrableSite("https://127.0.0.1:8443")).toBeNull();
+    expect(extractRegistrableSite("https://localhost:3000")).toBeNull();
+
+    // Distinct registrable sites (eTLD+1) are isolated and accepted.
     expect(areCompanionOriginsIsolated(PRIMARY_ORIGIN, COMPANION_ORIGIN)).toBe(true);
-    expect(areCompanionOriginsIsolated(PRIMARY_ORIGIN, "https://companion.other-domain.example")).toBe(true);
+    expect(areCompanionOriginsIsolated(PRIMARY_ORIGIN, "https://aistudy-scratchpad.example")).toBe(true);
+    expect(
+      areCompanionOriginsIsolated("https://app.aistudy.co.uk", "https://companion.aistudy-sandbox.co.uk"),
+    ).toBe(true);
+    expect(
+      areCompanionOriginsIsolated("https://a.uni.edu.cn", "https://companion.other.edu.cn"),
+    ).toBe(true);
+
+    // [P1-2] Sibling subdomains, same-host different-port, parent/child suffixes, multi-part
+    // public-suffix siblings, IP literals, and localhost MUST all be rejected!
+    expect(areCompanionOriginsIsolated("https://app.aistudy.example", "https://scratchpad.aistudy.example")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://app.aistudy.co.uk", "https://scratchpad.aistudy.co.uk")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://a.uni.edu.cn", "https://b.uni.edu.cn")).toBe(false);
     expect(areCompanionOriginsIsolated("https://app.aistudy.example:443", "https://app.aistudy.example:8443")).toBe(false);
     expect(areCompanionOriginsIsolated("https://aistudy.example", "https://scratchpad.aistudy.example")).toBe(false);
     expect(areCompanionOriginsIsolated("https://app.aistudy.example", "https://sub.app.aistudy.example")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://127.0.0.1:3000", "https://127.0.0.1:3001")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://10.0.0.1", "https://10.0.0.2")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://localhost:3000", "https://companion.localhost:3001")).toBe(false);
+
     expect(normalizeCompanionUserCode("ab23-cd45")).toBe("AB23-CD45");
     expect(normalizeCompanionUserCode("AB01-CDIL")).toBeNull();
     expect(normalizeCompanionUserCode("ABOO-CD23")).toBeNull();
@@ -672,15 +770,20 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     const generatedCode = formatCompanionUserCodeFromBytes(new Uint8Array([0, 1, 2, 3, 28, 29, 30, 31]));
     expect(generatedCode).toMatch(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
 
-    // [P1-3] Same host (including different port!) and parent/child Domain suffix sharing MUST fail closed,
-    // and non-HTTPS origins MUST fail closed.
+    // Same registrable site (including sibling subdomains, multi-part eTLD+1 siblings, ports,
+    // parent/child suffixes, IPs, localhost) and non-HTTPS origins MUST fail closed.
     for (const [primaryOrigin, allowedCompanionOrigin, expectedCode] of [
       ["https://app.aistudy.example:443", "HTTPS://APP.AISTUDY.EXAMPLE", "origin_isolation_violation"],
       ["https://app.aistudy.example:443", "https://app.aistudy.example:8443", "origin_isolation_violation"],
+      ["https://app.aistudy.example", "https://scratchpad.aistudy.example", "origin_isolation_violation"],
+      ["https://app.aistudy.co.uk", "https://scratchpad.aistudy.co.uk", "origin_isolation_violation"],
+      ["https://a.uni.edu.cn", "https://b.uni.edu.cn", "origin_isolation_violation"],
       ["https://aistudy.example", "https://scratchpad.aistudy.example", "origin_isolation_violation"],
       ["https://app.aistudy.example", "https://aistudy.example", "origin_isolation_violation"],
       ["https://app.aistudy.example", "https://sub.app.aistudy.example", "origin_isolation_violation"],
-      ["http://app.aistudy.example", "http://scratchpad.aistudy.example", "invalid_origin"],
+      ["https://127.0.0.1:3000", "https://127.0.0.1:3001", "origin_isolation_violation"],
+      ["https://localhost:3000", "https://companion.aistudy-sandbox.example", "origin_isolation_violation"],
+      ["http://app.aistudy.example", "http://companion.aistudy-sandbox.example", "invalid_origin"],
     ] as const) {
       const badOrigin = createCompanionPairingOffer({
         offerId: "offer-bad-origin",
@@ -729,6 +832,10 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
 
     expect(
       parseCompanionQrUrl(`${COMPANION_ORIGIN}/companion/pair?k=${FRAGMENT_SECRET}#k=${FRAGMENT_SECRET}`).ok,
+    ).toBe(false);
+    // Reject QR URLs containing embedded username/password userinfo credentials.
+    expect(
+      parseCompanionQrUrl(`https://user:pass@companion.aistudy-sandbox.example/companion/pair#k=${FRAGMENT_SECRET}`).ok,
     ).toBe(false);
 
     const proof = deriveCompanionFragmentSecretProof(FRAGMENT_SECRET, DEVICE_CODE);
@@ -921,12 +1028,41 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       reason: "companion_capability_forbidden",
     });
 
+    // Mandatory requestOrigin check on authorizeCompanionAction (missing or wrong origin fails closed).
+    expect(
+      authorizeCompanionAction({
+        session,
+        action: "upload_page",
+        attemptId: "attempt-42",
+        requestOrigin: PRIMARY_ORIGIN,
+        nowMs: T0 + 10_000,
+      }),
+    ).toMatchObject({
+      allowed: false,
+      httpStatus: 403,
+      reason: "companion_capability_forbidden",
+    });
+    expect(
+      authorizeCompanionAction({
+        session,
+        action: "upload_page",
+        attemptId: "attempt-42",
+        requestOrigin: "",
+        nowMs: T0 + 10_000,
+      }),
+    ).toMatchObject({
+      allowed: false,
+      httpStatus: 403,
+      reason: "companion_capability_forbidden",
+    });
+
     // Cross-attempt access rejected with 403 attempt_mismatch.
     expect(
       authorizeCompanionAction({
         session,
         action: "upload_page",
         attemptId: "attempt-999",
+        requestOrigin: COMPANION_ORIGIN,
         nowMs: T0 + 10_000,
       }),
     ).toMatchObject({ allowed: false, httpStatus: 403, reason: "attempt_mismatch" });
@@ -937,6 +1073,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
         session,
         action: "heartbeat",
         attemptId: "attempt-42",
+        requestOrigin: COMPANION_ORIGIN,
         nowMs: session.expiresAtMs + 1,
       }),
     ).toMatchObject({ allowed: false, httpStatus: 403, reason: "session_expired" });
@@ -947,6 +1084,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
         session: revokedSession,
         action: "upload_page",
         attemptId: "attempt-42",
+        requestOrigin: COMPANION_ORIGIN,
         nowMs: T0 + 16_000,
       }),
     ).toMatchObject({ allowed: false, httpStatus: 403, reason: "session_revoked" });
@@ -1082,8 +1220,11 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
   it("enforces strict 1-hop propagation only (ignores A->B upstream and bridge-only B->C)", () => {
     expect(BASE_PRIOR_ALPHA).toBe(1);
     expect(BASE_PRIOR_BETA).toBe(1);
-    expect(MAX_BRIDGE_PSEUDO_OBSERVATIONS).toBe(1);
-    expect(MAX_BRIDGE_PRIOR_MEAN).toBeCloseTo(2 / 3, 12);
+    expect(MAX_BRIDGE_WEIGHT).toBe(0.3);
+    expect(MAX_BRIDGE_PSEUDO_OBSERVATIONS).toBe(0.3);
+    expect(MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE).toBe(3);
+    expect(MAX_BRIDGE_PRIOR_MEAN).toBeCloseTo(1.3 / 2.3, 12);
+    expect(MIN_BRIDGE_PRIOR_MEAN).toBeCloseTo(1 / 2.3, 12);
 
     // Graph A -> B (strong direct mastery) and B -> C (0 direct obs, bridged only):
     // Computing for C must yield exact Beta(1, 1) with zero multi-hop leakage!
@@ -1098,7 +1239,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           targetCourseId: "course-b",
           targetConceptId: "matrices",
           alignmentWeight: 1,
-          sourceMasteryProbability: 1,
+          sourceDirectSuccessCount: 25,
           sourceDirectObservationCount: 25,
           edgePrivacyEpoch: 1,
           supportingSourceIds: ["src-a1"],
@@ -1133,7 +1274,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     expect(zeroPropagation.requiresInCourseVerification).toBe(true);
   });
 
-  it("caps aggregated pseudo-observations at <= 1 (posteriorMean strictly within [1/3, 2/3])", () => {
+  it("caps aggregated pseudo-observations at <= 0.30 (posteriorMean strictly within [1/2.3, 1.3/2.3]) and decouples <3 or non-integer direct observations", () => {
     const manyStrongEdges = Array.from({ length: 20 }, (_, i) => ({
       edgeId: `strong-${i}`,
       sourceCourseId: `course-${i}`,
@@ -1158,12 +1299,12 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
       activeCourseSharingEnabled: sharing,
       revokedSourceIds: new Set<string>(),
     });
-    expect(upperBound.equivalentObservations).toBeCloseTo(1, 12);
-    expect(upperBound.deltaAlpha + upperBound.deltaBeta).toBeLessThanOrEqual(1 + 1e-12);
-    expect(upperBound.alpha).toBeCloseTo(2, 12);
+    expect(upperBound.equivalentObservations).toBeCloseTo(0.3, 12);
+    expect(upperBound.deltaAlpha + upperBound.deltaBeta).toBeLessThanOrEqual(0.3 + 1e-12);
+    expect(upperBound.alpha).toBeCloseTo(1.3, 12);
     expect(upperBound.beta).toBeCloseTo(1, 12);
     expect(upperBound.posteriorMean).toBeCloseTo(MAX_BRIDGE_PRIOR_MEAN, 12);
-    expect(upperBound.posteriorMean).toBeLessThanOrEqual(MAX_BRIDGE_PRIOR_MEAN);
+    expect(upperBound.posteriorMean).toBeLessThanOrEqual(0.5 + 0.15);
 
     const manyWeakEdges = manyStrongEdges.map(e => ({ ...e, sourceDirectSuccessCount: 0 }));
     const lowerBound = computeCrossCourseWeakPrior({
@@ -1174,8 +1315,117 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
       activeCourseSharingEnabled: sharing,
       revokedSourceIds: new Set<string>(),
     });
+    expect(lowerBound.equivalentObservations).toBeCloseTo(0.3, 12);
     expect(lowerBound.posteriorMean).toBeCloseTo(MIN_BRIDGE_PRIOR_MEAN, 12);
-    expect(lowerBound.posteriorMean).toBeGreaterThanOrEqual(MIN_BRIDGE_PRIOR_MEAN);
+    expect(lowerBound.posteriorMean).toBeGreaterThanOrEqual(0.5 - 0.15);
+
+    // [P1-1] Direct observation counts of 1, 2, non-integer counts, or uncertified probability counts < 3 MUST decouple!
+    const insufficient = computeCrossCourseWeakPrior({
+      targetCourseId: "course-target",
+      targetConceptId: "target-concept",
+      edges: [
+        {
+          edgeId: "only-1-obs",
+          sourceCourseId: "course-1",
+          sourceConceptId: "c1",
+          targetCourseId: "course-target",
+          targetConceptId: "target-concept",
+          alignmentWeight: 0.3,
+          sourceDirectSuccessCount: 1,
+          sourceDirectObservationCount: 1,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        {
+          edgeId: "only-2-obs",
+          sourceCourseId: "course-2",
+          sourceConceptId: "c2",
+          targetCourseId: "course-target",
+          targetConceptId: "target-concept",
+          alignmentWeight: 0.3,
+          sourceDirectSuccessCount: 2,
+          sourceDirectObservationCount: 2,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        {
+          edgeId: "fractional-obs",
+          sourceCourseId: "course-3",
+          sourceConceptId: "c3",
+          targetCourseId: "course-target",
+          targetConceptId: "target-concept",
+          alignmentWeight: 0.3,
+          sourceDirectSuccessCount: 3,
+          sourceDirectObservationCount: 3.5,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        {
+          edgeId: "fractional-success",
+          sourceCourseId: "course-4",
+          sourceConceptId: "c4",
+          targetCourseId: "course-target",
+          targetConceptId: "target-concept",
+          alignmentWeight: 0.3,
+          sourceDirectSuccessCount: 1.5,
+          sourceDirectObservationCount: 4,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        {
+          edgeId: "missing-certified-count",
+          sourceCourseId: "course-5",
+          sourceConceptId: "c5",
+          targetCourseId: "course-target",
+          targetConceptId: "target-concept",
+          alignmentWeight: 0.3,
+          sourceDirectOnlyMasteryProbability: 0.9,
+          sourceDirectObservationCount: 5,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        {
+          edgeId: "certified-count-too-small",
+          sourceCourseId: "course-6",
+          sourceConceptId: "c6",
+          targetCourseId: "course-target",
+          targetConceptId: "target-concept",
+          alignmentWeight: 0.3,
+          sourceDirectOnlyMasteryProbability: 0.9,
+          certifiedDirectObservationCount: 2,
+          sourceDirectObservationCount: 5,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+      ],
+      coursePrivacyEpochs: {
+        "course-1": 1,
+        "course-2": 1,
+        "course-3": 1,
+        "course-4": 1,
+        "course-5": 1,
+        "course-6": 1,
+      },
+      activeCourseSharingEnabled: {
+        "course-1": true,
+        "course-2": true,
+        "course-3": true,
+        "course-4": true,
+        "course-5": true,
+        "course-6": true,
+      },
+      revokedSourceIds: new Set<string>(),
+    });
+    expect(insufficient.acceptedEdges).toHaveLength(0);
+    expect(insufficient.posteriorMean).toBe(0.5);
+    expect(insufficient.decoupledEdges).toEqual([
+      expect.objectContaining({ edgeId: "only-1-obs", reason: "insufficient_direct_evidence" }),
+      expect.objectContaining({ edgeId: "only-2-obs", reason: "insufficient_direct_evidence" }),
+      expect.objectContaining({ edgeId: "fractional-obs", reason: "insufficient_direct_evidence" }),
+      expect.objectContaining({ edgeId: "fractional-success", reason: "invalid_edge_parameters" }),
+      expect.objectContaining({ edgeId: "missing-certified-count", reason: "insufficient_direct_evidence" }),
+      expect.objectContaining({ edgeId: "certified-count-too-small", reason: "insufficient_direct_evidence" }),
+    ]);
   });
 
   it("performs instant read-time privacy_epoch / sharing / source revocation decoupling and preserves targetInCourseState bit-for-bit", () => {
@@ -1195,6 +1445,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
         targetConceptId: "span",
         alignmentWeight: 0.9,
         sourceDirectOnlyMasteryProbability: 0.95,
+        certifiedDirectObservationCount: 8,
         sourceDirectObservationCount: 8,
         edgePrivacyEpoch: 3,
         supportingSourceIds: ["src-a1"],
@@ -1219,13 +1470,14 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
         targetConceptId: "span",
         alignmentWeight: 0.7,
         sourceDirectOnlyMasteryProbability: 0.85,
+        certifiedDirectObservationCount: 5,
         sourceDirectObservationCount: 5,
         edgePrivacyEpoch: 2,
         supportingSourceIds: ["src-c1", "src-c2-revoked"],
       },
     ];
 
-    // Before revocation: all 3 active -> posteriorMean boosted above 0.5 and <= 2/3.
+    // Before revocation: all 3 active -> posteriorMean boosted above 0.5 and <= MAX_BRIDGE_PRIOR_MEAN.
     const activePrior = computeCrossCourseWeakPrior({
       targetCourseId: "course-target",
       targetConceptId: "span",
@@ -1236,6 +1488,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
       targetInCourseState,
     });
     expect(activePrior.acceptedEdges).toHaveLength(3);
+    expect(activePrior.equivalentObservations).toBeCloseTo(0.3, 12);
     expect(activePrior.posteriorMean).toBeGreaterThan(0.5);
     expect(activePrior.posteriorMean).toBeLessThanOrEqual(MAX_BRIDGE_PRIOR_MEAN);
 
@@ -1286,8 +1539,9 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           sourceConceptId: "vectors",
           targetCourseId: "course-target",
           targetConceptId: "span",
-          alignmentWeight: 1,
+          alignmentWeight: 0.3,
           sourceDirectOnlyMasteryProbability: 1,
+          certifiedDirectObservationCount: 10,
           sourceDirectObservationCount: 10,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
@@ -1298,8 +1552,9 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           sourceConceptId: "hop2",
           targetCourseId: "course-target",
           targetConceptId: "span",
-          alignmentWeight: 1,
+          alignmentWeight: 0.3,
           sourceDirectOnlyMasteryProbability: 1,
+          certifiedDirectObservationCount: 10,
           sourceDirectObservationCount: 10,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
@@ -1311,8 +1566,9 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           sourceConceptId: "c1",
           targetCourseId: "course-target",
           targetConceptId: "span",
-          alignmentWeight: 0.9,
+          alignmentWeight: 0.3,
           sourceDirectOnlyMasteryProbability: 1,
+          certifiedDirectObservationCount: 10,
           sourceDirectObservationCount: 10,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
@@ -1324,9 +1580,9 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           sourceConceptId: "relayed-from-a",
           targetCourseId: "course-target",
           targetConceptId: "span",
-          alignmentWeight: 1,
+          alignmentWeight: 0.3,
           sourceMasteryProbability: 0.95,
-          sourceDirectObservationCount: 2,
+          sourceDirectObservationCount: 4,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
         },
@@ -1337,22 +1593,24 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           sourceConceptId: "mixed-prior",
           targetCourseId: "course-target",
           targetConceptId: "span",
-          alignmentWeight: 1,
+          alignmentWeight: 0.3,
           sourceDirectOnlyMasteryProbability: 0.9,
+          certifiedDirectObservationCount: 4,
           includesBridgedPrior: true,
-          sourceDirectObservationCount: 2,
+          sourceDirectObservationCount: 4,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
         },
-        // Duplicate identical (sourceCourseId, sourceConceptId) edge with weight 0.4 must NOT inflate to 0.8.
+        // Duplicate identical (sourceCourseId, sourceConceptId) edge with weight 0.2 must NOT inflate to 0.3 or 0.4.
         {
           edgeId: "valid-dup-1",
           sourceCourseId: "course-valid",
           sourceConceptId: "linear-comb",
           targetCourseId: "course-target",
           targetConceptId: "span",
-          alignmentWeight: 0.4,
+          alignmentWeight: 0.2,
           sourceDirectOnlyMasteryProbability: 0.9,
+          certifiedDirectObservationCount: 4,
           sourceDirectObservationCount: 4,
           edgePrivacyEpoch: 7,
           supportingSourceIds: ["src-v1"],
@@ -1363,8 +1621,9 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           sourceConceptId: "linear-comb",
           targetCourseId: "course-target",
           targetConceptId: "span",
-          alignmentWeight: 0.4,
+          alignmentWeight: 0.2,
           sourceDirectOnlyMasteryProbability: 0.9,
+          certifiedDirectObservationCount: 4,
           sourceDirectObservationCount: 4,
           edgePrivacyEpoch: 7,
           supportingSourceIds: ["src-v1"],
@@ -1398,13 +1657,14 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
       expect.objectContaining({ edgeId: "contaminated-edge", reason: "bridged_prior_contamination" }),
     ]);
     expect(result.acceptedEdges).toHaveLength(1);
-    expect(result.equivalentObservations).toBeCloseTo(0.4, 12);
-    expect(result.deltaAlpha).toBeCloseTo(0.36, 12);
-    expect(result.deltaBeta).toBeCloseTo(0.04, 12);
-    expect(result.posteriorMean).toBeCloseTo(1.36 / 2.4, 12);
+    expect(result.equivalentObservations).toBeCloseTo(0.2, 12);
+    expect(result.deltaAlpha).toBeCloseTo(0.18, 12);
+    expect(result.deltaBeta).toBeCloseTo(0.02, 12);
+    expect(result.posteriorMean).toBeCloseTo(1.18 / 2.2, 12);
 
     // [P1-6] When raw direct counts are supplied alongside a higher mixed `sourceMasteryProbability`
-    // inflated by an upstream course A, ONLY `sourceDirectSuccessCount / sourceDirectObservationCount` is used!
+    // inflated by an upstream course A, ONLY `sourceDirectSuccessCount / sourceDirectObservationCount`
+    // is used and bounded at <= 0.30!
     const directCountOnly = computeCrossCourseWeakPrior({
       targetCourseId: "course-c",
       targetConceptId: "eigenvalues",
@@ -1431,8 +1691,9 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     expect(directCountOnly.acceptedEdges).toHaveLength(1);
     expect(directCountOnly.acceptedEdges[0]?.directEvidenceSource).toBe("direct_counts");
     expect(directCountOnly.acceptedEdges[0]?.sourceDirectOnlyMasteryProbability).toBe(0.25);
-    expect(directCountOnly.deltaAlpha).toBeCloseTo(0.25, 12);
-    expect(directCountOnly.deltaBeta).toBeCloseTo(0.75, 12);
-    expect(directCountOnly.posteriorMean).toBeCloseTo(1.25 / 3, 12);
+    expect(directCountOnly.equivalentObservations).toBeCloseTo(0.3, 12);
+    expect(directCountOnly.deltaAlpha).toBeCloseTo(0.075, 12);
+    expect(directCountOnly.deltaBeta).toBeCloseTo(0.225, 12);
+    expect(directCountOnly.posteriorMean).toBeCloseTo(1.075 / 2.3, 12);
   });
 });
