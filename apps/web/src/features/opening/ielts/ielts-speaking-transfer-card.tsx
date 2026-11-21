@@ -5,6 +5,7 @@ import {
   evaluateSpeakingRetelling,
   getSpeakingEvaluationContext,
   getSpeakingTargets,
+  hasVerifiedSpeakingRetelling,
   type IeltsRubricReceipt,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPart3Seed,
@@ -231,7 +232,7 @@ function isSpeakingReceiptVisibleForAttempt(
       (!receipt.assisted &&
         receipt.masteryQualified &&
         receipt.countsTowardMastery &&
-        context.writingReceiptEligible))
+        hasVerifiedSpeakingRetelling(receipt, targets, context)))
   );
 }
 
@@ -255,7 +256,8 @@ function SpeakingAttempt({
   readonly onEvaluated: IeltsSpeakingTransferCardProps["onEvaluated"];
 }) {
   const scaffoldSources = useMemo(
-    () => [scaffoldSampleTranscript ?? "", ...seed.argumentBridgeCues].filter((text) => text.trim().length > 0),
+    () => [scaffoldSampleTranscript ?? "", ...seed.argumentBridgeCues]
+      .filter((text) => typeof text === "string" && text.trim().length > 0),
     [scaffoldSampleTranscript, seed.argumentBridgeCues],
   );
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];

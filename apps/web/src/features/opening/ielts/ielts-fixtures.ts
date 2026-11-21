@@ -33,6 +33,8 @@ export type IeltsWorkbenchFixture = {
 };
 
 const PROMPT_ID = "ielts-task2-urban-rail-funding";
+const PROMPT_STATEMENT =
+  "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?";
 
 const DRAFT_1: IeltsEssayDraft = {
   draftId: "urban-rail-draft-1",
@@ -266,6 +268,7 @@ function mustValidateReceipt(
     draft,
     baselineDraft: DRAFT_1,
     transferTargets: UPGRADE_TARGETS,
+    promptStatement: PROMPT_STATEMENT,
     assessments,
     crossDraftTransferVerified,
   });
@@ -281,6 +284,7 @@ const TRANSFER_REPORT = analyzeCrossDraftTransfer({
   draft1: DRAFT_1,
   draft2: DRAFT_2,
   targets: UPGRADE_TARGETS,
+  promptStatement: PROMPT_STATEMENT,
 });
 
 const CORE_ARGUMENT: IeltsWritingCoreArgument = {
@@ -333,8 +337,7 @@ const INITIAL_SPEAKING_RECEIPT = evaluateSpeakingRetelling({
 export const IELTS_WRITING_SPEAKING_FIXTURE: IeltsWorkbenchFixture = {
   promptId: PROMPT_ID,
   promptTitleZh: "城市公共预算：优先投资轨道交通，还是继续拓宽公路？",
-  promptStatementEn:
-    "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?",
+  promptStatementEn: PROMPT_STATEMENT,
   promptTaskTypeLabel: "Academic Writing Task 2 · 观点论证",
   targetWordCount: 250,
   draft1: DRAFT_1,

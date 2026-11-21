@@ -2,7 +2,12 @@ import { graphemeBoundaries, trimToProseGraphemes } from "./graphemes";
 import { countProseWords, maskIeltsParagraphs } from "./prose";
 import { allocateIeltsSpans, compareText, rangesOverlap, type MatchRange } from "./span-allocation";
 import { segmentIeltsText, type GroundedClause, type GroundedSentence, type GroundedTextSpan } from "./text-segments";
-import { getUniqueWritingTargets, getWritingDraftSource, getWritingTransferSource } from "./writing-source";
+import {
+  getUniqueWritingTargets,
+  getWritingDraftSource,
+  getWritingTransferSource,
+  hasValidWritingTargetPatterns,
+} from "./writing-source";
 import {
   clampToIeltsBand,
   countDraftWords,
@@ -16,6 +21,8 @@ import {
 import {
   IELTS_CARTRIDGE_ID,
   IELTS_CRITERIA,
+  isDenseIeltsArray,
+  isNonBlankIeltsString as isNonBlankString,
   type IeltsBandScore,
   type IeltsCriterion,
   type IeltsCriterionAssessment,
@@ -985,6 +992,11 @@ function finalizeTransferReport(
   return { ...analysis, summary: { ...analysis.summary, masteryQualified } };
 }
 
+function qualifiesFreshPromptTransfer(summary: TransferAnalysis["summary"]): boolean {
+  return !summary.disqualificationReason &&
+    summary.transferredCount >= Math.max(1, Math.ceil(summary.totalTargets * 0.5));
+}
+
 /** Checks revisions for contextual target transfer and resolves Writing mastery eligibility. */
 export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
@@ -1288,7 +1300,7 @@ function analyzeTransfer(
     fromDraftId: input.draft1.draftId,
     toDraftId: input.draft2.draftId,
     sourceDraft: getWritingDraftSource(input.draft2),
-    transferSource: getWritingTransferSource(input.draft1, input.targets),
+    transferSource: getWritingTransferSource(input.draft1, input.targets, input.promptStatement),
     items,
     paragraphDiffs,
     memorizedTemplateHits,
@@ -1617,21 +1629,16 @@ export function evaluateRevisedDraftDeterministically(
     },
   ];
 
-  const canQualifyFreshPrompt =
-    freshPrompt &&
-    !transferReport.summary.disqualificationReason &&
-    transferReport.summary.transferredCount >=
-      Math.max(1, Math.ceil(transferReport.summary.totalTargets * 0.5));
-
   const validated = createValidatedRubricReceipt({
     receiptId: input.receiptId,
     taskMode: "writing_task2",
     draft: input.revisedDraft,
     baselineDraft: input.baselineDraft,
-    transferTargets: input.targets,
+    transferTargets: transferReport.transferSource?.targets,
+    promptStatement: input.promptStatement,
     assessments,
     crossDraftTransferVerified: transferReport.summary.meetsCrossDraftVerification,
-    freshPromptTransfer: canQualifyFreshPrompt,
+    freshPromptTransfer: freshPrompt && qualifiesFreshPromptTransfer(transferReport.summary),
     disqualificationReason: transferReport.summary.disqualificationReason,
     createdAt: input.createdAt,
   });
@@ -1669,17 +1676,6 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-function isNonBlankString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function isValidOptionalPatternList(value: unknown): value is readonly string[] | undefined {
-  return (
-    value === undefined ||
-    (Array.isArray(value) && value.every((pattern) => isNonBlankString(pattern)))
-  );
-}
-
 function isValidDraftSourceRecord(
   value: unknown,
   label: string,
@@ -1706,9 +1702,8 @@ function isValidDraftSourceRecord(
   }
   if (typeof value.assisted !== "boolean") issues.push(`${label}.assisted must be a boolean`);
   if (
-    !Array.isArray(value.paragraphs) ||
-    value.paragraphs.length === 0 ||
-    !value.paragraphs.every((paragraph) => typeof paragraph === "string")
+    !isDenseIeltsArray(value.paragraphs, (paragraph) => typeof paragraph === "string") ||
+    value.paragraphs.length === 0
   ) {
     issues.push(`${label}.paragraphs must be a non-empty string array`);
   }
@@ -1776,8 +1771,8 @@ export function validateWritingRubricReceipt(
     issues.push("wordCount must be a positive integer");
   }
   if (!isNonBlankString(rawReceipt.createdAt)) issues.push("createdAt must be a non-blank string");
-  if (!Array.isArray(rawReceipt.memorizedTemplateFlags)) {
-    issues.push("memorizedTemplateFlags must be an array");
+  if (!isDenseIeltsArray(rawReceipt.memorizedTemplateFlags, isPlainRecord)) {
+    issues.push("memorizedTemplateFlags must be a dense array of objects");
   }
 
   if (options?.expectedPromptId !== undefined && rawReceipt.promptId !== options.expectedPromptId) {
@@ -1797,11 +1792,23 @@ export function validateWritingRubricReceipt(
 
   let validatedBaseline: IeltsWritingDraftSource | undefined;
   let validatedTargets: IeltsUpgradeTarget[] | undefined;
+  const expectedPromptStatement = options?.promptStatement?.trim() || undefined;
+  let promptStatement = expectedPromptStatement;
 
   if (rawReceipt.transferSource !== undefined) {
     if (!isPlainRecord(rawReceipt.transferSource)) {
       issues.push("transferSource must be a plain object");
     } else {
+      const storedPromptStatement = rawReceipt.transferSource.promptStatement;
+      if (storedPromptStatement !== undefined) {
+        if (!isNonBlankString(storedPromptStatement)) {
+          issues.push("transferSource.promptStatement must be a non-blank string");
+        } else if (expectedPromptStatement !== undefined && storedPromptStatement.trim() !== expectedPromptStatement) {
+          issues.push("transferSource.promptStatement does not match the expected prompt");
+        } else {
+          promptStatement = storedPromptStatement.trim();
+        }
+      }
       const rawBaseline = rawReceipt.transferSource.baseline;
       if (isValidDraftSourceRecord(rawBaseline, "transferSource.baseline", issues)) {
         if (countDraftWords(rawBaseline.paragraphs) === 0) {
@@ -1817,24 +1824,19 @@ export function validateWritingRubricReceipt(
           };
         }
       }
-      if (!Array.isArray(rawReceipt.transferSource.targets)) {
-        issues.push("transferSource.targets must be an array");
+      if (!isDenseIeltsArray(rawReceipt.transferSource.targets, isPlainRecord)) {
+        issues.push("transferSource.targets must be a dense array of objects");
       } else {
         const sanitizedTargets: IeltsUpgradeTarget[] = [];
         for (const [index, target] of rawReceipt.transferSource.targets.entries()) {
           if (
-            !isPlainRecord(target) ||
+            !hasValidWritingTargetPatterns(target) ||
             !isNonBlankString(target.id) ||
             !isNonBlankString(target.label) ||
             !isNonBlankString(target.guidance) ||
             typeof target.category !== "string" ||
             !VALID_UPGRADE_CATEGORIES.has(target.category as IeltsUpgradeCategory) ||
-            !IELTS_CRITERIA.includes(target.criterion as IeltsCriterion) ||
-            !Array.isArray(target.targetPatterns) ||
-            target.targetPatterns.length === 0 ||
-            !target.targetPatterns.every((pattern) => isNonBlankString(pattern)) ||
-            !isValidOptionalPatternList(target.weakBaselinePatterns) ||
-            !isValidOptionalPatternList(target.clichePatterns)
+            !IELTS_CRITERIA.includes(target.criterion as IeltsCriterion)
           ) {
             issues.push(`transferSource.targets[${index}] is invalid`);
             continue;
@@ -1876,14 +1878,13 @@ export function validateWritingRubricReceipt(
       if (!isNonBlankString(entry.summary)) {
         issues.push(`criteria.${criterion}.summary must be a non-blank string`);
       }
-      if (!Array.isArray(entry.evidenceSpans) || entry.evidenceSpans.length === 0) {
+      if (!isDenseIeltsArray(entry.evidenceSpans, isPlainRecord) || entry.evidenceSpans.length === 0) {
         issues.push(`criteria.${criterion}.evidenceSpans must be a non-empty array`);
         continue;
       }
       const spans: IeltsSpanEvidence[] = [];
       for (const [spanIdx, rawSpan] of entry.evidenceSpans.entries()) {
         if (
-          !isPlainRecord(rawSpan) ||
           !isNonBlankString(rawSpan.id) ||
           typeof rawSpan.paragraphIndex !== "number" ||
           !isNonBlankString(rawSpan.excerpt) ||
@@ -1974,28 +1975,27 @@ export function validateWritingRubricReceipt(
       createdAt: receipt.createdAt,
     };
 
-    const transferReport = analyzeCrossDraftTransfer({
-      draft1: baselineAsEssayDraft,
-      draft2: sourceAsEssayDraft,
-      targets: validatedTargets,
-      promptStatement: options?.promptStatement,
-    });
+    const revisedProse = maskIeltsParagraphs(sourceDraft.paragraphs);
+    const { report: transferReport } = analyzeTransfer(
+      {
+        draft1: baselineAsEssayDraft,
+        draft2: sourceAsEssayDraft,
+        targets: validatedTargets,
+        promptStatement,
+      },
+      isFreshPromptTransfer,
+      revisedProse,
+      revisedProse.map(segmentIeltsText),
+      countProseWords(revisedProse.join("\n")),
+    );
 
     recomputedCrossDraftVerified =
-      isCrossDraftTransfer &&
-      transferReport.summary.hasSubstantiveRevision &&
-      transferReport.summary.meetsCrossDraftVerification &&
-      !transferReport.summary.hasLowEntropyStuffing &&
-      !transferReport.summary.hasMechanicalKeywordPaste &&
-      !transferReport.summary.hasMemorizedStuffing;
+      isCrossDraftTransfer && transferReport.summary.meetsCrossDraftVerification;
 
     recomputedFreshPromptTransfer =
       isFreshPromptTransfer &&
       lineage === "fresh_prompt" &&
-      transferReport.summary.hasSubstantiveRevision &&
-      !transferReport.summary.hasLowEntropyStuffing &&
-      !transferReport.summary.hasMechanicalKeywordPaste &&
-      !transferReport.summary.hasMemorizedStuffing;
+      qualifiesFreshPromptTransfer(transferReport.summary);
 
     if (isCrossDraftTransfer) {
       recomputedDisqualificationReason = transferReport.summary.disqualificationReason;
@@ -2007,37 +2007,23 @@ export function validateWritingRubricReceipt(
         );
       }
     } else if (isFreshPromptTransfer && (options?.requireVerifiedMastery || claimsVerified) && !recomputedFreshPromptTransfer) {
-      issues.push("recomputed fresh-prompt transfer failed substantive or anti-stuffing checks");
+      issues.push(
+        transferReport.summary.disqualificationReason
+          ? `recomputed fresh-prompt transfer failed: ${transferReport.summary.disqualificationReason}`
+          : "recomputed fresh-prompt transfer did not meet mastery verification criteria",
+      );
     }
-  } else if (isCrossDraftTransfer && (options?.requireVerifiedMastery || claimsVerified)) {
-    issues.push("verified unassisted_cross_draft_transfer receipt requires transferSource");
-  } else if (isFreshPromptTransfer && (options?.requireVerifiedMastery || claimsVerified)) {
-    const prose = maskIeltsParagraphs(sourceDraft.paragraphs);
-    const sentences = prose.map((paragraph) => segmentIeltsText(paragraph));
-    const hasLowEntropy = detectLowEntropyStuffing(prose, sentences);
-    if (hasLowEntropy) {
-      issues.push("sourceDraft failed low-entropy anti-stuffing check");
-    } else {
-      recomputedFreshPromptTransfer = true;
-    }
+  } else if ((isCrossDraftTransfer || isFreshPromptTransfer) && (options?.requireVerifiedMastery || claimsVerified)) {
+    issues.push(`verified ${receipt.evidenceSource} receipt requires transferSource`);
   }
-
-  const effectiveBaseline =
-    validatedBaseline ??
-    (isFreshPromptTransfer
-      ? {
-          promptId: `${sourceDraft.promptId}:baseline`,
-          version: 1,
-          paragraphs: ["baseline"],
-        }
-      : undefined);
 
   const recomputed = createValidatedRubricReceipt({
     receiptId: receipt.receiptId,
     taskMode: "writing_task2",
     draft: sourceAsEssayDraft,
-    baselineDraft: effectiveBaseline,
+    baselineDraft: validatedBaseline,
     transferTargets: validatedTargets,
+    promptStatement,
     assessments,
     crossDraftTransferVerified: recomputedCrossDraftVerified,
     freshPromptTransfer: recomputedFreshPromptTransfer,

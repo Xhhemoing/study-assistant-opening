@@ -289,6 +289,9 @@ describe("IeltsDraftCritiqueWorkbench", () => {
         epistemicStatus: "rubric_verified_evidence",
         masteryQualified: true,
         countsTowardMastery: true,
+        transferSource: expect.objectContaining({
+          promptStatement: IELTS_WRITING_SPEAKING_FIXTURE.promptStatementEn,
+        }),
       }),
     });
     expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
@@ -507,6 +510,19 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
     await render({ ...fixture, targets, transferReport: next.transferReport, draft2Receipt: next.receipt });
     expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+  });
+
+  it("withholds saved Writing mastery if its stored prompt differs from the current prompt", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const render = (promptStatementEn: string) => act(async () => root.render(createElement(
+      IeltsDraftCritiqueWorkbench, { fixture: { ...fixture, promptStatementEn } },
+    )));
+    await render(fixture.promptStatementEn);
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+    await render("Should cities invest in urban rail rather than widening roads?");
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
   });
 
   it("asks for English text when a punctuation-only revision is submitted", async () => {
@@ -1718,6 +1734,69 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
+  it("withholds restored Speaking mastery from collocations pasted after a colon", async () => {
+    const { speakingSeed, initialSpeakingTranscript } = IELTS_WRITING_SPEAKING_FIXTURE;
+    const seed = { ...speakingSeed, targetSpokenCollocations: ["affordable housing"] };
+    const transcript = `${initialSpeakingTranscript.slice(0, -1)}: affordable housing.`;
+    const practice = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(practice.transferredCollocations).toEqual([]);
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed,
+      initialTranscript: transcript,
+      initialDurationSeconds: 75,
+      initialReceipt: {
+        ...practice,
+        masteryQualified: true,
+        countsTowardMastery: true,
+        epistemicStatus: "rubric_verified_evidence",
+        transferredCollocations: ["affordable housing"],
+        pendingCollocations: [],
+      },
+    })));
+    expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).toBeNull();
+    expect(host.querySelectorAll('[data-collocation-state="transferred"]')).toHaveLength(0);
+  });
+
+  it.each(["missing fresh-prompt baseline", "sparse Writing patterns", "sparse Speaking targets"])(
+    "keeps Speaking feedback in practice mode with %s",
+    async (defect) => {
+      const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+      const transferSource = fixture.draft2Receipt.transferSource!;
+      const [target, ...otherTargets] = transferSource.targets;
+      const seed = defect === "sparse Speaking targets"
+        ? { ...fixture.speakingSeed, targetSpokenCollocations: new Array<string>(1) }
+        : {
+            ...fixture.speakingSeed,
+            verifiedWritingReceipt: defect === "missing fresh-prompt baseline"
+              ? {
+                  ...fixture.draft2Receipt,
+                  evidenceSource: "unassisted_fresh_prompt_transfer" as const,
+                  transferSource: undefined,
+                }
+              : {
+                  ...fixture.draft2Receipt,
+                  transferSource: {
+                    ...transferSource,
+                    targets: [{ ...target!, clichePatterns: new Array<string>(1) }, ...otherTargets],
+                  },
+                },
+          };
+      const onEvaluated = vi.fn();
+      await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+        seed,
+        initialAttemptPromptId: seed.sourcePromptId,
+        initialTranscript: GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT,
+        initialDurationSeconds: 75,
+        onEvaluated,
+      })));
+      await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+      expect(onEvaluated).toHaveBeenCalledWith(expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+      }));
+    },
+  );
+
   it("strips demo verified Writing receipt on default learner mount and blocks reveal-copy-reset-paste bypass even with a real verified Writing receipt", async () => {
     const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
     const onEvaluated = vi.fn();

@@ -83,6 +83,7 @@ export {
   getSpeakingTargets,
   hasRequiredWritingReceipt,
   hasStiffWrittenSpeakingConnector,
+  hasVerifiedSpeakingRetelling,
 } from "./speaking";
 
 export { getWritingDraftSource, getWritingTransferSource } from "./writing-source";

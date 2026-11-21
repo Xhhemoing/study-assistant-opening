@@ -7,22 +7,14 @@ import {
   type CartridgeValidationResult,
   type ContinuityCartridge,
 } from "../cartridges/types";
-import {
-  countEnglishWords,
-  detectMemorizedTemplates,
-  hasMemorizedTemplateStuffing,
-} from "./rubric";
-import { maskIeltsMarkup } from "./prose";
-import { classifySpeakingPace, hasStiffWrittenSpeakingConnector } from "./speaking";
-import { segmentIeltsText } from "./text-segments";
-import {
-  detectLowEntropyStuffing,
-  isVerifiedWritingReceipt,
-  validateWritingRubricReceipt,
-} from "./transfer";
+import { countEnglishWords } from "./rubric";
+import { classifySpeakingPace, hasVerifiedSpeakingRetelling } from "./speaking";
+import { validateWritingRubricReceipt } from "./transfer";
 import {
   IELTS_CARTRIDGE_ID,
   IELTS_CARTRIDGE_VERSION,
+  isDenseIeltsArray,
+  isNonBlankIeltsString as isNonBlankString,
   type IeltsRubricReceipt,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPaceStatus,
@@ -84,8 +76,6 @@ const SPEAKING_SIGNAL_RATINGS: ReadonlySet<string> = new Set([
   "needs_work",
 ]);
 
-const MIN_VERIFIED_SPEAKING_WORDS = 75;
-
 const ieltsContinuityStateSchema = z
   .object({
     schemaVersion: z.literal(IELTS_CONTINUITY_SCHEMA_VERSION),
@@ -107,10 +97,6 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
-}
-
-function isNonBlankString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 function validateSpeakingReceipt(
@@ -179,26 +165,19 @@ function validateSpeakingReceipt(
   ) {
     issues.push("speakingReceipt.paceStatus is invalid");
   }
-  if (
-    !Array.isArray(rawReceipt.transferredCollocations) ||
-    !rawReceipt.transferredCollocations.every((item) => isNonBlankString(item))
-  ) {
+  if (!isDenseIeltsArray(rawReceipt.transferredCollocations, isNonBlankString)) {
     issues.push("speakingReceipt.transferredCollocations must be a string array");
   }
-  if (
-    !Array.isArray(rawReceipt.pendingCollocations) ||
-    !rawReceipt.pendingCollocations.every((item) => isNonBlankString(item))
-  ) {
+  if (!isDenseIeltsArray(rawReceipt.pendingCollocations, isNonBlankString)) {
     issues.push("speakingReceipt.pendingCollocations must be a string array");
   }
-  if (!Array.isArray(rawReceipt.memorizedTemplateHits)) {
-    issues.push("speakingReceipt.memorizedTemplateHits must be an array");
+  if (!isDenseIeltsArray(rawReceipt.memorizedTemplateHits, isPlainRecord)) {
+    issues.push("speakingReceipt.memorizedTemplateHits must be a dense array of objects");
   }
   if (!isNonBlankString(rawReceipt.createdAt)) {
     issues.push("speakingReceipt.createdAt must be a non-blank string");
   }
 
-  let writingReceiptEligible: boolean | undefined;
   if (rawReceipt.evaluationContext !== undefined) {
     if (!isPlainRecord(rawReceipt.evaluationContext)) {
       issues.push("speakingReceipt.evaluationContext must be a plain object");
@@ -209,8 +188,6 @@ function validateSpeakingReceipt(
       }
       if (typeof rawReceipt.evaluationContext.writingReceiptEligible !== "boolean") {
         issues.push("speakingReceipt.evaluationContext.writingReceiptEligible must be a boolean");
-      } else {
-        writingReceiptEligible = rawReceipt.evaluationContext.writingReceiptEligible;
       }
     }
   }
@@ -233,13 +210,12 @@ function validateSpeakingReceipt(
     }
   }
 
-  if (!Array.isArray(rawReceipt.evidenceQuotes)) {
-    issues.push("speakingReceipt.evidenceQuotes must be an array");
+  if (!isDenseIeltsArray(rawReceipt.evidenceQuotes, isPlainRecord)) {
+    issues.push("speakingReceipt.evidenceQuotes must be a dense array of objects");
   } else if (typeof rawReceipt.sourceTranscript === "string") {
     const transcript = rawReceipt.sourceTranscript;
     for (const [index, quote] of rawReceipt.evidenceQuotes.entries()) {
       if (
-        !isPlainRecord(quote) ||
         !isNonBlankString(quote.id) ||
         typeof quote.signal !== "string" ||
         !SPEAKING_SIGNAL_KEYS.includes(quote.signal as IeltsSpeakingSignalKey) ||
@@ -263,7 +239,6 @@ function validateSpeakingReceipt(
   if (issues.length > 0) return issues;
 
   const receipt = rawReceipt as IeltsSpeakingFeedbackReceipt;
-  const prose = maskIeltsMarkup(receipt.sourceTranscript);
   const computedWords = countEnglishWords(receipt.sourceTranscript);
   if (computedWords !== receipt.wordCount) {
     issues.push("speakingReceipt.wordCount does not match sourceTranscript");
@@ -274,10 +249,6 @@ function validateSpeakingReceipt(
   if (receipt.paceStatus !== expectedPaceStatus) {
     issues.push("speakingReceipt.paceStatus does not match durationSeconds and timeWindowSeconds");
   }
-
-  const sentences = computedWords > 0 ? segmentIeltsText(prose) : [];
-  const hasLowEntropy = detectLowEntropyStuffing([prose], [sentences]);
-  const hasStiffConnector = hasStiffWrittenSpeakingConnector(prose.trim());
 
   const claimsVerified =
     receipt.epistemicStatus === "rubric_verified_evidence" ||
@@ -292,41 +263,18 @@ function validateSpeakingReceipt(
     ) {
       issues.push("speakingReceipt verified mastery flags are inconsistent");
     }
-    if (receipt.assisted !== false) {
-      issues.push("speakingReceipt cannot claim mastery when assisted is true");
-    }
-    if (
-      receipt.durationSeconds === null ||
-      receipt.durationSeconds < 60 ||
-      receipt.durationSeconds > 90 ||
-      expectedPaceStatus !== "on_target" ||
-      receipt.paceStatus !== "on_target"
-    ) {
-      issues.push("speakingReceipt cannot claim mastery outside the 60-90s target pace window");
-    }
-    if (computedWords < MIN_VERIFIED_SPEAKING_WORDS) {
-      issues.push("speakingReceipt cannot claim mastery below the minimum spoken word count");
-    }
-    const totalTargets =
-      receipt.transferredCollocations.length + receipt.pendingCollocations.length;
-    const requiredTransferred = totalTargets > 0 ? Math.min(2, totalTargets) : 1;
-    if (totalTargets === 0 || receipt.transferredCollocations.length < requiredTransferred) {
-      issues.push("speakingReceipt cannot claim mastery without meeting target collocation transfer");
-    }
-    if (hasMemorizedTemplateStuffing(detectMemorizedTemplates([prose]))) {
-      issues.push("speakingReceipt cannot claim mastery with memorized template stuffing");
-    }
-    if (hasLowEntropy) {
-      issues.push("speakingReceipt cannot claim mastery with low-entropy repetitive stuffing");
-    }
-    if (hasStiffConnector) {
-      issues.push("speakingReceipt cannot claim mastery with stiff written-only connectors");
-    }
-    if (writingReceiptEligible !== true) {
+    const context = receipt.evaluationContext;
+    if (context?.writingReceiptEligible !== true) {
       issues.push("speakingReceipt requires evaluationContext.writingReceiptEligible === true for mastery");
     }
-    if (draft2Receipt === null || !isVerifiedWritingReceipt(draft2Receipt, { expectedPromptId })) {
+    if (!draft2Receipt?.masteryQualified) {
       issues.push("speakingReceipt requires a verified Writing draft2Receipt prerequisite in continuity state");
+    } else if (context?.writingReceiptEligible === true && !hasVerifiedSpeakingRetelling(
+      receipt,
+      [...receipt.transferredCollocations, ...receipt.pendingCollocations],
+      context,
+    )) {
+      issues.push("speakingReceipt did not reproduce verified collocation transfer and mastery from sourceTranscript");
     }
   } else if (
     receipt.epistemicStatus !== "practice_feedback" ||
@@ -360,6 +308,7 @@ export function createInitialIeltsContinuityState(
 
 export function parseIeltsContinuityState(
   raw: unknown,
+  options?: { readonly promptStatement?: string },
 ): CartridgeValidationResult<IeltsContinuityState> {
   let value = raw;
   if (typeof raw === "string") {
@@ -388,6 +337,7 @@ export function parseIeltsContinuityState(
   if (parsed.data.draft2Receipt !== null) {
     const writingResult = validateWritingRubricReceipt(parsed.data.draft2Receipt, {
       expectedPromptId: parsed.data.promptId,
+      promptStatement: options?.promptStatement,
     });
     if (!writingResult.ok) {
       issues.push(...writingResult.issues.map((issue) => `draft2Receipt: ${issue}`));
@@ -440,25 +390,8 @@ export function serializeIeltsContinuityState(state: IeltsContinuityState): stri
 export function buildIeltsResumeSummary(raw: unknown): CartridgeResumeSummary {
   const state = restoreContinuityState(parseIeltsContinuityState, raw);
   const draft1Done = state.draft1Id !== null || state.draft2Receipt !== null;
-  const writingVerified =
-    state.draft2Receipt !== null &&
-    isVerifiedWritingReceipt(state.draft2Receipt, { expectedPromptId: state.promptId });
-  const speakingVerified =
-    writingVerified &&
-    state.speakingReceipt !== null &&
-    state.speakingReceipt.epistemicStatus === "rubric_verified_evidence" &&
-    state.speakingReceipt.countsTowardMastery &&
-    state.speakingReceipt.masteryQualified &&
-    state.speakingReceipt.assisted === false &&
-    state.speakingReceipt.evaluationContext?.writingReceiptEligible === true &&
-    state.speakingReceipt.durationSeconds !== null &&
-    state.speakingReceipt.durationSeconds >= 60 &&
-    state.speakingReceipt.durationSeconds <= 90 &&
-    classifySpeakingPace(
-      state.speakingReceipt.durationSeconds,
-      state.speakingReceipt.evaluationContext.timeWindowSeconds,
-    ) === "on_target" &&
-    state.speakingReceipt.paceStatus === "on_target";
+  const writingVerified = state.draft2Receipt?.masteryQualified === true;
+  const speakingVerified = state.speakingReceipt?.masteryQualified === true;
 
   const completions: readonly [IeltsRequirementKey, boolean][] = [
     ["ielts.writing.draft1-diagnostic", draft1Done],

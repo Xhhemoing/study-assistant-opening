@@ -1,6 +1,23 @@
 export const IELTS_CARTRIDGE_ID = "ielts-writing-speaking-v1" as const;
 export const IELTS_CARTRIDGE_VERSION = "1.0.0" as const;
 
+export function isDenseIeltsArray<T>(
+  value: unknown,
+  isElement: (item: unknown) => item is T,
+): value is readonly T[] {
+  if (!Array.isArray(value)) return false;
+  for (let index = 0; index < value.length; index++) {
+    if (!Object.prototype.hasOwnProperty.call(value, index) || !isElement(value[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function isNonBlankIeltsString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 export const IELTS_CRITERIA = ["TR", "CC", "LR", "GRA"] as const;
 export type IeltsCriterion = (typeof IELTS_CRITERIA)[number];
 
@@ -88,6 +105,7 @@ export type IeltsWritingDraftSource = Pick<
 export type IeltsWritingTransferSource = {
   readonly baseline: IeltsWritingDraftSource;
   readonly targets: readonly IeltsUpgradeTarget[];
+  readonly promptStatement?: string;
 };
 
 export type IeltsMemorizedTemplateHit = {
@@ -124,6 +142,7 @@ export type IeltsRubricValidationError = {
   readonly code:
     | "INVALID_BAND"
     | "MISSING_CRITERION"
+    | "INVALID_LIST"
     | "MISSING_EVIDENCE_SPANS"
     | "EMPTY_SPAN_FIELD"
     | "PARAGRAPH_OUT_OF_RANGE"

@@ -9,6 +9,8 @@ import {
 import { detectLowEntropyStuffing, isVerifiedWritingReceipt } from "./transfer";
 import {
   IELTS_CARTRIDGE_ID,
+  isDenseIeltsArray,
+  isNonBlankIeltsString,
   type IeltsSpeakingEvidenceQuote,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPaceStatus,
@@ -313,11 +315,11 @@ function contextualSpokenTargets(segment: string, spans: readonly SpokenTargetSp
 }
 
 function cleanSpokenCollocations(rawCollocations: readonly string[]): string[] {
+  if (!isDenseIeltsArray(rawCollocations, isNonBlankIeltsString)) return [];
   const seen = new Set<string>();
   const cleaned: string[] = [];
   for (const item of rawCollocations) {
     const trimmed = item.trim();
-    if (!trimmed) continue;
     const lower = trimmed.toLowerCase();
     if (STIFF_WRITTEN_ONLY_PHRASES.some((stiff) => lower === stiff)) continue;
     if (!seen.has(lower)) {
@@ -383,9 +385,9 @@ export function hasStiffWrittenSpeakingConnector(text: string): boolean {
 
 export function getSpeakingTargets(collocations: readonly string[]): ReadonlyMap<string, string> {
   const targets = new Map<string, string>();
+  if (!isDenseIeltsArray(collocations, isNonBlankIeltsString)) return targets;
   for (const collocation of collocations) {
     const phrase = collocation.trim();
-    if (!phrase) continue;
     const key = phrase.toLowerCase().replace(/\s+/gu, " ");
     const existing = targets.get(key);
     if (!existing || compareText(phrase, existing) < 0) targets.set(key, phrase);
@@ -449,7 +451,7 @@ export function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean
   return (
     receipt.cartridgeId === seed.cartridgeId &&
     (seed.verifiedTransferIds === undefined ||
-      (Array.isArray(seed.verifiedTransferIds) &&
+      (isDenseIeltsArray(seed.verifiedTransferIds, isNonBlankIeltsString) &&
         seed.verifiedTransferIds.includes(receipt.receiptId)))
   );
 }
@@ -459,34 +461,25 @@ export function getSpeakingEvaluationContext(seed: IeltsSpeakingPart3Seed) {
   return { timeWindowSeconds: { min, max }, writingReceiptEligible: hasRequiredWritingReceipt(seed) };
 }
 
-/**
- * Evaluates a learner's Speaking Part 3 oral retelling transcript with strict
- * duration/target/contextual-clause verification (no fresh-prompt or bare-fragment bypass),
- * untrimmed exact UTF-16 offsets for every credited target citation, and honest
- * transcript-only speaking signals.
- */
-export function evaluateSpeakingRetelling(
-  input: IeltsSpeakingRetellingInput,
-): IeltsSpeakingFeedbackReceipt {
-  const rawTranscript = input.transcript;
+type SpeakingEvaluationContext = ReturnType<typeof getSpeakingEvaluationContext>;
+
+function analyzeSpeakingRetelling(
+  rawTranscript: string,
+  durationSeconds: number | null,
+  assisted: boolean,
+  targetCollocations: readonly string[],
+  evaluationContext: SpeakingEvaluationContext,
+) {
   const prose = maskIeltsMarkup(rawTranscript);
   const trimmedTranscript = prose.trim();
   const wordCount = countProseWords(trimmedTranscript);
-  const evaluationContext = getSpeakingEvaluationContext(input.seed);
-  const { min, max } = evaluationContext.timeWindowSeconds;
-  const timeWindowLabel = `${min}–${max} 秒`;
-  const paceStatus = classifySpeakingPace(input.durationSeconds, evaluationContext.timeWindowSeconds);
-  const safeDurationSeconds =
-    Number.isFinite(input.durationSeconds) && input.durationSeconds > 0
-      ? input.durationSeconds
-      : null;
-
+  const paceStatus = classifySpeakingPace(durationSeconds, evaluationContext.timeWindowSeconds);
   const sentences = wordCount > 0 ? segmentIeltsText(prose) : [];
   const paragraphs = [prose];
   const memorizedTemplateHits = detectMemorizedTemplates(paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
   const hasLowEntropy = detectLowEntropyStuffing(paragraphs, [sentences]);
-  const targets = getSpeakingTargets(input.seed.targetSpokenCollocations);
+  const targets = getSpeakingTargets(targetCollocations);
   const { allocated, hasBareTargetPaste } = allocateSpeakingEvidence(sentences, targets);
 
   const transferredCollocations: string[] = [];
@@ -502,6 +495,73 @@ export function evaluateSpeakingRetelling(
     }
   }
 
+  const targetCount = targets.size;
+  const requiredTransferred = targetCount > 0 ? Math.min(2, targetCount) : 1;
+  const hasEnoughTransfer = transferredCollocations.length >= requiredTransferred;
+  const hasEnoughWords = wordCount >= MIN_VERIFIED_SPEAKING_WORDS;
+  const hasStiffWrittenConnector = hasStiffWrittenSpeakingConnector(trimmedTranscript);
+  const masteryQualified =
+    !assisted &&
+    evaluationContext.writingReceiptEligible &&
+    paceStatus === "on_target" &&
+    hasEnoughTransfer &&
+    hasEnoughWords &&
+    !hasBareTargetPaste &&
+    !hasStuffing &&
+    !hasLowEntropy &&
+    !hasStiffWrittenConnector;
+
+  return {
+    prose, trimmedTranscript, wordCount, paceStatus, sentences, memorizedTemplateHits,
+    hasStuffing, hasLowEntropy, targetCount, transferredCollocations, pendingCollocations,
+    matchedSentenceByCollocation, hasBareTargetPaste, requiredTransferred, hasEnoughTransfer,
+    hasEnoughWords, hasStiffWrittenConnector, masteryQualified,
+  };
+}
+
+/** Recomputes the mastery claim and its transferred/pending partition from the transcript. */
+export function hasVerifiedSpeakingRetelling(
+  receipt: IeltsSpeakingFeedbackReceipt,
+  targetCollocations: readonly string[],
+  context: SpeakingEvaluationContext,
+): boolean {
+  const retelling = analyzeSpeakingRetelling(
+    receipt.sourceTranscript, receipt.durationSeconds, receipt.assisted, targetCollocations, context,
+  );
+  const matchesCollocations = (stored: readonly string[], expected: readonly string[]) =>
+    isDenseIeltsArray(stored, isNonBlankIeltsString) &&
+    stored.length === expected.length &&
+    expected.every((expression) => stored.includes(expression));
+  return retelling.masteryQualified &&
+    retelling.wordCount === receipt.wordCount &&
+    retelling.paceStatus === receipt.paceStatus &&
+    matchesCollocations(receipt.transferredCollocations, retelling.transferredCollocations) &&
+    matchesCollocations(receipt.pendingCollocations, retelling.pendingCollocations);
+}
+
+/**
+ * Evaluates a learner's Speaking Part 3 retelling with contextual phrase evidence and
+ * exact UTF-16 citation offsets.
+ */
+export function evaluateSpeakingRetelling(
+  input: IeltsSpeakingRetellingInput,
+): IeltsSpeakingFeedbackReceipt {
+  const rawTranscript = input.transcript;
+  const evaluationContext = getSpeakingEvaluationContext(input.seed);
+  const { min, max } = evaluationContext.timeWindowSeconds;
+  const timeWindowLabel = `${min}–${max} 秒`;
+  const safeDurationSeconds =
+    Number.isFinite(input.durationSeconds) && input.durationSeconds > 0
+      ? input.durationSeconds
+      : null;
+  const {
+    prose, trimmedTranscript, wordCount, paceStatus, sentences, memorizedTemplateHits,
+    hasStuffing, hasLowEntropy, targetCount, transferredCollocations, pendingCollocations,
+    matchedSentenceByCollocation, hasBareTargetPaste, requiredTransferred, hasEnoughTransfer,
+    hasEnoughWords, hasStiffWrittenConnector, masteryQualified,
+  } = analyzeSpeakingRetelling(
+    rawTranscript, safeDurationSeconds, input.assisted, input.seed.targetSpokenCollocations, evaluationContext,
+  );
   const hasSpokenSignpost =
     /\b(personally|to be honest|that said|on the other hand|in the long run|the main reason|admittedly|for instance|for example|on top of that)\b/iu.test(
       trimmedTranscript,
@@ -510,8 +570,6 @@ export function evaluateSpeakingRetelling(
     /\b(while|although|even though|whereas|which|because|if|unless)\b/iu.test(
       trimmedTranscript,
     );
-  const hasStiffWrittenConnector = hasStiffWrittenSpeakingConnector(trimmedTranscript);
-
   // Build exact, untrimmed-offset evidence quotes: 1 fluency quote + 1 quote per credited target hit.
   const evidenceQuotes: IeltsSpeakingEvidenceQuote[] = [];
   const boundaries = graphemeBoundaries(rawTranscript);
@@ -558,7 +616,7 @@ export function evaluateSpeakingRetelling(
               : "继续保持这种把精准搭配融入自然口语句式的表达习惯，避免生硬背诵书面语。",
         });
       });
-    } else if (targets.size > 0) {
+    } else if (targetCount > 0) {
       const longestQuote = groundedQuotes.reduce(
         (longest, quote) => quote.quote.length > longest.quote.length ? quote : longest,
         firstQuote,
@@ -575,27 +633,9 @@ export function evaluateSpeakingRetelling(
     }
   }
 
-  // Airtight mastery / verification gate — NEVER bypassed by freshPromptTransfer or bare fragments!
-  const targetCount = targets.size;
-  const requiredTransferred = targetCount > 0 ? Math.min(2, targetCount) : 1;
   const hasEnoughTargets = targetCount > 0;
-  const hasEnoughTransfer =
-    hasEnoughTargets && transferredCollocations.length >= requiredTransferred;
   const hasValidPace = paceStatus === "on_target";
-  const hasEnoughWords = wordCount >= MIN_VERIFIED_SPEAKING_WORDS;
   const hasWritingReceipt = evaluationContext.writingReceiptEligible;
-
-  const masteryQualified =
-    !input.assisted &&
-    hasWritingReceipt &&
-    hasValidPace &&
-    hasEnoughTargets &&
-    hasEnoughTransfer &&
-    hasEnoughWords &&
-    !hasBareTargetPaste &&
-    !hasStuffing &&
-    !hasLowEntropy &&
-    !hasStiffWrittenConnector;
 
   const epistemicStatus = masteryQualified
     ? "rubric_verified_evidence"

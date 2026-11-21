@@ -3,6 +3,8 @@ import { countProseWords, maskIeltsMarkup, maskIeltsParagraphs } from "./prose";
 import {
   IELTS_CARTRIDGE_ID,
   IELTS_CRITERIA,
+  isDenseIeltsArray,
+  isNonBlankIeltsString,
   type IeltsBandScore,
   type IeltsCriterion,
   type IeltsCriterionAssessment,
@@ -17,7 +19,7 @@ import {
   type IeltsTaskMode,
   type IeltsUpgradeTarget,
 } from "./types";
-import { getWritingDraftSource, getWritingTransferSource } from "./writing-source";
+import { getWritingDraftSource, getWritingTransferSource, hasValidWritingTargetPatterns } from "./writing-source";
 
 const MIN_BAND = 4;
 const MAX_BAND = 9;
@@ -414,6 +416,7 @@ export type CreateRubricReceiptInput = {
   readonly baselineDraft?: DraftLineage & Pick<IeltsEssayDraft, "paragraphs"> &
     Partial<Pick<IeltsEssayDraft, "draftId" | "assisted">>;
   readonly transferTargets?: readonly IeltsUpgradeTarget[];
+  readonly promptStatement?: string;
   readonly assessments: readonly IeltsCriterionAssessment[];
   readonly crossDraftTransferVerified: boolean;
   readonly freshPromptTransfer?: boolean;
@@ -431,6 +434,18 @@ export function createValidatedRubricReceipt(
 ): IeltsRubricValidationResult {
   const errors: IeltsRubricValidationError[] = [];
   const paragraphs = input.draft.paragraphs;
+  const isParagraph = (value: unknown) => typeof value === "string";
+  if (
+    !isDenseIeltsArray(paragraphs, isParagraph) ||
+    (input.baselineDraft && !isDenseIeltsArray(input.baselineDraft.paragraphs, isParagraph)) ||
+    !isDenseIeltsArray(input.assessments, (value) => typeof value === "object" && value !== null) ||
+    (input.transferTargets !== undefined && !isDenseIeltsArray(input.transferTargets, hasValidWritingTargetPatterns))
+  ) {
+    return {
+      ok: false,
+      errors: [{ code: "INVALID_LIST", message: "Draft paragraphs, assessments, and transfer targets must be dense lists." }],
+    };
+  }
   const prose = maskIeltsParagraphs(paragraphs);
   const wordCount = countProseWords(prose.join("\n"));
 
@@ -470,7 +485,10 @@ export function createValidatedRubricReceipt(
       bandMap[criterion] = assessment.band;
     }
 
-    if (!assessment.evidenceSpans || assessment.evidenceSpans.length === 0) {
+    if (
+      !isDenseIeltsArray(assessment.evidenceSpans, (value) => typeof value === "object" && value !== null) ||
+      assessment.evidenceSpans.length === 0
+    ) {
       errors.push({
         code: "MISSING_EVIDENCE_SPANS",
         criterion,
@@ -492,9 +510,9 @@ export function createValidatedRubricReceipt(
       }
 
       if (
-        !span.excerpt.trim() ||
-        !span.diagnosis.trim() ||
-        !span.upgradeRewrite.trim()
+        !isNonBlankIeltsString(span.excerpt) ||
+        !isNonBlankIeltsString(span.diagnosis) ||
+        !isNonBlankIeltsString(span.upgradeRewrite)
       ) {
         errors.push({
           code: "EMPTY_SPAN_FIELD",
@@ -592,9 +610,14 @@ export function createValidatedRubricReceipt(
   });
 
   const baseline = input.baselineDraft;
-  const transferSource = baseline?.draftId !== undefined && baseline.assisted !== undefined && input.transferTargets
-    ? getWritingTransferSource({ ...baseline, draftId: baseline.draftId, assisted: baseline.assisted }, input.transferTargets)
-    : undefined;
+  const transferSource =
+    baseline?.draftId !== undefined && baseline.assisted !== undefined && input.transferTargets
+      ? getWritingTransferSource(
+          { ...baseline, draftId: baseline.draftId, assisted: baseline.assisted },
+          input.transferTargets,
+          input.promptStatement,
+        )
+      : undefined;
   const receipt: IeltsRubricReceipt = {
     receiptId: input.receiptId,
     cartridgeId: IELTS_CARTRIDGE_ID,

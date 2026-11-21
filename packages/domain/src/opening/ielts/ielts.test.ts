@@ -20,6 +20,7 @@ import {
   isValidIeltsBand,
   isVerifiedWritingReceipt,
   locateGroundedExcerpt,
+  parseIeltsContinuityState,
   validateWritingRubricReceipt,
   type EvaluateRevisedDraftInput,
   type IeltsContinuityState,
@@ -1082,6 +1083,12 @@ describe("Writing transfer review regressions", () => {
     expect(fresh.receipt.evidenceSource).toBe("unassisted_fresh_prompt_transfer");
     expect(fresh.receipt.countsTowardMastery).toBe(true);
     expect(fresh.transferReport.summary.masteryQualified).toBe(true);
+    expect(isVerifiedWritingReceipt(fresh.receipt)).toBe(true);
+    expect(isVerifiedWritingReceipt({ ...fresh.receipt, transferSource: undefined })).toBe(false);
+    expect(isVerifiedWritingReceipt({
+      ...fresh.receipt,
+      transferSource: { ...fresh.receipt.transferSource!, targets: [] },
+    })).toBe(false);
 
     const noTargets = evaluateNonEmptyRevision({
       ...candidate,
@@ -2743,6 +2750,37 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
     });
   });
 
+  it("restores a verified correction of an off-topic baseline using the original prompt", () => {
+    const promptId = "q-1";
+    const promptStatement = "Should cities invest in urban rail rather than widening roads?";
+    const baselineDraft = {
+      ...DRAFT_1,
+      promptId,
+      paragraphs: ["Museum curators preserve ancient pottery by repairing exhibition cases and cataloguing ceramic fragments."],
+    };
+    const target = { ...TARGETS[2]!, targetPatterns: ["consequently"] };
+    const { receipt } = evaluateNonEmptyRevision({
+      baselineDraft,
+      revisedDraft: { ...DRAFT_2, promptId },
+      targets: [target],
+      promptStatement,
+      receiptId: "r-prompt-restore",
+    });
+    expect(receipt.masteryQualified).toBe(true);
+
+    const state = {
+      ...createInitialIeltsContinuityState(promptId, receipt.createdAt, { draft1Id: baselineDraft.draftId }),
+      draft2Receipt: receipt,
+    };
+    const restored = ieltsWritingSpeakingCartridge.parseContinuityState(JSON.stringify(state));
+    expect(restored.ok).toBe(true);
+    expect(ieltsWritingSpeakingCartridge.buildResumeSummary(state).completedSteps).toBe(2);
+    expect(validateWritingRubricReceipt(receipt, { promptStatement }).ok).toBe(true);
+    expect(parseIeltsContinuityState(state, {
+      promptStatement: "Should cities close urban rail lines rather than expanding them?",
+    })).toMatchObject({ ok: false, issues: [expect.stringContaining("does not match the expected prompt")] });
+  });
+
   it("rejects malformed or tampered continuity state fail-closed", () => {
     const { receipt: writingReceipt } = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_1,
@@ -2932,6 +2970,27 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
     });
     expect(isVerifiedWritingReceipt(validWritingReceipt)).toBe(true);
 
+    const transferSource = validWritingReceipt.transferSource!;
+    const [target, ...otherTargets] = transferSource.targets;
+    const sparsePatterns = new Array<string>(2);
+    sparsePatterns[1] = "in a nutshell";
+    for (const field of ["weakBaselinePatterns", "clichePatterns", "targetPatterns"] as const) {
+      const targets = [{ ...target!, [field]: sparsePatterns }, ...otherTargets];
+      expect(validateWritingRubricReceipt({
+        ...validWritingReceipt,
+        transferSource: { ...transferSource, targets },
+      }), field).toMatchObject({ ok: false });
+      expect(createValidatedRubricReceipt({
+        receiptId: "sparse-pattern-issuance",
+        taskMode: "writing_task2",
+        draft: DRAFT_2,
+        baselineDraft: DRAFT_1,
+        transferTargets: targets,
+        assessments: buildValidDraft2Assessments(),
+        crossDraftTransferVerified: true,
+      }), field).toMatchObject({ ok: false, errors: [expect.objectContaining({ code: "INVALID_LIST" })] });
+    }
+
     // 1. Malformed optional pattern fields (null / blank entries) MUST return { ok: false } instead of throwing TypeError.
     const malformedNullWeak = {
       ...validWritingReceipt,
@@ -3099,6 +3158,42 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
       createdAt: "2026-11-21T08:30:00.000Z",
     });
     expect(practiceSpeaking.paceStatus).toBe("too_short");
+
+    const collage = evaluateSpeakingRetelling({
+      seed: speakingSeed,
+      transcript: validSpeaking.sourceTranscript.replace(
+        "local councils reduced harmful per-capita emissions across the city.",
+        "local councils updated their policy across the city: per-capita emissions.",
+      ),
+      durationSeconds: 75,
+      assisted: false,
+    });
+    expect(collage.transferredCollocations).toEqual([]);
+    expect(collage.masteryQualified).toBe(false);
+    const collageState = {
+      ...baseState,
+      draft2Receipt: writingReceipt,
+      speakingReceipt: collage,
+    };
+    expect(ieltsWritingSpeakingCartridge.parseContinuityState(collageState).ok).toBe(true);
+    expect(ieltsWritingSpeakingCartridge.buildResumeSummary(collageState).completedSteps).toBe(2);
+    expect(ieltsWritingSpeakingCartridge.parseContinuityState({
+      ...collageState,
+      speakingReceipt: { ...collage, transferredCollocations: new Array<string>(1) },
+    }).ok).toBe(false);
+    const forgedCollage = {
+      ...collageState,
+      speakingReceipt: {
+        ...collage,
+        epistemicStatus: "rubric_verified_evidence" as const,
+        countsTowardMastery: true,
+        masteryQualified: true,
+        transferredCollocations: collage.pendingCollocations,
+        pendingCollocations: [],
+      },
+    };
+    expect(ieltsWritingSpeakingCartridge.parseContinuityState(forgedCollage).ok).toBe(false);
+    expect(() => ieltsWritingSpeakingCartridge.buildResumeSummary(forgedCollage)).toThrow();
 
     // Low-entropy repetitive transcript (80+ words) for stuffing tamper test:
     const repetitiveSentence = "Local councils reduced harmful per-capita emissions across the city every single week.";

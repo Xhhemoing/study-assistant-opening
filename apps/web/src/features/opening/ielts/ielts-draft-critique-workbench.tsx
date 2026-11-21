@@ -510,36 +510,42 @@ function WritingWorkbenchPromptSession({
   const effectiveComposerAssisted = composerAssisted || isComposerStickyAssisted;
 
   const draftSource = stableSerialize(getWritingDraftSource(draft2));
-  const transferSource = stableSerialize(getWritingTransferSource(fixture.draft1, fixture.targets));
+  const transferSource = getWritingTransferSource(fixture.draft1, fixture.targets, fixture.promptStatementEn);
+  const { promptStatement, ...legacyTransferSource } = transferSource;
+  const currentTransferKey = stableSerialize(transferSource);
+  const legacyTransferKey = stableSerialize(legacyTransferSource);
   const { transferReport, matchesSavedEvaluation } = useMemo(() => {
-    const matchesReport =
+    const savedTransferKey = stableSerialize(savedReport.transferSource);
+    const matchesReportDraft =
       savedReport.fromDraftId === fixture.draft1.draftId &&
       savedReport.toDraftId === draft2.draftId &&
-      stableSerialize(savedReport.sourceDraft) === draftSource &&
-      stableSerialize(savedReport.transferSource) === transferSource;
+      stableSerialize(savedReport.sourceDraft) === draftSource;
+    const matchesCurrentReport = matchesReportDraft && savedTransferKey === currentTransferKey;
     return {
-      transferReport: matchesReport
+      transferReport: matchesCurrentReport
         ? savedReport
         : analyzeCrossDraftTransfer({
             draft1: fixture.draft1,
             draft2,
             targets: fixture.targets,
-            promptStatement: fixture.promptStatementEn,
+            promptStatement,
           }),
       matchesSavedEvaluation:
-        matchesReport &&
+        matchesReportDraft &&
+        (savedTransferKey === currentTransferKey || savedTransferKey === legacyTransferKey) &&
         stableSerialize(draft2Receipt.sourceDraft) === draftSource &&
-        stableSerialize(draft2Receipt.transferSource) === transferSource,
+        stableSerialize(draft2Receipt.transferSource) === savedTransferKey,
     };
   }, [
     fixture.draft1,
     fixture.targets,
-    fixture.promptStatementEn,
+    promptStatement,
     draft2,
     draft2Receipt,
     savedReport,
     draftSource,
-    transferSource,
+    currentTransferKey,
+    legacyTransferKey,
   ]);
   const activeDraft = viewMode === "draft1" ? fixture.draft1 : draft2;
   const activeReceipt = viewMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
@@ -673,7 +679,7 @@ function WritingWorkbenchPromptSession({
       fixture,
       composerDraft,
       draft2Receipt,
-      transferReport,
+      savedReport,
     );
     if (hasSubmitted && matchesSavedEvaluation && fingerprint === evaluation.cachedFingerprint) {
       setComposerNeedsText(false);
