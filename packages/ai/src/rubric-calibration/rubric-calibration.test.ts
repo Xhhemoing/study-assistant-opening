@@ -165,6 +165,46 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     expect(missingReverse.inconsistencyReasons).toContain("missing_reverse_comparison");
   });
 
+  it("excludes duplicate anchor comparisons from narrowing bandRange and rejects invalid runtime choices", () => {
+    const anchors = getSentinelAnchorsForDimension("task_response");
+    const duplicateBase = consistentComparisonsForTarget("task_response", 6.25);
+    // Anchor 6.0 appears twice with conflicting verdicts (win then loss); bracket must stay [5.0, 6.5], not [6.0, 6.5].
+    const duplicated = [
+      ...duplicateBase,
+      { anchorId: anchors[2]!.anchorId, forwardChoice: "B" as const, reverseChoice: "A" as const },
+    ];
+
+    const dupResult = evaluateAnchorCalibratedRubric({
+      submissionId: "dup-anchor",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      comparisons: duplicated,
+    });
+    expect(dupResult.status).toBe("interval_only");
+    expect(dupResult.band).toBeNull();
+    expect(dupResult.countsTowardMastery).toBe(false);
+    expect(dupResult.bandRange).toEqual([5.0, 6.5]);
+    expect(dupResult.inconsistencyReasons).toContain("duplicate_anchor_comparison");
+
+    const invalidChoiceValue = "unexpected" as unknown as PairwiseSwapComparison["forwardChoice"];
+    const invalidChoiceResult = evaluateAnchorCalibratedRubric({
+      submissionId: "invalid-choice",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      comparisons: duplicateBase.map((item, idx) =>
+        idx === 2 ? { anchorId: item.anchorId, forwardChoice: invalidChoiceValue, reverseChoice: "tie" } : item,
+      ),
+    });
+    expect(invalidChoiceResult.status).toBe("interval_only");
+    expect(invalidChoiceResult.band).toBeNull();
+    expect(invalidChoiceResult.countsTowardMastery).toBe(false);
+    expect(invalidChoiceResult.inconsistencyReasons).toContain("invalid_comparison_choice");
+  });
+
   it("blocks mastery updates for practice_feedback, assisted submissions, and template-padded essays", () => {
     const comparisons = consistentComparisonsForTarget("grammatical_range_accuracy", 6.5);
     const cleanText = SENTINEL_ANCHOR_ESSAYS[3]!.text;
@@ -322,5 +362,27 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
     expect(paddingInflation.passed).toBe(false);
     expect(paddingInflation.failures).toContain("counterfactual_padding_gain_exceeds_limit");
     expect(paddingInflation.failures).toContain("counterfactual_padded_not_below_equal_length_substantive");
+
+    const paddedCountsForMastery = evaluateRubricCalibrationGate({
+      benchmarkItems: [
+        { itemId: "m1", trueBand: 4.5, evaluation: calibratedPoint(4.5) },
+        { itemId: "m2", trueBand: 5.0, evaluation: calibratedPoint(5.0) },
+        { itemId: "m3", trueBand: 6.0, evaluation: calibratedPoint(6.0) },
+        { itemId: "m4", trueBand: 6.5, evaluation: calibratedPoint(6.5) },
+        { itemId: "m5", trueBand: 7.5, evaluation: calibratedPoint(7.5) },
+        { itemId: "m6", trueBand: 8.0, evaluation: calibratedPoint(8.0) },
+      ],
+      counterfactualTriplets: [
+        {
+          tripletId: "mastery-leak-padded",
+          substantiveConcise: calibratedPoint(6.0, 6.0),
+          templatePaddedExpansion: calibratedPoint(6.0, 6.1, true),
+          equalLengthSubstantive: calibratedPoint(7.5, 7.5),
+        },
+      ],
+    });
+    expect(paddedCountsForMastery.passed).toBe(false);
+    expect(paddedCountsForMastery.failures).toContain("counterfactual_padded_counts_toward_mastery");
+    expect(paddedCountsForMastery.counterfactualAudits[0]!.passed).toBe(false);
   });
 });

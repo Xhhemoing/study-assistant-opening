@@ -65,7 +65,7 @@ export interface VerifiedClinicTransferProbe {
 
 export interface RejectedClinicProbe {
   readonly probeId: string;
-  readonly reason: "duplicate_probe_id" | "not_distinguishable";
+  readonly reason: "duplicate_probe_id" | "duplicate_probe_prompt" | "not_distinguishable";
   readonly report: ProbeDistinguishabilityReport | null;
 }
 
@@ -342,6 +342,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   const verifiedProbes: VerifiedClinicTransferProbe[] = [];
   const rejectedProbes: RejectedClinicProbe[] = [];
   const acceptedProbeIds = new Set<string>();
+  const acceptedProbePrompts = new Set<string>();
 
   for (const probe of input.candidateProbes) {
     const report = verifyProbeDistinguishability(probe);
@@ -354,7 +355,13 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       rejectedProbes.push({ probeId, reason: "duplicate_probe_id", report });
       continue;
     }
+    const normalizedPrompt = probe.prompt.trim().replace(/\s+/g, " ").toLowerCase();
+    if (acceptedProbePrompts.has(normalizedPrompt)) {
+      rejectedProbes.push({ probeId, reason: "duplicate_probe_prompt", report });
+      continue;
+    }
     acceptedProbeIds.add(probeId);
+    acceptedProbePrompts.add(normalizedPrompt);
     verifiedProbes.push({
       probeId,
       requirementKey: probe.requirementKey,
@@ -470,11 +477,17 @@ export function revalidateRemedyClinic(
   if (
     !isValidPrivacyEpoch(currentPrivacyEpoch) ||
     !isValidPrivacyEpoch(clinic.createdPrivacyEpoch) ||
-    currentPrivacyEpoch < clinic.createdPrivacyEpoch
+    !isValidPrivacyEpoch(clinic.validatedPrivacyEpoch) ||
+    clinic.validatedPrivacyEpoch < clinic.createdPrivacyEpoch ||
+    currentPrivacyEpoch < clinic.createdPrivacyEpoch ||
+    currentPrivacyEpoch < clinic.validatedPrivacyEpoch
   ) {
-    const safeEpoch = isValidPrivacyEpoch(currentPrivacyEpoch)
-      ? currentPrivacyEpoch
-      : clinic.createdPrivacyEpoch;
+    const safeEpoch =
+      isValidPrivacyEpoch(clinic.validatedPrivacyEpoch) && isValidPrivacyEpoch(clinic.createdPrivacyEpoch)
+        ? Math.max(clinic.createdPrivacyEpoch, clinic.validatedPrivacyEpoch)
+        : isValidPrivacyEpoch(clinic.createdPrivacyEpoch)
+          ? clinic.createdPrivacyEpoch
+          : 0;
     return degradeClinicToRevoked(
       clinic,
       safeEpoch,
@@ -498,6 +511,8 @@ export function revalidateRemedyClinic(
   const survivingCases: ClinicEvidenceCase[] = [];
   for (const item of clinic.evidenceCases) {
     if (seenRoots.has(item.rootAttemptId)) continue;
+    if (item.ruleId !== clinic.ruleId) continue;
+    if (!isValidPrivacyEpoch(item.privacyEpoch) || item.privacyEpoch > currentPrivacyEpoch) continue;
     if (!isValidLocalDate(item.localDate)) continue;
     if (!areSourceRefsActive(item.sourceRefs, activeSourcesMap)) continue;
     seenRoots.add(item.rootAttemptId);

@@ -49,7 +49,8 @@ export type RubricCalibrationGateFailure =
   | "missing_counterfactual_triplets"
   | "counterfactual_missing_point_score"
   | "counterfactual_padding_gain_exceeds_limit"
-  | "counterfactual_padded_not_below_equal_length_substantive";
+  | "counterfactual_padded_not_below_equal_length_substantive"
+  | "counterfactual_padded_counts_toward_mastery";
 
 export interface CounterfactualTripletAudit {
   readonly tripletId: string;
@@ -251,6 +252,10 @@ export function evaluateRubricCalibrationGate(input: {
   } else {
     for (const triplet of input.counterfactualTriplets) {
       const tripletFailures: RubricCalibrationGateFailure[] = [];
+      if (triplet.templatePaddedExpansion.countsTowardMastery) {
+        tripletFailures.push("counterfactual_padded_counts_toward_mastery");
+        failures.add("counterfactual_padded_counts_toward_mastery");
+      }
       const conciseScore = extractCounterfactualScore(triplet.substantiveConcise);
       const paddedScore = extractCounterfactualScore(triplet.templatePaddedExpansion);
       const equalLengthScore = extractCounterfactualScore(triplet.equalLengthSubstantive);

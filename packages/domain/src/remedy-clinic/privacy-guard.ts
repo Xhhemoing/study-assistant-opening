@@ -211,6 +211,97 @@ function isBetterTriple(candidate: TripleScore, best: TripleScore): boolean {
   return candidate.tieKey.localeCompare(best.tieKey) < 0;
 }
 
+const SPREAD_POOL_CAP = 36;
+const MAX_GUARANTEED_CHAPTERS = 14;
+const MAX_GUARANTEED_DATES = 14;
+
+function buildSpreadCandidatePool(ordered: readonly ClinicEvidenceCase[]): readonly ClinicEvidenceCase[] {
+  const pool: ClinicEvidenceCase[] = [];
+  const includedRoots = new Set<string>();
+  const add = (item: ClinicEvidenceCase | undefined): void => {
+    if (!item || includedRoots.has(item.rootAttemptId)) return;
+    includedRoots.add(item.rootAttemptId);
+    pool.push(item);
+  };
+
+  // Phase 1: Guarantee chapter diversity across the full ordered list before any cap.
+  const seenChapters = new Set<string>();
+  for (const item of ordered) {
+    if (seenChapters.has(item.chapterId)) continue;
+    seenChapters.add(item.chapterId);
+    add(item);
+    if (seenChapters.size >= MAX_GUARANTEED_CHAPTERS) break;
+  }
+
+  // Phase 2: Guarantee calendar-day diversity (including earliest and latest dates first).
+  const firstItem = ordered[0];
+  const lastItem = ordered[ordered.length - 1];
+  add(firstItem);
+  add(lastItem);
+
+  const seenDates = new Set<string>();
+  if (firstItem) seenDates.add(firstItem.localDate);
+  if (lastItem) seenDates.add(lastItem.localDate);
+  for (const item of ordered) {
+    if (seenDates.has(item.localDate)) continue;
+    seenDates.add(item.localDate);
+    add(item);
+    if (seenDates.size >= MAX_GUARANTEED_DATES) break;
+  }
+
+  // Phase 2b: Also capture the latest case for the earliest guaranteed chapters to maximize span.
+  const latestChapters = new Set<string>();
+  for (let i = ordered.length - 1; i >= 0 && pool.length < SPREAD_POOL_CAP; i--) {
+    const item = ordered[i];
+    if (!item || latestChapters.has(item.chapterId)) continue;
+    latestChapters.add(item.chapterId);
+    add(item);
+    if (latestChapters.size >= 4) break;
+  }
+
+  // Phase 3: Fill remaining pool slots with up to 2 cases per (chapterId, localDate) bucket.
+  const bucketCounts = new Map<string, number>();
+  for (const item of pool) {
+    const key = `${item.chapterId}::${item.localDate}`;
+    bucketCounts.set(key, (bucketCounts.get(key) ?? 0) + 1);
+  }
+  for (const item of ordered) {
+    if (pool.length >= SPREAD_POOL_CAP) break;
+    if (includedRoots.has(item.rootAttemptId)) continue;
+    const key = `${item.chapterId}::${item.localDate}`;
+    const count = bucketCounts.get(key) ?? 0;
+    if (count < 2) {
+      bucketCounts.set(key, count + 1);
+      add(item);
+    }
+  }
+
+  return pool;
+}
+
+function constructFallbackSpreadTriple(
+  ordered: readonly ClinicEvidenceCase[],
+): readonly [ClinicEvidenceCase, ClinicEvidenceCase, ClinicEvidenceCase] | null {
+  const first = ordered[0];
+  if (!first) return null;
+  const second = ordered.find((item) => item.chapterId !== first.chapterId);
+  if (!second) return null;
+  const third =
+    first.localDate === second.localDate
+      ? ordered.find(
+          (item) =>
+            item.rootAttemptId !== first.rootAttemptId &&
+            item.rootAttemptId !== second.rootAttemptId &&
+            item.localDate !== first.localDate,
+        )
+      : ordered.find(
+          (item) =>
+            item.rootAttemptId !== first.rootAttemptId &&
+            item.rootAttemptId !== second.rootAttemptId,
+        );
+  return third ? [first, second, third] : null;
+}
+
 /** Deterministically select 3 representative cases maximizing chapter and calendar-day spread. */
 export function selectSpreadRepresentativeCases(
   cases: readonly ClinicEvidenceCase[],
@@ -219,21 +310,10 @@ export function selectSpreadRepresentativeCases(
     return cases.map(cloneEvidenceCase);
   }
 
-  // Bound exact triple search while preserving full chapter/date diversity.
   const ordered = [...cases].sort(
     (x, y) => x.localDate.localeCompare(y.localDate) || x.chapterId.localeCompare(y.chapterId) || x.rootAttemptId.localeCompare(y.rootAttemptId),
   );
-  const bucketCounts = new Map<string, number>();
-  const pool: ClinicEvidenceCase[] = [];
-  for (const item of ordered) {
-    const key = `${item.chapterId}::${item.localDate}`;
-    const count = bucketCounts.get(key) ?? 0;
-    if (count < 2) {
-      bucketCounts.set(key, count + 1);
-      pool.push(item);
-    }
-    if (pool.length >= 36) break;
-  }
+  const pool = buildSpreadCandidatePool(ordered);
 
   let bestTuple: readonly [ClinicEvidenceCase, ClinicEvidenceCase, ClinicEvidenceCase] | null = null;
   let bestScore: TripleScore | null = null;
@@ -254,6 +334,16 @@ export function selectSpreadRepresentativeCases(
         }
       }
     }
+  }
+
+  const inputCoverage = computeEvidenceCoverage(ordered);
+  const requiresSpread =
+    inputCoverage.chapterCount >= MIN_CLINIC_CHAPTERS &&
+    inputCoverage.localDateCount >= MIN_CLINIC_LOCAL_DAYS;
+
+  if (requiresSpread && (!bestTuple || bestScore?.meetsSpread !== 1)) {
+    const fallback = constructFallbackSpreadTriple(ordered);
+    if (fallback) return fallback.map(cloneEvidenceCase);
   }
 
   return bestTuple ? bestTuple.map(cloneEvidenceCase) : ordered.slice(0, SELECTED_DIFF_CASE_COUNT).map(cloneEvidenceCase);

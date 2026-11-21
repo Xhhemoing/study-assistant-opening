@@ -35,6 +35,7 @@ export interface RubricSubmissionInput {
 export type RubricInconsistencyReason =
   | "insufficient_anchor_coverage"
   | "missing_reverse_comparison"
+  | "invalid_comparison_choice"
   | "duplicate_anchor_comparison"
   | "unknown_anchor_id"
   | "swap_position_bias_first"
@@ -160,6 +161,10 @@ export function detectTemplatePadding(text: string): TemplatePaddingReport {
   };
 }
 
+function isValidPairwiseChoice(choice: unknown): choice is PairwiseChoice {
+  return choice === "A" || choice === "B" || choice === "tie";
+}
+
 function normalizeForward(choice: PairwiseChoice): "student" | "anchor" | "tie" {
   if (choice === "A") return "student";
   if (choice === "B") return "anchor";
@@ -176,8 +181,14 @@ function resolveSwapPair(
   forward: PairwiseChoice,
   reverse: PairwiseChoice | null | undefined,
 ): { outcome: 1 | 0.5 | 0 | null; reason: RubricInconsistencyReason | null } {
+  if (!isValidPairwiseChoice(forward)) {
+    return { outcome: null, reason: "invalid_comparison_choice" };
+  }
   if (reverse === null || reverse === undefined) {
     return { outcome: null, reason: "missing_reverse_comparison" };
+  }
+  if (!isValidPairwiseChoice(reverse)) {
+    return { outcome: null, reason: "invalid_comparison_choice" };
   }
   const f = normalizeForward(forward);
   const r = normalizeReverse(reverse);
@@ -278,6 +289,7 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
   const reasons = new Set<RubricInconsistencyReason>();
 
   const comparisonByAnchor = new Map<string, PairwiseSwapComparison>();
+  const duplicateAnchorIds = new Set<string>();
   const validAnchorIds = new Set(anchors.map((a) => a.anchorId));
 
   for (const comparison of input.comparisons) {
@@ -285,18 +297,34 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
       reasons.add("unknown_anchor_id");
       continue;
     }
+    if (duplicateAnchorIds.has(comparison.anchorId)) {
+      reasons.add("duplicate_anchor_comparison");
+      continue;
+    }
     if (comparisonByAnchor.has(comparison.anchorId)) {
       reasons.add("duplicate_anchor_comparison");
+      duplicateAnchorIds.add(comparison.anchorId);
+      comparisonByAnchor.delete(comparison.anchorId);
       continue;
     }
     comparisonByAnchor.set(comparison.anchorId, comparison);
   }
 
-  if (anchors.length < 2 || comparisonByAnchor.size < anchors.length) {
+  if (anchors.length < 2 || comparisonByAnchor.size + duplicateAnchorIds.size < anchors.length) {
     reasons.add("insufficient_anchor_coverage");
   }
 
   const resolved: ResolvedAnchorComparison[] = anchors.map((anchor) => {
+    if (duplicateAnchorIds.has(anchor.anchorId)) {
+      return {
+        anchorId: anchor.anchorId,
+        band: anchor.band,
+        thetaAnchor: anchor.thetaAnchor,
+        outcome: null,
+        consistent: false,
+        reason: "duplicate_anchor_comparison",
+      };
+    }
     const pair = comparisonByAnchor.get(anchor.anchorId);
     if (!pair) {
       return {

@@ -282,6 +282,126 @@ describe("RemedyClinicGenerator 14-minute 3-step clinic & #469 probe distinguish
       "not_distinguishable",
     ]);
   });
+
+  it("rejects distinct probeIds that share identical normalized prompt text", () => {
+    const first = makeProbe({ probeId: "probe-a", input: { a: -2, b: 8 } });
+    const clonePrompt: DistinguishableProbeSpec<InequalityInput, string> = {
+      ...makeProbe({ probeId: "probe-b", input: { a: -2, b: 8 } }),
+      prompt: `  ${first.prompt.toUpperCase()}  `,
+    };
+
+    const result = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: DEFAULT_SOURCES,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: qualifyingAttempts,
+      candidateProbes: [first, clonePrompt],
+    });
+
+    expect(result.status).toBe("insufficient_distinguishable_probes");
+    expect(result.clinic).toBeNull();
+    expect(result.verifiedProbeCount).toBe(1);
+    expect(result.rejectedProbes).toHaveLength(1);
+    expect(result.rejectedProbes[0]!.reason).toBe("duplicate_probe_prompt");
+  });
+
+  it("preserves >=2 chapters and >=2 days in selectedCases even with 37-root single-chapter or single-day prefixes", () => {
+    const probes = [
+      makeProbe({ probeId: "probe-spread-1", input: { a: -2, b: 8 } }),
+      makeProbe({ probeId: "probe-spread-2", input: { a: -3, b: 12 } }),
+    ];
+
+    const addDays = (offset: number): string => {
+      const dt = new Date(Date.UTC(2026, 9, 1 + offset));
+      return dt.toISOString().slice(0, 10);
+    };
+
+    // Counterexample A: 36 roots in ch-1 across 36 days + root 37 in ch-2 on day 37.
+    const singleChapterPrefix: DiagnosedRootAttempt[] = Array.from({ length: 36 }, (_, idx) =>
+      makeAttempt({
+        attemptId: `sc-a-${idx}`,
+        rootAttemptId: `sc-r-${idx}`,
+        chapterId: "ch-1",
+        localDate: addDays(idx),
+        sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }],
+      }),
+    );
+    singleChapterPrefix.push(
+      makeAttempt({
+        attemptId: "sc-a-36",
+        rootAttemptId: "sc-r-36",
+        chapterId: "ch-2",
+        localDate: addDays(36),
+        sourceRefs: [{ sourceId: "src-ch-2", sourceVersion: "v1" }],
+      }),
+    );
+
+    const resA = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: DEFAULT_SOURCES,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: singleChapterPrefix,
+      candidateProbes: probes,
+    });
+    expect(resA.status).toBe("active");
+    const step1A = resA.clinic!.steps[0];
+    expect(step1A.selectedCases).toHaveLength(3);
+    expect(new Set(step1A.selectedCases.map((c) => c.chapterId)).size).toBeGreaterThanOrEqual(2);
+    expect(new Set(step1A.selectedCases.map((c) => c.localDate)).size).toBeGreaterThanOrEqual(2);
+    expect(new Set(step1A.diffs.map((d) => d.chapterId)).size).toBeGreaterThanOrEqual(2);
+
+    // Counterexample B: 36 roots on day 1 across 18 chapters x 2 + root 37 on day 2.
+    const manySources: Record<string, string> = {};
+    const singleDayPrefix: DiagnosedRootAttempt[] = [];
+    for (let ch = 1; ch <= 18; ch++) {
+      const chapterId = `ch-${String(ch).padStart(2, "0")}`;
+      const sourceId = `src-${chapterId}`;
+      manySources[sourceId] = "v1";
+      for (let copy = 0; copy < 2; copy++) {
+        singleDayPrefix.push(
+          makeAttempt({
+            attemptId: `sd-a-${ch}-${copy}`,
+            rootAttemptId: `sd-r-${ch}-${copy}`,
+            chapterId,
+            localDate: "2026-11-01",
+            sourceRefs: [{ sourceId, sourceVersion: "v1" }],
+          }),
+        );
+      }
+    }
+    singleDayPrefix.push(
+      makeAttempt({
+        attemptId: "sd-a-day2",
+        rootAttemptId: "sd-r-day2",
+        chapterId: "ch-01",
+        localDate: "2026-11-02",
+        sourceRefs: [{ sourceId: "src-ch-01", sourceVersion: "v1" }],
+      }),
+    );
+
+    const resB = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: manySources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: singleDayPrefix,
+      candidateProbes: probes,
+    });
+    expect(resB.status).toBe("active");
+    const step1B = resB.clinic!.steps[0];
+    expect(step1B.selectedCases).toHaveLength(3);
+    expect(new Set(step1B.selectedCases.map((c) => c.chapterId)).size).toBeGreaterThanOrEqual(2);
+    expect(new Set(step1B.selectedCases.map((c) => c.localDate)).size).toBeGreaterThanOrEqual(2);
+    expect(new Set(step1B.diffs.map((d) => d.localDate)).size).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard", () => {
@@ -411,5 +531,46 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(regressed.steps[0].selectedCases).toEqual([]);
     expect(regressed.revocationSummary.reason).toBe("invalid_privacy_epoch");
     expect(JSON.stringify(regressed)).not.toContain("TOP_SECRET_REVOKED_TEXT");
+  });
+
+  it("rejects validatedPrivacyEpoch rollback (7 -> 6) and strips tampered ruleId or future-epoch cases", () => {
+    const clinic = createFourCaseClinic();
+    const allSources = {
+      "src-revokable": "v1",
+      "src-ch-1": "v1",
+      "src-ch-2": "v1",
+      "src-ch-3": "v1",
+    };
+
+    const atEpoch7 = revalidateRemedyClinic(clinic, allSources, 7);
+    expect(atEpoch7.status).toBe("active");
+    expect(atEpoch7.validatedPrivacyEpoch).toBe(7);
+
+    const rolledBack = revalidateRemedyClinic(atEpoch7, allSources, 6);
+    expect(rolledBack.status).toBe("stale_source_revoked");
+    expect(rolledBack.validatedPrivacyEpoch).toBe(7);
+    expect(rolledBack.evidenceCases).toEqual([]);
+    expect(rolledBack.steps[0].selectedCases).toEqual([]);
+    expect(rolledBack.steps[0].diffs).toEqual([]);
+    expect(rolledBack.revocationSummary.reason).toBe("invalid_privacy_epoch");
+    expect(JSON.stringify(rolledBack)).not.toContain("TOP_SECRET_REVOKED_TEXT");
+
+    const tampered = {
+      ...clinic,
+      evidenceCases: clinic.evidenceCases.map((item, idx) =>
+        idx === 0
+          ? { ...item, ruleId: "wrong_rule_id" }
+          : idx === 1
+            ? { ...item, privacyEpoch: 9 }
+            : item,
+      ),
+    };
+    const scrubbed = revalidateRemedyClinic(tampered, allSources, 6);
+    expect(scrubbed.status).toBe("stale_source_revoked");
+    expect(scrubbed.coverage.rootAttemptCount).toBe(2);
+    expect(scrubbed.evidenceCases).toEqual([]);
+    expect(scrubbed.steps[0].selectedCases).toEqual([]);
+    expect(scrubbed.revocationSummary.strippedCaseCount).toBe(2);
+    expect(JSON.stringify(scrubbed)).not.toContain("TOP_SECRET_REVOKED_TEXT");
   });
 });
