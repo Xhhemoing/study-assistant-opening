@@ -1232,8 +1232,11 @@ const WRAPPED_OPTION_LETTER_RE = new RegExp(
   "iu",
 );
 const OPTION_WORD_CONNECTOR = /\b(?:and|or|then)\b/.source;
+const OPTION_END_PUNCTUATION = /[\s.!?。！？;；:：,，、…—–-]*/u.source;
+const OPTION_CLOSING = `${OPTION_END_PUNCTUATION}${OPTION_WRAPPER_CLOSE}`;
+const TRAILING_OPTION_END = `${OPTION_CLOSING}${OPTION_END_PUNCTUATION}$`;
 const OPTION_SEQUENCE_SEPARATOR =
-  `\\s*(?:${OPTION_WRAPPER_CLOSE}\\s*)?` +
+  `(?:${OPTION_CLOSING})?\\s*` +
   `(?:[,，、](?:\\s*${OPTION_WORD_CONNECTOR})?|[;/&+→]|->|=>|${OPTION_WORD_CONNECTOR})` +
   `\\s*(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
 
@@ -1249,12 +1252,12 @@ function containsSingleChoiceReveal(syntax: string, normalizedText: string, choi
   ];
   if (patterns.some(pattern => pattern.test(syntax))) return true;
 
-  const trailing = new RegExp(`${OPTION_WRAPPER_OPEN}\\s*${escaped}\\s*${OPTION_WRAPPER_CLOSE}\\s*$`, "iu");
+  const trailing = new RegExp(`${OPTION_WRAPPER_OPEN}\\s*${escaped}${TRAILING_OPTION_END}`, "iu");
   if (!trailing.test(syntax)) return false;
 
   // Only suppress the trailing-label heuristic for a list the ordered matcher also recognizes.
   const trailingSequence = new RegExp(
-    `(?<!${NON_CJK_WORD_CHAR})[a-z]${OPTION_SEQUENCE_SEPARATOR}${escaped}\\s*${OPTION_WRAPPER_CLOSE}\\s*$`,
+    `(?<!${NON_CJK_WORD_CHAR})[a-z]${OPTION_SEQUENCE_SEPARATOR}${escaped}${TRAILING_OPTION_END}`,
     "iu",
   );
   return !trailingSequence.test(normalizedText);
