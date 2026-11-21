@@ -28,9 +28,7 @@ export const DEFAULT_SYMBOL_CONFIDENCE_THRESHOLD = 0.85;
 const CRITICAL_KIND_SET: ReadonlySet<string> = new Set(CRITICAL_HANDWRITING_TOKEN_KINDS);
 const NON_SEMANTIC_KIND_SET: ReadonlySet<string> = new Set(NON_SEMANTIC_HANDWRITING_TOKEN_KINDS);
 
-const NON_SEMANTIC_TEXT_RE = /^(?:[,;:，。；：、…·•\-–—"'“”‘’]|\.{2,})$/u;
-const CRITICAL_MATH_CONTENT_RE =
-  /(?:[0-9()[\]{}]|!=|==|<=|>=|->|=>|<-|←|→|[+\-−*/=<>^±!%∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
+const DECORATION_UNDERLINE_RE = /^_+$/u;
 const CRITICAL_AUTO_TEXT_RE =
   /(?:[0-9()[\]{}]|!=|==|<=|>=|->|=>|<-|←|→|[+\-−*/=<>^_±!%∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
 
@@ -99,7 +97,8 @@ export function isCriticalMathOr408Token(token: {
   const trimmed = token.rawText.trim();
   if (trimmed.length === 0) return false;
   if (CRITICAL_AUTO_TEXT_RE.test(trimmed)) return true;
-  if (NON_SEMANTIC_TEXT_RE.test(trimmed)) return false;
+  // Preserve every non-whitespace symbol under kind: "auto" so unrecognized
+  // glyphs fail closed instead of being silently stripped from verification.
   return true;
 }
 
@@ -153,51 +152,45 @@ function normalizeExpressionKey(expr: string): string {
   return expr.replace(/\s+/g, " ").trim();
 }
 
-function findNeighborEffectiveText(
-  tokens: readonly { kind: HandwrittenTokenKind; effectiveText: string }[],
-  index: number,
-  direction: -1 | 1,
-): string {
-  for (let cursor = index + direction; cursor >= 0 && cursor < tokens.length; cursor += direction) {
-    const candidate = tokens[cursor]!;
-    if (candidate.kind === "whitespace") continue;
-    const trimmed = candidate.effectiveText.trim();
-    if (trimmed.length === 0) continue;
-    return trimmed;
-  }
-  return "";
-}
-
 function isStepTokenCritical(
-  tokens: readonly { kind: HandwrittenTokenKind; effectiveText: string }[],
+  tokens: readonly {
+    kind: HandwrittenTokenKind;
+    effectiveText: string;
+    hasConfirmedTextMutation?: boolean;
+  }[],
   index: number,
 ): boolean {
   const token = tokens[index]!;
   const trimmed = token.effectiveText.trim();
   if (trimmed.length === 0) return false;
-  if (isCriticalMathOr408Token({ kind: token.kind, rawText: trimmed })) {
+  // Any non-whitespace learner confirmation/mutation MUST always be preserved as critical.
+  if (token.hasConfirmedTextMutation === true) {
     return true;
   }
-  if (token.kind === "whitespace") {
+  // Allowlist of genuinely non-semantic tokens (never strip dashes, commas, semicolons, quotes, etc.):
+  // 1) Pure whitespace (handled above)
+  // 2) Decorative underline runs ("__") with kind: "decoration"
+  if (token.kind === "decoration" && DECORATION_UNDERLINE_RE.test(trimmed)) {
     return false;
   }
-  // Never drop mathematical operators, digits, letters, or brackets as punctuation/decoration
-  // even when upstream OCR tagged the raw crop with a non-semantic kind (e.g. punctuation "." -> "-").
-  if (CRITICAL_MATH_CONTENT_RE.test(trimmed)) {
-    return true;
+  // 3) Single unedited trailing sentence period "." with kind: "punctuation" followed only by whitespace/underline decoration
+  if (token.kind === "punctuation" && trimmed === ".") {
+    for (let j = index + 1; j < tokens.length; j += 1) {
+      const trailing = tokens[j]!;
+      const trailingText = trailing.effectiveText.trim();
+      if (trailingText.length === 0) continue;
+      if (
+        !trailing.hasConfirmedTextMutation &&
+        trailing.kind === "decoration" &&
+        DECORATION_UNDERLINE_RE.test(trailingText)
+      ) {
+        continue;
+      }
+      return true;
+    }
+    return false;
   }
-  // Contextual decimal separators (even if upstream OCR tagged "." or "," as punctuation):
-  // "." immediately preceding digits (e.g. ["1", ".", "2"] or [".", "5"]) or "," between digits.
-  if (trimmed === ".") {
-    const nextText = findNeighborEffectiveText(tokens, index, 1);
-    return /^[0-9]/u.test(nextText);
-  }
-  if (trimmed === ",") {
-    const prevText = findNeighborEffectiveText(tokens, index, -1);
-    const nextText = findNeighborEffectiveText(tokens, index, 1);
-    return /[0-9]$/u.test(prevText) && /^[0-9]/u.test(nextText);
-  }
-  return false;
+  return true;
 }
 
 function assembleCriticalTokenExpression(criticalTexts: readonly string[]): string {
@@ -232,6 +225,7 @@ function computeStepExpressionKeys(
   const prepared: {
     kind: HandwrittenTokenKind;
     effectiveText: string;
+    hasConfirmedTextMutation: boolean;
   }[] = [];
   let hasConfirmedTextMutation = false;
 
@@ -245,7 +239,11 @@ function computeStepExpressionKeys(
     if (textMutated) {
       hasConfirmedTextMutation = true;
     }
-    prepared.push({ kind: textMutated ? "auto" : token.kind, effectiveText });
+    prepared.push({
+      kind: textMutated ? "auto" : token.kind,
+      effectiveText,
+      hasConfirmedTextMutation: textMutated,
+    });
   }
 
   const semanticTexts: string[] = [];
@@ -512,6 +510,7 @@ export function evaluateHandwritingStage1(
       confidence: number;
       tokenBbox: NormalizedBoundingBox;
       kind: HandwrittenTokenKind;
+      hasConfirmedTextMutation: boolean;
     }[] = [];
     let stepHasConfirmedTextMutation = false;
 
@@ -565,6 +564,7 @@ export function evaluateHandwritingStage1(
         confidence,
         tokenBbox,
         kind: tokenTextMutated ? "auto" : token.kind,
+        hasConfirmedTextMutation: tokenTextMutated,
       });
     }
 

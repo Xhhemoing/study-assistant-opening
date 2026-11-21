@@ -76,7 +76,10 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
     expect(isCriticalMathOr408Token({ kind: "pointer_index", rawText: "top-1" })).toBe(true);
     expect(isCriticalMathOr408Token({ kind: "punctuation", rawText: "," })).toBe(false);
     expect(isCriticalMathOr408Token({ kind: "whitespace", rawText: " " })).toBe(false);
-    expect(isCriticalMathOr408Token({ kind: "auto", rawText: ";" })).toBe(false);
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "   " })).toBe(false);
+    // Unrecognized symbols/punctuation under "auto" stay critical so Stage 2 never strips them silently.
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: ";" })).toBe(true);
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "–" })).toBe(true);
     expect(isCriticalMathOr408Token({ kind: "auto", rawText: "->" })).toBe(true);
     // [P1-4] Grouping delimiters ()[]{} are critical under kind: "auto".
     expect(isCriticalMathOr408Token({ kind: "auto", rawText: "(" })).toBe(true);
@@ -1395,6 +1398,84 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
     const directStage2 = evaluateHandwritingStage2(directConfirmedSteps, { assisted: false });
     expect(directStage2.overallVerdict).toBe("invalid");
     expect(directStage2.firstRootCauseError?.stepId).toBe("neg-or-dot");
+  });
+
+  it("Round-7 [P1]: never strips confirmed en-dash/em-dash/unrecognized punctuation ('–', '—', '?') so '.2 = 2' fails closed", () => {
+    const initialBelief = makeBelief();
+    const dotLeadingSteps: readonly HandwritingStepInput[] = [
+      {
+        stepId: "unicode-dash-or-symbol",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            {
+              tokenId: "p1",
+              rawText: ".",
+              kind: "punctuation",
+              confidence: 0.42,
+              visualCandidates: [".", "–"],
+            },
+            { tokenId: "p2", rawText: "2", kind: "digit", confidence: 0.99 },
+            { tokenId: "p3", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "p4", rawText: "2", kind: "digit", confidence: 0.99 },
+          ],
+        },
+      },
+    ];
+
+    for (const confirmedSymbol of ["\u2013", "\u2014", "?", ";", "\u2212"]) {
+      const confirmed = applyLearnerSymbolConfirmations(dotLeadingSteps, [
+        { stepId: "unicode-dash-or-symbol", tokenId: "p1", confirmedText: confirmedSymbol },
+      ]);
+      const stage1 = evaluateHandwritingStage1(confirmed);
+      expect(stage1.readyForStage2).toBe(true);
+      expect(stage1.steps[0]!.tokens[0]!.isCritical).toBe(true);
+      expect(stage1.steps[0]!.tokens[0]!.kind).toBe("auto");
+
+      const stage2 = evaluateHandwritingStage2(confirmed, { assisted: false });
+      expect(stage2.overallVerdict).not.toBe("valid");
+
+      if (confirmedSymbol === "\u2212") {
+        // Unicode minus "−" evaluates as "- 2 = 2" -> "invalid".
+        expect(stage2.overallVerdict).toBe("invalid");
+      } else {
+        // En-dash "–", em-dash "—", "?", ";" stay preserved in Stage 2 expression assembly
+        // so evaluateNumericExpression returns "unknown" and SkillBeliefV1 stays locked.
+        expect(stage2.overallVerdict).toBe("unknown");
+        expect(stage2.canUpdateSkillBelief).toBe(false);
+        expect(
+          applyHandwritingStage2ToSkillBelief({
+            stage2,
+            belief: initialBelief,
+            item: skillItem,
+            atMs: 86_400_000,
+          }).applied,
+        ).toBe(false);
+      }
+
+      // Also verify direct evaluateHandwritingStage2 without applyLearnerSymbolConfirmations (stale kind: "punctuation").
+      const directConfirmed: readonly HandwritingStepInput[] = [
+        {
+          ...dotLeadingSteps[0]!,
+          ast: {
+            ...dotLeadingSteps[0]!.ast,
+            tokens: [
+              {
+                ...dotLeadingSteps[0]!.ast.tokens[0]!,
+                confirmedByLearner: true,
+                confirmedText: confirmedSymbol,
+              },
+              ...dotLeadingSteps[0]!.ast.tokens.slice(1),
+            ],
+          },
+        },
+      ];
+      const directStage2 = evaluateHandwritingStage2(directConfirmed, { assisted: false });
+      expect(directStage2.overallVerdict).toBe(
+        confirmedSymbol === "\u2212" ? "invalid" : "unknown",
+      );
+    }
   });
 });
 
