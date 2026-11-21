@@ -34,7 +34,7 @@ function ioredisOptions(url: string) {
       username: redis.options.username,
       password: redis.options.password,
       db: redis.options.db,
-      tls: redis.options.tls ? {} : undefined,
+      tls: redis.options.tls,
     };
     return Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined && value !== null));
   } finally {
@@ -43,27 +43,28 @@ function ioredisOptions(url: string) {
 }
 
 it.each([
+  "redis://127.0.0.1:6379",
   "6380",
   "/tmp/redis.sock",
+  "/run/redis/redis.sock?db=3",
+  "//localhost:6380/2",
   "localhost:6380/1",
   "[::1]:6380",
   "user:pass@host:6380/2",
   "redis://localhost:6380/1",
-  "rediss://redis.example:6380/2",
+  "rediss://cache.example.com:6380/2",
+  "redis://:secret@127.0.0.1:6379/1?db=2&db=3",
+  "redis://:@127.0.0.1:6379/0",
+  "redis://?db=1&db=2",
+  "redis://?db=1&db=2&host=a&host=b&port=6380&port=6381&family=4&family=6&path=%2Fa&path=%2Fb&username=u&username=v&password=p&password=q&tls=0&tls=1",
+  "redis://127.0.0.1?tls=0",
 ])("matches ioredis endpoint options for %s", url => {
   expect(openingRedisConnectionOptions(url)).toEqual(ioredisOptions(url));
 });
 
-it("interprets a protocol-relative endpoint as a Redis URL", () => {
-  expect(openingRedisConnectionOptions(" //127.0.0.1:6380/2 ")).toMatchObject({
-    host: "127.0.0.1", port: 6380, family: 4, db: 2,
-  });
-});
-
-it("takes the first value from repeated query parameters", () => {
-  expect(openingRedisConnectionOptions(
-    "redis://?db=1&db=2&host=a&host=b&port=6380&port=6381&family=4&family=6&path=%2Fa&path=%2Fb&username=u&username=v&password=p&password=q&tls=0&tls=1",
-  )).toEqual({ host: "a", port: 6380, family: 4, path: "/a", username: "u", password: "p", db: 1, tls: {} });
+it("fails closed on an ambiguous effective database instead of fencing a different database", async () => {
+  await expect(fenceCancelledOpeningTutorStream("workspace", "job", "execution", "redis://127.0.0.1?db=1&db=2"))
+    .rejects.toThrow("Invalid Redis database index");
 });
 
 it.each(["http://localhost:6379", "https://localhost:6379", "postgres://localhost:5432", "unix:///tmp/redis.sock"])(
@@ -122,6 +123,24 @@ it("uses ioredis query-selected port for the revocation fence", async () => {
   });
   expect(received).toHaveLength(1);
   expect(received[0]?.toString()).toMatch(/^\*6\r\n\$4\r\nEVAL\r\n/);
+});
+
+it.each([":", "tutor:"])("sends EVAL without AUTH for empty Redis password (%s)", async credentials => {
+  const received: string[] = [];
+  await withRedisServer(async address => {
+    await fenceCancelledOpeningTutorStream("workspace", "job", "execution", `redis://${credentials}@${address}/0`);
+  }, socket => {
+    let request = "";
+    socket.on("data", chunk => {
+      request += chunk.toString();
+      const command = /^\*\d+\r\n\$\d+\r\n([A-Z]+)\r\n/.exec(request)?.[1];
+      if (!command) return;
+      if (command === "EVAL" && !request.endsWith("\r\n900\r\n")) return;
+      received.push(command);
+      socket.write(command === "EVAL" ? "$-1\r\n" : "-ERR Client sent AUTH, but no password is set\r\n");
+    });
+  });
+  expect(received).toEqual(["EVAL"]);
 });
 
 it("refuses an unconfirmed seal and closes the socket on a Redis error", async () => {

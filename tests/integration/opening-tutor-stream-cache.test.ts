@@ -5,7 +5,7 @@ import { Redis } from "ioredis";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { advanceOpeningWorkspacePrivacyEpoch, createOpeningBudgetRepository, createOpeningConversationRepository,
   createOpeningPrivacyRepository, createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
-  tutorStreamEpochKey } from "@aistudy/database";
+  tutorStreamEpochKey, tutorStreamKey } from "@aistudy/database";
 import { fenceCancelledOpeningTutorStream } from "../../packages/database/src/repositories/opening-tutor-stream-fence";
 import { createProducerRedisConnection } from "../../apps/worker/src/runtime/queue";
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
@@ -128,7 +128,7 @@ async function streamFixture(historySourceId?: string) {
     await sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${prior.jobId}`;
   }
   const { jobId } = await append("Current question");
-  const key = `opening:tutor-stream:${scope.workspaceId}:${jobId}`;
+  const key = tutorStreamKey(scope.workspaceId, jobId);
   keys.push(key, tutorStreamEpochKey(scope.workspaceId));
   const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
   const jobs = createOpeningTutorJobsRepository(sql);
@@ -141,20 +141,23 @@ async function streamFixture(historySourceId?: string) {
 it("revokes the same Redis privacy epoch for upper- and lowercase workspace UUIDs", async () => {
   const { fixture, scope, sql, jobId, key, writer, reader, jobs } = await streamFixture();
   const mixedCase = { ...scope, workspaceId: scope.workspaceId.toUpperCase() };
-  keys.push(`opening:tutor-stream:epoch:${mixedCase.workspaceId}`);
   try {
     const job = (await jobs.claim(jobId))!;
     await writer.begin(scope.workspaceId, jobId, { privacyEpoch: 0, contextSourceRefs: [],
       exposureReceiptId: null, executionId: job.executionId });
+    expect(await writer.append(scope.workspaceId, jobId, "before revocation", job.executionId, 0)).toBe(1);
+    const before = await reader.read(scope.workspaceId, jobId);
+    expect(before).toMatchObject({ text: "before revocation", sequence: 1, executionId: job.executionId });
     await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, mixedCase))).resolves.toBe(1);
-    expect(await redis.get(`opening:tutor-stream:epoch:${scope.workspaceId}`)).toBe("1");
-    expect(await redis.hget(key, "sequence")).toBe("0");
-    expect(await writer.append(scope.workspaceId, jobId, "stale", job.executionId, 0)).toBe(0);
-    await writer.begin(mixedCase.workspaceId, jobId, { privacyEpoch: 0, contextSourceRefs: [],
+    expect(await redis.get(tutorStreamEpochKey(scope.workspaceId))).toBe("1");
+    const mixedCaseJobId = jobId.toUpperCase();
+    await writer.begin(mixedCase.workspaceId, mixedCaseJobId, { privacyEpoch: 0, contextSourceRefs: [],
       exposureReceiptId: null, executionId: job.executionId });
-    expect(await reader.read(mixedCase.workspaceId, jobId)).toBeNull();
+    expect(await writer.append(scope.workspaceId, jobId, "stale", job.executionId, 0)).toBe(0);
+    expect(await writer.append(mixedCase.workspaceId, mixedCaseJobId, "stale", job.executionId, 0)).toBe(0);
+    expect(await reader.read(mixedCase.workspaceId, mixedCaseJobId)).toEqual(before);
+    expect(await redis.hget(key, "sequence")).toBe("1");
   } finally {
-    keys.push(`opening:tutor-stream:${mixedCase.workspaceId}:${jobId}`);
     await fixture.close();
   }
 });

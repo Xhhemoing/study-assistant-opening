@@ -1,6 +1,6 @@
 import "server-only";
 import { loadEnv, loadOpeningJobStaleConfig } from "@aistudy/config";
-import { createOpeningTutorJobsRepository, type OpeningScope, type OpeningTutorJobRecord } from "@aistudy/database";
+import { createOpeningTutorJobsRepository, openingRedisEndpoint, type OpeningScope, type OpeningTutorJobRecord } from "@aistudy/database";
 import { Redis } from "ioredis";
 import type { Sql } from "postgres";
 import { createTutorStreamReader, type TutorStreamSnapshot } from "../../../../../worker/src/runtime/tutor-stream";
@@ -146,14 +146,14 @@ export async function openTutorJobStream(
       reader: { read: async () => null, subscribe: async () => async () => undefined },
       getJob: () => jobs.get(scope, job.id), authorizeSnapshot: async () => job, close: () => undefined });
   }
-  const redis = new Redis(loadEnv(process.env).redisUrl, {
-    lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0,
-    connectTimeout: 2_000, commandTimeout: 2_000, retryStrategy: () => null,
-  });
-  // ioredis errors can contain connection strings. Surface only the bounded
-  // transport failure; persisted job completion remains available by polling.
-  redis.on("error", () => undefined);
+  let client: Redis | undefined;
   try {
+    const redis = client = new Redis(openingRedisEndpoint(loadEnv(process.env).redisUrl).url, {
+      lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0,
+      connectTimeout: 2_000, commandTimeout: 2_000, retryStrategy: () => null,
+    });
+    // Surface a bounded failure without exposing the Redis URL.
+    redis.on("error", () => undefined);
     await redis.connect();
     const reader = createTutorStreamReader(redis);
     return await createJobStreamResponse({ job, signal,
@@ -166,7 +166,7 @@ export async function openTutorJobStream(
       close: () => redis.disconnect(),
     });
   } catch (error) {
-    redis.disconnect();
+    client?.disconnect();
     if (error instanceof ApiError) throw error;
     throw new ApiError("SERVICE_UNAVAILABLE", "实时回答暂不可用，请稍后查看完整回答。", 503);
   }

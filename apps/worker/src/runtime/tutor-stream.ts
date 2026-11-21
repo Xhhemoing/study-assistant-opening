@@ -209,15 +209,20 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
   let controlConnection: ReturnType<typeof openConnection> | undefined;
   let appendConnection: ReturnType<typeof openConnection> | undefined;
 
-  function openConnection() {
+  function openConnection(control = false) {
     const redis = producer.duplicate({ lazyConnect: true, autoResendUnfulfilledCommands: false,
       maxRetriesPerRequest: 0, enableOfflineQueue: false, retryStrategy: () => null });
-    redis.on("error", reportError);
+    let definitiveError: Error | undefined;
+    redis.on("error", control ? (error: Error) => {
+      // ioredis emits a fatal handshake reply before connect rejects on close.
+      if (!definitiveError && isDefinitiveSealRejection(error)) definitiveError = error;
+      reportError(error);
+    } : reportError);
     const ready = redis.connect().then(async () => {
       // ioredis emits initial SELECT failures without rejecting connect().
       if (redis.options?.db) await redis.select(redis.options.db);
     });
-    return { redis, writer: createTutorStreamWriter(redis), ready };
+    return { redis, writer: createTutorStreamWriter(redis), ready, get definitiveError() { return definitiveError; } };
   }
 
   function closeConnection(redis: IORedis) {
@@ -241,13 +246,13 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
   const isClosed = (redis: IORedis) => redis.status === "end" || redis.status === "close";
   async function seal(workspaceId: string, jobId: string, executionId: string) {
     if (controlConnection && isClosed(controlConnection.redis)) retireControl();
-    const connection = controlConnection ??= openConnection();
+    const connection = controlConnection ??= openConnection(true);
     try {
       await connection.ready;
       await connection.writer.seal(workspaceId, jobId, executionId);
     } catch (error) {
       retireControl(connection);
-      throw error;
+      throw connection.definitiveError ?? error;
     }
   }
 

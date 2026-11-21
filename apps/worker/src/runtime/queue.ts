@@ -1,6 +1,6 @@
 import IORedis from "ioredis";
 import { Queue } from "bullmq";
-import { openingRedisConnectionOptions } from "@aistudy/database";
+import { openingRedisEndpoint } from "@aistudy/database";
 
 export type RedisOptions = { url: string };
 export type OpeningQueue = Queue;
@@ -13,12 +13,12 @@ export const jobQueueId = (workspaceId: string, jobId: string): string =>
   `opening-ws-${workspaceId}-job-${jobId}`;
 
 export function createRedisConnection({ url }: RedisOptions): IORedis {
-  return new IORedis(url, { ...openingRedisConnectionOptions(url), maxRetriesPerRequest: null });
+  return new IORedis(openingRedisEndpoint(url).url, { maxRetriesPerRequest: null });
 }
 
 /** A producer must fail promptly; blocking-worker retry policy is unsuitable. */
 export function createProducerRedisConnection({ url }: RedisOptions): IORedis {
-  return new IORedis(url, { ...openingRedisConnectionOptions(url), maxRetriesPerRequest: 1, enableOfflineQueue: false, commandTimeout: 5_000 });
+  return new IORedis(openingRedisEndpoint(url).url, { maxRetriesPerRequest: 1, enableOfflineQueue: false, commandTimeout: 5_000 });
 }
 
 export function createQueue(kind: string, connection: IORedis): OpeningQueue {

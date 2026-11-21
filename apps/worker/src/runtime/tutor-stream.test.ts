@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
 import {
@@ -87,6 +88,34 @@ it.each(["NOAUTH Authentication required", "NOPERM this user has no permissions"
     const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
     try {
       await expect(writer.append("workspace", "job", "tail", "execution", 0)).rejects.toBe(sealError);
+      expect(producer.duplicate).toHaveBeenCalledTimes(2);
+    } finally {
+      writer.disconnect();
+    }
+  },
+);
+
+it.each(["WRONGPASS invalid username-password pair", "NOAUTH Authentication required"])(
+  "preserves the emitted Redis rejection when connect closes: %s", async message => {
+    const appendError = new Error("Command timed out");
+    const reply = Object.assign(new Error(message), { name: "ReplyError" });
+    const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+      eval: vi.fn().mockRejectedValue(appendError) };
+    const control = Object.assign(new EventEmitter(), { status: "end", disconnect: vi.fn(), eval: vi.fn() });
+    const connect = vi.fn(async () => {
+      control.emit("error", reply);
+      throw new Error("Connection is closed.");
+    });
+    const replacement = { ...append, eval: vi.fn().mockResolvedValue(undefined) };
+    const producer = { duplicate: vi.fn().mockReturnValueOnce(append)
+      .mockReturnValueOnce(Object.assign(control, { connect })).mockReturnValue(replacement) };
+    const reportError = vi.fn();
+    const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, reportError);
+    try {
+      await expect(writer.append("workspace", "job", "tail", "execution", 0)).rejects.toBe(reply);
+      expect(reportError).toHaveBeenCalledWith(reply);
+      expect(control.eval).not.toHaveBeenCalled();
+      expect(control.disconnect).toHaveBeenCalledOnce();
       expect(producer.duplicate).toHaveBeenCalledTimes(2);
     } finally {
       writer.disconnect();

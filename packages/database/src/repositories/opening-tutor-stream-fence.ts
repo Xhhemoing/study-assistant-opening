@@ -13,92 +13,71 @@ export const tutorStreamAttemptHeadKey = (workspaceId: string, rootObservationId
 export const tutorStreamPreAnswerHeadKey = (workspaceId: string, attemptId: string) =>
   `opening:tutor-stream:attempt-head:${workspaceId.trim().toLowerCase()}:unsubmitted:${attemptId.trim().toLowerCase()}`;
 
-export type OpeningRedisConnectionOptions = {
-  host: string;
-  port: number;
-  family: number;
-  path?: string;
-  username?: string;
-  password?: string;
-  db: number;
-  tls?: object;
+type RedisQueryValue = string | string[];
+type OpeningRedisConnectionOptions = {
+  host: RedisQueryValue;
+  port: number | string[];
+  family: number | RedisQueryValue;
+  path?: RedisQueryValue;
+  username?: RedisQueryValue;
+  password?: RedisQueryValue;
+  db: number | string[];
+  tls?: true | RedisQueryValue;
 };
+
+function parseRedisNumber(value: number | RedisQueryValue): number | string[] {
+  return typeof value === "string" ? Number.parseInt(value, 10) : value;
+}
 
 /** Resolve the standalone endpoint with ioredis 5.6.1 URL precedence. */
 export function openingRedisConnectionOptions(redisUrl: string): OpeningRedisConnectionOptions {
-  const trimmed = redisUrl.trim();
-  if (!trimmed) throw new Error("Invalid Redis fence URL");
-
   const defaults = { host: "localhost", family: 4, db: 0 };
-  if (/^\d+$/.test(trimmed)) {
-    const port = Number.parseInt(trimmed, 10);
-    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid Redis port");
-    return { ...defaults, port };
-  }
-  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
-    return { ...defaults, port: 6379, path: trimmed };
+  const numericUrl = Number.parseFloat(redisUrl);
+  if (!Number.isNaN(Number(redisUrl)) && (numericUrl | 0) === numericUrl) {
+    return { ...defaults, port: Number.parseInt(redisUrl, 10) };
   }
 
-  // ioredis treats a protocol-relative URL as a host when passed directly.
-  // The fence endpoint is explicitly Redis, so preserve its URL database form.
-  const normalized = trimmed.startsWith("//") ? `redis:${trimmed}` : trimmed;
-  const explicitProtocol = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(trimmed);
-  let parsed = parse(normalized, true, true);
-  if (explicitProtocol && parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
-    throw new Error("Invalid Redis fence URL");
-  }
-  if (!parsed.slashes && !normalized.startsWith("/")) {
-    parsed = parse("//" + normalized, true, true);
-  }
-  if (parsed.protocol !== null && parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
+  let parsed = parse(redisUrl, true, true);
+  if (!parsed.slashes && !redisUrl.startsWith("/")) parsed = parse(`//${redisUrl}`, true, true);
+  const redisProtocol = parsed.protocol === "redis:" || parsed.protocol === "rediss:";
+  if (parsed.protocol !== null && !redisProtocol) {
     throw new Error("Invalid Redis fence URL");
   }
 
-  const query = parsed.query as Record<string, string | string[] | undefined>;
-  const first = (value: string | string[] | undefined): string | undefined => Array.isArray(value) ? value[0] : value;
-  const queryHost = first(query.host);
-  const queryPort = first(query.port);
-  const queryDb = first(query.db);
-  const queryFamily = first(query.family);
-  const queryPath = first(query.path);
-  const queryUsername = first(query.username);
-  const queryPassword = first(query.password);
-  const queryTls = first(query.tls);
+  const query = parsed.query as Record<string, RedisQueryValue | undefined>;
   const auth = parsed.auth;
   const authSeparator = auth?.indexOf(":") ?? -1;
-  const username = auth
-    ? authSeparator === -1 ? auth : auth.slice(0, authSeparator)
-    : queryUsername;
-  const password = auth
-    ? authSeparator === -1 ? "" : auth.slice(authSeparator + 1)
-    : queryPassword;
-  const rawPort = parsed.port ?? queryPort ?? "6379";
-  const port = Number.parseInt(rawPort, 10);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid Redis port");
-  const rawDb = parsed.protocol === "redis:" || parsed.protocol === "rediss:"
-    ? parsed.pathname && parsed.pathname.length > 1 ? parsed.pathname.slice(1) : queryDb
-    : queryDb;
-  const db = rawDb === undefined ? 0 : Number.parseInt(rawDb, 10);
-  if (!Number.isSafeInteger(db) || db < 0) throw new Error("Invalid Redis database index");
-  const rawFamily = queryFamily;
-  const family = rawFamily === undefined ? 4 : Number.parseInt(rawFamily, 10);
-  if (!Number.isSafeInteger(family) || family < 0) throw new Error("Invalid Redis address family");
-  const path = parsed.protocol === "redis:" || parsed.protocol === "rediss:"
-    ? queryPath
-    : parsed.pathname ?? queryPath;
-  const options: OpeningRedisConnectionOptions = {
-    host: parsed.hostname || queryHost || "localhost", port, family, db,
-    ...(path !== undefined ? { path } : {}),
-    ...(username !== undefined ? { username } : {}),
-    ...(password !== undefined ? { password } : {}),
-    ...(parsed.protocol === "rediss:" || queryTls !== undefined && Boolean(queryTls) ? { tls: {} } : {}),
+  const db = redisProtocol && parsed.pathname && parsed.pathname.length > 1 ? parsed.pathname.slice(1) : query.db;
+  const numericFamily = typeof query.family === "string" ? Number.parseInt(query.family, 10) : Number.NaN;
+  return {
+    host: (parsed.host ? parsed.hostname : null) ?? query.host ?? defaults.host,
+    port: parseRedisNumber(parsed.port ?? query.port ?? 6379),
+    family: Number.isNaN(numericFamily) ? query.family ?? defaults.family : numericFamily,
+    path: (redisProtocol ? null : parsed.pathname) ?? query.path,
+    username: auth ? (authSeparator < 0 ? auth : auth.slice(0, authSeparator)) : query.username,
+    password: auth ? (authSeparator < 0 ? "" : auth.slice(authSeparator + 1)) : query.password,
+    db: parseRedisNumber(db ?? defaults.db),
+    tls: query.tls ?? (redisUrl.startsWith("rediss://") ? true : undefined),
   };
-  return options;
 }
 
-/** Match ioredis 5.6.1's URL precedence and decimal conversion. */
+/** Validate usable options before Redis can accept commands on an unintended database. */
+export function openingRedisEndpoint(redisUrl: string) {
+  const url = redisUrl.trim();
+  if (!url) throw new Error("Invalid Redis fence URL");
+  const { host, port, family, path, db, username, password, tls } = openingRedisConnectionOptions(url);
+  if (typeof port !== "number" || !Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid Redis port");
+  if (typeof db !== "number" || !Number.isSafeInteger(db) || db < 0) throw new Error("Invalid Redis database index");
+  if (typeof family !== "number" || !Number.isSafeInteger(family) || family < 0) throw new Error("Invalid Redis address family");
+  if (typeof host !== "string" || Array.isArray(path) || Array.isArray(username) || Array.isArray(password) || Array.isArray(tls)) {
+    throw new Error("Ambiguous Redis endpoint options");
+  }
+  if (!tls && /^rediss:/i.test(url)) throw new Error("Redis TLS is required for rediss URLs");
+  return { url, host, port, family, path, db, username, password, tls };
+}
+
 export function openingRedisDatabase(redisUrl: string): number {
-  return openingRedisConnectionOptions(redisUrl).db;
+  return openingRedisEndpoint(redisUrl).db;
 }
 
 export async function sealOpeningTutorStream(redis: RedisEval, workspaceId: string, jobId: string, executionId: string) {
@@ -171,15 +150,10 @@ function redisCommand(args: RedisArgument[]): Buffer {
 
 /** One connection and one deadline for connect, optional AUTH/SELECT, and EVAL. */
 async function evalRevocationRedis(redisUrl: string, script: string, keyCount: number, ...args: RedisArgument[]): Promise<void> {
-  const options = openingRedisConnectionOptions(redisUrl);
-  const useTls = options.tls !== undefined;
-  const host = options.host.replace(/^\[|\]$/g, "");
-  const { port, family, path, db, username, password } = options;
+  const { host, port, family, path, db, username, password, tls } = openingRedisEndpoint(redisUrl);
+  const useTls = Boolean(tls);
   const commands: RedisArgument[][] = [];
-  if (username !== undefined || password !== undefined) {
-    if (username) commands.push(["AUTH", username, password ?? ""]);
-    else if (password !== undefined) commands.push(["AUTH", password]);
-  }
+  if (password) commands.push(username ? ["AUTH", username, password] : ["AUTH", password]);
   if (db) commands.push(["SELECT", db]);
   commands.push(["EVAL", script, keyCount, ...args]);
 
