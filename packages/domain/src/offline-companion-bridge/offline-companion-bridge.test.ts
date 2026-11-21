@@ -2512,6 +2512,13 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     { answerKey: "[17,1e3]", text: "Use 17 and 2.1e3.", leaks: false },
     { answerKey: "[17,1e3]", text: "Use 17 and 1000.", leaks: true },
     { answerKey: "[1e3,17]", text: "Use 2.1e3 and 17.", leaks: false },
+    { answerKey: "[0.0000001,1e3]", text: "Use 1e-7 and 1000.", leaks: true },
+    { answerKey: "[0.0000001,1e3]", text: "Use 50 and 1e-7 and 1000.", leaks: true },
+    { answerKey: "[0.0000001,1e3]", text: "Compare 1000 and 1e-7.", leaks: false },
+    { answerKey: "[0.0000001,1e3]", text: "Use [1e-7] and [-1000].", leaks: false },
+    { answerKey: "[0.0000001,-1e3]", text: "Use [1e-7] and [-1000].", leaks: true },
+    { answerKey: "[1e-400,17]", text: "Use 0.1e-399 and 17.", leaks: true },
+    { answerKey: "[1e9007199254740993,17]", text: "Use 0.1e9007199254740994 and 17.", leaks: true },
   ])("matches only the exact numeric sequence $answerKey in $text", ({ answerKey, text, leaks }) => {
     expect(containsAnswerLeak(text, answerKey)).toBe(leaks);
   });
@@ -2519,9 +2526,24 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
   describe.each(["variant stem", "prompt", "backSummary"] as const)("numeric and cue boundaries in a %s", surface => {
     it.each([
       { answerKey: "[1e3]", text: "Compare 2.1e3 with the threshold.", ok: true },
+      { answerKey: "[1e3]", text: "Compare .1e3 with the threshold.", ok: true },
       { answerKey: "[1e3]", text: "Compare 1e30 with the threshold.", ok: true },
       { answerKey: "[1e3]", text: "The selected value is 1e3.", ok: false },
       { answerKey: "[1e3]", text: "The selected value is 1000.", ok: false },
+      { answerKey: "[1e3]", text: "The result is…1000.", ok: false },
+      { answerKey: "[1e3]", text: "The result is 1..1000.", ok: false },
+      { answerKey: "[0.1]", text: "The result is…1000.", ok: true },
+      { answerKey: "[1e3]", text: "Compare -1e3 with the threshold.", ok: true },
+      { answerKey: "[1e3]", text: "Compare - ( 1e3 ) with the threshold.", ok: true },
+      { answerKey: "[1e3]", text: "The result = 1e3.", ok: false },
+      { answerKey: "[1e3]", text: "The result is +1e3.", ok: false },
+      { answerKey: "[-1e3]", text: "Compare -1000 with the threshold.", ok: false },
+      { answerKey: "[-1e3]", text: "Compare - ( 1000 ) with the threshold.", ok: false },
+      { answerKey: "[-1e3]", text: "Evaluate x - 1000.", ok: true },
+      { answerKey: "[0]", text: "The result is -0.", ok: false },
+      { answerKey: "[0.0000001]", text: "The result is 1e-7.", ok: false },
+      { answerKey: "0.0000001", text: "The result is 1e-7.", ok: false },
+      { answerKey: "1e-7", text: "The result is 0.0000001.", ok: false },
       { answerKey: "-3", text: "The scale is 1e-3.", ok: true },
       { answerKey: "3", text: "The scale is 1e+3 or 1e-3.", ok: true },
       { answerKey: "2", text: "The scale is 2e3.", ok: true },
@@ -2537,6 +2559,7 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { answerKey: '{"nested":[9007199254740993.0]}', text: "The selected value is 9007199254740993.", ok: false },
       { answerKey: "[1e-400]", text: "Start from 0.", ok: true },
       { answerKey: "[1e-400]", text: "The selected value is 1e-400.", ok: false },
+      { answerKey: "[1e-400]", text: "The selected value is 0.1e-399.", ok: false },
       { answerKey: "[1e-400]", text: "Compare 2.1e-400 with the threshold.", ok: true },
       { answerKey: "[0e-400]", text: "The selected value is 0.", ok: false },
       { answerKey: "[-0.0]", text: "The selected value is 0.", ok: false },
@@ -2548,8 +2571,13 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),
+      ...["answerKey: A.", "answer_key: A.", "correctAnswer: A.", "final-answer: A.",
+        "The correct answer is: A.", "Answer is = A.", "正确答案是：A。"].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
       { answerKey: "B", text: "Ans = B for the first question.", ok: false },
       { answerKey: "B", text: "Correct option is B in the first question.", ok: false },
+      { answerKey: "B", text: "selectedOption = B.", ok: false },
     ])("sets ok=$ok for $text with $answerKey", ({ answerKey, text, ok }) => {
       const variant = makeMissVariantCandidate({
         answerKey,
@@ -2570,6 +2598,29 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         issuedAtMs: T0,
         candidates,
       })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+
+    it("rejects a decimal spelling of a native scientific-notation member", () => {
+      const text = "The result is 0.0000001.";
+      const variant = makeMissVariantCandidate({
+        answerKey: undefined,
+        canonicalSolution: undefined,
+        gradingRubric: undefined,
+        referenceAnswer: undefined,
+        sealedPayload: { order: [1e-7] },
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), [surface]: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-native-scientific-member",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
     });
   });
 
