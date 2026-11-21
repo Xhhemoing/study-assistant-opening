@@ -33,7 +33,8 @@ const memory = new Map<string, PracticeDraftCollection>();
 // Full-snapshot edits are relative to a clean caller snapshot, even after a failed rebase.
 const cleanBase = new Map<string, PracticeDraftCollection>();
 const initializedCollections = new WeakSet<PracticeDraftCollection>();
-const dirtyDrafts = new Map<string, Map<string, DraftPatch>>();
+type PendingDraftEdit = { patch: DraftPatch; written: DraftPatch };
+const dirtyDrafts = new Map<string, Map<string, PendingDraftEdit>>();
 const legacySnapshots = new Map<string, { raw: string; id: string; destination?: string }>();
 const pendingArchiveCleanup = new Map<string, { source: PracticeDraft; targetScope: string }>();
 const unreconciled = new Set<string>();
@@ -41,6 +42,17 @@ const blocked = new Map<string, string>();
 
 function combineDraftPatches(earlier: DraftPatch, later: DraftPatch): DraftPatch {
   return { ...earlier, ...later, fields: { ...earlier.fields, ...later.fields } };
+}
+
+function omitProperties<T extends object>(value: T, keys: object): T {
+  const remaining = { ...value };
+  for (const key of Object.keys(keys)) delete remaining[key as keyof T];
+  return remaining;
+}
+
+function omitDraftPatchKeys(patch: DraftPatch, keys: DraftPatch): DraftPatch {
+  const { fields, ...checkpoint } = keys;
+  return { ...omitProperties(patch, checkpoint), fields: omitProperties(patch.fields ?? {}, fields ?? {}) };
 }
 
 function applyDraftPatch(draft: PracticeDraft, patch: DraftPatch): PracticeDraft {
@@ -175,6 +187,16 @@ function rememberCleanCollection(collection: PracticeDraftCollection): PracticeD
   return collection;
 }
 
+function cacheCollection(collection: PracticeDraftCollection): PracticeDraftCollection {
+  memory.set(collection.scope, collection);
+  return rememberCleanCollection(collection);
+}
+
+function forgetCollection(scope: string): void {
+  memory.delete(scope);
+  cleanBase.delete(scope);
+}
+
 /** A bad stored checkpoint blocks new writes; it is never silently replaced by an empty draft. */
 export function readPracticeDraftCollection(scope: string, storage: ReadStorage | null): PracticeDraftCollection | null {
   const cached = memory.get(scope);
@@ -189,8 +211,7 @@ export function readPracticeDraftCollection(scope: string, storage: ReadStorage 
     cleanBase.delete(scope);
     return null;
   }
-  memory.set(scope, stored.collection);
-  return rememberCleanCollection(stored.collection);
+  return cacheCollection(stored.collection);
 }
 
 export function initializePracticeDraft(draft: PracticeDraft): PracticeDraftCollection {
@@ -199,9 +220,8 @@ export function initializePracticeDraft(draft: PracticeDraft): PracticeDraftColl
   const cached = memory.get(draft.scope);
   if (cached) return rememberCleanCollection(cached);
   const collection = { version: 2 as const, scope: draft.scope, activeId: draft.id, drafts: [draft] };
-  memory.set(draft.scope, collection);
   initializedCollections.add(collection);
-  return rememberCleanCollection(collection);
+  return cacheCollection(collection);
 }
 
 export function readPracticeDraft(scope: string, storage: ReadStorage | null, draftId?: string): PracticeDraft | null {
@@ -261,6 +281,7 @@ function cleanupLegacyDraft(scope: string, storage: PartitionStorage, migrated: 
 
 function finishCollectionSave(collection: PracticeDraftCollection, storage: WriteStorage): void {
   dirtyDrafts.delete(collection.scope);
+  rememberCleanCollection(collection);
   if (hasRemoveItem(storage) && isReadStorage(storage)) {
     try {
       cleanupLegacyDraft(collection.scope, storage, collection.drafts);
@@ -290,6 +311,12 @@ function withoutDrafts(collection: PracticeDraftCollection, removedIds: Readonly
   return active ? { ...collection, activeId: active.id, drafts } : null;
 }
 
+function recoverManualAnswer(draft: PracticeDraft, manualScope: string): PracticeDraft | null {
+  // The frozen request belongs to the durable original. Recover the edited
+  // inputs as a separate draft so they cannot change that request.
+  return parsePracticeDraft(emptyPracticeDraft(manualScope, draft.fields), manualScope);
+}
+
 function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: PracticeDraftCollection, source: StoredPracticeDraftCollection | null, fallback: PracticeDraft, storage: PartitionStorage): void {
   const migrationError = "无法迁移练习草稿，原答案已保留。请释放浏览器存储后重试。";
   const manualScope = scopes.manual;
@@ -307,30 +334,61 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: Prac
     ? mergeWithStoredCollection(manualScope, cachedManual, storedManual)
     : storedManual?.collection;
   unreconciled.delete(manualScope);
-  if (manual) memory.set(manualScope, manual);
-  else memory.delete(manualScope);
-  const moved = ordinary.drafts.filter(draft => draft.fields.matrixMode !== true);
+  if (manual) cacheCollection(manual);
+  else forgetCollection(manualScope);
+  const manualDrafts: PracticeDraft[] = [];
   const added: PracticeDraft[] = [];
-  for (const draft of moved) {
-    const copy = parsePracticeDraft({ ...draft, scope: manualScope }, manualScope);
-    if (!copy) throw new Error(migrationError);
-    const existing = manual?.drafts.find(value => value.id === copy.id);
-    if (!existing) {
-      added.push(copy);
+  const unresolvedManualIds = new Set<string>();
+  const recoveredAnswers: PracticeDraft[] = [];
+  for (const draft of manual?.drafts ?? []) {
+    const valid = parsePracticeDraft(draft, manualScope);
+    if (valid) {
+      manualDrafts.push(valid);
       continue;
     }
-    const comparable = parsePracticeDraft(existing, manualScope);
-    if (!comparable) throw new Error(migrationError);
-    if (JSON.stringify(comparable) === JSON.stringify(copy)) continue;
-    // Keep the active destination identity and reuse any recovered copy from a failed cleanup.
-    const recovered = [...(manual?.drafts ?? []), ...added].some(value =>
-      JSON.stringify(parsePracticeDraft(value, manualScope)) === JSON.stringify({ ...copy, id: value.id }));
-    if (!recovered) added.push({ ...copy, id: crypto.randomUUID() });
+    const saved = storedManual?.collection.drafts.find(value => value.id === draft.id);
+    if (saved) manualDrafts.push(saved);
+    const recovery = recoverManualAnswer(draft, manualScope);
+    if (recovery) recoveredAnswers.push(recovery);
+    else unresolvedManualIds.add(draft.id);
   }
-  const drafts = [...(manual?.drafts ?? []), ...added];
+
+  function alreadyRecovered(copy: PracticeDraft) {
+    return [...manualDrafts, ...added].some(value => JSON.stringify(value) === JSON.stringify({ ...copy, id: value.id }));
+  }
+
+  function addCopy(copy: PracticeDraft) {
+    const existing = manualDrafts.find(value => value.id === copy.id);
+    if (!existing) { added.push(copy); return; }
+    // Keep the active destination identity and reuse any recovered copy from a failed cleanup.
+    if (JSON.stringify(existing) !== JSON.stringify(copy) && !alreadyRecovered(copy)) {
+      added.push({ ...copy, id: crypto.randomUUID() });
+    }
+  }
+  const migratedIds = new Set<string>();
+  for (const draft of ordinary.drafts) {
+    if (draft.fields.matrixMode) continue;
+    const copy = parsePracticeDraft({ ...draft, scope: manualScope }, manualScope);
+    if (copy) {
+      addCopy(copy);
+    } else {
+      const recovery = recoverManualAnswer(draft, manualScope);
+      const saved = source?.collection.drafts.find(value => value.id === draft.id);
+      const savedCopy = saved && parsePracticeDraft({ ...saved, scope: manualScope }, manualScope);
+      if (!recovery || (saved && !savedCopy)) continue;
+      if (savedCopy) addCopy(savedCopy);
+      recoveredAnswers.push(recovery);
+    }
+    migratedIds.add(draft.id);
+  }
+  for (const recovery of recoveredAnswers) {
+    // A failed source cleanup may have left the edited answer on the shelf already.
+    if (!alreadyRecovered(recovery)) added.push(recovery);
+  }
+  const drafts = [...manualDrafts, ...added];
   const legacyActive = added.find(draft => draft.id === ordinary.activeId && isRecoverableManualDraft(draft));
   const manualFallback = manualEntry ? fallback : emptyPracticeDraft(manualScope);
-  const activeId = manual?.activeId ?? legacyActive?.id ?? manualFallback.id;
+  const activeId = drafts.find(draft => draft.id === manual?.activeId)?.id ?? legacyActive?.id ?? manualFallback.id;
   if (activeId === manualFallback.id && !drafts.some(draft => draft.id === activeId)) drafts.push(manualFallback);
   const ordinaryKey = storageKey(scopes.ordinary);
   const manualKey = storageKey(manualScope);
@@ -341,10 +399,10 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: Prac
   if (source?.legacy) {
     try {
       if (storage.getItem(ordinaryKey) !== null || storage.getItem(legacyStorageKey(scopes.ordinary)) !== source.raw) return;
-      if (!parsePracticeDraftCollection(ordinary, scopes.ordinary)) throw new Error(migrationError);
-      expectedOrdinary = JSON.stringify(ordinary);
+      const durable = parsePracticeDraftCollection(ordinary, scopes.ordinary) ?? source.collection;
+      expectedOrdinary = JSON.stringify(durable);
       storage.setItem(ordinaryKey, expectedOrdinary);
-      memory.set(scopes.ordinary, ordinary);
+      cacheCollection(ordinary);
     } catch {
       if (manualEntry && manual) return;
       throw new Error(migrationError);
@@ -352,14 +410,23 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: Prac
   }
   if (!storedManual || storedManual.legacy || added.length || dirtyDrafts.has(manualScope)) {
     const next = { version: 2 as const, scope: manualScope, activeId, drafts };
+    const pending = dirtyDrafts.get(manualScope);
     if (!persistCollection(next, storage)) throw new Error(migrationError);
-    memory.set(manualScope, next);
+    if (unresolvedManualIds.size && pending && manual) {
+      for (const id of pending.keys()) {
+        if (!unresolvedManualIds.has(id)) pending.delete(id);
+      }
+      dirtyDrafts.set(manualScope, pending);
+      const unresolved = manual.drafts.filter(draft => unresolvedManualIds.has(draft.id));
+      cacheCollection({ ...next, drafts: [...drafts.filter(draft => !unresolvedManualIds.has(draft.id)), ...unresolved] });
+    } else {
+      cacheCollection(next);
+    }
     expectedManual = JSON.stringify(next);
   }
 
   // Leave ordinary v2 in place if cleanup is pending, so reads won't fall
   // back to an unresolved v1 while the migrated drafts remain available.
-  const migratedIds = new Set(moved.map(draft => draft.id));
   const remaining = withoutDrafts(ordinary, migratedIds);
   try {
     if (storage.getItem(manualKey) !== expectedManual || storage.getItem(ordinaryKey) !== expectedOrdinary) return;
@@ -377,15 +444,14 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: Prac
     if (durableRemaining) storage.setItem(ordinaryKey, JSON.stringify(durableRemaining));
     else storage.removeItem(ordinaryKey);
 
-    if (remaining) memory.set(scopes.ordinary, remaining);
-    else memory.delete(scopes.ordinary);
-
     const pending = dirtyDrafts.get(scopes.ordinary);
     if (!canSaveRemaining) {
       for (const id of migratedIds) pending?.delete(id);
     }
     if (canSaveRemaining || !pending?.size) dirtyDrafts.delete(scopes.ordinary);
     unreconciled.delete(scopes.ordinary);
+    if (remaining) cacheCollection(remaining);
+    else forgetCollection(scopes.ordinary);
   } catch (reason) {
     if (!manualEntry) throw reason;
   }
@@ -403,8 +469,8 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
       ordinaryReadSucceeded = true;
       if (!unsavedOrdinary) {
         unreconciled.delete(scopes.ordinary);
-        if (ordinary) memory.set(scopes.ordinary, ordinary.collection);
-        else memory.delete(scopes.ordinary);
+        if (ordinary) cacheCollection(ordinary.collection);
+        else forgetCollection(scopes.ordinary);
       }
     } catch (reason) {
       if (unsavedOrdinary && memory.has(scopes.ordinary)) {
@@ -415,7 +481,7 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
           throw reason;
         }
       } else {
-        memory.delete(scopes.ordinary);
+        forgetCollection(scopes.ordinary);
         if (fallback.scope !== scopes.manual) throw reason;
       }
     }
@@ -425,7 +491,7 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
       const storedManualActive = storedDrafts.find(draft => draft.id === ordinary?.collection.activeId && draft.fields.matrixMode !== true)?.id;
       const reconciled = mergeWithStoredCollection(scopes.ordinary, cached, ordinary, undefined, storedManualActive);
       if (!reconciled) {
-        memory.delete(scopes.ordinary);
+        forgetCollection(scopes.ordinary);
         dirtyDrafts.delete(scopes.ordinary);
         unreconciled.delete(scopes.ordinary);
       } else {
@@ -433,7 +499,7 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
           unreconciled.add(scopes.ordinary);
           migrateOrdinaryManualDrafts(scopes, reconciled, ordinary, fallback, storage);
         } else {
-          memory.set(scopes.ordinary, reconciled);
+          cacheCollection(reconciled);
           unreconciled.delete(scopes.ordinary);
           persistCollection(reconciled, storage);
         }
@@ -472,7 +538,7 @@ function mergeWithStoredCollection(
   const storedIds = new Set(storedDrafts.map(value => value.id));
   const mergedDrafts = [
     ...storedDrafts.map(value => {
-      const patch = edits?.get(value.id);
+      const patch = edits?.get(value.id)?.patch;
       return patch ? applyDraftPatch(value, patch) : value;
     }),
     ...cached.drafts.filter(value => !storedIds.has(value.id) && isEdited(value.id)),
@@ -488,7 +554,12 @@ function mergeWithStoredCollection(
   return { version: 2, scope, activeId, drafts: mergedDrafts };
 }
 
-function saveDraftEdit(current: PracticeDraft, change: (base: PracticeDraft) => DraftPatch, storage: WriteStorage | null) {
+function saveDraftEdit(
+  current: PracticeDraft,
+  change: (base: PracticeDraft) => DraftPatch,
+  storage: WriteStorage | null,
+  snapshot?: PracticeDraft,
+) {
   const { scope, id } = current;
   const error = blocked.get(scope);
   if (error) throw new Error(error);
@@ -505,17 +576,27 @@ function saveDraftEdit(current: PracticeDraft, change: (base: PracticeDraft) => 
       readFailed = true;
     }
   }
-  const edits = dirtyDrafts.get(scope) ?? new Map<string, DraftPatch>();
-  const pending = edits.get(id) ?? {};
+  const edits = dirtyDrafts.get(scope) ?? new Map<string, PendingDraftEdit>();
+  const previous = edits.get(id) ?? { patch: {}, written: {} };
+  const clean = snapshot && cleanBase.get(scope)?.drafts.find(value => value.id === id);
+  // An unchanged snapshot field cancels our own failed full write. A patch
+  // from another caller, or a newer durable value, still takes precedence.
+  const reverted = clean && snapshot ? omitDraftPatchKeys(previous.written, draftChanges(clean, snapshot)) : {};
+  const pending = omitDraftPatchKeys(previous.patch, reverted);
   const live = stored?.collection.drafts.find(value => value.id === id);
-  const base = live ? applyDraftPatch(live, pending) : current;
+  const base = live ? applyDraftPatch(live, pending) : applyDraftPatch(current, revertedToSnapshot(reverted, snapshot));
   const patch = change(base);
   const draft = applyDraftPatch(base, patch);
   const found = collection.drafts.some(value => value.id === id);
   let next = { ...collection, drafts: found ? collection.drafts.map(value => value.id === id ? draft : value) : [...collection.drafts, draft] };
   // Keep the latest inputs in this document even if the browser refuses persistence.
   memory.set(scope, next);
-  edits.set(id, combineDraftPatches(pending, patch));
+  edits.set(id, {
+    patch: combineDraftPatches(pending, patch),
+    written: snapshot
+      ? combineDraftPatches(omitDraftPatchKeys(previous.written, reverted), patch)
+      : omitDraftPatchKeys(previous.written, patch),
+  });
   dirtyDrafts.set(scope, edits);
   if (readFailed) {
     restoreCachedReadFailure(scope, previousBlocked);
@@ -529,6 +610,18 @@ function saveDraftEdit(current: PracticeDraft, change: (base: PracticeDraft) => 
   return { draft, persisted: persistCollection(next, storage) };
 }
 
+function revertedToSnapshot(reverted: DraftPatch, snapshot: PracticeDraft | undefined): DraftPatch {
+  if (!snapshot) return {};
+  const { fields, ...checkpoint } = snapshot;
+  const { fields: revertedFields, ...revertedCheckpoint } = reverted;
+  function pick<T extends object>(value: T, keys: object): Partial<T> {
+    const selected: Partial<T> = {};
+    for (const key of Object.keys(keys) as (keyof T)[]) selected[key] = value[key];
+    return selected;
+  }
+  return { ...pick(checkpoint, revertedCheckpoint), fields: pick(fields, revertedFields ?? {}) };
+}
+
 function changedProperties<T extends object>(previous: T, next: T): Partial<T> {
   const patch: Partial<T> = {};
   for (const key of Object.keys(next) as (keyof T)[]) {
@@ -537,13 +630,15 @@ function changedProperties<T extends object>(previous: T, next: T): Partial<T> {
   return patch;
 }
 
+function draftChanges(base: PracticeDraft | null, draft: PracticeDraft): DraftPatch {
+  const { start, attemptId, observationId, submission, disputeKey, fields } = draft;
+  const checkpoint = { start, attemptId, observationId, submission, disputeKey };
+  return base ? { ...changedProperties(base, checkpoint), fields: changedProperties(base.fields, fields) } : { ...checkpoint, fields };
+}
+
 export function writePracticeDraft(draft: PracticeDraft, storage: WriteStorage | null, base = cleanBase.get(draft.scope)?.drafts.find(value => value.id === draft.id) ?? null): boolean {
   const cached = memory.get(draft.scope)?.drafts.find(value => value.id === draft.id);
-  const { fields, ...checkpoint } = draft;
-  const patch = base ? { ...changedProperties(base, checkpoint), fields: changedProperties(base.fields, fields) } : { ...checkpoint, fields };
-  const { persisted } = saveDraftEdit(cached ?? draft, () => patch, storage);
-  if (persisted) rememberCleanCollection(memory.get(draft.scope)!);
-  return persisted;
+  return saveDraftEdit(cached ?? draft, () => draftChanges(base, draft), storage, draft).persisted;
 }
 
 /** Every callback uses its captured draftId, including after another draft becomes active. */
@@ -588,8 +683,7 @@ export function switchPracticeDraft(scope: string, expectedActiveId: string, tar
   }
   if (!next?.drafts.some(value => value.id === targetId)) throw new Error("找不到这份保留的草稿，当前答案未改动。");
   if (!persistCollection(next, storage)) throw new Error(switchError);
-  memory.set(scope, next);
-  return rememberCleanCollection(next);
+  return cacheCollection(next);
 }
 
 /** Hide a moved archive while its destination owns the active draft, and retry safe cleanup. */
@@ -599,7 +693,6 @@ export function reconcileMovedPracticeArchives(
   const hidden = new Set<string>();
   if (!storage) return hidden;
   const { scope, activeId, drafts } = collection;
-  const removable = new Set<string>();
   for (const draft of drafts) {
     if (draft.id === activeId) continue;
     const targetScope = targetScopeFor(draft);
@@ -614,23 +707,32 @@ export function reconcileMovedPracticeArchives(
       const pending = pendingArchiveCleanup.get(draft.id);
       const unchangedSource = pending?.targetScope === targetScope
         && JSON.stringify(pending.source) === JSON.stringify(parsePracticeDraft(draft, scope));
-      if (dirtyDrafts.get(scope)?.has(draft.id) && !sameCopy && !unchangedSource) continue;
+      if (!sameCopy && !unchangedSource) continue;
       hidden.add(draft.id);
-      if (sameCopy || unchangedSource) removable.add(draft.id);
     } catch { /* An unreadable destination cannot prove a move. */ }
   }
-  if (!removable.size || dirtyDrafts.has(scope)) return hidden;
+  if (!hidden.size || dirtyDrafts.has(scope)) return hidden;
   try {
     const key = storageKey(scope);
     const raw = storage.getItem(key);
     const saved = raw === null ? null : parsePracticeDraftCollection(JSON.parse(raw), scope);
-    // Preserve work that changed in storage since this collection was loaded.
-    if (saved && JSON.stringify(saved) === JSON.stringify(parsePracticeDraftCollection(collection, scope))) {
-      const next = { ...collection, drafts: drafts.filter(draft => !removable.has(draft.id)) };
-      storage.setItem(key, JSON.stringify(next));
-      memory.set(scope, next);
-      for (const id of removable) pendingArchiveCleanup.delete(id);
+    if (!saved) return new Set();
+    const cached = parsePracticeDraftCollection(collection, scope);
+    if (JSON.stringify(saved) !== JSON.stringify(cached)) {
+      // An editor can save a new answer into a source we already loaded.
+      // Refresh the clean cache and only keep proofs for unchanged archives.
+      for (const id of hidden) {
+        const previous = cached?.drafts.find(draft => draft.id === id);
+        const live = saved.drafts.find(draft => draft.id === id);
+        if (!live || JSON.stringify(live) !== JSON.stringify(previous)) hidden.delete(id);
+      }
+      if (memory.get(scope) === collection) cacheCollection(saved);
+      return hidden;
     }
+    const next = { ...collection, drafts: drafts.filter(draft => !hidden.has(draft.id)) };
+    storage.setItem(key, JSON.stringify(next));
+    cacheCollection(next);
+    for (const id of hidden) pendingArchiveCleanup.delete(id);
   } catch { /* Keep the source archive until cleanup can be saved. */ }
   return hidden;
 }
@@ -692,7 +794,7 @@ export function moveArchivedPracticeDraft(
     unreconciled.delete(scope);
     if (!persistCollection(source, storage)) throw new Error(moveError);
   }
-  memory.set(scope, source);
+  cacheCollection(source);
 
   try {
     storage.setItem(targetKey, JSON.stringify(nextTarget));
@@ -717,9 +819,9 @@ export function moveArchivedPracticeDraft(
   }
 
   for (const saved of sourceSaved ? [nextSource, nextTarget] : [nextTarget]) {
-    memory.set(saved.scope, saved);
+    cacheCollection(saved);
     unreconciled.delete(saved.scope);
     finishCollectionSave(saved, storage);
   }
-  return rememberCleanCollection(nextTarget);
+  return nextTarget;
 }

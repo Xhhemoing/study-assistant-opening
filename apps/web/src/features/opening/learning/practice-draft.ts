@@ -47,7 +47,7 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
   const [switchError, setSwitchError] = useState("");
   const [storageWarning, setStorageWarning] = useState(false);
   const [loadRevision, setLoadRevision] = useState(0);
-  const [hiddenArchives, setHiddenArchives] = useState<ReadonlySet<string>>();
+  const [hiddenArchives, setHiddenArchives] = useState<ReadonlyMap<string, string>>();
   useEffect(() => {
     try {
       const storage = browserStorage();
@@ -56,7 +56,10 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
         : readPracticeDraftCollection(scope, storage);
       if (!stored && !storage) throw new Error("无法读取练习草稿，已停止新建和切换。请允许此页面使用浏览器存储后重试。");
       const restored = stored ?? initializePracticeDraft(fallback);
-      if (targetScopeFor) setHiddenArchives(reconcileMovedPracticeArchives(restored, targetScopeFor, storage));
+      if (targetScopeFor) {
+        const hidden = reconcileMovedPracticeArchives(restored, targetScopeFor, storage);
+        setHiddenArchives(new Map(restored.drafts.filter(draft => hidden.has(draft.id)).map(draft => [draft.id, JSON.stringify(draft)])));
+      }
       setCollection(targetScopeFor ? readPracticeDraftCollection(scope, null)! : restored);
       setStorageWarning(practiceDraftHasUnsavedStorage(scope));
       setLoadError(""); setReady(true);
@@ -64,7 +67,7 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
   }, [scope, fallback, scopes, loadRevision, targetScopeFor]);
   const draft = collection.drafts.find(value => value.id === collection.activeId)!;
   const drafts = scopes?.manual === scope ? collection.drafts.filter(isRecoverableManualDraft)
-    : hiddenArchives?.size ? collection.drafts.filter(value => value.id === draft.id || !hiddenArchives.has(value.id))
+    : hiddenArchives?.size ? collection.drafts.filter(value => value.id === draft.id || !hiddenArchives.has(value.id) || hiddenArchives.get(value.id) !== JSON.stringify(value))
       : collection.drafts;
   const patch = useCallback((change: DraftPatch | ((current: PracticeDraft) => DraftPatch)) => {
     if (!ready) throw new Error("练习草稿尚未读完，未修改已保存的内容。");
