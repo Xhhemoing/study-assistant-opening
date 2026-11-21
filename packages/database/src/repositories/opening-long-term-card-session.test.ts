@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
+import { DAY_EXCEPTION_SNAPSHOT_KIND } from "@aistudy/contracts";
 import { resolveLocalDayBounds, SRS_VERSION } from "@aistudy/domain";
 import { listCardQueue } from "./cards-ops";
+import { createOpeningDayAdjustmentRepository } from "./opening-day-adjustment";
 import { assertOpeningLearningManagementDraft } from "./opening-learning-management-draft";
+import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
 import { acceptOpeningPlan } from "./opening-plan-accept";
 import {
   assertCardSessionStop,
@@ -1310,5 +1313,376 @@ describe("Round-8 fixes: persisted-block card cap in acceptOpeningPlan, archived
     expect(caughtMessage).toContain("单次最低 10 分钟维护额度");
     expect(caughtMessage).toContain("10 分钟");
     expect(caughtMessage).not.toContain("可用上限为 10 分钟（不超过每日可执行学习时长的 30%）");
+  });
+});
+
+describe("Round-9 fixes: standalone draft/replan 30% card cap, intraday post-adjustment card cap, and archived binding pre-filter", () => {
+  const planningSettings = {
+    weekOneMonday: "2026-09-07",
+    periodTimes: {},
+    dailyWindow: { start: "07:30", end: "22:30" },
+    lunch: { start: "12:00", end: "12:45" },
+    dinner: { start: "18:00", end: "18:45" },
+    sleep: { start: "23:00", end: "07:00" },
+    timeZone: "Asia/Shanghai",
+  };
+
+  it("P1-1: standalone assertOpeningLearningManagementDraft (no options) and standalone validateOpeningLocalReplan both reject over-cap card recovery", async () => {
+    const day = "2026-11-19";
+    const now = new Date("2026-11-19T05:00:00.000Z"); // 13:00 Asia/Shanghai
+    const cardSuggestionId = uuid("14141414", 1);
+    const cardSuggestionBlock = {
+      taskId: cardSuggestionId,
+      start: "2026-11-19T06:00:00.000Z", // 14:00 Asia/Shanghai
+      end: "2026-11-19T06:10:00.000Z",   // 14:10 Asia/Shanghai (10m)
+      reason: "planned",
+    };
+
+    const buildStandaloneTx = () => createMockSql((query) => {
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 75, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("SELECT planning_settings FROM workspace_preferences")) {
+        return [{ planning_settings: planningSettings }];
+      }
+      if (query.includes("SELECT a.id FROM opening_teaching_activities a")) return [];
+      if (query.includes("FROM opening_teaching_activities")) {
+        return [{
+          id: uuid("92929292", 1),
+          course_id: null,
+          status: "active",
+          created_at: "2026-11-19T02:00:00.000Z",
+          updated_at: "2026-11-19T02:00:00.000Z",
+          create_intent: { protocol: "card-review-session-v1" },
+          checkpoint_json: { cardReviewSession: { elapsedSeconds: 0, stoppedAt: null } },
+          goal_json: {
+            cardReviewSession: { budgetMinutes: 18 },
+            learningBudget: { localDate: day, timeZone: "Asia/Shanghai", minutes: 18 },
+          },
+        }];
+      }
+      return [];
+    }) as unknown as TransactionSql;
+
+    // 1. Standalone assertOpeningLearningManagementDraft WITHOUT options.acceptedBlocks rejects!
+    await expect(
+      assertOpeningLearningManagementDraft(
+        buildStandaloneTx(),
+        SCOPE,
+        {
+          day,
+          strategy_version: null,
+          input_snapshot: {},
+          suggested_tasks: [{
+            id: cardSuggestionId,
+            key: `planner:${day}:review_cards:none:long-term`,
+            kind: "review_cards",
+            minutes: 10,
+            courseId: null,
+          }],
+          blocks: [cardSuggestionBlock],
+        },
+        now,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // 2. Standalone validateOpeningLocalReplan (no prior assertOpeningLearningManagementDraft) rejects!
+    await expect(
+      validateOpeningLocalReplan(
+        buildStandaloneTx(),
+        SCOPE,
+        {
+          day,
+          state: { accepted_version: 0, accepted_blocks: [] },
+          draft: {
+            day,
+            origin: "manual",
+            strategy_version: "local-replan-v1",
+            suggested_tasks: [{
+              id: cardSuggestionId,
+              key: `planner:${day}:review_cards:none:long-term`,
+              kind: "review_cards",
+              minutes: 10,
+              courseId: null,
+            }],
+            input_snapshot: {
+              tasks: [{
+                id: cardSuggestionId,
+                version: 1,
+                title: "到期卡片复习（有界会话）",
+                minutes: 10,
+                dueAt: null,
+                priority: 2,
+                status: "pending",
+              }],
+              localReplan: {
+                baseAcceptedVersion: 0,
+                baselineBlocks: [],
+                fixedBlocks: [],
+                releasedTaskVersions: [],
+                proposedAt: "2026-11-19T04:55:00.000Z",
+                preserveAll: true,
+              },
+            },
+          },
+          blocks: [cardSuggestionBlock],
+          now,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("P1-2: intraday adjustment allows replacing a 10m review_cards slot with a non-overlapping 10m slot on a 40m day (12m cap) and rejects keeping both (20m > 12m)", async () => {
+    const day = "2026-11-19";
+    const now = new Date("2026-11-19T10:55:00.000Z"); // 18:55 Asia/Shanghai
+    const cardTask1 = uuid("15151515", 1);
+    const cardTask2 = uuid("15151515", 2);
+    const excId = uuid("15151515", 9);
+
+    const existingBlockC1 = {
+      taskId: cardTask1,
+      start: "2026-11-19T11:00:00.000Z", // 19:00 Asia/Shanghai
+      end: "2026-11-19T11:10:00.000Z",   // 19:10 Asia/Shanghai (10m)
+      reason: "planned",
+    };
+    const newBlockC2 = {
+      taskId: cardTask2,
+      start: "2026-11-19T11:20:00.000Z", // 19:20 Asia/Shanghai
+      end: "2026-11-19T11:30:00.000Z",   // 19:30 Asia/Shanghai (10m)
+      reason: "planned",
+    };
+
+    const cardTasks = [
+      {
+        id: cardTask1,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        title: "到期卡片复习 1",
+        minutes: 10,
+        status: "pending",
+        version: 1,
+        priority: 2,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        origin: "planner",
+        client_key: `planner:${day}:review_cards:c1:long-term`,
+        candidate_id: null,
+        retest_id: null,
+        candidate_reference_id: null,
+        scheduled_start_at: null,
+        recommended_at: null,
+        not_before_at: null,
+        snoozed_until: null,
+        learning_protocol: null,
+      },
+      {
+        id: cardTask2,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        title: "到期卡片复习 2",
+        minutes: 10,
+        status: "pending",
+        version: 1,
+        priority: 2,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        origin: "planner",
+        client_key: `planner:${day}:review_cards:c2:long-term`,
+        candidate_id: null,
+        retest_id: null,
+        candidate_reference_id: null,
+        scheduled_start_at: null,
+        recommended_at: null,
+        not_before_at: null,
+        snoozed_until: null,
+        learning_protocol: null,
+      },
+    ];
+
+    const buildDayAdjustmentSql = () => createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        // 55 - 15 = 40m executable day -> strict 30% card cap = 12m.
+        return [{
+          learning_management: { dailyMinutes: 55, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== day) return [];
+        return [{
+          id: excId,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: day,
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 25,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        return [{ day, accepted_version: 1, accepted_blocks: [existingBlockC1], hard_blocks_fingerprint: "" }];
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) return cardTasks;
+      return [];
+    });
+
+    // 1. Replacing C1 (10m) with non-overlapping C2 (10m) -> net 10m <= 12m -> SUCCEEDS!
+    const replaceRepo = createOpeningDayAdjustmentRepository(buildDayAdjustmentSql(), { clock: () => now });
+    const receipt = await replaceRepo.confirm(SCOPE, {
+      clientKey: "day-adjust:replace-card-10m",
+      sourceDate: day,
+      expectedTimeZone: "Asia/Shanghai",
+      expectedExceptionRevision: 1,
+      expectedBudgetRevision: 1,
+      expectedSourceAcceptedVersion: 1,
+      expectedTaskRevisions: [
+        { taskId: cardTask1, version: 1 },
+        { taskId: cardTask2, version: 1 },
+      ],
+      expectedRetestRevisions: [],
+      sourceActions: {
+        keptBlocks: [],
+        removedBlocks: [existingBlockC1],
+        addedBlocks: [newBlockC2],
+      },
+      targetActions: null,
+    });
+    expect(receipt.replayed).toBe(false);
+    expect(receipt.sourceBlocks).toEqual([newBlockC2]);
+
+    // 2. Keeping C1 (10m) and adding C2 (10m) -> 20m > 12m -> REJECTS with CONFLICT!
+    const keepBothRepo = createOpeningDayAdjustmentRepository(buildDayAdjustmentSql(), { clock: () => now });
+    await expect(
+      keepBothRepo.confirm(SCOPE, {
+        clientKey: "day-adjust:add-second-card-10m",
+        sourceDate: day,
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: 1,
+        expectedSourceAcceptedVersion: 1,
+        expectedTaskRevisions: [
+          { taskId: cardTask1, version: 1 },
+          { taskId: cardTask2, version: 1 },
+        ],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [existingBlockC1],
+          removedBlocks: [],
+          addedBlocks: [newBlockC2],
+        },
+        targetActions: null,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("P2-1: excludes archived requirement bindings before nodeId or key matching when active and archived requirements share knowledge_node_id", async () => {
+    const now = new Date("2026-11-19T12:00:00.000Z");
+    const sharedNode = uuid("aaaaaaaa", 41);
+    const otherNode = uuid("aaaaaaaa", 42);
+    const skillIds = ["skill-archived-shared-node", "skill-active-shared-node", "skill-other"];
+
+    const labelCardOnSharedNode = band1CardRow({
+      id: uuid("bbbbbbbb", 41),
+      now,
+      dueAt: "2026-11-01T00:00:00.000Z", // earlier dueAt
+      courseId: COURSE_A,
+      syllabusPointId: null,
+      skillLabel: "极限",
+      goalPriority: 5,
+    });
+    const labelCardOnOtherNode = band1CardRow({
+      id: uuid("bbbbbbbb", 42),
+      now,
+      dueAt: "2026-11-18T00:00:00.000Z", // later dueAt
+      courseId: COURSE_A,
+      syllabusPointId: null,
+      skillLabel: "导数",
+      goalPriority: 5,
+    });
+
+    const binding = {
+      courseId: COURSE_A,
+      milestoneId: null,
+      packSourceId: PACK_SOURCE_ID,
+      boundAt: "2026-10-05T00:00:00.000Z",
+      skills: [
+        { skillId: "skill-archived-shared-node", nodeId: sharedNode, requirementKey: "req-archived-shared" },
+        { skillId: "skill-active-shared-node", nodeId: sharedNode, requirementKey: "req-active-shared" },
+        { skillId: "skill-other", nodeId: otherNode, requirementKey: "req-other" },
+      ],
+      materials: [{ sourceTitle: "真卷", sourceId: PACK_SOURCE_ID, sourceVersion: 1 }],
+    };
+
+    const sql = createMockSql((query) => {
+      if (query.includes("FROM cards c")) return [labelCardOnSharedNode, labelCardOnOtherNode];
+      if (query.includes("FROM opening_exam_papers p")) {
+        return [{
+          id: uuid("cccccccc", 41),
+          sprint_id: SPRINT_ID,
+          course_id: COURSE_A,
+          source_id: uuid("dddddddd", 41),
+          source_version: 1,
+          teacher: "陈教授",
+          year: 2025,
+          label: "2025 真卷",
+          kind: "past_exam",
+          skills: [
+            { skillId: "skill-archived-shared-node", points: 15 },
+            { skillId: "skill-active-shared-node", points: 4 },
+            { skillId: "skill-other", points: 8 },
+          ],
+          client_key: "exam-paper-shared-node-archived",
+          recorded_at: "2026-10-10T00:00:00.000Z",
+          binding,
+          pack_snapshot: buildExamPack(skillIds),
+          sprint_state: buildExamState(),
+        }];
+      }
+      if (query.includes("FROM opening_course_knowledge g")) {
+        return [
+          { course_id: COURSE_A, node_id: sharedNode },
+          { course_id: COURSE_A, node_id: otherNode },
+        ];
+      }
+      if (query.includes("FROM course_requirements")) {
+        return [
+          { course_id: COURSE_A, requirement_key: "req-archived-shared", title: "旧极限", knowledge_node_id: sharedNode, lifecycle: "archived" },
+          { course_id: COURSE_A, requirement_key: "req-active-shared", title: "极限", knowledge_node_id: sharedNode, lifecycle: "active" },
+          { course_id: COURSE_A, requirement_key: "req-other", title: "导数", knowledge_node_id: otherNode, lifecycle: "active" },
+        ];
+      }
+      return [];
+    });
+
+    const queue = await listCardQueue(sql, {
+      ...SCOPE,
+      mode: "auto",
+      now,
+      timeZone: "Asia/Shanghai",
+      maxSessionCards: 200,
+    });
+
+    // labelCardOnSharedNode matches ONLY skill-active-shared-node (4 pts) and MUST NOT adopt
+    // skill-archived-shared-node (15 pts) through sharedNode, so labelCardOnOtherNode (8 pts) ranks first!
+    expect(queue.map((entry) => entry.card.id)).toEqual([
+      labelCardOnOtherNode.id,
+      labelCardOnSharedNode.id,
+    ]);
   });
 });

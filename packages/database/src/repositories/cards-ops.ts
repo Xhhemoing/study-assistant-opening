@@ -361,28 +361,24 @@ function resolveCardHistoricalMeanPoints(
     if (!normalizedLabel) continue;
     const reqMatches = lookup.requirementsByCourseLabel.get(courseId)?.get(normalizedLabel) ?? [];
     const archivedReqKeys = lookup.archivedRequirementKeysByCourse.get(courseId);
+    const activeBoundSkills = archivedReqKeys?.size
+      ? boundSkills.filter((skill) => !archivedReqKeys.has(skill.requirementKey))
+      : boundSkills;
     let matchedDirect = false;
-    for (const skill of boundSkills) {
-      // Requirement keys match exclusively via active `course_requirements`, never directly
-      // on `binding.skills`, so archived requirements cannot be revived by label lookup.
+    for (const skill of activeBoundSkills) {
+      // Exclude archived requirement bindings before matching by nodeId or key, and match
+      // requirement keys exclusively via active `course_requirements` (never directly on `binding.skills`).
       const matchesActiveRequirement = reqMatches.some(
         (req) => req.requirementKey === skill.requirementKey
           || (req.knowledgeNodeId !== null && req.knowledgeNodeId === skill.nodeId),
       );
-      if (matchesActiveRequirement) {
-        matchedDirect = true;
-        consider(skill.meanPoints);
-        continue;
-      }
-      if (archivedReqKeys?.has(skill.requirementKey)) continue;
-      if (normalizeSkillLabel(skill.skillId) === normalizedLabel) {
+      if (matchesActiveRequirement || normalizeSkillLabel(skill.skillId) === normalizedLabel) {
         matchedDirect = true;
         consider(skill.meanPoints);
       }
     }
     if (!matchedDirect) {
-      for (const skill of boundSkills) {
-        if (archivedReqKeys?.has(skill.requirementKey)) continue;
+      for (const skill of activeBoundSkills) {
         if (skill.packLabels.has(normalizedLabel)) consider(skill.meanPoints);
       }
     }

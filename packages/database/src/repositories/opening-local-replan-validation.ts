@@ -157,7 +157,12 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
     await assertOpeningPlanConstraints(tx, scope, input.day, fresh, true, meta.data.explicitFree);
     await assertOpeningPlanConstraints(tx, scope, input.day, futureFixed, false);
   });
-  if (pending) {
-    await assertAcceptedBlocksCardRecoveryCap(tx, scope, input.day, input.blocks, pending.draft, pending.now);
-  }
+  await assertAcceptedBlocksCardRecoveryCap(
+    tx,
+    scope,
+    input.day,
+    input.blocks,
+    pending?.draft ?? input.draft,
+    pending?.now ?? input.now,
+  );
 }

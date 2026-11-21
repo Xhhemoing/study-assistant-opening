@@ -13,7 +13,7 @@ import { addLocalDays, localDateKeyInZone, resolveLocalDayBounds } from "@aistud
 import { collectNonDaySpilloverBlocks, readOpeningLearningCapacity } from "./opening-learning-capacity";
 import { calculateSpanTutorBudgetUsage, evaluateDayPlanCapacity } from "./opening-learning-capacity-usage";
 import { assertLearningGoalAction } from "./opening-learning-goals";
-import { learningError } from "./opening-learning-facts";
+import { hasWorkspaceLearningHistoryLockForTx, learningError } from "./opening-learning-facts";
 import { assertCardRecoveryPlanDayCap, isCardRecoveryTaskRow } from "./opening-long-term-card-session";
 import { OpeningPlanError } from "./opening-plan-error";
 
@@ -33,7 +33,7 @@ type PendingDraftAcceptance = {
 };
 
 const pendingDraftAcceptances = new WeakMap<object, PendingDraftAcceptance>();
-const localReplanActiveTxs = new WeakSet<object>();
+const deferredStandaloneCardCapTxs = new WeakSet<object>();
 
 export function registerPendingDraftAcceptanceForTx(
   tx: TransactionSql,
@@ -61,24 +61,27 @@ export function consumePendingDraftAcceptanceForTx(
   return entry;
 }
 
-export function isLocalReplanConstraintsCheckActiveForTx(tx: TransactionSql): boolean {
-  return localReplanActiveTxs.has(tx as unknown as object);
+export function isDeferredStandaloneCardCapActiveForTx(tx: TransactionSql): boolean {
+  return deferredStandaloneCardCapTxs.has(tx as unknown as object);
 }
 
-export async function withLocalReplanConstraintsCheckForTx<T>(
+export async function withDeferredStandaloneCardCapForTx<T>(
   tx: TransactionSql,
   fn: () => Promise<T>,
 ): Promise<T> {
   const key = tx as unknown as object;
-  localReplanActiveTxs.add(key);
+  deferredStandaloneCardCapTxs.add(key);
   try {
     return await fn();
   } finally {
-    localReplanActiveTxs.delete(key);
+    deferredStandaloneCardCapTxs.delete(key);
   }
 }
 
-function overlappedLocalDays(blocks: readonly PlannedBlock[], timeZone: string): Set<string> {
+export const isLocalReplanConstraintsCheckActiveForTx = isDeferredStandaloneCardCapActiveForTx;
+export const withLocalReplanConstraintsCheckForTx = withDeferredStandaloneCardCapForTx;
+
+export function overlappedLocalDays(blocks: readonly PlannedBlock[], timeZone: string): Set<string> {
   const days = new Set<string>();
   for (const block of blocks) {
     const startMs = Date.parse(block.start);
@@ -110,6 +113,32 @@ export async function assertAcceptedBlocksCardRecoveryCap(
   preloadedState?: Awaited<ReturnType<typeof readOpeningLearningCapacity>>,
 ): Promise<void> {
   if (!acceptedBlocks.length) return;
+  const suggestions = (draft.suggested_tasks ?? []) as DraftSuggestionLike[];
+  const placedTaskIds = new Set(acceptedBlocks.map((block) => block.taskId));
+  const suggestionIds = new Set(suggestions.map((item) => item.id));
+
+  // Pre-filter before loading full learning capacity so non-card local replans and minimal tx mocks
+  // execute zero extra capacity queries when no card-recovery block is being persisted.
+  if (!preloadedState) {
+    const hasCardSuggestion = suggestions.some(
+      (item) => placedTaskIds.has(item.id) && isCardRecoveryTaskRow({
+        id: item.id,
+        origin: "planner",
+        client_key: item.key ?? null,
+        suggestion_kind: item.kind ?? null,
+        status: "pending",
+      }),
+    );
+    if (!hasCardSuggestion) {
+      const existingPlacedIds = [...placedTaskIds].filter((id) => !suggestionIds.has(id));
+      if (!existingPlacedIds.length) return;
+      const existingRows = await tx`SELECT id, origin, client_key, status FROM opening_tasks
+        WHERE id = ANY(${existingPlacedIds}::uuid[]) AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
+      const hasExistingCardTask = existingRows.some((row) => isCardRecoveryTaskRow(row as Record<string, unknown>));
+      if (!hasExistingCardTask) return;
+    }
+  }
+
   const baseState = preloadedState
     ?? await readOpeningLearningCapacity(
       tx,
@@ -123,8 +152,6 @@ export async function assertAcceptedBlocksCardRecoveryCap(
   );
   if (!fresh.length) return;
 
-  const suggestions = (draft.suggested_tasks ?? []) as DraftSuggestionLike[];
-  const placedTaskIds = new Set(acceptedBlocks.map((block) => block.taskId));
   const syntheticSuggestionsFor = (existingTasks: readonly Record<string, unknown>[]) => {
     const existingIds = new Set(existingTasks.map((task) => String(task.id)));
     return suggestions
@@ -177,7 +204,7 @@ export async function assertAcceptedBlocksCardRecoveryCap(
 
 /**
  * Enforces the 30% card-recovery cap for standalone `assertOpeningPlanConstraints` callers
- * (such as day-adjustment moves) when `blocks` adds existing `review_cards` tasks onto `day`.
+ * when `blocks` adds existing `review_cards` tasks onto `day`.
  * Executes zero extra capacity queries when `blocks` contains no card-recovery tasks.
  */
 export async function assertStandaloneBlocksCardRecoveryCap(
@@ -185,7 +212,7 @@ export async function assertStandaloneBlocksCardRecoveryCap(
   scope: Scope,
   day: string,
   blocks: readonly PlannedBlock[],
-  now: Date,
+  now: Date = new Date(),
 ): Promise<void> {
   if (!blocks.length) return;
   const uniqueTaskIds = [...new Set(blocks.map((block) => block.taskId))];
@@ -221,7 +248,7 @@ export async function assertOpeningLearningManagementDraft(
   scope: Scope,
   draft: Record<string, unknown>,
   now: Date,
-  options?: { acceptedBlocks?: readonly PlannedBlock[] },
+  options?: { acceptedBlocks?: readonly PlannedBlock[]; deferToPlanAccept?: boolean; standalone?: boolean },
 ) {
   const snapshot = draft.input_snapshot as { learningManagement?: unknown; dayException?: unknown; dayAdjustment?: unknown } | null;
   const reasons = draft.reasons && typeof draft.reasons === "object" && !Array.isArray(draft.reasons)
@@ -287,9 +314,14 @@ export async function assertOpeningLearningManagementDraft(
   if (options?.acceptedBlocks !== undefined) {
     pendingDraftAcceptances.delete(tx as unknown as object);
     await assertAcceptedBlocksCardRecoveryCap(tx, scope, draftDay, options.acceptedBlocks, draft, now, state);
-  } else if (blocks.some((block) => suggestionIds.has(block.taskId))) {
-    // `acceptOpeningPlan` filters placed suggestions by `acceptSuggestedKeys` / coach selection
-    // after this check; defer enforcement to `validateOpeningLocalReplan` / `assertOpeningPlanConstraints`
+  } else if (
+    !options?.standalone
+    && blocks.some((block) => suggestionIds.has(block.taskId))
+    && (options?.deferToPlanAccept === true || hasWorkspaceLearningHistoryLockForTx(tx))
+  ) {
+    // Inside `acceptOpeningPlan` (which holds `lockWorkspaceLearningHistory`), placed suggestions
+    // may still be deselected by `acceptSuggestedKeys` / coach selection before persistence;
+    // defer enforcement to `validateOpeningLocalReplan` / `assertOpeningPlanConstraints`
     // so deselected `review_cards` suggestions never block unrelated ordinary tasks.
     registerPendingDraftAcceptanceForTx(tx, { scope, draftDay, draft, now });
   } else {

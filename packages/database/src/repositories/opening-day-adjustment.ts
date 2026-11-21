@@ -51,6 +51,8 @@ import {
   type DayPlanEntry,
 } from "./opening-learning-capacity";
 import { evaluateDayPlanCapacity } from "./opening-learning-capacity-usage";
+import { overlappedLocalDays, withDeferredStandaloneCardCapForTx } from "./opening-learning-management-draft";
+import { assertCardRecoveryPlanDayCap, isCardRecoveryTaskRow } from "./opening-long-term-card-session";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import { assertOpeningCourseRouteRetestReschedulable } from "./opening-course-route-retest-state";
 import {
@@ -1700,25 +1702,28 @@ export function createOpeningDayAdjustmentRepository(
         }
         retestReschedulesToApply.sort((a, b) => a.retestId.localeCompare(b.retestId));
 
-        // Verify timetable and hard-block constraints on both days.
-        if (sourceAddedBlocks.length > 0) {
-          await assertOpeningPlanConstraints(
-            tx,
-            scope,
-            input.sourceDate,
-            sourceAddedBlocks,
-            Boolean(sourceCap.settings),
-          );
-        }
-        if (targetActions) {
-          await assertOpeningPlanConstraints(
-            tx,
-            scope,
-            targetActions.targetDate,
-            targetAddedBlocks,
-            Boolean(sourceCap.settings),
-          );
-        }
+        // Verify timetable and hard-block constraints on both days; defer the 30% card-recovery cap
+        // until post-adjustment schedules (`sourceAfterBlocks` / `targetAfterBlocks`) are evaluated below.
+        await withDeferredStandaloneCardCapForTx(tx, async () => {
+          if (sourceAddedBlocks.length > 0) {
+            await assertOpeningPlanConstraints(
+              tx,
+              scope,
+              input.sourceDate,
+              sourceAddedBlocks,
+              Boolean(sourceCap.settings),
+            );
+          }
+          if (targetActions) {
+            await assertOpeningPlanConstraints(
+              tx,
+              scope,
+              targetActions.targetDate,
+              targetAddedBlocks,
+              Boolean(sourceCap.settings),
+            );
+          }
+        });
 
         // Verify post-replacement capacity on both days (fail-closed on shortfall or usageUncertain).
         const movedToTargetTaskIds = new Set(targetAddedBlocks.map((b) => b.taskId));
@@ -1752,6 +1757,94 @@ export function createOpeningDayAdjustmentRepository(
           }
           if (targetEval.shortfallMinutes > 0) {
             throw new OpeningPlanError("CONFLICT", `目标日期 ${targetActions.targetDate} 的剩余预算不足，缺口 ${targetEval.shortfallMinutes} 分钟。`, "stale_version");
+          }
+        }
+
+        // Enforce the 30% daily card-recovery cap against the exact post-adjustment schedules
+        // using transaction `now` (never double-counting removed + replacement card slots).
+        const sourceCardTaskIds = new Set(
+          sourceCap.tasks.filter(isCardRecoveryTaskRow).map((task) => String(task.id)),
+        );
+        const sourceAddedCardBlocks = sourceAddedBlocks.filter((block) => sourceCardTaskIds.has(block.taskId));
+        if (sourceAddedCardBlocks.length > 0) {
+          const sourcePostBlocks = sortBlocks([
+            ...sourceAfterBlocks.filter((block) => !movedToTargetTaskIds.has(block.taskId)),
+            ...sourceSpilloverBlocks,
+          ]);
+          const sourceDaysToCheck = overlappedLocalDays(sourceAddedCardBlocks, timeZone);
+          if (!sourceDaysToCheck.size) sourceDaysToCheck.add(input.sourceDate);
+          for (const dayKey of sourceDaysToCheck) {
+            if (dayKey === input.sourceDate) {
+              await assertCardRecoveryPlanDayCap(tx, scope, {
+                day: sourceCap,
+                postTasks: sourceCap.tasks,
+                postBlocks: sourcePostBlocks,
+                now,
+              });
+            } else {
+              const extraState = targetActions && dayKey === targetActions.targetDate && targetCap
+                ? targetCap
+                : await readOpeningLearningCapacity(tx, scope, resolveLocalDayBounds(dayKey, timeZone).dayStart);
+              const extraSpillover = collectNonDaySpilloverBlocks({
+                day: input.sourceDate,
+                dayStartMs: extraState.bounds.dayStart.getTime(),
+                nextDayStartMs: extraState.bounds.nextDayStart.getTime(),
+                planEntries: extraState.planEntries,
+                ...(targetActions && dayKey === targetActions.targetDate
+                  ? { excludeDays: new Set([targetActions.targetDate]) }
+                  : {}),
+              });
+              const extraPostBlocks = sortBlocks([
+                ...sourceAfterBlocks.filter((block) => !movedToTargetTaskIds.has(block.taskId)),
+                ...(targetActions && dayKey === targetActions.targetDate ? targetAfterBlocks : []),
+                ...extraSpillover,
+              ]);
+              await assertCardRecoveryPlanDayCap(tx, scope, {
+                day: extraState,
+                postTasks: extraState.tasks,
+                postBlocks: extraPostBlocks,
+                now,
+              });
+            }
+          }
+        }
+
+        if (targetActions && targetCap) {
+          const targetCardTaskIds = new Set(
+            targetCap.tasks.filter(isCardRecoveryTaskRow).map((task) => String(task.id)),
+          );
+          const targetAddedCardBlocks = targetAddedBlocks.filter((block) => targetCardTaskIds.has(block.taskId));
+          if (targetAddedCardBlocks.length > 0) {
+            const targetDaysToCheck = overlappedLocalDays(targetAddedCardBlocks, timeZone);
+            if (!targetDaysToCheck.size) targetDaysToCheck.add(targetActions.targetDate);
+            for (const dayKey of targetDaysToCheck) {
+              if (dayKey === targetActions.targetDate) {
+                await assertCardRecoveryPlanDayCap(tx, scope, {
+                  day: targetCap,
+                  postTasks: targetCap.tasks,
+                  postBlocks: sortBlocks([...targetAfterBlocks, ...targetSpilloverBlocks]),
+                  now,
+                });
+              } else {
+                const extraState = await readOpeningLearningCapacity(
+                  tx,
+                  scope,
+                  resolveLocalDayBounds(dayKey, timeZone).dayStart,
+                );
+                const extraSpillover = collectNonDaySpilloverBlocks({
+                  day: targetActions.targetDate,
+                  dayStartMs: extraState.bounds.dayStart.getTime(),
+                  nextDayStartMs: extraState.bounds.nextDayStart.getTime(),
+                  planEntries: extraState.planEntries,
+                });
+                await assertCardRecoveryPlanDayCap(tx, scope, {
+                  day: extraState,
+                  postTasks: extraState.tasks,
+                  postBlocks: sortBlocks([...targetAfterBlocks, ...extraSpillover]),
+                  now,
+                });
+              }
+            }
           }
         }
 
