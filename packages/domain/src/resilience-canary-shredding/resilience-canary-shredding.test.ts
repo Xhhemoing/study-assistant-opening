@@ -657,6 +657,24 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
           privacyEpoch: 1,
         },
         {
+          recordId: "rec-waiver-rejected-source-chunk",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: null,
+          requiresSourceLineage: false,
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-waiver-rejected-custom-note",
+          recordType: "custom_note",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          requiresSourceLineage: false,
+          privacyEpoch: 1,
+        },
+        {
           recordId: "rec-workspace-meta",
           recordType: "workspace_metadata",
           workspaceId: "ws-1",
@@ -666,8 +684,8 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
           privacyEpoch: 1,
         },
         {
-          recordId: "rec-explicit-exempt",
-          recordType: "custom_note",
+          recordId: "rec-workspace-settings",
+          recordType: "workspace_settings",
           workspaceId: "ws-1",
           workspaceKeyId: "kw-1",
           requiresSourceLineage: false,
@@ -679,12 +697,14 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
     expect(result.status).toBe("approved_after_filtering");
     expect(result.approvedRecords.map((r) => r.recordId)).toEqual([
       "rec-workspace-meta",
-      "rec-explicit-exempt",
+      "rec-workspace-settings",
     ]);
     expect(result.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
       ["rec-chunk-no-lineage", "missing_source_lineage"],
       ["rec-embedding-no-lineage", "missing_source_lineage"],
       ["rec-explicit-required", "missing_source_lineage"],
+      ["rec-waiver-rejected-source-chunk", "missing_source_lineage"],
+      ["rec-waiver-rejected-custom-note", "missing_source_lineage"],
     ]);
   });
 
@@ -1047,12 +1067,43 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       EMERGENCY_ROLLBACK_SLA_MS,
     );
 
-    // Already-expired activeLeases never produce a negative maxDrainWindowMs
+    // Live authoritativeStoreState allows lease acquisition even when caller's local state.synchronizedAtMs is older than 2s
+    const liveStoreSnapshot = createCanaryRolloutState({
+      rolloutId: "rollout-lease",
+      schemaContractBackwardCompatible: true,
+      stage: "10_percent",
+      epoch: 3,
+    });
+    const liveAuthRenew = acquireCandidatePublishLease(
+      { ...initial, synchronizedAtMs: 1_000 },
+      "worker-live-auth",
+      15_000,
+      { authoritativeStoreState: liveStoreSnapshot },
+    );
+    expect(liveAuthRenew.granted).toBe(true);
+    if (liveAuthRenew.granted) {
+      expect(liveAuthRenew.lease.issuedAtMs).toBe(15_000);
+      expect(liveAuthRenew.lease.expiresAtMs).toBe(17_000);
+    }
+
+    // Without explicit certifiedCompleteInventory, even empty/expired activeLeases preserves full 2s drain window for partitioned workers
+    const uncertifiedRollback = triggerEmergencyRollback(
+      initial,
+      "uncertified_partition_drain",
+      15_000,
+      [],
+    );
+    expect(uncertifiedRollback.maxDrainWindowMs).toBe(2_000);
+    expect(uncertifiedRollback.rollbackDeadlineAtMs).toBe(17_000);
+    expect(uncertifiedRollback.withinRollbackSla).toBe(true);
+
+    // Only when caller certifies complete authoritative inventory do already-expired activeLeases clamp maxDrainWindowMs = 0
     const expiredDrainRollback = triggerEmergencyRollback(
       initial,
       "already_expired_leases",
       15_000,
       [acquired.lease],
+      { certifiedCompleteInventory: true },
     );
     expect(expiredDrainRollback.maxDrainWindowMs).toBe(0);
     expect(expiredDrainRollback.rollbackDeadlineAtMs).toBe(15_000);

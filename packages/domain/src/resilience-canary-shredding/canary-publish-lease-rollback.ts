@@ -5,6 +5,7 @@ import type {
   CanaryRolloutState,
   CandidatePublishLease,
   CommitFenceResult,
+  EmergencyRollbackOptions,
   EmergencyRollbackResult,
   ExpandContractRouteInput,
   ExpandContractRouteResult,
@@ -267,11 +268,11 @@ export function acquireCandidatePublishLease(
     };
   }
 
-  const rawSyncAtMs =
-    options?.stateSynchronizedAtMs ?? state.synchronizedAtMs ?? null;
   let expiresAtMs = issuedAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS;
 
   if (!authoritativeState) {
+    const rawSyncAtMs =
+      options?.stateSynchronizedAtMs ?? state.synchronizedAtMs ?? null;
     if (rawSyncAtMs === null) {
       return {
         granted: false,
@@ -300,20 +301,31 @@ export function acquireCandidatePublishLease(
       issuedAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
       syncAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
     );
-  } else if (rawSyncAtMs !== null) {
-    const syncAtMs = assertNonNegativeFinite(
-      rawSyncAtMs,
-      "stateSynchronizedAtMs",
-    );
-    if (
-      issuedAtMs < syncAtMs ||
-      issuedAtMs - syncAtMs > CANDIDATE_PUBLISH_LEASE_TTL_MS
-    ) {
-      return {
-        granted: false,
-        lease: null,
-        reason: "stale_authoritative_snapshot",
-      };
+  } else {
+    // Evaluate staleness against the authoritative snapshot (or treat a live
+    // authoritativeStoreState without an older sync watermark as freshly synced
+    // at nowMs), ignoring any stale local state.synchronizedAtMs.
+    const authRawSyncAtMs =
+      options?.stateSynchronizedAtMs ?? authoritativeState.synchronizedAtMs ?? null;
+    if (authRawSyncAtMs !== null) {
+      const authSyncAtMs = assertNonNegativeFinite(
+        authRawSyncAtMs,
+        "authoritativeStoreState.synchronizedAtMs",
+      );
+      if (
+        issuedAtMs < authSyncAtMs ||
+        issuedAtMs - authSyncAtMs > CANDIDATE_PUBLISH_LEASE_TTL_MS
+      ) {
+        return {
+          granted: false,
+          lease: null,
+          reason: "stale_authoritative_snapshot",
+        };
+      }
+      expiresAtMs = Math.min(
+        issuedAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
+        authSyncAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
+      );
     }
   }
 
@@ -483,11 +495,19 @@ export function triggerEmergencyRollback(
   reason: string,
   rollbackAtMs: number,
   activeLeases?: readonly CandidatePublishLease[],
+  options?: EmergencyRollbackOptions,
 ): EmergencyRollbackResult {
   const normalizedReason = assertNonEmptyString(reason, "reason");
   const triggeredAtMs = assertNonNegativeFinite(rollbackAtMs, "rollbackAtMs");
+  const certifiedComplete = options?.certifiedCompleteInventory === true;
 
-  let maxDrainWindowMs: number = CANDIDATE_PUBLISH_LEASE_TTL_MS;
+  if (certifiedComplete && activeLeases === undefined) {
+    throw new RangeError(
+      "certifiedCompleteInventory requires an explicit activeLeases inventory",
+    );
+  }
+
+  let enumeratedDrainWindowMs = 0;
   if (activeLeases !== undefined) {
     let latestExpiry = triggeredAtMs;
     for (const lease of activeLeases) {
@@ -496,8 +516,14 @@ export function triggerEmergencyRollback(
         latestExpiry = lease.expiresAtMs;
       }
     }
-    maxDrainWindowMs = Math.max(0, latestExpiry - triggeredAtMs);
+    enumeratedDrainWindowMs = Math.max(0, latestExpiry - triggeredAtMs);
   }
+
+  // Unless the caller certifies a complete lease inventory with zero unenumerated
+  // partitioned workers, bound rollback drain by full CANDIDATE_PUBLISH_LEASE_TTL_MS.
+  const maxDrainWindowMs = certifiedComplete
+    ? enumeratedDrainWindowMs
+    : Math.max(CANDIDATE_PUBLISH_LEASE_TTL_MS, enumeratedDrainWindowMs);
 
   const rollbackDeadlineAtMs = triggeredAtMs + maxDrainWindowMs;
   const slaDeadlineAtMs = triggeredAtMs + EMERGENCY_ROLLBACK_SLA_MS;

@@ -445,12 +445,12 @@ function classifyQuarantineRecord(
   const recordSourceId = record.sourceId?.trim() || null;
   const recordSourceKeyId = record.sourceKeyId?.trim() || null;
 
-  const requiresSourceLineage =
-    record.requiresSourceLineage === true ||
-    (record.requiresSourceLineage !== false &&
-      !WORKSPACE_METADATA_RECORD_TYPES.has(record.recordType.trim()));
+  const normalizedKind = record.recordType.trim();
+  const isWorkspaceMetadataExempt =
+    WORKSPACE_METADATA_RECORD_TYPES.has(normalizedKind) &&
+    record.requiresSourceLineage !== true;
 
-  if (requiresSourceLineage && !recordSourceId && !recordSourceKeyId) {
+  if (!isWorkspaceMetadataExempt && !recordSourceId && !recordSourceKeyId) {
     return "missing_source_lineage";
   }
 

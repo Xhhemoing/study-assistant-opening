@@ -469,6 +469,10 @@ export type CommitFenceResult = {
   leaseEpoch: number | null;
 };
 
+export type EmergencyRollbackOptions = {
+  certifiedCompleteInventory?: boolean;
+};
+
 export type EmergencyRollbackResult = {
   previousStage: CanaryRolloutStage;
   previousEpoch: number;
