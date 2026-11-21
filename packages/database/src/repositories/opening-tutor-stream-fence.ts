@@ -5,6 +5,40 @@ import type { TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
 export const TUTOR_STREAM_TTL_SECONDS = 15 * 60;
+
+const unconfirmedStreamSealErrors = new WeakSet<object>();
+
+export class UnconfirmedStreamSealError extends Error {
+  readonly code = "UNCONFIRMED_STREAM_SEAL" as const;
+  override readonly cause: unknown;
+  readonly sealError: unknown;
+  constructor(cause: unknown, sealError: unknown) {
+    super(
+      `tutor stream seal was not confirmed before deadline: ${
+        sealError instanceof Error ? sealError.message : "unknown seal error"
+      }`,
+    );
+    this.name = "UnconfirmedStreamSealError";
+    this.cause = cause;
+    this.sealError = sealError;
+  }
+}
+
+/** Mark a definitive seal rejection without altering the rejected error identity. */
+export function markUnconfirmedStreamSeal(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    unconfirmedStreamSealErrors.add(error);
+  }
+}
+
+export function isUnconfirmedStreamSealError(error: unknown): boolean {
+  if (error instanceof UnconfirmedStreamSealError) return true;
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    if (unconfirmedStreamSealErrors.has(error)) return true;
+    return "code" in error && (error as { code?: unknown }).code === "UNCONFIRMED_STREAM_SEAL";
+  }
+  return false;
+}
 export const tutorStreamKey = (workspaceId: string, jobId: string) =>
   `opening:tutor-stream:${workspaceId.trim().toLowerCase()}:${jobId.trim().toLowerCase()}`;
 export const tutorStreamEpochKey = (workspaceId: string) => `opening:tutor-stream:epoch:${workspaceId.trim().toLowerCase()}`;

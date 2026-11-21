@@ -11,13 +11,13 @@ import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
-import { helpInputSnapshotSchema, openingMaterialPurposePinSchema, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
+import { courseSourcePurposeAllows, helpInputSnapshotSchema, openingMaterialPurposePinSchema, type CourseSourcePurpose, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
-import { fenceCancelledOpeningTutorStream } from "./opening-tutor-stream-fence";
+import { fenceCancelledOpeningTutorStream, isUnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
 
 /** Terminal job error; nextAction "clarify" routes a refusal to the Clarify path (LAB-A01). */
 export type OpeningTutorJobError = { message: string; code?: string; nextAction?: "clarify" };
@@ -75,6 +75,8 @@ async function assertStreamMaterialAdmission(
   scope: OpeningScope,
   turn: StreamTurnBinding,
   materialPurposePin: OpeningMaterialPurposePin | undefined,
+  contextSourceRefs: readonly ContextSourceRef[] = [],
+  verifiedAttemptRefs?: readonly ContextSourceRef[],
 ): Promise<void> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
   const courseId = (typeof turn.course_id === "string" ? turn.course_id : null)
@@ -83,42 +85,77 @@ async function assertStreamMaterialAdmission(
   const turnSourceIds = Array.isArray(turn.source_ids)
     ? [...new Set(turn.source_ids.filter((value): value is string => typeof value === "string"))]
     : [];
+  let pin: OpeningMaterialPurposePin | undefined;
   if (materialPurposePin === undefined) {
     if (turnSourceIds.length) {
       throw Object.assign(new Error("stream material purpose pin missing"), { code: "CONFLICT" });
     }
-    return;
-  }
-  const parsed = openingMaterialPurposePinSchema.safeParse(materialPurposePin);
-  if (!parsed.success) {
-    throw Object.assign(new Error("stream material purpose pin invalid"), { code: "CONFLICT" });
-  }
-  const pin = parsed.data;
-  if ((pin.courseId?.toLowerCase() ?? null) !== (courseId?.toLowerCase() ?? null)
-    || pin.materialUse !== materialUse) {
-    throw Object.assign(new Error("stream material purpose pin mismatch"), { code: "CONFLICT" });
-  }
-  const turnSourceIdSet = new Set(turnSourceIds.map(sourceId => sourceId.toLowerCase()));
-  if (pin.sources.some(source => !turnSourceIdSet.has(source.sourceId.toLowerCase()))) {
-    throw Object.assign(new Error("stream material purpose pin mismatch"), { code: "CONFLICT" });
-  }
-  if (turnSourceIds.length) {
-    if (!pin.sources.length) {
-      throw Object.assign(new Error("stream material purpose pin incomplete"), { code: "CONFLICT" });
+  } else {
+    const parsed = openingMaterialPurposePinSchema.safeParse(materialPurposePin);
+    if (!parsed.success) {
+      throw Object.assign(new Error("stream material purpose pin invalid"), { code: "CONFLICT" });
     }
-    const pinnedIds = new Set(pin.sources.map(source => source.sourceId.toLowerCase()));
-    const unpinned = turnSourceIds.filter(sourceId => !pinnedIds.has(sourceId.toLowerCase()));
-    if (unpinned.length) {
-      const excluded = await tx`SELECT source_id FROM opening_privacy_exclusions
-        WHERE workspace_id=${scope.workspaceId} AND source_id=ANY(${unpinned}::uuid[])`;
-      const excludedIds = new Set(excluded.map(row => String(row.source_id).toLowerCase()));
-      if (unpinned.some(sourceId => !excludedIds.has(sourceId.toLowerCase()))) {
+    pin = parsed.data;
+    if ((pin.courseId?.toLowerCase() ?? null) !== (courseId?.toLowerCase() ?? null)
+      || pin.materialUse !== materialUse) {
+      throw Object.assign(new Error("stream material purpose pin mismatch"), { code: "CONFLICT" });
+    }
+    const turnSourceIdSet = new Set(turnSourceIds.map(sourceId => sourceId.toLowerCase()));
+    if (pin.sources.some(source => !turnSourceIdSet.has(source.sourceId.toLowerCase()))) {
+      throw Object.assign(new Error("stream material purpose pin mismatch"), { code: "CONFLICT" });
+    }
+    if (turnSourceIds.length) {
+      if (!pin.sources.length) {
         throw Object.assign(new Error("stream material purpose pin incomplete"), { code: "CONFLICT" });
       }
+      const pinnedIds = new Set(pin.sources.map(source => source.sourceId.toLowerCase()));
+      const unpinned = turnSourceIds.filter(sourceId => !pinnedIds.has(sourceId.toLowerCase()));
+      if (unpinned.length) {
+        const excluded = await tx`SELECT source_id FROM opening_privacy_exclusions
+          WHERE workspace_id=${scope.workspaceId} AND source_id=ANY(${unpinned}::uuid[])`;
+        const excludedIds = new Set(excluded.map(row => String(row.source_id).toLowerCase()));
+        if (unpinned.some(sourceId => !excludedIds.has(sourceId.toLowerCase()))) {
+          throw Object.assign(new Error("stream material purpose pin incomplete"), { code: "CONFLICT" });
+        }
+      }
+    }
+    if (pin.courseId !== null || pin.sources.length > 0) {
+      await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
     }
   }
-  if (pin.courseId !== null || pin.sources.length > 0) {
-    await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
+  const attemptRefSet = new Set((verifiedAttemptRefs ?? []).map(ref => `${ref.sourceId.toLowerCase()}:${ref.sourceVersion}`));
+  const verifiedAttemptSourceIds = new Set((verifiedAttemptRefs ?? []).map(ref => ref.sourceId.toLowerCase()));
+  const pinnedSourceIds = new Set((pin?.sources ?? []).map(source => source.sourceId.toLowerCase()));
+  const derivedSourceIds = [...new Set([
+    ...contextSourceRefs
+      .filter(ref => !attemptRefSet.has(`${ref.sourceId.toLowerCase()}:${ref.sourceVersion}`))
+      .map(ref => ref.sourceId.toLowerCase()),
+    ...(typeof anchor?.sourceId === "string" && !verifiedAttemptSourceIds.has(anchor.sourceId.toLowerCase())
+      ? [anchor.sourceId.toLowerCase()]
+      : []),
+  ].filter(sourceId => !pinnedSourceIds.has(sourceId)))].sort();
+  if (!derivedSourceIds.length) return;
+  if (courseId === null) {
+    const classified = await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
+      AND asset_type='source' AND asset_id=ANY(${derivedSourceIds}::uuid[]) AND purpose IS NOT NULL FOR SHARE`;
+    if (classified.length) {
+      throw Object.assign(new Error("select a course to use classified materials"), { code: "CONFLICT" });
+    }
+    return;
+  }
+  if (!pin) {
+    const course = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
+      AND archived_at IS NULL FOR SHARE`;
+    if (!course.length) throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
+  }
+  const memberships = await tx`SELECT asset_id,purpose FROM course_asset_memberships
+    WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}
+      AND asset_type='source' AND asset_id=ANY(${derivedSourceIds}::uuid[]) ORDER BY asset_id FOR SHARE`;
+  const bySource = new Map(memberships.map(row => [String(row.asset_id).toLowerCase(), row.purpose as CourseSourcePurpose | null]));
+  for (const sourceId of derivedSourceIds) {
+    if (!bySource.has(sourceId) || !courseSourcePurposeAllows(bySource.get(sourceId) ?? null, materialUse)) {
+      throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+    }
   }
 }
 
@@ -574,49 +611,80 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     async withStreamPublication(scope: OpeningScope, id: string,
       context: StreamPublicationContext & { attemptContext?: TutorAttemptContext }, publish: () => Promise<void>): Promise<void> {
       let transactionClosed = false;
-      await sql.begin(async tx => {
-        // Attempt revisions take the history lock before workspace and observation locks.
-        if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
-        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
-          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
-        if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
-          throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
-        }
-        const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
-          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
-          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
-          WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
-            AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
-            AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid FOR SHARE OF j`;
-        if (!job) throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
-        if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
-          if (!context.attemptContext) throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
-          await assertTutorAttemptContext(tx, scope,
-            { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
-        }
-        await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin);
-        if (context.contextSourceRefs.length) {
-          await assertStreamSources(tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs);
-        }
-        try {
-          await publish();
-        } finally {
-          // postgres.js can reject begin() when the connection dies while this
-          // callback is awaiting Redis. The server has already rolled back.
-          // Keep the abandoned callback from finalizing on the closed socket.
-          if (transactionClosed) await new Promise<never>(() => undefined);
-        }
-      }).catch((error: unknown) => {
+      let unconfirmedSealError: unknown;
+      let hasUnconfirmedSealError = false;
+      const clearExecutionFence = async (db: Sql | TransactionSql) => {
+        await db`UPDATE opening_tutor_jobs
+          SET timing_execution_id = NULL
+          WHERE id = ${id} AND workspace_id = ${scope.workspaceId}
+            AND status = 'running'
+            AND claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
+            AND timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid`;
+      };
+      try {
+        await sql.begin(async tx => {
+          // Attempt revisions take the history lock before workspace and observation locks.
+          if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
+          const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+            WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+          if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
+            throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
+          }
+          const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+            JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+            JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+            WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+              AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
+              AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid
+              AND (j.claim_token IS NULL OR j.timing_execution_id IS NOT NULL) FOR SHARE OF j`;
+          if (!job) throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
+          if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
+            if (!context.attemptContext) throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
+            await assertTutorAttemptContext(tx, scope,
+              { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+          }
+          await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+            context.contextSourceRefs, context.attemptContext?.sourceRefs);
+          if (context.contextSourceRefs.length) {
+            await assertStreamSources(tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs);
+          }
+          try {
+            await publish();
+          } catch (error) {
+            if (!transactionClosed && isUnconfirmedStreamSealError(error)) {
+              // Fail closed in PostgreSQL before releasing locks so unsealed Redis
+              // bytes carrying the old executionId can never pass readStream.
+              unconfirmedSealError = error;
+              hasUnconfirmedSealError = true;
+              await clearExecutionFence(tx);
+              return;
+            }
+            throw error;
+          } finally {
+            // postgres.js can reject begin() when the connection dies while this
+            // callback is awaiting Redis. The server has already rolled back.
+            // Keep the abandoned callback from finalizing on the closed socket.
+            if (transactionClosed) await new Promise<never>(() => undefined);
+          }
+        });
+      } catch (error: unknown) {
         transactionClosed = true;
+        if (hasUnconfirmedSealError) {
+          // Recover from a lock-upgrade deadlock (e.g. concurrent heartbeat) by
+          // persisting the execution fence outside the rolled-back transaction.
+          try { await clearExecutionFence(sql); } catch { /* Best effort; preserve the seal error. */ }
+          throw unconfirmedSealError;
+        }
         throw error;
-      });
+      }
+      if (hasUnconfirmedSealError) throw unconfirmedSealError;
     },
 
     /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */
     async readStream(scope: OpeningScope, id: string, context: StreamPublicationContext & {
       exposureReceiptId: string | null;
       attemptFence?: TutorAttemptFence;
-    }): Promise<OpeningTutorJobRecord | null> {
+    }, commitAuthorized?: (job: OpeningTutorJobRecord) => void): Promise<OpeningTutorJobRecord | null> {
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
@@ -632,7 +700,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
           throw new Error("stream authorization changed");
         }
-        if (context.executionId !== undefined && row.timing_execution_id !== context.executionId) throw new Error("stream execution changed");
+        if ((row.timing_execution_id === null && row.claim_token !== null)
+          || (context.executionId !== undefined && row.timing_execution_id !== context.executionId)) {
+          throw new Error("stream execution changed");
+        }
         const boundAttempt = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId;
         let verifiedAttemptRefs: ContextSourceRef[] | undefined;
         if (boundAttempt || context.attemptFence) {
@@ -642,7 +713,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
           verifiedAttemptRefs = current.sourceRefs;
         }
-        await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin);
+        await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
+          context.contextSourceRefs, verifiedAttemptRefs);
         await assertStreamSources(tx, scope, context.contextSourceRefs, verifiedAttemptRefs);
         if (context.exposureReceiptId) {
           const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
@@ -651,6 +723,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (!exposure) throw new Error("stream exposure does not belong to assistant turn");
           await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
         }
+        commitAuthorized?.(job);
         return job;
       }) as Promise<OpeningTutorJobRecord | null>;
     },

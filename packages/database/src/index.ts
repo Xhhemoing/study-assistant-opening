@@ -63,9 +63,11 @@ export * from "./schema/opening-assistant-candidates";
 export * from "./repositories/opening-candidates";
 export * from "./repositories/opening-tutor-jobs";
 export {
-  advanceOpeningWorkspacePrivacyEpoch, openingRedisConnectionOptions, openingRedisDatabase, openingRedisEndpoint,
+  advanceOpeningWorkspacePrivacyEpoch, isUnconfirmedStreamSealError, markUnconfirmedStreamSeal,
+  openingRedisConnectionOptions, openingRedisDatabase, openingRedisEndpoint,
   sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS,
   tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, tutorStreamPreAnswerHeadKey,
+  UnconfirmedStreamSealError,
 } from "./repositories/opening-tutor-stream-fence";
 export * from "./repositories/opening-context-provenance";
 

@@ -23,7 +23,10 @@ function setup() {
   const unsubscribe = vi.fn(async () => undefined);
   const close = vi.fn();
   const getJob = vi.fn(async () => job as typeof job | { status: "cancelled"; assistantTurnId: string; conversationId: string } | null);
-  const authorizeSnapshot = vi.fn(async (_: TutorStreamSnapshot) => job);
+  const authorizeSnapshot = vi.fn(async (_: TutorStreamSnapshot, commitAuthorized?: (authorizedJob: typeof job) => void) => {
+    commitAuthorized?.(job);
+    return job;
+  });
   const read = vi.fn(async () => cached);
   const subscribe = vi.fn(async (onDelta: () => void, onUnavailable: () => void) => {
     notify = onDelta;
@@ -48,7 +51,7 @@ describe("authorized tutor job event stream", () => {
     deps.read.mockResolvedValue({ ...snapshot("text", 1), executionId: "10000000-0000-4000-8000-000000000001", materialPurposePin });
     const reader = (await deps.open()).body!.getReader();
     const first = await readEvent(reader);
-    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }));
+    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }), expect.any(Function));
     expect(first?.data.executionId).toBe("10000000-0000-4000-8000-000000000001");
     expect(first?.data).not.toHaveProperty("claimToken");
     expect(first?.data).not.toHaveProperty("materialPurposePin");
@@ -64,8 +67,56 @@ describe("authorized tutor job event stream", () => {
     deps.authorizeSnapshot.mockRejectedValueOnce(Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" }));
     const response = await deps.open();
     expect(await response.text()).toBe("");
-    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }));
+    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }), expect.any(Function));
     expect(deps.unsubscribe).toHaveBeenCalledOnce();
+  });
+  it("enqueues authorized bytes synchronously inside commitAuthorized before authorization commits", async () => {
+    const deps = setup();
+    const order: string[] = [];
+    let releaseCommit!: () => void;
+    const commitGate = new Promise<void>(resolve => { releaseCommit = resolve; });
+    deps.authorizeSnapshot.mockImplementationOnce(async (_snap, commitAuthorized) => {
+      order.push("tx-locked");
+      commitAuthorized?.(job);
+      order.push("enqueued-under-lock");
+      await commitGate;
+      order.push("tx-committed");
+      return job;
+    });
+    const reader = (await deps.open()).body!.getReader();
+    const first = await readEvent(reader);
+    expect(first).toEqual({ event: "snapshot", data: {
+      assistantTurnId: job.assistantTurnId, conversationId: job.conversationId, text: "最小提示", sequence: 1,
+    } });
+    // Bytes were delivered to the ReadableStream while authorizeSnapshot still held its lock.
+    expect(order).toEqual(["tx-locked", "enqueued-under-lock"]);
+    releaseCommit();
+    await vi.waitFor(() => expect(order).toEqual(["tx-locked", "enqueued-under-lock", "tx-committed"]));
+    // Subsequent delta after commit does not re-emit snapshot 1.
+    deps.change("最小提示：继续", 2);
+    expect(await readEvent(reader)).toEqual({ event: "delta", data: {
+      assistantTurnId: job.assistantTurnId, conversationId: job.conversationId, text: "：继续", sequence: 2,
+    } });
+    await reader.cancel();
+  });
+  it("aborts commitAuthorized when the stream closed before delivery so the transaction rolls back", async () => {
+    const deps = setup();
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    let commitError: unknown;
+    deps.authorizeSnapshot.mockImplementationOnce(async (_snap, commitAuthorized) => {
+      await readGate;
+      try { commitAuthorized?.(job); }
+      catch (error) { commitError = error; throw error; }
+      return job;
+    });
+    const response = await deps.open();
+    const reader = response.body!.getReader();
+    await vi.waitFor(() => expect(deps.authorizeSnapshot).toHaveBeenCalledOnce());
+    deps.abort.abort();
+    releaseRead();
+    await vi.waitFor(() => expect(commitError).toBeInstanceOf(Error));
+    expect(await readEvent(reader)).toBeNull();
   });
   it("subscribes first, releases help before the first bytes, and reconnects with a full snapshot", async () => {
     const deps = setup();

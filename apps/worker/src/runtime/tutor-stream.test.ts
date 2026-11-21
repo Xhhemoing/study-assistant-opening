@@ -3,7 +3,7 @@ import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
 import {
   createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter, isDefinitiveRedisRejection,
-  isNonMutatingRedisReplyError, withTutorDeltaBatches,
+  isNonMutatingRedisReplyError, isUnconfirmedStreamSealError, UnconfirmedStreamSealError, withTutorDeltaBatches,
 } from "./tutor-stream";
 
 function deferred() {
@@ -100,7 +100,9 @@ it.each(["NOAUTH Authentication required", "NOPERM this user has no permissions"
     const producer = { duplicate: vi.fn().mockReturnValueOnce(append).mockReturnValueOnce(control) };
     const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
     try {
-      await expect(writer.append("workspace", "job", "tail", "execution", 0)).rejects.toBe(sealError);
+      const error = await writer.append("workspace", "job", "tail", "execution", 0).catch(err => err);
+      expect(error).toBe(sealError);
+      expect(isUnconfirmedStreamSealError(error)).toBe(true);
       expect(producer.duplicate).toHaveBeenCalledTimes(2);
     } finally {
       writer.disconnect();
@@ -294,4 +296,66 @@ it("drains overlapping callbacks accepted before close in arrival order", async 
   releaseFirst.resolve();
   await Promise.all([first, second, third, run]);
   expect(published.join("")).toBe("first second third");
+});
+
+it("bounds seal confirmation during a Redis outage and throws UnconfirmedStreamSealError", async () => {
+  vi.useFakeTimers();
+  const appendError = new Error("Command timed out");
+  const connectError = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+  const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+    eval: vi.fn().mockRejectedValue(appendError) };
+  const failingControl = () => ({ status: "end", on: vi.fn(), disconnect: vi.fn(), stream: { destroy: vi.fn() },
+    connect: vi.fn().mockRejectedValue(connectError), eval: vi.fn() });
+  const producer = { duplicate: vi.fn().mockReturnValueOnce(append).mockImplementation(failingControl) };
+  const reportError = vi.fn();
+  const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, reportError, {
+    sealDeadlineMs: 1_200, sealRetryIntervalMs: 500,
+  });
+  try {
+    const result = writer.append("workspace", "job", "tail", "execution", 0).then(
+      () => undefined,
+      error => error,
+    );
+    await vi.advanceTimersByTimeAsync(1_200);
+    const error = await result;
+    expect(error).toBeInstanceOf(UnconfirmedStreamSealError);
+    expect(isUnconfirmedStreamSealError(error)).toBe(true);
+    expect((error as UnconfirmedStreamSealError).cause).toBe(appendError);
+    expect((error as UnconfirmedStreamSealError).sealError).toBe(connectError);
+    expect(reportError).toHaveBeenCalledWith(connectError);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    writer.disconnect();
+    vi.useRealTimers();
+  }
+});
+
+it("aborts a hung seal attempt at sealDeadlineMs and destroys the stuck control socket", async () => {
+  vi.useFakeTimers();
+  const appendError = new Error("Command timed out");
+  const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+    eval: vi.fn().mockRejectedValue(appendError) };
+  const hungControl = { status: "connecting", on: vi.fn(), disconnect: vi.fn(), stream: { destroy: vi.fn() },
+    connect: vi.fn(() => new Promise<void>(() => undefined)), eval: vi.fn() };
+  const producer = { duplicate: vi.fn().mockReturnValueOnce(append).mockReturnValueOnce(hungControl) };
+  const reportError = vi.fn();
+  const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, reportError, {
+    sealDeadlineMs: 1_500,
+  });
+  try {
+    const result = writer.append("workspace", "job", "tail", "execution", 0).then(
+      () => undefined,
+      error => error,
+    );
+    await vi.advanceTimersByTimeAsync(1_500);
+    const error = await result;
+    expect(error).toBeInstanceOf(UnconfirmedStreamSealError);
+    expect(hungControl.disconnect).toHaveBeenCalledOnce();
+    expect(hungControl.stream.destroy).toHaveBeenCalledOnce();
+    expect(reportError).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    writer.disconnect();
+    vi.useRealTimers();
+  }
 });

@@ -51,7 +51,7 @@ import {
   type ResolvedTaskModel,
   type ParentInteractionBudget,
 } from "@aistudy/ai";
-import { isTutorStreamUnavailable, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
+import { isTutorStreamUnavailable, isUnconfirmedStreamSealError, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { prepareTutorNextAction, type TutorNextActionService } from "./tutor-next-action";
 import { withJobHeartbeat } from "../runtime/lifecycle";
@@ -433,13 +433,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             if (!streamAvailable) return;
             try {
               // Keep this inside the publication transaction: on a transport
-              // error the worker writer settles only after Redis confirms the seal.
+              // error the worker writer settles only after Redis confirms the seal
+              // or hits its bounded deadline (throwing UnconfirmedStreamSealError).
               const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId, streamContext.privacyEpoch, attemptFence);
               if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
-            } catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
+            } catch (error) {
+              streamAvailable = false;
+              deps.onStreamUnavailable?.(error);
+              if (isUnconfirmedStreamSealError(error)) throw error;
+            }
           });
         } catch (error) {
-          if (claimed.executionId && deps.stream?.seal) {
+          if (claimed.executionId && deps.stream?.seal && !isUnconfirmedStreamSealError(error)) {
             try { await deps.stream.seal(scope.workspaceId, claimed.id, claimed.executionId); }
             catch (sealError) { deps.onStreamUnavailable?.(sealError); }
           }

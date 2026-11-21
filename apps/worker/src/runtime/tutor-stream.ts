@@ -1,10 +1,11 @@
 import type IORedis from "ioredis";
-import { setTimeout as delay } from "node:timers/promises";
 import {
-  parseContextSourceRefs, sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema,
-  tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, tutorStreamPreAnswerHeadKey, type ContextSourceRef, type TutorAttemptFence,
+  isUnconfirmedStreamSealError, markUnconfirmedStreamSeal, parseContextSourceRefs, sealOpeningTutorStream,
+  TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema, tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey,
+  tutorStreamPreAnswerHeadKey, UnconfirmedStreamSealError, type ContextSourceRef, type TutorAttemptFence,
 } from "@aistudy/database";
 import { openingMaterialPurposePinSchema, uuidSchema, type OpeningMaterialPurposePin } from "@aistudy/contracts";
+export { isUnconfirmedStreamSealError, UnconfirmedStreamSealError };
 
 export type TutorStreamContext = {
   privacyEpoch: number;
@@ -204,8 +205,20 @@ export function createTutorStreamWriter(redis: IORedis) {
 }
 export type TutorStreamWriter = ReturnType<typeof createTutorStreamWriter>;
 
+export const DEFAULT_SEAL_DEADLINE_MS = 1_500;
+const DEFAULT_SEAL_RETRY_INTERVAL_MS = 500;
+
+export type WorkerTutorStreamWriterOptions = {
+  sealDeadlineMs?: number;
+  sealRetryIntervalMs?: number;
+};
+
 /** The worker holds PostgreSQL publication locks until this append settles. */
-export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (error: unknown) => void) {
+export function createWorkerTutorStreamWriter(
+  producer: IORedis,
+  reportError: (error: unknown) => void,
+  options: WorkerTutorStreamWriterOptions = {},
+) {
   // Control and append both own their sockets so a timeout never closes the queue producer.
   let controlConnection: ReturnType<typeof openConnection> | undefined;
   let appendConnection: ReturnType<typeof openConnection> | undefined;
@@ -270,18 +283,59 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
     return connection;
   }
 
-  async function sealUntilConfirmed(workspaceId: string, jobId: string, executionId: string) {
+  async function sealUntilConfirmed(workspaceId: string, jobId: string, executionId: string, appendError: unknown) {
+    const deadlineMs = Math.max(1, options.sealDeadlineMs ?? DEFAULT_SEAL_DEADLINE_MS);
+    const retryIntervalMs = Math.max(1, options.sealRetryIntervalMs ?? DEFAULT_SEAL_RETRY_INTERVAL_MS);
     let reported = false;
-    for (;;) {
-      try {
-        await seal(workspaceId, jobId, executionId);
-        return;
-      } catch (error) {
-        if (isDefinitiveSealRejection(error)) throw error;
-        if (reported) await delay(500);
-        else reportError(error);
+    let expired = false;
+    let lastSealError: unknown;
+    let rejectDeadline!: (error: Error) => void;
+    const deadlineReached = new Promise<never>((_resolve, reject) => { rejectDeadline = reject; });
+    void deadlineReached.catch(() => undefined);
+    const timer = setTimeout(() => {
+      expired = true;
+      retireControl();
+      const timeoutError = lastSealError ?? new Error(`tutor stream seal timed out after ${deadlineMs}ms`);
+      if (!reported) {
+        reportError(timeoutError);
         reported = true;
       }
+      rejectDeadline(new UnconfirmedStreamSealError(appendError, timeoutError));
+    }, deadlineMs);
+    try {
+      for (;;) {
+        if (expired) {
+          throw new UnconfirmedStreamSealError(
+            appendError,
+            lastSealError ?? new Error(`tutor stream seal timed out after ${deadlineMs}ms`),
+          );
+        }
+        try {
+          const attempt = seal(workspaceId, jobId, executionId);
+          void attempt.catch(() => undefined);
+          await Promise.race([attempt, deadlineReached]);
+          return;
+        } catch (error) {
+          if (isUnconfirmedStreamSealError(error)) throw error;
+          lastSealError = error;
+          if (isDefinitiveSealRejection(error)) {
+            markUnconfirmedStreamSeal(error);
+            throw error;
+          }
+          if (expired) throw new UnconfirmedStreamSealError(appendError, error);
+          if (reported) {
+            let retryTimer: ReturnType<typeof setTimeout> | undefined;
+            const retryWait = new Promise<void>(resolve => { retryTimer = setTimeout(resolve, retryIntervalMs); });
+            try { await Promise.race([retryWait, deadlineReached]); }
+            finally { clearTimeout(retryTimer); }
+          } else {
+            reportError(error);
+          }
+          reported = true;
+        }
+      }
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -305,11 +359,10 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
       } catch (error) {
         disconnectAppend(connection);
         if (isNonMutatingRedisReplyError(error)) throw error;
-        // Redis may still execute bytes already in transit. A confirmed seal on
-        // the control connection orders that EVAL on Redis: it either already
-        // ran under the PG locks, or sees the seal (or a missing/new execution).
-        // An unavailable control connection must keep the PG locks held.
-        await sealUntilConfirmed(workspaceId, jobId, executionId ?? "");
+        // Redis may still execute bytes already in transit. Try to confirm a
+        // seal within a bounded deadline; on expiry, throw UnconfirmedStreamSealError
+        // so withStreamPublication fences the execution in PostgreSQL before releasing locks.
+        await sealUntilConfirmed(workspaceId, jobId, executionId ?? "", error);
         throw error;
       }
     },

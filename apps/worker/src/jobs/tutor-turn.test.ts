@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
-import { OpeningBudgetError, type OpeningTutorJobsRepository, type OpeningTutorTimingInput } from "@aistudy/database";
+import { OpeningBudgetError, UnconfirmedStreamSealError, type OpeningTutorJobsRepository, type OpeningTutorTimingInput } from "@aistudy/database";
 import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
@@ -1592,5 +1592,47 @@ describe("tutor turn handler", () => {
     // Unknown invented id dropped; currentPage=1 → prefer chunkA only.
     expect(completeArg.citations.map((c) => c.chunkId)).toEqual([chunkA.id]);
     expect(completeArg.citations[0]).toMatchObject({ page: 1 });
+  });
+
+  it("propagates UnconfirmedStreamSealError out of withStreamPublication, skips redundant seal, and fails the job with preserved claimToken", async () => {
+    const { deps, provider, tutorJobs, budget } = setup();
+    const sealError = new UnconfirmedStreamSealError(new Error("Command timed out"), new Error("connect ECONNREFUSED"));
+    const onStreamUnavailable = vi.fn();
+    let seenByPublication: unknown;
+    tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, _context, publish) => {
+      try {
+        await publish();
+      } catch (error) {
+        seenByPublication = error;
+        throw error;
+      }
+    });
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => { throw sealError; }),
+    };
+    let capturedSignal: AbortSignal | undefined;
+    provider.complete.mockImplementationOnce(async (_input, signal, delta) => {
+      capturedSignal = signal;
+      await delta("First");
+      return { text: "First", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+
+    await expect(createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)).rejects.toBe(sealError);
+    expect(seenByPublication).toBe(sealError);
+    expect(onStreamUnavailable).toHaveBeenCalledWith(sealError);
+    expect(stream.seal).not.toHaveBeenCalled();
+    expect(capturedSignal?.aborted).toBe(true);
+    expect(capturedSignal?.reason).toBe(sealError);
+    expect(budget.markUnknown).toHaveBeenCalledOnce();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledWith(
+      { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      claimedJob.id,
+      expect.any(String),
+      undefined,
+      claimedJob.claimToken,
+    );
   });
 });

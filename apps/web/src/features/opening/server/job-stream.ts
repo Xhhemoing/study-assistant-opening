@@ -21,7 +21,7 @@ export async function createJobStreamResponse(input: {
   signal: AbortSignal;
   reader: StreamReader;
   getJob(): Promise<StreamJob | null>;
-  authorizeSnapshot(snapshot: TutorStreamSnapshot): Promise<StreamJob | null>;
+  authorizeSnapshot(snapshot: TutorStreamSnapshot, commitAuthorized?: (job: StreamJob) => void): Promise<StreamJob | null>;
   close(): void;
 }): Promise<Response> {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -56,6 +56,21 @@ export async function createJobStreamResponse(input: {
     send("terminal", { status: job.status, assistantTurnId: job.assistantTurnId, conversationId: job.conversationId });
     close();
   };
+  const emitSnapshot = (job: StreamJob, snapshot: TutorStreamSnapshot | null) => {
+    const executionId = snapshot?.text ? snapshot.executionId : undefined;
+    const identity = { assistantTurnId: job.assistantTurnId, conversationId: job.conversationId, ...(executionId ? { executionId } : {}) };
+    const text = snapshot?.text ?? "";
+    const sequence = snapshot?.sequence ?? 0;
+    if (firstSnapshot || executionId !== sentExecutionId || sequence < sentSequence || sequence > sentSequence + 1 || !text.startsWith(sentText)) {
+      send("snapshot", { ...identity, text, sequence }, sequence);
+      firstSnapshot = false;
+    } else if (sequence > sentSequence && text.length > sentText.length) {
+      send("delta", { ...identity, text: text.slice(sentText.length), sequence }, sequence);
+    }
+    sentText = text;
+    sentSequence = sequence;
+    sentExecutionId = executionId;
+  };
   const flush = async () => {
     if (!controller || closed || busy) return;
     busy = true;
@@ -65,27 +80,23 @@ export async function createJobStreamResponse(input: {
         const snapshot = await input.reader.read();
         if (closed) break;
         // Empty snapshots never deliver help. Every nonempty batch is checked
-        // against live source/privacy facts before its bytes leave the server.
+        // against live source/privacy facts and enqueued synchronously before
+        // readStream releases its PostgreSQL locks.
+        let deliveredInTransaction = false;
+        const commitAuthorized = (authorizedJob: StreamJob) => {
+          if (closed || !controller) throw new Error("stream closed before delivery");
+          if (authorizedJob.status !== "running" || deliveredInTransaction) return;
+          deliveredInTransaction = true;
+          emitSnapshot(authorizedJob, snapshot);
+        };
         const job = snapshot?.text
-          ? await input.authorizeSnapshot(snapshot)
+          ? await input.authorizeSnapshot(snapshot, commitAuthorized)
           : await input.getJob();
         if (closed) break;
         if (!job) { close(); break; }
         if (isTerminal(job)) { terminal(job); break; }
         if (snapshot?.text && job.status !== "running") break;
-        const executionId = snapshot?.text ? snapshot.executionId : undefined;
-        const identity = { assistantTurnId: job.assistantTurnId, conversationId: job.conversationId, ...(executionId ? { executionId } : {}) };
-        const text = snapshot?.text ?? "";
-        const sequence = snapshot?.sequence ?? 0;
-        if (firstSnapshot || executionId !== sentExecutionId || sequence < sentSequence || sequence > sentSequence + 1 || !text.startsWith(sentText)) {
-          send("snapshot", { ...identity, text, sequence }, sequence);
-          firstSnapshot = false;
-        } else if (sequence > sentSequence && text.length > sentText.length) {
-          send("delta", { ...identity, text: text.slice(sentText.length), sequence }, sequence);
-        }
-        sentText = text;
-        sentSequence = sequence;
-        sentExecutionId = executionId;
+        if (!deliveredInTransaction) emitSnapshot(job, snapshot);
       } while (pending && !closed);
     } catch {
       // The normal job endpoint remains the recovery path. In particular,
@@ -162,7 +173,7 @@ export async function openTutorJobStream(
         subscribe: (onDelta, onUnavailable) => reader.subscribe(scope.workspaceId, job.id, onDelta, onUnavailable),
       },
       getJob: () => jobs.get(scope, job.id),
-      authorizeSnapshot: snapshot => jobs.readStream(scope, job.id, snapshot),
+      authorizeSnapshot: (snapshot, commitAuthorized) => jobs.readStream(scope, job.id, snapshot, commitAuthorized),
       close: () => redis.disconnect(),
     });
   } catch (error) {

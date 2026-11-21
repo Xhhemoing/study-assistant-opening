@@ -12,7 +12,7 @@ import { createProducerRedisConnection } from "../../apps/worker/src/runtime/que
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter,
-  type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
+  UnconfirmedStreamSealError, type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
 import { getTutorJobService } from "../../apps/web/src/features/opening/server/data-services";
 import { createJobStreamResponse } from "../../apps/web/src/features/opening/server/job-stream";
 import { deleteOwnedMemory } from "../../packages/database/src/repositories/opening-memory-delete";
@@ -588,7 +588,7 @@ it("blocks Redis append and HTTP SSE delivery when course membership is removed 
       job: authorizedJob, signal: new AbortController().signal,
       reader: { read: async () => { entered.resolve(); await release.promise; return cached; }, subscribe: async () => async () => {} },
       getJob: () => jobs.get(scope, secondTurn.jobId),
-      authorizeSnapshot: snapshot => jobs.readStream(scope, secondTurn.jobId, snapshot),
+      authorizeSnapshot: (snapshot, commitAuthorized) => jobs.readStream(scope, secondTurn.jobId, snapshot, commitAuthorized),
       close: () => {},
     });
     try {
@@ -607,7 +607,7 @@ it("blocks Redis append and HTTP SSE delivery when course membership is removed 
       job: authorizedJob, signal: new AbortController().signal,
       reader: { read: () => reader.read(scope.workspaceId, secondTurn.jobId), subscribe: async () => async () => {} },
       getJob: () => jobs.get(scope, secondTurn.jobId),
-      authorizeSnapshot: snapshot => jobs.readStream(scope, secondTurn.jobId, snapshot),
+      authorizeSnapshot: (snapshot, commitAuthorized) => jobs.readStream(scope, secondTurn.jobId, snapshot, commitAuthorized),
       close: () => {},
     });
     expect(await reconnect.text()).toBe("");
@@ -616,6 +616,227 @@ it("blocks Redis append and HTTP SSE delivery when course membership is removed 
     resume.resolve();
     await settled;
     await unsubscribe();
+    await fixture.close();
+  }
+});
+
+it.each(["cancel", "membership removal"] as const)(
+  "serializes SSE controller.enqueue inside readStream transaction against concurrent %s",
+  async revocation => {
+    const fixture = await createOpeningFixture();
+    const { scope, sql } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const deliverySession = openRaceSession(), revocationSession = openRaceSession();
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "ReadStream Barrier", slug: randomUUID() });
+    const sourceId = randomUUID();
+    await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      VALUES (${sourceId},${scope.workspaceId},'barrier.txt','text/plain',12,${"b".repeat(64)},0,'uploaded','ready')`;
+    await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+      VALUES (${sourceId},0,${scope.workspaceId},'available')`;
+    const membershipInput = { workspaceId: scope.workspaceId, courseId: course.id, assetType: "source" as const, assetId: sourceId };
+    await courses.addAssetMembership({ ...membershipInput, role: "core", sortOrder: 0, visibility: "course", purpose: "teaching" });
+    const conversation = await conversations.create(scope, { title: "SSE barrier", courseId: course.id });
+
+    const prepareTurn = async (text: string) => {
+      const turn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id, text: "Explain",
+        mode: "explain", clientKey: randomUUID(), sourceIds: [sourceId], learningSessionId: null, currentPage: null, chunkId: null });
+      keys.push(tutorStreamKey(scope.workspaceId, turn.jobId), tutorStreamEpochKey(scope.workspaceId));
+      const claimed = (await jobs.claim(turn.jobId))!;
+      const materialPurposePin = await createOpeningCourseReadySourcesRepository(sql).readMaterialPurposePin(scope, {
+        courseId: course.id, materialUse: "citation", sourceIds: [sourceId],
+      });
+      const context = { privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 0 }], exposureReceiptId: null,
+        claimToken: claimed.claimToken, executionId: claimed.executionId, materialPurposePin };
+      await jobs.withStreamPublication(scope, turn.jobId, context, async () => {
+        await writer.begin(scope.workspaceId, turn.jobId, context);
+        expect(await writer.append(scope.workspaceId, turn.jobId, text, claimed.executionId, 0)).toBe(1);
+      });
+      return { turn, claimed, cached: (await reader.read(scope.workspaceId, turn.jobId))! };
+    };
+
+    const enqueued = deferred(), releaseCommit = deferred();
+    try {
+      await Promise.all([deliverySession.ready, revocationSession.ready]);
+      // Order 1: readStream acquires locks first; controller.enqueue finishes BEFORE revocation can commit.
+      const first = await prepareTurn("Delivered under lock");
+      const proxiedDeliverySql = new Proxy(deliverySession.sql, {
+        get(target, prop, receiver) {
+          if (prop === "begin") {
+            return (fn: (tx: unknown) => Promise<unknown>) => target.begin(async tx => {
+              const result = await fn(tx);
+              enqueued.resolve();
+              await releaseCommit.promise;
+              return result;
+            });
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      const deliveryJobs = createOpeningTutorJobsRepository(proxiedDeliverySql);
+      const response = await createJobStreamResponse({
+        job: first.claimed, signal: new AbortController().signal,
+        reader: { read: async () => first.cached, subscribe: async () => async () => {} },
+        getJob: () => jobs.get(scope, first.turn.jobId),
+        authorizeSnapshot: (snapshot, commitAuthorized) => deliveryJobs.readStream(scope, first.turn.jobId, snapshot, commitAuthorized),
+        close: () => {},
+      });
+      const streamReader = response.body!.getReader();
+      await enqueued.promise;
+      // Bytes were enqueued synchronously inside readStream BEFORE COMMIT released PG locks.
+      const chunk = await streamReader.read();
+      expect(new TextDecoder().decode(chunk.value)).toContain("Delivered under lock");
+
+      const revoking = revocation === "cancel"
+        ? track(createOpeningTutorJobsRepository(revocationSession.sql).cancel(scope, first.turn.jobId))
+        : track(createCourseMembershipRepository(revocationSession.sql).removeAssetMembership(membershipInput));
+      try {
+        await waitUntilBlocked(sql, revocationSession.pid, deliverySession.pid, revocation);
+      } finally {
+        releaseCommit.resolve();
+      }
+      await revoking;
+      await streamReader.cancel();
+
+      // Order 2: revocation commits first; readStream sees revoked state and commitAuthorized NEVER fires.
+      if (revocation === "membership removal") {
+        await courses.addAssetMembership({ ...membershipInput, role: "core", sortOrder: 0, visibility: "course", purpose: "teaching" });
+      }
+      const second = await prepareTurn("Never emit after revocation");
+      if (revocation === "cancel") await jobs.cancel(scope, second.turn.jobId);
+      else await courses.removeAssetMembership(membershipInput);
+
+      const commitSpy = vi.fn();
+      const afterRevocation = await createJobStreamResponse({
+        job: second.claimed, signal: new AbortController().signal,
+        reader: { read: async () => second.cached, subscribe: async () => async () => {} },
+        getJob: () => jobs.get(scope, second.turn.jobId),
+        authorizeSnapshot: (snapshot, commitAuthorized) => jobs.readStream(scope, second.turn.jobId, snapshot, authorized => {
+          commitSpy(authorized);
+          commitAuthorized?.(authorized);
+        }),
+        close: () => {},
+      });
+      const body = await afterRevocation.text();
+      expect(commitSpy).not.toHaveBeenCalled();
+      expect(body).not.toContain("Never emit after revocation");
+      if (revocation === "cancel") expect(body).toContain("event: terminal");
+      else expect(body).toBe("");
+    } finally {
+      releaseCommit.resolve();
+      await Promise.all([closeRace(deliverySession.sql), closeRace(revocationSession.sql), fixture.close()]);
+    }
+  },
+  15_000,
+);
+
+it("bounds seal confirmation during a Redis outage, fences timing_execution_id in PostgreSQL, and unblocks Stop and failure cleanup", async () => {
+  const { fixture, scope, sql, reader, writer, jobs, jobId } = await streamFixture();
+  const publication = openRaceSession(), revocationSession = openRaceSession();
+  const appendTransport = await openRedisTransport(redisUrl);
+  const blackholeSockets = new Set<import("node:net").Socket>();
+  const blackhole = createServer(socket => {
+    blackholeSockets.add(socket);
+    socket.on("close", () => blackholeSockets.delete(socket));
+  });
+  blackhole.listen(0, "127.0.0.1");
+  await once(blackhole, "listening");
+  const blackholePort = (blackhole.address() as AddressInfo).port;
+  const blackholeUrl = `redis://127.0.0.1:${blackholePort}`;
+  const producer = redis.duplicate();
+  vi.spyOn(producer, "duplicate")
+    .mockImplementationOnce(options => redis.duplicate({ ...options, host: "127.0.0.1", port: appendTransport.port, commandTimeout: 120 }))
+    .mockImplementation(options => redis.duplicate({ ...options, host: "127.0.0.1", port: blackholePort, connectTimeout: 5_000, commandTimeout: 5_000 }));
+  const appendWriter = createWorkerTutorStreamWriter(producer, vi.fn(), { sealDeadlineMs: 180, sealRetryIntervalMs: 40 });
+  try {
+    await Promise.all([publication.ready, revocationSession.ready]);
+    const job = (await jobs.claim(jobId))!;
+    const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+      claimToken: job.claimToken, executionId: job.executionId };
+    await writer.begin(scope.workspaceId, jobId, context);
+    expect(await appendWriter.append(scope.workspaceId, jobId, "First", job.executionId, 0)).toBe(1);
+
+    const stalledAppend = appendTransport.holdWrites();
+    const startedAt = performance.now();
+    const publishing = track(createOpeningTutorJobsRepository(publication.sql).withStreamPublication(scope, jobId, context, async () => {
+      await appendWriter.append(scope.workspaceId, jobId, " unsealed tail", job.executionId, 0);
+    }));
+    try {
+      await Promise.race([stalledAppend.received, publishing.then(() => { throw new Error("append settled before TCP hold"); })]);
+      const err = await publishing.catch(error => error);
+      expect(err).toBeInstanceOf(UnconfirmedStreamSealError);
+      expect(performance.now() - startedAt).toBeLessThan(2_000);
+
+      // PostgreSQL cleared timing_execution_id while preserving claim_token so cleanup still works.
+      const [row] = await sql`SELECT status, claim_token, timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`;
+      expect(row).toMatchObject({ status: "running", claim_token: job.claimToken, timing_execution_id: null });
+
+      // Even if Redis recovers later and accepts the in-flight unsealed append, readStream rejects it fail-closed.
+      const reply = stalledAppend.nextReply();
+      stalledAppend.release();
+      expect(await reply).toBe(":2\r\n");
+      const staleSnapshot = (await reader.read(scope.workspaceId, jobId))!;
+      expect(staleSnapshot).toMatchObject({ text: "First unsealed tail", sequence: 2, executionId: job.executionId });
+      await expect(jobs.readStream(scope, jobId, staleSnapshot)).rejects.toThrow("stream execution changed");
+      const sse = await createJobStreamResponse({
+        job, signal: new AbortController().signal,
+        reader: { read: async () => staleSnapshot, subscribe: async () => async () => {} },
+        getJob: () => jobs.get(scope, jobId),
+        authorizeSnapshot: (snapshot, commitAuthorized) => jobs.readStream(scope, jobId, snapshot, commitAuthorized),
+        close: () => {},
+      });
+      expect(await sse.text()).toBe("");
+
+      // Stop (cancel) succeeds in PostgreSQL even while Redis remains blackholed.
+      const cancelled = await createOpeningTutorJobsRepository(revocationSession.sql, { tutorStreamRedisUrl: blackholeUrl })
+        .cancel(scope, jobId);
+      expect(cancelled).toMatchObject({ status: "cancelled" });
+    } finally {
+      stalledAppend.release();
+      await Promise.allSettled([publishing]);
+    }
+  } finally {
+    appendWriter.disconnect();
+    producer.disconnect();
+    for (const socket of blackholeSockets) socket.destroy();
+    await new Promise<void>(resolve => { blackhole.close(() => resolve()); });
+    await Promise.all([appendTransport.close(), closeRace(publication.sql), closeRace(revocationSession.sql), fixture.close()]);
+  }
+}, 15_000);
+
+it("revokes a course stream using derived historySourceRefs when the history source is detached from the course", async () => {
+  const fixture = await createOpeningFixture();
+  const { scope, sql } = fixture;
+  const courses = createCourseMembershipRepository(sql);
+  const conversations = createOpeningConversationRepository(sql);
+  const jobs = createOpeningTutorJobsRepository(sql);
+  const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Derived Lineage", slug: randomUUID() });
+  const sourceId = randomUUID();
+  await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${sourceId},${scope.workspaceId},'derived.txt','text/plain',12,${"c".repeat(64)},0,'uploaded','ready')`;
+  await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+    VALUES (${sourceId},0,${scope.workspaceId},'available')`;
+  const membershipInput = { workspaceId: scope.workspaceId, courseId: course.id, assetType: "source" as const, assetId: sourceId };
+  await courses.addAssetMembership({ ...membershipInput, role: "core", sortOrder: 0, visibility: "course", purpose: "teaching" });
+  const conversation = await conversations.create(scope, { title: "Derived history stream", courseId: course.id });
+  const turn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id, text: "Follow-up",
+    mode: "explain", clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
+  try {
+    const claimed = (await jobs.claim(turn.jobId))!;
+    const materialPurposePin = await createOpeningCourseReadySourcesRepository(sql).readMaterialPurposePin(scope, {
+      courseId: course.id, materialUse: "citation", sourceIds: [],
+    });
+    const context = { privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 0 }], exposureReceiptId: null,
+      claimToken: claimed.claimToken, executionId: claimed.executionId, materialPurposePin };
+    await jobs.withStreamPublication(scope, turn.jobId, context, async () => {});
+    expect(await jobs.readStream(scope, turn.jobId, context)).toMatchObject({ status: "running" });
+
+    await courses.removeAssetMembership(membershipInput);
+    await expect(jobs.withStreamPublication(scope, turn.jobId, context, async () => {})).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.readStream(scope, turn.jobId, context)).rejects.toMatchObject({ code: "CONFLICT" });
+  } finally {
     await fixture.close();
   }
 });

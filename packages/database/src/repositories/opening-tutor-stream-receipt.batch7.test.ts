@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
+import { UnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
 const hooks = vi.hoisted(() => ({ release: vi.fn(), lock: vi.fn(), readAttempt: vi.fn() }));
 vi.mock("./opening-study-exposure", async original => ({ ...await original<typeof import("./opening-study-exposure")>(), releaseOpeningStudyExposure: hooks.release }));
 vi.mock("./opening-learning-facts", async original => ({ ...await original<typeof import("./opening-learning-facts")>(), lockWorkspaceLearningHistory: hooks.lock }));
@@ -20,25 +21,39 @@ const context = { privacyEpoch: 2, contextSourceRefs: [], exposureReceiptId: rec
 const job = { id: jobId, workspace_id: workspace, conversation_id: "conversation", user_turn_id: user, assistant_turn_id: assistant,
   status: "running", mode: "hint", error: null, created_at: time, updated_at: time, claim_token: token, timing_execution_id: execution,
   attempt_id: null, context_anchor: null, source_ids: [] as string[], course_id: null as string | null };
-type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; epoch?: number; token?: string; execution?: string;
+type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; epoch?: number; token?: string; execution?: string | null;
   unavailableSource?: boolean; missingExposure?: boolean; failAt?: string; boundAttempt?: string; anchorAttempt?: string;
-  courseId?: string | null; sourceIds?: string[]; membershipRemoved?: boolean; archivedCourse?: boolean };
+  courseId?: string | null; sourceIds?: string[]; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
+  derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null };
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt}`);
+  const txEvents: string[] = [];
   const tx = Object.assign(vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
     const sql = parts.join("?").replace(/\s+/g, " ").trim();
+    if (sql.startsWith("UPDATE opening_tutor_jobs SET timing_execution_id = NULL")) {
+      calls.push({ sql, values });
+      txEvents.push("clear-execution-fence");
+      return [];
+    }
     if (!sql.startsWith("SELECT")) return "fragment";
     calls.push({ sql, values });
     if (options.failAt && sql.startsWith(options.failAt)) throw failure;
     if (sql.startsWith("SELECT privacy_epoch")) return options.missingWorkspace ? [] : [{ privacy_epoch: options.epoch ?? 2 }];
     if (sql.startsWith("SELECT j.*,t.attempt_id") || sql.startsWith("SELECT j.user_turn_id,t.attempt_id")) {
-      return options.missingJob ? [] : [{ ...job, status: options.status ?? "running", claim_token: options.token ?? token, timing_execution_id: options.execution ?? execution,
+      const execValue = options.execution === undefined ? execution : options.execution;
+      return options.missingJob ? [] : [{ ...job, status: options.status ?? "running", claim_token: options.token ?? token, timing_execution_id: execValue,
         attempt_id: options.boundAttempt ?? null, context_anchor: options.anchorAttempt ? { attemptId: options.anchorAttempt } : null,
         source_ids: options.sourceIds ?? [], course_id: options.courseId ?? null }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
     if (sql.startsWith("SELECT s.id,s.version FROM opening_sources")) return options.unavailableSource ? [] : [{ id: sourceId, version: 0 }];
+    if (sql.startsWith("SELECT id FROM course_asset_memberships")) {
+      return options.classifiedStandalone ? [{ id: membershipId }] : [];
+    }
+    if (sql.startsWith("SELECT asset_id,purpose FROM course_asset_memberships")) {
+      return options.membershipRemoved ? [] : [{ asset_id: sourceId, purpose: options.derivedMembershipPurpose ?? "teaching" }];
+    }
     if (sql.startsWith("SELECT id,asset_id,purpose")) {
       return options.membershipRemoved ? [] : [{ id: membershipId, asset_id: sourceId, purpose: "teaching", purpose_revision: purposeRevision }];
     }
@@ -47,8 +62,20 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT id FROM opening_help_exposures")) return options.missingExposure ? [] : [{ id: receipt }];
     throw new Error(`Unsupported fixture query: ${sql}`);
   }), { json: (value: unknown) => value });
-  const sql = Object.assign(vi.fn(), { begin: async (fn: (tx: unknown) => Promise<unknown>) => fn(tx) });
-  return { repo: createOpeningTutorJobsRepository(sql as unknown as Sql), tx, calls, failure };
+  const sql = Object.assign(vi.fn(), {
+    begin: async (fn: (tx: unknown) => Promise<unknown>) => {
+      txEvents.push("begin");
+      try {
+        const result = await fn(tx);
+        txEvents.push("commit");
+        return result;
+      } catch (error) {
+        txEvents.push("rollback");
+        throw error;
+      }
+    },
+  });
+  return { repo: createOpeningTutorJobsRepository(sql as unknown as Sql), tx, calls, txEvents, failure };
 }
 beforeEach(() => { vi.resetAllMocks(); hooks.lock.mockResolvedValue(undefined); hooks.release.mockResolvedValue({ id: receipt });
   hooks.readAttempt.mockResolvedValue({ anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null, currentAnswer: null }); });
@@ -173,5 +200,53 @@ describe("stream receipt release waits for current job authorization and assista
     await expect(f.repo.readStream(scope, jobId, { ...context, materialPurposePin: value as unknown as typeof pin }))
       .rejects.toThrow(message);
     expect(hooks.release).not.toHaveBeenCalled();
+  });
+  it("invokes commitAuthorized synchronously inside readStream transaction before commit and skips on terminal or rejection", async () => {
+    const f = fixture();
+    const commitAuthorized = vi.fn(() => { f.txEvents.push("commit-authorized"); });
+    const out = await f.repo.readStream(scope, jobId, context, commitAuthorized);
+    expect(out).toMatchObject({ id: jobId, status: "running" });
+    expect(commitAuthorized).toHaveBeenCalledExactlyOnceWith(out);
+    expect(f.txEvents).toEqual(["begin", "commit-authorized", "commit"]);
+
+    const terminal = fixture({ status: "cancelled" });
+    const terminalCommit = vi.fn();
+    expect(await terminal.repo.readStream(scope, jobId, context, terminalCommit)).toMatchObject({ status: "cancelled" });
+    expect(terminalCommit).not.toHaveBeenCalled();
+
+    const rejected = fixture({ courseId, sourceIds: [sourceId], membershipRemoved: true });
+    const rejectedCommit = vi.fn();
+    await expect(rejected.repo.readStream(scope, jobId, { ...context, materialPurposePin: pin }, rejectedCommit))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(rejectedCommit).not.toHaveBeenCalled();
+    expect(rejected.txEvents).toEqual(["begin", "rollback"]);
+  });
+  it("fences timing_execution_id in PostgreSQL before releasing locks on UnconfirmedStreamSealError and rejects fenced reads", async () => {
+    const f = fixture();
+    const sealError = new UnconfirmedStreamSealError(new Error("append timed out"), new Error("redis down"));
+    await expect(f.repo.withStreamPublication(scope, jobId, context, async () => { throw sealError; }))
+      .rejects.toBe(sealError);
+    expect(f.txEvents).toEqual(["begin", "clear-execution-fence", "commit"]);
+    expect(f.calls.some(c => c.sql.startsWith("UPDATE opening_tutor_jobs SET timing_execution_id = NULL"))).toBe(true);
+
+    const fenced = fixture({ execution: null });
+    await expect(fenced.repo.readStream(scope, jobId, context)).rejects.toThrow("stream execution changed");
+    await expect(fenced.repo.readStream(scope, jobId, { ...context, executionId: undefined })).rejects.toThrow("stream execution changed");
+    expect(hooks.release).not.toHaveBeenCalled();
+  });
+  it("enforces course membership and purpose on derived contextSourceRefs outside turn.source_ids", async () => {
+    const derivedRefs = [{ sourceId, sourceVersion: 0 }];
+    const detached = fixture({ courseId, sourceIds: [], membershipRemoved: true });
+    await expect(detached.repo.readStream(scope, jobId, { ...context, contextSourceRefs: derivedRefs }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    const mockExam = fixture({ courseId, sourceIds: [], derivedMembershipPurpose: "mock_exam" });
+    await expect(mockExam.repo.withStreamPublication(scope, jobId, { ...context, contextSourceRefs: derivedRefs }, vi.fn()))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    const classifiedStandalone = fixture({ courseId: null, sourceIds: [], classifiedStandalone: true });
+    await expect(classifiedStandalone.repo.readStream(scope, jobId, { ...context, contextSourceRefs: derivedRefs }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    const allowed = fixture({ courseId, sourceIds: [], derivedMembershipPurpose: "teaching" });
+    expect(await allowed.repo.readStream(scope, jobId, { ...context, contextSourceRefs: derivedRefs }))
+      .toMatchObject({ status: "running" });
   });
 });
