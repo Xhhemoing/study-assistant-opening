@@ -69,6 +69,8 @@ type StreamTurnBinding = {
   course_id?: unknown;
 };
 
+const PUBLICATION_CLEANUP_DEADLINE_MS = 1_500;
+
 async function assertStreamMaterialAdmission(
   sql: Sql,
   tx: TransactionSql,
@@ -77,6 +79,7 @@ async function assertStreamMaterialAdmission(
   materialPurposePin: OpeningMaterialPurposePin | undefined,
   contextSourceRefs: readonly ContextSourceRef[] = [],
   verifiedAttemptRefs?: readonly ContextSourceRef[],
+  admissionOptions: { allowMissingPin?: boolean; skipPinRepoAssert?: boolean } = {},
 ): Promise<void> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
   const courseId = (typeof turn.course_id === "string" ? turn.course_id : null)
@@ -87,7 +90,7 @@ async function assertStreamMaterialAdmission(
     : [];
   let pin: OpeningMaterialPurposePin | undefined;
   if (materialPurposePin === undefined) {
-    if (turnSourceIds.length) {
+    if (turnSourceIds.length && !admissionOptions.allowMissingPin) {
       throw Object.assign(new Error("stream material purpose pin missing"), { code: "CONFLICT" });
     }
   } else {
@@ -119,7 +122,7 @@ async function assertStreamMaterialAdmission(
         }
       }
     }
-    if (pin.courseId !== null || pin.sources.length > 0) {
+    if (!admissionOptions.skipPinRepoAssert && (pin.courseId !== null || pin.sources.length > 0)) {
       await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
     }
   }
@@ -291,7 +294,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     const errorJson: OpeningTutorJobError = { message: input.message, ...(input.detail ?? {}) };
     // Only this invocation can request the post-rollback, read-only deletion path.
     const workspaceDeleted = new Error("terminal workspace deleted after history ensure");
-    return sql.begin(async (tx) => {
+    let pendingSeal: { workspaceId: string; jobId: string; executionId: string } | undefined;
+    const ended = await sql.begin(async (tx) => {
       // Recovery supplies an empty owner, and this legacy CAS has no owner
       // predicate. Canonical ownership coordinates history only, not authorization.
       const [canonical] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${input.scope.workspaceId}`;
@@ -323,21 +327,33 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       const updated = input.status === "failed"
         ? await tx`
             UPDATE opening_tutor_jobs SET status = 'failed', error = ${tx.json(errorJson as never)},
-              updated_at = now()
-            WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
-              AND status IN ('running', 'queued')
-              AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
-              AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
-            RETURNING id, workspace_id, assistant_turn_id, timing_execution_id
+              timing_execution_id = NULL, updated_at = now()
+            FROM (
+              SELECT id AS prior_id, timing_execution_id AS prior_execution_id
+              FROM opening_tutor_jobs
+              WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
+              FOR UPDATE
+            ) prior
+            WHERE opening_tutor_jobs.id = prior.prior_id AND opening_tutor_jobs.workspace_id = ${input.scope.workspaceId}
+              AND opening_tutor_jobs.status IN ('running', 'queued')
+              AND (${input.staleBefore !== undefined} OR opening_tutor_jobs.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
+              AND (${input.staleBefore ?? null}::timestamptz IS NULL OR opening_tutor_jobs.updated_at < ${input.staleBefore ?? null}::timestamptz)
+            RETURNING opening_tutor_jobs.id, opening_tutor_jobs.workspace_id, opening_tutor_jobs.assistant_turn_id, prior.prior_execution_id AS timing_execution_id
           `
         : await tx`
             UPDATE opening_tutor_jobs SET status = 'outcome_unknown',
-              error = ${tx.json({ message: input.message } as never)}, updated_at = now()
-            WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
-              AND status = 'running'
-              AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
-              AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
-            RETURNING id, workspace_id, assistant_turn_id, timing_execution_id
+              error = ${tx.json({ message: input.message } as never)}, timing_execution_id = NULL, updated_at = now()
+            FROM (
+              SELECT id AS prior_id, timing_execution_id AS prior_execution_id
+              FROM opening_tutor_jobs
+              WHERE id = ${input.jobId} AND workspace_id = ${input.scope.workspaceId}
+              FOR UPDATE
+            ) prior
+            WHERE opening_tutor_jobs.id = prior.prior_id AND opening_tutor_jobs.workspace_id = ${input.scope.workspaceId}
+              AND opening_tutor_jobs.status = 'running'
+              AND (${input.staleBefore !== undefined} OR opening_tutor_jobs.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
+              AND (${input.staleBefore ?? null}::timestamptz IS NULL OR opening_tutor_jobs.updated_at < ${input.staleBefore ?? null}::timestamptz)
+            RETURNING opening_tutor_jobs.id, opening_tutor_jobs.workspace_id, opening_tutor_jobs.assistant_turn_id, prior.prior_execution_id AS timing_execution_id
           `;
       if (!updated.length) return false;
       const terminalJob = updated[0] as Record<string, unknown>;
@@ -367,10 +383,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         `;
       }
       if (executionId) {
-        // A recovered publisher may have released its PG locks with bytes still
-        // in transit. Confirm the Redis seal before this terminal transaction commits.
-        await fenceCancelledOpeningTutorStream(terminalJob.workspace_id as string, terminalJob.id as string,
-          executionId, options.tutorStreamRedisUrl);
+        pendingSeal = { workspaceId: terminalJob.workspace_id as string, jobId: terminalJob.id as string, executionId };
       }
       return true;
     }).catch(async (error: unknown) => {
@@ -383,6 +396,17 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           AND claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid`;
       return false;
     });
+    if (ended && pendingSeal) {
+      // PostgreSQL has already committed terminal status and cleared timing_execution_id,
+      // fencing all stream reads and publications. Seal Redis best-effort within the
+      // bounded timeout so a Redis outage never blocks or fails job termination.
+      try {
+        await fenceCancelledOpeningTutorStream(
+          pendingSeal.workspaceId, pendingSeal.jobId, pendingSeal.executionId, options.tutorStreamRedisUrl,
+        );
+      } catch { /* PostgreSQL fence already invalidates stale snapshots. */ }
+    }
+    return ended;
   }
 
   /**
@@ -536,7 +560,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
 
     async cancel(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
       const coordinationChanged = new Error("cancel workspace changed after history ensure");
-      return sql.begin(async (tx) => {
+      let priorExecutionId: string | undefined;
+      const cancelled = await sql.begin(async (tx) => {
         // Canonical ownership selects the history key only. Cancellation still
         // authorizes against the conversation owner, including after a static workspace move.
         const [canonical] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${scope.workspaceId}`;
@@ -563,15 +588,20 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (historyLocked && (!workspace || workspace.owner_user_id !== canonical!.owner_user_id)) throw coordinationChanged;
         const rows = await tx`
           UPDATE opening_tutor_jobs j
-          SET status = 'cancelled', updated_at = now(), error = ${tx.json({ message: "cancelled by user" } as never)}
-          FROM opening_conversations c
-          WHERE j.id = ${id}
+          SET status = 'cancelled', timing_execution_id = NULL, updated_at = now(), error = ${tx.json({ message: "cancelled by user" } as never)}
+          FROM (
+            SELECT id AS prior_id, timing_execution_id AS prior_execution_id
+            FROM opening_tutor_jobs
+            WHERE id = ${id} AND workspace_id = ${scope.workspaceId}
+            FOR UPDATE
+          ) prior, opening_conversations c
+          WHERE j.id = prior.prior_id
             AND j.workspace_id = ${scope.workspaceId}
             AND c.id = j.conversation_id
             AND c.workspace_id = ${scope.workspaceId}
             AND c.owner_user_id = ${scope.ownerUserId}
             AND j.status IN ('queued', 'running')
-          RETURNING j.*
+          RETURNING j.*, prior.prior_execution_id
         `;
         if (!rows.length) return null;
         await tx`
@@ -581,11 +611,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             AND workspace_id = ${scope.workspaceId}
             AND NOT (status = ANY(${[...TERMINAL_TURN_STATUSES]}::text[]))
         `;
-        const job = mapJob(rows[0] as Record<string, unknown>);
-        // Confirm the Redis fence before committing even if the publishing PG
-        // backend died and released its locks with Redis bytes still in flight.
-        if (job.executionId) await fenceCancelledOpeningTutorStream(job.workspaceId, job.id, job.executionId, options.tutorStreamRedisUrl);
-        return job;
+        const row = rows[0] as Record<string, unknown>;
+        priorExecutionId = typeof row.prior_execution_id === "string"
+          ? row.prior_execution_id
+          : typeof row.timing_execution_id === "string" ? row.timing_execution_id : undefined;
+        return mapJob(row);
       }).catch(async (error: unknown) => {
         if (error !== coordinationChanged) throw error;
         // Preserve the original CAS's filtering/casts (notably invalid job UUIDs)
@@ -599,6 +629,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             AND j.status IN ('queued', 'running')`;
         return null;
       });
+      if (cancelled && priorExecutionId) {
+        // PostgreSQL already committed status='cancelled' and timing_execution_id=NULL.
+        // Seal Redis best-effort within the bounded timeout so Stop succeeds even during a Redis outage.
+        try {
+          await fenceCancelledOpeningTutorStream(cancelled.workspaceId, cancelled.id, priorExecutionId, options.tutorStreamRedisUrl);
+        } catch { /* PostgreSQL fence already blocks stale reads and publications. */ }
+      }
+      return cancelled;
     },
 
     async get(scope: OpeningScope, id: string): Promise<OpeningTutorJobRecord | null> {
@@ -611,6 +649,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     async withStreamPublication(scope: OpeningScope, id: string,
       context: StreamPublicationContext & { attemptContext?: TutorAttemptContext }, publish: () => Promise<void>): Promise<void> {
       let transactionClosed = false;
+      let publicationStarted = false;
+      let publishSettledCleanly = false;
+      let publishPromise: Promise<void> | undefined;
       let unconfirmedSealError: unknown;
       let hasUnconfirmedSealError = false;
       const clearExecutionFence = async (db: Sql | TransactionSql) => {
@@ -649,7 +690,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             await assertStreamSources(tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs);
           }
           try {
-            await publish();
+            publicationStarted = true;
+            publishPromise = Promise.resolve().then(() => publish());
+            void publishPromise.catch(() => undefined);
+            await publishPromise;
+            publishSettledCleanly = true;
           } catch (error) {
             if (!transactionClosed && isUnconfirmedStreamSealError(error)) {
               // Fail closed in PostgreSQL before releasing locks so unsealed Redis
@@ -669,31 +714,59 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         });
       } catch (error: unknown) {
         transactionClosed = true;
-        if (hasUnconfirmedSealError) {
-          // Recover from a lock-upgrade deadlock (e.g. concurrent heartbeat) by
-          // persisting the execution fence outside the rolled-back transaction.
-          try { await clearExecutionFence(sql); } catch { /* Best effort; preserve the seal error. */ }
-          throw unconfirmedSealError;
+        if (publicationStarted && !publishSettledCleanly) {
+          let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            if (publishPromise) {
+              const deadline = new Promise<void>(resolve => {
+                cleanupTimer = setTimeout(resolve, PUBLICATION_CLEANUP_DEADLINE_MS);
+              });
+              await Promise.race([Promise.allSettled([publishPromise]), deadline]);
+            }
+          } finally {
+            clearTimeout(cleanupTimer);
+          }
+          // Always fence timing_execution_id in PostgreSQL when publication did not
+          // settle cleanly under the transaction locks (e.g. PG drop or deadlock).
+          try { await clearExecutionFence(sql); } catch { /* Best effort; preserve original error. */ }
+          if (context.executionId && !hasUnconfirmedSealError) {
+            try {
+              await fenceCancelledOpeningTutorStream(scope.workspaceId, id, context.executionId, options.tutorStreamRedisUrl);
+            } catch { /* Best effort; PostgreSQL fence already blocks stale reads. */ }
+          }
         }
+        if (hasUnconfirmedSealError) throw unconfirmedSealError;
         throw error;
       }
       if (hasUnconfirmedSealError) throw unconfirmedSealError;
     },
 
-    /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */
+    /**
+     * Authorize every nonempty stream delivery and record help before bytes leave HTTP.
+     * Phase 1 durably commits exposure release before any bytes are enqueued;
+     * Phase 2 holds pure read-only FOR SHARE locks synchronously across commitAuthorized.
+     */
     async readStream(scope: OpeningScope, id: string, context: StreamPublicationContext & {
       exposureReceiptId: string | null;
       attemptFence?: TutorAttemptFence;
-    }, commitAuthorized?: (job: OpeningTutorJobRecord) => void): Promise<OpeningTutorJobRecord | null> {
-      return sql.begin(async tx => {
-        await lockWorkspaceLearningHistory(tx, scope);
-        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
-          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+    }, commitAuthorized?: (job: OpeningTutorJobRecord) => void, canDeliver?: () => boolean): Promise<OpeningTutorJobRecord | null> {
+      const verifyInTx = async (tx: TransactionSql, lockMode: "FOR UPDATE" | "FOR SHARE"): Promise<OpeningTutorJobRecord | null> => {
+        if (lockMode === "FOR UPDATE") await lockWorkspaceLearningHistory(tx, scope);
+        const [workspace] = lockMode === "FOR UPDATE"
+          ? await tx`SELECT privacy_epoch FROM workspaces
+              WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`
+          : await tx`SELECT privacy_epoch FROM workspaces
+              WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!workspace) return null;
-        const [row] = await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
-          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
-          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
-          WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`;
+        const [row] = lockMode === "FOR UPDATE"
+          ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+              JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+              JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+              WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`
+          : await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+              JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+              JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+              WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR SHARE OF j`;
         if (!row) return null;
         const job = mapJob(row as Record<string, unknown>);
         if (job.status !== "running") return job;
@@ -716,14 +789,39 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
           context.contextSourceRefs, verifiedAttemptRefs);
         await assertStreamSources(tx, scope, context.contextSourceRefs, verifiedAttemptRefs);
-        if (context.exposureReceiptId) {
-          const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
-            AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-            AND turn_id=${job.assistantTurnId} AND exposure_origin='assistant'`;
-          if (!exposure) throw new Error("stream exposure does not belong to assistant turn");
-          await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+        return job;
+      };
+
+      // Phase 1: Durable exposure commit (only when an exposure receipt exists, or for
+      // direct 3-arg callers that do not pass commitAuthorized).
+      let phase1ExecutionId: string | undefined;
+      if (context.exposureReceiptId || !commitAuthorized) {
+        const phase1Job = await sql.begin(async tx => {
+          const job = await verifyInTx(tx, "FOR UPDATE");
+          if (!job || job.status !== "running") return job;
+          if (context.exposureReceiptId) {
+            const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
+              AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND turn_id=${job.assistantTurnId} AND exposure_origin='assistant'`;
+            if (!exposure) throw new Error("stream exposure does not belong to assistant turn");
+            if (canDeliver && !canDeliver()) throw new Error("stream closed before delivery");
+            await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+          }
+          return job;
+        }) as OpeningTutorJobRecord | null;
+        if (!commitAuthorized || !phase1Job || phase1Job.status !== "running") return phase1Job;
+        phase1ExecutionId = phase1Job.executionId;
+      }
+
+      // Phase 2: Pure read-only FOR SHARE transaction holding row locks synchronously
+      // across commitAuthorized (controller.enqueue) with zero DB writes.
+      return sql.begin(async tx => {
+        const job = await verifyInTx(tx, "FOR SHARE");
+        if (!job || job.status !== "running") return job;
+        if (phase1ExecutionId !== undefined && job.executionId !== phase1ExecutionId) {
+          throw new Error("stream execution changed");
         }
-        commitAuthorized?.(job);
+        commitAuthorized(job);
         return job;
       }) as Promise<OpeningTutorJobRecord | null>;
     },
@@ -822,6 +920,23 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             throw new Error(
               `privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`,
             );
+          }
+        }
+        if (!receipt && (options?.materialPurposePin !== undefined || input.contextSourceRefs !== undefined)) {
+          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+            JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+            JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+            WHERE j.id=${input.jobId} AND j.workspace_id=${input.scope.workspaceId} AND c.owner_user_id=${input.scope.ownerUserId}
+              AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR UPDATE OF j`;
+          if (boundTurn) {
+            await assertStreamMaterialAdmission(
+              sql, tx, input.scope, boundTurn, options?.materialPurposePin,
+              input.contextSourceRefs ?? [], options?.attemptContext?.snapshot.sourceRefs,
+              { allowMissingPin: options?.materialPurposePin === undefined, skipPinRepoAssert: options?.materialPurposePin !== undefined },
+            );
+            if (input.contextSourceRefs?.length) {
+              await assertStreamSources(tx, input.scope, input.contextSourceRefs, options?.attemptContext?.snapshot.sourceRefs);
+            }
           }
         }
         const claimed = await tx`

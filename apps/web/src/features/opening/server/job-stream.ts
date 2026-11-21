@@ -21,7 +21,11 @@ export async function createJobStreamResponse(input: {
   signal: AbortSignal;
   reader: StreamReader;
   getJob(): Promise<StreamJob | null>;
-  authorizeSnapshot(snapshot: TutorStreamSnapshot, commitAuthorized?: (job: StreamJob) => void): Promise<StreamJob | null>;
+  authorizeSnapshot(
+    snapshot: TutorStreamSnapshot,
+    commitAuthorized?: (job: StreamJob) => void,
+    canDeliver?: () => boolean,
+  ): Promise<StreamJob | null>;
   close(): void;
 }): Promise<Response> {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -83,14 +87,15 @@ export async function createJobStreamResponse(input: {
         // against live source/privacy facts and enqueued synchronously before
         // readStream releases its PostgreSQL locks.
         let deliveredInTransaction = false;
+        const canDeliver = () => !closed && Boolean(controller);
         const commitAuthorized = (authorizedJob: StreamJob) => {
-          if (closed || !controller) throw new Error("stream closed before delivery");
+          if (!canDeliver()) throw new Error("stream closed before delivery");
           if (authorizedJob.status !== "running" || deliveredInTransaction) return;
           deliveredInTransaction = true;
           emitSnapshot(authorizedJob, snapshot);
         };
         const job = snapshot?.text
-          ? await input.authorizeSnapshot(snapshot, commitAuthorized)
+          ? await input.authorizeSnapshot(snapshot, commitAuthorized, canDeliver)
           : await input.getJob();
         if (closed) break;
         if (!job) { close(); break; }
@@ -173,7 +178,7 @@ export async function openTutorJobStream(
         subscribe: (onDelta, onUnavailable) => reader.subscribe(scope.workspaceId, job.id, onDelta, onUnavailable),
       },
       getJob: () => jobs.get(scope, job.id),
-      authorizeSnapshot: (snapshot, commitAuthorized) => jobs.readStream(scope, job.id, snapshot, commitAuthorized),
+      authorizeSnapshot: (snapshot, commitAuthorized, canDeliver) => jobs.readStream(scope, job.id, snapshot, commitAuthorized, canDeliver),
       close: () => redis.disconnect(),
     });
   } catch (error) {

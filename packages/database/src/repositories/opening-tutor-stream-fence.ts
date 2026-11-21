@@ -135,7 +135,7 @@ type RespFrame = { value: RespValue; end: number };
 const CRLF = "\r\n";
 // These dedicated sockets receive only AUTH/SELECT acknowledgments and the EVAL reply.
 const MAX_REPLY_BYTES = 64 * 1024;
-const FENCE_TIMEOUT_MS = 2_000;
+const FENCE_TIMEOUT_MS = 1_500;
 
 function readRespFrame(bytes: Buffer, start = 0, depth = 0): RespFrame | undefined {
   const lineEnd = bytes.indexOf(CRLF, start);

@@ -51,7 +51,7 @@ describe("authorized tutor job event stream", () => {
     deps.read.mockResolvedValue({ ...snapshot("text", 1), executionId: "10000000-0000-4000-8000-000000000001", materialPurposePin });
     const reader = (await deps.open()).body!.getReader();
     const first = await readEvent(reader);
-    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }), expect.any(Function));
+    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }), expect.any(Function), expect.any(Function));
     expect(first?.data.executionId).toBe("10000000-0000-4000-8000-000000000001");
     expect(first?.data).not.toHaveProperty("claimToken");
     expect(first?.data).not.toHaveProperty("materialPurposePin");
@@ -67,7 +67,7 @@ describe("authorized tutor job event stream", () => {
     deps.authorizeSnapshot.mockRejectedValueOnce(Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" }));
     const response = await deps.open();
     expect(await response.text()).toBe("");
-    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }), expect.any(Function));
+    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }), expect.any(Function), expect.any(Function));
     expect(deps.unsubscribe).toHaveBeenCalledOnce();
   });
   it("enqueues authorized bytes synchronously inside commitAuthorized before authorization commits", async () => {

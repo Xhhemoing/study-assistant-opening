@@ -316,11 +316,11 @@ it.each(["web", "repository"] as const)("keeps Redis unchanged when %s cancellat
     expect(before).toMatchObject({ sequence: 1, text: "First" });
     const cancelled = path === "web" ? (await getTutorJobService(sql).cancel(scope, jobId))?.job : await jobs.cancel(scope, jobId);
     expect(cancelled?.status).toBe("cancelled");
-    expect(await writer.append(scope.workspaceId, jobId, "sealed", cancelled?.executionId, 0)).toBe(0);
+    expect(await writer.append(scope.workspaceId, jobId, "sealed", before?.executionId, 0)).toBe(0);
     resume.resolve();
     expect(await settled).toMatchObject({ code: "CONFLICT" });
     expect(await reader.read(scope.workspaceId, jobId)).toEqual(before);
-    expect(await writer.append(scope.workspaceId, jobId, "sealed", cancelled?.executionId, 0)).toBe(0);
+    expect(await writer.append(scope.workspaceId, jobId, "sealed", before?.executionId, 0)).toBe(0);
     await redis.publish(`${key}:events`, JSON.stringify({ text: "checkpoint", sequence: 3 }));
     await checkpoint.promise;
     expect(observed).toEqual([{ text: "First", sequence: 1 }]);
@@ -410,19 +410,27 @@ it.each([
   }
 }, 15_000);
 
-it.each(["missing configuration", "unreachable Redis"] as const)("rolls back cancellation and privacy changes with %s", async failure => {
+it.each(["missing configuration", "unreachable Redis"] as const)("rolls back privacy changes while still committing Stop cancellation in PostgreSQL with %s", async failure => {
   const { fixture, scope, sql, jobs, jobId } = await streamFixture();
   const server = createServer(socket => socket.destroy());
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   try {
-    await jobs.claim(jobId);
+    const claimed = (await jobs.claim(jobId))!;
     const port = (server.address() as AddressInfo).port;
     vi.stubEnv("REDIS_URL", failure === "missing configuration" ? undefined : `redis://127.0.0.1:${port}`);
-    await expect(jobs.cancel(scope, jobId)).rejects.toThrow();
     await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope))).rejects.toThrow();
-    expect(await jobs.get(scope, jobId)).toMatchObject({ status: "running" });
     expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 0 }]);
+
+    // Stop (cancel) must commit status='cancelled' and timing_execution_id=NULL in PostgreSQL
+    // even when Redis is unavailable so jobs never stay stuck running during an outage.
+    expect(await jobs.cancel(scope, jobId)).toMatchObject({ status: "cancelled" });
+    expect(await sql`SELECT status, timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`)
+      .toMatchObject([{ status: "cancelled", timing_execution_id: null }]);
+    expect(await jobs.readStream(scope, jobId, {
+      privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+      claimToken: claimed.claimToken, executionId: claimed.executionId,
+    })).toMatchObject({ status: "cancelled" });
   } finally {
     vi.stubEnv("REDIS_URL", redisUrl);
     await new Promise<void>(resolve => { server.close(() => resolve()); });
@@ -680,7 +688,8 @@ it.each(["cancel", "membership removal"] as const)(
         job: first.claimed, signal: new AbortController().signal,
         reader: { read: async () => first.cached, subscribe: async () => async () => {} },
         getJob: () => jobs.get(scope, first.turn.jobId),
-        authorizeSnapshot: (snapshot, commitAuthorized) => deliveryJobs.readStream(scope, first.turn.jobId, snapshot, commitAuthorized),
+        authorizeSnapshot: (snapshot, commitAuthorized, canDeliver) =>
+          deliveryJobs.readStream(scope, first.turn.jobId, snapshot, commitAuthorized, canDeliver),
         close: () => {},
       });
       const streamReader = response.body!.getReader();
@@ -713,10 +722,10 @@ it.each(["cancel", "membership removal"] as const)(
         job: second.claimed, signal: new AbortController().signal,
         reader: { read: async () => second.cached, subscribe: async () => async () => {} },
         getJob: () => jobs.get(scope, second.turn.jobId),
-        authorizeSnapshot: (snapshot, commitAuthorized) => jobs.readStream(scope, second.turn.jobId, snapshot, authorized => {
+        authorizeSnapshot: (snapshot, commitAuthorized, canDeliver) => jobs.readStream(scope, second.turn.jobId, snapshot, authorized => {
           commitSpy(authorized);
           commitAuthorized?.(authorized);
-        }),
+        }, canDeliver),
         close: () => {},
       });
       const body = await afterRevocation.text();
@@ -836,6 +845,14 @@ it("revokes a course stream using derived historySourceRefs when the history sou
     await courses.removeAssetMembership(membershipInput);
     await expect(jobs.withStreamPublication(scope, turn.jobId, context, async () => {})).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.readStream(scope, turn.jobId, context)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.completeTurn({
+      scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
+      text: "Should not persist after derived source detachment",
+      citations: [], candidates: [], contextSourceRefs: [{ sourceId, sourceVersion: 0 }],
+      expectedPrivacyEpoch: 0, claimToken: claimed.claimToken,
+    }, { materialPurposePin })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await sql`SELECT status, text FROM opening_turns WHERE id=${turn.assistantTurnId}`)[0])
+      .toMatchObject({ status: "pending" });
   } finally {
     await fixture.close();
   }

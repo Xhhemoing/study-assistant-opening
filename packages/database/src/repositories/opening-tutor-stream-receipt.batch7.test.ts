@@ -21,13 +21,14 @@ const context = { privacyEpoch: 2, contextSourceRefs: [], exposureReceiptId: rec
 const job = { id: jobId, workspace_id: workspace, conversation_id: "conversation", user_turn_id: user, assistant_turn_id: assistant,
   status: "running", mode: "hint", error: null, created_at: time, updated_at: time, claim_token: token, timing_execution_id: execution,
   attempt_id: null, context_anchor: null, source_ids: [] as string[], course_id: null as string | null };
-type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; epoch?: number; token?: string; execution?: string | null;
-  unavailableSource?: boolean; missingExposure?: boolean; failAt?: string; boundAttempt?: string; anchorAttempt?: string;
-  courseId?: string | null; sourceIds?: string[]; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
+type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; phase2Status?: string; epoch?: number; token?: string; execution?: string | null;
+  unavailableSource?: boolean; missingExposure?: boolean; failAt?: string; failCommitAtTx?: number; boundAttempt?: string; anchorAttempt?: string;
+  anchorSourceId?: string; courseId?: string | null; sourceIds?: string[]; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
   derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null };
 function fixture(options: Options = {}) {
-  const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt}`);
+  const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
+  let txNumber = 0;
   const tx = Object.assign(vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
     const sql = parts.join("?").replace(/\s+/g, " ").trim();
     if (sql.startsWith("UPDATE opening_tutor_jobs SET timing_execution_id = NULL")) {
@@ -39,10 +40,14 @@ function fixture(options: Options = {}) {
     calls.push({ sql, values });
     if (options.failAt && sql.startsWith(options.failAt)) throw failure;
     if (sql.startsWith("SELECT privacy_epoch")) return options.missingWorkspace ? [] : [{ privacy_epoch: options.epoch ?? 2 }];
-    if (sql.startsWith("SELECT j.*,t.attempt_id") || sql.startsWith("SELECT j.user_turn_id,t.attempt_id")) {
+    if (sql.startsWith("SELECT j.*,t.attempt_id") || sql.startsWith("SELECT j.user_turn_id,t.attempt_id") || sql.startsWith("SELECT t.attempt_id,t.context_anchor")) {
       const execValue = options.execution === undefined ? execution : options.execution;
-      return options.missingJob ? [] : [{ ...job, status: options.status ?? "running", claim_token: options.token ?? token, timing_execution_id: execValue,
-        attempt_id: options.boundAttempt ?? null, context_anchor: options.anchorAttempt ? { attemptId: options.anchorAttempt } : null,
+      const status = txNumber >= 2 && options.phase2Status ? options.phase2Status : (options.status ?? "running");
+      const anchor = options.anchorAttempt || options.anchorSourceId
+        ? { ...(options.anchorAttempt ? { attemptId: options.anchorAttempt } : {}), ...(options.anchorSourceId ? { sourceId: options.anchorSourceId } : {}) }
+        : null;
+      return options.missingJob ? [] : [{ ...job, status, claim_token: options.token ?? token, timing_execution_id: execValue,
+        attempt_id: options.boundAttempt ?? null, context_anchor: anchor,
         source_ids: options.sourceIds ?? [], course_id: options.courseId ?? null }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
@@ -62,20 +67,32 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT id FROM opening_help_exposures")) return options.missingExposure ? [] : [{ id: receipt }];
     throw new Error(`Unsupported fixture query: ${sql}`);
   }), { json: (value: unknown) => value });
-  const sql = Object.assign(vi.fn(), {
+  const outerCalls: string[] = [];
+  const sql = Object.assign(vi.fn(async (parts: TemplateStringsArray) => {
+    const query = parts.join("?").replace(/\s+/g, " ").trim();
+    outerCalls.push(query);
+    if (query.startsWith("UPDATE opening_tutor_jobs SET timing_execution_id = NULL")) {
+      txEvents.push("outer-clear-execution-fence");
+      return [];
+    }
+    return [];
+  }), {
     begin: async (fn: (tx: unknown) => Promise<unknown>) => {
-      txEvents.push("begin");
+      txNumber += 1;
+      const currentTx = txNumber;
+      txEvents.push(`begin:${currentTx}`);
       try {
         const result = await fn(tx);
-        txEvents.push("commit");
+        if (options.failCommitAtTx === currentTx) throw failure;
+        txEvents.push(`commit:${currentTx}`);
         return result;
       } catch (error) {
-        txEvents.push("rollback");
+        txEvents.push(`rollback:${currentTx}`);
         throw error;
       }
     },
   });
-  return { repo: createOpeningTutorJobsRepository(sql as unknown as Sql), tx, calls, txEvents, failure };
+  return { repo: createOpeningTutorJobsRepository(sql as unknown as Sql), tx, sql, calls, outerCalls, txEvents, failure };
 }
 beforeEach(() => { vi.resetAllMocks(); hooks.lock.mockResolvedValue(undefined); hooks.release.mockResolvedValue({ id: receipt });
   hooks.readAttempt.mockResolvedValue({ anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null, currentAnswer: null }); });
@@ -201,13 +218,55 @@ describe("stream receipt release waits for current job authorization and assista
       .rejects.toThrow(message);
     expect(hooks.release).not.toHaveBeenCalled();
   });
-  it("invokes commitAuthorized synchronously inside readStream transaction before commit and skips on terminal or rejection", async () => {
+  it("commits Phase 1 exposure durably before Phase 2 pure FOR SHARE commitAuthorized and skips on terminal, rollback, or closed stream", async () => {
     const f = fixture();
     const commitAuthorized = vi.fn(() => { f.txEvents.push("commit-authorized"); });
-    const out = await f.repo.readStream(scope, jobId, context, commitAuthorized);
+    const out = await f.repo.readStream(scope, jobId, context, commitAuthorized, () => true);
     expect(out).toMatchObject({ id: jobId, status: "running" });
     expect(commitAuthorized).toHaveBeenCalledExactlyOnceWith(out);
-    expect(f.txEvents).toEqual(["begin", "commit-authorized", "commit"]);
+    // Phase 1 commits durable exposure release; Phase 2 runs pure read-only FOR SHARE across commitAuthorized.
+    expect(f.txEvents).toEqual(["begin:1", "commit:1", "begin:2", "commit-authorized", "commit:2"]);
+    expect(hooks.lock).toHaveBeenCalledOnce();
+    expect(hooks.release).toHaveBeenCalledOnce();
+    const shareSelects = f.calls.filter(c => c.sql.includes("FOR SHARE"));
+    expect(shareSelects.some(c => c.sql.startsWith("SELECT privacy_epoch"))).toBe(true);
+    expect(shareSelects.some(c => c.sql.startsWith("SELECT j.*,t.attempt_id"))).toBe(true);
+
+    // If Phase 1 COMMIT aborts, Phase 2 never runs and zero bytes are enqueued.
+    hooks.release.mockClear();
+    const commitFail = fixture({ failCommitAtTx: 1 });
+    const commitFailSpy = vi.fn();
+    await expect(commitFail.repo.readStream(scope, jobId, context, commitFailSpy, () => true)).rejects.toBe(commitFail.failure);
+    expect(commitFailSpy).not.toHaveBeenCalled();
+    expect(commitFail.txEvents).toEqual(["begin:1", "rollback:1"]);
+
+    // If client already closed before Phase 1 release, exposure release never runs.
+    hooks.release.mockClear();
+    const closedStream = fixture();
+    const closedSpy = vi.fn();
+    await expect(closedStream.repo.readStream(scope, jobId, context, closedSpy, () => false)).rejects.toThrow("stream closed before delivery");
+    expect(hooks.release).not.toHaveBeenCalled();
+    expect(closedSpy).not.toHaveBeenCalled();
+
+    // If job becomes cancelled between Phase 1 commit and Phase 2 begin, Phase 2 skips commitAuthorized.
+    hooks.release.mockClear();
+    const cancelledBetween = fixture({ phase2Status: "cancelled" });
+    const cancelledSpy = vi.fn();
+    expect(await cancelledBetween.repo.readStream(scope, jobId, context, cancelledSpy, () => true))
+      .toMatchObject({ status: "cancelled" });
+    expect(cancelledSpy).not.toHaveBeenCalled();
+    expect(cancelledBetween.txEvents).toEqual(["begin:1", "commit:1", "begin:2", "commit:2"]);
+
+    // Non-receipt streams use a single pure read-only FOR SHARE transaction without history lock or exposure write.
+    hooks.lock.mockClear();
+    hooks.release.mockClear();
+    const noReceipt = fixture();
+    const noReceiptSpy = vi.fn(() => { noReceipt.txEvents.push("commit-authorized"); });
+    expect(await noReceipt.repo.readStream(scope, jobId, { ...context, exposureReceiptId: null }, noReceiptSpy))
+      .toMatchObject({ id: jobId, status: "running" });
+    expect(hooks.lock).not.toHaveBeenCalled();
+    expect(hooks.release).not.toHaveBeenCalled();
+    expect(noReceipt.txEvents).toEqual(["begin:1", "commit-authorized", "commit:1"]);
 
     const terminal = fixture({ status: "cancelled" });
     const terminalCommit = vi.fn();
@@ -219,26 +278,60 @@ describe("stream receipt release waits for current job authorization and assista
     await expect(rejected.repo.readStream(scope, jobId, { ...context, materialPurposePin: pin }, rejectedCommit))
       .rejects.toMatchObject({ code: "CONFLICT" });
     expect(rejectedCommit).not.toHaveBeenCalled();
-    expect(rejected.txEvents).toEqual(["begin", "rollback"]);
+    expect(rejected.txEvents).toEqual(["begin:1", "rollback:1"]);
   });
-  it("fences timing_execution_id in PostgreSQL before releasing locks on UnconfirmedStreamSealError and rejects fenced reads", async () => {
+  it("fences timing_execution_id in PostgreSQL before releasing locks on UnconfirmedStreamSealError and when sql.begin drops during publish", async () => {
     const f = fixture();
     const sealError = new UnconfirmedStreamSealError(new Error("append timed out"), new Error("redis down"));
     await expect(f.repo.withStreamPublication(scope, jobId, context, async () => { throw sealError; }))
       .rejects.toBe(sealError);
-    expect(f.txEvents).toEqual(["begin", "clear-execution-fence", "commit"]);
+    expect(f.txEvents).toEqual(["begin:1", "clear-execution-fence", "commit:1"]);
     expect(f.calls.some(c => c.sql.startsWith("UPDATE opening_tutor_jobs SET timing_execution_id = NULL"))).toBe(true);
+
+    // If sql.begin drops while publish() is still pending, wait bounded and still clear timing_execution_id on outer sql.
+    vi.useFakeTimers();
+    try {
+      const dropped = fixture();
+      const pgDrop = Object.assign(new Error("connection dropped"), { code: "CONNECTION_CLOSED" });
+      dropped.sql.begin = async (fn: (tx: unknown) => Promise<unknown>) => {
+        const running = fn(dropped.tx);
+        void running.catch(() => undefined);
+        // Yield until publish() starts, then fail begin() while publish is still pending.
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        throw pgDrop;
+      };
+      const pending = dropped.repo.withStreamPublication(scope, jobId, context, () => new Promise<void>(() => undefined))
+        .then(() => undefined, error => error);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await pending).toBe(pgDrop);
+      expect(dropped.txEvents).toContain("outer-clear-execution-fence");
+    } finally {
+      vi.useRealTimers();
+    }
 
     const fenced = fixture({ execution: null });
     await expect(fenced.repo.readStream(scope, jobId, context)).rejects.toThrow("stream execution changed");
     await expect(fenced.repo.readStream(scope, jobId, { ...context, executionId: undefined })).rejects.toThrow("stream execution changed");
     expect(hooks.release).not.toHaveBeenCalled();
   });
-  it("enforces course membership and purpose on derived contextSourceRefs outside turn.source_ids", async () => {
+  it("enforces course membership and purpose on derived contextSourceRefs and context_anchor.sourceId in stream and completeTurn", async () => {
     const derivedRefs = [{ sourceId, sourceVersion: 0 }];
     const detached = fixture({ courseId, sourceIds: [], membershipRemoved: true });
     await expect(detached.repo.readStream(scope, jobId, { ...context, contextSourceRefs: derivedRefs }))
       .rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(detached.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "derived answer", citations: [], candidates: [],
+      contextSourceRefs: derivedRefs, expectedPrivacyEpoch: 2, claimToken: token,
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const detachedAnchor = fixture({ courseId, sourceIds: [], anchorSourceId: sourceId, membershipRemoved: true });
+    await expect(detachedAnchor.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "anchored answer", citations: [], candidates: [],
+      contextSourceRefs: [], expectedPrivacyEpoch: 2, claimToken: token,
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+
     const mockExam = fixture({ courseId, sourceIds: [], derivedMembershipPurpose: "mock_exam" });
     await expect(mockExam.repo.withStreamPublication(scope, jobId, { ...context, contextSourceRefs: derivedRefs }, vi.fn()))
       .rejects.toMatchObject({ code: "CONFLICT" });
