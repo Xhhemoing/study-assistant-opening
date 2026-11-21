@@ -757,8 +757,13 @@ function stripLeadingHorizontalSpacing(text: string): string {
   return text.replace(/^(?:\s|\\(?:quad|qquad|enspace|thinspace)(?![A-Za-z])|\\[,;:! ])+/, "");
 }
 
+function stripTrailingHorizontalSpacing(text: string): string {
+  return text.replace(/(?:\s|\\(?:quad|qquad|enspace|thinspace)(?![A-Za-z])|\\[,;:! ])+$/, "");
+}
+
 function endsWithOperatorOrEquals(text: string): boolean {
-  return /(?:=|\\times|\\div|\\cdot|\\pm|\\mp|[+\-*/×÷−±])\s*$/.test(text);
+  const stripped = stripTrailingHorizontalSpacing(text);
+  return /(?:=|\\(?:times|div|cdot|pm|mp|ast|star|circ|bullet|oplus|otimes|bmod|mod)(?![A-Za-z])|[+\-*/×÷−±·⋅∕⁄^_])$/.test(stripped);
 }
 
 function startsWithEquals(text: string): boolean {
@@ -766,7 +771,7 @@ function startsWithEquals(text: string): boolean {
 }
 
 function startsWithContinuationOperator(text: string): boolean {
-  return /^\s*(?:\\times|\\div|\\cdot|\\pm|\\mp|[+\-*/×÷−±])/.test(stripLeadingHorizontalSpacing(text));
+  return /^\s*(?:\\times|\\div|\\cdot|\\pm|\\mp|[+\-*/×÷−±·⋅∕⁄])/.test(stripLeadingHorizontalSpacing(text));
 }
 
 function startsWithBinaryOnlyOperator(text: string): boolean {
@@ -1220,7 +1225,7 @@ function splitMultiClauseFormula(text: string, mode: "layout" | "logical"): stri
       // Indentation within an operand is ordinary whitespace. A new equation
       // needs a completed RHS before the space and its own LHS after it.
       if (relationEnd !== undefined) {
-        const rhs = text.slice(relationEnd, at).trim();
+        const rhs = stripTrailingHorizontalSpacing(text.slice(relationEnd, at)).trim();
         if (rhs && !endsWithOperatorOrEquals(rhs)) pendingSpaces.push({ start: at, end });
       }
     } else {

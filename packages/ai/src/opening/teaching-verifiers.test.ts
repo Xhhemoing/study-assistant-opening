@@ -351,6 +351,11 @@ describe("teaching-verifiers", () => {
     [String.raw`2 + 2 = 2 \quad \quad \times 2 = 4`, "pass"],
     [String.raw`1 + 1 = 2 \quad 2 \quad \times 2 = 4`, "pass"],
     [String.raw`2 + 2 = 2 \quad × 2 = 4`, "pass"],
+    [String.raw`2 + 2 = 2 \quad · \quad (1 + 1) = 4`, "pass"],
+    [String.raw`2 + 2 = 2 \times \quad \quad (1 + 1) = 4`, "pass"],
+    [String.raw`2 + 2 = 6 - \quad \quad (1 + 1) = 4`, "pass"],
+    [String.raw`2 + 2 = 2 \ast \qquad (1 + 1) = 4`, "unknown"],
+    [String.raw`\begin{aligned} 2 + 2 &= 2 \\ &· 2 \end{aligned}`, "pass"],
     [String.raw`2 + 2 = 2 \quad \oplus 2 = 4`, "unknown"],
     [String.raw`1 + 2 = 1 \quad + 2`, "pass"],
     [String.raw`1 + 2 = (1 \qquad + 2)`, "pass"],
@@ -426,6 +431,9 @@ describe("teaching-verifiers", () => {
     ["contradiction before wide-spaced equation", String.raw`1 + 2 = 5 \quad 2 + 2 = 4`, "1 + 2 = 5"],
     ["contradiction before wide-spaced inequality", String.raw`1 + 2 = 5 \quad x \neq y`, "1 + 2 = 5"],
     ["contradiction in a continued product", String.raw`2 + 2 = 2 \quad \times 2 = 5`, String.raw`2 + 2 = 2 \times 2 = 5`],
+    ["contradiction in a spaced dot product", String.raw`2 + 2 = 2 \quad · \quad (1 + 1) = 5`, "2 + 2 = 2 · (1 + 1) = 5"],
+    ["contradiction after repeated spacing in a product", String.raw`2 + 2 = 2 \times \quad \quad (1 + 1) = 5`, String.raw`2 + 2 = 2 \times (1 + 1) = 5`],
+    ["contradiction after repeated spacing at the start of an operand", String.raw`2 + 2 = \quad \quad (1 + 1) = 2`, "2 + 2 = (1 + 1) = 2"],
     ["contradiction before a distinct macro with an operator prefix", String.raw`1 + 2 = 5 \quad \timeseries = x`, "1 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
