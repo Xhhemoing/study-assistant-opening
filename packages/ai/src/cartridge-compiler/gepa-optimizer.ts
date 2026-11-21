@@ -1508,20 +1508,14 @@ export function runGepaOptimizationRound(
   // independent deep-cloned copy to scoreCandidate so in-place callback mutations cannot alter
   // validated candidate policies, IDs, Pareto inputs, or returned outputs.
   const frozenProposed: readonly GepaProposedCandidate[] = Object.freeze([...proposed]);
-  const rawReceipts: unknown[] = [];
-  for (let i = 0; i < frozenProposed.length; i += 1) {
-    const candidateCopyForScorer = deepClonePlainGepaValue(frozenProposed[i]!);
-    rawReceipts.push(input.scoreCandidate(candidateCopyForScorer));
-  }
-
-  // Scan ALL raw scorer receipts for PII FIRST before any CandidateIdentityError can fire,
-  // and immediately snapshot plain receipts so callback-retained references cannot mutate them later.
   const snapshottedReceipts: unknown[] = [];
   for (let i = 0; i < frozenProposed.length; i += 1) {
-    const raw = rawReceipts[i];
-    assertNoRawPiiInValue(raw, `scorer_receipt[${frozenProposed[i]!.candidateId}]`);
+    const candidate = frozenProposed[i]!;
+    const raw: unknown = input.scoreCandidate(deepClonePlainGepaValue(candidate));
+    // A scorer may reuse its receipt on the next call. Validate and detach it here.
+    assertNoRawPiiInValue(raw, `scorer_receipt[${candidate.candidateId}]`);
     try {
-      snapshottedReceipts.push(isPlainObject(raw) ? deepClonePlainGepaValue(raw) : raw);
+      snapshottedReceipts.push(isPlainObject(raw) ? deepClonePlainGepaValue(raw, true) : null);
     } catch (error) {
       if (!(error instanceof CyclicGepaValueError)) throw error;
       // The existing malformed-receipt path vetoes this candidate under its proposed ID.

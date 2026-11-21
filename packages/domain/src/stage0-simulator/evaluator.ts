@@ -119,7 +119,9 @@ function hasUnaryMinusBefore(text: string, matchStart: number, matchEnd: number)
     }
     while (right < text.length && text[right] === " ") right += 1;
     const closesGroup =
-      (preceding === "(" && text[right] === ")") || (preceding === "{" && text[right] === "}");
+      (preceding === "(" && text[right] === ")") ||
+      (preceding === "[" && text[right] === "]") ||
+      (preceding === "{" && text[right] === "}");
     if (!closesGroup) break;
     left -= 1;
     right += 1;
@@ -279,6 +281,7 @@ function extractFractionRationals(numericText: string): readonly ExactRational[]
   const out: ExactRational[] = [];
   const fracText = numericText
     .replace(/\(\s*([+-]?)\s*(\d+)\s*\)/g, "($1$2)")
+    .replace(/\[\s*([+-]?)\s*(\d+)\s*\]/g, "($1$2)")
     .replace(/\{\s*([+-]?)\s*(\d+)\s*\}/g, "{$1$2}")
     .replace(/\/\s*([+-])\s*(\d+)/g, "/$1$2");
   const fractionPattern =

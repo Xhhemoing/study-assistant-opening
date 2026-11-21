@@ -3002,6 +3002,63 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     expect(round.pareto.promotedCandidateIds).toEqual(["policy_snapshot"]);
   });
 
+  it("preserves each candidate's metrics when a scorer reuses one receipt", () => {
+    const first = buildMatureCohort("candidate_a", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+      leakedTurns: 1,
+    });
+    const sharedReceipt = { ...first, l: { ...first.l } };
+    const round = runGepaOptimizationRound({
+      basePolicy: makeBasePolicy(),
+      split: createDisjointTrajectorySplit([]),
+      extraCandidatePatches: [
+        { candidateId: "candidate_a", patches: [] },
+        { candidateId: "candidate_b", patches: [] },
+      ],
+      scoreCandidate: ({ candidateId }) => {
+        sharedReceipt.candidateId = candidateId;
+        if (candidateId === "candidate_b") {
+          sharedReceipt.l.leakedReleasedTurns = 0;
+          sharedReceipt.l.rate = 0;
+        }
+        return sharedReceipt;
+      },
+      paretoOptions: { baseline: { cRate: 0.85, t7Rate: 0.72 } },
+    });
+
+    expect(round.pareto.vetoedCandidateIds).toEqual(["candidate_a"]);
+    expect(round.pareto.promotedCandidateIds).toEqual(["candidate_b"]);
+    const firstResult = round.pareto.results.find((r) => r.candidateId === "candidate_a");
+    expect(firstResult?.metrics.l).toEqual(first.l);
+  });
+
+  it("scans a scorer receipt for PII before invoking the next scorer", () => {
+    const scored: string[] = [];
+    expect(() =>
+      runGepaOptimizationRound({
+        basePolicy: makeBasePolicy(),
+        split: createDisjointTrajectorySplit([]),
+        extraCandidatePatches: [
+          { candidateId: "candidate_a", patches: [] },
+          { candidateId: "candidate_b", patches: [] },
+        ],
+        scoreCandidate: ({ candidateId }) => {
+          scored.push(candidateId);
+          return {
+            ...buildMatureCohort(candidateId, {
+              learnerCount: 5, repairedCount: 5, t7PassedCount: 5,
+            }),
+            note: "fixture@example.test",
+          };
+        },
+        paretoOptions: { baseline: { cRate: 0.85, t7Rate: 0.72 } },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+    expect(scored).toEqual(["candidate_a"]);
+  });
+
   it("vetoes cyclic scorer receipts while a sibling with shared acyclic metadata promotes", () => {
     const ids = ["missing_id_cycle", "valid_id_cycle", "shared_metadata"];
     const round = runGepaOptimizationRound({

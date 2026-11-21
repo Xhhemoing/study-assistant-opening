@@ -16,6 +16,7 @@ import {
   evaluateStage0Gate,
   generateStage0Episodes,
   getCanonicalStage0PersonaProfile,
+  runStage0Episode,
   type Stage0TutorPolicy,
 } from "./index";
 
@@ -858,6 +859,36 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     for (const [expression, expected] of cases) {
       const hits = detectProtectedLeakage("The limit is " + expression + ".", positive, negative);
       expect(hits, expression).toEqual(expected);
+    }
+  });
+
+  it("checks square-bracket signs against the sealed answer in calculus limit variant zero", () => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",
+    )!;
+    const cases = [
+      ["-[-6/8]", true],
+      ["-[-6/-8]", false],
+      ["-\\left[-\\frac{6}{8}\\right]", true],
+      ["-\\left(-\\left[6/8\\right]\\right)", true],
+      ["-{-[-6/8]}", false],
+      ["-[[-6]/[8]]", true],
+      ["-[-0.75]", true],
+      ["x - [-6/8]", false],
+    ] as const;
+
+    for (const [expression, leaks] of cases) {
+      const result = runStage0Episode(episode, {
+        policyId: "bracketed_limit",
+        diagnoseAndRespond: () => ({
+          move: "refuse_direct_answer",
+          diagnosedMisconceptionId: null,
+          releasedHintText: "The limit is " + expression + ".",
+          leaksProtectedStepOrAnswer: false,
+        }),
+      });
+      expect(result.leakedAnyTurn, expression).toBe(leaks);
+      expect(result.detectedLeakTokens, expression).toEqual(leaks ? ["3/4"] : []);
     }
   });
 
