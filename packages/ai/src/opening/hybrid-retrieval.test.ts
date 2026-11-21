@@ -95,4 +95,35 @@ describe("material hybrid retrieval", () => {
     expect(segEnv.every(s => encoder.encode(s.chunk.text).length <= 96)).toBe(true);
     expect(segEnv.some(s => s.chunk.text.includes("\\begin{cases} a \\\\ b \\end{cases}"))).toBe(true);
   });
+
+  it("protects numeric-leading inline LaTeX like $1, 2, \\dots, n$ and $5! = 120$ while ignoring currency", () => {
+    const encoder = new TextEncoder();
+    const numericSeq = "设 " + "a".repeat(60) + "$1, 2, \\dots, n$ 为正整数，$x + y = z$。";
+    const segSeq = segmentMaterialChunks([chunk("seq", numericSeq)], 80);
+    expect(segSeq.map(s => s.chunk.text).join("")).toBe(numericSeq);
+    expect(segSeq.every(s => encoder.encode(s.chunk.text).length <= 80)).toBe(true);
+    expect(segSeq.some(s => s.chunk.text.includes("$1, 2, \\dots, n$"))).toBe(true);
+
+    const factorial = "Compute " + "w".repeat(65) + "$5! = 120$ now";
+    const segFac = segmentMaterialChunks([chunk("fac", factorial)], 80);
+    expect(segFac.map(s => s.chunk.text).join("")).toBe(factorial);
+    expect(segFac.some(s => s.chunk.text.includes("$5! = 120$"))).toBe(true);
+
+    const currency = "Tickets cost $50 and VIP costs $100. " + "x".repeat(60);
+    const segCurrency = segmentMaterialChunks([chunk("currency", currency)], 40);
+    expect(segCurrency.map(s => s.chunk.text).join("")).toBe(currency);
+    expect(segCurrency.every(s => encoder.encode(s.chunk.text).length <= 40)).toBe(true);
+  });
+
+  it("scans pathological backslash and mismatched-env inputs in linear O(N) time", () => {
+    const backslashes = "\\".repeat(100_000);
+    const envs = "\\begin{a}".repeat(5_000) + "\\end{b}".repeat(5_000);
+    const started = performance.now();
+    const s1 = segmentMaterialChunks([chunk("bs", backslashes)], 4096);
+    const s2 = segmentMaterialChunks([chunk("env", envs)], 4096);
+    const elapsedMs = performance.now() - started;
+    expect(s1.map(s => s.chunk.text).join("")).toBe(backslashes);
+    expect(s2.map(s => s.chunk.text).join("")).toBe(envs);
+    expect(elapsedMs).toBeLessThan(1000);
+  });
 });

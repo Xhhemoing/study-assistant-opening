@@ -16,6 +16,7 @@ from docling.models.stages.reading_order.readingorder_model import ReadingOrderM
 from docling_core.types.doc import BoundingBox, DocItemLabel, DoclingDocument, ProvenanceItem, Size, TableCell
 
 from opening_parser import __main__ as cli
+from opening_parser import physical_pages
 
 
 SIZE = Size(width=612, height=792)
@@ -146,8 +147,11 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 text_element(13, "参考答案\n1. 由非负性可得。\n2. 略。", 1),
             ],
         )
-        blocks_by_page = cli.physical_pages.discourse_blocks_by_page(result)
-        raw_texts = cli.texts_by_page(result, include_sealed=True)
+        extracted_default = physical_pages.extract_physical_pages(result, include_sealed=False)
+        extracted_raw = physical_pages.extract_physical_pages(result, include_sealed=True)
+        blocks_by_page = extracted_default.discourse_blocks_by_page
+        raw_blocks_by_page = extracted_raw.discourse_blocks_by_page
+        raw_texts = extracted_raw.texts_by_page
         public_texts = cli.texts_by_page(result)
 
         p11_raw = "\n".join(raw_texts[11])
@@ -171,8 +175,16 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(blocks_by_page[13][0].visibility_hint, "sealed")
 
         for page_no, raw_text in ((11, p11_raw), (12, p12_raw), (13, p13_raw)):
+            public_page_text = "\n".join(public_texts[page_no])
             for block in blocks_by_page[page_no]:
                 self.assertEqual(block.page_number, page_no)
+                if block.visibility_hint == "sealed":
+                    self.assertIsNone(block.char_start)
+                    self.assertIsNone(block.char_end)
+                    self.assertEqual(raw_text[block.raw_char_start:block.raw_char_end], block.text)
+                else:
+                    self.assertEqual(public_page_text[block.char_start:block.char_end], block.text)
+            for block in raw_blocks_by_page[page_no]:
                 self.assertEqual(raw_text[block.char_start:block.char_end], block.text)
 
         # Public texts preserve exercises and public blocks on page 12 while sealing inline & standalone answer keys.
@@ -197,7 +209,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 text_element(12, "解答：利用行秩等于列秩即可。", 4),
             ],
         )
-        blocks = cli.physical_pages.discourse_blocks_by_page(result)
+        blocks = physical_pages.discourse_blocks_by_page(result)
         self.assertEqual([b.kind for b in blocks[11]], ["definition", "theorem", "proof"])
         self.assertTrue(blocks[11][2].continues_on_next_page)
         self.assertEqual([b.kind for b in blocks[12]], ["proof", "worked_example", "exercise", "solution_sealed"])
@@ -206,6 +218,85 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         public_p12 = "\n".join(cli.texts_by_page(result)[12])
         self.assertIn("习题 1", public_p12)
         self.assertNotIn("行秩等于列秩", public_p12)
+
+    def test_two_tier_sealing_avoids_prose_false_positives_and_blocks_answer_key_breakouts(self):
+        result = result_for(
+            [
+                text_element(11, "Theorem 2.1: If det(A) != 0, then Ax = b has a unique\nsolution. Moreover, x = A^{-1}b.", 1),
+                text_element(11, "## Solutions\nA homogeneous mixture of two substances.", 2),
+                text_element(11, "Solution-phase synthesis proceeds cleanly.", 3),
+                text_element(11, "解析、代数与拓扑是基础课程。", 4),
+                text_element(11, "Answer key concepts are summarized here.", 5),
+                text_element(11, "Example 1: Compute d/dx(x^2).\nSolution: By the power rule, 2x.\n\nNotice that it vanishes at 0.", 6),
+                text_element(11, "例 1：求导。\n解：导数为 2x。", 7),
+                text_element(11, "Figure 1: Lookup table for sin(x)", 8, DocItemLabel.CAPTION),
+                text_element(11, "Continued fractions converge rapidly.", 9),
+            ],
+            [
+                text_element(12, "Answers to Selected Exercises\n1.1 x = 3\n1.2 y = 4", 1),
+            ],
+            [
+                text_element(13, "Answer Key\nChapter 1\nProblem 1: x = 3", 1),
+            ],
+            [
+                text_element(14, "参考答案\n第一章\n1. x = 3", 1),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+        p11_pub = "\n".join(pub[11])
+        self.assertIn("unique\nsolution. Moreover", p11_pub)
+        self.assertIn("homogeneous mixture", p11_pub)
+        self.assertIn("Solution-phase synthesis", p11_pub)
+        self.assertIn("解析、代数与拓扑", p11_pub)
+        self.assertIn("Answer key concepts", p11_pub)
+        self.assertIn("By the power rule, 2x.", p11_pub)
+        self.assertIn("导数为 2x", p11_pub)
+        self.assertIn("Continued fractions", p11_pub)
+
+        caption_block = next(b for b in blocks[11] if b.kind == "figure_caption")
+        self.assertEqual(caption_block.associated_visual_kind, "picture")
+        self.assertFalse(any(b.kind == "solution_sealed" for b in blocks[11]))
+        self.assertFalse(blocks[11][-1].continued_from_prev_page)
+
+        self.assertEqual(pub[12], [])
+        self.assertEqual(pub[13], [])
+        self.assertEqual(pub[14], [])
+        self.assertEqual([b.kind for b in blocks[12]], ["solution_sealed"])
+        self.assertEqual([b.kind for b in blocks[13]], ["solution_sealed"])
+        self.assertEqual([b.kind for b in blocks[14]], ["solution_sealed"])
+
+    def test_running_answer_header_and_ocr_all_sealed_page_suppress_vision_and_none_text(self):
+        result = result_for(
+            [
+                text_element(11, "Answers to Exercises", 1, DocItemLabel.PAGE_HEADER),
+                text_element(11, "1.1 x = 3", 2),
+                text_element(11, "", 3),
+            ],
+        )
+        # Simulate defensive text=None and OCR cells on an all-sealed page.
+        object.__setattr__(result.pages[0].assembled.elements[2], "text", None)
+        result.pages[0].cells = [type("Cell", (), {"text": "1.1 x = 3", "from_ocr": True})()]
+        pub = cli.texts_by_page(result)
+        self.assertEqual(pub[11], [])
+        self.assertEqual(cli.visual_kinds_by_page(result, pub)[11], [])
+
+    def test_astral_math_charspans_align_exactly_with_public_texts(self):
+        result = result_for([
+            text_element(11, "Exercise 1: Compute 𝑥² + 1.\nAnswer Key: 𝑥 = 2.", 1),
+            text_element(11, "Theorem 1: Let 𝑥 ∈ ℝ.", 2),
+        ])
+        ext = physical_pages.extract_physical_pages(result, include_sealed=False)
+        public_p11 = "\n".join(ext.texts_by_page[11])
+        self.assertEqual(public_p11, "Exercise 1: Compute 𝑥² + 1.\nTheorem 1: Let 𝑥 ∈ ℝ.")
+        blocks = ext.discourse_blocks_by_page[11]
+        self.assertEqual([b.kind for b in blocks], ["exercise", "solution_sealed", "theorem"])
+        for block in blocks:
+            if block.visibility_hint == "sealed":
+                self.assertIsNone(block.char_start)
+                self.assertIsNone(block.char_end)
+            else:
+                self.assertEqual(public_p11[block.char_start:block.char_end], block.text)
 
 
 if __name__ == "__main__":

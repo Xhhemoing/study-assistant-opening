@@ -39,15 +39,39 @@ function codePointUtf8Bytes(cp: number): number {
   return 4;
 }
 
-function isEscaped(text: string, index: number): boolean {
-  let backslashes = 0;
-  for (let i = index - 1; i >= 0 && text[i] === "\\"; i--) backslashes++;
-  return (backslashes & 1) === 1;
-}
+const BEGIN_ENV_RE = /\\begin\{([A-Za-z][A-Za-z0-9*]*)\}/y;
+const END_ENV_RE = /\\end\{([A-Za-z][A-Za-z0-9*]*)\}/y;
+const CURRENCY_PROSE_WORD_RE = /\b(?:and|or|to|for|per|with|from|in|of|at|is|are|was|were|cost|costs|price|prices|usd|cad|aud|eur|cents?|dollars?)\b/i;
+const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 
 function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
-  const after = text.slice(dollarIndex + 1);
-  return /^\d+(?:,\d{3})*(?:\.\d+)?(?=$|[,.;:!?)\]]|\s+(?![+\-*/=<>^_\\]))/.test(after);
+  const first = text[dollarIndex + 1];
+  if (!first || first < "0" || first > "9") return false;
+  const limit = Math.min(text.length, dollarIndex + 2048);
+  let closeIdx = -1;
+  for (let j = dollarIndex + 1; j < limit; ) {
+    const ch = text[j]!;
+    if (ch === "\\") {
+      j += 2;
+      continue;
+    }
+    if (ch === "\n" && isBlankLineBreakAt(text, j)) break;
+    if (ch === "$") {
+      if (text[j + 1] === "$") return true;
+      closeIdx = j;
+      break;
+    }
+    j += 1;
+  }
+  if (closeIdx < 0) return true;
+  const prev = text[closeIdx - 1] ?? "";
+  const next = text[closeIdx + 1] ?? "";
+  if (/\s/.test(prev) || (next >= "0" && next <= "9")) return true;
+  const inner = text.slice(dollarIndex + 1, closeIdx);
+  if (CURRENCY_PROSE_WORD_RE.test(inner)) return true;
+  if (MATH_COMMAND_OR_OP_RE.test(inner)) return false;
+  if (/,\s/.test(inner)) return false;
+  return /^\d+(?:,\d{3})*(?:\.\d+)?$/.test(inner);
 }
 
 function isBlankLineBreakAt(text: string, newlineIndex: number): boolean {
@@ -64,14 +88,72 @@ function scanMathSpans(text: string): MathSpan[] {
   const bracketStack: number[] = [];
   const parenStack: number[] = [];
   const envStack: Array<{ name: string; start: number }> = [];
+  const envCounts = new Map<string, number>();
   let displayDollarStart: number | null = null;
   let inlineDollarStart: number | null = null;
 
   const scanRange = (from: number, to: number) => {
     for (let i = from; i < to; ) {
       const ch = text[i]!;
+      if (ch === "\\") {
+        const next = text[i + 1];
+        if (next === "\\" || next === "$") {
+          i += 2;
+          continue;
+        }
+        if (displayDollarStart === null) {
+          if (next === "[") { bracketStack.push(i); i += 2; continue; }
+          if (next === "]") {
+            const open = bracketStack.pop();
+            if (open !== undefined) spans.push({ start: open, end: i + 2 });
+            i += 2;
+            continue;
+          }
+          if (next === "(") { parenStack.push(i); i += 2; continue; }
+          if (next === ")") {
+            const open = parenStack.pop();
+            if (open !== undefined) spans.push({ start: open, end: i + 2 });
+            i += 2;
+            continue;
+          }
+          if (next === "b") {
+            BEGIN_ENV_RE.lastIndex = i;
+            const match = BEGIN_ENV_RE.exec(text);
+            if (match) {
+              const name = match[1]!;
+              envStack.push({ name, start: i });
+              envCounts.set(name, (envCounts.get(name) ?? 0) + 1);
+              i = BEGIN_ENV_RE.lastIndex;
+              continue;
+            }
+          }
+          if (next === "e") {
+            END_ENV_RE.lastIndex = i;
+            const match = END_ENV_RE.exec(text);
+            if (match) {
+              const target = match[1]!;
+              if ((envCounts.get(target) ?? 0) > 0) {
+                for (let idx = envStack.length - 1; idx >= 0; idx--) {
+                  const entry = envStack[idx]!;
+                  envCounts.set(entry.name, (envCounts.get(entry.name) ?? 1) - 1);
+                  if (entry.name === target) {
+                    envStack.length = idx;
+                    spans.push({ start: entry.start, end: END_ENV_RE.lastIndex });
+                    break;
+                  }
+                }
+              }
+              i = END_ENV_RE.lastIndex;
+              continue;
+            }
+          }
+        }
+        i += 1;
+        continue;
+      }
+
       if (displayDollarStart !== null) {
-        if (ch === "$" && text[i + 1] === "$" && !isEscaped(text, i)) {
+        if (ch === "$" && text[i + 1] === "$") {
           spans.push({ start: displayDollarStart, end: i + 2 });
           displayDollarStart = null;
           i += 2;
@@ -85,7 +167,7 @@ function scanMathSpans(text: string): MathSpan[] {
         inlineDollarStart = null;
       }
 
-      if (ch === "$" && !isEscaped(text, i)) {
+      if (ch === "$") {
         if (text[i + 1] === "$") {
           if (inlineDollarStart !== null) {
             const prev = text[i - 1] ?? "";
@@ -122,48 +204,6 @@ function scanMathSpans(text: string): MathSpan[] {
         continue;
       }
 
-      if (ch === "\\" && !isEscaped(text, i)) {
-        const next = text[i + 1];
-        if (next === "[") { bracketStack.push(i); i += 2; continue; }
-        if (next === "]") {
-          const open = bracketStack.pop();
-          if (open !== undefined) spans.push({ start: open, end: i + 2 });
-          i += 2;
-          continue;
-        }
-        if (next === "(") { parenStack.push(i); i += 2; continue; }
-        if (next === ")") {
-          const open = parenStack.pop();
-          if (open !== undefined) spans.push({ start: open, end: i + 2 });
-          i += 2;
-          continue;
-        }
-        if (text.startsWith("\\begin{", i)) {
-          const match = /^\\begin\{([A-Za-z][A-Za-z0-9*]*)\}/.exec(text.slice(i));
-          if (match) {
-            envStack.push({ name: match[1]!, start: i });
-            i += match[0].length;
-            continue;
-          }
-        }
-        if (text.startsWith("\\end{", i)) {
-          const match = /^\\end\{([A-Za-z][A-Za-z0-9*]*)\}/.exec(text.slice(i));
-          if (match) {
-            const target = match[1]!;
-            for (let idx = envStack.length - 1; idx >= 0; idx--) {
-              if (envStack[idx]!.name === target) {
-                const open = envStack[idx]!;
-                envStack.length = idx;
-                spans.push({ start: open.start, end: i + match[0].length });
-                break;
-              }
-            }
-            i += match[0].length;
-            continue;
-          }
-        }
-      }
-
       i += 1;
     }
   };
@@ -177,6 +217,7 @@ function scanMathSpans(text: string): MathSpan[] {
     bracketStack.length = 0;
     parenStack.length = 0;
     envStack.length = 0;
+    envCounts.clear();
     scanRange(suffixStart, text.length);
   }
   return spans;

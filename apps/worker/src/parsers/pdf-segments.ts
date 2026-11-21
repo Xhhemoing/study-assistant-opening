@@ -9,6 +9,7 @@ export const PDF_EXECUTION_POLL_MS = 1_000;
 export const MAX_PDF_BOOK_PAGES = 2_000;
 export const MAX_PDF_SEGMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_PDF_PAGE_TEXT_BYTES = 1024 * 1024;
+export const MAX_PDF_PAGE_TEXT_LENGTH = 200_020;
 export const MAX_PDF_BOOK_BYTES = 64 * 1024 * 1024;
 
 export type AcademicDiscourseKind =
@@ -118,21 +119,29 @@ export async function parsePdfSegments(input: {
   let cumulativeBookBytes = 0;
 
   const validateSegment = (rawPages: unknown, start: number, end: number) => {
-    const pages = validatePdfSegmentPages(rawPages, start, end);
     let segmentTextBytes = 0;
-    for (const page of pages) {
-      const pageBytes = Buffer.byteLength(page.text, "utf8");
-      if (pageBytes > maxPageTextBytes) {
-        throw new BoundsExceededError(`PDF page ${page.page} exceeds per-page text byte limit (${pageBytes} > ${maxPageTextBytes})`);
+    if (Array.isArray(rawPages)) {
+      for (const rawPage of rawPages) {
+        if (!rawPage || typeof rawPage !== "object") continue;
+        const row = rawPage as Record<string, unknown>;
+        if (typeof row.text !== "string") continue;
+        if (row.text.length > MAX_PDF_PAGE_TEXT_LENGTH) {
+          throw new BoundsExceededError(`PDF page ${String(row.page ?? "?")} exceeds text length limit (${row.text.length} > ${MAX_PDF_PAGE_TEXT_LENGTH})`);
+        }
+        const pageBytes = Buffer.byteLength(row.text, "utf8");
+        if (pageBytes > maxPageTextBytes) {
+          throw new BoundsExceededError(`PDF page ${String(row.page ?? "?")} exceeds per-page text byte limit (${pageBytes} > ${maxPageTextBytes})`);
+        }
+        segmentTextBytes += pageBytes;
       }
-      segmentTextBytes += pageBytes;
+      if (cumulativeBookBytes + segmentTextBytes > maxBookBytes) {
+        throw new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${cumulativeBookBytes + segmentTextBytes} > ${maxBookBytes})`);
+      }
     }
+    const pages = validatePdfSegmentPages(rawPages, start, end);
     const segmentBytes = Buffer.byteLength(JSON.stringify({ pages }), "utf8");
     if (segmentBytes > maxSegmentBytes) {
       throw new BoundsExceededError(`PDF segment ${start}-${end} exceeds per-segment byte limit (${segmentBytes} > ${maxSegmentBytes})`);
-    }
-    if (cumulativeBookBytes + segmentTextBytes > maxBookBytes) {
-      throw new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${cumulativeBookBytes + segmentTextBytes} > ${maxBookBytes})`);
     }
     return { pages, segmentBytes, segmentTextBytes };
   };

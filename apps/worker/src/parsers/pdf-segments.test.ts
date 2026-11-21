@@ -393,4 +393,191 @@ describe("bounded resumable PDF parser", () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("fails fast with BoundsExceededError on 210k-char pages without retrying or saving invalid_output", async () => {
+    const d = setup(1);
+    const runner = vi.fn<ParserRunner>(async (argv) => argv.includes("--inspect-pdf")
+      ? { exitCode: 0, stdout: '{"pageCount":1}' }
+      : { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 1, text: "x".repeat(210_000), imagePath: null }] }) });
+    d.input.runner = runner;
+    await expect(collectPdfSegments(d.input)).rejects.toBeInstanceOf(BoundsExceededError);
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(d.segments.save).not.toHaveBeenCalled();
+  });
+
+  it("seals scanned Vision answer transcriptions, stale saved chunks, and cross-segment 10->11 answer keys while keeping prose and worked examples", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-round2-seal-"));
+    try {
+      const pdfBytes = Buffer.from("pdf-payload-r2");
+      const sha256 = createHash("sha256").update(pdfBytes).digest("hex");
+      const sourceRecord: SourceRecord = {
+        id: "00000000-0000-4000-8000-000000000021",
+        workspaceId: "00000000-0000-4000-8000-000000000022",
+        name: "textbook.pdf",
+        mime: "application/pdf",
+        bytes: pdfBytes.byteLength,
+        sha256,
+        version: 0,
+        uploadState: "uploaded",
+        parseState: "queued",
+        error: null,
+        createdAt: new Date().toISOString(),
+      };
+      const jobRecord = {
+        id: "00000000-0000-4000-8000-000000000023",
+        workspaceId: sourceRecord.workspaceId,
+        ownerUserId: "00000000-0000-4000-8000-000000000024",
+        key: "parse-r2-test",
+        kind: "parse",
+        payload: { sourceId: sourceRecord.id, sourceVersion: 0 },
+        result: null,
+        state: "running",
+        claimToken: "claim-r2",
+        privacyEpoch: 0,
+      } as OpeningJobRecord;
+
+      const pages: PdfSegmentPage[] = [
+        // Page 1: wrapped prose with "solution." + chemistry Solutions + worked example with Solution: + Exercise with stale saved answer key
+        {
+          page: 1,
+          text: "Theorem 2.1: Ax = b has a unique\nsolution. Moreover, x = A^{-1}b.\n\n## Solutions\nA homogeneous mixture.\n\nExample 1: Compute d/dx(x^2).\nSolution: By the power rule, 2x.",
+          imagePath: null,
+          visualKinds: [],
+        },
+        // Page 2: scanned page where Vision returns Answer Key -> must be sealed and NOT published
+        { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
+        // Page 3: stale saved chunk with Answer Key + public Exercise
+        { page: 3, text: "Exercise 3: Find y.\nAnswer Key: y = 9.", imagePath: null, visualKinds: [] },
+        // Page 4..9: public prose
+        ...Array.from({ length: 6 }, (_, i) => ({ page: 4 + i, text: `Chapter 1 prose page ${4 + i}.`, imagePath: null, visualKinds: [] as [] })),
+        // Page 10: all-sealed Answer Key stripped to empty by physical_pages.py (visualKinds: [])
+        { page: 10, text: "", imagePath: null, visualKinds: [] },
+        // Page 11 (next 10-page segment): unheaded numbered answer items continuing from page 10
+        { page: 11, text: "11. x = 3\n12. y = 4", imagePath: null, visualKinds: [] },
+        // Page 12: Bibliography ends section_sealed
+        { page: 12, text: "Bibliography\n[1] Knuth.", imagePath: null, visualKinds: [] },
+      ];
+
+      const publishedChunks: NewSourceChunk[] = [];
+      const recognizePage = vi.fn(async ({ physicalPage }: { physicalPage: number }) => {
+        if (physicalPage === 2) return { text: "Answers to Selected Exercises\n1.1 x = 3\n1.2 y = 4", imageObjectKey: "vision/p2-secret" };
+        throw new Error(`unexpected vision call on page ${physicalPage}`);
+      });
+
+      const handler = createParseSourceHandler({
+        sources: { get: async () => sourceRecord, markParseState: async () => sourceRecord },
+        chunks: {
+          replaceChunks: async () => { throw new Error("expected replacePdfChunks"); },
+          replacePdfChunks: async (_scope, publication) => {
+            for await (const chunk of publication.chunks) publishedChunks.push(chunk);
+          },
+          listChunksAtVersion: async (_scope, _sid, _ver, pageNums) => {
+            if (pageNums?.includes(3)) {
+              return [{
+                id: "00000000-0000-4000-8000-000000000099",
+                sourceId: sourceRecord.id,
+                sourceVersion: 0,
+                page: 3,
+                slideLabel: null,
+                startMs: null,
+                endMs: null,
+                text: "Exercise 3: Find y.\nAnswer Key: y = 9.",
+                imageObjectKey: null,
+              }];
+            }
+            return [];
+          },
+        },
+        storage: {
+          finalKey: () => "sources/test/0/original",
+          presignGet: async () => `data:application/pdf;base64,${pdfBytes.toString("base64")}`,
+        },
+        runner: async (argv) => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 12 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const end = Number(argv[argv.indexOf("--page-end") + 1]);
+          return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, end) }) };
+        },
+        tempDir,
+        segments: { assertCurrent: async () => {}, read: async () => null, save: async () => {} },
+        recognizePage,
+      });
+
+      await expect(handler(jobRecord, { sourceId: sourceRecord.id, sourceVersion: 0 })).resolves.toEqual({ pages: 12 });
+      expect(recognizePage).toHaveBeenCalledTimes(1);
+      expect(publishedChunks.map(c => c.page)).toEqual([1, 3, 4, 5, 6, 7, 8, 9, 12]);
+      expect(publishedChunks[0]!.text).toContain("unique\nsolution. Moreover");
+      expect(publishedChunks[0]!.text).toContain("homogeneous mixture");
+      expect(publishedChunks[0]!.text).toContain("By the power rule, 2x.");
+      expect(publishedChunks[1]!.text).toBe("Exercise 3: Find y.");
+      expect(publishedChunks.find(c => c.page === 2)).toBeUndefined();
+      expect(publishedChunks.find(c => c.page === 10)).toBeUndefined();
+      expect(publishedChunks.find(c => c.page === 11)).toBeUndefined();
+      expect(publishedChunks.at(-1)!.text).toContain("Bibliography");
+      expect(await readdir(tempDir)).toEqual([]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("handles astral math symbols (𝑥) safely while sealing PPTX and PDF pages", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-astral-seal-"));
+    try {
+      const pdfBytes = Buffer.from("pptx-astral");
+      const sha256 = createHash("sha256").update(pdfBytes).digest("hex");
+      const pptxSource: SourceRecord = {
+        id: "00000000-0000-4000-8000-000000000031",
+        workspaceId: "00000000-0000-4000-8000-000000000032",
+        name: "astral.pptx",
+        mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        bytes: pdfBytes.byteLength,
+        sha256,
+        version: 0,
+        uploadState: "uploaded",
+        parseState: "queued",
+        error: null,
+        createdAt: new Date().toISOString(),
+      };
+      const jobRecord = {
+        id: "00000000-0000-4000-8000-000000000033",
+        workspaceId: pptxSource.workspaceId,
+        ownerUserId: "00000000-0000-4000-8000-000000000034",
+        key: "parse-astral-test",
+        kind: "parse",
+        payload: { sourceId: pptxSource.id, sourceVersion: 0 },
+        result: null,
+        state: "running",
+        claimToken: "claim-astral",
+        privacyEpoch: 0,
+      } as OpeningJobRecord;
+
+      const publishedChunks: NewSourceChunk[] = [];
+      const rawText = "Exercise 1: Compute 𝑥 + 1.\nAnswer Key: 𝑥 = 2.\n\nTheorem 1: 𝑥 ∈ ℝ.";
+      const pptxHandler = createParseSourceHandler({
+        sources: { get: async () => pptxSource, markParseState: async () => pptxSource },
+        chunks: {
+          replaceChunks: async (_scope, publication) => { publishedChunks.push(...publication.chunks); },
+          replacePdfChunks: async () => {},
+          listChunksAtVersion: async () => [],
+        },
+        storage: {
+          finalKey: () => "sources/test/0/original",
+          presignGet: async () => `data:application/vnd.openxmlformats-officedocument.presentationml.presentation;base64,${pdfBytes.toString("base64")}`,
+        },
+        runner: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify({ pages: [{ page: 1, text: rawText, imagePath: null }] }),
+        }),
+        tempDir,
+      });
+
+      await pptxHandler(jobRecord, { sourceId: pptxSource.id, sourceVersion: 0 });
+      expect(publishedChunks).toHaveLength(1);
+      expect(publishedChunks[0]?.text).toBe("Exercise 1: Compute 𝑥 + 1.\nTheorem 1: 𝑥 ∈ ℝ.");
+      expect(publishedChunks[0]?.text).not.toContain("Answer Key");
+      expect(publishedChunks[0]?.text).not.toContain("𝑥 = 2");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
