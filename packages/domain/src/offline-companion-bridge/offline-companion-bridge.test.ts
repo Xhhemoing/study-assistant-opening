@@ -1620,6 +1620,100 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       expect(r17Allowed.ok).toBe(true);
     }
 
+    // [Round-18 P1-1/P1-2/P1-3] Unified priority for closing groups outside math delimiters:
+    // (A) Prose/option labels (English, CJK, Unicode) veto unconditionally even with trailing `≈`/`≡`/`=`,
+    // (B) Case-sensitive physical/SI units reject unless led by an explicit math directive (English/CJK),
+    //     math operator, or explicit variable bindings (`m = ..., s = ...`),
+    // (C) Genuine math directives (`Evaluate (m/s) − 4, where m = 6 and s = 2.`, `计算 (m/s) − 4，其中 m = 6, s = 2。`,
+    //     `y = (m/s) − 4, where m = 8 and s = 2.`) remain allowed!
+    for (const [idx, r18LeakText] of [
+      "Velocity change (m/s) \u22124 \u2248 \u22123.99.",
+      "Option (a) \u22124 \u2261 1 (mod 5).",
+      "比值 (a/b) \u22124。",
+      "比值(a/b) \u22124。",
+      "速度变化 (m/s) \u22124 \u2248 \u22123.99。",
+      "选项 (a) \u22124 \u2261 1 (mod 5)。",
+      "(m/s) \u22124.",
+      "(m/s) \u22124 \u2248 \u22123.99.",
+      "(V/m) \u22124.",
+      "(J/K) \u22124.",
+    ].entries()) {
+      expect(containsAnswerLeak(r18LeakText, "-4")).toBe(true);
+      const r18MissRejected = issueOfflineFlashcardLease({
+        leaseId: `lease-r18-miss-leak-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r18LeakText,
+          }),
+        ],
+      });
+      expect(r18MissRejected.ok).toBe(false);
+      if (!r18MissRejected.ok) {
+        expect(r18MissRejected.httpStatus).toBe(422);
+        expect(r18MissRejected.code).toBe("miss_variant_answer_leak");
+      }
+
+      const r18PromptRejected = issueOfflineFlashcardLease({
+        leaseId: `lease-r18-prompt-leak-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: "Determine the equilibrium displacement for the damped oscillator.",
+          }),
+          {
+            ...makeFlashcardCandidate(500 + idx),
+            prompt: r18LeakText,
+            backSummary: "Check sign and modular equivalence rules.",
+          },
+        ],
+      });
+      expect(r18PromptRejected.ok).toBe(false);
+      if (!r18PromptRejected.ok) {
+        expect(r18PromptRejected.httpStatus).toBe(422);
+        expect(r18PromptRejected.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    for (const [idx, r18BenignStem] of [
+      "Evaluate (m/s) \u2212 4, where m = 6 and s = 2.",
+      "计算 (m/s) \u2212 4，其中 m = 6, s = 2。",
+      "y = (m/s) \u2212 4, where m = 8 and s = 2.",
+      "(m/s) \u2212 4, where m = 6 and s = 2.",
+      "(n/m^2) \u2212 4",
+      "(a/c) \u2212 4",
+      "$(x) \u2212 4$",
+      "(x + 1) \u2212 4",
+      "(a/b) \u2212 4",
+      "Evaluate (a/b) \u2212 4",
+      "f(x) \u2212 4",
+      "sqrt(2) \u2212 4",
+      "Solve (a) \u2212 4 = 0",
+      "Solve Velocity (m/s): (v/t) \u2212 4 = 0",
+      "Solve a \u2212 4*\u03B6 = 0, where \u03B6 = 1\u22122.",
+    ].entries()) {
+      expect(containsAnswerLeak(r18BenignStem, "-4")).toBe(false);
+      const r18Allowed = issueOfflineFlashcardLease({
+        leaseId: `lease-r18-benign-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r18BenignStem,
+          }),
+        ],
+      });
+      expect(r18Allowed.ok).toBe(true);
+    }
+
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
       { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },

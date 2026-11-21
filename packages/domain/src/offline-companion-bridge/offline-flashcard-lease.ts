@@ -466,7 +466,7 @@ function isInsideMathRange(index: number, ranges: ReadonlyArray<readonly [number
 
 const DEFINITE_BINARY_LEFT_OPERAND_END_RE = new RegExp(
   `(?:[\\d}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[B-HJ-Zb-hj-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))\\s*$`,
-  "u",
+  "iu",
 );
 
 const CLOSING_GROUP_END_RE = /[)\]]\s*$/;
@@ -767,42 +767,63 @@ const MATH_COMMAND_LEAD_WORDS: ReadonlySet<string> = new Set([
   "find",
 ]);
 
+const CJK_MATH_COMMAND_LEAD_RE =
+  /(?:计算|求值|化简|展开|因式分解|解方程|求解|证明|验证|已知|[解设令若当求])\s*$/u;
+
+const MATH_OPERATOR_BEFORE_GROUP_RE =
+  /(?:[+\-\u2212*\u00D7\u00B7\u22C5/\u00F7\u2215\u2044^=<>\u2264\u2265\u2260\u2248\u2261([]|\\(?:le|leq|ge|geq|ne|neq|approx|equiv|cdot|times))\s*$/i;
+
+const TRAILING_CJK_PROSE_CHAR_RE =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]\s*$/u;
+
 const PHYSICAL_UNIT_TOKENS: ReadonlySet<string> = new Set([
+  // Lowercase single-letter SI/time/mass/length units
   "m",
   "s",
+  "g",
+  "h",
+  // Uppercase-only single-letter SI units so lowercase algebra (`v/t`, `a/b`, `n/m^2`) stays algebraic
+  "V",
+  "A",
+  "N",
+  "J",
+  "W",
+  "C",
+  "K",
+  "L",
+  "F",
+  "T",
+  "H",
+  // Multi-letter SI and common physical units (exact SI casing)
   "ms",
   "km",
   "cm",
   "mm",
   "nm",
-  "h",
   "hr",
   "min",
-  "g",
   "kg",
   "mg",
-  "l",
-  "ml",
+  "mL",
   "mol",
   "mmol",
-  "n",
-  "pa",
-  "kpa",
-  "j",
-  "kj",
+  "Pa",
+  "kPa",
+  "MPa",
+  "kJ",
+  "MJ",
   "cal",
   "kcal",
-  "w",
-  "kw",
-  "v",
-  "mv",
-  "a",
-  "ma",
-  "c",
-  "k",
-  "hz",
-  "khz",
-  "mhz",
+  "kW",
+  "MW",
+  "mW",
+  "mV",
+  "kV",
+  "mA",
+  "Hz",
+  "kHz",
+  "MHz",
+  "GHz",
   "rad",
   "deg",
   "ft",
@@ -813,9 +834,30 @@ const PHYSICAL_UNIT_TOKENS: ReadonlySet<string> = new Set([
 
 const UNIT_CONNECTOR_CHAR_RE = /^[*/\u00D7\u00B7\u22C5\u2219\u2217\u2215\u2044]$/;
 
-function hasNonMathProseWordBeforeGroup(text: string, openIndex: number): boolean {
+function hasMathCommandLeadBeforeGroup(prefix: string): boolean {
+  if (CJK_MATH_COMMAND_LEAD_RE.test(prefix)) {
+    return true;
+  }
+  const wordMatch = /(?<![\\\p{L}\p{N}_])([A-Za-z]{2,})\s*$/u.exec(prefix);
+  if (!wordMatch) {
+    return false;
+  }
+  return MATH_COMMAND_LEAD_WORDS.has((wordMatch[1] ?? "").toLowerCase());
+}
+
+function hasNonMathProseBeforeGroup(
+  text: string,
+  openIndex: number,
+  isMathCall: boolean,
+): boolean {
   const prefix = text.slice(0, openIndex);
-  const wordMatch = /(?<!\\)\b([A-Za-z]{2,})\s*$/.exec(prefix);
+  if (hasMathCommandLeadBeforeGroup(prefix) || isMathCall) {
+    return false;
+  }
+  if (TRAILING_CJK_PROSE_CHAR_RE.test(prefix)) {
+    return true;
+  }
+  const wordMatch = /(?<![\\\p{L}\p{N}_])([\p{L}]{2,})\s*$/u.exec(prefix);
   if (!wordMatch) {
     return false;
   }
@@ -823,9 +865,9 @@ function hasNonMathProseWordBeforeGroup(text: string, openIndex: number): boolea
   return !MATH_COMMAND_LEAD_WORDS.has(word) && !ALGEBRAIC_EXPR_WORDS.has(word);
 }
 
-function isPhysicalUnitGroup(inner: string): boolean {
+function parsePhysicalUnitGroupTokens(inner: string): readonly string[] | null {
   let i = 0;
-  let unitCount = 0;
+  const tokens: string[] = [];
   let hasMultiLetterUnit = false;
   let expectAtom = true;
   let parenDepth = 0;
@@ -836,18 +878,18 @@ function isPhysicalUnitGroup(inner: string): boolean {
       continue;
     }
     if (ch === "(") {
-      if (!expectAtom) return false;
+      if (!expectAtom) return null;
       parenDepth += 1;
       expectAtom = true;
       i += 1;
       continue;
     }
     if (ch === ")") {
-      if (parenDepth === 0 || expectAtom) return false;
+      if (parenDepth === 0 || expectAtom) return null;
       parenDepth -= 1;
       if (inner[i + 1] === "^") {
         const expMatch = /^\^\s*(?:\(\s*-?\d+\s*\)|-?\d+)/.exec(inner.slice(i + 1));
-        if (!expMatch) return false;
+        if (!expMatch) return null;
         i += 1 + expMatch[0].length;
         continue;
       }
@@ -855,7 +897,7 @@ function isPhysicalUnitGroup(inner: string): boolean {
       continue;
     }
     if (UNIT_CONNECTOR_CHAR_RE.test(ch)) {
-      if (expectAtom) return false;
+      if (expectAtom) return null;
       expectAtom = true;
       i += 1;
       continue;
@@ -863,11 +905,11 @@ function isPhysicalUnitGroup(inner: string): boolean {
     if (/[A-Za-z]/.test(ch)) {
       let wordEnd = i + 1;
       while (wordEnd < inner.length && /[A-Za-z]/.test(inner[wordEnd] ?? "")) wordEnd += 1;
-      const token = inner.slice(i, wordEnd).toLowerCase();
+      const token = inner.slice(i, wordEnd);
       if (!PHYSICAL_UNIT_TOKENS.has(token)) {
-        return false;
+        return null;
       }
-      unitCount += 1;
+      tokens.push(token);
       if (token.length >= 2) hasMultiLetterUnit = true;
       i = wordEnd;
       const expMatch = /^(?:\^\s*(?:\(\s*-?\d+\s*\)|-?\d+)|-?\d+)/.exec(inner.slice(i));
@@ -877,9 +919,24 @@ function isPhysicalUnitGroup(inner: string): boolean {
       expectAtom = false;
       continue;
     }
-    return false;
+    return null;
   }
-  return parenDepth === 0 && !expectAtom && (unitCount >= 2 || hasMultiLetterUnit);
+  if (parenDepth !== 0 || expectAtom || (tokens.length < 2 && !hasMultiLetterUnit)) {
+    return null;
+  }
+  return tokens;
+}
+
+function areGroupUnitTokensBoundInText(unitTokens: readonly string[], text: string): boolean {
+  if (unitTokens.length === 0) return false;
+  for (const token of unitTokens) {
+    if (token.length !== 1) return false;
+    const bindingRe = new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(token)}\\s*=`, "u");
+    if (!bindingRe.test(text)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isAlgebraicClosingGroupBeforeSign(
@@ -902,23 +959,38 @@ function isAlgebraicClosingGroupBeforeSign(
   if (!inner) {
     return false;
   }
+  const prefix = text.slice(0, openIndex);
+  const isMathCall = text[openIndex] === "(" && DIRECT_MATH_CALL_PREFIX_RE.test(prefix);
+
+  // Rule A (Prose/Option Label Veto): a parenthetical/bracketed modifier attached to a
+  // non-math prose noun (Latin, CJK, or Unicode) is NEVER a binary-subtraction left operand,
+  // regardless of any trailing relation (`=`, `≈`, `≡`, `<`, `>`).
+  if (hasNonMathProseBeforeGroup(text, openIndex, isMathCall)) {
+    return false;
+  }
+
   const { isPureAlgebraic, hasArithmeticOperator } = analyzeAlgebraicGroupInner(inner);
   if (!isPureAlgebraic) {
     return false;
   }
-  const hasDirectRelation = hasDirectClauseAlgebraicRelation(text, openIndex, operandEndIndex);
-  if (!hasDirectRelation) {
-    if (hasNonMathProseWordBeforeGroup(text, openIndex) || isPhysicalUnitGroup(inner)) {
-      return false;
-    }
+
+  // Rule B (Physical/SI Compound Unit Group): only allow as an algebraic operand when
+  // explicitly led by a math directive (English or CJK), preceded by a math operator,
+  // or when all single-letter tokens in the group are explicitly bound as variables in text.
+  const unitTokens = parsePhysicalUnitGroupTokens(inner);
+  if (unitTokens !== null) {
+    return (
+      hasMathCommandLeadBeforeGroup(prefix) ||
+      MATH_OPERATOR_BEFORE_GROUP_RE.test(prefix) ||
+      areGroupUnitTokensBoundInText(unitTokens, text)
+    );
   }
-  if (hasArithmeticOperator) {
+
+  // Rule C (Remaining non-unit algebraic groups)
+  if (hasArithmeticOperator || isMathCall) {
     return true;
   }
-  if (text[openIndex] === "(" && DIRECT_MATH_CALL_PREFIX_RE.test(text.slice(0, openIndex))) {
-    return true;
-  }
-  return hasDirectRelation;
+  return hasDirectClauseAlgebraicRelation(text, openIndex, operandEndIndex);
 }
 
 function isBinaryLeftOperandBeforeSign(
@@ -987,13 +1059,7 @@ function collapseSpacedProseArticleSigns(text: string): string {
   );
 }
 
-/**
- * Deterministically canonicalizes Unicode math notation (NFKC fractions/superscripts,
- * minus signs, Greek symbols, radicals, operators, comparisons, infinity) and collapses
- * whitespace inside math expressions (`π / 2` -> `pi/2`, `− 7` -> `-7`, `√ ( 2 )` -> `sqrt(2)`)
- * so leak checks match symmetrically across spaced, ASCII, Unicode, and CJK contexts.
- */
-export function canonicalizeMathNotation(value: string): string {
+function canonicalizeMathNotationPreserveCase(value: string): string {
   let text = value.normalize("NFKC");
   // Normalize non-operand LaTeX spacing/styling/environment commands to spaces BEFORE
   // unary-minus detection so `\(\quad − 4\)`, `$\color{red} − 4$`, `\textcolor{red}{− 4}`,
@@ -1004,15 +1070,25 @@ export function canonicalizeMathNotation(value: string): string {
   for (const [pattern, replacement] of UNICODE_MATH_REPLACEMENTS) {
     text = text.replace(pattern, replacement);
   }
-  text = text.trim().replace(/\s+/g, " ").toLowerCase();
+  text = text.trim().replace(/\s+/g, " ");
   // Collapse whitespace around math operators and parentheses in math expressions.
   text = text.replace(/\s*(<=|>=|!=|~=|==|=|<|>|\/|\*|\^)\s*/g, "$1");
   text = text.replace(/\(\s+/g, "(").replace(/\s+\)/g, ")");
-  text = text.replace(/\bsqrt\s*\(\s*([^()]+?)\s*\)/g, "sqrt($1)");
+  text = text.replace(/\bsqrt\s*\(\s*([^()]+?)\s*\)/gi, "sqrt($1)");
   text = text.replace(SPACED_PLUS_MINUS_RE, "$1");
   text = text.replace(SPACED_UNARY_SIGN_RE, "$1");
   text = collapseSpacedProseArticleSigns(text);
   return text;
+}
+
+/**
+ * Deterministically canonicalizes Unicode math notation (NFKC fractions/superscripts,
+ * minus signs, Greek symbols, radicals, operators, comparisons, infinity) and collapses
+ * whitespace inside math expressions (`π / 2` -> `pi/2`, `− 7` -> `-7`, `√ ( 2 )` -> `sqrt(2)`)
+ * so leak checks match symmetrically across spaced, ASCII, Unicode, and CJK contexts.
+ */
+export function canonicalizeMathNotation(value: string): string {
+  return canonicalizeMathNotationPreserveCase(value).toLowerCase();
 }
 
 const CJK_SCRIPT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
@@ -1127,7 +1203,8 @@ export function containsAnswerLeak(
   secretText: string,
   options: { readonly includeShortTokens?: boolean } = {},
 ): boolean {
-  const normalizedStem = normalizeComparableText(rawText);
+  const casedStem = canonicalizeMathNotationPreserveCase(rawText);
+  const normalizedStem = casedStem.toLowerCase();
   const normalizedSecret = normalizeComparableText(secretText);
   if (!normalizedStem || !normalizedSecret) return false;
   if (normalizedStem === normalizedSecret) return true;
@@ -1203,7 +1280,7 @@ export function containsAnswerLeak(
           SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE.test(segment) ||
           UNICODE_MATH_SYMBOL_RE.test(segment)
         ) {
-          if (containsStandaloneNumericOrSymbolicToken(normalizedStem, segment)) {
+          if (containsStandaloneNumericOrSymbolicToken(casedStem, segment)) {
             return true;
           }
         } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
