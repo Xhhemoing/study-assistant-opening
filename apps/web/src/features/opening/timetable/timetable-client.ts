@@ -12,14 +12,16 @@ export async function readTimetable() {
 }
 
 export async function defaultPutTimetable(sessions: WeekSession[], expectedRevision: string): Promise<WeekSession[]> {
+  // Use PATCH so rolling-deploy base instances (which only export GET/PUT and ignore expectedRevision)
+  // fail closed with 405 instead of overwriting a newer timetable with a stale preview.
   const response = await fetch(url, {
-    method: "PUT",
+    method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ sessions, expectedRevision }),
   });
-  const body = await response.json();
+  const body = await response.json().catch(() => null);
   if (!response.ok) throw new Error(typeof body?.error?.message === "string" ? body.error.message : "课表保存失败，请重试。");
-  return sessionsSchema.parse(body.sessions);
+  return sessionsSchema.parse(body?.sessions);
 }
 
 export function sameTimetable(left: WeekSession[], right: WeekSession[]): boolean {

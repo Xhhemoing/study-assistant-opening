@@ -454,4 +454,124 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     await runScenario("unknown");
     await runScenario("ready");
   });
+
+  it("scans same-intent siblings before reclaiming stale row A on original clientKey or alias retry", async () => {
+    const idA = "77777777-7777-4777-8777-777777777781";
+    const idB = "77777777-7777-4777-8777-777777777782";
+    const keyA = "legacy-original-key-a";
+    const aliasKeyA = "legacy-alias-key-a";
+    const runRetry = async (
+      entry: "original" | "alias",
+      rowALedger: "none" | "released_only",
+      siblingStatus: "ready" | "unknown",
+    ) => {
+      const statuses: Record<string, string> = { [idA]: "pending", [idB]: siblingStatus };
+      const ledgerByOp: Record<string, Array<Record<string, unknown>>> = {
+        [`exam-review:${scope.workspaceId}:${idA}`]: rowALedger === "released_only"
+          ? [{ state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 }]
+          : [],
+        [`exam-review:${scope.workspaceId}:${idB}`]: [
+          { state: "reserved", release_reason: null, outcome_unknown_at: new Date("2026-10-17T00:00:30Z"), pending_reconcile_cents: 0 },
+        ],
+      };
+      let reclaimedAny = false;
+      let inserted = false;
+      const makeRow = (id: string, clientKey: string, createdAt: string) => ({
+        id,
+        sprint_id: sprintId,
+        workspace_id: scope.workspaceId,
+        owner_user_id: scope.ownerUserId,
+        source_item_id: input.sourceItemId,
+        work_source_id: workId,
+        work_source_version: 1,
+        reference_source_id: referenceId,
+        reference_source_version: 1,
+        answer_text: input.answerText,
+        client_key: clientKey,
+        intent: { ...input, clientKey },
+        status: statuses[id],
+        proposal: siblingStatus === "ready" && id === idB ? {
+          transcription: "x=1", questionMatch: true, outcome: "correct",
+          steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
+        } : null,
+        model_label: siblingStatus === "ready" && id === idB ? "vision-model" : null,
+        privacy_epoch: 1,
+        created_at: new Date(createdAt),
+        updated_at: new Date(createdAt),
+        is_stale: true,
+      });
+      const exec = (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join("?").replace(/\s+/g, " ").trim();
+        if (strings.length === 1 && query === "") return { __fragment: "" };
+        if (query.startsWith("AND ") || query.startsWith("OR ")) return { __fragment: query, values };
+        if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId, privacy_epoch: 1 }]);
+        if (query.includes("FROM opening_exam_integration_commands")) {
+          return Promise.resolve(entry === "alias"
+            ? [{ id: "alias-cmd-1", sprint_id: sprintId, intent: { reviewId: idA } }]
+            : []);
+        }
+        if (query.includes("FROM opening_exam_sprints s JOIN opening_exam_bindings")) {
+          return Promise.resolve([{ id: sprintId, pack_snapshot: pack, state, binding }]);
+        }
+        if (query.includes("FROM courses WHERE")) return Promise.resolve([{ id: courseId }]);
+        if (query.includes("FROM opening_sources s JOIN opening_source_versions")) return Promise.resolve([{ id: workId }]);
+        if (query.includes("SELECT version FROM opening_sources")) return Promise.resolve([{ version: 1 }]);
+        if (query.includes("SELECT mime FROM opening_sources")) return Promise.resolve([{ mime: "image/png" }]);
+        if (query.includes("FROM opening_source_chunks")) return Promise.resolve([{ "?column?": 1 }]);
+        if (query.includes("FROM opening_budget_reservations")) {
+          const opId = String(values[1]);
+          return Promise.resolve(ledgerByOp[opId] ?? []);
+        }
+        if (query.includes("UPDATE opening_exam_reviews SET status='failed'")) {
+          statuses[String(values[0])] = "failed";
+          return Promise.resolve([]);
+        }
+        if (query.includes("UPDATE opening_exam_reviews SET updated_at=GREATEST")) {
+          reclaimedAny = true;
+          return Promise.resolve([{ lease_updated_at: "2026-10-17 00:05:00.000000+00" }]);
+        }
+        if (query.includes("INSERT INTO opening_exam_reviews")) {
+          inserted = true;
+          return Promise.resolve([{ lease_updated_at: "2026-10-17 00:05:00.000000+00" }]);
+        }
+        if (query.includes("FROM opening_exam_reviews")) {
+          if (query.includes("WHERE id=?")) {
+            const targetId = String(values[0]);
+            return Promise.resolve([
+              targetId === idA
+                ? makeRow(idA, keyA, "2026-10-17T00:00:00.000Z")
+                : makeRow(idB, "legacy-key-b", "2026-10-17T00:00:05.000Z"),
+            ]);
+          }
+          expect(query).toContain("ORDER BY id ASC FOR UPDATE");
+          return Promise.resolve([
+            makeRow(idA, keyA, "2026-10-17T00:00:00.000Z"),
+            makeRow(idB, "legacy-key-b", "2026-10-17T00:00:05.000Z"),
+          ]);
+        }
+        return Promise.resolve([]);
+      };
+      const sql = Object.assign(exec, {
+        json: (value: unknown) => value,
+        begin: async <T>(fn: (tx: unknown) => Promise<T>) => fn(sql),
+      }) as unknown as Sql;
+      const retryKey = entry === "original" ? keyA : aliasKeyA;
+      const ctx = await createOpeningExamReviewsRepository(sql).begin(scope, { ...input, clientKey: retryKey });
+      expect(reclaimedAny).toBe(false);
+      expect(inserted).toBe(false);
+      if (rowALedger === "released_only") expect(statuses[idA]).toBe("failed");
+      expect(ctx.review.id).toBe(idB);
+      expect(ctx.review.status).toBe(siblingStatus);
+      expect(ctx.executionUpdatedAt).toBeUndefined();
+      expect(ctx.reusedUnresolved).toBe(siblingStatus === "unknown" ? true : undefined);
+    };
+    await runRetry("original", "none", "ready");
+    await runRetry("original", "none", "unknown");
+    await runRetry("original", "released_only", "ready");
+    await runRetry("original", "released_only", "unknown");
+    await runRetry("alias", "none", "ready");
+    await runRetry("alias", "none", "unknown");
+    await runRetry("alias", "released_only", "ready");
+    await runRetry("alias", "released_only", "unknown");
+  });
 });

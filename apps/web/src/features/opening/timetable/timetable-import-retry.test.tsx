@@ -37,8 +37,9 @@ afterEach(async () => {
 
 const confirm = () => host.querySelector("button")!;
 const click = () => act(async () => confirm().click());
-const writes = () => fetcher.mock.calls.filter(([, init]) => init?.method === "PUT")
+const writes = () => fetcher.mock.calls.filter(([, init]) => init?.method === "PATCH")
   .map(([, init]) => JSON.parse(String(init?.body)));
+const putWrites = () => fetcher.mock.calls.filter(([, init]) => init?.method === "PUT");
 
 it("recognizes a committed import after losing its response", async () => {
   fetcher.mockRejectedValueOnce(new TypeError("connection lost")).mockResolvedValueOnce(Response.json(committed));
@@ -85,4 +86,14 @@ it("retries once against the original baseline when nothing was committed", asyn
   await act(async () => finish(sessions));
   expect(host.querySelector('[role="status"]')?.textContent).toContain("已保存 2 条");
   expect(parseTimetableFile).toHaveBeenCalledOnce();
+  expect(putWrites()).toHaveLength(0);
+});
+
+it("uses PATCH for conditional saves and fails closed on 405 from a rolling-deploy base instance", async () => {
+  fetcher.mockResolvedValueOnce(new Response(null, { status: 405 })).mockResolvedValueOnce(Response.json(baseline));
+  await click();
+  expect(writes()).toEqual([{ sessions, expectedRevision: "empty" }]);
+  expect(putWrites()).toHaveLength(0);
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("课表保存失败");
+  expect(confirm().textContent).toBe("确认加入课表");
 });

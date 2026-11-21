@@ -119,65 +119,104 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     return allReleasedNotSent ? "released_only" : "active_or_billed";
   }
 
-  async function reconcileExistingReview(
+  async function reconcileSameIntentRows(
     tx: TransactionSql,
     scope: Scope,
-    row: Row,
-    options: { wrapCommittedReceipt: boolean; allowFreshOnReleasedStale?: boolean },
-  ): Promise<ExamReviewContext | null> {
-    const id = String(row.id);
-    const load = () => options.wrapCommittedReceipt
+    rows: Row[],
+    options: {
+      wrapCommittedReceipt: boolean;
+      preferredRowId?: string;
+    },
+  ): Promise<{ context: ExamReviewContext; chosenId: string } | null> {
+    if (!rows.length) return null;
+    const load = (id: string) => options.wrapCommittedReceipt
       ? readCommittedExamReceipt(() => readContext(tx, scope, id))
       : readContext(tx, scope, id);
-    if (row.status === "unknown") {
-      if (row.is_stale) {
-        const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
-        // Only a positive released_only receipt proves zero spend. Missing ledger rows
-        // (e.g. after Backup v2 restore, which omits opening_budget_reservations) MUST stay unknown.
-        if (ledger === "released_only") {
-          await tx`UPDATE opening_exam_reviews
-            SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-            WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
-          if (options.allowFreshOnReleasedStale) return null;
-          return await load();
+    const sortByCreatedThenId = (a: Row, b: Row) => {
+      const aTime = new Date(a.created_at as string | Date).getTime();
+      const bTime = new Date(b.created_at as string | Date).getTime();
+      return aTime !== bTime ? aTime - bTime : String(a.id).localeCompare(String(b.id));
+    };
+    const readyRows: Row[] = [];
+    const blockingRows: Row[] = [];
+    const reclaimableRows: Row[] = [];
+    for (const row of rows) {
+      const rowId = String(row.id);
+      if (row.status === "ready") {
+        readyRows.push(row);
+      } else if (row.status === "unknown") {
+        if (row.is_stale) {
+          const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
+          // Only a positive released_only receipt proves zero spend. Missing ledger rows
+          // (e.g. after Backup v2 restore, which omits opening_budget_reservations) MUST stay unknown.
+          if (ledger === "released_only") {
+            await tx`UPDATE opening_exam_reviews
+              SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+              WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
+            continue;
+          }
+        }
+        blockingRows.push(row);
+      } else if (row.status === "pending") {
+        if (!row.is_stale) {
+          blockingRows.push(row);
+        } else {
+          const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
+          if (ledger === "released_only") {
+            await tx`UPDATE opening_exam_reviews
+              SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+              WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+            continue;
+          }
+          if (ledger === "active_or_billed") {
+            // Preserve updated_at so the in-flight worker's lease still matches if it later
+            // confirms a no-charge release, and stale-unknown recovery stays eligible once released.
+            await tx`UPDATE opening_exam_reviews SET status='unknown'
+              WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+            blockingRows.push(row);
+          } else {
+            reclaimableRows.push(row);
+          }
         }
       }
-      const context = await load();
-      return { ...context, reusedUnresolved: true };
     }
-    if (row.status !== "pending") {
-      return await load();
-    }
-    if (!row.is_stale) {
-      const context = await load();
-      return { ...context, reusedUnresolved: true };
-    }
-    const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
-    if (ledger === "active_or_billed") {
-      // Preserve updated_at so the in-flight worker's lease still matches if it later
-      // confirms a no-charge release, and stale-unknown recovery stays eligible once released.
-      await tx`UPDATE opening_exam_reviews SET status='unknown'
-        WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
-      const context = await load();
-      return { ...context, reusedUnresolved: true };
-    }
-    if (ledger === "released_only") {
-      await tx`UPDATE opening_exam_reviews
-        SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-        WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
-      if (options.allowFreshOnReleasedStale) return null;
-      return await load();
-    }
-    // Stale pending with zero budget reservation: proven pre-send crash; validate before reclaiming lease.
-    const context = await load();
-    const [reclaimed] = await tx`UPDATE opening_exam_reviews
-      SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-      WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
-      RETURNING updated_at::text AS lease_updated_at`;
-    return {
-      ...context,
-      ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
+    const pick = (bucket: Row[]) => {
+      if (options.preferredRowId) {
+        const preferred = bucket.find(row => String(row.id) === options.preferredRowId);
+        if (preferred) return preferred;
+      }
+      return bucket.sort(sortByCreatedThenId)[0]!;
     };
+    if (readyRows.length) {
+      const chosenId = String(pick(readyRows).id);
+      return { context: await load(chosenId), chosenId };
+    }
+    if (blockingRows.length) {
+      const chosenId = String(pick(blockingRows).id);
+      return { context: { ...(await load(chosenId)), reusedUnresolved: true }, chosenId };
+    }
+    if (reclaimableRows.length) {
+      const chosenId = String(pick(reclaimableRows).id);
+      const context = await load(chosenId);
+      for (const extra of reclaimableRows) {
+        if (String(extra.id) === chosenId) continue;
+        await tx`UPDATE opening_exam_reviews
+          SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+          WHERE id=${String(extra.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+      }
+      const [reclaimed] = await tx`UPDATE opening_exam_reviews
+        SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+        WHERE id=${chosenId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
+        RETURNING updated_at::text AS lease_updated_at`;
+      return {
+        chosenId,
+        context: {
+          ...context,
+          ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
+        },
+      };
+    }
+    return null;
   }
 
   return {
@@ -191,34 +230,72 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
           if (!owner) throw learningError("NOT_FOUND", "工作区不存在");
           const workspacePrivacyEpoch = Number(owner.privacy_epoch);
-          const [existing] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
-            FROM opening_exam_reviews
-            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}
-            FOR UPDATE`;
-          if (existing) {
-            if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
-            if (Number(existing.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
-            return (await reconcileExistingReview(tx, scope, existing, { wrapCommittedReceipt: true }))!;
-          }
           const [aliasRow] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
             JOIN opening_exam_sprints s ON s.id=c.sprint_id
             WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
               AND c.client_key=${reviewAliasKey(input.clientKey)} LIMIT 1`;
+          let aliasTarget: { id: string; sprintId: string; reviewId: string } | null = null;
           if (aliasRow) {
             const parsed = examReviewAliasSchema.safeParse(aliasRow.intent);
             if (!parsed.success) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
-            const [target] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
-              FROM opening_exam_reviews
-              WHERE id=${parsed.data.reviewId} AND sprint_id=${aliasRow.sprint_id}
-                AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-              FOR UPDATE`;
+            aliasTarget = {
+              id: String(aliasRow.id),
+              sprintId: String(aliasRow.sprint_id),
+              reviewId: parsed.data.reviewId,
+            };
+          }
+          // Lock the caller's clientKey row, alias target, and ALL non-failed same-intent rows in one
+          // canonical id ASC query so original/alias retries cannot reclaim stale row A while sibling B is ready/active/unknown.
+          const lockedRows = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+            FROM opening_exam_reviews
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND (
+                client_key=${input.clientKey}
+                ${aliasTarget ? tx`OR (id=${aliasTarget.reviewId} AND sprint_id=${aliasTarget.sprintId})` : tx``}
+                OR (
+                  source_item_id=${input.sourceItemId}
+                  AND work_source_id=${input.workSourceId} AND work_source_version=${input.workSourceVersion}
+                  AND reference_source_id=${input.referenceSourceId} AND reference_source_version=${input.referenceSourceVersion}
+                  AND privacy_epoch=${workspacePrivacyEpoch} AND answer_text=${input.answerText}
+                  AND status IN ('pending', 'unknown', 'ready')
+                )
+              )
+            ORDER BY id ASC
+            FOR UPDATE`;
+          const matchesSameIntent = (row: Row, sprintId: string) =>
+            String(row.sprint_id) === sprintId
+            && String(row.source_item_id) === input.sourceItemId
+            && String(row.work_source_id) === input.workSourceId
+            && Number(row.work_source_version) === input.workSourceVersion
+            && String(row.reference_source_id) === input.referenceSourceId
+            && Number(row.reference_source_version) === input.referenceSourceVersion
+            && Number(row.privacy_epoch) === workspacePrivacyEpoch
+            && String(row.answer_text) === input.answerText
+            && (row.status === "pending" || row.status === "unknown" || row.status === "ready");
+          const existing = lockedRows.find(row => row.client_key === input.clientKey);
+          if (existing) {
+            if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
+            if (Number(existing.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
+            const existingId = String(existing.id);
+            if (existing.status === "ready" || existing.status === "failed") {
+              return await readCommittedExamReceipt(() => readContext(tx, scope, existingId));
+            }
+            const sameIntent = lockedRows.filter(row => matchesSameIntent(row, String(existing.sprint_id)));
+            const reconciled = await reconcileSameIntentRows(tx, scope, sameIntent, {
+              wrapCommittedReceipt: true,
+              preferredRowId: existingId,
+            });
+            return reconciled
+              ? reconciled.context
+              : await readCommittedExamReceipt(() => readContext(tx, scope, existingId));
+          }
+          if (aliasTarget) {
+            const target = lockedRows.find(
+              row => String(row.id) === aliasTarget.reviewId && String(row.sprint_id) === aliasTarget.sprintId,
+            );
             if (!target) {
-              staleAlias = {
-                id: String(aliasRow.id),
-                sprintId: String(aliasRow.sprint_id),
-                reviewId: parsed.data.reviewId,
-              };
-              await tx`DELETE FROM opening_exam_integration_commands WHERE id=${aliasRow.id}`;
+              staleAlias = aliasTarget;
+              await tx`DELETE FROM opening_exam_integration_commands WHERE id=${aliasTarget.id}`;
             } else {
               const targetIntent = examWorkReviewInputSchema.safeParse(target.intent);
               if (!targetIntent.success) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
@@ -226,103 +303,28 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
                 throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
               }
               if (Number(target.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
-              return (await reconcileExistingReview(tx, scope, target, { wrapCommittedReceipt: true }))!;
+              const targetId = String(target.id);
+              if (target.status === "ready" || target.status === "failed") {
+                return await readCommittedExamReceipt(() => readContext(tx, scope, targetId));
+              }
+              const sameIntent = lockedRows.filter(row => matchesSameIntent(row, String(target.sprint_id)));
+              const reconciled = await reconcileSameIntentRows(tx, scope, sameIntent, {
+                wrapCommittedReceipt: true,
+                preferredRowId: targetId,
+              });
+              return reconciled
+                ? reconciled.context
+                : await readCommittedExamReceipt(() => readContext(tx, scope, targetId));
             }
           }
           const checked = await validate(tx, scope, input), id = randomUUID();
-          // Lock ALL non-failed same-intent rows in canonical id order so a legacy multi-row
-          // workspace cannot skip an active/unknown/ready sibling after expiring an older row.
-          const candidates = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
-            FROM opening_exam_reviews
-            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-              AND sprint_id=${checked.sprintId} AND source_item_id=${input.sourceItemId}
-              AND work_source_id=${input.workSourceId} AND work_source_version=${input.workSourceVersion}
-              AND reference_source_id=${input.referenceSourceId} AND reference_source_version=${input.referenceSourceVersion}
-              AND privacy_epoch=${checked.privacyEpoch} AND answer_text=${input.answerText}
-              AND status IN ('pending', 'unknown', 'ready')
-            ORDER BY id ASC
-            FOR UPDATE`;
-          if (candidates.length) {
-            const sortByCreatedThenId = (a: Row, b: Row) => {
-              const aTime = new Date(a.created_at as string | Date).getTime();
-              const bTime = new Date(b.created_at as string | Date).getTime();
-              return aTime !== bTime ? aTime - bTime : String(a.id).localeCompare(String(b.id));
-            };
-            const readyRows: Row[] = [];
-            const blockingRows: Row[] = [];
-            const reclaimableRows: Row[] = [];
-            for (const row of candidates) {
-              const rowId = String(row.id);
-              if (row.status === "ready") {
-                readyRows.push(row);
-              } else if (row.status === "unknown") {
-                if (row.is_stale) {
-                  const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
-                  if (ledger === "released_only") {
-                    await tx`UPDATE opening_exam_reviews
-                      SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
-                    continue;
-                  }
-                }
-                blockingRows.push(row);
-              } else if (row.status === "pending") {
-                if (!row.is_stale) {
-                  blockingRows.push(row);
-                } else {
-                  const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
-                  if (ledger === "released_only") {
-                    await tx`UPDATE opening_exam_reviews
-                      SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
-                    continue;
-                  }
-                  if (ledger === "active_or_billed") {
-                    await tx`UPDATE opening_exam_reviews SET status='unknown'
-                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
-                    blockingRows.push(row);
-                  } else {
-                    reclaimableRows.push(row);
-                  }
-                }
-              }
-            }
-            const attachAlias = async (reviewId: string) => {
-              const alias: ExamReviewAlias = { reviewId };
-              await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
-                VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
-            };
-            if (readyRows.length) {
-              const chosenId = String(readyRows.sort(sortByCreatedThenId)[0]!.id);
-              const context = await readContext(tx, scope, chosenId);
-              await attachAlias(chosenId);
-              return context;
-            }
-            if (blockingRows.length) {
-              const chosenId = String(blockingRows.sort(sortByCreatedThenId)[0]!.id);
-              const context = await readContext(tx, scope, chosenId);
-              await attachAlias(chosenId);
-              return { ...context, reusedUnresolved: true };
-            }
-            if (reclaimableRows.length) {
-              const ordered = reclaimableRows.sort(sortByCreatedThenId);
-              const chosenId = String(ordered[0]!.id);
-              const context = await readContext(tx, scope, chosenId);
-              for (const extra of ordered.slice(1)) {
-                await tx`UPDATE opening_exam_reviews
-                  SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-                  WHERE id=${String(extra.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
-              }
-              const [reclaimed] = await tx`UPDATE opening_exam_reviews
-                SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
-                WHERE id=${chosenId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
-                RETURNING updated_at::text AS lease_updated_at`;
-              await attachAlias(chosenId);
-              return {
-                ...context,
-                ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
-              };
-            }
+          const sameIntent = lockedRows.filter(row => matchesSameIntent(row, checked.sprintId));
+          const reconciled = await reconcileSameIntentRows(tx, scope, sameIntent, { wrapCommittedReceipt: false });
+          if (reconciled) {
+            const alias: ExamReviewAlias = { reviewId: reconciled.chosenId };
+            await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
+              VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
+            return reconciled.context;
           }
           const [inserted] = await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
             work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
