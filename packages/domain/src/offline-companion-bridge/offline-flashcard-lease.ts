@@ -81,21 +81,20 @@ function normalizeLeakSyntax(text: string): string {
   const normalized = (hasGroupingSpace
     ? text.replace(/[^\u00A0\u2007\u2009\u202F]+/gu, part => part.normalize("NFKC"))
     : text.normalize("NFKC")).replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "");
-  const grouped = hasGroupingSpace
-    ? normalized.replace(LOCALE_SPACE_GROUPED_DECIMAL_RE, value => value.replace(LOCALE_GROUPING_SPACE, "_").replace(",", "."))
-      .replace(LOCALE_GROUPING_SPACE, " ")
+  const grouped = hasGroupingSpace || /\d,\d/.test(normalized)
+    ? normalizeGroupedDecimals(normalized)
     : normalized;
-  return /\d,\d/.test(grouped) ? normalizeGroupedDecimalCommas(grouped) : grouped;
+  return hasGroupingSpace ? grouped.replace(LOCALE_GROUPING_SPACE, " ") : grouped;
 }
 
-function normalizeGroupedDecimalCommas(text: string): string {
-  // Paired brackets can contain comma-separated answers. Preserve the
-  // decimal-point interpretation of dotted values in those groups.
+function normalizeGroupedDecimals(text: string): string {
+  // Pair containers before deciding whether their commas separate members.
   const openBrackets: { index: number; close: string }[] = [];
   const pairedBrackets = new Set<number>();
   for (const bracket of text.matchAll(DECIMAL_CONTEXT_BRACKET_RE)) {
-    if (bracket[0] === "(" || bracket[0] === "[") {
-      openBrackets.push({ index: bracket.index, close: bracket[0] === "(" ? ")" : "]" });
+    const close = DECIMAL_CONTAINER_CLOSER.get(bracket[0]);
+    if (close !== undefined) {
+      openBrackets.push({ index: bracket.index, close });
     } else {
       const open = openBrackets.at(-1);
       if (open?.close !== bracket[0]) continue;
@@ -106,13 +105,15 @@ function normalizeGroupedDecimalCommas(text: string): string {
   }
 
   let depth = 0;
-  return text.replace(GROUPED_COMMA_DECIMAL_OR_BRACKET_RE, (token, offset: number) => {
-    if (pairedBrackets.has(offset)) depth += token === "(" || token === "[" ? 1 : -1;
-    const commaIndex = token.indexOf(",");
-    if (commaIndex < 0) return token;
-    const integer = token.slice(0, commaIndex);
-    if (depth > 0 && integer.includes(".")) return token;
-    return integer.replace(/[.'’]/g, "_") + "." + token.slice(commaIndex + 1);
+  return text.replace(GROUPED_DECIMAL_OR_BRACKET_RE, (token, _space: string | undefined, offset: number) => {
+    if (pairedBrackets.has(offset)) {
+      depth += DECIMAL_CONTAINER_CLOSER.has(token) ? 1 : -1;
+      return token;
+    }
+    const grouped = token.replace(LOCALE_GROUPING_SPACE, "_");
+    const commaIndex = grouped.indexOf(",");
+    if (commaIndex < 0 || depth > 0) return grouped;
+    return grouped.slice(0, commaIndex).replace(/[.'’]/g, "_") + "." + grouped.slice(commaIndex + 1);
   });
 }
 
@@ -1332,13 +1333,17 @@ const ANSWER_CUE_BEFORE_DASH_RE = new RegExp(`(?:${BOUNDED_ANSWER_CUE}|${BARE_CH
 
 const NUMERIC_TOKEN_END = `(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d|[eE][+-]?\\d)`;
 const LOCALE_GROUPING_SPACE = /[\u00A0\u2007\u2009\u202F]/gu;
-const LOCALE_SPACE_GROUPED_DECIMAL_RE = new RegExp(standaloneNumericSource(
+const LOCALE_SPACE_GROUPED_DECIMAL = standaloneNumericSource(
   `(?<!\\d${LOCALE_GROUPING_SPACE.source})\\d{1,3}(${LOCALE_GROUPING_SPACE.source})\\d{3}(?:\\1\\d{3})*` +
-  `(?!${LOCALE_GROUPING_SPACE.source}\\d)(?:[.,]${DECIMAL_DIGITS})?${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)`,
-), "gu");
-const DECIMAL_CONTEXT_BRACKET_RE = /(?<!\\)[()[\]]/gu;
-const GROUPED_COMMA_DECIMAL_OR_BRACKET_RE = new RegExp(
-  DECIMAL_CONTEXT_BRACKET_RE.source + "|" + standaloneNumericSource(
+  `(?!${LOCALE_GROUPING_SPACE.source}\\d)(?:,${DECIMAL_DIGITS}${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)|` +
+  `(?:${DECIMAL_FRACTION})?${OPTIONAL_DECIMAL_EXPONENT})`,
+);
+const DECIMAL_CONTAINER_CLOSER = new Map([["(", ")"], ["[", "]"], ["{", "}"], ["<", ">"], ["⟨", "⟩"], ["〈", "〉"]]);
+// An angle opener is a tuple delimiter only when it encloses a numeric list.
+const DECIMAL_CONTEXT_BRACKET_RE =
+  /(?<!\\)(?:[()[\]{}⟨⟩〈〉>]|<(?=\s*[+-]?(?:\d|\.\d)[\d.'_’eE\s+-]*,\s*[+-]?(?:\d|\.\d)[\d.,'_’eE\s+-]*>))/gu;
+const GROUPED_DECIMAL_OR_BRACKET_RE = new RegExp(
+  DECIMAL_CONTEXT_BRACKET_RE.source + "|" + LOCALE_SPACE_GROUPED_DECIMAL + "|" + standaloneNumericSource(
     `\\d{1,3}(?:(?:\\.\\d{3})+|(?:['’]\\d{3})+),${DECIMAL_DIGITS}${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)`,
   ),
   "gu",
@@ -1513,20 +1518,37 @@ const NEXT_OPTION_RE = new RegExp(
   `^${OPTION_SEQUENCE_CONNECTOR}(?:${WRAPPED_NEIGHBOR_OPTION}|${BARE_NEIGHBOR_OPTION}(?=${OPTION_SENTENCE_END}))`,
   "iu",
 );
-const ARTICLE_FUNCTION_WORD = "(?:" +
+const ARTICLE_FUNCTION_WORD_RE = new RegExp("^(?:" +
   "for|in|on|at|to|of|by|with|from|into|onto|upon|over|under|after|before|between|among|through|during|" +
   "without|within|about|against|per|via|as|up|off|out|across|along|past|around|inside|outside|despite|except|towards?|" +
   "is|was|are|were|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|equals?|" +
-  "and|or|but|nor|yet|so|if|then|else|when|while|where|because|since|unless|until|although|though|than|" +
+  "and|or|but|nor|yet|so|if|then|else|when|while|where|whereas|because|since|unless|until|till|although|though|than|whether|" +
   "that|which|who|whom|whose|what|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
-  "me|my|mine|this|these|those|the|an|another|each|every|all|both|any|either|neither|some|several|many|much|none)";
-const ARTICLE_NOMINAL_WORD = `(?!${ARTICLE_FUNCTION_WORD}\\b)[a-z]{2,}\\b`;
-const DIMENSION_MODIFIER = /\d+(?:(?:[ \t]*[x×*][ \t]*|[ \t]+by[ \t]+)\d+)*/.source;
-const ARTICLE_NOUN_PHRASE_RE = new RegExp(
-  `^[ \\t]+(?:${ARTICLE_NOMINAL_WORD}|${DIMENSION_MODIFIER}(?:[ \\t]+${ARTICLE_NOMINAL_WORD}|` +
-  `-?(?!${ARTICLE_FUNCTION_WORD}\\b)[a-z]+\\b))`,
+  "me|my|mine|this|these|those|the|an|another|each|every|all|both|any|either|neither|some|several|many|much|no|none|" +
+  "instead|rather|apart|aside|away|regardless|irrespective|only|alone|just|merely|simply|solely|even|still|already|" +
+  "also|too|again|once|twice|here|there|now|today|tomorrow|yesterday|otherwise|therefore|however|thus|hence|" +
+  "versus|vs|plus|minus|modulo|mod|times)$");
+const ARTICLE_MODIFIER_WORD_RE =
+  /^(?:zeroth|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|\w+(?:teenth|tieth|illionth)|hundredth|thousandth|next|last|\w+ly)$/;
+const ARTICLE_LY_NOUN_RE =
+  /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly)$/;
+const ARTICLE_QUANTITY_TOKEN = /\d(?:[^\s.,;:!?()[\]{}<>]|\.(?=\d))*/u.source;
+const ARTICLE_QUANTITY_PREFIX_RE = new RegExp(
+  `^[ \\t]+${ARTICLE_QUANTITY_TOKEN}(?:[ \\t]+(?:by|[x×*])[ \\t]+${ARTICLE_QUANTITY_TOKEN})*`,
   "iu",
 );
+
+function startsArticleNounPhrase(text: string): boolean {
+  const quantity = ARTICLE_QUANTITY_PREFIX_RE.exec(text);
+  const words = /[ \t]+([a-z]{2,})(?:-[a-z]+)*\b/iy;
+  words.lastIndex = quantity?.[0].length ?? 0;
+  for (let match = words.exec(text); match !== null; match = words.exec(text)) {
+    const word = match[1]!.toLowerCase();
+    if (ARTICLE_FUNCTION_WORD_RE.test(word)) return false;
+    if (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word)) return true;
+  }
+  return false;
+}
 
 function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
@@ -1547,7 +1569,7 @@ function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLe
     const remainder = syntax.slice(match.index + match[0].length);
     // "Correct a mistake" uses an article. Case, wrappers and line breaks
     // distinguish it from a choice label in the same position.
-    if (match[1]?.trim() !== "a" || !ARTICLE_NOUN_PHRASE_RE.test(remainder)) return true;
+    if (match[1]?.trim() !== "a" || !startsArticleNounPhrase(remainder)) return true;
   }
 
   const wrapped = new RegExp(

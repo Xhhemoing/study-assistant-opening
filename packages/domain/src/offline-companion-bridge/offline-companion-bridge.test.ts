@@ -2526,6 +2526,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     { answerKey: "[100000,0.5]", text: "Use 1,00,000 and 0.5.", leaks: true },
     { answerKey: "[1000.5,17]", text: "Use 1\u202F000,5 and 17.", leaks: true },
     { answerKey: "[1000,17]", text: "Use 1\u202F000,5 and 17.", leaks: false },
+    { answerKey: "[1000,5]", text: "Use (1\u202F000,5).", leaks: true },
+    { answerKey: "[1000,5,6]", text: "Use [1\u202F000,5,6].", leaks: true },
+    { answerKey: "[1000,5]", text: "Use <1'000,5>.", leaks: true },
     { answerKey: "[1,5]", text: "Use (1.000,5).", leaks: true },
     { answerKey: "[1,5,6]", text: "Use 1.000,5,6 as the initial values.", leaks: true },
   ])("matches only the exact numeric sequence $answerKey in $text", ({ answerKey, text, leaks }) => {
@@ -2561,6 +2564,11 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { answerKey: "[1000.5]", text: "Use (7, (1.000,5)) as the starting tuple.", ok: true },
       { answerKey: "[1000.5]", text: "Use 1.000,5,6 as the initial values.", ok: true },
       { answerKey: "[1000.5]", text: "The hint has an unmatched [. The value is 1.000,5.", ok: false },
+      ...["[1\u202F000,5]", "(1\u202F000,5)", "{1\u202F000,5}", "<1\u202F000,5>", "[1\u00A0000,5]",
+        "[1'000,5]", "{1\u2019000,5}", "[1\u2009000,5]", "⟨1\u202F000,5⟩"].flatMap(pair => [
+        { answerKey: "[1000,5]", text: `Use the ordered pair ${pair} as the two coordinates.`, ok: false },
+        { answerKey: "[1000.5]", text: `Use the ordered pair ${pair} as the two coordinates.`, ok: true },
+      ]),
       { answerKey: "[1000]", text: "The selected value is 1.000.", ok: true },
       { answerKey: "[1]", text: "The selected value is 1.000.", ok: false },
       { answerKey: "[1]", text: "Compare 1\u202F000 with the threshold.", ok: true },
@@ -2627,7 +2635,12 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       ...["Can you correct a mistake?", "Correct a calculation error.", "Correct a sign error first.", "What is a matrix?",
         "Select a valid approach.", "Choose a basis vector.", "Can you correct a 2×2 matrix calculation?",
         "Correct a 2x2 system.", "Select a 3-step approach.", "Choose a 2D vector.",
-        "Choose a 64-bit integer.", "Correct a 10-point scale.", "Choose a 3 by 3 grid."].map(text => ({
+        "Choose a 64-bit integer.", "Correct a 10-point scale.", "Choose a 3 by 3 grid.",
+        "Choose a 90° angle.", "Select a 95% confidence interval.", "Choose a 1/2 scale factor.",
+        "Choose a 0.05 tolerance.", "Select a 3.5-inch gauge.", "Choose a 10² scale factor.",
+        "Select a first step.", "Choose a first-order approximation.", "Select a linearly independent set.",
+        "Choose a next logical step.",
+        "Choose a family of functions.", "Select a pulley."].map(text => ({
         answerKey: "A", text, ok: true,
       })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
@@ -2643,6 +2656,10 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Correct a that works.", "Correct a with justification.", "Correct a if necessary.",
         "Correct a was chosen.", "Correct a will work.", "Correct a after checking.",
         "Correct a 2.", "Correct a 2 by 2.", "Correct a 2×2.",
+        "Choose a instead of b.", "Select a only.", "Select a first.", "Select a directly.",
+        "Select a second.", "Select a twelfth.", "Select a next.", "Select a linearly.", "Select a rather than b.",
+        "Select a again.", "Choose a versus b.", "Select a modulo b.", "Choose a 90°.",
+        "Choose a 2D.", "Choose a 95% only.", "Select a no matter what.",
         "A is correct.", "Correct response is A.", "Correct letter is A.", "Correct value is A.",
         ...["-", "–", "—", "―"].map(separator => `Answer ${separator} A`)].map(text => ({
         answerKey: "A", text, ok: false,
@@ -2686,6 +2703,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { order: [1000], text: "The result is 1,000." },
       { order: [1000], text: `The result is ${new Intl.NumberFormat("fr-FR").format(1000)}.` },
       { order: [1000.5], text: `The result is ${new Intl.NumberFormat("fr-FR").format(1000.5)}.` },
+      { order: [1000, 5], text: "Use the ordered pair [1\u202F000,5] as the two coordinates." },
+      { order: [1000, 5], text: "Use the ordered pair (1\u202F000,5) as the two coordinates." },
       { order: [1, 234], text: "Use [1,234]." },
     ])("rejects $text for native protected array $order", ({ order, text }) => {
       const variant = makeMissVariantCandidate({
