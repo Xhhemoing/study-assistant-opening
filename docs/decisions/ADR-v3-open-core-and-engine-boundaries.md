@@ -176,14 +176,20 @@ The analyzer checks that each selected entry is a readable file, then follows ru
 and type-only edges across workspace packages and local modules. Triple-slash path
 references resolve relative to the declaring file. Ambient type directives resolve
 through in-repository `node_modules/@types` declarations, including their transitive
-references. Runtime allowlists apply only to module imports.
+references. For ambient and workspace packages, the gate scans unversioned declarations
+and every matching `typesVersions` replacement across all compiler-version selectors.
+Each replacement must resolve to a declaration inside its package. Runtime allowlists
+apply only to module imports.
 
 Directory resolution checks root export conditions, legacy entries, browser mappings,
 and existing index files. Runtime targets require an implementation, and the gate also
 scans any paired declarations. Missing entries and directory entry cycles fail the check.
 Before reading disk files or manifests, the analyzer resolves links within the real
 repository root. It checks both the requested path and its destination for closed-core
-content and, during export, for the owning package's license. The gate matches exact
+content and, during export, for the owning package's license. A linked file's outgoing
+edges resolve from both its requested directory and its physical directory. A plain
+lookup miss can be satisfied by the other directory. Broken links, invalid manifest
+entries and boundary violations from either directory fail the check. The gate matches exact
 subpaths before wildcard patterns and reports the chain to each violation.
 The in-memory cases cover mixed public and private conditional branches, alias cycles,
 Node built-ins, Wave P directories, dynamic calls, declaration files, and private
