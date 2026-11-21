@@ -549,6 +549,54 @@ function cohortSnapshotsEquivalent(
   );
 }
 
+const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
+function isValidSha256Digest(value: string | undefined): value is string {
+  return typeof value === "string" && SHA256_DIGEST_PATTERN.test(value);
+}
+
+function readVerifiedPublicationLedgerEntry(
+  ledger: CohortSnapshotPublicationLedger,
+  publicationKey: string,
+): {
+  readonly snapshot: CohortHeatmapResult;
+  readonly expectedDigest: string;
+} | undefined {
+  const hasSnapshot = ledger.snapshotsByKey.has(publicationKey);
+  const hasDigest = ledger.snapshotDigestsByKey.has(publicationKey);
+
+  if (hasSnapshot !== hasDigest) {
+    throw new CommercialResilienceError(
+      "COHORT_PUBLICATION_LEDGER_CORRUPTED",
+      `Cohort publication ledger has incomplete (snapshot, digest) pair for "${publicationKey}"`,
+    );
+  }
+  if (!hasSnapshot) {
+    return undefined;
+  }
+
+  const snapshot = ledger.snapshotsByKey.get(publicationKey);
+  const storedDigest = ledger.snapshotDigestsByKey.get(publicationKey);
+  if (!snapshot || !isValidSha256Digest(storedDigest)) {
+    throw new CommercialResilienceError(
+      "COHORT_PUBLICATION_LEDGER_CORRUPTED",
+      `Cohort publication ledger has missing or malformed digest for "${publicationKey}"`,
+    );
+  }
+  const actualDigest = computeCohortSnapshotStructuralDigest(snapshot);
+  if (actualDigest !== storedDigest) {
+    throw new CommercialResilienceError(
+      "COHORT_PUBLICATION_LEDGER_CORRUPTED",
+      `Cohort publication ledger structural digest mismatch for "${publicationKey}"`,
+    );
+  }
+
+  return {
+    snapshot,
+    expectedDigest: storedDigest,
+  };
+}
+
 function lookupPublishedSnapshot(
   source:
     | ReadonlyMap<string, CohortHeatmapResult>
@@ -563,14 +611,7 @@ function lookupPublishedSnapshot(
     return undefined;
   }
   if ("ledgerKind" in source) {
-    const snapshot = source.snapshotsByKey.get(publicationKey);
-    if (!snapshot) {
-      return undefined;
-    }
-    return {
-      snapshot,
-      expectedDigest: source.snapshotDigestsByKey.get(publicationKey) ?? null,
-    };
+    return readVerifiedPublicationLedgerEntry(source, publicationKey);
   }
   const snapshot = source.get(publicationKey);
   if (!snapshot) {
@@ -584,6 +625,8 @@ function lookupPublishedSnapshot(
  * Replaying an identical snapshot returns a deeply frozen copy of the original sealed snapshot;
  * attempting to publish any altered count/cell/digest for an already-published
  * `(cohortId, isoWeekKey)` throws `COHORT_WEEK_ALREADY_PUBLISHED`.
+ * Incomplete or tampered `(snapshot, digest)` ledger pairs fail closed with
+ * `COHORT_PUBLICATION_LEDGER_CORRUPTED`.
  */
 export function sealCohortWeeklySnapshot(
   ledger: CohortSnapshotPublicationLedger,
@@ -629,20 +672,15 @@ export function sealCohortWeeklySnapshot(
   });
   const candidateDigest = computeCohortSnapshotStructuralDigest(candidateFrozen);
 
-  const existing = ledger.snapshotsByKey.get(key);
-  if (existing) {
-    const storedDigest =
-      ledger.snapshotDigestsByKey.get(key) ??
-      computeCohortSnapshotStructuralDigest(existing);
-    const existingDigest = computeCohortSnapshotStructuralDigest(existing);
+  const existingRecord = readVerifiedPublicationLedgerEntry(ledger, key);
+  if (existingRecord) {
     if (
-      existingDigest === storedDigest &&
-      candidateDigest === storedDigest &&
-      cohortSnapshotsEquivalent(existing, candidateFrozen)
+      candidateDigest === existingRecord.expectedDigest &&
+      cohortSnapshotsEquivalent(existingRecord.snapshot, candidateFrozen)
     ) {
       return {
         ledger,
-        snapshot: cloneAndFreezeCohortSnapshot(existing, {
+        snapshot: cloneAndFreezeCohortSnapshot(existingRecord.snapshot, {
           sealed: true,
           idempotentReplay: true,
         }),

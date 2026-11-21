@@ -18,6 +18,7 @@ export type CommercialResilienceErrorCode =
   | "INVALID_MONETARY_AMOUNT"
   | "MISSING_OR_ZERO_COST_ESTIMATE"
   | "INVALID_TIMESTAMP"
+  | "OUT_OF_ORDER_TIMESTAMP"
   | "INVALID_IDENTIFIER"
   | "INVALID_CURRENCY"
   | "INVALID_COUNT"
@@ -42,6 +43,7 @@ export type CommercialResilienceErrorCode =
   | "SLIDING_OR_INVALID_WEEK_WINDOW"
   | "COHORT_WEEK_NOT_FINALIZED"
   | "COHORT_WEEK_ALREADY_PUBLISHED"
+  | "COHORT_PUBLICATION_LEDGER_CORRUPTED"
   | "INVALID_COHORT_COUNTS";
 
 export class CommercialResilienceError extends Error {

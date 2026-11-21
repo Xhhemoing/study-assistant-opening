@@ -1292,6 +1292,128 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
       netSettledLifetimeMicros: 70_000_000n,
     });
 
+    // Backdated refund (day 5 recorded after day 10) MUST be rejected with OUT_OF_ORDER_TIMESTAMP
+    let chronoLedger = createCreatorRoyaltyLedger();
+    chronoLedger = appendCreatorRoyaltyAccrual(chronoLedger, {
+      entryId: "cr-chrono-1",
+      idempotencyKey: "accrual-chrono",
+      purchaseId: "order-chrono",
+      creatorAccountId: "creator-chrono",
+      buyerAccountId: "buyer-chrono",
+      cartridgeId: "cs408-os",
+      currency: "USD",
+      settledPurchaseAtMs: settledAt,
+      grossReceiptsMicros: 100_000_000n,
+      channelFeeMicros: 0n,
+      quality: {
+        eligibleCohortSize: 10,
+        blindSevenDayTransferRate: 0.5,
+        severeLeakCount: 0,
+      },
+    }).ledger;
+
+    chronoLedger = appendCreatorRoyaltyRefund(chronoLedger, {
+      entryId: "cr-chrono-ref-d10",
+      idempotencyKey: "ref-chrono-d10",
+      purchaseId: "order-chrono",
+      additionalRefundMicros: 20_000_000n,
+      refundOccurredAtMs: settledAt + 10 * DAY_MS,
+    }).ledger;
+
+    try {
+      appendCreatorRoyaltyRefund(chronoLedger, {
+        entryId: "cr-chrono-ref-d5",
+        idempotencyKey: "ref-chrono-d5",
+        purchaseId: "order-chrono",
+        additionalRefundMicros: 30_000_000n,
+        refundOccurredAtMs: settledAt + 5 * DAY_MS,
+      });
+      expect.unreachable("Expected OUT_OF_ORDER_TIMESTAMP");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "OUT_OF_ORDER_TIMESTAMP",
+      );
+    }
+
+    // Defense-in-depth: even if a deserialized ledger contains an out-of-order day-5 entry
+    // carrying stale cumulative totals, point-in-time projection recomputes strictly from filtered deltas!
+    const day10Entry = chronoLedger.entries[1]!;
+    const syntheticCorruptedLedger = {
+      ...chronoLedger,
+      entries: [
+        ...chronoLedger.entries,
+        {
+          ...day10Entry,
+          entryId: "cr-chrono-synth-d5",
+          idempotencyKey: "synth-d5",
+          recordedAtMs: settledAt + 5 * DAY_MS,
+          eventRefundMicros: 30_000_000n,
+          cumulativeRefundsMicros: 50_000_000n, // polluted cumulative copy including day 10!
+          netReceiptsMicros: 50_000_000n,
+          resultingRoyaltyMicros: 35_000_000n,
+        },
+      ],
+    };
+    const posAtDay5 = projectCreatorRoyaltyPosition(
+      syntheticCorruptedLedger,
+      "order-chrono",
+      settledAt + 5 * DAY_MS,
+    );
+    expect(posAtDay5.cumulativeRefundsMicros).toBe(30_000_000n);
+    expect(posAtDay5.netReceiptsMicros).toBe(70_000_000n);
+    expect(posAtDay5.royaltyMicros).toBe(49_000_000n); // 70% of $70, NOT polluted by day-10 refund!
+
+    // Future-dated EUR entries & payout settlements AFTER nowMs MUST NOT break an earlier USD summary
+    const day25 = exactMaturity + 11 * DAY_MS;
+    const day40 = day25 + ROYALTY_ESCROW_WINDOW_MS + DAY_MS;
+    let futureMultiCurrencyLedger = appendCreatorRoyaltyAccrual(ledger, {
+      entryId: "cr-eur-1",
+      idempotencyKey: "accrual-eur-1",
+      purchaseId: "order-eur-1",
+      creatorAccountId: "creator-1",
+      buyerAccountId: "buyer-eur",
+      cartridgeId: "cs408-os",
+      currency: "EUR",
+      settledPurchaseAtMs: day25,
+      grossReceiptsMicros: 50_000_000n,
+      channelFeeMicros: 0n,
+      quality: {
+        eligibleCohortSize: 10,
+        blindSevenDayTransferRate: 0.5,
+        severeLeakCount: 0,
+      },
+    }).ledger;
+    futureMultiCurrencyLedger = appendCreatorRoyaltyRelease(
+      futureMultiCurrencyLedger,
+      {
+        entryId: "cr-eur-rel",
+        idempotencyKey: "release-eur-1",
+        purchaseId: "order-eur-1",
+        nowMs: day40,
+      },
+    ).ledger;
+    futureMultiCurrencyLedger = recordCreatorRoyaltyPayoutSettlement(
+      futureMultiCurrencyLedger,
+      {
+        entryId: "ps-eur-1",
+        idempotencyKey: "payout-eur-1",
+        creatorAccountId: "creator-1",
+        currency: "EUR",
+        settledAtMs: day40,
+        settledReleaseEntryIds: ["cr-eur-rel"],
+      },
+    ).ledger;
+
+    // Historical USD report at day17 succeeds without CURRENCY_MISMATCH from future day25/day40 EUR rows
+    expect(
+      summarizeCreatorRoyaltyPayableBalance(futureMultiCurrencyLedger, {
+        creatorAccountId: "creator-1",
+        currency: "USD",
+        nowMs: day17,
+      }),
+    ).toEqual(summaryAtDay17);
+
     // Purchase B: full chargeback within 14d voids escrowed entry cleanly before release
     ledger = appendCreatorRoyaltyAccrual(ledger, {
       entryId: "cr-b-1",
@@ -1796,6 +1918,60 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     expect(Object.isFrozen(replayViaAggregate)).toBe(true);
     expect(Object.isFrozen(replayViaAggregate.cells[1])).toBe(true);
     expect(replayViaAggregate.finalizedAtMs).toBe(validWeek.weekEndUtcMs); // original sealed timestamp preserved
+
+    // Incomplete or asymmetric (snapshot, digest) ledger states fail closed with COHORT_PUBLICATION_LEDGER_CORRUPTED
+    const missingDigestLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map(pubLedger.snapshotsByKey),
+      snapshotDigestsByKey: new Map<string, string>(),
+    };
+    const missingSnapshotLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map<string, typeof firstSeal.snapshot>(),
+      snapshotDigestsByKey: new Map(pubLedger.snapshotDigestsByKey),
+    };
+    const malformedDigestLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map(pubLedger.snapshotsByKey),
+      snapshotDigestsByKey: new Map([
+        [firstSeal.snapshot.publicationKey!, "not-a-valid-digest"],
+      ]),
+    };
+
+    for (const corruptedLedger of [
+      missingDigestLedger,
+      missingSnapshotLedger,
+      malformedDigestLedger,
+    ]) {
+      for (const action of [
+        () => sealCohortWeeklySnapshot(corruptedLedger, heatmap),
+        () =>
+          aggregateCohortEventsToHeatmap({
+            cohortId: "cohort-cs408",
+            mode: "cohort",
+            role: "instructor",
+            window: {
+              weekStartUtcMs: validWeek.weekStartUtcMs,
+              weekEndUtcMs: validWeek.weekEndUtcMs,
+            },
+            evaluatedAtMs: validWeek.weekEndUtcMs + 7_200_000,
+            enrolledRoster,
+            skillIds: ["spam-single-student", "genuine-five-students"],
+            events: baseEvents,
+            publishedSnapshots: corruptedLedger,
+          }),
+      ]) {
+        try {
+          action();
+          expect.unreachable("Expected COHORT_PUBLICATION_LEDGER_CORRUPTED");
+        } catch (err) {
+          expect(err).toBeInstanceOf(CommercialResilienceError);
+          expect((err as CommercialResilienceError).code).toBe(
+            "COHORT_PUBLICATION_LEDGER_CORRUPTED",
+          );
+        }
+      }
+    }
 
     // Attempting to republish the same (cohortId, isoWeekKey) with an extra backdated event (E=6 instead of E=5) MUST fail closed
     try {

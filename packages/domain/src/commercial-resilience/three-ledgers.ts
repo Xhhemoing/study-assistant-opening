@@ -933,6 +933,22 @@ function royaltyEntriesEqual(
   );
 }
 
+function getMaxRecordedAtMsForPurchase(
+  ledger: CreatorRoyaltyLedger,
+  purchaseId: string,
+): number | null {
+  let maxMs: number | null = null;
+  for (const item of ledger.entries) {
+    if (item.purchaseId !== purchaseId) {
+      continue;
+    }
+    if (maxMs === null || item.recordedAtMs > maxMs) {
+      maxMs = item.recordedAtMs;
+    }
+  }
+  return maxMs;
+}
+
 function appendValidatedRoyaltyEntry(
   ledger: CreatorRoyaltyLedger,
   entry: CreatorRoyaltyEntry,
@@ -973,6 +989,19 @@ function appendValidatedRoyaltyEntry(
         `Duplicate creator_royalty_entry entryId "${entry.entryId}"`,
       );
     }
+  }
+  const maxExistingRecordedAtMs = getMaxRecordedAtMsForPurchase(
+    ledger,
+    entry.purchaseId,
+  );
+  if (
+    maxExistingRecordedAtMs !== null &&
+    entry.recordedAtMs < maxExistingRecordedAtMs
+  ) {
+    throw new CommercialResilienceError(
+      "OUT_OF_ORDER_TIMESTAMP",
+      `Entry "${entry.entryId}" recordedAtMs (${entry.recordedAtMs}) cannot precede existing entry timestamp (${maxExistingRecordedAtMs}) for purchase "${entry.purchaseId}"`,
+    );
   }
   return {
     ledger: {
@@ -1112,56 +1141,108 @@ function projectCreatorRoyaltyPositionInternal(
       item.purchaseId === normalizedPurchaseId &&
       (includeFutureEntries || item.recordedAtMs <= evaluatedAtMs),
   );
-  const latest = history[history.length - 1];
-  if (!latest) {
+  const accrual = history.find((item) => item.eventType === "accrual");
+  if (!accrual) {
     throw new CommercialResilienceError(
       "PURCHASE_NOT_FOUND",
       `No creator royalty entries found for purchase "${normalizedPurchaseId}" as of ${evaluatedAtMs}`,
     );
   }
 
-  const escrowMatured = evaluatedAtMs >= latest.escrowReleaseAtMs;
+  const escrowMatured = evaluatedAtMs >= accrual.escrowReleaseAtMs;
   const remainingEscrowMs = escrowMatured
     ? 0
-    : latest.escrowReleaseAtMs - evaluatedAtMs;
+    : accrual.escrowReleaseAtMs - evaluatedAtMs;
 
+  // Recompute cumulative totals strictly by summing per-entry incremental deltas
+  // across filtered history rather than trusting stored cumulative snapshots.
   const releaseEntry =
     history.find((item) => item.eventType === "escrow_release") ?? null;
-  const releasedMicros = releaseEntry ? releaseEntry.resultingRoyaltyMicros : 0n;
-  let clawedBackMicros = 0n;
+
+  let cumulativeRefundsMicros = 0n;
+  let preReleaseRefundsMicros = 0n;
+  let hasPostReleaseClawback = false;
+
   for (const item of history) {
-    if (item.eventType === "post_release_clawback") {
-      clawedBackMicros += -item.deltaRoyaltyMicros;
+    if (
+      item.eventType === "accrual" ||
+      item.eventType === "escrow_refund_adjustment"
+    ) {
+      cumulativeRefundsMicros += item.eventRefundMicros;
+      preReleaseRefundsMicros += item.eventRefundMicros;
+    } else if (item.eventType === "post_release_clawback") {
+      cumulativeRefundsMicros += item.eventRefundMicros;
+      hasPostReleaseClawback = true;
     }
   }
+
+  const rawNet =
+    accrual.grossReceiptsMicros -
+    accrual.channelFeeMicros -
+    cumulativeRefundsMicros;
+  const netReceiptsMicros = rawNet > 0n ? rawNet : 0n;
+  const earnedRoyaltyFromNet =
+    accrual.excludedReason !== null
+      ? 0n
+      : (accrual.ratePermille * netReceiptsMicros) / ROYALTY_RATE_DENOMINATOR;
+
+  let releasedMicros = 0n;
+  let clawedBackMicros = 0n;
+  let royaltyMicros = earnedRoyaltyFromNet;
+  let status: CreatorRoyaltyStatus;
+
+  if (accrual.excludedReason !== null) {
+    status = "excluded";
+    royaltyMicros = 0n;
+  } else if (releaseEntry !== null) {
+    const rawPreReleaseNet =
+      accrual.grossReceiptsMicros -
+      accrual.channelFeeMicros -
+      preReleaseRefundsMicros;
+    const preReleaseNet = rawPreReleaseNet > 0n ? rawPreReleaseNet : 0n;
+    releasedMicros =
+      (accrual.ratePermille * preReleaseNet) / ROYALTY_RATE_DENOMINATOR;
+    const rawClawback =
+      releasedMicros > earnedRoyaltyFromNet
+        ? releasedMicros - earnedRoyaltyFromNet
+        : 0n;
+    clawedBackMicros =
+      rawClawback > releasedMicros ? releasedMicros : rawClawback;
+    royaltyMicros = releasedMicros - clawedBackMicros;
+    if (hasPostReleaseClawback) {
+      status = royaltyMicros === 0n ? "clawed_back" : "partially_clawed_back";
+    } else {
+      status = "released";
+    }
+  } else {
+    status = royaltyMicros === 0n ? "voided" : "pending_escrow";
+  }
+
   const netSettledMicros =
     releasedMicros > clawedBackMicros ? releasedMicros - clawedBackMicros : 0n;
   const payableOffsetMicros = -clawedBackMicros;
-
   const releasableMicros =
-    latest.statusAfterEvent === "pending_escrow" && escrowMatured
-      ? latest.resultingRoyaltyMicros
-      : 0n;
+    status === "pending_escrow" && escrowMatured ? royaltyMicros : 0n;
 
   return {
-    purchaseId: latest.purchaseId,
-    creatorAccountId: latest.creatorAccountId,
-    buyerAccountId: latest.buyerAccountId,
-    cartridgeId: latest.cartridgeId,
-    currency: latest.currency,
-    status: latest.statusAfterEvent,
-    excludedReason: latest.excludedReason,
-    settledPurchaseAtMs: latest.settledPurchaseAtMs,
-    escrowReleaseAtMs: latest.escrowReleaseAtMs,
+    purchaseId: accrual.purchaseId,
+    creatorAccountId: accrual.creatorAccountId,
+    buyerAccountId: accrual.buyerAccountId,
+    cartridgeId: accrual.cartridgeId,
+    currency: accrual.currency,
+    status,
+    excludedReason: accrual.excludedReason,
+    settledPurchaseAtMs: accrual.settledPurchaseAtMs,
+    escrowReleaseAtMs: accrual.escrowReleaseAtMs,
     escrowMaturedAtEvaluation: escrowMatured,
     remainingEscrowMs,
-    grossReceiptsMicros: latest.grossReceiptsMicros,
-    channelFeeMicros: latest.channelFeeMicros,
-    cumulativeRefundsMicros: latest.cumulativeRefundsMicros,
-    netReceiptsMicros: latest.netReceiptsMicros,
-    ratePermille: latest.ratePermille,
-    qualityMultiplierApplied: latest.qualityMultiplierApplied,
-    royaltyMicros: latest.resultingRoyaltyMicros,
+    grossReceiptsMicros: accrual.grossReceiptsMicros,
+    channelFeeMicros: accrual.channelFeeMicros,
+    cumulativeRefundsMicros,
+    netReceiptsMicros,
+    ratePermille: accrual.ratePermille,
+    qualityMultiplierApplied: accrual.qualityMultiplierApplied,
+    royaltyMicros,
     releasableMicros,
     releasedEntryId: releaseEntry ? releaseEntry.entryId : null,
     releasedMicros,
@@ -1220,9 +1301,17 @@ export function recordPostReleaseRoyaltyClawback(
         item.purchaseId === purchaseId && item.eventType === "escrow_release",
     ) ?? null;
 
+  const maxExistingRecordedAtMs = getMaxRecordedAtMsForPurchase(
+    ledger,
+    purchaseId,
+  );
   const expectedRecordedAtMs = releaseEntry
     ? (explicitRecordedAtMs ??
-      Math.max(refundOccurredAtMs, releaseEntry.recordedAtMs))
+      Math.max(
+        refundOccurredAtMs,
+        releaseEntry.recordedAtMs,
+        maxExistingRecordedAtMs ?? releaseEntry.recordedAtMs,
+      ))
     : explicitRecordedAtMs;
 
   const existingByKey = ledger.entries.find(
@@ -1234,8 +1323,8 @@ export function recordPostReleaseRoyaltyClawback(
       existingByKey.purchaseId === purchaseId &&
       existingByKey.eventType === "post_release_clawback" &&
       existingByKey.eventRefundMicros === additionalRefundMicros &&
-      expectedRecordedAtMs !== null &&
-      existingByKey.recordedAtMs === expectedRecordedAtMs
+      (explicitRecordedAtMs === null ||
+        existingByKey.recordedAtMs === explicitRecordedAtMs)
     ) {
       return { ledger, entry: existingByKey, idempotentReplay: true };
     }
@@ -1268,11 +1357,24 @@ export function recordPostReleaseRoyaltyClawback(
 
   const effectiveRecordedAtMs =
     explicitRecordedAtMs ??
-    Math.max(refundOccurredAtMs, releaseEntry.recordedAtMs);
+    Math.max(
+      refundOccurredAtMs,
+      releaseEntry.recordedAtMs,
+      maxExistingRecordedAtMs ?? releaseEntry.recordedAtMs,
+    );
   if (effectiveRecordedAtMs < releaseEntry.recordedAtMs) {
     throw new CommercialResilienceError(
       "INVALID_TIMESTAMP",
       "Post-release clawback recordedAtMs cannot precede escrow release timestamp",
+    );
+  }
+  if (
+    maxExistingRecordedAtMs !== null &&
+    effectiveRecordedAtMs < maxExistingRecordedAtMs
+  ) {
+    throw new CommercialResilienceError(
+      "OUT_OF_ORDER_TIMESTAMP",
+      `Post-release clawback recordedAtMs (${effectiveRecordedAtMs}) cannot precede existing entry timestamp (${maxExistingRecordedAtMs}) for purchase "${purchaseId}"`,
     );
   }
 
@@ -1895,15 +1997,16 @@ export function summarizeCreatorRoyaltyPayableBalance(
     if (entry.creatorAccountId !== creatorAccountId) {
       continue;
     }
+    if (entry.recordedAtMs > nowMs) {
+      continue;
+    }
     if (entry.currency !== currency) {
       throw new CommercialResilienceError(
         "CURRENCY_MISMATCH",
         `Creator royalty entry "${entry.entryId}" has currency "${entry.currency}", expected "${currency}"`,
       );
     }
-    if (entry.recordedAtMs <= nowMs) {
-      purchaseIds.add(entry.purchaseId);
-    }
+    purchaseIds.add(entry.purchaseId);
   }
 
   let paidOutReleasedGrossMicros = 0n;
@@ -1913,14 +2016,14 @@ export function summarizeCreatorRoyaltyPayableBalance(
     if (settlement.creatorAccountId !== creatorAccountId) {
       continue;
     }
+    if (settlement.settledAtMs > nowMs) {
+      continue;
+    }
     if (settlement.currency !== currency) {
       throw new CommercialResilienceError(
         "CURRENCY_MISMATCH",
         `Payout settlement "${settlement.entryId}" has currency "${settlement.currency}", expected "${currency}"`,
       );
-    }
-    if (settlement.settledAtMs > nowMs) {
-      continue;
     }
     paidOutReleasedGrossMicros += settlement.grossReleasedMicros;
     settledClawbackMicros += settlement.settledClawbackMicros;
