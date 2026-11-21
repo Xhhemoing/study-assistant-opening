@@ -3,8 +3,7 @@ import { portableMarkdownNoteSchema, type ObsidianLink, type PortableMarkdownNot
 function obsidianLinks(markdown: string): ObsidianLink[] {
   const links: ObsidianLink[] = [];
   let fence: string | undefined;
-  let offset = 0;
-  for (const line of markdown.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
+  for (const { 0: line, index: offset } of markdown.matchAll(/[^\r\n]*(?:\r\n?|\n)|[^\r\n]+$/gu)) {
     const marker = /^ {0,3}(`{3,}|~{3,})([^\r\n]*)/u.exec(line);
     if (marker && !fence) fence = marker[1];
     else if (marker && fence && marker[1]!.startsWith(fence) && !marker[2]!.trim()) fence = undefined;
@@ -25,7 +24,6 @@ function obsidianLinks(markdown: string): ObsidianLink[] {
         });
       }
     }
-    offset += line.length;
   }
   return links;
 }

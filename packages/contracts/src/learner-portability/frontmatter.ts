@@ -4,7 +4,14 @@ const openingFence = /^---[ \t]*$/u;
 const closingFence = /^(?:---|\.\.\.)[ \t]*$/u;
 const plainKey = /^[\p{L}_][\p{L}\p{M}\p{N}_.-]*(?: [\p{L}\p{M}\p{N}_.-]+)*$/u;
 const scalarKeyword = /^(?:y|n|yes|no|on|off|true|false|null)$/iu;
-const privateKey = /^(?:sealed|0109|skillbelief(?:v1)?|openingcoursereservedquestions|<<)$/iu;
+const privateKeys = new Set([
+  "workspaceid", "owneruserid", "userid", "principalid", "sessionid", "tenantid", "accountid", "privacyepoch",
+  "claimtoken", "executionid", "jobexecution", "idempotencykey", "clientkey",
+  "tutorjobid", "assistantturnid", "userturnid", "conversationid", "sourceturnids", "memorydependencyids",
+  "contextsourcerefs", "exposurereceiptid", "materialpurposepin", "sourceversion", "uploadstate", "parsestate", "imageobjectkey",
+  "sealed", "solutionsealed", "visibilityhint", "0109", "skillbelief", "skillbeliefv1", "bkt", "fiass", "remedyclinic",
+  "examforecast", "diagnosticplacement", "openingcoursereservedquestions", "reservedquestions", "internalrubric", "<<",
+]);
 const yamlEscapes: Readonly<Record<string, string>> = {
   "0": "\0", a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", e: "\x1b",
   " ": " ", "\t": "\t", '"': '"', "/": "/", "\\": "\\", N: "\u0085", _: "\u00a0", L: "\u2028", P: "\u2029",
@@ -135,7 +142,7 @@ class FrontmatterReader {
     this.skipHorizontal();
     if (!key || keys.has(key) || (flow ? this.current !== ":" : !this.indicator(":"))
       || (!quoted && (!plainKey.test(key) || scalarKeyword.test(key)))
-      || privateKey.test(key.normalize("NFKC").replace(/[-_\s]/gu, ""))) invalid();
+      || privateKeys.has(key.normalize("NFKC").replace(/[-_.\s]/gu, "").toLowerCase())) invalid();
     keys.add(key);
     this.offset++;
   }

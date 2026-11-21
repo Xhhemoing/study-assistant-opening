@@ -6,6 +6,26 @@ import {
   queryCartridgeLiteCapability, schedulePortableReview, validateCartridgeLite,
 } from "./index";
 
+function changeZipKey(archive: Uint8Array, before: string, after: string): Uint8Array {
+  const headers = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
+  const start = 30 + headers.getUint16(26, true) + headers.getUint16(28, true);
+  const end = start + headers.getUint32(18, true);
+  const payload = archive.subarray(start, end);
+  const text = new TextDecoder().decode(payload);
+  const offset = text.indexOf(before);
+  expect(offset).toBeGreaterThanOrEqual(0);
+  const encoder = new TextEncoder();
+  payload.set(encoder.encode(after), encoder.encode(text.slice(0, offset)).length);
+  let crc = 0xffffffff;
+  for (const byte of payload) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  headers.setUint32(14, crc ^ 0xffffffff, true);
+  headers.setUint32(end + 16, crc ^ 0xffffffff, true);
+  return archive;
+}
+
 describe("learner portability", () => {
   it("preserves raw note text and indexes Obsidian links without changing it", () => {
     const text = "\uFEFF---\r\ntitle: 笔记\r\n---\r\n![[图#步骤|图示]] [[#本页]] `[[code]]` \\[[escaped]]\n```ts\n[[in fence]]\n```\n\n";
@@ -16,6 +36,13 @@ describe("learner portability", () => {
     ]);
     expect(exportObsidianNote(note)).toEqual({ path: note.path, markdown: text });
     expect(exportMarkdown(importMarkdown(note.path, text))).toBe(text);
+  });
+
+  it.each(["\n", "\r\n", "\r"])("ignores Obsidian links in code fences with %j line endings", newline => {
+    const markdown = ["---", "title: 课程", "---", "~~~example", "[[example]]", "~~~", "数学 ![[real]]", ""].join(newline);
+    const note = importObsidianNote("notes/algebra.md", markdown);
+    expect(note.links).toEqual([{ target: "real", fragment: null, alias: null, embed: true, offset: markdown.indexOf("![[real]]") }]);
+    expect(exportObsidianNote(note).markdown).toBe(markdown);
   });
 
   it("round-trips quoted Anki fields, FSRS snapshots and deterministic in-memory ZIP bytes", () => {
@@ -68,6 +95,27 @@ describe("learner portability", () => {
     expect(() => importMarkdown("public.md", "---\nsealed: true\n---\n")).toThrow();
     expect(() => importObsidianNote("../notes.md", "public")).toThrow();
     expect(() => exportLearnerZip({ ...bundle, manifest: { ...bundle.manifest, notes: 0 } })).toThrow();
+  });
+
+  it.each(["\n", "\r\n", "\r"])("rejects internal Opening keys in both note formats and both ZIP directions with %j", newline => {
+    for (const key of ["workspaceId", "ownerUserId", "privacyEpoch", "memoryDependencyIds", "workspace_id", "workspace-id", "workspace id", "Workspace.ID"]) {
+      const publicKey = "x".repeat(key.length);
+      const markdown = ["---", "title: Algebra", "details:", "  - " + publicKey + ": example", "---", "# Note"].join(newline);
+      const original = importObsidianNote("notes/algebra.md", markdown);
+      const bundle = createLearnerPackage({ notes: [original], decks: [], reviews: [] });
+      const imported = markdown.replace(publicKey, key);
+      expect(() => importMarkdown(original.path, imported)).toThrow(/YAML frontmatter/u);
+      expect(() => importObsidianNote(original.path, imported)).toThrow(/YAML frontmatter/u);
+      expect(() => exportLearnerZip({ ...bundle, notes: [{ ...original, markdown: imported }] })).toThrow(/YAML frontmatter/u);
+      const historical = changeZipKey(exportLearnerZip(bundle), publicKey, key);
+      expect(() => importLearnerZip(historical)).toThrow(/YAML frontmatter/u);
+    }
+  });
+
+  it.each(["\u2028", "\u2029"])("rejects internal metadata across ambiguous YAML separators %j", newline => {
+    for (const importNote of [importMarkdown, importObsidianNote]) {
+      expect(() => importNote("notes/algebra.md", ["---", "workspaceId: example", "---", "# Note"].join(newline))).toThrow(/YAML frontmatter/u);
+    }
   });
 
   it.each([

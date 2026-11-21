@@ -20,10 +20,10 @@ export function isSafeGitPath(file: string): boolean {
 
 export function isPublicFile(file: string): boolean {
   return isSafeGitPath(file) && sourceRoots.some(root => file.startsWith(root))
-    && !file.split("/").some(part => closedProduct.test(part) || closedSegment.test(part.replace(/\.(?:json|(?:d\.)?[cm]?[jt]sx?)$/u, "")))
+    && !file.split("/").some(part => closedProduct.test(part) || closedSegment.test(part.replace(/\.(?:d\.json\.ts|json|(?:d\.)?[cm]?[jt]sx?)$/u, "")))
     && !/(?:^|\/)opening\/(?:cartridges|exam-sprint|share|teachback-arena|span-[^/]+)\//iu.test(file)
     && !/(?:^|\/)(?:fixtures|__fixtures__|__tests__|seeds|migrations)\//iu.test(file)
-    && !/\.(?:test|spec)\.(?:json|[cm]?[jt]sx?)$/iu.test(file)
+    && !/\.(?:test|spec)\.(?:d\.json\.ts|json|[cm]?[jt]sx?)$/iu.test(file)
     && (sourceExtension.test(file) || (file.endsWith(".json") && !/^package(?:-lock)?\.json$/iu.test(posix.basename(file))));
 }
 

@@ -1,7 +1,9 @@
 import ts from "typescript";
 
-export type ModuleEdge = { spec: string; line: number; kind: "module" | "type" | "path" | "ambient" };
+export type ResolutionMode = "import" | "require";
+export type ModuleEdge = { spec: string; line: number; kind: "module" | "type" | "path" | "ambient"; mode: ResolutionMode };
 type Loader = "require" | "module" | "wrapper";
+const bundler = { module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler };
 
 function unwrap(node: ts.Expression): ts.Expression {
   while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)
@@ -30,15 +32,16 @@ function isPropertyName(node: ts.Identifier): boolean {
     || ts.isMethodSignature(parent) || ts.isPropertyAccessExpression(parent)) && parent.name === node;
 }
 
-function allTypeSpecifiers(elements: readonly { isTypeOnly: boolean }[]): boolean {
-  return elements.length > 0 && elements.every(element => element.isTypeOnly);
-}
-
 export function readModuleEdges(file: string, text: string): ModuleEdge[] {
-  const source = ts.createSourceFile(file, text, { languageVersion: ts.ScriptTarget.Latest, jsDocParsingMode: ts.JSDocParsingMode.ParseAll }, true);
+  const fileMode: ResolutionMode = /\.c[jt]s$/u.test(file) ? "require" : "import";
+  const source = ts.createSourceFile(file, text, {
+    languageVersion: ts.ScriptTarget.Latest, jsDocParsingMode: ts.JSDocParsingMode.ParseAll,
+    impliedNodeFormat: fileMode === "require" ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
+  }, true);
   const nodes: ts.Node[] = [];
   const seen = new Set<ts.Node>();
   const edges: ModuleEdge[] = [];
+  const literals = new Set<number>();
   const handled = new Set<ts.Node>();
   const aliases = new Map<string, Loader>();
   const lineAt = (offset: number) => source.getLineAndCharacterOfPosition(offset).line + 1;
@@ -55,10 +58,14 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   };
   visit(source);
 
-  const edge = (node: ts.Node | undefined, origin: ts.Node, kind: ModuleEdge["kind"]): void => {
+  const edge = (node: ts.Node | undefined, origin: ts.Node, kind: ModuleEdge["kind"], mode?: ResolutionMode): void => {
     const spec = node && ts.isExpression(node) ? unwrap(node) : node;
     if (!spec || !ts.isStringLiteralLike(spec)) return fail(origin, "Nonliteral module specifier");
-    edges.push({ spec: spec.text, line: lineAt(spec.getStart(source)), kind });
+    const offset = spec.getStart(source);
+    literals.add(offset);
+    const typeMode = kind === "type" ? ts.getModeForUsageLocation(source, spec, bundler) : undefined;
+    const resolution = mode ?? (typeMode === undefined ? fileMode : typeMode === ts.ModuleKind.CommonJS ? "require" : "import");
+    edges.push({ spec: spec.text, line: lineAt(offset), kind, mode: resolution });
   };
 
   function loader(expression: ts.Expression, mark = false): Loader | undefined {
@@ -121,29 +128,19 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   }
 
   for (const node of nodes) {
-    if (ts.isImportDeclaration(node)) {
-      const clause = node.importClause;
-      const bindings = clause?.namedBindings;
-      const typeOnly = clause?.isTypeOnly
-        || (!clause?.name && bindings && ts.isNamedImports(bindings) && allTypeSpecifiers(bindings.elements));
-      edge(node.moduleSpecifier, node, typeOnly ? "type" : "module");
-    }
-    if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
-      const clause = node.exportClause;
-      const typeOnly = node.isTypeOnly || (clause && ts.isNamedExports(clause) && allTypeSpecifiers(clause.elements));
-      edge(node.moduleSpecifier, node, typeOnly ? "type" : "module");
-    }
+    if (ts.isImportDeclaration(node)) edge(node.moduleSpecifier, node, node.importClause?.isTypeOnly ? "type" : "module");
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier) edge(node.moduleSpecifier, node, node.isTypeOnly ? "type" : "module");
     if (ts.isExternalModuleReference(node)) {
       const typeOnly = ts.isImportEqualsDeclaration(node.parent) && node.parent.isTypeOnly;
-      edge(node.expression, node, typeOnly ? "type" : "module");
+      edge(node.expression, node, typeOnly ? "type" : "module", "require");
     }
     if (ts.isImportTypeNode(node)) edge(ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined, node, "type");
     if (ts.isJSDocImportTag(node)) edge(node.moduleSpecifier, node, "type");
     if (ts.isCallExpression(node)) {
-      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) edge(node.arguments[0], node, "module");
+      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) edge(node.arguments[0], node, "module", "import");
       else if (loader(node.expression) === "require") {
         loader(node.expression, true);
-        edge(node.arguments[0], node, "module");
+        edge(node.arguments[0], node, "module", "require");
       }
     }
     if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
@@ -170,7 +167,7 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   }
 
   const addReferences = (references: readonly ts.FileReference[], kind: ModuleEdge["kind"]) => {
-    for (const ref of references) edges.push({ spec: ref.fileName, line: lineAt(ref.pos), kind });
+    for (const ref of references) edges.push({ spec: ref.fileName, line: lineAt(ref.pos), kind, mode: fileMode });
   };
   addReferences(source.referencedFiles, "path");
   addReferences(source.typeReferenceDirectives, "ambient");
@@ -181,23 +178,24 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
     if (token !== ts.SyntaxKind.MultiLineCommentTrivia && token !== ts.SyntaxKind.SingleLineCommentTrivia) continue;
     const comment = scanner.getTokenText();
     for (const pragma of comment.matchAll(/@jsxImportSource\s+(\S+?)(?=\s|\*\/|$)/gu)) {
-      edges.push({ spec: `${pragma[1]}/jsx-runtime`, line: lineAt(scanner.getTokenStart() + pragma.index), kind: "module" });
+      edges.push({ spec: `${pragma[1]}/jsx-runtime`, line: lineAt(scanner.getTokenStart() + pragma.index), kind: "module", mode: fileMode });
     }
     if (!comment.startsWith("/**")) continue;
     for (const match of comment.matchAll(/\bimport\s*\(/gu)) {
       const offset = scanner.getTokenStart() + match.index;
-      const tail = comment.slice(match.index + match[0].length).replace(/\r?\n[ \t]*\*/gu, "\n");
+      const tail = comment.slice(match.index + match[0].length).replace(/(\r?\n[ \t]*)\*/gu, "$1 ");
       const specScanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, tail);
       const first = specScanner.scan();
       if (first !== ts.SyntaxKind.StringLiteral && first !== ts.SyntaxKind.NoSubstitutionTemplateLiteral) {
         throw new Error(`${file}:${lineAt(offset)}: Nonliteral JSDoc module specifier`);
       }
+      if (literals.has(offset + match[0].length + specScanner.getTokenStart())) continue;
       const spec = specScanner.getTokenValue();
       const close = specScanner.scan();
       if (close !== ts.SyntaxKind.CloseParenToken && close !== ts.SyntaxKind.CommaToken) {
         throw new Error(`${file}:${lineAt(offset)}: Malformed JSDoc module specifier`);
       }
-      edges.push({ spec, line: lineAt(offset), kind: "type" });
+      edges.push({ spec, line: lineAt(offset), kind: "type", mode: fileMode });
     }
   }
   return edges;
