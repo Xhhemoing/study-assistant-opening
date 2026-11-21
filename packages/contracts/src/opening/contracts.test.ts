@@ -97,7 +97,7 @@ describe("F02 opening contracts", () => {
     expect(chunk.slideLabel).toBe("Slide 12");
   });
 
-  it("citationSchema accepts optional page / startMs / slideLabel locators", () => {
+  it("citationSchema accepts optional page, media range, keyframe, and slide locators", () => {
     const base = {
       chunkId: U, sourceId: U2, sourceVersion: 1, label: "notes.pdf page 3",
     };
@@ -107,6 +107,14 @@ describe("F02 opening contracts", () => {
     });
     expect(withLocators.page).toBe(3);
     expect(withLocators.startMs).toBe(1500);
+    const range = { ...base, startMs: 0, endMs: 1500, keyframeChunkId: "frame-1500" };
+    expect(citationSchema.parse(range)).toEqual(range);
+    expect(citationSchema.safeParse({ ...range, startMs: 1500 }).success).toBe(true);
+    for (const endMs of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(citationSchema.safeParse({ ...range, endMs }).success).toBe(false);
+    }
+    expect(citationSchema.safeParse({ ...range, startMs: 1501 }).success).toBe(false);
+    expect(citationSchema.safeParse({ ...range, keyframeChunkId: "" }).success).toBe(false);
     expect(withLocators.slideLabel).toBe("A-1");
   });
 

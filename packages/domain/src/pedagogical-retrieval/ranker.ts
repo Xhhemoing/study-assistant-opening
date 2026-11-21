@@ -191,12 +191,9 @@ function filterEdgeAuthorized(
   if (!matchesPrivacyEpoch(edge.privacyEpoch, auth.expectedPrivacyEpoch)) return false;
   if (!survivingNodeIds.has(edge.from) || !survivingNodeIds.has(edge.to)) return false;
   if (edge.sourceId !== undefined && !admissibleSources.has(edge.sourceId)) return false;
-  if (edge.supportingSourceIds && edge.supportingSourceIds.length > 0) {
-    if (!edge.supportingSourceIds.some(sourceId => admissibleSources.has(sourceId))) return false;
-  }
-  if (edge.supportingChunkIds && edge.supportingChunkIds.length > 0) {
-    if (!edge.supportingChunkIds.some(chunkId => survivingChunkIds.has(chunkId))) return false;
-  }
+  // Edge weights aggregate their provenance, so every referenced source and chunk must survive.
+  if (edge.supportingSourceIds?.some(sourceId => !admissibleSources.has(sourceId))) return false;
+  if (edge.supportingChunkIds?.some(chunkId => !survivingChunkIds.has(chunkId))) return false;
   return true;
 }
 
@@ -276,14 +273,14 @@ function orderFoundationsBeforeDependents(
     return false;
   };
 
-  // Pass 1: Add ALL explicit filtered prerequisite / requires / defines constraints first so
-  // inferred shared-concept tier edges can never create 2-cycles or transitive multi-hop cycles.
+  // Add explicit constraints in rank order. Only a constraint whose reverse path
+  // already exists can close a cycle, so acyclic prerequisites retain their order.
   for (let i = 0; i < n; i++) {
     const chunkA = selected[i]!.chunk;
     for (let j = 0; j < n; j++) {
       if (i === j) continue;
       const chunkB = selected[j]!.chunk;
-      if (prereqBeforePairs.has(`${chunkA.id}\0${chunkB.id}`)) {
+      if (prereqBeforePairs.has(`${chunkA.id}\0${chunkB.id}`) && !isReachable(j, i)) {
         addOrderConstraint(i, j);
       }
     }
@@ -338,8 +335,7 @@ function orderFoundationsBeforeDependents(
     effectivePriority[i] = best;
   }
 
-  // Kahn's topological sort breaking ties by (effectivePriority asc, foundationTier asc, originalRank asc),
-  // falling back cleanly if a cyclic dependency exists.
+  // Kahn's topological sort, with relevance and foundation tier breaking ties.
   const emitted = new Uint8Array(n);
   const ordered: RankedPedagogicalChunk[] = [];
   const isBetter = (a: number, b: number): boolean => {
@@ -358,14 +354,7 @@ function orderFoundationsBeforeDependents(
         pick = idx;
       }
     }
-    if (pick === -1) {
-      // Break any cycle deterministically by highest effective priority remaining.
-      for (let idx = 0; idx < n; idx++) {
-        if (!emitted[idx] && (pick === -1 || isBetter(idx, pick))) {
-          pick = idx;
-        }
-      }
-    }
+    if (pick === -1) throw new Error("Prerequisite ordering must be acyclic");
     emitted[pick] = 1;
     ordered.push(selected[pick]!);
     for (const next of outgoing[pick]!) {

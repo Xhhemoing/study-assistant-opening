@@ -417,6 +417,9 @@ function parseTableRowCells(
   return cells;
 }
 
+const THEMATIC_BREAK_RE = /^[ ]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+const SETEXT_LIST_MARKER_RE = /^[ ]{0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/;
+
 function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolean {
   const raw = lines[index]!.raw;
   if (/^\s*$/.test(raw)) return true;
@@ -432,11 +435,29 @@ function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolea
   if (/^[ \t]*\\\[/.test(raw)) return true;
   if (/^[ \t]*>/.test(raw)) return true;
   if (/^[ \t]{0,3}#{1,6}[ \t]+/.test(raw)) return true;
+  if (THEMATIC_BREAK_RE.test(raw)) return true;
   if (raw.includes("|") && index + 1 < lines.length && isTableDelimiterRow(lines[index + 1]!.raw)) {
     return true;
   }
   if (parseInlineTranscriptCue(raw) !== null) return true;
   return false;
+}
+
+function findSetextUnderline(lines: readonly SourceLine[], firstLine: number) {
+  const titleStart = lines[firstLine]!.raw;
+  if (
+    startsSpecialBlock(lines, firstLine) ||
+    SETEXT_LIST_MARKER_RE.test(titleStart) ||
+    /^(?: {4}| {0,3}\t)/.test(titleStart)
+  ) return null;
+
+  for (let index = firstLine + 1; index < lines.length; index++) {
+    const raw = lines[index]!.raw;
+    const underline = /^[ ]{0,3}(=+|-+)[ \t]*$/.exec(raw);
+    if (underline) return { index, level: underline[1]![0] === "=" ? 1 : 2 };
+    if (startsSpecialBlock(lines, index) || SETEXT_LIST_MARKER_RE.test(raw)) break;
+  }
+  return null;
 }
 
 interface InlineConstructSpan {
@@ -463,14 +484,14 @@ function findInlineConstructSpans(
     if (text.startsWith("$$", i) && !isEscaped(text, i)) {
       const close = findUnescapedToken(text, "$$", i + 2);
       const end = close !== -1 ? close + 2 : text.length;
-      spans.push({ start: i, end, kind: "display_math", visibility: activeVisibility });
+      spans.push({ start: i, end, kind: "display_math", visibility: close === -1 ? "sealed" : activeVisibility });
       i = end;
       continue;
     }
     if (text.startsWith("\\[", i) && !isEscaped(text, i)) {
       const close = findUnescapedToken(text, "\\]", i + 2);
       const end = close !== -1 ? close + 2 : text.length;
-      spans.push({ start: i, end, kind: "display_math", visibility: activeVisibility });
+      spans.push({ start: i, end, kind: "display_math", visibility: close === -1 ? "sealed" : activeVisibility });
       i = end;
       continue;
     }
@@ -489,7 +510,7 @@ function findInlineConstructSpans(
             start: i,
             end: bounds.closeEnd,
             kind: classified.kind,
-            visibility: classified.visibility,
+            visibility: isMath && bounds.closeStart === text.length ? "sealed" : classified.visibility,
             label: envName,
             ...(isMath ? {} : { openEnd, closeStart: bounds.closeStart }),
           });
@@ -1021,19 +1042,27 @@ function parsePedagogicalAstInternal(
 
     // 1. Heading (and monotonic heading-stack section visibility propagation)
     const headingMatch = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/.exec(raw);
-    if (headingMatch) {
-      const level = headingMatch[1]!.length;
-      const headingText = headingMatch[2]!.trim();
+    const setext = headingMatch ? null : findSetextUnderline(lines, i);
+    if (headingMatch || setext) {
+      const level = headingMatch ? headingMatch[1]!.length : setext!.level;
+      const headingLastIndex = setext?.index ?? i;
+      const headingEnd = lines[headingLastIndex]!.contentEnd;
+      const headingTextStart = headingMatch
+        ? line.start + raw.indexOf(headingMatch[2]!, raw.indexOf(headingMatch[1]!) + level)
+        : line.start;
+      const headingTextEnd = headingMatch
+        ? headingTextStart + headingMatch[2]!.length
+        : lines[headingLastIndex - 1]!.contentEnd;
+      const headingText = text.slice(headingTextStart, headingTextEnd).trim();
+      const inlineEnd = setext ? headingTextEnd : headingEnd;
       const rawInlineSpans = findInlineConstructSpans(
         text,
         line.start,
-        line.contentEnd,
+        inlineEnd,
         defaultVisibility,
         sealProofs,
       );
       const nonMathInlineSpans = rawInlineSpans.filter(s => s.kind !== "display_math");
-      const headingTextStart = line.start + raw.indexOf(headingMatch[2]!);
-      const headingTextEnd = headingTextStart + headingMatch[2]!.length;
       const cleanHeadingTitle =
         nonMathInlineSpans.length > 0
           ? sanitizeHeaderLabel(
@@ -1063,9 +1092,9 @@ function parsePedagogicalAstInternal(
       const activeVis = getActiveSectionVisibility();
       const headingInlineSpans =
         rawInlineSpans.length > 0
-          ? findInlineConstructSpans(text, line.start, line.contentEnd, activeVis, sealProofs)
+          ? findInlineConstructSpans(text, line.start, inlineEnd, activeVis, sealProofs)
           : [];
-      const extracted = extractProtectedBlocksFromSpans(headingInlineSpans, line.contentEnd, activeVis);
+      const extracted = extractProtectedBlocksFromSpans(headingInlineSpans, inlineEnd, activeVis);
       if (extracted.length > 0) {
         extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
         const safeLabel = sanitizeHeaderLabel(text, headingTextStart, headingTextEnd, extracted, "heading");
@@ -1084,7 +1113,7 @@ function parsePedagogicalAstInternal(
           });
           cursor = Math.max(cursor, block.endOffset);
         }
-        if (cursor > line.contentEnd) {
+        if (cursor > headingEnd) {
           const closeLineIdx = lineIndexContaining(lines, Math.max(line.start, cursor - 1), i);
           const closeLine = lines[closeLineIdx]!;
           const trailingOnCloseLine = text.slice(cursor, closeLine.contentEnd);
@@ -1100,19 +1129,25 @@ function parsePedagogicalAstInternal(
             i = closeLineIdx + 1;
           }
         } else {
-          if (cursor < line.contentEnd) {
-            const suf = trimWhitespaceBounds(text, cursor, line.contentEnd, false);
+          if (cursor < headingEnd) {
+            const suf = trimWhitespaceBounds(text, cursor, headingEnd, false);
             if (suf) {
               pushBlock("heading", activeVis, false, suf.start, suf.end, { label: safeLabel });
             }
           }
-          i++;
+          i = headingLastIndex + 1;
         }
         continue;
       }
-      pushBlock("heading", activeVis, false, line.start, line.contentEnd, {
+      pushBlock("heading", activeVis, false, line.start, headingEnd, {
         label: headingText,
       });
+      i = headingLastIndex + 1;
+      continue;
+    }
+
+    if (THEMATIC_BREAK_RE.test(raw)) {
+      pushBlock("prose", getActiveSectionVisibility(), false, line.start, line.contentEnd);
       i++;
       continue;
     }
@@ -1185,7 +1220,8 @@ function parsePedagogicalAstInternal(
           pushBlock(classified.kind, classified.visibility, true, outerStart, outerEnd, { label });
         }
       } else {
-        pushBlock("code", activeVis, true, outerStart, outerEnd);
+        // A missing closer makes it ambiguous whether following protected Markdown is code.
+        pushBlock("code", closed ? activeVis : "sealed", true, outerStart, outerEnd);
       }
       i = endLineIdx + 1;
       continue;
@@ -1327,7 +1363,8 @@ function parsePedagogicalAstInternal(
             innerBlocks,
           );
         } else {
-          pushBlock(classified.kind, classified.visibility, true, envStart, outerEnd, {
+          const visibility = isMath && closeStart === text.length ? "sealed" : classified.visibility;
+          pushBlock(classified.kind, visibility, true, envStart, outerEnd, {
             label: envName,
           });
         }
@@ -1443,7 +1480,7 @@ function parsePedagogicalAstInternal(
           i = endLineIdx + 1;
         }
       } else {
-        pushBlock("display_math", activeVis, true, startOffset, text.length);
+        pushBlock("display_math", "sealed", true, startOffset, text.length);
         i = lines.length;
       }
       continue;
@@ -1477,7 +1514,7 @@ function parsePedagogicalAstInternal(
           i = endLineIdx + 1;
         }
       } else {
-        pushBlock("display_math", activeVis, true, startOffset, text.length);
+        pushBlock("display_math", "sealed", true, startOffset, text.length);
         i = lines.length;
       }
       continue;
@@ -2158,11 +2195,15 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
   }
 
   const defaultVisibility = input.defaultVisibility ?? "public";
+  // Keep paragraph boundaries between cues while sharing section and container state.
+  const text = input.cues.map(cue => cue.text).join("\n\n");
+  const blocks = parsePedagogicalAst(text, { defaultVisibility });
   const chunks: PedagogicalChunk[] = [];
   let seq = 0;
-  let offsetCursor = 0;
+  let cueStart = 0;
+  let blockIndex = 0;
 
-  for (const cue of input.cues) {
+  for (const [cueIndex, cue] of input.cues.entries()) {
     if (
       !Number.isSafeInteger(cue.startMs) ||
       !Number.isSafeInteger(cue.endMs) ||
@@ -2171,36 +2212,44 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
     ) {
       throw new RangeError(`Invalid transcript cue range [${cue.startMs}, ${cue.endMs}]`);
     }
-    const visibility = cue.visibility ?? defaultVisibility;
-    const baseOffset = offsetCursor;
-    offsetCursor += cue.text.length + 1;
+    const start = cueStart;
+    const end = start + cue.text.length;
+    cueStart = end + 2;
     if (!cue.text) continue;
 
-    if (cue.text.length <= maxSealedChars) {
-      chunks.push({
-        id: `${input.sourceId}:v${input.sourceVersion}:m${seq++}`,
-        sourceId: input.sourceId,
-        sourceVersion: input.sourceVersion,
-        ...(input.privacyEpoch !== undefined ? { privacyEpoch: input.privacyEpoch } : {}),
-        kind: "transcript_cue",
-        constructKinds: ["transcript_cue"],
-        visibility,
-        atomicConstruct: true,
-        text: cue.text,
-        startOffset: baseOffset,
-        endOffset: baseOffset + cue.text.length,
-        pageStart: null,
-        pageEnd: null,
-        startMs: cue.startMs,
-        endMs: cue.endMs,
-        keyframeChunkId: cue.keyframeChunkId ?? null,
-        oversizedSplit: false,
-        ...(cue.itemFamilyId ? { itemFamilyId: cue.itemFamilyId } : {}),
-        ...(cue.conceptIds?.length ? { conceptIds: [...cue.conceptIds] } : {}),
-        ...(cue.label ? { label: cue.label } : {}),
-      });
-    } else {
-      const parts = safeSubsplitText(cue.text, maxSealedChars);
+    const visibilityFloor = maxVisibility(defaultVisibility, cue.visibility ?? defaultVisibility);
+    const spans: Array<{ start: number; end: number; visibility: PedagogicalVisibility }> = [];
+    let cursor = start;
+    const addSpan = (spanEnd: number, visibility: PedagogicalVisibility) => {
+      if (spanEnd <= cursor) return;
+      const last = spans.at(-1);
+      if (last?.visibility === visibility) last.end = spanEnd;
+      else spans.push({ start: cursor, end: spanEnd, visibility });
+      cursor = spanEnd;
+    };
+    const addGap = (gapEnd: number, nearbyVisibility: PedagogicalVisibility) => {
+      if (gapEnd <= cursor) return;
+      // Whitespace can follow its neighboring span. Unclassified content stays sealed.
+      addSpan(gapEnd, /\S/u.test(text.slice(cursor, gapEnd)) ? "sealed" : nearbyVisibility);
+    };
+
+    while (blockIndex < blocks.length && blocks[blockIndex]!.endOffset <= start) blockIndex++;
+    while (blockIndex < blocks.length && blocks[blockIndex]!.startOffset < end) {
+      const block = blocks[blockIndex]!;
+      const visibility = maxVisibility(visibilityFloor, block.visibility);
+      addGap(block.startOffset, spans.at(-1)?.visibility ?? visibility);
+      addSpan(Math.min(end, block.endOffset), visibility);
+      if (block.endOffset > end) break;
+      blockIndex++;
+    }
+    addGap(end, spans.at(-1)?.visibility ?? visibilityFloor);
+
+    for (const span of spans) {
+      const spanText = text.slice(span.start, span.end);
+      const oversizedSplit = spanText.length > maxSealedChars;
+      const parts = oversizedSplit
+        ? safeSubsplitText(spanText, maxSealedChars)
+        : [{ text: spanText, start: 0, end: spanText.length }];
       for (const part of parts) {
         chunks.push({
           id: `${input.sourceId}:v${input.sourceVersion}:m${seq++}`,
@@ -2209,20 +2258,21 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
           ...(input.privacyEpoch !== undefined ? { privacyEpoch: input.privacyEpoch } : {}),
           kind: "transcript_cue",
           constructKinds: ["transcript_cue"],
-          visibility,
+          visibility: span.visibility,
           atomicConstruct: true,
           text: part.text,
-          startOffset: baseOffset + part.start,
-          endOffset: baseOffset + part.end,
+          // Public offsets still use a single separator between cues.
+          startOffset: span.start + part.start - cueIndex,
+          endOffset: span.start + part.end - cueIndex,
           pageStart: null,
           pageEnd: null,
           startMs: cue.startMs,
           endMs: cue.endMs,
           keyframeChunkId: cue.keyframeChunkId ?? null,
-          oversizedSplit: true,
+          oversizedSplit,
           ...(cue.itemFamilyId ? { itemFamilyId: cue.itemFamilyId } : {}),
           ...(cue.conceptIds?.length ? { conceptIds: [...cue.conceptIds] } : {}),
-          ...(cue.label ? { label: cue.label } : {}),
+          ...(cue.label && spans.length === 1 ? { label: cue.label } : {}),
         });
       }
     }

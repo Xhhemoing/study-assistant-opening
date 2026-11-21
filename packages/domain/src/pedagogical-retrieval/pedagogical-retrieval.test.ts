@@ -230,6 +230,84 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ).toThrow(RangeError);
   });
 
+  it("applies protected spans and section visibility across structured cues without changing anchors or offsets", () => {
+    const texts = [
+      "  Public before \\begin{solution}inline-secret\\end{solution} public after. ",
+      "<details><summary>Hint</summary>gated-clue</details> public tail",
+      "参考答案\n---",
+      "section-secret",
+      "Back to lecture\n---",
+      "public again\n> [!hint] callout-clue",
+      "<details><summary>Solution</summary>cross-cue-secret",
+      "second-secret</details> public ending",
+    ];
+    const cues = texts.map((text, i) => ({
+      text, startMs: i * 100, endMs: (i + 1) * 100, keyframeChunkId: `frame-${i}`,
+    }));
+    const chunks = chunkTranscriptCues({ sourceId: "media", sourceVersion: 1, cues });
+    expect(chunks.filter(c => c.startMs === 0).map(c => c.visibility))
+      .toEqual(["public", "sealed", "public"]);
+    expect(chunks.filter(c => c.startMs === 100).map(c => c.visibility)).toEqual(["hint_gated", "public"]);
+    for (const [snippet, visibility] of [
+      ["inline-secret", "sealed"], ["gated-clue", "hint_gated"],
+      ["section-secret", "sealed"], ["public again", "public"],
+      ["callout-clue", "hint_gated"], ["cross-cue-secret", "sealed"],
+      ["second-secret", "sealed"], ["public ending", "public"],
+    ]) {
+      expect(chunks.filter(c => c.text.includes(snippet!)).map(c => c.visibility)).toEqual([visibility]);
+    }
+    const joined = texts.join("\n");
+    let previousEnd = 0;
+    for (const chunk of chunks) {
+      expect(chunk.startOffset).toBeGreaterThanOrEqual(previousEnd);
+      expect(joined.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+      const cue = cues[chunk.startMs! / 100]!;
+      expect(chunk).toMatchObject({
+        startMs: cue.startMs, endMs: cue.endMs, keyframeChunkId: cue.keyframeChunkId,
+      });
+      previousEnd = chunk.endOffset;
+    }
+    expect(chunkTranscriptCues({
+      sourceId: "media", sourceVersion: 1, defaultVisibility: "sealed",
+      cues: [{ ...cues[0]!, visibility: "public" }],
+    }).every(chunk => chunk.visibility === "sealed")).toBe(true);
+  });
+
+  it("tracks multi-line Setext titles, heading levels and thematic breaks", () => {
+    const text = [
+      "Intro", "", "---", "", "From the instructor", "Answer Key", "===", "english-secret",
+      "", "Why this works", "---", "nested-secret", "", "Next unit", "===", "public again",
+      "", "参考答案", "---", "chinese-secret", "### Notes", "still-secret", "## Lecture", "public end",
+    ].join("\n");
+    const blocks = parsePedagogicalAst(text);
+    expect(blocks.filter(block => block.kind === "heading").map(({ label, visibility }) => [label, visibility]))
+      .toEqual([
+        ["From the instructor\nAnswer Key", "sealed"], ["Why this works", "sealed"],
+        ["Next unit", "public"], ["参考答案", "sealed"], ["Notes", "sealed"], ["Lecture", "public"],
+      ]);
+    const chunks = chunkPedagogicalDocument({ sourceId: "markdown", sourceVersion: 1, text });
+    const publicText = partitionPedagogicalChunks(chunks).indexableChunks.map(chunk => chunk.text).join("\n");
+    expect(publicText).not.toContain("-secret");
+    expect(publicText).toContain("public again");
+    expect(publicText).toContain("public end");
+  });
+
+  it.each(["$$", "\\[", "\\begin{align}", "prefix $$", "prefix \\[", "prefix \\begin{align}", "```text", "~~~text"])(
+    "quarantines a malformed %s construct before private headings and containers",
+    open => {
+      const text = [
+        "Public intro", "", open, "unfinished", "# Answer Key", "heading-secret",
+        ":::hint", "private-clue", ":::", "<details>details-secret</details>",
+      ].join("\n");
+      const chunks = chunkPedagogicalDocument({ sourceId: "malformed", sourceVersion: 1, text });
+      const partition = partitionPedagogicalChunks(chunks);
+      const publicText = partition.indexableChunks.map(chunk => chunk.text).join("\n");
+      expect(publicText).toContain("Public intro");
+      expect(publicText).not.toMatch(/unfinished|secret|private-clue/);
+      expect(partition.sealedChunks.map(chunk => chunk.text).join("\n")).toContain("heading-secret");
+    },
+  );
+
   it("safely sub-splits oversized sealed constructs with oversizedSplit=true without breaking LaTeX commands or UTF-16 surrogate pairs", () => {
     // Mathematical bold '𝐱' is a surrogate pair (\uD835\uDC31).
     const mathBoldX = "\uD835\uDC31";
@@ -1224,6 +1302,61 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
     expect(rootDomain).not.toHaveProperty("sparsePpr");
     expect(rootDomain).not.toHaveProperty("chunkPedagogicalDocument");
     expect(rootDomain).not.toHaveProperty("rankPedagogicalEvidence");
+  });
+
+  it.each([
+    { visibility: "sealed" }, { visibility: "hint_gated" }, { sourceId: "revoked" },
+    { sourceVersion: 99 }, { privacyEpoch: 8 }, { itemFamilyId: "withheld" }, null,
+  ] satisfies (Partial<PedagogicalChunk> | null)[])(
+    "gives a mixed-provenance edge zero PPR and ordering effect when support is inadmissible (%j)",
+    rejected => {
+      const prerequisite = makeChunk({ id: "pre", kind: "prose" });
+      const dependent = makeChunk({ id: "dep", kind: "definition" });
+      const support = makeChunk({ id: "good" });
+      const chunks = [dependent, prerequisite, support, ...(rejected ? [makeChunk({ id: "bad", ...rejected })] : [])];
+      const input = {
+        chunks, seedScores: { dep: 1, pre: 0.5 },
+        authorization: {
+          admissibleSourceIds: ["src-notes"], admissibleSourceVersions: { "src-notes": prerequisite.sourceVersion },
+          expectedPrivacyEpoch: 7, excludedItemFamilyIds: ["withheld"],
+        },
+      };
+      const edge = { from: "pre", to: "dep", kind: "prerequisite", privacyEpoch: 7, weight: 4 } as const;
+      const baseline = rankPedagogicalEvidence(input);
+      const mixed = rankPedagogicalEvidence({ ...input, edges: [{ ...edge, supportingChunkIds: ["good", "bad"] }] });
+      expect(mixed.diagnostics).toMatchObject({ survivingEdges: 0, filteredEdges: 1 });
+      expect(mixed.pprByNodeId).toEqual(baseline.pprByNodeId);
+      expect(mixed.ranked).toEqual(baseline.ranked);
+      for (const provenance of [{ supportingChunkIds: ["good"] }, { supportingSourceIds: ["src-notes"] }]) {
+        const allowed = rankPedagogicalEvidence({ ...input, edges: [{ ...edge, ...provenance }] });
+        expect(allowed.diagnostics.survivingEdges).toBe(1);
+        expect(allowed.ranked.map(result => result.chunk.id)).toEqual(["pre", "dep"]);
+        expect(allowed.pprByNodeId).not.toEqual(baseline.pprByNodeId);
+      }
+    },
+  );
+
+  it("preserves the acyclic constraints into and out of explicit prerequisite cycles", () => {
+    const chunks = [
+      makeChunk({ id: "first", kind: "prose" }), makeChunk({ id: "a", kind: "prose" }),
+      makeChunk({ id: "b", kind: "prose" }), makeChunk({ id: "last", kind: "definition" }),
+    ];
+    const edges: PedagogicalGraphEdge[] = [
+      { from: "first", to: "a", kind: "prerequisite", privacyEpoch: 7 },
+      { from: "a", to: "b", kind: "prerequisite", privacyEpoch: 7 },
+      { from: "b", to: "a", kind: "prerequisite", privacyEpoch: 7 },
+      { from: "b", to: "last", kind: "prerequisite", privacyEpoch: 7 },
+    ];
+    const input = {
+      chunks, seedScores: { last: 1, b: 0.9, a: 0.8, first: 0.5 },
+      authorization: { admissibleSourceIds: ["src-notes"], expectedPrivacyEpoch: 7 },
+      options: { seedWeight: 1, pprWeight: 0, prerequisiteWeight: 0 },
+    };
+    const first = rankPedagogicalEvidence({ ...input, edges }).ranked.map(result => result.chunk.id);
+    const reversed = rankPedagogicalEvidence({ ...input, edges: [...edges].reverse() }).ranked.map(result => result.chunk.id);
+    expect(first).toEqual(reversed);
+    expect(first[0]).toBe("first");
+    expect(first.at(-1)).toBe("last");
   });
 
   it("guards shared-concept tier ordering against reverse explicit prereqBeforePairs to avoid spurious 2-cycles", () => {

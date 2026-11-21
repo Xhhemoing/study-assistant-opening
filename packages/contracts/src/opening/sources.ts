@@ -176,9 +176,15 @@ export const citationSchema = z
     label: z.string().min(1).max(240),
     page: z.number().int().positive().optional(),
     startMs: z.number().int().nonnegative().optional(),
+    endMs: z.number().int().nonnegative().optional(),
+    keyframeChunkId: z.string().trim().min(1).max(120).optional(),
     slideLabel: z.string().min(1).max(120).optional(),
   })
-  .strict();
+  .strict()
+  .refine(({ startMs, endMs }) => startMs === undefined || endMs === undefined || endMs >= startMs, {
+    path: ["endMs"],
+    message: "endMs must be at or after startMs",
+  });
 
 export type SourceMime = z.infer<typeof sourceMimeSchema>;
 export type UploadInput = z.infer<typeof uploadInputSchema>;

@@ -22,7 +22,7 @@ const baseResume = {
 };
 
 it("keeps resume citations and accepts legacy history without citations", () => {
-  const withLocators = { ...citation, page: 2, startMs: 0, slideLabel: "S1" };
+  const withLocators = { ...citation, page: 2, startMs: 0, endMs: 4_000, keyframeChunkId: "frame-0", slideLabel: "S1" };
   const withCitations = conversationResumeSchema.parse({
     ...baseResume,
     boundedHistory: [{ role: "assistant", text: "a", citations: [withLocators] }],

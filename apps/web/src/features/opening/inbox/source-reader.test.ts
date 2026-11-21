@@ -122,8 +122,13 @@ describe("dedicated material reader", () => {
     expect(player.getAttribute("data-media-anchor-keyframe-id")).toBe("kf-65");
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
 
-    const pauseSpy = vi.spyOn(video, "pause").mockImplementation(() => {});
-    const playSpy = vi.spyOn(video, "play").mockImplementation(() => Promise.resolve());
+    let paused = true;
+    vi.spyOn(video, "paused", "get").mockImplementation(() => paused);
+    const pauseSpy = vi.spyOn(video, "pause").mockImplementation(() => { paused = true; });
+    const playSpy = vi.spyOn(video, "play").mockImplementation(() => {
+      paused = false;
+      return Promise.resolve();
+    });
 
     // Simulate metadata load -> auto-seeks to startMs / 1000 = 65s and keeps highlight active while paused.
     Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
@@ -132,6 +137,8 @@ describe("dedicated material reader", () => {
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
 
     // Mid-segment timeupdate does not pause.
+    paused = false;
+    await act(async () => { video.dispatchEvent(new Event("play")); });
     video.currentTime = 75;
     await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
     expect(pauseSpy).not.toHaveBeenCalled();
@@ -146,6 +153,7 @@ describe("dedicated material reader", () => {
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
 
     // Manual user resume releases the end bound and clears the jumped-range highlight.
+    paused = false;
     await act(async () => { video.dispatchEvent(new Event("play")); });
     video.currentTime = 110;
     await act(async () => { video.dispatchEvent(new Event("timeupdate")); });

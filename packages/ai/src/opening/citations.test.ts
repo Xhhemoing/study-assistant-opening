@@ -66,6 +66,21 @@ describe("opening citations", () => {
     );
     expect(cite.label).toBe("牛顿力学讲义 v2 page 2");
   });
+
+  it("copies the authorized media chunk range and preserves point-only citations", () => {
+    const [segment, point, invalid] = resolveCitations(
+      ["segment", "point", "invalid"],
+      [
+        base("segment", { page: null, startMs: 0, endMs: 900 }),
+        base("point", { page: null, startMs: 1_000 }),
+        base("invalid", { page: null, startMs: 1_000, endMs: 900 }),
+      ],
+    );
+    expect(segment).toMatchObject({ startMs: 0, endMs: 900 });
+    expect(point).toMatchObject({ startMs: 1_000 });
+    expect(point).not.toHaveProperty("endMs");
+    expect(invalid).not.toHaveProperty("endMs");
+  });
 });
 
 describe("renumberInlineCitations", () => {

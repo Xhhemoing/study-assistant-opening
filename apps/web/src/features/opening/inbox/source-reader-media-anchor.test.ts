@@ -187,6 +187,28 @@ describe("media anchor bounded playback controller", () => {
     expect(media.pauseMock).not.toHaveBeenCalled();
   });
 
+  it.each([10.05, 10.35])("keeps the first play bounded after an initial seek rounds to %ss", roundedTime => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 10_050 })!;
+    const media = createFakeMedia(2);
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    media.currentTime = roundedTime;
+    controller.handleTimeUpdate(media);
+    controller.handleSeeked(media);
+    expect(media.pauseMock).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ boundActive: true, autoPausedAtEnd: false });
+
+    void media.play();
+    controller.handlePlay(media);
+    expect(media.pauseMock).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ phase: "paused_at_end", autoPausedAtEnd: true });
+
+    void media.play();
+    controller.handlePlay(media);
+    expect(media.pauseMock).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({ phase: "continued_past_end", userReleasedBound: true });
+  });
+
   it("keeps rangeHighlightActive true while paused on jumped range and after auto-pause at endMs until manual play or seek elsewhere", () => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000, keyframeChunkId: "kf-10" })!;
     const media = createFakeMedia(2);
@@ -202,6 +224,8 @@ describe("media anchor bounded playback controller", () => {
     expect(controller.snapshot().rangeHighlightActive).toBe(true);
 
     // Auto-pausing at endMs keeps rangeHighlightActive true!
+    void media.play();
+    controller.handlePlay(media);
     media.currentTime = 25;
     controller.handleTimeUpdate(media);
     expect(controller.snapshot()).toMatchObject({
@@ -220,6 +244,8 @@ describe("media anchor bounded playback controller", () => {
     });
 
     // Auto-pause again at endMs, then seek outside the range -> clears highlight.
+    void media.play();
+    controller.handlePlay(media);
     media.currentTime = 25;
     controller.handleTimeUpdate(media);
     expect(controller.snapshot().rangeHighlightActive).toBe(true);
@@ -270,6 +296,8 @@ describe("media anchor bounded playback controller", () => {
     });
 
     // End bound still auto-pauses cleanly at 90s!
+    void m2.play();
+    c2.handlePlay(m2);
     m2.currentTime = 90;
     c2.handleTimeUpdate(m2);
     expect(m2.pauseMock).toHaveBeenCalledOnce();

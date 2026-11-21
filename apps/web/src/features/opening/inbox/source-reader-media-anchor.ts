@@ -163,6 +163,17 @@ export function createMediaAnchorPlaybackController(
     emit();
   };
 
+  const pauseAtEnd = (media: SeekableMediaElement) => {
+    if (!anchor || !boundActive || pendingSeek || media.paused) return;
+    if (!Number.isFinite(media.currentTime) || media.currentTime < anchor.endMs / 1000) return;
+    awaitingProgrammaticSeeked = false;
+    autoPausedAtEnd = true;
+    boundActive = false;
+    phase = "paused_at_end";
+    media.pause();
+    emit();
+  };
+
   return {
     snapshot,
     activate(media) {
@@ -186,25 +197,18 @@ export function createMediaAnchorPlaybackController(
       ) {
         awaitingProgrammaticSeeked = false;
       }
-      if (Number.isFinite(currentMs) && currentMs >= anchor.endMs) {
-        awaitingProgrammaticSeeked = false;
-        autoPausedAtEnd = true;
-        boundActive = false;
-        phase = "paused_at_end";
-        media.pause();
-        emit();
-      }
+      pauseAtEnd(media);
     },
     handlePlay(media) {
-      if (!anchor || !anchor.bounded) return;
-      const currentMs = media.currentTime * 1000;
-      if (autoPausedAtEnd || (!pendingSeek && Number.isFinite(currentMs) && currentMs >= anchor.endMs)) {
+      if (autoPausedAtEnd) {
         awaitingProgrammaticSeeked = false;
         userReleasedBound = true;
         autoPausedAtEnd = false;
         boundActive = false;
         phase = "continued_past_end";
         emit();
+      } else {
+        pauseAtEnd(media);
       }
     },
     handleSeeked(media) {
@@ -215,7 +219,8 @@ export function createMediaAnchorPlaybackController(
       if (!Number.isFinite(currentMs)) return;
       if (anchor.bounded) {
         const startTolerance = wasProgrammatic ? PROGRAMMATIC_SEEK_TOLERANCE_MS : SEEK_RANGE_TOLERANCE_MS;
-        if (currentMs < anchor.startMs - startTolerance || currentMs > anchor.endMs + SEEK_RANGE_TOLERANCE_MS) {
+        const latestSeek = Math.max(anchor.endMs + SEEK_RANGE_TOLERANCE_MS, anchor.startMs + startTolerance);
+        if (currentMs < anchor.startMs - startTolerance || currentMs > latestSeek) {
           if (phase !== "continued_past_end") {
             userReleasedBound = true;
             autoPausedAtEnd = false;
