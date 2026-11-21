@@ -1041,6 +1041,18 @@ function inspectMultiCommaRun(run: string, targetOffset?: number): boolean | num
   return targetOffset !== undefined ? false : -1;
 }
 
+function matchProseConnectiveWord(text: string, index: number): { matched: boolean; wordEnd: number } | null {
+  const prev = index > 0 ? text[index - 1]! : "";
+  if (/[A-Za-z0-9\\]/.test(prev)) return null;
+  const wordMatch = /^[A-Za-z]+/.exec(text.slice(index));
+  if (!wordMatch) return null;
+  const word = wordMatch[0];
+  const wordEnd = index + word.length;
+  const next = wordEnd < text.length ? text[wordEnd]! : "";
+  const matched = PROSE_CONNECTIVE_WORD.test(word) && (!next || /[\s,;:)}\\[\]]/.test(next));
+  return { matched, wordEnd };
+}
+
 function findRightBoundary(text: string, clauseStart: number, fromIndex: number): number {
   let depth = 0;
   for (let k = fromIndex; k < text.length; k++) {
@@ -1049,7 +1061,7 @@ function findRightBoundary(text: string, clauseStart: number, fromIndex: number)
       const cmdMatch = /^\\([A-Za-z]+)/.exec(text.slice(k));
       if (cmdMatch) {
         const cmd = cmdMatch[1]!;
-        if (depth === 0 && (CLAUSE_SPLIT_MACROS.has(cmd) || TEXT_MACRO_NAMES.has(cmd) || cmd === "mathrm" || cmd === "quad")) {
+        if (depth === 0 && (CLAUSE_SPLIT_MACROS.has(cmd) || TEXT_MACRO_NAMES.has(cmd) || cmd === "mathrm" || cmd === "quad" || cmd === "qquad")) {
           return k;
         }
         k += cmd.length;
@@ -1090,7 +1102,15 @@ function findRightBoundary(text: string, clauseStart: number, fromIndex: number)
       k = subRight - 1;
       continue;
     }
+    if (ch === "!" && text[k + 1] === "=") return k;
     if (/[;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵\r\n\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) return k;
+    if (/[A-Za-z]/.test(ch)) {
+      const wordCheck = matchProseConnectiveWord(text, k);
+      if (wordCheck) {
+        if (wordCheck.matched) return k;
+        k = wordCheck.wordEnd - 1;
+      }
+    }
   }
   return text.length;
 }
@@ -1127,6 +1147,28 @@ function isDigitInternalComma(text: string, index: number, clauseStart: number):
   if (leftCheck === null) return true;
 
   const dotToken = run.replace(",", ".");
+  const fullWithDot = text.slice(clauseStart, left) + dotToken + text.slice(right, rhsEnd);
+  const fullParts = fullWithDot.split("=");
+  const memberIdx = text.slice(clauseStart, left).split("=").length - 1;
+  const member = fullParts[memberIdx];
+  if (member !== undefined) {
+    const normalizedMember = normalizeNumericCommas(member);
+    const leftAdjacent = memberIdx > 0
+      ? checkEqualityWithRational(normalizeNumericCommas(fullParts[memberIdx - 1]!), normalizedMember)
+      : undefined;
+    const rightAdjacent = memberIdx + 1 < fullParts.length
+      ? checkEqualityWithRational(normalizedMember, normalizeNumericCommas(fullParts[memberIdx + 1]!))
+      : undefined;
+    if (leftAdjacent === "correct" || rightAdjacent === "correct") return true;
+    // Do not split an unproved decimal comma when its own/adjacent member is non-numeric
+    // (e.g. symbolic variable or collapsed spacing) unless LHS already satisfied before ','.
+    if (leftCheck !== "correct"
+      && (leftAdjacent === null || leftAdjacent === undefined)
+      && (rightAdjacent === null || rightAdjacent === undefined)) {
+      return true;
+    }
+  }
+
   const leftWithDotParts = (text.slice(clauseStart, left) + dotToken).split("=");
   const leftWithDotCorrect = leftWithDotParts.length >= 2
     && checkEqualityWithRational(
@@ -1256,21 +1298,14 @@ function splitMultiClauseFormula(text: string): string[] {
     }
 
     if (/[A-Za-z]/.test(ch)) {
-      const prev = i > 0 ? text[i - 1]! : "";
-      if (!/[A-Za-z0-9\\]/.test(prev)) {
-        const wordMatch = /^[A-Za-z]+/.exec(text.slice(i));
-        if (wordMatch) {
-          const word = wordMatch[0];
-          const nextIndex = i + word.length;
-          const next = nextIndex < text.length ? text[nextIndex]! : "";
-          if (PROSE_CONNECTIVE_WORD.test(word) && (!next || /[\s,;:)}\\[\]]/.test(next))) {
-            clauses.push(text.slice(start, i));
-            start = nextIndex;
-            i = nextIndex - 1;
-            continue;
-          }
-          i = nextIndex - 1;
+      const wordCheck = matchProseConnectiveWord(text, i);
+      if (wordCheck) {
+        if (wordCheck.matched) {
+          clauses.push(text.slice(start, i));
+          start = wordCheck.wordEnd;
         }
+        i = wordCheck.wordEnd - 1;
+        continue;
       }
     }
   }
@@ -1441,7 +1476,10 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
           for (let i = 0; i < members.length; i++) {
             if (!isCleanEqualityMember(members[i]!)) continue;
             for (let j = i + 1; j < members.length; j++) {
-              if (!isCleanEqualityMember(members[j]!)) break;
+              if (!isCleanEqualityMember(members[j]!)) {
+                if (/^[\d.,+\-*/×÷−()\s]+$/.test(members[j]!) && !/\d\s+\d/.test(members[j]!)) continue;
+                break;
+              }
               const forward = await runSingleFormulaCheck(checkFormula, `${members[i]} = ${members[j]}`);
               if (forward.outcome === "fail") return forward.result;
               if (forward.outcome === "unknown") {

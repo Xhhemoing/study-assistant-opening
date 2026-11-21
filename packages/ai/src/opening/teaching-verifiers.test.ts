@@ -393,6 +393,8 @@ describe("teaching-verifiers", () => {
     ["decimal-comma equation followed by consecutive commas and contradiction", "1 + 2 = 1,5 * 2,,2 + 2 = 5", "2 + 2 = 5"],
     ["decimal-comma equation followed by space comma and contradiction", "1 + 2 = 1,5 * 2, 2 + 2 = 5", "2 + 2 = 5"],
     ["decimal-comma equation followed by tight comma and contradiction", "1 + 2 = 1,5 * 2,2 + 2 = 5", "2 + 2 = 5"],
+    ["decimal-comma equation followed by English connective and contradiction", "1 + 2 = 1,5 * 2 and 2 + 2 = 5", "2 + 2 = 5"],
+    ["chained equality with middle decimal-comma member and trailing contradiction", "2 + 2 = 2 * 1,5 + 1 = 5", "2 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -472,7 +474,8 @@ describe("teaching-verifiers", () => {
       "1,000 + 2 = 1,002, 1 + 1 = 2",
       "1,5 = 1,5 得到 2 + 2 = 4",
       "x = 1,5 * 2 = 3",
-      "3 / 2 = 1,5 * 2 = 3",
+      "6 / 2 = 1,5 * 2 = 3",
+      "3 / 2 = 1,5; 1,5 * 2 = 3",
       "2 * 0,75 = 1,5 = 3 / 2",
       "1,000 + 2 = 1,002.5",
       "1 + 1 = 2,2,,3",
@@ -481,6 +484,13 @@ describe("teaching-verifiers", () => {
       "1 + 2 = 1,5 * 2,,2 + 2 = 4",
       "1 + 2 = 1,5 * 2, 2 + 2 = 4",
       "1 + 2 = 1,5 * 2,2 + 2 = 4",
+      "1 + 2 = 1,5 * 2 and 2 + 2 = 4",
+      "1 + 2 = 1,5 * 2 != 5",
+      String.raw`1 + 2 = 1,5 * 2 \qquad x = 1`,
+      String.raw`1 + 2 = 1,5 * 2 \qquad 2 + 2 = 4`,
+      "1 + 2 = 1,5 * x = 3",
+      "2 + 2 = 2 * 1,5 + 1 = 4",
+      "2 + 2 = 1 + 1,5 * 2 = 4",
       "50\\% = 0.5\n% \\\\ 1 + 1 = 5",
       "% \\\\ 1 + 1 = 5",
       "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n1 + 1 &= 2\n\\end{aligned}",
@@ -490,7 +500,7 @@ describe("teaching-verifiers", () => {
         blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex } }],
         tools: { checkFormula: realArithmeticCheckFormula },
       });
-      expect(unknownReport.layers.find(layer => layer.layer === "tool_result")?.outcome).toBe("unknown");
+      expect(unknownReport.layers.find(layer => layer.layer === "tool_result")?.outcome, latex).toBe("unknown");
     }
   });
 
