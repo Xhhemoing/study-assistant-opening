@@ -11,7 +11,7 @@ import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
-import { helpInputSnapshotSchema, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
+import { helpInputSnapshotSchema, openingMaterialPurposePinSchema, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
@@ -59,7 +59,68 @@ export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJob
 
 type StreamPublicationContext = {
   privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; claimToken?: string; executionId?: string;
+  materialPurposePin?: OpeningMaterialPurposePin;
 };
+
+type StreamTurnBinding = {
+  attempt_id?: unknown;
+  context_anchor?: unknown;
+  source_ids?: unknown;
+  course_id?: unknown;
+};
+
+async function assertStreamMaterialAdmission(
+  sql: Sql,
+  tx: TransactionSql,
+  scope: OpeningScope,
+  turn: StreamTurnBinding,
+  materialPurposePin: OpeningMaterialPurposePin | undefined,
+): Promise<void> {
+  const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
+  const courseId = (typeof turn.course_id === "string" ? turn.course_id : null)
+    ?? (typeof anchor?.courseId === "string" ? anchor.courseId : null);
+  const materialUse = turn.attempt_id || anchor?.itemVersionId ? "practice" as const : "citation" as const;
+  const turnSourceIds = Array.isArray(turn.source_ids)
+    ? [...new Set(turn.source_ids.filter((value): value is string => typeof value === "string"))]
+    : [];
+  if (materialPurposePin === undefined) {
+    if (turnSourceIds.length) {
+      throw Object.assign(new Error("stream material purpose pin missing"), { code: "CONFLICT" });
+    }
+    return;
+  }
+  const parsed = openingMaterialPurposePinSchema.safeParse(materialPurposePin);
+  if (!parsed.success) {
+    throw Object.assign(new Error("stream material purpose pin invalid"), { code: "CONFLICT" });
+  }
+  const pin = parsed.data;
+  if ((pin.courseId?.toLowerCase() ?? null) !== (courseId?.toLowerCase() ?? null)
+    || pin.materialUse !== materialUse) {
+    throw Object.assign(new Error("stream material purpose pin mismatch"), { code: "CONFLICT" });
+  }
+  const turnSourceIdSet = new Set(turnSourceIds.map(sourceId => sourceId.toLowerCase()));
+  if (pin.sources.some(source => !turnSourceIdSet.has(source.sourceId.toLowerCase()))) {
+    throw Object.assign(new Error("stream material purpose pin mismatch"), { code: "CONFLICT" });
+  }
+  if (turnSourceIds.length) {
+    if (!pin.sources.length) {
+      throw Object.assign(new Error("stream material purpose pin incomplete"), { code: "CONFLICT" });
+    }
+    const pinnedIds = new Set(pin.sources.map(source => source.sourceId.toLowerCase()));
+    const unpinned = turnSourceIds.filter(sourceId => !pinnedIds.has(sourceId.toLowerCase()));
+    if (unpinned.length) {
+      const excluded = await tx`SELECT source_id FROM opening_privacy_exclusions
+        WHERE workspace_id=${scope.workspaceId} AND source_id=ANY(${unpinned}::uuid[])`;
+      const excludedIds = new Set(excluded.map(row => String(row.source_id).toLowerCase()));
+      if (unpinned.some(sourceId => !excludedIds.has(sourceId.toLowerCase()))) {
+        throw Object.assign(new Error("stream material purpose pin incomplete"), { code: "CONFLICT" });
+      }
+    }
+  }
+  if (pin.courseId !== null || pin.sources.length > 0) {
+    await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
+  }
+}
 
 async function assertStreamSources(tx: TransactionSql, scope: OpeningScope, refs: ContextSourceRef[], verifiedAttemptRefs?: ContextSourceRef[]) {
   // The attempt-context read already checks historical availability and privacy for these exact versions.
@@ -521,7 +582,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
           throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
         }
-        const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor FROM opening_tutor_jobs j
+        const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
           JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
           JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
           WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
@@ -533,6 +594,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           await assertTutorAttemptContext(tx, scope,
             { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
         }
+        await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin);
         if (context.contextSourceRefs.length) {
           await assertStreamSources(tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs);
         }
@@ -560,7 +622,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
           WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!workspace) return null;
-        const [row] = await tx`SELECT j.*,t.attempt_id,t.context_anchor FROM opening_tutor_jobs j
+        const [row] = await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
           JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
           JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
           WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`;
@@ -580,6 +642,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
           verifiedAttemptRefs = current.sourceRefs;
         }
+        await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin);
         await assertStreamSources(tx, scope, context.contextSourceRefs, verifiedAttemptRefs);
         if (context.exposureReceiptId) {
           const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}

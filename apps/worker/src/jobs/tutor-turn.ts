@@ -403,7 +403,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const exposureReceipt = streamExposure
         ? await deps.streamExposures!.generate(scope, streamExposure) : null;
       const streamContext = { privacyEpoch: jobEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
-        executionId: claimed.executionId };
+        executionId: claimed.executionId,
+        ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}) };
       const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
@@ -423,7 +424,6 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       let firstTextAt: number | null = null;
       const authorizeAndPublish = async (text: string) => {
         try {
-          await assertMaterialsCurrent();
           await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
             if (firstTextAt === null) {
               const observedAt = new Date();

@@ -3,15 +3,18 @@ import { once } from "node:events";
 import { createServer, type AddressInfo } from "node:net";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { advanceOpeningWorkspacePrivacyEpoch, createOpeningBudgetRepository, createOpeningConversationRepository,
-  createOpeningPrivacyRepository, createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
+import { advanceOpeningWorkspacePrivacyEpoch, createCourseMembershipRepository, createOpeningBudgetRepository,
+  createOpeningConversationRepository, createOpeningCourseReadySourcesRepository, createOpeningPrivacyRepository,
+  createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
   tutorStreamEpochKey, tutorStreamKey } from "@aistudy/database";
 import { fenceCancelledOpeningTutorStream } from "../../packages/database/src/repositories/opening-tutor-stream-fence";
 import { createProducerRedisConnection } from "../../apps/worker/src/runtime/queue";
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
+import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter,
   type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
 import { getTutorJobService } from "../../apps/web/src/features/opening/server/data-services";
+import { createJobStreamResponse } from "../../apps/web/src/features/opening/server/job-stream";
 import { deleteOwnedMemory } from "../../packages/database/src/repositories/opening-memory-delete";
 import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture } from "./opening-fixture";
@@ -481,4 +484,138 @@ it("rejects a buffered batch when a history-only source version becomes unavaila
     expect(await reader.read(scope.workspaceId, jobId)).toMatchObject({ text: "First", sequence: 1 });
     expect(result).toMatchObject({ code: "CONFLICT" });
   } finally { await fixture.close(); }
+});
+
+it("blocks Redis append and HTTP SSE delivery when course membership is removed before withStreamPublication or SSE read", async () => {
+  const fixture = await createOpeningFixture();
+  const { scope, sql } = fixture;
+  const courses = createCourseMembershipRepository(sql);
+  const conversations = createOpeningConversationRepository(sql);
+  const jobs = createOpeningTutorJobsRepository(sql);
+  const chunks = createOpeningSourceChunksRepository(sql);
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: 100_000 });
+  const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+  const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Membership TOCTOU", slug: randomUUID() });
+  const sourceId = randomUUID();
+  await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${sourceId},${scope.workspaceId},'course.txt','text/plain',12,${"a".repeat(64)},0,'uploaded','ready')`;
+  await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+    VALUES (${sourceId},0,${scope.workspaceId},'available')`;
+  await chunks.replaceChunks(scope, { sourceId, sourceVersion: 0, chunks: [{
+    page: 1, text: "Course-only material", slideLabel: null, startMs: null, endMs: null, imageObjectKey: null,
+  }] });
+  const membershipInput = { workspaceId: scope.workspaceId, courseId: course.id, assetType: "source" as const, assetId: sourceId };
+  await courses.addAssetMembership({ ...membershipInput, role: "core", sortOrder: 0, visibility: "course", purpose: "teaching" });
+  const conversation = await conversations.create(scope, { title: "Course stream", courseId: course.id });
+
+  // Part 1: course membership removed in the gap right before withStreamPublication.
+  const firstTurn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id, text: "Explain",
+    mode: "explain", clientKey: randomUUID(), sourceIds: [sourceId], learningSessionId: null, currentPage: 1, chunkId: null });
+  const firstKey = tutorStreamKey(scope.workspaceId, firstTurn.jobId);
+  keys.push(firstKey, tutorStreamEpochKey(scope.workspaceId));
+  const checked = deferred(), resume = deferred(), checkpoint = deferred();
+  const observed: TutorStreamDelta[] = [];
+  const unsubscribe = await reader.subscribe(scope.workspaceId, firstTurn.jobId, delta => {
+    if (delta.text === "checkpoint") checkpoint.resolve();
+    else observed.push(delta);
+  });
+  let tail = false;
+  const provider: NonNullable<TutorTurnDeps["provider"]> = { complete: async (_input, _signal, emit) => {
+    await emit!("First");
+    tail = true;
+    await emit!(" unauthorized tail");
+    return { text: "First unauthorized tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+  } };
+  const retrieveContext = createOpeningMaterialRetriever(sql, budget, null);
+  const tutorJobs = { ...jobs, withStreamPublication: (async (...args) => {
+    if (tail) {
+      // Simulate the pre-check gap: pin/job/source/epoch are still current before entering withStreamPublication.
+      const [, , publicationContext] = args;
+      expect(publicationContext.materialPurposePin?.courseId).toBe(course.id);
+      await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, publicationContext.materialPurposePin!);
+      checked.resolve();
+      await resume.promise;
+    }
+    return jobs.withStreamPublication(...args);
+  }) satisfies typeof jobs.withStreamPublication };
+  const run = createTutorTurnHandler({
+    tutorJobs, stream: writer, chunks, budget, provider, retrieveContext,
+    privacy: createOpeningPrivacyRepository(sql),
+    config: { maxContextCharacters: 1000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  })(firstTurn.jobId);
+  const settled = run.catch(error => error);
+  try {
+    await Promise.race([checked.promise, settled.then(() => { throw new Error("job finished before membership removal gap"); })]);
+    const before = (await reader.read(scope.workspaceId, firstTurn.jobId))!;
+    expect(before).toMatchObject({ sequence: 1, text: "First", materialPurposePin: { courseId: course.id, materialUse: "citation" } });
+    // Remove course membership while privacy_epoch, source version, and running claim stay unchanged.
+    await courses.removeAssetMembership(membershipInput);
+    expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 0 }]);
+    expect(await sql`SELECT version FROM opening_sources WHERE id=${sourceId}`).toMatchObject([{ version: 0 }]);
+    expect(await jobs.get(scope, firstTurn.jobId)).toMatchObject({ status: "running" });
+    resume.resolve();
+    expect(await settled).toMatchObject({ code: "CONFLICT" });
+    expect(await reader.read(scope.workspaceId, firstTurn.jobId)).toEqual(before);
+    await redis.publish(`${firstKey}:events`, JSON.stringify({ text: "checkpoint", sequence: 3 }));
+    await checkpoint.promise;
+    expect(observed).toEqual([{ text: "First", sequence: 1 }]);
+    expect((await sql`SELECT status FROM opening_turns WHERE id=${firstTurn.assistantTurnId}`)[0]?.status).toBe("failed");
+
+    // Part 2: course membership removed AFTER a Redis batch was published, BEFORE HTTP SSE read / delayed flush.
+    await courses.addAssetMembership({ ...membershipInput, role: "core", sortOrder: 0, visibility: "course", purpose: "teaching" });
+    const secondTurn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id, text: "Explain again",
+      mode: "explain", clientKey: randomUUID(), sourceIds: [sourceId], learningSessionId: null, currentPage: 1, chunkId: null });
+    keys.push(tutorStreamKey(scope.workspaceId, secondTurn.jobId));
+    const claimed = (await jobs.claim(secondTurn.jobId))!;
+    const materialPurposePin = await createOpeningCourseReadySourcesRepository(sql).readMaterialPurposePin(scope, {
+      courseId: course.id, materialUse: "citation", sourceIds: [sourceId],
+    });
+    const context = { privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 0 }], exposureReceiptId: null,
+      claimToken: claimed.claimToken, executionId: claimed.executionId, materialPurposePin };
+    await jobs.withStreamPublication(scope, secondTurn.jobId, context, async () => {
+      await writer.begin(scope.workspaceId, secondTurn.jobId, context);
+      expect(await writer.append(scope.workspaceId, secondTurn.jobId, "Published before removal", claimed.executionId, 0)).toBe(1);
+    });
+    const cached = (await reader.read(scope.workspaceId, secondTurn.jobId))!;
+    expect(cached).toMatchObject({ text: "Published before removal", sequence: 1, materialPurposePin });
+    const authorizedJob = (await jobs.readStream(scope, secondTurn.jobId, cached))!;
+    expect(authorizedJob).toMatchObject({ status: "running" });
+    await expect(jobs.readStream(scope, secondTurn.jobId, { ...cached, materialPurposePin: undefined }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+
+    const entered = deferred(), release = deferred();
+    const delayed = await createJobStreamResponse({
+      job: authorizedJob, signal: new AbortController().signal,
+      reader: { read: async () => { entered.resolve(); await release.promise; return cached; }, subscribe: async () => async () => {} },
+      getJob: () => jobs.get(scope, secondTurn.jobId),
+      authorizeSnapshot: snapshot => jobs.readStream(scope, secondTurn.jobId, snapshot),
+      close: () => {},
+    });
+    try {
+      await entered.promise;
+      await courses.removeAssetMembership(membershipInput);
+      expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 0 }]);
+      expect(await sql`SELECT version FROM opening_sources WHERE id=${sourceId}`).toMatchObject([{ version: 0 }]);
+      expect(await jobs.get(scope, secondTurn.jobId)).toMatchObject({ status: "running" });
+      release.resolve();
+      expect(await delayed.text()).toBe("");
+    } finally {
+      release.resolve();
+    }
+
+    const reconnect = await createJobStreamResponse({
+      job: authorizedJob, signal: new AbortController().signal,
+      reader: { read: () => reader.read(scope.workspaceId, secondTurn.jobId), subscribe: async () => async () => {} },
+      getJob: () => jobs.get(scope, secondTurn.jobId),
+      authorizeSnapshot: snapshot => jobs.readStream(scope, secondTurn.jobId, snapshot),
+      close: () => {},
+    });
+    expect(await reconnect.text()).toBe("");
+    await expect(jobs.readStream(scope, secondTurn.jobId, cached)).rejects.toMatchObject({ code: "CONFLICT" });
+  } finally {
+    resume.resolve();
+    await settled;
+    await unsubscribe();
+    await fixture.close();
+  }
 });

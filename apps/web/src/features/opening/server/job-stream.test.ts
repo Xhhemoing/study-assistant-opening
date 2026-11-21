@@ -41,12 +41,31 @@ afterEach(() => { vi.useRealTimers(); });
 describe("authorized tutor job event stream", () => {
   it("exposes only the observation execution id after authorizing streamed text", async () => {
     const deps = setup();
-    deps.read.mockResolvedValue({ ...snapshot("text", 1), executionId: "10000000-0000-4000-8000-000000000001" });
+    const materialPurposePin = { courseId: "10000000-0000-4000-8000-000000000002", materialUse: "citation" as const, sources: [{
+      sourceId: "10000000-0000-4000-8000-000000000003", sourceVersion: 0,
+      membershipId: "10000000-0000-4000-8000-000000000004", purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
+    }] };
+    deps.read.mockResolvedValue({ ...snapshot("text", 1), executionId: "10000000-0000-4000-8000-000000000001", materialPurposePin });
     const reader = (await deps.open()).body!.getReader();
     const first = await readEvent(reader);
+    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }));
     expect(first?.data.executionId).toBe("10000000-0000-4000-8000-000000000001");
     expect(first?.data).not.toHaveProperty("claimToken");
+    expect(first?.data).not.toHaveProperty("materialPurposePin");
     await reader.cancel();
+  });
+  it("withholds cached text when course membership revocation rejects snapshot authorization", async () => {
+    const deps = setup();
+    const materialPurposePin = { courseId: "10000000-0000-4000-8000-000000000002", materialUse: "citation" as const, sources: [{
+      sourceId: "10000000-0000-4000-8000-000000000003", sourceVersion: 0,
+      membershipId: "10000000-0000-4000-8000-000000000004", purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
+    }] };
+    deps.read.mockResolvedValue({ ...snapshot("unauthorized course text", 1), materialPurposePin });
+    deps.authorizeSnapshot.mockRejectedValueOnce(Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" }));
+    const response = await deps.open();
+    expect(await response.text()).toBe("");
+    expect(deps.authorizeSnapshot).toHaveBeenCalledWith(expect.objectContaining({ materialPurposePin }));
+    expect(deps.unsubscribe).toHaveBeenCalledOnce();
   });
   it("subscribes first, releases help before the first bytes, and reconnects with a full snapshot", async () => {
     const deps = setup();

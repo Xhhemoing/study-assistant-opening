@@ -23,6 +23,19 @@ it("sm95 parses the cached attempt fence and rejects malformed identities before
   await expect(reader.read(id, id)).rejects.toThrow();
 });
 
+it("parses cached materialPurposePin and rejects malformed pins before delivery", async () => {
+  const id = "10000000-0000-4000-8000-000000000001";
+  const materialPurposePin = { courseId: id, materialUse: "citation" as const, sources: [{
+    sourceId: id, sourceVersion: 0, membershipId: id, purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
+  }] };
+  const context = { privacyEpoch: 0, contextSourceRefs: [{ sourceId: id, sourceVersion: 0 }], exposureReceiptId: null, materialPurposePin };
+  const hgetall = vi.fn().mockResolvedValueOnce({ context: JSON.stringify(context), text: "cached", sequence: "1" })
+    .mockResolvedValueOnce({ context: JSON.stringify({ ...context, materialPurposePin: { ...materialPurposePin, materialUse: "unknown" } }), text: "cached", sequence: "1" });
+  const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
+  expect(await reader.read(id, id)).toMatchObject({ ...context, text: "cached", sequence: 1 });
+  await expect(reader.read(id, id)).rejects.toThrow();
+});
+
 it("returns only confirmed publication sequences and includes the expected execution identity", async () => {
   const evalScript = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0);
   const writer = createTutorStreamWriter({ eval: evalScript } as unknown as IORedis);

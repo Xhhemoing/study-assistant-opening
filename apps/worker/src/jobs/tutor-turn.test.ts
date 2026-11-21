@@ -296,29 +296,40 @@ describe("tutor turn handler", () => {
   it("batches 200 rapid 50-byte deltas into 35 authorized appends with no text loss", async () => {
     vi.useFakeTimers();
     try {
-      const { deps, provider } = setup();
+      const { deps, provider, tutorJobs } = setup();
       const assertCurrent = vi.fn(async () => {});
+      const purposePin = { courseId: claimedJob.conversationId, materialUse: "citation" as const, sources: [{
+        sourceId: chunkA.sourceId, sourceVersion: 0, membershipId: claimedJob.userTurnId,
+        purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
+      }] };
       const retrieveContext: typeof deps.retrieveContext = async (...args) =>
-        ({ ...await deps.retrieveContext(...args), assertCurrent });
-      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+        ({ ...await deps.retrieveContext(...args), purposePin, assertCurrent });
+      const stream = { begin: vi.fn(async () => {}), append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
       const deltas = Array.from({ length: 200 }, (_, index) => String(index).padStart(50, "0"));
       const text = deltas.join("");
       provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
-        const beforeStreaming = assertCurrent.mock.calls.length;
+        const beforeStreaming = tutorJobs.withStreamPublication.mock.calls.length;
         await delta("");
         expect(stream.append).not.toHaveBeenCalled();
         await delta(deltas[0]);
         expect(stream.append.mock.calls.map(call => call[2])).toEqual([deltas[0]]);
-        expect(assertCurrent.mock.calls.length - beforeStreaming).toBe(1);
+        expect(tutorJobs.withStreamPublication.mock.calls.length - beforeStreaming).toBe(1);
         for (const part of deltas.slice(1)) await delta(part);
-        expect(assertCurrent.mock.calls.length - beforeStreaming).toBe(stream.append.mock.calls.length);
+        expect(tutorJobs.withStreamPublication.mock.calls.length - beforeStreaming).toBe(stream.append.mock.calls.length);
         return { text, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
       });
       await createTutorTurnHandler({ ...deps, stream, retrieveContext })(claimedJob.id);
       expect(Buffer.byteLength(text)).toBe(10_000);
+      expect(stream.begin).toHaveBeenCalledWith(claimedJob.workspaceId, claimedJob.id,
+        expect.objectContaining({ materialPurposePin: purposePin }));
       expect(stream.append).toHaveBeenCalledTimes(35);
       expect(stream.append.mock.calls.map(call => call[2]).join("")).toBe(text);
-      expect(assertCurrent).toHaveBeenCalledTimes(39); // Includes the four non-publication checks.
+      expect(tutorJobs.withStreamPublication).toHaveBeenCalledTimes(36);
+      for (const [, , publicationContext] of tutorJobs.withStreamPublication.mock.calls) {
+        expect(publicationContext.materialPurposePin).toEqual(purposePin);
+      }
+      // Stream publication checks material admission inside withStreamPublication; only the four non-publication checks call assertCurrent.
+      expect(assertCurrent).toHaveBeenCalledTimes(4);
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
@@ -368,15 +379,22 @@ describe("tutor turn handler", () => {
       const { deps, provider, tutorJobs, budget } = setup();
       const drift = new Error("source revoked");
       let revoked = false;
+      const purposePin = { courseId: claimedJob.conversationId, materialUse: "citation" as const, sources: [{
+        sourceId: chunkA.sourceId, sourceVersion: 0, membershipId: claimedJob.userTurnId,
+        purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
+      }] };
       const retrieveContext: typeof deps.retrieveContext = async (...args) => ({
         ...await deps.retrieveContext(...args),
+        purposePin,
         assertCurrent: async () => { if (revoked && fence === "material") throw drift; },
       });
       const privacy = {
         getWorkspaceEpoch: async () => revoked && fence === "privacy" ? 1 : 0,
         listExcludedSourceIds: async () => [],
       };
-      tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, _context, publish) => {
+      tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, context, publish) => {
+        expect(context.materialPurposePin).toEqual(purposePin);
+        if (revoked && fence === "material") throw drift;
         if (revoked && fence === "claim") throw Object.assign(new Error("claim changed"), { code: "CONFLICT" });
         if (revoked && fence === "privacy") throw new PrivacyEpochError("privacy changed");
         await publish();
@@ -477,9 +495,10 @@ describe("tutor turn handler", () => {
       let authorize!: () => void;
       const authorization = new Promise<void>(resolve => { authorize = resolve; });
       let hold = false;
-      const assertCurrent = vi.fn(async () => { if (hold) await authorization; });
-      const retrieveContext: typeof deps.retrieveContext = async (...args) =>
-        ({ ...await deps.retrieveContext(...args), assertCurrent });
+      tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, _context, publish) => {
+        if (hold) await authorization;
+        await publish();
+      });
       const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
       provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
         await delta("First");
@@ -488,9 +507,9 @@ describe("tutor turn handler", () => {
         await new Promise(resolve => setTimeout(resolve, 41));
         return { text: "First tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
       });
-      const run = createTutorTurnHandler({ ...deps, stream, retrieveContext })(claimedJob.id);
+      const run = createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
       await vi.advanceTimersByTimeAsync(40);
-      expect(assertCurrent).toHaveBeenCalledTimes(4);
+      expect(tutorJobs.withStreamPublication).toHaveBeenCalledTimes(3);
       await vi.advanceTimersByTimeAsync(1);
       expect(budget.settle).not.toHaveBeenCalled();
       expect(tutorJobs.completeTurn).not.toHaveBeenCalled();

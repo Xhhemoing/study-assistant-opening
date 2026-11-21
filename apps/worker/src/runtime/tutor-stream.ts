@@ -4,7 +4,7 @@ import {
   parseContextSourceRefs, sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema,
   tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, tutorStreamPreAnswerHeadKey, type ContextSourceRef, type TutorAttemptFence,
 } from "@aistudy/database";
-import { uuidSchema } from "@aistudy/contracts";
+import { openingMaterialPurposePinSchema, uuidSchema, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 
 export type TutorStreamContext = {
   privacyEpoch: number;
@@ -13,6 +13,7 @@ export type TutorStreamContext = {
   claimToken?: string;
   executionId?: string;
   attemptFence?: TutorAttemptFence;
+  materialPurposePin?: OpeningMaterialPurposePin;
 };
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
@@ -326,7 +327,10 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     || (context.claimToken !== undefined && typeof context.claimToken !== "string")
     || (context.executionId !== undefined && !uuidSchema.safeParse(context.executionId).success)) throw new Error("invalid tutor stream cache");
   const fence = context.attemptFence === undefined ? undefined : tutorAttemptFenceSchema.parse(context.attemptFence);
-  return { ...context, ...(fence ? { attemptFence: fence } : {}), contextSourceRefs: refs, text: row.text, sequence };
+  const materialPurposePin = context.materialPurposePin === undefined ? undefined
+    : openingMaterialPurposePinSchema.parse(context.materialPurposePin);
+  return { ...context, ...(fence ? { attemptFence: fence } : {}),
+    ...(materialPurposePin ? { materialPurposePin } : {}), contextSourceRefs: refs, text: row.text, sequence };
 }
 
 export function createTutorStreamReader(redis: IORedis) {
