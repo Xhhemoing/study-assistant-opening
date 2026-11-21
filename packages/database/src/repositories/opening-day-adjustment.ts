@@ -51,6 +51,8 @@ import {
   type DayPlanEntry,
 } from "./opening-learning-capacity";
 import { evaluateDayPlanCapacity } from "./opening-learning-capacity-usage";
+import { overlappedLocalDays, withDeferredStandaloneCardCapForTx } from "./opening-learning-management-draft";
+import { assertCardRecoveryPlanDayCap, isCardRecoveryTaskRow } from "./opening-long-term-card-session";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import { assertOpeningCourseRouteRetestReschedulable } from "./opening-course-route-retest-state";
 import {
@@ -428,6 +430,135 @@ function effectiveRescheduleBoundsMs(task: {
   ].filter((value): value is number => value !== null);
   const dueMs = dueCandidates.length ? Math.min(...dueCandidates) : null;
   return { earliestMs, dueMs };
+}
+
+function conflictErrorMessage(error: unknown): string | null {
+  if (
+    error instanceof Error
+    && "code" in error
+    && (error as { code?: unknown }).code === "CONFLICT"
+    && error.message.trim().length > 0
+  ) {
+    return error.message;
+  }
+  return null;
+}
+
+async function assertDayAdjustmentSourceCardRecoveryCap(
+  tx: TransactionSql,
+  scope: Scope,
+  input: {
+    sourceDate: string;
+    timeZone: string;
+    now: Date;
+    sourceCap: Awaited<ReturnType<typeof readOpeningLearningCapacity>>;
+    sourceAfterBlocks: readonly PlannedBlock[];
+    sourceAddedBlocks: readonly PlannedBlock[];
+    sourceSpilloverBlocks: readonly PlannedBlock[];
+    movedToTargetTaskIds: ReadonlySet<string>;
+    cardTaskIds?: ReadonlySet<string>;
+    target?: {
+      targetDate: string;
+      targetCap: Awaited<ReturnType<typeof readOpeningLearningCapacity>>;
+      targetAfterBlocks: readonly PlannedBlock[];
+    } | null;
+  },
+): Promise<void> {
+  const sourceCardTaskIds = input.cardTaskIds
+    ?? new Set(input.sourceCap.tasks.filter(isCardRecoveryTaskRow).map((task) => String(task.id)));
+  const sourceAddedCardBlocks = input.sourceAddedBlocks.filter((block) => sourceCardTaskIds.has(block.taskId));
+  if (sourceAddedCardBlocks.length === 0) return;
+
+  const sourcePostBlocks = sortBlocks([
+    ...input.sourceAfterBlocks.filter((block) => !input.movedToTargetTaskIds.has(block.taskId)),
+    ...input.sourceSpilloverBlocks,
+  ]);
+  const sourceDaysToCheck = overlappedLocalDays(sourceAddedCardBlocks, input.timeZone);
+  if (!sourceDaysToCheck.size) sourceDaysToCheck.add(input.sourceDate);
+  for (const dayKey of sourceDaysToCheck) {
+    if (dayKey === input.sourceDate) {
+      await assertCardRecoveryPlanDayCap(tx, scope, {
+        day: input.sourceCap,
+        postTasks: input.sourceCap.tasks,
+        postBlocks: sourcePostBlocks,
+        now: input.now,
+      });
+    } else {
+      const target = input.target && dayKey === input.target.targetDate ? input.target : null;
+      const extraState = target
+        ? target.targetCap
+        : await readOpeningLearningCapacity(tx, scope, resolveLocalDayBounds(dayKey, input.timeZone).dayStart);
+      const extraSpillover = collectNonDaySpilloverBlocks({
+        day: input.sourceDate,
+        dayStartMs: extraState.bounds.dayStart.getTime(),
+        nextDayStartMs: extraState.bounds.nextDayStart.getTime(),
+        planEntries: extraState.planEntries,
+        ...(target ? { excludeDays: new Set([target.targetDate]) } : {}),
+      });
+      const extraPostBlocks = sortBlocks([
+        ...input.sourceAfterBlocks.filter((block) => !input.movedToTargetTaskIds.has(block.taskId)),
+        ...(target ? target.targetAfterBlocks : []),
+        ...extraSpillover,
+      ]);
+      await assertCardRecoveryPlanDayCap(tx, scope, {
+        day: extraState,
+        postTasks: extraState.tasks,
+        postBlocks: extraPostBlocks,
+        now: input.now,
+      });
+    }
+  }
+}
+
+async function assertDayAdjustmentTargetCardRecoveryCap(
+  tx: TransactionSql,
+  scope: Scope,
+  input: {
+    targetDate: string;
+    timeZone: string;
+    now: Date;
+    targetCap: Awaited<ReturnType<typeof readOpeningLearningCapacity>>;
+    targetAfterBlocks: readonly PlannedBlock[];
+    targetAddedBlocks: readonly PlannedBlock[];
+    targetSpilloverBlocks: readonly PlannedBlock[];
+  },
+): Promise<void> {
+  const targetCardTaskIds = new Set(
+    input.targetCap.tasks.filter(isCardRecoveryTaskRow).map((task) => String(task.id)),
+  );
+  const targetAddedCardBlocks = input.targetAddedBlocks.filter((block) => targetCardTaskIds.has(block.taskId));
+  if (targetAddedCardBlocks.length === 0) return;
+
+  const targetDaysToCheck = overlappedLocalDays(targetAddedCardBlocks, input.timeZone);
+  if (!targetDaysToCheck.size) targetDaysToCheck.add(input.targetDate);
+  for (const dayKey of targetDaysToCheck) {
+    if (dayKey === input.targetDate) {
+      await assertCardRecoveryPlanDayCap(tx, scope, {
+        day: input.targetCap,
+        postTasks: input.targetCap.tasks,
+        postBlocks: sortBlocks([...input.targetAfterBlocks, ...input.targetSpilloverBlocks]),
+        now: input.now,
+      });
+    } else {
+      const extraState = await readOpeningLearningCapacity(
+        tx,
+        scope,
+        resolveLocalDayBounds(dayKey, input.timeZone).dayStart,
+      );
+      const extraSpillover = collectNonDaySpilloverBlocks({
+        day: input.targetDate,
+        dayStartMs: extraState.bounds.dayStart.getTime(),
+        nextDayStartMs: extraState.bounds.nextDayStart.getTime(),
+        planEntries: extraState.planEntries,
+      });
+      await assertCardRecoveryPlanDayCap(tx, scope, {
+        day: extraState,
+        postTasks: extraState.tasks,
+        postBlocks: sortBlocks([...input.targetAfterBlocks, ...extraSpillover]),
+        now: input.now,
+      });
+    }
+  }
 }
 
 export function createOpeningDayAdjustmentRepository(
@@ -1007,6 +1138,50 @@ export function createOpeningDayAdjustmentRepository(
           blockers.push(`目标日期 ${targetDate} 的剩余预算不足，缺口 ${targetCapacityAfter.shortfallMinutes} 分钟。`);
         }
 
+        // Enforce the exact same post-adjustment 30% daily card-recovery cap as `confirm`
+        // so `preview.canConfirm` never advertises a schedule that `confirm` would reject.
+        const sourceCardTaskIds = new Set(
+          sourceCap.tasks.filter(isCardRecoveryTaskRow).map((task) => String(task.id)),
+        );
+        const previewTargetCapContext = targetDate !== null && targetCap !== null && targetAddedBlocks.length > 0
+          ? { targetDate, targetCap, targetAfterBlocks }
+          : null;
+        try {
+          await assertDayAdjustmentSourceCardRecoveryCap(tx, scope, {
+            sourceDate,
+            timeZone,
+            now,
+            sourceCap,
+            sourceAfterBlocks,
+            sourceAddedBlocks,
+            sourceSpilloverBlocks,
+            movedToTargetTaskIds,
+            cardTaskIds: sourceCardTaskIds,
+            target: previewTargetCapContext,
+          });
+        } catch (error) {
+          const message = conflictErrorMessage(error);
+          if (!message) throw error;
+          blockers.push(message.slice(0, 300));
+        }
+        if (previewTargetCapContext) {
+          try {
+            await assertDayAdjustmentTargetCardRecoveryCap(tx, scope, {
+              targetDate: previewTargetCapContext.targetDate,
+              timeZone,
+              now,
+              targetCap: previewTargetCapContext.targetCap,
+              targetAfterBlocks: previewTargetCapContext.targetAfterBlocks,
+              targetAddedBlocks,
+              targetSpilloverBlocks,
+            });
+          } catch (error) {
+            const message = conflictErrorMessage(error);
+            if (!message) throw error;
+            blockers.push(message.slice(0, 300));
+          }
+        }
+
         // Compute indivisible quick-slot candidates against keptBlocks + movedToTargetTaskIds.
         const keptTaskIds = new Set(keptBlocks.map((b) => b.taskId));
         const removedTaskIds = new Set(removedBlocks.map((b) => b.taskId));
@@ -1060,7 +1235,43 @@ export function createOpeningDayAdjustmentRepository(
               })
             : null;
 
-          if (candidateBlock && windowOk && capWithCandidate && !capWithCandidate.usageUncertain && capWithCandidate.shortfallMinutes === 0) {
+          let cardCapBlocker: string | null = null;
+          if (
+            candidateBlock
+            && windowOk
+            && capWithCandidate
+            && !capWithCandidate.usageUncertain
+            && capWithCandidate.shortfallMinutes === 0
+            && sourceCardTaskIds.has(task.id)
+          ) {
+            try {
+              await assertDayAdjustmentSourceCardRecoveryCap(tx, scope, {
+                sourceDate,
+                timeZone,
+                now,
+                sourceCap,
+                sourceAfterBlocks: sortBlocks([...keptBlocks, candidateBlock]),
+                sourceAddedBlocks: [candidateBlock],
+                sourceSpilloverBlocks,
+                movedToTargetTaskIds,
+                cardTaskIds: sourceCardTaskIds,
+                target: previewTargetCapContext,
+              });
+            } catch (error) {
+              const message = conflictErrorMessage(error);
+              if (!message) throw error;
+              cardCapBlocker = message;
+            }
+          }
+
+          if (
+            candidateBlock
+            && windowOk
+            && capWithCandidate
+            && !capWithCandidate.usageUncertain
+            && capWithCandidate.shortfallMinutes === 0
+            && cardCapBlocker === null
+          ) {
             quickCandidates.push({
               taskId: task.id,
               title: task.title,
@@ -1074,20 +1285,22 @@ export function createOpeningDayAdjustmentRepository(
           } else {
             const capShortfall = capWithCandidate?.shortfallMinutes
               ?? Math.max(0, task.minutes - capacityAfter.availableUpperMinutes);
-            const reason = capWithCandidate?.usageUncertain
-              ? "当前存在跨时段记录，剩余可用时长暂不确定。"
-              : capShortfall > 0
-                ? `需要完整 ${task.minutes} 分钟（不可截断），当前还差 ${Math.ceil(capShortfall)} 分钟。`
-                : !slot
-                  ? `需要完整 ${task.minutes} 分钟连续空闲时段，今日剩余时段不足。`
-                  : "不在今日允许的时间窗口内。";
+            const reason = cardCapBlocker !== null
+              ? cardCapBlocker.slice(0, 300)
+              : capWithCandidate?.usageUncertain
+                ? "当前存在跨时段记录，剩余可用时长暂不确定。"
+                : capShortfall > 0
+                  ? `需要完整 ${task.minutes} 分钟（不可截断），当前还差 ${Math.ceil(capShortfall)} 分钟。`
+                  : !slot
+                    ? `需要完整 ${task.minutes} 分钟连续空闲时段，今日剩余时段不足。`
+                    : "不在今日允许的时间窗口内。";
             quickCandidates.push({
               taskId: task.id,
               title: task.title,
               minutes: task.minutes,
               version: task.version,
               fits: false,
-              shortfallMinutes: Math.round(capShortfall * 1000) / 1000,
+              shortfallMinutes: cardCapBlocker !== null ? 0 : Math.round(capShortfall * 1000) / 1000,
               reason,
               suggestedSlot: null,
             });
@@ -1700,25 +1913,28 @@ export function createOpeningDayAdjustmentRepository(
         }
         retestReschedulesToApply.sort((a, b) => a.retestId.localeCompare(b.retestId));
 
-        // Verify timetable and hard-block constraints on both days.
-        if (sourceAddedBlocks.length > 0) {
-          await assertOpeningPlanConstraints(
-            tx,
-            scope,
-            input.sourceDate,
-            sourceAddedBlocks,
-            Boolean(sourceCap.settings),
-          );
-        }
-        if (targetActions) {
-          await assertOpeningPlanConstraints(
-            tx,
-            scope,
-            targetActions.targetDate,
-            targetAddedBlocks,
-            Boolean(sourceCap.settings),
-          );
-        }
+        // Verify timetable and hard-block constraints on both days; defer the 30% card-recovery cap
+        // until post-adjustment schedules (`sourceAfterBlocks` / `targetAfterBlocks`) are evaluated below.
+        await withDeferredStandaloneCardCapForTx(tx, async () => {
+          if (sourceAddedBlocks.length > 0) {
+            await assertOpeningPlanConstraints(
+              tx,
+              scope,
+              input.sourceDate,
+              sourceAddedBlocks,
+              Boolean(sourceCap.settings),
+            );
+          }
+          if (targetActions) {
+            await assertOpeningPlanConstraints(
+              tx,
+              scope,
+              targetActions.targetDate,
+              targetAddedBlocks,
+              Boolean(sourceCap.settings),
+            );
+          }
+        });
 
         // Verify post-replacement capacity on both days (fail-closed on shortfall or usageUncertain).
         const movedToTargetTaskIds = new Set(targetAddedBlocks.map((b) => b.taskId));
@@ -1753,6 +1969,33 @@ export function createOpeningDayAdjustmentRepository(
           if (targetEval.shortfallMinutes > 0) {
             throw new OpeningPlanError("CONFLICT", `目标日期 ${targetActions.targetDate} 的剩余预算不足，缺口 ${targetEval.shortfallMinutes} 分钟。`, "stale_version");
           }
+        }
+
+        // Enforce the 30% daily card-recovery cap against the exact post-adjustment schedules
+        // using transaction `now` (never double-counting removed + replacement card slots).
+        await assertDayAdjustmentSourceCardRecoveryCap(tx, scope, {
+          sourceDate: input.sourceDate,
+          timeZone,
+          now,
+          sourceCap,
+          sourceAfterBlocks,
+          sourceAddedBlocks,
+          sourceSpilloverBlocks,
+          movedToTargetTaskIds,
+          target: targetActions && targetCap
+            ? { targetDate: targetActions.targetDate, targetCap, targetAfterBlocks }
+            : null,
+        });
+        if (targetActions && targetCap) {
+          await assertDayAdjustmentTargetCardRecoveryCap(tx, scope, {
+            targetDate: targetActions.targetDate,
+            timeZone,
+            now,
+            targetCap,
+            targetAfterBlocks,
+            targetAddedBlocks,
+            targetSpilloverBlocks,
+          });
         }
 
         // ALL VALIDATIONS PASSED — ATOMIC COMMIT SECTION.
