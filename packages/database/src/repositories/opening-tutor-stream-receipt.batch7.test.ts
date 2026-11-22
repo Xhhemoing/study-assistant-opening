@@ -88,6 +88,7 @@ function fixture(options: Options = {}) {
         session_course_id: sql.includes("AS session_course_id") ? options.sessionCourseId : undefined }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
+    if (sql.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 1 }];
     if (sql.startsWith("SELECT jsonb_build_array(")) {
       const ids = options.discoveredAttemptSourceIds ?? [];
       return [{ materials: [{ ids, versions: Object.fromEntries(ids.map(id => [id, 0])) }], work_source: null }];

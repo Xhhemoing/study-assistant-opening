@@ -126,6 +126,62 @@ describe("saved tutor material provenance", () => {
     await expect(propose()).rejects.toMatchObject({ code: "VALIDATION" });
   }, 15_000);
 
+  it("rechecks session-only history against the destination after loading it across courses", async () => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const origin = await courses.createCourse({ workspaceId: scope.workspaceId, title: "History origin", slug: randomUUID() });
+    const destination = await courses.createCourse({ workspaceId: scope.workspaceId, title: "History destination", slug: randomUUID() });
+    const material = await source();
+    const membership = { workspaceId: scope.workspaceId, courseId: destination.id, assetType: "source" as const, assetId: material };
+    for (const courseId of [origin.id, destination.id]) {
+      await courses.addAssetMembership({ ...membership, courseId, role: "core", visibility: "course", purpose: "teaching" });
+    }
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Cross-course history", courseId: null });
+    const prior = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const priorClaim = (await jobs.claim(prior.jobId))!;
+    await jobs.completeTurn({ scope, jobId: prior.jobId, assistantTurnId: prior.assistantTurnId, claimToken: priorClaim.claimToken,
+      text: "Session material answer", citations: [], candidates: [], contextSourceRefs: [] });
+    const activityId = await insertTestTeachingActivity(sql, scope, origin.id);
+    const sessionId = randomUUID();
+    await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+      VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${origin.id}, ${activityId}, 'History origin', ${[material]}::uuid[])`;
+    await sql`UPDATE opening_turns SET learning_session_id=${sessionId}, created_at=now()-interval '1 minute' WHERE id=${prior.turnId}`;
+    const current = await append(conversation.id);
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: destination.id })} WHERE id=${current.turnId}`;
+    const saved = await jobs.loadHistoryContext(scope, current.turnId);
+    expect(saved.history.map(turn => turn.text)).toEqual(["continue", "Session material answer"]);
+    expect(saved.sourceRefs).toEqual([]);
+    expect(saved.historyCourseBindings).toEqual(expect.arrayContaining([origin, destination].map(course =>
+      expect.objectContaining({ courseId: course.id, materialUse: "citation", sourceIds: [material] }))));
+    const claim = (await jobs.claim(current.jobId))!;
+    const privacyEpoch = await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope);
+    const fallback = { privacyEpoch, claimToken: claim.claimToken, executionId: claim.executionId,
+      contextSourceRefs: saved.sourceRefs, exposureReceiptId: null };
+    const context = { ...fallback, historyCourseBindings: saved.historyCourseBindings };
+    const deliver = vi.fn();
+    await expect(jobs.readStream(scope, current.jobId, fallback, deliver)).resolves.toMatchObject({ status: "running" });
+    expect(deliver).toHaveBeenCalledOnce();
+    deliver.mockClear();
+
+    await courses.removeAssetMembership(membership);
+    const send = vi.fn(async () => {});
+    await expect(jobs.authorizeSend(scope, current.jobId, context, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.withStreamPublication(scope, current.jobId, context, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    for (const replay of [context, fallback]) {
+      await expect(jobs.readStream(scope, current.jobId, replay, deliver)).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    await expect(jobs.completeTurn({ scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId, claimToken: claim.claimToken,
+      text: "Stale answer", citations: [], candidates: [], contextSourceRefs: [] },
+    { historyCourseBindings: saved.historyCourseBindings })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(send).not.toHaveBeenCalled();
+    expect(deliver).not.toHaveBeenCalled();
+    const reloaded = await jobs.loadHistoryContext(scope, current.turnId);
+    expect(reloaded.history).toEqual([]);
+    await expect(jobs.readStream(scope, current.jobId, { ...fallback, historyCourseBindings: reloaded.historyCourseBindings ?? [] }, deliver))
+      .resolves.toMatchObject({ status: "running" });
+  }, 15_000);
+
   it("checks a task's paired user memory and its backing course under the user's scope", async () => {
     const { sql, scope } = f;
     const courses = createCourseMembershipRepository(sql);

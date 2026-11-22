@@ -50,6 +50,7 @@ export function historyMaterialsActive(sql: Db, workspaceId: string, ids: Fragme
 
 function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readonly string[],
   purpose: TutorHistoryPurpose | "ancestors", excludedSourceIds: string[] = [],
+  requireDestinationSessionMaterials = false,
 ) {
   const recordReferents = purpose === "record_referents";
   const ancestors = purpose === "ancestors";
@@ -69,6 +70,8 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
     AND ${lineageUuid(sql, () => sql`a.context_anchor->>'courseId'`)} IS NULL`;
   const allowed = (ids: FragmentFactory, course: FragmentFactory, use: FragmentFactory) =>
     historyMaterialsActive(sql, scope.workspaceId, ids, course, use);
+  const sessionIds = (alias: "u" | "a") =>
+    turnSessionMaterialIds(sql, () => alias === "u" ? sql`u` : sql`a`, () => sql`c.owner_user_id`);
   return sql`
     WITH prior AS MATERIALIZED (
       SELECT current.id AS current_id, u.id, a.id AS assistant_id, u.created_at,
@@ -82,9 +85,10 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
           AND ${turnDirectSourcesVersioned(sql, () => sql`a.source_ids`, () => sql`refs.assistant_refs`, () => sql`a.citations`)}
         )`} AS assistant_direct_versioned,
         ${recordReferents ? sql`` : sql`${directSourceIds(sql, () => sql`u.source_ids`, () => sql`refs.user_refs`, () => sql`u.citations`)}
-          || ${turnSessionMaterialIds(sql, () => sql`u`, () => sql`c.owner_user_id`)} AS user_direct_ids,
+          || ${sessionIds("u")} AS user_direct_ids,
           ${directSourceIds(sql, () => sql`a.source_ids`, () => sql`refs.assistant_refs`, () => sql`a.citations`)}
-          || ${turnSessionMaterialIds(sql, () => sql`a`, () => sql`c.owner_user_id`)} AS assistant_direct_ids,`}
+          || ${sessionIds("a")} AS assistant_direct_ids,`}
+        ${requireDestinationSessionMaterials ? sql`${sessionIds("u")} || ${sessionIds("a")} AS session_material_ids,` : sql``}
         CASE WHEN a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
           THEN ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, assistantCourse, standaloneSessions, scope)}
           ELSE '[]'::jsonb END AS memory_backing_ids,
@@ -117,7 +121,10 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
       SELECT prior.*,
         ${recordReferents ? sql`true` : sql`${allowed(() => sql`user_direct_ids`, () => sql`prior_course_id`, () => sql`prior_material_use`)}
           AND ${allowed(() => sql`assistant_direct_ids`, () => sql`assistant_course_id`, () => sql`assistant_material_use`)}`} AS origin_allowed,
-        ${recordReferents || ancestors ? sql`true` : sql`${allowed(() => sql`user_direct_ids`, () => sql`current_course_id`, () => sql`material_use`)}
+        ${requireDestinationSessionMaterials
+          ? sql`(cardinality(session_material_ids) = 0 OR
+            ${allowed(() => sql`session_material_ids`, () => sql`current_course_id`, () => sql`material_use`)})`
+          : recordReferents || ancestors ? sql`true` : sql`${allowed(() => sql`user_direct_ids`, () => sql`current_course_id`, () => sql`material_use`)}
           AND ${allowed(() => sql`assistant_direct_ids`, () => sql`current_course_id`, () => sql`material_use`)}`} AS current_allowed
       FROM prior
     )
@@ -204,21 +211,25 @@ export type HistoryAncestorAuthority = {
   courseId: string | null; materialUse: MaterialUse; memoryIds: string[]; backings: string[][]; expiresAt: number;
 };
 
-/** Collect direct ancestor authority without resolving memory edges yet. */
-export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningScope, userTurnIds: readonly string[], rules?: {
+type HistoryAncestorRules = {
   collectSourceIds?: Set<string>; collectCourseIds?: Set<string>; lockedSourceIds?: readonly string[];
-}) {
+  requireDestinationSessionMaterials?: boolean;
+};
+
+/** Collect direct ancestor authority without resolving memory edges yet. */
+export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningScope, userTurnIds: readonly string[], rules?: HistoryAncestorRules) {
   const authority = new Map<string, HistoryAncestorAuthority[] | null>(userTurnIds.map(id => [id, []]));
   if (!userTurnIds.length) return authority;
   const locked = rules?.lockedSourceIds && new Set(rules.lockedSourceIds);
-  const rows = await readSavedExchanges(sql, scope, userTurnIds, "ancestors");
+  const rows = await readSavedExchanges(sql, scope, userTurnIds, "ancestors", [], rules?.requireDestinationSessionMaterials);
   for (const row of rows) {
     const entries = authority.get(row.current_id);
     if (!entries) continue;
     const assistantRefs = parseContextSourceRefs(row.assistant_source_refs);
     const userRefs = parseContextSourceRefs(row.user_source_refs);
     const memoryAuthority = exchangeMemoryAuthority(row);
-    if (row.invalid || !row.assistant_direct_versioned || !row.origin_allowed || !memoryAuthority || !assistantRefs || !userRefs
+    if (row.invalid || !row.assistant_direct_versioned || !row.origin_allowed || row.current_allowed === false
+      || !memoryAuthority || !assistantRefs || !userRefs
       || memoryAuthority.some(entry => !(entry.expiresAt > Date.now()))) {
       authority.set(row.current_id, null);
       continue;
@@ -257,9 +268,7 @@ export function resolveHistoryAncestorExpiry(authority: HistoryAncestorAuthority
 }
 
 /** Revalidate the saved conversation prefix before reusing its derivative. */
-export async function readTutorHistoryAncestorStatus(sql: Db, scope: OpeningScope, currentTurnId: string, rules?: {
-  collectSourceIds?: Set<string>; collectCourseIds?: Set<string>; lockedSourceIds?: readonly string[];
-}) {
+export async function readTutorHistoryAncestorStatus(sql: Db, scope: OpeningScope, currentTurnId: string, rules?: HistoryAncestorRules) {
   const authority = (await readTutorHistoryAncestorAuthority(sql, scope, [currentTurnId], rules)).get(currentTurnId);
   if (!authority) return { valid: false, hasAncestors: true, earliestExpiresAtMs: -Infinity };
   const graph = new Map<MaterialUse, Map<string, MemoryDependencyStatus[]>>();
@@ -306,6 +315,18 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   let characters = 0;
   const sourceRefs: ContextSourceRef[] = [];
   const courseBindings = new Map<string, HistoryCourseBinding>();
+  const mergeBinding = (binding: HistoryCourseBinding) => {
+    const key = `${binding.courseId}:${binding.materialUse}`;
+    const previous = courseBindings.get(key);
+    if (!previous) {
+      courseBindings.set(key, binding);
+      return;
+    }
+    previous.sourceIds = [...new Set([...previous.sourceIds, ...binding.sourceIds])].sort();
+    previous.sourceRefs = mergeContextSourceRefs(previous.sourceRefs, binding.sourceRefs);
+    if (binding.memoryIds?.length) previous.memoryIds = [...new Set([...(previous.memoryIds ?? []), ...binding.memoryIds])].sort();
+    if (binding.memoryBackings?.length) previous.memoryBackings = [...(previous.memoryBackings ?? []), ...binding.memoryBackings];
+  };
   const memoryIdSet = new Set<string>();
   let newestRetained = rows.length;
   let earliestExpiry = Infinity;
@@ -326,6 +347,9 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     // For model history, every assistant source ID is already covered by a direct pin, ref or citation.
     sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []), ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
     if (!recordReferents) {
+      const sourceIds = [...new Set<string>([...(row.user_direct_ids ?? []), ...(row.assistant_direct_ids ?? [])].filter(isLineageUuid))].sort();
+      if (sourceIds.length) mergeBinding({ courseId: row.current_course_id ?? null, materialUse: row.material_use ?? "citation",
+        sourceIds, sourceRefs: [], memoryIds: [], memoryBackings: [] });
       // The SQL admission above requires each citation to name an available source and version.
       for (const { sourceId, sourceVersion } of (row.assistant_citations as ContextSourceRef[] | undefined) ?? []) {
         sourceRefs.push({ sourceId, sourceVersion });
@@ -337,16 +361,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   }
   if (!recordReferents) for (let index = newestRetained; index < rows.length; index++) {
     for (const expiry of expirations[index]!) earliestExpiry = Math.min(earliestExpiry, expiry);
-    for (const binding of historyCourseBindings(rows[index]!)) {
-      const key = `${binding.courseId}:${binding.materialUse}`;
-      const previous = courseBindings.get(key);
-      if (previous) {
-        previous.sourceIds = [...new Set([...previous.sourceIds, ...binding.sourceIds])].sort();
-        previous.sourceRefs = mergeContextSourceRefs(previous.sourceRefs, binding.sourceRefs);
-        if (binding.memoryIds) previous.memoryIds = [...new Set([...(previous.memoryIds ?? []), ...binding.memoryIds])].sort();
-        if (binding.memoryBackings) previous.memoryBackings = [...(previous.memoryBackings ?? []), ...binding.memoryBackings];
-      } else courseBindings.set(key, binding);
-    }
+    for (const binding of historyCourseBindings(rows[index]!)) mergeBinding(binding);
   }
   const memoryIds = [...memoryIdSet].sort();
   return {
