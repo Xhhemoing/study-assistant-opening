@@ -98,13 +98,16 @@ const SEALED_HEADING_RE =
   /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
+const HTML_ATTRIBUTE_TOKEN_RE = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r >]+)))?/g;
 const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\s/'"=<>]*)(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">";
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
 const HTML_RAW_TEXT_TAGS = new Set(["textarea", "title", "script", "style", "xmp", "iframe", "noembed", "noframes", "noscript"]);
-const FOREIGN_NON_RENDERED_LABEL_TAGS = new Set(["metadata", "defs", "annotation", "annotation-xml"]);
+const SVG_NON_RENDERED_LABEL_TAGS = new Set(["metadata", "defs"]);
+const MATH_NON_RENDERED_LABEL_TAGS = new Set(["annotation", "annotation-xml"]);
+const HTML_FOREIGN_BREAKOUT_TAG_RE =
+  /^(?:b|big|blockquote|body|br|center|code|dd|div|dl|dt|em|embed|h[1-6]|head|hr|i|img|li|listing|menu|meta|nobr|ol|p|pre|ruby|s|small|span|strong|strike|sub|sup|table|tt|u|ul|var)$/;
 const HTML_NON_RENDERED_LABEL_TAGS = new Set([
-  "title", "script", "style", "iframe", "noembed", "noframes", "noscript", "template", "datalist", "head",
-  ...FOREIGN_NON_RENDERED_LABEL_TAGS,
+  "title", "script", "style", "iframe", "noembed", "noframes", "noscript", "template", "datalist",
 ]);
 const HTML_VOID_TAGS = new Set([
   "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
@@ -525,24 +528,28 @@ function htmlElementEnd(text: string, tag: string, from: number): number | undef
       if (prefix === "") templateDepth++;
       else if (prefix === "/" && templateDepth > 0) templateDepth--;
     } else if (name === tag && templateDepth === 0) {
-      if (prefix === "" && !isSelfClosingForeignLabelTag(tag, match[0])) depth++;
+      if (prefix === "") depth++;
       else if (prefix === "/" && --depth === 0) return tokens.lastIndex;
     }
   }
   return undefined;
 }
 
-function isSelfClosingForeignLabelTag(tag: string, markup: string): boolean {
-  return FOREIGN_NON_RENDERED_LABEL_TAGS.has(tag) && markup.endsWith("/>");
+function hasSelfClosingFlag(markup: string, tag: string): boolean {
+  if (!markup.endsWith("/>")) return false;
+  const attributes = markup.slice(tag.length + 1, -1);
+  for (const match of attributes.matchAll(HTML_ATTRIBUTE_TOKEN_RE)) {
+    if (match[4] && match.index + match[0].length === attributes.length) return false;
+  }
+  return true;
 }
 
-function hasHiddenAttribute(opener: string, tag: string): boolean {
+function htmlAttributeValue(opener: string, tag: string, attribute: string): string | undefined {
   const attributes = opener.slice(tag.length + 1, -1);
-  const tokens = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"[^"]*"|'[^']*'|[^\t\n\f\r >]+))?/g;
-  for (const match of attributes.matchAll(tokens)) {
-    if (match[1]!.toLowerCase() === "hidden") return true;
+  for (const match of attributes.matchAll(HTML_ATTRIBUTE_TOKEN_RE)) {
+    if (match[1]!.toLowerCase() === attribute) return match[2] ?? match[3] ?? match[4] ?? "";
   }
-  return false;
+  return undefined;
 }
 
 function htmlContainerCrossingCodeEnd(text: string, start: number, end: number, inHtmlBlock = false): number | undefined {
@@ -837,6 +844,15 @@ function maskMarkdownLabelMarkup(label: string): string {
   return parts.length ? parts.join("") + label.slice(cursor) : label;
 }
 
+type OpenLabelTag = { tag: string; childrenNamespace: "svg" | "math" | undefined; hiddenForeign: boolean };
+
+function lastOpenLabelTagIndex(openTags: readonly OpenLabelTag[], tag: string): number {
+  for (let index = openTags.length - 1; index >= 0; index--) {
+    if (openTags[index]!.tag === tag) return index;
+  }
+  return -1;
+}
+
 function htmlLabelTextVariants(label: string) {
   const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
   const inline: string[] = [];
@@ -849,23 +865,42 @@ function htmlLabelTextVariants(label: string) {
     spaced.push(text);
   };
   let cursor = 0;
-  const openTags: string[] = [];
+  const openTags: OpenLabelTag[] = [];
   let annotationIndex: number | undefined;
   let hasDetails = false;
   for (let match = tokens.exec(label); match; match = tokens.exec(label)) {
-    if (annotationIndex === undefined) appendText(cursor, match.index);
+    let visibleTag = !openTags.at(-1)?.hiddenForeign;
+    if (annotationIndex === undefined && visibleTag) appendText(cursor, match.index);
     cursor = tokens.lastIndex;
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
-    const rubyAnnotation = tag === "rt" || tag === "rp";
+    if (tag && openTags.at(-1)?.childrenNamespace) {
+      const exitsForeign = prefix === "" ? HTML_FOREIGN_BREAKOUT_TAG_RE.test(tag) ||
+        (tag === "font" && ["color", "face", "size"].some(name => htmlAttributeValue(match[0], tag, name) !== undefined)) :
+        prefix === "/" && (tag === "br" || tag === "p");
+      if (exitsForeign) {
+        while (openTags.at(-1)?.childrenNamespace) openTags.pop();
+        if (annotationIndex !== undefined && annotationIndex >= openTags.length) annotationIndex = undefined;
+        visibleTag = !openTags.at(-1)?.hiddenForeign;
+      }
+    }
+    if (tag === "head") continue;
+    const rubyTextTag = tag === "rt" || tag === "rp";
+    const rubyIndex = rubyTextTag || tag === "rb" ? lastOpenLabelTagIndex(openTags, "ruby") : -1;
+    const rubyAnnotation = rubyTextTag && rubyIndex >= 0;
     if (tag && prefix === "") {
-      const rubyIndex = rubyAnnotation || tag === "rb" ? openTags.lastIndexOf("ruby") : -1;
+      const namespace = openTags.at(-1)?.childrenNamespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
+      const htmlAnnotation = namespace === "math" && tag === "annotation-xml" &&
+        /^(?:text\/html|application\/xhtml\+xml)$/i.test(decodeHtmlLabelText(htmlAttributeValue(match[0], tag, "encoding") ?? ""));
+      const foreignHidden = (namespace === "svg" && SVG_NON_RENDERED_LABEL_TAGS.has(tag)) ||
+        (namespace === "math" && MATH_NON_RENDERED_LABEL_TAGS.has(tag) && !htmlAnnotation);
+      const selfClosingForeignTag = namespace !== undefined && hasSelfClosingFlag(match[0], tag);
       // Browsers can close these elements implicitly before the next visible sibling.
-      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) && hasHiddenAttribute(match[0], tag);
-      const raw = htmlRawTextBounds(label, match, cursor);
-      if (hidden || HTML_NON_RENDERED_LABEL_TAGS.has(tag) || (rubyAnnotation && rubyIndex === -1)) {
+      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) && htmlAttributeValue(match[0], tag, "hidden") !== undefined;
+      const raw = namespace === undefined ? htmlRawTextBounds(label, match, cursor) : null;
+      if (!foreignHidden && (hidden || HTML_NON_RENDERED_LABEL_TAGS.has(tag))) {
         // When an end tag is omitted, keep potentially visible text available for protection.
-        const end = HTML_VOID_TAGS.has(tag) || isSelfClosingForeignLabelTag(tag, match[0]) ? cursor :
+        const end = HTML_VOID_TAGS.has(tag) || selfClosingForeignTag ? cursor :
           raw?.closeEnd ?? htmlElementEnd(label, tag, cursor);
         if (end !== undefined || tag === "template") {
           tokens.lastIndex = cursor = end ?? label.length;
@@ -873,7 +908,7 @@ function htmlLabelTextVariants(label: string) {
         }
       }
       if (raw) {
-        if (annotationIndex === undefined) appendText(cursor, raw.closeStart, tag === "textarea");
+        if (annotationIndex === undefined && visibleTag) appendText(cursor, raw.closeStart, tag === "textarea");
         tokens.lastIndex = cursor = raw.closeEnd;
         continue;
       }
@@ -881,22 +916,27 @@ function htmlLabelTextVariants(label: string) {
         openTags.length = annotationIndex;
         annotationIndex = undefined;
       }
-      if (rubyIndex >= 0 && rubyAnnotation && annotationIndex === undefined) annotationIndex = openTags.length;
-      if (!HTML_VOID_TAGS.has(tag)) openTags.push(tag);
+      if (rubyAnnotation && annotationIndex === undefined) annotationIndex = openTags.length;
+      visibleTag = visibleTag && !foreignHidden;
+      if (!HTML_VOID_TAGS.has(tag) && !selfClosingForeignTag) {
+        const htmlChildren = htmlAnnotation || (namespace === "svg" && /^(?:desc|foreignobject|title)$/.test(tag)) ||
+          (namespace === "math" && /^(?:mi|mo|mn|ms|mtext)$/.test(tag));
+        openTags.push({ tag, childrenNamespace: htmlChildren ? undefined : namespace, hiddenForeign: !visibleTag });
+      }
     } else if (tag && prefix === "/") {
-      const index = openTags.lastIndexOf(tag);
+      const index = lastOpenLabelTagIndex(openTags, tag);
       if (index >= 0) {
         openTags.length = index;
         if (annotationIndex !== undefined && index <= annotationIndex) annotationIndex = undefined;
       }
     }
-    if (tag && tag !== "ruby" && !rubyAnnotation && annotationIndex === undefined) {
+    if (visibleTag && tag && tag !== "ruby" && !rubyAnnotation && annotationIndex === undefined) {
       if (tag === "details" && prefix === "") hasDetails = true;
       if (HTML_LABEL_BREAK_TAGS.has(tag)) inline.push(" ");
       spaced.push(" ");
     }
   }
-  if (annotationIndex === undefined) appendText(cursor);
+  if (annotationIndex === undefined && !openTags.at(-1)?.hiddenForeign) appendText(cursor);
   const normalize = (parts: readonly string[]) => parts.join("").replace(INVISIBLE_LABEL_TEXT, "").replace(/\s+/g, " ").trim();
   return { inline: normalize(inline), spaced: normalize(spaced), hasDetails };
 }

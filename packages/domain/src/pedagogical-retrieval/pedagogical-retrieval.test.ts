@@ -1195,6 +1195,13 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["hidden void element in summary", "<details><summary>Hint / An<br hidden>swer</summary>forty-two</details>"],
     ["non-rendered raw text in summary", "<details><summary>Hint / An<script>x</script><style>y</style><title>z</title>swer</summary>forty-two</details>"],
     ["nested datalist in summary", "<details><summary>Hint / An<datalist><option>x</option><datalist><option>y</option></datalist></datalist>swer</summary>forty-two</details>"],
+    ...["head", "defs", "metadata", "annotation", "annotation-xml", "rt", "rp"]
+      .flatMap(tag => ["", "Hint / "].map(prefix => [
+        `visible text in a bare ${tag} summary tag${prefix ? " with a hint label" : ""}`,
+        `<details><summary>${prefix}<${tag}>Answer</${tag}></summary>forty-two</details>`,
+      ])),
+    ["SVG defs in a summary", "<details><summary>An<svg><defs>x</defs></svg>swer</summary>forty-two</details>"],
+    ["SVG defs in a summary with a hint label", "<details><summary>Hint / An<svg><defs>x</defs></svg>swer</summary>forty-two</details>"],
     ["comment in summary", "<details><summary>Hint / An<!-- note -->swer</summary>forty-two</details>"],
     ["ruby annotations in summary", "<details><summary>Hint / <ruby>An<rp>(</rp><rt>ah</rt><rp>)</rp>swer</ruby></summary>forty-two</details>"],
     ["omitted ruby end tag in summary", "<details><summary>Hint / <ruby>An<rt>ah<rt>sy</ruby>swer</summary>forty-two</details>"],
@@ -1215,8 +1222,24 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["datalist in a Setext heading", "An<datalist><option>x</option></datalist>swer\n---\nforty-two\n\n# Next topic"],
     ["Markdown emphasis in a heading", "## **Answer**\nforty-two\n\n## Next topic"],
     ["Markdown code in a heading", "## \x60Answer\x60\nforty-two\n\n## Next topic"],
-    ...["noscript", "head", "metadata", "defs", "annotation", "annotation-xml"]
-      .map(tag => [`${tag} in a heading`, `## An<${tag}>x</${tag}>swer\nforty-two\n\n## Next topic`]),
+    ["noscript in a heading", "## An<noscript>x</noscript>swer\nforty-two\n\n## Next topic"],
+    ["ignored head tags in a heading", "## An<head></head>swer\nforty-two\n\n## Next topic"],
+    ["empty bare defs in a heading", "## An<defs></defs>swer\nforty-two\n\n## Next topic"],
+    ["MathML annotation in a heading", "## An<math><semantics><mi>s</mi><annotation>x</annotation></semantics></math>wer\nforty-two\n\n## Next topic"],
+    ["MathML annotation-xml without HTML encoding", '## An<math><annotation-xml title=\'encoding="text/html"\'>x</annotation-xml></math>swer\nforty-two\n\n## Next topic'],
+    ["HTML inside a MathML annotation-xml", '## An<math><annotation-xml encoding="text/html"><annotation>sw</annotation></annotation-xml></math>er\nforty-two\n\n## Next topic'],
+    ["XHTML inside a MathML annotation-xml", '## An<math><annotation-xml ENCODING=application/xhtml+xml><span>sw</span></annotation-xml></math>er\nforty-two\n\n## Next topic'],
+    ["HTML inside an SVG foreign object", "## An<svg><foreignObject><defs>sw</defs></foreignObject></svg>er\nforty-two\n\n## Next topic"],
+    ["slash in an unquoted attribute on an SVG integration point", "## An<svg><foreignObject data-note=x/><defs>sw</defs></foreignObject></svg>er\nforty-two\n\n## Next topic"],
+    ["slash in an unquoted attribute on a MathML integration point", "## An<math><annotation-xml encoding=text/html data-note=x/><annotation>sw</annotation></annotation-xml></math>er\nforty-two\n\n## Next topic"],
+    ["slash in an unquoted attribute on an SVG root", "## An<svg data-note=x/><defs>x</defs></svg>swer\nforty-two\n\n## Next topic"],
+    ["slash in an unquoted attribute on nested SVG defs", "## An<svg><defs><defs data-note=x/>x</defs>y</defs></svg>swer\nforty-two\n\n## Next topic"],
+    ["a body tag exits SVG before a bare defs tag", "## <svg><div><defs>Answer</defs></div></svg>\nforty-two\n\n## Next topic"],
+    ["a body tag exits MathML before a bare annotation tag", "## <math><span><annotation>Answer</annotation></span></math>\nforty-two\n\n## Next topic"],
+    ["a body tag exits a hidden SVG subtree", "## <svg><defs><div>Answer</div></defs></svg>\nforty-two\n\n## Next topic"],
+    ["a body tag exits a hidden MathML subtree", "## <math><annotation><span>Answer</span></annotation></math>\nforty-two\n\n## Next topic"],
+    ["a font with a color attribute exits SVG", "## <svg><font color=red><defs>Answer</defs></font></svg>\nforty-two\n\n## Next topic"],
+    ["an HTML integration point within SVG defs stays hidden", "## An<svg><defs><foreignObject><div>x</div></foreignObject></defs></svg>swer\nforty-two\n\n## Next topic"],
     ["self-closing SVG metadata in a heading", "## An<svg><metadata /></svg>swer\nforty-two\n\n## Next topic"],
     ["hidden element in an ATX heading", "## Hint / An<span hidden>x</span>swer\nforty-two\n\n## Next topic"],
     ["literal hidden element in a heading code span", "## \x60<span hidden>Answer</span>\x60\nforty-two\n\n## Next topic"],
@@ -1229,6 +1252,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["word break in table header", "Hint / An<wbr>swer | Note\n--- | ---\nforty-two | x"],
     ["template in table header", "Topic | Hint / An<template>x</template>swer\n--- | ---\nrow | forty-two"],
     ["datalist in table header", "An<datalist><option>x</option></datalist>swer | Note\n--- | ---\nforty-two | y"],
+    ["ruby text tags outside a ruby in a table header", "<rt>Hint</rt><rp>Answer</rp> | Note\n--- | ---\nforty-two | y"],
     ["answer after a new ruby base ends an annotation", "Topic | <ruby><rb>H</rb><rt>phonetic<rb>Answer</rb></ruby>\n--- | ---\nrow | forty-two"],
     ["answer after an enclosing tag ends a ruby annotation", "Topic | <span><ruby>H<rt>phonetic</span>Answer\n--- | ---\nrow | forty-two"],
     ["literal template in a table header code span", "Topic | \x60<template>Answer</template>\x60\n--- | ---\nrow | forty-two"],
@@ -1285,6 +1309,9 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["unmatched raw text in indented code", "<details><summary>Answer</summary>\n\n    <textarea>\n\n</details>\n\nPublic theorem.", "Public theorem."],
     ["unmatched template in an inline code span", "<details><summary>Answer</summary>\n\nUse \x60<template>\x60\n</details>\n\nPublic theorem.", "Public theorem."],
     ["annotation text in table header", "Topic | An<ruby><rt>sw</rt></ruby>er\n--- | ---\nrow | forty-two\n\nPublic theorem.", "forty-two"],
+    ...["head", "metadata", "defs", "annotation", "annotation-xml"].map(tag => [
+      `visible ${tag} content in a body fragment`, `## An<${tag}>x</${tag}>swer\nforty-two\n\n## Next topic\n\nPublic theorem.`, "forty-two",
+    ]),
   ])("keeps public content retrievable after %s", (_name, text, publicText) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     for (const chunks of [
