@@ -1162,14 +1162,21 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["backticks in a div HTML block", "<details>\n<summary>Answer</summary>\n\n<div>\nUse \x60<textarea>\x60</details></textarea>\nforty-two\n</details>"],
     ["fence markers in a div HTML block", "<details>\n<summary>Answer</summary>\n<div>\n~~~html\n<textarea>\n~~~\n</details>\nforty-two\n</textarea>\n</details>"],
     ["raw text crossing a fence", "<details><summary>Answer</summary>\n~~~\n<textarea>\n~~~\n</details></textarea>forty-two</details>"],
+    ["raw text starting on a fence opener", "<details><summary>Answer</summary>\n~~~<textarea>\n~~~\n</details></textarea>forty-two</details>"],
+    ["raw text crossing a fence with a slash on its end tag", "<details><summary>Answer</summary>\n~~~\n<textarea>\n~~~\n</details></textarea/>forty-two</details>"],
+    ["template crossing a fence", "<details><summary>Answer</summary>\n~~~\n<template>\n~~~\n</details></template>forty-two</details>"],
+    ["template crossing a fence after an unmatched raw-text example", "<details><summary>Answer</summary>\n~~~\nExample: <textarea>\n<template>\n~~~\n</details></template>forty-two</details>"],
+    ["nested template crossing a fence", "<details><summary>Answer</summary>\n~~~\n<template><template>\n~~~\n</template></details></template>forty-two</details>"],
+    ["template crossing indented code", "<details><summary>Answer</summary>\n\n    <template>\n\n</details></template>forty-two</details>"],
+    ["template crossing inline code", "<details><summary>Answer</summary>\n\nUse \x60<template>\x60\n</details></template>forty-two</details>"],
     ["raw text crossing a quoted list fence", "<details><summary>Answer</summary>\n\n> - \x60\x60\x60\n>   <textarea>\n>   \x60\x60\x60\n</details></textarea>forty-two</details>"],
     ["raw text crossing indented code", "<details><summary>Answer</summary>\n\n    <textarea>\n\n</details></textarea>forty-two</details>"],
     ["raw text crossing tab-indented code in a quote", "<details><summary>Answer</summary>\r\n\r\n> \t<textarea>\r\n\r\n</details></textarea>forty-two</details>"],
     ["raw text confined to indented code", "<details><summary>Answer</summary>\n\n    <textarea>\n\n    </textarea>\nforty-two\n</details>"],
     ["commented and quoted raw text openers in a fence", "<details><summary>Answer</summary>\n~~~\n<!-- <textarea> --><span title='<script>'>Example</span>\n~~~\nforty-two\n</details>"],
-    ["unclosed raw text crossing a fence", "<details><summary>Answer</summary>\n~~~\n<textarea>\n~~~\n</details>forty-two"],
     ["details closer in a nested template", "<details><summary>Answer</summary><template><template></details></template></template>forty-two</details>"],
     ["unclosed raw text in a div HTML block", "<details>\n<summary>Answer</summary>\n\n<div>\nUse \x60<textarea>\x60\n</details>\nforty-two"],
+    ["unclosed raw text on the summary HTML line", "<details><summary>Hint \x60<textarea>\x60</summary>example</details>forty-two"],
     ["HTML block in a quote interrupts multiline code", "<details>\n<summary>Answer</summary>\n\n> literal \x60start\n> <details>\n> \x60end\n> </details>\nforty-two\n</details>"],
     ["HTML block in an ordered list interrupts multiline code", "<details>\n<summary>Answer</summary>\n\nliteral \x60start\n123. Item\n     <details>\n     \x60end\n     </details>\nforty-two\n</details>"],
     ["Markdown backticks after a blank line", "<details>\n<summary>Answer</summary>\n\nUse \x60</details>\x60 to close.\nforty-two\n</details>"],
@@ -1187,6 +1194,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["hidden element in summary", "<details><summary>Hint / An<span data-note='a > b' hidden='until-found'>x<span>y</span></span>swer</summary>forty-two</details>"],
     ["hidden void element in summary", "<details><summary>Hint / An<br hidden>swer</summary>forty-two</details>"],
     ["non-rendered raw text in summary", "<details><summary>Hint / An<script>x</script><style>y</style><title>z</title>swer</summary>forty-two</details>"],
+    ["nested datalist in summary", "<details><summary>Hint / An<datalist><option>x</option><datalist><option>y</option></datalist></datalist>swer</summary>forty-two</details>"],
     ["comment in summary", "<details><summary>Hint / An<!-- note -->swer</summary>forty-two</details>"],
     ["ruby annotations in summary", "<details><summary>Hint / <ruby>An<rp>(</rp><rt>ah</rt><rp>)</rp>swer</ruby></summary>forty-two</details>"],
     ["omitted ruby end tag in summary", "<details><summary>Hint / <ruby>An<rt>ah<rt>sy</ruby>swer</summary>forty-two</details>"],
@@ -1203,6 +1211,13 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["spoiler in summary", "<details><summary>Hint / Spo<wbr>iler</summary>forty-two</details>"],
     ["zero-width joiner in spoiler", "<details><summary>Hint / Spo&zwj;iler</summary>forty-two</details>"],
     ["word break in heading", "## Hint / An<wbr>swer\nforty-two\n\n## Next topic"],
+    ["datalist in an ATX heading", "## An<datalist><option>x</option></datalist>swer\nforty-two\n\n## Next topic"],
+    ["datalist in a Setext heading", "An<datalist><option>x</option></datalist>swer\n---\nforty-two\n\n# Next topic"],
+    ["Markdown emphasis in a heading", "## **Answer**\nforty-two\n\n## Next topic"],
+    ["Markdown code in a heading", "## \x60Answer\x60\nforty-two\n\n## Next topic"],
+    ...["noscript", "head", "metadata", "defs", "annotation", "annotation-xml"]
+      .map(tag => [`${tag} in a heading`, `## An<${tag}>x</${tag}>swer\nforty-two\n\n## Next topic`]),
+    ["self-closing SVG metadata in a heading", "## An<svg><metadata /></svg>swer\nforty-two\n\n## Next topic"],
     ["hidden element in an ATX heading", "## Hint / An<span hidden>x</span>swer\nforty-two\n\n## Next topic"],
     ["literal hidden element in a heading code span", "## \x60<span hidden>Answer</span>\x60\nforty-two\n\n## Next topic"],
     ["escaped hidden opener in a heading", "## \\<span hidden>Answer</span>\nforty-two\n\n## Next topic"],
@@ -1213,11 +1228,13 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["literal template in a Setext code span", "\x60<template>Answer</template>\x60\n---\nforty-two\n\n# Next topic"],
     ["word break in table header", "Hint / An<wbr>swer | Note\n--- | ---\nforty-two | x"],
     ["template in table header", "Topic | Hint / An<template>x</template>swer\n--- | ---\nrow | forty-two"],
+    ["datalist in table header", "An<datalist><option>x</option></datalist>swer | Note\n--- | ---\nforty-two | y"],
+    ["answer after a new ruby base ends an annotation", "Topic | <ruby><rb>H</rb><rt>phonetic<rb>Answer</rb></ruby>\n--- | ---\nrow | forty-two"],
+    ["answer after an enclosing tag ends a ruby annotation", "Topic | <span><ruby>H<rt>phonetic</span>Answer\n--- | ---\nrow | forty-two"],
     ["literal template in a table header code span", "Topic | \x60<template>Answer</template>\x60\n--- | ---\nrow | forty-two"],
     ["answer in an email autolink in a table header", "Topic | <foo+Answer@example.test>\n--- | ---\nrow | forty-two"],
     ["answer after a hidden element with an omitted end tag", "Topic | <ul><li hidden>Ignore<li>Answer</li></ul>\n--- | ---\nrow | forty-two"],
     ["answer after a hidden paragraph closed implicitly", "Topic | <p hidden>Ignore<div>Answer</div></p>\n--- | ---\nrow | forty-two"],
-    ["annotation text in table header", "Topic | An<ruby><rt>sw</rt></ruby>er\n--- | ---\nrow | forty-two"],
     ["spaced verbatim", "\\begin{solution}\n\\begin {verbatim}\n\\end{solution}\n\\end{verbatim}\nforty-two\n\\end{solution}"],
     ["spaced starred verbatim", "\\begin{solution}\n\\begin\t{ verbatim* }\n\\end{solution}\n\\end\t{ verbatim* }\nforty-two\n\\end{solution}"],
     ["spaced block environment", "\\begin { solution }\nforty-two\n\\end { solution }"],
@@ -1260,14 +1277,21 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(cueChunks.find(chunk => chunk.text.includes("try factoring"))?.visibility).toBe(visibility);
   });
 
-  it("classifies a hint from the base ruby text without its annotations", () => {
-    const text = "<details><summary><ruby>H<rt>Answer</rt>int</ruby></summary>try factoring</details>";
+  it.each([
+    ["unmatched raw text in a fence after a blank line", "<details><summary>Answer</summary>\n\n~~~html\n<textarea>\n~~~\n</details>\n\nPublic theorem.", "Public theorem."],
+    ["unmatched raw text in a fence after a summary", "<details><summary>Answer</summary>\n~~~\n<textarea>\n~~~\n</details>forty-two", "forty-two"],
+    ["unmatched template in a fence", "<details><summary>Answer</summary>\n~~~\n<template>\n~~~\n</details>\n\nPublic theorem.", "Public theorem."],
+    ["unmatched outer template in a fence", "<details><summary>Answer</summary>\n~~~\n<template><template>\n~~~\n</details></template>\n\nPublic theorem.", "Public theorem."],
+    ["unmatched raw text in indented code", "<details><summary>Answer</summary>\n\n    <textarea>\n\n</details>\n\nPublic theorem.", "Public theorem."],
+    ["unmatched template in an inline code span", "<details><summary>Answer</summary>\n\nUse \x60<template>\x60\n</details>\n\nPublic theorem.", "Public theorem."],
+    ["annotation text in table header", "Topic | An<ruby><rt>sw</rt></ruby>er\n--- | ---\nrow | forty-two\n\nPublic theorem.", "forty-two"],
+  ])("keeps public content retrievable after %s", (_name, text, publicText) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     for (const chunks of [
       chunkPedagogicalDocument({ ...source, text }),
       chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
     ]) {
-      expect(chunks.find(chunk => chunk.text.includes("try factoring"))?.visibility).toBe("hint_gated");
+      expectSealedEvidence(chunks, text, [], publicText);
     }
   });
 
@@ -1277,6 +1301,11 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["hidden in an attribute value", '<details><summary>Hint / An<span title="hidden">x</span>swer</summary>try factoring</details>'],
     ["non-rendered table label", "Topic | <template>Answer</template>Hint\n--- | ---\nrow | try factoring"],
     ["non-rendered heading label", "## <span hidden>Answer</span>Hint\ntry factoring"],
+    ["ruby annotation in summary", "<details><summary><ruby>H<rt>Answer</rt>int</ruby></summary>try factoring</details>"],
+    ["ruby annotation in ATX heading", "## <ruby>H<rt>Answer</rt>int</ruby>\ntry factoring"],
+    ["ruby annotation in Setext heading", "<ruby>H<rt>Answer</rt>int</ruby>\n---\ntry factoring"],
+    ["ruby annotation in table header", "Topic | <ruby>H<rt>Answer</rt>int</ruby>\n--- | ---\nrow | try factoring"],
+    ["datalist holding a sealed marker", "## <datalist><option>Answer</option></datalist>Hint\ntry factoring"],
   ])("indexes hints according to the rendered label (%s)", (_name, text) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     for (const chunks of [
