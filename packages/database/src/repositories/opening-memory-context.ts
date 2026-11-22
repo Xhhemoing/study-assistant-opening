@@ -127,7 +127,7 @@ async function readMemoryContextInTx(
   const origins = await lockAndReadMemoryOrigins(db, scope, originRows, materialRules, eligibleCourseId);
   return rows.flatMap(row => {
     const origin = origins.get(String(row.id));
-    const sourceRefs = parseContextSourceRefs(row.material_source_refs);
+    const sourceRefs = parseContextSourceRefs(row.material_source_refs, "saved-turn");
     if (origin === null || sourceRefs === null) return [];
     const expiry = Math.min(row.ancestor_temporary_expires_at == null
       ? Infinity : new Date(row.ancestor_temporary_expires_at as string | Date).getTime(), origin?.expiresAt ?? Infinity);

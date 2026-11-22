@@ -103,7 +103,8 @@ afterAll(async () => {
   await fixture?.close();
 });
 
-it.each(["cached", "discovered"] as const)("locks teaching-spec sources before memberships during attempt replay with %s refs", async mode => {
+it.each(["cached replay", "discovered replay", "send", "publication", "completion"] as const)(
+  "locks teaching-spec sources before memberships during attempt %s", async mode => {
   const { sql, scope } = fixture;
   const f = await learningAttemptFixture(fixture);
   const attempt = await f.start();
@@ -142,7 +143,7 @@ it.each(["cached", "discovered"] as const)("locks teaching-spec sources before m
   });
   const context = { privacyEpoch: snapshot.privacyEpoch, claimToken: claim.claimToken, executionId: claim.executionId,
     materialPurposePin, contextSourceRefs: snapshot.sourceRefs, exposureReceiptId: null, attemptFence: tutorAttemptFence(snapshot),
-    ...(mode === "cached" ? { attemptSourceRefs: snapshot.sourceRefs } : {}) };
+    ...(mode === "cached replay" ? { attemptSourceRefs: snapshot.sourceRefs } : {}) };
   const holder = openRaceSession(), reader = openRaceSession();
   const acquired = deferred(), release = deferred(), deliver = vi.fn();
   const hold = track(holder.ready.then(() => holder.sql.begin(async tx => {
@@ -150,23 +151,38 @@ it.each(["cached", "discovered"] as const)("locks teaching-spec sources before m
     acquired.resolve();
     await release.promise;
   })));
-  let replay: ReturnType<typeof jobs.readStream> | undefined;
+  let operation: Promise<unknown> | undefined;
   try {
     await Promise.race([acquired.promise, hold]);
     await reader.ready;
-    replay = track(createOpeningTutorJobsRepository(reader.sql).readStream(scope, turn.jobId, context, deliver));
-    await waitUntilBlocked(sql, reader.pid, holder.pid, "Attempt replay source locks",
-      /FROM opening_sources s[\s\S]+ORDER BY s\.id FOR SHARE OF s/);
+    const repo = createOpeningTutorJobsRepository(reader.sql);
+    const publication = { ...context, attemptContext: snapshot };
+    const run = async () => {
+      if (mode === "send") await repo.authorizeSend(scope, turn.jobId, publication, async () => { deliver(); });
+      else if (mode === "publication") await repo.withStreamPublication(scope, turn.jobId, publication, async () => { deliver(); });
+      else if (mode === "completion") await repo.completeTurn({
+        scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId, claimToken: claim.claimToken,
+        text: "Attempt answer", citations: [], candidates: [], contextSourceRefs: snapshot.sourceRefs,
+      }, { materialPurposePin, attemptContext: { target: { jobId: turn.jobId, userTurnId: turn.turnId,
+        claimToken: claim.claimToken }, snapshot } });
+      else expect(await repo.readStream(scope, turn.jobId, context, deliver)).toMatchObject({ status: "running" });
+    };
+    operation = track(run());
+    await waitUntilBlocked(sql, reader.pid, holder.pid, "Attempt source locks",
+      /SELECT s\.id,s\.version FROM opening_sources s[\s\S]+ORDER BY s\.id FOR SHARE OF s/);
     await expect(sql`SELECT id FROM opening_sources WHERE id=${f.sourceId} FOR UPDATE NOWAIT`)
       .rejects.toMatchObject({ code: "55P03" });
     await expect(sql`SELECT id FROM course_asset_memberships
       WHERE course_id=${f.courseId} AND asset_type='source' AND asset_id=${f.sourceId} FOR UPDATE NOWAIT`).resolves.toHaveLength(1);
     release.resolve();
-    await expect(replay).resolves.toMatchObject({ status: "running" });
-    expect(deliver).toHaveBeenCalledOnce();
+    await operation;
+    if (mode === "completion") {
+      await expect(sql`SELECT text FROM opening_turns WHERE id=${turn.assistantTurnId}`)
+        .resolves.toEqual([{ text: "Attempt answer" }]);
+    } else expect(deliver).toHaveBeenCalledOnce();
   } finally {
     release.resolve();
-    await Promise.allSettled([hold, replay]);
+    await Promise.allSettled([hold, operation]);
     await Promise.all([closeRace(holder.sql), closeRace(reader.sql)]);
   }
 }, 15_000);

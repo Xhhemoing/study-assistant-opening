@@ -30,6 +30,7 @@ export function parseContextMemoryDependencyIds(value: unknown): string[] | null
       for (const id of ref.memoryDependencyIds) ids.add(id.toLowerCase());
       continue;
     }
+    if (isUnversionedTurnSourceRef(ref)) continue;
     if (!ref || typeof ref !== "object" || typeof ref.sourceId !== "string"
       || !UUID.test(ref.sourceId) || !Number.isSafeInteger(ref.sourceVersion) || ref.sourceVersion < 0
       || (ref.memoryOnly !== undefined && typeof ref.memoryOnly !== "boolean")) return null;
@@ -38,11 +39,13 @@ export function parseContextMemoryDependencyIds(value: unknown): string[] | null
 }
 
 /** Persisted JSON is a trust boundary. NULL is unknown, never an empty lineage. */
-export function parseContextSourceRefs(value: unknown): ContextSourceRef[] | null {
+export function parseContextSourceRefs(value: unknown, mode?: "saved-turn"): ContextSourceRef[] | null {
   if (!Array.isArray(value)) return null;
   const refs: ContextSourceRef[] = [];
   for (const ref of value) {
     if (isMemoryDependencyMetadata(ref)) continue;
+    // Saved membership dependencies are rechecked by turn admission. They are not version pins.
+    if (mode === "saved-turn" && isUnversionedTurnSourceRef(ref)) continue;
     if (!ref || typeof ref !== "object" || typeof ref.sourceId !== "string"
       || !UUID.test(ref.sourceId) || !Number.isSafeInteger(ref.sourceVersion) || ref.sourceVersion < 0
       || (ref.memoryOnly !== undefined && typeof ref.memoryOnly !== "boolean")) return null;
@@ -53,6 +56,15 @@ export function parseContextSourceRefs(value: unknown): ContextSourceRef[] | nul
     });
   }
   return mergeContextSourceRefs(refs);
+}
+
+function isUnversionedTurnSourceRef(ref: unknown): boolean {
+  return !!ref && typeof ref === "object" && Object.keys(ref).length === 1
+    && "sourceId" in ref && typeof ref.sourceId === "string" && UUID.test(ref.sourceId);
+}
+
+export function unversionedTurnSourceRef(db: Db, ref: FragmentFactory): Fragment {
+  return db`${ref()} = jsonb_build_object('sourceId', ${ref()}->'sourceId')`;
 }
 
 export function mergeContextSourceRefs(...groups: readonly ContextSourceRef[][]): ContextSourceRef[] {
@@ -98,7 +110,9 @@ export function contextSourceRefsIncluded(
   bareSourceIds?: FragmentFactory, citations?: FragmentFactory,
 ): Fragment {
   const separateInputs = bareSourceIds !== undefined || citations !== undefined;
-  const versionless: FragmentFactory = () => separateInputs ? db`input.unversioned` : db`false`;
+  const versionless: FragmentFactory = () => separateInputs
+    ? db`(input.unversioned OR (input.allow_dependency_metadata AND ${unversionedTurnSourceRef(db, () => db`provenance_ref`)}))`
+    : unversionedTurnSourceRef(db, () => db`provenance_ref`);
   const safeArray = (value: FragmentFactory): Fragment => db`CASE WHEN jsonb_typeof(${value()}) = 'array' THEN ${value()} ELSE '[]'::jsonb END`;
   return db`
     COALESCE(jsonb_typeof(${refs()}) = 'array', false)

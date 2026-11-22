@@ -16,6 +16,7 @@ type Db = Sql | TransactionSql;
 type MaterialUse = "citation" | "practice";
 export type HistoryCourseBinding = {
   courseId: string | null; materialUse: MaterialUse; sourceIds: string[]; sourceRefs: ContextSourceRef[];
+  selectedDestinationSourceIds?: string[];
   memoryIds?: string[];
   memoryBackings?: string[][];
 };
@@ -162,9 +163,9 @@ function historyCourseBindings(row: HistoryRows[number]): HistoryCourseBinding[]
   if (!row.user_direct_ids || !row.assistant_direct_ids) return [];
   const bindings: HistoryCourseBinding[] = [
     { courseId: row.prior_course_id, materialUse: row.prior_material_use, sourceIds: [...new Set<string>(row.user_direct_ids)].sort(),
-      sourceRefs: (parseContextSourceRefs(row.user_source_refs) ?? []).filter(ref => ref.memoryOnly !== true) },
+      sourceRefs: (parseContextSourceRefs(row.user_source_refs, "saved-turn") ?? []).filter(ref => ref.memoryOnly !== true) },
     { courseId: row.assistant_course_id, materialUse: row.assistant_material_use, sourceIds: [...new Set<string>(row.assistant_direct_ids)].sort(),
-      sourceRefs: mergeContextSourceRefs((parseContextSourceRefs(row.assistant_source_refs) ?? []).filter(ref => ref.memoryOnly !== true),
+      sourceRefs: mergeContextSourceRefs((parseContextSourceRefs(row.assistant_source_refs, "saved-turn") ?? []).filter(ref => ref.memoryOnly !== true),
         ((row.assistant_citations ?? []) as ContextSourceRef[]).map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion }))) },
   ];
   for (const [index, entry] of (exchangeMemoryAuthority(row) ?? []).entries()) {
@@ -225,8 +226,8 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
   for (const row of rows) {
     const entries = authority.get(row.current_id);
     if (!entries) continue;
-    const assistantRefs = parseContextSourceRefs(row.assistant_source_refs);
-    const userRefs = parseContextSourceRefs(row.user_source_refs);
+    const assistantRefs = parseContextSourceRefs(row.assistant_source_refs, "saved-turn");
+    const userRefs = parseContextSourceRefs(row.user_source_refs, "saved-turn");
     const memoryAuthority = exchangeMemoryAuthority(row);
     if (row.invalid || !row.assistant_direct_versioned || !row.origin_allowed || row.current_allowed === false
       || !memoryAuthority || !assistantRefs || !userRefs
@@ -314,6 +315,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   const history: HistoryTurn[] = [];
   let characters = 0;
   const sourceRefs: ContextSourceRef[] = [];
+  const selectedDestinationSourceIds = new Set<string>();
   const courseBindings = new Map<string, HistoryCourseBinding>();
   const mergeBinding = (binding: HistoryCourseBinding) => {
     const key = `${binding.courseId}:${binding.materialUse}`;
@@ -345,9 +347,11 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     if (recordReferents) history.unshift({ role: "user", text: question });
     else history.unshift({ role: "user", text: question }, { role: "assistant", text: answer });
     // For model history, every assistant source ID is already covered by a direct pin, ref or citation.
-    sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []), ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
+    sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs, "saved-turn") ?? []),
+      ...(parseContextSourceRefs(row.assistant_source_refs, "saved-turn") ?? []));
     if (!recordReferents) {
       const sourceIds = [...new Set<string>([...(row.user_direct_ids ?? []), ...(row.assistant_direct_ids ?? [])].filter(isLineageUuid))].sort();
+      for (const id of sourceIds) selectedDestinationSourceIds.add(id);
       if (sourceIds.length) mergeBinding({ courseId: row.current_course_id ?? null, materialUse: row.material_use ?? "citation",
         sourceIds, sourceRefs: [], memoryIds: [], memoryBackings: [] });
       // The SQL admission above requires each citation to name an available source and version.
@@ -363,10 +367,19 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     for (const expiry of expirations[index]!) earliestExpiry = Math.min(earliestExpiry, expiry);
     for (const binding of historyCourseBindings(rows[index]!)) mergeBinding(binding);
   }
+  const mergedRefs = mergeContextSourceRefs(sourceRefs);
+  const destination = courseBindings.get(`${rows[0]?.current_course_id ?? null}:${rows[0]?.material_use ?? "citation"}`);
+  if (destination) {
+    const versionedDirect = new Set(mergedRefs.filter(ref => ref.memoryOnly !== true).map(ref => ref.sourceId));
+    if (destination.sourceIds.some(id => !versionedDirect.has(id))) {
+      // Origin bindings also contain omitted history. Persist only sources from selected text.
+      destination.selectedDestinationSourceIds = [...selectedDestinationSourceIds].sort();
+    }
+  }
   const memoryIds = [...memoryIdSet].sort();
   return {
     history,
-    sourceRefs: mergeContextSourceRefs(sourceRefs),
+    sourceRefs: mergedRefs,
     ...(courseBindings.size ? { historyCourseBindings: [...courseBindings.values()] } : {}),
     ...(revokedDirectSourceIds.length ? { revokedDirectSourceIds } : {}),
     ...(memoryIds.length ? { memoryIds } : {}),

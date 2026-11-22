@@ -4,6 +4,7 @@ import {
   assistantDirectSourcesVersioned, historicalUserTurnId, isLineageUuid, lineageUuid, memoryCourseAllows, pairedUserTurnId,
   parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
   turnDependencyWalk, turnHasOwnedSession, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs, turnSessionMaterialIds,
+  unversionedTurnSourceRef,
   type FragmentFactory,
   type MemoryDependencyStatus,
 } from "./opening-context-provenance";
@@ -60,7 +61,7 @@ export function turnMaterialRows(db: Db, owner: FragmentFactory, alias: "t" | "u
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.citations) = 'array' THEN ${turn()}.citations ELSE '[]'::jsonb END) citation
     UNION ALL
     SELECT ref->>'sourceId', CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number' THEN ref->>'sourceVersion' END,
-      true, COALESCE(ref->'memoryOnly' = 'true'::jsonb, false)
+      NOT (${unversionedTurnSourceRef(db, () => db`ref`)}), COALESCE(ref->'memoryOnly' = 'true'::jsonb, false)
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.context_source_refs) = 'array'
       THEN ${turn()}.context_source_refs ELSE '[]'::jsonb END) ref
     WHERE NOT (ref = jsonb_build_object('memoryDependencyIds', ref->'memoryDependencyIds')

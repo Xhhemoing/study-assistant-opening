@@ -36,6 +36,7 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   metadataTarget?: boolean;
   sessionCourseId?: string;
   discoveredAttemptSourceIds?: string[];
+  teachingSpecSourceIds?: string[];
   metadataVersionMaps?: Partial<Record<"u" | "t", unknown>>;
   metadataDirectSource?: boolean;
   storedMemoryOrigins?: Record<string, { refs: unknown[]; backings?: string[][]; sourceIds?: string[] }>;
@@ -91,7 +92,8 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 1 }];
     if (sql.startsWith("SELECT jsonb_build_array(")) {
       const ids = options.discoveredAttemptSourceIds ?? [];
-      return [{ materials: [{ ids, versions: Object.fromEntries(ids.map(id => [id, 0])) }], work_source: null }];
+      return [{ materials: [{ ids, versions: Object.fromEntries(ids.map(id => [id, 0])) }], work_source: null,
+        spec_refs: options.teachingSpecSourceIds?.map(id => ({ sourceId: id })) }];
     }
     if (sql === "SELECT ? AS included") return [{ included: true }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
@@ -813,17 +815,34 @@ describe("stream receipt release waits for current job authorization and assista
     })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
-  it("checks the attempt binding after the workspace lock and before locking the job on completion", async () => {
-    const f = fixture({ boundAttempt: attempt, courseId });
-    const verify = vi.fn(() => {
-      expect(f.calls.some(call => call.sql.startsWith("SELECT privacy_epoch FROM workspaces") && call.sql.includes("FOR UPDATE"))).toBe(true);
-      expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(false);
-    });
-    hooks.assertAttempt.mockImplementationOnce(verify);
-    await f.repo.completeTurn({ scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token, contextSourceRefs: [] },
-      { attemptContext: { target: { jobId, userTurnId: user, claimToken: token }, snapshot: { sourceRefs: [] } as never } });
-    expect(verify).toHaveBeenCalledOnce();
-    expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(true);
+  it.each(["send", "publication", "completion"] as const)("prelocks teaching-spec sources before attempt %s", async mode => {
+    const f = fixture({ boundAttempt: attempt, courseId, sourceIds: [sourceId], teachingSpecSourceIds: [attemptSourceId] });
+    const snapshot = { sourceRefs: [{ sourceId, sourceVersion: 0 }] } as never;
+    const materialPurposePin = { ...pin, materialUse: "practice" as const };
+    const publish = vi.fn(async () => {});
+    const publication = { ...context, materialPurposePin, attemptContext: snapshot };
+    if (mode === "send") await f.repo.authorizeSend(scope, jobId, publication, publish);
+    else if (mode === "publication") await f.repo.withStreamPublication(scope, jobId, publication, publish);
+    else await f.repo.completeTurn({ scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [],
+      claimToken: token, contextSourceRefs: [] },
+    { materialPurposePin, attemptContext: { target: { jobId, userTurnId: user, claimToken: token }, snapshot } });
+
+    const workspaceIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT privacy_epoch FROM workspaces"));
+    const historyIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT revision FROM opening_workspace_history_revisions")
+      && call.sql.endsWith("FOR SHARE"));
+    const sourceIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT s.id,s.version FROM opening_sources"));
+    const membershipIndex = f.calls.findIndex(call => call.sql.includes("FROM course_asset_memberships") && call.sql.includes("FOR SHARE"));
+    if (mode === "completion") {
+      expect(hooks.lock.mock.invocationCallOrder[0]).toBeLessThan(f.tx.mock.invocationCallOrder[workspaceIndex]!);
+    } else {
+      expect(historyIndex).toBeGreaterThanOrEqual(0);
+      expect(historyIndex).toBeLessThan(workspaceIndex);
+    }
+    expect(sourceIndex).toBeGreaterThan(workspaceIndex);
+    expect(f.calls[sourceIndex]?.values[1]).toEqual([sourceId, attemptSourceId]);
+    expect(membershipIndex).toBeGreaterThan(sourceIndex);
+    expect(hooks.assertAttempt).toHaveBeenCalledOnce();
+    expect(f.tx.mock.invocationCallOrder[membershipIndex]).toBeLessThan(hooks.assertAttempt.mock.invocationCallOrder[0]!);
   });
 
   it("checks the bound turn when a record receipt supplies context refs and no options", async () => {

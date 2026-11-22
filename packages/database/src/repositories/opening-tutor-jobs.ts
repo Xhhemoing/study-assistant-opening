@@ -76,6 +76,7 @@ type StreamPublicationContext = {
 
 type StreamTurnBinding = {
   attempt_id?: unknown;
+  learning_session_id?: string | null;
   context_anchor?: unknown;
   source_ids?: unknown;
   source_versions?: unknown;
@@ -106,6 +107,14 @@ function boundTurnCourseId(turn: StreamTurnBinding): string | null {
   return courseId.toLowerCase();
 }
 
+function boundTurnAttemptId(turn: StreamTurnBinding) {
+  return turn.attempt_id ?? (turn.context_anchor as StudyContextAnchor | null)?.attemptId;
+}
+
+function boundTurnMaterialUse(turn: StreamTurnBinding) {
+  return turn.attempt_id || (turn.context_anchor as StudyContextAnchor | null)?.itemVersionId ? "practice" : "citation";
+}
+
 function jobUserSessionCourse(db: Sql | TransactionSql) {
   return db`CASE WHEN c.course_id IS NULL AND t.context_anchor->>'courseId' IS NULL
     THEN ${turnLearningSessionCourse(db, () => db`t`, () => db`c.owner_user_id`)} END`;
@@ -115,6 +124,12 @@ async function lockStreamCourse(tx: TransactionSql, scope: OpeningScope, courseI
   if (!await lockActiveMemoryCourse(tx, scope, courseId)) {
     throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
   }
+}
+
+async function shareAttemptHistory(tx: TransactionSql, scope: OpeningScope) {
+  // Learning writers lock this revision before changing attempt or teaching context.
+  await tx`SELECT revision FROM opening_workspace_history_revisions
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
 }
 
 type SendAuthorizationContext = {
@@ -186,7 +201,7 @@ async function assertStreamMaterialAdmission(
 ): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[]; historyExpiresAt: number }> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
   const courseId = boundTurnCourseId(turn);
-  const materialUse = turn.attempt_id || anchor?.itemVersionId ? "practice" as const : "citation" as const;
+  const materialUse = boundTurnMaterialUse(turn);
   const turnSourceIds = Array.isArray(turn.source_ids)
     ? [...new Set(turn.source_ids.filter((value): value is string => typeof value === "string"))]
     : [];
@@ -326,17 +341,10 @@ async function assertStreamMaterialAdmission(
     // Lock courses -> all opening_sources (pinned + derived + memory lineage) in deterministic ID order
     // BEFORE any course_asset_memberships lock so addAssetMembership(FOR UPDATE on opening_sources)
     // can never deadlock or race standalone/mock_exam classification.
-    const allSourceIds = [...new Set([
+    lockedSourceIds = await lockStreamSources(tx, scope, [
       ...pinnedSourceIds, ...derivedSourceIds, ...collectSourceIds, ...historySourceIds, ...verifiedAttemptSourceIds,
       ...replaySourceIds,
-    ])].sort();
-    const lockedSources = await tx`SELECT s.id,s.version FROM opening_sources s
-      WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${allSourceIds}::uuid[])
-      ORDER BY s.id FOR SHARE OF s`;
-    if (lockedSources.length !== allSourceIds.length) {
-      throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
-    }
-    lockedSourceIds = lockedSources.map(row => String(row.id));
+    ]);
     const membershipSourceIds = [...new Set([...collectSourceIds, ...historySourceIds])].sort();
     if (membershipSourceIds.length) {
       await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
@@ -476,6 +484,18 @@ async function assertStreamMaterialAdmission(
 }
 
 /** Collect the source set for both the attempt and its nested study-context reads. */
+async function lockStreamSources(tx: TransactionSql, scope: OpeningScope, sourceIds: readonly string[]) {
+  const ids = [...new Set(sourceIds.map(id => id.toLowerCase()))].sort();
+  if (!ids.length) return [];
+  const rows = await tx`SELECT s.id,s.version FROM opening_sources s
+    WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${ids}::uuid[])
+    ORDER BY s.id FOR SHARE OF s`;
+  if (rows.length !== ids.length) {
+    throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
+  }
+  return rows.map(row => String(row.id));
+}
+
 async function discoverStreamAttemptMaterials(tx: TransactionSql, scope: OpeningScope, attemptId: string,
   learningSessionId: string | null, anchor: StudyContextAnchor | null,
 ) {
@@ -527,6 +547,35 @@ async function discoverStreamAttemptMaterials(tx: TransactionSql, scope: Opening
       ...specRefs.map(ref => ref.sourceId), exam?.sourceId].filter(isLineageUuid).map(id => id.toLowerCase()),
     courseIds: [row.course_id, exam?.courseId].filter(isLineageUuid),
   };
+}
+
+async function discoverBoundAttemptMaterials(tx: TransactionSql, scope: OpeningScope, turn: StreamTurnBinding) {
+  const attemptId = boundTurnAttemptId(turn);
+  if (!isLineageUuid(attemptId)) throw Object.assign(new Error("stream attempt context changed"), { code: "CONFLICT" });
+  return discoverStreamAttemptMaterials(tx, scope, attemptId,
+    turn.learning_session_id ?? null, turn.context_anchor as StudyContextAnchor | null);
+}
+
+async function lockStandaloneAttemptMaterials(tx: TransactionSql, scope: OpeningScope, target: TutorAttemptContextTarget) {
+  await shareAttemptHistory(tx, scope);
+  const [workspace] = await tx`SELECT id FROM workspaces
+    WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+  if (!workspace) return;
+  const [turn] = await tx`SELECT t.attempt_id,t.context_anchor,t.learning_session_id,c.course_id,
+    ${jobUserSessionCourse(tx)} AS session_course_id
+    FROM opening_tutor_jobs j
+    JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+    JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+    WHERE j.id=${target.jobId} AND j.user_turn_id=${target.userTurnId} AND j.workspace_id=${scope.workspaceId}
+      AND c.owner_user_id=${scope.ownerUserId} AND j.status='running'
+      AND j.claim_token IS NOT DISTINCT FROM ${target.claimToken ?? null}::uuid`;
+  if (!turn || !boundTurnAttemptId(turn)) return;
+  const materials = await discoverBoundAttemptMaterials(tx, scope, turn);
+  const courseId = boundTurnCourseId(turn);
+  if (!await lockActiveMemoryCourses(tx, scope, courseId === null ? materials.courseIds : [...materials.courseIds, courseId])) {
+    throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
+  }
+  await lockStreamSources(tx, scope, materials.sourceIds);
 }
 
 async function assertStreamSources(
@@ -1153,7 +1202,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
   ): Promise<T> {
     let inFlight: Promise<T> | undefined;
     await sql.begin(async tx => {
-      if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
+      if (context.attemptContext) await shareAttemptHistory(tx, scope);
       const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
         WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
       if (!workspace) {
@@ -1162,7 +1211,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       if (context.expectedPrivacyEpoch !== undefined && Number(workspace.privacy_epoch) !== context.expectedPrivacyEpoch) {
         throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
       }
-      const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
+      const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,t.learning_session_id,c.course_id,
         ${jobUserSessionCourse(tx)} AS session_course_id
         FROM opening_tutor_jobs j
         JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
@@ -1176,14 +1225,16 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       if (!job) {
         throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
       }
-      if ((job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId) && !context.attemptContext) {
+      if (boundTurnAttemptId(job) && !context.attemptContext) {
         throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
       }
+      const attemptLockScope = context.attemptContext ? await discoverBoundAttemptMaterials(tx, scope, job) : undefined;
       const { courseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
         context.contextSourceRefs, context.attemptContext?.sourceRefs, {
           memoryLineageSourceIds: context.memoryLineageSourceIds,
           globalMemoryIds: context.globalMemoryIds,
           historyCourseBindings: context.historyCourseBindings,
+          attemptLockScope,
         });
       if (context.attemptContext) {
         await assertTutorAttemptContext(tx, scope,
@@ -1378,13 +1429,13 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       try {
         await sql.begin(async tx => {
           // Attempt revisions take the history lock before workspace and observation locks.
-          if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
+          if (context.attemptContext) await shareAttemptHistory(tx, scope);
           const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
             WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
           if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
             throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
           }
-          const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
+          const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,t.learning_session_id,c.course_id,
             ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
             JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
@@ -1393,14 +1444,16 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid
               AND (j.claim_token IS NULL OR j.timing_execution_id IS NOT NULL) FOR SHARE OF j`;
           if (!job) throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
-          if ((job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId) && !context.attemptContext) {
+          if (boundTurnAttemptId(job) && !context.attemptContext) {
             throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
           }
+          const attemptLockScope = context.attemptContext ? await discoverBoundAttemptMaterials(tx, scope, job) : undefined;
           const { courseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
             context.contextSourceRefs, context.attemptContext?.sourceRefs, {
               memoryLineageSourceIds: context.memoryLineageSourceIds,
               globalMemoryIds: context.globalMemoryIds,
               historyCourseBindings: context.historyCourseBindings,
+              attemptLockScope,
             });
           if (context.attemptContext) {
             await assertTutorAttemptContext(tx, scope,
@@ -1486,12 +1539,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     }, commitAuthorized?: (job: OpeningTutorJobRecord) => void, canDeliver?: () => boolean): Promise<OpeningTutorJobRecord | null> {
       const verifyInTx = async (tx: TransactionSql, lockMode: "FOR UPDATE" | "FOR SHARE"): Promise<OpeningTutorJobRecord | null> => {
         if (lockMode === "FOR UPDATE") await lockWorkspaceLearningHistory(tx, scope);
-        else if (context.attemptFence !== undefined) {
-          // Learning writers take this lock before the workspace row. Keep their
-          // attempt, observation and teaching-spec bindings stable through replay.
-          await tx`SELECT revision FROM opening_workspace_history_revisions
-            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
-        }
+        else if (context.attemptFence !== undefined) await shareAttemptHistory(tx, scope);
         const [workspace] = lockMode === "FOR UPDATE"
           ? await tx`SELECT privacy_epoch FROM workspaces
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`
@@ -1537,7 +1585,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           || (context.executionId !== undefined && row.timing_execution_id !== context.executionId)) {
           throw new Error("stream execution changed");
         }
-        const boundAttempt = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId;
+        const boundAttempt = boundTurnAttemptId(row);
         let attemptRefs: readonly ContextSourceRef[] | undefined;
         let attemptFence: TutorAttemptFence | undefined;
         let attemptLockScope: Awaited<ReturnType<typeof discoverStreamAttemptMaterials>> | undefined;
@@ -1545,8 +1593,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           const fence = tutorAttemptFenceSchema.safeParse(context.attemptFence);
           if (!fence.success || !boundAttempt) throw new Error("stream attempt fence missing");
           attemptFence = fence.data;
-          attemptLockScope = await discoverStreamAttemptMaterials(tx, scope, String(boundAttempt),
-            row.learning_session_id ?? null, row.context_anchor);
+          attemptLockScope = await discoverBoundAttemptMaterials(tx, scope, row);
           attemptRefs = context.attemptSourceRefs ?? attemptLockScope.refs;
         }
         const historicalUserTurnId = row.has_prior_exchanges ? String(row.user_turn_id) : undefined;
@@ -1625,10 +1672,16 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
 
     /** One statement-consistent read of the bound attempt, with no grading side effects. */
     readAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget) =>
-      sql.begin("isolation level repeatable read", tx => readTutorAttemptContext(tx, scope, target)) as Promise<TutorAttemptContext | null>,
+      sql.begin("isolation level repeatable read", async tx => {
+        await lockStandaloneAttemptMaterials(tx, scope, target);
+        return readTutorAttemptContext(tx, scope, target);
+      }) as Promise<TutorAttemptContext | null>,
 
     assertAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget, expected: TutorAttemptContext) =>
-      sql.begin("isolation level repeatable read", tx => assertTutorAttemptContext(tx, scope, target, expected)) as Promise<void>,
+      sql.begin("isolation level repeatable read", async tx => {
+        await lockStandaloneAttemptMaterials(tx, scope, target);
+        await assertTutorAttemptContext(tx, scope, target, expected);
+      }) as Promise<void>,
 
     async assertGlobalMemoriesCurrent(scope: OpeningScope, memoryIds: readonly string[], jobId?: string): Promise<void> {
       const ids = [...new Set(memoryIds.map(id => {
@@ -1757,18 +1810,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           }
         }
         const attempt = options?.attemptContext;
-        const verifyAttemptAfterMaterial = Boolean(options?.historyCourseBindings?.length || options?.globalMemoryIds?.length);
-        if (attempt) {
-          if (attempt.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
-          if (!verifyAttemptAfterMaterial) await assertTutorAttemptContext(tx, input.scope, attempt.target, attempt.snapshot);
-        }
+        if (attempt && attempt.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
         const refs = input.contextSourceRefs ?? [];
         const memoryBearing = hasMemoryBearingRef(refs);
         if (memoryBearing && (!options?.globalMemoryIds?.length
           || refs.some(ref => ref && Object.hasOwn(ref, "memoryDependencyIds")))) {
           throw Object.assign(new Error("stream global memory binding missing or invalid"), { code: "CONFLICT" });
         }
-        const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,j.assistant_turn_id,
+        const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,t.learning_session_id,c.course_id,j.assistant_turn_id,
           ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
           JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
           JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
@@ -1777,6 +1826,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (!boundTurn) return;
         if (boundTurn.assistant_turn_id !== input.assistantTurnId.toLowerCase()) throw new Error("assistant turn was not persisted");
         const boundCourseId = boundTurnCourseId(boundTurn);
+        const attemptLockScope = attempt ? await discoverBoundAttemptMaterials(tx, input.scope, boundTurn) : undefined;
         if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
           || options?.memoryLineageSourceIds !== undefined || options?.historyCourseBindings !== undefined
           || options?.attemptContext !== undefined
@@ -1793,9 +1843,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               memoryLineageSourceIds: options?.memoryLineageSourceIds,
               globalMemoryIds: options?.globalMemoryIds,
               historyCourseBindings: options?.historyCourseBindings,
+              attemptLockScope,
             },
           );
-          if (attempt && verifyAttemptAfterMaterial) {
+          if (attempt) {
             await assertTutorAttemptContext(tx, input.scope, attempt.target, attempt.snapshot);
           }
           if (!receipt && refs.length) {
@@ -1819,9 +1870,26 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         const memoryDependencyIds = options?.globalMemoryIds?.length
           ? [...new Set(options.globalMemoryIds.map(id => id.toLowerCase()))].sort()
           : [];
-        const persistedContextSourceRefs = input.contextSourceRefs === undefined
-          ? (memoryDependencyIds.length ? [{ memoryDependencyIds }] : null)
-          : [...input.contextSourceRefs, ...(memoryDependencyIds.length ? [{ memoryDependencyIds }] : [])];
+        // History's session and activity sources carry destination membership even
+        // when the provider received no explicit versioned source reference.
+        const directlyPinned = new Set([
+          ...((boundTurn.source_ids ?? []) as string[]),
+          ...refs.map(ref => ref.sourceId.toLowerCase()),
+        ]);
+        const selectedHistorySourceIds = new Set((options?.historyCourseBindings ?? [])
+          .filter(binding => binding.courseId?.toLowerCase() === (boundCourseId ?? undefined)
+            && binding.materialUse === boundTurnMaterialUse(boundTurn))
+          .flatMap(binding => {
+            const selectedIds = binding.selectedDestinationSourceIds && new Set(binding.selectedDestinationSourceIds);
+            return binding.sourceIds.filter(id => selectedIds?.has(id) ?? true).map(id => id.toLowerCase());
+          }));
+        const persistedRefs = [
+          ...refs.map(ref => ref.memoryOnly && selectedHistorySourceIds.has(ref.sourceId.toLowerCase())
+            ? { sourceId: ref.sourceId, sourceVersion: ref.sourceVersion } : ref),
+          ...[...selectedHistorySourceIds].filter(id => !directlyPinned.has(id)).sort().map(sourceId => ({ sourceId })),
+          ...(memoryDependencyIds.length ? [{ memoryDependencyIds }] : []),
+        ];
+        const persistedContextSourceRefs = input.contextSourceRefs === undefined && !persistedRefs.length ? null : persistedRefs;
         const assistant = await tx`
           UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)},
             system_query=${receipt ? tx.json(receipt as never) : null},
@@ -1891,7 +1959,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (!workspace) return false;
         const target = await findCompletedCandidateTarget(tx, input);
         if (!target) return false;
-        const parsedRefs = parseContextSourceRefs(target.row.context_source_refs);
+        const parsedRefs = parseContextSourceRefs(target.row.context_source_refs, "saved-turn");
         if (!parsedRefs) return false;
         const sourceIds = [...new Set(parsedRefs.map(ref => ref.sourceId))];
         if (!(target.earliestExpiresAtMs > Date.now())) return false;

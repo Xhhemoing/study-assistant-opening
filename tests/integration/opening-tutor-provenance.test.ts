@@ -182,6 +182,79 @@ describe("saved tutor material provenance", () => {
       .resolves.toMatchObject({ status: "running" });
   }, 15_000);
 
+  it("rejects reuse of completed session-only history after destination membership is revoked", async () => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const origin = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Origin", slug: randomUUID() });
+    const destination = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Destination", slug: randomUUID() });
+    const material = await source();
+    const membership = { workspaceId: scope.workspaceId, courseId: destination.id, assetType: "source" as const, assetId: material };
+    const addMembership = (courseId: string) => courses.addAssetMembership({
+      ...membership, courseId, role: "core", visibility: "course", purpose: "teaching",
+    });
+    await addMembership(origin.id);
+    await addMembership(destination.id);
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Cross-course history", courseId: null });
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const prior = await append(conversation.id);
+    const activityId = await insertTestTeachingActivity(sql, scope, origin.id);
+    const sessionId = randomUUID();
+    await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+      VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${origin.id}, ${activityId}, 'Origin', ${[material]}::uuid[])`;
+    await sql`UPDATE opening_turns SET learning_session_id=${sessionId}, created_at=now()-interval '2 minutes'
+      WHERE id=ANY(${[prior.turnId, prior.assistantTurnId]}::uuid[])`;
+    const priorClaim = (await jobs.claim(prior.jobId))!;
+    await jobs.completeTurn({ scope, jobId: prior.jobId, assistantTurnId: prior.assistantTurnId, claimToken: priorClaim.claimToken,
+      text: "Original session answer", citations: [], candidates: [], contextSourceRefs: [] });
+
+    const current = await append(conversation.id, [], "Follow-up across courses");
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: destination.id })}, created_at=now()-interval '1 minute'
+      WHERE id=ANY(${[current.turnId, current.assistantTurnId]}::uuid[])`;
+    const history = await jobs.loadHistoryContext(scope, current.turnId);
+    expect(history.history.map(turn => turn.text)).toContain("Original session answer");
+    const claim = (await jobs.claim(current.jobId))!;
+    const target = { scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId, claimToken: claim.claimToken };
+    await jobs.completeTurn({ ...target, text: "Answer using session history", citations: [], candidates: [],
+      contextSourceRefs: history.sourceRefs }, { historyCourseBindings: history.historyCourseBindings });
+
+    const send = vi.fn(async () => true);
+    const appendCandidates = (candidates: unknown[]) => jobs.appendCompletedTurnCandidates({ ...target, candidates });
+    await expect(jobs.loadCompletedTurnForMetadata(target)).resolves.toMatchObject({ answer: "Answer using session history" });
+    await expect(jobs.authorizeMetadataSend(target, send)).resolves.toBe(true);
+    await expect(appendCandidates([])).resolves.toBe(true);
+    send.mockClear();
+    const memories = createOpeningMemoryRepository(sql);
+    const propose = () => memories.proposeMemory(scope, {
+      courseId: destination.id, text: "Session memory", sourceTurnIds: [current.assistantTurnId], expiresAt: null,
+    });
+    const proposed = await propose();
+    const later = await append(conversation.id);
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: origin.id })} WHERE id=${later.turnId}`;
+    const laterHistory = async () => (await jobs.loadHistoryContext(scope, later.turnId)).history.map(turn => turn.text);
+    await expect(laterHistory()).resolves.toContain("Answer using session history");
+
+    await courses.removeAssetMembership(membership);
+    await expect(jobs.loadCompletedTurnForMetadata(target)).resolves.toBeNull();
+    await expect(jobs.authorizeMetadataSend(target, send)).rejects.toThrow("tutor metadata authorization changed");
+    expect(send).not.toHaveBeenCalled();
+    const task = { kind: "task", title: "Review history", minutes: 15, dueText: null };
+    await expect(appendCandidates([task])).resolves.toBe(false);
+    await expect(laterHistory()).resolves.toEqual(["continue", "Original session answer"]);
+    await expect(propose()).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.confirm(scope, proposed.id, proposed.version, randomUUID())).rejects.toMatchObject({ code: "VALIDATION" });
+
+    const id = randomUUID();
+    await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+      VALUES (${id}, ${scope.workspaceId}, ${conversation.id}, ${current.assistantTurnId}, '[]'::jsonb, ${sql.json(task)})`;
+    const accept = () => insertOpeningTaskWithOutcome(sql, scope,
+      { candidateId: id, courseId: destination.id, title: task.title, minutes: task.minutes, dueAt: null, priority: 0 });
+    await expect(accept()).rejects.toMatchObject({ code: "VALIDATION" });
+    await addMembership(destination.id);
+    await expect(accept()).resolves.toMatchObject({ task: { title: task.title } });
+    await expect(sql`SELECT context_source_refs,source_ids FROM opening_turns WHERE id=${current.assistantTurnId}`)
+      .resolves.toEqual([{ context_source_refs: [{ sourceId: material }], source_ids: [] }]);
+  }, 15_000);
+
   it("checks a task's paired user memory and its backing course under the user's scope", async () => {
     const { sql, scope } = f;
     const courses = createCourseMembershipRepository(sql);
