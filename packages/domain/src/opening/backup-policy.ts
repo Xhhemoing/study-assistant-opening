@@ -274,7 +274,7 @@ export function validateOpeningRestore(
   const forbidden = findForbiddenBackupTable(backup);
   if (forbidden) return reject(`table ${forbidden} is not allowlisted`);
   if (!isUuid(backup.workspaceId) || !Number.isSafeInteger(backup.privacyEpoch)
-    || (backup.privacyEpoch as number) < 0 || !isJournal(backup.deletionJournal)
+    || (backup.privacyEpoch as number) < 0 || (backup.privacyEpoch as number) >= 2 ** 31 || !isJournal(backup.deletionJournal)
     || !isJournal(currentDeletionJournal) || !isTables(backup.tables)
     || !Array.isArray(backup.objects) || !backup.objects.every(validObject)) {
     return reject("invalid backup structure or privacy metadata");

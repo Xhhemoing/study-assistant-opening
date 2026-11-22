@@ -1,14 +1,86 @@
 import { expect, it } from "vitest";
+import { planOpeningRestoreApply } from "./backup-apply-plan";
+import { composeOpeningBackupDraft } from "./backup-compose";
+import { OPENING_RESTORE_APPLY_ORDER } from "./backup-inventory";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
 import { orderBackupMisconceptionRevisions, sourceReferences, validateBackupMisconceptionRevisions } from "./backup-validation";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const referenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const openRange = '["2026-11-21 12:00:00.000001+00",)';
+const revisionText = { concept_key: "limit", misconception_code: "conditions", summary: "Review the conditions." };
+
+function misconceptionArchive(rows: Record<string, unknown>[], privacyEpoch = 0) {
+  const tables = Object.fromEntries(OPENING_RESTORE_APPLY_ORDER.map(table =>
+    [table, table === "v3_bitemporal_misconception_edges" ? rows : []]));
+  const metadata = { privacyEpoch, deletionJournal: [], memoryDeletions: { workspaceId, memories: [] } };
+  const backup: OpeningBackup = { format: "opening-backup", version: 1, workspaceId, ...metadata, tables, objects: [] };
+  const compose = () => composeOpeningBackupDraft({
+    records: { ...metadata, tables },
+    staging: { snapshot: { workspaceId, ...metadata, sources: [] }, objects: [] },
+  });
+  const preview = () => validateOpeningRestore(backup, [], metadata.memoryDeletions);
+  const plan = () => planOpeningRestoreApply(backup, [], {
+    confirmLocalRestore: true, currentMemoryDeletions: metadata.memoryDeletions,
+  });
+  return { compose, preview, plan };
+}
+
+const diagnosis = {
+  ...revisionText,
+  workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
+  status: "verified", origin: "system_diagnosis", privacy_epoch: 0, evidence_attempt_ids: [],
+  valid_range: openRange, tx_range: openRange,
+};
+
+it.each(["concept_key", "misconception_code", "summary"] as const)(
+  "rejects missing or malformed %s in compose, preview, and plan", column => {
+    const missing: Partial<typeof diagnosis> = { ...diagnosis };
+    delete missing[column];
+    const invalid = [null, 42, "invalid\u0000text", "\uD800", "\uDFFF", new Date("2026-11-21T12:00:00Z"), new Date(NaN)];
+    for (const row of [missing, ...invalid.map(value => ({ ...diagnosis, [column]: value }))]) {
+      const { compose, preview, plan } = misconceptionArchive([row]);
+      const errors = [`misconception revision has invalid ${column}`];
+      expect(compose()).toMatchObject({ ok: false, code: "PREVIEW_REJECTED", errors });
+      expect(preview()).toMatchObject({ allowed: false, errors });
+      expect(plan()).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", errors });
+    }
+  },
+);
+
+it("preserves valid Unicode text and empty strings in the archive", () => {
+  const row = { ...diagnosis, concept_key: "", misconception_code: "極限", summary: "Review 🧠\n" };
+  const { compose, preview, plan } = misconceptionArchive([row]);
+  expect(compose()).toMatchObject({ ok: true, backup: { tables: { v3_bitemporal_misconception_edges: [row] } } });
+  expect(preview()).toMatchObject({ allowed: true, errors: [] });
+  expect(plan()).toMatchObject({ ok: true });
+});
+
+it("rejects conflicting owners across otherwise independent revisions of a workspace", () => {
+  const otherId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const { compose, preview, plan } = misconceptionArchive([
+    diagnosis, { ...diagnosis, owner_user_id: otherId, edge_id: otherId, revision_id: otherId },
+  ]);
+  const errors = ["misconception revisions have conflicting workspace owners"];
+  expect(compose()).toMatchObject({ ok: false, code: "PREVIEW_REJECTED", errors });
+  expect(preview()).toMatchObject({ allowed: false, errors });
+  expect(plan()).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", errors });
+});
+
+it.each([false, true])("rejects an archive epoch outside the PostgreSQL integer range (has revisions: %s)", hasRevisions => {
+  const privacyEpoch = 2 ** 31;
+  const rows = hasRevisions ? [{ ...diagnosis, privacy_epoch: privacyEpoch }] : [];
+  const { compose, preview, plan } = misconceptionArchive(rows, privacyEpoch);
+  const errors = ["invalid backup structure or privacy metadata"];
+  expect(compose()).toMatchObject({ ok: false, code: "PREVIEW_REJECTED", errors });
+  expect(preview()).toMatchObject({ allowed: false, errors });
+  expect(plan()).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", errors });
+});
 
 it.each(["self", "two revisions"])("rejects a %s predecessor cycle during restore preflight", cycle => {
   const a = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", b = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const root = {
+    ...revisionText,
     workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: a, prior_revision_id: a,
     status: "verified", origin: "system_diagnosis", course_id: null, privacy_epoch: 0, evidence_attempt_ids: [],
     valid_range: openRange, tx_range: openRange,
@@ -30,6 +102,7 @@ it.each([
   { name: "a string epoch", epochs: ["1"] },
 ])("rejects $name in an epoch-1 archive", ({ epochs }) => {
   const root = {
+    ...revisionText,
     workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
     status: "verified", origin: "system_diagnosis", course_id: null, evidence_attempt_ids: [],
     privacy_epoch: 1,
@@ -76,6 +149,7 @@ it.each([
   ['["294277-01-01 00:00:00+00",)', false],
 ])("validates an archived time range %j (allowed: %s)", (range, allowed) => {
   const root = {
+    ...revisionText,
     workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
     status: "verified", origin: "system_diagnosis", course_id: null, privacy_epoch: 0, evidence_attempt_ids: [],
     valid_range: openRange, tx_range: openRange,
@@ -93,6 +167,7 @@ it.each([
 
 it("allows an explicit positive infinity endpoint only for valid time", () => {
   const root = {
+    ...revisionText,
     workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
     status: "verified", origin: "system_diagnosis", privacy_epoch: 0, evidence_attempt_ids: [],
     valid_range: "[-infinity,infinity)", tx_range: "[-infinity,)",
@@ -106,6 +181,7 @@ it("allows an explicit positive infinity endpoint only for valid time", () => {
 it("checks overlapping rectangles and orders predecessors across all valid slices", () => {
   const first = "2026-11-21T12:00:00.000001Z", second = "2026-11-21T12:00:00.000002Z";
   const root = {
+    ...revisionText,
     workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
     status: "verified", origin: "system_diagnosis", privacy_epoch: 0, evidence_attempt_ids: [],
     valid_range: `[-infinity,${second})`, tx_range: `[${first},)`,

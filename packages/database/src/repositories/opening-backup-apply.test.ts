@@ -15,6 +15,7 @@ import type { OpeningRestoreNamespaceCounts } from "./opening-backup-empty-names
 
 const workspaceId = "a1000000-0000-4000-8000-000000000001";
 const sourceId = "c3000000-0000-4000-8000-000000000010";
+const revisionText = { concept_key: "limit", misconception_code: "conditions", summary: "Review the conditions." };
 
 function zeroCounts(): OpeningRestoreNamespaceCounts {
   return Object.fromEntries(OPENING_BACKUP_TABLES.map((t) => [t, 0])) as OpeningRestoreNamespaceCounts;
@@ -71,6 +72,7 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
   ])("rejects %s before opening a restore transaction", async (_name, patch) => {
     const backup = draft();
     const candidate = {
+      ...revisionText,
       workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
       course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
       status: "candidate", origin: "public_try_handoff", privacy_epoch: 4,
@@ -90,6 +92,7 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
     const backup = draft();
     backup.privacyEpoch = 1;
     const root = {
+      ...revisionText,
       workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
       course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
       status: "candidate", origin: "public_try_handoff", privacy_epoch: 0,
@@ -116,6 +119,7 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
   ])("rejects $name in preview and plan before opening a transaction", async ({ predecessor, childRange, error }) => {
     const backup = draft();
     const root = {
+      ...revisionText,
       workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
       status: "verified", origin: "system_diagnosis", privacy_epoch: 4, evidence_attempt_ids: [],
       valid_range: "[-infinity,)", tx_range: "[2026-11-21T00:00:00Z,)",
@@ -129,6 +133,27 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
     const sql = { begin: vi.fn() };
     await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
       .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false, errors: [error] });
+    expect(sql.begin).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["concept_key", undefined],
+    ["misconception_code", null],
+    ["summary", "invalid\uD800text"],
+  ])("rejects invalid %s before opening a transaction", async (column, value) => {
+    const backup = draft();
+    const row = {
+      ...revisionText,
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      status: "verified", origin: "system_diagnosis", privacy_epoch: 4, evidence_attempt_ids: [],
+      valid_range: "[-infinity,)", tx_range: "[2026-11-21T00:00:00Z,)",
+    };
+    backup.tables.v3_bitemporal_misconception_edges = [{ ...row, [column]: value }];
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false,
+        errors: [`misconception revision has invalid ${column}`],
+      });
     expect(sql.begin).not.toHaveBeenCalled();
   });
 

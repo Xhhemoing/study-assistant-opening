@@ -138,7 +138,20 @@ export function validateBackupMisconceptionRevisions(
   const errors = new Set<string>();
   const txByRevision = new Map<string, MisconceptionRange>();
   const slicesByEdge = new Map<string, MisconceptionSlice[]>();
+  let workspaceOwner: string | undefined;
   for (const row of rows) {
+    if (isUuid(row.owner_user_id)) {
+      const owner = row.owner_user_id.toLowerCase();
+      workspaceOwner ??= owner;
+      if (owner !== workspaceOwner) errors.add("misconception revisions have conflicting workspace owners");
+    }
+    for (const column of ["concept_key", "misconception_code", "summary"]) {
+      const value = row[column];
+      // Unicode matching preserves valid surrogate pairs while rejecting lone surrogates.
+      if (typeof value !== "string" || value.includes("\u0000") || /[\uD800-\uDFFF]/u.test(value)) {
+        errors.add(`misconception revision has invalid ${column}`);
+      }
+    }
     const valid = parseMisconceptionRange(row.valid_range, true);
     const tx = parseMisconceptionRange(row.tx_range, false);
     if (!valid) errors.add("misconception revision has invalid valid_range");
