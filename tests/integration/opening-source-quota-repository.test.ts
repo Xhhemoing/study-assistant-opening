@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningSourceActionsRepository, createOpeningSourceRepository, OpeningSourceError } from "@aistudy/database";
 import { createOpeningMediaSegmentsService } from "../../apps/web/src/features/opening/media/media-segments-service";
+import { finishCapture } from "../../apps/web/src/features/opening/imports-text/retell-task";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
@@ -50,6 +51,68 @@ describe("workspace upload quota with real SQL", () => {
     }
     if (withId) await expect(repo.create(f.scope, { ...operation, uploadId: "invalid" })).rejects.toMatchObject({ code: "22P02" });
     expect(await f.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
+  });
+
+  it.each([false, true])("links the uploaded capture to its course once (retell=%s)", async scheduleNextDayRetell => {
+    const courseId = randomUUID();
+    await f.sql`INSERT INTO courses (id, workspace_id, title, slug) VALUES (${courseId}, ${f.scope.workspaceId}, 'Course', 'course')`;
+    const repo = createOpeningSourceRepository(f.sql);
+    const input = { ...upload(4), mime: "text/markdown" as const, name: "notes.md" };
+    const source = await repo.create(f.scope, input);
+    await repo.complete(f.scope, source.id, input);
+    const capture = { sourceId: source.id, courseId, title: "Notes", scheduleNextDayRetell };
+    await finishCapture(f.sql, f.scope, capture);
+    await finishCapture(f.sql, f.scope, capture);
+    expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE workspace_id=${f.scope.workspaceId}
+      AND course_id=${courseId} AND asset_type='source'`).toEqual([{ asset_id: source.id }]);
+    expect(await f.sql`SELECT course_id FROM opening_tasks WHERE id=${source.id}`).toEqual(scheduleNextDayRetell ? [{ course_id: courseId }] : []);
+  });
+
+  it("releases both legacy keys on initial retell scheduling without changing the learner's tasks", async () => {
+    const repo = createOpeningSourceRepository(f.sql);
+    const input = upload(4);
+    const source = await repo.create(f.scope, input);
+    const key = `text-retell:${source.id}`;
+    await f.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, origin, client_key) VALUES
+      (${randomUUID()}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 'My task', 15, 'manual', ${key}),
+      (${randomUUID()}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 'Course task', 20, 'course_seed', ${key + ":deferred"})`;
+    const legacyTasks = () => f.sql`SELECT * FROM opening_tasks WHERE workspace_id=${f.scope.workspaceId}
+      AND origin IN ('manual', 'course_seed') ORDER BY id`;
+    const before = await legacyTasks();
+    await repo.complete(f.scope, source.id, input);
+    const capture = { sourceId: source.id, title: "Notes", scheduleNextDayRetell: true };
+    expect(await finishCapture(f.sql, f.scope, capture)).toMatchObject({ taskId: source.id, replayed: false });
+    expect(await finishCapture(f.sql, f.scope, capture)).toMatchObject({ taskId: source.id, replayed: true });
+    expect(await legacyTasks()).toEqual(before.map(task => ({ ...task, client_key: null })));
+    expect(await f.sql`SELECT client_key FROM opening_tasks WHERE id=${source.id} AND origin='agent'`).toEqual([{ client_key: key }]);
+  });
+
+  it("reserves one of two competing capture intents and lets the winner retry", async () => {
+    const repo = createOpeningSourceRepository(f.sql);
+    const ids = [randomUUID(), randomUUID()] as const;
+    const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64), title: "Notes", timeZone: null },
+    });
+    const results = await Promise.allSettled([reserve(0), reserve(1)]);
+    expect(results.filter(result => result.status === "rejected")).toMatchObject([{ reason: { code: "CONFLICT" } }]);
+    const winner = results[0].status === "fulfilled" ? 0 : 1;
+    await expect(reserve(winner)).resolves.toMatchObject({ id: ids[winner] });
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: ids[winner] }]);
+  });
+
+  it("blocks both capture IDs using the deletion receipt alone after a pending upload is deleted", async () => {
+    const repo = createOpeningSourceRepository(f.sql);
+    const ids = [randomUUID(), randomUUID()] as const;
+    const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64), title: "Notes", timeZone: null },
+    });
+    const pending = await reserve(1);
+    await createOpeningSourceActionsRepository(f.sql).apply(f.scope, pending.id,
+      { action: "delete", expectedMembershipIds: [], expectedVersion: 0 },
+      { stagingKey: id => `staging/${id}`, finalKey: (id, version) => `opening/sources/${id}/v${version}` }, new Date());
+    expect(await f.sql`SELECT version FROM opening_source_versions WHERE source_id=${pending.id}`).toEqual([]);
+    for (const index of [0, 1] as const) await expect(reserve(index)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
   });
 
@@ -133,17 +196,29 @@ describe("workspace upload quota with real SQL", () => {
   it.each([false, true])("releases deleted quota only after cleanup acknowledgements (uploaded=%s)", async uploaded => {
     const repo = createOpeningSourceRepository(f.sql, { quota: { maxBytes: 4, maxObjects: 1 } });
     const source = await repo.create(f.scope, upload(4));
-    if (uploaded) await repo.complete(f.scope, source.id, upload(4));
+    const manifest = { role: "exercise", pages: [] };
+    if (uploaded) {
+      await repo.complete(f.scope, source.id, upload(4));
+      await f.sql`UPDATE opening_source_versions SET material_manifest=${f.sql.json(manifest)},
+        material_manifest_revision=1, material_reviewed_by=${f.scope.ownerUserId}, material_reviewed_at=now()
+        WHERE source_id=${source.id} AND version=0`;
+    }
     const actions = createOpeningSourceActionsRepository(f.sql);
     const removed = await actions.apply(f.scope, source.id, { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }, {
       stagingKey: id => `opening/staging/${id}`, finalKey: (id, version) => `opening/sources/${id}/v${version}`,
     }, new Date());
     await expect(repo.create(f.scope, upload(4))).rejects.toMatchObject({ code: "CONFLICT" });
     // The object store acknowledges removal before these journal entries clear.
-    for (const key of removed.cleanup.keys) await actions.cleaned(f.scope, source.id, key);
+    const finalKey = `opening/sources/${source.id}/v0`;
+    for (const key of removed.cleanup.keys.filter(key => key !== finalKey)) await actions.cleaned(f.scope, source.id, key);
+    expect((await actions.cleanup(f.scope, source.id)).keys).toEqual([finalKey]);
+    await actions.cleaned(f.scope, source.id, finalKey);
     expect((await repo.create(f.scope, upload(4))).bytes).toBe(4);
-    const versions = await f.sql`SELECT availability FROM opening_source_versions WHERE source_id=${source.id}`;
-    expect(versions).toEqual(uploaded ? [{ availability: "unavailable" }] : []);
+    expect((await actions.cleanup(f.scope, source.id)).keys).toEqual([]);
+    const versions = await f.sql`SELECT availability, sha256, material_manifest, material_reviewed_by
+      FROM opening_source_versions WHERE source_id=${source.id}`;
+    expect(versions).toEqual(uploaded ? [{ availability: "unavailable", sha256: upload(4).sha256,
+      material_manifest: manifest, material_reviewed_by: f.scope.ownerUserId }] : []);
   });
 
   it("rejects an expired pending lease even before the sweeper marks it rejected", async () => {

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { TransactionSql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type { TaskCreateInput } from "@aistudy/contracts";
-import { prepareRetestTask, retestPayloadHash } from "./opening-retest-task";
+import { insertOpeningTaskWithOutcome, prepareRetestTask, retestPayloadHash } from "./opening-retest-task";
 import { lockOpeningRetestReviewCandidate } from "./opening-review-candidates";
 
 vi.mock("./opening-review-candidates", () => ({ lockOpeningRetestReviewCandidate: vi.fn() }));
@@ -20,6 +20,14 @@ const taskRow = { id: taskId, title: "复习", minutes: 20, due_at: null, priori
 beforeEach(() => {
   vi.mocked(lockOpeningRetestReviewCandidate).mockReset();
   vi.mocked(lockOpeningRetestReviewCandidate).mockResolvedValue({ kind: "task", accepted: true });
+});
+
+it.each(["", ":deferred"])("rejects an internal retell key before starting quick-add (%s)", async suffix => {
+  const begin = vi.fn();
+  const manual = { title: "Task", minutes: 5, dueAt: null, priority: 1 as const, candidateId: null,
+    clientKey: `text-retell:${taskId}${suffix}` };
+  await expect(insertOpeningTaskWithOutcome({ begin } as unknown as Sql, scope, manual)).rejects.toMatchObject({ code: "VALIDATION" });
+  expect(begin).not.toHaveBeenCalled();
 });
 
 describe("retest task lock-time replay", () => {

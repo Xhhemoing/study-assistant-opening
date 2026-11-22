@@ -10,7 +10,7 @@ import { SkillsAndLessons } from "./learning-plan";
 const client = vi.hoisted(() => ({
   snapshot: {} as { overview: ExamSprintOverview; integration: { binding: null }; busy: boolean; uncertain: boolean; error?: string | null },
   listeners: new Set<() => void>(),
-  send: vi.fn(), load: vi.fn(), loadIntegration: vi.fn(), loadForecast: vi.fn(), dispose: vi.fn(),
+  send: vi.fn(), recover: vi.fn(), load: vi.fn(), loadIntegration: vi.fn(), loadForecast: vi.fn(), dispose: vi.fn(),
   subscribe(listener: () => void) { client.listeners.add(listener); return () => client.listeners.delete(listener); },
   getSnapshot: () => client.snapshot,
 }));
@@ -119,6 +119,23 @@ it.each(["busy", "uncertain"] as const)("locks priority lesson writes while %s",
   expect(button!.disabled).toBe(true);
   await act(async () => button!.click());
   expect(client.send).not.toHaveBeenCalled();
+});
+
+it("allows another lesson selection after recovery definitively rejects the previous one", async () => {
+  function settle(uncertain: boolean) {
+    client.snapshot = { ...client.snapshot, uncertain, error: uncertain ? "结果待确认" : "串讲已更新" };
+    for (const listener of client.listeners) listener();
+    return null;
+  }
+  client.send.mockImplementationOnce(async () => settle(true));
+  client.recover.mockImplementationOnce(async () => settle(false));
+  await act(async () => root.render(createElement(ExamSprintView)));
+  const lesson = (id: number) => host.querySelector<HTMLButtonElement>(`#sprint-priority-lesson-${id} button`)!;
+  await act(async () => lesson(1).click());
+  expect(lesson(2).disabled).toBe(true);
+  await act(async () => findButton(host, "核对进度并恢复上一操作").click());
+  await act(async () => lesson(2).click());
+  expect(client.send.mock.calls.map(([command]) => command.lessonId)).toEqual(["lesson-1", "lesson-2"]);
 });
 
 it("offers low-confidence and untested lessons in the main area and directly beside skill status", async () => {

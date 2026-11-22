@@ -999,4 +999,56 @@ describe("projectCourseRoutePlanningWindow", () => {
       }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
+
+  it("holds deferred text-retell tasks behind open-ended active retests until closed and blocks premature deferTask resume", async () => {
+    const retellId = id(88);
+    const openEndedRow = {
+      id: retellId,
+      workspace_id: SCOPE.workspaceId,
+      owner_user_id: SCOPE.ownerUserId,
+      course_id: COURSE_ID,
+      version: 1,
+      title: "完成复测后，闭卷复述已保存讲解的关键步骤",
+      minutes: 10,
+      due_at: null,
+      not_before: "2026-10-16T00:00:00.000Z",
+      priority: 0,
+      status: "pending",
+      origin: "agent",
+      client_key: `text-retell:${retellId}:deferred`,
+      created_at: "2026-10-15T12:00:00.000Z",
+      retest_hold_open_ended: true,
+      retest_hold_end_at: null,
+    };
+
+    const [heldTask] = await createOpeningPlansRepository(
+      vi.fn().mockResolvedValue([openEndedRow]) as unknown as Sql,
+    ).listTasks(SCOPE);
+    expect(heldTask.notBefore).toBe("9999-12-31T23:59:59.000Z");
+
+    const closedRow = {
+      ...openEndedRow,
+      retest_hold_open_ended: false,
+      retest_hold_end_at: "2026-10-18T10:00:00.000Z",
+    };
+    const [releasedTask] = await createOpeningPlansRepository(
+      vi.fn().mockResolvedValue([closedRow]) as unknown as Sql,
+    ).listTasks(SCOPE);
+    expect(releasedTask.notBefore).toBe("2026-10-18T10:00:01.000Z");
+
+    const deferTx = vi.fn(async (parts: TemplateStringsArray) => {
+      const q = parts.join("?");
+      if (q.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (q.includes("pg_advisory_xact_lock") || q.includes("opening_workspace_history_revisions")) return [];
+      if (q.includes("SELECT * FROM opening_tasks")) return [openEndedRow];
+      if (q.includes("AS blocked")) return [{ blocked: true }];
+      throw new Error("Unexpected SQL in deferTask: " + q);
+    });
+    const deferSql = Object.assign(deferTx, {
+      begin: async (run: (tx: TransactionSql) => unknown) => run(deferTx as unknown as TransactionSql),
+    }) as unknown as Sql;
+    await expect(
+      createOpeningPlansRepository(deferSql).deferTask(SCOPE, retellId, { expectedVersion: 1, notBefore: null }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
 });

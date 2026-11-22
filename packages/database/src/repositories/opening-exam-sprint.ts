@@ -8,10 +8,11 @@ import {
 import { applyExamSprintCommand, createExamSprintState, examSprintOverview } from "@aistudy/domain";
 import { parseExamSprintSnapshot, OpeningExamSprintRepositoryError, corrupt } from "./opening-exam-sprint-snapshot";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { lockBoundExamCourse, packWithExamSourceMappings, readExamEvidenceState } from "./opening-exam-integration-facts";
+import { readCommittedExamReceipt, lockBoundExamCourse, packWithExamSourceMappings, readExamEvidenceState } from "./opening-exam-integration-facts";
 import { syncExamIntegration } from "./opening-exam-integration-attempts";
 import { readExamIntegrationInTx } from "./opening-exam-integration";
 import { examSourceExposureCoverage, readExamSourceExposure } from "./opening-exam-source-exposure";
+import { withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 export { OpeningExamSprintRepositoryError } from "./opening-exam-sprint-snapshot";
 
 
@@ -58,11 +59,10 @@ export function createOpeningExamSprintRepository(sql: Sql, pack: ExamPack) {
 
     async act(scope: Scope, raw: ExamSprintCommand): Promise<ExamSprintOverview> {
       const command = examSprintCommandSchema.parse(raw);
-      return sql.begin(async tx => {
+      return withOpeningTutorStreamFenceCommit(sql, async tx => {
         // Serialize first-write creation too; a state-row lock alone cannot lock a missing row.
         await lockWorkspaceLearningHistory(tx, scope);
         await lockOwner(tx, scope, true);
-        await lockBoundExamCourse(tx, scope);
         const now = await nowIso(tx);
         const [row] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
           WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -80,9 +80,13 @@ export function createOpeningExamSprintRepository(sql: Sql, pack: ExamPack) {
           }
           // A durable receipt does not authorize delivery in a different run or a sealed mock.
           // Revalidate against the captured pack/context without writing another exposure.
-          if (command.action === "open_lesson") applyExamSprintCommand(snapshot.state, command, snapshot.pack, now);
-          return examSprintOverview(snapshot.state, snapshot.pack, now, await readExamEvidenceState(tx, scope, sprintId, snapshot.state));
+          return readCommittedExamReceipt(async () => {
+            await lockBoundExamCourse(tx, scope);
+            if (command.action === "open_lesson") applyExamSprintCommand(snapshot.state, command, snapshot.pack, now);
+            return examSprintOverview(snapshot.state, snapshot.pack, now, await readExamEvidenceState(tx, scope, sprintId, snapshot.state));
+          });
         }
+        await lockBoundExamCourse(tx, scope);
         if (command.action === "configure") {
           const [bound] = await tx`SELECT sprint_id FROM opening_exam_bindings WHERE sprint_id=${sprintId}`;
           if (bound) throw new OpeningExamSprintRepositoryError("CONFLICT", "请到课程目标调整考试日期和时间预算");

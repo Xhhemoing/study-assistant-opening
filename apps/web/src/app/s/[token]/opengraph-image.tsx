@@ -15,10 +15,7 @@ export const contentType = "image/png";
 const FONT_FAMILY = "Share Poster";
 let posterFont: Buffer | undefined;
 
-const OG_RESPONSE_OPTIONS = {
-  ...size,
-  headers: { "Cache-Control": "no-store" },
-};
+const PREVIEW_MAX_AGE_SECONDS = 30;
 
 type OpenGraphImageProps = {
   params: Promise<{ token: string }>;
@@ -42,6 +39,7 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
   }
 
   const card = toDisplayShareCard(verified.payload);
+  const maxAge = Math.max(0, Math.min(PREVIEW_MAX_AGE_SECONDS, Math.floor(verified.payload.exp - Date.now() / 1000)));
   const cohortBadge =
     card.cohortTrapRate !== null
       ? `约 ${card.cohortTrapRate}% 同学曾在此踩坑 · ${card.cohortSampleSize} 人样本`
@@ -195,7 +193,8 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
       </div>
     ),
     {
-      ...OG_RESPONSE_OPTIONS,
+      ...size,
+      headers: { "Cache-Control": `public, max-age=${maxAge}, must-revalidate` },
       fonts: [{
         name: FONT_FAMILY,
         data: posterFont ??= readFileSync(join(process.cwd(), "src/features/opening/share/assets/share-poster.woff")),

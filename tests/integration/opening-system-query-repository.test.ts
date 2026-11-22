@@ -80,7 +80,7 @@ describe("owned read-only system query against PostgreSQL", () => {
   it("invalidates AI context for unavailable source versions while preserving historical backup metadata", async () => {
     const sourceId = await backupRows(fixture.sql, fixture.scope).source();
     await fixture.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,availability) VALUES (${sourceId},1,${fixture.scope.workspaceId},'unavailable')`;
-    const refs = fixture.sql`${JSON.stringify([{ sourceId, sourceVersion: 1 }])}::text::jsonb`;
+    const refs = () => fixture.sql`${JSON.stringify([{ sourceId, sourceVersion: 1 }])}::text::jsonb`;
     const [admission] = await fixture.sql`SELECT ${contextSourceRefsIncluded(fixture.sql, fixture.scope.workspaceId, refs)} AS ai,
       ${contextSourceRefsIncluded(fixture.sql, fixture.scope.workspaceId, refs, true)} AS backup`;
     expect(admission).toMatchObject({ ai: false, backup: true });

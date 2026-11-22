@@ -54,7 +54,7 @@ export async function readOpeningSpanTutorOriginChange(db: Sql, scope: Scope, ac
   if (metadata.sourceRefs !== undefined) {
     const refs = parseContextSourceRefs(metadata.sourceRefs);
     if (!refs) return change("source_unavailable");
-    const [available] = await db`SELECT 1 AS ok WHERE ${contextSourceRefsIncluded(db, scope.workspaceId, db`${db.json(refs)}`)}`;
+    const [available] = await db`SELECT 1 AS ok WHERE ${contextSourceRefsIncluded(db, scope.workspaceId, () => db`${db.json(refs)}`)}`;
     if (!available) return change("source_unavailable");
   }
   const ids = [...new Set([...metadata.observationIds, ...(metadata.originReference?.observationId ? [metadata.originReference.observationId] : [])])];

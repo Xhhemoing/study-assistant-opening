@@ -9,6 +9,9 @@ import { applyExamSprintCommand, examSprintOverview, composeOpeningBackupDraft, 
 import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
 import { createSqlClient } from "../../packages/database/src/migrate";
 import { createMemoryOpeningRestoreObjectPut, executeOpeningRestoreApply, readOpeningBackupRecords, readOpeningRestoreNamespaceCounts } from "../../packages/database/src/repositories/opening-backup";
+import { connectorReservationId } from "@aistudy/database";
+import { readOpeningBackupSources } from "../../packages/database/src/repositories/opening-backup-sources";
+import { readOpeningRestoreCurrentFacts } from "../../packages/database/src/repositories/opening-restore-current-facts";
 import { insertTestTeachingActivity } from "./opening-fixture";
 import { dumpWorkspaceSnapshot, snapshotToPackage } from "../../packages/database/src/repositories/backup-dump";
 import { createBackupRestoreRepository } from "../../packages/database/src/repositories/backup-restore";
@@ -1208,6 +1211,78 @@ it("keeps unanswered mock conversion receipts while removing the catalog solutio
       expect(receipt).toMatchObject({ id: archivedReceipt.id, attempt_link_id: archivedReceipt.attempt_link_id, kind: "solution",
         delivered_at: new Date(String(archivedReceipt.delivered_at)), history_revision: archivedReceipt.history_revision,
         workspace_history_revision: archivedReceipt.workspace_history_revision, content_snapshot: null });
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+}, 30_000);
+
+it("excludes temporary connector reservations from backup exports and restore live deletion journals", async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback connector backup fixture"), discardSeed = new Error("discard connector backup seed");
+  const w = randomUUID(), u = randomUUID(), realExcludedId = randomUUID(), inFlightId = randomUUID();
+  const scope = { workspaceId: w, ownerUserId: u };
+  const realDeletedAt = new Date("2026-11-20T05:00:00.000Z");
+  try {
+    await sql.begin("isolation level repeatable read", async outer => {
+      await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+      let backup: OpeningBackup | undefined;
+      await outer.savepoint(async tx => {
+        await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+        await tx`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,deleted_at,asset_deleted_at,pending_object_keys)
+          VALUES(${randomUUID()},${w},${realExcludedId},${realDeletedAt},${realDeletedAt},'{}'::text[])`;
+        await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,availability)
+          VALUES(${inFlightId},0,${w},512,'unavailable')`;
+        await tx`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,asset_deleted_at,pending_object_keys)
+          VALUES(${connectorReservationId(inFlightId)},${w},${inFlightId},now(),ARRAY[${`opening/sources/${inFlightId}/v0`}]::text[])`;
+        const db = transactionClient(tx);
+        const sourceSnapshot = await readOpeningBackupSources(db, scope);
+        expect(sourceSnapshot.deletionJournal).toEqual([
+          { sourceId: realExcludedId, deletedAt: realDeletedAt.toISOString(), assetDeletedAt: realDeletedAt.toISOString() },
+        ]);
+        const records = await readOpeningBackupRecords(db, scope);
+        expect(records.deletionJournal).toEqual([
+          { sourceId: realExcludedId, deletedAt: realDeletedAt.toISOString(), assetDeletedAt: realDeletedAt.toISOString() },
+        ]);
+        expect(records.tables.opening_privacy_exclusions).toHaveLength(1);
+        expect(records.tables.opening_privacy_exclusions![0]).toMatchObject({ source_id: realExcludedId });
+        const liveFactsWithBoth = await readOpeningRestoreCurrentFacts(tx, w, u);
+        expect(liveFactsWithBoth.currentDeletionJournal).toEqual([
+          { sourceId: realExcludedId, deletedAt: realDeletedAt.toISOString(), assetDeletedAt: realDeletedAt.toISOString() },
+        ]);
+        throw discardSeed;
+      }).catch(error => { if (error !== discardSeed) throw error; });
+
+      const activeConnSourceId = randomUUID();
+      await outer.savepoint(async tx => {
+        await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+        await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,availability)
+          VALUES(${activeConnSourceId},0,${w},512,'unavailable')`;
+        await tx`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,asset_deleted_at,pending_object_keys)
+          VALUES(${connectorReservationId(activeConnSourceId)},${w},${activeConnSourceId},now(),ARRAY[${`opening/sources/${activeConnSourceId}/v0`}]::text[])`;
+        const records = await readOpeningBackupRecords(transactionClient(tx), scope);
+        expect(records.deletionJournal).toEqual([]);
+        expect(records.tables.opening_privacy_exclusions).toEqual([]);
+        const composed = composeOpeningBackupDraft({ records, staging: {
+          snapshot: { workspaceId: w, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+            memoryDeletions: records.memoryDeletions, sources: [] },
+          objects: [],
+        } });
+        if (!composed.ok) throw new Error(composed.errors.join(", "));
+        backup = composed.backup;
+        throw discardSeed;
+      }).catch(error => { if (error !== discardSeed) throw error; });
+      if (!backup) throw new Error("missing connector backup draft");
+
+      await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+      const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
+      const cleanRestore = await executeOpeningRestoreApply(transactionClient(outer), {
+        confirmLocalRestore: true,
+        backup: wire,
+        currentMemoryDeletions: wire.memoryDeletions,
+        currentLearningState: { workspacePreferences: null, courses: [] },
+      });
+      expect(cleanRestore, cleanRestore.errors.join(", ")).toMatchObject({ ok: true });
       throw rollback;
     }).catch(error => { if (error !== rollback) throw error; });
   } finally { await sql.end(); }

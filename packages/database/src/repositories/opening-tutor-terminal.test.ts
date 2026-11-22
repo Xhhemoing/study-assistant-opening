@@ -7,6 +7,11 @@ import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 
 const scope = { workspaceId: "workspace-1", ownerUserId: "owner-1" };
 
+function unclaimedTerminalJobUpdate(query: string) {
+  if (!/UPDATE opening_tutor_jobs SET status = '(failed|outcome_unknown)'/.test(query)) return [];
+  return [{ id: "job-1", workspace_id: scope.workspaceId, assistant_turn_id: "assistant-turn-1", timing_execution_id: null }];
+}
+
 function fakeSql(handler: (query: string) => unknown[] = () => []) {
   const calls: string[] = [];
   let terminal = false;
@@ -155,6 +160,77 @@ describe("opening tutor jobs repository", () => {
     expect(sql.calls[0]).toContain("conversation_id");
   });
 
+  it("omits clientKey on unfiltered pending-job discovery and returns exact status+clientKey across active, unknown, and terminal states on scoped lookup", async () => {
+    const activeSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
+      ? [{
+          id: "job-active",
+          status: "running",
+          turn_status: "pending",
+          client_key: "turn-client-key-1",
+          error: null,
+          updated_at: new Date("2026-09-13T12:00:00.000Z"),
+        }]
+      : []);
+    await expect(createOpeningTutorJobsRepository(activeSql).findPendingForConversation(scope, "conversation-1")).resolves.toEqual({
+      id: "job-active",
+      status: "running",
+      error: null,
+      updatedAt: "2026-09-13T12:00:00.000Z",
+    });
+
+    const unknownSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
+      ? [{
+          id: "job-unknown",
+          status: "outcome_unknown",
+          turn_status: "outcome_unknown",
+          client_key: "turn-client-key-2",
+          error: null,
+          updated_at: new Date("2026-09-13T12:00:00.000Z"),
+        }]
+      : []);
+    await expect(createOpeningTutorJobsRepository(unknownSql).findPendingForConversation(scope, "conversation-1")).resolves.toEqual({
+      id: "job-unknown",
+      status: "outcome_unknown",
+      error: { message: TUTOR_UNKNOWN_MESSAGE },
+      updatedAt: "2026-09-13T12:00:00.000Z",
+    });
+
+    // clientKey-scoped lookup filters on u.client_key and reports active, outcome_unknown, and terminal states.
+    await expect(createOpeningTutorJobsRepository(activeSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-1")).resolves.toEqual({
+      id: "job-active",
+      status: "running",
+      error: null,
+      updatedAt: "2026-09-13T12:00:00.000Z",
+      clientKey: "turn-client-key-1",
+    });
+    expect(activeSql.calls.at(-1)).toContain("u.client_key");
+    await expect(createOpeningTutorJobsRepository(unknownSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-2")).resolves.toEqual({
+      id: "job-unknown",
+      status: "outcome_unknown",
+      error: { message: TUTOR_UNKNOWN_MESSAGE },
+      updatedAt: "2026-09-13T12:00:00.000Z",
+      clientKey: "turn-client-key-2",
+    });
+
+    const terminalSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
+      ? [{
+          id: "job-done",
+          status: "succeeded",
+          turn_status: "complete",
+          client_key: "turn-client-key-3",
+          error: null,
+          updated_at: new Date("2026-09-13T12:00:00.000Z"),
+        }]
+      : []);
+    await expect(createOpeningTutorJobsRepository(terminalSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-3")).resolves.toEqual({
+      id: "job-done",
+      status: "succeeded",
+      error: null,
+      updatedAt: "2026-09-13T12:00:00.000Z",
+      clientKey: "turn-client-key-3",
+    });
+  });
+
   it("discovers a recovered unknown outcome without marking it active", async () => {
     const sql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
       ? [{
@@ -183,11 +259,7 @@ describe("opening tutor jobs repository", () => {
   });
 
   it("marks the associated assistant turn failed with the definitive message", async () => {
-    const sql = fakeSql((query) =>
-      query.includes("RETURNING assistant_turn_id")
-        ? [{ assistant_turn_id: "assistant-turn-1" }]
-        : [],
-    );
+    const sql = fakeSql(unclaimedTerminalJobUpdate);
     const repository = createOpeningTutorJobsRepository(sql);
 
     await repository.fail(scope, "job-1", "provider rejected the request");
@@ -201,11 +273,7 @@ describe("opening tutor jobs repository", () => {
   });
 
   it("marks the associated assistant turn as outcome_unknown with the explanation", async () => {
-    const sql = fakeSql((query) =>
-      query.includes("RETURNING assistant_turn_id")
-        ? [{ assistant_turn_id: "assistant-turn-1" }]
-        : [],
-    );
+    const sql = fakeSql(unclaimedTerminalJobUpdate);
     const repository = createOpeningTutorJobsRepository(sql);
 
     await repository.markUnknown(scope, "job-1", "provider outcome unknown; usage reconciliation pending");
@@ -215,11 +283,7 @@ describe("opening tutor jobs repository", () => {
   });
 
   it("keeps an ordinary failure distinct from outcome_unknown", async () => {
-    const sql = fakeSql((query) =>
-      query.includes("RETURNING assistant_turn_id")
-        ? [{ assistant_turn_id: "assistant-turn-1" }]
-        : [],
-    );
+    const sql = fakeSql(unclaimedTerminalJobUpdate);
     const repository = createOpeningTutorJobsRepository(sql);
 
     await repository.fail(scope, "job-1", "provider rejected the request");
@@ -622,7 +686,7 @@ describe("cancel history coordination", () => {
 
 describe("LAB-U01 clarify terminal turn", () => {
   it("ends a page refusal's assistant turn as clarify while the job stays failed with nextAction clarify", async () => {
-    const sql = capturingSql((query) => query.includes("RETURNING assistant_turn_id") ? [{ assistant_turn_id: "assistant-turn-1" }] : []);
+    const sql = capturingSql(unclaimedTerminalJobUpdate);
     await createOpeningTutorJobsRepository(sql).fail(scope, "job-1", "请重新选择材料和页码", { code: "page_not_in_sources", nextAction: "clarify" });
     const jobUpdate = sql.calls.find((call) => call.query.includes("UPDATE opening_tutor_jobs SET status = 'failed'"));
     expect(jobUpdate?.values).toContainEqual({ message: "请重新选择材料和页码", code: "page_not_in_sources", nextAction: "clarify" });
@@ -646,7 +710,7 @@ describe("LAB-U01 clarify terminal turn", () => {
   }
 
   it("guards every terminal turn rewrite with the shared terminal list, which includes clarify", async () => {
-    const sql = capturingSql((query) => query.includes("RETURNING assistant_turn_id") ? [{ assistant_turn_id: "assistant-turn-1" }] : []);
+    const sql = capturingSql(unclaimedTerminalJobUpdate);
     const repository = createOpeningTutorJobsRepository(sql);
     await repository.fail(scope, "job-1", "provider rejected the request");
     await repository.markUnknown(scope, "job-1", "provider outcome unknown");

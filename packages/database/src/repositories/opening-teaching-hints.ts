@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
-import { repairDecodedLatexInJson } from "@aistudy/ai";
+import { repairDecodedLatexInJson } from "@aistudy/domain/opening/ai-policy";
 import { courseSourcePurposeAllows, teachingHintResponseSchema, teachingPartialHintsSchema, type CourseSourcePurpose, type Scope, type TeachingAnswerKey, type TeachingBlockRef, type TeachingHintLevel, type TeachingHintResponse, type TeachingSourceRef } from "@aistudy/contracts";
 import { admitLearningSources, learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { assertOpeningCourseExamSourceCurrent } from "./opening-course-exam-origin";

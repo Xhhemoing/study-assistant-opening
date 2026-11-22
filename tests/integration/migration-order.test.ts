@@ -25,18 +25,22 @@ const recovery108Commit = "996fc1d8623ae106c8dd0f5379fe533b9bb4efee";
 const storage109Commit = "e2b9166adeb790e6a5f63520389aa38d7c69199a";
 const artifactFixtures = path.resolve("tests/fixtures/migrations/recovery-artifacts");
 const manifestDigests = {
-  "108": "3fd0b3176bbf0cf242b7a9f524d2075dba8d781a05c237c38b7e0a9c85c08474",
-  "109": "bc823e31e9834f8f91c615bc3d89a2bc483c529c2ce0e812fc5f20424ca6a3f9",
+  "108": "83845286ab01dcc0cde94af5320ca9223e90423cd45a3baf7705fd0b95881647",
+  "109": "d87225937d06862395cf02cabaaf16637bce120d9605075e3ec43e01e6136dfe",
 };
 type ArtifactManifest = {
   repository: string; commit: string; baseManifest?: string;
   controls: Array<{ path: string; sha256: string; fixture: string }>;
-  runtimeFiles: Array<{ path: string; sha256: string }>;
+  runtimeFiles: Array<{ path: string; sha256: string; fixture?: string }>;
   migrations: Array<{ filename: string; sha256: string }>;
 };
 function verifyArtifactBytes(bytes: Buffer, digest: string, label: string) {
   if (createHash("sha256").update(bytes).digest("hex") !== digest) throw new Error(`Historical artifact checksum mismatch: ${label}`);
   return bytes;
+}
+
+function runtimeArtifactSource(entry: ArtifactManifest["runtimeFiles"][number]): string {
+  return entry.fixture ? path.join(artifactFixtures, entry.fixture) : path.resolve(entry.path);
 }
 
 describe("migration registry order and verification", () => {
@@ -193,6 +197,7 @@ describe("migration registry order and verification", () => {
       expect(manifest.commit).toBe(version === "108" ? recovery108Commit : storage109Commit);
       const entries = [
         ...manifest.controls.map(entry => ({ source: path.join(artifactFixtures, entry.fixture), digest: entry.sha256 })),
+        ...manifest.runtimeFiles.map(entry => ({ source: runtimeArtifactSource(entry), digest: entry.sha256 })),
         ...manifest.migrations.map(entry => ({ source: path.resolve("packages/database/src/migrations", entry.filename), digest: entry.sha256 })),
         { source: path.join(artifactFixtures, version, "manifest.json"), digest: manifestDigests[version] },
       ];
@@ -239,7 +244,7 @@ describe("migration registry order and verification", () => {
     for (const entry of migrations) await writeVerified(`packages/database/src/migrations/${entry.filename}`,
       path.join(canonical, entry.filename), entry.sha256);
     for (const entry of manifest.controls) await writeVerified(entry.path, path.join(artifactFixtures, entry.fixture), entry.sha256);
-    for (const entry of manifest.runtimeFiles) await writeVerified(entry.path, path.resolve(entry.path), entry.sha256);
+    for (const entry of manifest.runtimeFiles) await writeVerified(entry.path, runtimeArtifactSource(entry), entry.sha256);
     // Dependencies are runtime-only; all historical source/SQL bytes stay verified.
     // Keep hermes-db.mjs untouched; its private tsx entry starts one Node loader
     // instead of paying for the tsx CLI's additional Node process on every call.

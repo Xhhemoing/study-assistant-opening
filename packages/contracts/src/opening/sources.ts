@@ -11,9 +11,21 @@ import {
  */
 export const courseSourcePurposeSchema = z.enum(["teaching", "practice", "mock_exam", "reference"]);
 export type CourseSourcePurpose = z.infer<typeof courseSourcePurposeSchema>;
-export type CourseSourceUse = "teaching" | "practice" | "citation";
+export const courseSourceUseSchema = z.enum(["teaching", "practice", "citation"]);
+export type CourseSourceUse = z.infer<typeof courseSourceUseSchema>;
 
 /** Server-only captured admission. Never accepted from HTTP or model output. */
+export const openingMaterialPurposePinSchema = z.object({
+  courseId: uuidSchema.nullable(),
+  materialUse: courseSourceUseSchema,
+  sources: z.array(z.object({
+    sourceId: uuidSchema,
+    sourceVersion: z.number().int().nonnegative(),
+    membershipId: uuidSchema.nullable(),
+    purposeRevision: z.string().min(1).max(64).nullable(),
+    purpose: courseSourcePurposeSchema.nullable(),
+  }).strict()),
+}).strict();
 export type OpeningMaterialPurposePin = {
   readonly courseId: string | null;
   readonly materialUse: CourseSourceUse;
@@ -174,6 +186,7 @@ export type SourceRecord = z.infer<typeof sourceRecordSchema>;
 export type UploadTicket = z.infer<typeof uploadTicketSchema>;
 export type SourceDownload = z.infer<typeof sourceDownloadSchema>;
 export type SourceChunk = z.infer<typeof sourceChunkSchema>;
+export type MaterialSegment = { chunk: SourceChunk; segmentIndex: number };
 export type Citation = z.infer<typeof citationSchema>;
 
 /** RU-01: attach opening source to a course via membership (not ownership). */

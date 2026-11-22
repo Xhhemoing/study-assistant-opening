@@ -359,6 +359,64 @@ describe("runBudgetedCall", () => {
     expect(repo.unknowns).toHaveLength(0);
   });
 
+  it("authorizeAndStartSend releases not_sent before startSend, runs provider synchronously under lock, and marks unknown if commit fails post-start", async () => {
+    // 1. Rejection before startSend releases not_sent and never invokes provider.complete.
+    const preFail = fakeBudget();
+    const neverCalled = vi.fn(async () => output);
+    await expect(runBudgetedCall({
+      ...options,
+      budget: preFail.api,
+      provider: { complete: neverCalled },
+      authorizeAndStartSend: async () => {
+        throw Object.assign(new Error("revoked before send"), { code: "CONFLICT" });
+      },
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(neverCalled).not.toHaveBeenCalled();
+    expect(preFail.repo.released).toEqual(["req-1"]);
+    expect(preFail.repo.unknowns).toEqual([]);
+
+    // 2. Synchronous provider initiation under lock settles normally after lock release.
+    const ok = fakeBudget();
+    const events: string[] = [];
+    let finishNetwork!: (value: typeof output) => void;
+    const networkPromise = new Promise<typeof output>(resolve => { finishNetwork = resolve; });
+    const call = runBudgetedCall({
+      ...options,
+      budget: ok.api,
+      provider: {
+        complete: () => {
+          events.push("provider-started-sync");
+          return networkPromise;
+        },
+      },
+      authorizeAndStartSend: async startSend => {
+        events.push("lock-held");
+        const inFlight = startSend();
+        events.push("lock-released");
+        return await inFlight;
+      },
+    });
+    await vi.waitFor(() => expect(events).toEqual(["lock-held", "provider-started-sync", "lock-released"]));
+    finishNetwork(output);
+    expect((await call).text).toBe("ok");
+    expect(ok.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 120 }]);
+
+    // 3. Rejection AFTER startSend() was invoked (e.g. DB commit failure) marks unknown, never releases not_sent.
+    const postStartFail = fakeBudget();
+    await expect(runBudgetedCall({
+      ...options,
+      budget: postStartFail.api,
+      provider: { complete: () => new Promise(() => undefined) },
+      authorizeAndStartSend: async startSend => {
+        const inFlight = startSend();
+        void inFlight.catch(() => undefined);
+        throw new Error("db commit dropped after fetch initiated");
+      },
+    })).rejects.toThrow("db commit dropped after fetch initiated");
+    expect(postStartFail.repo.released).toEqual([]);
+    expect(postStartFail.repo.unknowns).toEqual(["res-1"]);
+  });
+
   it("releases the reservation by requestId on a definitive failure", async () => {
     const { repo, api } = fakeBudget();
     await expect(

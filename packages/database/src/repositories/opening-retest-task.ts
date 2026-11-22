@@ -244,6 +244,9 @@ export async function insertOpeningTaskWithOutcome(
   }
   if (input.candidateId === null && input.clientKey) {
     const clientKey = input.clientKey;
+    if (clientKey.startsWith("text-retell:")) {
+      throw new OpeningPlanError("VALIDATION", "这个任务标识已保留，请换一个。");
+    }
     return sql.begin((tx) => insertQuickAddWithKey(tx, scope, input, clientKey));
   }
   // Candidate accepts keep their own receipts (assistant: task_accept_client_key,
