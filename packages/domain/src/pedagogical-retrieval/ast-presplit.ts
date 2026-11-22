@@ -1,4 +1,3 @@
-import { decodeHTML } from "entities";
 import type {
   ChunkPedagogicalDocumentInput,
   ChunkTranscriptCuesInput,
@@ -108,7 +107,31 @@ const HTML_LABEL_BREAK_TAGS = new Set([
   "article", "header", "footer", "aside", "nav",
 ]);
 const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
-const INVISIBLE_LABEL_TEXT = /\u00AD|\u200B|\u200C|\u200D|\u2060|\uFEFF/g;
+const INVISIBLE_LABEL_TEXT = /\u00AD|\u200B|\u200C|\u200D|\u200E|\u200F|\u2060|\uFEFF/g;
+const HTML_LABEL_REFERENCES = new Map(Object.entries({
+  amp: "&", AMP: "&", lt: "<", LT: "<", gt: ">", GT: ">", quot: '"', QUOT: '"', apos: "'",
+  nbsp: "\u00A0", NonBreakingSpace: "\u00A0", shy: "\u00AD", Tab: "\t", NewLine: "\n",
+  ZeroWidthSpace: "\u200B", NegativeVeryThinSpace: "\u200B", NegativeThinSpace: "\u200B",
+  NegativeMediumSpace: "\u200B", NegativeThickSpace: "\u200B",
+  ThinSpace: "\u2009", thinsp: "\u2009", VeryThinSpace: "\u200A", HairSpace: "\u200A", hairsp: "\u200A",
+  ensp: "\u2002", emsp: "\u2003", emsp13: "\u2004", emsp14: "\u2005", numsp: "\u2007", puncsp: "\u2008",
+  MediumSpace: "\u205F", ThickSpace: "\u205F\u200A", zwnj: "\u200C", zwj: "\u200D", lrm: "\u200E", rlm: "\u200F",
+  NoBreak: "\u2060", WordJoiner: "\u2060", wj: "\u2060",
+  sol: "/", bsol: "\\", colon: ":", semi: ";", equals: "=",
+  lowbar: "_", UnderBar: "_", hyphen: "\u2010", dash: "\u2010", ndash: "\u2013", mdash: "\u2014",
+  vert: "|", lsqb: "[", rsqb: "]", lpar: "(", rpar: ")", lcub: "{", rcub: "}",
+  le: "\u2264", leq: "\u2264", ge: "\u2265", geq: "\u2265", ne: "\u2260", NotEqual: "\u2260",
+  minus: "\u2212", times: "\u00D7", divide: "\u00F7", plus: "+", plusmn: "\u00B1",
+  middot: "\u00B7", hellip: "\u2026",
+}));
+const HTML_LEGACY_LABEL_REFERENCE = /^(?:amp|AMP|lt|LT|gt|GT|quot|QUOT|nbsp|shy)/;
+// HTML's numeric reference replacements for 0x80 through 0x9F.
+const HTML_WINDOWS_1252 = [
+  0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+  0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+  0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+  0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+];
 const ATX_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/;
 
 interface HeadingScope {
@@ -413,6 +436,23 @@ function endOfHtmlComment(text: string, afterOpener: number): number {
   return end === -1 ? text.length : end + 3;
 }
 
+function decodeHtmlLabelText(text: string): string {
+  return text.replace(/&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?|&([A-Za-z][A-Za-z0-9]*);?/g,
+    (reference, hex?: string, decimal?: string, name?: string) => {
+      if (name !== undefined) {
+        const named = reference.endsWith(";") ? HTML_LABEL_REFERENCES.get(name) : undefined;
+        if (named !== undefined) return named;
+        const legacy = HTML_LEGACY_LABEL_REFERENCE.exec(name)?.[0];
+        return legacy ? HTML_LABEL_REFERENCES.get(legacy)! + reference.slice(legacy.length + 1) : reference;
+      }
+      const codePoint = hex === undefined ? Number.parseInt(decimal!, 10) : Number.parseInt(hex, 16);
+      if (codePoint === 0 || codePoint > 0x10FFFF || (codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+        return "\uFFFD";
+      }
+      return String.fromCodePoint(HTML_WINDOWS_1252[codePoint - 0x80] ?? codePoint);
+    });
+}
+
 function findScriptEndTag(text: string, from: number, closer: RegExp) {
   // Script text inside an HTML comment can enter the double-escaped state.
   // The first </script> in that state returns to escaped text.
@@ -455,6 +495,26 @@ function htmlRawTextBounds(text: string, opener: RegExpExecArray, afterOpener: n
   return match ? { closeStart: match.index, closeEnd: closer.lastIndex } : { closeStart: text.length, closeEnd: text.length };
 }
 
+function rawTextCrossingInlineCode(text: string, start: number, end: number, htmlLine: boolean) {
+  const code = text.slice(start, end);
+  if (!code.includes("<")) return null;
+  const tokens = new RegExp("<!--|" + HTML_TAG_TOKEN, "gi");
+  for (let match = tokens.exec(code); match; match = tokens.exec(code)) {
+    if (match[0] === "<!--") {
+      tokens.lastIndex = endOfHtmlComment(code, tokens.lastIndex);
+      continue;
+    }
+    const rawText = htmlRawTextBounds(text, match, start + tokens.lastIndex);
+    if (rawText) {
+      // Embedded raw text only extends a Markdown span when its close is
+      // outside the span or the opener occurs on the disclosure's HTML line.
+      if (rawText.closeStart >= end && (htmlLine || rawText.closeStart < rawText.closeEnd)) return rawText;
+      tokens.lastIndex = Math.min(rawText.closeEnd, end) - start;
+    }
+  }
+  return null;
+}
+
 function endOfBacktickSpan(text: string, start: number, limit = text.length): number {
   const runs = /\x60+|(?:\r\n|\r(?!\n)|(?<!\r)\n)[ \t]*(?:\r\n|\r(?!\n)|(?<!\r)\n)/g;
   runs.lastIndex = start;
@@ -492,10 +552,11 @@ interface DetailsBounds {
     readonly openEnd: number;
     readonly closeStart: number;
     readonly closeEnd: number;
+    readonly codeSpans: readonly { start: number; end: number }[];
   };
 }
 
-function crossesHtmlBlockStart(
+function crossesDetailsHtmlBoundary(
   text: string,
   start: number,
   end: number,
@@ -504,8 +565,12 @@ function crossesHtmlBlockStart(
   let containers = initialContainers;
   for (const { raw } of splitLinesWithOffsets(text.slice(start, end)).slice(1)) {
     const next = readMarkdownContainerLine(raw, containers);
-    if (HTML_TYPE_6_BLOCK_START_RE.test(next.body)) return true;
     containers = next.containers;
+    if (!HTML_TYPE_6_BLOCK_START_RE.test(next.body)) continue;
+    // Keep an unmatched backtick from absorbing a standalone disclosure
+    // closer and pairing with code in a following public paragraph.
+    if (!next.body.trimStart().startsWith("</") ||
+      /^ {0,3}<\/(?:details|summary)[ \t]*>[ \t]*$/i.test(next.body)) return true;
   }
   return false;
 }
@@ -522,15 +587,18 @@ function findMatchingDetailsBounds(
   let containers: MarkdownContainer[] = [];
   let nextLineStart = containingLineStart(text, searchFrom);
   let contiguousHtml = /^ {0,3}$/.test(text.slice(containingLineStart(text, openStart), openStart));
+  let htmlStartedInBody = false;
+  let markdownBodyStart = Infinity;
   let body = "";
   let inIndentedCode = false;
   let afterBlockBoundary = true;
   const readThroughLine = (offset: number) => {
     while (nextLineStart <= offset && nextLineStart < text.length) {
-      const newline = nextLineBreak(text, nextLineStart);
-      const line = text.slice(nextLineStart, newline?.index ?? text.length);
+      const lineStart = nextLineStart;
+      const newline = nextLineBreak(text, lineStart);
+      const line = text.slice(lineStart, newline?.index ?? text.length);
       nextLineStart = newline ? newline.index + newline[0].length : text.length;
-      if (contiguousHtml) {
+      if (contiguousHtml && (lineStart < markdownBodyStart || htmlStartedInBody)) {
         const continued = continueMarkdownContainers(line, containers);
         if (continued.depth === containers.length && continued.body.trim()) {
           body = continued.body;
@@ -544,7 +612,11 @@ function findMatchingDetailsBounds(
         current.containers.length === containers.length;
       containers = current.containers;
       body = current.body;
-      contiguousHtml = HTML_TYPE_6_BLOCK_START_RE.test(body);
+      const startsHtml = HTML_TYPE_6_BLOCK_START_RE.test(body);
+      const continuesHtml = contiguousHtml && sameContainer && Boolean(body.trim());
+      htmlStartedInBody = (continuesHtml && htmlStartedInBody) ||
+        (lineStart >= markdownBodyStart && startsHtml && !body.trimStart().startsWith("</"));
+      contiguousHtml = startsHtml || continuesHtml;
       const endsSetext = sameContainer && !afterBlockBoundary && !inIndentedCode && SETEXT_UNDERLINE_RE.test(body);
       inIndentedCode = /^(?: {4}| {0,3}\t)/.test(body) &&
         (afterBlockBoundary || !sameContainer || inIndentedCode);
@@ -561,16 +633,19 @@ function findMatchingDetailsBounds(
   let depth = 1;
   let summaryOpening: { openStart: number; openEnd: number } | undefined;
   let summary: DetailsBounds["summary"];
+  const summaryCodeSpans: { start: number; end: number }[] = [];
   let match: RegExpExecArray | null;
   while ((match = tokenRe.exec(text)) !== null) {
     readThroughLine(match.index);
+    const markdownBody = match.index >= markdownBodyStart;
+    const allowsMarkdown = !contiguousHtml || (markdownBody && !htmlStartedInBody);
     const rawText = !inIndentedCode || contiguousHtml ? htmlRawTextBounds(text, match, tokenRe.lastIndex) : null;
     if (rawText) {
       tokenRe.lastIndex = rawText.closeEnd;
       skipLiteralLines(tokenRe.lastIndex);
       continue;
     }
-    if (!contiguousHtml && inIndentedCode) {
+    if (allowsMarkdown && inIndentedCode) {
       tokenRe.lastIndex = nextLineStart;
       continue;
     }
@@ -584,17 +659,20 @@ function findMatchingDetailsBounds(
       continue;
     }
     if (match.groups?.ticks) {
-      if (!contiguousHtml && !isEscaped(text, match.index)) {
+      const insideSummary = depth === 1 && summaryOpening !== undefined && summary === undefined;
+      if ((allowsMarkdown || insideSummary) && !isEscaped(text, match.index)) {
         const end = endOfBacktickSpan(text, match.index);
-        if (end !== -1 && !crossesHtmlBlockStart(text, match.index, end, containers)) {
-          tokenRe.lastIndex = end;
-          skipLiteralLines(end);
+        if (end !== -1 && !crossesDetailsHtmlBoundary(text, match.index, end, containers)) {
+          const raw = rawTextCrossingInlineCode(text, match.index, end, contiguousHtml && !markdownBody);
+          if (insideSummary && !raw) summaryCodeSpans.push({ start: match.index, end });
+          tokenRe.lastIndex = raw?.closeEnd ?? end;
+          skipLiteralLines(tokenRe.lastIndex);
         }
       }
       continue;
     }
     if (match.groups?.fence) {
-      const fence = contiguousHtml ? undefined : matchFenceOpening(body)?.[1];
+      const fence = allowsMarkdown ? matchFenceOpening(body)?.[1] : undefined;
       if (fence) {
         nextLineStart = endOfDetailsCodeFence(text, tokenRe.lastIndex, fence, containers);
         tokenRe.lastIndex = nextLineStart;
@@ -612,7 +690,9 @@ function findMatchingDetailsBounds(
         const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
         if (!text.slice(tokenRe.lastIndex, end).trim()) afterBlockBoundary = true;
         if (depth === 1 && summaryOpening && !summary) {
-          summary = { ...summaryOpening, closeStart: match.index, closeEnd: tokenRe.lastIndex };
+          summary = { ...summaryOpening, closeStart: match.index, closeEnd: tokenRe.lastIndex, codeSpans: summaryCodeSpans };
+          const newline = nextLineBreak(text, summary.closeEnd);
+          if (newline) markdownBodyStart = newline.index + newline[0].length;
         }
       } else if (!prefix && depth === 1 && !summaryOpening) {
         summaryOpening = { openStart: match.index, openEnd: tokenRe.lastIndex };
@@ -654,13 +734,25 @@ function maskSummaryLiterals(text: string): string {
   return parts.length > 0 ? parts.join("") + text.slice(copied) : text;
 }
 
+function readSummaryMarkup(text: string, summary: NonNullable<DetailsBounds["summary"]>): string {
+  const parts: string[] = [];
+  let cursor = summary.openEnd;
+  // Only shield spans the disclosure scanner actually treated as Markdown.
+  for (const { start, end } of summary.codeSpans) {
+    parts.push(text.slice(cursor, start), text.slice(start, end).replace(/[<>]/g, " "));
+    cursor = end;
+  }
+  parts.push(text.slice(cursor, summary.closeStart));
+  return maskSummaryLiterals(parts.join(""));
+}
+
 function htmlLabelTextVariants(label: string, removeRubyAnnotations = false) {
   const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
   const inline: string[] = [];
   const spaced: string[] = [];
   const appendText = (start: number, end?: number) => {
     // References cannot continue into the next HTML text node.
-    const text = decodeHTML(label.slice(start, end));
+    const text = decodeHtmlLabelText(label.slice(start, end));
     inline.push(text);
     spaced.push(text);
   };
@@ -688,7 +780,7 @@ function htmlLabelTextVariants(label: string, removeRubyAnnotations = false) {
     }
   }
   if (annotationStart === undefined) appendText(cursor);
-  else spaced.push(decodeHTML(label.slice(annotationStart)));
+  else spaced.push(decodeHtmlLabelText(label.slice(annotationStart)));
   const normalize = (parts: readonly string[]) => parts.join("").replace(INVISIBLE_LABEL_TEXT, "").replace(/\s+/g, " ").trim();
   return { inline: normalize(inline), spaced: normalize(spaced), hasDetails };
 }
@@ -705,7 +797,7 @@ function classifyDetailsElement(
   readonly summaryEndOffset: number | null;
 } {
   if (summary && !maskSummaryLiterals(text.slice(openEnd, summary.openStart)).replace(HTML_COMMENT_RE, "").trim()) {
-    const summaryContents = maskSummaryLiterals(text.slice(summary.openEnd, summary.closeStart));
+    const summaryContents = readSummaryMarkup(text, summary);
     const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, true);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
@@ -914,7 +1006,7 @@ function isPipeTableStart(header: string, delimiter?: string): boolean {
 
 function tableColumnVisibility(label: string): PedagogicalVisibility {
   if (SEALED_HEADING_RE.test(label)) return "sealed";
-  if (/[<&]|\u00AD|\u200B|\u200C|\u200D|\uFEFF/.test(label)) {
+  if (/[<&]|\p{Cf}/u.test(label)) {
     const { inline, spaced } = htmlLabelTextVariants(label);
     if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
     if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";

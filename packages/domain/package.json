@@ -65,7 +65,6 @@
   },
   "dependencies": {
     "@aistudy/contracts": "0.0.0",
-    "entities": "4.5.0",
     "ts-fsrs": "5.4.2"
   }
 }

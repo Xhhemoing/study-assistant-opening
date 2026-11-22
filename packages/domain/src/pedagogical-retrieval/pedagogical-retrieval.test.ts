@@ -1080,13 +1080,13 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["commented details closer", "<details>\n<summary>Answer</summary>\n<!-- </details> -->\nforty-two\n</details>"],
     ["commented details opener", "<details>\n<summary>Answer</summary>\n<!--\n<details>\n-->\nforty-two\n</details>"],
     ["commented summary closer", "<details>\n<summary>Hint <!-- </summary> --> Answer</summary>\nforty-two\n</details>"],
-    ["fenced details closer", "<details>\n<summary>Answer</summary>\n\n~~~html\n</details>\n~~~\nforty-two\n</details>"],
-    ["nested fenced details closer", "<details>\n<summary>Answer</summary>\n\n- \x60\x60\x60html\n  </details>\n  \x60\x60\x60\nforty-two\n</details>"],
-    ["list-continuation fence in details", "<details>\n<summary>Answer</summary>\n\n123. Item\n     ~~~html\n     </details>\n     ~~~\nforty-two\n</details>"],
-    ["inline comment opener in details", "<details>\n<summary>Answer</summary>\n\nExample: \x60<!--\x60\nforty-two\n</details>"],
-    ["inline details closer", "<details>\n<summary>Answer</summary>\n\nExample: \x60</details>\x60\nforty-two\n</details>"],
-    ["multiline inline details closer", "<details>\r\n<summary>Answer</summary>\r\n\r\nExample: \x60\x60start\r\nEnd: </details>\x60\x60\r\nforty-two\r\n</details>"],
-    ["inline summary closer", "<details>\n<summary>Hint / Answer\n\nExample: \x60</summary>\x60\n</summary>\nforty-two\n</details>"],
+    ["fenced details closer", "<details>\n<summary>Answer</summary>\n~~~html\n</details>\n~~~\nforty-two\n</details>"],
+    ["nested fenced details closer", "<details>\n<summary>Answer</summary>\n- \x60\x60\x60html\n  </details>\n  \x60\x60\x60\nforty-two\n</details>"],
+    ["list-continuation fence in details", "<details>\n<summary>Answer</summary>\n123. Item\n     ~~~html\n     </details>\n     ~~~\nforty-two\n</details>"],
+    ["inline comment opener in details", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>"],
+    ["inline details closer", "<details>\n<summary>Answer</summary>\nExample: \x60</details>\x60\nforty-two\n</details>"],
+    ["multiline inline details closer", "<details>\r\n<summary>Answer</summary>\r\nExample: \x60\x60start\r\n</details> end\x60\x60\r\nforty-two\r\n</details>"],
+    ["inline summary closer", "<details>\n<summary>Hint \x60</summary>\x60 Answer</summary>\nforty-two\n</details>"],
   ])("preserves explicit protection across %s", (_name, body) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     const text = body + "\n\npublic-after";
@@ -1117,13 +1117,13 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["quoted attribute on details", '<details title="> </details>">\n<summary>Answer</summary>\nforty-two\n</details>'],
     ["quoted summary closer", '<details>\n<summary>Hint <span title="</summary>">Answer</span></summary>\nforty-two\n</details>'],
     ["four-space code", "<details>\n<summary>Answer</summary>\n\n    </details>\n\nforty-two\n</details>"],
-    ["tab-indented code", "<details>\r\n<summary>Answer</summary>\r\n\r\n\t</details>\r\nforty-two\r\n</details>"],
-    ["indented code after a heading", "<details>\n<summary>Answer</summary>\n\n### Example\n    </details>\nforty-two\n</details>"],
-    ["indented code after an empty heading", "<details>\n<summary>Answer</summary>\n\n###\n    </details>\nforty-two\n</details>"],
-    ["indented code after a Setext heading", "<details>\n<summary>Answer</summary>\n\nExample\n===\n    </details>\nforty-two\n</details>"],
-    ["indented code after a thematic break", "<details>\n<summary>Answer</summary>\n\n---\n    </details>\nforty-two\n</details>"],
-    ["indented code after a block comment", "<details>\n<summary>Answer</summary>\n\n<!--\npreamble\n-->\n    </details>\nforty-two\n</details>"],
-    ["indented code nested in a list", "<details>\n<summary>Answer</summary>\n\n- Item\n\n      </details>\n\nforty-two\n</details>"],
+    ["tab-indented code", "<details>\r\n<summary>Answer</summary>\r\n\t</details>\r\nforty-two\r\n</details>"],
+    ["indented code after a heading", "<details>\n<summary>Answer</summary>\n### Example\n    </details>\nforty-two\n</details>"],
+    ["indented code after an empty heading", "<details>\n<summary>Answer</summary>\n###\n    </details>\nforty-two\n</details>"],
+    ["indented code after a Setext heading", "<details>\n<summary>Answer</summary>\nExample\n===\n    </details>\nforty-two\n</details>"],
+    ["indented code after a thematic break", "<details>\n<summary>Answer</summary>\n---\n    </details>\nforty-two\n</details>"],
+    ["indented code after a block comment", "<details>\n<summary>Answer</summary>\n<!--\npreamble\n-->\n    </details>\nforty-two\n</details>"],
+    ["indented code nested in a list", "<details>\n<summary>Answer</summary>\n- Item\n\n      </details>\n\nforty-two\n</details>"],
     ["indented closer after prose", "<details>\n<summary>Answer</summary>\nforty-two\n    </details>"],
     ["indented hint summary literal", "<details>\n\n    <summary>Hint</summary>\nforty-two\n</details>"],
     ["verb closer", "\\begin{solution}\n\\verb|\\end{solution}|\nforty-two\n\\end{solution}"],
@@ -1153,14 +1153,21 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["unclosed plaintext", "<details><summary>Answer</summary><plaintext></details>forty-two"],
     ["non-ASCII space in a false closer", "<details><summary>Answer</summary><textarea></textarea\u00a0></details>forty-two</textarea></details>"],
     ["indented opener in contiguous HTML", "<details>\n<summary>Answer</summary>\n    <textarea>\n</details>\nforty-two\n</textarea>\n</details>"],
+    ["inline code comment in a summary", "<details>\n<summary>Hint \x60<!--\x60 Answer</summary>\nforty-two\n</details>"],
     ["summary closer in raw text", "<details><summary>Hint <style></summary></style> Answer</summary>forty-two</details>"],
     ["slash on non-void raw text", "<details><summary>Answer</summary><textarea/></details>forty-two</textarea></details>"],
     ["double-escaped script", "<details><summary>Answer</summary><script><!--<script></script></details>--></script>forty-two</details>"],
     ["backticks in a contiguous HTML block", "<details><summary>Answer</summary>\x60<textarea>\x60</details></textarea>forty-two</details>"],
     ["backticks in a restarted HTML block", "<details>\n<summary>Answer</summary>\n\n<details>\n\x60<textarea>\x60</details></textarea>forty-two</details>\n</details>"],
     ["backticks in a div HTML block", "<details>\n<summary>Answer</summary>\n\n<div>\nUse \x60<textarea>\x60</details></textarea>\nforty-two\n</details>"],
+    ["fence markers in a div HTML block", "<details>\n<summary>Answer</summary>\n<div>\n~~~html\n<textarea>\n~~~\n</details>\nforty-two\n</textarea>\n</details>"],
+    ["unclosed raw text in a div HTML block", "<details>\n<summary>Answer</summary>\n\n<div>\nUse \x60<textarea>\x60\n</details>\nforty-two"],
     ["HTML block in a quote interrupts multiline code", "<details>\n<summary>Answer</summary>\n\n> literal \x60start\n> <details>\n> \x60end\n> </details>\nforty-two\n</details>"],
+    ["HTML block in an ordered list interrupts multiline code", "<details>\n<summary>Answer</summary>\n\nliteral \x60start\n123. Item\n     <details>\n     \x60end\n     </details>\nforty-two\n</details>"],
     ["Markdown backticks after a blank line", "<details>\n<summary>Answer</summary>\n\nUse \x60</details>\x60 to close.\nforty-two\n</details>"],
+    ["unclosed raw text after unmatched Markdown backtick", "<details>\n<summary>Answer</summary>\n\nUse \x60<textarea>\n</details>\nforty-two"],
+    ["Markdown code with an unmatched raw-text opener", "<details>\n<summary>Answer</summary>\n\nUse \x60<textarea>\x60 as an example.\nforty-two\n</details>"],
+    ["matched raw text after a literal closing tag", "<details>\n<summary>Answer</summary>\n\nUse \x60</details><textarea>\x60\n</details>\n</textarea>\nforty-two\n</details>"],
     ["word break in summary", "<details><summary>Hint / An<wbr>swer</summary>forty-two</details>"],
     ["emphasis in summary", "<details><summary>Hint / An<em>sw</em>er</summary>forty-two</details>"],
     ["link in summary", "<details><summary>Hint / An<a>sw</a>er</summary>forty-two</details>"],
@@ -1207,6 +1214,25 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }
   });
 
+  it.each([
+    ["named zero-width space alias", "Hint / An&NegativeVeryThinSpace;swer", "Hint / Answer", "sealed"],
+    ["named thin space", "Hint&ThinSpace;Solution", "Hint Solution", "sealed"],
+    ["named space in a compound label", "Hint / marking&MediumSpace;scheme", "Hint / marking scheme", "sealed"],
+    ["named figure space in a compound label", "Hint / proof&numsp;key", "Hint / proof key", "sealed"],
+    ["mathematical comparison", "Hint / x &le; 2", "Hint / x \u2264 2", "hint_gated"],
+    ["named direction marks", "Hint / An&lrm;&rlm;swer", "Hint / Answer", "sealed"],
+    ["numeric references without semicolons and Windows-1252 numbers", "H&#105nt &#x80 &#130;", "Hint \u20AC \u201A", "hint_gated"],
+    ["zero, surrogate and out-of-range numbers", "Hint / &#0;&#xD800;&#1114112;", "Hint / \uFFFD\uFFFD\uFFFD", "hint_gated"],
+    ["unknown named reference", "Hint / An&invented;swer", "Hint / An&invented;swer", "hint_gated"],
+  ])("decodes summary labels for retrieval visibility (%s)", (_name, summary, label, visibility) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = "<details><summary>" + summary + "</summary>try factoring</details>";
+    const chunks = chunkPedagogicalDocument({ ...source, text });
+    const cueChunks = chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] });
+    expect(chunks.find(chunk => chunk.text.includes("try factoring"))).toMatchObject({ label, visibility });
+    expect(cueChunks.find(chunk => chunk.text.includes("try factoring"))?.visibility).toBe(visibility);
+  });
+
   it("classifies a hint from the base ruby text without its annotations", () => {
     const text = "<details><summary><ruby>H<rt>Answer</rt>int</ruby></summary>try factoring</details>";
     const source = { sourceId: "captions", sourceVersion: 1 };
@@ -1215,6 +1241,17 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
     ]) {
       expect(chunks.find(chunk => chunk.text.includes("try factoring"))?.visibility).toBe("hint_gated");
+    }
+  });
+
+  it("ends details before public inline code after a stray backtick", () => {
+    const text = "<details>\n<summary>Answer</summary>\nforty-two \x60\n</details>\nPublic theorem. \x60code\x60 example.";
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text }),
+      chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
+    ]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
     }
   });
 
