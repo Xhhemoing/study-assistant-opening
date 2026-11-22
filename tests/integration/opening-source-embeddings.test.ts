@@ -376,7 +376,8 @@ describe("pgvector material repository", () => {
 
   it.each(["IV.", "(iv).", "[iv].", "（iv）。", "- iv -.", "pp. 12.", "Page 12 of 300.",
     "12 / 300.", "- 12 -.", "第 十二页。", "第十二 / 三百頁。", "第十二页（共三百页）",
-    "第 12 页 / 共 300 页", "第 12 页，共 300 页", "共三百页 第十二页"])(
+    "第 12 页 / 共 300 页", "第 12 页，共 300 页", "共三百页 第十二页", "Page 12",
+    "Chapter 2 — Page 12", "第 2 章 | 第 12 页"])(
     "ignores the running footer %j after a pending archived exercise answer", async footer => {
       const stem = "Exercise 1. Solve x - 3 = 0.\n【答案】";
       await expectArchivedPdfPages([stem + "\n" + footer, "x = 3.", "Public prose continues here."], [3], 2);
@@ -390,7 +391,11 @@ describe("pgvector material repository", () => {
     "Chapter 2 explains why this equation holds.", "Section 2.1 shows the derivation.", "Appendix A gives the factorization.",
     "表 1 给出了分解结果。", "图 2 显示了图像", "插图 1 列出了各项", "附表 1 描述了计算", "算法 1 说明了计算",
     "第 2 章解释了原因。", "第 1 节给出了推导", "定理 2.1 说明了该事实。", "引理 1 给出了条件",
-    "定义 3 描述了对象", "命题 1 说明了该事实", "推论 1 可由上式得到"])(
+    "定义 3 描述了对象", "命题 1 说明了该事实", "推论 1 可由上式得到",
+    "图 2（a）显示了函数图像。", "图 2(a) 显示了函数图像。", "表 3（1）列出了数据。",
+    "Figure 2(a) shows the graph.", "Table 3 (b) lists the values.", "Theorem 2.1 (Lagrange) states that G is finite.",
+    "Figure 2 a: shows the graph.", "Example 1 (Lagrange) gives the construction.",
+    "3.14 is the desired approximation.", "3.14 Euler's constant is irrational.", "2.718 = e", "3.14 是所需近似值。"])(
     "keeps ordinary %j inside an archived inline answer", async line => {
       const stem = "Exercise 1. Solve x - 3 = 0.\n【解答】";
       await expectArchivedPdfPages([stem, line + "\nx = 3.", "Public prose continues here."], [3], 2);
@@ -401,7 +406,9 @@ describe("pgvector material repository", () => {
     "Table 1 Summary", "Diagram I", "# Section 2.2 Ring operations", "Theorem 2.1", "Theorem 2.1.",
     "Theorem 2.1 (Lagrange)", "# Theorem 2.1 finite rings", "**Theorem 2.1.** finite rings",
     "**Theorem 2.1**", "**Table 1: Roots**", "Chapter 2", "Lesson 2 Finite Fields", "# Section 2.2 finite rings",
-    "第一章 环与域", "第 2 章：群", "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理"])(
+    "第一章 环与域", "第 2 章：群", "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理",
+    "图 2（a）：函数图像", "Figure 2(a): Function graph", "定理 2.1（拉格朗日定理）",
+    "2.1 Ring Homomorphisms", "2.1.3 Kernel of a Homomorphism", "2.3 线性变换的矩阵"])(
     "reopens an archived inline answer at the structural heading %j", async heading => {
       const stem = "Exercise 1. Solve x - 3 = 0.\n【解答】";
       await expectArchivedPdfPages([stem, "x =", heading, "Public prose continues here."], [3, 4], 2);
@@ -623,6 +630,49 @@ describe("pgvector material repository", () => {
         sectionSealedAtEnd: true, publicationSealHadPublicPrefix: false, visualKinds: [] }]);
     }
   });
+
+  it.each([false, true])("withholds an archived native answer when replacing its heading (failure: %s)", async failed => {
+    const archived = ["Answer Key", "x = 3.", "Chapter 3: Fields\nThis chapter introduces fields."];
+    const pdf = await expectArchivedPdfPages(archived, [3], 2);
+    const fresh = ["This introduction explains polynomial rings.", "The new extraction introduces ring operations.", archived[2]!];
+    const retry = await startPdfRetry(pdf.sourceId, fresh.map((text, index) => ({
+      page: index + 1, text, imagePath: null, visualKinds: [],
+    })), {}, failed ? [2] : []);
+    await expect(retry.run()).resolves.toMatchObject({ pages: failed ? 2 : 3 });
+    await retry.finish(failed ? 2 : 3);
+    const published = await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, undefined, { unpublishedPdfForRecovery: true });
+    expect(published.map(({ page, text }) => [page, text])).toEqual(
+      failed ? [[1, fresh[0]], [3, fresh[2]]] : fresh.map((text, index) => [index + 1, text]),
+    );
+    if (failed) {
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ error: { code: "PARSE_PARTIAL" } });
+      expect(await f.sql`SELECT pages->0 AS marker FROM opening_pdf_parse_segments
+        WHERE source_id=${pdf.sourceId} AND page_start=2 AND parser_profile='pdf-publication-page-seal-v1'`)
+        .toMatchObject([{ marker: { hadSealedContent: true, sectionSealedAtEnd: true, publicationSealCommitted: true } }]);
+    } else {
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).resolves.toMatchObject({ text: fresh[1] });
+    }
+  });
+
+  it.each(["The complete construction is shown on page 12.", "完整推导见第 12 页。"])(
+    "recovers native prose containing a page reference after a conversion failure (%j)", async text => {
+      const first = "This introduction explains polynomial rings.";
+      const pdf = await seed([first]);
+      const pages: PdfSegmentPage[] = [first, text].map((body, index) => ({
+        page: index + 1, text: body, imagePath: null, visualKinds: [],
+      }));
+      const failed = await startPdfRetry(pdf.sourceId, pages, {}, [2]);
+      await expect(failed.run()).resolves.toMatchObject({ pages: 1 });
+      await failed.finish(1);
+      expect(await failed.sources.get(f.scope, pdf.sourceId)).toMatchObject({ error: { code: "PARSE_PARTIAL" } });
+      const retry = await startPdfRetry(pdf.sourceId, pages);
+      await expect(retry.run()).resolves.toEqual({ pages: 2 });
+      await retry.finish(2);
+      expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ parseState: "ready", error: null });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).resolves.toMatchObject({ text });
+    },
+  );
 
   it("persists a same-mode Vision seal across a subsequent native-only retry", async () => {
     const texts = ["Answer Key", "5 units.", "Chapter 3: Fields"];

@@ -59,28 +59,41 @@ const workedExampleHeading = String.raw`${lineStart}(?:${pdfHeadingContainer})?(
 const englishBlock = String.raw`(?:definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof(?: +of +(?:theorem|lemma|proposition|corollary))?)`;
 const captionName = String.raw`(?:figure|fig\.?|table|tab\.?|chart|diagram|scheme|algorithm|listing)`;
 const captionPrefix = String.raw`${lineStart}${captionName}(?= |[:：]|$)`;
-const headingId = String.raw`(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*|[ivxlcdm]+)(?=[ :：.．—–(-]|$)`;
+const headingId = String.raw`(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)(?=[ :：.．、—–(（-]|$)`;
 const numberedBlockPrefix = String.raw`${lineStart}(?:${englishBlock}|${captionName}) +${headingId}`;
-const englishContainerPrefix = String.raw`${lineStart}(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)|appendix(?: +(?:[a-z](?![a-z\d])|\d+))?)(?=[ :：.．—–(-]|$)`;
+const englishContainerPrefix = String.raw`${lineStart}(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)|appendix(?: +(?:[a-z](?![a-z\d])|\d+))?)(?=[ |:：.．—–(（-]|$)`;
 const chineseContainerPrefix = String.raw`${lineStart}(?:第 *[一二三四五六七八九十百千\d]+ *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?: *(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)`;
 const chineseBlocks = "(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明)";
-const chineseNumberedBlock = String.raw`${lineStart}(?:${chineseBlocks}|图|表|插图|附表|算法) *\d+(?:[.-]\d+)*`;
-const chineseHeadingDelimiter = String.raw`^ *(?:[:：.．、—–(（-]|$)`;
-const chineseReferenceProse = String.raw`[。！？；] *$|^ *(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)`;
-const englishContainerSuffix = String.raw`^(?: *(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)| +[A-Z0-9一-龥])`;
+const chineseNumberedBlock = String.raw`${lineStart}(?:${chineseBlocks}|图|表|插图|附表|算法) *\d+(?:[.-]\d+)*[a-zA-Z]?(?![a-zA-Z\d])`;
+const englishNumberedExample = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:worked +)?example +\d+(?:[.-]\d+)*`;
+const chineseNumberedExample = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:例题|例) *\d+(?:[.-]\d+)*`;
+const headingQualifiers = String.raw`^(?: *(?:\([^()（）]*\)|（[^()（）]*）)| +[a-zA-Z](?= |[:：.．、—–(（-]|$))* *`;
+const headingDelimiter = String.raw`(?:[:：．、—–]|\.(?!\d)|-(?!\d))`;
+const englishReferenceProse = String.raw`^(?:[a-z]|${headingDelimiter} *(?:is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides)\M)`;
+const chineseReferenceProse = String.raw`^(?:${headingDelimiter} *)?(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)|^(?!${headingDelimiter}).*[。！？；] *$`;
+const dottedSectionPrefix = String.raw`${lineStart}\d+(?:\.\d+)+ +`;
+const latinSectionTitle = String.raw`^[A-Z][A-Za-z0-9'’&-]*(?:[ ,]+(?:[A-Z0-9][A-Za-z0-9'’&-]*|and|as|at|by|for|from|in|of|on|or|the|to|a|an|with|without|via)){0,12} *$`;
+const cjkSectionTitle = "^[【「『〈《（(]?[一-鿿]";
+const sectionProse = String.raw`[=<>≈%％。！？；]|[.!?;] *$|\m(?:is|are|was|were|has|have|had|gives|shows|yields|equals|approximates|denotes|represents|follows)\M|^(?:是|为|有|在)|可得|得到|满足|成立|显示|表明|说明|^(?:倍|个|米|秒|克|元|度)(?=$|[ /每。！？；])|^(?:True|False|Yes|No|None|[A-F](?: *, *[A-F])*) *$`;
 const appendixHeading = String.raw`${lineStart}(?:appendix(?= |[:：]|$)|附录)`;
 const bareContainerSuffix = String.raw`^[ :：.．—–-]*$`;
-const inlinePublicHeading = String.raw`${lineStart}(?:${englishBlock} *(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)|${chineseBlocks} *(?:[:：]|$)|\d+(?:\.\d+)+ +[^ ])`;
+const inlinePublicHeading = String.raw`${lineStart}(?:${englishBlock} *(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)|${chineseBlocks} *(?:[:：]|$))`;
 const explicitHeadingMarkup = String.raw`^ *#{1,6} +[^ ]`;
 
 const jsWorkedExample = new RegExp(workedExampleHeading, "iu");
+const jsEnglishExample = new RegExp(englishNumberedExample, "iu");
+const jsChineseExample = new RegExp(chineseNumberedExample, "u");
 const jsNumberedBlock = new RegExp(numberedBlockPrefix, "iu");
 const jsChineseNumberedBlock = new RegExp(chineseNumberedBlock, "u");
 const jsEnglishContainer = new RegExp(englishContainerPrefix, "iu");
 const jsChineseContainer = new RegExp(chineseContainerPrefix, "u");
-const jsChineseDelimiter = new RegExp(chineseHeadingDelimiter, "u");
+const jsHeadingQualifiers = new RegExp(headingQualifiers, "u");
+const jsEnglishProse = new RegExp(englishReferenceProse.replace(String.raw`\M`, String.raw`\b`), "u");
 const jsChineseProse = new RegExp(chineseReferenceProse, "u");
-const jsEnglishContainerSuffix = new RegExp(englishContainerSuffix, "u");
+const jsDottedSection = new RegExp(dottedSectionPrefix, "u");
+const jsLatinTitle = new RegExp(latinSectionTitle, "u");
+const jsCjkTitle = new RegExp(cjkSectionTitle, "u");
+const jsSectionProse = new RegExp(sectionProse.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "u");
 const jsPublicHeading = new RegExp(inlinePublicHeading, "iu");
 const jsCaptionPrefix = new RegExp(captionPrefix, "iu");
 const jsMarkdownTitle = new RegExp(("^ *" + markdownTitle).replaceAll("[[:alpha:]一-龥]", "[\\p{L}]"), "iu");
@@ -88,6 +101,10 @@ const jsBackMatter = new RegExp(backMatterLine, "iu");
 const jsBlockedReopening = new RegExp(blockedReopeningHeading.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "iu");
 const jsExerciseHeading = new RegExp(exerciseHeading.replace(String.raw`\M`, String.raw`\b`), "iu");
 const jsExplicitHeading = new RegExp(explicitHeadingMarkup, "u");
+
+function acceptsPdfHeading(line: string, prefix: RegExpExecArray, prose: RegExp, atx: boolean): boolean {
+  return atx || !prose.test(line.slice(prefix[0].length).replace(jsHeadingQualifiers, ""));
+}
 
 export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
   const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ").replace(pdfClosingAtxHashes, "$1");
@@ -100,19 +117,25 @@ export function containsPdfAnswerLabel(text: string, { checkContext = true } = {
       if (!inWorkedExample) return true;
       continue;
     }
-    if (jsWorkedExample.test(line)) {
+    const atx = jsExplicitHeading.test(rawLine);
+    const englishExample = jsEnglishExample.exec(line);
+    const chineseExample = jsChineseExample.exec(line);
+    if (jsWorkedExample.test(line)
+      && (!englishExample || acceptsPdfHeading(line, englishExample, jsEnglishProse, atx))
+      && (!chineseExample || acceptsPdfHeading(line, chineseExample, jsChineseProse, atx))) {
       inWorkedExample = true;
     } else if (inWorkedExample) {
       const numbered = jsNumberedBlock.exec(line);
       const chinese = jsChineseNumberedBlock.exec(line) ?? jsChineseContainer.exec(line);
       const container = jsEnglishContainer.exec(line);
-      const atx = jsExplicitHeading.test(rawLine);
-      const chineseSuffix = chinese ? line.slice(chinese[0].length) : "";
+      const dotted = jsDottedSection.exec(line);
+      const title = dotted ? line.slice(dotted[0].length) : "";
+      const numberedSection = Boolean(dotted && (jsLatinTitle.test(title) || jsCjkTitle.test(title)) && !jsSectionProse.test(title));
       if (jsExerciseHeading.test(line) || jsPublicHeading.test(line)
-        || (numbered && (atx || !/^ +[a-z]/u.test(line.slice(numbered[0].length))))
-        || (chinese && (atx || jsChineseDelimiter.test(chineseSuffix) || !jsChineseProse.test(chineseSuffix)))
-        || ((container && (atx || jsEnglishContainerSuffix.test(line.slice(container[0].length))))
-          || jsBackMatter.test(line) || (atx && !jsCaptionPrefix.test(line) && jsMarkdownTitle.test(line)))
+        || (numbered && acceptsPdfHeading(line, numbered, jsEnglishProse, atx))
+        || (chinese && acceptsPdfHeading(line, chinese, jsChineseProse, atx))
+        || ((container && acceptsPdfHeading(line, container, jsEnglishProse, atx))
+          || numberedSection || jsBackMatter.test(line) || (atx && !dotted && !jsCaptionPrefix.test(line) && jsMarkdownTitle.test(line)))
           && !jsBlockedReopening.test(line)) {
         inWorkedExample = false;
       }
@@ -127,7 +150,8 @@ const chinesePage = String.raw`(?:第 *)?${chinesePageNumber} *[页頁]`;
 const chinesePageTotal = String.raw`共 *${chinesePageNumber} *[页頁]`;
 const chineseCounter = String.raw`(?:${chinesePage}(?: *[（(] *${chinesePageTotal} *[）)]| *[/／,，] *${chinesePageTotal})?|${chinesePageTotal} +${chinesePage}|(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *${chinesePage})`;
 const counter = String.raw`(?:\d+(?:\.\d+)*|[ivxlcdm]+)`;
-const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|[ivxlcdm]+ *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|[(（\[【]? *(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]? *[.。]?|${chineseCounter} *[.。．、]?) *$`;
+const shortFurniturePrefix = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)|第 *${chinesePageNumber} *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])) *[|:：—–-] *`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|[ivxlcdm]+ *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|(?:${shortFurniturePrefix})?(?:[(（\[【]? *(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]? *[.。]?|${chineseCounter} *[.。．、]?)) *$`;
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
 const inlineTerminator = String.raw`(?:[□■∎]|end +of +answers?|答案完|解答完) *[.。]? *$`;
@@ -177,21 +201,29 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     WHERE ${scope} AND c.page IS NOT NULL
   ), pdf_archive_headings AS (
     SELECT *,
-      (english_container IS NOT NULL AND (atx OR english_container ~ ${englishContainerSuffix})
-        OR chinese_container IS NOT NULL AND (atx OR chinese_container ~ ${chineseHeadingDelimiter}
-          OR chinese_container !~ ${chineseReferenceProse})) AND line !~* ${blockedReopeningHeading} AS public_container,
-      (english_numbered IS NOT NULL AND (atx OR english_numbered !~ '^ +[a-z]')
-        OR chinese_numbered IS NOT NULL AND (atx OR chinese_numbered ~ ${chineseHeadingDelimiter}
-          OR chinese_numbered !~ ${chineseReferenceProse})) AS public_numbered,
+      (english_container IS NOT NULL AND (atx OR regexp_replace(english_container,${headingQualifiers},'') !~ ${englishReferenceProse})
+        OR chinese_container IS NOT NULL AND (atx OR regexp_replace(chinese_container,${headingQualifiers},'') !~ ${chineseReferenceProse}))
+        AND line !~* ${blockedReopeningHeading} AND line !~* ${inlineRunningHeading} AS public_container,
+      (english_numbered IS NOT NULL AND (atx OR regexp_replace(english_numbered,${headingQualifiers},'') !~ ${englishReferenceProse})
+        OR chinese_numbered IS NOT NULL AND (atx OR regexp_replace(chinese_numbered,${headingQualifiers},'') !~ ${chineseReferenceProse})) AS public_numbered,
+      (line ~* ${workedExampleHeading}
+        AND (english_example IS NULL OR atx OR regexp_replace(english_example,${headingQualifiers},'') !~ ${englishReferenceProse})
+        AND (chinese_example IS NULL OR atx OR regexp_replace(chinese_example,${headingQualifiers},'') !~ ${chineseReferenceProse})) AS public_example,
+      (dotted_title IS NOT NULL AND (dotted_title ~ ${latinSectionTitle} OR dotted_title ~ ${cjkSectionTitle})
+        AND dotted_title !~ ${sectionProse} AND line !~* ${blockedReopeningHeading}) AS public_dotted,
       (line ~* ${backMatterLine} OR (atx AND line ~* ${"^ *" + markdownTitle}
+        AND dotted_title IS NULL
         AND (line !~* ${captionPrefix} OR english_numbered IS NOT NULL)))
-        AND line !~* ${blockedReopeningHeading} AS other_reopening
+        AND line !~* ${blockedReopeningHeading} AND line !~* ${inlineRunningHeading} AS other_reopening
     FROM (
       SELECT *, raw_line ~ ${explicitHeadingMarkup} AS atx,
         NULLIF(regexp_replace(line,${englishContainerPrefix},'','i'),line) AS english_container,
         NULLIF(regexp_replace(line,${chineseContainerPrefix},''),line) AS chinese_container,
         NULLIF(regexp_replace(line,${numberedBlockPrefix},'','i'),line) AS english_numbered,
-        NULLIF(regexp_replace(line,${chineseNumberedBlock},''),line) AS chinese_numbered
+        NULLIF(regexp_replace(line,${chineseNumberedBlock},''),line) AS chinese_numbered,
+        NULLIF(regexp_replace(line,${englishNumberedExample},'','i'),line) AS english_example,
+        NULLIF(regexp_replace(line,${chineseNumberedExample},''),line) AS chinese_example,
+        NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
         SELECT *,replace(replace(raw_line,'**',''),'__','') AS line
         FROM (
@@ -205,11 +237,11 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT id,source_id,source_version,page,line,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
       line ~* ${exerciseHeading} AS opens_exercise,
-      line ~* ${workedExampleHeading} AS opens_worked_example,
-      (line ~* ${inlinePublicHeading} OR line ~* ${workedExampleHeading}
-        OR public_numbered OR public_container OR other_reopening)
+      public_example AS opens_worked_example,
+      (line ~* ${inlinePublicHeading} OR public_example
+        OR public_numbered OR public_container OR public_dotted OR other_reopening)
         AND line !~* ${answerLabelLine} AND line !~* ${explanationLabelLine} AS opens_public,
-      (other_reopening OR public_container AND (line ~* ${appendixHeading}
+      (other_reopening OR atx AND public_dotted OR public_container AND (line ~* ${appendixHeading}
         OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix})) AS reopens_section,
       line ~* ${sectionAnswerLine} AS opens_section,
       line ~* ${answerLabelLine} AS unconditional_answer,

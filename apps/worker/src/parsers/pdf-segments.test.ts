@@ -77,11 +77,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v26-discourse/text",
     "docling-2.126.0/pdf-segments-v27-discourse/text",
     "docling-2.126.0/pdf-segments-v28-discourse/text",
+    "docling-2.126.0/pdf-segments-v29-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v29-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v30-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -1125,6 +1126,23 @@ describe("bounded resumable PDF parser", () => {
     expect(result.publishedChunks).toMatchObject([{ page: 2, text: "Recovered second page" }]);
     expect(result.pdfWarning).toMatchObject({ code: "PARSE_PARTIAL" });
     if (capped) expect(result.pdfWarning).toMatchObject({ pdfTextCap: [1] });
+  });
+
+  it.each([false, true])("keeps a previously sealed native continuation private after replacing its heading (failure: %s)", async failed => {
+    const archived = ["Answer Key", "x = 3.", "Chapter 3: Fields"];
+    const fresh = ["This introduction explains polynomial rings.", "The new extraction introduces ring operations.", archived[2]!];
+    const scenario = await runPdfScenario({
+      segmentPages: 1,
+      failedStarts: failed ? [2] : [],
+      savedChunks: archived.map((text, index) => ({
+        page: index + 1, text, imageObjectKey: null, slideLabel: null, startMs: null, endMs: null,
+      })),
+      pages: fresh.map((text, index) => ({ page: index + 1, text })),
+    });
+    expect(scenario.preservePages).not.toContain(2);
+    expect(scenario.publishedChunks.map(({ page, text }) => [page, text])).toEqual(
+      failed ? [[1, fresh[0]], [3, fresh[2]]] : fresh.map((text, index) => [index + 1, text]),
+    );
   });
 
   it.each(["native", "Vision"])("remembers a %s seal when a retry changes the segment size", async origin => {
@@ -2636,7 +2654,7 @@ describe("bounded resumable PDF parser", () => {
     expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Find x.", "Public explanation."]);
   });
 
-  it.each(["(iv).", "第十二页（共三百页）", "共三百页 第十二页"])(
+  it.each(["(iv).", "第十二页（共三百页）", "共三百页 第十二页", "Page 12", "Chapter 2 — Page 12", "第 2 章 | 第 12 页", "- 12 -"])(
     "carries an inline answer past the running footer %j", async footer => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解析】\n" + footer },
@@ -2651,7 +2669,11 @@ describe("bounded resumable PDF parser", () => {
     "Lemma 1.2 implies x = 3.", "Definition 3.1 requires a field.", "Figure 2 illustrates the construction.",
     "**Theorem 2.1** states this fact.", "**Theorem 2.1 states this fact.**", "__Table 1__ gives the factorization.",
     "Chapter 2 explains why this equation holds.", "Section 2.1 shows the derivation.", "Appendix A gives the factorization.",
-    "表 1 给出了分解结果。", "图 2 显示了图像", "第 2 章解释了原因。", "定理 2.1 说明了该事实。", "引理 1 给出了条件"])(
+    "表 1 给出了分解结果。", "图 2 显示了图像", "第 2 章解释了原因。", "定理 2.1 说明了该事实。", "引理 1 给出了条件",
+    "图 2（a）显示了函数图像。", "图 2(a) 显示了函数图像。", "表 3（1）列出了数据。",
+    "Figure 2(a) shows the graph.", "Table 3 (b) lists the values.", "Theorem 2.1 (Lagrange) states that G is finite.",
+    "Figure 2 a: shows the graph.", "Example 1 (Lagrange) gives the construction.",
+    "3.14 is the desired approximation.", "3.14 Euler's constant is irrational.", "2.718 = e", "3.14 是所需近似值。"])(
     "keeps %j and its following answer inside the exercise seal", async reference => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解答】" },
@@ -2665,7 +2687,9 @@ describe("bounded resumable PDF parser", () => {
   it.each(["Theorem 2.1.", "Theorem 2.1 (Lagrange)", "**Theorem 2.1.** finite rings", "# Theorem 2.1 finite rings",
     "**Theorem 2.1**", "**Table 1: Roots**", "Table A.2 Summary", "Fig. IV: Ring diagram", "Listing 1: Program",
     "Chapter 2", "Chapter 2 Rings", "# Section 2.2 finite rings", "第一章 环与域", "第 2 章：群",
-    "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理"])(
+    "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理", "图 2（a）：函数图像",
+    "Figure 2(a): Function graph", "定理 2.1（拉格朗日定理）",
+    "2.1 Ring Homomorphisms", "2.1.3 Kernel of a Homomorphism", "2.3 线性变换的矩阵"])(
     "reopens a pending inline answer at %j", async heading => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解答】" },

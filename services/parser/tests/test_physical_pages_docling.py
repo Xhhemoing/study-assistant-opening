@@ -1070,6 +1070,10 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             "**Theorem 2.1** states this fact.", "**Theorem 2.1 states this fact.**", "__Table 1__ gives the factorization.",
             "Chapter 2 explains why this equation holds.", "Section 2.1 shows the derivation.", "Appendix A gives the factorization.",
             "表 1 给出了分解结果。", "图 2 显示了图像", "第 2 章解释了原因。", "定理 2.1 说明了该事实。", "引理 1 给出了条件",
+            "图 2（a）显示了函数图像。", "图 2(a) 显示了函数图像。", "表 3（1）列出了数据。",
+            "Figure 2(a) shows the graph.", "Table 3 (b) lists the values.", "Theorem 2.1 (Lagrange) states that G is finite.",
+            "Figure 2 a: shows the graph.", "Example 1 (Lagrange) gives the construction.",
+            "3.14 is the desired approximation.", "3.14 Euler's constant is irrational.", "2.718 = e", "3.14 是所需近似值。",
         ):
             for label in (DocItemLabel.TEXT, DocItemLabel.SECTION_HEADER):
                 with self.subTest(line=line, label=label):
@@ -1100,6 +1104,12 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             ("表 1：分解结果", DocItemLabel.TEXT),
             ("表 1 分解结果", DocItemLabel.TEXT),
             ("定理 2.1：拉格朗日定理", DocItemLabel.TEXT),
+            ("图 2（a）：函数图像", DocItemLabel.TEXT),
+            ("Figure 2(a): Function graph", DocItemLabel.TEXT),
+            ("定理 2.1（拉格朗日定理）", DocItemLabel.TEXT),
+            ("2.1 Ring Homomorphisms", DocItemLabel.TEXT),
+            ("2.1.3 Kernel of a Homomorphism", DocItemLabel.TEXT),
+            ("2.3 线性变换的矩阵", DocItemLabel.TEXT),
         ):
             with self.subTest(line=line, label=label):
                 ext = physical_pages.extract_physical_pages(result_for(
@@ -1111,7 +1121,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertEqual(ext.texts_by_page[13], [line])
 
     def test_inline_exercise_answer_ignores_parenthesized_footer_punctuation(self):
-        for footer in ("(iv).", "第十二页（共三百页）", "共三百页 第十二页"):
+        for footer in ("(iv).", "第十二页（共三百页）", "共三百页 第十二页", "Page 12", "Chapter 2 — Page 12", "第 2 章 | 第 12 页", "- 12 -"):
             with self.subTest(footer=footer):
                 ext = physical_pages.extract_physical_pages(result_for(
                     [text_element(11, "Exercise 1: Find x.\n【解析】\n" + footer, 1)],
@@ -1120,6 +1130,12 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 ))
                 self.assertEqual(ext.texts_by_page[12], [])
                 self.assertEqual(ext.texts_by_page[13], ["Public explanation."])
+
+    def test_running_counters_do_not_match_prose_page_references(self):
+        for line in ("The complete construction is shown on page 12.", "The derivation appears at page 12.",
+                     "For the complete derivation, see page 12.", "完整推导见第 12 页。"):
+            with self.subTest(line=line):
+                self.assertFalse(physical_pages._is_running_page_heading(line))
 
     def test_round8_reading_order_tables_and_lecture_solutions(self):
         table_label = DocItemLabel.TABLE

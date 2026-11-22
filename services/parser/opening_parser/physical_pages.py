@@ -41,23 +41,27 @@ _MD_EDGE_EMPHASIS_RE = re.compile(r"^(?:\*\*|__)+|(?:\*\*|__)+$")
 _MD_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
 _CAPTION_NAME = r"(?:Figure|Fig\.?|Table|Tab\.?|Chart|Diagram|Scheme|Algorithm|Listing)"
 _CAPTION_NAME_RE = re.compile(rf"^{_CAPTION_NAME}(?=\s|[:：]|$)", re.IGNORECASE)
-_BLOCK_ID = r"(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*|[ivxlcdm]+)\b(?=[\s:：.．—–(-]|$)"
+_BLOCK_ID = r"(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)\b(?=[\s:：.．、—–(（-]|$)"
 _CAPTION_PREFIX_RE = re.compile(
     rf"^(?P<ref>{_CAPTION_NAME}\s+{_BLOCK_ID})"
-    r"|^(?P<zh_ref>(?:图|表|插图|附表|算法)\s*\d+(?:[.-]\d+)*)",
+    r"|^(?P<zh_ref>(?:图|表|插图|附表|算法)\s*\d+(?:[.-]\d+)*[a-z]?(?![a-z\d]))",
     re.IGNORECASE,
 )
 _BLOCK_DELIMITER_RE = re.compile(r"^\s*(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)")
-_CHINESE_BLOCK_PREFIX_RE = re.compile(r"^(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明)\s*\d+(?:[.-]\d+)*")
-_CHINESE_HEADING_DELIMITER_RE = re.compile(r"^\s*(?:[:：.．、—–(（-]|$)")
-_CHINESE_PROSE_RE = re.compile(
-    r"[。！？；]\s*$|^\s*(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|"
+_CHINESE_BLOCK_PREFIX_RE = re.compile(
+    r"^(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明)\s*\d+(?:[.-]\d+)*[a-z]?(?![a-z\d])", re.IGNORECASE
+)
+_HEADING_QUALIFIERS_RE = re.compile(r"^(?:\s*(?:\([^()（）]*\)|（[^()（）]*）)|\s+[a-zA-Z](?=\s|[:：.．、—–(（-]|$))*\s*")
+_HEADING_DELIMITER_RE = re.compile(r"^(?:[:：．、—–]|\.(?!\d)|-(?!\d))")
+_CHINESE_REFERENCE_VERB_RE = re.compile(
+    r"^(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|"
     r"满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)"
 )
 _PROSE_SENTENCE_RE = re.compile(r"[.!?;。！？；]\s*$")
 _ENGLISH_REFERENCE_VERB_RE = re.compile(
-    r"^\s*(?:am|is|are|was|were|can|will|explains|gives|shows|states|implies|requires|illustrates|"
-    r"demonstrates|depicts|presents|indicates|says|provides|contains|describes|lists|proves|discusses)\b"
+    r"^(?:am|is|are|was|were|has|have|had|can|will|explains|gives|shows|lists|states|implies|requires|"
+    r"yields|equals|approximates|denotes|represents|follows|illustrates|demonstrates|depicts|presents|"
+    r"indicates|says|provides|contains|describes|proves|discusses)\b"
 )
 _ENGLISH_BLOCK_PREFIX_RE = re.compile(
     r"^(?:Definition|Notation|Terminology|Convention|Axiom|Theorem|Lemma|Proposition|Corollary|Conjecture|Claim"
@@ -198,10 +202,20 @@ _EXERCISE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_SECTION_BREAK_RE = re.compile(r"^\d+(?:\.\d+)+\s+\S")
+_DOTTED_SECTION_PREFIX_RE = re.compile(r"^\d+(?:\.\d+)+\s+")
+_LATIN_SECTION_TITLE_RE = re.compile(
+    r"^[A-Z][A-Za-z0-9'’&-]*(?:[ ,]+(?:[A-Z0-9][A-Za-z0-9'’&-]*|and|as|at|by|for|from|in|of|on|or|"
+    r"the|to|a|an|with|without|via)){0,12}$"
+)
+_CJK_SECTION_TITLE_RE = re.compile(r"^[【「『〈《（(]?[\u4e00-\u9fff]")
+_CJK_SECTION_UNITS_RE = re.compile(r"^(?:倍|个|米|秒|克|元|度)(?=$|[\s/每。！？；])")
+_SECTION_PROSE_RE = re.compile(
+    r"[=<>≈%％。！？；]|[.!?;]$|\b(?:is|are|was|were|has|have|had|gives|shows|yields|equals|"
+    r"approximates|denotes|represents|follows)\b|^(?:是|为|有|在)|可得|得到|满足|成立|显示|表明|说明"
+)
 _ENGLISH_CONTAINER_PREFIX_RE = re.compile(
     r"^(?:(?:Chapter|Section|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)"
-    r"|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s:：.．—–(-]|$)",
+    r"|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s|:：.．—–(（-]|$)",
     re.IGNORECASE,
 )
 _CHINESE_CONTAINER_PREFIX_RE = re.compile(
@@ -209,18 +223,26 @@ _CHINESE_CONTAINER_PREFIX_RE = re.compile(
     r"|附录(?:\s*(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)"
 )
 _PAGE_METADATA_HEADING_RE = re.compile(
-    r"^(?:[\[【(]\s*)?(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+\d+"
-    r"(?:\s*(?:of\s+|[/／–—-]\s*)\d+)?\s*[)）\]】]?\s*[.。]?$|(?:p|pp)\.\s*\d"
-    r"|(?:(?:cached|raw|readable|verified|automatic)\s+)*(?:transcription|ocr)\b"
-    r"|(?:第\s*)?[\d一二三四五六七八九十百千零〇]+(?:\s*(?:[/／\-–—]|共)\s*(?:第\s*)?[\d一二三四五六七八九十百千零〇]+)?\s*[页頁张張]"
-    r"|共\s*[\d一二三四五六七八九十百千零〇]+\s*[页頁]\s*第\s*[\d一二三四五六七八九十百千零〇]+\s*[页頁]"
-    r"|\d+\s*(?:of|[/／\-–—])\s*\d+\s*[.)。]?$|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)",
+    r"^(?:[\[【(]\s*)?(?:(?:(?:cached|raw|readable|verified|automatic)\s+)*(?:transcription|ocr)\b"
+    r"|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)",
     re.IGNORECASE,
 )
+_CHINESE_COUNTER_NUMBER = r"[\d一二三四五六七八九十百千零〇]+"
+_CHINESE_PAGE_COUNTER = (
+    rf"(?:(?:第\s*)?{_CHINESE_COUNTER_NUMBER}(?:\s*(?:[/／–—-]|共)\s*(?:第\s*)?{_CHINESE_COUNTER_NUMBER})?\s*[页頁张張]"
+    rf"(?:\s*(?:[（(]\s*共\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁]\s*[）)]|[/／,，]\s*共\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁]))?"
+    rf"|共\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁]\s*第\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁])"
+)
+_PAGE_COUNTER = (
+    r"(?:[(（\[【]?\s*(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+|pp?\.\s*)\d+"
+    rf"(?:\s*(?:of\s+|[/／–—-]\s*)\d+)?\s*[)）\]】]?|{_CHINESE_PAGE_COUNTER})\s*[.。．、]?$"
+)
+_PAGE_COUNTER_RE = re.compile(rf"^{_PAGE_COUNTER}", re.IGNORECASE)
+_FURNITURE_PAGE_COUNTER_RE = re.compile(rf"^\s*[|:：—–-]\s*{_PAGE_COUNTER}", re.IGNORECASE)
+_PARENTHESIZED_COUNTER_RE = re.compile(r"^(.*?)\s*[（(]([^()（）]+)[）)]\s*[.。]?$")
 _RUNNING_COUNTER_RE = re.compile(
-    r"(?:^(?:[(（\[【]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8})\s*[)）\]】]?|[-–—]\s*(?:\d+|[ivxlcdm]{1,8})\s*[-–—])\s*[.。．、]?$"
-    r"|[(（\[]\s*(?:(?:pages?|slides?)\s+\d+|pp?\.\s*\d+|第\s*\d+\s*[页頁])(?:\s*(?:of|[/／–-])\s*\d+)?\s*[)）\]]"
-    r"|(?:\s|[:：—–-]\s*)(?:(?:pages?|slides?)\s+\d+|pp?\.\s*\d+|第\s*\d+\s*[页頁])(?:\s*(?:of|[/／–-])\s*\d+)?\s*[.。]?$)",
+    r"^(?:[(（\[【]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8}|\d+\s*(?:of|[/／–—-])\s*\d+)\s*[)）\]】]?"
+    r"|[-–—]\s*(?:\d+|[ivxlcdm]{1,8})\s*[-–—])\s*[.。．、]?$",
     re.IGNORECASE,
 )
 _OCR_PLACEHOLDER_RE = re.compile(
@@ -522,8 +544,41 @@ def _strip_heading_markup(line_text: str) -> str:
     return _MD_EDGE_EMPHASIS_RE.sub("", s).strip()
 
 
-def _chinese_heading_suffix(suffix: str, is_markdown_heading: bool) -> bool:
-    return is_markdown_heading or bool(_CHINESE_HEADING_DELIMITER_RE.match(suffix)) or not _CHINESE_PROSE_RE.search(suffix)
+def _is_numbered_section_heading(stripped: str) -> bool:
+    prefix = _DOTTED_SECTION_PREFIX_RE.match(stripped)
+    if not prefix:
+        return False
+    title = stripped[prefix.end():]
+    return (not _SECTION_PROSE_RE.search(title)
+            and not re.fullmatch(r"True|False|Yes|No|None|[A-F](?:\s*,\s*[A-F])*", title)
+            and bool(_LATIN_SECTION_TITLE_RE.fullmatch(title) or (
+                _CJK_SECTION_TITLE_RE.match(title) and not _CJK_SECTION_UNITS_RE.match(title))))
+
+
+def _reference_heading_suffix(suffix: str, is_markdown_heading: bool, *, chinese: bool = False,
+                              docling_heading: bool = False) -> bool:
+    if is_markdown_heading:
+        return True
+    remainder = _HEADING_QUALIFIERS_RE.sub("", suffix, count=1)
+    delimiter = _HEADING_DELIMITER_RE.match(remainder)
+    body = remainder[delimiter.end():].lstrip() if delimiter else remainder
+    if not body:
+        return True
+    if chinese:
+        return not _CHINESE_REFERENCE_VERB_RE.match(body) and bool(delimiter or not re.search(r"[。！？；]$", body))
+    if not re.match(r"^[a-z]", body):
+        return True
+    return not _ENGLISH_REFERENCE_VERB_RE.match(body) and bool(
+        delimiter or (docling_heading and not _PROSE_SENTENCE_RE.search(body)))
+
+
+def _is_worked_example_heading(stripped: str, is_markdown_heading: bool) -> bool:
+    if not _WORKED_EXAMPLE_RE.match(stripped):
+        return False
+    numbered = re.match(r"^(?:(?:Worked\s+)?Example\s+\d+(?:[.-]\d+)*|(?:例题|例)\s*\d+(?:[.-]\d+)*)",
+                        stripped, re.IGNORECASE)
+    return not numbered or _reference_heading_suffix(
+        stripped[numbered.end():], is_markdown_heading, chinese=stripped.startswith("例"))
 
 
 def _is_titled_non_answer_chapter(stripped: str, is_markdown_heading: bool) -> bool:
@@ -537,38 +592,40 @@ def _is_titled_non_answer_chapter(stripped: str, is_markdown_heading: bool) -> b
         return False
     if re.match(r"^(?:\*\*|__)?(?:Key\b|\(?cont|\(?续)", title, re.IGNORECASE):
         return False
-    if chinese:
-        return _chinese_heading_suffix(suffix, is_markdown_heading)
-    return is_markdown_heading or bool(_BLOCK_DELIMITER_RE.match(suffix) or re.match(r"^\s+[A-Z0-9\u4e00-\u9fff]", suffix))
+    return _reference_heading_suffix(suffix, is_markdown_heading, chinese=bool(chinese))
 
 
 def _is_running_page_heading(stripped: str, *, bare_containers_are_counters: bool = True) -> bool:
     if (_PAGE_METADATA_HEADING_RE.match(stripped) or _CONTINUATION_HEADING_RE.search(stripped)
-            or _RUNNING_COUNTER_RE.search(stripped) or _OCR_PLACEHOLDER_RE.match(stripped)):
+            or _RUNNING_COUNTER_RE.match(stripped) or _PAGE_COUNTER_RE.match(stripped) or _OCR_PLACEHOLDER_RE.match(stripped)):
         return True
     container = _ENGLISH_CONTAINER_PREFIX_RE.match(stripped) or _CHINESE_CONTAINER_PREFIX_RE.match(stripped)
-    return bool(bare_containers_are_counters and container and not container[0].lower().startswith(("appendix", "附录"))
-                and not stripped[container.end():].strip(" \t:：.．—–-"))
+    if not container:
+        return False
+    suffix = stripped[container.end():]
+    parenthesized = _PARENTHESIZED_COUNTER_RE.match(suffix)
+    title = _HEADING_DELIMITER_RE.sub("", parenthesized[1].strip()).strip() if parenthesized else ""
+    if (_FURNITURE_PAGE_COUNTER_RE.match(suffix)
+            or (parenthesized and _PAGE_COUNTER_RE.match(parenthesized[2].strip())
+                and (not title or _LATIN_SECTION_TITLE_RE.fullmatch(title)
+                     or (_CJK_SECTION_TITLE_RE.match(title) and not _SECTION_PROSE_RE.search(title))))):
+        return True
+    return bare_containers_are_counters and not container[0].lower().startswith(("appendix", "附录")) and not suffix.strip(" \t:：.．—–-")
 
 
 def _is_textbook_block_heading(stripped: str, is_markdown_heading: bool, docling_heading: bool) -> bool:
     chinese = _CHINESE_BLOCK_PREFIX_RE.match(stripped)
     if chinese:
-        return _chinese_heading_suffix(stripped[chinese.end():], is_markdown_heading)
+        return _reference_heading_suffix(stripped[chinese.end():], is_markdown_heading, chinese=True)
     prefix = _ENGLISH_BLOCK_PREFIX_RE.match(stripped)
     if not prefix:
-        return True
+        return not _WORKED_EXAMPLE_RE.match(stripped) or _is_worked_example_heading(stripped, is_markdown_heading)
     suffix = stripped[prefix.end():]
     identifier = _BLOCK_IDENTIFIER_RE.match(suffix)
     if not identifier:
         return bool(_BLOCK_DELIMITER_RE.match(suffix))
     rest = suffix[identifier.end():]
-    return _english_heading_suffix(rest, is_markdown_heading, docling_heading)
-
-
-def _english_heading_suffix(suffix: str, is_markdown_heading: bool, docling_heading: bool) -> bool:
-    return (is_markdown_heading or bool(_BLOCK_DELIMITER_RE.match(suffix) or re.match(r"^\s+[^a-z\s]", suffix))
-            or (docling_heading and not _PROSE_SENTENCE_RE.search(suffix) and not _ENGLISH_REFERENCE_VERB_RE.match(suffix)))
+    return _reference_heading_suffix(rest, is_markdown_heading, docling_heading=docling_heading)
 
 
 def _caption_heading(stripped: str, is_markdown_heading: bool, docling_heading: bool):
@@ -576,9 +633,7 @@ def _caption_heading(stripped: str, is_markdown_heading: bool, docling_heading: 
     if not match:
         return None
     rest = stripped[match.end():]
-    if match.group("zh_ref"):
-        return match if _chinese_heading_suffix(rest, is_markdown_heading) else None
-    if _english_heading_suffix(rest, is_markdown_heading, docling_heading):
+    if _reference_heading_suffix(rest, is_markdown_heading, chinese=bool(match.group("zh_ref")), docling_heading=docling_heading):
         return match
     return None
 
@@ -607,9 +662,9 @@ def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_h
         re.IGNORECASE,
     ):
         return False
-    if (frag_label in _HEADING_LABELS or is_markdown_heading) and not _SECTION_BREAK_RE.match(stripped) and not _EXERCISE_RE.match(stripped) and not _SECTION_SEALED_RE.match(stripped) and not _INLINE_SEALED_ALWAYS_RE.match(stripped) and not _INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped) and not re.search(r"(?:\b(?:Chapters?|Sections?|Parts?|Lectures?|Units?|Homework|Self-Check)\b|章|节|篇|部|讲|作业题)", stripped, re.IGNORECASE):
+    if (frag_label in _HEADING_LABELS or is_markdown_heading) and not _DOTTED_SECTION_PREFIX_RE.match(stripped) and not _EXERCISE_RE.match(stripped) and not _SECTION_SEALED_RE.match(stripped) and not _INLINE_SEALED_ALWAYS_RE.match(stripped) and not _INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped) and not re.search(r"(?:\b(?:Chapters?|Sections?|Parts?|Lectures?|Units?|Homework|Self-Check)\b|章|节|篇|部|讲|作业题)", stripped, re.IGNORECASE):
         return True
-    if (frag_label in _HEADING_LABELS or is_markdown_heading) and re.match(r"^\d+(?:\.\d+)+\s+(?!True\.?$|False\.?$|Yes\.?$|No\.?$|None\.?$|[A-F](?:\s*,\s*[A-F])*\.?$)[A-Z]", stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
+    if (frag_label in _HEADING_LABELS or is_markdown_heading) and _is_numbered_section_heading(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
     return False
 
@@ -694,7 +749,7 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
         return "theorem", None, True, False, True, None, None
     if _DEFINITION_RE.match(stripped) and block_heading:
         return "definition", None, True, False, True, None, None
-    if _WORKED_EXAMPLE_RE.match(stripped):
+    if _is_worked_example_heading(stripped, is_markdown_heading):
         return "worked_example", None, True, False, True, None, None
     if _EXERCISE_RE.match(stripped):
         return "exercise", None, True, False, exited_section_seal, None, None
@@ -706,9 +761,10 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     section_exit_candidate = bool(
         _MAJOR_NON_ANSWER_HEADING_RE.match(stripped)
         or _is_titled_non_answer_chapter(stripped, is_markdown_heading)
-        or _SECTION_BREAK_RE.match(stripped)
+        or (_is_numbered_section_heading(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped))
     )
     generic_heading = ((is_markdown_heading or docling_heading) and block_heading and not has_caption_name
+                       and not _DOTTED_SECTION_PREFIX_RE.match(stripped) and not _is_running_page_heading(stripped)
                        and not (_ENGLISH_CONTAINER_PREFIX_RE.match(stripped) or _CHINESE_CONTAINER_PREFIX_RE.match(stripped)))
     if generic_heading or section_exit_candidate or exited_section_seal:
         return "narrative", None, True, True, _is_section_sealed_exit(stripped, frag_label, is_markdown_heading) or exited_section_seal, None, None
