@@ -1230,7 +1230,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ].flatMap(label => [
       [`${label} in a summary`, `<details><summary>Hint / ${label}</summary>forty-two</details>`],
       [`${label} in an ATX heading`, `## ${label.replace("\n", " ")}\nforty-two\n\n## Next topic`],
-      [`${label} in a Setext heading`, `${label}\n---\nforty-two\n\n# Next topic`],
+      [`${label} in a Setext heading`, `${/^<[!?]/.test(label) ? "Topic " : ""}${label}\n---\nforty-two\n\n# Next topic`],
       [`${label} in a table header`, `Note | ${label.replace("\n", " ")}\n--- | ---\ny | forty-two`],
     ]),
     ...[
@@ -1847,7 +1847,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["preferred-text-scale", "public"],
     ["preferred-text-scale 0", "sealed"],
     ...["width", "height", "top", "right", "bottom", "left"].flatMap(dimension => [
-      ["viewport-segment-" + dimension + " 0 0", "public"],
+      ["viewport-segment-" + dimension + " 0 0", "sealed"],
       ["viewport-segment-" + dimension + " 1 0", "sealed"],
     ]),
     ["viewport-segment-width", "sealed"],
@@ -1860,6 +1860,59 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       if (visibility === "sealed") expectSealedEvidence(chunks, text, ["Public theorem."]);
       else expectSealedEvidence(chunks, text, [], "Public theorem.");
     }
+  });
+
+  it.each([
+    ["<h2>Answer</h2>\n\nPreface. <h2>Introduction</h2>", "public"],
+    ["Preface. <h2>Answer</h2>", "sealed"],
+    ["Preface. <h2>Answer</h2> ## Introduction", "sealed"],
+    ["Preface. <h2>An**sw**er</h2>", "sealed"],
+    ['Preface. <h2\n id="answer">Answer</h2>', "sealed"],
+    ["Preface. <h2 followed/by>Answer</h2>", "public"],
+    ["Preface. <h2>&copyAnswer</h2>", "public"],
+    ["Preface. \x60<h2>Answer</h2>\x60", "public"],
+    ["Preface. \\<h2>Answer</h2>", "public"],
+    ["~~~html\n<h2>Answer</h2>\n~~~", "public"],
+    ["    <h2>Answer</h2>", "public"],
+  ] as const)("updates sections only at rendered inline HTML headings in %s", (prefix, visibility) => {
+    const marker = visibility === "sealed" ? "forty-two" : "Public theorem.";
+    const text = prefix + "\n\n" + marker;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "sealed") expectSealedEvidence(chunks, text, [marker]);
+      else expectSealedEvidence(chunks, text, [], marker);
+    }
+  });
+
+  it.each([
+    "<div>\n## Answer\n</div>",
+    "<!--\n## Answer\n-->",
+    "<pre>\n## Answer\n</pre>",
+    "<div>\nAnswer\n---\n</div>",
+    "<div>\n| Answer |\n| --- |\n| Literal cell. |\n</div>",
+    "<div>\n> ## Answer\n> Literal cell.\n</div>",
+    "<div>\n- ## Answer\n  Literal cell.\n</div>",
+  ])("keeps Markdown heading and table syntax literal in %s", prefix => {
+    const text = prefix + "\n\nPublic theorem.";
+    const markers = prefix.includes("Literal cell.") ? ["Literal cell.", "Public theorem."] : ["Public theorem."];
+    for (const chunks of chunkDocumentAndCues(text)) {
+      for (const marker of markers) expectSealedEvidence(chunks, text, [], marker);
+    }
+    expect(parsePedagogicalAst(text).some(block => block.kind === "heading" || block.kind === "table")).toBe(false);
+  });
+
+  it("parses an ATX heading after a blank line ends an HTML block", () => {
+    const text = "<div>\n\n## Answer\n\n</div>\n\nforty-two";
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
+  });
+
+  it("keeps an active answer section over a literal heading in an HTML block", () => {
+    const text = "<h2>Answer</h2>\n\n<div>\n## Introduction\n</div>\n\nforty-two";
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
+  });
+
+  it("falls back for viewport segments on an ordinary viewport", () => {
+    const text = '## Topic <span style="display:env(viewport-segment-width 0 0,none)">Answer</span>\n\nPublic theorem.';
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
   });
 
   it("keeps semicolon-less references literal in pipe-table headers", () => {
@@ -1891,6 +1944,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ...[
       "display:env(missing-display, none)", "display:env(a, var(--b, none))",
       "display:ENV(a, env(b, var(--c, none)))", "display:\\65 nv(missing-display, none)",
+      "display:env(viewport-segment-width 0 0, none)", "display:env(viewport-segment-width +0 0, none)",
       "display:none;display:env(123, block)", "display:none;display:env(default, block)",
       "display:none;display:env(, block)", "display:none;display:env(initial, block)",
       "display:none;display:env(-1name, block)", "display:none;display:env(x -1, block)",
@@ -1904,7 +1958,6 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       "display:none;display:env(safe-area-inset-top, none)",
       "display:none;display:env(titlebar-area-width, none)",
       "display:none;display:env(keyboard-inset-bottom, none)",
-      "display:env(viewport-segment-width 0 0, none)", "display:env(viewport-segment-width +0 0, none)",
     ].map(style => [`Topic <span style="${style}">Answer</span>`, "sealed"] as const),
   ] as const)("uses ASCII keyword matching and CSS substitution in %s", (label, visibility) => {
     const text = `## ${label}\n\nPublic theorem.`;

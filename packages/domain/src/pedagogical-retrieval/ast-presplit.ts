@@ -98,7 +98,7 @@ const SEALED_HEADING_RE =
   /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
-const RAW_HTML_HEADING_RE = /<h[1-6](?=[\t\n\f\r />])/i;
+const HTML_HEADING_START_RE = /<h[1-6](?=[\t\n\f\r />])/i;
 const HTML_ATTRIBUTE_TOKEN_RE = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r >]+)))?/g;
 const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\t\n\f\r />]*)(?=[\t\n\f\r />])/.source + HTML_TAG_ATTRIBUTES + ">";
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\t\n\f\r />])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
@@ -822,7 +822,7 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
 function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_LABEL_CONTEXT) {
   const scanner = createMarkdownBlockScanner();
   const activeAtLine = new Map<number, MarkdownHtmlBlock>();
-  const htmlLines = new Set<number>();
+  const htmlLines = new Map<number, number>();
   let cursor = 0;
   let projected: string | undefined;
   let scopeLookup: ReturnType<typeof createHtmlScopeLookup> | undefined;
@@ -841,24 +841,27 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_
   const scanThrough = (lineStart: number) => {
     while (cursor <= lineStart && cursor < text.length) {
       const newline = nextLineBreak(text, cursor);
-      if (scanner.scan(text.slice(cursor, newline?.index ?? text.length)).mode === "html") htmlLines.add(cursor);
+      const state = scanner.scan(text.slice(cursor, newline?.index ?? text.length));
+      if (state.mode === "html") htmlLines.set(cursor, state.containers.length);
       cursor = newline ? newline.index + newline[0].length : text.length;
       if (scanner.htmlBlock) activeAtLine.set(cursor, scanner.htmlBlock);
     }
   };
+  const rawHtmlDepthAt = (offset: number) => {
+    const lineStart = containingLineStart(text, offset);
+    scanThrough(lineStart);
+    return htmlLines.get(lineStart);
+  };
   return {
-    rawHeadings(definedLinkLabels: ReadonlySet<string>) {
-      return RAW_HTML_HEADING_RE.test(text) ? getScopeLookup(definedLinkLabels).rawHeadings : [];
+    htmlHeadings(definedLinkLabels: ReadonlySet<string>) {
+      return HTML_HEADING_START_RE.test(text) ? getScopeLookup(definedLinkLabels).htmlHeadings : [];
     },
     htmlBlockAt(lineStart: number) {
       scanThrough(lineStart - 1);
       return activeAtLine.get(lineStart);
     },
-    isRawHtmlAt(offset: number) {
-      const lineStart = containingLineStart(text, offset);
-      scanThrough(lineStart);
-      return htmlLines.has(lineStart);
-    },
+    rawHtmlDepthAt,
+    isRawHtmlAt: (offset: number) => rawHtmlDepthAt(offset) !== undefined,
     maskedLiterals(definedLinkLabels: ReadonlySet<string>) {
       return projected ??= projectDisclosureCommentMarkdown(text, [], definedLinkLabels, false);
     },
@@ -880,17 +883,17 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_
   };
 }
 
-type RawHtmlHeading = {
+type HtmlHeading = {
   start: number;
   end: number;
-  blockStart: number;
   level: number;
   depth: number;
   context: LabelContext;
   visibilityHidden: boolean;
+  rawHtml: boolean;
 };
 
-function splitLinesAtRawHeadings(text: string, lines: readonly SourceLine[], headings: readonly RawHtmlHeading[]) {
+function splitLinesAtHtmlHeadings(text: string, lines: readonly SourceLine[], headings: readonly HtmlHeading[]) {
   const offsets = headings.flatMap(({ start, end }) => [start, end]).sort((a, b) => a - b);
   const result: SourceLine[] = [];
   let index = 0;
@@ -1875,11 +1878,7 @@ const CSS_ZERO_LENGTH_ENVIRONMENT = new Set([
   "keyboard-inset-top", "keyboard-inset-right", "keyboard-inset-bottom", "keyboard-inset-left",
   "keyboard-inset-width", "keyboard-inset-height",
 ]);
-const CSS_VIEWPORT_SEGMENT_ENVIRONMENT = new Set([
-  "viewport-segment-width", "viewport-segment-height", "viewport-segment-top", "viewport-segment-right",
-  "viewport-segment-bottom", "viewport-segment-left",
-]);
-// The document-only model supplies neutral UA values and a synthetic segment at (0, 0).
+// The document-only model uses neutral scalar values and an unsegmented viewport.
 const CSS_ZERO_LENGTH: readonly CssToken[] = [{ kind: "literal", value: "0px" }];
 const CSS_DEFAULT_TEXT_SCALE: readonly CssToken[] = [{ kind: "integer", value: "1" }];
 
@@ -1893,14 +1892,10 @@ function cssEnvironmentCall(group: Extract<CssToken, { kind: "group" }>) {
   if (end < group.tokens.length && !isCssPunct(group.tokens[end], ",")) return undefined;
   const fallback = end < group.tokens.length ? group.tokens.slice(end + 1) : undefined;
   if (fallback?.some(token => token.kind === "punct" && /[!;\])}]/.test(token.value))) return undefined;
-  const indices = group.tokens.slice(1, end);
   let value: readonly CssToken[] | undefined;
-  if (indices.length === 0) {
+  if (end === 1) {
     if (name.value === "preferred-text-scale") value = CSS_DEFAULT_TEXT_SCALE;
     if (CSS_ZERO_LENGTH_ENVIRONMENT.has(name.value)) value = CSS_ZERO_LENGTH;
-  } else if (indices.length === 2 && CSS_VIEWPORT_SEGMENT_ENVIRONMENT.has(name.value) &&
-    indices.every(index => index.kind === "integer" && /^[+-]?0+$/.test(index.value))) {
-    value = CSS_ZERO_LENGTH;
   }
   return { value, fallback };
 }
@@ -2649,9 +2644,8 @@ function createHtmlScopeLookup(
   let generatedRow: OpenStyledTag | undefined;
   let cursor = 0;
   let rawHtml = false;
-  let rawBlockStart = 0;
-  const rawHeadings: RawHtmlHeading[] = [];
-  const openHeadings: { entry: OpenStyledTag; heading: RawHtmlHeading }[] = [];
+  const htmlHeadings: HtmlHeading[] = [];
+  const openHeadings: { entry: OpenStyledTag; heading: HtmlHeading }[] = [];
   const finishHeadings = (offset: number, closing?: OpenStyledTag, closeEnd = offset, endOfBlock = false) => {
     while (openHeadings.length) {
       const { entry, heading } = openHeadings.at(-1)!;
@@ -2691,8 +2685,6 @@ function createHtmlScopeLookup(
       readText(line.offset);
       if (rawHtml && !line.rawHtml) {
         finishHeadings(precedingLineBreakStart(html, line.offset), undefined, undefined, true);
-      } else if (!rawHtml && line.rawHtml) {
-        rawBlockStart = line.offset;
       }
       rawHtml = line.rawHtml ?? false;
       const select = elements.selectIndex();
@@ -2759,6 +2751,8 @@ function createHtmlScopeLookup(
     readText(match.index);
     const prefix = match.groups?.prefix;
     const tag = asciiLower(match.groups?.tag ?? "");
+    const headingTag = /^h[1-6]$/.test(tag);
+    if (headingTag && !rawHtml && !STANDALONE_HTML_TAG_RE.test(match[0])) continue;
     const { namespace, ignored } = elements.readTokenContext(match);
     if (match.groups?.cdata && !isForeignCdata(stack.at(-1), match)) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
@@ -2792,22 +2786,24 @@ function createHtmlScopeLookup(
         if (!current && tag === "summary" && parent?.disclosure && !parent.disclosure.summary) {
           parent.disclosure.summary = entry;
         }
-        if (rawHtml && !current && /^h[1-6]$/.test(tag) &&
+        // Markdown headings and table cells classify their own inline labels.
+        const sectionHeading = rawHtml || (!generatedHeading && !(generatedTable && isOnStack(generatedTable)));
+        if (headingTag && sectionHeading && !current &&
           !labelStyle.suppressedSubtree && !skipsLabelContents(labelStyle) &&
           !stack.some((ancestor, index) => ancestor.disclosure?.open === false &&
             ancestor.disclosure.summary !== stack[index + 1])) {
           const heading = {
-            start: match.index, end: tokens.lastIndex, blockStart: rawBlockStart,
+            start: match.index, end: tokens.lastIndex, rawHtml,
             level: Number(tag[1]), depth: entry.containerDepth,
             context: scopes.at(-1)!.context, visibilityHidden: labelStyle.visibilityHidden,
           };
-          rawHeadings.push(heading);
+          htmlHeadings.push(heading);
           openHeadings.push({ entry, heading });
         }
       }
     } else if (tag && prefix === "/") {
       const closed = elements.closeTag(tag);
-      finishHeadings(match.index, closed, /^h[1-6]$/.test(tag) ? tokens.lastIndex : match.index);
+      finishHeadings(match.index, closed, headingTag ? tokens.lastIndex : match.index);
     }
     // Multi-line HTML tokens and raw text consume the intervening source lines.
     while (blockLines[lineIndex] && blockLines[lineIndex]!.offset < tokens.lastIndex) lineIndex++;
@@ -2826,7 +2822,7 @@ function createHtmlScopeLookup(
     }
     return scopes[low]!;
   };
-  return { scopeAt, ignoredDetailsStarts, rawHeadings };
+  return { scopeAt, ignoredDetailsStarts, htmlHeadings };
 }
 
 function seedPipeTableCell(elements: ReturnType<typeof createHtmlElementStack>, cell: "th" | "td") {
@@ -3254,7 +3250,7 @@ const HTML_TYPE_6_BLOCK_START_RE =
   /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$)/i;
 const HTML_OTHER_BLOCK_START_RE = /^ {0,3}<(?:\?|!(?:--|\[CDATA\[|[A-Z])|\/?(?:pre|script|style|textarea)(?=[ \t/>]|$))/i;
 const STANDALONE_HTML_TAG_RE =
-  /^ {0,3}(?:<\/[a-z][a-z0-9-]*[ \t]*>|<[a-z][a-z0-9-]*(?:[ \t]+[a-z_:][\w.:-]*(?:[ \t]*=[ \t]*(?:"[^"]*"|'[^']*'|[^ \t"'=<>\x60]+))?)*[ \t]*\/?>)[ \t]*$/i;
+  /^ {0,3}(?:<\/[a-z][a-z0-9-]*[ \t\r\n]*>|<[a-z][a-z0-9-]*(?:[ \t\r\n]+[a-z_:][\w.:-]*(?:[ \t\r\n]*=[ \t\r\n]*(?:"[^"]*"|'[^']*'|[^ \t\r\n"'=<>\x60]+))?)*[ \t\r\n]*\/?>)[ \t]*$/i;
 
 function interruptsPipeTable(line: string): boolean {
   return matchFenceOpening(line) !== null || /^[ \t]{0,3}(?::{3,}|#{1,6}(?:[ \t]|$)|>)/.test(line) ||
@@ -3479,16 +3475,31 @@ function createTranscriptCueSeparator(
     }
     return start;
   });
-  const htmlHeadingContinuations = new Set<number>();
+  const htmlContinuations = new Set<number>();
+  const rawHtmlLines = new Set<number>();
+  const htmlScanner = createMarkdownBlockScanner();
+  for (const [cueIndex, start] of cueLineStarts.entries()) {
+    const end = cueLineStarts[cueIndex + 1] ?? lines.length;
+    const previousStart = cueLineStarts[cueIndex - 1];
+    // Multiline cues can contain their own blocks. Preserve soft HTML breaks
+    // across adjacent one-line cues and explicit HTML terminators across all cues.
+    if (previousStart !== undefined && (start - previousStart > 1 || end - start > 1)) htmlScanner.scan("");
+    for (let index = start; index < end; index++) {
+      const line = lines[index]!;
+      const block = htmlScanner.htmlBlock;
+      if (block && markdownHtmlContinuation(line, block) !== undefined) htmlContinuations.add(index);
+      if (htmlScanner.scan(line).mode === "html") rawHtmlLines.add(index);
+    }
+  }
   if (lines.some(line => /<h[1-6](?:$|[\t\f />])/i.test(line))) {
     const headingText = lines.join("\n");
     const headingLines = splitLinesWithOffsets(headingText);
     const htmlContext = createMarkdownHtmlBlockLookup(headingText, inheritedContext);
     let index = 0;
-    for (const heading of htmlContext.rawHeadings(definedLinkLabels)) {
-      while (headingLines[index] && headingLines[index]!.start <= heading.blockStart) index++;
+    for (const heading of htmlContext.htmlHeadings(definedLinkLabels)) {
+      while (headingLines[index] && headingLines[index]!.start <= heading.start) index++;
       while (headingLines[index] && headingLines[index]!.start < heading.end) {
-        htmlHeadingContinuations.add(index++);
+        htmlContinuations.add(index++);
       }
     }
   }
@@ -3540,6 +3551,12 @@ function createTranscriptCueSeparator(
         if (endLine > 0) break;
         latex = readLatexCueCommand(current.body, readNext, nextColumn);
       }
+      if (rawHtmlLines.has(index)) {
+        containers = current.containers;
+        previousBody = "";
+        tableColumns = undefined;
+        continue;
+      }
       if (tableColumns && continuation.depth === containers.length) {
         const explicitBoundary = startsTimedTableBoundary(current, true, readNext);
         const canContinue = isCaptionTableBodyRow(continuation.body);
@@ -3567,6 +3584,7 @@ function createTranscriptCueSeparator(
     }
     const nextLine = lines[end];
     if (!joinNext || nextLine === undefined) return "";
+    if (htmlContinuations.has(end)) return newline;
     const continued = continueMarkdownContainers(nextLine, containers);
     if (end <= latexArgumentThrough) return newline;
     if (tableColumns && continued.depth === containers.length) {
@@ -3594,8 +3612,7 @@ function createTranscriptCueSeparator(
       isPipeParagraphLine(previousBody) && isPipeParagraphLine(continued.body);
     const continuesLatexEnvironment = continued.depth === containers.length &&
       (mathEnvironments.length > 0 || literalEnvironment !== undefined);
-    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph || continuesLatexEnvironment ||
-      htmlHeadingContinuations.has(end)) return newline;
+    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph || continuesLatexEnvironment) return newline;
 
     // The synthetic paragraph break also ends any table.
     previousBody = "";
@@ -4454,17 +4471,26 @@ function parsePedagogicalAstInternal(
       options, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors, headingContext, inheritedContext);
   }
   const inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text, inheritedContext);
-  const rawHeadings = inheritsHtmlBlock.rawHeadings(definedLinkLabels).filter(heading => {
+  const htmlHeadings = inheritsHtmlBlock.htmlHeadings(definedLinkLabels).filter(heading => {
     if (heading.depth !== 0) return false;
     if (!heading.visibilityHidden) return true;
-    const { inline } = htmlLabelTextVariants(text.slice(heading.start, heading.end), heading.context, undefined, true);
+    const source = text.slice(heading.start, heading.end);
+    const label = heading.rawHtml ? source : renderMarkdownLabelMarkup(source, true, definedLinkLabels);
+    const { inline } = htmlLabelTextVariants(label, heading.context, undefined, heading.rawHtml);
     return inline.length > 0;
   });
-  const rawHeadingAt = new Map(rawHeadings.map((heading, index) => {
-    const end = Math.min(heading.end, rawHeadings[index + 1]?.start ?? text.length);
+  const htmlHeadingAt = new Map(htmlHeadings.map((heading, index) => {
+    const end = Math.min(heading.end, htmlHeadings[index + 1]?.start ?? text.length);
     return [heading.start, { ...heading, end }] as const;
   }));
-  if (rawHeadingAt.size) lines = splitLinesAtRawHeadings(text, lines, [...rawHeadingAt.values()]);
+  const htmlHeadingSpans = [...htmlHeadingAt.values()];
+  const htmlHeadingEnds = new Set(htmlHeadingSpans.map(heading => heading.end));
+  if (htmlHeadingSpans.length) lines = splitLinesAtHtmlHeadings(text, lines, htmlHeadingSpans);
+  const readMarkdownLine = (index: number) => {
+    const line = lines[index];
+    if (line && !htmlHeadingAt.has(line.start) && !htmlHeadingEnds.has(line.start) &&
+      !inheritsHtmlBlock.isRawHtmlAt(line.start)) return line.raw;
+  };
   const labelContextAt = (offset: number) => inheritsHtmlBlock.labelContextAt(offset, definedLinkLabels);
   const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(
     index => lines[index]?.raw, definedLinkLabels, index => labelContextAt(lines[index]?.start ?? 0),
@@ -4482,13 +4508,22 @@ function parsePedagogicalAstInternal(
     end: number,
     visibility: PedagogicalVisibility,
     kind: PedagogicalBlockKind,
+    summaryEnd?: number | null,
   ): MappedInnerBlock[] => {
-    const slice = text.slice(start, end);
+    let slice = text.slice(start, end);
+    const bodyStart = summaryEnd != null && start < summaryEnd && summaryEnd < end ? summaryEnd - start : undefined;
+    if (bodyStart !== undefined) {
+      // A disclosure body starts a pedagogical Markdown block after the summary.
+      // Keep a single input so protected constructs can cross that boundary.
+      slice = slice.slice(0, bodyStart) + "\n\n" + slice.slice(bodyStart);
+    }
+    const sourceOffset = (offset: number) =>
+      start + offset - (bodyStart === undefined ? 0 : Math.min(2, Math.max(0, offset - bodyStart)));
     const rebasedCaptions = captionRowStarts && new Set<number>();
     const rebasedFloors = boundaryFloors && new Map<number, PedagogicalVisibility>();
     if (rebasedCaptions || rebasedFloors) {
       for (const line of splitLinesWithOffsets(slice)) {
-        const offset = start + line.start;
+        const offset = sourceOffset(line.start);
         if (captionRowStarts?.has(offset)) rebasedCaptions?.add(line.start);
         const floor = boundaryFloors?.get(offset);
         if (floor !== undefined) rebasedFloors?.set(line.start, floor);
@@ -4505,8 +4540,8 @@ function parsePedagogicalAstInternal(
       labelContextAt(start),
     ).map(block => ({
       ...block,
-      startOffset: start + block.startOffset,
-      endOffset: start + block.endOffset,
+      startOffset: sourceOffset(block.startOffset),
+      endOffset: sourceOffset(block.endOffset),
     }));
   };
 
@@ -4625,7 +4660,7 @@ function parsePedagogicalAstInternal(
         span.visibility !== "sealed" &&
         span.closeStart > span.openEnd
       ) {
-        const innerBlocks = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind);
+        const innerBlocks = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind, span.summaryEndOffset);
         const higherBlocks = innerBlocks.filter(
           b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
         );
@@ -4699,7 +4734,7 @@ function parsePedagogicalAstInternal(
       ];
     }
 
-    const inner = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind);
+    const inner = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind, span.summaryEndOffset);
     const higherInner = inner.filter(
       b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
     );
@@ -4798,7 +4833,7 @@ function parsePedagogicalAstInternal(
         span.closeStart !== undefined &&
         span.closeStart > span.openEnd
       ) {
-        const inner = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind);
+        const inner = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind, span.summaryEndOffset);
         for (const b of inner) {
           if (VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis]) {
             extracted.push(b);
@@ -4824,16 +4859,16 @@ function parsePedagogicalAstInternal(
     }
 
     // 1. Heading (and monotonic heading-stack section visibility propagation)
-    const inRawHtml = rawHeadingAt.size > 0 && inheritsHtmlBlock.isRawHtmlAt(line.start);
-    const headingMatch = inRawHtml ? null : ATX_HEADING_RE.exec(raw);
-    const rawHeading = rawHeadingAt.get(line.start);
-    const setext = headingMatch || inRawHtml ? null : readSetextParagraph(index => lines[index]?.raw, i);
-    const level = headingMatch?.[1]?.length ?? rawHeading?.level ?? setext?.level;
+    const markdownLine = readMarkdownLine(i);
+    const headingMatch = markdownLine === undefined ? null : ATX_HEADING_RE.exec(markdownLine);
+    const htmlHeading = htmlHeadingAt.get(line.start);
+    const setext = headingMatch || markdownLine === undefined ? null : readSetextParagraph(readMarkdownLine, i);
+    const level = headingMatch?.[1]?.length ?? htmlHeading?.level ?? setext?.level;
     const boundaryFloor = boundaryFloors?.get(line.start) ??
       (tableHeadingFloor?.offset === line.start ? tableHeadingFloor.visibility : "public");
     if (level !== undefined) {
-      const headingLastIndex = rawHeading
-        ? lineIndexContaining(lines, rawHeading.end - 1, i)
+      const headingLastIndex = htmlHeading
+        ? lineIndexContaining(lines, htmlHeading.end - 1, i)
         : setext?.index ?? i;
       const headingEnd = lines[headingLastIndex]!.contentEnd;
       const headingTextStart = headingMatch
@@ -4841,7 +4876,7 @@ function parsePedagogicalAstInternal(
         : line.start;
       const headingTextEnd = headingMatch
         ? headingTextStart + headingMatch[2]!.length
-        : rawHeading ? headingEnd : lines[headingLastIndex - 1]!.contentEnd;
+        : htmlHeading ? headingEnd : lines[headingLastIndex - 1]!.contentEnd;
       const headingText = text.slice(headingTextStart, headingTextEnd).trim();
       const inlineEnd = setext ? headingTextEnd : headingEnd;
       const rawInlineSpans = findInlineConstructSpans(
@@ -4872,8 +4907,8 @@ function parsePedagogicalAstInternal(
       if (isSectionHeading) headingContext?.onHeading?.(line.start, level);
       if (propagateSectionVisibility) {
         const titleVisibility = tableColumnVisibility(
-          cleanHeadingTitle, definedLinkLabels, rawHeading?.context ?? labelContextAt(headingTextStart),
-          undefined, rawHeading !== undefined,
+          cleanHeadingTitle, definedLinkLabels, htmlHeading?.context ?? labelContextAt(headingTextStart),
+          undefined, htmlHeading?.rawHtml,
         );
         const ownVisibility = titleVisibility === "public" ? sectionBaseVisibility : titleVisibility;
         const visibility = maxVisibility(ownVisibility, boundaryFloor);
@@ -5096,7 +5131,7 @@ function parsePedagogicalAstInternal(
       }
     }
 
-    const tableHeaderCells = pipeTableHeaderCells(line, lines[i + 1]?.raw);
+    const tableHeaderCells = markdownLine === undefined ? null : pipeTableHeaderCells(line, readMarkdownLine(i + 1));
 
     // 4. LaTeX environment (\begin{equation|align|theorem|lemma|proof|definition|solution}...)
     const envMatch = matchLatexBlockOpening(raw, () => text.slice(line.start));
@@ -5172,7 +5207,7 @@ function parsePedagogicalAstInternal(
       const outerEnd = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
 
       if (classified.visibility !== "sealed" && closeStart > openEndOffset) {
-        const innerBlocks = parseInnerSlice(openEndOffset, closeStart, classified.visibility, classified.kind);
+        const innerBlocks = parseInnerSlice(openEndOffset, closeStart, classified.visibility, classified.kind, classified.summaryEndOffset);
         const higherBlocks = innerBlocks.filter(
           b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
         );
@@ -5349,7 +5384,8 @@ function parsePedagogicalAstInternal(
       }
     }
 
-    if (BLOCKQUOTE_PREFIX_RE.test(raw)) {
+    const permitsMarkdownContainers = !htmlHeadingEnds.has(line.start) && inheritsHtmlBlock.rawHtmlDepthAt(line.start) !== 0;
+    if (permitsMarkdownContainers && BLOCKQUOTE_PREFIX_RE.test(raw)) {
       const activeVis = getActiveSectionVisibility();
       const j = findBlockquoteEnd(lines, i, candidate =>
         classifyLabel(CALLOUT_RE.exec(candidate)?.[1], activeVis, sealProofs) !== null,
@@ -5400,7 +5436,7 @@ function parsePedagogicalAstInternal(
 
     // Project the item with its indentation removed, including lazy lines
     // owned by a quoted paragraph inside the item.
-    const listMatch = LIST_ITEM_RE.exec(raw);
+    const listMatch = permitsMarkdownContainers ? LIST_ITEM_RE.exec(raw) : null;
     if (listMatch) {
       const contentIndent = listContentIndent(listMatch[1]!);
       const quote: QuoteParagraph = { open: false };
@@ -5459,7 +5495,7 @@ function parsePedagogicalAstInternal(
       const columns = getTableColumnVisibilities(raw, tableHeaderCells, definedLinkLabels, line.start, labelContextAt);
       while (j < lines.length) {
         const row = lines[j]!;
-        if (boundaryFloors?.has(row.start)) break;
+        if (htmlHeadingAt.has(row.start) || inheritsHtmlBlock.isRawHtmlAt(row.start) || boundaryFloors?.has(row.start)) break;
         const isCaptionRow = captionRowStarts?.has(row.start);
         if (!isPipeTableBodyRow(row.raw) && !(isCaptionRow && isCaptionTableBodyRow(row.raw))) {
           // A pipe-separated heading can also carry values from the table it ends.
@@ -5643,7 +5679,7 @@ function parsePedagogicalAstInternal(
 
     // 10. Prose paragraph (with embedded inline display-math & pedagogical-env protection)
     const endsParagraph = (index: number) =>
-      rawHeadingAt.has(lines[index]!.start) || boundaryFloors?.has(lines[index]!.start) ||
+      htmlHeadingAt.has(lines[index]!.start) || boundaryFloors?.has(lines[index]!.start) ||
       startsMarkdownBlock(lines[index]!.raw, lines[index + 1]?.raw);
     let inlineSpans: readonly InlineConstructSpan[] | undefined;
     let spanIndex = 0;
