@@ -13,6 +13,7 @@ import unittest
 from contextlib import redirect_stdout
 from importlib.util import find_spec
 from pathlib import Path
+from time import perf_counter
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -124,6 +125,12 @@ def worker_pdf_cli_fixtures():
             5: "What Is Algebra? — Page 12\n定理 2.1（拉格朗日定理）\nPublic explanation.",
         }, (), [(1, 5, None), (1, 1, None), (2, 2, "section_sealed"), (3, 3, "section_sealed"),
                 (4, 4, "section_sealed"), (5, 5, "section_sealed")]),
+        "nested_answer_proof": (3, {
+            1: "Problem 1. Prove the identity.\nSolution. We use induction.\n\nProof. Base Cases: private.",
+            2: "Inductive Step: private.\n\nThe conclusion is private. \\Box",
+            3: "Problem 2. Find the root.",
+        }, (), [(1, 3, None), (1, 1, None), (2, 2, "inline_proof_sealed", False, True),
+                (3, 3, None, False, True)]),
     }
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -1180,6 +1187,55 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         public_lines = [line for text in ext.texts_by_page[11] for line in text.splitlines() if line.strip()]
         self.assertEqual(public_lines, [f"Problem {index}. Find x." for index in range(1, len(labels) + 1)])
         self.assertEqual("\n".join(ext.texts_by_page[12]), theorem + "\n" + example)
+
+    def test_nested_answer_proof_survives_paragraphs_and_page_breaks(self):
+        problem = "Problem 1. Prove the identity."
+        theorem = "Theorem 2.1: The identity.\n\nProof. The public justification. ∎"
+        example = "Example 1: Factor x.\nSolution. The derivation.\n\nProof. The worked proof."
+        for separator in ("\n", "\n\n"):
+            for label in ("Solution.", "Answer:"):
+                for end in ("", "∎", "Q.E.D.", "\\Box", "证毕"):
+                    with self.subTest(separator=separator, label=label, end=end):
+                        first = separator.join((problem, f"{label} We use strong induction.",
+                                                "Proof. Base Cases: private calculation."))
+                        second = separator.join(("Inductive Step: private computation.", "The equality follows."))
+                        public_tail = "Public prose after the proof." if end else "Problem 2. Find the root."
+                        third = f"The private conclusion. {end}\n\n{public_tail}" if end else public_tail
+                        ext = physical_pages.extract_physical_pages(result_for(
+                            [text_element(11, first)], [text_element(12, second)], [text_element(13, third)],
+                            [text_element(14, theorem)], [text_element(15, example)],
+                        ))
+                        self.assertEqual(ext.texts_by_page[11], [problem])
+                        self.assertEqual(ext.texts_by_page[12], [])
+                        self.assertEqual(ext.texts_by_page[13], [public_tail])
+                        self.assertEqual(ext.texts_by_page[14], [theorem])
+                        self.assertEqual(ext.texts_by_page[15], [example])
+                        self.assertTrue(ext.inline_proof_sealed_by_page[11])
+                        self.assertTrue(ext.inline_proof_sealed_by_page[12])
+                        self.assertFalse(ext.inline_sealed_by_page[13])
+                        self.assertIn("proof", [block.kind for block in ext.discourse_blocks_by_page[14]])
+
+    def test_scans_public_proof_continuation_once_per_line(self):
+        line = "Because the two terms agree, the inductive equality follows."
+        proof = "\n".join(["Proof."] + [line] * 3200 + ["This concludes the proof. \\square"])
+        fragments = [(proof + "\nThe following paragraph is outside the proof.", None)]
+        scanned_characters = 0
+        pattern = physical_pages._PROOF_TERMINATOR_RE
+
+        class MeteredTerminator:
+            def search(self, text):
+                nonlocal scanned_characters
+                scanned_characters += len(text)
+                return pattern.search(text)
+
+        with patch.object(physical_pages, "_PROOF_TERMINATOR_RE", MeteredTerminator()):
+            start = perf_counter()
+            blocks, *_ = physical_pages._build_page_blocks(1, fragments, set())
+            elapsed = perf_counter() - start
+        self.assertEqual([block.kind for block in blocks], ["proof", "narrative"])
+        self.assertEqual(blocks[0].text, proof)
+        self.assertEqual(scanned_characters, len(proof.replace("\n", "")))
+        self.assertLess(elapsed, 0.25)
 
     def test_section_seal_withholds_proofs_and_reopens_at_structural_headings(self):
         for heading in ("Theorem 2.1 (Lagrange)", "定理 2.1（拉格朗日定理）", "Definition 1.2", "定义 1.2",

@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true; withheldNativeDigest?: string; withheldNativeMode?: "section_sealed" | "inline_sealed" };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; inlineProofSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true; withheldNativeDigest?: string; withheldNativeMode?: "section_sealed" | "inline_sealed" | "inline_proof_sealed" };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[]; requiresRevalidation?: true } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -40,7 +40,8 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       || new Set(row.visualKinds).size !== row.visualKinds.length)) throw new TypeError("invalid PDF visual classification");
     if (row.sectionSealedAtEnd !== undefined && typeof row.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid PDF sectionSealedAtEnd metadata");
     if (row.inlineSealedAtEnd !== undefined && typeof row.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid PDF inlineSealedAtEnd metadata");
-    if (row.sectionSealedAtEnd && row.inlineSealedAtEnd) throw new TypeError("conflicting PDF page end seal metadata");
+    if (row.inlineProofSealedAtEnd !== undefined && typeof row.inlineProofSealedAtEnd !== "boolean") throw new TypeError("invalid PDF inlineProofSealedAtEnd metadata");
+    if (row.sectionSealedAtEnd && row.inlineSealedAtEnd || row.inlineProofSealedAtEnd && !row.inlineSealedAtEnd) throw new TypeError("conflicting PDF page end seal metadata");
     if (row.hadSealedContent !== undefined && typeof row.hadSealedContent !== "boolean") throw new TypeError("invalid PDF hadSealedContent metadata");
     if (row.inWorkedExampleAtEnd !== undefined && typeof row.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid PDF inWorkedExampleAtEnd metadata");
     if (row.inExerciseAtEnd !== undefined && typeof row.inExerciseAtEnd !== "boolean") throw new TypeError("invalid PDF inExerciseAtEnd metadata");
@@ -50,7 +51,7 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
     if (row.reopenedSection !== undefined && typeof row.reopenedSection !== "boolean") throw new TypeError("invalid PDF reopenedSection metadata");
     if (row.withheldNativeDigest !== undefined || row.withheldNativeMode !== undefined || row.failedRangeBoundary !== undefined) {
       if (typeof row.withheldNativeDigest !== "string" || !/^[a-f0-9]{64}$/u.test(row.withheldNativeDigest)
-        || (row.withheldNativeMode !== "section_sealed" && row.withheldNativeMode !== "inline_sealed")
+        || (row.withheldNativeMode !== "section_sealed" && row.withheldNativeMode !== "inline_sealed" && row.withheldNativeMode !== "inline_proof_sealed")
         || row.failedRangeBoundary !== true || row.publicationSealUnknown !== true || row.text !== "") {
         throw new TypeError("invalid PDF withheld native metadata");
       }
@@ -59,6 +60,7 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       ...(row.visualKinds === undefined ? {} : { visualKinds: row.visualKinds as PdfSegmentPage["visualKinds"] }),
       ...(row.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: row.sectionSealedAtEnd }),
       ...(row.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: row.inlineSealedAtEnd }),
+      ...(row.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: row.inlineProofSealedAtEnd }),
       ...(row.hadSealedContent === undefined ? {} : { hadSealedContent: row.hadSealedContent }),
       ...(row.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: row.inWorkedExampleAtEnd }),
       ...(row.inExerciseAtEnd === undefined ? {} : { inExerciseAtEnd: row.inExerciseAtEnd }),

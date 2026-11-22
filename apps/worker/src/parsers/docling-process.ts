@@ -25,7 +25,8 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some(kind => !["scan", "formula", "table", "picture"].includes(kind)) || new Set(kinds).size !== kinds.length)) throw new TypeError("invalid visual page metadata");
     if (page.sectionSealedAtEnd !== undefined && typeof page.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid sectionSealedAtEnd metadata");
     if (page.inlineSealedAtEnd !== undefined && typeof page.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid inlineSealedAtEnd metadata");
-    if (page.sectionSealedAtEnd && page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
+    if (page.inlineProofSealedAtEnd !== undefined && typeof page.inlineProofSealedAtEnd !== "boolean") throw new TypeError("invalid inlineProofSealedAtEnd metadata");
+    if (page.sectionSealedAtEnd && page.inlineSealedAtEnd || page.inlineProofSealedAtEnd && !page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
     if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
     if (page.inWorkedExampleAtEnd !== undefined && typeof page.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid inWorkedExampleAtEnd metadata");
     if (page.inExerciseAtEnd !== undefined && typeof page.inExerciseAtEnd !== "boolean") throw new TypeError("invalid inExerciseAtEnd metadata");
@@ -33,6 +34,7 @@ export function decodeParserOutput(text: string): ParsedPage[] {
       ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }),
       ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }),
       ...(page.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: page.inlineSealedAtEnd }),
+      ...(page.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: page.inlineProofSealedAtEnd }),
       ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }),
       ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }),
       ...(page.inExerciseAtEnd !== undefined || tracksExerciseContext ? { inExerciseAtEnd: page.inExerciseAtEnd ?? false } : {}) };

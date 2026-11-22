@@ -24,7 +24,7 @@ def parser():
     result.add_argument("--timeout-seconds", type=float, default=240)
     result.add_argument("--page-start", type=int)
     result.add_argument("--page-end", type=int)
-    result.add_argument("--initial-seal-mode", choices=("section_sealed", "inline_sealed"))
+    result.add_argument("--initial-seal-mode", choices=("section_sealed", "inline_sealed", "inline_proof_sealed"))
     result.add_argument("--initial-in-worked-example", action="store_true")
     result.add_argument("--initial-in-exercise", action="store_true")
     result.add_argument("--inspect-pdf", action="store_true")
@@ -172,6 +172,8 @@ def main(argv=None):
                 entry["sectionSealedAtEnd"] = True
             if inline_sealed_by_page.get(page_number) or had_sealed_by_page.get(page_number):
                 entry["inlineSealedAtEnd"] = inline_sealed_by_page[page_number]
+            if extraction.inline_proof_sealed_by_page.get(page_number):
+                entry["inlineProofSealedAtEnd"] = True
             if had_sealed_by_page.get(page_number):
                 entry["hadSealedContent"] = True
             if args.mime == PDF and extraction.in_worked_example_by_page.get(page_number):

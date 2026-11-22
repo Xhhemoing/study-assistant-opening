@@ -143,7 +143,7 @@ const REFERENCE_BODY_RE = /^[A-Za-z0-9\u4e00-\u9fff【「『〈《]/u;
 const ENGLISH_REFERENCE_CLAUSE_RE = /,\s*(?:which|where|applied|used|shown|given|as)\b/u;
 const ENGLISH_REFERENCE_SUBJECT_RE = /^(?:[a-z]+|This|That|It|They|We)\b/u;
 const CHINESE_REFERENCE_CLAUSE_RE = /[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)/u;
-const ANSWER_PROOF_HEADING_RE = /^(?:Proof\b|证明(?=[\s\d:：.．—–(（-]|$))/iu;
+const ANSWER_PROOF_HEADING_RE = /^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s\d:：.．—–(（-]|$)|证\s*[:：.．])/iu;
 const ENGLISH_CONTAINER_PREFIX_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s|:：.．—–(（-]|$)/iu;
 const CHINESE_CONTAINER_PREFIX_RE = /^(?:第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)/u;
 const BLOCK_IDENTIFIER_RE = /^\s+(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)\b(?=[\s:：.．、—–(（-]|$)/iu;
@@ -200,7 +200,7 @@ const ANSWER_OR_REVIEW_TITLE_RE = /\b(?:Answers?|Solutions?|Exercises?|Problems?
 const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Units?|Lectures?|Lessons?|Modules?|Appendix)\b|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录|\d+(?:\.\d+)+\s+)/iu;
 const PAGE_METADATA_HEADING_RE = /^(?:[[【(]\s*)?(?:(?:(?:cached|raw|readable|verified|automatic)\s+)*(?:transcription|ocr)\b|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)/iu;
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
-const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
+const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
 const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
 const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/u;
 const SAVED_NATIVE_HEADER_RE = /^\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n/u;
@@ -260,6 +260,10 @@ function isSectionSealedHeader(stripped: string): boolean {
   if (!SECTION_SEALED_RE.test(heading)) return false;
   if (INLINE_WITH_BODY_RE.test(heading)) return QUALIFIED_MULTI_SECTION_RE.test(heading);
   return true;
+}
+
+function isInlineSeal(mode: SealState["mode"] | undefined): mode is "inline_sealed" | "inline_proof_sealed" {
+  return mode === "inline_sealed" || mode === "inline_proof_sealed";
 }
 
 function findAssessmentSolutionsContext(lines: readonly string[], index: number): number {
@@ -371,6 +375,7 @@ function stripSealedSolutionLines(
   let publish = !requirePublicVisionHeading;
   let firstContentLine = true;
   let lastInlineBodyLine = "";
+  let inlineBreakPending = false;
   let assessmentContextLine = -1;
   const hasSectionSeal = requirePublicVisionHeading
     && lines.some((line, index) => {
@@ -390,14 +395,14 @@ function stripSealedSolutionLines(
     state.mode = nextMode;
     if (nextMode === "section_sealed") state.inExercise = false;
     if (prevMode !== nextMode || explicitOpener) onModeTransition?.(prevMode, nextMode, explicitOpener);
-    if (nextMode !== "inline_sealed") lastInlineBodyLine = "";
+    if (!isInlineSeal(nextMode)) lastInlineBodyLine = "";
   };
 
   for (const [index, line] of lines.entries()) {
     const trimmed = line.trim();
     if (!trimmed) {
-      if (state.mode === "inline_sealed") {
-        if (lastInlineBodyLine) setMode("none");
+      if (isInlineSeal(state.mode)) {
+        inlineBreakPending = state.mode === "inline_sealed" && Boolean(lastInlineBodyLine);
         changed = true;
       } else if (state.mode === "section_sealed" || state.unknownAfterFailure) {
         changed = true;
@@ -414,10 +419,21 @@ function stripSealedSolutionLines(
     if (assessmentContext >= 0) assessmentContextLine = assessmentContext;
     const sectionHeader = !exerciseAnswer && (isSectionSealedHeader(stripped) || assessmentContext >= 0);
     if (!sectionHeader && (state.mode !== "none" || state.unknownAfterFailure || state.afterAllSealedPage)
-      && isRunningPageHeading(stripped, state.mode !== "inline_sealed" || !allowBareInlineContainer)
+      && isRunningPageHeading(stripped, !isInlineSeal(state.mode) || !allowBareInlineContainer)
       && !(state.inExercise && !isMarkdownHeading && /^\d+[.。]$/u.test(stripped))) {
       changed = true;
       continue;
+    }
+    if (isInlineSeal(state.mode) && ANSWER_PROOF_HEADING_RE.test(stripped)) {
+      inlineBreakPending = false;
+      setMode("inline_proof_sealed");
+      changed = true;
+      if (INLINE_SEALED_TERMINATOR_RE.test(stripped)) setMode("none");
+      continue;
+    }
+    if (inlineBreakPending) {
+      setMode("none");
+      inlineBreakPending = false;
     }
     if (state.unknownAfterFailure) {
       if (!sectionHeader && !isRecoverySectionHeading(stripped)) {
@@ -520,7 +536,7 @@ function stripSealedSolutionLines(
       continue;
     }
 
-    if (state.mode === "inline_sealed") {
+    if (isInlineSeal(state.mode)) {
       changed = true;
       lastInlineBodyLine = trimmed;
       if (INLINE_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
@@ -766,7 +782,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             if (prevMode === "section_sealed" && nextMode === "none") sawSectionExit = true;
             if (nextMode === "section_sealed" && sawSectionExit) reenteredSectionSealed = true;
             // The scanner also notifies when an explicit inline opener replaces an existing one.
-            openedInlineAtEnd = nextMode === "inline_sealed";
+            openedInlineAtEnd = isInlineSeal(nextMode);
             detectedOnPage ||= nextMode !== "none";
           },
           requirePublicHeading,
@@ -806,13 +822,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           target.inWorkedExample = vision.inWorkedExample;
           target.inExercise = Boolean(vision.inExercise);
         }
-        if (target.mode !== "section_sealed" && vision?.mode === "inline_sealed"
-          && (options.incomingSeal.mode !== "inline_sealed" || options.visionOpenedInlineAtEnd)) {
-          target.mode = "inline_sealed";
+        if (target.mode !== "section_sealed" && isInlineSeal(vision?.mode)
+          && (!isInlineSeal(options.incomingSeal.mode) || options.visionOpenedInlineAtEnd)
+          && (target.mode !== "inline_proof_sealed" || vision.mode === "inline_proof_sealed")) {
+          target.mode = vision.mode;
           target.inWorkedExample = false;
           target.afterAllSealedPage = false;
         }
-        if (options.doclingEndSeal && (options.doclingEndSeal === "section_sealed" || target.mode !== "section_sealed")) {
+        if (options.doclingEndSeal && (options.doclingEndSeal === "section_sealed" || target.mode !== "section_sealed")
+          && (target.mode !== "inline_proof_sealed" || options.doclingEndSeal !== "inline_sealed")) {
           target.mode = options.doclingEndSeal;
           target.inWorkedExample = false;
           target.afterAllSealedPage = false;
@@ -1094,7 +1112,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           reconcileEndSealState(sealState, { hasNativeText: hadRawText, doclingEndSeal, incomingSeal, nativeOutSeal });
           // Archived text may be unusable even when it establishes a seal.
           if ((sealedAllText || incomingSeal.unknownAfterFailure) && savedVisionDetectedOnPage && savedSeal && savedSeal.mode !== "none"
-            && (sealState.mode === "none" || (sealState.mode === "inline_sealed" && savedSeal.mode === "section_sealed"))) {
+            && (sealState.mode === "none" || isInlineSeal(sealState.mode) && savedSeal.mode === "section_sealed"
+              || sealState.mode === "inline_sealed" && savedSeal.mode === "inline_proof_sealed")) {
             Object.assign(sealState, savedSeal);
           }
         }
@@ -1284,7 +1303,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             || nextMode && nextMode !== previousMode && previousMode !== "section_sealed"
             || republish && marker?.publicationSealCommitted !== false;
           if (!tighter) return;
-          const mode = previousMode === "section_sealed" ? previousMode : nextMode ?? previousMode;
+          const mode = previousMode === "section_sealed" || previousMode === "inline_proof_sealed" && nextMode === "inline_sealed"
+            ? previousMode : nextMode ?? previousMode;
           // Concurrent readers see every tightening immediately. A pending write cannot erase
           // older blocking evidence or publish a section reopening before the chunks commit.
           const pending = {
@@ -1296,7 +1316,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             // An empty array records archived Vision evidence without current visual inputs.
             visualKinds: next.visualKinds ?? marker?.visualKinds,
             sectionSealedAtEnd: mode === "section_sealed",
-            inlineSealedAtEnd: mode === "inline_sealed",
+            inlineSealedAtEnd: isInlineSeal(mode),
+            inlineProofSealedAtEnd: mode === "inline_proof_sealed" ? true : undefined,
             publicationSealCommitted: false,
             reopenedSection: false,
           };
@@ -1354,7 +1375,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               && isStandaloneRecoverySection(vision.transcription)) Object.assign(endSeal, visionSeal);
           }
           const markerMode = marker?.visualKinds === undefined ? pdfPageEndSeal(marker) : undefined;
-          if (markerMode === "section_sealed" || markerMode && endSeal.mode === "none") endSeal.mode = markerMode;
+          if (markerMode === "section_sealed" || markerMode && endSeal.mode === "none"
+            || markerMode === "inline_proof_sealed" && endSeal.mode === "inline_sealed") endSeal.mode = markerMode;
           if (marker?.reopenedSection && marker.publicationSealCommitted && !pdfPageEndSeal(marker) && !marker.publicationSealUnknown) {
             endSeal.mode = "none";
           }
@@ -1562,7 +1584,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                       if (!confirmed && !unknown) continue;
                       const endModes = [endSeal, prepared.nativeOutSeal.mode, savedVisionMode];
                       const section = confirmed && endModes.includes("section_sealed");
-                      const inline = confirmed && !section && endModes.includes("inline_sealed");
+                      const inline = confirmed && !section && endModes.some(isInlineSeal);
+                      const proof = inline && endModes.includes("inline_proof_sealed");
                       const hasPublicPrefix = Boolean((nativeConfirmed && prepared.page.text.trim())
                         || (archivedConfirmed && prepared.saved?.text.trim()));
                       const previousMarker = pageSeals.get(page.page);
@@ -1574,6 +1597,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                         page: page.page, text: "", imagePath: null, visualKinds: markerVisualKinds, hadSealedContent: confirmed,
                         ...(confirmed ? { publicationSealHadPublicPrefix: hasPublicPrefix } : {}),
                         sectionSealedAtEnd: section, inlineSealedAtEnd: inline, publicationSealUnknown: unknown,
+                        ...(proof ? { inlineProofSealedAtEnd: true } : {}),
                       }, true);
                     }
                   }
@@ -1630,7 +1654,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 if (replayMarker) {
                   if (onlyUncertainty && !preparedPage.archiveStillApplies && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
                   hasSealedContent ||= previouslySealed;
-                  if (recordedMode === "section_sealed" || recordedMode === "inline_sealed" && pdfSealState.mode === "none" && !pdfSealState.unknownAfterFailure) {
+                  if (recordedMode === "section_sealed" || isInlineSeal(recordedMode) && pdfSealState.mode === "none" && !pdfSealState.unknownAfterFailure
+                    || recordedMode === "inline_proof_sealed" && pdfSealState.mode === "inline_sealed") {
                     Object.assign(pdfSealState, cleanSeal, { mode: recordedMode });
                   } else if (previouslyUnverified && !preparedPage.archiveStillApplies && pdfSealState.mode === "none") {
                     Object.assign(pdfSealState, cleanSeal, { unknownAfterFailure: true });
@@ -1705,7 +1730,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                       || unverifiedPage && unverifiedImage || (replayMarker || committedReopening) && marker?.visualKinds !== undefined
                       ? { visualKinds: visualSealKinds ?? preparedPage.visual?.visualKinds ?? marker?.visualKinds ?? [] } : {}),
                     ...(pdfSealState.mode === "section_sealed" ? { sectionSealedAtEnd: true }
-                      : pdfSealState.mode === "inline_sealed" ? { inlineSealedAtEnd: true } : {}),
+                      : isInlineSeal(pdfSealState.mode) ? { inlineSealedAtEnd: true } : {}),
+                    ...(pdfSealState.mode === "inline_proof_sealed" ? { inlineProofSealedAtEnd: true } : {}),
                     ...(reopenedSection ? { reopenedSection: true } : {}),
                   });
                 } else if (replayMarker && marker && (!marker.failedRangeBoundary || marker.withheldNativeDigest)) {

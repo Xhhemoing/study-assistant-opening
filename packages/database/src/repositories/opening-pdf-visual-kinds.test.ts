@@ -12,6 +12,9 @@ it("preserves optional sectionSealedAtEnd metadata and rejects non-boolean value
   const sealedPage = { page: 1, text: "Public theorem.", imagePath: null, visualKinds: [], sectionSealedAtEnd: true, hadSealedContent: true };
   expect(validatePdfSegmentPages([sealedPage], 1, 1)).toEqual([sealedPage]);
   const inlineSealedPage = { page: 1, text: "Public stem.", imagePath: null, visualKinds: ["picture"], inlineSealedAtEnd: true, hadSealedContent: true };
+  const proofPage = { ...inlineSealedPage, inlineProofSealedAtEnd: true };
+  expect(validatePdfSegmentPages([proofPage], 1, 1)).toEqual([proofPage]);
+  expect(() => validatePdfSegmentPages([{ ...proofPage, inlineSealedAtEnd: false }], 1, 1)).toThrow();
   expect(validatePdfSegmentPages([inlineSealedPage], 1, 1)).toEqual([inlineSealedPage]);
   const plainPage = { page: 1, text: "Public theorem.", imagePath: null };
   expect(validatePdfSegmentPages([plainPage], 1, 1)).toEqual([plainPage]);

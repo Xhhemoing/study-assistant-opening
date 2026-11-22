@@ -65,7 +65,10 @@ _REFERENCE_BODY_RE = re.compile(r"^[A-Za-z0-9\u4e00-\u9fff【「『〈《]")
 _ENGLISH_REFERENCE_CLAUSE_RE = re.compile(r",\s*(?:which|where|applied|used|shown|given|as)\b")
 _ENGLISH_REFERENCE_SUBJECT_RE = re.compile(r"^(?:[a-z]+|This|That|It|They|We)\b")
 _CHINESE_REFERENCE_CLAUSE_RE = re.compile(r"[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)")
-_ANSWER_PROOF_HEADING_RE = re.compile(r"^(?:Proof\b|证明(?=[\s\d:：.．—–(（-]|$))", re.IGNORECASE)
+_ANSWER_PROOF_HEADING_RE = re.compile(
+    r"^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】"
+    r"|(?:证明|略证|续证)(?=[\s\d:：.．—–(（-]|$)|证\s*[:：.．])", re.IGNORECASE,
+)
 _ENGLISH_BLOCK_PREFIX_RE = re.compile(
     r"^(?:Definition|Notation|Terminology|Convention|Axiom|Theorem|Lemma|Proposition|Corollary|Conjecture|Claim"
     r"|Proof(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary))?)\b",
@@ -313,9 +316,11 @@ _NEXT_CONTINUATION_RE = re.compile(
     r"(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|（\s*(?:下接下页|转下页|未完待续)\s*）|\(\s*(?:下接下页|转下页|未完待续)\s*\)|接下页|转下页)\s*$",
     re.IGNORECASE,
 )
-_PROOF_TERMINATOR_RE = re.compile(r"(?:[□■∎]|Q\.?E\.?D\.?|证毕|证完)\s*[.。]?\s*$", re.IGNORECASE)
+_PROOF_END = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完)"
+_PROOF_TERMINATOR_RE = re.compile(rf"{_PROOF_END}\s*[.。]?\s*$", re.IGNORECASE)
 _SECTION_SEALED_TERMINATOR_RE = re.compile(r"(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
-_INLINE_SEALED_TERMINATOR_RE = re.compile(r"(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
+_INLINE_SEALED_TERMINATOR_RE = re.compile(rf"(?:{_PROOF_END}|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
+_INLINE_SEAL_MODES = ("inline_sealed", "inline_proof_sealed")
 _BARE_ANSWER_LABEL_RE = re.compile(r"^(?:答案|解答)\s*[:：]$")
 _MODEL_ANSWER_LABEL_RE = re.compile(
     r"^(?:Model\s+[Aa]nswer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?"
@@ -366,6 +371,7 @@ class PhysicalPagesExtraction:
     visual_kinds_by_page: dict[int, list[str]]
     section_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     inline_sealed_by_page: dict[int, bool] = field(default_factory=dict)
+    inline_proof_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     had_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     in_worked_example_by_page: dict[int, bool] = field(default_factory=dict)
     in_exercise_by_page: dict[int, bool] = field(default_factory=dict)
@@ -776,6 +782,8 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
             exited_section_seal = True
         else:
             return "solution_sealed", "section_sealed", False, False, False, None, None
+    if seal_mode == "inline_proof_sealed" and _ANSWER_PROOF_HEADING_RE.match(stripped):
+        return "solution_sealed", seal_mode, False, False, False, None, None
 
     cap_match = _caption_heading(stripped, docling_heading)
     has_caption_name = bool(_CAPTION_NAME_RE.match(stripped) or _CAPTION_PREFIX_RE.match(stripped))
@@ -881,9 +889,11 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
     in_exercise = initial_in_exercise and initial_seal_mode != "section_sealed"
     last_inline_body = ""
     inline_break_pending = False
+    current_proof_terminated = False
 
     def flush():
-        nonlocal current
+        nonlocal current, current_proof_terminated
+        current_proof_terminated = False
         if current is None:
             return
         kind, start, end, visual_kind, caption_ref, is_furniture, explicit_opener, seal_mode, is_section_exit = current
@@ -913,9 +923,9 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
     for index, (unit_start, unit_end, unit_text, frag_label, is_frag_start) in enumerate(units):
         if not unit_text.strip():
             active_seal = current[7] if current is not None else page_seal_mode
-            if active_seal == "inline_sealed":
+            if active_seal in _INLINE_SEAL_MODES:
                 # A paragraph break closes a populated answer only if body text follows on this page.
-                inline_break_pending = bool(last_inline_body)
+                inline_break_pending = active_seal == "inline_sealed" and bool(last_inline_body)
             elif is_frag_start:
                 # Empty fragments are omitted from sealed public_texts; do not merge blocks across them.
                 flush()
@@ -924,12 +934,13 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             continue
 
         active_seal = current[7] if current is not None else page_seal_mode
+        is_furniture = frag_label in _FURNITURE_LABELS
+        stripped = _strip_heading_markup(unit_text)
         assessment_context = (_find_assessment_solutions_context(units, index)
-                              if _ASSESSMENT_SOLUTIONS_HEADING_RE.match(_strip_heading_markup(unit_text)) else -1)
+                              if _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped) else -1)
         if assessment_context >= 0:
             assessment_context_line = assessment_context
-        if active_seal == "inline_sealed":
-            stripped = _strip_heading_markup(unit_text)
+        if active_seal in _INLINE_SEAL_MODES:
             numeric_exercise_answer = (in_exercise and not _MD_HEADING_LINE_RE.match(unit_text.strip())
                                        and re.fullmatch(r"\d+[.。]", stripped))
             if (_is_running_page_heading(stripped, bare_containers_are_counters=False)
@@ -940,8 +951,12 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                 else:
                     current[2] = unit_end
                 continue
+            if not is_furniture and _ANSWER_PROOF_HEADING_RE.match(stripped):
+                page_seal_mode = "inline_proof_sealed"
+                if current is not None:
+                    current[7] = page_seal_mode
+                inline_break_pending = False
 
-        is_furniture = frag_label in _FURNITURE_LABELS
         if inline_break_pending and not is_furniture:
             flush()
             if page_seal_mode == "inline_sealed":
@@ -972,30 +987,30 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         # An inline answer stays within the current exercise.
         if explicit_opener or section_break:
             in_worked_example = kind == "worked_example"
-            if seal_kind != "inline_sealed":
+            if seal_kind not in _INLINE_SEAL_MODES:
                 in_exercise = kind == "exercise"
             page_seal_mode = seal_kind
 
         if current is None or explicit_opener or section_break:
             flush()
-            if active_seal == "inline_sealed" and not (explicit_opener or section_break):
-                kind, seal_kind = "solution_sealed", "inline_sealed"
+            if active_seal in _INLINE_SEAL_MODES and not (explicit_opener or section_break):
+                kind, seal_kind = "solution_sealed", active_seal
             current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
-        elif current[0] == "figure_caption" or (
-            current[0] == "proof" and _PROOF_TERMINATOR_RE.search(page_text[current[1]:current[2]])
-        ):
+        elif current[0] == "figure_caption" or current_proof_terminated:
             flush()
             current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
         else:
             # Unmarked lines, tables and formulas continue the active block.
             current[2] = unit_end
+        if current[0] == "proof":
+            current_proof_terminated = bool(_PROOF_TERMINATOR_RE.search(unit_text))
         active_seal = current[7]
-        if active_seal == "inline_sealed":
+        if active_seal in _INLINE_SEAL_MODES:
             last_inline_body = _inline_answer_body(unit_text) if explicit_opener else unit_text.strip()
         if (
             active_seal == "section_sealed" and _SECTION_SEALED_TERMINATOR_RE.search(unit_text)
         ) or (
-            active_seal == "inline_sealed" and _INLINE_SEALED_TERMINATOR_RE.search(last_inline_body)
+            active_seal in _INLINE_SEAL_MODES and _INLINE_SEALED_TERMINATOR_RE.search(last_inline_body)
         ):
             flush()
             page_seal_mode = None
@@ -1004,7 +1019,9 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
     substantive = [entry for entry in entries if not entry[1]]
     if substantive:
         first_idx, _, explicit, first_seal, _ = substantive[0]
-        if initial_seal_mode is not None and first_seal == initial_seal_mode and not explicit:
+        if initial_seal_mode is not None and not explicit and (
+            first_seal == initial_seal_mode or first_seal in _INLINE_SEAL_MODES and initial_seal_mode in _INLINE_SEAL_MODES
+        ):
             blocks[first_idx] = replace(blocks[first_idx], continued_from_prev_page=True)
         if (page_seal_mode == "inline_sealed" and _TERMINAL_PUNCTUATION_RE.search(last_inline_body)
                 and not _NEXT_CONTINUATION_RE.search(last_inline_body)):
@@ -1268,7 +1285,8 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         discourse_blocks_by_page=blocks_by_page,
         visual_kinds_by_page=visuals,
         section_sealed_by_page={page: mode == "section_sealed" for page, mode in end_seals.items()},
-        inline_sealed_by_page={page: mode == "inline_sealed" for page, mode in end_seals.items()},
+        inline_sealed_by_page={page: mode in _INLINE_SEAL_MODES for page, mode in end_seals.items()},
+        inline_proof_sealed_by_page={page: mode == "inline_proof_sealed" for page, mode in end_seals.items()},
         had_sealed_by_page=had_sealed_by_page,
         in_worked_example_by_page=worked_examples,
         in_exercise_by_page=exercises,

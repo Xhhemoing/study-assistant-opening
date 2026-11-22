@@ -81,11 +81,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v30-discourse/text",
     "docling-2.126.0/pdf-segments-v31-discourse/text",
     "docling-2.126.0/pdf-segments-v32-discourse/text",
+    "docling-2.126.0/pdf-segments-v33-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v33-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v34-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -597,6 +598,25 @@ describe("bounded resumable PDF parser", () => {
     ]);
   });
 
+  it.each([false, true].flatMap(blank => ["", "∎", "Q.E.D.", "\\Box", "证毕"].map(end => ({ blank, end }))))(
+    "keeps an assessment proof sealed across pages (paragraph breaks: $blank, terminator: $end)",
+    async ({ blank, end }) => {
+      const join = blank ? "\n\n" : "\n";
+      const problem = "Problem 1. Prove the formula.";
+      const next = end ? "Public prose after the proof." : "Problem 2. Find the root.";
+      const publicProof = "Theorem 2.1: The identity.\n\nProof. The public justification. ∎";
+      const example = "Example 1: Factor x.\nSolution. The derivation.\n\nProof. The worked proof.";
+      const texts = [[problem, blank ? "Solution. We use strong induction." : "Answer: We use strong induction.",
+        "Proof. Base Cases: private calculation."].join(join),
+        ["Inductive Step: private computation.", "Therefore the desired equality holds."].join(join),
+        end ? `The hidden conclusion. ${end}\n\n${next}` : next, publicProof, example];
+      const result = await runPdfScenario({ segmentPages: 1, pages: texts.map((text, index) => ({ page: index + 1, text })) });
+      expect(result.publishedChunks.map(chunk => chunk.text.trim())).toEqual([problem, next, publicProof, example]);
+      expect(result.requests[1]?.seed).toBe("inline_proof_sealed");
+      expect(result.requests[2]?.seed).toBe("inline_proof_sealed");
+    },
+  );
+
   it("seals scanned Vision answer transcriptions, stale saved chunks, and cross-segment 10->11 answer keys while keeping prose and worked examples", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-round2-seal-"));
     try {
@@ -1013,6 +1033,14 @@ describe("bounded resumable PDF parser", () => {
       expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([
         [5, "定理 2.1（拉格朗日定理）\nPublic explanation."],
       ]);
+    });
+
+    it.each([1, 3])("restores the nested proof seal from Python CLI in %i-page ranges", async segmentPages => {
+      const result = await runCliScenario("nested_answer_proof", { segmentPages });
+      expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([
+        [1, "Problem 1. Prove the identity."], [3, "Problem 2. Find the root."],
+      ]);
+      if (segmentPages === 1) expect(result.requests[1]).toEqual({ start: 2, seed: "inline_proof_sealed", exercise: true });
     });
 
     it("re-extracts a speculative tail when Vision establishes exercise context", async () => {

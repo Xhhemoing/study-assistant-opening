@@ -298,6 +298,29 @@ describe("pgvector material repository", () => {
     await expectArchivedPdfPages(texts, [7, 8, 9, 10], 1);
   });
 
+  it.each([false, true].flatMap(blank => ["", "∎", "Q.E.D.", "\\Box", "证毕"].map(end => ({ blank, end }))))(
+    "withholds nested assessment proofs from archive readers (paragraph breaks: $blank, terminator: $end)",
+    async ({ blank, end }) => {
+      const join = blank ? "\n\n" : "\n";
+      const label = blank ? "Solution." : "Answer:";
+      const next = end ? "Public prose after the proof." : "Problem 2. Find the roots.";
+      await expectArchivedPdfPages([
+        ["Problem 1. Prove the formula.", `${label} We use strong induction.`, "Proof. Base Cases: private."].join(join),
+        ["Inductive Step: private computation.", "The equality follows."].join(join),
+        ...(end ? [`The private conclusion. ${end}`] : []),
+        next, "Theorem 2.1: The identity.\n\nProof. The public justification.",
+        "Example 1: Factor x.\nSolution. The derivation.\n\nProof. The worked proof.",
+        "Solution. Continuing the worked example on the next physical page.",
+      ], end ? [4, 5, 6, 7] : [3, 4, 5, 6], 2);
+    },
+  );
+
+  it("keeps proof headings inside an archived answer section until a public theorem", async () => {
+    await expectArchivedPdfPages(["Answer Key", "## Proof. Base Cases: private.",
+      "Proof (by induction). Private.", "Proof of Lemma 1.1. Private.", "证明：私有推导。",
+      "Theorem 2.1: Public theorem.\n\nProof. Public proof."], [6], 2);
+  });
+
   it("keeps an archived answer section sealed through exercise subheadings", async () => {
     const subheadings = [
       "# Drills", "# Self-Check", "# Self Check", "# Problem Set 1", "# Recitation", "# 思考题",

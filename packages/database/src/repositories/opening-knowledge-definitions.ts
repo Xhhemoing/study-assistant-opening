@@ -108,7 +108,7 @@ const sectionProse = String.raw`[=<>≈%％。！？；]|[.!?;] *$|${englishRefe
 const appendixHeading = String.raw`${lineStart}(?:appendix(?= |[:：]|$)|附录)`;
 const bareContainerSuffix = String.raw`^[ :：.．—–-]*$`;
 const inlinePublicHeading = String.raw`${lineStart}(?:${englishBlock} *(?:[:：．—–]|\.(?!\d)|-(?!\d)|$)|${chineseBlocks} *(?:[:：]|$))`;
-const answerProofHeading = String.raw`${lineStart}(?:proof\M|证明(?=[ \d:：.．—–(（-]|$))`;
+const answerProofHeading = String.raw`${lineStart}(?:(?:Proof|Sketch +of +Proof)\M|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ \d:：.．—–(（-]|$)|证 *[:：.．])`;
 const explicitHeadingMarkup = String.raw`^ *#{1,6} +[^ ]`;
 
 const jsWorkedExample = new RegExp(workedExampleHeading, "iu");
@@ -136,6 +136,7 @@ const jsBackMatter = new RegExp(backMatterLine, "iu");
 const jsBlockedReopening = new RegExp(blockedReopeningHeading.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "iu");
 const jsExerciseHeading = new RegExp(exerciseHeading.replace(String.raw`\M`, String.raw`\b`), "iu");
 const jsExplicitHeading = new RegExp(explicitHeadingMarkup, "u");
+const jsProofHeading = new RegExp(asJsPattern(answerProofHeading), "iu");
 
 function asJsPattern(pattern: string): string {
   return pattern.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`);
@@ -165,7 +166,7 @@ export function containsPdfAnswerLabel(text: string, { checkContext = true } = {
       if (!inWorkedExample) return true;
       continue;
     }
-    if (isArchiveRunningHeading(line)) continue;
+    if (isArchiveRunningHeading(line) || jsProofHeading.test(line)) continue;
     const atx = jsExplicitHeading.test(rawLine);
     const englishExample = jsEnglishExample.exec(line);
     const chineseExample = jsChineseExample.exec(line);
@@ -222,7 +223,7 @@ function isArchiveRunningHeading(line: string): boolean {
 }
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
-const inlineTerminator = String.raw`(?:[□■∎]|end +of +answers?|答案完|解答完) *[.。]? *$`;
+const inlineTerminator = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *(?:\$+|\\[)\]]))?|\mQ\.?E\.?D\.?|证毕|证完|end +of +answers?|答案完|解答完) *[.。]? *$`;
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -315,10 +316,11 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT id,source_id,source_version,page,line,running_heading,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
       line ~* ${exerciseHeading} AS opens_exercise,
+      line ~* ${answerProofHeading} AS proof_heading,
       public_example AND NOT running_heading AS opens_worked_example,
       (line ~* ${inlinePublicHeading} OR public_example
         OR public_numbered OR public_container OR public_dotted OR other_reopening)
-        AND NOT running_heading
+        AND NOT running_heading AND line !~* ${answerProofHeading}
         AND line !~* ${answerLabelLine} AND line !~* ${explanationLabelLine} AS opens_public,
       (other_reopening OR public_dotted OR public_example OR public_numbered OR line ~* ${inlinePublicHeading}
         OR public_container AND (line ~* ${appendixHeading} OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix}))
@@ -372,14 +374,20 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     FROM pdf_archive_line_events
   ), pdf_archive_inline_body AS (
     SELECT *, min(position) FILTER (WHERE body_line<>'')
-      OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body
+      OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body,
+      min(position) FILTER (WHERE proof_heading AND body_line<>'')
+      OVER (PARTITION BY source_id,source_version,inline_group) AS first_proof,
+      min(position) FILTER (WHERE body_line<>'')
+      OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_body
     FROM pdf_archive_inline_groups
   ), pdf_archive_inline_pages AS (
     SELECT source_id,source_version,inline_group,page,bool_or(inline_opener) AS starts_inline,
       bool_or(inline_opener AND NOT (unconditional_answer OR sealed_explanation)) AS hide_opening_page,
       (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
-      min(position) FILTER (WHERE btrim(line)='' AND position>first_body)
-        < max(position) FILTER (WHERE body_line<>'') AS closed_after_blank,
+      bool_or(btrim(line)='' AND position>first_body AND next_body IS NOT NULL
+        AND (first_proof IS NULL OR next_body<first_proof)) AS closed_after_blank,
+      bool_or(first_proof<=position) AS in_sealed_proof,
       bool_or(body_line ~* ${inlineTerminator}) AS ended_inline
     FROM pdf_archive_inline_body
     GROUP BY source_id,source_version,inline_group,page
@@ -388,7 +396,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT source_id,source_version,min(page) FILTER (WHERE starts_inline) AS first_page,
       bool_or(hide_opening_page) AS hide_opening_page,
       COALESCE(min(page) FILTER (WHERE closed_after_blank OR ended_inline
-        OR (last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})),max(page)) AS last_page
+        OR (in_sealed_proof IS NOT TRUE AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})),max(page)) AS last_page
     FROM pdf_archive_inline_pages
     GROUP BY source_id,source_version,inline_group
     HAVING bool_or(starts_inline)

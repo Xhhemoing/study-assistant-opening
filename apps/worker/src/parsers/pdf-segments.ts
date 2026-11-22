@@ -56,8 +56,9 @@ type PdfSegmentContinuation = PdfSealMode | null | void | {
 type FailedPdfSegment = { pageStart: number; pageEnd: number; initialSealMode?: PdfSealMode };
 export type PdfSegmentParseResult = { pageCount: number; failedRanges: string[]; failedSegments?: FailedPdfSegment[] };
 
-export function pdfPageEndSeal(page: Pick<ParsedPage, "sectionSealedAtEnd" | "inlineSealedAtEnd"> | undefined): PdfSealMode | undefined {
+export function pdfPageEndSeal(page: Pick<ParsedPage, "sectionSealedAtEnd" | "inlineSealedAtEnd" | "inlineProofSealedAtEnd"> | undefined): PdfSealMode | undefined {
   if (page?.sectionSealedAtEnd) return "section_sealed";
+  if (page?.inlineProofSealedAtEnd) return "inline_proof_sealed";
   if (page?.inlineSealedAtEnd) return "inline_sealed";
 }
 
