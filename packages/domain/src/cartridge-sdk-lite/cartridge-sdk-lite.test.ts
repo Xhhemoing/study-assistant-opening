@@ -59,6 +59,38 @@ function expectPortableFrontmatter(markdown: string): void {
   expect(importLearnerZip(archive).notes.map(exportMarkdown)).toEqual([markdown, markdown]);
 }
 
+const publicSeparationCases = [
+  ["tab on a plain continuation", "title:\n  First line\n  \tsecond line"],
+  ["tab after minimum indentation", "title:\n \tFirst line\n \tsecond line"],
+  ["tabs inside a nested plain value", "properties:\n  title:\n   \tFirst line\n   \tsecond line"],
+  ["blank and comment lines around a plain value", "title:\n \t# before\n  \tFirst line\n \t\n  \tsecond line\n \t# after\nnext: ok"],
+  ["tabs around a double-quoted value", 'title:\n  \t# before\n  \t"First line\n  \tsecond line"\t# inline\n \t# after\nnext: ok'],
+  ["tab on a single-quoted continuation", "title: 'First line\n \tsecond line'\t# inline"],
+  ["punctuation in block values", "focus: :focus\nquery: ?q=algebra\nflag: -flag\ndouble: ::double\npair: ?:pair\nnumber: -1"],
+  ["punctuation in next-line values", "title:\n  :focus\n  selector\nsummary:\n  ?q=algebra\n  search notes\nitem:\n  -flag"],
+  ["punctuation in flow values", "items: [:focus, ?q=1, -flag, ::double, ?:pair, -1]"],
+  ["tab before a block scalar header", "title:\n  \t|2-\n  body"],
+  ["tabs before a dedented block-scalar comment", "title: |2-\n  First line\n \t# comment\nnext: ok"],
+  ["tabs on a block-scalar comment at the parent indentation", "title: |2-\n  First line\n\t# comment\nnext: ok"],
+  ["dedented tab-only line before the next key", "title: |2-\n  First line\n \t\nnext: ok"],
+  ["tab-only block-scalar content", "title: |2-\n  First line\n  \t\n  second line\nnext: ok"],
+  ["tab at autodetected block-scalar indentation", "title: |-\n \t\n  second line\nnext: ok"],
+  ["hash after the required block-scalar indentation", "title: |2-\n  First line\n  \t# literal text\nnext: ok"],
+] as const;
+
+const invalidSeparationCases = [
+  ["tab as first-line plain indentation", "title:\n\tfirst line"],
+  ["tab as plain continuation indentation", "title: first\n\tsecond"],
+  ["tab at the parent plain indentation", "properties:\n  title:\n  \tfirst line"],
+  ["tab as quoted continuation indentation", 'title: "first\n\tsecond"'],
+  ["tab before a nested mapping key", "properties:\n  \ttitle: ok"],
+  ["tab before a nested sequence marker", "items:\n  \t- value"],
+  ["dedented tab-only line followed by scalar content", "title: |2-\n  First line\n \t\n  second line\nnext: ok"],
+  ["dedented tab before non-comment block text", "title: |2-\n  First line\n \tmore\nnext: ok"],
+  ["bare question indicator in a flow sequence", "title: [?, x]"],
+  ["dash before a flow delimiter", "title: [-[x], y]"],
+] as const;
+
 describe("learner portability", () => {
   it("preserves raw note text and indexes Obsidian links without changing it", () => {
     const text = "\uFEFF---\r\ntitle: 笔记\r\n---\r\n![[图#步骤|图示]] [[#本页]] `[[code]]` \\[[escaped]]\n```ts\n[[in fence]]\n```\n\n";
@@ -432,6 +464,31 @@ describe("learner portability", () => {
       "nested: { kind: conflict, dimensions: [[source_version]] }", "toolNotes: { name: notes, arguments: general }",
       "workLog: { role: assistant, calls: 5 }", "progress: { status: pending }", "---", "# Note",
     ].join("\n"));
+  });
+
+  it.each(publicSeparationCases)("preserves YAML separation and punctuation for %s", (_name, metadata) => {
+    for (const newline of ["\n", "\r\n", "\r"]) {
+      expectPortableFrontmatter(["---", ...metadata.split("\n"), "---", "# Note"].join(newline));
+    }
+  });
+
+  it.each(invalidSeparationCases)("rejects %s", (name, metadata) => {
+    for (const newline of ["\n", "\r\n", "\r"]) {
+      expectPrivateFrontmatter(["---", ...metadata.split("\n"), "---", "# Note"].join(newline), name);
+    }
+  });
+
+  it.each(["\n", "\r\n", "\r"])("keeps private shape and mapping key checks with %j line endings", newline => {
+    for (const metadata of [
+      "kind:\n \tcandidate\nbasis:\n \tsemantic",
+      "kind: |2-\n  conflict\n \t# end of kind\ndimensions:\n \t[source_version]",
+      "title: :focus\n \t# end of title\nreceiptId: example",
+      "?query: example",
+      ":focus: example",
+      "-flag: example",
+    ]) {
+      expectPrivateFrontmatter(["---", ...metadata.split("\n"), "---", "# Note"].join(newline), metadata);
+    }
   });
 
   it.each([

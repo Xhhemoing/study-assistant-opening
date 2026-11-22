@@ -3,6 +3,7 @@ const documentMarker = /^(?:---|\.\.\.)(?=[\s\u0085]|$)/u;
 const openingFence = /^---[ \t]*$/u;
 const closingFence = /^(?:---|\.\.\.)[ \t]*$/u;
 const plainKey = /^[\p{L}_][\p{L}\p{M}\p{N}_.-]*(?: [\p{L}\p{M}\p{N}_.-]+)*$/u;
+const flowDelimiter = /[[\]{},]/u;
 const scalarKeyword = /^(?:y|n|yes|no|on|off|true|false|null)$/iu;
 const privateKeys = new Set([
   "workspaceid", "owneruserid", "userid", "principalid", "sessionid", "tenantid", "accountid", "privacyepoch",
@@ -105,6 +106,10 @@ function hasValue(values: ReadonlySet<string>, value: FrontmatterValue): boolean
   return typeof value === "string" && values.has(value.trim());
 }
 
+function isPlainSafe(character: string, flow: boolean): boolean {
+  return character !== "" && !/[ \t\n]/u.test(character) && (!flow || !flowDelimiter.test(character));
+}
+
 // Walk the data-only YAML grammar without materializing records. Advanced YAML
 // constructs such as tags, anchors, aliases and complex keys fail closed.
 class FrontmatterReader {
@@ -133,7 +138,13 @@ class FrontmatterReader {
   private get done(): boolean { return this.offset >= this.source.length; }
 
   private skipHorizontal(): void {
-    while (this.current === " " || this.current === "\t") this.offset++;
+    this.offset = this.horizontalEnd(this.offset);
+  }
+
+  private horizontalEnd(offset: number): number {
+    let end = offset;
+    while (this.source[end] === " " || this.source[end] === "\t") end++;
+    return end;
   }
 
   private indent(): number {
@@ -241,12 +252,14 @@ class FrontmatterReader {
 
   private plain(flow: boolean, continuation = false): string {
     const start = this.offset;
-    if (!this.current || (!continuation && (/^[[\]{},#?&*!|>'"%@`:]/u.test(this.current) || this.indicator("-")))) invalid();
+    const first = this.current;
+    if (!first || (!continuation && (/^[[\]{},#&*!|>'"%@`]/u.test(first)
+      || (/^[-?:]$/u.test(first) && !isPlainSafe(this.source[start + 1] ?? "", flow))))) invalid();
     while (!this.done) {
       const char = this.current;
       const next = this.source[this.offset + 1] ?? "";
       if (char === "\n" || (char === "#" && /[ \t]/u.test(this.source[this.offset - 1] ?? ""))
-        || (flow && /[[\]{},]/u.test(char)) || (char === ":" && (!next || /[ \t\n]/u.test(next) || (flow && /[[\]{},]/u.test(next))))) break;
+        || (flow && flowDelimiter.test(char)) || (char === ":" && !isPlainSafe(next, flow))) break;
       this.offset++;
     }
     const value = this.source.slice(start, this.offset).trimEnd();
@@ -314,7 +327,7 @@ class FrontmatterReader {
 
   private inlineMapping(minIndent: number): boolean {
     const start = this.offset;
-    if (!this.current || /^[[\]{},#?|>]/u.test(this.current)) return false;
+    if (!this.current || /^[[\]{},#|>]/u.test(this.current)) return false;
     if (this.current === '"' || this.current === "'") this.quoted(minIndent);
     else this.plain(false);
     this.skipHorizontal();
@@ -366,13 +379,15 @@ class FrontmatterReader {
     this.endLine();
     this.blankLines();
     if (this.done) return undefined;
-    const indent = this.indent();
+    const indent = this.leadingSpaces();
+    const first = this.offset + indent;
+    if (indent <= parentIndent && this.source[first] === "\t") invalid();
     if (indent === parentIndent && allowIndentlessSequence && this.sequenceAt(indent)) {
       return this.block(indent, depth + 1, false, true);
     }
     if (indent <= parentIndent) return undefined;
     const start = this.offset;
-    this.offset += indent;
+    this.offset = this.horizontalEnd(first);
     if (!this.indicator("-") && !this.inlineMapping(parentIndent + 1)) return this.blockValue(parentIndent, depth);
     this.offset = start;
     return this.block(indent, depth + 1);
@@ -400,12 +415,15 @@ class FrontmatterReader {
         this.offset = Math.min(end + 1, this.source.length);
         breaks++;
       }
-      const indent = this.indent();
-      if (this.done || indent <= parentIndent || this.source[this.offset + indent] === "#") {
+      const indent = this.leadingSpaces();
+      const first = this.offset + indent;
+      const textStart = this.horizontalEnd(first);
+      if (this.done || this.source[textStart] === "#" || indent <= parentIndent) {
+        if (this.source[textStart] !== "#" && this.source[first] === "\t") invalid();
         this.offset = start;
         break;
       }
-      this.offset += indent;
+      this.offset = textStart;
       value += (breaks === 1 ? " " : "\n".repeat(breaks - 1)) + this.plain(false, true);
       comment = this.endLine();
     }
@@ -435,7 +453,9 @@ class FrontmatterReader {
       const first = this.source[this.offset + spaces];
       if (this.offset + spaces < end) {
         if (spaces < (contentIndent ?? parentIndent + 1)) {
-          if (first === "#" || (spaces <= parentIndent && first !== "\t")) break;
+          const textStart = this.horizontalEnd(this.offset + spaces);
+          // A dedented tab-only line terminates the scalar like a comment.
+          if (textStart === end || this.source[textStart] === "#" || (spaces <= parentIndent && first !== "\t")) break;
           invalid();
         }
         contentIndent ??= spaces;
