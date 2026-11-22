@@ -10,6 +10,7 @@ import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { insertOwnedTurn } from "./opening-memory-context-fixture";
+import { closeRace, deferred, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
@@ -189,6 +190,65 @@ describe("saved tutor material provenance", () => {
     await expect(jobs.assertGlobalMemoriesCurrent(scope, [a.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(false);
   });
+
+  it.each(["archive", "remove membership"] as const)("rechecks metadata after a concurrent course change (%s)", async change => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const memories = createOpeningMemoryRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Metadata race", slug: randomUUID() });
+    const material = await source();
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id,
+      assetType: "source", assetId: material, role: "core", visibility: "course", purpose: "teaching" });
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const candidate = await memories.proposeMemory(scope, { courseId: course.id, text: "Course evidence",
+      sourceTurnIds: [origin], expiresAt: null });
+    const memory = await memories.confirm(scope, candidate.id, candidate.version, randomUUID());
+    const conversation = await conversations.create(scope, { title: "Metadata context", courseId: course.id });
+    const saved = await append(conversation.id);
+    const claim = (await jobs.claim(saved.jobId))!;
+    const target = { scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId, claimToken: claim.claimToken };
+    await jobs.completeTurn({ ...target, text: "Saved answer", citations: [], candidates: [], contextSourceRefs: [] },
+      { globalMemoryIds: [memory.id] });
+
+    const writer = openRaceSession();
+    const metadata = openRaceSession();
+    const changed = deferred();
+    const release = deferred();
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([writer.ready, metadata.ready]);
+      const mutation = track(writer.sql.begin(async tx => {
+        if (change === "archive") {
+          await tx`UPDATE courses SET archived_at=now() WHERE id=${course.id} AND workspace_id=${scope.workspaceId}`;
+        } else {
+          await tx`DELETE FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
+            AND course_id=${course.id} AND asset_type='source' AND asset_id=${material}`;
+        }
+        changed.resolve();
+        await release.promise;
+      }));
+      pending.push(mutation);
+      await Promise.race([changed.promise, mutation]);
+      const reader = createOpeningTutorJobsRepository(metadata.sql);
+      const check = track(change === "archive"
+        ? reader.canAppendCompletedTurnCandidates(target)
+        : reader.appendCompletedTurnCandidates({ ...target, candidates: [{ kind: "memory", text: "Candidate", temporary: false }] }));
+      pending.push(check);
+      await waitUntilBlocked(sql, metadata.pid, writer.pid, change,
+        change === "archive" ? /FROM courses/ : /FROM course_asset_memberships/);
+      release.resolve();
+      await mutation;
+      await expect(check).resolves.toBe(false);
+      const savedCandidates = await sql`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${saved.assistantTurnId}`;
+      expect(savedCandidates).toEqual([]);
+    } finally {
+      release.resolve();
+      await Promise.allSettled(pending);
+      await Promise.all([closeRace(writer.sql), closeRace(metadata.sql)]);
+    }
+  }, 15_000);
 
   it("tracks legacy backing below a named memory across metadata, history, and memory context", async () => {
     const { sql, scope } = f;

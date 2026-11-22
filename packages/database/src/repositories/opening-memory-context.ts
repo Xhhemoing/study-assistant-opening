@@ -7,7 +7,7 @@ import {
   type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockOwnedWorkspace, readMemoryOrigins } from "./opening-memory-admission";
+import { lockActiveMemoryCourse, lockMemoryMaterialSources, lockOwnedWorkspace, readMemoryOrigins } from "./opening-memory-admission";
 import { mapMemoryRow } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -22,7 +22,7 @@ export type LoadedMemoryContext = {
 /**
  * Read eligible memories as a batch before resolving their full backing lineage.
  */
-async function readMemoryContext(
+async function readMemoryContextInTx(
   db: Db,
   scope: OpeningScope,
   activeCourseId: string | null,
@@ -34,11 +34,13 @@ async function readMemoryContext(
   ancestorMemoryIds: string[];
 }>> {
   await lockOwnedWorkspace(db, scope);
+  const eligibleCourseId = activeCourseId !== null && await lockActiveMemoryCourse(db, scope, activeCourseId)
+    ? activeCourseId : null;
   const workspace: FragmentFactory = () => db`m.workspace_id`;
   const course: FragmentFactory = () => db`m.course_id`;
   const eligibleForScope: FragmentFactory = () => db`m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
     AND jsonb_array_length(m.source_turn_ids) > 0
-    AND ${memoryCourseAllows(db, course, () => db`${activeCourseId}::uuid`, workspace)}`;
+    AND ${memoryCourseAllows(db, course, () => db`${eligibleCourseId}::uuid`, workspace)}`;
   // Avoid reaching the dependency planner at all when there is no sourced memory.
   const [hasEvidence] = await db`SELECT m.id FROM opening_memories m WHERE ${eligibleForScope()} LIMIT 1`;
   if (!hasEvidence) return [];
@@ -84,9 +86,15 @@ async function readMemoryContext(
     WHERE COALESCE(ancestry.all_active, true)
       AND jsonb_array_length(source_evidence->'turn_ids') = jsonb_array_length(source_turn_ids)
     ORDER BY created_at ASC`;
-  const origins = await readMemoryOrigins(db, scope, rows.flatMap(row => Array.isArray(row.evidence_turn_ids) ? [{
+  const originRows = rows.flatMap(row => Array.isArray(row.evidence_turn_ids) ? [{
     id: String(row.id), excludedId: String(row.id), course_id: row.course_id as string | null, turn_ids: row.evidence_turn_ids as string[],
-  }] : []), { excluded: excludedSourceIds });
+  }] : []);
+  const collectSourceIds = new Set<string>();
+  let origins = await readMemoryOrigins(db, scope, originRows, { excluded: excludedSourceIds, collectSourceIds });
+  if (collectSourceIds.size) {
+    const lockedSourceIds = await lockMemoryMaterialSources(db, scope, collectSourceIds);
+    origins = await readMemoryOrigins(db, scope, originRows, { excluded: excludedSourceIds, lockedSourceIds });
+  }
   return rows.flatMap(row => {
     const origin = origins.get(String(row.id));
     const sourceRefs = parseContextSourceRefs(row.material_source_refs);
@@ -101,6 +109,11 @@ async function readMemoryContext(
     ])].sort();
     return [{ memory: mapMemoryRow(row as Record<string, unknown>), sourceRefs, ancestorTemporaryExpiresAt, ancestorMemoryIds }];
   });
+}
+
+function readMemoryContext(db: Db, scope: OpeningScope, activeCourseId: string | null, excludedSourceIds?: readonly string[]) {
+  const read = (tx: Db) => readMemoryContextInTx(tx, scope, activeCourseId, excludedSourceIds);
+  return "begin" in db && typeof db.begin === "function" ? db.begin(read) : read(db);
 }
 
 export async function listMemoriesForContext(

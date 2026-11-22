@@ -18,6 +18,25 @@ export async function lockOwnedWorkspace(db: Db, scope: OpeningScope): Promise<v
   if (!owners.length) throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
 }
 
+export async function lockActiveMemoryCourse(db: Db, scope: OpeningScope, courseId: string): Promise<boolean> {
+  const rows = await db`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
+    AND archived_at IS NULL ORDER BY id FOR SHARE`;
+  return rows.length > 0;
+}
+
+/** Lock sources before memberships to serialize both first classification and removal. */
+export async function lockMemoryMaterialSources(db: Db, scope: OpeningScope, sourceIds: Set<string>): Promise<string[]> {
+  if (!sourceIds.size) return [];
+  const sources = await db<{ id: string }[]>`SELECT id FROM opening_sources WHERE workspace_id=${scope.workspaceId}
+    AND id=ANY(${[...sourceIds].sort()}::uuid[]) ORDER BY id FOR SHARE`;
+  const lockedIds = sources.map(source => source.id);
+  if (lockedIds.length) {
+    await db`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
+      AND asset_type='source' AND asset_id=ANY(${lockedIds}::uuid[]) ORDER BY asset_id, course_id FOR SHARE`;
+  }
+  return lockedIds;
+}
+
 /** Turn material rows retain version pins and document identity independent of context provenance. */
 export function turnMaterialRows(db: Db): ReturnType<Db> {
   return db`
@@ -51,6 +70,7 @@ export function turnSourceMaterialsActive(
     WHERE s.id IS NULL OR sv.source_id IS NOT NULL OR e.source_id IS NOT NULL
       OR (ref.version_required AND ref.version IS NULL)
       OR (ref.version IS NOT NULL AND ref.version <> s.version::text)
+      ${options?.lockedSourceIds ? db`OR NOT (s.id = ANY(${options.lockedSourceIds}::uuid[]))` : db``}
       ${options ? db`OR s.id = ANY(${options.excluded ?? []}::uuid[]) OR (
         SELECT COALESCE(bool_or(cam.purpose = 'mock_exam'), false)
           OR CASE WHEN ${options.memoryCourse()} IS NULL THEN count(cam.purpose) > 0
@@ -121,7 +141,12 @@ export async function assertSourceTurnsOwned(
 }
 
 type MemoryOrigin = { id: string; course_id: string | null; turn_ids: string[]; excludedId?: string };
-type MemoryMaterialRules = { excluded?: readonly string[]; materialUse?: "citation" | "practice" };
+type MemoryMaterialRules = {
+  excluded?: readonly string[];
+  materialUse?: "citation" | "practice";
+  collectSourceIds?: Set<string>;
+  lockedSourceIds?: readonly string[];
+};
 type OriginBinding = { id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][] };
 
 async function readOriginBindings(
@@ -129,9 +154,13 @@ async function readOriginBindings(
 ): Promise<Map<string, OriginBinding[]>> {
   const byMemory = new Map<string, OriginBinding[]>();
   if (!origins.some(origin => origin.turn_ids.length)) return byMemory;
-  const rows = await db<{ id: string; turn_course_id: string | null; refs: unknown; backings: string[][] }[]>`
+  const rows = await db<{ id: string; turn_course_id: string | null; refs: unknown; backings: string[][]; source_ids?: string[] }[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
       ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`, scope)} AS backings
+      ${rules?.collectSourceIds ? db`, ARRAY(
+        SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
+        FROM (${turnMaterialRows(db)}) material
+      ) AS source_ids` : db``}
     FROM jsonb_to_recordset(${db.json(origins)}::jsonb) m(id uuid, course_id uuid, turn_ids uuid[])
     CROSS JOIN LATERAL unnest(m.turn_ids) ref(turn_id)
     JOIN opening_turns t ON t.id = ref.turn_id AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
@@ -140,6 +169,7 @@ async function readOriginBindings(
     WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && { memoryCourse: () => db`m.course_id`, ...rules })}
       ${rules ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}`;
   for (const row of rows) {
+    for (const id of row.source_ids ?? []) if (id) rules?.collectSourceIds?.add(id);
     const binding = { ...row, ids: row.refs == null ? [] : parseContextMemoryDependencyIds(row.refs) };
     const group = byMemory.get(row.id);
     if (group) group.push(binding);

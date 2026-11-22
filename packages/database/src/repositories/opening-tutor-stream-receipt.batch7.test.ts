@@ -28,7 +28,10 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
   activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; courseOnlyMemorySourceIds?: string[];
   classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string;
-  storedMemoryMaterials?: Array<{ source_id: string; version: string; course_id: string | null; usable: boolean }> };
+  expiredOnFinalCheck?: string;
+  legacyBackingId?: string;
+  storedMemoryMaterials?: Array<{ source_id: string | null; version: string | null; course_id: string | null; usable: boolean;
+    memory_id?: string; legacy_turn_id?: string }> };
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
@@ -69,7 +72,19 @@ function fixture(options: Options = {}) {
       return requested.map(id => ({ id, version: 0 }));
     }
     if (sql.startsWith("SELECT id FROM opening_memories")) {
-      return (options.activeGlobalMemoryIds ?? []).map(id => ({ id }));
+      const requested = values[1] as string[];
+      return (options.activeGlobalMemoryIds ?? []).filter(id => requested.includes(id)
+        && (sql.endsWith("FOR SHARE") || id !== options.expiredOnFinalCheck)).map(id => ({ id }));
+    }
+    if (sql.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+      const requested = values.find(Array.isArray) as string[];
+      return (options.activeGlobalMemoryIds ?? []).filter(id => requested.includes(id))
+        .map(id => ({ id, course_id: null, expires_at: null, source_turn_ids: [] }));
+    }
+    if (sql.startsWith("SELECT m.id, course.id AS turn_course_id")) {
+      const origins = values.find(Array.isArray) as Array<{ id: string }>;
+      return origins.map(origin => ({ id: origin.id, turn_course_id: null, refs: [],
+        backings: [[options.legacyBackingId]] }));
     }
     if (sql.startsWith("SELECT lower(sid.id::text) AS source_id")) {
       return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id, backed_by_global: true }))
@@ -107,9 +122,6 @@ function fixture(options: Options = {}) {
     if (query.startsWith("UPDATE opening_tutor_jobs SET timing_execution_id = NULL")) {
       txEvents.push("outer-clear-execution-fence");
       return [];
-    }
-    if (query.startsWith("SELECT m.id FROM opening_memories m")) {
-      return (options.activeGlobalMemoryIds ?? []).map(id => ({ id }));
     }
     return [];
   }), {
@@ -421,7 +433,8 @@ describe("stream receipt release waits for current job authorization and assista
     expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"))).toBe(true);
     expect(admitted.calls.some(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, [memoryId])).resolves.toBeUndefined();
-    expect(admitted.outerCalls.some(sql => sql.startsWith("SELECT m.id FROM opening_memories m") && sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+    expect(admitted.calls.some(call => call.sql.startsWith("SELECT dep_m.id, dep_m.course_id")
+      && call.sql.includes("dep_m.expires_at > clock_timestamp()"))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, ["not-a-uuid"])).rejects.toMatchObject({ code: "CONFLICT" });
 
     // Missing globalMemoryIds for memoryLineageSourceIds is rejected fail-closed.
@@ -606,6 +619,19 @@ describe("stream receipt release waits for current job authorization and assista
     })).resolves.toBeUndefined();
     const backedCall = f.calls.find(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id"));
     expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id::text = lower(ref.turn_id)");
+  });
+
+  it("checks the legacy backing's expiry in the final gate before starting the provider", async () => {
+    const parent = "12000000-0000-4000-8000-0000000000ac";
+    const backing = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ activeGlobalMemoryIds: [parent, backing], legacyBackingId: backing, expiredOnFinalCheck: backing,
+      storedMemoryMaterials: [{ source_id: null, version: null, course_id: null, usable: true,
+        memory_id: parent, legacy_turn_id: user }] });
+    const startProvider = vi.fn(async () => "provider reply");
+    await expect(f.repo.authorizeSend(scope, jobId, { ...context, globalMemoryIds: [parent] }, startProvider))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.at(-1)?.values[1]).toEqual([parent, backing]);
+    expect(startProvider).not.toHaveBeenCalled();
   });
 
   it("locks the saved anchor course before the source-less memory fence", async () => {
