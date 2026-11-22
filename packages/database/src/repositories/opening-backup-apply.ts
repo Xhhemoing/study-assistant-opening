@@ -75,6 +75,7 @@ export type OpeningRestoreApplyGuarantees = {
 export type OpeningRestoreExecuteArgs = {
   confirmLocalRestore: true;
   backup: unknown;
+  currentPrivacyEpoch?: number;
   currentDeletionJournal?: readonly OpeningDeletionMark[];
   currentMemoryDeletions?: OpeningMemoryDeletions;
   availableCourseIds?: readonly string[];
@@ -447,6 +448,7 @@ async function assertOpeningRestoreTarget(tx: TransactionSql, backup: OpeningBac
   const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, owner);
   const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
     confirmLocalRestore: true,
+    currentPrivacyEpoch: facts.currentPrivacyEpoch,
     availableCourseIds: facts.availableCourseIds,
     currentMemoryDeletions: facts.currentMemoryDeletions,
     currentLearningState: facts.currentLearningState,
@@ -502,6 +504,7 @@ export async function executeOpeningRestoreApply(
   } };
   const planned = planOpeningRestoreApply(backup, journal, {
     confirmLocalRestore: true,
+    currentPrivacyEpoch: args.currentPrivacyEpoch,
     availableCourseIds: args.availableCourseIds,
     currentLearningState: args.currentLearningState,
     currentMemoryDeletions: args.currentMemoryDeletions,
@@ -592,12 +595,12 @@ export async function executeOpeningRestoreApply(
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
       const [lockedWorkspace] = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
       if (!lockedWorkspace) throw new Error("restore workspace owner changed");
+      const privacyEpoch = Number(lockedWorkspace.privacy_epoch);
+      if (privacyEpoch !== backup.privacyEpoch) {
+        throw Object.assign(new Error("backup privacy epoch differs from restore workspace"), { restoreCode: "PREFLIGHT_REJECTED" });
+      }
       // Drift can commit while we wait for either lock, so only this read authorizes apply.
       await assertOpeningRestoreTarget(tx, backup, owner, seeded.length > 0);
-      const privacyEpoch = Number(lockedWorkspace.privacy_epoch);
-      if (misconceptionRevisions.length && privacyEpoch !== backup.privacyEpoch) {
-        throw Object.assign(new Error("misconception history backup privacy epoch differs from restore workspace"), { restoreCode: "PREFLIGHT_REJECTED" });
-      }
 
       for (const [row, imported] of importedVersions) {
         // Archive contents cannot authenticate a reviewer, even if the UUID still
@@ -676,10 +679,15 @@ export async function executeOpeningRestoreApply(
       if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
       if (!history) await tx`DELETE FROM opening_workspace_history_revisions
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
-      if (misconceptionRevisions.length) {
-        const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
-        await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock!.at);
-      }
+      // Separate the restore cutoff from pre-restore receipts even when both clocks report the same millisecond.
+      await tx`SELECT pg_sleep(0.005)`;
+      // The receipt issuer uses Date.now(), which can report an earlier millisecond than PostgreSQL.
+      const receiptClockMs = Date.now();
+      const [clock] = await tx<{ at: string; restoredAt: string }[]>`
+        WITH tick AS MATERIALIZED (SELECT clock_timestamp() AS at)
+        SELECT at::text, LEAST(date_trunc('milliseconds', at),
+          to_timestamp(${receiptClockMs}::double precision / 1000))::text AS "restoredAt" FROM tick`;
+      await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock!.at, clock!.restoredAt);
 
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;

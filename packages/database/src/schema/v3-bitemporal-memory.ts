@@ -48,6 +48,7 @@ export const v3LearnerContextBlocks = pgTable("v3_learner_context_blocks", {
   invalidated: boolean("invalidated").notNull().default(false),
   privacyEpoch: integer("privacy_epoch").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  restoredAt: timestamp("restored_at", { withTimezone: true }),
 }, t => [
   foreignKey({ name: "v3_learner_context_workspace_owner", columns: [t.workspaceId, t.ownerUserId],
     foreignColumns: [workspaces.id, workspaces.ownerUserId] }).onDelete("cascade"),

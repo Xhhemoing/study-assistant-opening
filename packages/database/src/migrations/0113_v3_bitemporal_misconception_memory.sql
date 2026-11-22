@@ -110,6 +110,7 @@ CREATE TABLE v3_learner_context_blocks (
   invalidated boolean NOT NULL DEFAULT false,
   privacy_epoch integer NOT NULL CHECK (privacy_epoch >= 0),
   updated_at timestamptz NOT NULL,
+  restored_at timestamptz,
   CONSTRAINT v3_learner_context_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
     REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
   PRIMARY KEY (workspace_id, owner_user_id)

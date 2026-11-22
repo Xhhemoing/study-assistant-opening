@@ -12,6 +12,7 @@ type Revision = { edgeId: string; revisionId: string; txAt: string };
 type TryMisconceptionClaim = Pick<Edge, "conceptKey" | "misconceptionCode" | "summary"> & {
   receiptId: string;
   payloadSha256: string;
+  issuedAt: number;
   expiresAt: number;
 };
 type LearnerCorrection = {
@@ -82,14 +83,18 @@ async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string)
 }
 
 /** Call after the final revision mutation, with the workspace lock still held. */
-export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
+export async function refreshLearnerMisconceptionContextBlock(
+  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoredAt?: string,
+): Promise<ContextBlock> {
   await lockMisconceptionContext(tx, scope.workspaceId);
   await tx`SET CONSTRAINTS v3_invalidate_misconception_context IMMEDIATE`;
   await tx`SET CONSTRAINTS v3_invalidate_misconception_context DEFERRED`;
-  return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
+  return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at, restoredAt);
 }
 
-async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
+async function writeLearnerMisconceptionContextBlock(
+  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoredAt: string | null = null,
+): Promise<ContextBlock> {
   // Exclude ASCII blanks and controls in SQL. The renderer handles Unicode whitespace across pages.
   const blankSummary = "^[ \u0001-\u001f\u007f-\u009f]*$";
   const pages = tx<ContextItem[]>`
@@ -109,11 +114,13 @@ async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: 
   const { renderedMarkdown, byteLength } = rendered;
   const [block] = await tx<ContextBlock[]>`
     INSERT INTO v3_learner_context_blocks
-      (workspace_id, owner_user_id, rendered_markdown, byte_length, revision, privacy_epoch, updated_at)
-    VALUES (${scope.workspaceId}, ${scope.ownerUserId}, ${renderedMarkdown}, ${byteLength}, 1, ${privacyEpoch}, ${at}::text::timestamptz)
+      (workspace_id, owner_user_id, rendered_markdown, byte_length, revision, privacy_epoch, updated_at, restored_at)
+    VALUES (${scope.workspaceId}, ${scope.ownerUserId}, ${renderedMarkdown}, ${byteLength}, 1, ${privacyEpoch},
+      ${at}::text::timestamptz, ${restoredAt}::text::timestamptz)
     ON CONFLICT (workspace_id, owner_user_id) DO UPDATE
     SET rendered_markdown = EXCLUDED.rendered_markdown, byte_length = EXCLUDED.byte_length, invalidated = false,
-      revision = v3_learner_context_blocks.revision + 1, privacy_epoch = EXCLUDED.privacy_epoch, updated_at = EXCLUDED.updated_at
+      revision = v3_learner_context_blocks.revision + 1, privacy_epoch = EXCLUDED.privacy_epoch, updated_at = EXCLUDED.updated_at,
+      restored_at = GREATEST(EXCLUDED.restored_at, v3_learner_context_blocks.restored_at)
     RETURNING rendered_markdown AS "renderedMarkdown", byte_length AS "byteLength", revision`;
   return block!;
 }
@@ -161,9 +168,11 @@ export async function queryMisconceptionEdgesAsOf(
       e.edge_id AS "edgeId", e.course_id AS "courseId", e.concept_key AS "conceptKey", e.misconception_code AS "misconceptionCode",
       e.summary, e.status, e.origin, e.learner_disposition AS "learnerDisposition", e.evidence_attempt_ids AS "evidenceAttemptIds",
       e.privacy_epoch AS "privacyEpoch", e.valid_range::text AS "validRange", e.tx_range::text AS "txRange",
-      e.prior_revision_id AS "priorRevisionId"
+      CASE WHEN p.privacy_epoch = w.privacy_epoch THEN p.revision_id ELSE NULL END AS "priorRevisionId"
     FROM v3_bitemporal_misconception_edges e
     JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
+    LEFT JOIN v3_bitemporal_misconception_edges p ON p.workspace_id = e.workspace_id AND p.owner_user_id = e.owner_user_id
+      AND p.edge_id = e.edge_id AND p.revision_id = e.prior_revision_id
     WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
       AND e.valid_range @> ${validAt instanceof Date ? validAt.toISOString() : validAt}::text::timestamptz
       AND e.tx_range @> ${txAt instanceof Date ? txAt.toISOString() : txAt}::text::timestamptz
@@ -270,6 +279,12 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
     }
     const at = clock!.at;
     if (!root) {
+      // Restore and redemption serialize on the workspace lock. Read the cutoff without locking the cache row.
+      const [cutoff] = await tx<{ blocked: boolean }[]>`
+        SELECT true AS blocked FROM v3_learner_context_blocks
+        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+          AND to_timestamp(${claim.issuedAt}::double precision / 1000) < restored_at`;
+      if (cutoff?.blocked) throw learningError("CONFLICT", "体验记录已被使用。");
       const [inserted] = await tx`
         INSERT INTO v3_bitemporal_misconception_edges
           (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin,

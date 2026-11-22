@@ -12,7 +12,7 @@ it("issues a bounded signed receipt with only the server's candidate signal", ()
   const now = Date.UTC(2026, 10, 21);
   const token = issueTryMisconceptionReceipt(selection, secret, now);
   const claim = verifyTryMisconceptionReceipt(token!, secret);
-  expect(claim).toMatchObject({ conceptKey: "limit", expiresAt: now + 900_000 });
+  expect(claim).toMatchObject({ conceptKey: "limit", issuedAt: now, expiresAt: now + 900_000 });
   expect(claim.payloadSha256).toMatch(/^[a-f0-9]{64}$/);
   const encoded = token!.split(".")[0]!;
   expect(Object.keys(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))).sort()).toEqual([

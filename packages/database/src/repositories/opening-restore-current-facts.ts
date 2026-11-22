@@ -3,6 +3,7 @@ import type { OpeningDeletionMark, OpeningRestoreLearningState } from "@aistudy/
 import { readOpeningMemoryDeletions, type OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 
 export type OpeningRestoreCurrentFacts = {
+  currentPrivacyEpoch: number;
   currentDeletionJournal: readonly OpeningDeletionMark[];
   currentMemoryDeletions: OpeningMemoryDeletions;
   currentLearningState: OpeningRestoreLearningState;
@@ -22,7 +23,7 @@ export function openingRestoreWorkspaceId(backup: unknown): string {
 export async function readOpeningRestoreCurrentFacts(
   tx: TransactionSql, workspaceId: string, ownerUserId: string,
 ): Promise<OpeningRestoreCurrentFacts> {
-  const [owner] = await tx`SELECT id FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${ownerUserId}`;
+  const [owner] = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${ownerUserId}`;
   if (!owner) throw new Error("restore workspace owner is missing or changed");
   const marks = await tx`SELECT e.source_id, e.deleted_at, e.asset_deleted_at FROM opening_privacy_exclusions e
     WHERE e.workspace_id=${workspaceId} AND e.source_id IS NOT NULL
@@ -47,6 +48,7 @@ export async function readOpeningRestoreCurrentFacts(
     to_char(automatic_reminders_enabled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS automatic_reminders_enabled_at
     FROM courses WHERE workspace_id=${workspaceId} ORDER BY id`;
   return {
+    currentPrivacyEpoch: Number(owner.privacy_epoch),
     currentDeletionJournal, currentMemoryDeletions,
     currentLearningState: { workspacePreferences: preferences ?? null, courses: [...courses] },
     availableCourseIds: courses.map(row => String(row.id)),

@@ -14,7 +14,7 @@ it("exports durable tables and version metadata with owner isolation and no obje
   const own = await seedBackupGraph(fixture.sql, fixture.scope);
   const other = await seedBackupGraph(fixture.sql, fixture.otherScope);
   const createEdge = (scope: OpeningScope) => redeemTryMisconceptionHandoff(fixture.sql, scope, {
-    receiptId: randomUUID(), payloadSha256: "a".repeat(64), expiresAt: Date.now() + 60_000,
+    receiptId: randomUUID(), payloadSha256: "a".repeat(64), issuedAt: Date.now(), expiresAt: Date.now() + 60_000,
     conceptKey: "limits", misconceptionCode: "preconditions", summary: "Review when the rule applies",
   });
   const ownEdge = await createEdge(fixture.scope);

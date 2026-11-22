@@ -527,7 +527,9 @@ it("omits revoked misconception lineages from backup while retaining current his
   const old = await seedEdge({ summary: "Revoked diagnosis" });
   await closeRevision(sql, old.revisionId);
   await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
-  await seedEdge({ edgeId: old.edgeId, priorRevisionId: old.revisionId, privacyEpoch: 1 });
+  const successor = await seedEdge({ edgeId: old.edgeId, priorRevisionId: old.revisionId, privacyEpoch: 1 });
+  await expect(queryMisconceptionEdgesAsOf(sql, scope, { validAt, txAt: successor.txAt }))
+    .resolves.toMatchObject([{ revisionId: successor.revisionId, priorRevisionId: null }]);
   const current = await seedEdge({ privacyEpoch: 1 });
   const backup = await readOpeningBackupRecords(sql, scope);
   expect(backup.privacyEpoch).toBe(1);
@@ -714,6 +716,41 @@ it("rejects a course change on the same edge at the database and restore boundar
   }
   await sql`DELETE FROM courses WHERE id=${course}`;
   expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${root.edgeId}`).toEqual([]);
+});
+
+it("rejects receipts whose revoked roots were omitted by restore and accepts fresh receipts", async () => {
+  const { sql, scope } = f;
+  const receipt = issueTryMisconceptionReceipt(selection, secret);
+  if (!receipt) throw new Error("Expected a receipt for the fixture selection");
+  expect((await redeem(tryRequest("POST", { receipt }))).status).toBe(201);
+  await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
+  const archive = await exportMisconceptionArchive();
+  expect(archive.tables.v3_bitemporal_misconception_edges).toEqual([]);
+  await recreateEmptyWorkspace();
+  await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
+  const restored = await restoreMisconceptionArchive(archive);
+  const fresh = issueTryMisconceptionReceipt(selection, secret);
+  if (!fresh) throw new Error("Expected a fresh receipt for the fixture selection");
+  expect(restored).toMatchObject({ ok: true });
+
+  const replay = await redeem(tryRequest("POST", { receipt }));
+  expect(replay.status).toBe(409);
+  expect(await replay.json()).toMatchObject({ error: { code: "CONFLICT" } });
+  const revisions = () => sql`SELECT revision_id, privacy_epoch FROM v3_bitemporal_misconception_edges WHERE workspace_id=${scope.workspaceId}`;
+  const claims = () => sql`SELECT initial_revision_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`;
+  const cutoff = () => sql`SELECT restored_at::text FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
+  expect(await revisions()).toEqual([]);
+  expect(await claims()).toEqual([]);
+  const restoredAt = await cutoff();
+  expect(restoredAt).toEqual([{ restored_at: expect.any(String) }]);
+
+  const firstUse = await redeem(tryRequest("POST", { receipt: fresh }));
+  expect(firstUse.status).toBe(201);
+  const result = await firstUse.json();
+  expect(result).toMatchObject({ replayed: false });
+  expect(await revisions()).toEqual([{ revision_id: result.revisionId, privacy_epoch: 1 }]);
+  expect(await claims()).toEqual([{ initial_revision_id: result.revisionId }]);
+  expect(await cutoff()).toEqual(restoredAt);
 });
 
 it.each(["ledger", "restored root"])("rejects signed receipt replay from the %s after a privacy epoch advance", async path => {

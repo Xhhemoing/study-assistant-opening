@@ -81,8 +81,9 @@ export function verifyTryMisconceptionReceipt(receipt: string, secret = process.
   }
   const result = receiptPayloadSchema.safeParse(parsed);
   if (!result.success) throw invalid();
-  const { receiptId, expiresAt, conceptKey, misconceptionCode, summary } = result.data;
-  return { receiptId, expiresAt, conceptKey, misconceptionCode, summary, payloadSha256: createHash("sha256").update(bytes).digest("hex") };
+  const { receiptId, issuedAt, expiresAt, conceptKey, misconceptionCode, summary } = result.data;
+  return { receiptId, issuedAt, expiresAt, conceptKey, misconceptionCode, summary,
+    payloadSha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
 export function redeemSignedTryMisconceptionReceipt(sql: Sql, scope: OpeningScope, receipt: string) {
