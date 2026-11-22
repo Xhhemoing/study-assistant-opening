@@ -1516,6 +1516,44 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
+    ["a heading foster-parented outside a styled table", '<table style="--mode:none">', "sw", true],
+    ["a heading foster-parented outside a styled table row", '<table><tbody><tr style="--mode:none">', "sw", true],
+    ["a foster parent inheriting the table's enclosing style", '<div style="--mode:none"><table style="--mode:inline">', "x", true],
+    ["the CSS scope of an actual table cell", '<table style="--mode:none"><tr><td>', "sw", false],
+    ["the CSS scope of an actual table caption", '<table style="--mode:none"><caption>', "x", true],
+    ["a stray styled table cell", '<td style="--mode:none">', "sw", true],
+    ["an out-of-scope division end inside a table", '<div style="--mode:none"><table></div>', "x", true],
+    ["a form immediately popped inside a table", '<table><form style="--mode:none">', "sw", true],
+    ["formatting reconstructed after an explicit heading end", '<h2><b style="--mode:none">First</h2>', "x", true],
+    ["formatting reconstructed after an explicit division end", '<div><b style="--mode:none">First</div>', "x", true],
+    ["a matching formatting end after an explicit heading end", '<h2><b style="--mode:none">First</h2></b>', "x", false],
+    ["a styled division staying open across a formatting end", '<div><b style="--mode:inline"><div style="--mode:none"></b>', "x", true],
+    ["a styled inline ancestor dropped when a block is reparented", '<div><b><span style="--mode:none"><div></b>', "sw", true],
+    ["formatting rebuilt against a new insertion parent", '<h2 style="--mode:none"><b>First</h2>', "sw", true],
+    ["formatting cleared when its table cell closes", '<table><tr><td><b style="--mode:none">First</td></tr></table>', "sw", true],
+    ["foster-parented formatting surviving the table end", '<table><b style="--mode:none">First</table>', "x", true],
+    ["a section stopping implied list-item closure", '<ul><li style="--mode:none"><section><li>', "x", true],
+    ["a section stopping implied definition closure", '<dl><dt style="--mode:none"><section><dd>', "x", true],
+    ["an SVG integration point stopping implied list-item closure", '<ul><li style="--mode:none"><svg><foreignObject><li>', "x", true],
+    ["a MathML integration point stopping implied list-item closure", '<ul><li style="--mode:none"><math><mtext><li>', "x", true],
+    ["a formatting end outside its SVG integration-point scope", '<div style="--mode:none"><b style="--mode:inline"><svg><foreignObject><div></b>', "sw", true],
+    ["a Markdown heading breaking out of an unclosed SVG element", '<div style="--mode:inline"><svg style="--mode:none"><g>', "sw", true],
+    ["a Markdown heading breaking out of an unclosed MathML element", '<div style="--mode:none"><math style="--mode:inline"><mrow>', "x", true],
+    ["a div allowing implied list-item closure", '<ul><li style="--mode:none"><div><li>', "x", false],
+    ["a paragraph allowing implied definition closure", '<dl><dd style="--mode:none"><p><dt>', "x", false],
+  ] as const)("uses the parsed HTML scope for %s", (_name, prefix, middle, sealed) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const suffix = middle === "sw" ? "er" : "swer";
+    const text = `${prefix}\n\n## An<span style="display:var(--mode)">${middle}</span>${suffix}\n\nforty-two`;
+    const cues = text.split("\n").map((line, index) => ({
+      text: line, startMs: index * 1000, endMs: (index + 1) * 1000,
+    }));
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, sealed ? ["forty-two"] : [], sealed ? undefined : "forty-two");
+    }
+  });
+
+  it.each([
     ["a nested nonimage reference", "An[s[w][inner]][outer]er", "[inner]: /inner\n[outer]: /outer"],
     ["an undefined reference", "An[sw][lesson]er", ""],
     ["a definition in a fenced code block", "An[sw][lesson]er", "~~~\n[lesson]: /lesson\n~~~"],

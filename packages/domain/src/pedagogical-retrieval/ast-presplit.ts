@@ -1850,26 +1850,33 @@ const HTML_ELEMENT_SCOPE_RE = new RegExp("^(?:" + HTML_SCOPE_TAGS + ")$");
 const HTML_BUTTON_SCOPE_RE = new RegExp("^(?:button|" + HTML_SCOPE_TAGS + ")$");
 const HTML_FORMATTING_SCOPE_RE = /^(?:applet|caption|marquee|object|td|th|template|#markdown-td)$/;
 const HTML_NESTED_TABLE_SCOPE_RE = /^(?:caption|html|td|th|template|#markdown-td)$/;
+const HTML_TABLE_SCOPE_RE = /^(?:html|template)$/;
+const HTML_TABLE_ELEMENT_BOUNDARY_RE = /^(?:html|table|template)$/;
+const HTML_TABLE_INSERTION_RE = /^(?:table|thead|tbody|tfoot|tr)$/;
+const HTML_TABLE_STRUCTURE_RE = /^(?:caption|colgroup|col|thead|tbody|tfoot|tr|td|th)$/;
+const HTML_TABLE_SECTION_RE = /^(?:thead|tbody|tfoot)$/;
 const HTML_HEADING_SCOPE_RE = /^(?:h[1-6]|#markdown-heading)$/;
 const HTML_FORMATTING_TAG_RE = /^(?:a|b|big|code|em|font|i|nobr|s|small|strike|strong|tt|u)$/;
 const MARKDOWN_PARAGRAPH_OR_CELL_RE = /^#markdown-(?:p|td)$/;
+const HTML_SPECIAL_TAG_RE =
+  /^(?:address|applet|area|article|aside|base|basefont|bgsound|blockquote|body|br|button|caption|center|col|colgroup|dd|details|dir|div|dl|dt|embed|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|iframe|img|input|li|link|listing|main|marquee|menu|meta|nav|noembed|noframes|noscript|object|ol|p|param|plaintext|pre|script|search|section|select|source|style|summary|table|tbody|td|template|textarea|tfoot|th|thead|title|tr|track|ul|wbr|xmp|#markdown-heading|#markdown-p|#markdown-td)$/;
+const HTML_LIST_ITEM_SCOPE_RE = new RegExp("^(?:ol|ul|" + HTML_SCOPE_TAGS + ")$");
+const HTML_NON_RECONSTRUCTING_START_RE =
+  /^(?:base|basefont|bgsound|body|center|dir|form|frame|frameset|head|html|iframe|link|listing|meta|noembed|noframes|noscript|param|plaintext|rb|rp|rt|rtc|script|source|style|template|textarea|title|track)$/;
+
+function isSpecialHtmlElement({ tag, namespace }: { tag: string; namespace?: HtmlNamespace }): boolean {
+  if (namespace === "svg") return /^(?:desc|foreignobject|title)$/.test(tag);
+  if (namespace === "math") return /^(?:annotation-xml|mi|mn|mo|ms|mtext)$/.test(tag);
+  return HTML_SPECIAL_TAG_RE.test(tag);
+}
 
 // Search back to the matching parsing scope even if inline elements are still open.
 const HTML_IMPLIED_SIBLING_ENDS: ReadonlyArray<readonly [RegExp, RegExp, RegExp]> = [
-  [/^li$/, /^li$/, /^(?:ul|ol|menu|table|template)$/],
-  [/^(?:dd|dt)$/, /^(?:dd|dt)$/, /^(?:dl|table|template)$/],
   [/^option$/, /^option$/, /^(?:optgroup|select|datalist|template)$/],
   [/^optgroup$/, /^(?:option|optgroup)$/, /^(?:select|datalist|template)$/],
-  [/^(?:td|th)$/, /^(?:td|th|caption|colgroup)$/, /^(?:tr|table|template)$/],
-  [/^tr$/, /^(?:tr|td|th|caption|colgroup)$/, /^(?:thead|tbody|tfoot|table|template)$/],
-  [/^col$/, /^(?:caption|thead|tbody|tfoot|tr|td|th)$/, /^(?:colgroup|table|template)$/],
-  [/^(?:thead|tbody|tfoot|colgroup|caption)$/,
-    /^(?:caption|colgroup|thead|tbody|tfoot|tr|td|th)$/, /^(?:table|template)$/],
   [/^(?:rt|rp)$/, /^(?:rb|rt|rp)$/, /^(?:rtc|ruby|template)$/],
   [/^(?:rb|rtc)$/, /^(?:rb|rt|rp|rtc)$/, /^(?:ruby|template)$/],
   [/^button$/, /^button$/, HTML_ELEMENT_SCOPE_RE],
-  [/^a$/, /^a$/, HTML_FORMATTING_SCOPE_RE],
-  [/^nobr$/, /^nobr$/, HTML_ELEMENT_SCOPE_RE],
 ];
 
 function createHtmlCustomPropertiesLookup(
@@ -1881,83 +1888,217 @@ function createHtmlCustomPropertiesLookup(
   type OpenStyledTag = OpenHtmlTag & {
     customProps: CssCustomProperties;
     containerDepth: number;
-    formattingStyle?: string;
+    namespace?: HtmlNamespace;
+    style?: string;
+    formattingMarker?: number;
+    stackIndex: number;
   };
   const stack: OpenStyledTag[] = [];
+  const activeFormatting: (OpenStyledTag | null)[] = [];
   const positions = [0];
   const scopes = [inheritedProps];
   let lineIndex = 0;
   let containerDepth = 0;
   let generatedHeading = false;
+  let cursor = 0;
   const getProps = () => stack.at(-1)?.customProps ?? inheritedProps;
-  const closeTag = (tag: string) => {
-    const index = lastOpenHtmlTagIndex(stack, tag);
-    if (index >= 0) stack.length = index;
+  const inTableInsertionContext = (entry = stack.at(-1)) =>
+    !entry?.namespace && HTML_TABLE_INSERTION_RE.test(entry?.tag ?? "");
+  const insertionProps = (parentIndex = stack.length - 1) => {
+    const parent = stack[parentIndex];
+    if (parent && inTableInsertionContext(parent)) {
+      // Foster parenting inserts before the nearest table, in the table's parent.
+      for (let index = parentIndex; index >= 0; index--) {
+        const entry = stack[index]!;
+        if (entry.namespace) continue;
+        if (entry.tag === "template") return entry.customProps;
+        if (entry.tag === "table") return stack[index - 1]?.customProps ?? inheritedProps;
+      }
+    }
+    return parent?.customProps ?? inheritedProps;
+  };
+  const pushTag = (element: OpenHtmlTag & Pick<OpenStyledTag, "customProps" | "namespace" | "style">) => {
+    const entry: OpenStyledTag = { ...element, containerDepth, stackIndex: stack.length };
+    if (!entry.namespace && HTML_FORMATTING_SCOPE_RE.test(entry.tag)) {
+      entry.formattingMarker = activeFormatting.length;
+      activeFormatting.push(null);
+    }
+    stack.push(entry);
+    return entry;
+  };
+  const popTo = (length: number) => {
+    while (stack.length > length) {
+      const { formattingMarker } = stack.pop()!;
+      if (formattingMarker !== undefined) activeFormatting.length = formattingMarker;
+    }
+  };
+  const leaveForeignContent = () => {
+    while (stack.at(-1)?.childrenNamespace) popTo(stack.length - 1);
+  };
+  const isScopeBoundary = (entry: OpenStyledTag, boundary: RegExp) => {
+    if (!entry.namespace) return boundary.test(entry.tag);
+    return (boundary === HTML_ELEMENT_SCOPE_RE || boundary === HTML_BUTTON_SCOPE_RE ||
+      boundary === HTML_LIST_ITEM_SCOPE_RE) && isSpecialHtmlElement(entry);
   };
   const findInScope = (tags: RegExp, boundary?: RegExp, outermost = false) => {
     let found = -1;
     for (let index = stack.length - 1; index >= 0; index--) {
-      const tag = stack[index]!.tag;
-      if (boundary?.test(tag)) break;
-      if (tags.test(tag)) {
+      const entry = stack[index]!;
+      if (boundary && isScopeBoundary(entry, boundary)) break;
+      if (!entry.namespace && tags.test(entry.tag)) {
         found = index;
         if (!outermost) break;
       }
     }
     return found;
   };
+  const isInScope = (index: number, boundary: RegExp) => {
+    for (let above = stack.length - 1; above > index; above--) {
+      if (isScopeBoundary(stack[above]!, boundary)) return false;
+    }
+    return true;
+  };
+  const closeListItem = (tag: string) => {
+    const siblings = tag === "li" ? /^li$/ : /^(?:dd|dt)$/;
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const entry = stack[index]!;
+      if (!entry.namespace && siblings.test(entry.tag)) {
+        popTo(index);
+        return;
+      }
+      if (isSpecialHtmlElement(entry) && !/^(?:address|div|p|#markdown-p)$/.test(entry.tag)) return;
+    }
+  };
   const closeRawParagraph = () => {
     const index = findInScope(/^p$/, HTML_BUTTON_SCOPE_RE);
-    if (index >= 0) stack.length = index;
+    if (index >= 0) popTo(index);
   };
   const closeCurrentHeading = () => {
-    if (HTML_HEADING_SCOPE_RE.test(stack.at(-1)?.tag ?? "")) stack.pop();
+    if (HTML_HEADING_SCOPE_RE.test(stack.at(-1)?.tag ?? "")) popTo(stack.length - 1);
   };
   const closeTableForNewTable = () => {
     const index = findInScope(/^table$/, HTML_NESTED_TABLE_SCOPE_RE);
-    if (index >= 0) stack.length = index;
+    if (index >= 0) popTo(index);
   };
-  const reconstructFormatting = (closed: readonly OpenStyledTag[]) => {
-    for (const entry of closed) {
-      if (entry.formattingStyle === undefined) continue;
-      const { customProps } = resolveElementStyle(entry.formattingStyle, undefined, getProps());
-      stack.push({ ...entry, customProps });
+  const isOnStack = (entry: OpenStyledTag) => stack[entry.stackIndex] === entry;
+  const reconstructFormatting = () => {
+    let index = activeFormatting.length;
+    while (index > 0) {
+      const entry = activeFormatting[index - 1]!;
+      if (entry === null || isOnStack(entry)) break;
+      index--;
+    }
+    for (; index < activeFormatting.length; index++) {
+      const entry = activeFormatting[index]!;
+      const { customProps } = resolveElementStyle(entry.style, undefined, insertionProps());
+      activeFormatting[index] = pushTag({ tag: entry.tag, customProps, childrenNamespace: undefined, style: entry.style });
     }
   };
-  const closeGeneratedInline = (index = findInScope(MARKDOWN_PARAGRAPH_OR_CELL_RE)) => {
-    if (index < 0) return;
-    const closed = stack.splice(index);
-    // Separating whitespace reconstructs active formatting after a heading or paragraph.
-    if (closed[0]!.tag !== "#markdown-td") reconstructFormatting(closed.slice(1));
+  const activeFormattingIndex = (tag: string) => {
+    for (let index = activeFormatting.length - 1; index >= 0; index--) {
+      const entry = activeFormatting[index]!;
+      if (entry === null) break;
+      if (entry.tag === tag) return index;
+    }
+    return -1;
   };
-  const closeOptionalSibling = (tag: string) => {
-    const rule = HTML_IMPLIED_SIBLING_ENDS.find(([open]) => open.test(tag));
-    if (!rule) return;
-    const [, siblings, scope] = rule;
-    const index = findInScope(siblings, scope, true);
-    if (index < 0) return;
-    const closed = stack.splice(index);
-    if (/^(?:li|dt|dd)$/.test(tag)) return closed.slice(1);
-    if (/^(?:a|nobr|button)$/.test(tag)) reconstructFormatting(closed.slice(1));
+  const closeFormatting = (tag: string) => {
+    // Adoption agency steps affecting the open stack and inherited styles.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const activeIndex = activeFormattingIndex(tag);
+      if (activeIndex < 0) return;
+      const entry = activeFormatting[activeIndex]!;
+      const index = entry.stackIndex;
+      if (!isOnStack(entry)) {
+        activeFormatting.splice(activeIndex, 1);
+        return;
+      }
+      if (!isInScope(index, HTML_ELEMENT_SCOPE_RE)) return;
+      let block = index + 1;
+      while (block < stack.length && !isSpecialHtmlElement(stack[block]!)) block++;
+      if (block === stack.length) {
+        activeFormatting.splice(activeIndex, 1);
+        popTo(index);
+        return;
+      }
+
+      // Reparent the first special element. The three nearest active formatting
+      // ancestors may be retained as wrappers, with their original declarations.
+      const wrappers = stack.slice(Math.max(index + 1, block - 3), block)
+        .filter(candidate => activeFormatting.includes(candidate));
+      const bookmark = wrappers.at(-1);
+      for (let active = activeFormatting.length - 1; active >= 0; active--) {
+        const candidate = activeFormatting[active]!;
+        if (candidate === null) break;
+        if (isOnStack(candidate) && candidate.stackIndex > index && candidate.stackIndex < block - 3) {
+          activeFormatting.splice(active, 1);
+        }
+      }
+      const replacement = { ...entry };
+      const entryIndex = activeFormatting.indexOf(entry);
+      if (bookmark) {
+        activeFormatting.splice(entryIndex, 1);
+        activeFormatting.splice(activeFormatting.indexOf(bookmark) + 1, 0, replacement);
+      } else activeFormatting[entryIndex] = replacement;
+      stack.splice(index, block - index, ...wrappers);
+      stack.splice(index + wrappers.length + 1, 0, replacement);
+      for (let changed = index; changed < stack.length; changed++) {
+        const candidate = stack[changed]!;
+        candidate.stackIndex = changed;
+        candidate.customProps = resolveElementStyle(candidate.style, undefined, insertionProps(changed - 1)).customProps;
+      }
+    }
   };
-  const recordScope = (offset: number) => {
-    const active = getProps();
+  const prepareTableStructure = (tag: string) => {
+    const table = findInScope(/^table$/, HTML_TABLE_SCOPE_RE);
+    // Table-only start tags in the body do not create an inheritance scope.
+    if (table < 0) return false;
+    if (tag === "col") {
+      const group = findInScope(/^colgroup$/, HTML_TABLE_ELEMENT_BOUNDARY_RE);
+      popTo((group < 0 ? table : group) + 1);
+      if (group < 0) pushTag({ tag: "colgroup", customProps: getProps(), childrenNamespace: undefined });
+    } else if (tag === "tr" || tag === "td" || tag === "th") {
+      const row = tag === "tr" ? -1 : findInScope(/^tr$/, HTML_TABLE_ELEMENT_BOUNDARY_RE);
+      if (row >= 0) popTo(row + 1);
+      else {
+        const section = findInScope(HTML_TABLE_SECTION_RE, HTML_TABLE_ELEMENT_BOUNDARY_RE);
+        popTo((section < 0 ? table : section) + 1);
+        if (section < 0) pushTag({ tag: "tbody", customProps: getProps(), childrenNamespace: undefined });
+        if (tag !== "tr") pushTag({ tag: "tr", customProps: getProps(), childrenNamespace: undefined });
+      }
+    } else popTo(table + 1);
+    return true;
+  };
+  const recordScope = (offset: number, active = getProps()) => {
     if (active !== scopes.at(-1)) {
       positions.push(offset);
       scopes.push(active);
     }
   };
+  const readText = (end: number) => {
+    if (end <= cursor) return;
+    if (stack.at(-1)?.tag === "colgroup" && /[^\t\n\f\r ]/.test(html.slice(cursor, end))) popTo(stack.length - 1);
+    if (!stack.at(-1)?.childrenNamespace && activeFormatting.length &&
+      (!inTableInsertionContext() || /[^\t\n\f\r ]/.test(html.slice(cursor, end)))) {
+      reconstructFormatting();
+      recordScope(cursor, insertionProps());
+    }
+    cursor = end;
+  };
   const advanceLines = (offset: number) => {
     for (let line = blockLines[lineIndex]; line && line.offset <= offset; line = blockLines[++lineIndex]) {
+      readText(line.offset);
       if (line.endsInline) {
         // An inline HTML heading can replace the generated heading on the open-element stack.
-        if (generatedHeading) closeGeneratedInline(findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE));
-        else closeGeneratedInline();
+        const index = generatedHeading ? findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE) :
+          findInScope(MARKDOWN_PARAGRAPH_OR_CELL_RE);
+        if (index >= 0) popTo(index);
         generatedHeading = false;
       }
       // Generated Markdown container closing tags also close their raw HTML descendants.
-      while (stack.length && stack.at(-1)!.containerDepth > line.continuedDepth) stack.pop();
+      while (stack.length && stack.at(-1)!.containerDepth > line.continuedDepth) popTo(stack.length - 1);
       containerDepth = line.containerDepth;
+      if (line.inlineScope || line.startsTable || line.closesRawParagraph) leaveForeignContent();
       if (line.startsTable) closeTableForNewTable();
       if (line.closesRawParagraph || line.startsTable) closeRawParagraph();
       if (line.inlineScope === "#markdown-heading") {
@@ -1968,65 +2109,88 @@ function createHtmlCustomPropertiesLookup(
       if (line.inlineScope && (line.inlineScope === "#markdown-heading" ||
         (!generatedHeading && findInScope(MARKDOWN_PARAGRAPH_OR_CELL_RE) < 0))) {
         if (line.inlineScope === "#markdown-p") closeRawParagraph();
-        stack.push({
-          tag: line.inlineScope,
-          containerDepth,
-          customProps: getProps(),
-          childrenNamespace: stack.at(-1)?.childrenNamespace,
-        });
+        if (stack.at(-1)?.tag === "colgroup") popTo(stack.length - 1);
+        pushTag({ tag: line.inlineScope, customProps: insertionProps(), childrenNamespace: undefined });
+        reconstructFormatting();
       }
       recordScope(line.offset);
     }
   };
   for (let match = tokens.exec(html); match; match = tokens.exec(html)) {
     advanceLines(match.index);
+    readText(match.index);
     const prefix = match.groups?.prefix;
     const tag = match.groups?.tag?.toLowerCase();
     if (tag && stack.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
-      while (stack.at(-1)?.childrenNamespace) stack.pop();
+      leaveForeignContent();
     }
     const namespace = stack.at(-1)?.childrenNamespace;
     if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
-    let resumeFormatting: readonly OpenStyledTag[] | undefined;
-    if (!namespace && tag && prefix === "") {
+    const start = tag && prefix === "";
+    const tableStructure = start && !namespace && HTML_TABLE_STRUCTURE_RE.test(tag);
+    const ignored = tableStructure && !prepareTableStructure(tag);
+    const tableForm = start && !namespace && tag === "form" &&
+      findInScope(HTML_TABLE_INSERTION_RE, /^(?:caption|td|th|template|#markdown-td)$/) >= 0;
+    if (!namespace && start && !ignored) {
+      if (!tableStructure && tag !== "template" && tag !== "html" && stack.at(-1)?.tag === "colgroup") {
+        popTo(stack.length - 1);
+      }
       if (tag === "table") closeTableForNewTable();
-      if (HTML_CLOSES_PARAGRAPH_RE.test(tag)) {
-        closeGeneratedInline(findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE));
+      if (tag === "li" || tag === "dd" || tag === "dt") closeListItem(tag);
+      if (!tableForm && HTML_CLOSES_PARAGRAPH_RE.test(tag)) {
+        const index = findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE);
+        if (index >= 0) popTo(index);
         closeRawParagraph();
       }
       if (HTML_HEADING_SCOPE_RE.test(tag)) closeCurrentHeading();
-      resumeFormatting = closeOptionalSibling(tag);
+      const sibling = HTML_IMPLIED_SIBLING_ENDS.find(([open]) => open.test(tag));
+      if (sibling) {
+        const index = findInScope(sibling[1], sibling[2], true);
+        if (index >= 0) popTo(index);
+      }
+      if (!tableStructure && !HTML_CLOSES_PARAGRAPH_RE.test(tag) && !HTML_NON_RECONSTRUCTING_START_RE.test(tag)) {
+        if (tag === "a" || tag === "nobr") closeFormatting(tag);
+        reconstructFormatting();
+      }
+      recordScope(match.index, tableStructure ? getProps() : insertionProps());
     }
     const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
     if (raw || (!namespace && tag === "template" && prefix === "")) {
       tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(html, "template", tokens.lastIndex) ?? html.length;
-    } else if (tag && tag !== "head" && prefix === "") {
+    } else if (tag && tag !== "head" && start && !ignored && !tableForm) {
       const current = namespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
       if (!HTML_VOID_TAGS.has(tag) && !(current && hasSelfClosingFlag(match[0], tag))) {
         const style = htmlAttributeValue(match[0], tag, "style");
-        const { customProps } = resolveElementStyle(style, undefined, getProps());
-        stack.push({
-          tag, customProps, containerDepth,
-          formattingStyle: !current && HTML_FORMATTING_TAG_RE.test(tag) ? style ?? "" : undefined,
-          childrenNamespace: htmlChildNamespace(current, tag, htmlEncodedAnnotation(current, tag, match[0])),
-        });
-        if (resumeFormatting) reconstructFormatting(resumeFormatting);
+        const { customProps } = resolveElementStyle(style, undefined, tableStructure ? getProps() : insertionProps());
+        const childrenNamespace = htmlChildNamespace(current, tag, htmlEncodedAnnotation(current, tag, match[0]));
+        const entry = pushTag({ tag, customProps, namespace: current, childrenNamespace, style });
+        if (!current && HTML_FORMATTING_TAG_RE.test(tag)) activeFormatting.push(entry);
       }
     } else if (tag && prefix === "/") {
       if (!namespace && tag === "p") {
-        closeGeneratedInline(findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE));
+        const index = findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE);
+        if (index >= 0) popTo(index);
         closeRawParagraph();
       } else if (!namespace && HTML_HEADING_SCOPE_RE.test(tag)) {
         const index = findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE);
-        if (index >= 0) stack.length = index;
+        if (index >= 0) popTo(index);
+      } else if (!namespace && HTML_FORMATTING_TAG_RE.test(tag)) {
+        closeFormatting(tag);
       } else {
-        closeTag(tag);
+        const index = lastOpenHtmlTagIndex(stack, tag);
+        if (index >= 0) {
+          const boundary = namespace ? undefined : tag === "li" ? HTML_LIST_ITEM_SCOPE_RE : tag === "table" ? HTML_TABLE_SCOPE_RE :
+            HTML_TABLE_STRUCTURE_RE.test(tag) ? HTML_TABLE_ELEMENT_BOUNDARY_RE :
+            HTML_CLOSES_PARAGRAPH_RE.test(tag) || HTML_FORMATTING_SCOPE_RE.test(tag) ? HTML_ELEMENT_SCOPE_RE : undefined;
+          if (!boundary || isInScope(index, boundary)) popTo(index);
+        }
       }
     }
     // Multi-line HTML tokens and raw text consume the intervening source lines.
     while (blockLines[lineIndex] && blockLines[lineIndex]!.offset < tokens.lastIndex) lineIndex++;
+    cursor = tokens.lastIndex;
     recordScope(tokens.lastIndex);
   }
   advanceLines(html.length);
