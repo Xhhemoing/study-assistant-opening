@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OpeningBackup } from "@aistudy/domain";
 import { OPENING_RESTORE_APPLY_ORDER } from "@aistudy/domain";
+import { validateOpeningRestore } from "../../../domain/src/opening/backup-policy";
 import { OPENING_BACKUP_TABLES } from "./opening-backup-records";
 import {
   createOpeningS3RestoreObjectPut,
@@ -52,6 +53,32 @@ function draft(): OpeningBackup {
 }
 
 describe("executeOpeningRestoreApply fail-closed gates", () => {
+  it.each([
+    ["verified public handoff", { status: "verified" }],
+    ["public handoff attached to a course", { course_id: sourceId }],
+    ["public handoff with a predecessor", { prior_revision_id: sourceId }],
+    ["public handoff with evidence", { evidence_attempt_ids: [sourceId] }],
+    ["diagnosis with invalid evidence UUID", { origin: "system_diagnosis", evidence_attempt_ids: ["invalid"] }],
+    ["diagnosis with dangling evidence", { origin: "system_diagnosis", evidence_attempt_ids: [sourceId] }],
+    ["diagnosis with dangling course", { origin: "system_diagnosis", course_id: sourceId }],
+    ["diagnosis with learner disposition", { origin: "system_diagnosis", learner_disposition: "disputed" }],
+    ["diagnosis marked learner-reported", { origin: "system_diagnosis", status: "learner_reported" }],
+    ["learner correction without a predecessor", { origin: "learner_correction", status: "learner_reported", learner_disposition: "clarified" }],
+  ])("rejects %s before opening a restore transaction", async (_name, patch) => {
+    const backup = draft();
+    const candidate = {
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
+      status: "candidate", origin: "public_try_handoff", privacy_epoch: 4,
+    };
+    backup.tables.v3_bitemporal_misconception_edges = [candidate];
+    expect(validateOpeningRestore(backup, []).allowed).toBe(true);
+    backup.tables.v3_bitemporal_misconception_edges = [{ ...candidate, ...patch }];
+    expect(validateOpeningRestore(backup, []).allowed).toBe(false);
+    await expect(executeOpeningRestoreApply({} as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  });
+
   it("strips timetable revision metadata before restoring strict intervention settings", () => {
     const row = { workspace_id: workspaceId, intervention_settings: { quietMode: "focus", timetableRevision: "legacy" } };
     expect(stripLegacyTimetableRevision(row)).toEqual({

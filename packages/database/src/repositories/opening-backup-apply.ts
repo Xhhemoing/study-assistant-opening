@@ -42,7 +42,7 @@ import {
 import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
-import { orderBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
+import { orderBackupMisconceptionRevisions, validateBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
 import { refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
 
 export type OpeningRestoreObjectSideEffects = {
@@ -489,9 +489,11 @@ export async function executeOpeningRestoreApply(
   const normalized = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
   const rawTables = normalized.tables as Record<string, Record<string, unknown>[]>;
   const misconceptionRevisions = orderBackupMisconceptionRevisions(rawTables.v3_bitemporal_misconception_edges ?? []);
-  if (!misconceptionRevisions) return {
+  const misconceptionErrors = validateBackupMisconceptionRevisions(rawTables);
+  if (!misconceptionRevisions) misconceptionErrors.push("invalid misconception revision lineage");
+  if (!misconceptionRevisions || misconceptionErrors.length) return {
     ok: false, code: "PREFLIGHT_REJECTED", mutated: false, guarantees: RESTORE_GUARANTEES, preview,
-    errors: ["invalid misconception revision lineage"],
+    errors: misconceptionErrors,
   };
   const tables = projectOpeningRestoreLibrary(rawTables);
   const backup: OpeningBackup = { ...normalized, tables: {

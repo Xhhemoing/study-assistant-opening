@@ -42,6 +42,45 @@ export function orderBackupMisconceptionRevisions(rows: readonly Record<string, 
   return ordered.length === rows.length ? ordered : null;
 }
 
+export function validateBackupMisconceptionRevisions(
+  tables: Record<string, Record<string, unknown>[]>,
+): string[] {
+  const rows = tables.v3_bitemporal_misconception_edges ?? [];
+  if (!rows.length) return [];
+  const attemptIds = new Set((tables.opening_learning_attempts ?? []).map(row => row.id).filter(isUuid).map(id => id.toLowerCase()));
+  const courseIds = new Set((tables.courses ?? []).map(row => row.id).filter(isUuid).map(id => id.toLowerCase()));
+  const errors = new Set<string>();
+  for (const row of rows) {
+    const evidence = uuidList(row.evidence_attempt_ids) ? row.evidence_attempt_ids : null;
+    if (!evidence || evidence.some(id => !attemptIds.has(id.toLowerCase()))) {
+      errors.add("misconception revision references invalid or missing archived attempts");
+    }
+    if (row.course_id != null && (!isUuid(row.course_id) || !courseIds.has(row.course_id.toLowerCase()))) {
+      errors.add("misconception revision references an invalid or missing archived course");
+    }
+    const { status, origin, learner_disposition: disposition, prior_revision_id: prior } = row;
+    switch (origin) {
+      case "public_try_handoff":
+        if (status !== "candidate" || prior != null || row.course_id != null || disposition != null
+          || !evidence || evidence.length !== 0) errors.add("invalid public try misconception revision");
+        break;
+      case "system_diagnosis":
+        if (disposition != null || (status !== "candidate" && status !== "verified" && status !== "retracted"
+          && status !== "superseded")) errors.add("invalid system misconception revision");
+        break;
+      case "learner_correction":
+        if (status !== "learner_reported" || !isUuid(prior)
+          || (disposition !== "disputed" && disposition !== "clarified" && disposition !== "resolved_self_report")) {
+          errors.add("invalid learner misconception revision");
+        }
+        break;
+      default:
+        errors.add("invalid misconception revision origin");
+    }
+  }
+  return [...errors];
+}
+
 export function isJournal(value: unknown): value is Array<{ sourceId: string; deletedAt: string; assetDeletedAt?: string | null }> {
   return Array.isArray(value) && value.every((mark) => isRecord(mark)
     && isUuid(mark.sourceId) && typeof mark.deletedAt === "string"

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { LEARNER_CONTEXT_MAX_BYTES, type LearnerMisconceptionDisposition, type v3BitemporalMisconceptionEdges } from "../schema/v3-bitemporal-memory";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
@@ -68,7 +68,12 @@ async function lockWorkspace(tx: TransactionSql, scope: OpeningScope): Promise<n
   return workspace.privacy_epoch;
 }
 
-export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
+async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
+  // The migration's course-cascade trigger holds this same lock when invalidating the cache.
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || ${workspaceId}::uuid::text, 0))`;
+}
+
+async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
   const items = await tx<ContextItem[]>`
     SELECT status, learner_disposition AS "learnerDisposition", left(summary, ${LEARNER_CONTEXT_MAX_BYTES}) AS summary
     FROM v3_bitemporal_misconception_edges e
@@ -89,6 +94,28 @@ export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql
       revision = v3_learner_context_blocks.revision + 1, privacy_epoch = EXCLUDED.privacy_epoch, updated_at = EXCLUDED.updated_at
     RETURNING rendered_markdown AS "renderedMarkdown", byte_length AS "byteLength", revision`;
   return block!;
+}
+
+export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
+  await lockMisconceptionContext(tx, scope.workspaceId);
+  return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
+}
+
+export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: OpeningScope): Promise<ContextBlock | null> {
+  return sql.begin(async tx => {
+    const [workspace] = await tx<{ privacy_epoch: number }[]>`
+      SELECT privacy_epoch FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
+    if (!workspace) return null;
+    await lockMisconceptionContext(tx, scope.workspaceId);
+    const [cached] = await tx<ContextBlock[]>`
+      SELECT rendered_markdown AS "renderedMarkdown", byte_length AS "byteLength", revision
+      FROM v3_learner_context_blocks
+      WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+        AND privacy_epoch = ${workspace.privacy_epoch}`;
+    if (cached) return cached;
+    const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
+    return writeLearnerMisconceptionContextBlock(tx, scope, workspace.privacy_epoch, clock!.at);
+  });
 }
 
 // Bind timestamp text before casting so postgres.js preserves microseconds.
@@ -153,6 +180,14 @@ export async function applyLearnerMisconceptionCorrection(sql: Sql, scope: Openi
   });
 }
 
+function deriveTryHandoffUuid(kind: "edge" | "initial-revision", receiptId: string): string {
+  const bytes = createHash("sha256").update(`opening:try-misconception:v1:${kind}:${receiptId.toLowerCase()}`).digest();
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScope, claim: TryMisconceptionClaim) {
   return sql.begin(async tx => {
     const privacyEpoch = await lockWorkspace(tx, scope);
@@ -172,22 +207,36 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
       return { edgeId: prior.edgeId, revisionId: prior.revisionId, replayed: true };
     }
 
-    const edgeId = randomUUID();
-    const revisionId = randomUUID();
+    const edgeId = deriveTryHandoffUuid("edge", claim.receiptId);
+    const initialRevisionId = deriveTryHandoffUuid("initial-revision", claim.receiptId);
+    // Backups retain the root revision and omit the server-owned receipt ledger.
+    const [root] = await tx<{ revisionId: string; matches: boolean }[]>`
+      SELECT revision_id AS "revisionId",
+        (workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+          AND origin = 'public_try_handoff' AND concept_key = ${claim.conceptKey}
+          AND misconception_code = ${claim.misconceptionCode} AND summary = ${claim.summary}) AS matches
+      FROM v3_bitemporal_misconception_edges WHERE edge_id = ${edgeId} AND prior_revision_id IS NULL
+      ORDER BY (revision_id = ${initialRevisionId}) DESC, revision_id LIMIT 1`;
+    if (root && !root.matches) throw learningError("CONFLICT", "体验记录已被使用。");
+    const revisionId = root?.revisionId ?? initialRevisionId;
     const at = clock!.at;
-    await tx`
-      INSERT INTO v3_bitemporal_misconception_edges
-        (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin,
-         privacy_epoch, valid_range, tx_range)
-      VALUES (${revisionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${claim.conceptKey},
-        ${claim.misconceptionCode}, ${claim.summary}, 'candidate', 'public_try_handoff', ${privacyEpoch},
-        tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))`;
-    await tx`
+    if (!root) {
+      await tx`
+        INSERT INTO v3_bitemporal_misconception_edges
+          (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin,
+           privacy_epoch, valid_range, tx_range)
+        VALUES (${revisionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${claim.conceptKey},
+          ${claim.misconceptionCode}, ${claim.summary}, 'candidate', 'public_try_handoff', ${privacyEpoch},
+          tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))`;
+    }
+    const [claimed] = await tx`
       INSERT INTO v3_try_misconception_handoff_receipts
         (receipt_id, workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
       VALUES (${claim.receiptId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${claim.payloadSha256},
-        ${edgeId}, ${revisionId}, ${at}::text::timestamptz)`;
-    await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
-    return { edgeId, revisionId, replayed: false };
+        ${edgeId}, ${revisionId}, ${at}::text::timestamptz)
+      ON CONFLICT (receipt_id) DO NOTHING RETURNING receipt_id`;
+    if (!claimed) throw learningError("CONFLICT", "体验记录已被使用。");
+    if (!root) await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
+    return { edgeId, revisionId, replayed: Boolean(root) };
   });
 }

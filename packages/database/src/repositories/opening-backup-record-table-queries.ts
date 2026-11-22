@@ -1,4 +1,4 @@
-import { orderBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
+import { orderBackupMisconceptionRevisions, uuidList } from "../../../domain/src/opening/backup-validation";
 import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences, unavailableBackupMemoryLineage } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
 import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, projectOpeningBackupProvenance, readBackupLibrary, readBackupNoteProvenance } from "./opening-backup-library";
@@ -499,13 +499,19 @@ export async function readOpeningBackupTableRows(
   Object.assign(tables, libraryTables);
   tables.opening_note_provenance = projectOpeningBackupProvenance(libraryTables.opening_note_provenance, cardIds);
   await readBackupCourseAssets(tx, id, userId, tables);
-  const misconceptionRevisions = orderBackupMisconceptionRevisions(asRows(await tx`
+  const revisions = asRows(await tx`
     SELECT revision_id, workspace_id, owner_user_id, edge_id, course_id, concept_key, misconception_code,
       summary, status, origin, learner_disposition, evidence_attempt_ids, privacy_epoch,
       valid_range::text, tx_range::text, prior_revision_id
     FROM v3_bitemporal_misconception_edges
     WHERE workspace_id = ${id} AND owner_user_id = ${userId}
-    ORDER BY lower(tx_range), revision_id`));
+    ORDER BY lower(tx_range), revision_id`);
+  const courseIds = new Set(tables.courses.map(row => row.id));
+  const excludedEdges = new Set(revisions.filter(row =>
+    (row.course_id != null && !courseIds.has(row.course_id))
+    || !uuidList(row.evidence_attempt_ids)
+    || row.evidence_attempt_ids.some(id => !completeAttemptIds.has(id))).map(row => row.edge_id));
+  const misconceptionRevisions = orderBackupMisconceptionRevisions(revisions.filter(row => !excludedEdges.has(row.edge_id)));
   if (!misconceptionRevisions) throw new Error("Invalid stored misconception revision lineage");
   tables.v3_bitemporal_misconception_edges = misconceptionRevisions;
   return tables;

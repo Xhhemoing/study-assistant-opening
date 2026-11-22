@@ -24,6 +24,11 @@ CREATE TABLE v3_bitemporal_misconception_edges (
     AND (status = 'learner_reported') = (learner_disposition IS NOT NULL)
     AND (status <> 'learner_reported' OR prior_revision_id IS NOT NULL)
   ),
+  CONSTRAINT v3_misconception_public_try_candidate CHECK (
+    origin <> 'public_try_handoff' OR (
+      status = 'candidate' AND prior_revision_id IS NULL AND course_id IS NULL AND cardinality(evidence_attempt_ids) = 0
+    )
+  ),
   CONSTRAINT v3_misconception_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
     REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
   CONSTRAINT v3_misconception_revision_scope UNIQUE (workspace_id, owner_user_id, edge_id, revision_id),
@@ -81,6 +86,22 @@ CREATE TABLE v3_learner_context_blocks (
   PRIMARY KEY (workspace_id, owner_user_id)
 );
 
+CREATE FUNCTION v3_invalidate_misconception_context() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id) THEN
+    -- Serialize with context refreshes, including ones creating a new cache row.
+    PERFORM pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || OLD.workspace_id::text, 0));
+    DELETE FROM v3_learner_context_blocks
+      WHERE workspace_id = OLD.workspace_id AND owner_user_id = OLD.owner_user_id;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER v3_invalidate_misconception_context
+  AFTER DELETE ON v3_bitemporal_misconception_edges
+  FOR EACH ROW EXECUTE FUNCTION v3_invalidate_misconception_context();
+
 CREATE TABLE v3_try_misconception_handoff_receipts (
   receipt_id uuid PRIMARY KEY,
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -97,5 +118,6 @@ CREATE TABLE v3_try_misconception_handoff_receipts (
 
 -- Roll back the application first and retain these tables to preserve learner history and receipt claims.
 -- Before retiring the schema, stop writes and export the three tables. Then drop the receipt table,
--- context-block table, edge table and v3_misconception_close_tx_only(). Drop v3_workspaces_id_owner_key after dropping the dependent tables.
+-- context-block table, edge table, v3_misconception_close_tx_only() and v3_invalidate_misconception_context().
+-- Drop v3_workspaces_id_owner_key after dropping the dependent tables.
 -- Keep the shared extension installed.

@@ -5,18 +5,20 @@ import {
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
   executeOpeningRestoreApply,
+  readLearnerMisconceptionContextBlock,
   readOpeningBackupRecords,
   readOpeningRestoreNamespaceCounts,
   queryMisconceptionEdgesAsOf,
   type OpeningScope,
 } from "@aistudy/database";
-import { composeOpeningBackupDraft, type OpeningBackup } from "@aistudy/domain";
+import { composeOpeningBackupDraft, validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
 import { POST as redeem, PUT as issue } from "../../apps/web/src/app/api/opening/public-try/misconception-handoff/route";
 import { POST as correct } from "../../apps/web/src/app/api/opening/memory/bitemporal-correction/route";
 import { issueTryMisconceptionReceipt } from "../../apps/web/src/features/opening/public-try/v3-try-misconception-handoff";
 import { createAuthRuntime } from "../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../apps/web/src/server/runtime";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
 const secret = "synthetic-receipt-secret-with-32-characters";
@@ -52,17 +54,26 @@ function tryRequest(method: "PUT" | "POST", body: unknown, owner = "primary") {
   });
 }
 
+function withDifferentSignedSummary(receipt: string): string {
+  const payload = JSON.parse(Buffer.from(receipt.split(".")[0]!, "base64url").toString("utf8"));
+  const changed = Buffer.from(JSON.stringify({ ...payload, summary: "Different signed payload" })).toString("base64url");
+  const signature = createHmac("sha256", secret).update("opening:try-misconception:v1." + changed).digest("base64url");
+  return changed + "." + signature;
+}
+
 async function seedEdge({
   scope = f.scope, edgeId = randomUUID(), courseId = null, evidenceAttemptIds = [], future = false,
-}: { scope?: OpeningScope; edgeId?: string; courseId?: string | null; evidenceAttemptIds?: string[]; future?: boolean } = {}) {
+  origin = "system_diagnosis", summary = "Initial diagnosis", priorRevisionId = null,
+}: { scope?: OpeningScope; edgeId?: string; courseId?: string | null; evidenceAttemptIds?: string[]; future?: boolean;
+  origin?: string; summary?: string; priorRevisionId?: string | null } = {}) {
   const [row] = await f.sql<{ edgeId: string; revisionId: string; txAt: string }[]>`
     INSERT INTO v3_bitemporal_misconception_edges
       (revision_id, workspace_id, owner_user_id, edge_id, course_id, concept_key, misconception_code, summary, status, origin,
-       evidence_attempt_ids, valid_range, tx_range)
+       evidence_attempt_ids, valid_range, tx_range, prior_revision_id)
     VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${courseId},
-      'limit', 'conditions', 'Initial diagnosis', 'verified', 'system_diagnosis', ${evidenceAttemptIds}::uuid[],
+      'limit', 'conditions', ${summary}, 'verified', ${origin}, ${evidenceAttemptIds}::uuid[],
       tstzrange('2000-01-01Z'::timestamptz, NULL, '[)'),
-      tstzrange(clock_timestamp() + CASE WHEN ${future} THEN interval '5 seconds' ELSE interval '0' END, NULL, '[)'))
+      tstzrange(clock_timestamp() + CASE WHEN ${future} THEN interval '5 seconds' ELSE interval '0' END, NULL, '[)'), ${priorRevisionId})
     RETURNING edge_id AS "edgeId", revision_id AS "revisionId", lower(tx_range)::text AS "txAt"`;
   return row!;
 }
@@ -84,6 +95,33 @@ it("enforces GiST overlap and global edge identity, and rejects historical row e
   await expect(seedEdge({ courseId: otherCourse })).rejects.toMatchObject({
     code: "23503", constraint_name: "v3_misconception_course_scope",
   });
+});
+
+it("rejects a verified public handoff at the database boundary", async () => {
+  await expect(seedEdge({ origin: "public_try_handoff" })).rejects.toMatchObject({
+    code: "23514", constraint_name: "v3_misconception_public_try_candidate",
+  });
+});
+
+it("omits the entire diagnosis lineage when an attempt's source is excluded from backup", async () => {
+  const { sql, scope } = f;
+  const learning = await learningAttemptFixture(f);
+  const attempt = await learning.start();
+  const diagnosis = await seedEdge({ courseId: learning.courseId, evidenceAttemptIds: [attempt.id], summary: "Private diagnosis" });
+  // A revision with no evidence still depends on the excluded predecessor.
+  await sql`UPDATE v3_bitemporal_misconception_edges SET tx_range =
+    tstzrange(lower(tx_range), GREATEST(clock_timestamp(), lower(tx_range) + interval '1 microsecond'), '[)')
+    WHERE revision_id=${diagnosis.revisionId}`;
+  const later = await seedEdge({ edgeId: diagnosis.edgeId, courseId: learning.courseId, priorRevisionId: diagnosis.revisionId });
+  const independent = await seedEdge({ summary: "Independent diagnosis" });
+  const before = await readOpeningBackupRecords(sql, scope);
+  expect(before.tables.opening_learning_attempts).toMatchObject([{ id: attempt.id }]);
+  expect(before.tables.v3_bitemporal_misconception_edges.map(row => row.revision_id))
+    .toEqual([diagnosis.revisionId, independent.revisionId, later.revisionId]);
+  await sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES (${scope.workspaceId},${learning.sourceId})`;
+  const filtered = await readOpeningBackupRecords(sql, scope);
+  expect(filtered.tables.opening_learning_attempts).toEqual([]);
+  expect(filtered.tables.v3_bitemporal_misconception_edges).toMatchObject([{ revision_id: independent.revisionId }]);
 });
 
 it("keeps exact valid time, historical reads and both L1 ledgers when the learner disputes an edge", async () => {
@@ -192,10 +230,7 @@ it("issues and redeems one signed candidate under concurrent retries and rejects
   expect(await replay.json()).toEqual({ ...created, replayed: true });
   expect((await redeem(tryRequest("POST", { receipt }, "other"))).status).toBe(409);
 
-  const payload = JSON.parse(Buffer.from(receipt.split(".")[0], "base64url").toString("utf8"));
-  const changed = Buffer.from(JSON.stringify({ ...payload, summary: "Different signed payload" })).toString("base64url");
-  const signature = createHmac("sha256", secret).update("opening:try-misconception:v1." + changed).digest("base64url");
-  expect((await redeem(tryRequest("POST", { receipt: changed + "." + signature }))).status).toBe(409);
+  expect((await redeem(tryRequest("POST", { receipt: withDifferentSignedSummary(receipt) }))).status).toBe(409);
   const expired = issueTryMisconceptionReceipt(selection, secret, Date.now() - 900_001);
   expect((await redeem(tryRequest("POST", { receipt: expired }))).status).toBe(409);
 
@@ -230,9 +265,11 @@ it("enforces owner binding on all three tables and preserves course and workspac
   const courseId = randomUUID();
   await sql`INSERT INTO courses(id, workspace_id, title, slug)
     VALUES (${courseId}, ${scope.workspaceId}, 'Cascade fixture', ${courseId})`;
+  const independent = await seedEdge({ summary: "Independent diagnosis" });
   const first = await seedEdge({ courseId });
-  await applyLearnerMisconceptionCorrection(sql, scope,
+  const correction = await applyLearnerMisconceptionCorrection(sql, scope,
     { edgeId: first.edgeId, disposition: "clarified", summary: "Course correction" });
+  expect(correction.contextBlock.renderedMarkdown).toContain("Course correction");
   const receiptId = randomUUID();
   const insertReceipt = (ownerId: string) => sql`INSERT INTO v3_try_misconception_handoff_receipts
     (receipt_id, workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
@@ -245,10 +282,13 @@ it("enforces owner binding on all three tables and preserves course and workspac
     .rejects.toMatchObject({ code: "23514" });
   expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${first.edgeId}`).toHaveLength(2);
   await sql`DELETE FROM courses WHERE id=${courseId}`;
+  expect(await sql`SELECT rendered_markdown FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
   expect(await sql`SELECT edge_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${first.edgeId}`).toEqual([]);
   expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE receipt_id=${receiptId}`).toEqual([]);
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({
+    renderedMarkdown: "- 已确认：Independent diagnosis",
+  });
 
-  const independent = await seedEdge();
   await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
   expect(await sql`SELECT edge_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${independent.edgeId}`).toEqual([]);
   expect(await sql`SELECT revision FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
@@ -287,6 +327,7 @@ it("renders only edges recorded and valid at the context timestamp", async () =>
 it("round-trips misconception corrections through a v1 workspace backup and rebuilds derived context", async () => {
   const { sql, scope } = f;
   const receipt = issueTryMisconceptionReceipt(selection, secret);
+  if (!receipt) throw new Error("Expected a receipt for the fixture selection");
   const redeemed = await redeem(tryRequest("POST", { receipt }));
   expect(redeemed.status).toBe(201);
   const { edgeId, revisionId } = await redeemed.json();
@@ -306,6 +347,9 @@ it("round-trips misconception corrections through a v1 workspace backup and rebu
   expect(rows.map(row => row.revision_id)).toEqual([revisionId, firstCorrection.revisionId, secondCorrection.revisionId]);
   expect(archive.tables).not.toHaveProperty("v3_try_misconception_handoff_receipts");
   expect(archive.tables).not.toHaveProperty("v3_learner_context_blocks");
+  const forged = structuredClone(archive);
+  (forged.tables.v3_bitemporal_misconception_edges![0] as Record<string, unknown>).status = "verified";
+  expect(validateOpeningRestore(forged, [], archive.memoryDeletions)).toMatchObject({ allowed: false });
   const exported = [...rows];
   rows.reverse();
 
@@ -334,4 +378,16 @@ it("round-trips misconception corrections through a v1 workspace backup and rebu
   expect(block).toMatchObject({ rendered_markdown: "- 学习者补充说明：I can explain the condition now", revision: 1 });
   expect(block!.byte_length).toBe(Buffer.byteLength(block!.rendered_markdown));
   expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
+
+  expect((await redeem(tryRequest("POST", { receipt }, "other"))).status).toBe(409);
+  expect((await redeem(tryRequest("POST", { receipt: withDifferentSignedSummary(receipt) }))).status).toBe(409);
+  const replays = await Promise.all([redeem(tryRequest("POST", { receipt })), redeem(tryRequest("POST", { receipt }))]);
+  for (const replay of replays) {
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ edgeId, revisionId, replayed: true });
+  }
+  expect(await sql`SELECT DISTINCT edge_id FROM v3_bitemporal_misconception_edges WHERE workspace_id=${scope.workspaceId}`)
+    .toEqual([{ edge_id: edgeId }]);
+  expect(await sql`SELECT initial_revision_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`)
+    .toEqual([{ initial_revision_id: revisionId }]);
 });

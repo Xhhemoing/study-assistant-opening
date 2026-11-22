@@ -13,7 +13,7 @@ import { validateBackupSystemQuery } from "./backup-system-query";
 import { validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, libraryBlockSourceReferences,
   libraryRevisionSourceReferences, noteProvenanceSourceReferences, orderBackupMisconceptionRevisions, parseUuidArray, sourceReferences,
-  turnMemoryDependencyIds, turnSourceReferences, unavailableBackupMemoryLineage, validObject } from "./backup-validation";
+  turnMemoryDependencyIds, turnSourceReferences, unavailableBackupMemoryLineage, validObject, validateBackupMisconceptionRevisions } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
 export type OpeningMemoryDeletions = {
@@ -406,6 +406,7 @@ export function validateOpeningRestore(
   }
   const misconceptionHistory = tables.v3_bitemporal_misconception_edges ?? [];
   if (!orderBackupMisconceptionRevisions(misconceptionHistory)) errors.push("invalid misconception revision lineage");
+  errors.push(...validateBackupMisconceptionRevisions(tables));
   if (misconceptionHistory.some(row => !Number.isSafeInteger(row.privacy_epoch)
     || Number(row.privacy_epoch) < 0 || Number(row.privacy_epoch) > Number(backup.privacyEpoch))) {
     errors.push("misconception revision privacy epoch is outside the archive epoch");
