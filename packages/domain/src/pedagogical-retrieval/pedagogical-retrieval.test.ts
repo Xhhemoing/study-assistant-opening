@@ -1609,6 +1609,92 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   }
 
   it.each([
+    "An<table>swer</table>",
+    "An<table>sw<table>er</table></table>",
+    "An<table><tr><td>Key</td></tr>swer</table>",
+    "An<table><tr><td>Key</td></tr>swer",
+    'An<table style="display:inline"><tr><td>Key</td></tr>swer</table>',
+    'An<div style="display:inline">sw</div>er',
+    'An<div style="display:contents">sw</div>er',
+    'An<div style="display:inline flow-root">sw</div>er',
+    'An<span hidden style="display:inline!important">sw</span>er',
+    'An<span hidden style="display:inline">sw</span>er',
+    'An<span hidden style="display:inline;display:bogus">sw</span>er',
+    'An<span hidden="until-found" style="content-visibility:visible">sw</span>er',
+    '<svg><g visibility="hidden"><text visibility="visible">Answer</text></g></svg>',
+    '<svg><text visibility="hidden" style="visibility:visible">Answer</text></svg>',
+    '<svg><text visibility="hidden"><tspan visibility="visible">Answer</tspan></text></svg>',
+  ])("protects an answer label in rendered HTML for %s", label => {
+    for (const text of [`## ${label}\n\nforty-two`, `${label}\n===\n\nforty-two`]) {
+      for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
+    }
+  });
+
+  it.each([
+    "An<span hidden>sw</span>er",
+    'An<span hidden style="display:bogus">sw</span>er',
+    'An<span hidden="until-found">sw</span>er',
+    'An<span hidden="until-found" style="display:block">sw</span>er',
+    'An<div hidden="until-found">extra</div>swer',
+    'An<div style="content-visibility:hidden">extra</div>swer',
+    'An<svg style="display:block"><text>sw</text></svg>er',
+    ...["block", "flex", "grid", "table", "list-item", "flow-root", "flow-root block"].map(
+      display => `An<span style="display:${display}">sw</span>er`,
+    ),
+    ...["hidden", "collapse", " HIDDEN "].map(
+      visibility => `Topic <svg><text visibility="${visibility}">Answer</text></svg>`,
+    ),
+  ])("keeps body evidence public when the rendered label is split or hidden in %s", label => {
+    const text = `## ${label}\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it.each([
+    ['style="visibility:hidden"', "", "sealed"],
+    ['style="visibility:hidden"', 'style="visibility:visible"', "hint_gated"],
+    ['style="display:none"', 'style="visibility:visible"', "sealed"],
+    ["hidden", 'style="visibility:visible"', "sealed"],
+    ['hidden style="display:block"', "", "hint_gated"],
+    ['hidden="until-found"', 'style="content-visibility:visible"', "sealed"],
+    ['hidden="until-found" style="content-visibility:visible"', "", "hint_gated"],
+  ] as const)("classifies a summary with inherited disclosure styles (%s, %s)", (details, summary, visibility) => {
+    const text = `<details ${details}><summary ${summary}>Hint</summary>forty-two</details>`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expect(chunks.find(chunk => chunk.text.includes("forty-two"))?.visibility).toBe(visibility);
+      if (visibility === "sealed") expectSealedEvidence(chunks, text, ["forty-two"]);
+      else for (const allowHintGated of [false, true]) {
+        const result = rankPedagogicalEvidence({
+          chunks,
+          authorization: { admissibleSourceIds: ["captions"], allowHintGated },
+          lexicalRanking: chunks.map(chunk => ({ id: chunk.id, score: 1 })),
+        });
+        expect(result.ranked.some(evidence => evidence.chunk.text.includes("forty-two"))).toBe(allowHintGated);
+      }
+    }
+  });
+
+  it.each([
+    "A | B\n--- | ---\nx | <select><td><details><summary>Answer</summary>forty-two</details>",
+    "A | <select><th><details><summary>Answer</summary>forty-two</details>\n--- | ---\nx | y",
+    "A | B\n--- | ---\nx | <details><summary>Answer</summary><select><input>forty-two</details>",
+    "A | B\n--- | ---\nx | <details><summary>Answer</summary>forty-two",
+    "A | B\n--- | ---\nx | <select><td><details><summary>Answer</summary>forty-two",
+    'A | <select><th>Answer\n--- | ---\nx | forty-two',
+    '<div style="visibility:hidden">\n\nA | <span style="visibility:visible">Answer</span>\n--- | ---\nx | forty-two\n\n</div>',
+  ])("protects evidence in generated pipe-table cell scopes for %s", text => {
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
+  });
+
+  it.each([
+    '<div style="display:none">\n\n## <span style="visibility:visible">Answer</span>\n\nPublic theorem.',
+    '<div style="visibility:hidden">\n\nAnswer\n===\n\nPublic theorem.',
+    '<div hidden>\n\nTopic | Answer\n--- | ---\nx | Public theorem.',
+    '<div style="visibility:hidden">\n\nTopic | Answer\n--- | ---\nx | Public theorem.',
+  ])("inherits suppression for labels in generated Markdown for %s", text => {
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it.each([
     "An<div hidden></div>swer",
     'An<div style="display:none">extra</div>swer',
     "An<template><div>extra</div></template>swer",
