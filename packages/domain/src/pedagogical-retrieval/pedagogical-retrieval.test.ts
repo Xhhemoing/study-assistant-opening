@@ -1161,6 +1161,14 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["backticks in a restarted HTML block", "<details>\n<summary>Answer</summary>\n\n<details>\n\x60<textarea>\x60</details></textarea>forty-two</details>\n</details>"],
     ["backticks in a div HTML block", "<details>\n<summary>Answer</summary>\n\n<div>\nUse \x60<textarea>\x60</details></textarea>\nforty-two\n</details>"],
     ["fence markers in a div HTML block", "<details>\n<summary>Answer</summary>\n<div>\n~~~html\n<textarea>\n~~~\n</details>\nforty-two\n</textarea>\n</details>"],
+    ["raw text crossing a fence", "<details><summary>Answer</summary>\n~~~\n<textarea>\n~~~\n</details></textarea>forty-two</details>"],
+    ["raw text crossing a quoted list fence", "<details><summary>Answer</summary>\n\n> - \x60\x60\x60\n>   <textarea>\n>   \x60\x60\x60\n</details></textarea>forty-two</details>"],
+    ["raw text crossing indented code", "<details><summary>Answer</summary>\n\n    <textarea>\n\n</details></textarea>forty-two</details>"],
+    ["raw text crossing tab-indented code in a quote", "<details><summary>Answer</summary>\r\n\r\n> \t<textarea>\r\n\r\n</details></textarea>forty-two</details>"],
+    ["raw text confined to indented code", "<details><summary>Answer</summary>\n\n    <textarea>\n\n    </textarea>\nforty-two\n</details>"],
+    ["commented and quoted raw text openers in a fence", "<details><summary>Answer</summary>\n~~~\n<!-- <textarea> --><span title='<script>'>Example</span>\n~~~\nforty-two\n</details>"],
+    ["unclosed raw text crossing a fence", "<details><summary>Answer</summary>\n~~~\n<textarea>\n~~~\n</details>forty-two"],
+    ["details closer in a nested template", "<details><summary>Answer</summary><template><template></details></template></template>forty-two</details>"],
     ["unclosed raw text in a div HTML block", "<details>\n<summary>Answer</summary>\n\n<div>\nUse \x60<textarea>\x60\n</details>\nforty-two"],
     ["HTML block in a quote interrupts multiline code", "<details>\n<summary>Answer</summary>\n\n> literal \x60start\n> <details>\n> \x60end\n> </details>\nforty-two\n</details>"],
     ["HTML block in an ordered list interrupts multiline code", "<details>\n<summary>Answer</summary>\n\nliteral \x60start\n123. Item\n     <details>\n     \x60end\n     </details>\nforty-two\n</details>"],
@@ -1173,6 +1181,12 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["link in summary", "<details><summary>Hint / An<a>sw</a>er</summary>forty-two</details>"],
     ["output element in summary", "<details><summary>Hint / An<output>sw</output>er</summary>forty-two</details>"],
     ["custom element in summary", "<details><summary>Hint / An<word-part>sw</word-part>er</summary>forty-two</details>"],
+    ["template in summary", "<details><summary>Hint / An<template>x</template>swer</summary>forty-two</details>"],
+    ["nested template in summary", "<details><summary>Hint / An<template>a<template>b</template>c</template>swer</summary>forty-two</details>"],
+    ["summary closer in a template", "<details><summary>Hint / An<template></summary></template>swer</summary>forty-two</details>"],
+    ["hidden element in summary", "<details><summary>Hint / An<span data-note='a > b' hidden='until-found'>x<span>y</span></span>swer</summary>forty-two</details>"],
+    ["hidden void element in summary", "<details><summary>Hint / An<br hidden>swer</summary>forty-two</details>"],
+    ["non-rendered raw text in summary", "<details><summary>Hint / An<script>x</script><style>y</style><title>z</title>swer</summary>forty-two</details>"],
     ["comment in summary", "<details><summary>Hint / An<!-- note -->swer</summary>forty-two</details>"],
     ["ruby annotations in summary", "<details><summary>Hint / <ruby>An<rp>(</rp><rt>ah</rt><rp>)</rp>swer</ruby></summary>forty-two</details>"],
     ["omitted ruby end tag in summary", "<details><summary>Hint / <ruby>An<rt>ah<rt>sy</ruby>swer</summary>forty-two</details>"],
@@ -1189,7 +1203,20 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["spoiler in summary", "<details><summary>Hint / Spo<wbr>iler</summary>forty-two</details>"],
     ["zero-width joiner in spoiler", "<details><summary>Hint / Spo&zwj;iler</summary>forty-two</details>"],
     ["word break in heading", "## Hint / An<wbr>swer\nforty-two\n\n## Next topic"],
+    ["hidden element in an ATX heading", "## Hint / An<span hidden>x</span>swer\nforty-two\n\n## Next topic"],
+    ["literal hidden element in a heading code span", "## \x60<span hidden>Answer</span>\x60\nforty-two\n\n## Next topic"],
+    ["escaped hidden opener in a heading", "## \\<span hidden>Answer</span>\nforty-two\n\n## Next topic"],
+    ["answer after an abruptly closed heading comment", "## <!-->Answer\nforty-two\n\n## Next topic"],
+    ["answer in a literal unterminated Markdown comment", "## <!-- Answer\nforty-two\n\n## Next topic"],
+    ["answer in a heading autolink", "## <https://example.test/Answer>\nforty-two\n\n## Next topic"],
+    ["template in a Setext heading", "Hint / An<template>x</template>swer\n---\nforty-two\n\n# Next topic"],
+    ["literal template in a Setext code span", "\x60<template>Answer</template>\x60\n---\nforty-two\n\n# Next topic"],
     ["word break in table header", "Hint / An<wbr>swer | Note\n--- | ---\nforty-two | x"],
+    ["template in table header", "Topic | Hint / An<template>x</template>swer\n--- | ---\nrow | forty-two"],
+    ["literal template in a table header code span", "Topic | \x60<template>Answer</template>\x60\n--- | ---\nrow | forty-two"],
+    ["answer in an email autolink in a table header", "Topic | <foo+Answer@example.test>\n--- | ---\nrow | forty-two"],
+    ["answer after a hidden element with an omitted end tag", "Topic | <ul><li hidden>Ignore<li>Answer</li></ul>\n--- | ---\nrow | forty-two"],
+    ["answer after a hidden paragraph closed implicitly", "Topic | <p hidden>Ignore<div>Answer</div></p>\n--- | ---\nrow | forty-two"],
     ["annotation text in table header", "Topic | An<ruby><rt>sw</rt></ruby>er\n--- | ---\nrow | forty-two"],
     ["spaced verbatim", "\\begin{solution}\n\\begin {verbatim}\n\\end{solution}\n\\end{verbatim}\nforty-two\n\\end{solution}"],
     ["spaced starred verbatim", "\\begin{solution}\n\\begin\t{ verbatim* }\n\\end{solution}\n\\end\t{ verbatim* }\nforty-two\n\\end{solution}"],
@@ -1241,6 +1268,33 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
     ]) {
       expect(chunks.find(chunk => chunk.text.includes("try factoring"))?.visibility).toBe("hint_gated");
+    }
+  });
+
+  it.each([
+    ["template", "<details><summary><template>Answer</template>Hint</summary>try factoring</details>"],
+    ["hidden attribute", "<details><summary><span hidden>Answer</span>Hint</summary>try factoring</details>"],
+    ["hidden in an attribute value", '<details><summary>Hint / An<span title="hidden">x</span>swer</summary>try factoring</details>'],
+    ["non-rendered table label", "Topic | <template>Answer</template>Hint\n--- | ---\nrow | try factoring"],
+    ["non-rendered heading label", "## <span hidden>Answer</span>Hint\ntry factoring"],
+  ])("indexes hints according to the rendered label (%s)", (_name, text) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text }),
+      chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
+    ]) {
+      expect(chunks.find(chunk => chunk.text.includes("try factoring"))?.visibility).toBe("hint_gated");
+      for (const allowHintGated of [false, true]) {
+        const { indexableChunks } = partitionPedagogicalChunks(chunks, { allowHintGated });
+        const ranked = rankPedagogicalEvidence({
+          chunks,
+          authorization: { admissibleSourceIds: [source.sourceId], allowHintGated },
+          lexicalRanking: chunks.map(chunk => ({ id: chunk.id, score: 1 })),
+          options: { maxResults: chunks.length },
+        });
+        expect(indexableChunks.some(chunk => chunk.text.includes("try factoring"))).toBe(allowHintGated);
+        expect(ranked.ranked.some(({ chunk }) => chunk.text.includes("try factoring"))).toBe(allowHintGated);
+      }
     }
   });
 

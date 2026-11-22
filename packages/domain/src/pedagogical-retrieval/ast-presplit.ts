@@ -101,12 +101,21 @@ const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
 const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\s/'"=<>]*)(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">";
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
 const HTML_RAW_TEXT_TAGS = new Set(["textarea", "title", "script", "style", "xmp", "iframe", "noembed", "noframes"]);
+const HTML_NON_RENDERED_RAW_TEXT_TAGS = new Set(["title", "script", "style", "iframe", "noembed", "noframes"]);
+const HTML_VOID_TAGS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+]);
+const HTML_OPTIONAL_END_TAGS = new Set([
+  "html", "head", "body", "li", "dt", "dd", "p", "option", "optgroup", "colgroup", "thead", "tbody", "tfoot", "tr", "td", "th",
+]);
+const MARKDOWN_AUTOLINK = /(?<autolink><(?:[a-z][a-z0-9+.-]{1,31}:[^\s<>]*|[a-z0-9.!#$%&'*+/=?^_\x60{|}~-]+@[a-z0-9.-]+)>)/.source;
 const HTML_LABEL_BREAK_TAGS = new Set([
   "br", "hr", "div", "p", "li", "ul", "ol", "table", "tr", "td", "th",
   "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "section",
   "article", "header", "footer", "aside", "nav",
 ]);
-const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+const HTML_COMMENT_TAIL = /(?:-?>|[\s\S]*?(?:--!?>|$))/.source;
+const HTML_COMMENT_RE = new RegExp("<!--" + HTML_COMMENT_TAIL, "g");
 const INVISIBLE_LABEL_TEXT = /\u00AD|\u200B|\u200C|\u200D|\u200E|\u200F|\u2060|\uFEFF/g;
 const HTML_LABEL_REFERENCES = new Map(Object.entries({
   amp: "&", AMP: "&", lt: "<", LT: "<", gt: ">", GT: ">", quot: '"', QUOT: '"', apos: "'",
@@ -432,8 +441,10 @@ function lineIndexContaining(lines: readonly SourceLine[], offset: number, start
 }
 
 function endOfHtmlComment(text: string, afterOpener: number): number {
-  const end = text.indexOf("-->", afterOpener);
-  return end === -1 ? text.length : end + 3;
+  const tail = new RegExp(HTML_COMMENT_TAIL, "y");
+  tail.lastIndex = afterOpener;
+  tail.exec(text);
+  return tail.lastIndex;
 }
 
 function decodeHtmlLabelText(text: string): string {
@@ -495,7 +506,38 @@ function htmlRawTextBounds(text: string, opener: RegExpExecArray, afterOpener: n
   return match ? { closeStart: match.index, closeEnd: closer.lastIndex } : { closeStart: text.length, closeEnd: text.length };
 }
 
-function rawTextCrossingInlineCode(text: string, start: number, end: number, htmlLine: boolean) {
+function htmlElementEnd(text: string, tag: string, from: number): number | undefined {
+  const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
+  tokens.lastIndex = from;
+  let depth = 1;
+  let templateDepth = 0;
+  for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
+    const name = match.groups?.tag?.toLowerCase();
+    const prefix = match.groups?.prefix;
+    const raw = htmlRawTextBounds(text, match, tokens.lastIndex);
+    if (raw) {
+      tokens.lastIndex = raw.closeEnd;
+    } else if (name === "template" && tag !== "template") {
+      if (prefix === "") templateDepth++;
+      else if (prefix === "/" && templateDepth > 0) templateDepth--;
+    } else if (name === tag && templateDepth === 0) {
+      if (prefix === "") depth++;
+      else if (prefix === "/" && --depth === 0) return tokens.lastIndex;
+    }
+  }
+  return undefined;
+}
+
+function hasHiddenAttribute(opener: string, tag: string): boolean {
+  const attributes = opener.slice(tag.length + 1, -1);
+  const tokens = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"[^"]*"|'[^']*'|[^\t\n\f\r >]+))?/g;
+  for (const match of attributes.matchAll(tokens)) {
+    if (match[1]!.toLowerCase() === "hidden") return true;
+  }
+  return false;
+}
+
+function rawTextCrossingCode(text: string, start: number, end: number, allowUnclosed: boolean) {
   const code = text.slice(start, end);
   if (!code.includes("<")) return null;
   const tokens = new RegExp("<!--|" + HTML_TAG_TOKEN, "gi");
@@ -506,9 +548,7 @@ function rawTextCrossingInlineCode(text: string, start: number, end: number, htm
     }
     const rawText = htmlRawTextBounds(text, match, start + tokens.lastIndex);
     if (rawText) {
-      // Embedded raw text only extends a Markdown span when its close is
-      // outside the span or the opener occurs on the disclosure's HTML line.
-      if (rawText.closeStart >= end && (htmlLine || rawText.closeStart < rawText.closeEnd)) return rawText;
+      if (rawText.closeStart === rawText.closeEnd ? allowUnclosed : rawText.closeEnd > end) return rawText;
       tokens.lastIndex = Math.min(rawText.closeEnd, end) - start;
     }
   }
@@ -542,6 +582,18 @@ function endOfDetailsCodeFence(
     if (closesFence(body, opener)) return newline ? newline.index + newline[0].length : text.length;
   }
   return text.length;
+}
+
+const INDENTED_CODE_RE = /^(?: {4}| {0,3}\t)/;
+
+function endOfDetailsIndentedCode(text: string, start: number, containers: readonly MarkdownContainer[]): number {
+  while (start < text.length) {
+    const newline = nextLineBreak(text, start);
+    const { depth, body } = continueMarkdownContainers(text.slice(start, newline?.index ?? text.length), containers);
+    if (depth !== containers.length || (body.trim() && !INDENTED_CODE_RE.test(body))) break;
+    start = newline ? newline.index + newline[0].length : text.length;
+  }
+  return start;
 }
 
 interface DetailsBounds {
@@ -618,7 +670,7 @@ function findMatchingDetailsBounds(
         (lineStart >= markdownBodyStart && startsHtml && !body.trimStart().startsWith("</"));
       contiguousHtml = startsHtml || continuesHtml;
       const endsSetext = sameContainer && !afterBlockBoundary && !inIndentedCode && SETEXT_UNDERLINE_RE.test(body);
-      inIndentedCode = /^(?: {4}| {0,3}\t)/.test(body) &&
+      inIndentedCode = INDENTED_CODE_RE.test(body) &&
         (afterBlockBoundary || !sameContainer || inIndentedCode);
       afterBlockBoundary = !body.trim() || endsSetext || /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) ||
         THEMATIC_BREAK_RE.test(body);
@@ -628,6 +680,14 @@ function findMatchingDetailsBounds(
     if (end < nextLineStart) return;
     const newline = nextLineBreak(text, end);
     nextLineStart = newline ? newline.index + newline[0].length : text.length;
+  };
+  const skipCodeBlock = (start: number, end: number) => {
+    const raw = rawTextCrossingCode(text, start, end, true);
+    tokenRe.lastIndex = raw?.closeEnd ?? end;
+    nextLineStart = end;
+    if (raw) skipLiteralLines(raw.closeEnd);
+    inIndentedCode = false;
+    afterBlockBoundary = true;
   };
 
   let depth = 1;
@@ -639,14 +699,15 @@ function findMatchingDetailsBounds(
     readThroughLine(match.index);
     const markdownBody = match.index >= markdownBodyStart;
     const allowsMarkdown = !contiguousHtml || (markdownBody && !htmlStartedInBody);
-    const rawText = !inIndentedCode || contiguousHtml ? htmlRawTextBounds(text, match, tokenRe.lastIndex) : null;
+    if (allowsMarkdown && inIndentedCode) {
+      const end = endOfDetailsIndentedCode(text, nextLineStart, containers);
+      skipCodeBlock(containingLineStart(text, match.index), end);
+      continue;
+    }
+    const rawText = htmlRawTextBounds(text, match, tokenRe.lastIndex);
     if (rawText) {
       tokenRe.lastIndex = rawText.closeEnd;
       skipLiteralLines(tokenRe.lastIndex);
-      continue;
-    }
-    if (allowsMarkdown && inIndentedCode) {
-      tokenRe.lastIndex = nextLineStart;
       continue;
     }
     if (match[0] === "<!--") {
@@ -663,7 +724,7 @@ function findMatchingDetailsBounds(
       if ((allowsMarkdown || insideSummary) && !isEscaped(text, match.index)) {
         const end = endOfBacktickSpan(text, match.index);
         if (end !== -1 && !crossesDetailsHtmlBoundary(text, match.index, end, containers)) {
-          const raw = rawTextCrossingInlineCode(text, match.index, end, contiguousHtml && !markdownBody);
+          const raw = rawTextCrossingCode(text, match.index, end, contiguousHtml && !markdownBody);
           if (insideSummary && !raw) summaryCodeSpans.push({ start: match.index, end });
           tokenRe.lastIndex = raw?.closeEnd ?? end;
           skipLiteralLines(tokenRe.lastIndex);
@@ -674,9 +735,8 @@ function findMatchingDetailsBounds(
     if (match.groups?.fence) {
       const fence = allowsMarkdown ? matchFenceOpening(body)?.[1] : undefined;
       if (fence) {
-        nextLineStart = endOfDetailsCodeFence(text, tokenRe.lastIndex, fence, containers);
-        tokenRe.lastIndex = nextLineStart;
-        afterBlockBoundary = true;
+        const end = endOfDetailsCodeFence(text, tokenRe.lastIndex, fence, containers);
+        skipCodeBlock(nextLineStart, end);
       } else {
         tokenRe.lastIndex = match.index + 1;
       }
@@ -685,6 +745,11 @@ function findMatchingDetailsBounds(
     skipLiteralLines(tokenRe.lastIndex);
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
+    if (tag === "template" && prefix === "") {
+      tokenRe.lastIndex = htmlElementEnd(text, tag, tokenRe.lastIndex) ?? text.length;
+      skipLiteralLines(tokenRe.lastIndex);
+      continue;
+    }
     if (tag === "summary") {
       if (prefix === "/") {
         const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
@@ -711,29 +776,6 @@ function findMatchingDetailsBounds(
   return { closeStart: text.length, closeEnd: text.length, summary };
 }
 
-function maskSummaryLiterals(text: string): string {
-  const parts: string[] = [];
-  const tokens = new RegExp("<!--|" + HTML_TAG_TOKEN, "gi");
-  let copied = 0;
-  for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
-    if (match[0] === "<!--") {
-      tokens.lastIndex = endOfHtmlComment(text, tokens.lastIndex);
-      parts.push(text.slice(copied, tokens.lastIndex));
-    } else {
-      // Keep real tag boundaries while hiding markup inside quoted attributes.
-      parts.push(text.slice(copied, match.index + 1), match[0].slice(1, -1).replace(/[<>]/g, " "), ">");
-      const rawText = htmlRawTextBounds(text, match, tokens.lastIndex);
-      if (rawText) {
-        parts.push(text.slice(tokens.lastIndex, rawText.closeStart).replace(/[<>]/g, " "),
-          text.slice(rawText.closeStart, rawText.closeEnd));
-        tokens.lastIndex = rawText.closeEnd;
-      }
-    }
-    copied = tokens.lastIndex;
-  }
-  return parts.length > 0 ? parts.join("") + text.slice(copied) : text;
-}
-
 function readSummaryMarkup(text: string, summary: NonNullable<DetailsBounds["summary"]>): string {
   const parts: string[] = [];
   let cursor = summary.openEnd;
@@ -743,16 +785,48 @@ function readSummaryMarkup(text: string, summary: NonNullable<DetailsBounds["sum
     cursor = end;
   }
   parts.push(text.slice(cursor, summary.closeStart));
-  return maskSummaryLiterals(parts.join(""));
+  return parts.join("");
 }
 
-function htmlLabelTextVariants(label: string, removeRubyAnnotations = false) {
+function maskMarkdownLabelMarkup(label: string): string {
+  const tokens = new RegExp([MARKDOWN_AUTOLINK, /\x60+/.source, HTML_COMMENT_RE.source, HTML_TAG_TOKEN].join("|"), "gi");
+  const parts: string[] = [];
+  let cursor = 0;
+  for (let match = tokens.exec(label); match; match = tokens.exec(label)) {
+    const unterminatedComment = match[0].startsWith("<!--") && !/^<!--(?:-?>|[\s\S]*--!?>)$/.test(match[0]);
+    if (isEscaped(label, match.index) || unterminatedComment) {
+      tokens.lastIndex = match.index + 1;
+      if (match[0].startsWith("<")) {
+        parts.push(label.slice(cursor, match.index), " ");
+        cursor = tokens.lastIndex;
+      }
+    } else if (match.groups?.autolink) {
+      parts.push(label.slice(cursor, match.index), " ", match[0].slice(1, -1), " ");
+      cursor = tokens.lastIndex;
+    } else if (match[0].startsWith("\x60")) {
+      const end = endOfBacktickSpan(label, match.index);
+      if (end !== -1) {
+        parts.push(label.slice(cursor, match.index), label.slice(match.index, end).replace(/[<>]/g, " "));
+        tokens.lastIndex = cursor = end;
+      }
+    } else if (match.groups?.tag?.toLowerCase() === "template" && match.groups.prefix === "") {
+      tokens.lastIndex = htmlElementEnd(label, "template", tokens.lastIndex) ?? label.length;
+    } else {
+      const raw = htmlRawTextBounds(label, match, tokens.lastIndex);
+      if (raw) tokens.lastIndex = raw.closeEnd;
+    }
+  }
+  return parts.length ? parts.join("") + label.slice(cursor) : label;
+}
+
+function htmlLabelTextVariants(label: string, removeRubyAnnotations = true) {
   const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
   const inline: string[] = [];
   const spaced: string[] = [];
-  const appendText = (start: number, end?: number) => {
+  const appendText = (start: number, end?: number, decodeReferences = true) => {
     // References cannot continue into the next HTML text node.
-    const text = decodeHtmlLabelText(label.slice(start, end));
+    const raw = label.slice(start, end);
+    const text = decodeReferences ? decodeHtmlLabelText(raw) : raw;
     inline.push(text);
     spaced.push(text);
   };
@@ -765,6 +839,28 @@ function htmlLabelTextVariants(label: string, removeRubyAnnotations = false) {
     cursor = tokens.lastIndex;
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
+    if (tag && prefix === "") {
+      // Browsers can close these elements implicitly before the next visible sibling.
+      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) && hasHiddenAttribute(match[0], tag);
+      const raw = htmlRawTextBounds(label, match, cursor);
+      if (tag === "template" || HTML_NON_RENDERED_RAW_TEXT_TAGS.has(tag)) {
+        tokens.lastIndex = cursor = raw?.closeEnd ?? htmlElementEnd(label, tag, cursor) ?? label.length;
+        continue;
+      }
+      if (hidden || (removeRubyAnnotations && rubyDepth === 0 && (tag === "rt" || tag === "rp"))) {
+        // When an end tag is omitted, keep potentially visible text available for protection.
+        const end = HTML_VOID_TAGS.has(tag) ? cursor : raw?.closeEnd ?? htmlElementEnd(label, tag, cursor);
+        if (end !== undefined) {
+          tokens.lastIndex = cursor = end;
+          continue;
+        }
+      }
+      if (raw) {
+        if (annotationStart === undefined) appendText(cursor, raw.closeStart, tag === "textarea");
+        tokens.lastIndex = cursor = raw.closeEnd;
+        continue;
+      }
+    }
     if (removeRubyAnnotations && tag === "ruby") {
       if (prefix === "/") {
         rubyDepth = Math.max(0, rubyDepth - 1);
@@ -796,9 +892,9 @@ function classifyDetailsElement(
   readonly label: string;
   readonly summaryEndOffset: number | null;
 } {
-  if (summary && !maskSummaryLiterals(text.slice(openEnd, summary.openStart)).replace(HTML_COMMENT_RE, "").trim()) {
+  if (summary && !text.slice(openEnd, summary.openStart).replace(HTML_COMMENT_RE, "").trim()) {
     const summaryContents = readSummaryMarkup(text, summary);
-    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, true);
+    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
       !hasDetails &&
@@ -1005,13 +1101,15 @@ function isPipeTableStart(header: string, delimiter?: string): boolean {
 }
 
 function tableColumnVisibility(label: string): PedagogicalVisibility {
-  if (SEALED_HEADING_RE.test(label)) return "sealed";
-  if (/[<&]|\p{Cf}/u.test(label)) {
-    const { inline, spaced } = htmlLabelTextVariants(label);
-    if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
-    if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";
+  if (label.includes("<")) label = maskMarkdownLabelMarkup(label);
+  const { inline, spaced } = /[<&]|\p{Cf}/u.test(label) ? htmlLabelTextVariants(label) : { inline: label, spaced: label };
+  if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
+  if (/<(?:rt|rp)(?=[\s/>])/i.test(label)) {
+    // Preserve answer protection for imported labels that use ruby text as part of a word.
+    const annotated = htmlLabelTextVariants(label, false);
+    if (SEALED_HEADING_RE.test(annotated.inline) || SEALED_HEADING_RE.test(annotated.spaced)) return "sealed";
   }
-  if (HINT_HEADING_RE.test(label)) return "hint_gated";
+  if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";
   return "public";
 }
 
