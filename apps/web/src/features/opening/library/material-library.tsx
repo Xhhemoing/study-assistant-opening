@@ -33,7 +33,7 @@ const sorts: Array<{ value: MaterialSort; label: string }> = [
   { value: "name", label: "名称排序" }, { value: "largest", label: "文件大小" },
 ];
 
-export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null, onCourseChange, onFilterQueryChange, incomingFiles, onIncomingFilesAccepted, onUploadBusyChange, onUploadRequested, onEmptyChange, hideUploadPicker = false }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; onCourseChange?: (courseId: string | null) => void; onFilterQueryChange?: (query: string) => void; incomingFiles?: LibraryFileBatch | null; onIncomingFilesAccepted?: () => void; onUploadBusyChange?: (busy: boolean) => void; onUploadRequested?: () => void; onEmptyChange?: (empty: boolean) => void; hideUploadPicker?: boolean }) {
+export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null, onCourseChange, onFilterQueryChange, incomingFiles, onIncomingFilesAccepted, onUploadBusyChange, onUploadRequested, onEmptyChange, hideUploadPicker = false, refreshRevision = 0 }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; onCourseChange?: (courseId: string | null) => void; onFilterQueryChange?: (query: string) => void; incomingFiles?: LibraryFileBatch | null; onIncomingFilesAccepted?: () => void; onUploadBusyChange?: (busy: boolean) => void; onUploadRequested?: () => void; onEmptyChange?: (empty: boolean) => void; hideUploadPicker?: boolean; refreshRevision?: number }) {
   const library = useMaterialLibrary(api, { uploadCourseId });
   const { sources, organization, space, selection, loading, refreshing, busy, error, organizationError, refresh, load, changeSpace: setLibrarySpace } = library;
   const [query, setQuery] = useState("");
@@ -45,6 +45,12 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const [managing, setManaging] = useState(false);
   const [assignId, setAssignId] = useState<string | null>(null);
   const previousUploadCourseId = useRef<string | null | undefined>(undefined);
+  const previousRefreshRevision = useRef(refreshRevision);
+  useEffect(() => {
+    if (previousRefreshRevision.current === refreshRevision) return;
+    previousRefreshRevision.current = refreshRevision;
+    void load();
+  }, [load, refreshRevision]);
   useEffect(() => { onEmptyChange?.(!loading && !error && sources.length === 0); }, [loading, error, sources.length, onEmptyChange]);
   // Apply only inbound changes, preserving locally selected views or newly created courses.
   useEffect(() => {
@@ -83,12 +89,16 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const titles = { all: "全部原件", inbox: "待整理", ready: "可用于提问", attention: "需处理" };
   const title = courseId ? organization.courses.find(item => item.id === courseId)?.title ?? "课程资料" : titles[space as keyof typeof titles];
   const changeSpace = (next: typeof space) => { library.changeSpace(next); onCourseChange?.(next.startsWith("course:") ? next.slice(7) : null); setPage(1); setQuery(""); setKind("all"); setStatus("all"); };
+  const createCourse = (title: string) => library.createCourse(title, course => {
+    onCourseChange?.(course.id);
+    setPage(1); setQuery(""); setKind("all"); setStatus("all");
+  });
   const filtered = query.trim() !== "" || kind !== "all" || status !== "all";
   const incompleteUpload = scoped.filter(record => materialStatus(record) === "incomplete_upload").length;
   const parsing = scoped.filter(record => materialStatus(record) === "parsing").length;
   const failures = scoped.filter(record => materialStatus(record) === "attention").length;
   return <div className="grid min-w-0 gap-6 lg:grid-cols-[180px_minmax(0,1fr)]">
-    <MaterialSpaceNav sources={sources} organization={organization} space={space} onSpace={changeSpace} onCreate={library.createCourse} disabled={busy || loading || !library.organizationReady} />
+    <MaterialSpaceNav sources={sources} organization={organization} space={space} onSpace={changeSpace} onCreate={createCourse} disabled={busy || loading || !library.organizationReady} />
     <div className="min-w-0 space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs text-text-2"><h2 className="text-sm font-semibold text-text">{title}</h2><span>{scoped.length} 份材料</span>
