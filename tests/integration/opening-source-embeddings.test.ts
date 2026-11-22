@@ -2,11 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningPdfSegmentsRepository,
-  createOpeningSourceChunksRepository, createOpeningSourceEmbeddingsRepository, createOpeningSourceRepository, openingJobScope, readOpeningSourceContent } from "@aistudy/database";
+  createOpeningSourceChunksRepository, createOpeningSourceEmbeddingsRepository, createOpeningSourceRepository, openingJobScope,
+  readOpeningSourceContent, type PdfSegmentPage } from "@aistudy/database";
 import { segmentMaterialChunks } from "@aistudy/ai";
 import * as network from "../../packages/ai/src/opening/provider-network";
 import { createOpeningMaterialRetriever, retrievalBudgetId } from "../../apps/worker/src/runtime/material-retrieval";
 import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
+import { createSourceVisualRecognition } from "../../apps/worker/src/runtime/source-visual-recognition";
+import { preserveOpeningKnowledgeDefinitions } from "../../packages/database/src/repositories/opening-knowledge-definitions";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
@@ -25,6 +28,53 @@ async function seed(text: string | string[], scope = f.scope) {
   const snapshot = (await repository.snapshot(scope, sourceId))!;
   await repository.store(scope, snapshot, model, segmentMaterialChunks(snapshot.chunks).map(segment => ({ ...segment, vector: [1, 0, 0] })));
   return { sourceId, snapshot, repository };
+}
+
+async function startPdfRetry(sourceId: string, pages: PdfSegmentPage[],
+  recognition: Pick<Parameters<typeof createParseSourceHandler>[0], "recognizePage" | "recognizePages"> = {}) {
+  const bytes = Buffer.from("%PDF synthetic retry");
+  await f.sql`UPDATE opening_sources SET mime='application/pdf',parse_state='running',bytes=${bytes.length},
+    sha256=${createHash("sha256").update(bytes).digest("hex")} WHERE id=${sourceId}`;
+  const jobs = createOpeningJobRepository(f.sql);
+  const payload = { sourceId, sourceVersion: 1 };
+  const job = await jobs.createOnce(f.scope, { kind: "parse", key: randomUUID(), payload,
+    privacyEpoch: await jobs.workspacePrivacyEpoch(f.scope.workspaceId) });
+  const claimed = await jobs.claim(job.id);
+  expect(claimed?.claimToken).toBeTruthy();
+  const chunks = createOpeningSourceChunksRepository(f.sql);
+  const sources = createOpeningSourceRepository(f.sql);
+  const handler = createParseSourceHandler({
+    ...recognition, sources, chunks, tempDir: os.tmpdir(),
+    segments: createOpeningPdfSegmentsRepository(f.sql),
+    storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${bytes.toString("base64")}` },
+    runner: async argv => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: pages.length }) };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      const end = Number(argv[argv.indexOf("--page-end") + 1]);
+      return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, end) }) };
+    },
+  });
+  return { chunks, sources, run: () => handler(claimed!, payload),
+    finish: (pages: number) => jobs.finish(claimed!.id, "succeeded", { pages }, claimed!.claimToken) };
+}
+
+async function backfilledPages(pdf: Awaited<ReturnType<typeof seed>>) {
+  const courseId = randomUUID();
+  const nodes = pdf.snapshot.chunks.map(chunk => ({
+    id: randomUUID(), courseId, label: `Page ${chunk.page}`, kind: "concept",
+    evidenceChunkIds: [chunk.id], status: "supported",
+  }));
+  await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${pdf.sourceId} ON CONFLICT DO NOTHING`;
+  await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'PDF evidence',${courseId})`;
+  await f.sql`INSERT INTO course_asset_memberships(id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${courseId},'source',${pdf.sourceId},'core',0,'course')`;
+  await f.sql`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
+    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},1,${f.sql.json({ courseId, version: 1, nodes, edges: [] })},
+      ${f.sql.json({ [pdf.sourceId]: 1 })})`;
+  await f.sql.begin(tx => preserveOpeningKnowledgeDefinitions(tx, f.scope, pdf.sourceId, 1));
+  const [graph] = await f.sql`SELECT node_definitions FROM opening_course_knowledge WHERE course_id=${courseId}`;
+  return nodes.flatMap(({ id }, index) => graph?.node_definitions?.[id] ? [index + 1] : []);
 }
 
 describe("pgvector material repository", () => {
@@ -172,42 +222,94 @@ describe("pgvector material repository", () => {
       .rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
-  it("fences archived images and continuation text before an empty Vision response aborts publication", async () => {
-    const publicText = "Public introduction.";
-    const pdf = await seed([publicText, "123", "5 units."]);
-    const bytes = Buffer.from("%PDF synthetic recognition failure");
-    await f.sql`UPDATE opening_sources SET mime='application/pdf',parse_state='running',bytes=${bytes.length},
-      sha256=${createHash("sha256").update(bytes).digest("hex")} WHERE id=${pdf.sourceId}`;
-    await f.sql`UPDATE opening_source_chunks SET image_object_key='archived/image' WHERE source_id=${pdf.sourceId} AND page=2`;
-    const chunks = createOpeningSourceChunksRepository(f.sql);
-    expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual([publicText, "123", "5 units."]);
-    const jobs = createOpeningJobRepository(f.sql);
-    const payload = { sourceId: pdf.sourceId, sourceVersion: 1 };
-    const job = await jobs.createOnce(f.scope, { kind: "parse", key: randomUUID(), payload,
-      privacyEpoch: await jobs.workspacePrivacyEpoch(f.scope.workspaceId) });
-    const claimed = await jobs.claim(job.id);
-    expect(claimed?.claimToken).toBeTruthy();
+  it.each(["empty response", "confirmed native seal", "native seal with unverified picture", "batch setup failure"])(
+    "withdraws archived images and continuations after %s", async failure => {
+      const publicText = "Chapter 2: Geometry";
+      const confirmed = failure === "confirmed native seal" || failure === "native seal with unverified picture";
+      const nativeText = failure === "native seal with unverified picture" ? "123" : publicText;
+      const markerPage = confirmed ? 1 : 2;
+      const archived = [publicText, confirmed ? "5 units." : "123", "5 more units."];
+      const pdf = await seed(archived);
+      await f.sql`UPDATE opening_source_chunks SET image_object_key='archived/image'
+        WHERE source_id=${pdf.sourceId} AND page=${markerPage}`;
+      const reads: number[] = [];
+      const visual = createSourceVisualRecognition({
+        repository: { read: async (_scope, { physicalPage }) => {
+          reads.push(physicalPage);
+          if (physicalPage === 2) throw new Error("Scan cache unavailable");
+          return null;
+        }, save: vi.fn(), assertCurrent: vi.fn(), ledger: vi.fn(), releasedReservation: vi.fn() },
+        gateway: { call: vi.fn() }, budget: vi.fn(), storage: { finalKey: () => "final" }, renderPdf: vi.fn(),
+      });
+      const retry = await startPdfRetry(pdf.sourceId, [
+        { page: 1, text: nativeText, imagePath: null, visualKinds: confirmed || failure === "batch setup failure" ? ["picture"] : [],
+          ...(confirmed ? { hadSealedContent: true, sectionSealedAtEnd: true } : {}) },
+        { page: 2, text: confirmed ? "" : "123", imagePath: null, visualKinds: confirmed ? [] : ["scan"] },
+        { page: 3, text: "5 more units.", imagePath: null, visualKinds: [] },
+      ], failure === "batch setup failure" ? { recognizePages: visual.recognizePages } : {
+        recognizePage: async () => {
+          if (confirmed) throw new Error("Vision unavailable");
+          return { text: "", imageObjectKey: "recognized/2" };
+        },
+      });
+      expect((await retry.chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual(archived);
+      await expect(retry.run()).rejects.toThrow(confirmed ? "Vision unavailable"
+        : failure === "batch setup failure" ? "Scan cache unavailable" : "no readable content");
+      if (failure === "batch setup failure") expect(reads).toEqual([1, 2]);
+      const markers = await f.sql`SELECT pages FROM opening_pdf_parse_segments
+        WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`;
+      expect(markers).toEqual([{ pages: [expect.objectContaining({ page: markerPage, publicationSealCommitted: false,
+        hadSealedContent: confirmed, sectionSealedAtEnd: confirmed,
+        publicationSealUnknown: !confirmed || failure === "native seal with unverified picture",
+      })] }]);
+      const expected = confirmed ? [] : [publicText];
+      for (const state of ["running", "failed", "ready"]) {
+        await f.sql`UPDATE opening_sources SET parse_state=${state} WHERE id=${pdf.sourceId}`;
+        expect((await retry.chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual(expected);
+        expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(chunk => chunk.text)).toEqual(expected);
+        await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: markerPage }))
+          .rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
+          .rejects.toMatchObject({ code: "NOT_FOUND" });
+        if (!confirmed) await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 1 }))
+          .resolves.toMatchObject({ text: publicText, pages: [1] });
+      }
+      expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks.map(chunk => chunk.text)).toEqual(expected);
+      const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+      expect((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.text)).toEqual(expected);
+      expect(await backfilledPages(pdf)).toEqual(confirmed ? [] : [1]);
+    },
+  );
 
-    const handler = createParseSourceHandler({
-      sources: createOpeningSourceRepository(f.sql), chunks, tempDir: os.tmpdir(),
-      segments: createOpeningPdfSegmentsRepository(f.sql),
-      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${bytes.toString("base64")}` },
-      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf") ? { pageCount: 3 } : { pages: [
-        { page: 1, text: publicText, imagePath: null, visualKinds: [] },
-        { page: 2, text: "123", imagePath: null, visualKinds: ["picture"] },
-        { page: 3, text: "5 units.", imagePath: null, visualKinds: [] },
-      ] }) }),
-      recognizePage: async () => ({ text: "", imageObjectKey: "recognized/2" }),
-    });
-    await expect(handler(claimed!, payload)).rejects.toThrow("no readable content");
-    const [row] = await f.sql`SELECT pages FROM opening_pdf_parse_segments
-      WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`;
-    expect(row?.pages).toMatchObject([{ page: 2, publicationSealUnknown: true, publicationSealCommitted: false }]);
-    for (const state of ["running", "failed"]) {
-      await f.sql`UPDATE opening_sources SET parse_state=${state} WHERE id=${pdf.sourceId}`;
-      expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual([publicText]);
-      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 })).rejects.toMatchObject({ code: "NOT_FOUND" });
-    }
+  it("seals sentence-case assessment sections before publication and index admission", async () => {
+    const texts = ["Answers to exercises 1–5", "5 units.", "Chapter 2: Geometry"];
+    const pdf = await seed(texts);
+    const retry = await startPdfRetry(pdf.sourceId, texts.map((text, index) => ({
+      page: index + 1, text, imagePath: null, visualKinds: [],
+    })));
+    await expect(retry.run()).resolves.toMatchObject({ pages: 3 });
+    expect((await retry.chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual([texts[2]]);
+    expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks.map(chunk => chunk.text)).toEqual([texts[2]]);
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("publishes fresh native prose and the continuation on the first retry after unreadable Vision", async () => {
+    const texts = ["Public introduction.", "Chapter 2: Geometry\nThis section introduces triangles.", "Public continuation."];
+    const pdf = await seed([texts[0]!, "123", texts[2]!]);
+    const pages: PdfSegmentPage[] = texts.map((text, index) => ({ page: index + 1, text, imagePath: null, visualKinds: [] }));
+    const failed = await startPdfRetry(pdf.sourceId, [pages[0]!,
+      { ...pages[1]!, text: "123", visualKinds: ["picture"] }, pages[2]!],
+    { recognizePage: async () => ({ text: "[unreadable]", imageObjectKey: "archived/image" }) });
+    await expect(failed.run()).resolves.toMatchObject({ pages: 3, degraded: true });
+    await failed.finish(3);
+    expect((await failed.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2], { unpublishedPdfForRecovery: true }))[0]?.text)
+      .toContain("[unreadable]");
+
+    const retry = await startPdfRetry(pdf.sourceId, pages);
+    await expect(retry.run()).resolves.toEqual({ pages: 3 });
+    expect((await retry.chunks.listForSources(f.scope, [pdf.sourceId])).map(({ text, imageObjectKey }) => [text, imageObjectKey]))
+      .toEqual(texts.map(text => [text, null]));
+    expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ parseState: "ready", error: null });
   });
 
   it("ranks the three admitted pages even with 55 closer pages in the same book", async () => {

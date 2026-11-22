@@ -772,7 +772,9 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
     def test_model_answer_section_headings_still_seal_the_following_page(self):
         for title in ("Model answers", "Model Answers:", "Selected answers", "Official solutions",
                       "Reference solutions", "Answer key", "Solutions manual", "Answers to Exercises 1–5",
-                      "**Solu**tions to Problems 1.1—1.8", "Answers\u00a0to Review Questions #1 through #5"):
+                      "**Solu**tions to Problems 1.1—1.8", "Answers\u00a0to Review Questions #1 through #5",
+                      "Answers to exercises 1–5", "Solutions to problems 1–10", "Answers to selected review questions",
+                      "Key to the exercises", "Chapter 3: answers to exercises", "Answer key (CoNt.)"):
             with self.subTest(title=title):
                 result = result_for(
                     [text_element(10, "Exercise 1: Find x.\n" + title + "\n1. x = 3.")],
@@ -785,6 +787,18 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertTrue(ext.section_sealed_by_page[10])
                 self.assertEqual(ext.texts_by_page[11], [])
                 self.assertEqual(ext.texts_by_page[12], ["Chapter 2: Vectors"])
+
+    def test_assessment_prose_does_not_open_a_seal(self):
+        for text in ("Answers to exercises are omitted in this edition.",
+                     "Answers to review questions appear on the course website.",
+                     "Solutions to problems require careful units."):
+            with self.subTest(text=text):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(10, text)], [text_element(11, "Public continuation.")], start_page=10,
+                ))
+                self.assertEqual(ext.texts_by_page[10], [text])
+                self.assertFalse(ext.section_sealed_by_page[10])
+                self.assertEqual(ext.texts_by_page[11], ["Public continuation."])
 
     def test_qualified_inline_answers_and_solution_headings(self):
         for label in ("Sample solution:", "Model answer", "Model Answer", "MODEL ANSWER", "Reference answer",

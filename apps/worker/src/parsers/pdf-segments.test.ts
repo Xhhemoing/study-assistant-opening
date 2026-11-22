@@ -69,11 +69,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v18-discourse/text",
     "docling-2.126.0/pdf-segments-v19-discourse/text",
     "docling-2.126.0/pdf-segments-v20-discourse/text",
+    "docling-2.126.0/pdf-segments-v21-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v21-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v22-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -1335,6 +1336,25 @@ describe("bounded resumable PDF parser", () => {
       : expect.objectContaining({ text: "[视觉转写与描述]\nRecovered second page", imageObjectKey: "recognized/2" }));
   });
 
+  it("replaces archived unreadable Vision on the first verified native retry", async () => {
+    const segmentData = new Map<string, PdfSegment>();
+    const first = await runPdfScenario({ segmentData, segmentPages: 1, pages: [
+      { page: 1, text: "Public first page." },
+      { page: 2, text: "123", visualKinds: ["picture"] },
+      { page: 3, text: "Public continuation." },
+    ], recognizePage: async () => ({ text: "[unreadable]", imageObjectKey: "archive/2" }) });
+    expect(first.publishedChunks[1]?.text).toContain("[视觉转写与描述]\n[unreadable]");
+    const text = "Chapter 2: Geometry\nThis section introduces triangles.";
+    const retry = await runPdfScenario({ segmentData, segmentPages: 1, pages: [
+      { page: 1, text: "Public first page." }, { page: 2, text }, { page: 3, text: "Public continuation." },
+    ], savedChunks: first.publishedChunks });
+    expect(retry.publishedChunks.map(({ page, text, imageObjectKey }) => [page, text, imageObjectKey])).toEqual([
+      [1, "Public first page.", null], [2, text, null], [3, "Public continuation.", null],
+    ]);
+    expect(retry.pdfWarning).toBeUndefined();
+    expect(segmentData.has("pdf-publication-page-seal-v1/2-2")).toBe(false);
+  });
+
   it("replays a mixed-page seal using only native-aligned Vision lines", async () => {
     const chapter = "Chapter 1: Geometry";
     const segmentData = new Map<string, PdfSegment>();
@@ -2304,7 +2324,9 @@ describe("bounded resumable PDF parser", () => {
     }
   });
 
-  it.each(["Model answers", "Model Answers:", "Selected answers", "Official solutions", "Reference solutions", "Answer key", "Solutions manual"])(
+  it.each(["Model answers", "Model Answers:", "Selected answers", "Official solutions", "Reference solutions",
+    "Answer key", "Solutions manual", "Answers to exercises 1–5", "Solutions to problems 1–10",
+    "Answers to selected review questions", "Key to the exercises", "Chapter 3: answers to exercises", "Answer key (CoNt.)"])(
     "keeps the standalone %s header section-sealed", async title => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n" + title + "\n1. x = 3." },
@@ -2313,6 +2335,17 @@ describe("bounded resumable PDF parser", () => {
       ] });
       expect(result.publishedChunks.map(chunk => [chunk.page, chunk.text]))
         .toEqual([[1, "Exercise 1: Find x."], [3, "Chapter 2: Vectors"]]);
+    },
+  );
+
+  it.each(["Answers to exercises are omitted in this edition.",
+    "Answers to review questions appear on the course website.", "Solutions to problems require careful units."])(
+    "keeps the prose sentence %j and its continuation public", async text => {
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text }, { page: 2, text: "Public continuation." },
+      ] });
+      expect(result.requests).toEqual([{ start: 1 }, { start: 2 }]);
+      expect(result.publishedChunks.map(chunk => chunk.text)).toEqual([text, "Public continuation."]);
     },
   );
 

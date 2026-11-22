@@ -7,7 +7,7 @@ import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 const definitionPatchByteLimit = 256 * 1024;
 const pdfHeadingContainer = /^(?:(?:chapter|section|lecture|part|unit|appendix)[ \t]+[\w.]+|第[ \t]*[一二三四五六七八九十百千\d]+[ \t]*(?:章|节|讲|部分|单元)|附录[ \t]*[A-Z0-9一二三四五六七八九十]+)(?:[ \t]*[:：.\-—–][ \t]*|[ \t]+)/iu;
 const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
-const englishContinuation = String.raw`(?:[ \t]*\([ \t]*(?:continued|cont\.?|cont['’]?d)[ \t]*\))?`;
+const englishContinuation = String.raw`(?:[ \t]*\([ \t]*(?:continued|cont(?:['’]?d)?\.?)[ \t]*\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答)";
 const chineseContinuation = String.raw`(?:[ \t]*[（(](?:续|接上页)[）)])?[ \t]*`;
 const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;

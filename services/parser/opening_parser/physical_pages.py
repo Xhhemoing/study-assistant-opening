@@ -48,40 +48,42 @@ _CAPTION_PREFIX_RE = re.compile(
 _TABLE_CAPTION_REF_RE = re.compile(r"^(?:Table|表|附表)\b", re.IGNORECASE)
 _VISUAL_CAPTION_REF_RE = re.compile(r"^(?:Figure|Fig\.?|Chart|Diagram|Scheme|图|插图)\b", re.IGNORECASE)
 
-# Dedicated multi-problem Answer-Key / Solutions section headings (case-sensitive for English to
-# avoid matching lowercase wrapped prose like "solution." or bare chemistry "Solutions").
-_SEALED_SECTION_CONTAINER = r"(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|(?:Lecture|LECTURE|Part|PART|Unit|UNIT)\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)"
+# Standalone assessment headings can open a seal across physical pages.
+_SEALED_SECTION_CONTAINER = r"(?:Appendix\s+[A-Z0-9]+|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*|(?:Lecture|Part|Unit)\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)"
+_SEALED_HEADING_CONTINUATION = r"(?:\s*\(\s*(?:continued|cont(?:['’]?d)?\.?)\s*\))?"
+_ASSESSMENT_NUMBER = r"#?\d+(?:\.\d+)*"
+_ASSESSMENT_TARGET = rf"(?:\s+{_ASSESSMENT_NUMBER}(?:(?:\s*[-–—]\s*|\s+(?:to|through)\s+){_ASSESSMENT_NUMBER})?)?"
+_ASSESSMENT_ANSWER_HEADING = (
+    r"(?:Answers?|Solutions?|Key)\s+to\s+"
+    r"(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*"
+    rf"(?:(?:Exercises?|Problems?|Questions?|Review\s+Questions?|Practice\s+Problems?|Self[- ]Check\s+Exercises?){_ASSESSMENT_TARGET}|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)"
+)
+_QUALIFIED_ANSWER_SECTION = r"(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|(?:Official|Reference)\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)"
 _CONTAINER_SEALED_HEADING = (
     rf"{_SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+)"
-    r"(?:Answers?\s+[Kk]ey|ANSWERS?\s+KEY|(?:(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Odd-numbered|Even-Numbered|Even-numbered)\s+)?(?:[Aa]nswers?|[Ss]olutions?)|(?:(?:MODEL|SELECTED|OFFICIAL|REFERENCE|CORRECT|SAMPLE|ODD-NUMBERED|EVEN-NUMBERED)\s+)?(?:ANSWERS?|SOLUTIONS?)|参考答案|标准答案|参考解答|详细解答|答案|解答)"
-    r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+    r"(?:Answers?\s+Key|(?:(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Even-Numbered)\s+)?(?:Answers?|Solutions?)|参考答案|标准答案|参考解答|详细解答|答案|解答)"
+    rf"{_SEALED_HEADING_CONTINUATION}\s*(?:[:：]|$)"
 )
 
 _SECTION_SEALED_RE = re.compile(
     r"^(?:"
     rf"(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
-    r"(?:(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?\s+[Kk]ey|ANSWERS?\s+KEY|Key\s+(?:to|TO)\s+(?:the\s+|THE\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
-    r"|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\s+(?:to|TO)\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)\s+)*(?:(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\s+Questions?|REVIEW\s+QUESTIONS?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Self-Check\s+Exercises?|SELF-CHECK\s+EXERCISES?)(?:\s+#?\d+(?:\.\d+)*(?:(?:\s*[-–—]\s*|\s+(?:to|TO|through|THROUGH)\s+)#?\d+(?:\.\d+)*)?)?|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
-    r"|(?:Selected\s+[Aa]nswers?|SELECTED\s+ANSWERS?|Model\s+[Aa]nswers|MODEL\s+ANSWERS|Official\s+[Ss]olutions|OFFICIAL\s+SOLUTIONS|Reference\s+[Ss]olutions|REFERENCE\s+SOLUTIONS|Answer\s+Section|ANSWER\s+SECTION|Solutions?\s+[Mm]anual|SOLUTIONS?\s+MANUAL|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+(?:and|AND)\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
-    r"|(?:Answers|ANSWERS)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+    rf"(?:(?:Answers?\s+Key|{_ASSESSMENT_ANSWER_HEADING}|{_QUALIFIED_ANSWER_SECTION}|Answer\s+Section|Answers){_SEALED_HEADING_CONTINUATION}\s*(?:[:：]|$)"
     r"|【\s*(?:参考答案|标准答案|习题答案|习题解答|练习答案|练习解答|课后答案|课后练习答案|课后习题答案|课后解答|思考题答案|答案与解析|参考解答|详细解答|参考答案与解析|部分习题答案)\s*】\s*$"
     r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r"|(?:习题\s*)?(?:答案|解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r")"
     rf"|{_CONTAINER_SEALED_HEADING}"
-    r")"
+    r")",
+    re.IGNORECASE,
 )
 _INLINE_WITH_BODY_CHECK_RE = re.compile(r"[:：]\s*\S")
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
     rf"^(?:(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
-    r"(?:Answers?\s+(?:to|TO)\s+|ANSWERS?\s+(?:to|TO)\s+|Selected\s+[Aa]nswers?|SELECTED\s+ANSWERS?|Model\s+[Aa]nswers|MODEL\s+ANSWERS|"
-    r"Official\s+[Ss]olutions|OFFICIAL\s+SOLUTIONS|Reference\s+[Ss]olutions|REFERENCE\s+SOLUTIONS|"
-    r"Solutions?\s+(?:to|TO)\s+|SOLUTIONS?\s+(?:to|TO)\s+|Solutions?\s+[Mm]anual|SOLUTIONS?\s+MANUAL|"
-    r"Key\s+(?:to|TO)\s+|KEY\s+(?:to|TO)\s+|"
-    r"Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|"
-    r"Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|"
+    rf"(?:{_ASSESSMENT_ANSWER_HEADING}|{_QUALIFIED_ANSWER_SECTION}|"
     r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)"
-    rf"|{_CONTAINER_SEALED_HEADING})"
+    rf"|{_CONTAINER_SEALED_HEADING})",
+    re.IGNORECASE,
 )
 
 _QUALIFIED_ANSWER_LABEL = r"(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)"

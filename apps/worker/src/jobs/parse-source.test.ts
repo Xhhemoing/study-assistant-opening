@@ -75,6 +75,61 @@ async function deps(input: HandlerOverrides & { source?: SourceRecord; exitCode?
 }
 
 describe("parse source handler", () => {
+  it("persists a confirmed native section seal when Vision fails on its public prefix", async () => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const d = await deps({
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"],
+          sectionSealedAtEnd: true, hadSealedContent: true },
+        { page: 2, text: "", imagePath: null, visualKinds: [], sectionSealedAtEnd: true },
+      ] }),
+      recognizePage: async () => { throw new Error("Vision failed"); },
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Vision failed");
+    const markers = save.mock.calls.filter(([, identity]) => identity.parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, identity, segment]) => [identity.pageStart, segment])).toEqual([[1, {
+      state: "ready", pages: [expect.objectContaining({
+        page: 1, hadSealedContent: true, publicationSealHadPublicPrefix: true,
+        sectionSealedAtEnd: true, publicationSealCommitted: false,
+      })],
+    }]]);
+    expect(d.replaceInput()).toBeUndefined();
+  });
+
+  it("fences the later scan whose cache read fails before the renderer yields the first picture", async () => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const reads: number[] = [];
+    const visual = createSourceVisualRecognition({
+      repository: {
+        read: async (_scope, { physicalPage }) => {
+          reads.push(physicalPage);
+          if (physicalPage === 2) throw new Error("Scan cache unavailable");
+          return null;
+        },
+        save: vi.fn(), assertCurrent: vi.fn(), ledger: vi.fn(), releasedReservation: vi.fn(),
+      },
+      gateway: { call: vi.fn() }, budget: vi.fn(), storage: { finalKey: () => "final" }, renderPdf: vi.fn(),
+    });
+    const d = await deps({
+      pageCount: 3,
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"] },
+        { page: 2, text: "123", imagePath: null, visualKinds: ["scan"] },
+        { page: 3, text: "5 units.", imagePath: null, visualKinds: [] },
+      ] }),
+      recognizePages: visual.recognizePages,
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Scan cache unavailable");
+    expect(reads).toEqual([1, 2]);
+    const markers = save.mock.calls.filter(([, identity]) => identity.parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, identity, segment]) => [identity.pageStart, segment])).toEqual([[2, {
+      state: "ready", pages: [expect.objectContaining({ page: 2, publicationSealUnknown: true, publicationSealCommitted: false })],
+    }]]);
+    expect(d.replaceInput()).toBeUndefined();
+  });
+
   it("reports low quality on a saved legacy page preserved beyond the UTF-16 staging limit", async () => {
     const legacyText = "😀".repeat(51_000) + "\uFFFD".repeat(2_000);
     const saved = { id: "00000000-0000-4000-8000-000000000004", sourceId, sourceVersion: 7, page: 1,
