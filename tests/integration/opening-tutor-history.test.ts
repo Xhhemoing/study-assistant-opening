@@ -75,6 +75,33 @@ it("bounds history by whole exchanges and excludes oversized recent turns", asyn
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
 });
 
+it("skips citation-only memory for a practice turn while keeping independent history", async () => {
+  const { current, c, repo, jobs } = await seed();
+  const courses = createCourseMembershipRepository(f.sql);
+  const course = await courses.createCourse({ workspaceId: f.scope.workspaceId, title: "Purpose history", slug: randomUUID() });
+  await f.sql`UPDATE opening_conversations SET course_id=${course.id} WHERE id=${c.id}`;
+  const sourceId = await insertSource(f.sql, f.scope);
+  await courses.addAssetMembership({ workspaceId: f.scope.workspaceId, courseId: course.id, assetType: "source",
+    assetId: sourceId, role: "core", visibility: "course", purpose: "reference" });
+  const origin = await insertOwnedTurn(f.sql, f.scope, { sourceIds: [sourceId] });
+  const memory = await createOpeningMemoryRepository(f.sql).proposeMemory(f.scope, {
+    courseId: course.id, text: "Reference memory", sourceTurnIds: [origin], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await f.sql`UPDATE opening_turns SET created_at=now()-interval '30 minutes' WHERE id=${current.turnId}`;
+  await f.sql`UPDATE opening_turns SET status='complete', text='reference answer',
+    context_source_refs=${f.sql.json([{ memoryDependencyIds: [memory.id] }])} WHERE id=${current.assistantTurnId}`;
+  const next = await repo.appendSavedTurn({ scope: f.scope, conversationId: c.id, text: "Practice next", mode: "hint",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
+  expect(await jobs.loadHistory(f.scope, next.turnId)).toHaveLength(4);
+  await f.sql`UPDATE opening_turns SET context_anchor=${f.sql.json({ itemVersionId: randomUUID() })} WHERE id=${next.turnId}`;
+  expect(await jobs.loadHistoryContext(f.scope, next.turnId)).toEqual({
+    history: [{ role: "user", text: "previous question" }, { role: "assistant", text: "step two" }], sourceRefs: [],
+  });
+
+  await f.sql`UPDATE opening_memories SET expires_at=now()-interval '1 second' WHERE id=${memory.id}`;
+  expect(await jobs.loadHistory(f.scope, next.turnId)).toEqual([]);
+});
+
 it("tracks temporary ancestors of legacy global memory-only history", async () => {
   const { current, prior, jobs } = await seed();
   const memories = createOpeningMemoryRepository(f.sql);

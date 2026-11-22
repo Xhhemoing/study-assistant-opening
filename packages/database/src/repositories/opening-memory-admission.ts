@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import {
   lineageUuid, memoryCourseAllows, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
-  turnDependencyWalk, turnLineageCourse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs, type FragmentFactory,
+  turnDependencyWalk, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs, type FragmentFactory,
   type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
@@ -38,15 +38,15 @@ export async function lockMemoryMaterialSources(db: Db, scope: OpeningScope, sou
 }
 
 /** Turn material rows retain version pins and document identity independent of context provenance. */
-export function turnMaterialRows(db: Db): ReturnType<Db> {
+export function turnMaterialRows(db: Db, includeUserContext = false): ReturnType<Db> {
   return db`
     SELECT sid.id::text AS source_id, NULL::text AS version, false AS version_required
     FROM unnest(t.source_ids) sid(id)
     UNION ALL
-    SELECT ref->>'sourceId', ref->>'sourceVersion', true
+    SELECT ref->>'sourceId', CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number' THEN ref->>'sourceVersion' END, true
     FROM jsonb_array_elements(
       CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END
-      || CASE WHEN t.role = 'assistant' AND jsonb_typeof(t.context_source_refs) = 'array'
+      || CASE WHEN (${includeUserContext} OR t.role = 'assistant') AND jsonb_typeof(t.context_source_refs) = 'array'
         THEN t.context_source_refs ELSE '[]'::jsonb END) ref
     WHERE NOT (ref = jsonb_build_object('memoryDependencyIds', ref->'memoryDependencyIds')
       AND jsonb_typeof(ref->'memoryDependencyIds') = 'array'
@@ -54,14 +54,20 @@ export function turnMaterialRows(db: Db): ReturnType<Db> {
     UNION ALL
     SELECT pin.source_id, CASE WHEN pin.source_version IS NULL THEN NULL
       WHEN jsonb_typeof(pin.source_version) = 'number' THEN pin.source_version #>> '{}' ELSE '' END, pin.version_required
-    FROM (${turnPinnedSourceRefs(db, () => db`t.source_versions`, () => db`t.context_anchor`)}) pin`;
+    FROM (${turnPinnedSourceRefs(db, () => db`t.source_versions`, () => db`t.context_anchor`)}) pin
+    UNION ALL
+    SELECT k.source_id::text, k.source_version::text, true
+    FROM (SELECT t.chunk_id AS id WHERE t.chunk_id IS NOT NULL) saved
+    LEFT JOIN opening_source_chunks k ON k.id = saved.id`;
 }
 
-export function turnSourceMaterialsActive(
-  db: Db, workspaceId: string, options?: MemoryMaterialRules & { memoryCourse: FragmentFactory },
+export function sourceMaterialsActive(
+  db: Db, workspaceId: string, materials: FragmentFactory,
+  options?: MemoryMaterialRules & { memoryCourse?: FragmentFactory; originUse?: FragmentFactory },
 ): ReturnType<Db> {
+  const memoryCourse = options?.memoryCourse;
   return db`NOT EXISTS (
-    SELECT 1 FROM (${turnMaterialRows(db)}) ref
+    SELECT 1 FROM (${materials()}) ref
     LEFT JOIN opening_sources s ON s.id = ${lineageUuid(db, () => db`ref.source_id`)}
       AND s.workspace_id = ${workspaceId} AND s.upload_state = 'uploaded'
     LEFT JOIN opening_source_versions sv ON sv.workspace_id = s.workspace_id AND sv.source_id = s.id
@@ -71,16 +77,26 @@ export function turnSourceMaterialsActive(
       OR (ref.version_required AND ref.version IS NULL)
       OR (ref.version IS NOT NULL AND ref.version <> s.version::text)
       ${options?.lockedSourceIds ? db`OR NOT (s.id = ANY(${options.lockedSourceIds}::uuid[]))` : db``}
-      ${options ? db`OR s.id = ANY(${options.excluded ?? []}::uuid[]) OR (
+      ${options?.excluded ? db`OR s.id = ANY(${options.excluded}::uuid[])` : db``}
+      ${memoryCourse ? db`OR (
         SELECT COALESCE(bool_or(cam.purpose = 'mock_exam'), false)
-          OR CASE WHEN ${options.memoryCourse()} IS NULL THEN count(cam.purpose) > 0
-            ELSE NOT COALESCE(bool_or(cam.course_id = ${options.memoryCourse()}
+          OR CASE WHEN ${memoryCourse()} IS NULL THEN count(cam.purpose) > 0
+            ELSE NOT COALESCE(bool_or(cam.course_id = ${memoryCourse()}
               AND (cam.purpose IS NULL OR cam.purpose = 'teaching'
-                OR cam.purpose = ${options.materialUse === "practice" ? "practice" : "reference"})), false) END
+                OR cam.purpose = ${options?.originUse
+                  ? db`CASE WHEN ${options.originUse()} = 'practice' THEN 'practice' ELSE 'reference' END`
+                  : db`${options?.materialUse === "practice" ? "practice" : "reference"}::text`})), false) END
         FROM course_asset_memberships cam
         WHERE cam.asset_id = s.id AND cam.workspace_id = s.workspace_id AND cam.asset_type = 'source'
       )` : db``}
-  ) AND jsonb_typeof(t.source_versions) = 'object'
+  )`;
+}
+
+export function turnSourceMaterialsActive(
+  db: Db, workspaceId: string, options?: MemoryMaterialRules & { memoryCourse: FragmentFactory; originUse?: FragmentFactory },
+): ReturnType<Db> {
+  return db`${sourceMaterialsActive(db, workspaceId, () => turnMaterialRows(db), options)}
+    AND jsonb_typeof(t.source_versions) = 'object'
     AND jsonb_typeof(t.citations) = 'array'
     AND (t.role <> 'assistant' OR t.context_source_refs IS NULL OR jsonb_typeof(t.context_source_refs) = 'array')`;
 }
@@ -143,33 +159,40 @@ export async function assertSourceTurnsOwned(
 }
 
 type MemoryOrigin = { id: string; course_id: string | null; turn_ids: string[]; excludedId?: string };
+type MaterialUse = "citation" | "practice";
 type MemoryMaterialRules = {
   excluded?: readonly string[];
-  materialUse?: "citation" | "practice";
+  materialUse?: MaterialUse | "origin";
   collectSourceIds?: Set<string>;
   lockedSourceIds?: readonly string[];
 };
-type OriginBinding = { id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][] };
+type OriginBinding = {
+  id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][]; material_use: MaterialUse | null;
+};
 
 async function readOriginBindings(
   db: Db, scope: OpeningScope, origins: MemoryOrigin[], rules?: MemoryMaterialRules,
 ): Promise<Map<string, OriginBinding[]>> {
   const byMemory = new Map<string, OriginBinding[]>();
   if (!origins.some(origin => origin.turn_ids.length)) return byMemory;
-  const rows = await db<{ id: string; turn_course_id: string | null; refs: unknown; backings: string[][]; source_ids?: string[] }[]>`
+  const originUse: FragmentFactory | undefined = rules?.materialUse === "origin" ? () => db`policy.material_use` : undefined;
+  const rows = await db<(Omit<OriginBinding, "ids"> & { refs: unknown; source_ids?: string[] })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
-      ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`, scope)} AS backings
+      ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`, scope)} AS backings,
+      ${originUse ? originUse() : db`NULL::text`} AS material_use
       ${rules?.collectSourceIds ? db`, ARRAY(
         SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
         FROM (${turnMaterialRows(db)}) material
       ) AS source_ids` : db``}
     FROM jsonb_to_recordset(${db.json(origins)}::jsonb) m(id uuid, course_id uuid, turn_ids uuid[])
-    CROSS JOIN LATERAL unnest(m.turn_ids) ref(turn_id)
+    CROSS JOIN LATERAL unnest(m.turn_ids) WITH ORDINALITY ref(turn_id, ordinality)
     JOIN opening_turns t ON t.id = ref.turn_id AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
     JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id AND c.owner_user_id = ${scope.ownerUserId}
     CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`)} AS id) course
-    WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && { memoryCourse: () => db`m.course_id`, ...rules })}
-      ${rules ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}`;
+    ${originUse ? db`CROSS JOIN LATERAL (SELECT ${turnMaterialUse(db, "t")} AS material_use) policy` : db``}
+    WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && { memoryCourse: () => db`m.course_id`, ...rules, originUse })}
+      ${rules ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}
+    ORDER BY m.id, ref.ordinality`;
   for (const row of rows) {
     for (const id of row.source_ids ?? []) if (id) rules?.collectSourceIds?.add(id);
     const binding = { ...row, ids: row.refs == null ? [] : parseContextMemoryDependencyIds(row.refs) };
@@ -185,13 +208,13 @@ function bindingRoots(rows: Iterable<OriginBinding[]>) {
 }
 
 function resolveOrigins(
-  graph: ReadonlyMap<string, MemoryDependencyStatus[]>, origin: MemoryOrigin, group: OriginBinding[],
+  graphFor: (row: OriginBinding) => ReadonlyMap<string, MemoryDependencyStatus[]>, origin: MemoryOrigin, group: OriginBinding[],
 ): MemoryDependencyStatus[] | null {
   if (group.length !== origin.turn_ids.length) return null;
   const nodes = group.map(row => {
     if (row.ids === null || (origin.course_id !== null && origin.course_id !== row.turn_course_id
       && (row.ids.length || row.backings.length))) return null;
-    return resolveMemoryDependencyStatus(graph, row.ids, row.backings, origin.course_id, origin.excludedId);
+    return resolveMemoryDependencyStatus(graphFor(row), row.ids, row.backings, origin.course_id, origin.excludedId);
   });
   return nodes.some(node => node === null) ? null : nodes.flatMap(node => node ?? []);
 }
@@ -230,27 +253,47 @@ export async function readMemoryDependencyStatus(
 
   // Wake parents only when a dependency becomes usable. Unresolved cycles have no independent authority.
   const parents = new Map<string, Set<string>>();
-  for (const [id, node] of pending) {
+  const orderedIds = [...pending.keys()].sort();
+  for (const id of orderedIds) {
+    const node = pending.get(id)!;
     for (const root of bindingRoots([node.bindings])) {
       const consumers = parents.get(root);
       if (consumers) consumers.add(id);
       else parents.set(root, new Set([id]));
     }
   }
-  const ready = new Set([...pending.keys()].reverse());
+  const ready = new Set(orderedIds);
   for (const id of ready) {
     ready.delete(id);
     const node = pending.get(id);
     if (!node) continue;
-    const ancestry = resolveOrigins(graph, node, node.bindings);
+    const ancestry = resolveOrigins(() => graph, node, node.bindings);
     if (!ancestry) continue;
     const dependencies = new Map(ancestry.map(dep => [dep.dep_id, dep]));
     dependencies.set(id, { dep_id: id, course_id: node.course_id, expires_at: node.expires_at, usable: true });
     graph.set(id, [...dependencies.values()]);
-    pending.delete(id);
     for (const parent of parents.get(id) ?? []) {
-      if (pending.has(parent)) ready.add(parent);
+      if (!graph.has(parent)) ready.add(parent);
     }
+  }
+  // An early pass can prove usability via a later UUID while a preferred backing
+  // is still resolving. Revisit those choices and propagate the resulting ancestry.
+  const usableIds = orderedIds.filter(id => graph.has(id));
+  for (let pass = 0; pass < usableIds.length; pass++) {
+    let changed = false;
+    for (const id of usableIds) {
+      const node = pending.get(id)!;
+      const ancestry = resolveOrigins(() => graph, node, node.bindings);
+      if (!ancestry) continue;
+      const next = new Map(ancestry.map(dep => [dep.dep_id, dep]));
+      next.set(id, { dep_id: id, course_id: node.course_id, expires_at: node.expires_at, usable: true });
+      const previous = graph.get(id)!;
+      const resolved = [...next.values()];
+      if (previous.length === resolved.length && previous.every((dep, index) => dep.dep_id === resolved[index]?.dep_id)) continue;
+      graph.set(id, resolved);
+      changed = true;
+    }
+    if (!changed) break;
   }
   return graph;
 }
@@ -259,9 +302,20 @@ export async function readMemoryDependencyStatus(
 export async function readMemoryOrigins(db: Db, scope: OpeningScope, origins: MemoryOrigin[], rules?: MemoryMaterialRules) {
   const result = new Map<string, { ids: Set<string>; expiresAt: number } | null>();
   const bindings = await readOriginBindings(db, scope, origins, rules);
-  const graph = await readMemoryDependencyStatus(db, scope, bindingRoots(bindings.values()), rules);
+  const graphFor = new Map<MaterialUse | undefined, Map<string, MemoryDependencyStatus[]>>();
+  if (rules?.materialUse === "origin") {
+    const allBindings = [...bindings.values()].flat();
+    for (const materialUse of ["citation", "practice"] as const) {
+      const roots = bindingRoots([allBindings.filter(row => row.material_use === materialUse)]);
+      graphFor.set(materialUse, await readMemoryDependencyStatus(db, scope, roots, { ...rules, materialUse }));
+    }
+  } else {
+    graphFor.set(undefined, await readMemoryDependencyStatus(db, scope, bindingRoots(bindings.values()), rules));
+  }
+  const emptyGraph = new Map<string, MemoryDependencyStatus[]>();
   for (const origin of origins) {
-    const dependencies = resolveOrigins(graph, origin, bindings.get(origin.id) ?? []);
+    const dependencies = resolveOrigins(row => graphFor.get(row.material_use ?? undefined) ?? emptyGraph,
+      origin, bindings.get(origin.id) ?? []);
     if (!dependencies) {
       result.set(origin.id, null);
       continue;

@@ -26,13 +26,15 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   const priorCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`u.context_anchor->>'courseId'`)})`;
   const currentCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`current.context_anchor->>'courseId'`)})`;
   const rows = await sql`
-    WITH prior AS (
+    WITH prior AS MATERIALIZED (
       SELECT u.id, a.id AS assistant_id, u.created_at,
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch,
         refs.user_refs AS user_source_refs, refs.assistant_refs AS assistant_source_refs,
         ${priorCourse()} AS prior_course_id, ${currentCourse()} AS current_course_id,
         CASE WHEN current.attempt_id IS NOT NULL OR current.context_anchor->>'itemVersionId' IS NOT NULL
           THEN 'practice' ELSE 'citation' END AS material_use,
+        CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
+          THEN 'practice' ELSE 'citation' END AS prior_material_use,
         ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, priorCourse, scope)} AS memory_backing_ids,
         COALESCE(a.context_source_refs @? '$[*].memoryDependencyIds[*]' OR
           a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb, false) AS memory_bearing,
@@ -65,26 +67,33 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     )
     SELECT id, assistant_id,
       user_source_refs, assistant_source_refs, prior_course_id, current_course_id, memory_backing_ids,
-      query_system, system_query, current_privacy_epoch, material_use
+      query_system, system_query, current_privacy_epoch, material_use, prior_material_use
     FROM ranked WHERE (memory_bearing OR ordinary_rank <= 20) AND NOT EXISTS (SELECT 1 FROM prior WHERE invalid)
     ORDER BY created_at DESC, id DESC
   `;
   const lineage = rows.map(row => {
     const ids = row.assistant_source_refs === undefined ? [] : parseContextMemoryDependencyIds(row.assistant_source_refs);
     const backings = row.memory_backing_ids as string[][] | undefined;
-    return { ids, backings };
+    return { ids, backings, priorUse: row.prior_material_use === "practice" ? "practice" as const : "citation" as const };
   });
-  const roots = [...new Set(lineage.flatMap(row => row.backings ? [...(row.ids ?? []), ...row.backings.flat()] : []))];
+  if (lineage.some(row => row.ids === null)) return { history: [], sourceRefs: [] };
   const materialUse = rows[0]?.material_use === "practice" ? "practice" : "citation";
-  const graph = await readMemoryDependencyStatus(sql, scope, roots, { excluded: excludedSourceIds, materialUse });
-  const resolved = lineage.map(({ ids, backings }, index) => {
-    if (!ids) return null;
+  const graphs = await Promise.all((["citation", "practice"] as const).map(async use => {
+    const roots = [...new Set(lineage.flatMap(row => row.backings && (row.priorUse === use || materialUse === use)
+      ? [...row.ids!, ...row.backings.flat()] : []))];
+    return readMemoryDependencyStatus(sql, scope, roots, { excluded: excludedSourceIds, materialUse: use });
+  }));
+  const graphFor = (use: "citation" | "practice") => graphs[use === "practice" ? 1 : 0]!;
+  const resolved = lineage.map(({ ids, backings, priorUse }, index) => {
     const row = rows[index]!;
-    const nodes = backings ? resolveMemoryDependencyStatus(graph, ids, backings, row.prior_course_id as string | null) : [];
-    if (!nodes) return null;
-    return { ids: [...ids, ...nodes.map(node => node.dep_id)],
-      inScope: nodes.every(node => node.course_id === null || node.course_id === row.current_course_id),
-      expirations: nodes.flatMap(node => node.expires_at === null ? [] : [node.expires_at]) };
+    const own = backings ? resolveMemoryDependencyStatus(graphFor(priorUse), ids!, backings, row.prior_course_id as string | null) : [];
+    if (!own) return null;
+    const inCourse = own.every(node => node.course_id === null || node.course_id === row.current_course_id);
+    const current = inCourse && backings && materialUse !== priorUse
+      ? resolveMemoryDependencyStatus(graphFor(materialUse), ids!, backings, row.current_course_id as string | null) : own;
+    return { ids: [...ids!, ...(current ?? []).map(node => node.dep_id)], inScope: inCourse && current !== null,
+      ownExpirations: own.flatMap(node => node.expires_at === null ? [] : [node.expires_at]),
+      expirations: (current ?? []).flatMap(node => node.expires_at === null ? [] : [node.expires_at]) };
   });
   if (resolved.some(item => item === null)) return { history: [], sourceRefs: [] };
   const selected = rows.flatMap((row, index) => resolved[index]!.inScope ? [{ row, dependencies: resolved[index]! }] : []).slice(0, 20);
@@ -95,7 +104,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     WHERE workspace_id=${scope.workspaceId} AND id=ANY(${textIds}::uuid[]) AND status='complete'` : [];
   const textById = new Map(texts.map(row => [row.id, row.text]));
   const nowMs = Date.now();
-  if (resolved.some(item => item!.expirations.some(expiry => !(new Date(expiry).getTime() > nowMs)))) {
+  if (resolved.some(item => item!.ownExpirations.some(expiry => !(new Date(expiry).getTime() > nowMs)))) {
     return { history: [], sourceRefs: [] };
   }
   const history: HistoryTurn[] = [];
@@ -105,6 +114,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   let earliestTempExpiresAtMs: number | undefined;
   let earliestTempExpiresAtIso: string | undefined;
   for (const { row, dependencies } of selected) {
+    if (dependencies.expirations.some(expiry => !(new Date(expiry).getTime() > nowMs))) continue;
     if (recordReferents && (row.query_system || row.system_query != null)) {
       const receipt = systemQueryReceiptSchema.safeParse(row.system_query);
       const lineage = parseContextSourceRefs(row.assistant_source_refs) ?? [];

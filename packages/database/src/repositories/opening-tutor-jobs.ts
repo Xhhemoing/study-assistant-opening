@@ -15,7 +15,7 @@ import { courseSourcePurposeAllows, helpInputSnapshotSchema, openingMaterialPurp
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import {
   contextSourceRefsIncluded, hasMemoryBearingRef, lineageUuid, memoryBacksSource, memoryCourseAllows,
-  memoryDependencyGraphCtes, memoryDependencyRows, memoryTransitiveDependenciesActive, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
+  memoryDependencyGraphCtes, memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
   resolveMemoryDependencyStatus, turnContextSourceRefs, turnPinnedSourceRefs, type ContextSourceRef,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
@@ -138,7 +138,6 @@ async function assertGlobalMemoriesUnexpiredInTx(
       AND status='active'
       AND ${memoryCourseAllows(tx, () => tx`opening_memories.course_id`, () => tx`${courseId}::uuid`, () => tx`opening_memories.workspace_id`)}
       AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
-      AND ${memoryTransitiveDependenciesActive(tx, "")}
     ORDER BY id`;
   if (active.length !== ids.length) {
     throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
@@ -194,6 +193,7 @@ async function readStreamMemoryMaterials(
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
     }
     materials.push(...rows);
+    for (const row of rows) if (row.memory_id) known.add(row.memory_id);
     const legacy = new Map<string, { id: string; excludedId: string; course_id: string | null; turn_ids: string[] }>();
     for (const row of rows) {
       if (!row.legacy_turn_id) continue;
@@ -393,7 +393,7 @@ async function assertStreamMaterialAdmission(
           AND EXISTS (
             SELECT 1
             FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
-            JOIN opening_turns t ON t.id::text = lower(ref.turn_id) AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
+            JOIN opening_turns t ON t.id = ${lineageUuid(tx, () => tx`ref.turn_id`)} AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
             JOIN opening_conversations c ON c.id = t.conversation_id
               AND c.workspace_id = ${scope.workspaceId}
               AND c.owner_user_id = ${scope.ownerUserId}
@@ -462,7 +462,6 @@ async function assertStreamMaterialAdmission(
         AND status='active'
         AND ${memoryCourseAllows(tx, () => tx`opening_memories.course_id`, () => tx`${courseId}::uuid`, () => tx`opening_memories.workspace_id`)}
         AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
-        AND ${memoryTransitiveDependenciesActive(tx, "")}
       ORDER BY id FOR SHARE`;
     if (activeMemories.length !== globalMemoryIdList.length) {
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
@@ -1595,18 +1594,6 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE
         `;
         if (!workspace.length) throw new Error("workspace permission changed");
-        if (input.expectedPrivacyEpoch !== undefined) {
-          const currentEpoch = Number((workspace[0] as { privacy_epoch?: number } | undefined)?.privacy_epoch);
-          if (currentEpoch !== input.expectedPrivacyEpoch) {
-            throw new Error(
-              `privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`,
-            );
-          }
-        }
-        if (options?.attemptContext) {
-          if (options.attemptContext.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
-          await assertTutorAttemptContext(tx, input.scope, options.attemptContext.target, options.attemptContext.snapshot);
-        }
         const receipt = input.systemQuery ? systemQueryReceiptSchema.parse(input.systemQuery) : null;
         if (receipt) {
           if (receipt.authorization.purpose !== "system_record_lookup" || receipt.authorization.workspaceId !== input.scope.workspaceId
@@ -1616,6 +1603,16 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (refs.some(ref => !provided.some(item => item.sourceId === ref.sourceId && item.sourceVersion === ref.sourceVersion))) throw new Error("query lineage incomplete");
           const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, input.scope.workspaceId, () => tx`${tx.json(provided)}::jsonb`, true, true)} AS included`;
           if (!admitted?.included) throw new Error("query source unavailable before persistence");
+        }
+        if (input.expectedPrivacyEpoch !== undefined) {
+          const currentEpoch = Number(workspace[0]!.privacy_epoch);
+          if (currentEpoch !== input.expectedPrivacyEpoch) {
+            throw new Error(`privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`);
+          }
+        }
+        if (options?.attemptContext) {
+          if (options.attemptContext.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
+          await assertTutorAttemptContext(tx, input.scope, options.attemptContext.target, options.attemptContext.snapshot);
         }
         const refs = input.contextSourceRefs ?? [];
         const memoryBearing = hasMemoryBearingRef(refs);
@@ -1655,10 +1652,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           UPDATE opening_tutor_jobs SET status = 'succeeded', timing_execution_id = NULL, error = NULL, updated_at = now()
           WHERE id = ${input.jobId}
             AND workspace_id = ${input.scope.workspaceId}
-            AND assistant_turn_id = ${input.assistantTurnId}
             AND status = 'running'
             AND claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
-          RETURNING id
+          RETURNING id, assistant_turn_id
         `;
         if (!claimed.length) return;
         const memoryDependencyIds = options?.globalMemoryIds?.length
@@ -1672,6 +1668,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             system_query=${receipt ? tx.json(receipt as never) : null},
             context_source_refs = ${persistedContextSourceRefs === null ? null : tx.json(persistedContextSourceRefs as never)}, status = 'complete'
           WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId} AND (${receipt === null} OR query_system)
+            AND id = (SELECT j.assistant_turn_id FROM opening_tutor_jobs j WHERE j.id = ${input.jobId})
           RETURNING id
         `;
         if (!assistant.length) throw new Error("assistant turn was not persisted");

@@ -12,6 +12,7 @@ import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { insertOwnedTurn } from "./opening-memory-context-fixture";
 import { closeRace, deferred, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 import { readTurnsWithActiveMemoryDependencies } from "../../packages/database/src/repositories/opening-context-provenance";
+import { admitTaskCandidate } from "../../packages/database/src/repositories/opening-task-candidate-admission";
 
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
@@ -62,6 +63,90 @@ function handler(text: string, memoryText?: string) {
 }
 
 describe("saved tutor material provenance", () => {
+  it("confirms a memory suggestion under its saved practice policy, including inherited material", async () => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Practice suggestions", slug: randomUUID() });
+    const material = await source();
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id,
+      assetType: "source", assetId: material, role: "core", visibility: "course", purpose: "practice" });
+    const conversations = createOpeningConversationRepository(sql);
+    const conversation = await conversations.create(scope, { title: "Practice memory suggestions", courseId: course.id });
+    const memories = createOpeningMemoryRepository(sql);
+    const suggest = async (practice: boolean, ancestor?: string) => {
+      const saved = await append(conversation.id);
+      if (practice) {
+        await sql`UPDATE opening_turns SET context_anchor=${sql.json({ itemVersionId: randomUUID() })} WHERE id=${saved.turnId}`;
+      }
+      const refs = ancestor ? [{ memoryDependencyIds: [ancestor] }] : [{ sourceId: material, sourceVersion: 0 }];
+      await sql`UPDATE opening_turns SET status='complete', context_source_refs=${sql.json(refs)} WHERE id=${saved.assistantTurnId}`;
+      const id = randomUUID();
+      await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+        VALUES (${id}, ${scope.workspaceId}, ${conversation.id}, ${saved.assistantTurnId}, ${sql.json([material])},
+          ${sql.json({ kind: "memory", text: `Practice preference ${id}`, temporary: false })})`;
+      return memories.decideMemoryCandidate(scope, { id, action: "confirm", expectedVersion: 0, clientKey: randomUUID(), expiresAt: null });
+    };
+
+    const direct = await suggest(true);
+    const inherited = await suggest(true, direct.id);
+    await expect(suggest(false)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(suggest(false, direct.id)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.listForContext(scope, course.id)).resolves.toEqual([]);
+    await expect(memories.listForContext(scope, course.id, "practice")).resolves.toEqual([
+      expect.objectContaining({ id: direct.id }), expect.objectContaining({ id: inherited.id }),
+    ]);
+  });
+
+  it("waits for removal of a task candidate's last backing-source membership and rejects acceptance", async () => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Task source membership", slug: randomUUID() });
+    const material = await source();
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id,
+      assetType: "source", assetId: material, role: "core", visibility: "course", purpose: "teaching" });
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, { courseId: course.id,
+      text: "Task backing material", sourceTurnIds: [origin], expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Task candidate", courseId: course.id });
+    const saved = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const claim = (await jobs.claim(saved.jobId))!;
+    await jobs.completeTurn({ scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId, claimToken: claim.claimToken,
+      text: "Task from memory", citations: [], candidates: [], contextSourceRefs: [] }, { globalMemoryIds: [memory.id] });
+    const id = randomUUID();
+    await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+      VALUES (${id}, ${scope.workspaceId}, ${conversation.id}, ${saved.assistantTurnId}, '[]'::jsonb,
+        ${sql.json({ kind: "task", title: "Practice", minutes: 15, dueText: null })})`;
+    await expect(sql.begin(tx => admitTaskCandidate(tx, scope, id))).resolves.toBe(saved.assistantTurnId);
+
+    const writer = openRaceSession();
+    const reader = openRaceSession();
+    const removed = deferred();
+    const release = deferred();
+    const pending: Promise<unknown>[] = [];
+    try {
+      await Promise.all([writer.ready, reader.ready]);
+      const removal = track(writer.sql.begin(async tx => {
+        await tx`DELETE FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId} AND course_id=${course.id}
+          AND asset_type='source' AND asset_id=${material}`;
+        removed.resolve();
+        await release.promise;
+      }));
+      pending.push(removal);
+      await Promise.race([removed.promise, removal]);
+      const admission = track(reader.sql.begin(tx => admitTaskCandidate(tx, scope, id)));
+      pending.push(admission);
+      await waitUntilBlocked(sql, reader.pid, writer.pid, "task source membership", /FROM course_asset_memberships/);
+      release.resolve();
+      await removal;
+      await expect(admission).rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("memory dependency") });
+    } finally {
+      release.resolve();
+      await Promise.allSettled(pending);
+      await Promise.all([closeRace(writer.sql), closeRace(reader.sql)]);
+    }
+  }, 15_000);
+
   it("carries matching course memories through Worker completion and fences their exact IDs against the saved job", async () => {
     const { sql, scope } = f;
     const courses = createCourseMembershipRepository(sql);

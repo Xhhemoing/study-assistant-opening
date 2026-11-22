@@ -26,7 +26,7 @@ async function readMemoryContextInTx(
   db: Db,
   scope: OpeningScope,
   activeCourseId: string | null,
-  materialUse: "citation" | "practice",
+  materialUse: "citation" | "practice" | "origin",
   excludedSourceIds?: readonly string[],
 ): Promise<Array<{
   memory: MemoryItem;
@@ -56,7 +56,7 @@ async function readMemoryContextInTx(
           'refs', jsonb_path_query_array(COALESCE(jsonb_agg(${turnContextSourceRefs(db, "t")}), '[]'::jsonb), '$[*][*]')
         )
         FROM jsonb_array_elements_text(m.source_turn_ids) ref(turn_id)
-        JOIN opening_turns t ON t.id::text = lower(ref.turn_id) AND t.workspace_id = m.workspace_id AND t.status = 'complete'
+        JOIN opening_turns t ON t.id = ${lineageUuid(db, () => db`lower(ref.turn_id)`)} AND t.workspace_id = m.workspace_id AND t.status = 'complete'
       ) AS source_evidence
       FROM opening_memories m
       WHERE ${eligibleForScope()}
@@ -75,7 +75,7 @@ async function readMemoryContextInTx(
       CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
       CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t")} AS id) course
       LEFT JOIN opening_memories child ON child.id = ${lineageUuid(db, () => db`dep.id`)} AND child.workspace_id = parent.workspace_id
-    ), ancestry AS (
+    ), ancestry AS MATERIALIZED (
       SELECT d.root_id, jsonb_agg(DISTINCT d.dep_id) AS memory_ids,
         min(dep_m.expires_at) FILTER (WHERE dep_m.kind = 'temporary') AS temporary_expires_at,
         bool_and(COALESCE(dep_m.id <> d.root_id AND dep_m.status = 'active'
@@ -120,7 +120,7 @@ async function readMemoryContextInTx(
 }
 
 function readMemoryContext(
-  db: Db, scope: OpeningScope, activeCourseId: string | null, materialUse: "citation" | "practice", excludedSourceIds?: readonly string[],
+  db: Db, scope: OpeningScope, activeCourseId: string | null, materialUse: "citation" | "practice" | "origin", excludedSourceIds?: readonly string[],
 ) {
   const read = (tx: Db) => readMemoryContextInTx(tx, scope, activeCourseId, materialUse, excludedSourceIds);
   return "begin" in db && typeof db.begin === "function" ? db.begin(read) : read(db);
@@ -128,9 +128,9 @@ function readMemoryContext(
 
 export async function listMemoriesForContext(
   db: Db, scope: OpeningScope, activeCourseId: string | null, excludedSourceIds?: readonly string[], now?: string,
-  materialUse: "citation" | "practice" = "citation",
+  materialUse?: "citation" | "practice",
 ): Promise<MemoryItem[]> {
-  const rows = await readMemoryContext(db, scope, activeCourseId, materialUse, excludedSourceIds);
+  const rows = await readMemoryContext(db, scope, activeCourseId, materialUse ?? "origin", excludedSourceIds);
   if (now === undefined) return rows.map((row) => row.memory);
   const nowMs = Date.parse(now);
   return rows

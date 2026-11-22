@@ -29,6 +29,7 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; courseOnlyMemorySourceIds?: string[];
   classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string;
   expiredOnFinalCheck?: string;
+  missingCompletionAssistant?: boolean;
   legacyBackingId?: string;
   metadataTarget?: boolean;
   storedMemoryMaterials?: Array<{ source_id: string | null; version: string | null; course_id: string | null; usable: boolean;
@@ -45,6 +46,7 @@ function fixture(options: Options = {}) {
       return [];
     }
     if (sql.startsWith("WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
+    if (sql.startsWith("CASE WHEN (?) ~*")) return { fragmentSql: sql };
     if (sql.startsWith("WITH RECURSIVE ? SELECT mat.source_id")) {
       calls.push({ sql, values });
       return options.storedMemoryMaterials ?? [];
@@ -54,7 +56,8 @@ function fixture(options: Options = {}) {
       calls.push({ sql, values });
       return options.metadataTarget ? [{ course_id: options.courseId }] : [];
     }
-    if (!sql.startsWith("SELECT")) return "fragment";
+    if (!sql.startsWith("SELECT") && !sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")
+      && !sql.startsWith("UPDATE opening_turns SET text =")) return "fragment";
     calls.push({ sql, values });
     if (options.failAt && sql.startsWith(options.failAt)) throw failure;
     if (sql.startsWith("SELECT privacy_epoch")) return options.missingWorkspace ? [] : [{ privacy_epoch: options.epoch ?? 2 }];
@@ -117,7 +120,7 @@ function fixture(options: Options = {}) {
     }
     if (sql.startsWith("SELECT id FROM opening_help_exposures")) return options.missingExposure ? [] : [{ id: receipt }];
     if (sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")) return [{ id: jobId }];
-    if (sql.startsWith("UPDATE opening_turns SET text =")) return [{ id: assistant }];
+    if (sql.startsWith("UPDATE opening_turns SET text =")) return options.missingCompletionAssistant ? [] : [{ id: assistant }];
     throw new Error(`Unsupported fixture query: ${sql}`);
   }), { json: (value: unknown) => value, unsafe: (value: string) => value });
   const outerCalls: string[] = [];
@@ -598,12 +601,11 @@ describe("stream receipt release waits for current job authorization and assista
     const sseLastMemIdx = sse.calls.findLastIndex(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"));
     expect(sseLastMemIdx).toBeGreaterThan(sseSourcesIdx);
     expect(sseLastMemIdx).toBe(sse.calls.length - 1);
-    await expect(f.calls[lastMemIdx]?.values.at(-1)).resolves.toMatchObject({
-      fragmentSql: expect.stringContaining("WITH RECURSIVE mem_deps(dep_id)"),
-    });
-    await expect(sse.calls[sseLastMemIdx]?.values.at(-1)).resolves.toMatchObject({
-      fragmentSql: expect.stringContaining("WITH RECURSIVE mem_deps(dep_id)"),
-    });
+    expect(f.calls[lastMemIdx]?.values).toContainEqual([memoryId]);
+    expect(sse.calls[sseLastMemIdx]?.values).toContainEqual([memoryId]);
+    for (const values of [f.calls[lastMemIdx]!.values, sse.calls[sseLastMemIdx]!.values]) {
+      expect(await Promise.all(values)).not.toContainEqual({ fragmentSql: expect.stringContaining("WITH RECURSIVE") });
+    }
   });
 
   it("matches restored uppercase opening_memories.source_turn_ids case-insensitively during memoryOnly admission", async () => {
@@ -623,7 +625,8 @@ describe("stream receipt release waits for current job authorization and assista
       globalMemoryIds: [memoryId],
     })).resolves.toBeUndefined();
     const backedCall = f.calls.find(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id"));
-    expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id::text = lower(ref.turn_id)");
+    expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id = ?");
+    expect(await Promise.all(backedCall!.values)).toContainEqual({ fragmentSql: "CASE WHEN (?) ~* ? THEN (?)::uuid END" });
   });
 
   it("starts eligible metadata under the course lock and commits before the provider responds", async () => {
@@ -738,6 +741,47 @@ describe("stream receipt release waits for current job authorization and assista
       },
     })).rejects.toMatchObject({ code: "CONFLICT" });
     expect(f.calls.some(call => call.sql.startsWith("SELECT id FROM courses"))).toBe(true);
+  });
+
+  it("reports the receipt grant change before the completion privacy epoch error", async () => {
+    const f = fixture({ epoch: 3 });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+      expectedPrivacyEpoch: 2,
+      systemQuery: {
+        authorization: { purpose: "system_record_lookup", workspaceId: workspace,
+          principalId: owner, role: "workspace_owner", permissionRevision: "1" },
+        version: "study-query-v1", asOf: time, privacyEpoch: 2,
+        mode: "deterministic", status: "ok", reason: "read", results: [],
+      },
+    })).rejects.toThrow("query receipt grant changed");
+    expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(false);
+  });
+
+  it("rejects a missing assistant after claiming a bare completion", async () => {
+    const f = fixture({ missingCompletionAssistant: true });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+    })).rejects.toThrow("assistant turn was not persisted");
+    const claim = f.calls.find(call => call.sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'"));
+    expect(claim?.sql).toContain("RETURNING id, assistant_turn_id");
+    expect(claim?.values).not.toContain(assistant);
+    expect(f.txEvents).not.toContain("commit:1");
+  });
+
+  it("rechecks an expanded explicit ancestor at the final provider send gate", async () => {
+    const parent = "12000000-0000-4000-8000-0000000000ac";
+    const ancestor = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ activeGlobalMemoryIds: [parent, ancestor], expiredOnFinalCheck: ancestor,
+      storedMemoryMaterials: [parent, ancestor].map(memory_id => ({
+        source_id: null, version: null, course_id: null, usable: true, memory_id,
+      })),
+    });
+    const start = vi.fn(async () => "sent");
+    await expect(f.repo.authorizeSend(scope, jobId, { ...context, expectedPrivacyEpoch: 2,
+      globalMemoryIds: [parent] }, start)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.findLast(call => call.sql.startsWith("SELECT id FROM opening_memories"))?.values).toContainEqual([parent, ancestor]);
+    expect(start).not.toHaveBeenCalled();
   });
 
   it("blocks source-free receipt release when the bound course was archived", async () => {

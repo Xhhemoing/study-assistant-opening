@@ -2,8 +2,25 @@ import type { TransactionSql } from "postgres";
 import { assistantCandidateSchema } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
-import { includedTurn } from "./opening-backup-record-predicates";
-import { readTurnsWithActiveMemoryDependencies, turnHasMemoryDependencies, turnPinnedSourceRefs } from "./opening-context-provenance";
+import { lineageUuid, parseContextMemoryDependencyIds, readTurnsWithActiveMemoryDependencies, turnHasMemoryDependencies, turnLineageCourse, type FragmentFactory } from "./opening-context-provenance";
+import { lockActiveMemoryCourse, lockMemoryMaterialSources, sourceMaterialsActive, turnMaterialRows } from "./opening-memory-admission";
+
+function candidateMaterialRows(tx: TransactionSql, scope: OpeningScope): ReturnType<FragmentFactory> {
+  return tx`
+    SELECT ref.id AS source_id, NULL::text AS version, false AS version_required
+    FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(c.source_ids) = 'array' THEN c.source_ids ELSE '[]'::jsonb END) ref(id)
+    UNION ALL
+    ${turnMaterialRows(tx, true)}
+    UNION ALL
+    SELECT ref.id::text, NULL::text, false
+    FROM (SELECT t.learning_session_id AS id WHERE t.learning_session_id IS NOT NULL) saved
+    LEFT JOIN opening_learning_sessions session ON session.id = saved.id AND session.workspace_id = ${scope.workspaceId}
+      AND session.owner_user_id = ${scope.ownerUserId}
+    LEFT JOIN opening_teaching_activities activity ON activity.id = session.activity_id
+      AND activity.workspace_id = session.workspace_id AND activity.owner_user_id = session.owner_user_id
+    CROSS JOIN LATERAL unnest(CASE WHEN activity.id IS NULL THEN ARRAY[NULL]::uuid[]
+      ELSE session.source_ids || activity.source_ids END) ref(id)`;
+}
 
 /** Share locks admit parallel accepts but serialize against owner/privacy deletion. */
 export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope, id: string): Promise<string | null> {
@@ -11,8 +28,12 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     SELECT id FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
     FOR SHARE`;
   if (!owners.length) throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
-  const [candidate] = await tx<{ payload: unknown; source_turn_id: string; has_memory_dependencies: boolean | null }[]>`
-    SELECT c.payload, t.id AS source_turn_id, ${turnHasMemoryDependencies(tx)} AS has_memory_dependencies
+  const [candidate] = await tx<{ payload: unknown; source_turn_id: string; has_memory_dependencies: boolean | null;
+    course_id: string | null; source_ids: string[]; role: string; context_source_refs: unknown }[]>`
+    SELECT c.payload, t.id AS source_turn_id, ${turnHasMemoryDependencies(tx)} AS has_memory_dependencies,
+      ${turnLineageCourse(tx, "t", () => tx`conv.course_id`)} AS course_id, t.role, t.context_source_refs,
+      ARRAY(SELECT DISTINCT ${lineageUuid(tx, () => tx`ref.source_id`)}
+        FROM (${candidateMaterialRows(tx, scope)}) ref) AS source_ids
     FROM opening_assistant_candidates c
     JOIN opening_conversations conv ON conv.id = c.conversation_id AND conv.workspace_id = c.workspace_id
       AND conv.owner_user_id = ${scope.ownerUserId}
@@ -24,45 +45,33 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   if (!candidate || !payload.success || payload.data.kind !== "task") {
     throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
   }
-  // Lock referenced source rows before checking their current versions/admission.
-  await tx`
-    SELECT s.id FROM opening_sources s
-    WHERE s.workspace_id = ${scope.workspaceId} AND s.id::text IN (
-      SELECT lower(ref.id) FROM opening_assistant_candidates c
-      JOIN opening_turns t ON t.id = c.source_turn_id
-      CROSS JOIN LATERAL (
-        SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(c.source_ids) = 'array' THEN c.source_ids ELSE '[]'::jsonb END) AS id
-        UNION SELECT unnest(t.source_ids)::text
-        UNION SELECT pin.source_id FROM (${turnPinnedSourceRefs(tx, () => tx`t.source_versions`, () => tx`t.context_anchor`)}) pin
-        UNION SELECT citation->>'sourceId' FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END) citation
-        UNION SELECT context_ref->>'sourceId'
-          FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END) context_ref
-        UNION SELECT k.source_id::text FROM opening_source_chunks k WHERE k.id = t.chunk_id
-      ) ref WHERE c.id = ${id}
-    ) ORDER BY s.id FOR SHARE`;
-  // Share the existing restore/context lineage rules: revoked, missing, excluded,
-  // malformed, or version-drifted evidence is never admitted for a replay either.
+  if (candidate.course_id && !(await lockActiveMemoryCourse(tx, scope, candidate.course_id))) {
+    throw new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
+  }
+  const dependencyTurnId = candidate.has_memory_dependencies ? candidate.source_turn_id : null;
+  const sourceIds = new Set(candidate.source_ids?.filter(Boolean));
+  let lockedSourceIds: string[] = [];
+  const acquire = async () => {
+    lockedSourceIds = await lockMemoryMaterialSources(tx, scope, sourceIds);
+    return lockedSourceIds;
+  };
+  const active = dependencyTurnId === null ? null :
+    await readTurnsWithActiveMemoryDependencies(tx, scope.workspaceId, [dependencyTurnId], { sourceIds, acquire });
+  if (dependencyTurnId === null) await acquire();
+
   const admitted = await tx`
     SELECT c.id FROM opening_assistant_candidates c
-    JOIN opening_conversations conv ON conv.id = c.conversation_id
-    JOIN opening_turns t ON t.id = c.source_turn_id
+    JOIN opening_turns t ON t.id = c.source_turn_id AND t.id = ${candidate.source_turn_id}
     WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}
-      AND (conv.course_id IS NULL OR EXISTS (
-        SELECT 1 FROM courses course WHERE course.id = conv.course_id AND course.workspace_id = ${scope.workspaceId}
-      ))
       AND jsonb_typeof(c.source_ids) = 'array'
-      AND NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(c.source_ids) = 'array' THEN c.source_ids ELSE '[]'::jsonb END) ref(id)
-        WHERE NOT EXISTS (
-          SELECT 1 FROM opening_sources s WHERE s.id::text = lower(ref.id)
-            AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
-        ) OR EXISTS (
-          SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id::text = lower(ref.id)
-        )
-      ) AND ${includedTurn(tx, scope.workspaceId, scope.ownerUserId, "t")}`;
-  if (!admitted.length) throw new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
-  const dependencyTurnId = candidate.has_memory_dependencies ? candidate.source_turn_id : null;
-  await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependencyTurnId);
+      AND jsonb_typeof(t.source_versions) = 'object' AND jsonb_typeof(t.citations) = 'array'
+      AND ${sourceMaterialsActive(tx, scope.workspaceId, () => candidateMaterialRows(tx, scope), { lockedSourceIds })}`;
+  const refs = candidate.context_source_refs ?? (candidate.role === "assistant" ? null : []);
+  const validRefs = parseContextMemoryDependencyIds(refs) !== null;
+  if (!admitted.length || !validRefs) throw new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
+  if (dependencyTurnId !== null && !active?.has(dependencyTurnId)) {
+    throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
+  }
   return dependencyTurnId;
 }
 
