@@ -102,7 +102,9 @@ const HTML_ATTRIBUTE_TOKEN_RE = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r 
 const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\s/'"=<>]*)(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">";
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
 const HTML_RAW_TEXT_TAGS = new Set(["textarea", "title", "script", "style", "xmp", "iframe", "noembed", "noframes", "noscript"]);
-const SVG_NON_RENDERED_LABEL_TAGS = new Set(["metadata", "defs"]);
+const SVG_NON_RENDERED_LABEL_TAGS = new Set([
+  "metadata", "defs", "desc", "symbol", "clippath", "mask", "pattern", "marker", "lineargradient", "radialgradient", "filter", "view",
+]);
 const MATH_NON_RENDERED_LABEL_TAGS = new Set(["annotation", "annotation-xml"]);
 const HTML_FOREIGN_BREAKOUT_TAG_RE =
   /^(?:b|big|blockquote|body|br|center|code|dd|div|dl|dt|em|embed|h[1-6]|head|hr|i|img|li|listing|menu|meta|nobr|ol|p|pre|ruby|s|small|span|strong|strike|sub|sup|table|tt|u|ul|var)$/;
@@ -123,6 +125,8 @@ const HTML_LABEL_BREAK_TAGS = new Set([
 ]);
 const HTML_COMMENT_TAIL = /(?:-?>|[\s\S]*?(?:--!?>|$))/.source;
 const HTML_COMMENT_RE = new RegExp("<!--" + HTML_COMMENT_TAIL, "g");
+const HTML_OTHER_LITERAL = /(?<cdata><!\[CDATA\[[\s\S]*?(?:\]\]>|(?![\s\S])))|<!(?!--)[^>]*>?|<\?[^>]*>?/.source;
+const HTML_MARKUP_TOKEN = [HTML_COMMENT_RE.source, HTML_OTHER_LITERAL, HTML_TAG_TOKEN].join("|");
 const INVISIBLE_LABEL_TEXT = /\u00AD|\u200B|\u200C|\u200D|\u200E|\u200F|\u2060|\uFEFF/g;
 const HTML_LABEL_REFERENCES = new Map(Object.entries({
   amp: "&", AMP: "&", lt: "<", LT: "<", gt: ">", GT: ">", quot: '"', QUOT: '"', apos: "'",
@@ -513,22 +517,72 @@ function htmlRawTextBounds(text: string, opener: RegExpExecArray, afterOpener: n
   return match ? { closeStart: match.index, closeEnd: closer.lastIndex } : { closeStart: text.length, closeEnd: text.length };
 }
 
+function endOfBogusHtmlComment(text: string, from: number): number {
+  const end = text.indexOf(">", from);
+  return end === -1 ? text.length : end + 1;
+}
+
+type HtmlNamespace = "svg" | "math" | undefined;
+type OpenHtmlTag = { tag: string; childrenNamespace: HtmlNamespace };
+
+function exitsHtmlForeignContent(tag: string, prefix: string | undefined, markup: string): boolean {
+  if (prefix === "/") return tag === "br" || tag === "p";
+  return prefix === "" && (HTML_FOREIGN_BREAKOUT_TAG_RE.test(tag) ||
+    (tag === "font" && ["color", "face", "size"].some(name => htmlAttributeValue(markup, tag, name) !== undefined)));
+}
+
+function htmlEncodedAnnotation(namespace: HtmlNamespace, tag: string, markup: string): boolean {
+  return namespace === "math" && tag === "annotation-xml" &&
+    /^(?:text\/html|application\/xhtml\+xml)$/i.test(decodeHtmlLabelText(htmlAttributeValue(markup, tag, "encoding") ?? ""));
+}
+
+function htmlChildNamespace(namespace: HtmlNamespace, tag: string, htmlAnnotation: boolean): HtmlNamespace {
+  const htmlChildren = htmlAnnotation || (namespace === "svg" && /^(?:desc|foreignobject|title)$/.test(tag)) ||
+    (namespace === "math" && /^(?:mi|mo|mn|ms|mtext)$/.test(tag));
+  return htmlChildren ? undefined : namespace;
+}
+
+function markupNamespace(openTags: OpenHtmlTag[], match: RegExpExecArray): HtmlNamespace {
+  const tag = match.groups?.tag?.toLowerCase();
+  const prefix = match.groups?.prefix;
+  if (tag && openTags.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
+    while (openTags.at(-1)?.childrenNamespace) openTags.pop();
+  }
+  const namespace = openTags.at(-1)?.childrenNamespace;
+  if (!tag) return namespace;
+  if (prefix === "" && !HTML_VOID_TAGS.has(tag)) {
+    const current = namespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
+    if ((openTags.length || current) && !(current && hasSelfClosingFlag(match[0], tag))) {
+      openTags.push({ tag, childrenNamespace: htmlChildNamespace(current, tag, htmlEncodedAnnotation(current, tag, match[0])) });
+    }
+  } else if (prefix === "/") {
+    const index = lastOpenHtmlTagIndex(openTags, tag);
+    if (index >= 0) openTags.length = index;
+  }
+  return namespace;
+}
+
 function htmlElementEnd(text: string, tag: string, from: number): number | undefined {
-  const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
+  const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   tokens.lastIndex = from;
+  const openTags: OpenHtmlTag[] = tag === "svg" || tag === "math" ? [{ tag, childrenNamespace: tag }] : [];
   let depth = 1;
   let templateDepth = 0;
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
+    const namespace = markupNamespace(openTags, match);
+    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+      tokens.lastIndex = endOfBogusHtmlComment(text, match.index);
+    }
     const name = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
-    const raw = htmlRawTextBounds(text, match, tokens.lastIndex);
+    const raw = namespace ? null : htmlRawTextBounds(text, match, tokens.lastIndex);
     if (raw) {
       tokens.lastIndex = raw.closeEnd;
-    } else if (name === "template" && tag !== "template") {
+    } else if (!namespace && name === "template" && tag !== "template") {
       if (prefix === "") templateDepth++;
       else if (prefix === "/" && templateDepth > 0) templateDepth--;
     } else if (name === tag && templateDepth === 0) {
-      if (prefix === "") depth++;
+      if (prefix === "" && !(namespace && hasSelfClosingFlag(match[0], tag))) depth++;
       else if (prefix === "/" && --depth === 0) return tokens.lastIndex;
     }
   }
@@ -552,24 +606,25 @@ function htmlAttributeValue(opener: string, tag: string, attribute: string): str
   return undefined;
 }
 
-function htmlContainerCrossingCodeEnd(text: string, start: number, end: number, inHtmlBlock = false): number | undefined {
-  const code = text.slice(start, end);
+function htmlContainerCrossingCodeEnd(text: string, start: number, end: number, openerLimit = end): number | undefined {
+  const code = text.slice(start, openerLimit);
   if (!code.includes("<")) return undefined;
-  const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
+  const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
+  const openTags: OpenHtmlTag[] = [];
   for (let match = tokens.exec(code); match; match = tokens.exec(code)) {
+    const namespace = markupNamespace(openTags, match);
+    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+      tokens.lastIndex = endOfBogusHtmlComment(code, match.index);
+    }
     const afterOpener = start + tokens.lastIndex;
-    const rawText = htmlRawTextBounds(text, match, afterOpener);
+    const rawText = namespace ? null : htmlRawTextBounds(text, match, afterOpener);
     let closeEnd: number | undefined;
-    if (rawText) {
-      if (rawText.closeStart === rawText.closeEnd) {
-        if (inHtmlBlock) return text.length;
-        continue;
-      }
+    if (match[0].startsWith("<!--")) {
+      closeEnd = endOfHtmlComment(text, start + match.index + 4);
+    } else if (rawText) {
       closeEnd = rawText.closeEnd;
-    } else if (match.groups?.tag?.toLowerCase() === "template" && match.groups.prefix === "") {
-      closeEnd = htmlElementEnd(text, "template", afterOpener);
-      // An unmatched template cannot promote one of its nested openers to a top-level crossing.
-      if (closeEnd === undefined) return inHtmlBlock ? text.length : undefined;
+    } else if (!namespace && match.groups?.tag?.toLowerCase() === "template" && match.groups.prefix === "") {
+      closeEnd = htmlElementEnd(text, "template", afterOpener) ?? text.length;
     } else {
       continue;
     }
@@ -651,6 +706,31 @@ function crossesDetailsHtmlBoundary(
   return false;
 }
 
+function inheritsHtmlBlock(text: string, lineStart: number): boolean {
+  let start = lineStart;
+  while (start > 0) {
+    const lineEnd = precedingLineBreakStart(text, start);
+    const previous = containingLineStart(text, lineEnd);
+    if (!text.slice(previous, lineEnd).trim()) break;
+    start = previous;
+  }
+  let fence: string | undefined;
+  let afterBlockBoundary = true;
+  for (const { raw } of splitLinesWithOffsets(text.slice(start, lineStart))) {
+    if (fence) {
+      if (closesFence(raw, fence)) {
+        fence = undefined;
+        afterBlockBoundary = true;
+      }
+      continue;
+    }
+    if (HTML_TYPE_6_BLOCK_START_RE.test(raw) || (afterBlockBoundary && STANDALONE_HTML_TAG_RE.test(raw))) return true;
+    fence = matchFenceOpening(raw)?.[1];
+    afterBlockBoundary = false;
+  }
+  return false;
+}
+
 function findMatchingDetailsBounds(
   text: string,
   openStart: number,
@@ -658,11 +738,12 @@ function findMatchingDetailsBounds(
 ): DetailsBounds {
   const literals =
     /<!--|(?<fence>^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)*(?:\x60{3,}[^\x60\r\n]*|~{3,}[^\r\n]*)(?=\r|\n|$))|(?<ticks>\x60+)/.source;
-  const tokenRe = new RegExp(literals + "|" + HTML_TAG_TOKEN, "gim");
+  const tokenRe = new RegExp(literals + "|" + HTML_OTHER_LITERAL + "|" + HTML_TAG_TOKEN, "gim");
   tokenRe.lastIndex = searchFrom;
   let containers: MarkdownContainer[] = [];
   let nextLineStart = containingLineStart(text, searchFrom);
   let contiguousHtml = /^ {0,3}$/.test(text.slice(containingLineStart(text, openStart), openStart));
+  let htmlBlockContainers: readonly MarkdownContainer[] | undefined = contiguousHtml || inheritsHtmlBlock(text, nextLineStart) ? [] : undefined;
   let htmlStartedInBody = false;
   let markdownBodyStart = Infinity;
   let body = "";
@@ -674,6 +755,10 @@ function findMatchingDetailsBounds(
       const newline = nextLineBreak(text, lineStart);
       const line = text.slice(lineStart, newline?.index ?? text.length);
       nextLineStart = newline ? newline.index + newline[0].length : text.length;
+      if (htmlBlockContainers) {
+        const continued = continueMarkdownContainers(line, htmlBlockContainers);
+        if (continued.depth !== htmlBlockContainers.length || !continued.body.trim()) htmlBlockContainers = undefined;
+      }
       if (contiguousHtml && (lineStart < markdownBodyStart || htmlStartedInBody)) {
         const continued = continueMarkdownContainers(line, containers);
         if (continued.depth === containers.length && continued.body.trim()) {
@@ -689,6 +774,9 @@ function findMatchingDetailsBounds(
       containers = current.containers;
       body = current.body;
       const startsHtml = HTML_TYPE_6_BLOCK_START_RE.test(body);
+      if (!htmlBlockContainers && (startsHtml || (afterBlockBoundary && STANDALONE_HTML_TAG_RE.test(body)))) {
+        htmlBlockContainers = containers;
+      }
       const continuesHtml = contiguousHtml && sameContainer && Boolean(body.trim());
       htmlStartedInBody = (continuesHtml && htmlStartedInBody) ||
         (lineStart >= markdownBodyStart && startsHtml && !body.trimStart().startsWith("</"));
@@ -700,14 +788,27 @@ function findMatchingDetailsBounds(
         THEMATIC_BREAK_RE.test(body);
     }
   };
+  const htmlBlockEnd = (limit: number) => {
+    if (!htmlBlockContainers) return nextLineStart;
+    for (let start = nextLineStart; start < limit;) {
+      const newline = nextLineBreak(text, start);
+      const line = continueMarkdownContainers(text.slice(start, newline?.index ?? text.length), htmlBlockContainers);
+      if (line.depth !== htmlBlockContainers.length || !line.body.trim()) return start;
+      start = newline ? newline.index + newline[0].length : text.length;
+    }
+    return limit;
+  };
   const skipLiteralLines = (end: number) => {
     if (end < nextLineStart) return;
+    if (htmlBlockContainers && htmlBlockEnd(end) < end) htmlBlockContainers = undefined;
     const newline = nextLineBreak(text, end);
     nextLineStart = newline ? newline.index + newline[0].length : text.length;
   };
   const skipCodeBlock = (start: number, end: number) => {
-    const htmlEnd = htmlContainerCrossingCodeEnd(text, start, end);
+    const openerLimit = htmlBlockContainers ? htmlBlockEnd(end) : undefined;
+    const htmlEnd = openerLimit === undefined ? undefined : htmlContainerCrossingCodeEnd(text, start, end, openerLimit);
     tokenRe.lastIndex = htmlEnd ?? end;
+    if (openerLimit !== undefined && openerLimit < end) htmlBlockContainers = undefined;
     nextLineStart = end;
     if (htmlEnd !== undefined) skipLiteralLines(htmlEnd);
     inIndentedCode = false;
@@ -718,6 +819,7 @@ function findMatchingDetailsBounds(
   let summaryOpening: { openStart: number; openEnd: number } | undefined;
   let summary: DetailsBounds["summary"];
   const summaryCodeSpans: { start: number; end: number }[] = [];
+  const openTags: OpenHtmlTag[] = [];
   let match: RegExpExecArray | null;
   while ((match = tokenRe.exec(text)) !== null) {
     readThroughLine(match.index);
@@ -728,7 +830,11 @@ function findMatchingDetailsBounds(
       skipCodeBlock(containingLineStart(text, match.index), end);
       continue;
     }
-    const rawText = htmlRawTextBounds(text, match, tokenRe.lastIndex);
+    const namespace = markupNamespace(openTags, match);
+    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+      tokenRe.lastIndex = endOfBogusHtmlComment(text, match.index);
+    }
+    const rawText = namespace ? null : htmlRawTextBounds(text, match, tokenRe.lastIndex);
     if (rawText) {
       tokenRe.lastIndex = rawText.closeEnd;
       skipLiteralLines(tokenRe.lastIndex);
@@ -748,8 +854,11 @@ function findMatchingDetailsBounds(
       if ((allowsMarkdown || insideSummary) && !isEscaped(text, match.index)) {
         const end = endOfBacktickSpan(text, match.index);
         if (end !== -1 && !crossesDetailsHtmlBoundary(text, match.index, end, containers)) {
-          // Summary text accepts literal backticks, but a raw HTML container on an active HTML line still opens.
-          const htmlEnd = htmlContainerCrossingCodeEnd(text, match.index, end, !allowsMarkdown);
+          // Keep the legacy inline example consisting solely of an unmatched comment opener.
+          const literalComment = /^\x60+[ \t]*<!--[ \t]*\x60+$/.test(text.slice(match.index, end)) &&
+            !/--!?>/.test(text.slice(end, htmlBlockEnd(text.length)));
+          const htmlEnd = htmlBlockContainers && !literalComment ?
+            htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end)) : undefined;
           if (insideSummary && htmlEnd === undefined) summaryCodeSpans.push({ start: match.index, end });
           tokenRe.lastIndex = htmlEnd ?? end;
           skipLiteralLines(tokenRe.lastIndex);
@@ -770,7 +879,7 @@ function findMatchingDetailsBounds(
     skipLiteralLines(tokenRe.lastIndex);
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
-    if (tag === "template" && prefix === "") {
+    if (!namespace && tag === "template" && prefix === "") {
       tokenRe.lastIndex = htmlElementEnd(text, tag, tokenRe.lastIndex) ?? text.length;
       skipLiteralLines(tokenRe.lastIndex);
       continue;
@@ -801,40 +910,137 @@ function findMatchingDetailsBounds(
   return { closeStart: text.length, closeEnd: text.length, summary };
 }
 
+const ASCII_PUNCTUATION = /[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]/;
+
+function encodeLiteralLabelText(text: string): string {
+  return text.replace(new RegExp(ASCII_PUNCTUATION.source, "g"), character => `&#${character.charCodeAt(0)};`);
+}
+
+function codeSpanLabelText(span: string): string {
+  const ticks = /^\x60+/.exec(span)![0].length;
+  const text = span.slice(ticks, -ticks).replace(/\r\n|[\r\n]/g, " ");
+  return encodeLiteralLabelText(/^ .* $/.test(text) && /[^ ]/.test(text) ? text.slice(1, -1) : text);
+}
+
 function readSummaryMarkup(text: string, summary: NonNullable<DetailsBounds["summary"]>): string {
   const parts: string[] = [];
   let cursor = summary.openEnd;
   // Only shield spans the disclosure scanner actually treated as Markdown.
   for (const { start, end } of summary.codeSpans) {
-    parts.push(text.slice(cursor, start), text.slice(start, end).replace(/[<>]/g, " "));
+    parts.push(text.slice(cursor, start), codeSpanLabelText(text.slice(start, end)));
     cursor = end;
   }
   parts.push(text.slice(cursor, summary.closeStart));
   return parts.join("");
 }
 
-function maskMarkdownLabelMarkup(label: string): string {
-  const tokens = new RegExp([MARKDOWN_AUTOLINK, /\x60+/.source, HTML_COMMENT_RE.source, HTML_TAG_TOKEN].join("|"), "gi");
+function markdownLabelLinkEnd(label: string, start: number): number {
+  if (label[start] !== "(") return -1;
+  let cursor = start + 1;
+  while (/\s/.test(label[cursor] ?? "")) cursor++;
+  if (label[cursor] === "<") {
+    const destination = /<(?:\\[<>]|[^<>\r\n])*>/y;
+    destination.lastIndex = cursor;
+    if (!destination.exec(label)) return -1;
+    cursor = destination.lastIndex;
+  } else {
+    let depth = 0;
+    for (; cursor < label.length; cursor++) {
+      const character = label[cursor]!;
+      if (character === "\\" && ASCII_PUNCTUATION.test(label[cursor + 1] ?? "")) cursor++;
+      else if (character === "(") depth++;
+      else if (character === ")" && depth === 0) return cursor + 1;
+      else if (character === ")") depth--;
+      else if (/\s/.test(character)) break;
+    }
+    if (depth !== 0) return -1;
+  }
+  const whitespaceStart = cursor;
+  while (/\s/.test(label[cursor] ?? "")) cursor++;
+  if (label[cursor] === ")") return cursor + 1;
+  if (cursor === whitespaceStart) return -1;
+  const title = /(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\))[ \t\r\n]*\)/y;
+  title.lastIndex = cursor;
+  return title.exec(label) ? title.lastIndex : -1;
+}
+
+function renderMarkdownLabelMarkup(label: string, readCodeSpans = true): string {
+  const escapes = "\\\\(?<escape>" + ASCII_PUNCTUATION.source + ")";
+  const punctuation = /(?<ticks>\x60+)|(?<bracket>!?\[|\])|(?<emphasis>\*+|_+|~+)/.source;
+  const tokens = new RegExp([escapes, MARKDOWN_AUTOLINK, punctuation, HTML_MARKUP_TOKEN].join("|"), "gi");
   const parts: string[] = [];
+  const brackets: number[] = [];
+  const delimiters = new Map<string, { part: number; length: number; remaining: number; canClose: boolean }[]>();
   let cursor = 0;
+  const replace = (start: number, end: number, replacement: string) => {
+    parts.push(label.slice(cursor, start), replacement);
+    cursor = end;
+    return parts.length - 1;
+  };
   for (let match = tokens.exec(label); match; match = tokens.exec(label)) {
+    const groups = match.groups!;
     const unterminatedComment = match[0].startsWith("<!--") && !/^<!--(?:-?>|[\s\S]*--!?>)$/.test(match[0]);
-    if (isEscaped(label, match.index) || unterminatedComment) {
+    const unterminatedDeclaration = !groups.cdata && /^<[!?]/.test(match[0]) && !match[0].endsWith(">");
+    if (groups.escape) {
+      replace(match.index, tokens.lastIndex, encodeLiteralLabelText(groups.escape));
+    } else if (unterminatedComment || unterminatedDeclaration) {
       tokens.lastIndex = match.index + 1;
-      if (match[0].startsWith("<")) {
-        parts.push(label.slice(cursor, match.index), " ");
-        cursor = tokens.lastIndex;
-      }
-    } else if (match.groups?.autolink) {
-      parts.push(label.slice(cursor, match.index), " ", match[0].slice(1, -1), " ");
-      cursor = tokens.lastIndex;
-    } else if (match[0].startsWith("\x60")) {
+      replace(match.index, tokens.lastIndex, "&#60;");
+    } else if (groups.autolink) {
+      replace(match.index, tokens.lastIndex, " " + match[0].slice(1, -1) + " ");
+    } else if (groups.ticks && readCodeSpans) {
       const end = endOfBacktickSpan(label, match.index);
       if (end !== -1) {
-        parts.push(label.slice(cursor, match.index), label.slice(match.index, end).replace(/[<>]/g, " "));
-        tokens.lastIndex = cursor = end;
+        replace(match.index, end, codeSpanLabelText(label.slice(match.index, end)));
+        tokens.lastIndex = end;
       }
-    } else if (match.groups?.tag?.toLowerCase() === "template" && match.groups.prefix === "") {
+    } else if (groups.bracket === "]") {
+      const opener = brackets.pop();
+      const end = opener === undefined ? -1 : markdownLabelLinkEnd(label, tokens.lastIndex);
+      if (opener !== undefined && end !== -1) {
+        parts[opener] = "";
+        replace(match.index, end, "");
+        tokens.lastIndex = end;
+      }
+    } else if (groups.bracket) {
+      brackets.push(replace(match.index, tokens.lastIndex, match[0]));
+    } else if (groups.emphasis) {
+      const marker = groups.emphasis;
+      const symbol = marker[0]!;
+      if (symbol === "~" && marker !== "~~") continue;
+      const before = label[match.index - 1] ?? " ";
+      const after = label[tokens.lastIndex] ?? " ";
+      const punctuation = /[\p{P}\p{S}]/u;
+      const left = !/\s/.test(after) && (!punctuation.test(after) || /\s/.test(before) || punctuation.test(before));
+      const right = !/\s/.test(before) && (!punctuation.test(before) || /\s/.test(after) || punctuation.test(after));
+      const canOpen = left && (symbol !== "_" || !right || punctuation.test(before));
+      const canClose = right && (symbol !== "_" || !left || punctuation.test(after));
+      const openers = delimiters.get(symbol) ?? [];
+      let remaining = marker.length;
+      if (canClose) {
+        for (let index = openers.length - 1; index >= 0 && remaining > 0;) {
+          const opener = openers[index]!;
+          // CommonMark's rule of three applies to a run that can also face the other way.
+          if (symbol !== "~" && (opener.canClose || canOpen) && (opener.length + marker.length) % 3 === 0 &&
+            (opener.length % 3 !== 0 || marker.length % 3 !== 0)) {
+            index--;
+            continue;
+          }
+          const length = opener.remaining >= 2 && remaining >= 2 ? 2 : 1;
+          opener.remaining -= length;
+          remaining -= length;
+          parts[opener.part] = symbol.repeat(opener.remaining);
+          if (opener.remaining === 0) openers.splice(index--, 1);
+        }
+      }
+      if (remaining !== marker.length || canOpen) {
+        const part = replace(match.index, tokens.lastIndex, symbol.repeat(remaining));
+        if (canOpen && remaining) {
+          openers.push({ part, length: marker.length, remaining, canClose });
+          delimiters.set(symbol, openers);
+        }
+      }
+    } else if (groups.tag?.toLowerCase() === "template" && groups.prefix === "") {
       tokens.lastIndex = htmlElementEnd(label, "template", tokens.lastIndex) ?? label.length;
     } else {
       const raw = htmlRawTextBounds(label, match, tokens.lastIndex);
@@ -844,9 +1050,9 @@ function maskMarkdownLabelMarkup(label: string): string {
   return parts.length ? parts.join("") + label.slice(cursor) : label;
 }
 
-type OpenLabelTag = { tag: string; childrenNamespace: "svg" | "math" | undefined; hiddenForeign: boolean };
+type OpenLabelTag = OpenHtmlTag & { hiddenForeign: boolean };
 
-function lastOpenLabelTagIndex(openTags: readonly OpenLabelTag[], tag: string): number {
+function lastOpenHtmlTagIndex(openTags: readonly OpenHtmlTag[], tag: string): number {
   for (let index = openTags.length - 1; index >= 0; index--) {
     if (openTags[index]!.tag === tag) return index;
   }
@@ -854,7 +1060,7 @@ function lastOpenLabelTagIndex(openTags: readonly OpenLabelTag[], tag: string): 
 }
 
 function htmlLabelTextVariants(label: string) {
-  const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
+  const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const inline: string[] = [];
   const spaced: string[] = [];
   const appendText = (start: number, end?: number, decodeReferences = true) => {
@@ -872,26 +1078,30 @@ function htmlLabelTextVariants(label: string) {
     let visibleTag = !openTags.at(-1)?.hiddenForeign;
     if (annotationIndex === undefined && visibleTag) appendText(cursor, match.index);
     cursor = tokens.lastIndex;
+    if (match.groups?.cdata) {
+      if (openTags.at(-1)?.childrenNamespace && match[0].startsWith("<![CDATA[")) {
+        if (annotationIndex === undefined && visibleTag) {
+          appendText(match.index + 9, match[0].endsWith("]]>") ? cursor - 3 : cursor, false);
+        }
+      } else {
+        tokens.lastIndex = cursor = endOfBogusHtmlComment(label, match.index);
+      }
+      continue;
+    }
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
-    if (tag && openTags.at(-1)?.childrenNamespace) {
-      const exitsForeign = prefix === "" ? HTML_FOREIGN_BREAKOUT_TAG_RE.test(tag) ||
-        (tag === "font" && ["color", "face", "size"].some(name => htmlAttributeValue(match[0], tag, name) !== undefined)) :
-        prefix === "/" && (tag === "br" || tag === "p");
-      if (exitsForeign) {
-        while (openTags.at(-1)?.childrenNamespace) openTags.pop();
-        if (annotationIndex !== undefined && annotationIndex >= openTags.length) annotationIndex = undefined;
-        visibleTag = !openTags.at(-1)?.hiddenForeign;
-      }
+    if (tag && openTags.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
+      while (openTags.at(-1)?.childrenNamespace) openTags.pop();
+      if (annotationIndex !== undefined && annotationIndex >= openTags.length) annotationIndex = undefined;
+      visibleTag = !openTags.at(-1)?.hiddenForeign;
     }
     if (tag === "head") continue;
     const rubyTextTag = tag === "rt" || tag === "rp";
-    const rubyIndex = rubyTextTag || tag === "rb" ? lastOpenLabelTagIndex(openTags, "ruby") : -1;
+    const rubyIndex = rubyTextTag || tag === "rb" ? lastOpenHtmlTagIndex(openTags, "ruby") : -1;
     const rubyAnnotation = rubyTextTag && rubyIndex >= 0;
     if (tag && prefix === "") {
       const namespace = openTags.at(-1)?.childrenNamespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
-      const htmlAnnotation = namespace === "math" && tag === "annotation-xml" &&
-        /^(?:text\/html|application\/xhtml\+xml)$/i.test(decodeHtmlLabelText(htmlAttributeValue(match[0], tag, "encoding") ?? ""));
+      const htmlAnnotation = htmlEncodedAnnotation(namespace, tag, match[0]);
       const foreignHidden = (namespace === "svg" && SVG_NON_RENDERED_LABEL_TAGS.has(tag)) ||
         (namespace === "math" && MATH_NON_RENDERED_LABEL_TAGS.has(tag) && !htmlAnnotation);
       const selfClosingForeignTag = namespace !== undefined && hasSelfClosingFlag(match[0], tag);
@@ -919,12 +1129,10 @@ function htmlLabelTextVariants(label: string) {
       if (rubyAnnotation && annotationIndex === undefined) annotationIndex = openTags.length;
       visibleTag = visibleTag && !foreignHidden;
       if (!HTML_VOID_TAGS.has(tag) && !selfClosingForeignTag) {
-        const htmlChildren = htmlAnnotation || (namespace === "svg" && /^(?:desc|foreignobject|title)$/.test(tag)) ||
-          (namespace === "math" && /^(?:mi|mo|mn|ms|mtext)$/.test(tag));
-        openTags.push({ tag, childrenNamespace: htmlChildren ? undefined : namespace, hiddenForeign: !visibleTag });
+        openTags.push({ tag, childrenNamespace: htmlChildNamespace(namespace, tag, htmlAnnotation), hiddenForeign: !visibleTag });
       }
     } else if (tag && prefix === "/") {
-      const index = lastOpenLabelTagIndex(openTags, tag);
+      const index = lastOpenHtmlTagIndex(openTags, tag);
       if (index >= 0) {
         openTags.length = index;
         if (annotationIndex !== undefined && index <= annotationIndex) annotationIndex = undefined;
@@ -953,7 +1161,7 @@ function classifyDetailsElement(
   readonly summaryEndOffset: number | null;
 } {
   if (summary && !text.slice(openEnd, summary.openStart).replace(HTML_COMMENT_RE, "").trim()) {
-    const summaryContents = readSummaryMarkup(text, summary);
+    const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false);
     const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
@@ -1161,7 +1369,7 @@ function isPipeTableStart(header: string, delimiter?: string): boolean {
 }
 
 function tableColumnVisibility(label: string): PedagogicalVisibility {
-  if (label.includes("<")) label = maskMarkdownLabelMarkup(label);
+  if (/[<\\*_[~\x60]/.test(label)) label = renderMarkdownLabelMarkup(label);
   const { inline, spaced } = /[<&]|\p{Cf}/u.test(label) ? htmlLabelTextVariants(label) : { inline: label, spaced: label };
   if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
   if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";
