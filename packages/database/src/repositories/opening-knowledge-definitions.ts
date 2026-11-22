@@ -4,6 +4,19 @@ import type { TransactionSql } from "postgres";
 import { storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
 
 const definitionPatchByteLimit = 256 * 1024;
+const pdfHeadingContainer = /^(?:(?:chapter|section|lecture|part|unit|appendix)[ \t]+[\w.]+|第[ \t]*[一二三四五六七八九十百千\d]+[ \t]*(?:章|节|讲|部分|单元)|附录[ \t]*[A-Z0-9一二三四五六七八九十]+)(?:[ \t]*[:：.\-—–][ \t]*|[ \t]+)/iu;
+const explicitPdfAnswerLabel = /^(?:(?:answer[ \t]+(?:key|section)|(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)[ \t]+answers?|(?:official|reference)[ \t]+solutions?|solutions?[ \t]+manual|answers?)(?:[ \t]*\([ \t]*(?:continued|cont\.?)[ \t]*\))?[ \t]*(?:[:：]|$)|(?:answers?|solutions?|key)[ \t]+to[ \t]+(?:the[ \t]+)?(?:exercises?|problems?|questions?)\b|(?:【[ \t]*)?(?:参考答案|标准答案|正确答案|习题答案|练习答案|答案与解析|参考解答|详细解答|答案|解答)[ \t]*(?:】|[:：]|$))/iu;
+
+function containsPdfAnswerLabel(text: string): boolean {
+  // Bare "Solution" may belong to a worked example spanning several pages.
+  return text.split(/\r?\n/u).some(line => {
+    const heading = line.trim().replace(/^#{1,6}[ \t]+/u, "").replace(/\*\*|__/gu, "");
+    const container = pdfHeadingContainer.exec(heading)?.[0];
+    const title = container ? heading.slice(container.length) : heading;
+    return explicitPdfAnswerLabel.test(title) || Boolean(container &&
+      /^(?:(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)[ \t]+)?solutions?[ \t]*(?:[:：]|$)/iu.test(title));
+  });
+}
 
 async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string) {
   // Read one text at a time. A single existing chunk can itself exceed 256 KiB in UTF-8.
@@ -19,8 +32,22 @@ async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string
       AND graph.owner_user_id=${scope.ownerUserId}
     WHERE c.id=${id} AND c.source_version::text=graph.source_versions->>s.id::text
       AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+      AND (c.page IS NULL OR NOT EXISTS (
+        SELECT 1 FROM opening_pdf_parse_segments seal
+        WHERE seal.workspace_id=s.workspace_id AND seal.source_id=c.source_id AND seal.source_version=c.source_version
+          AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'
+          AND seal.page_end=seal.page_start AND seal.page_start<=c.page
+          AND (
+            ((seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'publicationSealUnknown'='true')
+              AND (s.parse_state<>'ready' OR seal.updated_at>s.updated_at))
+            OR (seal.page_start=c.page
+              AND (seal.pages->0->>'hadSealedContent'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
+                OR seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'publicationSealUnknown'='true')
+              AND (c.image_object_key IS NOT NULL OR s.parse_state<>'ready' OR seal.updated_at>s.updated_at))
+          )
+      ))
     FOR SHARE OF c,s,v,m`;
-  return chunk?.id === id ? chunk : undefined;
+  return chunk?.id === id && (chunk.page === null || !containsPdfAnswerLabel(chunk.text)) ? chunk : undefined;
 }
 
 /** Upgrade pre-definition graphs before the parser replaces their evidence UUIDs.

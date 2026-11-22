@@ -242,12 +242,12 @@ describe("parse source handler", () => {
     const d = await deps({ pageCount: 3, stdout: JSON.stringify({ pages: [
       { page: 1, text: "Native table caption", imagePath: null, visualKinds: ["table"] },
       { page: 2, text: "  ", imagePath: null },
-      { page: 3, text: "Readable native page", imagePath: null },
+      { page: 3, text: "Chapter 2: Readable native section", imagePath: null },
     ] }) });
     await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 3, warnings: 2, degraded: true });
     expect(d.replaceInput()).toMatchObject({ chunks: [
       { page: 1, text: "Native table caption", imageObjectKey: null },
-      { page: 3, text: "Readable native page", imageObjectKey: null },
+      { page: 3, text: "Chapter 2: Readable native section", imageObjectKey: null },
     ] });
     expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: "第 1–2 页未能识别，可以重新解析", retryable: true }]);
   });
@@ -410,7 +410,7 @@ describe("parse source handler", () => {
   it.each([
     { pageCount: 2, cachedPages: [2], missingPages: "1", warnings: 1 },
     { pageCount: 6, cachedPages: [2, 3, 5], missingPages: "1、4、6", warnings: 3 },
-  ])("publishes cached scans after routing fails on page 1 of a $pageCount-page PDF", async ({ pageCount, cachedPages, missingPages, warnings }) => {
+  ])("publishes cached scans with section headings after routing fails on page 1 of a $pageCount-page PDF", async ({ pageCount, cachedPages, missingPages, warnings }) => {
     const call = vi.fn<ModelGateway["call"]>(async () => { throw new OpeningModelRoutingError("vision route unavailable"); });
     const renderPdf = vi.fn<NonNullable<Parameters<typeof createSourceVisualRecognition>[0]["renderPdf"]>>(
       async (_bytes, requests) => requests.map(request => ({ ...request, mediaType: "image/png", data: "data:image/png;base64,cGFnZQ==" })),
@@ -418,7 +418,7 @@ describe("parse source handler", () => {
     const visual = createSourceVisualRecognition({
       repository: {
         read: async (_scope, { physicalPage }) => cachedPages.includes(physicalPage) ? {
-          result: { transcription: `Cached readable transcription for page ${physicalPage}`, description: "", uncertainties: [], contentKinds: ["text"] },
+          result: { transcription: `Section ${physicalPage}: Cached readable section`, description: "", uncertainties: [], contentKinds: ["text"] },
           modelSnapshot: { id: "vision", providerId: "test", modelName: "vision", inputCentsPerMillion: 10, outputCentsPerMillion: 50 },
           operationId: `stored-page-${physicalPage}`, imageObjectKey: "final",
         } : null,
@@ -443,7 +443,8 @@ describe("parse source handler", () => {
 
     expect(d.states).toEqual(["ready"]);
     expect(d.replaceInput()).toMatchObject({ chunks: cachedPages.map(page => ({
-      page, text: expect.stringContaining(`Cached readable transcription for page ${page}`), imageObjectKey: "final",
+      page, text: expect.stringContaining(`Section ${page}: Cached readable section`),
+      imageObjectKey: cachedPages.includes(page - 1) ? "final" : null,
     })) });
     expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: `第 ${missingPages} 页未能识别，可以重新解析`, retryable: true }]);
     expect(call).toHaveBeenCalledExactlyOnceWith(scope, "materials.recognize-page", expect.objectContaining({

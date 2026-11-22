@@ -44,14 +44,28 @@ const END_ENV_RE = /\\end\{([A-Za-z][A-Za-z0-9*]*)\}/y;
 const CURRENCY_PROSE_OR_NON_MATH_RE = /\b(?:and|to|or|per|for|in|of|at|from|with|by|on|million|billion|thousand|hundred|usd|eur|gbp|cad|aud|cny|rmb|jpy|hkd|sgd|dollars?|cents?|each|more|less|off|only|about|around|over|under|between|is|are|was|were|costs?|prices?)\b|^\d[\d,.]*[;:]\s*[a-z]|[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/iu;
 const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 
+function endOfLatexComment(text: string, start: number, end: number): number {
+  let index = start + 1;
+  while (index < end && text[index] !== "\n" && text[index] !== "\r") index++;
+  return index;
+}
+
 function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
   const first = text[dollarIndex + 1];
   if (!first || first < "0" || first > "9") return false;
   let closeIdx = -1;
-  for (let j = dollarIndex + 1; j < text.length; ) {
+  let bodyStart = dollarIndex + 1;
+  const mathBody: string[] = [];
+  for (let j = bodyStart; j < text.length; ) {
     const ch = text[j]!;
     if (ch === "\\") {
       j += 2;
+      continue;
+    }
+    if (ch === "%") {
+      mathBody.push(text.slice(bodyStart, j));
+      j = endOfLatexComment(text, j, text.length);
+      bodyStart = j;
       continue;
     }
     if (ch === "\n" && isBlankLineBreakAt(text, j)) break;
@@ -66,7 +80,8 @@ function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
   const prev = text[closeIdx - 1] ?? "";
   const next = text[closeIdx + 1] ?? "";
   if (/\s/.test(prev) || (next >= "0" && next <= "9")) return true;
-  const inner = text.slice(dollarIndex + 1, closeIdx);
+  mathBody.push(text.slice(bodyStart, closeIdx));
+  const inner = mathBody.join("");
   if (MATH_COMMAND_OR_OP_RE.test(inner)) return false;
   if (CURRENCY_PROSE_OR_NON_MATH_RE.test(inner)) return true;
   return false;
@@ -95,7 +110,7 @@ function scanMathSpans(text: string): MathSpan[] {
       const ch = text[i]!;
       if (ch === "\\") {
         const next = text[i + 1];
-        if (next === "\\" || next === "$") {
+        if (next === "\\" || next === "$" || next === "%") {
           i += 2;
           continue;
         }
@@ -147,6 +162,11 @@ function scanMathSpans(text: string): MathSpan[] {
           }
         }
         i += 1;
+        continue;
+      }
+
+      if (ch === "%") {
+        i = endOfLatexComment(text, i, to);
         continue;
       }
 

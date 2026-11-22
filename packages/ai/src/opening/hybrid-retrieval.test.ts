@@ -146,6 +146,20 @@ describe("material hybrid retrieval", () => {
     expect(segEn.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
   });
 
+  it.each([
+    ["$$", "$$"], ["\\[", "\\]"], ["\\(", "\\)"], ["\\begin{align}", "\\end{align}"], ["$", "$"],
+  ])("ignores comment delimiters inside a long %s formula and recognizes escaped percents", (open, close) => {
+    for (const bytes of [6424, 8192]) {
+      const start = open + "2x \\% literal\n% ignored " + close + " $$ \\] \\end{align}\r\n";
+      const formula = start + "x".repeat(bytes - Buffer.byteLength(start + close)) + close;
+      const prefix = "a".repeat(140) + "\n";
+      const segments = segmentMaterialChunks([chunk("latex-comments", prefix + formula + "\nTail.")]);
+      expect(segments.map(segment => segment.chunk.text)).toEqual([prefix, formula, "\nTail."]);
+    }
+    const escaped = open + "x".repeat(6424 - open.length - close.length - 2) + "\\%" + close;
+    expect(segmentMaterialChunks([chunk("escaped-percent", escaped)]).map(segment => segment.chunk.text)).toEqual([escaped]);
+  });
+
   it.each(["$2 xy$", "$2 x$", "$10 n^2$", "$3 ab + 1$"])("keeps %s whole across the 6,000-byte boundary", (formula) => {
     const prefix = "a".repeat(5997);
     const segments = segmentMaterialChunks([chunk("short-formula", prefix + formula)], 6000);

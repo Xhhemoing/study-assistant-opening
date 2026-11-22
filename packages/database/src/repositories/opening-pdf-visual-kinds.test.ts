@@ -38,3 +38,12 @@ it("keeps publication uncertainty separate from a confirmed answer seal", () => 
   expect(validatePdfSegmentPages([marker], 4, 4)).toEqual([marker]);
   expect(() => validatePdfSegmentPages([{ ...marker, publicationSealUnknown: "true" }], 4, 4)).toThrow();
 });
+
+it("preserves whether a confirmed publication seal followed public text", () => {
+  const marker = { page: 4, text: "", imagePath: null, hadSealedContent: true, sectionSealedAtEnd: true };
+  for (const publicationSealHadPublicPrefix of [true, false]) {
+    const annotated = { ...marker, publicationSealHadPublicPrefix };
+    expect(validatePdfSegmentPages([annotated], 4, 4)).toEqual([annotated]);
+  }
+  expect(() => validatePdfSegmentPages([{ ...marker, publicationSealHadPublicPrefix: "true" }], 4, 4)).toThrow();
+});

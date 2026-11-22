@@ -1,5 +1,6 @@
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
+import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
 import { chunksHaveReadableContent, createOpeningSourceChunksRepository, type NewSourceChunk } from "./opening-source-chunks";
 
 const base = { page: 1, slideLabel: null, startMs: null, endMs: null };
@@ -77,6 +78,54 @@ describe("empty PDF chunk publication", () => {
     const { repo, input, statements } = setup();
     await expect(repo.replacePdfChunks(scope, input)).rejects.toThrow("source has no readable text");
     expect(statements.some(({ query }) => query.startsWith("DELETE FROM opening_source_chunks"))).toBe(false);
+  });
+});
+
+describe("cross-source legacy definition backfill", () => {
+  it.each([
+    { reason: "same-page seal", marker: "hadSealedContent", available: false, text: "x = 3." },
+    { reason: "unresolved earlier section", marker: "sectionSealedAtEnd", available: false, text: "5 units." },
+    { reason: "unknown earlier scan", marker: "publicationSealUnknown", available: false, text: "5 units." },
+    { reason: "unstripped answer", available: true, text: "Answer Key\nx = 3." },
+    { reason: "completed public publication", available: true, text: "Public introduction.", preservesDefinition: true },
+  ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition }) => {
+    const courseId = "00000000-0000-4000-8000-000000000001";
+    const nodeId = "00000000-0000-4000-8000-000000000002";
+    const [chunkB, chunkA] = ["00000000-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000004"];
+    const snapshot = { courseId, version: 1, nodes: [{ id: nodeId, courseId, label: "Concept", kind: "concept",
+      evidenceChunkIds: [chunkB, chunkA], status: "supported" }], edges: [] };
+    const writes: string[] = [];
+    const citedIds: unknown[] = [];
+    const tx = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join("?").replace(/\s+/gu, " ").trim();
+      if (query.startsWith("SELECT id FROM workspaces")) return [{ id: "workspace" }];
+      if (query.startsWith("SELECT graph.course_id, missing.node_indexes")) {
+        expect(values).toContain("source-B");
+        return [{ course_id: courseId, node_indexes: [0] }];
+      }
+      if (query.startsWith("SELECT snapshot")) return [{ snapshot }];
+      if (query.startsWith("SELECT c.id,")) {
+        const id = values.at(-1);
+        citedIds.push(id);
+        if (id === chunkA && marker) {
+          expect(query).toContain("seal.workspace_id=s.workspace_id AND seal.source_id=c.source_id AND seal.source_version=c.source_version");
+          expect(query).toContain("seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'");
+          expect(query).toContain("seal.page_start<=c.page");
+          expect(query).toContain("s.parse_state<>'ready' OR seal.updated_at>s.updated_at");
+          expect(query).toContain("c.image_object_key IS NOT NULL");
+          expect(query).toContain("seal.pages->0->>'" + marker + "'='true'");
+        }
+        if (id === chunkA && !available) return [];
+        return [{ ...base, id, sourceId: id === chunkA ? "source-A" : "source-B", sourceVersion: 4,
+          text: id === chunkA ? text : "Study notes.", imageObjectKey: null }];
+      }
+      if (query.startsWith("UPDATE opening_course_knowledge")) writes.push(query);
+      return [];
+    };
+    await preserveOpeningKnowledgeDefinitions(tx as unknown as TransactionSql,
+      { workspaceId: "workspace", ownerUserId: "owner" }, "source-B", 4);
+    expect(citedIds).toEqual([chunkB, chunkA]);
+    expect(writes).toHaveLength(preservesDefinition ? 1 : 0);
   });
 });
 
