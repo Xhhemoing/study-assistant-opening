@@ -196,7 +196,6 @@ type InlineCueTiming = {
   startMs: number;
   endMs: number;
   prefixLength: number;
-  precedingTableVisibility?: PedagogicalVisibility;
 };
 
 function parseInlineTranscriptCue(line: string): InlineCueTiming | null {
@@ -517,14 +516,34 @@ function tableColumnVisibility(label: string): PedagogicalVisibility {
   return "public";
 }
 
-function timedTableRowVisibility(raw: string, columns: readonly PedagogicalVisibility[]): PedagogicalVisibility {
+function parseTableBodyRowCells(
+  row: Pick<SourceLine, "raw" | "start">,
+  columnCount: number,
+  captionRow: boolean,
+  tableSpans?: readonly InlineConstructSpan[],
+) {
+  const parsed = parseTableRowCells(row, tableSpans);
+  const leadingEmptyCell = captionRow && parsed.cells.length < columnCount &&
+    row.raw.trimStart().startsWith("|") && !row.raw.trimEnd().endsWith("|");
+  return { ...(leadingEmptyCell ? parseTableRowCells(row, tableSpans, true) : parsed), leadingEmptyCell };
+}
+
+function timedTableRowVisibility(
+  raw: string,
+  columns: readonly PedagogicalVisibility[],
+  captionRow: boolean,
+): PedagogicalVisibility {
   if (columns.every(visibility => visibility === "public")) return "public";
-  const { cells, hasSeparator } = parseTableRowCells({ raw, start: 0 });
+  const { cells, hasSeparator, leadingEmptyCell } = parseTableBodyRowCells(
+    { raw, start: 0 }, columns.length, captionRow,
+  );
   if (!hasSeparator) return columns[0] ?? "public";
   let visibility: PedagogicalVisibility = "public";
   for (const [index, cell] of cells.entries()) {
-    const column = columns[index];
-    if (column && raw.slice(cell.start, cell.end).trim()) visibility = maxVisibility(visibility, column);
+    if (!raw.slice(cell.start, cell.end).trim()) continue;
+    const column = columns[index] ?? "public";
+    const alternate = leadingEmptyCell ? columns[index - 1] ?? "public" : "public";
+    visibility = maxVisibility(visibility, maxVisibility(column, alternate));
   }
   return visibility;
 }
@@ -539,13 +558,16 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
   let checkedBefore = -1;
   let checkedContainers: readonly MarkdownContainer[] = [];
   let checkedColumns: readonly PedagogicalVisibility[] | undefined;
+  let checkedCaptionRow = false;
   return (
     start: number,
     { body, containers }: ReturnType<typeof readMarkdownContainerLine>,
     columns?: readonly PedagogicalVisibility[],
+    captionRow = false,
   ): number | undefined => {
     // A suffix of a checked, unprotected paragraph cannot introduce a protected title.
-    if (start < checkedBefore && columns === checkedColumns && containers.length === checkedContainers.length &&
+    if (start < checkedBefore && columns === checkedColumns && captionRow === checkedCaptionRow &&
+      containers.length === checkedContainers.length &&
       containers.every((container, index) => container === checkedContainers[index])) return undefined;
 
     let firstProtectedTitleLine = Infinity;
@@ -560,7 +582,9 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
       }
       // Data rows cannot become an earlier part of a later hint heading and lose column protection.
       if (columns && index < firstProtectedTitleLine &&
-        timedTableRowVisibility(index === start ? raw : line.body, columns) !== "public") return undefined;
+        timedTableRowVisibility(line.depth === containers.length ? line.body : raw, columns, captionRow) !== "public") {
+        return undefined;
+      }
       return titleLine;
     };
     const paragraph = readSetextParagraph(readLine, start);
@@ -572,15 +596,16 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
     checkedBefore = paragraph.index;
     checkedContainers = containers;
     checkedColumns = columns;
+    checkedCaptionRow = captionRow;
     return undefined;
   };
 }
 
 function startsTimedTableBoundary(
-  body: string,
-  containers: readonly MarkdownContainer[],
+  { body, containers, continuedDepth }: ReturnType<typeof readMarkdownContainerLine>,
+  tableActive = true,
 ): boolean {
-  if (interruptsPipeTable(body)) return true;
+  if (interruptsPipeTable(body) || (tableActive && containers.includes("quote", continuedDepth))) return true;
   if (containers.at(-1) === "quote" && CALLOUT_HEADER_RE.test(body.trimStart())) return true;
   const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}[ \t]*$/.exec(body);
   return latex !== null && (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null);
@@ -594,7 +619,7 @@ function isCaptionTableBodyRow(line: string): boolean {
   if (isPipeTableBodyRow(line)) return true;
   if (!isListLikeTableRow(line)) return false;
   const projected = readMarkdownContainerLine(line);
-  return !startsTimedTableBoundary(projected.body, projected.containers);
+  return !startsTimedTableBoundary(projected);
 }
 
 function matchFenceOpening(line: string): RegExpExecArray | null {
@@ -609,12 +634,20 @@ function closesFence(line: string, opener: string): boolean {
 
 function createTranscriptCueSeparator(
   cueTexts: readonly string[],
-  preserveBoundaryVisibility?: (cueIndex: number, visibility: PedagogicalVisibility) => void,
+  preserveBoundaryVisibility?: (cueIndex: number, offset: number, visibility: PedagogicalVisibility) => void,
 ) {
   const lines: string[] = [];
+  const offsets: number[] = [];
   const cueLineStarts = cueTexts.map(text => {
     const start = lines.length;
-    for (const line of text.split(/\r?\n/)) lines.push(line);
+    for (const line of splitLinesWithOffsets(text)) {
+      lines.push(line.raw);
+      offsets.push(line.start);
+    }
+    if (!text || text.endsWith("\n")) {
+      lines.push("");
+      offsets.push(text.length);
+    }
     return start;
   });
   let containers: MarkdownContainer[] = [];
@@ -636,14 +669,19 @@ function createTranscriptCueSeparator(
       const line = lines[index]!;
       const continuation = continueMarkdownContainers(line, containers);
       const current = readMarkdownContainerLine(line, containers);
-      if (tableColumns && continuation.depth === containers.length && isCaptionTableBodyRow(continuation.body)) {
-        const underline = protectedUnderline(index, current, tableColumns);
-        if (underline === undefined) {
+      if (tableColumns && continuation.depth === containers.length) {
+        const explicitBoundary = startsTimedTableBoundary(current);
+        const canContinue = isCaptionTableBodyRow(continuation.body);
+        const underline = !explicitBoundary && canContinue
+          ? protectedUnderline(index, current, tableColumns, true)
+          : undefined;
+        if (explicitBoundary || underline !== undefined) {
+          if (underline !== undefined) setextThrough = underline;
+          preserveBoundaryVisibility?.(cueIndex, offsets[index]!, timedTableRowVisibility(continuation.body, tableColumns, true));
+        } else if (canContinue) {
           previousBody = continuation.body;
           continue;
         }
-        setextThrough = underline;
-        preserveBoundaryVisibility?.(cueIndex, timedTableRowVisibility(continuation.body, tableColumns));
       }
       const sameContainer = current.continuedDepth === containers.length &&
         current.continuedDepth === current.containers.length;
@@ -657,10 +695,11 @@ function createTranscriptCueSeparator(
     const continued = continueMarkdownContainers(nextLine, containers);
     if (tableColumns && continued.depth === containers.length) {
       const next = readMarkdownContainerLine(nextLine, containers);
-      const underline = protectedUnderline(end, next, tableColumns);
-      if (startsTimedTableBoundary(next.body, next.containers) || underline !== undefined) {
+      const explicitBoundary = startsTimedTableBoundary(next);
+      const underline = explicitBoundary ? undefined : protectedUnderline(end, next, tableColumns, true);
+      if (explicitBoundary || underline !== undefined) {
         if (underline !== undefined) setextThrough = underline;
-        preserveBoundaryVisibility?.(cueIndex + 1, timedTableRowVisibility(continued.body, tableColumns));
+        preserveBoundaryVisibility?.(cueIndex + 1, offsets[end]!, timedTableRowVisibility(continued.body, tableColumns, true));
         previousBody = "";
         tableColumns = undefined;
         return "\n\n";
@@ -1057,6 +1096,7 @@ function parsePrefixedInnerBlocks(
   propagateSectionVisibility: boolean,
   innerSealProofs: boolean,
   captionRowStarts?: ReadonlySet<number>,
+  boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   readPrefix = (line: SourceLine, _index: number) => ({
     length: BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0, padding: 0,
   }),
@@ -1066,6 +1106,7 @@ function parsePrefixedInnerBlocks(
   const charOrigEnd: number[] = [];
   const vLineToOrigLine = new Map<number, SourceLine>();
   const projectedCaptionRows = captionRowStarts && new Set<number>();
+  const projectedBoundaryFloors = boundaryFloors && new Map<number, PedagogicalVisibility>();
   let vCursor = 0;
 
   for (let idx = startLineIdx; idx <= endLineIdx; idx++) {
@@ -1075,6 +1116,10 @@ function parsePrefixedInnerBlocks(
       : readPrefix(curLine, idx);
     const stripped = curLine.raw.slice(length);
     if (captionRowStarts?.has(curLine.start)) projectedCaptionRows?.add(vCursor);
+    const boundaryFloor = boundaryFloors?.get(curLine.start);
+    if (boundaryFloor !== undefined && !(idx === startLineIdx && firstLineSliceStart !== null)) {
+      projectedBoundaryFloors?.set(vCursor, boundaryFloor);
+    }
     if (!(idx === startLineIdx && firstLineSliceStart !== null)) {
       vLineToOrigLine.set(vCursor, curLine);
     }
@@ -1108,6 +1153,7 @@ function parsePrefixedInnerBlocks(
     },
     innerSealProofs,
     projectedCaptionRows,
+    projectedBoundaryFloors,
   );
 
   return innerAst.map(b => {
@@ -1206,6 +1252,7 @@ interface TranscriptRegion {
 function scanInlineCueTimings(
   lines: readonly SourceLine[],
   captionRowStarts?: ReadonlySet<number>,
+  boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
 ) {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
@@ -1218,7 +1265,7 @@ function scanInlineCueTimings(
     return raw?.slice(cueTimings[index]?.prefixLength ?? 0);
   };
   const protectedUnderline = createProtectedSetextLookup(readCueBody);
-  const tableBreaks = new Set<number>();
+  const tableBreakVisibilities = new Map<number, PedagogicalVisibility>();
   const timings = lines.map(({ raw, start }, index) => {
     const timing = cueTimings[index]!;
     if (fence) {
@@ -1236,27 +1283,27 @@ function scanInlineCueTimings(
     const cueLine = timing && readMarkdownContainerLine(cueBody, containers);
     const documentLine = readMarkdownContainerLine(raw, containers);
     const next = lines[index + 1];
-    let explicitBoundary = cueLine !== null && startsTimedTableBoundary(cueLine.body, cueLine.containers);
-    let precedingTableVisibility: PedagogicalVisibility | undefined;
-    if (table) {
+    const markedBoundary = boundaryFloors?.has(start);
+    let explicitBoundary = markedBoundary || (cueLine !== null && startsTimedTableBoundary(cueLine, table !== undefined));
+    if (table && !markedBoundary) {
       const projectedRow = table.timed && timing;
       const continuation = continueMarkdownContainers(projectedRow ? cueBody : raw, containers);
-      const captionRow = (projectedRow || captionRowStarts?.has(start)) && isCaptionTableBodyRow(continuation.body);
-      const canContinue = isPipeTableBodyRow(continuation.body) || captionRow;
-      if (continuation.depth === containers.length && (canContinue || projectedRow)) {
+      const captionRow = Boolean(projectedRow || captionRowStarts?.has(start));
+      const canContinue = isPipeTableBodyRow(continuation.body) || (captionRow && isCaptionTableBodyRow(continuation.body));
+      if (continuation.depth === containers.length && (canContinue || table.timed)) {
         const candidate = cueLine ?? documentLine;
+        explicitBoundary ||= table.timed && startsTimedTableBoundary(candidate);
         const underline = !explicitBoundary
-          ? protectedUnderline(index, candidate, table.columns)
+          ? protectedUnderline(index, candidate, table.columns, captionRow)
           : undefined;
         explicitBoundary ||= underline !== undefined && cueCounts[underline + 1]! > cueCounts[index]!;
         if (!explicitBoundary && canContinue) return table.timed ? timing : null;
         if (explicitBoundary) {
-          tableBreaks.add(index);
-          precedingTableVisibility = timedTableRowVisibility(continuation.body, table.columns);
+          tableBreakVisibilities.set(index, timedTableRowVisibility(continuation.body, table.columns, captionRow));
         }
       }
-      table = undefined;
     }
+    table = undefined;
 
     const delimiter = next && continueMarkdownContainers(next.raw, documentLine.containers);
     const literalHeader = !explicitBoundary && !interruptsPipeTable(cueBody) &&
@@ -1288,23 +1335,25 @@ function scanInlineCueTimings(
     containers = line.containers;
     const opener = matchFenceOpening(line.body)?.[1];
     if (opener) fence = { opener, literal: !timing };
-    return timing && precedingTableVisibility !== undefined ? { ...timing, precedingTableVisibility } : timing;
+    return timing;
   });
-  return { timings, tableBreaks };
+  return { timings, tableBreakVisibilities };
 }
 
 function parseInlineCuedDocument(
   source: string,
   lines: readonly SourceLine[],
   timings: readonly (InlineCueTiming | null)[],
-  tableBreaks: ReadonlySet<number>,
+  tableBreakVisibilities: ReadonlyMap<number, PedagogicalVisibility>,
   options: AstParseOptions,
   sealProofs: boolean,
   captionRowStarts?: ReadonlySet<number>,
+  boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
 ): PedagogicalAstBlock[] {
   const parts: string[] = [];
   const regions: TranscriptRegion[] = [];
   const timedRows = new Set<number>();
+  const boundaryFloorByProjectedOffset = new Map<number, PedagogicalVisibility>();
   const bodies = lines.map((line, index) => line.raw.slice(timings[index]?.prefixLength ?? 0));
   const cueSeparator = createTranscriptCueSeparator(bodies);
   let offset = 0;
@@ -1312,14 +1361,14 @@ function parseInlineCuedDocument(
     const timing = timings[index];
     const next = timings[index + 1];
     const body = bodies[index]!;
-    const breakBefore = tableBreaks.has(index);
+    const tableFloor = tableBreakVisibilities.get(index);
+    const priorFloor = boundaryFloors?.get(line.start);
+    const breakBefore = tableFloor !== undefined || priorFloor !== undefined;
     if (breakBefore) {
-      // An unwrapped Setext title still looks like a table row until its underline.
-      // Keep the boundary in the projected Markdown without changing source offsets.
-      parts.push("\n");
-      offset++;
+      boundaryFloorByProjectedOffset.set(offset, maxVisibility(tableFloor ?? "public", priorFloor ?? "public"));
     }
-    const joinNext = Boolean(timing && next && !tableBreaks.has(index + 1));
+    const joinNext = Boolean(timing && next && !tableBreakVisibilities.has(index + 1) &&
+      !boundaryFloors?.has(lines[index + 1]!.start));
     const separator = cueSeparator(index, joinNext, breakBefore);
     if (timing || captionRowStarts?.has(line.start)) timedRows.add(offset);
     if (timing) {
@@ -1344,7 +1393,7 @@ function parseInlineCuedDocument(
   const readRange = readAstRanges(parsePedagogicalAstInternal(markdown, {
     defaultVisibility: options.defaultVisibility,
     propagateSectionVisibility: options.propagateSectionVisibility,
-  }, sealProofs, timedRows));
+  }, sealProofs, timedRows, boundaryFloorByProjectedOffset));
   const blocks: PedagogicalAstBlock[] = [];
   for (const region of regions) {
     const { start, end, sourceStart, cue } = region;
@@ -1361,13 +1410,9 @@ function parseInlineCuedDocument(
       continue;
     }
 
-    const visibilityFloor = maxVisibility(
-      options.defaultVisibility ?? "public",
-      cue.timing.precedingTableVisibility ?? "public",
-    );
     const spans = start === end
       ? [{ start, end, visibility: "sealed" } satisfies CueSpan]
-      : splitCueVisibility(markdown, start, end, visibilityFloor, readRange, true);
+      : splitCueVisibility(markdown, start, end, options.defaultVisibility ?? "public", readRange, true);
     for (const span of spans) {
       const startOffset = span.start === start ? cue.lineStart : span.start + sourceDelta;
       const endOffset = span.end + sourceDelta;
@@ -1407,14 +1452,15 @@ function parsePedagogicalAstInternal(
   options: AstParseOptions,
   sealProofs: boolean,
   captionRowStarts?: ReadonlySet<number>,
+  boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
 ): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
-  const { timings, tableBreaks } = scanInlineCueTimings(lines, captionRowStarts);
+  const { timings, tableBreakVisibilities } = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors);
   if (timings.some(Boolean)) {
-    return parseInlineCuedDocument(text, lines, timings, tableBreaks, options, sealProofs, captionRowStarts);
+    return parseInlineCuedDocument(text, lines, timings, tableBreakVisibilities, options, sealProofs, captionRowStarts, boundaryFloors);
   }
   const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(index => lines[index]?.raw);
   const blocks: PedagogicalAstBlock[] = [];
@@ -1767,6 +1813,7 @@ function parsePedagogicalAstInternal(
     const headingMatch = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/.exec(raw);
     const setext = headingMatch ? null : readSetextParagraph(index => lines[index]?.raw, i);
     const level = headingMatch?.[1]?.length ?? setext?.level;
+    const boundaryFloor = boundaryFloors?.get(line.start) ?? "public";
     if (level !== undefined) {
       const headingLastIndex = setext?.index ?? i;
       const headingEnd = lines[headingLastIndex]!.contentEnd;
@@ -1809,10 +1856,10 @@ function parsePedagogicalAstInternal(
             : defaultVisibility;
         headingStack.push({
           level,
-          visibility: maxVisibility(parentVisibility, ownVisibility),
+          visibility: maxVisibility(parentVisibility, maxVisibility(ownVisibility, boundaryFloor)),
         });
       }
-      const activeVis = getActiveSectionVisibility();
+      const activeVis = maxVisibility(getActiveSectionVisibility(), boundaryFloor);
       const headingInlineSpans =
         rawInlineSpans.length > 0
           ? findInlineConstructSpans(text, line.start, inlineEnd, activeVis, sealProofs)
@@ -1869,8 +1916,9 @@ function parsePedagogicalAstInternal(
       continue;
     }
 
+    const blockVisibility = maxVisibility(getActiveSectionVisibility(), boundaryFloor);
     if (THEMATIC_BREAK_RE.test(raw)) {
-      pushBlock("prose", getActiveSectionVisibility(), false, line.start, line.contentEnd);
+      pushBlock("prose", blockVisibility, false, line.start, line.contentEnd);
       i++;
       continue;
     }
@@ -1880,7 +1928,7 @@ function parsePedagogicalAstInternal(
     if (fenceMatch) {
       const opener = fenceMatch[1]!;
       const fenceChar = opener[0]!;
-      const activeVis = getActiveSectionVisibility();
+      const activeVis = blockVisibility;
       const infoRaw = fenceMatch[2]!;
       const infoMatch = /^[ \t]*\{?\.?([a-zA-Z][\w-]*)\}?([ \t].*)?$/.exec(infoRaw);
       const classified = infoMatch ? classifyLabel(infoMatch[1], activeVis, sealProofs) : null;
@@ -1952,7 +2000,7 @@ function parsePedagogicalAstInternal(
     // 3. Fenced pedagogical container (:::theorem ... :::)
     const containerMatch = /^[ \t]{0,3}(:{3,})[ \t]*([a-zA-Z][\w-]*)(.*)$/.exec(raw);
     if (containerMatch) {
-      const activeVis = getActiveSectionVisibility();
+      const activeVis = blockVisibility;
       const classified = classifyLabel(containerMatch[2], activeVis, sealProofs);
       if (classified) {
         const colonStack: number[] = [containerMatch[1]!.length];
@@ -2047,7 +2095,7 @@ function parsePedagogicalAstInternal(
     const envMatch = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(raw);
     if (envMatch && !tableHeaderCells) {
       const envName = envMatch[1]!;
-      const activeVis = getActiveSectionVisibility();
+      const activeVis = blockVisibility;
       const isMath = MATH_ENVS.has(envName);
       const classified = isMath
         ? { kind: "display_math" as const, visibility: activeVis }
@@ -2113,7 +2161,7 @@ function parsePedagogicalAstInternal(
     // 4b. HTML <details> block (spoiler / hint / solution disclosure; fails closed if unclosed)
     const detailsOpenMatch = /^[ \t]*(<details(?:\s[^>]*)?>)/i.exec(raw);
     if (detailsOpenMatch) {
-      const activeVis = getActiveSectionVisibility();
+      const activeVis = blockVisibility;
       const leadingWs = detailsOpenMatch[0].length - detailsOpenMatch[1]!.length;
       const detailsStart = line.start + leadingWs;
       const openEndOffset = line.start + detailsOpenMatch[0].length;
@@ -2189,7 +2237,7 @@ function parsePedagogicalAstInternal(
       const hasTrailingContent = !/^[ \t]*$/.test(trailing);
       pushBlock(
         "display_math",
-        closed ? getActiveSectionVisibility() : "sealed",
+        closed ? blockVisibility : "sealed",
         true,
         startOffset,
         hasTrailingContent ? end : Math.max(end, closeLine.contentEnd),
@@ -2206,7 +2254,7 @@ function parsePedagogicalAstInternal(
     // 7. Markdown callout (> [!theorem], > [!proof], > [!solution], ...) and blockquotes
     const calloutMatch = CALLOUT_RE.exec(raw);
     if (calloutMatch) {
-      const activeVis = getActiveSectionVisibility();
+      const activeVis = blockVisibility;
       const classified = classifyLabel(calloutMatch[1], activeVis, sealProofs);
       if (classified) {
         const j = findBlockquoteEnd(lines, i, candidate => {
@@ -2232,6 +2280,7 @@ function parsePedagogicalAstInternal(
             propagateSectionVisibility,
             classified.kind === "exercise",
             captionRowStarts,
+            boundaryFloors,
           );
           const higherBlocks = innerBlocks.filter(
             b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
@@ -2285,6 +2334,7 @@ function parsePedagogicalAstInternal(
           propagateSectionVisibility,
           sealProofs,
           captionRowStarts,
+          boundaryFloors,
         );
         if (innerBlocks.some(b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis])) {
           emitContainerWithExtraction(
@@ -2347,6 +2397,7 @@ function parsePedagogicalAstInternal(
         propagateSectionVisibility,
         sealProofs,
         captionRowStarts,
+        boundaryFloors,
         (bodyLine, index) => index === i
           ? { length: listMatch[0].length, padding: 0 }
           : listContinuationPrefix(bodyLine.raw, contentIndent),
@@ -2363,11 +2414,12 @@ function parsePedagogicalAstInternal(
       const columns = getTableColumnVisibilities(raw, tableHeaderCells, line.start);
       while (j < lines.length) {
         const row = lines[j]!;
+        if (boundaryFloors?.has(row.start)) break;
         const isCaptionRow = captionRowStarts?.has(row.start);
         if (!isPipeTableBodyRow(row.raw) && !(isCaptionRow && isCaptionTableBodyRow(row.raw))) break;
         if (isCaptionRow && protectedCaptionUnderline) {
           const candidate = readMarkdownContainerLine(row.raw);
-          if (protectedCaptionUnderline(j, candidate, columns) !== undefined) break;
+          if (protectedCaptionUnderline(j, candidate, columns, true) !== undefined) break;
         }
         j++;
       }
@@ -2401,13 +2453,11 @@ function parsePedagogicalAstInternal(
       if (colPolicies.some(Boolean)) {
         for (let rowIdx = i + 2; rowIdx <= endLineIdx; rowIdx++) {
           const row = lines[rowIdx]!;
-          let { cells: rowCells } = parseTableRowCells(row, inlineSpans);
           // A short caption row can start with the separator for an empty
           // first cell. Keep that position without altering document GFM rows.
-          const leadingEmptyCell =
-            captionRowStarts?.has(row.start) && rowCells.length < headerCells.length &&
-            row.raw.trimStart().startsWith("|") && !row.raw.trimEnd().endsWith("|");
-          if (leadingEmptyCell) rowCells = parseTableRowCells(row, inlineSpans, true).cells;
+          const { cells: rowCells, leadingEmptyCell } = parseTableBodyRowCells(
+            row, headerCells.length, captionRowStarts?.has(row.start) === true, inlineSpans,
+          );
           for (let colIdx = 0; colIdx < Math.min(colPolicies.length, rowCells.length); colIdx++) {
             const columnPolicy = colPolicies[colIdx];
             // An omitted edge pipe is ambiguous on a short caption row. Keep
@@ -2536,10 +2586,10 @@ function parsePedagogicalAstInternal(
 
     // 10. Prose paragraph (with embedded inline display-math & pedagogical-env protection)
     let j = i + 1;
-    while (j < lines.length && !startsSpecialBlock(lines, j)) j++;
+    while (j < lines.length && !boundaryFloors?.has(lines[j]!.start) && !startsSpecialBlock(lines, j)) j++;
     const paraStart = line.start;
     const paraEnd = lines[j - 1]!.contentEnd;
-    i = emitInlineConstructsRange(paraStart, paraEnd, getActiveSectionVisibility(), i, j);
+    i = emitInlineConstructsRange(paraStart, paraEnd, blockVisibility, i, j);
   }
 
   return blocks;
@@ -2866,9 +2916,9 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
   const cueStarts: number[] = [];
   const captionRowStarts = new Set<number>();
   const textParts: string[] = [];
-  const boundaryVisibilities = new Map<number, PedagogicalVisibility>();
-  const cueSeparator = createTranscriptCueSeparator(input.cues.map(cue => cue.text), (index, visibility) => {
-    boundaryVisibilities.set(index, maxVisibility(boundaryVisibilities.get(index) ?? "public", visibility));
+  const boundaryLines: { cueIndex: number; offset: number; visibility: PedagogicalVisibility }[] = [];
+  const cueSeparator = createTranscriptCueSeparator(input.cues.map(cue => cue.text), (cueIndex, offset, visibility) => {
+    boundaryLines.push({ cueIndex, offset, visibility });
   });
   let virtualOffset = 0;
   for (const [index, cue] of input.cues.entries()) {
@@ -2879,8 +2929,14 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
     virtualOffset += cue.text.length + separator.length;
   }
   const text = textParts.join("");
+  const boundaryFloorByProjectedOffset = new Map<number, PedagogicalVisibility>();
+  for (const boundary of boundaryLines) {
+    const offset = cueStarts[boundary.cueIndex]! + boundary.offset;
+    const existing = boundaryFloorByProjectedOffset.get(offset) ?? "public";
+    boundaryFloorByProjectedOffset.set(offset, maxVisibility(existing, boundary.visibility));
+  }
   const readRange = readAstRanges(parsePedagogicalAstInternal(
-    text, { defaultVisibility }, false, captionRowStarts,
+    text, { defaultVisibility }, false, captionRowStarts, boundaryFloorByProjectedOffset,
   ));
   const chunks: PedagogicalChunk[] = [];
   let seq = 0;
@@ -2901,10 +2957,7 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
     originalOffset += cue.text.length + 1;
     if (!cue.text) continue;
 
-    const visibilityFloor = maxVisibility(
-      maxVisibility(defaultVisibility, cue.visibility ?? defaultVisibility),
-      boundaryVisibilities.get(cueIndex) ?? "public",
-    );
+    const visibilityFloor = maxVisibility(defaultVisibility, cue.visibility ?? defaultVisibility);
     const spans = splitCueVisibility(text, start, end, visibilityFloor, readRange);
 
     for (const span of spans) {
