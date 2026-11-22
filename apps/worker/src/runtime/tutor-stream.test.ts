@@ -73,7 +73,9 @@ it("round-trips origin course authority through the cache and rejects malformed 
   });
   const cached = evalScript.mock.calls[0]?.[7] as string;
   const hgetall = vi.fn().mockResolvedValueOnce({ context: cached, text: "buffered", sequence: "1" });
-  const invalidBindings = [undefined, null, {}, [null], [{ ...binding, courseId: "invalid" }],
+  const invalidBindings = [undefined, null, {}, [null],
+    [{ courseId: id, materialUse: "citation", sourceIds: [id], sourceRefs: [ref] }],
+    [{ ...binding, courseId: "invalid" }],
     [{ ...binding, materialUse: "exam" }], [{ ...binding, sourceIds: ["invalid"] }],
     [{ ...binding, sourceRefs: [{ ...ref, memoryOnly: true }] }], [{ ...binding, sourceRefs: [{ ...ref, sourceVersion: "1" }] }],
     [{ ...binding, sourceIds: [] }], [{ ...binding, memoryIds: ["invalid"] }], [{ ...binding, memoryBackings: [[]] }]];

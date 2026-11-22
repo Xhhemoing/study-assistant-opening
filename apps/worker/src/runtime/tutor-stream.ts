@@ -254,7 +254,11 @@ export function createTutorStreamWriter(redis: IORedis) {
         redis.call('EXPIRE', KEYS[1], ARGV[3])
         return 1
       `, 4, key, tutorStreamEpochKey(workspaceId), head?.key ?? key, head?.revKey ?? key,
-      context.executionId ?? "", JSON.stringify({ ...context, historyCourseBindings: context.historyCourseBindings ?? [] }),
+      context.executionId ?? "", JSON.stringify({ ...context,
+        historyCourseBindings: (context.historyCourseBindings ?? []).map(binding => ({
+          ...binding, memoryIds: binding.memoryIds ?? [], memoryBackings: binding.memoryBackings ?? [],
+        })),
+      }),
       TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch,
       head?.id ?? "", head?.revision ?? "", tempExpiresAtMs !== null ? String(tempExpiresAtMs) : "", nowMs);
       if (result === "EXPIRED") {
@@ -562,23 +566,22 @@ function parseHistoryCourseBindings(value: unknown): NonNullable<TutorStreamCont
   const normalizeIds = (ids: string[]) => [...new Set(ids.map(id => id.toLowerCase()))];
   return value.map(binding => {
     if (!binding || typeof binding !== "object"
-      || Object.keys(binding).some(key => !["courseId", "materialUse", "sourceIds", "sourceRefs", "memoryIds", "memoryBackings"].includes(key))
+      || Object.keys(binding).length !== 6
       || !(binding.courseId === null || uuidSchema.safeParse(binding.courseId).success)
       || (binding.materialUse !== "citation" && binding.materialUse !== "practice")
       || !isUuidList(binding.sourceIds)
       || !Array.isArray(binding.sourceRefs) || binding.sourceRefs.some((ref: ContextSourceRef) =>
         !ref || typeof ref !== "object" || !uuidSchema.safeParse(ref.sourceId).success || ref.memoryOnly === true)
-      || (binding.memoryIds !== undefined && !isUuidList(binding.memoryIds))
-      || (binding.memoryBackings !== undefined && (!Array.isArray(binding.memoryBackings)
-        || binding.memoryBackings.some((ids: unknown) => !isUuidList(ids) || !ids.length)))) {
+      || !isUuidList(binding.memoryIds)
+      || !Array.isArray(binding.memoryBackings)
+      || binding.memoryBackings.some((ids: unknown) => !isUuidList(ids) || !ids.length)) {
       throw new Error("invalid tutor stream cache");
     }
     const sourceRefs = parseContextSourceRefs(binding.sourceRefs);
     const sourceIds = normalizeIds(binding.sourceIds).sort();
     if (!sourceRefs || sourceRefs.some(ref => !sourceIds.includes(ref.sourceId))) throw new Error("invalid tutor stream cache");
     return { courseId: binding.courseId?.toLowerCase() ?? null, materialUse: binding.materialUse, sourceIds, sourceRefs,
-      ...(binding.memoryIds !== undefined ? { memoryIds: normalizeIds(binding.memoryIds).sort() } : {}),
-      ...(binding.memoryBackings !== undefined ? { memoryBackings: binding.memoryBackings.map(normalizeIds) } : {}),
+      memoryIds: normalizeIds(binding.memoryIds).sort(), memoryBackings: binding.memoryBackings.map(normalizeIds),
     };
   });
 }

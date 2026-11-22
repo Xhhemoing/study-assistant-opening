@@ -1,6 +1,6 @@
 import type { TransactionSql } from "postgres";
-import { describe, expect, it } from "vitest";
-import { turnHasStandaloneSessions, type FragmentFactory } from "./opening-context-provenance";
+import { describe, expect, it, vi } from "vitest";
+import { readTurnMemoryDependencyDeadlines, turnHasStandaloneSessions, type FragmentFactory } from "./opening-context-provenance";
 import { admitTaskCandidate } from "./opening-task-candidate-admission";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
 
@@ -94,6 +94,34 @@ function simulatedSql(read: (query: string) => unknown[]) {
   }, { json: JSON.stringify }) as unknown as TransactionSql;
   return { tx, queries };
 }
+
+it("checks the paired user's temporary deadline after awaiting task history", async () => {
+  const memoryId = "55555555-5555-4555-8555-555555555555";
+  const userTurnId = "66666666-6666-4666-8666-666666666666";
+  const checkedAt = Date.now(), expiry = checkedAt + 1_000;
+  const { tx } = simulatedSql(query => {
+    if (query.startsWith("SELECT t.id FROM opening_turns")) return [{ id: {
+      turnId, ownerUserId: scope.ownerUserId, courseId: null, materialUse: "citation",
+      refs: [], checkedAt: new Date(checkedAt).toISOString(), historicalUserTurnId: userTurnId,
+      paired: { turnId: userTurnId, courseId: null, materialUse: "practice", refs: [{ memoryDependencyIds: [memoryId] }] },
+    } }];
+    if (query.startsWith("SELECT dep_m.id")) return [{ id: memoryId, course_id: null, expires_at: new Date(expiry), source_turn_ids: [] }];
+    throw new Error(query);
+  });
+  const clock = vi.spyOn(Date, "now").mockReturnValue(checkedAt);
+  try {
+    const history = vi.fn(async () => {
+      await Promise.resolve();
+      clock.mockReturnValue(expiry);
+      return { valid: true, earliestExpiresAtMs: Infinity };
+    });
+    const deadlines = await readTurnMemoryDependencyDeadlines(tx, scope.workspaceId, [turnId], undefined, history);
+    expect(history).toHaveBeenCalledOnce();
+    expect(deadlines.has(turnId)).toBe(false);
+  } finally {
+    clock.mockRestore();
+  }
+});
 
 it("requires an owned course-less session for each non-empty origin session binding", async () => {
   const { tx, queries } = simulatedSql(() => []);

@@ -325,11 +325,7 @@ it.each(["archive", "detach", "mock_exam"] as const)("fences origin revocation (
   const deliver = vi.fn();
   const legacyBuffer = { claimToken: claim.claimToken, executionId: claim.executionId,
     contextSourceRefs: saved.sourceRefs, exposureReceiptId: null, privacyEpoch: beforeEpoch };
-  await expect(jobs.readStream(scope, current.jobId, legacyBuffer))
-    .rejects.toMatchObject({ code: "CONFLICT", message: "stream history bindings missing" });
-  await expect(jobs.readStream(scope, current.jobId, legacyBuffer, deliver))
-    .rejects.toMatchObject({ code: "CONFLICT", message: "stream history bindings missing" });
-  expect(deliver).not.toHaveBeenCalled();
+  await expect(jobs.readStream(scope, current.jobId, legacyBuffer)).resolves.toMatchObject({ status: "running" });
   await expect(jobs.readStream(scope, current.jobId, buffered, deliver)).resolves.toMatchObject({ status: "running" });
   expect(deliver).toHaveBeenCalledOnce();
   deliver.mockClear();
@@ -344,6 +340,13 @@ it.each(["archive", "detach", "mock_exam"] as const)("fences origin revocation (
   expect(privacyEpoch).toBe(beforeEpoch);
   await expect(jobs.readStream(scope, current.jobId, buffered)).rejects.toMatchObject({ code: "CONFLICT" });
   await expect(jobs.readStream(scope, current.jobId, buffered, deliver)).rejects.toMatchObject({ code: "CONFLICT" });
+  for (const historyCourseBindings of [undefined, [], saved.historyCourseBindings?.slice(0, 1)]) {
+    const incomplete = { ...legacyBuffer, historyCourseBindings };
+    await expect(jobs.readStream(scope, current.jobId, incomplete))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "stream history is no longer available" });
+    await expect(jobs.readStream(scope, current.jobId, incomplete, deliver))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "stream history is no longer available" });
+  }
   expect(deliver).not.toHaveBeenCalled();
   await expect(jobs.completeTurn({ scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId,
     claimToken: claim.claimToken, text: "Derived answer", citations: [], candidates: [], contextSourceRefs: saved.sourceRefs },
@@ -403,6 +406,9 @@ it("retains an assistant-only course memory and locks its omitted backing course
   await expect(jobs.withStreamPublication(scope, current.jobId, context, start)).rejects.toMatchObject({ code: "CONFLICT" });
   await expect(jobs.readStream(scope, current.jobId, { ...context, exposureReceiptId: null }, deliver))
     .rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(jobs.readStream(scope, current.jobId, {
+    ...context, exposureReceiptId: null, historyCourseBindings: [],
+  }, deliver)).rejects.toMatchObject({ code: "CONFLICT" });
   await expect(jobs.completeTurn({ scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId,
     claimToken: claim.claimToken, text: "Late derivative", citations: [], candidates: [], contextSourceRefs: [] },
   { historyCourseBindings: history.historyCourseBindings })).rejects.toMatchObject({ code: "CONFLICT" });

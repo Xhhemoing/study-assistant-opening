@@ -7,7 +7,7 @@ import {
   type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
+import { bareUserOrigin, lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
 import { mapMemoryRow } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -43,9 +43,21 @@ async function readMemoryContextInTx(
   const eligibleForScope: FragmentFactory = () => db`m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
     AND jsonb_array_length(m.source_turn_ids) > 0
     AND ${memoryCourseAllows(db, course, () => db`${eligibleCourseId}::uuid`, workspace)}`;
-  // Avoid reaching the dependency planner at all when there is no sourced memory.
-  const [hasEvidence] = await db`SELECT m.id FROM opening_memories m WHERE ${eligibleForScope()} LIMIT 1`;
-  if (!hasEvidence) return [];
+  // A batch of bare user origins has no material or dependencies to lock or resolve.
+  const eligibleRows = await db`SELECT m.*,
+    CASE WHEN ${eligibleCourseId}::uuid IS NULL AND m.course_id IS NULL THEN NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements_text(m.source_turn_ids) origin(turn_id)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM opening_turns t
+        JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+        WHERE t.id=${lineageUuid(db, () => db`origin.turn_id`)} AND t.workspace_id=m.workspace_id
+          AND c.owner_user_id=${scope.ownerUserId} AND t.status='complete' AND ${bareUserOrigin(db)}
+      )
+    ) ELSE false END AS bare_origins
+    FROM opening_memories m WHERE ${eligibleForScope()} ORDER BY m.created_at ASC`;
+  if (eligibleRows.every(row => row.bare_origins === true)) {
+    return eligibleRows.map(row => ({ memory: mapMemoryRow(row), sourceRefs: [], ancestorMemoryIds: [] }));
+  }
   // Keep the UUID probe correlated when the number of saved origins is unknown to the planner.
   const savedOrigins = (ids: FragmentFactory, workspaceId: FragmentFactory): ReturnType<Db> => db`
     unnest(ARRAY(

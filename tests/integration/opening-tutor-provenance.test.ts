@@ -12,7 +12,7 @@ import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture }
 import { insertOwnedTurn } from "./opening-memory-context-fixture";
 import { closeRace, deferred, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 import { readTurnsWithActiveMemoryDependencies } from "../../packages/database/src/repositories/opening-context-provenance";
-import { admitTaskCandidate } from "../../packages/database/src/repositories/opening-task-candidate-admission";
+import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "../../packages/database/src/repositories/opening-task-candidate-admission";
 import { insertOpeningTaskWithOutcome } from "../../packages/database/src/repositories/opening-retest-task";
 
 let f: OpeningFixture;
@@ -64,6 +64,86 @@ function handler(text: string, memoryText?: string) {
 }
 
 describe("saved tutor material provenance", () => {
+  it.each(["session", "activity"] as const)("fences a task against material held only by the paired user %s", async origin => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const createCourse = (title: string) => courses.createCourse({ workspaceId: scope.workspaceId, title, slug: randomUUID() });
+    const userCourse = await createCourse("Task user course");
+    const assistantCourse = await createCourse("Task assistant course");
+    const assetId = await source();
+    const membership = { workspaceId: scope.workspaceId, courseId: userCourse.id, assetType: "source" as const, assetId };
+    await courses.addAssetMembership({ ...membership, role: "core", visibility: "course", purpose: "teaching" });
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Paired session task", courseId: null });
+    const turn = await append(conversation.id);
+    for (const [courseId, turnId] of [[userCourse.id, turn.turnId], [assistantCourse.id, turn.assistantTurnId]] as const) {
+      const sessionId = randomUUID();
+      const activityId = await insertTestTeachingActivity(sql, scope, courseId);
+      const sources = courseId === userCourse.id ? [assetId] : [];
+      await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+        VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, ${activityId}, 'Task origin',
+          ${origin === "session" ? sources : []}::uuid[])`;
+      if (origin === "activity" && sources.length) {
+        await sql`UPDATE opening_teaching_activities SET source_ids=${sources}::uuid[] WHERE id=${activityId}`;
+      }
+      await sql`UPDATE opening_turns SET learning_session_id=${sessionId},status='complete',context_source_refs='[]' WHERE id=${turnId}`;
+    }
+    const id = randomUUID();
+    await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+      VALUES (${id}, ${scope.workspaceId}, ${conversation.id}, ${turn.assistantTurnId}, '[]',
+        ${sql.json({ kind: "task", title: "Session task", minutes: 15, dueText: null })})`;
+    const admit = () => sql.begin(async tx => {
+      const dependency = await admitTaskCandidate(tx, scope, id);
+      await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependency);
+      return dependency;
+    });
+    await expect(admit()).resolves.toBe(turn.assistantTurnId);
+    await courses.removeAssetMembership(membership);
+    await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(sql.begin(tx => assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, turn.assistantTurnId)))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("checks a task's paired user memory and its backing course under the user's scope", async () => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const createCourse = (title: string) => courses.createCourse({ workspaceId: scope.workspaceId, title, slug: randomUUID() });
+    const userCourse = await createCourse("Memory consumer");
+    const assistantCourse = await createCourse("Task answer");
+    const backingCourse = await createCourse("Memory evidence");
+    const assetId = await source();
+    const backing = { workspaceId: scope.workspaceId, courseId: backingCourse.id, assetType: "source" as const, assetId };
+    for (const membership of [backing, { ...backing, courseId: userCourse.id }]) {
+      await courses.addAssetMembership({ ...membership, role: "core", visibility: "course", purpose: "teaching" });
+    }
+    const memoryOrigin = await insertOwnedTurn(sql, scope, { sourceIds: [assetId] });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: backingCourse.id })} WHERE id=${memoryOrigin}`;
+    const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+      courseId: userCourse.id, text: "User memory", sourceTurnIds: [memoryOrigin], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Paired memory task", courseId: null });
+    const turn = await append(conversation.id);
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: userCourse.id })},
+      context_source_refs=${sql.json([{ memoryDependencyIds: [memory.id] }])} WHERE id=${turn.turnId}`;
+    await sql`UPDATE opening_turns SET status='complete', context_anchor=${sql.json({ courseId: assistantCourse.id })},
+      context_source_refs='[]' WHERE id=${turn.assistantTurnId}`;
+    const id = randomUUID();
+    await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+      VALUES (${id}, ${scope.workspaceId}, ${conversation.id}, ${turn.assistantTurnId}, '[]',
+        ${sql.json({ kind: "task", title: "Memory task", minutes: 15, dueText: null })})`;
+    const admit = () => sql.begin(async tx => {
+      const dependency = await admitTaskCandidate(tx, scope, id);
+      await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependency);
+      return dependency;
+    });
+    await expect(admit()).resolves.toBe(turn.assistantTurnId);
+    await courses.removeAssetMembership(backing);
+    await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(sql.begin(tx => assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, turn.assistantTurnId)))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    await sql`UPDATE opening_turns SET context_source_refs='[{"memoryDependencyIds":["invalid"]}]' WHERE id=${turn.turnId}`;
+    await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
   it.each(["assistant-source", "candidate-only"] as const)("requires saved versions for task material from %s records", async origin => {
     const { sql, scope } = f;
     const sourceId = await source();

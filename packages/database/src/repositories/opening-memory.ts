@@ -95,7 +95,7 @@ export function createOpeningMemoryRepository(
           throw error;
         }
         await lockOwnedWorkspace(tx, scope);
-        await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
+        if (input.sourceTurnIds.length) await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
         await assertCourseInWorkspace(tx, scope, courseId, true);
         const rejected = await tx`
           SELECT source_turn_ids, text FROM opening_memories
@@ -113,7 +113,7 @@ export function createOpeningMemoryRepository(
             ${randomUUID()}, ${scope.workspaceId}, ${courseId}, ${kind},
             ${text}, ${tx.json(input.sourceTurnIds as never)}, 0, ${input.expiresAt}, 'active'
           ) RETURNING *`;
-        await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
+        if (input.sourceTurnIds.length) await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
         return mapMemoryRow(rows[0] as Record<string, unknown>);
       });
     },

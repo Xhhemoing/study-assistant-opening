@@ -476,7 +476,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
-        historyCourseBindings: historyCourseBindings ?? [],
+        historyCourseBindings: (historyCourseBindings ?? []).map(binding => ({
+          ...binding, memoryIds: binding.memoryIds ?? [], memoryBackings: binding.memoryBackings ?? [],
+        })),
         ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}) };
       const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;

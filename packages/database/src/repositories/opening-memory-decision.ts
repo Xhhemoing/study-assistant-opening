@@ -1,8 +1,8 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
-import { lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
+import { isLineageUuid, lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
+import { lockAndReadMemoryOrigins, lockOwnedWorkspace, readBareUserOrigins } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
@@ -50,7 +50,11 @@ export function confirmOwnedMemory(
       throw new OpeningMemoryError("CONFLICT", "memory cannot be confirmed");
     }
     let expiryBeforeCommit: string | null = null;
-    if (current.courseId !== null || current.kind === "temporary" || current.sourceTurnIds.length > 0) {
+    const bareOrigins = current.courseId === null && current.kind !== "temporary"
+      && current.sourceTurnIds.length > 0 && current.sourceTurnIds.every(isLineageUuid)
+      && (await readBareUserOrigins(tx, scope, current.sourceTurnIds)).size
+        === new Set(current.sourceTurnIds.map(turnId => turnId.toLowerCase())).size;
+    if (!bareOrigins && (current.courseId !== null || current.kind === "temporary" || current.sourceTurnIds.length > 0)) {
       const memoryCourse: FragmentFactory = () => tx`m.course_id`;
       const workspace: FragmentFactory = () => tx`m.workspace_id`;
       const [admitted] = await tx<{ id: string; ancestor_temporary_expires_at: Date | null; origin_turn_ids: string[] }[]>`

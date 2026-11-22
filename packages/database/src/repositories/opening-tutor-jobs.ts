@@ -179,6 +179,7 @@ async function assertStreamMaterialAdmission(
     memoryLineageSourceIds?: readonly string[];
     globalMemoryIds?: readonly string[];
     historyCourseBindings?: readonly HistoryCourseBinding[];
+    historicalUserTurnId?: string;
   } = {},
 ): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[]; historyExpiresAt: number }> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
@@ -273,11 +274,16 @@ async function assertStreamMaterialAdmission(
   const memoryOnlySet = new Set(memoryOnlySourceIds);
   const courseDerivedSourceIds = derivedSourceIds.filter(sourceId => !memoryOnlySet.has(sourceId));
   const historyBindings = admissionOptions.historyCourseBindings ?? [];
+  const historicalUserTurnId = admissionOptions.historicalUserTurnId;
   const originCourseIds = new Set(historyBindings.flatMap(binding => binding.courseId === null ? [] : [binding.courseId]));
   const historySourceIds = historyBindings.flatMap(binding => binding.sourceIds);
-  const deferredCourseId = admissionOptions.deferSourceFreeCourseLock && !pin && !historyBindings.length
+  const deferredCourseId = admissionOptions.deferSourceFreeCourseLock && !pin && !historyBindings.length && !historicalUserTurnId
     && !contextSourceRefs.length && !derivedSourceIds.length && !globalMemoryIdList.length ? courseId : null;
   const collectSourceIds = new Set<string>();
+  const historyConflict = () => Object.assign(new Error("stream history is no longer available"), { code: "CONFLICT" });
+  if (historicalUserTurnId && !await readTutorHistoryAncestors(tx, scope, historicalUserTurnId, {
+    collectSourceIds, collectCourseIds: originCourseIds,
+  })) throw historyConflict();
   const memoryBindings = historyBindings.filter(binding => binding.memoryIds?.length || binding.memoryBackings?.length);
   const roots = { citation: new Set<string>(), practice: new Set<string>() };
   for (const id of globalMemoryIdList) roots[materialUse].add(id);
@@ -331,6 +337,15 @@ async function assertStreamMaterialAdmission(
   }
   if (graphs && (collectSourceIds.size || originCourseIds.size)) graphs = await readGraphs(lockedSourceIds);
   let historyExpiresAt = Infinity;
+  if (historicalUserTurnId) {
+    const currentSources = new Set<string>(), currentCourses = new Set<string>();
+    const status = await readTutorHistoryAncestorStatus(tx, scope, historicalUserTurnId, {
+      lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
+    });
+    if (!status.valid || [...currentCourses].some(id => !originCourseIds.has(id))
+      || [...currentSources].some(id => !lockedSourceIds.includes(id))) throw historyConflict();
+    historyExpiresAt = status.earliestExpiresAtMs;
+  }
   for (const binding of memoryBindings) {
     const nodes = resolveMemoryDependencyStatus(graphs!.get(binding.materialUse)!,
       binding.memoryIds ?? [], binding.memoryBackings ?? [], binding.courseId);
@@ -1409,13 +1424,20 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           : await tx`SELECT privacy_epoch FROM workspaces
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!workspace) return null;
-        const hasPriorExchanges = () => tx`${context.historyCourseBindings === undefined} AND NOT COALESCE(t.query_system, false) AND EXISTS (
+        const hasPriorExchanges = () => tx`NOT COALESCE(t.query_system, false) AND EXISTS (
           SELECT 1 FROM opening_tutor_jobs prior_job
           JOIN LATERAL (
             SELECT 1 FROM opening_turns prior_u
             WHERE prior_u.id=prior_job.user_turn_id AND prior_u.workspace_id=j.workspace_id
               AND prior_u.conversation_id=j.conversation_id AND prior_u.role='user' AND prior_u.status='complete'
+              AND NOT prior_u.query_system
               AND (prior_u.created_at, prior_u.id) < (t.created_at, t.id)
+              AND EXISTS (
+                SELECT 1 FROM opening_turns prior_a WHERE prior_a.id=prior_job.assistant_turn_id
+                  AND prior_a.workspace_id=j.workspace_id AND prior_a.conversation_id=j.conversation_id
+                  AND prior_a.role='assistant' AND prior_a.status='complete' AND NOT prior_a.query_system
+                  AND prior_a.system_query IS NULL
+              )
             OFFSET 0
           ) prior ON true
           WHERE prior_job.workspace_id=j.workspace_id AND prior_job.conversation_id=j.conversation_id
@@ -1434,9 +1456,6 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (!row) return null;
         const job = mapJob(row as Record<string, unknown>);
         if (job.status !== "running") return job;
-        if (context.historyCourseBindings === undefined && row.has_prior_exchanges) {
-          throw Object.assign(new Error("stream history bindings missing"), { code: "CONFLICT" });
-        }
         if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
           throw new Error("stream authorization changed");
         }
@@ -1454,7 +1473,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
           return current.sourceRefs;
         };
-        const verifyAttemptAfterMaterial = Boolean(context.historyCourseBindings?.length || context.globalMemoryIds?.length);
+        const historicalUserTurnId = row.has_prior_exchanges ? String(row.user_turn_id) : undefined;
+        const verifyAttemptAfterMaterial = Boolean(historicalUserTurnId || context.historyCourseBindings?.length || context.globalMemoryIds?.length);
         const attemptRefs = verifyAttemptAfterMaterial ? context.attemptSourceRefs : await verifyAttempt();
         const { courseId, deferredCourseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
           context.contextSourceRefs, attemptRefs, {
@@ -1462,6 +1482,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             memoryLineageSourceIds: context.memoryLineageSourceIds,
             globalMemoryIds: context.globalMemoryIds,
             historyCourseBindings: context.historyCourseBindings,
+            historicalUserTurnId,
           });
         if (verifyAttemptAfterMaterial && (boundAttempt || context.attemptFence)) {
           const currentRefs = await verifyAttempt();

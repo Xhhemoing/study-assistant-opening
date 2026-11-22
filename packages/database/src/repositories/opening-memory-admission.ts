@@ -163,19 +163,19 @@ function turnOriginPolicies(db: Db, scope: OpeningScope, rules?: MemoryMaterialR
     ))`;
 }
 
-function bareUserOrigin(db: Db) {
+export function bareUserOrigin(db: Db) {
   return db`t.role='user' AND c.course_id IS NULL AND t.learning_session_id IS NULL
     AND t.context_anchor IS NULL AND t.chunk_id IS NULL AND cardinality(t.source_ids)=0
     AND t.citations='[]'::jsonb AND t.source_versions='{}'::jsonb
     AND (t.context_source_refs IS NULL OR t.context_source_refs='[]'::jsonb)`;
 }
 
-async function readBareUserOrigins(db: Db, scope: OpeningScope, turnIds: readonly string[]) {
+export async function readBareUserOrigins(db: Db, scope: OpeningScope, turnIds: readonly string[]) {
   if (!turnIds.length) return new Set<string>();
   const rows = await db<{ id: string }[]>`
     SELECT t.id FROM opening_turns AS t
     JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
-    WHERE t.id=ANY(${turnIds}::uuid[]) AND t.workspace_id=${scope.workspaceId}
+    WHERE t.id=ANY(${turnIds.map(id => id.toLowerCase())}::uuid[]) AND t.workspace_id=${scope.workspaceId}
       AND t.status='complete' AND c.owner_user_id=${scope.ownerUserId} AND ${bareUserOrigin(db)}`;
   return new Set(rows.map(row => row.id));
 }

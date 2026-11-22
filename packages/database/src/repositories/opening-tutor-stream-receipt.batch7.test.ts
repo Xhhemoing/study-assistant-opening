@@ -905,7 +905,7 @@ describe("stream receipt release waits for current job authorization and assista
   });
 });
 
-it("uses the bare user probe for each proposal admission and one closure for confirmation", async () => {
+it("uses bare user probes for proposal and confirmation with no recursive admission", async () => {
   const statements: string[] = [];
   const memory = { id: receipt, workspace_id: workspace, course_id: null, kind: "candidate", text: "Ordinary evidence",
     source_turn_ids: [user], version: 0, status: "active", created_at: time, updated_at: time };
@@ -927,8 +927,8 @@ it("uses the bare user probe for each proposal admission and one closure for con
   const proposed = await repo.proposeMemory(scope, { text: memory.text, sourceTurnIds: [user], expiresAt: null });
   await expect(repo.confirm(scope, proposed.id, proposed.version, "confirm-ordinary")).resolves.toMatchObject({ kind: "confirmed" });
   const probes = statements.filter(query => query.startsWith("SELECT t.id FROM opening_turns AS t"));
-  expect(probes).toHaveLength(2);
+  expect(probes).toHaveLength(3);
   expect(probes.every(query => !/\bWITH\s+RECURSIVE\b/i.test(query))).toBe(true);
   expect(statements.filter(query => query.startsWith("SELECT m.id,")).map(query =>
-    query.match(/\bWITH\s+RECURSIVE\b/gi)?.length)).toEqual([1]);
+    query.match(/\bWITH\s+RECURSIVE\b/gi)?.length)).toEqual([]);
 });

@@ -567,33 +567,37 @@ export function resolveMemoryDependencyStatus(
   return groups.some(group => group === null) ? null : groups.flatMap(group => group ?? []);
 }
 
-export function turnHasMemoryDependencies(db: Db): Fragment {
-  return db`(t.context_source_refs @? '$[*].memoryDependencyIds[*]'
-    OR t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb)`;
+export function turnHasMemoryDependencies(db: Db, refs: FragmentFactory = () => db`t.context_source_refs`): Fragment {
+  return db`(${refs()} @? '$[*].memoryDependencyIds[*]' OR ${refs()} @> '[{"memoryOnly":true}]'::jsonb)`;
 }
 
-type TurnMemoryEvidence = {
+type TurnMemorySide = {
   turnId: string;
-  ownerUserId: string;
   courseId: string | null;
   materialUse: "citation" | "practice";
   refs: unknown;
-  checkedAt: string;
   standaloneSessions: boolean;
+};
+
+type TurnMemoryEvidence = TurnMemorySide & {
+  ownerUserId: string;
+  checkedAt: string;
+  paired?: TurnMemorySide | null;
   historicalUserTurnId?: string;
 };
 
-/** Validate memory-bearing turns under their saved material policy, then resolve their backing graph. */
-export async function readTurnsWithActiveMemoryDependencies(
+/** Resolve each saved side under its own policy and keep its deadline across later reads. */
+export async function readTurnMemoryDependencyDeadlines(
   db: Db, workspaceId: string, turnIds: string[], sourceLocks?: {
     sourceIds: Set<string>; courseIds?: Set<string>; acquire: () => Promise<readonly string[]>;
   },
-  verifyHistory?: (scope: OpeningScope, userTurnId: string) => Promise<boolean>,
+  verifyHistory?: (scope: OpeningScope, userTurnId: string) => Promise<{ valid: boolean; earliestExpiresAtMs: number }>,
   verifyOrigins?: FragmentFactory,
-): Promise<Set<string>> {
-  if (!turnIds.length) return new Set();
+): Promise<Map<string, number>> {
+  if (!turnIds.length) return new Map();
   const course: FragmentFactory = () => db`course.id`;
   const refs: FragmentFactory = () => db`a.context_source_refs`;
+  const owner: FragmentFactory = () => db`c.owner_user_id`;
   const historical: FragmentFactory | undefined = verifyHistory ? () => historicalUserTurnId(db, () => db`a`) : undefined;
   const rows = await db<{ id: string | TurnMemoryEvidence }[]>`
     SELECT t.id FROM opening_turns a
@@ -602,15 +606,18 @@ export async function readTurnsWithActiveMemoryDependencies(
       AND u.workspace_id=a.workspace_id AND u.conversation_id=c.id AND u.role='user' AND u.status='complete'
     CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "a", () => db`c.course_id`, () => db`c.owner_user_id`)} AS id) course
     CROSS JOIN LATERAL (SELECT CASE
-      WHEN ${refs()} @? '$[*].memoryDependencyIds[*]' OR ${refs()} @> '[{"memoryOnly":true}]'::jsonb
+      WHEN ${turnHasMemoryDependencies(db, refs)} OR u.context_source_refs <> '[]'::jsonb
         ${historical ? db`OR ${historical()} IS NOT NULL` : db``}
       THEN jsonb_build_object('turnId', a.id, 'ownerUserId', c.owner_user_id, 'courseId', ${course()},
         ${historical ? db`'historicalUserTurnId', ${historical()},` : db``}
-        'refs', ${refs()}, 'checkedAt', clock_timestamp(),
-        'standaloneSessions', ${turnHasStandaloneSessions(db, () => db`c.owner_user_id`, () => db`a`)},
-        'materialUse', CASE WHEN COALESCE(u.attempt_id, a.attempt_id) IS NOT NULL
-          OR COALESCE(u.context_anchor->>'itemVersionId', a.context_anchor->>'itemVersionId') IS NOT NULL
-          THEN 'practice' ELSE 'citation' END)
+        'refs', ${refs()}, 'checkedAt', clock_timestamp(), 'materialUse', ${turnMaterialUse(db, "a")},
+        'standaloneSessions', ${turnHasStandaloneSessions(db, owner, () => db`a`)},
+        'paired', CASE WHEN u.id IS NOT NULL THEN jsonb_build_object(
+          'turnId', u.id, 'refs', COALESCE(u.context_source_refs, '[]'::jsonb),
+          'courseId', ${turnLineageCourse(db, "u", () => db`c.course_id`, owner)},
+          'materialUse', ${turnMaterialUse(db, "u")},
+          'standaloneSessions', ${turnHasStandaloneSession(db, () => db`u`, owner)}
+        ) END)
       ELSE to_jsonb(a.id) END AS id) t
     WHERE a.workspace_id = ${workspaceId} AND a.id = ANY(${turnIds}::uuid[]) AND a.status='complete'
       ${verifyOrigins ? db`AND ${verifyOrigins()}` : db``}
@@ -618,26 +625,32 @@ export async function readTurnsWithActiveMemoryDependencies(
       AND (a.role <> 'assistant' OR cardinality(a.source_ids) = 0 OR
         ${contextSourceRefsIncluded(db, workspaceId, () => turnContextSourceRefs(db, "a"), false, true,
           () => db`a.source_ids`, () => db`a.citations`)})`;
-  const active = new Set<string>();
-  const groups = new Map<string, Array<TurnMemoryEvidence & { ids: string[]; memoryOnlyCount: number }>>();
+  const active = new Map<string, number>();
+  const evidence = new Map<string, TurnMemoryEvidence>();
+  const groups = new Map<string, Array<TurnMemorySide & { consumerId: string; ownerUserId: string; ids: string[]; memoryOnlyCount: number }>>();
   for (const { id } of rows) {
     if (typeof id === "string") {
-      active.add(id);
+      active.set(id, Infinity);
       continue;
     }
-    const ids = parseContextMemoryDependencyIds(id.refs);
-    if (!ids) continue;
-    const memoryOnlyCount = Array.isArray(id.refs) ? id.refs.filter(ref => ref.memoryOnly === true).length : 0;
-    const turn = { ...id, ids, memoryOnlyCount };
-    const key = `${id.ownerUserId}:${id.materialUse}`;
-    const group = groups.get(key);
-    if (group) group.push(turn);
-    else groups.set(key, [turn]);
+    const sides = id.paired ? [id, id.paired] : [id];
+    const parsed = sides.map(side => parseContextMemoryDependencyIds(side.refs));
+    if (parsed.some(ids => ids === null)) continue;
+    evidence.set(id.turnId, id);
+    for (const [index, side] of sides.entries()) {
+      const memoryOnlyCount = Array.isArray(side.refs) ? side.refs.filter(ref => ref.memoryOnly === true).length : 0;
+      const entry = { ...side, consumerId: id.turnId, ownerUserId: id.ownerUserId, ids: parsed[index]!, memoryOnlyCount };
+      const key = `${id.ownerUserId}:${entry.materialUse}`;
+      const group = groups.get(key);
+      if (group) group.push(entry);
+      else groups.set(key, [entry]);
+    }
   }
   const readGroups = async (rules?: {
     collectSourceIds?: Set<string>; collectCourseIds?: Set<string>; lockedSourceIds?: readonly string[];
   }) => {
-    const admitted = new Set(active);
+    const admitted = new Map(active);
+    const deadlines = new Map<string, number>();
     for (const turns of groups.values()) {
       const { ownerUserId, materialUse } = turns[0]!;
       const scope = { workspaceId, ownerUserId };
@@ -651,15 +664,22 @@ export async function readTurnsWithActiveMemoryDependencies(
       const backings = new Map(backingRows.map(row => [row.id, row.backings]));
       const graph = await readMemoryDependencyStatus(db, scope,
         [...turns.flatMap(turn => turn.ids), ...backingRows.flatMap(row => row.backings.flat())], { ...rules, materialUse });
-      const now = Date.now();
       for (const turn of turns) {
+        if (turn.courseId !== null) rules?.collectCourseIds?.add(turn.courseId);
         const turnBackings = backings.get(turn.turnId) ?? [];
-        if (turnBackings.length !== turn.memoryOnlyCount) continue;
-        const resolved = resolveMemoryDependencyStatus(graph, turn.ids, turnBackings, turn.courseId);
-        const checkedAt = Math.max(now, Date.parse(turn.checkedAt));
-        if (resolved?.every(memory => memory.expires_at === null || new Date(memory.expires_at).getTime() > checkedAt)
-          && (!turn.historicalUserTurnId || await verifyHistory?.(scope, turn.historicalUserTurnId))) admitted.add(turn.turnId);
+        const resolved = turnBackings.length === turn.memoryOnlyCount
+          ? resolveMemoryDependencyStatus(graph, turn.ids, turnBackings, turn.courseId) : null;
+        const expiry = resolved?.reduce((earliest, node) => node.expires_at === null ? earliest
+          : Math.min(earliest, new Date(node.expires_at).getTime()), Infinity) ?? -Infinity;
+        deadlines.set(turn.consumerId, Math.min(deadlines.get(turn.consumerId) ?? Infinity, expiry));
       }
+    }
+    for (const turn of evidence.values()) {
+      const scope = { workspaceId, ownerUserId: turn.ownerUserId };
+      const history = turn.historicalUserTurnId && verifyHistory ? await verifyHistory(scope, turn.historicalUserTurnId) : undefined;
+      if (history && !history.valid) continue;
+      const deadline = Math.min(deadlines.get(turn.turnId) ?? Infinity, history?.earliestExpiresAtMs ?? Infinity);
+      if (deadline > Math.max(Date.now(), Date.parse(turn.checkedAt))) admitted.set(turn.turnId, deadline);
     }
     return admitted;
   };
@@ -668,7 +688,11 @@ export async function readTurnsWithActiveMemoryDependencies(
     const lockedSourceIds = await sourceLocks.acquire();
     const currentCourses = new Set<string>();
     const admitted = await readGroups({ lockedSourceIds, collectCourseIds: currentCourses });
-    return !sourceLocks.courseIds || [...currentCourses].every(id => sourceLocks.courseIds!.has(id)) ? admitted : new Set();
+    return !sourceLocks.courseIds || [...currentCourses].every(id => sourceLocks.courseIds!.has(id)) ? admitted : new Map();
   }
   return readGroups();
+}
+
+export async function readTurnsWithActiveMemoryDependencies(db: Db, workspaceId: string, turnIds: string[]) {
+  return new Set((await readTurnMemoryDependencyDeadlines(db, workspaceId, turnIds)).keys());
 }
