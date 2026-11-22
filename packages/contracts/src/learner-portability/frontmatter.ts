@@ -57,6 +57,7 @@ const privateKeys = new Set([
   "spentcents", "reservedcents",
   "cachedinputtokens", "inputtokens", "outputtokens", "maxoutputtokens", "maxprovidercalls", "mediainputtokenupperbound",
   "bankversion", "modelversion", "pairedbrierdifference", "meanprediction", "bkteligible", "bkteligibleattemptids",
+  "capcents", "checkpointjson", "lostblockids", "diagnosticbasis", "returnmoveid", "callid", "expectedlinkrevision",
 ]);
 // Receipt and lineage families include sibling field names added by Opening
 // without reserving generic public keys such as id, version, status, or source.
@@ -65,6 +66,27 @@ const privateEligibilityReasons: Readonly<Record<string, ReadonlySet<string>>> =
   unknown: new Set(["identity_unknown", "identity_candidate", "key_unknown", "exposure_unknown", "coverage_unknown"]),
   unavailable: new Set(["identity_conflict", "key_unavailable", "reference_unavailable", "exposed", "stale_receipt"]),
 };
+const privateComparisonBases = new Set(["semantic", "model", "unverified_reference"]);
+const privateComparisonReasons = new Set(["missing_identity", "missing_conditions", "missing_figures", "unavailable_reference"]);
+const privateComparisonDimensions = new Set(["source_version", "conditions", "figures", "answer_role"]);
+const privateSpanReasons = new Set([
+  "prerequisite_binding_missing", "requirement_changed", "relation_unconfirmed", "source_unavailable",
+  "prerequisite_evidence_missing", "prerequisite_evidence_changed", "prerequisite_identity_mismatch",
+  "prerequisite_content_unavailable", "prerequisite_verification_mismatch", "prerequisite_not_verified_weak",
+  "evidence_unavailable", "verification_mismatch", "predecessor_unobserved", "ambiguous_branch",
+  "unsupported_target", "no_verified_error", "teaching_unavailable", "unknown_history",
+]);
+const privateToolNames = new Set([
+  "learner_state", "explain_decision", "notes", "cards", "exam_sprint", "courses", "learning", "recommendation",
+  "materials", "planning", "jobs", "settings", "teaching", "propose_teaching_move", "propose_plan_change",
+  "propose_card", "propose_note", "propose_memory", "flag_dispute",
+]);
+const trackedFields = new Set(["kind", "basis", "dimensions", "status", "reason", "reasonCode", "name", "arguments", "role", "calls"]);
+// Keep only collection kinds and the presence of a comparison dimension.
+const mappingNode = Symbol();
+const sequenceNode = Symbol();
+const comparisonDimensionSequence = Symbol();
+type FrontmatterValue = string | typeof mappingNode | typeof sequenceNode | typeof comparisonDimensionSequence | undefined;
 const yamlEscapes: Readonly<Record<string, string>> = {
   "0": "\0", a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", e: "\x1b",
   " ": " ", "\t": "\t", '"': '"', "/": "/", "\\": "\\", N: "\u0085", _: "\u00a0", L: "\u2028", P: "\u2029",
@@ -77,6 +99,10 @@ function invalid(): never {
 function isPrivateKey(key: string): boolean {
   const normalized = key.normalize("NFKC").replace(/[-_.\s]/gu, "").toLowerCase();
   return privateKeyPattern.test(normalized) || privateKeys.has(normalized);
+}
+
+function hasValue(values: ReadonlySet<string>, value: FrontmatterValue): boolean {
+  return typeof value === "string" && values.has(value.trim());
 }
 
 // Walk the data-only YAML grammar without materializing records. Advanced YAML
@@ -111,9 +137,14 @@ class FrontmatterReader {
   }
 
   private indent(): number {
+    const spaces = this.leadingSpaces();
+    if (this.source[this.offset + spaces] === "\t") invalid();
+    return spaces;
+  }
+
+  private leadingSpaces(): number {
     let end = this.offset;
     while (this.source[end] === " ") end++;
-    if (this.source[end] === "\t") invalid();
     return end - this.offset;
   }
 
@@ -140,12 +171,15 @@ class FrontmatterReader {
     }
   }
 
-  private endLine(): void {
+  private endLine(): boolean {
     const at = this.offset;
     this.skipHorizontal();
-    if (this.current === "#" && this.offset > at) this.offset = this.lineEnd();
+    // A plain scalar may already have scanned the whitespace before a comment.
+    const comment = this.current === "#" && (this.offset > at || /[ \t]/u.test(this.source[at - 1] ?? ""));
+    if (comment) this.offset = this.lineEnd();
     if (this.current === "\n") this.offset++;
     else if (!this.done) invalid();
+    return comment;
   }
 
   private indicator(token: string): boolean {
@@ -205,9 +239,9 @@ class FrontmatterReader {
     return invalid();
   }
 
-  private plain(flow: boolean): string {
+  private plain(flow: boolean, continuation = false): string {
     const start = this.offset;
-    if (!this.current || /^[[\]{},#?&*!|>'"%@`:]/u.test(this.current) || this.indicator("-")) invalid();
+    if (!this.current || (!continuation && (/^[[\]{},#?&*!|>'"%@`:]/u.test(this.current) || this.indicator("-")))) invalid();
     while (!this.done) {
       const char = this.current;
       const next = this.source[this.offset + 1] ?? "";
@@ -220,7 +254,7 @@ class FrontmatterReader {
     return value;
   }
 
-  private key(flow: boolean, fields: Map<string, string | undefined>): string {
+  private key(flow: boolean, fields: Map<string, FrontmatterValue>): string {
     const quoted = this.current === '"' || this.current === "'";
     const key = quoted ? this.quoted() : this.plain(flow);
     this.skipHorizontal();
@@ -232,30 +266,40 @@ class FrontmatterReader {
     return key;
   }
 
-  private recordScalar(fields: Map<string, string | undefined>, key: string | undefined, value: string | undefined): void {
-    if ((key !== "status" && key !== "reason") || value === undefined) return;
-    fields.set(key, value.trim());
+  private recordValue(fields: Map<string, FrontmatterValue>, key: string | undefined, value: FrontmatterValue): void {
+    if (key === undefined || !trackedFields.has(key)) return;
+    fields.set(key, typeof value === "string" ? value.trim() : value);
+    const kind = fields.get("kind");
     const status = fields.get("status");
     const reason = fields.get("reason");
-    if (status && reason && Object.hasOwn(privateEligibilityReasons, status) && privateEligibilityReasons[status]!.has(reason)) invalid();
+    const calls = fields.get("calls");
+    if ((kind === "candidate" && hasValue(privateComparisonBases, fields.get("basis")))
+      || (kind === "unknown" && hasValue(privateComparisonReasons, reason))
+      || (kind === "conflict" && fields.get("dimensions") === comparisonDimensionSequence)
+      || (typeof status === "string" && Object.hasOwn(privateEligibilityReasons, status) && hasValue(privateEligibilityReasons[status]!, reason))
+      || ((status === "unknown" || status === "needs_clarification") && hasValue(privateSpanReasons, fields.get("reasonCode")))
+      || (fields.get("arguments") === mappingNode && hasValue(privateToolNames, fields.get("name")))
+      || ((calls === sequenceNode || calls === comparisonDimensionSequence) && fields.get("role") === "assistant")) invalid();
   }
 
-  private flowValue(depth: number, minIndent: number): string | undefined {
+  private flowValue(depth: number, minIndent: number): FrontmatterValue {
     if (depth > 100) invalid();
     this.flowTrivia();
     const opener = this.source[this.offset];
     if (opener === "[" || opener === "{") {
       const closer = opener === "[" ? "]" : "}";
-      const fields = new Map<string, string | undefined>();
+      const fields = new Map<string, FrontmatterValue>();
+      let sequenceValue: FrontmatterValue;
       this.offset++;
       this.flowTrivia();
       while (this.current !== closer) {
         const field = opener === "{" ? this.key(true, fields) : undefined;
         this.flowTrivia();
         if (this.current !== closer && this.current !== ",") {
-          this.recordScalar(fields, field, this.flowValue(depth + 1, minIndent));
-        }
-        else if (opener === "[") invalid();
+          const value = this.flowValue(depth + 1, minIndent);
+          if (opener === "[" && hasValue(privateComparisonDimensions, value)) sequenceValue = comparisonDimensionSequence;
+          this.recordValue(fields, field, value);
+        } else if (opener === "[") invalid();
         this.flowTrivia();
         if (this.current === closer) break;
         if (this.current !== ",") invalid();
@@ -263,7 +307,7 @@ class FrontmatterReader {
         this.flowTrivia();
       }
       this.offset++;
-      return undefined;
+      return opener === "[" ? sequenceValue ?? sequenceNode : mappingNode;
     }
     return opener === '"' || opener === "'" ? this.quoted(minIndent) : this.plain(true);
   }
@@ -279,18 +323,19 @@ class FrontmatterReader {
     return found;
   }
 
-  private block(indent: number, depth: number, inline = false, indentlessSequence = false): void {
+  private block(indent: number, depth: number, inline = false, indentlessSequence = false): FrontmatterValue {
     if (depth > 100) invalid();
     let sequence: boolean | undefined;
-    const fields = new Map<string, string | undefined>();
+    const fields = new Map<string, FrontmatterValue>();
+    let sequenceValue: FrontmatterValue;
     while (!this.done) {
       if (!inline) {
         this.blankLines();
-        if (this.done) return;
+        if (this.done) break;
         const actual = this.indent();
-        if (actual < indent) return;
+        if (actual < indent) break;
         if (actual > indent) invalid();
-        if (indentlessSequence && !this.sequenceAt(indent)) return;
+        if (indentlessSequence && !this.sequenceAt(indent)) break;
         this.offset += indent;
       }
       inline = false;
@@ -302,27 +347,69 @@ class FrontmatterReader {
       if (item) this.offset++;
       this.skipHorizontal();
       if (this.current === "#") this.offset = this.lineEnd();
+      let value: FrontmatterValue;
       if (this.current === "\n" || this.done) {
-        this.endLine();
-        this.blankLines();
-        if (!this.done) {
-          const nextIndent = this.indent();
-          if (nextIndent > indent) this.block(nextIndent, depth + 1);
-          else if (!item && nextIndent === indent && this.sequenceAt(indent)) this.block(indent, depth + 1, false, true);
-        }
+        value = this.nextLineValue(indent, depth, !item);
       } else if (item && (this.indicator("-") || this.inlineMapping(indent + 1))) {
-        this.block(indent + this.offset - start, depth + 1, true);
-      } else if (this.current === "|" || this.current === ">") {
-        this.recordScalar(fields, field, this.blockScalar(indent));
+        value = this.block(indent + this.offset - start, depth + 1, true);
       } else {
-        const value = this.current === "[" || this.current === "{" || this.current === '"' || this.current === "'"
-          ? this.flowValue(depth + 1, indent + 1) : this.plain(false);
-        this.recordScalar(fields, field, value);
-        // The plain-scalar scanner has already consumed whitespace before a comment.
-        if (this.current === "#" && /[ \t]/u.test(this.source[this.offset - 1] ?? "")) this.offset = this.lineEnd();
-        this.endLine();
+        value = this.blockValue(indent, depth);
       }
+      if (item && hasValue(privateComparisonDimensions, value)) sequenceValue = comparisonDimensionSequence;
+      this.recordValue(fields, field, value);
     }
+    if (sequence) return sequenceValue ?? sequenceNode;
+    return sequence === false ? mappingNode : undefined;
+  }
+
+  private nextLineValue(parentIndent: number, depth: number, allowIndentlessSequence: boolean): FrontmatterValue {
+    this.endLine();
+    this.blankLines();
+    if (this.done) return undefined;
+    const indent = this.indent();
+    if (indent === parentIndent && allowIndentlessSequence && this.sequenceAt(indent)) {
+      return this.block(indent, depth + 1, false, true);
+    }
+    if (indent <= parentIndent) return undefined;
+    const start = this.offset;
+    this.offset += indent;
+    if (!this.indicator("-") && !this.inlineMapping(parentIndent + 1)) return this.blockValue(parentIndent, depth);
+    this.offset = start;
+    return this.block(indent, depth + 1);
+  }
+
+  private blockValue(parentIndent: number, depth: number): FrontmatterValue {
+    if (this.current === "|" || this.current === ">") return this.blockScalar(parentIndent);
+    if (this.current === "[" || this.current === "{" || this.current === '"' || this.current === "'") {
+      const value = this.flowValue(depth + 1, parentIndent + 1);
+      this.endLine();
+      return value;
+    }
+    return this.plainBlockValue(parentIndent);
+  }
+
+  private plainBlockValue(parentIndent: number): string {
+    let value = this.plain(false);
+    let comment = this.endLine();
+    while (!this.done && !comment) {
+      const start = this.offset;
+      let breaks = 1;
+      while (!this.done) {
+        const end = this.lineEnd();
+        if (!/^[ \t]*$/u.test(this.source.slice(this.offset, end))) break;
+        this.offset = Math.min(end + 1, this.source.length);
+        breaks++;
+      }
+      const indent = this.indent();
+      if (this.done || indent <= parentIndent || this.source[this.offset + indent] === "#") {
+        this.offset = start;
+        break;
+      }
+      this.offset += indent;
+      value += (breaks === 1 ? " " : "\n".repeat(breaks - 1)) + this.plain(false, true);
+      comment = this.endLine();
+    }
+    return value;
   }
 
   private sequenceAt(indent: number): boolean {
@@ -344,13 +431,15 @@ class FrontmatterReader {
     let nonemptyLines = 0;
     while (!this.done) {
       const end = this.lineEnd();
-      const line = this.source.slice(this.offset, end);
-      if (line.trim()) {
-        const indent = this.indent();
-        if (indent <= parentIndent) break;
-        contentIndent ??= indent;
-        if (indent < contentIndent) invalid();
-        if (nonemptyLines++ === 0) firstLine = line.trim();
+      const spaces = this.leadingSpaces();
+      const first = this.source[this.offset + spaces];
+      if (this.offset + spaces < end) {
+        if (spaces < (contentIndent ?? parentIndent + 1)) {
+          if (first === "#" || (spaces <= parentIndent && first !== "\t")) break;
+          invalid();
+        }
+        contentIndent ??= spaces;
+        if (nonemptyLines++ === 0) firstLine = this.source.slice(this.offset + contentIndent, end).trim();
       }
       this.offset = Math.min(end + 1, this.source.length);
     }

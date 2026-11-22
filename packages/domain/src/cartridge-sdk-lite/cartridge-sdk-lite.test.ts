@@ -50,6 +50,15 @@ function expectPrivateRecord(record: object, name: string, newline: string): voi
   expectPrivateFrontmatter(["---", "details:", "  - " + JSON.stringify(record), "---", "# Note"].join(newline), `${name} (nested)`);
 }
 
+function expectPortableFrontmatter(markdown: string): void {
+  const markdownNote = importMarkdown("plain.md", markdown);
+  const obsidianNote = importObsidianNote("obsidian.md", markdown);
+  expect(exportMarkdown(markdownNote)).toBe(markdown);
+  expect(exportObsidianNote(obsidianNote).markdown).toBe(markdown);
+  const archive = exportLearnerZip(createLearnerPackage({ notes: [markdownNote, obsidianNote], decks: [], reviews: [] }));
+  expect(importLearnerZip(archive).notes.map(exportMarkdown)).toEqual([markdown, markdown]);
+}
+
 describe("learner portability", () => {
   it("preserves raw note text and indexes Obsidian links without changing it", () => {
     const text = "\uFEFF---\r\ntitle: 笔记\r\n---\r\n![[图#步骤|图示]] [[#本页]] `[[code]]` \\[[escaped]]\n```ts\n[[in fence]]\n```\n\n";
@@ -233,6 +242,60 @@ describe("learner portability", () => {
       "eligibility encoded in block and quoted scalars");
   });
 
+  it.each(["\n", "\r\n", "\r"])("rejects detached question comparison results with %j line endings", newline => {
+    const resultSchema = openingContracts.questionIdentityMatchSchema.shape.result;
+    const results = [
+      ...["semantic", "model", "unverified_reference"].map(basis => ({ kind: "candidate", basis })),
+      ...["missing_identity", "missing_conditions", "missing_figures", "unavailable_reference"].map(reason => ({ kind: "unknown", reason })),
+      ...["source_version", "conditions", "figures", "answer_role"].map(dimension => ({ kind: "conflict", dimensions: [dimension] })),
+    ];
+    for (const input of results) {
+      const result = resultSchema.parse(input);
+      const fields = Object.entries(result);
+      const flow = JSON.stringify(result);
+      const block = fields.map(([key, value]) => `${key}: ${JSON.stringify(value)}`);
+      const nextLineFlow = [...fields].reverse().flatMap(([key, value]) => [key + ":", "  " + JSON.stringify(value)]);
+      const checks: Array<readonly [string, readonly string[]]> = [
+        ["flow", [flow]],
+        ["block", block],
+        ["block with next-line flow values", nextLineFlow],
+      ];
+      if (result.kind === "conflict") {
+        checks.push(
+          ["indented sequence", ["dimensions:", "  - " + result.dimensions[0], "kind: conflict"]],
+          ["indentless sequence", ["dimensions:", "- " + result.dimensions[0], "kind: conflict"]],
+          ["next-line sequence item", ["kind: conflict", "dimensions:", "  -", "    '" + result.dimensions[0] + "'"]],
+        );
+      }
+      for (const [style, lines] of checks) {
+        expectPrivateFrontmatter(["---", ...lines, "---", "# Note"].join(newline), `${flow} standalone ${style}`);
+        expectPrivateFrontmatter(["---", "result:", ...lines.map(line => "  " + line), "---", "# Note"].join(newline), `${flow} nested ${style}`);
+      }
+      expectPrivateFrontmatter(["---", "result: " + flow, "---", "# Note"].join(newline), `${flow} inline nested flow`);
+    }
+  });
+
+  it("rejects other detached Opening diagnostic, tool, and checkpoint variants", () => {
+    const records = {
+      prerequisite: openingContracts.spanPrerequisiteQualificationSchema.parse({
+        status: "unknown", reasonCode: "prerequisite_binding_missing",
+      }),
+      toolRequest: openingContracts.systemQueryRequestSchema.parse({ name: "exam_sprint", arguments: {} }),
+      proposal: openingContracts.assistantProposalToolSchema.parse({
+        name: "propose_note", arguments: { title: "Draft", text: "Private proposal" },
+      }),
+      toolTrace: openingContracts.providerToolMessageSchema.parse({
+        role: "assistant", calls: [{ id: "call-1", name: "notes", arguments: "{}" }],
+      }),
+      checkpoint: openingContracts.teachingCheckpointSaveResultSchema.parse({
+        ok: true, contentVersion: 1, checkpointJson: {},
+      }),
+      quota: openingContracts.openingDailyQuotaSchema.parse({ mode: "limited", capCents: 10 }),
+    };
+    for (const [name, record] of Object.entries(records)) expectPrivateRecord(record, name, "\n");
+    expectPrivateFrontmatter("---\nkind: conflict\ndimensions: [scheduling, source_version]\n---\n# Note", "matching element after an unrelated one");
+  });
+
   it("finds private markers across the required shapes of exported Opening schemas", () => {
     const openingSchemas: Record<string, unknown> = {
       ...openingContracts, examPartResultSchema, examQuestionPartsSchema, gradingEvaluationDatasetSchema, gradingEvaluationRunSchema,
@@ -345,12 +408,30 @@ describe("learner portability", () => {
       "    ReceiptId: sample text", "  reverse: |-2", "    First line", "    Second line", "  folded: >2+",
       "    Fold this", "    paragraph", "", "items:", '  - "Line 1', '   Line 2"', "---", "# Note", "",
     ].join(newline);
-    const markdownNote = importMarkdown("plain.md", markdown);
-    const obsidianNote = importObsidianNote("obsidian.md", markdown);
-    expect(exportMarkdown(markdownNote)).toBe(markdown);
-    expect(exportObsidianNote(obsidianNote).markdown).toBe(markdown);
-    const archive = exportLearnerZip(createLearnerPackage({ notes: [markdownNote, obsidianNote], decks: [], reviews: [] }));
-    expect(importLearnerZip(archive).notes.map(exportMarkdown)).toEqual([markdown, markdown]);
+    expectPortableFrontmatter(markdown);
+  });
+
+  it.each(["\n", "\r\n", "\r"])("round-trips next-line scalars and dedented block-scalar comments with %j line endings", newline => {
+    const markdown = [
+      "---", "title:", '  "Line 1', '  Line 2"', "description:", "  'First", "  second'",
+      "topic:", "  Plain multiline", "", "  text", "summary:", "  |2-", "  \ttabbed text", " # trailing comment", "next: ok",
+      "inline: |2-", "  \tinline tabbed text", " # trailing inline scalar comment",
+      "properties:", "  auto: |-", "    # literal leading line", "    \ttabbed", "   # trailing comment", "  next: ok",
+      "  empty: |-", "  # comment before any content", "  final: ok",
+      "items:", "  -", "    |2-", "    body", "  -", "    >2-", "    folded", "    text",
+      "  -", "    plain sequence item", "    continuation", "  -", "    'Quoted", "    continuation'",
+      "---", "# Note", "",
+    ].join(newline);
+    expectPortableFrontmatter(markdown);
+  });
+
+  it("preserves unrelated public values for comparison field names", () => {
+    expectPortableFrontmatter([
+      "---", "result: { kind: conflict, dimensions: [schedule] }", "candidate: { kind: candidate, basis: outline }",
+      "other: { kind: unknown, reason: researching }", "first: { kind: candidate }", "second: { basis: semantic }",
+      "nested: { kind: conflict, dimensions: [[source_version]] }", "toolNotes: { name: notes, arguments: general }",
+      "workLog: { role: assistant, calls: 5 }", "progress: { status: pending }", "---", "# Note",
+    ].join("\n"));
   });
 
   it.each([
@@ -363,6 +444,9 @@ describe("learner portability", () => {
     ["under-indented escaped newline", 'details:\n  title: "Part one\\\n  Part two"'],
     ["multiline implicit key", '"course\n  name": Algebra'],
     ["escaped newline in implicit key", '"course\\\n  name": Algebra'],
+    ["tab used as block indentation", "summary: |2-\n \ttabbed text"],
+    ["tab used as auto-detected block indentation", "summary: |-\n\ttabbed text"],
+    ["comment before a plain continuation", "title: first\n # comment\n  second"],
   ])("rejects %s in frontmatter", (name, metadata) => {
     expectPrivateFrontmatter(`---\n${metadata}\n---\n# Note`, name);
   });
