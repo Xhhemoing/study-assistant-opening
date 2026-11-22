@@ -88,6 +88,10 @@ describe("source viewer deep-link (cite Package D)", () => {
     );
     expect(sourceViewerHref(record.id, 1, { slideLabel: "A-1", startMs: 65000 })).toContain("slide=A-1");
     expect(sourceViewerHref(record.id, 1, { startMs: 65000 })).toContain("startMs=65000");
+    const mediaHref = sourceViewerHref(record.id, 1, { startMs: 65000, endMs: 90000, keyframeChunkId: "kf-65" });
+    expect(mediaHref).toContain("startMs=65000");
+    expect(mediaHref).toContain("endMs=90000");
+    expect(mediaHref).toContain("keyframeChunkId=kf-65");
   });
 
   it("parses viewer search params and rejects invalid source ids", () => {
@@ -96,7 +100,38 @@ describe("source viewer deep-link (cite Package D)", () => {
       version: "2",
       page: "3",
     })).toEqual({ sourceId: record.id, version: 2, page: 3 });
+    expect(parseSourceViewerSearchParams({
+      source: record.id,
+      version: "2",
+      startMs: "65000",
+      endMs: "90000",
+      keyframeChunkId: " kf-65 ",
+      slide: " A-1 ",
+      conversation: record.workspaceId,
+    })).toEqual({
+      sourceId: record.id,
+      version: 2,
+      startMs: 65000,
+      endMs: 90000,
+      keyframeChunkId: "kf-65",
+      slideLabel: "A-1",
+      conversationId: record.workspaceId,
+    });
     expect(parseSourceViewerSearchParams({ source: "not-a-uuid", version: "1" })).toBeNull();
+  });
+
+  it.each([
+    { field: "source", value: record.id },
+    { field: "version", value: "2" },
+    { field: "page", value: "3" },
+    { field: "startMs", value: "65000" },
+    { field: "endMs", value: "90000" },
+    { field: "keyframeChunkId", value: "kf-65" },
+    { field: "slide", value: "A-1" },
+    { field: "conversation", value: record.workspaceId },
+  ])("rejects array-valued $field search params", ({ field, value }) => {
+    expect(parseSourceViewerSearchParams({ source: record.id, [field]: [value, value] })).toBeNull();
+    expect(parseSourceViewerSearchParams({ source: record.id, [field]: [value] })).toBeNull();
   });
 
   it("builds a readable chip label from source name and page", () => {

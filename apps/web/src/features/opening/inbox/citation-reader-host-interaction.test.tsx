@@ -28,3 +28,23 @@ it("passes the clicked conversation to the reader while preserving the exact sou
     expect(reader.render.mock.lastCall?.[0].courseId).toBeUndefined();
   } finally { await act(async () => root.unmount()); host.remove(); vi.clearAllMocks(); }
 });
+
+it("forwards media range startMs, endMs, and keyframeChunkId from clicked citations to SourceReader", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  const sourceId = "11111111-1111-4111-8111-111111111111";
+  const record = { id: sourceId, name: "微积分网课.mp4", mime: "video/mp4", version: 2, uploadState: "uploaded", bytes: 9427, sha256: "ab".repeat(32) } as SourceRecord;
+  const api = { listSources: vi.fn().mockResolvedValue([record]) } as unknown as OpeningApi;
+  const host = document.createElement("div"); document.body.append(host); const root = createRoot(host);
+  try {
+    const href = sourceViewerHref(sourceId, 2, { startMs: 65_000, endMs: 90_000, keyframeChunkId: "kf-65" });
+    await act(async () => root.render(createElement("div", null, createElement("a", { href }, "打开媒体引用"), createElement(CitationReaderHost, { api }))));
+    await act(async () => host.querySelector("a")!.click());
+    expect(reader.render.mock.lastCall?.[0]).toMatchObject({
+      record,
+      requestedVersion: 2,
+      startMs: 65_000,
+      endMs: 90_000,
+      keyframeChunkId: "kf-65",
+    });
+  } finally { await act(async () => root.unmount()); host.remove(); vi.clearAllMocks(); }
+});

@@ -6,7 +6,8 @@ import { turnRecordSchema } from "@aistudy/contracts";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
 import { createOpeningApi } from "../client/api";
 import { resolveChatMessages } from "./message-model";
-import { citationChipLabel, sourceDownloadHref, sourceViewerHref } from "../inbox/source-viewer";
+import { citationChipLabel, parseSourceViewerSearchParams, sourceDownloadHref, sourceViewerHref } from "../inbox/source-viewer";
+import { citationReaderTarget } from "../inbox/citation-reader-host";
 
 describe("logical send clientKey", () => {
   let n = 0;
@@ -286,6 +287,36 @@ describe("MessageList", () => {
     }));
     expect(html).toContain("notes.pdf · 第 3 页");
     expect(html).toContain(`href="${sourceDownloadHref(sourceId, 1, 3)}"`);
+  });
+
+  it("opens the same bounded media range from tutor inline and chip links", () => {
+    const sourceId = "22222222-2222-4222-8222-222222222222";
+    const media = { startMs: 0, endMs: 9_500, keyframeChunkId: "frame-1" };
+    const html = renderToStaticMarkup(createElement(MessageList, {
+      proseEnabled: true,
+      messages: [{
+        id: "turn-media",
+        role: "assistant",
+        text: "听这一段[1]。",
+        citationLabels: [],
+        citations: [{ chunkId: "44444444-4444-4444-8444-444444444444", sourceId, sourceVersion: 3, label: "lecture", ...media }],
+        status: "complete",
+      }],
+    }));
+    const escapedHref = html.match(/<sup[^>]*><a href="([^"]+)"/)?.[1];
+    expect(escapedHref).toBe(sourceViewerHref(sourceId, 3, media).replaceAll("&", "&amp;"));
+    expect(html.split(`href="${escapedHref}"`).length - 1).toBe(2);
+    const href = escapedHref!.replaceAll("&amp;", "&");
+    const origin = "https://study.example";
+    expect(citationReaderTarget({
+      href,
+      origin,
+      button: 0,
+    })).toEqual({
+      sourceId, version: 3, ...media,
+    });
+    expect(parseSourceViewerSearchParams(Object.fromEntries(new URL(href, origin).searchParams)))
+      .toEqual({ sourceId, version: 3, ...media });
   });
 
   it("shows a general badge when materials were selected but citations are empty", () => {

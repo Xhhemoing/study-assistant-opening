@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Dialog } from "@aistudy/ui";
 import { ArrowLeft } from "lucide-react";
 import type { SourceRecord } from "@aistudy/contracts";
@@ -8,7 +8,15 @@ import { ui } from "../design/ui";
 import { sourcePreviewKind } from "../sources/preview-mime";
 import { SourceContent } from "./source-content";
 import { sourceReaderInitialPage } from "./source-reader-position";
-import { buildSourceDownloadView, SourceViewer } from "./source-viewer";
+import {
+  createMediaAnchorPlaybackController,
+  formatMediaAnchorRange,
+  mediaKindFromMime,
+  validateMediaAnchorRange,
+  type MediaAnchorPlaybackPhase,
+  type MediaAnchorPlaybackSnapshot,
+} from "./source-reader-media-anchor";
+import { buildSourceDownloadView, sourcePreviewHref, SourceViewer } from "./source-viewer";
 import { captureReaderReturnPoint, restoreReaderReturnPoint, type ReaderReturnPoint } from "./reader-return-point";
 import { selectedReaderExcerpt, type ReaderSelection } from "./source-reader-selection";
 import { StudyToolsPanel } from "../teaching/study-tools-panel";
@@ -60,12 +68,37 @@ export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint
   </Dialog.Portal></Dialog.Root>;
 }
 
-function SourceReaderContent({ record, latestRecord = record, requestedVersion, page, startMs, slideLabel, returnPoint, onClose, onRetry, courseId, originalConversationId, questionProtected = false }: {
+function mediaAnchorStatus(phase: MediaAnchorPlaybackPhase, bounded: boolean) {
+  switch (phase) {
+    case "pending_metadata":
+      return "正在加载媒体信息，加载后将自动跳到引用位置。";
+    case "seeking_segment":
+      return "正在跳到引用位置。";
+    case "seek_unreached":
+      return "未能跳到引用位置。";
+    case "media_error":
+      return "媒体加载失败，无法跳到引用位置。";
+    case "ready_segment":
+      return bounded ? "已定位到引用片段，播放至末尾会自动暂停。" : "已定位到引用时间点。";
+    case "paused_at_end":
+      return "已播放到引用片段末尾；点击继续播放可查看后续内容。";
+    case "continued_past_end":
+      return "已继续播放后续内容。";
+    case "seeked_outside_range":
+      return bounded ? "已跳转到其他时间位置，可随时重播引用片段。" : "已跳转到其他时间位置，可随时跳回引用时间点。";
+    case "idle":
+      return null;
+  }
+}
+
+function SourceReaderContent({ record, latestRecord = record, requestedVersion, page, startMs, endMs, keyframeChunkId, slideLabel, returnPoint, onClose, onRetry, courseId, originalConversationId, questionProtected = false }: {
   record: SourceRecord;
   latestRecord?: SourceRecord;
   requestedVersion: number;
   page?: number;
   startMs?: number;
+  endMs?: number;
+  keyframeChunkId?: string;
   slideLabel?: string;
   returnPoint?: ReaderReturnPoint;
   onClose: () => void;
@@ -75,6 +108,32 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
   questionProtected?: boolean;
 }) {
   const [readingPage] = useState(() => sourceReaderInitialPage(record.id, requestedVersion, page));
+  const mediaKind = mediaKindFromMime(record.mime ?? latestRecord.mime);
+  const mediaAnchor = useMemo(
+    () => validateMediaAnchorRange({ startMs, endMs, keyframeChunkId }),
+    [startMs, endMs, keyframeChunkId],
+  );
+  const hasInvalidMediaRange = mediaKind !== null && (startMs != null || endMs != null) && mediaAnchor == null;
+  const mediaSrc = mediaKind !== null ? sourcePreviewHref(record.id, requestedVersion) : null;
+  const mediaRef = useRef<HTMLMediaElement | null>(null);
+  const [mediaPlayback, setMediaPlayback] = useState<MediaAnchorPlaybackSnapshot>(() => ({
+    anchor: mediaAnchor,
+    phase: mediaAnchor ? "pending_metadata" : "idle",
+    boundActive: mediaAnchor?.bounded ?? false,
+    autoPausedAtEnd: false,
+    userReleasedBound: false,
+    rangeHighlightActive: mediaAnchor !== null,
+  }));
+  const mediaController = useMemo(
+    () => createMediaAnchorPlaybackController(mediaAnchor, setMediaPlayback),
+    [mediaAnchor],
+  );
+  useEffect(() => {
+    setMediaPlayback(mediaController.snapshot());
+    if (mediaKind !== null && mediaAnchor) {
+      mediaController.activate(mediaRef.current);
+    }
+  }, [mediaAnchor, mediaController, mediaKind, mediaSrc]);
   const preferExtractedText = sourcePreviewKind(record.mime) == null && latestRecord.parseState === "ready";
   const [tool, setTool] = useState<string | null>(originalConversationId ? "conversation" : null);
   const [questionPage, setQuestionPage] = useState(readingPage);
@@ -140,7 +199,80 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
     // cancel. Close that inner surface first, on both narrow and wide layouts.
     if (tool) { event.preventDefault(); setTool(null); }
   }}>
-    {startMs != null || slideLabel ? <p className="text-sm text-warn">引用定位：{slideLabel ? `幻灯片 ${slideLabel}` : ""}{slideLabel && startMs != null ? " · " : ""}{startMs != null ? `${Math.floor(startMs / 60000)}:${String(Math.floor(startMs / 1000) % 60).padStart(2, "0")}` : ""}。此阅读器尚不能同步确认该位置，请在原件中核对。</p> : null}
+    {mediaKind !== null && mediaSrc ? (
+      <section
+        className="shrink-0 space-y-2 rounded-xl border border-line bg-surface px-3.5 py-2.5 shadow-card"
+        aria-label="媒体播放"
+        data-media-anchor-player="true"
+        data-media-anchor-start-ms={mediaAnchor ? String(mediaAnchor.startMs) : undefined}
+        data-media-anchor-end-ms={mediaAnchor ? String(mediaAnchor.endMs) : undefined}
+        data-media-anchor-keyframe-id={mediaAnchor?.keyframeChunkId}
+        data-media-anchor-phase={mediaPlayback.phase}
+        data-media-anchor-highlight={mediaAnchor ? (mediaPlayback.rangeHighlightActive ? "active" : "inactive") : undefined}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {mediaAnchor ? (
+              <span className={`inline-flex items-center rounded-pill px-2.5 py-1 text-xs font-medium tabular-nums ${mediaPlayback.rangeHighlightActive ? "bg-accent-soft text-accent ring-1 ring-accent/30" : "bg-line/40 text-text-2"}`}>
+                引用片段：{formatMediaAnchorRange(mediaAnchor)}
+              </span>
+            ) : null}
+            {mediaAnchor ? (
+              <p role="status" className="text-xs text-text-3">
+                {mediaAnchorStatus(mediaPlayback.phase, mediaAnchor.bounded)}
+              </p>
+            ) : hasInvalidMediaRange ? (
+              <p role="status" className="text-xs text-warn">引用时间范围无效，请从头查看原件。</p>
+            ) : null}
+          </div>
+          {mediaAnchor ? (
+            <button
+              type="button"
+              className={ui.secondary}
+              disabled={mediaPlayback.phase === "media_error"}
+              onClick={() => mediaController.replay(mediaRef.current)}
+            >
+              {mediaAnchor.bounded ? "重播片段" : "跳到起点"}
+            </button>
+          ) : null}
+        </div>
+        {mediaKind === "video" ? (
+          <video
+            ref={node => { mediaRef.current = node; }}
+            controls
+            preload="metadata"
+            src={mediaSrc}
+            aria-label={`${latestRecord.name} 媒体播放`}
+            className="max-h-72 w-full rounded-lg bg-ink"
+            onError={event => mediaController.handleError(event.currentTarget)}
+            onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
+            onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
+            onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onPause={event => mediaController.handlePause(event.currentTarget)}
+            onSeeking={event => mediaController.handleSeeking(event.currentTarget)}
+            onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
+          />
+        ) : (
+          <audio
+            ref={node => { mediaRef.current = node; }}
+            controls
+            preload="metadata"
+            src={mediaSrc}
+            aria-label={`${latestRecord.name} 媒体播放`}
+            className="w-full"
+            onError={event => mediaController.handleError(event.currentTarget)}
+            onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
+            onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
+            onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onPause={event => mediaController.handlePause(event.currentTarget)}
+            onSeeking={event => mediaController.handleSeeking(event.currentTarget)}
+            onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
+          />
+        )}
+      </section>
+    ) : null}
+    {mediaKind === null && (startMs != null || slideLabel) ? <p className="text-sm text-warn">引用定位：{slideLabel ? `幻灯片 ${slideLabel}` : ""}{slideLabel && startMs != null ? " · " : ""}{startMs != null ? `${Math.floor(startMs / 60000)}:${String(Math.floor(startMs / 1000) % 60).padStart(2, "0")}` : ""}。此阅读器尚不能同步确认该位置，请在原件中核对。</p> : null}
+    {mediaKind !== null && slideLabel ? <p className="text-sm text-warn">引用定位：幻灯片 {slideLabel}。此阅读器尚不能同步确认该位置，请在原件中核对。</p> : null}
     <div ref={body} className="flex min-h-0 flex-1 flex-col">
       <StudyToolsPanel fillHeight preferContentOnNarrowEntry={Boolean(originalConversationId)} activePanel={tool} onPanelChange={setTool} panels={[
         { id: "text", label: preferExtractedText ? "原件信息" : "提取文字 / OCR 核对", content: preferExtractedText ? <SourceViewer record={record} latestRecord={latestRecord} requestedVersion={requestedVersion} download={buildSourceDownloadView(record.id, requestedVersion, latestRecord.version, readingPage)} page={readingPage} hideHeading /> : <div className="space-y-3"><SourceContent sourceId={record.id} version={requestedVersion} initialPage={readingPage} onExplain={explain} /></div> },

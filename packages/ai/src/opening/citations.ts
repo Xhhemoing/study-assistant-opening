@@ -38,7 +38,12 @@ function citationFromChunk(
     label: label(chunk, sourceNames),
   };
   if (chunk.page != null) result.page = chunk.page;
-  if (chunk.startMs != null) result.startMs = chunk.startMs;
+  if (chunk.startMs != null) {
+    result.startMs = chunk.startMs;
+    if (chunk.endMs != null && Number.isSafeInteger(chunk.endMs) && chunk.endMs >= chunk.startMs) {
+      result.endMs = chunk.endMs;
+    }
+  }
   if (chunk.slideLabel != null && chunk.slideLabel.length > 0) {
     result.slideLabel = chunk.slideLabel;
   }

@@ -29,7 +29,13 @@ export function citationReaderTarget(click: CitationClick): SourceViewerTarget |
   let url: URL;
   try { url = new URL(click.href, click.origin); } catch { return null; }
   if (url.origin !== click.origin || url.pathname !== "/opening/library" || url.searchParams.get("tab") !== "materials") return null;
-  return parseSourceViewerSearchParams(Object.fromEntries(url.searchParams));
+  const params = new Map<string, string | string[]>();
+  for (const [key, value] of url.searchParams) {
+    const previous = params.get(key);
+    if (Array.isArray(previous)) previous.push(value);
+    else params.set(key, previous === undefined ? value : [previous, value]);
+  }
+  return parseSourceViewerSearchParams(Object.fromEntries(params));
 }
 
 export async function loadCitationReaderRecord(api: Pick<OpeningApi, "listSources">, target: SourceViewerTarget): Promise<SourceRecord> {
@@ -88,7 +94,7 @@ export function CitationReaderHost({ api: supplied }: { api?: OpeningApi }) {
   }, [api, request, revision]);
   if (!request) return null;
   const close = () => { sequence.current++; setRequest(null); setRecord(null); setError(""); };
-  return record ? <SourceReader record={record} requestedVersion={request.target.version} page={request.target.page} startMs={request.target.startMs} slideLabel={request.target.slideLabel}
+  return record ? <SourceReader record={record} requestedVersion={request.target.version} page={request.target.page} startMs={request.target.startMs} endMs={request.target.endMs} keyframeChunkId={request.target.keyframeChunkId} slideLabel={request.target.slideLabel}
     returnPoint={request.returnPoint} courseId={request.courseId} originalConversationId={request.target.conversationId} questionProtected={request.questionProtected} onClose={close} onRetry={async () => {
       const current = sequence.current;
       await api.retryParse(record.id);

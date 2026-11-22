@@ -45,6 +45,10 @@ async function render(props: Partial<Parameters<typeof SourceReader>[0]> = {}) {
 async function click(element: HTMLElement) { await act(async () => element.click()); }
 async function settle() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); }); }
 
+function mockSeekableRange(media: HTMLMediaElement, end: number) {
+  vi.spyOn(media, "seekable", "get").mockReturnValue({ length: 1, start: () => 0, end: () => end });
+}
+
 describe("dedicated material reader", () => {
   it("opens the requested original as the only default reading view and keeps extracted text on demand", async () => {
     const dialog = await render({ requestedVersion: 0, page: 3 });
@@ -102,6 +106,244 @@ describe("dedicated material reader", () => {
     expect(html).toContain("幻灯片 A-1");
     expect(html).toContain("1:05");
     expect(html).toContain("尚不能同步确认该位置");
+  });
+  it("auto-seeks video/audio media citations to [startMs, endMs], pauses at endMs, and allows manual resume", async () => {
+    const videoRecord: SourceRecord = { ...record, name: "微积分网课.mp4", mime: "video/mp4", version: 2 };
+    const reader = await render({
+      record: videoRecord,
+      latestRecord: videoRecord,
+      requestedVersion: 2,
+      startMs: 65_000,
+      endMs: 90_000,
+      keyframeChunkId: "kf-65",
+    });
+    const video = reader.querySelector<HTMLVideoElement>("video")!;
+    const player = reader.querySelector<HTMLElement>('[data-media-anchor-player="true"]')!;
+    expect(video).not.toBeNull();
+    expect(video.getAttribute("src")).toBe(`/api/opening/sources/${videoRecord.id}/download?version=2&disposition=inline`);
+    expect(reader.textContent).toContain("1:05–1:30");
+    expect(reader.textContent).not.toContain("尚不能同步确认该位置");
+    expect(player.getAttribute("data-media-anchor-keyframe-id")).toBe("kf-65");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+    const status = player.querySelector('[role="status"]')!;
+    expect(video.readyState).toBe(0);
+    expect(video.currentTime).toBe(0);
+    expect(status.textContent).toContain("正在加载媒体信息，加载后将自动跳到引用位置。");
+    expect(status.textContent).not.toContain("已定位");
+
+    let paused = true;
+    vi.spyOn(video, "paused", "get").mockImplementation(() => paused);
+    const pauseSpy = vi.spyOn(video, "pause").mockImplementation(() => { paused = true; });
+    const playSpy = vi.spyOn(video, "play").mockImplementation(() => {
+      paused = false;
+      return Promise.resolve();
+    });
+
+    // Simulate metadata load -> auto-seeks to startMs / 1000 = 65s and keeps highlight active while paused.
+    mockSeekableRange(video, 120);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+    expect(video.currentTime).toBe(65);
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("seeking_segment");
+    expect(status.textContent).toBe("正在跳到引用位置。");
+
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("ready_segment");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+    expect(status.textContent).toBe("已定位到引用片段，播放至末尾会自动暂停。");
+
+    // Mid-segment timeupdate does not pause.
+    paused = false;
+    await act(async () => { video.dispatchEvent(new Event("play")); });
+    video.currentTime = 75;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).not.toHaveBeenCalled();
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    // Reaching endMs = 90_000ms triggers automatic pause while KEEPING range highlight active.
+    video.currentTime = 90;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).toHaveBeenCalledOnce();
+    expect(reader.textContent).toContain("已播放到引用片段末尾");
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("paused_at_end");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    // Manual user resume releases the end bound and clears the jumped-range highlight.
+    paused = false;
+    await act(async () => { video.dispatchEvent(new Event("play")); });
+    video.currentTime = 110;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).toHaveBeenCalledOnce();
+    expect(reader.textContent).toContain("已继续播放后续内容");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+
+    // Clicking replay button seeks back to 65s, re-activates highlight, and re-arms the 90s auto-pause.
+    const replayButton = Array.from(reader.querySelectorAll("button")).find(b => b.textContent === "重播片段")!;
+    await click(replayButton);
+    expect(video.currentTime).toBe(65);
+    expect(status.textContent).toBe("正在跳到引用位置。");
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    expect(status.textContent).toBe("已定位到引用片段，播放至末尾会自动暂停。");
+    expect(playSpy).toHaveBeenCalledOnce();
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+    video.currentTime = 90.2;
+    await act(async () => { video.dispatchEvent(new Event("timeupdate")); });
+    expect(pauseSpy).toHaveBeenCalledTimes(2);
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    // Manually seeking elsewhere clears the jumped-range highlight.
+    video.currentTime = 15;
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("seeked_outside_range");
+    expect(status.textContent).toBe("已跳转到其他时间位置，可随时重播引用片段。");
+  });
+  it("announces an unseekable video citation and keeps replay from playing it", async () => {
+    const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
+    const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 10_100 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const video = player.querySelector("video")!;
+    const status = player.querySelector('[role="status"]')!;
+    let currentTime = 0;
+    vi.spyOn(video, "seekable", "get").mockReturnValue({ length: 1, start: () => 10.4, end: () => 90 });
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
+    Object.defineProperty(video, "currentTime", {
+      get: () => currentTime,
+      set: (time: number) => { currentTime = Math.max(time, 10.4); },
+    });
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("seek_unreached");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+    expect(status.textContent).toBe("未能跳到引用位置。");
+    await click(Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!);
+    expect(status.textContent).toBe("未能跳到引用位置。");
+    expect(currentTime).toBe(0);
+    expect(play).not.toHaveBeenCalled();
+  });
+  it.each([9.9, 10.2])("validates replay at %s when the video has a gap at the citation start", async landing => {
+    const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
+    const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 10_500 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    expect(player.textContent).toContain("引用片段：0:10–0:10.5");
+    const video = player.querySelector("video")!;
+    const replay = Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!;
+    let seeking = true;
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    vi.spyOn(video, "seeking", "get").mockImplementation(() => seeking);
+    vi.spyOn(video, "seekable", "get").mockReturnValue({
+      length: 2, start: index => [0, 10.2][index]!, end: index => [9.9, 90][index]!,
+    });
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
+    await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+    expect(video.currentTime).toBe(10.2);
+    await click(replay);
+    expect(video.currentTime).toBe(10.2);
+    expect(play).not.toHaveBeenCalled();
+    video.currentTime = landing;
+    await act(async () => { video.dispatchEvent(new Event("seeking")); });
+    seeking = false;
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    const reached = landing === 10.2;
+    expect(player.getAttribute("data-media-anchor-phase")).toBe(reached ? "ready_segment" : "seek_unreached");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe(reached ? "active" : "inactive");
+    expect(play).toHaveBeenCalledTimes(reached ? 1 : 0);
+  });
+  it("clears the citation highlight when metadata arrives without a seekable range", async () => {
+    const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
+    const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 20_000 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const video = player.querySelector("video")!;
+
+    expect(video.seekable.length).toBe(0);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+
+    expect(video.currentTime).toBe(0);
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("seek_unreached");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+    expect(player.querySelector('[role="status"]')?.textContent).toBe("未能跳到引用位置。");
+
+    video.currentTime = 37;
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
+    await click(Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!);
+    expect(play).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(37);
+  });
+
+  it.each(["audio", "video"] as const)("cancels deferred %s replay on a native pause", async kind => {
+    const mediaRecord: SourceRecord = { ...record, mime: kind === "audio" ? "audio/mpeg" : "video/mp4" };
+    const reader = await render({ record: mediaRecord, startMs: 10_000, endMs: 20_000 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const media = player.querySelector(kind)!;
+    const play = vi.spyOn(media, "play").mockResolvedValue(undefined);
+    const replay = Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!;
+
+    await click(replay);
+    expect(play).not.toHaveBeenCalled();
+    await act(async () => { media.dispatchEvent(new Event("pause")); });
+    mockSeekableRange(media, 90);
+    Object.defineProperty(media, "readyState", { configurable: true, value: 1 });
+    await act(async () => { media.dispatchEvent(new Event("loadedmetadata")); });
+    expect(media.currentTime).toBe(10);
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it.each(["audio", "video"] as const)("announces a terminal %s error before citation metadata loads", async kind => {
+    const mediaRecord: SourceRecord = { ...record, mime: kind === "audio" ? "audio/mpeg" : "video/mp4" };
+    const reader = await render({ record: mediaRecord, startMs: 10_000, endMs: 20_000 });
+    const player = reader.querySelector("[data-media-anchor-player]")!;
+    const media = player.querySelector(kind)!;
+    const status = player.querySelector('[role="status"]')!;
+    expect(status.textContent).toBe("正在加载媒体信息，加载后将自动跳到引用位置。");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    Object.defineProperty(media, "error", { configurable: true, value: { code: 4 } });
+    await act(async () => { media.dispatchEvent(new Event("error")); });
+    expect(status.textContent).toBe("媒体加载失败，无法跳到引用位置。");
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("media_error");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+    expect(player.querySelector("button")?.disabled).toBe(true);
+    expect(media.currentTime).toBe(0);
+  });
+
+  it("announces an audio citation point once programmatic seeking finishes", async () => {
+    const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg" };
+    const reader = await render({ record: audioRecord, startMs: 30_000 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const audio = player.querySelector("audio")!;
+    const status = player.querySelector('[role="status"]')!;
+
+    expect(audio.readyState).toBe(0);
+    expect(audio.currentTime).toBe(0);
+    expect(status.textContent).toContain("正在加载媒体信息，加载后将自动跳到引用位置。");
+    expect(status.textContent).not.toContain("已定位");
+
+    mockSeekableRange(audio, 90);
+    Object.defineProperty(audio, "readyState", { configurable: true, value: 1 });
+    await act(async () => { audio.dispatchEvent(new Event("loadedmetadata")); });
+    expect(audio.currentTime).toBe(30);
+    expect(status.textContent).toBe("正在跳到引用位置。");
+
+    await act(async () => { audio.dispatchEvent(new Event("seeked")); });
+    expect(status.textContent).toBe("已定位到引用时间点。");
+    audio.currentTime = 45;
+    await act(async () => { audio.dispatchEvent(new Event("seeked")); });
+    expect(status.textContent).toBe("已跳转到其他时间位置，可随时跳回引用时间点。");
+  });
+  it("renders an audio player and rejects inverted [startMs, endMs] media ranges without seeking", async () => {
+    const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg", version: 1 };
+    const reader = await render({
+      record: audioRecord,
+      latestRecord: audioRecord,
+      requestedVersion: 1,
+      startMs: 30_000,
+      endMs: 10_000,
+    });
+    const audio = reader.querySelector<HTMLAudioElement>("audio")!;
+    expect(audio).not.toBeNull();
+    expect(audio.currentTime).toBe(0);
+    expect(reader.textContent).toContain("引用时间范围无效");
   });
   it("keeps retryable parse failures actionable without pretending the original failed to upload", async () => {
     const html = (await render({ record: { ...record, parseState: "failed", error: { code: "PARSE_FAILED", message: "解析失败", retryable: true } }, onRetry: async () => {} })).outerHTML;

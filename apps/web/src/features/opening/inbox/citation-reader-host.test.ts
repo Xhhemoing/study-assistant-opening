@@ -10,6 +10,17 @@ const record = { id: sourceId, version: 1, uploadState: "uploaded" } as SourceRe
 describe("in-place citation reading", () => {
   it("preserves the exact source/version and all supported citation locators", () => {
     expect(citationReaderTarget(click)).toEqual({ sourceId, version: 0, page: 3, slideLabel: "A-1", startMs: 65000 });
+    const mediaClick = {
+      ...click,
+      href: sourceViewerHref(sourceId, 1, { startMs: 65000, endMs: 90000, keyframeChunkId: "kf-65" }),
+    };
+    expect(citationReaderTarget(mediaClick)).toEqual({
+      sourceId,
+      version: 1,
+      startMs: 65000,
+      endMs: 90000,
+      keyframeChunkId: "kf-65",
+    });
   });
   it("carries only an explicitly valid original conversation without changing material locators", () => {
     const conversation = "22222222-2222-4222-8222-222222222222";
@@ -17,6 +28,12 @@ describe("in-place citation reading", () => {
     expect(citationReaderTarget({ ...click, href: `${click.href}&conversation=invalid` })).toEqual(citationReaderTarget(click));
     expect(citationReaderTarget({ ...click, href: `${click.href}&conversation=` })).toEqual(citationReaderTarget(click));
   });
+  it.each(["version=2", "page=4", "slide=A-2", "keyframeChunkId=a&keyframeChunkId=b"])(
+    "does not intercept a citation with repeated %s",
+    suffix => {
+      expect(citationReaderTarget({ ...click, href: click.href + "&" + suffix })).toBeNull();
+    },
+  );
   it.each([
     { button: 1 }, { modified: true }, { defaultPrevented: true }, { download: true }, { target: "_blank" },
     { inLibrary: true }, { withinReader: true }, { href: `https://external.example${click.href}` },

@@ -80,7 +80,7 @@ export function InboxPanel({
   const [managedId, setManagedId] = useState<string | null>(null);
   const [manageInitialAction, setManageInitialAction] = useState<"exclude" | "delete" | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [view, setView] = useState<{ record: SourceRecord; requestedVersion: number; page?: number; startMs?: number; slideLabel?: string; conversationId?: string; returnPoint?: ReaderReturnPoint } | null>(null);
+  const [view, setView] = useState<{ record: SourceRecord; requestedVersion: number; page?: number; startMs?: number; endMs?: number; keyframeChunkId?: string; slideLabel?: string; conversationId?: string; returnPoint?: ReaderReturnPoint } | null>(null);
   const [queueItems, setQueueItems] = useState<UploadQueueItem[]>([]);
   const [refreshError, setRefreshError] = useState(false);
   const [openedInitialKey, setOpenedInitialKey] = useState<string | null>(null);
@@ -96,7 +96,7 @@ export function InboxPanel({
   const currentViewRecord = view ? sources.find(record => record.id === view.record.id) : undefined;
   useEffect(() => {
     if (!initialOpen) return;
-    const key = `${initialOpen.sourceId}:${initialOpen.version}:${initialOpen.page ?? ""}:${initialOpen.startMs ?? ""}:${initialOpen.slideLabel ?? ""}:${initialOpen.conversationId ?? ""}`;
+    const key = `${initialOpen.sourceId}:${initialOpen.version}:${initialOpen.page ?? ""}:${initialOpen.startMs ?? ""}:${initialOpen.endMs ?? ""}:${initialOpen.keyframeChunkId ?? ""}:${initialOpen.slideLabel ?? ""}:${initialOpen.conversationId ?? ""}`;
     if (openedInitialKey === key) return;
     const record = sources.find((item) => item.id === initialOpen.sourceId);
     if (!record || record.uploadState !== "uploaded" || initialOpen.version > record.version) {
@@ -109,6 +109,8 @@ export function InboxPanel({
       requestedVersion: initialOpen.version,
       ...(initialOpen.page != null ? { page: initialOpen.page } : {}),
       ...(initialOpen.startMs != null ? { startMs: initialOpen.startMs } : {}),
+      ...(initialOpen.endMs != null ? { endMs: initialOpen.endMs } : {}),
+      ...(initialOpen.keyframeChunkId ? { keyframeChunkId: initialOpen.keyframeChunkId } : {}),
       ...(initialOpen.slideLabel ? { slideLabel: initialOpen.slideLabel } : {}),
       ...(initialOpen.conversationId ? { conversationId: initialOpen.conversationId } : {}),
     });
@@ -317,7 +319,7 @@ export function InboxPanel({
       </ul>
       {!sources.length && showEmptyState ? <EmptyState title="还没有材料" description="添加第一份材料，上传后的处理状态会显示在这里。" action={hideUploadPicker ? onUploadRequested ? <button type="button" className={ui.primary} disabled={uploading} onClick={onUploadRequested}>上传材料</button> : undefined : <CaptureDialog disabled={uploading} courseId={courseId} courseRole={courseRole} onFiles={(files) => void uploadFiles(files).catch(showOperationFailure)} />} /> : sources.length > 0 && !renderedSources.length ? <p className="py-4 text-sm text-text-3">没有匹配的材料。</p> : null}
       {view && currentViewRecord ? <SourceReader key={`${view.record.id}:${view.requestedVersion}:${view.page ?? ""}`}
-        record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} slideLabel={view.slideLabel} courseId={courseId} originalConversationId={view.conversationId}
+        record={view.record} latestRecord={currentViewRecord} requestedVersion={view.requestedVersion} page={view.page} startMs={view.startMs} endMs={view.endMs} keyframeChunkId={view.keyframeChunkId} slideLabel={view.slideLabel} courseId={courseId} originalConversationId={view.conversationId}
         returnPoint={view.returnPoint} onClose={() => setView(null)} onRetry={async () => { await api.retryParse(view.record.id); await onChanged(); }} /> : null}
     </section>
   );

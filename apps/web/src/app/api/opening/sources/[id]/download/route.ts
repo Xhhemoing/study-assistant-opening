@@ -6,6 +6,7 @@ import {
 } from "../../../../../../features/opening/sources/source-service";
 import { UploadPolicyError } from "../../../../../../features/opening/sources/upload-policy";
 import { isOpeningDataError } from "../../../../../../features/opening/server/data-services";
+import { parseByteRange, streamByteRange } from "./byte-range";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -30,7 +31,7 @@ function parseDisposition(raw: string | null): DownloadDisposition {
  * Same-origin download: streams object bytes with Content-Disposition.
  * Contract change (Package A): response is **binary**, not JSON with a MinIO presign URL.
  * Experience should use `/api/opening/sources/:id/download?version=` as `<a href>` (cookies apply).
- * Pass `disposition=inline` for previewable MIME (PDF / image / plain / markdown); default stays attachment.
+ * Pass `disposition=inline` for previewable MIME. The default is attachment.
  * Version metadata is also mirrored on response headers for fetch-based clients.
  */
 export async function GET(request: Request, context: Params): Promise<Response> {
@@ -58,8 +59,22 @@ export async function GET(request: Request, context: Params): Promise<Response> 
       "X-Opening-Source-Current-Version": String(download.currentVersion),
       "X-Opening-Source-Version-Mismatch": download.versionMismatch ? "1" : "0",
     });
-    if (download.contentLength !== undefined) {
-      headers.set("Content-Length", String(download.contentLength));
+    const length = download.contentLength;
+    if (length !== undefined && Number.isSafeInteger(length) && length >= 0) {
+      headers.set("Accept-Ranges", "bytes");
+      // This response has no validators to confirm an If-Range precondition.
+      const range = request.headers.has("if-range") ? null : parseByteRange(request.headers.get("range"), length);
+      if (range === "unsatisfiable") {
+        await download.body.cancel().catch(() => undefined);
+        headers.set("Content-Range", `bytes */${length}`);
+        return new Response(null, { status: 416, headers });
+      }
+      if (range) {
+        headers.set("Content-Range", `bytes ${range.start}-${range.end}/${length}`);
+        headers.set("Content-Length", String(range.end - range.start + 1));
+        return new Response(streamByteRange(download.body, range), { status: 206, headers });
+      }
+      headers.set("Content-Length", String(length));
     }
     return new Response(download.body, { status: 200, headers });
   } catch (error) {

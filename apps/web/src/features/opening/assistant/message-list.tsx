@@ -63,10 +63,9 @@ type Props = {
 };
 /** Shared by the 出处 chips and inline `[k]` links so both open the same place. */
 function citationLink(citation: Citation, sourceNames: Readonly<Record<string, string>>): CitationLink {
-  const locators = { page: citation.page, startMs: citation.startMs, slideLabel: citation.slideLabel };
   return {
-    href: sourceViewerHref(citation.sourceId, citation.sourceVersion, locators),
-    label: citationChipLabel({ ...locators, label: citation.label, sourceName: sourceNames[citation.sourceId] }),
+    href: sourceViewerHref(citation.sourceId, citation.sourceVersion, citation),
+    label: citationChipLabel({ ...citation, sourceName: sourceNames[citation.sourceId] }),
   };
 }
 
