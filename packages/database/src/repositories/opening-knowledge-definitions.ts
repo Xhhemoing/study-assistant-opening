@@ -18,6 +18,16 @@ const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numb
 const assessmentAnswers = String.raw`(?:answers?|solutions?|key) +to +${assessmentQualifier}${assessmentTopic}`;
 const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numbered) +answers?|model +answers|(?:official|reference) +solutions|solutions? +manual|answers? +and +solutions?)`;
 const lineStart = String.raw`^ *(?:#{1,6} +)*`;
+const assessmentSolutionsHeading = String.raw`${lineStart}Solutions${englishContinuation} *[:：]? *$`;
+const assessmentSolutionsContext = String.raw`${lineStart}(?:(?:Chapter|Section|Part|Unit|Lecture) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?=[ :：.—–-]|$)|(?:Exercises?|Problems?|Questions?|Review(?: +Questions?)?|Practice(?: +Problems?)?|Quiz|Drills?|Self[- ]Check)\M(?= *(?:[:：.—–-]|$)| +(?:#?\d|(?:for|of|on|from) +(?:Chapter|Section|Part|Unit)\M))|(?:\d+|[a-z])[.)](?= |$)|[（(] *(?:\d+|[a-z]) *[)）](?= |$))`;
+const standaloneAssessmentItem = String.raw`${lineStart}\d+[.)] *$`;
+// Periods also end prose. Keep these patterns separate from case-insensitive answer labels.
+const inlinePeriodSuffix = String.raw`(?: +\d+(?:\.\d+)*)?(?: *\( *(?:continued|cont\.?|CONTD?\.?|CONTINUED) *\))? *\.(?= |$)`;
+const inlineAnswerPeriod = String.raw`(?:Answer +[Kk]ey|ANSWER +KEY|Answers?|ANSWERS?|(?:Official|Model|Correct|Sample|Reference) +[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE) +ANSWER)${inlinePeriodSuffix}`;
+const inlineSolutionPeriod = String.raw`(?:(?:Worked|Full|Sample|Official|Reference) +[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE) +SOLUTIONS?|Solutions?|SOLUTIONS?)(?: +(?:to|TO) +(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION) *\d*(?:\.\d+)*)?${inlinePeriodSuffix}`;
+const answerPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineAnswerPeriod}`;
+const solutionPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineSolutionPeriod}`;
+const exerciseInlineAnswerPeriod = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${inlineAnswerPeriod}|${inlineSolutionPeriod})`;
 // Standalone answer keys and bare "Answers" open a section. Numbered inline labels
 // and a singular "Answer:" affect the current chunk alone.
 const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|答案${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
@@ -28,6 +38,11 @@ const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadi
 const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|[.。](?: |$)|$))`;
 const answerLabel = new RegExp(answerLabelLine, "imu");
 const explanationLabel = new RegExp(explanationLabelLine, "iu");
+const jsAnswerPeriod = new RegExp(answerPeriodLine, "mu");
+const jsSolutionPeriod = new RegExp(solutionPeriodLine, "u");
+const jsAssessmentSolutionsHeading = new RegExp(assessmentSolutionsHeading, "imu");
+const jsAssessmentSolutionsContext = new RegExp(asJsPattern(assessmentSolutionsContext), "iu");
+const jsStandaloneAssessmentItem = new RegExp(standaloneAssessmentItem, "u");
 const horizontalWhitespace = "[ \t\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+";
 const pdfHorizontalWhitespace = new RegExp(horizontalWhitespace, "gu");
 const closingAtxHashes = String.raw`^( *#{1,6}(?: +.*?)?) +#+ *$`;
@@ -49,6 +64,7 @@ const blockedReopeningHeading = [
 
 // Only extraction and transcription headers may precede a reopening heading.
 const pdfLeadingTextWrappers = String.raw`^(?: *(?:\[(?:原生提取|本地提取（可能含OCR）|视觉转写与描述)\]|【原图忠实转写，尚需核对】) *(?:\n[ \n]*|$))+`;
+const jsPdfLeadingTextWrappers = new RegExp(pdfLeadingTextWrappers, "u");
 const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +problems?|(?:problem|question) +\d+)\M|习题|练习题?|思考题|作业题)`;
 const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
 const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
@@ -133,12 +149,19 @@ function acceptsPdfHeading(line: string, prefix: RegExpExecArray, prose: RegExp)
 
 export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
   const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ").replace(pdfClosingAtxHashes, "$1");
-  if (answerLabel.test(normalized.replace(/\*\*|__/gu, ""))) return true;
+  const withoutEmphasis = normalized.replace(/\*\*|__/gu, "");
+  if (answerLabel.test(withoutEmphasis) || jsAnswerPeriod.test(withoutEmphasis)) return true;
+  if (jsAssessmentSolutionsHeading.test(withoutEmphasis)) {
+    const content = withoutEmphasis.split("\n").filter(line => line.trim() && !jsPdfLeadingTextWrappers.test(line)
+      && (!isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line)));
+    if (content.some((line, index) => jsAssessmentSolutionsHeading.test(line)
+      && jsAssessmentSolutionsContext.test(content[index + 1] ?? ""))) return true;
+  }
   if (!checkContext) return false;
   let inWorkedExample = false;
   for (const rawLine of normalized.split("\n")) {
     const line = rawLine.replace(/\*\*|__/gu, "");
-    if (explanationLabel.test(line)) {
+    if (explanationLabel.test(line) || jsSolutionPeriod.test(line)) {
       if (!inWorkedExample) return true;
       continue;
     }
@@ -301,12 +324,22 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         OR public_container AND (line ~* ${appendixHeading} OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix}))
         AND NOT running_heading AND line !~* ${answerProofHeading}
         AND line !~* ${captionPrefix} AND line !~ ${chineseCaptionPrefix} AS reopens_section,
-      line ~* ${sectionAnswerLine} AS opens_section,
-      line ~* ${answerLabelLine} AS unconditional_answer,
-      line ~* ${explanationLabelLine} AS explanation_label,
-      line ~* ${exerciseSectionException} AS exercise_exception,
-      line ~* ${pdfLeadingTextWrappers} AS wrapper
-    FROM pdf_archive_headings
+      line ~* ${sectionAnswerLine} OR assessment_solutions AS opens_section,
+      line ~* ${answerLabelLine} OR period_answer OR assessment_solutions AS unconditional_answer,
+      line ~* ${explanationLabelLine} OR period_solution AS explanation_label,
+      period_answer OR period_solution AS period_inline,
+      line ~* ${exerciseSectionException} AS exercise_exception,wrapper
+    FROM (
+      SELECT *, line ~ ${answerPeriodLine} AS period_answer, line ~ ${solutionPeriodLine} AS period_solution,
+        line ~* ${assessmentSolutionsHeading} AND COALESCE(
+          lead(line) OVER (PARTITION BY id,content_line ORDER BY line_number) ~* ${assessmentSolutionsContext},false) AS assessment_solutions
+      FROM (
+        SELECT *, line ~* ${pdfLeadingTextWrappers} AS wrapper,
+          (NOT running_heading OR line ~ ${standaloneAssessmentItem})
+            AND btrim(line)<>'' AND line !~* ${pdfLeadingTextWrappers} AS content_line
+        FROM pdf_archive_headings
+      ) lookahead
+    ) contextual
   ), pdf_archive_exercise_context AS (
     SELECT *, COALESCE(max(position) FILTER (WHERE opens_exercise) OVER context,0)
       > COALESCE(max(position) FILTER (WHERE (opens_section AND NOT exercise_exception)
@@ -320,7 +353,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT *, opens_section AND NOT (in_exercise AND exercise_exception)
       AND NOT (in_worked_example AND explanation_label) AS section_answer,
       explanation_label AND NOT in_worked_example AS sealed_explanation,
-      in_exercise AND line ~* ${exerciseInlineAnswer}
+      (period_inline OR in_exercise AND line ~* ${exerciseInlineAnswer})
         AND (NOT opens_section OR exercise_exception) AND NOT (in_worked_example AND explanation_label) AS inline_opener
     FROM pdf_archive_exercise_context
   ), pdf_archive_page_events AS (
@@ -333,7 +366,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     -- An opener and its continuation lines share a group until the next explicit boundary.
     SELECT *, count(*) FILTER (WHERE inline_opener OR section_answer OR opens_exercise OR opens_public)
       OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group,
-      CASE WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
+      CASE WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
+        WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
         WHEN wrapper OR running_heading THEN '' ELSE btrim(line) END AS body_line
     FROM pdf_archive_line_events
   ), pdf_archive_inline_body AS (

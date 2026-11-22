@@ -273,6 +273,31 @@ describe("pgvector material repository", () => {
     expect(await backfilledPages(pdf)).toEqual([1, 2, 4, 11, 12]);
   });
 
+  it.each(["Solutions\nChapter 1 Exercises", "## Solutions (cont.):\n\n[原生提取]\nPage 304\nChapter 1",
+    "Solutions\nSection 1.1 Sets", "Solutions:\n1. The first hidden answer.",
+    "Solutions\n(1) The first hidden answer.", "Solutions\n(a) The first hidden answer.",
+    "Solutions\n1) The first hidden answer.", "Solutions\n1.\nThe first hidden answer.", "Solutions\na. The first hidden answer."])(
+    "withholds a textbook solutions appendix from every archived reader after %j",
+    async heading => {
+      const texts = ["## Solutions\nA homogeneous mixture.", "## Solutions\nProblems arise when dissolved ions precipitate.",
+        heading + "\n3. A hidden derivation.",
+        "Chapter 2 Exercises\n1. Another hidden derivation.", "Works Cited\nPublic references."];
+      await expectArchivedPdfPages(texts, [1, 2, 5], 3);
+    },
+  );
+
+  it("withholds period-delimited assessment answers and retains examples and lowercase prose", async () => {
+    const labels = ["Solution.", "SOLUTION.", "Answer.", "ANSWER.", "Worked solution.", "Model answer."];
+    const texts = [
+      ...labels.map((label, index) => `Problem ${index + 1}. Find x.\n${label} The answer is private.`),
+      "Theorem 2.1: Ax = b has a unique\nsolution. Moreover, x = A^{-1}b.",
+      "Example 1: Factor x.\nSolution. The worked example is public.",
+      "Solution. The example continues on the next physical page.",
+      "Chapter 3: Fields",
+    ];
+    await expectArchivedPdfPages(texts, [7, 8, 9, 10], 1);
+  });
+
   it("keeps an archived answer section sealed through exercise subheadings", async () => {
     const subheadings = [
       "# Drills", "# Self-Check", "# Self Check", "# Problem Set 1", "# Recitation", "# 思考题",

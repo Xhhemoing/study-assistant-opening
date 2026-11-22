@@ -1149,6 +1149,38 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertEqual(ext.texts_by_page[12], [])
                 self.assertEqual(ext.texts_by_page[13], ["Public explanation."])
 
+    def test_solutions_appendix_requires_assessment_context(self):
+        for heading in ("Solutions\nChapter 1 Exercises", "## Solutions (continued):\n\nPage 304\nChapter 1",
+                        "Solutions\nSection 1.1 Sets", "Solutions:\n1. The first answer.",
+                        "Solutions\n(1) The first answer.", "Solutions\n(a) The first answer.",
+                        "Solutions\n1) The first answer.", "Solutions\n1.\nThe first answer.", "Solutions\na. The first answer."):
+            with self.subTest(heading=heading):
+                chemistry = "## Solutions\nProblems arise when dissolved ions precipitate."
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, chemistry, 1)],
+                    [text_element(12, heading + "\n3. A hidden derivation.", 1)],
+                    [text_element(13, "Chapter 2 Exercises\n1. Another hidden derivation.", 1)],
+                    [text_element(14, "Works Cited\nPublic references.", 1)],
+                ))
+                self.assertEqual("\n".join(ext.texts_by_page[11]), chemistry)
+                self.assertEqual(ext.texts_by_page[12], [])
+                self.assertEqual(ext.texts_by_page[13], [])
+                self.assertEqual("\n".join(ext.texts_by_page[14]), "Works Cited\nPublic references.")
+
+    def test_period_delimited_assessment_answers_and_worked_examples(self):
+        theorem = "Theorem 2.1: Ax = b has a unique\nsolution. Moreover, x = A^{-1}b."
+        example = "Example 1: Factor x.\nSolution. The worked example is public."
+        labels = ("Solution.", "SOLUTION.", "Answer.", "ANSWER.", "Worked solution.", "Model answer.")
+        assessment = "\n\n".join(f"Problem {index}. Find x.\n{label} The answer is private."
+                                  for index, label in enumerate(labels, 1))
+        ext = physical_pages.extract_physical_pages(result_for(
+            [text_element(11, assessment, 1)],
+            [text_element(12, theorem, 1), text_element(12, example, 2)],
+        ))
+        public_lines = [line for text in ext.texts_by_page[11] for line in text.splitlines() if line.strip()]
+        self.assertEqual(public_lines, [f"Problem {index}. Find x." for index in range(1, len(labels) + 1)])
+        self.assertEqual("\n".join(ext.texts_by_page[12]), theorem + "\n" + example)
+
     def test_section_seal_withholds_proofs_and_reopens_at_structural_headings(self):
         for heading in ("Theorem 2.1 (Lagrange)", "定理 2.1（拉格朗日定理）", "Definition 1.2", "定义 1.2",
                         "Worked Example 2.1", "例题 2.1", "2.1 有限群", "2.1 AI", "2.1 ML", "2.1 OS", "2.1 LP",

@@ -87,11 +87,15 @@ const QUALIFIED_ANSWER_LABEL = String.raw`(?:(?:Official|Model|Correct|Sample|Re
 const ENGLISH_SOLUTION_LABEL = String.raw`(?:(?:Worked|Full|Sample|Official|Reference)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)`;
 const CONTINUED_LABEL = String.raw`(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?`;
 const CHINESE_SOLUTION_LABEL = "(?:参考解答|详细解答|解答|详解|解析)";
+const ENGLISH_INLINE_DELIMITER = String.raw`(?:[:：]|\.(?=\s|$))`;
+const ASSESSMENT_SOLUTIONS_HEADING_RE = new RegExp(String.raw`^Solutions${SEALED_HEADING_CONTINUATION}\s*[:：]?$`, "iu");
+const ASSESSMENT_SOLUTIONS_CONTEXT_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?=[\s:：.—–-]|$)|(?:Exercises?|Problems?|Questions?|Review(?:\s+Questions?)?|Practice(?:\s+Problems?)?|Quiz|Drills?|Self[- ]Check)\b(?=\s*(?:[:：.—–-]|$)|\s+(?:#?\d|(?:for|of|on|from)\s+(?:Chapter|Section|Part|Unit)\b))|(?:\d+|[a-z])[.)](?=\s|$)|[（(]\s*(?:\d+|[a-z])\s*[)）](?=\s|$))/iu;
+const STANDALONE_ASSESSMENT_ITEM_RE = /^\d+[.)]$/u;
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
-  String.raw`(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*[:：]` +
-  String.raw`|${QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:[:：]|$)` +
+  String.raw`(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*${ENGLISH_INLINE_DELIMITER}` +
+  String.raw`|${QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)` +
   String.raw`|【\s*(?:${CHINESE_ANSWER_HEADING}|答案)${CHINESE_ANSWER_CONTINUATION}\s*】` +
   String.raw`|(?:${CHINESE_ANSWER_HEADING}|答案)\s*(?:\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
   ")",
@@ -100,7 +104,7 @@ const INLINE_SEALED_ALWAYS_RE = new RegExp(
 
 const INLINE_SEALED_NON_EXAMPLE_RE = new RegExp(
   "^(?:" +
-  String.raw`${ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*[:：]` +
+  String.raw`${ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*${ENGLISH_INLINE_DELIMITER}` +
   String.raw`|【\s*${CHINESE_SOLUTION_LABEL}${CHINESE_ANSWER_CONTINUATION}\s*】` +
   String.raw`|(?:${CHINESE_SOLUTION_LABEL}|解)\s*(?:\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
   ")",
@@ -258,6 +262,18 @@ function isSectionSealedHeader(stripped: string): boolean {
   return true;
 }
 
+function findAssessmentSolutionsContext(lines: readonly string[], index: number): number {
+  for (let next = index + 1; next < lines.length; next++) {
+    const { stripped } = stripHeadingMarkup(lines[next]!);
+    if (ASSESSMENT_SOLUTIONS_HEADING_RE.test(stripped)) return -1;
+    if (STANDALONE_ASSESSMENT_ITEM_RE.test(stripped)) return next;
+    if (stripped && !isRunningPageHeading(stripped, false)) {
+      return ASSESSMENT_SOLUTIONS_CONTEXT_RE.test(stripped) ? next : -1;
+    }
+  }
+  return -1;
+}
+
 function isSectionSealedExit(stripped: string, isMarkdownHeading: boolean): boolean {
   if (!stripped || isSectionSealedHeader(stripped) || isRunningPageHeading(stripped) || ANSWER_PROOF_HEADING_RE.test(stripped)
     || CAPTION_PREFIX_RE.test(stripped) || CHINESE_CAPTION_PREFIX_RE.test(stripped)
@@ -355,10 +371,12 @@ function stripSealedSolutionLines(
   let publish = !requirePublicVisionHeading;
   let firstContentLine = true;
   let lastInlineBodyLine = "";
+  let assessmentContextLine = -1;
   const hasSectionSeal = requirePublicVisionHeading
-    && lines.some(line => {
+    && lines.some((line, index) => {
       const { stripped } = stripHeadingMarkup(line);
-      return !BARE_ANSWER_LABEL_RE.test(stripped) && isSectionSealedHeader(stripped);
+      return !BARE_ANSWER_LABEL_RE.test(stripped) && (isSectionSealedHeader(stripped)
+        || ASSESSMENT_SOLUTIONS_HEADING_RE.test(stripped) && findAssessmentSolutionsContext(lines, index) >= 0);
     });
 
   const keep = (line: string) => {
@@ -375,7 +393,7 @@ function stripSealedSolutionLines(
     if (nextMode !== "inline_sealed") lastInlineBodyLine = "";
   };
 
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const trimmed = line.trim();
     if (!trimmed) {
       if (state.mode === "inline_sealed") {
@@ -391,7 +409,10 @@ function stripSealedSolutionLines(
 
     const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
     const exerciseAnswer = state.inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped));
-    const sectionHeader = !exerciseAnswer && isSectionSealedHeader(stripped);
+    const bareSolutionsHeading = ASSESSMENT_SOLUTIONS_HEADING_RE.test(stripped);
+    const assessmentContext = bareSolutionsHeading ? findAssessmentSolutionsContext(lines, index) : -1;
+    if (assessmentContext >= 0) assessmentContextLine = assessmentContext;
+    const sectionHeader = !exerciseAnswer && (isSectionSealedHeader(stripped) || assessmentContext >= 0);
     if (!sectionHeader && (state.mode !== "none" || state.unknownAfterFailure || state.afterAllSealedPage)
       && isRunningPageHeading(stripped, state.mode !== "inline_sealed" || !allowBareInlineContainer)
       && !(state.inExercise && !isMarkdownHeading && /^\d+[.。]$/u.test(stripped))) {
@@ -422,7 +443,7 @@ function stripSealedSolutionLines(
     firstContentLine = false;
 
     if (state.mode === "section_sealed") {
-      if (isSectionSealedExit(stripped, isMarkdownHeading)) {
+      if (index !== assessmentContextLine && isSectionSealedExit(stripped, isMarkdownHeading)) {
         setMode("none");
         state.inWorkedExample = isWorkedExampleHeading(stripped);
         keep(line);
@@ -465,7 +486,7 @@ function stripSealedSolutionLines(
       continue;
     }
 
-    const inlineOpener = INLINE_SEALED_ALWAYS_RE.exec(stripped) ?? (!state.inWorkedExample
+    const inlineOpener = INLINE_SEALED_ALWAYS_RE.exec(stripped) ?? (!state.inWorkedExample && !bareSolutionsHeading
       ? INLINE_SEALED_NON_EXAMPLE_RE.exec(stripped) ?? STANDALONE_SOLUTION_HEADING_RE.exec(stripped)
       : null);
     if (inlineOpener) {

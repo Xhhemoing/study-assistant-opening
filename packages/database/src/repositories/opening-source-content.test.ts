@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { describe, expect, it } from "vitest";
-import { containsPdfAnswerLabel } from "./opening-knowledge-definitions";
+import { containsPdfAnswerLabel, isPublicSourceChunk } from "./opening-knowledge-definitions";
 import { readOpeningSourceContent } from "./opening-source-content";
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
@@ -8,6 +8,18 @@ const source = { version: 1, mime: "application/pdf", parse_state: "ready", uplo
   published: false, ai_excluded: true, error: null };
 
 const defaultChunks = [{ id: "public", page: 1, text: "private", characters: 7, readable: true }];
+
+it("recognizes contextual appendix and capitalized period labels in PDF text", () => {
+  const solutions = "## Solutions (cont.):\n\n[原生提取]\nPage 304\nChapter 1 Exercises\n1. A hidden answer.";
+  const chemistry = "## Solutions\nA homogeneous mixture.";
+  expect(isPublicSourceChunk({ mime: "application/pdf", page: 304, text: solutions })).toBe(false);
+  expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: chemistry })).toBe(true);
+  for (const line of ["Solution.", "SOLUTION.", "Answer.", "ANSWER.", "Full solutions.", "Official answer."]) {
+    expect(containsPdfAnswerLabel(`Problem 1. Find x.\n${line} The answer is private.`), line).toBe(true);
+  }
+  expect(containsPdfAnswerLabel("Theorem 2.1: Ax = b has a unique\nsolution. Moreover, x = A^{-1}b.")).toBe(false);
+  expect(containsPdfAnswerLabel("Example 1: Factor x.\nSolution. The worked example is public.")).toBe(false);
+});
 
 it("keeps PDF worked-example context until a genuine structural heading", () => {
   const exampleWith = (line: string) => `Worked Example 1: Factor x.\n${line}\n【解析】\nThe derivation follows.`;

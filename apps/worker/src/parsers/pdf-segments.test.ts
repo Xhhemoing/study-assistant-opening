@@ -80,11 +80,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v29-discourse/text",
     "docling-2.126.0/pdf-segments-v30-discourse/text",
     "docling-2.126.0/pdf-segments-v31-discourse/text",
+    "docling-2.126.0/pdf-segments-v32-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v32-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v33-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -566,6 +567,34 @@ describe("bounded resumable PDF parser", () => {
     await expect(collectPdfSegments(d.input)).rejects.toBeInstanceOf(BoundsExceededError);
     expect(runner).toHaveBeenCalledTimes(2);
     expect(d.segments.save).not.toHaveBeenCalled();
+  });
+
+  it.each(["Solutions\nChapter 1 Exercises", "## Solutions (cont.):\n\nPage 304\nChapter 1", "Solutions\nSection 1.1 Sets",
+    "Solutions:\n1. The first hidden answer.", "Solutions\n(a) The first hidden answer.",
+    "Solutions\n1) The first hidden answer.", "Solutions\n1.\nThe first hidden answer.", "Solutions\na. The first hidden answer."])(
+    "seals a textbook solutions appendix across a page boundary after %j", async heading => {
+      const pages = ["## Solutions\nA homogeneous mixture.", "## Solutions\nProblems arise when dissolved ions precipitate.",
+        heading + "\n3. A hidden derivation.",
+        "Chapter 2 Exercises\n1. Another hidden derivation.", "Works Cited\nPublic references."]
+        .map((text, index) => ({ page: index + 1, text }));
+      const result = await runPdfScenario({ pages, segmentPages: 1 });
+      expect(result.publishedChunks.map(chunk => chunk.text)).toEqual([pages[0]!.text, pages[1]!.text, pages[4]!.text]);
+    },
+  );
+
+  it("withholds assessment answers introduced by capitalized period labels", async () => {
+    const text = "Problem 1. Find the result.\nSolution. The first answer is private.\n\n"
+      + "Problem 2. Find the value.\nSOLUTION. The second answer is private.\n\n"
+      + "Problem 3. Find the root.\nAnswer. The third answer is private.\n\n"
+      + "Problem 4. Find the power.\nWorked solution. The fourth answer is private.\n\n"
+      + "Problem 5. Find the order.\nModel answer. The fifth answer is private.";
+    const publicText = "Theorem 2.1: Ax = b has a unique\nsolution. Moreover, x = A^{-1}b.\n\n"
+      + "Example 1: Find the root.\nSolution. The worked example is public.";
+    const result = await runPdfScenario({ pages: [{ page: 1, text }, { page: 2, text: publicText }] });
+    expect(result.publishedChunks.map(chunk => chunk.text)).toEqual([
+      "Problem 1. Find the result.\nProblem 2. Find the value.\nProblem 3. Find the root.\n"
+      + "Problem 4. Find the power.\nProblem 5. Find the order.", publicText,
+    ]);
   });
 
   it("seals scanned Vision answer transcriptions, stale saved chunks, and cross-segment 10->11 answer keys while keeping prose and worked examples", async () => {
