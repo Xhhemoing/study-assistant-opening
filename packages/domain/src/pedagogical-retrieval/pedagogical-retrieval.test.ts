@@ -1327,6 +1327,10 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["a disclosure closer in a link title after a nonbreaking space in the destination", "<details><summary>Answer</summary>\n\nExample: [example](/part\u00a0more \"</details>\")\n\nforty-two\n</details>"],
     ["a disclosure closer in a multiline link title with an escaped newline", "<details><summary>Answer</summary>\n\nExample: [ex](/a \"one\\\ntwo </details>\")\n\nforty-two\n</details>"],
     ["a disclosure closer in a multiline parenthesized link title", "<details><summary>Answer</summary>\n\nExample: [ex](/a (one\\\r\ntwo </details>))\n\nforty-two\n</details>"],
+    ...["> x", "## x", "~~~ x", "- x", "::: x"].map(marker => [
+      `a four-space-indented ${marker} inside a multiline link title`,
+      `<details><summary>Answer</summary>\n\n[ex](/a "one\n    ${marker} </details>")\nforty-two\n</details>`,
+    ] as const),
     ["a disclosure closer escaped in Markdown prose", "<details><summary>Answer</summary>\n\nExample: \\</details>\n\nforty-two\n</details>"],
     ["a disclosure closer inside Markdown image alt text", "<details><summary>Answer</summary>\n\nExample: ![</details>](/figure.png)\n\nforty-two\n</details>"],
     ["a resolved shortcut image containing a closer", "<details><summary>Answer</summary>\n\nExample: ![</details>]\n\nforty-two\n</details>\n\n[</details>]: /figure"],
@@ -1388,6 +1392,15 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["a table header inheriting CSS from an HTML block", '<div style="--mode:none">\n\nTopic | An<span style="display:var(--mode)">x</span>swer\n--- | ---\nrow | forty-two\n\n</div>', ""],
     ["an ATX heading following an implicitly closed paragraph", '<p style="--mode:none">\n\n## An<span style="display:var(--mode)">sw</span>er\nforty-two', ""],
     ["a table following an implicitly closed paragraph", '<p style="--mode:none">\n\nTopic | An<span style="display:var(--mode)">sw</span>er\n--- | ---\nrow | forty-two', ""],
+    ["a heading following an implicitly closed list item", '<ul><li style="--mode:none">one<li>\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two\n\n</li></ul>', ""],
+    ["a heading following an implicitly closed definition term", '<dl><dt style="--mode:none">one<dd>\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two\n\n</dd></dl>', ""],
+    ["a heading following a table cell with an omitted end tag", '<table><tr><td style="--mode:none">one<td>\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two\n\n</td></tr></table>', ""],
+    ["a heading following an unclosed span in a Markdown paragraph", 'First <span style="--mode:none">x\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two', ""],
+    ["a heading inheriting an outer HTML scope after a Markdown paragraph", '<div style="--mode:none">\n\nFirst <span style="--mode:inline">x\n\n## An<span style="display:var(--mode)">x</span>swer\n\nforty-two\n</div>', ""],
+    ["a heading after a thematic break implicitly closes a raw paragraph", '<p style="--mode:inline">\n\n---\n\n<span style="--mode:none">\n\n## An<span style="display:var(--mode)">x</span>swer\nforty-two\n\n</span>', ""],
+    ["a heading after a code block implicitly closes a raw paragraph", '<p style="--mode:inline">\n\n~~~\ncode\n~~~\n\n<span style="--mode:none">\n\n## An<span style="display:var(--mode)">x</span>swer\nforty-two\n\n</span>', ""],
+    ["a heading inheriting reconstructed HTML formatting", 'First <b style="--mode:none">x\n\n## An<span style="display:var(--mode)">x</span>swer\n\nforty-two', ""],
+    ["a reconstructed formatting element that loses its former parent's style", 'First <span style="--mode:none"><b>x\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two', ""],
     ["a summary after details implicitly closes a paragraph", '<p style="--mode:none"><details><summary>Hint / An<span style="display:var(--mode)">sw</span>er</summary>forty-two</details>', ""],
     ["a heading after a blockquote closes a styled HTML descendant", '> <div style="--mode:none">\n\n## An<span style="display:var(--mode)">sw</span>er\nforty-two', ""],
     ["a heading inheriting the outer scope after a blockquote closes", '<div style="--mode:none">\n\n> <div style="--mode:inline">\n\n## An<span style="display:var(--mode)">x</span>swer\nforty-two\n\n</div>', ""],
@@ -2830,6 +2843,26 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
     });
     // The definition self-loop contributes weight 4 in each direction.
     expect(result.pprByNodeId.small).toBe(Number.MIN_VALUE);
+  });
+
+  it("ranks positive subnormal parallel weights like one combined edge", () => {
+    const m = Number.MIN_VALUE;
+    const rank = (weights: readonly number[]) => rankPedagogicalEvidence({
+      chunks: ["seed", "a", "b", "c"].map(id => makeChunk({ id })),
+      seedScores: { seed: 1 },
+      edges: [
+        { from: "seed", to: "a", kind: "defines", weight: 4 },
+        { from: "seed", to: "b", kind: "defines", weight: 56 * m },
+        ...weights.map(weight => ({ from: "seed", to: "c", kind: "defines" as const, weight })),
+      ],
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { alpha: 0.5, maxIterations: 1 },
+    });
+    const combined = rank([48 * m]).pprByNodeId;
+    const parallel = rank(Array<number>(16).fill(3 * m)).pprByNodeId;
+    expect(combined.b).toBe(7 * m);
+    expect(combined.c).toBe(6 * m);
+    expect(parallel).toEqual(combined);
   });
 
   it.each([false, true])("normalizes wide family weights before rank propagation (parallel=%s)", parallel => {

@@ -48,6 +48,7 @@ export interface MediaAnchorPlaybackController {
   handleLoadedMetadata(media: SeekableMediaElement): void;
   handleTimeUpdate(media: SeekableMediaElement): void;
   handlePlay(media: SeekableMediaElement): void;
+  handlePause(media: SeekableMediaElement): void;
   handleSeeking(media: SeekableMediaElement): void;
   handleSeeked(media: SeekableMediaElement): void;
   seekToStart(media: SeekableMediaElement | null): void;
@@ -160,6 +161,7 @@ export function createMediaAnchorPlaybackController(
   onChange?: (snapshot: MediaAnchorPlaybackSnapshot) => void,
 ): MediaAnchorPlaybackController {
   let pendingSeek = anchor !== null;
+  let pendingReplayPlay = false;
   let seekOrigin: "programmatic_requested" | "programmatic_started" | "manual" | null = null;
   let requestedPosition = 0;
   let positionBeforeSeek = 0;
@@ -215,6 +217,21 @@ export function createMediaAnchorPlaybackController(
     emit();
   };
 
+  const playPendingReplay = (media: SeekableMediaElement) => {
+    if (!anchor || pendingSeek || !pendingReplayPlay) return;
+    pendingReplayPlay = false;
+    if (phase === "seek_unreached" || mediaEndsBeforeAnchor(media, anchor)) return;
+    if (media.readyState >= 1 && media.seekable) {
+      const reachableStart = nearestSeekablePosition(media.seekable, anchor.startMs / 1000, positionBeforeSeek);
+      if (reachableStart !== undefined && !isWithinSeekTolerance(anchor, reachableStart)) return;
+    }
+    try {
+      void Promise.resolve(media.play()).catch(() => undefined);
+    } catch {
+      // Browsers may block programmatic playback outside a gesture.
+    }
+  };
+
   const pauseAtEnd = (media: SeekableMediaElement) => {
     if (!anchor || !boundActive || pendingSeek || media.paused || seekOrigin === "manual" ||
       (media.seeking && !isProgrammaticSeek())) return;
@@ -231,11 +248,13 @@ export function createMediaAnchorPlaybackController(
   return {
     snapshot,
     activate(media) {
+      pendingReplayPlay = false;
       applySeek(media, true);
     },
     handleLoadedMetadata(media) {
       if (!anchor || !pendingSeek) return;
       applySeek(media, false);
+      playPendingReplay(media);
     },
     handleTimeUpdate(media) {
       pauseAtEnd(media);
@@ -256,7 +275,11 @@ export function createMediaAnchorPlaybackController(
         pauseAtEnd(media);
       }
     },
+    handlePause(media) {
+      if (media.paused) pendingReplayPlay = false;
+    },
     handleSeeking(media) {
+      if (pendingSeek) pendingReplayPlay = false;
       if (!anchor || pendingSeek) return;
       const atRequestedPosition = Math.abs(media.currentTime - requestedPosition) * 1000 <= SEEK_TOLERANCE_MS;
       const clampedToEnd = media.currentTime === media.duration && mediaEndsBeforeAnchor(media, anchor);
@@ -268,10 +291,12 @@ export function createMediaAnchorPlaybackController(
       if (isProgrammaticSeek() && (atRequestedPosition || clampedToEnd || clampedToSeekable)) {
         seekOrigin = "programmatic_started";
       } else {
+        pendingReplayPlay = false;
         seekOrigin = "manual";
       }
     },
     handleSeeked(media) {
+      if (pendingSeek) pendingReplayPlay = false;
       if (!anchor || pendingSeek || media.seeking) return;
       const completedProgrammaticSeek = isProgrammaticSeek();
       seekOrigin = null;
@@ -307,21 +332,14 @@ export function createMediaAnchorPlaybackController(
       }
     },
     seekToStart(media) {
+      pendingReplayPlay = false;
       applySeek(media, true);
     },
     replay(media) {
-      if (!anchor || !media) return;
+      pendingReplayPlay = !!anchor && !!media;
+      if (!pendingReplayPlay || !media) return;
       applySeek(media, true);
-      if (phase === "seek_unreached" || mediaEndsBeforeAnchor(media, anchor)) return;
-      if (media.readyState >= 1 && media.seekable) {
-        const reachableStart = nearestSeekablePosition(media.seekable, anchor.startMs / 1000, positionBeforeSeek);
-        if (reachableStart !== undefined && !isWithinSeekTolerance(anchor, reachableStart)) return;
-      }
-      try {
-        void Promise.resolve(media.play()).catch(() => undefined);
-      } catch {
-        // Browsers may block programmatic playback outside a gesture.
-      }
+      playPendingReplay(media);
     },
   };
 }

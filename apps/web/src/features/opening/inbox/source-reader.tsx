@@ -244,6 +244,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onPause={event => mediaController.handlePause(event.currentTarget)}
             onSeeking={event => mediaController.handleSeeking(event.currentTarget)}
             onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
           />
@@ -258,6 +259,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onPause={event => mediaController.handlePause(event.currentTarget)}
             onSeeking={event => mediaController.handleSeeking(event.currentTarget)}
             onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
           />

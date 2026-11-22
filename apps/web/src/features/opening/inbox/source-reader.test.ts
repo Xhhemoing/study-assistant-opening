@@ -245,6 +245,24 @@ describe("dedicated material reader", () => {
     expect(video.currentTime).toBe(37);
   });
 
+  it.each(["audio", "video"] as const)("cancels deferred %s replay on a native pause", async kind => {
+    const mediaRecord: SourceRecord = { ...record, mime: kind === "audio" ? "audio/mpeg" : "video/mp4" };
+    const reader = await render({ record: mediaRecord, startMs: 10_000, endMs: 20_000 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const media = player.querySelector(kind)!;
+    const play = vi.spyOn(media, "play").mockResolvedValue(undefined);
+    const replay = Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!;
+
+    await click(replay);
+    expect(play).not.toHaveBeenCalled();
+    await act(async () => { media.dispatchEvent(new Event("pause")); });
+    mockSeekableRange(media, 90);
+    Object.defineProperty(media, "readyState", { configurable: true, value: 1 });
+    await act(async () => { media.dispatchEvent(new Event("loadedmetadata")); });
+    expect(media.currentTime).toBe(10);
+    expect(play).not.toHaveBeenCalled();
+  });
+
   it("announces an audio citation point once programmatic seeking finishes", async () => {
     const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg" };
     const reader = await render({ record: audioRecord, startMs: 30_000 });

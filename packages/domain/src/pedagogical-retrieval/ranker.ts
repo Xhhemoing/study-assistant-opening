@@ -137,49 +137,43 @@ function scaleEdgeWeight(weight: number, maxRawWeight: number, multiplier: numbe
   return Number.isFinite(divisor) ? weight / divisor : (weight * multiplier) / maxRawWeight;
 }
 
+type ParallelTypedWeight = { weight: number; scaled: boolean };
+
 function normalizeTypedAdjacency(nodeCount: number, edges: readonly TypedGraphEdge[]) {
-  // Allocate per-family budgets per source node, then normalize across present families.
+  // Preserve each direction's raw parallel sum before rounding small target shares.
   const perNode = Array.from(
     { length: nodeCount },
-    () => new Map<string, {
-      maxRawWeight: number;
-      maxScaledWeight: number;
-      targets: Map<number, number>;
-      underflowWeights?: Map<number, number>;
-    }>(),
+    () => new Map<string, { maxRawWeight: number; weights: Map<number, Map<number, ParallelTypedWeight>> }>(),
   );
-  // Find each source family's scale before summing parallel or distinct edges.
-  for (const edge of edges) {
-    if (edge.rawWeight <= 0 || !Number.isFinite(edge.rawWeight)) continue;
-    const families = perNode[edge.from]!;
-    const family = families.get(edge.family);
-    if (family) {
-      family.maxRawWeight = Math.max(family.maxRawWeight, edge.rawWeight);
-    } else {
-      families.set(edge.family, { maxRawWeight: edge.rawWeight, maxScaledWeight: 0, targets: new Map() });
+  for (const { from, to, family, rawWeight, directionMultiplier = 1 } of edges) {
+    if (rawWeight <= 0 || !Number.isFinite(rawWeight)) continue;
+    const families = perNode[from]!;
+    let row = families.get(family);
+    if (!row) {
+      row = { maxRawWeight: 0, weights: new Map() };
+      families.set(family, row);
     }
-  }
-  // Cancel a common direction factor before rounding very small target shares.
-  for (const edge of edges) {
-    if (edge.rawWeight <= 0 || !Number.isFinite(edge.rawWeight)) continue;
-    const family = perNode[edge.from]!.get(edge.family)!;
-    const relativeWeight = (edge.rawWeight / family.maxRawWeight) * (edge.directionMultiplier ?? 1);
-    family.maxScaledWeight = Math.max(family.maxScaledWeight, relativeWeight);
-  }
-  for (const edge of edges) {
-    if (edge.rawWeight <= 0 || !Number.isFinite(edge.rawWeight)) continue;
-    const family = perNode[edge.from]!.get(edge.family)!;
-    const directionMultiplier = edge.directionMultiplier ?? 1;
-    const scaledWeight = scaleEdgeWeight(edge.rawWeight, family.maxRawWeight, directionMultiplier / family.maxScaledWeight);
-    if (scaledWeight === 0) {
-      // Individually unrepresentable terms can add up to representable target mass.
-      const weights = family.underflowWeights ??= new Map();
-      // Accumulate in quarter units so even a subnormal raw weight retains its contribution.
-      const weight = edge.rawWeight * (directionMultiplier / PREREQUISITE_SUPPORT_MULTIPLIER);
-      weights.set(edge.to, (weights.get(edge.to) ?? 0) + weight);
-    } else {
-      family.targets.set(edge.to, (family.targets.get(edge.to) ?? 0) + scaledWeight);
+    let directions = row.weights.get(to);
+    if (!directions) {
+      directions = new Map();
+      row.weights.set(to, directions);
     }
+    let sum = directions.get(directionMultiplier);
+    if (!sum) {
+      sum = { weight: rawWeight, scaled: false };
+      directions.set(directionMultiplier, sum);
+    } else if (sum.scaled) {
+      sum.weight += rawWeight / Number.MAX_VALUE;
+    } else {
+      const combined = sum.weight + rawWeight;
+      if (Number.isFinite(combined)) {
+        sum.weight = combined;
+      } else {
+        sum.weight = sum.weight / Number.MAX_VALUE + rawWeight / Number.MAX_VALUE;
+        sum.scaled = true;
+      }
+    }
+    row.maxRawWeight = Math.max(row.maxRawWeight, sum.scaled ? Number.MAX_VALUE : sum.weight);
   }
 
   const flattened: SparseWeightedEdge[] = [];
@@ -190,17 +184,40 @@ function normalizeTypedAdjacency(nodeCount: number, edges: readonly TypedGraphEd
     for (const family of families.keys()) {
       activeBudgetSum += EDGE_FAMILY_BUDGET[family] ?? 0.1;
     }
-    for (const [family, { targets, maxRawWeight, maxScaledWeight, underflowWeights }] of families.entries()) {
-      const familyMass = (EDGE_FAMILY_BUDGET[family] ?? 0.1) / activeBudgetSum;
-      for (const [target, weight] of underflowWeights ?? []) {
-        const scaledWeight = scaleEdgeWeight(weight, maxRawWeight, PREREQUISITE_SUPPORT_MULTIPLIER / maxScaledWeight);
-        if (scaledWeight > 0) targets.set(target, (targets.get(target) ?? 0) + scaledWeight);
+
+    for (const [family, { weights, maxRawWeight }] of families) {
+      let maxScaledWeight = 0;
+      for (const directions of weights.values()) {
+        for (const [multiplier, { weight, scaled }] of directions) {
+          const ratio = scaled ? weight : weight / maxRawWeight;
+          maxScaledWeight = Math.max(maxScaledWeight, ratio * multiplier);
+        }
       }
+
+      const targets = new Map<number, number>();
       let targetSum = 0;
-      for (const w of targets.values()) targetSum += w;
-      if (targetSum <= 0) continue;
-      for (const [v, w] of targets.entries()) {
-        flattened.push({ from: u, to: v, weight: familyMass * (w / targetSum) });
+      for (const [target, directions] of weights) {
+        let total = 0;
+        let underflowWeight = 0;
+        for (const [multiplier, { weight, scaled }] of directions) {
+          const factor = multiplier / maxScaledWeight;
+          const share = scaled ? weight * factor : scaleEdgeWeight(weight, maxRawWeight, factor);
+          if (share === 0) {
+            // Sum different discounted directions in quarter units before division.
+            underflowWeight += weight * (multiplier / PREREQUISITE_SUPPORT_MULTIPLIER);
+          } else {
+            total += share;
+          }
+        }
+        if (underflowWeight > 0) {
+          total += scaleEdgeWeight(underflowWeight, maxRawWeight, PREREQUISITE_SUPPORT_MULTIPLIER / maxScaledWeight);
+        }
+        targets.set(target, total);
+        targetSum += total;
+      }
+      const familyMass = (EDGE_FAMILY_BUDGET[family] ?? 0.1) / activeBudgetSum;
+      for (const [v, weight] of targets) {
+        flattened.push({ from: u, to: v, weight: familyMass * (weight / targetSum) });
       }
     }
   }

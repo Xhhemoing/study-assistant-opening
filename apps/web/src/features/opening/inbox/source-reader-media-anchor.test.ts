@@ -265,6 +265,39 @@ describe("media anchor bounded playback controller", () => {
     if (!rangeCount) expect(media.currentTime).toBe(37);
   });
 
+  it.each([0, 1])("defers replay until metadata reveals %i seekable ranges", rangeCount => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
+    const media = Object.assign(createFakeMedia(), {
+      readyState: 0, duration: 90, seekable: { length: rangeCount, start: () => 0, end: () => 90 },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.replay(media);
+    expect(media.playMock).not.toHaveBeenCalled();
+    expect(controller.snapshot().phase).toBe("pending_metadata");
+    media.readyState = 1;
+    controller.handleLoadedMetadata(media);
+    expect(media.playMock).toHaveBeenCalledTimes(rangeCount);
+    expect(media.currentTime).toBe(rangeCount ? 10 : 0);
+    expect(controller.snapshot().phase).toBe(rangeCount ? "seeking_segment" : "seek_unreached");
+    controller.handleLoadedMetadata(media);
+    expect(media.playMock).toHaveBeenCalledTimes(rangeCount);
+  });
+
+  it.each(["activate", "seekToStart", "handleSeeking", "handleSeeked"] as const)(
+    "cancels a deferred replay when %s supersedes it",
+    action => {
+      const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
+      const media = Object.assign(createFakeMedia(), { readyState: 0 });
+      const controller = createMediaAnchorPlaybackController(anchor);
+      controller.replay(media);
+      controller[action](media);
+      media.readyState = 1;
+      controller.handleLoadedMetadata(media);
+      expect(media.playMock).not.toHaveBeenCalled();
+      expect(media.currentTime).toBe(10);
+    },
+  );
+
   it.each(["seekToStart", "replay"] as const)("reports an empty seekable range and retries with %s", retry => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
     const media = Object.assign(createFakeMedia(), {

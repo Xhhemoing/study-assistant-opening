@@ -854,7 +854,9 @@ type HtmlScopeLine = {
   offset: number;
   containerDepth: number;
   continuedDepth: number;
-  closesParagraph: boolean;
+  endsParagraph: boolean;
+  hasInlineContent: boolean;
+  closesRawParagraph: boolean;
 };
 
 function projectDisclosureCommentMarkdown(
@@ -895,13 +897,22 @@ function projectDisclosureCommentMarkdown(
     const line = lines[index]!;
     const continuedLiteral = line.start < literalEnd;
     const state = scanner.scan(line.raw, continuedLiteral);
-    onScopeLine?.({
-      offset: line.start,
-      containerDepth: state.containers.length,
-      continuedDepth: state.continuedDepth,
-      closesParagraph: !continuedLiteral && state.mode !== "html" && !isMarkdownBlankLine(state.body) &&
-        (state.mode === "code" || state.atBoundary || startsMarkdownBlock(state.body, undefined, true)),
-    });
+    if (onScopeLine) {
+      const blank = isMarkdownBlankLine(state.body);
+      const underline = !state.atBoundary && SETEXT_UNDERLINE_RE.test(state.body);
+      const thematic = !underline && THEMATIC_BREAK_RE.test(state.body);
+      const endsParagraph = !continuedLiteral && (state.mode !== "text" || blank || underline ||
+        state.atBoundary || startsMarkdownBlock(state.body, undefined, true));
+      onScopeLine({
+        offset: line.start,
+        containerDepth: state.containers.length,
+        continuedDepth: state.continuedDepth,
+        endsParagraph,
+        hasInlineContent: !continuedLiteral && state.mode === "text" && !blank && !underline && !thematic,
+        closesRawParagraph: !continuedLiteral && (state.mode === "code" || thematic ||
+          state.containers.length > state.continuedDepth),
+      });
+    }
     if (state.mode !== "text" || state.atBoundary) brackets.length = 0;
     if (state.mode === "code") {
       if (maskCode) mask(line.start, line.end);
@@ -1779,13 +1790,35 @@ function resolveElementStyle(
 const HTML_CLOSES_PARAGRAPH_RE =
   /^(?:address|article|aside|blockquote|dd|details|dialog|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hgroup|hr|li|main|menu|nav|ol|p|pre|search|section|table|ul)$/;
 
+// Optional sibling end tags close within their own HTML parsing scope.
+const HTML_IMPLIED_SIBLING_ENDS = new Map<RegExp, { siblings: RegExp; scope: RegExp }>([
+  [/^li$/, { siblings: /^li$/, scope: /^(?:ul|ol|menu|table|template)$/ }],
+  [/^(?:dd|dt)$/, { siblings: /^(?:dd|dt)$/, scope: /^(?:dl|table|template)$/ }],
+  [/^option$/, { siblings: /^option$/, scope: /^(?:optgroup|select|datalist|template)$/ }],
+  [/^optgroup$/, { siblings: /^(?:option|optgroup)$/, scope: /^(?:select|datalist|template)$/ }],
+  [/^(?:td|th)$/, { siblings: /^(?:td|th)$/, scope: /^(?:tr|table|template)$/ }],
+  [/^tr$/, { siblings: /^tr$/, scope: /^(?:thead|tbody|tfoot|table|template)$/ }],
+  [/^(?:thead|tbody|tfoot|colgroup)$/, {
+    siblings: /^(?:thead|tbody|tfoot|colgroup)$/, scope: /^(?:table|template)$/,
+  }],
+  [/^(?:rt|rp)$/, { siblings: /^(?:rb|rt|rp)$/, scope: /^(?:rtc|ruby|template)$/ }],
+  [/^(?:rb|rtc)$/, { siblings: /^(?:rb|rt|rp|rtc)$/, scope: /^(?:ruby|template)$/ }],
+]);
+const MARKDOWN_PARAGRAPH_TAG = "#markdown-p";
+const HTML_FORMATTING_TAG_RE = /^(?:a|b|big|code|em|font|i|nobr|s|small|strike|strong|tt|u)$/;
+
 function createHtmlCustomPropertiesLookup(
   html: string,
   inheritedProps: CssCustomProperties,
   blockLines: readonly HtmlScopeLine[],
 ) {
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
-  const stack: (OpenHtmlTag & { customProps: CssCustomProperties; containerDepth: number })[] = [];
+  type OpenStyledTag = OpenHtmlTag & {
+    customProps: CssCustomProperties;
+    containerDepth: number;
+    formattingStyle?: string;
+  };
+  const stack: OpenStyledTag[] = [];
   const positions = [0];
   const scopes = [inheritedProps];
   let lineIndex = 0;
@@ -1794,6 +1827,31 @@ function createHtmlCustomPropertiesLookup(
   const closeTag = (tag: string) => {
     const index = lastOpenHtmlTagIndex(stack, tag);
     if (index >= 0) stack.length = index;
+  };
+  const closeGeneratedParagraph = () => {
+    const index = lastOpenHtmlTagIndex(stack, MARKDOWN_PARAGRAPH_TAG);
+    if (index < 0) return;
+    const closed = stack.splice(index);
+    // HTML reconstructs active formatting when it consumes the block separator.
+    for (const entry of closed) {
+      if (entry.formattingStyle === undefined) continue;
+      const { customProps } = resolveElementStyle(entry.formattingStyle, undefined, getProps());
+      stack.push({ ...entry, customProps });
+    }
+  };
+  const closeOptionalSibling = (tag: string) => {
+    for (const [open, { siblings, scope }] of HTML_IMPLIED_SIBLING_ENDS) {
+      if (!open.test(tag)) continue;
+      let previous = -1;
+      for (let index = stack.length - 1; index >= 0; index--) {
+        const candidate = stack[index]!.tag;
+        if (scope.test(candidate)) break;
+        if (siblings.test(candidate)) previous = index;
+        else if (previous >= 0) break;
+      }
+      if (previous >= 0) stack.length = previous;
+      return;
+    }
   };
   const recordScope = (offset: number) => {
     const active = getProps();
@@ -1807,7 +1865,17 @@ function createHtmlCustomPropertiesLookup(
       // Generated Markdown container closing tags also close their raw HTML descendants.
       while (stack.length && stack.at(-1)!.containerDepth > line.continuedDepth) stack.pop();
       containerDepth = line.containerDepth;
-      if (line.closesParagraph) closeTag("p");
+      if (line.endsParagraph) closeGeneratedParagraph();
+      if (line.closesRawParagraph) closeTag("p");
+      if (line.hasInlineContent && lastOpenHtmlTagIndex(stack, MARKDOWN_PARAGRAPH_TAG) < 0) {
+        closeTag("p");
+        stack.push({
+          tag: MARKDOWN_PARAGRAPH_TAG,
+          containerDepth,
+          customProps: getProps(),
+          childrenNamespace: stack.at(-1)?.childrenNamespace,
+        });
+      }
       recordScope(line.offset);
     }
   };
@@ -1822,17 +1890,28 @@ function createHtmlCustomPropertiesLookup(
     if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
-    if (!namespace && tag && prefix === "" && HTML_CLOSES_PARAGRAPH_RE.test(tag)) closeTag("p");
+    if (!namespace && tag && prefix === "") {
+      if (HTML_CLOSES_PARAGRAPH_RE.test(tag)) {
+        closeGeneratedParagraph();
+        closeTag("p");
+      }
+      closeOptionalSibling(tag);
+    } else if (!namespace && tag === "p" && prefix === "/") {
+      closeGeneratedParagraph();
+    }
     const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
     if (raw || (!namespace && tag === "template" && prefix === "")) {
       tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(html, "template", tokens.lastIndex) ?? html.length;
     } else if (tag && tag !== "head" && prefix === "") {
       const current = namespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
       if (!HTML_VOID_TAGS.has(tag) && !(current && hasSelfClosingFlag(match[0], tag))) {
-        const { customProps } = resolveElementStyle(htmlAttributeValue(match[0], tag, "style"), undefined, getProps());
-        stack.push({ tag, customProps, containerDepth, childrenNamespace: htmlChildNamespace(
-          current, tag, htmlEncodedAnnotation(current, tag, match[0]),
-        ) });
+        const style = htmlAttributeValue(match[0], tag, "style");
+        const { customProps } = resolveElementStyle(style, undefined, getProps());
+        stack.push({
+          tag, customProps, containerDepth,
+          formattingStyle: !current && HTML_FORMATTING_TAG_RE.test(tag) ? style ?? "" : undefined,
+          childrenNamespace: htmlChildNamespace(current, tag, htmlEncodedAnnotation(current, tag, match[0])),
+        });
       }
     } else if (tag && prefix === "/") {
       closeTag(tag);
@@ -2651,6 +2730,8 @@ function startsLatexBlock(raw: string, readContinuation?: () => string): boolean
 
 function startsMarkdownBlock(raw: string, next?: string, interruptsParagraph = false): boolean {
   if (isMarkdownBlankLine(raw)) return true;
+  // Indented code cannot interrupt a paragraph, even if its content resembles a block opener.
+  if (interruptsParagraph && INDENTED_CODE_RE.test(raw)) return false;
   if (/^[ \t]{0,3}(\x60{3,}|~{3,})/.test(raw)) return true;
   if (/^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(raw)) return true;
   if (DETAILS_OPEN_RE.test(raw.trimStart())) return true;
