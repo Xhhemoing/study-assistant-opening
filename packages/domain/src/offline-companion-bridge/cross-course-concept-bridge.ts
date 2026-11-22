@@ -20,7 +20,6 @@ import {
 interface AdmissibleBridgeEdge {
   readonly edge: CrossCourseConceptEdge;
   readonly edgeId: string;
-  readonly inputIndex: number;
   readonly canonicalSourceCourseId: string;
   readonly canonicalSourceConceptId: string;
   readonly directOnlyMastery: number;
@@ -29,13 +28,29 @@ interface AdmissibleBridgeEdge {
 
 const DIRECT_MASTERY_TOLERANCE = 1e-12;
 
+function compareCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : Number(a > b);
+}
+
 function compareBridgeCandidates(a: AdmissibleBridgeEdge, b: AdmissibleBridgeEdge): number {
   const weightOrder = b.edge.alignmentWeight - a.edge.alignmentWeight;
   const observationOrder = b.edge.sourceDirectObservationCount - a.edge.sourceDirectObservationCount;
   const evidenceOrder = Number(b.evidenceSource === "direct_counts") - Number(a.evidenceSource === "direct_counts");
-  const idOrder = a.edgeId < b.edgeId ? -1 : Number(a.edgeId > b.edgeId);
+  const idOrder = compareCodeUnits(a.edgeId, b.edgeId);
   // Equal IDs can carry distinct probabilities within the tolerance.
   return weightOrder || observationOrder || evidenceOrder || idOrder || a.directOnlyMastery - b.directOnlyMastery;
+}
+
+function compareConflictingBridgeCandidates(a: AdmissibleBridgeEdge, b: AdmissibleBridgeEdge): number {
+  // Equal canonical IDs can have different spellings in the emitted diagnostics.
+  return compareCodeUnits(a.edgeId, b.edgeId) ||
+    a.directOnlyMastery - b.directOnlyMastery ||
+    a.edge.alignmentWeight - b.edge.alignmentWeight ||
+    a.edge.sourceDirectObservationCount - b.edge.sourceDirectObservationCount ||
+    compareCodeUnits(a.edge.sourceCourseId, b.edge.sourceCourseId) ||
+    compareCodeUnits(a.edge.sourceConceptId, b.edge.sourceConceptId) ||
+    compareCodeUnits(a.edge.targetCourseId, b.edge.targetCourseId) ||
+    compareCodeUnits(a.edge.targetConceptId, b.edge.targetConceptId);
 }
 
 function decoupledBridgeEdge(
@@ -200,10 +215,10 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
   }
 
   const ignoredNonDirectEdges: IgnoredNonDirectBridgeEdge[] = [];
-  const decoupledByIndex: Array<DecoupledConceptBridgeEdge | undefined> = [];
+  const decoupledEdges: DecoupledConceptBridgeEdge[] = [];
   const admissibleBySourceKey = new Map<string, AdmissibleBridgeEdge[]>();
 
-  for (const [inputIndex, edge] of edges.entries()) {
+  for (const edge of edges) {
     const edgeId = resolveEdgeId(edge);
     const edgeTargetIdsValid =
       isSafeIdentifier(edge.targetCourseId) && isSafeIdentifier(edge.targetConceptId);
@@ -319,7 +334,7 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     }
 
     if (decoupleReasons.length > 0 || !directResolution || !directResolution.ok) {
-      decoupledByIndex[inputIndex] = decoupledBridgeEdge(edge, edgeId, decoupleReasons);
+      decoupledEdges.push(decoupledBridgeEdge(edge, edgeId, decoupleReasons));
       continue;
     }
 
@@ -327,7 +342,6 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     const candidate = {
       edge,
       edgeId,
-      inputIndex,
       canonicalSourceCourseId,
       canonicalSourceConceptId,
       directOnlyMastery: directResolution.directOnlyMastery,
@@ -355,15 +369,14 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     }
 
     if (maximumMastery - minimumMastery > DIRECT_MASTERY_TOLERANCE) {
-      for (const { edge, edgeId, inputIndex } of group) {
-        decoupledByIndex[inputIndex] = decoupledBridgeEdge(edge, edgeId, ["invalid_edge_parameters"]);
+      // Keep validation diagnostics in scan order, then report conflicts by source and candidate.
+      for (const { edge, edgeId } of group.sort(compareConflictingBridgeCandidates)) {
+        decoupledEdges.push(decoupledBridgeEdge(edge, edgeId, ["invalid_edge_parameters"]));
       }
     } else {
       surviving.push(preferred);
     }
   }
-
-  const decoupledEdges = decoupledByIndex.filter(edge => edge !== undefined);
 
   if (surviving.length === 0) {
     return {

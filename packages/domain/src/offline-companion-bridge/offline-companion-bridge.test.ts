@@ -2858,6 +2858,35 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Select a given result in the circuit carefully x = 0."].map(text => ({
         answerKey: "A", text, ok: false,
       })),
+      ...["Choose a given vehicle with the lower speed v = 2.",
+        "Choose a given point on the smaller radius r = 1.",
+        "Choose a given sample with the smaller scale s = 2.",
+        "Choose a given point on the linear map f(x) = x.",
+        "Choose a given value with z = 2 scale(x) <= 1.",
+        "Choose a given measurement with the relative increases.",
+        "Choose a given angle with vertical shifts.",
+        "Choose a given route through mountain passes.",
+        "Choose a given route across steep mountain passes.",
+        "Choose a given function shifted by two.",
+        "Choose a given map rotated clockwise.",
+        "Choose a given transformation mapped explicitly to a vector.",
+        "Choose a given angle with sin^2 x + cos^2 x = 1.",
+        "Choose a given angle with sin^2(x) + cos^2(x) = 1.",
+        "Choose a given value with sin^-1 x = 0.",
+        "Choose a given value with tan^(-1) x = 0.",
+        "Choose a given value with cos^2 theta = 1.",
+        "Choose a given value with log_2 x = 3."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
+      ...["Choose a given graph in the figure approaches y = 0.",
+        "Select a given trace in the figure stretches y = 0.",
+        "Select a given test in the field passes.",
+        "Choose a given angle with sin^2 x + cos^2 x = 1 fails.",
+        "Choose a given graph with sin^2 x = 1 fluctuates (unexpectedly).",
+        "Choose a given approximation with sin^2 x = 1 seems correct.",
+        "Choose a given graph with sin^2 x = 1 trembles (unexpectedly)."].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),
@@ -4271,16 +4300,28 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
         { ...sharedEdge, edgeId: "six-successes", sourceDirectSuccessCount: 6 },
       ];
 
-      for (const orderedEdges of [edges, [...edges].reverse()]) {
-        const result = computeCrossCourseWeakPrior({ ...context, edges: orderedEdges });
+      const result = computeCrossCourseWeakPrior({ ...context, edges });
 
-        expect(result).toMatchObject({ alpha: 1, beta: 1, posteriorMean: 0.5, acceptedEdges: [] });
-        expect(result.decoupledEdges.map(({ edgeId, reason, reasons }) => ({ edgeId, reason, reasons }))).toEqual(
-          orderedEdges.map(({ edgeId }) => ({
-            edgeId, reason: "invalid_edge_parameters", reasons: ["invalid_edge_parameters"],
-          })),
-        );
-      }
+      expect(computeCrossCourseWeakPrior({ ...context, edges: [...edges].reverse() })).toEqual(result);
+      expect(result).toMatchObject({ alpha: 1, beta: 1, posteriorMean: 0.5, acceptedEdges: [] });
+      expect(result.decoupledEdges.map(({ edgeId, reason, reasons }) => ({ edgeId, reason, reasons }))).toEqual(
+        ["invalid-alignment", "no-successes", "six-successes"].map(edgeId => ({
+          edgeId, reason: "invalid_edge_parameters", reasons: ["invalid_edge_parameters"],
+        })),
+      );
+    });
+
+    it("orders tied conflict diagnostics by their original IDs", () => {
+      const edges = [
+        { ...sharedEdge, edgeId: "same-id", sourceDirectSuccessCount: 0, ingestSequence: 1n },
+        { ...sharedEdge, edgeId: "same-id", sourceDirectSuccessCount: 0, sourceCourseId: " math", ingestSequence: 2n },
+        { ...sharedEdge, edgeId: "same-id", sourceDirectSuccessCount: 6, ingestSequence: 3n },
+      ];
+
+      const result = computeCrossCourseWeakPrior({ ...context, edges });
+
+      expect(computeCrossCourseWeakPrior({ ...context, edges: [...edges].reverse() })).toEqual(result);
+      expect(result.decoupledEdges.map(edge => edge.sourceCourseId)).toEqual([" math", "math", "math"]);
     });
 
     it("selects consistent duplicates by weight, observation count, evidence source, and edge ID", () => {

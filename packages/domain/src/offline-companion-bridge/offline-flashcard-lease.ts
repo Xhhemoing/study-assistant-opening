@@ -1611,7 +1611,7 @@ const ARTICLE_MEASURE_WORD_RE = new RegExp(
   "unit|term|factor|second|minute|hour|day|week|month|year|inch|foot|yard|mile|met(?:er|re)|" +
   "(?:centi|milli|kilo)met(?:er|re)|gram|kilogram|milligram|pound|ounce|tonne?|lit(?:er|re)|gallon|degree)$",
 );
-const ARTICLE_PRENOMINAL_ADJECTIVE_RE = /^(?:new|old|small|large|simple|complex|[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$/;
+const ARTICLE_PRENOMINAL_ADJECTIVE_RE = /^(?:new|old|small|large|simple|complex|steep|[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$/;
 
 const ARTICLE_CLAUSE_END_RE = /[.!?。！？;；:：\r\n\u2028\u2029]/u;
 const ARTICLE_SUBORDINATE_RE = /^(?:that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$/;
@@ -1631,26 +1631,42 @@ const ARTICLE_SYMBOLIC_LHS_RE = new RegExp(
 const ARTICLE_MATH_FUNCTION_RE = new RegExp("^(?:" + MATH_FUNCTION_NAMES.join("|") + "|" +
   "cbrt|sec|csc|cot|arcsin|arccos|arctan|arccot|arcsec|arccsc|asin|acos|atan|" +
   "sinh|cosh|tanh|coth|sech|csch|asinh|acosh|atanh|lg|lim|limsup|liminf|sup|inf|" +
-  "det|tr|trace|rank|dim|ker|im|re|deg|gcd|lcm|mod|arg|sgn|sign|floor|ceil|round|norm|proj|span|grad|div|curl)$");
+  "det|tr|trace|rank|dim|ker|im|re|deg|gcd|lcm|mod|arg|sgn|sign|floor|ceil|round|norm|proj|span|grad|div|curl)" +
+  "(?:_[\\p{L}\\p{N}]+)?$", "u");
 const ARTICLE_DETERMINER_RE = /^(?:the|a|an|this|these|those|each|every|all|both|any|some|no|its|their|our|your|my|his|her)$/;
 const ARTICLE_PARTICIPLE_COMPLEMENT_RE = /^(?:in|on|by|from|with|to|for|at|as|under|over|into|through)$/;
+const ARTICLE_PARTICIPLE_DIRECTION_RE = /^(?:counter|anti)?clockwise$/;
 const ARTICLE_FINITE_AUXILIARY_RE = /^(?:is|are|was|were|am|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must)$/;
 const ARTICLE_INFINITIVE_CHAIN_RE = /^(?:be|have|been|being)$/;
-const ARTICLE_FINITE_VERB_RE = /^(?:fails|converges|diverges|vanishes|exceeds|implies|satisfies|violates|occurs|appears|exists|becomes|differs|succeeds|commutes|terminates|contradicts|guarantees|ensures)$/;
+const ARTICLE_FINITE_VERB_RE = new RegExp("^(?:" +
+  "fails|converges|diverges|vanishes|exceeds|implies|satisfies|violates|occurs|appears|exists|becomes|differs|" +
+  "succeeds|commutes|terminates|contradicts|guarantees|ensures|tends|rotates|fluctuates|oscillates|trembles|seems|" +
+  "stabilizes|maximizes|minimizes|solves|obeys|governs|describes|represents|denotes|assumes)$");
 const ARTICLE_HOMOGRAPH_VERB_RE = new RegExp("^(?:" +
   "holds|equals|remains|stays|works|means|states|shows|gives|yields|makes|takes|uses|needs|lacks|contains|" +
   "includes|excludes|requires|matches|applies|follows|depends|lies|falls|rises|grows|decays|reduces|simplifies|" +
-  "cancels|persists|forces|determines|reaches|attains|intersects|crosses|starts|begins|ends|stops|continues|produces|returns)$");
+  "cancels|persists|forces|determines|reaches|attains|intersects|crosses|starts|begins|ends|stops|continues|produces|returns|" +
+  "approaches|touches|passes|meets|moves|shifts|scales|maps|projects|transforms|increases|decreases|doubles|halves|peaks|drops|jumps|hits)$");
 const ARTICLE_INTRANSITIVE_PAST_RE = new RegExp("^(?:" +
   "failed|converged|diverged|vanished|occurred|appeared|existed|remained|stayed|persisted|worked|held|fell|rose|" +
-  "grew|decayed|began|ended|stopped|became|differed|succeeded|commuted|terminated|depended|lay|continued)$");
+  "grew|decayed|began|ended|stopped|became|differed|succeeded|commuted|terminated|depended|lay|continued|" +
+  "tended|peaked|jumped|fluctuated|oscillated|trembled|seemed)$");
 const ARTICLE_TRANSITIVE_PAST_RE = new RegExp("^(?:" +
   "exceeded|implied|satisfied|violated|contradicted|guaranteed|ensured|equaled|meant|stated|showed|gave|yielded|" +
   "made|took|used|needed|lacked|contained|included|excluded|required|matched|applied|followed|reduced|simplified|" +
-  "cancelled|forced|determined|reached|attained|intersected|crossed|started|produced|returned|computed|defined|measured|tested)$");
+  "cancelled|forced|determined|reached|attained|intersected|crossed|started|produced|returned|computed|defined|measured|tested|" +
+  "approached|touched|passed|met|moved|shifted|scaled|rotated|mapped|projected|transformed|increased|decreased|" +
+  "doubled|halved|dropped|stabilized|maximized|minimized|solved|obeyed|governed|described|" +
+  "represented|denoted|assumed|hit)$");
 const ARTICLE_PARTICIPLE_FORM_RE = /^(?:[a-z]{2,}(?:ed|ing)|shown|given|taken|known|written|drawn|seen)$/;
-const ARTICLE_PLURAL_VERB_RE = /^(?:fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist|work|remain|stay|appear|occur|apply|follow|depend)$/;
+const ARTICLE_PLURAL_VERB_RE = new RegExp("^(?:" +
+  "fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist|work|remain|stay|appear|occur|apply|follow|depend|" +
+  "approach|tend|touch|pass|meet|move|shift|scale|rotate|map|project|transform|increase|decrease|double|halve|peak|drop|jump|" +
+  "fluctuate|oscillate|tremble|seem|stabilize|maximize|minimize|solve|obey|govern|describe|represent|denote|assume|hit)$");
 const ARTICLE_IMPERATIVE_RE = /^(?:compute|find|show|prove|check|explain|determine|evaluate|verify|state|give|write|list|sketch|plot)$/;
+const ARTICLE_ED_NOUN_RE = /^(?:speed|seed|feed|need|weed|reed|bed|red|sled|shed|shred|thread|bread|head|lead|spread|tread|stead|med|ped|biped|quadruped|hundred)$/;
+const ARTICLE_APPOSITIVE_NOUN_HOMOGRAPH_RE = /^(?:approach|touch|pass|meet|move|shift|scale|map|project|transform|increase|decrease|peak|drop|jump|hit)$/;
+const ARTICLE_NOUN_COMPOUND_RE = /^(?:mountain passes|coordinate transforms)$/;
 
 const ARTICLE_IMPLICIT_PRODUCT_RE = /^\d*([a-z]{2,3})(?:_[\p{L}\p{N}]+)?$/iu;
 const ARTICLE_TWO_LETTER_PROSE_RE = /^(?:in|on|at|to|of|by|as|up|or|if|so|no|an|is|am|be|do|go|we|he|me|my|us|it|ox)$/;
@@ -1666,10 +1682,14 @@ const ARTICLE_THREE_LETTER_PROSE_RE = new RegExp("^(?:" +
   "vet|via|war|was|wax|way|web|wed|wet|who|why|wig|win|wit|won|wow|yam|yes|yet|you|zip|zoo|all|bad)$");
 const ARTICLE_PRODUCT_OPERATOR_RE = /^[+\-*/^]$/;
 
+function isArticleFinitePredicateWord(word: string): boolean {
+  return ARTICLE_FINITE_AUXILIARY_RE.test(word) || ARTICLE_FINITE_VERB_RE.test(word) || ARTICLE_HOMOGRAPH_VERB_RE.test(word) ||
+    ARTICLE_INTRANSITIVE_PAST_RE.test(word) || ARTICLE_TRANSITIVE_PAST_RE.test(word);
+}
+
 function isArticleRelationBoundaryWord(word: string): boolean {
   return ARTICLE_STOP_WORD_RE.test(word) || ARTICLE_DETERMINER_RE.test(word) || ARTICLE_SUBORDINATE_RE.test(word) ||
-    ARTICLE_FINITE_AUXILIARY_RE.test(word) || ARTICLE_FINITE_VERB_RE.test(word) || ARTICLE_HOMOGRAPH_VERB_RE.test(word) ||
-    ARTICLE_INTRANSITIVE_PAST_RE.test(word) || ARTICLE_TRANSITIVE_PAST_RE.test(word) || ARTICLE_PLURAL_VERB_RE.test(word);
+    isArticleFinitePredicateWord(word) || ARTICLE_PLURAL_VERB_RE.test(word);
 }
 
 function isArticleImplicitProduct(token: string, nearArithmetic: boolean): boolean {
@@ -1714,6 +1734,24 @@ function articleClauseTokens(remainder: string): string[] {
   return tokens;
 }
 
+function articleFunctionArgumentStart(tokens: readonly string[], index: number): number | undefined {
+  const name = tokens[index]!.toLowerCase();
+  let argumentStart = index + 1;
+  if (tokens[argumentStart] === "(" && ARTICLE_IDENTIFIER_RE.test(name)) return argumentStart;
+  if (!ARTICLE_MATH_FUNCTION_RE.test(name)) return undefined;
+
+  if (tokens[argumentStart] === "^") {
+    argumentStart += 1;
+    if (tokens[argumentStart] === "+" || tokens[argumentStart] === "-") argumentStart += 1;
+    const exponent = tokens[argumentStart] ?? "";
+    if (exponent !== "(" && !isArticleImplicitProduct(exponent, true)) return undefined;
+    argumentStart += 1;
+  }
+
+  const argument = tokens[argumentStart] ?? "";
+  return argument === "(" || isArticleImplicitProduct(argument, false) ? argumentStart : undefined;
+}
+
 function articleRelationComplementEnd(tokens: readonly string[], start: number): number {
   let expectsOperand = true;
   let sawRelation = false;
@@ -1735,18 +1773,19 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
     } else if (token.length === 1 && ARTICLE_ARITHMETIC_RE.test(token)) {
       if (expectsOperand && token !== "+" && token !== "-") break;
       expectsOperand = true;
-    } else if ((argument === "(" && ARTICLE_IDENTIFIER_RE.test(token)) ||
-      (ARTICLE_MATH_FUNCTION_RE.test(token) && ARTICLE_SYMBOLIC_LHS_RE.test(argument))) {
-      // A verb following a complete RHS can introduce a parenthetical aside.
-      if (sawRelation && !expectsOperand && (ARTICLE_FINITE_AUXILIARY_RE.test(token) ||
-        ARTICLE_FINITE_VERB_RE.test(token) || ARTICLE_HOMOGRAPH_VERB_RE.test(token) ||
-        ARTICLE_INTRANSITIVE_PAST_RE.test(token) || ARTICLE_TRANSITIVE_PAST_RE.test(token))) break;
-      expectsOperand = true;
-    } else if ("([{".includes(token) || isArticleImplicitProduct(rawToken,
-      ARTICLE_PRODUCT_OPERATOR_RE.test(tokens[index - 1] ?? "") || ARTICLE_PRODUCT_OPERATOR_RE.test(argument))) {
-      expectsOperand = false;
     } else {
-      break;
+      const argumentStart = articleFunctionArgumentStart(tokens, index);
+      if (argumentStart !== undefined) {
+        // A verb following a complete RHS can introduce a parenthetical aside.
+        if (sawRelation && !expectsOperand && isArticleFinitePredicateWord(token)) break;
+        index = argumentStart - 1;
+        expectsOperand = true;
+      } else if ("([{".includes(token) || isArticleImplicitProduct(rawToken,
+        ARTICLE_PRODUCT_OPERATOR_RE.test(tokens[index - 1] ?? "") || ARTICLE_PRODUCT_OPERATOR_RE.test(argument))) {
+        expectsOperand = false;
+      } else {
+        break;
+      }
     }
     // Keep the last complete comparison, including any chained relation.
     if (sawRelation && !expectsOperand && !insideAbsoluteValue) end = index + 1;
@@ -1761,15 +1800,19 @@ function articlePrepositionalRelationEnd(tokens: readonly string[], start: numbe
   const headStart = ARTICLE_DETERMINER_RE.test(tokens[start]?.toLowerCase() ?? "") ? start + 1 : start;
   for (let headIndex = headStart; headIndex < headStart + 3; headIndex += 1) {
     const word = tokens[headIndex]?.toLowerCase() ?? "";
-    if (!ARTICLE_IDENTIFIER_RE.test(word) || isArticlePrepositionalBoundary(word)) break;
+    if (!ARTICLE_IDENTIFIER_RE.test(word) ||
+      (isArticlePrepositionalBoundary(word) && !ARTICLE_APPOSITIVE_NOUN_HOMOGRAPH_RE.test(word))) break;
 
     // The appositive needs its own LHS, as in "the straight line x + y = 1".
     const appositiveStart = headIndex + 1;
-    if (isArticlePrepositionalBoundary(tokens[appositiveStart]?.toLowerCase() ?? "")) break;
+    const first = tokens[appositiveStart]?.toLowerCase() ?? "";
+    if (isArticlePrepositionalBoundary(first) && !ARTICLE_APPOSITIVE_NOUN_HOMOGRAPH_RE.test(first)) break;
     const end = articleRelationComplementEnd(tokens, appositiveStart);
     if (end > appositiveStart) {
-      // "The loop approached x = 0" starts a predicate after the noun.
-      return headIndex > headStart && word.endsWith("ed") ? start : end;
+      // A later head must be singular and cannot be a predicate after the noun.
+      const plural = word.endsWith("s") && !ARTICLE_SINGULAR_S_RE.test(word);
+      const pastVerb = /[aeiouy][a-z]*ed$/.test(word) && !ARTICLE_ED_NOUN_RE.test(word);
+      return headIndex > headStart && (plural || pastVerb) ? start : end;
     }
   }
 
@@ -1779,7 +1822,7 @@ function articlePrepositionalRelationEnd(tokens: readonly string[], start: numbe
 function hasConditionalClausePredicate(remainder: string): boolean {
   const tokens = articleClauseTokens(remainder);
   let previous = "";
-  let expectsDeterminedNoun = false;
+  let expectsNoun = false;
   let afterQuantifier = false;
   let inInfinitive = false;
   let hasConjoinedSubject = false;
@@ -1802,7 +1845,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
       if (end > index + 1) {
         index = end - 1;
         previous = "";
-        expectsDeterminedNoun = false;
+        expectsNoun = false;
         afterQuantifier = false;
         inInfinitive = false;
         continue;
@@ -1812,7 +1855,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
 
     const participle = ARTICLE_PARTICIPLE_FORM_RE.test(token);
     const infinitiveAuxiliary = ARTICLE_INFINITIVE_CHAIN_RE.test(token);
-    const nounSlot: boolean = afterConjunction || expectsDeterminedNoun || afterQuantifier ||
+    const nounSlot: boolean = afterConjunction || expectsNoun || afterQuantifier ||
       previous === "of" || previous === "by" || ARTICLE_RELATION_COMPLEMENT_RE.test(previous);
     if (ARTICLE_FINITE_AUXILIARY_RE.test(token) &&
       !(inInfinitive && (infinitiveAuxiliary || token === "do"))) return true;
@@ -1821,18 +1864,24 @@ function hasConditionalClausePredicate(remainder: string): boolean {
       if (ARTICLE_HOMOGRAPH_VERB_RE.test(token) || (hasConjoinedSubject && ARTICLE_PLURAL_VERB_RE.test(token))) {
         return true;
       }
-      if (!inInfinitive && (ARTICLE_INTRANSITIVE_PAST_RE.test(token) ||
-        (ARTICLE_TRANSITIVE_PAST_RE.test(token) && !ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(tokens[index + 1]?.toLowerCase() ?? "")))) {
-        return true;
+      if (!inInfinitive) {
+        if (ARTICLE_INTRANSITIVE_PAST_RE.test(token)) return true;
+        if (ARTICLE_TRANSITIVE_PAST_RE.test(token)) {
+          const next = tokens[index + 1]?.toLowerCase() ?? "";
+          const complement = next.endsWith("ly") ? tokens[index + 2]?.toLowerCase() ?? "" : next;
+          if (!ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(complement) &&
+            !ARTICLE_PARTICIPLE_DIRECTION_RE.test(complement)) return true;
+        }
       }
     }
 
     // A number opens a noun slot after "among the", but is a label in "theorem 1".
     const quantity = ARTICLE_CARDINAL_RE.test(token) || DECIMAL_LITERAL_RE.test(token);
     afterQuantifier = nounSlot && quantity;
-    expectsDeterminedNoun = ARTICLE_DETERMINER_RE.test(token) ||
-      (expectsDeterminedNoun && (quantity || participle ||
+    expectsNoun = ARTICLE_DETERMINER_RE.test(token) ||
+      (nounSlot && (quantity || participle ||
         ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) ||
+        ARTICLE_NOUN_COMPOUND_RE.test(token + " " + (tokens[index + 1]?.toLowerCase() ?? "")) ||
         (ARTICLE_MODIFIER_WORD_RE.test(token) && !ARTICLE_LY_NOUN_RE.test(token))));
     inInfinitive = token === "to" || (inInfinitive && infinitiveAuxiliary);
     previous = token;
