@@ -1321,6 +1321,135 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
+    ["a textarea inside a pre HTML block after a blank line", "<details><summary>Answer</summary>\n\n<pre>\n\n~~~\n<textarea>\n~~~\n</details></textarea>forty-two</pre></details>"],
+    ["SVG CDATA opening inside a fence in an HTML block", "<details><summary>Answer</summary>\n~~~\n<svg><defs><![CDATA[\n~~~\n</details>]]></defs></svg>forty-two</details>"],
+    ["SVG CDATA inside a fence after its SVG ancestor", "<details><summary>Answer</summary><svg><defs>\n~~~\n<![CDATA[\n~~~\n</details>]]></defs></svg>forty-two</details>"],
+    ["a bogus HTML comment inside a fence in an HTML block", "<details><summary>Answer</summary>\n~~~\n<!bogus\n~~~\n</details>>forty-two</details>"],
+    ["an HTML comment finishing in the next HTML block", "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n<div>-->forty-two</div></details>"],
+  ])("seals details across %s", (_name, body) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const tail = "\nPublic theorem.\n\n~~~\n-->\n~~~\n\n<!-- independent comment -->";
+    const text = body + "\n" + tail;
+    const cues = [{ text: body, startMs: 0, endMs: 1000 }, { text: tail, startMs: 1000, endMs: 2000 }];
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it.each([
+    ...[
+      ["full reference link", "An[sw][lesson]er", "[lesson]: /lesson"],
+      ["collapsed reference link", "An[sw][]er", "[sw]: /lesson"],
+      ["shortcut reference link", "An[sw]er", "[sw]: /lesson"],
+      ["full reference image", "An![sw][lesson]er", "[lesson]: /lesson"],
+      ["collapsed reference image", "An![sw][]er", "[sw]: /lesson"],
+      ["shortcut reference image", "An![sw]er", "[sw]: /lesson"],
+    ].flatMap(([name, label, definition]) => [
+      [`${name} in an ATX heading`, `## ${label}\nforty-two`, definition],
+      [`${name} in a Setext heading`, `${label}\n---\nforty-two`, definition],
+      [`${name} in a table header`, `Topic | ${label}\n--- | ---\nrow | forty-two`, definition],
+      [`${name} in a summary`, `<details><summary>Hint / ${label}</summary>forty-two</details>`, definition],
+    ]),
+    ["a reference link nested inside an image", "## An![s[w][inner]][outer]er\nforty-two", "[inner]: /inner\n[outer]: /outer"],
+    ["single-tilde strikethrough", "## An~sw~er\nforty-two", ""],
+    ["visible SVG text", "## An<svg><g><text><tspan>sw</tspan></text></g></svg>er\nforty-two", ""],
+    ["visible HTML in foreignObject", "## An<svg><foreignObject><span>sw</span></foreignObject></svg>er\nforty-two", ""],
+    ["inert SVG group text", "## An<svg><g>x</g></svg>swer\nforty-two", ""],
+    ["inert SVG shape text", "## An<svg><rect>x</rect></svg>swer\nforty-two", ""],
+    ["SVG text in defs", "## An<svg><defs><text>x</text></defs></svg>swer\nforty-two", ""],
+    ["HTML in SVG desc", "## An<svg><desc><span>x</span></desc></svg>swer\nforty-two", ""],
+  ])("seals evidence for the rendered label with %s", (_name, body, definition) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const tail = `\n## Next topic\n\nPublic theorem.${definition ? "\n\n" + definition : ""}`;
+    const text = body + "\n" + tail;
+    const cues = [{ text: body, startMs: 0, endMs: 1000 }, { text: tail, startMs: 1000, endMs: 2000 }];
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it.each([
+    ["a nested nonimage reference", "An[s[w][inner]][outer]er", "[inner]: /inner\n[outer]: /outer"],
+    ["an undefined reference", "An[sw][lesson]er", ""],
+    ["a definition in a fenced code block", "An[sw][lesson]er", "~~~\n[lesson]: /lesson\n~~~"],
+    ["a definition in an indented code block", "An[sw][lesson]er", "    [lesson]: /lesson"],
+    ["a definition in an HTML block", "An[sw][lesson]er", "<div>\n[lesson]: /lesson\n</div>"],
+    ["a definition in an HTML comment", "An[sw][lesson]er", "<!--\n[lesson]: /lesson\n-->"],
+    ["triple tildes", "An~~~sw~~~er", ""],
+    ["unequal tilde runs", "An~sw~~er", ""],
+    ["SVG group text outside a text element", "An<svg><g>sw</g></svg>er", ""],
+    ["SVG shape text outside a text element", "An<svg><rect>sw</rect></svg>er", ""],
+    ["non-rendered defs text", "An<svg><defs><text>sw</text></defs></svg>er", ""],
+    ["non-rendered desc text", "An<svg><desc><span>sw</span></desc></svg>er", ""],
+  ])("keeps evidence public with %s", (_name, label, definition) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = `## ${label}\nforty-two${definition ? "\n\n" + definition : ""}`;
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text }),
+      chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
+    ]) {
+      expectSealedEvidence(chunks, text, [], "forty-two");
+    }
+  });
+
+  it("keeps reference heading protection across cues with the answer cue citation", () => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const bodies = ["## An[sw][lesson]er", "forty-two", "## Next topic", "Public theorem.", "[lesson]: /lesson"];
+    const cues = bodies.map((text, index) => ({
+      text, startMs: index * 1000, endMs: (index + 1) * 1000, keyframeChunkId: `frame-${index}`,
+    }));
+    const text = bodies.join("\n");
+    const chunks = chunkTranscriptCues({ ...source, cues });
+    const inlineTimedText = bodies.map((body, index) => "[00:0" + index + " - 00:0" + (index + 1) + "] " + body).join("\n");
+    expectSealedEvidence(chunkPedagogicalDocument({ ...source, text: inlineTimedText }), inlineTimedText, ["forty-two"], "Public theorem.");
+    expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      startMs: 1000, endMs: 2000, keyframeChunkId: "frame-1",
+    });
+  });
+
+  it.each([
+    ["Type 1 raw HTML", "<pre>\n\n[Answer]: /lesson\n</pre>"],
+    ["Type 2 HTML comment", "<!--\n\n[Answer]: /lesson\n-->"],
+    ["Type 3 processing instruction", "<?xml\n\n[Answer]: /lesson\n?>"],
+    ["Type 4 declaration", "<!DOCTYPE\n\n[Answer]: /lesson\n>"],
+    ["Type 5 CDATA", "<![CDATA[\n\n[Answer]: /lesson\n]]>"],
+    ["a continued paragraph", "Example text\n[Answer]: /lesson"],
+    ["a lazy quoted paragraph", "> Example text\n[Answer]: /lesson"],
+    ["Type 7 HTML with a quoted attribute", "<example-card title=\"a > b\">\n[Answer]: /lesson\n</example-card>"],
+    ["an indented block", "    [Answer]: /lesson"],
+    ["a pipe table header", "[Answer]: /lesson|Note\n--- | ---\nrow | note"],
+    ["a quoted fenced block", "> ~~~\n> [Answer]: /lesson\n> ~~~"],
+    ["a different identifier with nonbreaking space", "[Answer\u00a0]: /lesson"],
+  ])("keeps the visible reference label when a definition lookalike is in %s", (_name, lookalike) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = "## [lecture][Answer]\nforty-two\n\n" + lookalike + "\n\n## Next topic\nPublic theorem.";
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text }),
+      chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
+    ]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it.each([
+    ["a multiline label and destination", "[long\n  label]:\n  /lesson\n  \"a title\n  across lines\""],
+    ["a blockquote", "> [long label]: /lesson"],
+    ["a bare destination with angle punctuation", "[long label]: /a>b"],
+    ["a new sibling list item", "- Example text\n- [long label]: /lesson"],
+    ["a fenced pedagogical container", ":::example\n[long label]: /lesson\n:::"],
+  ])("resolves a document-wide definition from %s", (_name, definition) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = "> ## An[sw][ LONG  LABEL ]er\n> forty-two\n\n" + definition + "\n\n## Next topic\nPublic theorem.";
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text }),
+      chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
+    ]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it.each([
     ["unmatched raw text in a fence after a blank line", "<details><summary>Answer</summary>\n\n~~~html\n<textarea>\n~~~\n</details>\n\nPublic theorem.", "Public theorem."],
     ["raw text literals in separate Markdown fences", "<details><summary>Answer</summary>\n\n~~~\n<textarea>\n~~~\n</details>\n\nPublic theorem.\n\n~~~\n</textarea>\n~~~", "Public theorem."],
     ["unmatched template in a Markdown fence", "<details><summary>Answer</summary>\n\n~~~\n<template>\n~~~\n</details>\n\nPublic theorem.", "Public theorem."],
@@ -1333,6 +1462,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["raw text and a disclosure closer in inline Markdown code", "<details>\n<summary>Answer</summary>\n\nUse \x60</details><textarea>\x60\n</details>\n</textarea>\nforty-two\n</details>", "forty-two"],
     ["comment in a Markdown fence", "<details><summary>Answer</summary>\n\n~~~\n<!--\n~~~\n</details>\n\nPublic theorem.\n\n~~~\n-->\n~~~", "Public theorem."],
     ["an independent comment after a literal inline comment opener", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->", "Public theorem."],
+    ["an independent comment before another disclosure", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nfirst secret\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\n<details><summary>Answer</summary>second secret</details>", "Public theorem."],
     ["a bogus CDATA opener in an SVG HTML integration point", "<details><summary>Answer</summary><svg><foreignObject><![CDATA[ignored></foreignObject></svg>Answer</details>forty-two]]>", "forty-two"],
     ["escaped emphasis markers", "## An\\*sw\\*er\nforty-two", "forty-two"],
     ["literal intraword underscores", "## An_sw_er\nforty-two", "forty-two"],
@@ -2888,7 +3018,7 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
     expect(rootDomain).not.toHaveProperty("sparsePpr");
     expect(rootDomain).not.toHaveProperty("chunkPedagogicalDocument");
     expect(rootDomain).not.toHaveProperty("rankPedagogicalEvidence");
-  });
+  }, 30_000);
 
   it.each([
     { visibility: "sealed" }, { visibility: "hint_gated" }, { sourceId: "revoked" },

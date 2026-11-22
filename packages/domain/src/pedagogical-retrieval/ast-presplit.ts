@@ -103,9 +103,11 @@ const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\s/'"=<>]*)(?=[\s/>])/.s
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
 const HTML_RAW_TEXT_TAGS = new Set(["textarea", "title", "script", "style", "xmp", "iframe", "noembed", "noframes", "noscript"]);
 const SVG_NON_RENDERED_LABEL_TAGS = new Set([
-  "metadata", "defs", "desc", "symbol", "clippath", "mask", "pattern", "marker", "lineargradient", "radialgradient", "filter", "view",
+  "metadata", "defs", "desc", "symbol", "clippath", "mask", "pattern", "marker", "lineargradient", "radialgradient",
+  "filter", "view", "title", "script", "style", "cursor", "font",
 ]);
-const MATH_NON_RENDERED_LABEL_TAGS = new Set(["annotation", "annotation-xml"]);
+const SVG_TEXT_TAGS = new Set(["text", "tspan", "textpath", "tref", "altglyph"]);
+const MATH_NON_RENDERED_LABEL_TAGS = new Set(["annotation", "annotation-xml", "mphantom", "none", "mprescripts"]);
 const HTML_FOREIGN_BREAKOUT_TAG_RE =
   /^(?:b|big|blockquote|body|br|center|code|dd|div|dl|dt|em|embed|h[1-6]|head|hr|i|img|li|listing|menu|meta|nobr|ol|p|pre|ruby|s|small|span|strong|strike|sub|sup|table|tt|u|ul|var)$/;
 const HTML_NON_RENDERED_LABEL_TAGS = new Set([
@@ -606,30 +608,40 @@ function htmlAttributeValue(opener: string, tag: string, attribute: string): str
   return undefined;
 }
 
-function htmlContainerCrossingCodeEnd(text: string, start: number, end: number, openerLimit = end): number | undefined {
-  const code = text.slice(start, openerLimit);
-  if (!code.includes("<")) return undefined;
+function htmlContainerCrossingCodeEnd(
+  text: string,
+  start: number,
+  end: number,
+  openerLimit: number,
+  liveTags: OpenHtmlTag[],
+): number | undefined {
+  if (!text.slice(start, openerLimit).includes("<")) return undefined;
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
-  const openTags: OpenHtmlTag[] = [];
-  for (let match = tokens.exec(code); match; match = tokens.exec(code)) {
+  const openTags = [...liveTags];
+  tokens.lastIndex = start;
+  for (let match = tokens.exec(text); match && match.index < openerLimit; match = tokens.exec(text)) {
+    const oldCount = openTags.length;
     const namespace = markupNamespace(openTags, match);
-    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
-      tokens.lastIndex = endOfBogusHtmlComment(code, match.index);
-    }
-    const afterOpener = start + tokens.lastIndex;
-    const rawText = namespace ? null : htmlRawTextBounds(text, match, afterOpener);
-    let closeEnd: number | undefined;
+    const raw = namespace ? null : htmlRawTextBounds(text, match, tokens.lastIndex);
+    const tag = match.groups?.tag?.toLowerCase();
+    let closeEnd: number;
     if (match[0].startsWith("<!--")) {
-      closeEnd = endOfHtmlComment(text, start + match.index + 4);
-    } else if (rawText) {
-      closeEnd = rawText.closeEnd;
-    } else if (!namespace && match.groups?.tag?.toLowerCase() === "template" && match.groups.prefix === "") {
-      closeEnd = htmlElementEnd(text, "template", afterOpener) ?? text.length;
+      closeEnd = endOfHtmlComment(text, match.index + 4);
+    } else if (match.groups?.cdata && namespace && match[0].startsWith("<![CDATA[")) {
+      closeEnd = tokens.lastIndex;
+    } else if (/^<[!?]/.test(match[0])) {
+      closeEnd = endOfBogusHtmlComment(text, match.index + 2);
+    } else if (raw || (!namespace && tag === "template" && match.groups?.prefix === "")) {
+      closeEnd = raw?.closeEnd ?? htmlElementEnd(text, "template", tokens.lastIndex) ?? text.length;
+      openTags.length = Math.min(openTags.length, oldCount);
     } else {
       continue;
     }
-    if (closeEnd > end) return closeEnd;
-    tokens.lastIndex = closeEnd - start;
+    if (closeEnd > end) {
+      liveTags.splice(0, liveTags.length, ...openTags);
+      return closeEnd;
+    }
+    tokens.lastIndex = closeEnd;
   }
   return undefined;
 }
@@ -706,27 +718,132 @@ function crossesDetailsHtmlBoundary(
   return false;
 }
 
-function inheritsHtmlBlock(text: string, lineStart: number): boolean {
-  let start = lineStart;
-  while (start > 0) {
-    const lineEnd = precedingLineBreakStart(text, start);
-    const previous = containingLineStart(text, lineEnd);
-    if (!text.slice(previous, lineEnd).trim()) break;
-    start = previous;
+type MarkdownHtmlBlockKind = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type MarkdownHtmlBlock = { kind: MarkdownHtmlBlockKind; containers: readonly MarkdownContainer[] };
+
+function startsMarkdownHtmlBlock(body: string, afterBlockBoundary: boolean): MarkdownHtmlBlockKind | undefined {
+  if (/^ {0,3}<(?:pre|script|style|textarea)(?=[ \t>]|$)/i.test(body)) return 1;
+  if (/^ {0,3}<!--/.test(body)) return 2;
+  if (/^ {0,3}<\?/.test(body)) return 3;
+  if (/^ {0,3}<![A-Z]/.test(body)) return 4;
+  if (/^ {0,3}<!\[CDATA\[/.test(body)) return 5;
+  if (HTML_TYPE_6_BLOCK_START_RE.test(body)) return 6;
+  if (afterBlockBoundary && STANDALONE_HTML_TAG_RE.test(body)) return 7;
+  return undefined;
+}
+
+function endsMarkdownHtmlBlockLine(kind: MarkdownHtmlBlockKind, body: string): boolean {
+  switch (kind) {
+    case 1: return /<\/(?:pre|script|style|textarea)>/i.test(body);
+    case 2: return body.includes("-->");
+    case 3: return body.includes("?>");
+    case 4: return body.includes(">");
+    case 5: return body.includes("]]>");
+    default: return false;
   }
-  let fence: string | undefined;
+}
+
+function markdownHtmlContinuation(raw: string, block: MarkdownHtmlBlock): string | undefined {
+  const { body, depth } = continueMarkdownContainers(raw, block.containers);
+  return depth === block.containers.length && (block.kind <= 5 || body.trim()) ? body : undefined;
+}
+
+function createMarkdownBlockScanner(initialContainers: readonly MarkdownContainer[] = []) {
+  let containers = [...initialContainers];
+  let htmlBlock: MarkdownHtmlBlock | undefined;
+  let fence: { opener: string; containers: readonly MarkdownContainer[] } | undefined;
   let afterBlockBoundary = true;
-  for (const { raw } of splitLinesWithOffsets(text.slice(start, lineStart))) {
-    if (fence) {
-      if (closesFence(raw, fence)) {
-        fence = undefined;
-        afterBlockBoundary = true;
+  let indented = false;
+  return {
+    get htmlBlock() { return htmlBlock; },
+    breakParagraph() { afterBlockBoundary = true; },
+    scan(raw: string) {
+      if (htmlBlock) {
+        const body = markdownHtmlContinuation(raw, htmlBlock);
+        if (body !== undefined) {
+          const block = htmlBlock;
+          if (endsMarkdownHtmlBlockLine(block.kind, body)) htmlBlock = undefined;
+          return { body, containers: block.containers, mode: "html" as const, atBoundary: false };
+        }
+        htmlBlock = undefined;
       }
-      continue;
+      if (fence) {
+        const { body, depth } = continueMarkdownContainers(raw, fence.containers);
+        if (depth === fence.containers.length) {
+          if (closesFence(body, fence.opener)) fence = undefined;
+          return { body, containers, mode: "code" as const, atBoundary: false };
+        }
+        fence = undefined;
+      }
+      const next = readMarkdownContainerLine(raw, containers);
+      const atBoundary = afterBlockBoundary || next.containers.length > next.continuedDepth;
+      containers = next.containers;
+      const { body } = next;
+      const htmlKind = startsMarkdownHtmlBlock(body, atBoundary);
+      if (htmlKind) {
+        if (!endsMarkdownHtmlBlockLine(htmlKind, body)) htmlBlock = { kind: htmlKind, containers };
+        afterBlockBoundary = true;
+        indented = false;
+        return { body, containers, mode: "html" as const, atBoundary };
+      }
+      const opener = matchFenceOpening(body)?.[1];
+      if (opener) fence = { opener, containers };
+      indented = INDENTED_CODE_RE.test(body) && (atBoundary || indented);
+      afterBlockBoundary = Boolean(opener) || indented || !body.trim() || THEMATIC_BREAK_RE.test(body) ||
+        /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) || (!atBoundary && SETEXT_UNDERLINE_RE.test(body)) ||
+        /^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(body) ||
+        (containers.includes("quote") && CALLOUT_HEADER_RE.test(body));
+      return { body, containers, mode: opener || indented ? "code" as const : "text" as const, atBoundary };
+    },
+  };
+}
+
+function createMarkdownHtmlBlockLookup(text: string) {
+  const scanner = createMarkdownBlockScanner();
+  const activeAtLine = new Map<number, MarkdownHtmlBlock>();
+  let cursor = 0;
+  return (lineStart: number) => {
+    while (cursor < lineStart) {
+      const newline = nextLineBreak(text, cursor);
+      scanner.scan(text.slice(cursor, newline?.index ?? text.length));
+      cursor = newline ? newline.index + newline[0].length : text.length;
+      if (scanner.htmlBlock) activeAtLine.set(cursor, scanner.htmlBlock);
     }
-    if (HTML_TYPE_6_BLOCK_START_RE.test(raw) || (afterBlockBoundary && STANDALONE_HTML_TAG_RE.test(raw))) return true;
-    fence = matchFenceOpening(raw)?.[1];
-    afterBlockBoundary = false;
+    return activeAtLine.get(lineStart);
+  };
+}
+
+function hasDisclosureCommentEnd(
+  text: string,
+  start: number,
+  htmlEnd: number,
+  containers: readonly MarkdownContainer[],
+): boolean {
+  if (/--!?>/.test(text.slice(start, htmlEnd))) return true;
+  const scanner = createMarkdownBlockScanner(containers);
+  const markdown = text.slice(Math.max(start, htmlEnd));
+  let independentOpener = false;
+  let codeSpanEnd = -1;
+  for (const line of splitLinesWithOffsets(markdown)) {
+    const state = scanner.scan(line.raw);
+    if (state.mode === "code") continue;
+    const tokens = /<!--|--!?>|\x60+/g;
+    tokens.lastIndex = Math.max(0, codeSpanEnd - line.start);
+    for (let match = tokens.exec(line.raw); match; match = tokens.exec(line.raw)) {
+      if (match[0] === "<!--") independentOpener = true;
+      else if (match[0].startsWith("--")) {
+        if (!independentOpener) return true;
+        // A subsequent disclosure opener owns its own closer.
+        const nextDetails = /<(\/?)details(?=[\s/>])/i.exec(markdown.slice(line.start + tokens.lastIndex));
+        return nextDetails?.[1] === "/";
+      } else if (state.mode === "text" && !isEscaped(line.raw, match.index)) {
+        const end = endOfBacktickSpan(markdown, line.start + match.index);
+        if (end !== -1 && !crossesDetailsHtmlBoundary(markdown, line.start + match.index, end, state.containers)) {
+          codeSpanEnd = end;
+          tokens.lastIndex = end - line.start;
+        }
+      }
+    }
   }
   return false;
 }
@@ -735,6 +852,7 @@ function findMatchingDetailsBounds(
   text: string,
   openStart: number,
   searchFrom: number,
+  inheritsHtmlBlock: ReturnType<typeof createMarkdownHtmlBlockLookup>,
 ): DetailsBounds {
   const literals =
     /<!--|(?<fence>^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)*(?:\x60{3,}[^\x60\r\n]*|~{3,}[^\r\n]*)(?=\r|\n|$))|(?<ticks>\x60+)/.source;
@@ -743,7 +861,9 @@ function findMatchingDetailsBounds(
   let containers: MarkdownContainer[] = [];
   let nextLineStart = containingLineStart(text, searchFrom);
   let contiguousHtml = /^ {0,3}$/.test(text.slice(containingLineStart(text, openStart), openStart));
-  let htmlBlockContainers: readonly MarkdownContainer[] | undefined = contiguousHtml || inheritsHtmlBlock(text, nextLineStart) ? [] : undefined;
+  let htmlBlock = inheritsHtmlBlock(nextLineStart);
+  let htmlBlockEndsHere = false;
+  const openTags: OpenHtmlTag[] = [];
   let htmlStartedInBody = false;
   let markdownBodyStart = Infinity;
   let body = "";
@@ -755,11 +875,11 @@ function findMatchingDetailsBounds(
       const newline = nextLineBreak(text, lineStart);
       const line = text.slice(lineStart, newline?.index ?? text.length);
       nextLineStart = newline ? newline.index + newline[0].length : text.length;
-      if (htmlBlockContainers) {
-        const continued = continueMarkdownContainers(line, htmlBlockContainers);
-        if (continued.depth !== htmlBlockContainers.length || !continued.body.trim()) htmlBlockContainers = undefined;
-      }
-      if (contiguousHtml && (lineStart < markdownBodyStart || htmlStartedInBody)) {
+      if (htmlBlockEndsHere) htmlBlock = undefined;
+      const htmlContinuation = htmlBlock && markdownHtmlContinuation(line, htmlBlock);
+      if (htmlContinuation === undefined) htmlBlock = undefined;
+      htmlBlockEndsHere = htmlBlock !== undefined && endsMarkdownHtmlBlockLine(htmlBlock.kind, htmlContinuation!);
+      if (contiguousHtml && htmlBlock && (lineStart < markdownBodyStart || htmlStartedInBody)) {
         const continued = continueMarkdownContainers(line, containers);
         if (continued.depth === containers.length && continued.body.trim()) {
           body = continued.body;
@@ -773,14 +893,15 @@ function findMatchingDetailsBounds(
         current.containers.length === containers.length;
       containers = current.containers;
       body = current.body;
-      const startsHtml = HTML_TYPE_6_BLOCK_START_RE.test(body);
-      if (!htmlBlockContainers && (startsHtml || (afterBlockBoundary && STANDALONE_HTML_TAG_RE.test(body)))) {
-        htmlBlockContainers = containers;
+      const htmlKind = startsMarkdownHtmlBlock(body, afterBlockBoundary || !sameContainer);
+      const startsNewHtmlBlock = htmlBlock === undefined && htmlKind !== undefined;
+      if (startsNewHtmlBlock) {
+        htmlBlock = { kind: htmlKind, containers };
+        htmlBlockEndsHere = endsMarkdownHtmlBlockLine(htmlKind, body);
       }
-      const continuesHtml = contiguousHtml && sameContainer && Boolean(body.trim());
-      htmlStartedInBody = (continuesHtml && htmlStartedInBody) ||
-        (lineStart >= markdownBodyStart && startsHtml && !body.trimStart().startsWith("</"));
-      contiguousHtml = startsHtml || continuesHtml;
+      htmlStartedInBody = htmlBlock !== undefined && ((htmlStartedInBody && htmlContinuation !== undefined) ||
+        (lineStart >= markdownBodyStart && (startsNewHtmlBlock || htmlKind === 6) && !body.trimStart().startsWith("</")));
+      contiguousHtml = htmlBlock !== undefined;
       const endsSetext = sameContainer && !afterBlockBoundary && !inIndentedCode && SETEXT_UNDERLINE_RE.test(body);
       inIndentedCode = INDENTED_CODE_RE.test(body) &&
         (afterBlockBoundary || !sameContainer || inIndentedCode);
@@ -789,28 +910,39 @@ function findMatchingDetailsBounds(
     }
   };
   const htmlBlockEnd = (limit: number) => {
-    if (!htmlBlockContainers) return nextLineStart;
+    if (!htmlBlock || htmlBlockEndsHere) return Math.min(nextLineStart, limit);
     for (let start = nextLineStart; start < limit;) {
       const newline = nextLineBreak(text, start);
-      const line = continueMarkdownContainers(text.slice(start, newline?.index ?? text.length), htmlBlockContainers);
-      if (line.depth !== htmlBlockContainers.length || !line.body.trim()) return start;
+      const body = markdownHtmlContinuation(text.slice(start, newline?.index ?? text.length), htmlBlock);
+      if (body === undefined) return start;
       start = newline ? newline.index + newline[0].length : text.length;
+      if (endsMarkdownHtmlBlockLine(htmlBlock.kind, body)) return Math.min(start, limit);
     }
     return limit;
   };
   const skipLiteralLines = (end: number) => {
     if (end < nextLineStart) return;
-    if (htmlBlockContainers && htmlBlockEnd(end) < end) htmlBlockContainers = undefined;
+    if (htmlBlock && htmlBlockEnd(end + 1) <= end) {
+      htmlBlock = undefined;
+      contiguousHtml = false;
+      htmlStartedInBody = false;
+    }
     const newline = nextLineBreak(text, end);
     nextLineStart = newline ? newline.index + newline[0].length : text.length;
   };
   const skipCodeBlock = (start: number, end: number) => {
-    const openerLimit = htmlBlockContainers ? htmlBlockEnd(end) : undefined;
-    const htmlEnd = openerLimit === undefined ? undefined : htmlContainerCrossingCodeEnd(text, start, end, openerLimit);
+    const openerLimit = htmlBlock ? htmlBlockEnd(end) : start;
+    const htmlEnd = openerLimit > start ? htmlContainerCrossingCodeEnd(text, start, end, openerLimit, openTags) : undefined;
     tokenRe.lastIndex = htmlEnd ?? end;
-    if (openerLimit !== undefined && openerLimit < end) htmlBlockContainers = undefined;
-    nextLineStart = end;
     if (htmlEnd !== undefined) skipLiteralLines(htmlEnd);
+    else {
+      if (openerLimit < end) {
+        htmlBlock = undefined;
+        contiguousHtml = false;
+        htmlStartedInBody = false;
+      }
+      nextLineStart = end;
+    }
     inIndentedCode = false;
     afterBlockBoundary = true;
   };
@@ -819,7 +951,6 @@ function findMatchingDetailsBounds(
   let summaryOpening: { openStart: number; openEnd: number } | undefined;
   let summary: DetailsBounds["summary"];
   const summaryCodeSpans: { start: number; end: number }[] = [];
-  const openTags: OpenHtmlTag[] = [];
   let match: RegExpExecArray | null;
   while ((match = tokenRe.exec(text)) !== null) {
     readThroughLine(match.index);
@@ -830,12 +961,14 @@ function findMatchingDetailsBounds(
       skipCodeBlock(containingLineStart(text, match.index), end);
       continue;
     }
+    const previousTagCount = openTags.length;
     const namespace = markupNamespace(openTags, match);
     if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
-      tokenRe.lastIndex = endOfBogusHtmlComment(text, match.index);
+      tokenRe.lastIndex = endOfBogusHtmlComment(text, match.index + 2);
     }
     const rawText = namespace ? null : htmlRawTextBounds(text, match, tokenRe.lastIndex);
     if (rawText) {
+      openTags.length = Math.min(openTags.length, previousTagCount);
       tokenRe.lastIndex = rawText.closeEnd;
       skipLiteralLines(tokenRe.lastIndex);
       continue;
@@ -856,9 +989,9 @@ function findMatchingDetailsBounds(
         if (end !== -1 && !crossesDetailsHtmlBoundary(text, match.index, end, containers)) {
           // Keep the legacy inline example consisting solely of an unmatched comment opener.
           const literalComment = /^\x60+[ \t]*<!--[ \t]*\x60+$/.test(text.slice(match.index, end)) &&
-            !/--!?>/.test(text.slice(end, htmlBlockEnd(text.length)));
-          const htmlEnd = htmlBlockContainers && !literalComment ?
-            htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end)) : undefined;
+            !hasDisclosureCommentEnd(text, end, htmlBlockEnd(text.length), containers);
+          const htmlEnd = htmlBlock && !literalComment ?
+            htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end), openTags) : undefined;
           if (insideSummary && htmlEnd === undefined) summaryCodeSpans.push({ start: match.index, end });
           tokenRe.lastIndex = htmlEnd ?? end;
           skipLiteralLines(tokenRe.lastIndex);
@@ -880,6 +1013,7 @@ function findMatchingDetailsBounds(
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
     if (!namespace && tag === "template" && prefix === "") {
+      openTags.length = Math.min(openTags.length, previousTagCount);
       tokenRe.lastIndex = htmlElementEnd(text, tag, tokenRe.lastIndex) ?? text.length;
       skipLiteralLines(tokenRe.lastIndex);
       continue;
@@ -964,12 +1098,100 @@ function markdownLabelLinkEnd(label: string, start: number): number {
   return title.exec(label) ? title.lastIndex : -1;
 }
 
-function renderMarkdownLabelMarkup(label: string, readCodeSpans = true): string {
+const LINK_REFERENCE_LABEL_RE = /\[((?:\\[^\r\n]|\\(?=[\r\n]|$)|[^\\[\]]){0,999})\]/y;
+const LINK_REFERENCE_TITLE_RE = /^(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\((?:\\[\s\S]|[^()\\])*\))[ \t]*$/;
+const EMPTY_LINK_LABELS: ReadonlySet<string> = new Set<string>();
+
+function readLinkReferenceLabel(text: string, start: number) {
+  LINK_REFERENCE_LABEL_RE.lastIndex = start;
+  const match = LINK_REFERENCE_LABEL_RE.exec(text);
+  return match && match[1]!.length <= 999 ? { raw: match[1]!, end: LINK_REFERENCE_LABEL_RE.lastIndex } : undefined;
+}
+
+function normalizeLinkReferenceLabel(raw: string): string {
+  return raw.replace(/[ \t\r\n]+/g, " ").replace(/^ | $/g, "").toLowerCase().toUpperCase().toLowerCase();
+}
+
+function linkReferenceDestinationEnd(line: string): number {
+  if (line.startsWith("<")) return /^<(?:\\[<>]|[^<>\r\n])*>/.exec(line)?.[0].length ?? -1;
+  let depth = 0;
+  let index = 0;
+  for (; index < line.length; index++) {
+    const code = line.charCodeAt(index);
+    if (code <= 32 || code === 127) break;
+    const character = line[index];
+    if (character === "\\" && ASCII_PUNCTUATION.test(line[index + 1] ?? "")) index++;
+    else if (character === "(") depth++;
+    else if (character === ")" && --depth < 0) return -1;
+
+  }
+  return index && depth === 0 ? index : -1;
+}
+
+function collectLinkReferenceLabels(lines: readonly string[]): ReadonlySet<string> {
+  const scanner = createMarkdownBlockScanner();
+  const labels = new Set<string>();
+  for (let index = 0; index < lines.length; index++) {
+    const { body, containers, mode, atBoundary } = scanner.scan(lines[index]!);
+    if (mode !== "text" || !atBoundary || !/^ {0,3}\[/.test(body)) continue;
+    const continuation = (lineIndex: number) => {
+      if (lineIndex >= lines.length) return undefined;
+      const next = continueMarkdownContainers(lines[lineIndex]!, containers);
+      return next.depth === containers.length && next.body.trim() ? next.body : undefined;
+    };
+    if (body.includes("|") && isPipeTableStart(body, continuation(index + 1))) continue;
+    let header = body.trimStart();
+    let lastLine = index;
+    let reference = readLinkReferenceLabel(header, 0);
+    while (!reference && header.length <= 999 && !/[[\]]/.test(header.slice(1).replace(/\\[^\r\n]/g, ""))) {
+      const next = continuation(lastLine + 1);
+      if (next === undefined) break;
+      header += "\n" + next;
+      lastLine++;
+      reference = readLinkReferenceLabel(header, 0);
+    }
+    if (!reference || header[reference.end] !== ":") continue;
+    const name = normalizeLinkReferenceLabel(reference.raw);
+    if (!name) continue;
+    let destination = header.slice(reference.end + 1).trimStart();
+    if (!destination) destination = continuation(++lastLine)?.trimStart() ?? "";
+    const destinationEnd = linkReferenceDestinationEnd(destination);
+    if (destinationEnd < 0) continue;
+    const remainder = destination.slice(destinationEnd);
+    if (remainder && !/^[ \t]/.test(remainder)) continue;
+    const inlineTitle = remainder.trim();
+    let titleLine = inlineTitle ? lastLine : lastLine + 1;
+    let title = inlineTitle || continuation(titleLine)?.trimStart() || "";
+    if (/^["'(]/.test(title)) {
+      const quote = title[0] === "(" ? ")" : title[0]!;
+      while (!LINK_REFERENCE_TITLE_RE.test(title) && !title.slice(1).includes(quote)) {
+        const next = continuation(titleLine + 1);
+        if (next === undefined) break;
+        title += "\n" + next;
+        titleLine++;
+      }
+      if (LINK_REFERENCE_TITLE_RE.test(title)) lastLine = titleLine;
+      else if (inlineTitle) continue;
+    } else if (inlineTitle) {
+      continue;
+    }
+    labels.add(name);
+    index = lastLine;
+    scanner.breakParagraph();
+  }
+  return labels;
+}
+
+function renderMarkdownLabelMarkup(
+  label: string,
+  readCodeSpans = true,
+  definedLinkLabels = EMPTY_LINK_LABELS,
+): string {
   const escapes = "\\\\(?<escape>" + ASCII_PUNCTUATION.source + ")";
   const punctuation = /(?<ticks>\x60+)|(?<bracket>!?\[|\])|(?<emphasis>\*+|_+|~+)/.source;
   const tokens = new RegExp([escapes, MARKDOWN_AUTOLINK, punctuation, HTML_MARKUP_TOKEN].join("|"), "gi");
   const parts: string[] = [];
-  const brackets: number[] = [];
+  const brackets: { part: number; contentStart: number; image: boolean; active: boolean }[] = [];
   const delimiters = new Map<string, { part: number; length: number; remaining: number; canClose: boolean }[]>();
   let cursor = 0;
   const replace = (start: number, end: number, replacement: string) => {
@@ -996,18 +1218,35 @@ function renderMarkdownLabelMarkup(label: string, readCodeSpans = true): string 
       }
     } else if (groups.bracket === "]") {
       const opener = brackets.pop();
-      const end = opener === undefined ? -1 : markdownLabelLinkEnd(label, tokens.lastIndex);
-      if (opener !== undefined && end !== -1) {
-        parts[opener] = "";
+      if (!opener?.active) continue;
+      let end = markdownLabelLinkEnd(label, tokens.lastIndex);
+      if (end === -1 && definedLinkLabels.size) {
+        const suffix = readLinkReferenceLabel(label, tokens.lastIndex);
+        const raw = suffix?.raw || label.slice(opener.contentStart, match.index);
+        const candidate = readLinkReferenceLabel("[" + raw + "]", 0);
+        if (candidate?.raw === raw && definedLinkLabels.has(normalizeLinkReferenceLabel(raw))) {
+          end = suffix?.end ?? tokens.lastIndex;
+        }
+      }
+      if (end !== -1) {
+        parts[opener.part] = "";
         replace(match.index, end, "");
         tokens.lastIndex = end;
+        if (!opener.image) {
+          for (const previous of brackets) if (!previous.image) previous.active = false;
+        }
       }
     } else if (groups.bracket) {
-      brackets.push(replace(match.index, tokens.lastIndex, match[0]));
+      brackets.push({
+        part: replace(match.index, tokens.lastIndex, match[0]),
+        contentStart: tokens.lastIndex,
+        image: match[0].startsWith("!"),
+        active: true,
+      });
     } else if (groups.emphasis) {
       const marker = groups.emphasis;
       const symbol = marker[0]!;
-      if (symbol === "~" && marker !== "~~") continue;
+      if (symbol === "~" && marker.length > 2) continue;
       const before = label[match.index - 1] ?? " ";
       const after = label[tokens.lastIndex] ?? " ";
       const punctuation = /[\p{P}\p{S}]/u;
@@ -1026,7 +1265,11 @@ function renderMarkdownLabelMarkup(label: string, readCodeSpans = true): string 
             index--;
             continue;
           }
-          const length = opener.remaining >= 2 && remaining >= 2 ? 2 : 1;
+          if (symbol === "~" && (opener.length !== marker.length || opener.remaining !== remaining)) {
+            index--;
+            continue;
+          }
+          const length = symbol === "~" ? remaining : opener.remaining >= 2 && remaining >= 2 ? 2 : 1;
           opener.remaining -= length;
           remaining -= length;
           parts[opener.part] = symbol.repeat(opener.remaining);
@@ -1050,7 +1293,7 @@ function renderMarkdownLabelMarkup(label: string, readCodeSpans = true): string 
   return parts.length ? parts.join("") + label.slice(cursor) : label;
 }
 
-type OpenLabelTag = OpenHtmlTag & { hiddenForeign: boolean };
+type OpenLabelTag = OpenHtmlTag & { suppressedSubtree: boolean; svgText: boolean };
 
 function lastOpenHtmlTagIndex(openTags: readonly OpenHtmlTag[], tag: string): number {
   for (let index = openTags.length - 1; index >= 0; index--) {
@@ -1074,13 +1317,18 @@ function htmlLabelTextVariants(label: string) {
   const openTags: OpenLabelTag[] = [];
   let annotationIndex: number | undefined;
   let hasDetails = false;
+  const rendersText = () => {
+    const parent = openTags.at(-1);
+    return annotationIndex === undefined && !parent?.suppressedSubtree &&
+      (parent?.childrenNamespace !== "svg" || parent.svgText);
+  };
   for (let match = tokens.exec(label); match; match = tokens.exec(label)) {
-    let visibleTag = !openTags.at(-1)?.hiddenForeign;
-    if (annotationIndex === undefined && visibleTag) appendText(cursor, match.index);
+    let visibleTag = !openTags.at(-1)?.suppressedSubtree;
+    if (rendersText()) appendText(cursor, match.index);
     cursor = tokens.lastIndex;
     if (match.groups?.cdata) {
       if (openTags.at(-1)?.childrenNamespace && match[0].startsWith("<![CDATA[")) {
-        if (annotationIndex === undefined && visibleTag) {
+        if (rendersText()) {
           appendText(match.index + 9, match[0].endsWith("]]>") ? cursor - 3 : cursor, false);
         }
       } else {
@@ -1093,9 +1341,10 @@ function htmlLabelTextVariants(label: string) {
     if (tag && openTags.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
       while (openTags.at(-1)?.childrenNamespace) openTags.pop();
       if (annotationIndex !== undefined && annotationIndex >= openTags.length) annotationIndex = undefined;
-      visibleTag = !openTags.at(-1)?.hiddenForeign;
+      visibleTag = !openTags.at(-1)?.suppressedSubtree;
     }
     if (tag === "head") continue;
+    const parent = openTags.at(-1);
     const rubyTextTag = tag === "rt" || tag === "rp";
     const rubyIndex = rubyTextTag || tag === "rb" ? lastOpenHtmlTagIndex(openTags, "ruby") : -1;
     const rubyAnnotation = rubyTextTag && rubyIndex >= 0;
@@ -1129,7 +1378,12 @@ function htmlLabelTextVariants(label: string) {
       if (rubyAnnotation && annotationIndex === undefined) annotationIndex = openTags.length;
       visibleTag = visibleTag && !foreignHidden;
       if (!HTML_VOID_TAGS.has(tag) && !selfClosingForeignTag) {
-        openTags.push({ tag, childrenNamespace: htmlChildNamespace(namespace, tag, htmlAnnotation), hiddenForeign: !visibleTag });
+        openTags.push({
+          tag,
+          childrenNamespace: htmlChildNamespace(namespace, tag, htmlAnnotation),
+          suppressedSubtree: !visibleTag,
+          svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
+        });
       }
     } else if (tag && prefix === "/") {
       const index = lastOpenHtmlTagIndex(openTags, tag);
@@ -1138,13 +1392,14 @@ function htmlLabelTextVariants(label: string) {
         if (annotationIndex !== undefined && index <= annotationIndex) annotationIndex = undefined;
       }
     }
-    if (visibleTag && tag && tag !== "ruby" && !rubyAnnotation && annotationIndex === undefined) {
+    if (visibleTag && tag && tag !== "svg" && tag !== "ruby" && parent?.childrenNamespace !== "svg" &&
+      !rubyAnnotation && annotationIndex === undefined) {
       if (tag === "details" && prefix === "") hasDetails = true;
       if (HTML_LABEL_BREAK_TAGS.has(tag)) inline.push(" ");
       spaced.push(" ");
     }
   }
-  if (annotationIndex === undefined && !openTags.at(-1)?.hiddenForeign) appendText(cursor);
+  if (rendersText()) appendText(cursor);
   const normalize = (parts: readonly string[]) => parts.join("").replace(INVISIBLE_LABEL_TEXT, "").replace(/\s+/g, " ").trim();
   return { inline: normalize(inline), spaced: normalize(spaced), hasDetails };
 }
@@ -1154,6 +1409,7 @@ function classifyDetailsElement(
   openEnd: number,
   { summary }: DetailsBounds,
   activeVisibility: PedagogicalVisibility,
+  definedLinkLabels: ReadonlySet<string>,
 ): {
   readonly kind: PedagogicalBlockKind;
   readonly visibility: PedagogicalVisibility;
@@ -1161,7 +1417,7 @@ function classifyDetailsElement(
   readonly summaryEndOffset: number | null;
 } {
   if (summary && !text.slice(openEnd, summary.openStart).replace(HTML_COMMENT_RE, "").trim()) {
-    const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false);
+    const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false, definedLinkLabels);
     const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
@@ -1339,7 +1595,8 @@ function innermostQuoteBody(line: string): string | null {
 const HTML_TYPE_6_BLOCK_START_RE =
   /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$)/i;
 const HTML_OTHER_BLOCK_START_RE = /^ {0,3}<(?:\?|!(?:--|\[CDATA\[|[A-Z])|\/?(?:pre|script|style|textarea)(?=[ \t/>]|$))/i;
-const STANDALONE_HTML_TAG_RE = /^[ ]{0,3}<\/?[A-Za-z][\w-]*(?:[ \t]+[^<>]*?)?\/?>[ \t]*$/;
+const STANDALONE_HTML_TAG_RE =
+  /^ {0,3}(?:<\/[a-z][a-z0-9-]*[ \t]*>|<[a-z][a-z0-9-]*(?:[ \t]+[a-z_:][\w.:-]*(?:[ \t]*=[ \t]*(?:"[^"]*"|'[^']*'|[^ \t"'=<>\x60]+))?)*[ \t]*\/?>)[ \t]*$/i;
 
 function interruptsPipeTable(line: string): boolean {
   return matchFenceOpening(line) !== null || /^[ \t]{0,3}(?::{3,}|#{1,6}(?:[ \t]|$)|>)/.test(line) ||
@@ -1368,8 +1625,8 @@ function isPipeTableStart(header: string, delimiter?: string): boolean {
   return pipeTableHeaderCells({ raw: header, start: 0 }, delimiter) !== null;
 }
 
-function tableColumnVisibility(label: string): PedagogicalVisibility {
-  if (/[<\\*_[~\x60]/.test(label)) label = renderMarkdownLabelMarkup(label);
+function tableColumnVisibility(label: string, definedLinkLabels = EMPTY_LINK_LABELS): PedagogicalVisibility {
+  if (/[<\\*_[~\x60]/.test(label)) label = renderMarkdownLabelMarkup(label, true, definedLinkLabels);
   const { inline, spaced } = /[<&]|\p{Cf}/u.test(label) ? htmlLabelTextVariants(label) : { inline: label, spaced: label };
   if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
   if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";
@@ -1422,13 +1679,15 @@ function tableBoundaryVisibility(
   return visibility;
 }
 
-function getTableColumnVisibilities(header: string, cells: readonly { start: number; end: number }[], start = 0) {
-  return cells.map(cell => tableColumnVisibility(header.slice(cell.start - start, cell.end - start)));
+function getTableColumnVisibilities(
+  header: string, cells: readonly { start: number; end: number }[], definedLinkLabels: ReadonlySet<string>, start = 0,
+) {
+  return cells.map(cell => tableColumnVisibility(header.slice(cell.start - start, cell.end - start), definedLinkLabels));
 }
 
 type ReadMarkdownLine = (index: number) => string | undefined;
 
-function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
+function createProtectedSetextLookup(readRaw: ReadMarkdownLine, definedLinkLabels: ReadonlySet<string>) {
   let checkedBefore = -1;
   let checkedContainers: readonly MarkdownContainer[] = [];
   let checkedColumns: readonly PedagogicalVisibility[] | undefined;
@@ -1451,7 +1710,7 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
       const line = continueMarkdownContainers(raw, containers);
       if (index !== start && line.depth !== containers.length) return undefined;
       const titleLine = index === start ? body : line.body;
-      if (columns && tableColumnVisibility(titleLine) !== "public") {
+      if (columns && tableColumnVisibility(titleLine, definedLinkLabels) !== "public") {
         firstProtectedTitleLine = Math.min(firstProtectedTitleLine, index);
       }
       // Data rows cannot become an earlier part of a later hint heading and lose column protection.
@@ -1465,7 +1724,7 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
     if (paragraph.level !== undefined) {
       const title: string[] = [];
       for (let index = start; index < paragraph.index; index++) title.push(readLine(index)!);
-      if (tableColumnVisibility(title.join("\n")) !== "public") return paragraph.index;
+      if (tableColumnVisibility(title.join("\n"), definedLinkLabels) !== "public") return paragraph.index;
     }
     checkedBefore = paragraph.index;
     checkedContainers = containers;
@@ -1516,6 +1775,7 @@ function closesFence(line: string, opener: string): boolean {
 
 function createTranscriptCueSeparator(
   cueTexts: readonly string[],
+  definedLinkLabels: ReadonlySet<string>,
   preserveBoundaryVisibility?: (cueIndex: number, offset: number, visibility: PedagogicalVisibility) => void,
 ) {
   const lines: string[] = [];
@@ -1540,7 +1800,7 @@ function createTranscriptCueSeparator(
   let latexArgumentThrough = -1;
   let literalEnvironment: string | undefined;
   const mathEnvironments: string[] = [];
-  const protectedUnderline = createProtectedSetextLookup(index => lines[index]);
+  const protectedUnderline = createProtectedSetextLookup(index => lines[index], definedLinkLabels);
   const readCaptionRow = (index: number) => ({
     ...continueMarkdownContainers(lines[index]!, containers),
     captionRow: true,
@@ -1598,7 +1858,7 @@ function createTranscriptCueSeparator(
       const sameContainer = current.continuedDepth === containers.length &&
         current.continuedDepth === current.containers.length;
       const headerCells = sameContainer ? pipeTableHeaderCells({ raw: previousBody, start: 0 }, current.body) : null;
-      tableColumns = headerCells ? getTableColumnVisibilities(previousBody, headerCells) : undefined;
+      tableColumns = headerCells ? getTableColumnVisibilities(previousBody, headerCells, definedLinkLabels) : undefined;
       containers = current.containers;
       previousBody = current.body;
     }
@@ -1638,6 +1898,21 @@ function createTranscriptCueSeparator(
     tableColumns = undefined;
     return newline.repeat(2);
   };
+}
+
+function collectCueLinkReferenceLabels(
+  bodies: readonly string[],
+  joinsNext: (index: number) => boolean = () => true,
+  breaksBefore: (index: number) => boolean = () => false,
+): ReadonlySet<string> {
+  if (!bodies.some(body => body.includes("]:"))) return EMPTY_LINK_LABELS;
+  const separator = createTranscriptCueSeparator(bodies, EMPTY_LINK_LABELS);
+  const projected = bodies.map((body, index) => {
+    const joinNext = joinsNext(index);
+    const boundary = separator(index, joinNext, breaksBefore(index));
+    return body + (joinNext ? boundary : "\n");
+  }).join("");
+  return collectLinkReferenceLabels(splitLinesWithOffsets(projected).map(line => line.raw));
 }
 
 function nextMarkdownColumn(column: number, character: string): number {
@@ -1902,6 +2177,8 @@ function findInlineConstructSpans(
   sealProofs: boolean,
   tableLiterals = false,
   includeInlineCode = false,
+  definedLinkLabels = EMPTY_LINK_LABELS,
+  inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text),
 ): InlineConstructSpan[] {
   const spans: InlineConstructSpan[] = [];
   let i = rangeStart;
@@ -1960,8 +2237,8 @@ function findInlineConstructSpans(
       const m = DETAILS_OPEN_RE.exec(text.slice(i));
       if (m) {
         const openEnd = i + m[0].length;
-        const bounds = findMatchingDetailsBounds(text, i, openEnd);
-        const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility);
+        const bounds = findMatchingDetailsBounds(text, i, openEnd, inheritsHtmlBlock);
+        const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility, definedLinkLabels);
         spans.push({
           start: i,
           end: bounds.closeEnd,
@@ -2035,6 +2312,7 @@ function parsePrefixedInnerBlocks(
   outerVisibility: PedagogicalVisibility,
   propagateSectionVisibility: boolean,
   innerSealProofs: boolean,
+  definedLinkLabels: ReadonlySet<string>,
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   readPrefix = (line: SourceLine, _index: number) => ({
@@ -2103,6 +2381,7 @@ function parsePrefixedInnerBlocks(
         if (original) observeHeading(original.start, level);
       },
     } : headingContext,
+    definedLinkLabels,
   );
 
   return innerAst.map(b => {
@@ -2202,6 +2481,7 @@ function scanInlineCueTimings(
   lines: readonly SourceLine[],
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
+  definedLinkLabels: ReadonlySet<string> = EMPTY_LINK_LABELS,
 ) {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
@@ -2213,7 +2493,7 @@ function scanInlineCueTimings(
     const raw = lines[index]?.raw;
     return raw?.slice(cueTimings[index]?.prefixLength ?? 0);
   };
-  const protectedUnderline = createProtectedSetextLookup(readCueBody);
+  const protectedUnderline = createProtectedSetextLookup(readCueBody, definedLinkLabels);
   const tableBreakVisibilities = new Map<number, PedagogicalVisibility>();
   const timings = lines.map(({ raw, start }, index) => {
     const timing = cueTimings[index]!;
@@ -2291,7 +2571,7 @@ function scanInlineCueTimings(
       const header = timedHeader ? projectedHeader : documentLine;
       containers = header.containers;
       table = {
-        columns: getTableColumnVisibilities(header.body, cells),
+        columns: getTableColumnVisibilities(header.body, cells, definedLinkLabels),
         timed: timedHeader !== null,
         delimiterIndex: index + 1,
       };
@@ -2314,6 +2594,7 @@ function parseInlineCuedDocument(
   tableBreakVisibilities: ReadonlyMap<number, PedagogicalVisibility>,
   options: AstParseOptions,
   sealProofs: boolean,
+  definedLinkLabels: ReadonlySet<string>,
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   headingContext?: HeadingContext,
@@ -2325,7 +2606,7 @@ function parseInlineCuedDocument(
   const observeHeading = headingContext?.onHeading;
   const projectedLineOrigins = observeHeading && new Map<number, number>();
   const bodies = lines.map((line, index) => line.raw.slice(timings[index]?.prefixLength ?? 0));
-  const cueSeparator = createTranscriptCueSeparator(bodies);
+  const cueSeparator = createTranscriptCueSeparator(bodies, definedLinkLabels);
   let offset = 0;
   for (const [index, line] of lines.entries()) {
     const timing = timings[index];
@@ -2370,7 +2651,7 @@ function parseInlineCuedDocument(
       const original = projectedLineOrigins?.get(projectedOffset);
       if (original !== undefined) observeHeading(original, level);
     },
-  } : headingContext));
+  } : headingContext, definedLinkLabels));
   const blocks: PedagogicalAstBlock[] = [];
   for (const region of regions) {
     const { start, end, sourceStart, cue } = region;
@@ -2431,18 +2712,35 @@ function parsePedagogicalAstInternal(
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   headingContext?: HeadingContext,
+  inheritedLinkLabels?: ReadonlySet<string>,
 ): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
-  const { timings, tableBreakVisibilities } = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors);
+  const initialTimings = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, inheritedLinkLabels);
+  const hasCueTimings = initialTimings.timings.some(Boolean);
+  const boundaryBefore = (index: number) => initialTimings.tableBreakVisibilities.has(index) ||
+    boundaryFloors?.has(lines[index]?.start ?? -1) === true;
+  const definedLinkLabels = inheritedLinkLabels ?? (text.includes("]:")
+    ? hasCueTimings
+      ? collectCueLinkReferenceLabels(
+          lines.map(({ raw }, index) => raw.slice(initialTimings.timings[index]?.prefixLength ?? 0)),
+          index => Boolean(initialTimings.timings[index] && initialTimings.timings[index + 1] && !boundaryBefore(index + 1)),
+          boundaryBefore,
+        )
+      : collectLinkReferenceLabels(lines.map(line => line.raw))
+    : EMPTY_LINK_LABELS);
+  const { timings, tableBreakVisibilities } = hasCueTimings && !inheritedLinkLabels && definedLinkLabels.size
+    ? scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, definedLinkLabels)
+    : initialTimings;
   if (timings.some(Boolean)) {
     return parseInlineCuedDocument(text, lines, timings, tableBreakVisibilities,
-      options, sealProofs, captionRowStarts, boundaryFloors, headingContext);
+      options, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors, headingContext);
   }
-  const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(index => lines[index]?.raw);
+  const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(index => lines[index]?.raw, definedLinkLabels);
   const blocks: PedagogicalAstBlock[] = [];
+  const inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text);
   const headingStack = headingContext?.stack ?? [];
   const sectionBaseVisibility = headingContext?.baseVisibility ?? defaultVisibility;
   let localHeading: HeadingScope | undefined;
@@ -2473,6 +2771,8 @@ function parsePedagogicalAstInternal(
       sealProofs || kind === "exercise",
       rebasedCaptions,
       rebasedFloors,
+      undefined,
+      definedLinkLabels,
     ).map(block => ({
       ...block,
       startOffset: start + block.startOffset,
@@ -2572,7 +2872,7 @@ function parsePedagogicalAstInternal(
     startLineIdx: number,
     defaultNextLineIdx: number,
   ): number => {
-    const inlineSpans = findInlineConstructSpans(text, rangeStart, rangeEnd, activeVis, sealProofs);
+    const inlineSpans = findInlineConstructSpans(text, rangeStart, rangeEnd, activeVis, sealProofs, false, false, definedLinkLabels, inheritsHtmlBlock);
     if (inlineSpans.length === 0) {
       const proseBounds = trimWhitespaceBounds(text, rangeStart, rangeEnd, false);
       if (proseBounds) {
@@ -2816,6 +3116,10 @@ function parsePedagogicalAstInternal(
         inlineEnd,
         defaultVisibility,
         sealProofs,
+        false,
+        false,
+        definedLinkLabels,
+        inheritsHtmlBlock,
       );
       const nonMathInlineSpans = rawInlineSpans.filter(s => s.kind !== "display_math");
       const cleanHeadingTitle =
@@ -2831,7 +3135,7 @@ function parsePedagogicalAstInternal(
       const isSectionHeading = line.start > 0 || !headingContext?.firstHeadingIsLocal;
       if (isSectionHeading) headingContext?.onHeading?.(line.start, level);
       if (propagateSectionVisibility) {
-        const titleVisibility = tableColumnVisibility(cleanHeadingTitle);
+        const titleVisibility = tableColumnVisibility(cleanHeadingTitle, definedLinkLabels);
         const ownVisibility = titleVisibility === "public" ? sectionBaseVisibility : titleVisibility;
         const visibility = maxVisibility(ownVisibility, boundaryFloor);
         if (isSectionHeading) {
@@ -2848,7 +3152,7 @@ function parsePedagogicalAstInternal(
       const activeVis = maxVisibility(getActiveSectionVisibility(), boundaryFloor);
       const headingInlineSpans =
         rawInlineSpans.length > 0
-          ? findInlineConstructSpans(text, line.start, inlineEnd, activeVis, sealProofs)
+          ? findInlineConstructSpans(text, line.start, inlineEnd, activeVis, sealProofs, false, false, definedLinkLabels, inheritsHtmlBlock)
           : [];
       const extracted = extractProtectedBlocksFromSpans(headingInlineSpans, inlineEnd, activeVis);
       if (extracted.length > 0) {
@@ -3120,9 +3424,9 @@ function parsePedagogicalAstInternal(
       const leadingWs = raw.length - raw.trimStart().length;
       const detailsStart = line.start + leadingWs;
       const openEndOffset = detailsStart + detailsOpenMatch[0].length;
-      const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset);
+      const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset, inheritsHtmlBlock);
       const { closeStart, closeEnd } = bounds;
-      const classified = classifyDetailsElement(text, openEndOffset, bounds, activeVis);
+      const classified = classifyDetailsElement(text, openEndOffset, bounds, activeVis, definedLinkLabels);
       const endLineIdx = lineIndexContaining(lines, Math.max(detailsStart, closeEnd - 1), i);
       const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
       const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
@@ -3215,7 +3519,7 @@ function parsePedagogicalAstInternal(
           const levels = new Map<number, number>();
           const quoteEnd = findBlockquoteEnd(lines, i, () => false);
           parsePrefixedInnerBlocks(
-            lines, i, quoteEnd - 1, null, activeVis, false, sealProofs, captionRowStarts, boundaryFloors,
+            lines, i, quoteEnd - 1, null, activeVis, false, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors,
             quoted => ({
               length: CALLOUT_RE.test(quoted.raw) ? quoted.raw.length : BLOCKQUOTE_PREFIX_RE.exec(quoted.raw)?.[0].length ?? 0,
               padding: 0,
@@ -3251,7 +3555,7 @@ function parsePedagogicalAstInternal(
           pushBlock(classified.kind, classified.visibility, true, outerStart, lines[resetAt - 1]!.contentEnd);
           const innerBlocks = parsePrefixedInnerBlocks(
             lines, resetAt, endLineIdx, null, intrinsic.visibility, propagateSectionVisibility, sealProofs,
-            captionRowStarts, boundaryFloors, undefined,
+            definedLinkLabels, captionRowStarts, boundaryFloors, undefined,
             { stack: quotedHeadings, baseVisibility: getActiveSectionVisibility() },
           );
           emitContainerWithExtraction(
@@ -3267,6 +3571,7 @@ function parsePedagogicalAstInternal(
             classified.visibility,
             propagateSectionVisibility,
             sealProofs || classified.kind === "exercise",
+            definedLinkLabels,
             captionRowStarts,
             boundaryFloors,
             undefined,
@@ -3324,6 +3629,7 @@ function parsePedagogicalAstInternal(
           activeVis,
           propagateSectionVisibility,
           sealProofs,
+          definedLinkLabels,
           captionRowStarts,
           boundaryFloors,
           undefined,
@@ -3389,6 +3695,7 @@ function parsePedagogicalAstInternal(
         activeVis,
         propagateSectionVisibility,
         sealProofs,
+        definedLinkLabels,
         captionRowStarts,
         boundaryFloors,
         (bodyLine, index) => index === i
@@ -3404,7 +3711,7 @@ function parsePedagogicalAstInternal(
     // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
     if (tableHeaderCells) {
       let j = i + 2;
-      const columns = getTableColumnVisibilities(raw, tableHeaderCells, line.start);
+      const columns = getTableColumnVisibilities(raw, tableHeaderCells, definedLinkLabels, line.start);
       while (j < lines.length) {
         const row = lines[j]!;
         if (boundaryFloors?.has(row.start)) break;
@@ -3427,7 +3734,7 @@ function parsePedagogicalAstInternal(
       const tableStart = line.start;
       const tableEnd = lines[endLineIdx]!.contentEnd;
 
-      const inlineSpans = findInlineConstructSpans(text, tableStart, tableEnd, activeVis, sealProofs, true);
+      const inlineSpans = findInlineConstructSpans(text, tableStart, tableEnd, activeVis, sealProofs, true, false, definedLinkLabels, inheritsHtmlBlock);
       const extracted = extractProtectedBlocksFromSpans(inlineSpans, tableEnd, activeVis);
 
       extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
@@ -3436,7 +3743,7 @@ function parsePedagogicalAstInternal(
       const headerCells = activeVis === "sealed" ? [] : tableHeaderCells;
       const colPolicies = headerCells.map(cell => {
         const cellText = sanitizeHeaderLabel(text, cell.start, cell.end, extracted, "");
-        const visibility = tableColumnVisibility(cellText);
+        const visibility = tableColumnVisibility(cellText, definedLinkLabels);
         if (visibility === "sealed") {
           return { kind: "solution" as const, visibility: maxVisibility("sealed", activeVis), label: cellText };
         }
@@ -3599,7 +3906,7 @@ function parsePedagogicalAstInternal(
           let limit = j + 1;
           while (limit < lines.length && !endsParagraph(limit)) limit++;
           inlineSpans = findInlineConstructSpans(
-            text, line.start, lines[limit - 1]!.contentEnd, blockVisibility, sealProofs, false, true,
+            text, line.start, lines[limit - 1]!.contentEnd, blockVisibility, sealProofs, false, true, definedLinkLabels, inheritsHtmlBlock,
           );
         }
         let span = inlineSpans[spanIndex];
@@ -3939,7 +4246,9 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
   const captionRowStarts = new Set<number>();
   const textParts: string[] = [];
   const boundaryLines: { cueIndex: number; offset: number; visibility: PedagogicalVisibility }[] = [];
-  const cueSeparator = createTranscriptCueSeparator(input.cues.map(cue => cue.text), (cueIndex, offset, visibility) => {
+  const cueTexts = input.cues.map(cue => cue.text);
+  const definedLinkLabels = collectCueLinkReferenceLabels(cueTexts);
+  const cueSeparator = createTranscriptCueSeparator(cueTexts, definedLinkLabels, (cueIndex, offset, visibility) => {
     boundaryLines.push({ cueIndex, offset, visibility });
   });
   let virtualOffset = 0;
@@ -3958,7 +4267,7 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
     boundaryFloorByProjectedOffset.set(offset, maxVisibility(existing, boundary.visibility));
   }
   const readRange = readAstRanges(parsePedagogicalAstInternal(
-    text, { defaultVisibility }, false, captionRowStarts, boundaryFloorByProjectedOffset,
+    text, { defaultVisibility }, false, captionRowStarts, boundaryFloorByProjectedOffset, undefined, definedLinkLabels,
   ));
   const chunks: PedagogicalChunk[] = [];
   let seq = 0;
