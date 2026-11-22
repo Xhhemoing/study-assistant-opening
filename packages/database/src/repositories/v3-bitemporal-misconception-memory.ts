@@ -61,15 +61,16 @@ export function renderLearnerContextBlock(items: readonly ContextItem[]) {
 
 async function lockWorkspace(tx: TransactionSql, scope: OpeningScope): Promise<number> {
   await lockWorkspaceLearningHistory(tx, scope);
+  // Serialize writers and context rebuilds while allowing foreign-key key shares.
   const [workspace] = await tx<{ privacy_epoch: number }[]>`
     SELECT privacy_epoch FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-    FOR UPDATE`;
+    FOR NO KEY UPDATE`;
   if (!workspace) throw learningError("NOT_FOUND", "学习空间不存在。");
   return workspace.privacy_epoch;
 }
 
 async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
-  // The migration's course-cascade trigger holds this same lock when invalidating the cache.
+  // The migration's revision trigger holds this same lock when invalidating the cache.
   await tx`SELECT pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || ${workspaceId}::uuid::text, 0))`;
 }
 
@@ -96,6 +97,7 @@ async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: 
   return block!;
 }
 
+/** The caller holds the workspace lock before mutating revisions and refreshing the cache. */
 export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
   await lockMisconceptionContext(tx, scope.workspaceId);
   return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
@@ -106,6 +108,7 @@ export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: Open
     const [workspace] = await tx<{ privacy_epoch: number }[]>`
       SELECT privacy_epoch FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
     if (!workspace) return null;
+    // Read revision snapshots without row locks while holding the invalidation lock.
     await lockMisconceptionContext(tx, scope.workspaceId);
     const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
     const at = clock!.at;
@@ -217,26 +220,31 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
 
     const edgeId = deriveTryHandoffUuid("edge", claim.receiptId);
     const initialRevisionId = deriveTryHandoffUuid("initial-revision", claim.receiptId);
-    // Backups retain the root revision and omit the server-owned receipt ledger.
+    // Backups retain revisions and omit the receipt ledger. Look up both identities
+    // globally so a restored revision attached to another edge is still a conflict.
     const [root] = await tx<{ revisionId: string; matches: boolean }[]>`
       SELECT revision_id AS "revisionId",
-        (workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-          AND origin = 'public_try_handoff' AND concept_key = ${claim.conceptKey}
+        (edge_id = ${edgeId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+          AND prior_revision_id IS NULL AND course_id IS NULL AND cardinality(evidence_attempt_ids) = 0
+          AND origin = 'public_try_handoff' AND status = 'candidate' AND concept_key = ${claim.conceptKey}
           AND misconception_code = ${claim.misconceptionCode} AND summary = ${claim.summary}) AS matches
-      FROM v3_bitemporal_misconception_edges WHERE edge_id = ${edgeId} AND prior_revision_id IS NULL
+      FROM v3_bitemporal_misconception_edges
+      WHERE revision_id = ${initialRevisionId} OR (edge_id = ${edgeId} AND prior_revision_id IS NULL)
       ORDER BY (revision_id = ${initialRevisionId}) DESC, revision_id LIMIT 1`;
     if (root && (!root.matches || root.revisionId.toLowerCase() !== initialRevisionId)) {
       throw learningError("CONFLICT", "体验记录已被使用。");
     }
     const at = clock!.at;
     if (!root) {
-      await tx`
+      const [inserted] = await tx`
         INSERT INTO v3_bitemporal_misconception_edges
           (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin,
            privacy_epoch, valid_range, tx_range)
         VALUES (${initialRevisionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${claim.conceptKey},
           ${claim.misconceptionCode}, ${claim.summary}, 'candidate', 'public_try_handoff', ${privacyEpoch},
-          tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))`;
+          tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))
+        ON CONFLICT DO NOTHING RETURNING revision_id`;
+      if (!inserted) throw learningError("CONFLICT", "体验记录已被使用。");
     }
     const [claimed] = await tx`
       INSERT INTO v3_try_misconception_handoff_receipts

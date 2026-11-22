@@ -182,7 +182,9 @@ it("uses fresh post-lock transaction time and advances rapid revisions by at lea
   const { sql, scope } = f;
   const released = await seedEdge();
   const writer = await openRaceSession().ready;
+  const reader = await openRaceSession().ready;
   let correction: ReturnType<typeof applyLearnerMisconceptionCorrection> | undefined;
+  let context: ReturnType<typeof readLearnerMisconceptionContextBlock> | undefined;
   try {
     const releasedAt = await sql.begin(async tx => {
       await tx`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE revision_id=${released.revisionId} FOR UPDATE`;
@@ -191,14 +193,27 @@ it("uses fresh post-lock transaction time and advances rapid revisions by at lea
         { edgeId: released.edgeId, disposition: "clarified", summary: "After the row lock" }));
       await waitUntilBlocked(sql, writer.pid, holder!.pid, "correction waits for edge lock",
         /FROM v3_bitemporal_misconception_edges[\s\S]+FOR UPDATE/);
+      context = track(readLearnerMisconceptionContextBlock(reader.sql, scope));
+      await waitUntilBlocked(sql, reader.pid, writer.pid, "context waits for workspace before reading revisions",
+        /FROM workspaces[\s\S]+FOR SHARE/);
+      // The earlier transaction can still complete an insert's workspace FK check.
+      await tx`INSERT INTO v3_bitemporal_misconception_edges
+        (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
+         summary, status, origin, valid_range, tx_range)
+        SELECT ${randomUUID()}, workspace_id, owner_user_id, ${randomUUID()}, concept_key, misconception_code,
+          'Concurrent diagnosis', status, origin, valid_range, tx_range
+        FROM v3_bitemporal_misconception_edges WHERE revision_id=${released.revisionId}`;
       const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
       return clock!.at;
     });
     const result = await correction!;
     const [time] = await sql`SELECT ${result.txAt}::text::timestamptz >= ${releasedAt}::text::timestamptz AS after_lock`;
     expect(time!.after_lock).toBe(true);
+    await expect(context).resolves.toEqual(result.contextBlock);
   } finally {
     await correction?.catch(() => undefined);
+    await context?.catch(() => undefined);
+    await reader.sql.end({ timeout: 5 });
     await writer.sql.end({ timeout: 5 });
   }
 
@@ -388,6 +403,35 @@ it("rebuilds a context snapshot that was rendered at a future transaction bounda
   });
 });
 
+it("invalidates cached context after a retroactive transaction closure or insert", async () => {
+  const { sql, scope } = f;
+  const initial = await seedEdge();
+  const first = await readLearnerMisconceptionContextBlock(sql, scope);
+  expect(first?.renderedMarkdown).toBe("- 已确认：Initial diagnosis");
+  const readCache = () => sql<{ updated_at: string; rendered_markdown: string }[]>`
+    SELECT updated_at::text, rendered_markdown FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
+  const [snapshot] = await readCache();
+
+  const [closed] = await sql`UPDATE v3_bitemporal_misconception_edges
+    SET tx_range = tstzrange(lower(tx_range), lower(tx_range) + interval '1 microsecond', '[)')
+    WHERE revision_id=${initial.revisionId}
+    RETURNING upper(tx_range) < ${snapshot!.updated_at}::text::timestamptz AS closed_before_snapshot`;
+  expect(closed?.closed_before_snapshot).toBe(true);
+  const cacheAfterClosure = await readCache();
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({ renderedMarkdown: "", byteLength: 0 });
+  expect(cacheAfterClosure).toEqual([]);
+
+  await sql`INSERT INTO v3_bitemporal_misconception_edges
+    (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
+     summary, status, origin, valid_range, tx_range)
+    SELECT ${randomUUID()}, workspace_id, owner_user_id, ${randomUUID()}, concept_key, misconception_code,
+      'Backdated diagnosis', status, origin, valid_range, tstzrange(lower(tx_range), NULL, '[)')
+    FROM v3_bitemporal_misconception_edges WHERE revision_id=${initial.revisionId}`;
+  const cacheAfterInsert = await readCache();
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({ renderedMarkdown: "- 已确认：Backdated diagnosis" });
+  expect(cacheAfterInsert).toEqual([]);
+});
+
 it("rejects a course change on the same edge at the database and restore boundaries", async () => {
   const { sql, scope } = f;
   const course = randomUUID(), otherCourse = randomUUID();
@@ -425,7 +469,7 @@ it("rejects a course change on the same edge at the database and restore boundar
   expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${root.edgeId}`).toEqual([]);
 });
 
-it("rejects a substituted archived root revision on signed receipt replay", async () => {
+it.each(["revision_id", "edge_id"] as const)("rejects a substituted archived root %s on signed receipt replay", async field => {
   const { sql, scope } = f;
   const receipt = issueTryMisconceptionReceipt(selection, secret);
   const original = await redeem(tryRequest("POST", { receipt }));
@@ -434,14 +478,15 @@ it("rejects a substituted archived root revision on signed receipt replay", asyn
   const archive = await exportMisconceptionArchive();
   const root = archive.tables.v3_bitemporal_misconception_edges![0] as Record<string, unknown>;
   expect(root).toMatchObject({ edge_id: edgeId, revision_id: revisionId });
-  const substitutedId = randomUUID();
-  root.revision_id = substitutedId;
+  root[field] = randomUUID();
   await recreateEmptyWorkspace();
   const restored = await restoreMisconceptionArchive(archive);
   expect(restored, restored.errors.join(", ")).toMatchObject({ ok: true });
-  expect((await redeem(tryRequest("POST", { receipt }))).status).toBe(409);
-  expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${edgeId}`)
-    .toEqual([{ revision_id: substitutedId }]);
+  const conflict = await redeem(tryRequest("POST", { receipt }));
+  expect(conflict.status).toBe(409);
+  expect(await conflict.json()).toMatchObject({ error: { code: "CONFLICT" } });
+  expect(await sql`SELECT revision_id, edge_id FROM v3_bitemporal_misconception_edges WHERE workspace_id=${scope.workspaceId}`)
+    .toEqual([{ edge_id: root.edge_id, revision_id: root.revision_id }]);
   expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
 });
 

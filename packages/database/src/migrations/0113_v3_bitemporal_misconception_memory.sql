@@ -89,19 +89,21 @@ CREATE TABLE v3_learner_context_blocks (
 );
 
 CREATE FUNCTION v3_invalidate_misconception_context() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  affected_workspace_id uuid := COALESCE(NEW.workspace_id, OLD.workspace_id);
 BEGIN
-  IF EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id) THEN
-    -- Serialize with context refreshes, including ones creating a new cache row.
-    PERFORM pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || OLD.workspace_id::text, 0));
-    DELETE FROM v3_learner_context_blocks
-      WHERE workspace_id = OLD.workspace_id AND owner_user_id = OLD.owner_user_id;
+  IF EXISTS (SELECT 1 FROM workspaces WHERE id = affected_workspace_id) THEN
+    -- The revision lock is already held. Use only the cache lock here so a cascade
+    -- or direct SQL mutation cannot wait for a workspace lock held by a revision writer.
+    PERFORM pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || affected_workspace_id::text, 0));
+    DELETE FROM v3_learner_context_blocks WHERE workspace_id = affected_workspace_id;
   END IF;
   RETURN NULL;
 END;
 $$;
 
 CREATE TRIGGER v3_invalidate_misconception_context
-  AFTER DELETE ON v3_bitemporal_misconception_edges
+  AFTER INSERT OR UPDATE OR DELETE ON v3_bitemporal_misconception_edges
   FOR EACH ROW EXECUTE FUNCTION v3_invalidate_misconception_context();
 
 CREATE TABLE v3_try_misconception_handoff_receipts (

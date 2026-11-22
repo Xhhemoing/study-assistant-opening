@@ -4,6 +4,10 @@ import { readLearnerMisconceptionContextBlock, redeemTryMisconceptionHandoff, re
 
 const scope = { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerUserId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
 const at = "2026-11-21 12:00:00.000001+00";
+const claim = {
+  receiptId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", expiresAt: Date.UTC(2026, 10, 21, 12, 0, 1),
+  payloadSha256: "a".repeat(64), conceptKey: "limit", misconceptionCode: "conditions", summary: "Review the conditions.",
+};
 
 function mockTransaction(...responses: unknown[][]) {
   const query = vi.fn();
@@ -21,16 +25,21 @@ it("replaces an unusable cached context using the same database timestamp for re
 });
 
 it("denies a restored root with a different revision identity even when its scope and content match", async () => {
-  const receiptId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const { sql, query } = mockTransaction(
     [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],
     [{ at, expired: false }], [], [{ matches: true, revisionId: scope.workspaceId }],
   );
-  await expect(redeemTryMisconceptionHandoff(sql, scope, {
-    receiptId, expiresAt: Date.parse(at) + 1000, payloadSha256: "a".repeat(64),
-    conceptKey: "limit", misconceptionCode: "conditions", summary: "Review the conditions.",
-  })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(query).toHaveBeenCalledTimes(8);
+});
+
+it("rejects a competing revision insert without recording a receipt claim", async () => {
+  const { sql, query } = mockTransaction(
+    [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],
+    [{ at, expired: false }], [], [], [],
+  );
+  await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query).toHaveBeenCalledTimes(9);
 });
 
 describe("LearnerContextBlock rendering", () => {
