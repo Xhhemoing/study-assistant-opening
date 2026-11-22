@@ -406,11 +406,7 @@ export function validateOpeningRestore(
   }
   const misconceptionHistory = tables.v3_bitemporal_misconception_edges ?? [];
   if (!orderBackupMisconceptionRevisions(misconceptionHistory)) errors.push("invalid misconception revision lineage");
-  errors.push(...validateBackupMisconceptionRevisions(tables));
-  if (misconceptionHistory.some(row => !Number.isSafeInteger(row.privacy_epoch)
-    || Number(row.privacy_epoch) < 0 || Number(row.privacy_epoch) > Number(backup.privacyEpoch))) {
-    errors.push("misconception revision privacy epoch is outside the archive epoch");
-  }
+  errors.push(...validateBackupMisconceptionRevisions(tables, backup.privacyEpoch as number));
   validateBackupWorkspaceAssets(tables, errors);
   validateWorkspaceHistory(tables, errors);
   validateRetestReferences(tables, errors);

@@ -765,6 +765,13 @@ it("round-trips misconception corrections through a v1 workspace backup and rebu
   const restore = () => restoreMisconceptionArchive(archive);
   await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
   await expect(restore()).resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  const mixedEpochArchive = { ...archive, privacyEpoch: 1, tables: { ...archive.tables,
+    v3_bitemporal_misconception_edges: [exported[0]!, { ...exported[1]!, privacy_epoch: 1 }],
+  } };
+  await expect(restoreMisconceptionArchive(mixedEpochArchive)).resolves.toMatchObject({
+    ok: false, code: "PREFLIGHT_REJECTED", mutated: false,
+    errors: ["misconception revision privacy epoch does not match the archive epoch"],
+  });
   expect(await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId)).toEqual(counts);
   await sql`UPDATE workspaces SET privacy_epoch=0 WHERE id=${scope.workspaceId}`;
   const restored = await restore();

@@ -51,6 +51,7 @@ export function orderBackupMisconceptionRevisions(rows: readonly Record<string, 
 
 export function validateBackupMisconceptionRevisions(
   tables: Record<string, Record<string, unknown>[]>,
+  archivePrivacyEpoch: number,
 ): string[] {
   const rows = tables.v3_bitemporal_misconception_edges ?? [];
   if (!rows.length) return [];
@@ -58,6 +59,9 @@ export function validateBackupMisconceptionRevisions(
   const courseIds = new Set((tables.courses ?? []).map(row => row.id).filter(isUuid).map(id => id.toLowerCase()));
   const errors = new Set<string>();
   for (const row of rows) {
+    if (row.privacy_epoch !== archivePrivacyEpoch) {
+      errors.add("misconception revision privacy epoch does not match the archive epoch");
+    }
     const evidence = uuidList(row.evidence_attempt_ids) ? row.evidence_attempt_ids : null;
     if (!evidence || evidence.some(id => !attemptIds.has(id.toLowerCase()))) {
       errors.add("misconception revision references invalid or missing archived attempts");

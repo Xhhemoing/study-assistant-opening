@@ -21,6 +21,33 @@ it.each(["self", "two revisions"])("rejects a %s predecessor cycle during restor
   });
 });
 
+it.each([
+  { name: "a mixed epoch-0 root and epoch-1 correction", epochs: [0, 1] },
+  { name: "an epoch-0 root", epochs: [0] },
+  { name: "an epoch-2 root", epochs: [2] },
+  { name: "a string epoch", epochs: ["1"] },
+])("rejects $name in an epoch-1 archive", ({ epochs }) => {
+  const root = {
+    workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
+    status: "verified", origin: "system_diagnosis", course_id: null, evidence_attempt_ids: [],
+    privacy_epoch: 1,
+  };
+  const correction = {
+    ...root, revision_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", prior_revision_id: root.revision_id,
+    status: "learner_reported", origin: "learner_correction", learner_disposition: "clarified",
+  };
+  const revisions = [root, correction].slice(0, epochs.length);
+  const backup: OpeningBackup = {
+    format: "opening-backup", version: 1, workspaceId, privacyEpoch: 1, deletionJournal: [], objects: [],
+    tables: { v3_bitemporal_misconception_edges: revisions },
+  };
+  expect(validateOpeningRestore(backup, [])).toMatchObject({ allowed: true, errors: [] });
+  backup.tables.v3_bitemporal_misconception_edges = revisions.map((row, index) => ({ ...row, privacy_epoch: epochs[index] }));
+  expect(validateOpeningRestore(backup, [])).toMatchObject({
+    allowed: false, errors: ["misconception revision privacy epoch does not match the archive epoch"],
+  });
+});
+
 it("requires the same normalized course across every revision of a misconception edge", () => {
   const course = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const root = {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { OpeningBackup } from "@aistudy/domain";
 import { OPENING_RESTORE_APPLY_ORDER } from "@aistudy/domain";
 import { validateOpeningRestore } from "../../../domain/src/opening/backup-policy";
@@ -77,6 +77,25 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
     expect(validateOpeningRestore(backup, []).allowed).toBe(false);
     await expect(executeOpeningRestoreApply({} as never, { confirmLocalRestore: true, backup }))
       .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  });
+
+  it.each([false, true])("rejects an epoch-0 root in an epoch-1 archive before starting a transaction (correction: %s)", async withCorrection => {
+    const backup = draft();
+    backup.privacyEpoch = 1;
+    const root = {
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
+      status: "candidate", origin: "public_try_handoff", privacy_epoch: 0,
+    };
+    const correction = {
+      ...root, revision_id: "c3000000-0000-4000-8000-000000000011", prior_revision_id: root.revision_id,
+      status: "learner_reported", origin: "learner_correction", learner_disposition: "clarified", privacy_epoch: 1,
+    };
+    backup.tables.v3_bitemporal_misconception_edges = withCorrection ? [root, correction] : [root];
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+    expect(sql.begin).not.toHaveBeenCalled();
   });
 
   it("strips timetable revision metadata before restoring strict intervention settings", () => {

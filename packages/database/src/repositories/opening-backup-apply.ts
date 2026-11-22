@@ -489,7 +489,7 @@ export async function executeOpeningRestoreApply(
   const normalized = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
   const rawTables = normalized.tables as Record<string, Record<string, unknown>[]>;
   const misconceptionRevisions = orderBackupMisconceptionRevisions(rawTables.v3_bitemporal_misconception_edges ?? []);
-  const misconceptionErrors = validateBackupMisconceptionRevisions(rawTables);
+  const misconceptionErrors = validateBackupMisconceptionRevisions(rawTables, normalized.privacyEpoch);
   if (!misconceptionRevisions) misconceptionErrors.push("invalid misconception revision lineage");
   if (!misconceptionRevisions || misconceptionErrors.length) return {
     ok: false, code: "PREFLIGHT_REJECTED", mutated: false, guarantees: RESTORE_GUARANTEES, preview,
