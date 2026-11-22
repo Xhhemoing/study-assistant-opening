@@ -23,6 +23,7 @@ function fixture(opts:{claimLost?:boolean;assistantMissing?:boolean;frozen?:unkn
   if(s.startsWith('INSERT INTO opening_workspace_history_revisions'))return [];
   if(s.startsWith('SELECT revision FROM opening_workspace_history_revisions'))return [{revision:1}];
   if(s.startsWith('SELECT privacy_epoch FROM workspaces'))return [{privacy_epoch:4}];
+  if(s.startsWith('SELECT t.attempt_id,t.context_anchor'))return opts.claimLost?[]:[{assistant_turn_id:turnId,course_id:null}];
   if(s.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")){events.push('claim');return opts.claimLost?[]:[{id:jobId}]}
   if(s.startsWith('UPDATE opening_turns SET text')){events.push('assistant');return opts.assistantMissing?[]:[{id:turnId}]}
   if(s.startsWith('SELECT l.* FROM opening_learning_sessions'))return [{id:sessionId,course_id:courseId,source_ids:[],activity_id:activityId}];
@@ -57,7 +58,7 @@ describe('F9: completed assistant stores inert help, not a release claim',()=>{
   const f=fixture();await expect(insertOpeningDeliveredHelp(f.tx.sql,scope,help)).resolves.toMatchObject({delivered:true,historyRevision:2});
   expect(f.writes[0]).toMatchObject({delivered:true,history_revision:2,workspace_history_revision:3});expect(f.writes[0]?.released_at).not.toBeNull();expect(ports.invalidate).toHaveBeenCalledExactlyOnceWith(f.tx.sql,scope,{rootIds:[id(13)]});
  });
- it('lost completion claim never reaches assistant or help insert',async()=>{const f=fixture({claimLost:true});await f.complete();expect(f.events).toEqual(['claim']);expect(f.writes).toHaveLength(0)});
+ it('lost completion claim never reaches assistant or help insert',async()=>{const f=fixture({claimLost:true});await f.complete();expect(f.events).toEqual([]);expect(f.writes).toHaveLength(0)});
  it('unpersisted assistant cannot create generated help or metadata',async()=>{const f=fixture({assistantMissing:true});await expect(f.complete()).rejects.toThrow('assistant turn was not persisted');expect(f.events).toEqual(['claim','assistant']);expect(f.writes).toHaveLength(0)});
  it.each([['changed frozen mode',{...snapshot,tutorMode:'explain'}],['missing snapshot',null]])('%s blocks insertion and downstream metadata',async(_name,frozen)=>{
   const f=fixture({frozen});await expect(f.complete()).rejects.toMatchObject({code:'VALIDATION'});expect(f.events).toEqual(['claim','assistant','snapshot']);expect(f.writes).toHaveLength(0);expect(ports.invalidate).not.toHaveBeenCalled();

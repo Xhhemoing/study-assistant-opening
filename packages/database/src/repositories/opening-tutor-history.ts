@@ -31,7 +31,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     WITH prior AS MATERIALIZED (
       SELECT u.id, a.id AS assistant_id, u.created_at,
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch,
-        refs.user_refs AS user_source_refs, refs.assistant_refs AS assistant_source_refs,
+        refs.user_refs AS user_source_refs, refs.assistant_refs AS assistant_source_refs, a.citations AS assistant_citations,
         ${priorCourse()} AS prior_course_id, ${currentCourse()} AS current_course_id,
         CASE WHEN current.attempt_id IS NOT NULL OR current.context_anchor->>'itemVersionId' IS NOT NULL
           THEN 'practice' ELSE 'citation' END AS material_use,
@@ -69,7 +69,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
       FROM prior WINDOW exchange_order AS (ORDER BY created_at DESC, id DESC)
     )
     SELECT id, assistant_id,
-      user_source_refs, assistant_source_refs, prior_course_id, current_course_id, memory_backing_ids,
+      user_source_refs, assistant_source_refs, assistant_citations, prior_course_id, current_course_id, memory_backing_ids,
       query_system, system_query, current_privacy_epoch, material_use, prior_material_use
     FROM ranked WHERE (memory_bearing OR ordinary_rank <= 20) AND NOT EXISTS (SELECT 1 FROM prior WHERE invalid)
     ORDER BY created_at DESC, id DESC
@@ -149,6 +149,12 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     if (recordReferents) history.unshift({ role: "user", text: question });
     else history.unshift({ role: "user", text: question }, { role: "assistant", text: answer });
     sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []), ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
+    if (!recordReferents) {
+      // The SQL admission above requires each citation to name an available source and version.
+      for (const { sourceId, sourceVersion } of (row.assistant_citations as ContextSourceRef[] | undefined) ?? []) {
+        sourceRefs.push({ sourceId, sourceVersion });
+      }
+    }
     const ancestorMemoryIds = parseContextMemoryDependencyIds([{ memoryDependencyIds: row.memory_dependency_ids }]) ?? [];
     for (const memoryId of [...dependencies.ids, ...ancestorMemoryIds]) memoryIdSet.add(memoryId);
     characters += question.length + answer.length;

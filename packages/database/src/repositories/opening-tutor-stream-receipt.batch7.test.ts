@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createOpeningMemoryRepository } from "./opening-memory";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
+import { loadTutorHistoryContext } from "./opening-tutor-history";
 import { hasAttemptedFallbackStreamSeal, UnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
 const hooks = vi.hoisted(() => ({ release: vi.fn(), lock: vi.fn(), readAttempt: vi.fn(), assertAttempt: vi.fn() }));
 vi.mock("./opening-study-exposure", async original => ({ ...await original<typeof import("./opening-study-exposure")>(), releaseOpeningStudyExposure: hooks.release }));
@@ -818,6 +819,29 @@ describe("stream receipt release waits for current job authorization and assista
       },
     })).rejects.toThrow("query receipt grant changed");
     expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(false);
+  });
+
+  it("projects assistant citations as direct model refs without adding them to record referents", async () => {
+    const citation = { sourceId, sourceVersion: 0 };
+    const sql = Object.assign(async (parts: TemplateStringsArray) => parts.join("").includes("WITH prior AS MATERIALIZED")
+      ? [{ question: "prior question", answer: "prior answer", user_source_refs: [], assistant_source_refs: [],
+        assistant_citations: [{ ...citation, memoryOnly: true }] }]
+      : [], { unsafe: () => "fragment" }) as unknown as Sql;
+
+    await expect(loadTutorHistoryContext(sql, scope, user)).resolves.toMatchObject({ sourceRefs: [citation] });
+    await expect(loadTutorHistoryContext(sql, scope, user, "record_referents")).resolves.toMatchObject({
+      history: [{ role: "user", text: "prior question" }], sourceRefs: [],
+    });
+  });
+
+  it("locks the saved active course before a bare completion", async () => {
+    const f = fixture({ sessionCourseId: courseId, archivedCourse: true });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.find(call => call.sql.startsWith("SELECT t.attempt_id,t.context_anchor"))?.sql).toContain("FOR UPDATE OF j");
+    expect(f.calls.find(call => call.sql.startsWith("SELECT id FROM courses"))?.values).toContain(courseId);
+    expect(f.calls.some(call => call.sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'"))).toBe(false);
   });
 
   it("rejects a missing assistant after claiming a bare completion", async () => {

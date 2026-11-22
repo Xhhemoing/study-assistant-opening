@@ -133,7 +133,7 @@ export function contextSourceRefsIncluded(
             THEN (provenance_ref->>'sourceVersion')::numeric > 9007199254740991 ELSE false END
           OR NOT EXISTS (
             SELECT 1 FROM opening_sources provenance_source
-            WHERE provenance_source.id::text = lower(provenance_ref->>'sourceId')
+            WHERE provenance_source.id = ${lineageUuid(db, () => db`provenance_ref->>'sourceId'`)}
               AND provenance_source.workspace_id = ${workspaceId}
               AND provenance_source.upload_state = 'uploaded'
               AND (${!requireAvailability} OR NOT EXISTS (SELECT 1 FROM opening_source_versions provenance_version
@@ -310,10 +310,28 @@ export function turnMaterialUse(db: Db, alias: "t" | "u"): Fragment {
     THEN 'practice' ELSE 'citation' END`;
 }
 
-export function turnLearningSessionCourse(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
-  return db`(SELECT ls.course_id FROM opening_learning_sessions ls
+function ownedTurnLearningSession(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
+  return db`FROM opening_learning_sessions ls
     WHERE ls.id = ${turn()}.learning_session_id AND ls.workspace_id = ${turn()}.workspace_id
-      AND ls.owner_user_id = ${owner()})`;
+      AND ls.owner_user_id = ${owner()}`;
+}
+
+export function turnLearningSessionCourse(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
+  return db`(SELECT ls.course_id ${ownedTurnLearningSession(db, turn, owner)})`;
+}
+
+/** A missing or foreign session cannot establish that a saved turn was standalone. */
+export function turnHasStandaloneSessions(db: Db, owner: FragmentFactory): Fragment {
+  const turn: FragmentFactory = () => db`t`;
+  const standaloneSession = (saved: FragmentFactory) => db`(${saved()}.learning_session_id IS NULL OR EXISTS (
+    SELECT 1 ${ownedTurnLearningSession(db, saved, owner)} AND ls.course_id IS NULL
+  ))`;
+  return db`${standaloneSession(turn)} AND (t.role <> 'assistant' OR NOT EXISTS (
+    SELECT 1 FROM opening_turns tu
+    WHERE tu.id = (${pairedUserTurnId(db, turn)})
+      AND tu.workspace_id = t.workspace_id AND tu.conversation_id = t.conversation_id AND tu.role = 'user'
+      AND NOT ${standaloneSession(() => db`tu`)}
+  ))`;
 }
 
 export function turnLineageCourse(

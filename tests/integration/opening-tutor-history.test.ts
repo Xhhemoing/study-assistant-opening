@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { createCourseMembershipRepository, createOpeningConversationRepository, createOpeningMemoryRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { createCourseMembershipRepository, createOpeningConversationRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
 let f: OpeningFixture;
@@ -97,6 +97,42 @@ it("bounds history by whole exchanges and excludes oversized recent turns", asyn
   const { current, jobs, prior } = await seed();
   await f.sql`UPDATE opening_turns SET text=${'x'.repeat(12001)} WHERE id=${prior.turnId}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
+});
+
+it.each(["mock_exam", "reference"] as const)("fences citation-only history after classification as %s", async purpose => {
+  const { sql, scope } = f;
+  const { c, current, jobs, prior } = await seed();
+  const courses = createCourseMembershipRepository(sql);
+  const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Citation replay", slug: randomUUID() });
+  const sourceId = await insertSource(sql, scope);
+  await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id, assetType: "source",
+    assetId: sourceId, role: "core", visibility: "course", purpose: "teaching" });
+  await sql`UPDATE opening_conversations SET course_id=${course.id} WHERE id=${c.id}`;
+  if (purpose === "reference") {
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ itemVersionId: randomUUID() })} WHERE id=${current.turnId}`;
+  }
+  const citation = { sourceId, sourceVersion: 0 };
+  await sql`UPDATE opening_turns SET citations=${sql.json([citation])} WHERE id=${prior.assistantTurnId}`;
+  const { history, sourceRefs } = await jobs.loadHistoryContext(scope, current.turnId);
+  expect(history).toContainEqual({ role: "assistant", text: "step two" });
+  expect(sourceRefs).toEqual([citation]);
+  expect((await jobs.loadHistoryContext(scope, current.turnId, "record_referents")).sourceRefs).toEqual([]);
+  const claim = (await jobs.claim(current.jobId))!;
+  const send = { claimToken: claim.claimToken, executionId: claim.executionId, contextSourceRefs: sourceRefs };
+  const callback = vi.fn(async () => {});
+  await jobs.authorizeSend(scope, current.jobId, send, callback);
+  expect(callback).toHaveBeenCalledOnce();
+  callback.mockClear();
+  await sql`UPDATE course_asset_memberships SET purpose=${purpose} WHERE course_id=${course.id} AND asset_id=${sourceId}`;
+
+  const privacyEpoch = await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope);
+  await expect(jobs.authorizeSend(scope, current.jobId, send, callback)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(jobs.withStreamPublication(scope, current.jobId, { ...send, privacyEpoch }, callback)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(jobs.completeTurn({ scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId,
+    claimToken: claim.claimToken, text: "Saved answer", citations: [], candidates: [], contextSourceRefs: sourceRefs }))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(callback).not.toHaveBeenCalled();
+  await expect(jobs.get(scope, current.jobId)).resolves.toMatchObject({ status: "running" });
 });
 
 it("skips citation-only memory for a practice turn while keeping independent history", async () => {

@@ -372,6 +372,9 @@ describe("opening tutor turn durable path (guarded)", () => {
     const seeded = await seedConversationAndSource();
     const sessionId = randomUUID(), courseId = randomUUID();
     await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Help course',${courseId})`;
+    await fixture.sql`
+      INSERT INTO course_asset_memberships (workspace_id, course_id, asset_type, asset_id, role, visibility, purpose)
+      VALUES (${fixture.scope.workspaceId}, ${courseId}, 'source', ${sourceId}, 'core', 'course', NULL)`;
     const activityId = await insertTestTeachingActivity(fixture.sql, fixture.scope, courseId);
     await fixture.sql`
       INSERT INTO opening_learning_sessions

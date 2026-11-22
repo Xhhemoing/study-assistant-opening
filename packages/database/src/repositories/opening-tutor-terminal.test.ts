@@ -295,6 +295,7 @@ describe("opening tutor jobs repository", () => {
   it("writes help exposure only after the assistant turn update succeeds", async () => {
     const sql = fakeSql((query) => {
       if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (query.includes("SELECT t.attempt_id,t.context_anchor")) return [{ assistant_turn_id: "assistant-turn-1", course_id: null }];
       if (query.includes("UPDATE opening_tutor_jobs SET status = 'succeeded'")) {
         return [{ id: "job-1" }];
       }
@@ -348,6 +349,7 @@ describe("opening tutor jobs repository", () => {
   it("does not write help exposure when the assistant turn was not persisted", async () => {
     const sql = fakeSql((query) => {
       if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (query.includes("SELECT t.attempt_id,t.context_anchor")) return [{ assistant_turn_id: "assistant-turn-1", course_id: null }];
       if (query.includes("SELECT id FROM workspaces") && !query.includes("privacy_epoch")) return [{ id: scope.workspaceId }];
       if (query.includes("INSERT INTO opening_workspace_history_revisions")) return [];
       if (query.includes("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 1 }];

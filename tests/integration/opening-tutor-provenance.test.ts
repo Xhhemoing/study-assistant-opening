@@ -381,6 +381,63 @@ describe("saved tutor material provenance", () => {
     await expect(appendCandidates()).resolves.toBe(true);
   }, 15_000);
 
+  it.each(["user", "assistant", "paired user"] as const)("checks ownership of the %s session before admitting classified global memory", async binding => {
+    const { sql, scope, otherScope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const consumer = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory consumer", slug: randomUUID() });
+    const classifier = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Material classification", slug: randomUUID() });
+    const material = await source();
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Standalone origin", courseId: null });
+    const saved = await append(conversation.id);
+    const originId = binding === "user" ? saved.turnId : saved.assistantTurnId;
+    const sessionTurnId = binding === "assistant" ? saved.assistantTurnId : saved.turnId;
+    await sql`UPDATE opening_turns SET status='complete', source_ids=ARRAY[${material}]::uuid[],
+      source_versions=${sql.json({ [material]: 0 })}, context_source_refs='[]'::jsonb WHERE id=${originId}`;
+    const memories = createOpeningMemoryRepository(sql);
+    const proposed = await memories.proposeMemory(scope, { text: "Standalone material", sourceTurnIds: [originId], expiresAt: null });
+    const memory = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: classifier.id, assetType: "source",
+      assetId: material, role: "core", visibility: "course", purpose: "practice" });
+    const context = () => memories.listForContext(scope, consumer.id);
+    await expect(context()).resolves.toMatchObject([{ id: memory.id }]);
+
+    const insertSession = async (sessionScope: typeof scope) => {
+      const id = randomUUID();
+      const activity = await insertTestTeachingActivity(sql, sessionScope);
+      await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label)
+        VALUES (${id}, ${sessionScope.workspaceId}, ${sessionScope.ownerUserId}, NULL, ${activity}, 'Course-less session')`;
+      return id;
+    };
+    const bind = (sessionId: string) => sql`UPDATE opening_turns SET learning_session_id=${sessionId} WHERE id=${sessionTurnId}`;
+    const missing = randomUUID();
+    const foreignOwner = await insertSession({ ...scope, ownerUserId: otherScope.ownerUserId });
+    const foreignWorkspace = await insertSession({ ...scope, workspaceId: otherScope.workspaceId });
+    for (const sessionId of [missing, foreignOwner, foreignWorkspace]) {
+      await bind(sessionId);
+      await expect(context()).resolves.toEqual([]);
+    }
+    await bind(await insertSession(scope));
+    await expect(context()).resolves.toMatchObject([{ id: memory.id }]);
+  }, 15_000);
+
+  it("fences bare completion against the archived saved course", async () => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Completion course", slug: randomUUID() });
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Bare completion", courseId: course.id });
+    const saved = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const claim = (await jobs.claim(saved.jobId))!;
+    const complete = () => jobs.completeTurn({ scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId,
+      claimToken: claim.claimToken, text: "Saved answer", citations: [], candidates: [] });
+    await courses.setArchived({ ...scope, courseId: course.id, archived: true });
+    await expect(complete()).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.get(scope, saved.jobId)).resolves.toMatchObject({ status: "running" });
+    await courses.setArchived({ ...scope, courseId: course.id, archived: false });
+    await complete();
+    await expect(jobs.get(scope, saved.jobId)).resolves.toMatchObject({ status: "succeeded" });
+  });
+
   it("uses the saved course membership for direct metadata across unrelated exam classification", async () => {
     const { sql, scope } = f;
     const courses = createCourseMembershipRepository(sql);

@@ -2,7 +2,8 @@ import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import {
   isLineageUuid, lineageUuid, memoryCourseAllows, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
-  turnDependencyWalk, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs, type FragmentFactory,
+  turnDependencyWalk, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs,
+  type FragmentFactory,
   type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
@@ -226,7 +227,8 @@ async function readOriginBindings(
     CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`, () => db`c.owner_user_id`)} AS id) course
     ${originUse ? db`CROSS JOIN LATERAL (SELECT ${turnMaterialUse(db, "t")} AS material_use) policy` : db``}
     WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && {
-      ...rules, memoryCourse: () => db`m.course_id`, originUse, standaloneOrigin: () => db`course.id IS NULL`,
+      ...rules, memoryCourse: () => db`m.course_id`, originUse,
+      standaloneOrigin: () => db`course.id IS NULL AND ${turnHasStandaloneSessions(db, () => db`c.owner_user_id`)}`,
     })}
       ${rules ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}
     ORDER BY m.id, m.ordinality`;

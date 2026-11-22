@@ -1,6 +1,6 @@
 import type { TransactionSql } from "postgres";
 import { describe, expect, it } from "vitest";
-import type { FragmentFactory } from "./opening-context-provenance";
+import { turnHasStandaloneSessions, type FragmentFactory } from "./opening-context-provenance";
 import { admitTaskCandidate } from "./opening-task-candidate-admission";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
 
@@ -28,7 +28,7 @@ it("consumes each material admission SQL fragment with or without a course polic
   const options = {
     memoryCourse: () => tx`material.course_id`,
     originUse: () => tx`material.material_use`,
-    standaloneOrigin: () => tx`material.origin_course_id IS NULL`,
+    standaloneOrigin: () => tx`material.origin_course_id IS NULL AND ${turnHasStandaloneSessions(tx, () => tx`material.owner_user_id`)}`,
   } satisfies NonNullable<Parameters<typeof sourceMaterialsActive>[3]>;
 
   for (const resolved of [undefined, { directMaterialPolicy: true }, options,
@@ -94,6 +94,17 @@ function simulatedSql(read: (query: string) => unknown[]) {
   }, { json: JSON.stringify }) as unknown as TransactionSql;
   return { tx, queries };
 }
+
+it("requires an owned course-less session for each non-empty origin session binding", async () => {
+  const { tx, queries } = simulatedSql(() => []);
+  await tx`SELECT 1 WHERE ${turnHasStandaloneSessions(tx, () => tx`c.owner_user_id`)}`;
+
+  expect(queries[0]).toContain("t.learning_session_id IS NULL OR EXISTS (");
+  expect(queries[0]).toContain("ls.id = t.learning_session_id AND ls.workspace_id = t.workspace_id AND ls.owner_user_id = c.owner_user_id AND ls.course_id IS NULL");
+  expect(queries[0]).toContain("t.role <> 'assistant' OR NOT EXISTS ( SELECT 1 FROM opening_turns tu");
+  expect(queries[0]).toContain("tu.learning_session_id IS NULL OR EXISTS (");
+  expect(queries[0]).toContain("ls.id = tu.learning_session_id AND ls.workspace_id = tu.workspace_id AND ls.owner_user_id = c.owner_user_id AND ls.course_id IS NULL");
+});
 
 it("locks the course, direct and inherited materials, and memberships before validating a task candidate", async () => {
   const courseId = "55555555-5555-4555-8555-555555555555";

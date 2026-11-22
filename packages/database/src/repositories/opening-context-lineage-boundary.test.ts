@@ -52,11 +52,11 @@ describe("context lineage SQL mode and scope emission", () => {
   ])("binds independent historical and availability options: $name", ({ historical, availability, expectedHistorical, bypassAvailability }) => {
     const db = sqlFixture(), refs = { text: "lineage.refs", values: [] };
     const actual = contextSourceRefsIncluded(db as unknown as TransactionSql, "workspace", () => ({ ...refs }) as never, historical, availability) as unknown as Fragment;
-    expect(actual.values).toEqual(["workspace", bypassAvailability, "workspace", expectedHistorical, "workspace"]);
+    expect(actual.values).toEqual([expect.stringMatching(/^\^\[0-9a-f\]/), "workspace", bypassAvailability, "workspace", expectedHistorical, "workspace"]);
     expect(actual.text).toContain("COALESCE(jsonb_typeof(lineage.refs) = 'array', false)");
     expect(actual.text).toContain("CASE WHEN jsonb_typeof(lineage.refs) = 'array' THEN lineage.refs ELSE '[]'::jsonb END");
     expect(actual.text).toContain("NOT EXISTS ( SELECT 1 FROM opening_sources provenance_source");
-    expect(actual.text).toContain("provenance_source.id::text = lower(provenance_ref->>'sourceId') AND provenance_source.workspace_id = ?");
+    expect(actual.text).toContain("provenance_source.id = CASE WHEN (provenance_ref->>'sourceId') ~* ? THEN (provenance_ref->>'sourceId')::uuid END AND provenance_source.workspace_id = ?");
     expect(actual.text).toContain("provenance_version.workspace_id=? AND provenance_version.source_id=provenance_source.id");
     expect(actual.text).toContain("provenance_exclusion.workspace_id = ? AND provenance_exclusion.source_id = provenance_source.id");
   });
