@@ -1622,12 +1622,16 @@ const ARTICLE_CLAUSE_TOKEN_RE = new RegExp(
   "gu",
 );
 const ARTICLE_RELATION_COMPLEMENT_RE = /^(?:in|on|at|with|for|from|over|under|within|between|among|through|near|around|across|along|into|onto)$/;
-const ARTICLE_SYMBOLIC_TERM = /(?:\d+)?\p{L}(?:\d+|_[\p{L}\p{N}]+)?/u.source;
+const ARTICLE_IDENTIFIER_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
+const ARTICLE_SYMBOLIC_TERM = `(?:\\d+)?(?:\\p{L}|${GREEK_OR_CONST})(?:\\d+|_[\\p{L}\\p{N}]+)?`;
 const ARTICLE_SYMBOLIC_LHS_RE = new RegExp(
   `^${ARTICLE_SYMBOLIC_TERM}(?:-(?:${ARTICLE_SYMBOLIC_TERM}|${UNGROUPED_DECIMAL}))*$`,
   "u",
 );
-const ARTICLE_MATH_FUNCTION_RE = /^(?:sin|cos|tan|exp|ln|log|lim|min|max|sup|inf|det|tr|rank|dim|ker|deg|gcd|lcm|abs)$/;
+const ARTICLE_MATH_FUNCTION_RE = new RegExp("^(?:" + MATH_FUNCTION_NAMES.join("|") + "|" +
+  "cbrt|sec|csc|cot|arcsin|arccos|arctan|arccot|arcsec|arccsc|asin|acos|atan|" +
+  "sinh|cosh|tanh|coth|sech|csch|asinh|acosh|atanh|lg|lim|limsup|liminf|sup|inf|" +
+  "det|tr|trace|rank|dim|ker|im|re|deg|gcd|lcm|mod|arg|sgn|sign|floor|ceil|round|norm|proj|span|grad|div|curl)$");
 const ARTICLE_DETERMINER_RE = /^(?:the|a|an|this|these|those|each|every|all|both|any|some|no|its|their|our|your|my|his|her)$/;
 const ARTICLE_PARTICIPLE_COMPLEMENT_RE = /^(?:in|on|by|from|with|to|for|at|as|under|over|into|through)$/;
 const ARTICLE_FINITE_AUXILIARY_RE = /^(?:is|are|was|were|am|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must)$/;
@@ -1673,6 +1677,7 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
   let end = start;
   for (let index = start; index < tokens.length; index += 1) {
     const token = tokens[index]!;
+    const argument = tokens[index + 1] ?? "";
     if (RELATION_OP_RE.test(token)) {
       if (expectsOperand || insideAbsoluteValue) break;
       sawRelation = true;
@@ -1685,9 +1690,12 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
     } else if (token.length === 1 && ARTICLE_ARITHMETIC_RE.test(token)) {
       if (expectsOperand && token !== "+" && token !== "-") break;
       expectsOperand = true;
-    } else if (ARTICLE_MATH_FUNCTION_RE.test(token)) {
-      const argument = tokens[index + 1] ?? "";
-      if (argument !== "(" && !ARTICLE_SYMBOLIC_LHS_RE.test(argument)) break;
+    } else if ((argument === "(" && ARTICLE_IDENTIFIER_RE.test(token)) ||
+      (ARTICLE_MATH_FUNCTION_RE.test(token) && ARTICLE_SYMBOLIC_LHS_RE.test(argument))) {
+      // A verb following a complete RHS can introduce a parenthetical aside.
+      if (sawRelation && !expectsOperand && (ARTICLE_FINITE_AUXILIARY_RE.test(token) ||
+        ARTICLE_FINITE_VERB_RE.test(token) || ARTICLE_HOMOGRAPH_VERB_RE.test(token) ||
+        ARTICLE_INTRANSITIVE_PAST_RE.test(token) || ARTICLE_TRANSITIVE_PAST_RE.test(token))) break;
       expectsOperand = true;
     } else if ("([{".includes(token) || ARTICLE_SYMBOLIC_LHS_RE.test(token) || DECIMAL_LITERAL_RE.test(token)) {
       expectsOperand = false;
@@ -1698,6 +1706,27 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
     if (sawRelation && !expectsOperand && !insideAbsoluteValue) end = index + 1;
   }
   return end;
+}
+
+function articlePrepositionalRelationEnd(tokens: readonly string[], start: number): number {
+  const directEnd = articleRelationComplementEnd(tokens, start);
+  if (directEnd > start) return directEnd;
+
+  const headStart = ARTICLE_DETERMINER_RE.test(tokens[start] ?? "") ? start + 1 : start;
+  for (let headIndex = headStart; headIndex < headStart + 3; headIndex += 1) {
+    const word = tokens[headIndex] ?? "";
+    if (!ARTICLE_IDENTIFIER_RE.test(word) || ARTICLE_DETERMINER_RE.test(word) || ARTICLE_SUBORDINATE_RE.test(word) ||
+      ARTICLE_FINITE_AUXILIARY_RE.test(word) || ARTICLE_FINITE_VERB_RE.test(word)) break;
+
+    // After the head, the equation needs its own LHS, as in "the line x + y = 1".
+    const appositiveStart = headIndex + 1;
+    const first = tokens[appositiveStart] ?? "";
+    if (ARTICLE_FINITE_AUXILIARY_RE.test(first) || ARTICLE_FINITE_VERB_RE.test(first)) break;
+    const end = articleRelationComplementEnd(tokens, appositiveStart);
+    if (end > appositiveStart) return end;
+  }
+
+  return start;
 }
 
 function hasConditionalClausePredicate(remainder: string): boolean {
@@ -1722,7 +1751,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     hasConjoinedSubject ||= afterConjunction;
 
     if (ARTICLE_RELATION_COMPLEMENT_RE.test(token)) {
-      const end = articleRelationComplementEnd(tokens, index + 1);
+      const end = articlePrepositionalRelationEnd(tokens, index + 1);
       if (end > index + 1) {
         index = end - 1;
         previous = "";

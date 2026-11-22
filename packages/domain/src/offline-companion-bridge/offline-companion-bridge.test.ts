@@ -2797,6 +2797,28 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Choose a 3 kPa pressure setting."].map(text => ({
         answerKey: "A", text, ok: true,
       })),
+      ...["Choose a given point on y = sqrt(x).",
+        "Choose a given point on y = arctan(x).",
+        "Choose a given point on cbrt(x) = y.",
+        "Choose a given point on transform_2(x) = y.",
+        "Choose a given point on y = arctan theta.",
+        "Choose a given point on y = sin(x).",
+        "Choose a given point on the line x + y = 1.",
+        "Choose a given point on the unit circle x^2 + y^2 = 1.",
+        "Choose a given point on the curve y = sqrt(x).",
+        "Choose a given value in the closed interval 0 <= x <= 1.",
+        "Choose a given function with the boundary condition u(0) = 0.",
+        "Choose a given angle in 0 <= theta <= pi.",
+        "Choose a given value in 0 <= x < infinity."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
+      ...["Select a given point on the line x + y = 1 fails.",
+        "Select a given point on the line x + y = 1 is fixed.",
+        "Select a given point on y = sqrt(x) fails (as expected).",
+        "Select a given condition in the reservoir > 0.",
+        "Select a given result in the process fails x > 0."].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),
