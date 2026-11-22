@@ -1753,6 +1753,80 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }
   });
 
+  it.each([
+    ["## &copyAnswer", "public"],
+    ["## <span>&copyAnswer</span>", "public"],
+    ["&copyAnswer\n===", "public"],
+    ["## &copy;Answer", "sealed"],
+    ["## &#32Answer", "public"],
+    ["## An&#00000115;wer", "public"],
+    ["## An&#x0000073;wer", "public"],
+    ["## &#0000032;Answer", "sealed"],
+    ["## &#x000020;Answer", "sealed"],
+    ["<h2>&copyAnswer</h2>", "sealed"],
+    ["<H2><span>&copyAnswer</span></H2>", "sealed"],
+    ["<h2>\n&copyAnswer\n</h2>", "sealed"],
+    ["<script>\n<h2>&copyAnswer</h2>\n</script>", "public"],
+  ] as const)("uses the character-reference grammar belonging to %s", (heading, visibility) => {
+    const text = `${heading}\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "public") expectSealedEvidence(chunks, text, [], "Public theorem.");
+      else expectSealedEvidence(chunks, text, ["Public theorem."]);
+    }
+  });
+
+  it("keeps semicolon-less references literal in pipe-table headers", () => {
+    const text = "Topic | <span>&copyAnswer</span> | Notes\n--- | --- | ---\nAlgebra | Public theorem. | Example";
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it.each([
+    ["<details><summary>Hint &copyAnswer</summary>forty-two</details>", "sealed"],
+    ["Topic <details><summary>Hint &copyAnswer</summary>forty-two</details>", "hint_gated"],
+    ["<details><summary>Hint\n\n&copyAnswer\n</summary>forty-two</details>", "hint_gated"],
+    ["Topic <details><summary>Hint\n<div>&copyAnswer</div>\n</summary>forty-two</details>", "sealed"],
+  ] as const)("uses the character-reference grammar belonging to summary %s", (text, visibility) => {
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expect(chunks.find(chunk => chunk.text.includes("forty-two"))?.visibility).toBe(visibility);
+    }
+  });
+
+  it.each([
+    ['Topic <span style="display:none;display:blocK">Answer</span>', "public"],
+    ['Topic <span style="display:none;display:inlinK">Answer</span>', "public"],
+    ['Topic <span style="display:none;display:ſubgrid">Answer</span>', "public"],
+    ['Topic <span style="visibility:hidden;visibilitK:visible">Answer</span>', "public"],
+    ['Topic <span style="visibility:hidden;VISIBILITY:VİSIBLE">Answer</span>', "public"],
+    ['An<DIV>sw</DIV>er', "public"],
+    ['An<DİV>sw</DİV>er', "public"],
+    ['Topic <span style="display:none;DİSPLAY:block">Answer</span>', "public"],
+    ['Topic <span style="--Mode:none;display:var(--mode,block)">Answer</span>', "sealed"],
+    ...[
+      "display:env(missing-display, none)", "display:env(a, var(--b, none))",
+      "display:ENV(a, env(b, var(--c, none)))", "display:\\65 nv(missing-display, none)",
+      "display:env(viewport-segment-width 0 0, none)", "display:env(viewport-segment-width +0 0, none)",
+      "display:none;display:env(123, block)", "display:none;display:env(default, block)",
+      "display:none;display:env(, block)", "display:none;display:env(initial, block)",
+      "display:none;display:env(-1name, block)", "display:none;display:env(x -1, block)",
+      "display:none;display:env(x 1px, block)", "display:none;display:env(x 1.5, block)",
+      "display:none;display:env(x 0+0, block)",
+      "display:env(\\31 23, none)", "--value:env(missing-display, none);display:var(--value)",
+      "display:env(safe-area-inset-top 0, none)", "display:env(SAFE-AREA-INSET-TOP, none)",
+    ].map(style => [`Topic <span style="${style}">Answer</span>`, "public"] as const),
+    ...[
+      "display:none;display:env(missing)", "display:none;display:env(missing,)",
+      "display:none;display:env(safe-area-inset-top, none)",
+      "display:none;display:env(titlebar-area-width, none)",
+      "display:none;display:env(keyboard-inset-bottom, none)",
+    ].map(style => [`Topic <span style="${style}">Answer</span>`, "sealed"] as const),
+  ] as const)("uses ASCII keyword matching and CSS substitution in %s", (label, visibility) => {
+    const text = `## ${label}\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "public") expectSealedEvidence(chunks, text, [], "Public theorem.");
+      else expectSealedEvidence(chunks, text, ["Public theorem."]);
+    }
+  });
+
   it("seals a standalone summaryless disclosure through its closing tag", () => {
     const text = "<details>forty-two</details>\n\nPublic theorem.";
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");

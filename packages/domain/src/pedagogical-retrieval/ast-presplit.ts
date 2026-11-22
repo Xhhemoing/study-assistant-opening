@@ -98,6 +98,7 @@ const SEALED_HEADING_RE =
   /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
+const HTML_HEADING_OPEN_RE = new RegExp(/^ {0,3}<h([1-6])(?=[\t />])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
 const HTML_ATTRIBUTE_TOKEN_RE = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r >]+)))?/g;
 const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\t\n\f\r />]*)(?=[\t\n\f\r />])/.source + HTML_TAG_ATTRIBUTES + ">";
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\t\n\f\r />])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
@@ -446,6 +447,23 @@ function endOfHtmlComment(text: string, afterOpener: number): number {
   return tail.lastIndex;
 }
 
+function asciiLower(value: string): string {
+  return value.replace(/[A-Z]/g, char => String.fromCharCode(char.charCodeAt(0) | 0x20));
+}
+
+function decodeMarkdownCharacterReferences(text: string): string {
+  return text.replace(/&#(?:[xX]([0-9a-fA-F]{1,6})|([0-9]{1,7}));|&([A-Za-z][A-Za-z0-9]{1,31});/g,
+    (reference, hex: string | undefined, decimal: string | undefined, name: string | undefined) => {
+      if (name !== undefined) return HTML_NAMED_REFERENCES.get(name) ?? reference;
+      const codePoint = hex === undefined ? Number.parseInt(decimal!, 10) : Number.parseInt(hex, 16);
+      const lowWord = codePoint & 0xFFFF;
+      return codePoint < 9 || codePoint === 11 || (codePoint > 13 && codePoint < 32) ||
+        (codePoint >= 0x7F && codePoint <= 0x9F) || (codePoint >= 0xD800 && codePoint <= 0xDFFF) ||
+        (codePoint >= 0xFDD0 && codePoint <= 0xFDEF) || lowWord >= 0xFFFE || codePoint > 0x10FFFF
+        ? "\uFFFD" : String.fromCodePoint(codePoint);
+    });
+}
+
 function decodeHtmlCharacterReferences(text: string, inAttribute = false): string {
   return text.replace(/&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?|&([A-Za-z][A-Za-z0-9]*);?/g,
     (reference, hex: string | undefined, decimal: string | undefined, name: string | undefined, offset: number) => {
@@ -476,7 +494,7 @@ function findScriptEndTag(text: string, from: number, closer: RegExp) {
   tokens.lastIndex = from;
   let state: "data" | "escaped" | "double-escaped" = "data";
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
-    switch (match[0].toLowerCase()) {
+    switch (asciiLower(match[0])) {
       case "<!--":
         if (state === "data") state = "escaped";
         break;
@@ -500,7 +518,7 @@ function findScriptEndTag(text: string, from: number, closer: RegExp) {
 }
 
 function htmlRawTextBounds(text: string, opener: RegExpExecArray, afterOpener: number) {
-  const tag = opener.groups?.tag?.toLowerCase();
+  const tag = asciiLower(opener.groups?.tag ?? "");
   if (!tag || opener.groups?.prefix) return null;
   if (tag === "plaintext") return { closeStart: text.length, closeEnd: text.length };
   if (!HTML_RAW_TEXT_TAGS.has(tag)) return null;
@@ -571,7 +589,7 @@ function htmlElementEnd(
       continue;
     }
     elements.applyToken(match, namespace);
-    if (match.groups?.prefix === "/" && match.groups.tag?.toLowerCase() === tag && !elements.isOnStack(root)) {
+    if (match.groups?.prefix === "/" && asciiLower(match.groups.tag ?? "") === tag && !elements.isOnStack(root)) {
       return tokens.lastIndex;
     }
   }
@@ -599,7 +617,7 @@ function hasSelfClosingFlag(markup: string, tag: string): boolean {
 function htmlAttributeValue(opener: string, tag: string, attribute: string): string | undefined {
   const attributes = opener.slice(tag.length + 1, -1);
   for (const match of attributes.matchAll(HTML_ATTRIBUTE_TOKEN_RE)) {
-    if (match[1]!.toLowerCase() === attribute) return decodeHtmlAttributeValue(match[2] ?? match[3] ?? match[4] ?? "");
+    if (asciiLower(match[1]!) === attribute) return decodeHtmlAttributeValue(match[2] ?? match[3] ?? match[4] ?? "");
   }
   return undefined;
 }
@@ -624,7 +642,7 @@ function htmlContainerCrossingCodeEnd(
   for (let match = tokens.exec(text); match && match.index < openerLimit; match = tokens.exec(text)) {
     const { namespace, ignored } = elements.readTokenContext(match);
     const raw = namespace || ignored ? null : htmlRawTextBounds(text, match, tokens.lastIndex);
-    const tag = match.groups?.tag?.toLowerCase();
+    const tag = asciiLower(match.groups?.tag ?? "");
     let closeEnd: number;
     if (match[0].startsWith("<!--")) {
       closeEnd = endOfHtmlComment(text, match.index + 4);
@@ -804,6 +822,7 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
 function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_LABEL_CONTEXT) {
   const scanner = createMarkdownBlockScanner();
   const activeAtLine = new Map<number, MarkdownHtmlBlock>();
+  const htmlLines = new Set<number>();
   let cursor = 0;
   let projected: string | undefined;
   let scopeLookup: ReturnType<typeof createHtmlScopeLookup> | undefined;
@@ -819,15 +838,23 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_
     }
     return scopeLookup;
   };
+  const scanThrough = (lineStart: number) => {
+    while (cursor <= lineStart && cursor < text.length) {
+      const newline = nextLineBreak(text, cursor);
+      if (scanner.scan(text.slice(cursor, newline?.index ?? text.length)).mode === "html") htmlLines.add(cursor);
+      cursor = newline ? newline.index + newline[0].length : text.length;
+      if (scanner.htmlBlock) activeAtLine.set(cursor, scanner.htmlBlock);
+    }
+  };
   return {
     htmlBlockAt(lineStart: number) {
-      while (cursor < lineStart) {
-        const newline = nextLineBreak(text, cursor);
-        scanner.scan(text.slice(cursor, newline?.index ?? text.length));
-        cursor = newline ? newline.index + newline[0].length : text.length;
-        if (scanner.htmlBlock) activeAtLine.set(cursor, scanner.htmlBlock);
-      }
+      scanThrough(lineStart - 1);
       return activeAtLine.get(lineStart);
+    },
+    isRawHtmlAt(offset: number) {
+      const lineStart = containingLineStart(text, offset);
+      scanThrough(lineStart);
+      return htmlLines.has(lineStart);
     },
     maskedLiterals(definedLinkLabels: ReadonlySet<string>) {
       return projected ??= projectDisclosureCommentMarkdown(text, [], definedLinkLabels, false);
@@ -850,6 +877,22 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_
   };
 }
 
+function readRawHtmlHeading(
+  text: string, lines: readonly SourceLine[], index: number, htmlContext: ReturnType<typeof createMarkdownHtmlBlockLookup>,
+) {
+  const line = lines[index]!;
+  const opening = HTML_HEADING_OPEN_RE.exec(line.raw);
+  if (!opening || htmlContext.htmlBlockAt(line.start) || !htmlContext.isRawHtmlAt(line.start)) return undefined;
+  let end = index + 1;
+  while (end < lines.length && htmlContext.isRawHtmlAt(lines[end]!.start)) end++;
+  const html = text.slice(line.start, lines[end - 1]!.contentEnd);
+  const close = htmlElementEnd(html, `h${opening[1]}`, opening[0].length);
+  if (close === undefined) return undefined;
+  const lastIndex = lineIndexContaining(lines, line.start + close - 1, index);
+  if (!isMarkdownBlankLine(text.slice(line.start + close, lines[lastIndex]!.contentEnd))) return undefined;
+  return { level: Number(opening[1]), lastIndex };
+}
+
 type MarkdownInlineScope = "#markdown-p" | "#markdown-heading";
 
 type HtmlScopeLine = {
@@ -861,6 +904,7 @@ type HtmlScopeLine = {
   closesRawParagraph?: boolean;
   table?: "header" | "body" | "row" | "end";
   cell?: "th" | "td";
+  rawHtml?: boolean;
 };
 
 function createHtmlScopeLineProjector(lines: readonly SourceLine[], emit: (line: HtmlScopeLine) => void) {
@@ -913,6 +957,7 @@ function createHtmlScopeLineProjector(lines: readonly SourceLine[], emit: (line:
       inlineScope: text && !blank && !underline && !thematic
         ? (atx ? "#markdown-heading" : "#markdown-p") : undefined,
       closesRawParagraph: !continuedLiteral && (mode === "code" || thematic || depth > continuedDepth),
+      rawHtml: mode === "html",
     };
     if (endsInline) paragraphStart = undefined;
     if (event.inlineScope === "#markdown-p") paragraphStart ??= event;
@@ -1059,7 +1104,7 @@ function findDisclosureCommentEnd(
     if (match[0].startsWith("--")) return markdownStart + closeEnd;
     const { namespace, ignored } = elements.readTokenContext(match);
     if (ignored) continue;
-    const tag = match.groups?.tag?.toLowerCase();
+    const tag = asciiLower(match.groups?.tag ?? "");
     const prefix = match.groups?.prefix;
     if (match.groups?.cdata && !isForeignCdata(elements.stack.at(-1), match)) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
@@ -1250,7 +1295,7 @@ function findMatchingDetailsBounds(
       continue;
     }
     skipLiteralLines(tokenRe.lastIndex);
-    const tag = match.groups?.tag?.toLowerCase();
+    const tag = asciiLower(match.groups?.tag ?? "");
     const prefix = match.groups?.prefix;
     if (!namespace && tag === "template" && prefix === "") {
       tokenRe.lastIndex = htmlElementEnd(text, tag, tokenRe.lastIndex) ?? text.length;
@@ -1292,15 +1337,40 @@ function codeSpanLabelText(span: string): string {
   return encodeLiteralLabelText(/^ .* $/.test(text) && /[^ ]/.test(text) ? text.slice(1, -1) : text);
 }
 
-function readSummaryMarkup(text: string, summary: NonNullable<DetailsBounds["summary"]>): string {
+function readSummaryMarkup(
+  text: string, summary: NonNullable<DetailsBounds["summary"]>,
+  htmlContext: ReturnType<typeof createMarkdownHtmlBlockLookup>,
+): string {
   const parts: string[] = [];
+  const appendMarkup = (start: number, end: number) => {
+    const markup = text.slice(start, end);
+    if (!markup.includes("&")) {
+      parts.push(markup);
+      return;
+    }
+    // A summary can straddle a raw HTML block and Markdown text. Project
+    // Markdown text references into HTML without rewriting markup or attributes.
+    const tokens = new RegExp(HTML_MARKUP_TOKEN + /|(?<reference>&(?:(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);?)?)/.source, "gi");
+    let after = 0;
+    for (const match of markup.matchAll(tokens)) {
+      const reference = match.groups?.reference;
+      if (!reference || isEscaped(text, start + match.index) || htmlContext.isRawHtmlAt(start + match.index)) continue;
+      const decoded = decodeMarkdownCharacterReferences(reference);
+      const escaped = decoded === reference ? `&#38;${reference.slice(1)}` :
+        Array.from(decoded, character => `&#${character.codePointAt(0)};`).join("");
+      parts.push(markup.slice(after, match.index), escaped);
+      after = match.index + reference.length;
+    }
+    parts.push(markup.slice(after));
+  };
   let cursor = summary.openEnd;
   // Only shield spans the disclosure scanner actually treated as Markdown.
   for (const { start, end } of summary.codeSpans) {
-    parts.push(text.slice(cursor, start), codeSpanLabelText(text.slice(start, end)));
+    appendMarkup(cursor, start);
+    parts.push(codeSpanLabelText(text.slice(start, end)));
     cursor = end;
   }
-  parts.push(text.slice(cursor, summary.closeStart));
+  appendMarkup(cursor, summary.closeStart);
   return parts.join("");
 }
 
@@ -1572,7 +1642,7 @@ function renderMarkdownLabelMarkup(
           delimiters.set(symbol, openers);
         }
       }
-    } else if (groups.tag?.toLowerCase() === "template" && groups.prefix === "") {
+    } else if (asciiLower(groups.tag ?? "") === "template" && groups.prefix === "") {
       tokens.lastIndex = htmlElementEnd(label, "template", tokens.lastIndex) ?? label.length;
     } else {
       const raw = htmlRawTextBounds(label, match, tokens.lastIndex);
@@ -1598,7 +1668,7 @@ const CSS_DISPLAY_ALIASES = new Map([
 ]);
 
 type CssToken =
-  | { kind: "ident" | "punct" | "literal"; value: string }
+  | { kind: "ident" | "integer" | "punct" | "literal"; value: string }
   | { kind: "group"; name: string; tokens: CssToken[] };
 type CssDeclaration = { name: string; value: readonly CssToken[]; important: boolean };
 type CssCustomProperties = ReadonlyMap<string, readonly CssToken[]>;
@@ -1644,10 +1714,13 @@ function supportsContentVisibility(display: string, namespace: HtmlNamespace, ou
 }
 
 const CSS_ESCAPE = /\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f]|(?![\s\S]))/.source;
-const CSS_IDENT = "(?:[-_a-zA-Z0-9\\u0080-\\uFFFF]|" + CSS_ESCAPE + ")+";
+const CSS_NAME_START = "(?:[_a-zA-Z\\u0080-\\uFFFF]|" + CSS_ESCAPE + ")";
+const CSS_IDENT = "(?:--|-?" + CSS_NAME_START + ")(?:[-_a-zA-Z0-9\\u0080-\\uFFFF]|" + CSS_ESCAPE + ")*";
+const CSS_NUMBER = /[+-]?(?:[0-9]*\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?/.source;
 const CSS_COMPONENT = [
   /(?<trivia>[ \t\r\n\f]+|\/\*[\s\S]*?(?:\*\/|$))/.source,
   /(?<string>"(?:\\[\s\S]|[^"\\\r\n\f])*(?:"|(?=[\r\n\f])|\\?(?![\s\S]))|'(?:\\[\s\S]|[^'\\\r\n\f])*(?:'|(?=[\r\n\f])|\\?(?![\s\S])))/.source,
+  "(?<number>" + CSS_NUMBER + ")(?:" + CSS_IDENT + "|%)?",
   "(?<ident>" + CSS_IDENT + ")(?<call>\\()?",
   /(?<punct>[()[\]{},;:!])|[\s\S]/.source,
 ].join("|");
@@ -1655,10 +1728,14 @@ const CSS_COMPONENT = [
 function cssValueTokens(text: string): CssToken[] {
   const root: CssToken[] = [];
   const stack: { group: Extract<CssToken, { kind: "group" }>; closer: string }[] = [];
+  let separated = false;
   for (const match of text.matchAll(new RegExp(CSS_COMPONENT, "g"))) {
-    const { trivia, ident, call, punct } = match.groups!;
+    const { trivia, number, ident, call, punct } = match.groups!;
     // Comments separate adjacent tokens, including identifiers such as no/**/ne.
-    if (trivia) continue;
+    if (trivia) {
+      separated = true;
+      continue;
+    }
     const current = stack.at(-1);
     const tokens = current?.group.tokens ?? root;
     const value = ident === undefined ? match[0] : unescapeCssDisplay(ident);
@@ -1670,8 +1747,10 @@ function cssValueTokens(text: string): CssToken[] {
     } else if (current && punct === current.closer) {
       stack.pop();
     } else {
-      tokens.push({ kind: ident !== undefined ? "ident" : punct ? "punct" : "literal", value });
+      const integer = separated && number === value && /^(?:\+?\d+|-0+)$/.test(value);
+      tokens.push({ kind: ident !== undefined ? "ident" : integer ? "integer" : punct ? "punct" : "literal", value });
     }
+    separated = false;
   }
   // CSS closes open component values at EOF. Their contents are already in the group.
   return root;
@@ -1690,7 +1769,7 @@ function cssDisplayKeyword(tokens: readonly CssToken[], all: boolean): string | 
   const words: string[] = [];
   for (const token of tokens) {
     if (token.kind !== "ident") return undefined;
-    words.push(token.value.toLowerCase());
+    words.push(asciiLower(token.value));
   }
   const first = words[0]!;
   if (all) return words.length === 1 && CSS_WIDE_KEYWORDS.has(first) ? first : undefined;
@@ -1734,7 +1813,7 @@ function cssStyleDeclarations(text: string): CssDeclaration[] {
     const name = tokens[start];
     if (name?.kind === "ident" && isCssPunct(tokens[start + 1], ":")) {
       const last = tokens[end - 1];
-      const important = end >= start + 4 && last?.kind === "ident" && last.value.toLowerCase() === "important" &&
+      const important = end >= start + 4 && last?.kind === "ident" && asciiLower(last.value) === "important" &&
         isCssPunct(tokens[end - 2], "!");
       declarations.push({ name: name.value, value: tokens.slice(start + 2, important ? end - 2 : end), important });
     }
@@ -1750,24 +1829,54 @@ function cssVariableCall(group: Extract<CssToken, { kind: "group" }>) {
   return { name: name.value, fallback: comma ? group.tokens.slice(2) : undefined };
 }
 
-function cssVariableDependencies(tokens: readonly CssToken[]): Set<string> | undefined {
+const CSS_ZERO_LENGTH_ENVIRONMENT = new Set([
+  "safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left",
+  "titlebar-area-x", "titlebar-area-y", "titlebar-area-width", "titlebar-area-height",
+  "keyboard-inset-top", "keyboard-inset-right", "keyboard-inset-bottom", "keyboard-inset-left",
+  "keyboard-inset-width", "keyboard-inset-height",
+]);
+// The chunker has no viewport or keyboard measurements. These scalar UA
+// lengths use the zero-inset value, which cannot match a label style keyword.
+const CSS_ZERO_LENGTH: readonly CssToken[] = [{ kind: "literal", value: "0px" }];
+
+function cssEnvironmentCall(group: Extract<CssToken, { kind: "group" }>) {
+  const [name] = group.tokens;
+  if (name?.kind !== "ident" || CSS_WIDE_KEYWORDS.has(asciiLower(name.value)) || asciiLower(name.value) === "default") {
+    return undefined;
+  }
+  let end = 1;
+  while (group.tokens[end]?.kind === "integer") end++;
+  if (end === group.tokens.length) return { name: name.value, indexed: end > 1 };
+  if (!isCssPunct(group.tokens[end], ",")) return undefined;
+  const fallback = group.tokens.slice(end + 1);
+  if (fallback.some(token => token.kind === "punct" && /[!;\])}]/.test(token.value))) return undefined;
+  return { name: name.value, indexed: end > 1, fallback };
+}
+
+function cssSubstitutions(tokens: readonly CssToken[]) {
   const dependencies = new Set<string>();
+  let required = false;
   const groups = tokens.filter(token => token.kind === "group");
   for (let index = 0; index < groups.length; index++) {
     const group = groups[index]!;
-    if (group.name.toLowerCase() === "var") {
+    const name = asciiLower(group.name);
+    if (name === "var") {
       const call = cssVariableCall(group);
       if (!call) return undefined;
       dependencies.add(call.name);
+      required = true;
+    } else if (name === "env") {
+      if (!cssEnvironmentCall(group)) return undefined;
+      required = true;
     }
     for (const token of group.tokens) if (token.kind === "group") groups.push(token);
   }
-  return dependencies;
+  return { dependencies, required };
 }
 
 function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, inherited: CssCustomProperties) {
   const dependencies = new Map(
-    Array.from(custom, ([name, declaration]) => [name, cssVariableDependencies(declaration.value)]),
+    Array.from(custom, ([name, declaration]) => [name, cssSubstitutions(declaration.value)]),
   );
   const indices = new Map<string, number>();
   const active = new Set<string>();
@@ -1780,7 +1889,7 @@ function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, 
     indices.set(name, index);
     active.add(name);
     stack.push(name);
-    const edges = dependencies.get(name);
+    const edges = dependencies.get(name)?.dependencies;
     for (const dependency of edges ?? []) {
       if (!dependencies.has(dependency)) continue;
       const existing = indices.get(dependency);
@@ -1811,15 +1920,23 @@ function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, 
         if (result.length < 4) result.push(token);
         continue;
       }
-      if (token.name.toLowerCase() !== "var") {
+      const functionName = asciiLower(token.name);
+      let replacement: readonly CssToken[] | undefined;
+      if (functionName === "var") {
+        const call = cssVariableCall(token);
+        if (!call) return undefined;
+        replacement = resolve(call.name) ?? (call.fallback && substitute(call.fallback));
+      } else if (functionName === "env") {
+        const call = cssEnvironmentCall(token);
+        if (!call) return undefined;
+        replacement = !call.indexed && CSS_ZERO_LENGTH_ENVIRONMENT.has(call.name)
+          ? CSS_ZERO_LENGTH : call.fallback && substitute(call.fallback);
+      } else {
         const children = substitute(token.tokens);
         if (children === undefined) return undefined;
         if (result.length < 4) result.push({ ...token, tokens: [...children] });
         continue;
       }
-      const call = cssVariableCall(token);
-      if (!call) return undefined;
-      const replacement = resolve(call.name) ?? (call.fallback && substitute(call.fallback));
       if (replacement === undefined) return undefined;
       // Display has at most three tokens. Keep one extra to distinguish an invalid value.
       result.push(...replacement.slice(0, 4 - result.length));
@@ -1832,7 +1949,7 @@ function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, 
     if (computed.has(name)) return computed.get(name);
     const { value } = declaration;
     const first = value[0];
-    const keyword = value.length === 1 && first?.kind === "ident" ? first.value.toLowerCase() : "";
+    const keyword = value.length === 1 && first?.kind === "ident" ? asciiLower(first.value) : "";
     const resolved = CSS_WIDE_KEYWORDS.has(keyword)
       ? keyword === "initial" ? undefined : inherited.get(name)
       : !cyclic.has(name) && dependencies.get(name) ? substitute(value) : undefined;
@@ -1845,7 +1962,7 @@ function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, 
 function cssVisibilityKeyword(tokens: readonly CssToken[]): string | undefined {
   const [token] = tokens;
   if (tokens.length !== 1 || token?.kind !== "ident") return undefined;
-  const word = token.value.toLowerCase();
+  const word = asciiLower(token.value);
   return word === "visible" || word === "hidden" || word === "collapse" || CSS_WIDE_KEYWORDS.has(word)
     ? word : undefined;
 }
@@ -1853,13 +1970,13 @@ function cssVisibilityKeyword(tokens: readonly CssToken[]): string | undefined {
 function cssContentVisibilityKeyword(tokens: readonly CssToken[]): string | undefined {
   const visibility = cssVisibilityKeyword(tokens);
   if (visibility !== "collapse" && visibility !== undefined) return visibility;
-  if (tokens.length === 1 && tokens[0]?.kind === "ident" && tokens[0].value.toLowerCase() === "auto") return "auto";
+  if (tokens.length === 1 && tokens[0]?.kind === "ident" && asciiLower(tokens[0].value) === "auto") return "auto";
 }
 
 function cssLayoutKeyword(tokens: readonly CssToken[], allowed: RegExp): string | undefined {
   const [token] = tokens;
   if (tokens.length !== 1 || token?.kind !== "ident") return undefined;
-  const word = token.value.toLowerCase();
+  const word = asciiLower(token.value);
   return allowed.test(word) || CSS_WIDE_KEYWORDS.has(word) ? word : undefined;
 }
 
@@ -1897,7 +2014,7 @@ function resolveElementStyle(
   const attribute = (name: string) => markup === undefined ? undefined : htmlAttributeValue(markup, tag, name);
   const styleAttr = attribute("style");
   const hidden = namespace ? undefined : attribute("hidden");
-  const untilFound = hidden?.toLowerCase() === "until-found";
+  const untilFound = asciiLower(hidden ?? "") === "until-found";
   const hiddenByDefault = (hidden !== undefined && !untilFound) || HTML_NON_RENDERED_LABEL_TAGS.has(tag) ||
     tag === "head" || (tag === "dialog" && attribute("open") === undefined);
   const displayDefault = namespace ? "inline" : hiddenByDefault ? "none" :
@@ -1924,17 +2041,17 @@ function resolveElementStyle(
   for (const declaration of styleAttr ? cssStyleDeclarations(styleAttr) : []) {
     const { name, value, important } = declaration;
     if (name.startsWith("--")) {
-      if ((!custom.get(name)?.important || important) && cssVariableDependencies(value)) custom.set(name, declaration);
+      if ((!custom.get(name)?.important || important) && cssSubstitutions(value)) custom.set(name, declaration);
       continue;
     }
-    const property = name.toLowerCase();
+    const property = asciiLower(name);
     const all = property === "all";
     if (!all && !Object.hasOwn(LABEL_STYLE_PROPERTIES, property)) continue;
-    const variables = cssVariableDependencies(value);
+    const variables = cssSubstitutions(value);
     if (!variables) continue;
     for (const target of all ? LABEL_STYLE_PROPERTY_NAMES : [property as LabelStyleProperty]) {
       if ((!declarations.get(target)?.important || important) &&
-        (variables.size || (all ? cssDisplayKeyword(value, true) : LABEL_STYLE_PROPERTIES[target](value)))) {
+        (variables.required || (all ? cssDisplayKeyword(value, true) : LABEL_STYLE_PROPERTIES[target](value)))) {
         declarations.set(target, declaration);
       }
     }
@@ -1957,14 +2074,14 @@ function resolveElementStyle(
       ? attribute(property) : undefined;
     const parse = LABEL_STYLE_PROPERTIES[property];
     if (declaration) {
-      const value = cssVariableDependencies(declaration.value)?.size
+      const value = cssSubstitutions(declaration.value)?.required
         ? variables().substitute(declaration.value) : declaration.value;
       // Invalid at computed-value time resets the property without consulting lower declarations.
-      return (value && (declaration.name.toLowerCase() === "all" ? cssDisplayKeyword(value, true) : parse(value))) ?? "unset";
+      return (value && (asciiLower(declaration.name) === "all" ? cssDisplayKeyword(value, true) : parse(value))) ?? "unset";
     }
     if (presentation !== undefined) {
       const tokens = cssValueTokens(presentation);
-      if (cssVariableDependencies(tokens)?.size) {
+      if (cssSubstitutions(tokens)?.required) {
         const value = variables().substitute(tokens);
         return (value && parse(value)) ?? "unset";
       }
@@ -2352,7 +2469,7 @@ function createHtmlElementStack(
   };
   const readTokenContext = (match: RegExpExecArray) => {
     const prefix = match.groups?.prefix;
-    const tag = match.groups?.tag?.toLowerCase();
+    const tag = asciiLower(match.groups?.tag ?? "");
     const startTag = prefix === "" ? tag : undefined;
     if (tag && htmlChildNamespace(stack.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
       leaveForeignContent();
@@ -2435,7 +2552,7 @@ function createHtmlElementStack(
     }
   };
   const applyToken = (match: RegExpExecArray, namespace: HtmlNamespace, protectedElement?: OpenStyledTag) => {
-    const tag = match.groups?.tag?.toLowerCase();
+    const tag = asciiLower(match.groups?.tag ?? "");
     if (!tag) return;
     const prefix = match.groups?.prefix;
     if (prefix === "/") return closeTag(tag, protectedElement);
@@ -2480,6 +2597,7 @@ function createHtmlScopeLookup(
   let generatedSection: OpenStyledTag | undefined;
   let generatedRow: OpenStyledTag | undefined;
   let cursor = 0;
+  let rawHtml = false;
   const recordScope = (offset: number, style = getStyle()) => {
     const namespace = htmlChildNamespace(stack.at(-1));
     let pipeCell: "th" | "td" | undefined;
@@ -2501,13 +2619,15 @@ function createHtmlScopeLookup(
   };
   const readText = (end: number) => {
     if (end <= cursor) return;
-    const { parent } = elements.prepareText(decodeHtmlCharacterReferences(html.slice(cursor, end)));
+    const segment = html.slice(cursor, end);
+    const { parent } = elements.prepareText(rawHtml ? decodeHtmlCharacterReferences(segment) : decodeMarkdownCharacterReferences(segment));
     recordScope(cursor, parent?.labelStyle ?? inheritedStyle);
     cursor = end;
   };
   const advanceLines = (offset: number) => {
     for (let line = blockLines[lineIndex]; line && line.offset <= offset; line = blockLines[++lineIndex]) {
       readText(line.offset);
+      rawHtml = line.rawHtml ?? false;
       const select = elements.selectIndex();
       if (select >= 0) {
         const endsCell = (line.cell || line.table) && generatedTable && isOnStack(generatedTable);
@@ -2570,7 +2690,7 @@ function createHtmlScopeLookup(
     advanceLines(match.index);
     readText(match.index);
     const prefix = match.groups?.prefix;
-    const tag = match.groups?.tag?.toLowerCase();
+    const tag = asciiLower(match.groups?.tag ?? "");
     const { namespace, ignored } = elements.readTokenContext(match);
     if (match.groups?.cdata && !isForeignCdata(stack.at(-1), match)) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
@@ -2628,7 +2748,10 @@ type LabelOutput = { parts: (string | boolean | LabelBoxOutput | LabelDetailsLeg
 type LabelBoxOutput = { parent: LabelOutput; before?: LabelOutput; inside: LabelOutput; block: boolean };
 type LabelDetailsLegend = { disclosure: LabelDisclosure; parent: LabelOutput; visibilityHidden: boolean };
 
-function htmlLabelTextVariants(label: string, context: LabelContext, pipeCell?: "th" | "td") {
+function htmlLabelTextVariants(
+  label: string, context: LabelContext, pipeCell?: "th" | "td", rawHtml = false,
+  decodeText = rawHtml ? decodeHtmlCharacterReferences : decodeMarkdownCharacterReferences,
+) {
   const { style: inheritedStyle } = context;
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const root: LabelOutput = { parts: [], hasText: false };
@@ -2676,7 +2799,7 @@ function htmlLabelTextVariants(label: string, context: LabelContext, pipeCell?: 
   const appendData = (start: number, end: number) => {
     if (start >= end) return;
     // References cannot continue into the next HTML text node.
-    const text = decodeHtmlCharacterReferences(label.slice(start, end));
+    const text = decodeText(label.slice(start, end));
     const { parent, before } = elements.prepareText(text);
     if (rendersText(parent)) appendText(outputAt(parent, before), text);
   };
@@ -2694,9 +2817,13 @@ function htmlLabelTextVariants(label: string, context: LabelContext, pipeCell?: 
       }
       continue;
     }
-    const tag = match.groups?.tag?.toLowerCase();
+    const tag = asciiLower(match.groups?.tag ?? "");
     const prefix = match.groups?.prefix;
     if (!tag || (prefix !== "" && prefix !== "/")) continue;
+    if (!rawHtml && !/^[a-z][a-z0-9-]*$/.test(tag)) {
+      appendData(match.index, cursor);
+      continue;
+    }
     const { namespace: parentNamespace, ignored } = elements.readTokenContext(match);
     if (ignored) continue;
     if (prefix === "") {
@@ -2735,7 +2862,7 @@ function htmlLabelTextVariants(label: string, context: LabelContext, pipeCell?: 
       if (raw) {
         if (!style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden) {
           const text = label.slice(cursor, raw.closeStart);
-          appendText(bufferOutOfFlow(output, style), tag === "textarea" ? decodeHtmlCharacterReferences(text) : text);
+          appendText(bufferOutOfFlow(output, style), tag === "textarea" ? decodeText(text) : text);
         }
         tokens.lastIndex = cursor = raw.closeEnd;
         continue;
@@ -2856,10 +2983,11 @@ function classifyDetailsElement(
       "details", htmlContext.labelContextAt(openStart, definedLinkLabels).style, text.slice(openStart, openEnd),
     );
     const summaryStyle = resolveElementStyle("summary", detailsStyle, text.slice(summary.openStart, summary.openEnd));
-    const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false, definedLinkLabels);
+    const rawHtml = htmlContext.isRawHtmlAt(summary.openStart);
+    const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary, htmlContext), false, definedLinkLabels);
     const summaryContext = htmlContext.labelContextAt(summary.openEnd, definedLinkLabels);
     const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, { ...summaryContext, style: summaryStyle },
-      htmlContext.pipeCellAt(openStart, definedLinkLabels));
+      htmlContext.pipeCellAt(openStart, definedLinkLabels), rawHtml, decodeHtmlCharacterReferences);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
       !hasDetails &&
@@ -3068,12 +3196,12 @@ function isPipeTableStart(header: string, delimiter?: string): boolean {
 
 function tableColumnVisibility(
   label: string, definedLinkLabels = EMPTY_LINK_LABELS, context = DEFAULT_LABEL_CONTEXT,
-  pipeCell?: "th" | "td",
+  pipeCell?: "th" | "td", rawHtml = false,
 ): PedagogicalVisibility {
   const { style: inheritedStyle } = context;
   if (inheritedStyle.suppressedSubtree || skipsLabelContents(inheritedStyle)) return "public";
-  if (/[<\\*_[~\x60]/.test(label)) label = renderMarkdownLabelMarkup(label, true, definedLinkLabels);
-  const { inline, spaced } = /[<&]/.test(label) ? htmlLabelTextVariants(label, context, pipeCell)
+  if (!rawHtml && /[<\\*_[~\x60]/.test(label)) label = renderMarkdownLabelMarkup(label, true, definedLinkLabels);
+  const { inline, spaced } = /[<&]/.test(label) ? htmlLabelTextVariants(label, context, pipeCell, rawHtml)
     : { inline: inheritedStyle.visibilityHidden ? "" : label.replace(INVISIBLE_LABEL_TEXT, ""), spaced: "" };
   if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
   if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";
@@ -3262,10 +3390,14 @@ function createTranscriptCueSeparator(
     }
     return start;
   });
+  const headingText = lines.some(line => HTML_HEADING_OPEN_RE.test(line)) ? lines.join("\n") : undefined;
+  const headingLines = headingText === undefined ? undefined : splitLinesWithOffsets(headingText);
+  const headingContext = headingText === undefined ? undefined : createMarkdownHtmlBlockLookup(headingText, inheritedContext);
   let containers: MarkdownContainer[] = [];
   let previousBody = "";
   let tableColumns: PedagogicalVisibility[] | undefined;
   let setextThrough = -1;
+  let htmlHeadingThrough = -1;
   let latexArgumentThrough = -1;
   let literalEnvironment: string | undefined;
   const mathEnvironments: string[] = [];
@@ -3287,11 +3419,15 @@ function createTranscriptCueSeparator(
       literalEnvironment = undefined;
       mathEnvironments.length = 0;
       latexArgumentThrough = -1;
+      htmlHeadingThrough = -1;
       const underline = protectedUnderline(start, readMarkdownContainerLine(lines[start]!, containers));
       if (underline !== undefined) setextThrough = underline;
     }
     for (let index = start; index < end; index++) {
       const line = lines[index]!;
+      if (headingText !== undefined && headingLines && headingContext && index > htmlHeadingThrough && HTML_HEADING_OPEN_RE.test(line)) {
+        htmlHeadingThrough = readRawHtmlHeading(headingText, headingLines, index, headingContext)?.lastIndex ?? -1;
+      }
       const continuation = continueMarkdownContainers(line, containers);
       const current = readMarkdownContainerLine(line, containers);
       const readNext = (distance: number) => nextBodyInContainer(lines[index + distance], current.containers);
@@ -3364,7 +3500,8 @@ function createTranscriptCueSeparator(
       isPipeParagraphLine(previousBody) && isPipeParagraphLine(continued.body);
     const continuesLatexEnvironment = continued.depth === containers.length &&
       (mathEnvironments.length > 0 || literalEnvironment !== undefined);
-    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph || continuesLatexEnvironment) return newline;
+    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph || continuesLatexEnvironment ||
+      end <= htmlHeadingThrough) return newline;
 
     // The synthetic paragraph break also ends any table.
     previousBody = "";
@@ -3709,7 +3846,7 @@ function findInlineConstructSpans(
         }
       }
     }
-    if (text.charCodeAt(i) === 60 && text.slice(i, i + 8).toLowerCase() === "<details") {
+    if (text.charCodeAt(i) === 60 && asciiLower(text.slice(i, i + 8)) === "<details") {
       const m = DETAILS_OPEN_RE.exec(text.slice(i));
       if (m && inheritsHtmlBlock.opensHtmlDetailsAt(i, definedLinkLabels)) {
         const openEnd = i + m[0].length;
@@ -4583,19 +4720,20 @@ function parsePedagogicalAstInternal(
 
     // 1. Heading (and monotonic heading-stack section visibility propagation)
     const headingMatch = ATX_HEADING_RE.exec(raw);
-    const setext = headingMatch ? null : readSetextParagraph(index => lines[index]?.raw, i);
-    const level = headingMatch?.[1]?.length ?? setext?.level;
+    const rawHeading = headingMatch ? undefined : readRawHtmlHeading(text, lines, i, inheritsHtmlBlock);
+    const setext = headingMatch || rawHeading ? null : readSetextParagraph(index => lines[index]?.raw, i);
+    const level = headingMatch?.[1]?.length ?? rawHeading?.level ?? setext?.level;
     const boundaryFloor = boundaryFloors?.get(line.start) ??
       (tableHeadingFloor?.offset === line.start ? tableHeadingFloor.visibility : "public");
     if (level !== undefined) {
-      const headingLastIndex = setext?.index ?? i;
+      const headingLastIndex = setext?.index ?? rawHeading?.lastIndex ?? i;
       const headingEnd = lines[headingLastIndex]!.contentEnd;
       const headingTextStart = headingMatch
         ? line.start + raw.indexOf(headingMatch[2]!, raw.indexOf(headingMatch[1]!) + level)
         : line.start;
       const headingTextEnd = headingMatch
         ? headingTextStart + headingMatch[2]!.length
-        : lines[headingLastIndex - 1]!.contentEnd;
+        : rawHeading ? headingEnd : lines[headingLastIndex - 1]!.contentEnd;
       const headingText = text.slice(headingTextStart, headingTextEnd).trim();
       const inlineEnd = setext ? headingTextEnd : headingEnd;
       const rawInlineSpans = findInlineConstructSpans(
@@ -4625,7 +4763,9 @@ function parsePedagogicalAstInternal(
       const isSectionHeading = line.start > 0 || !headingContext?.firstHeadingIsLocal;
       if (isSectionHeading) headingContext?.onHeading?.(line.start, level);
       if (propagateSectionVisibility) {
-        const titleVisibility = tableColumnVisibility(cleanHeadingTitle, definedLinkLabels, labelContextAt(headingTextStart));
+        const titleVisibility = tableColumnVisibility(
+          cleanHeadingTitle, definedLinkLabels, labelContextAt(headingTextStart), undefined, rawHeading !== undefined,
+        );
         const ownVisibility = titleVisibility === "public" ? sectionBaseVisibility : titleVisibility;
         const visibility = maxVisibility(ownVisibility, boundaryFloor);
         if (isSectionHeading) {
