@@ -29,6 +29,6 @@ export async function probeParserOcr(
 /** A version, not a file hash: models are pinned, and file content is source-versioned.
  * Bump when extraction semantics/models change. Never reuse non-OCR output for OCR. */
 export function pdfParserProfile(env: NodeJS.ProcessEnv = process.env): string {
-  // v10 keeps label-only inline answers open across pages.
-  return `docling-2.126.0/pdf-segments-v34-discourse/${env.PARSER_OCR_MODEL_DIR?.trim() ? "rapidocr-3.9.2-torch-ppocrv4" : "text"}`;
+  // v35 carries proof-boundary state and same-line nested proof headings.
+  return `docling-2.126.0/pdf-segments-v35-discourse/${env.PARSER_OCR_MODEL_DIR?.trim() ? "rapidocr-3.9.2-torch-ppocrv4" : "text"}`;
 }

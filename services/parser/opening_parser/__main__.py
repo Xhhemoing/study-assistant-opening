@@ -25,6 +25,7 @@ def parser():
     result.add_argument("--page-start", type=int)
     result.add_argument("--page-end", type=int)
     result.add_argument("--initial-seal-mode", choices=("section_sealed", "inline_sealed", "inline_proof_sealed"))
+    result.add_argument("--initial-inline-proof-boundary", action="store_true")
     result.add_argument("--initial-in-worked-example", action="store_true")
     result.add_argument("--initial-in-exercise", action="store_true")
     result.add_argument("--inspect-pdf", action="store_true")
@@ -153,7 +154,8 @@ def main(argv=None):
         pages = []
         extraction = extract_physical_pages(conversion, initial_seal_mode=args.initial_seal_mode,
                                             initial_in_worked_example=args.initial_in_worked_example,
-                                            initial_in_exercise=args.initial_in_exercise)
+                                            initial_in_exercise=args.initial_in_exercise,
+                                            initial_inline_proof_boundary=args.initial_inline_proof_boundary)
         by_page = extraction.texts_by_page
         visual_kinds = extraction.visual_kinds_by_page if args.mime == PDF else {}
         sealed_by_page = extraction.section_sealed_by_page
@@ -174,6 +176,8 @@ def main(argv=None):
                 entry["inlineSealedAtEnd"] = inline_sealed_by_page[page_number]
             if extraction.inline_proof_sealed_by_page.get(page_number):
                 entry["inlineProofSealedAtEnd"] = True
+            if extraction.inline_proof_boundary_by_page.get(page_number):
+                entry["inlineProofBoundaryPendingAtEnd"] = True
             if had_sealed_by_page.get(page_number):
                 entry["hadSealedContent"] = True
             if args.mime == PDF and extraction.in_worked_example_by_page.get(page_number):

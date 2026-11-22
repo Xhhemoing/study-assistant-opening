@@ -489,7 +489,6 @@ function stripSealedSolutionLines(
     }
 
     if (state.inWorkedExample && WORKED_EXAMPLE_INTERNAL_RE.test(stripped)) {
-      setMode("none");
       keep(line);
       continue;
     }
@@ -509,6 +508,7 @@ function stripSealedSolutionLines(
       setMode("inline_sealed", true);
       state.inWorkedExample = false;
       lastInlineBodyLine = stripped.slice(inlineOpener[0].length).replace(/^\s*[:：]?\s*/u, "");
+      if (ANSWER_PROOF_HEADING_RE.test(lastInlineBodyLine)) setMode("inline_proof_sealed");
       changed = true;
       if (INLINE_SEALED_TERMINATOR_RE.test(lastInlineBodyLine)) setMode("none");
       continue;
@@ -1471,7 +1471,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             }
             return blockingSeals;
           },
-          onPages: async (pages, initialDoclingSeal, _afterFailedSegment, initialDoclingWorkedExample, cached, initialDoclingExercise) => {
+          onPages: async (pages, initialDoclingSeal, _afterFailedSegment, initialDoclingWorkedExample, cached, initialDoclingExercise, initialDoclingProofBoundary) => {
             const pageSeals = await readPageSeals(pages[0]!.page, pages.at(-1)!.page);
             const existing = deps.segments
               ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages.map(page => page.page), { unpublishedPdfForRecovery: true })
@@ -1481,9 +1481,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             const drySealState: SealState = { ...pdfSealState };
             let dryArchivedSeal = archivedSavedSeal;
             let doclingIncomingSeal = initialDoclingSeal;
+            let doclingIncomingProofBoundary = Boolean(initialDoclingProofBoundary);
             let doclingIncomingWorkedExample = initialDoclingWorkedExample;
             let doclingIncomingExercise = initialDoclingExercise;
             const planned = pages.map(rawPage => {
+              if (doclingIncomingProofBoundary) {
+                const firstLine = rawPage.text.split(/\r?\n/u).map(line => stripHeadingMarkup(line).stripped).find(Boolean) ?? "";
+                doclingIncomingSeal = ANSWER_PROOF_HEADING_RE.test(firstLine) ? "inline_proof_sealed" : undefined;
+                doclingIncomingProofBoundary = false;
+              }
               const seed = doclingIncomingSeal;
               const workedExample = doclingIncomingWorkedExample;
               const exercise = doclingIncomingExercise;
@@ -1493,6 +1499,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               dryArchivedSeal = archive.endSeal;
               const prep = preparePage(rawPage, saved, drySealState, seed, workedExample, exercise, archive);
               doclingIncomingSeal = pdfPageEndSeal(rawPage);
+              doclingIncomingProofBoundary = Boolean(rawPage.inlineProofBoundaryPendingAtEnd);
               doclingIncomingWorkedExample = Boolean(rawPage.inWorkedExampleAtEnd);
               doclingIncomingExercise = rawPage.inExerciseAtEnd;
               const blocked = marker?.hadSealedContent || marker?.publicationSealUnknown || pdfPageEndSeal(marker);
@@ -1772,6 +1779,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             } finally { await recognition?.return(); }
             return {
               nextSealMode: pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? null : pdfSealState.mode,
+              nextInlineProofBoundary: Boolean(pages.at(-1)?.inlineProofBoundaryPendingAtEnd),
               nextInWorkedExample: !pdfSealState.unknownAfterFailure && pdfSealState.inWorkedExample,
               nextInExercise: Boolean(pdfSealState.inExercise && !pdfSealState.unknownAfterFailure),
             };

@@ -25,6 +25,7 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some(kind => !["scan", "formula", "table", "picture"].includes(kind)) || new Set(kinds).size !== kinds.length)) throw new TypeError("invalid visual page metadata");
     if (page.sectionSealedAtEnd !== undefined && typeof page.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid sectionSealedAtEnd metadata");
     if (page.inlineSealedAtEnd !== undefined && typeof page.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid inlineSealedAtEnd metadata");
+    if (page.inlineProofBoundaryPendingAtEnd !== undefined && typeof page.inlineProofBoundaryPendingAtEnd !== "boolean") throw new TypeError("invalid inlineProofBoundaryPendingAtEnd metadata");
     if (page.inlineProofSealedAtEnd !== undefined && typeof page.inlineProofSealedAtEnd !== "boolean") throw new TypeError("invalid inlineProofSealedAtEnd metadata");
     if (page.sectionSealedAtEnd && page.inlineSealedAtEnd || page.inlineProofSealedAtEnd && !page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
     if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
@@ -49,6 +50,7 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
     const argv = ["-m", "opening_parser", "--input", input.path, "--mime", input.mime, "--max-pages", String(input.maxPages), "--timeout-seconds", String(timeoutSeconds)];
     if (input.pageStart !== undefined && input.pageEnd !== undefined) argv.push("--page-start", String(input.pageStart), "--page-end", String(input.pageEnd));
     if (input.initialSealMode !== undefined) argv.push("--initial-seal-mode", input.initialSealMode);
+    if (input.initialInlineProofBoundary) argv.push("--initial-inline-proof-boundary");
     if (input.initialInWorkedExample) argv.push("--initial-in-worked-example");
     if (input.initialInExercise) argv.push("--initial-in-exercise");
     // The outer deadline includes imports/model initialization, which the

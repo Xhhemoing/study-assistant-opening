@@ -1215,6 +1215,17 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                         self.assertFalse(ext.inline_sealed_by_page[13])
                         self.assertIn("proof", [block.kind for block in ext.discourse_blocks_by_page[14]])
 
+    def test_same_line_answer_proof_and_terminal_boundary_are_sealed(self):
+        ext = physical_pages.extract_physical_pages(result_for(
+            [text_element(11, "Problem 1. Prove it.\nSolution. Proof. Private derivation.", 1)],
+            [text_element(12, "Proof. Private continuation.", 2)],
+            [text_element(13, "Problem 2. Public problem.", 3)],
+        ))
+        self.assertEqual(ext.texts_by_page[11], ["Problem 1. Prove it."])
+        self.assertEqual(ext.texts_by_page[12], [])
+        self.assertEqual(ext.texts_by_page[13], ["Problem 2. Public problem."])
+        self.assertTrue(ext.inline_proof_sealed_by_page[11])
+
     def test_scans_public_proof_continuation_once_per_line(self):
         line = "Because the two terms agree, the inductive equality follows."
         proof = "\n".join(["Proof."] + [line] * 3200 + ["This concludes the proof. \\square"])

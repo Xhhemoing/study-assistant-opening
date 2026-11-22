@@ -223,7 +223,7 @@ function isArchiveRunningHeading(line: string): boolean {
 }
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
-const inlineTerminator = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *(?:\$+|\\[)\]]))?|\mQ\.?E\.?D\.?|证毕|证完|end +of +answers?|答案完|解答完) *[.。]? *$`;
+const inlineTerminator = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|\mQ\.?E\.?D\.?|证毕|证完|end +of +answers?|答案完|解答完) *[.。]? *$`;
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -316,7 +316,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT id,source_id,source_version,page,line,running_heading,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
       line ~* ${exerciseHeading} AS opens_exercise,
-      line ~* ${answerProofHeading} AS proof_heading,
+      (line ~* ${answerProofHeading}
+        OR (line ~ ${answerPeriodLine} AND btrim(regexp_replace(line,${answerPeriodLine},'')) ~* ${answerProofHeading})) AS proof_heading,
       public_example AND NOT running_heading AS opens_worked_example,
       (line ~* ${inlinePublicHeading} OR public_example
         OR public_numbered OR public_container OR public_dotted OR other_reopening)
