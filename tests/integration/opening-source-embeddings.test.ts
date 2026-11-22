@@ -147,7 +147,7 @@ describe("pgvector material repository", () => {
     const repo = pdf.repository;
     const chunks = createOpeningSourceChunksRepository(f.sql);
     const before = await repo.snapshot(f.scope, pdf.sourceId);
-    expect(before?.chunks).toEqual([notes, continuation]);
+    expect(before?.chunks).toEqual([notes]);
     await expect(repo.assertCurrent(f.scope, pdf.snapshot)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(await repo.hasIndex(f.scope, { ...query, chunkIds: [answer!.id] })).toBe(false);
     expect((await repo.search(f.scope, { ...query, sourceIds: [markdown.sourceId] })).map(row => row.chunk.text)).toEqual([texts[1]]);
@@ -202,6 +202,46 @@ describe("pgvector material repository", () => {
       expect(content).toMatchObject({ pages: [1, 2], text: publicText[0] });
       await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 10 })).rejects.toMatchObject({ code: "NOT_FOUND" });
     }
+  });
+
+  it.each([
+    "Answers to exercises 1–5", "Solutions to problems 1–10", "Answers to selected review questions",
+    "Key to the exercises", "Chapter 3: answers to exercises", "Selected answers", "Model answers",
+    "Official solutions", "Answer key", "Solutions to problems (CoNt.)", "**Ans**wers to Review Questions",
+    "Answers\u00a0to\u202fReview\u3000Questions", "复习题答案", "【课后习题答案】",
+  ])("blocks archived continuations after %s until a public chapter", async heading => {
+    const reopening = "Chapter 2: Geometry\nThis section introduces triangles.";
+    const pdf = await seed([heading, "5 units.", reopening]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const [answer, continuation, chapter] = pdf.snapshot.chunks;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+    expect(await chunks.listForSources(f.scope, [pdf.sourceId])).toEqual([chapter]);
+    expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2])).toEqual([]);
+    expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).toEqual([chapter]);
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
+      .resolves.toMatchObject({ pages: [3], text: reopening });
+    expect(await backfilledPages(pdf)).toEqual([3]);
+    expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks).toEqual([chapter]);
+    expect((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.id)).toEqual([chapter!.id]);
+    expect(await pdf.repository.search(f.scope, { ...query, chunkIds: [continuation!.id] })).toEqual([]);
+    expect((await pdf.repository.authorizeChunks(f.scope, [answer!, continuation!])).chunks).toEqual([]);
+    expect(await pdf.repository.hasIndex(f.scope, { ...query, chunkIds: [continuation!.id] })).toBe(false);
+  });
+
+  it("ignores inline labels as cross-page boundaries and requires a clean heading to reopen", async () => {
+    const pdf = await seed([
+      "Answers to exercises are omitted in this edition.", "Public notes.", "Solution 1: x = 3.",
+      "Public continuation.", "Answer Key", "# Page 6 of 10", "# Cached transcription for page 7",
+      "# Chapter 1 (continued)", "# Chapter 1 (page 9 of 10)", "5 units.",
+      "# Geometry\nThe next topic is triangles.", "The chapter continues.",
+    ]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.page)).toEqual([1, 2, 4, 11, 12]);
+    expect(await backfilledPages(pdf)).toEqual([1, 2, 4, 11, 12]);
   });
 
   it("keeps historical legacy seals settled while the current PDF version is retried", async () => {
@@ -280,6 +320,73 @@ describe("pgvector material repository", () => {
       expect(await backfilledPages(pdf)).toEqual(confirmed ? [] : [1]);
     },
   );
+
+  it.each([
+    { scenario: "later native seal", boundary: 2, section: true, inline: false, unknown: false },
+    { scenario: "archived Vision seal", boundary: 1, section: false, inline: true, unknown: false },
+    { scenario: "batch with a reusable scan", boundary: 3, section: false, inline: false, unknown: true },
+  ])("keeps publication fenced after Vision fails with $scenario", async ({ boundary, section, inline, unknown }) => {
+    const native = "Chapter 2: Geometry";
+    const savedVision = "[视觉转写与描述]\n[原图忠实转写]\n";
+    const savedScan = savedVision + "Public scan notes.";
+    const archived = [
+      inline ? "[原生提取]\n" + native + "\n\n" + savedVision + native + "\nSolution:" : native,
+      unknown ? savedScan : "Archived page text.",
+      unknown ? "123" : "5 units.",
+      "5 more units.",
+    ];
+    const pdf = await seed(archived);
+    await f.sql`UPDATE opening_source_chunks SET image_object_key='archived/image'
+      WHERE source_id=${pdf.sourceId} AND (page=${boundary} OR (${unknown} AND page=2))`;
+    const visual = createSourceVisualRecognition({
+      repository: {
+        read: async (_scope, { physicalPage }) => {
+          if (physicalPage === 3) throw new Error("Vision unavailable");
+          expect(physicalPage).toBe(1);
+          return null;
+        },
+        save: vi.fn(), assertCurrent: vi.fn(), ledger: vi.fn(), releasedReservation: vi.fn(),
+      },
+      gateway: { call: vi.fn() }, budget: vi.fn(), storage: { finalKey: () => "final" }, renderPdf: vi.fn(),
+    });
+    const retry = await startPdfRetry(pdf.sourceId, [
+      { page: 1, text: native, imagePath: null, visualKinds: ["picture"] },
+      { page: 2, text: unknown || section ? "" : "5 units.", imagePath: null, visualKinds: unknown ? ["scan"] : [],
+        ...(section ? { hadSealedContent: true, sectionSealedAtEnd: true } : {}) },
+      { page: 3, text: unknown ? "123" : "5 units.", imagePath: null, visualKinds: unknown ? ["scan"] : [] },
+      { page: 4, text: "5 more units.", imagePath: null, visualKinds: [] },
+    ], unknown ? { recognizePages: visual.recognizePages } : {
+      recognizePage: async () => { throw new Error("Vision unavailable"); },
+    });
+    const { chunks } = retry;
+    expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual(archived);
+    await expect(retry.run()).rejects.toThrow("Vision unavailable");
+    expect(await f.sql`SELECT pages FROM opening_pdf_parse_segments
+      WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`).toEqual([
+      { pages: [expect.objectContaining({ page: boundary, hadSealedContent: section || inline,
+        sectionSealedAtEnd: section, inlineSealedAtEnd: inline, publicationSealUnknown: unknown,
+        publicationSealCommitted: false, ...(inline ? { publicationSealHadPublicPrefix: true } : {}),
+      })] },
+    ]);
+    const expectedPages = unknown ? [1, 2] : section ? [1] : [];
+    const publicChunks = await chunks.listForSources(f.scope, [pdf.sourceId]);
+    expect(publicChunks.map(({ page }) => page)).toEqual(expectedPages);
+    if (unknown) expect(publicChunks[1]).toMatchObject({ text: savedScan, imageObjectKey: "archived/image" });
+    expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(({ page }) => page)).toEqual(expectedPages);
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: boundary }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 4 }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    if (unknown) await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 }))
+      .resolves.toMatchObject({ pages: expectedPages, text: savedScan });
+    expect(await backfilledPages(pdf)).toEqual(expectedPages);
+
+    // A status write cannot settle the marker or re-admit the stale embeddings.
+    await f.sql`UPDATE opening_sources SET parse_state='ready' WHERE id=${pdf.sourceId}`;
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+    expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks.map(({ page }) => page)).toEqual(expectedPages);
+    expect((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.page).sort()).toEqual(expectedPages);
+  });
 
   it("seals sentence-case assessment sections before publication and index admission", async () => {
     const texts = ["Answers to exercises 1–5", "5 units.", "Chapter 2: Geometry"];

@@ -1,32 +1,43 @@
 import type { Scope, SourceChunk } from "@aistudy/contracts";
 import { knowledgeDefinitionHeader, knowledgeNodeDefinition, serializeKnowledgeEvidence } from "@aistudy/domain";
-import type { Sql, TransactionSql } from "postgres";
+import type { PendingQuery, Row, Sql, TransactionSql } from "postgres";
 import { storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
 import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 
 const definitionPatchByteLimit = 256 * 1024;
-const pdfHeadingContainer = /^(?:(?:chapter|section|lecture|part|unit|appendix)[ \t]+[\w.]+|第[ \t]*[一二三四五六七八九十百千\d]+[ \t]*(?:章|节|讲|部分|单元)|附录[ \t]*[A-Z0-9一二三四五六七八九十]+)(?:[ \t]*[:：.\-—–][ \t]*|[ \t]+)/iu;
+const pdfHeadingContainer = String.raw`(?:(?:chapter|section|lecture|lesson|module|part|unit|appendix) +[\w.]+|第 *[一二三四五六七八九十百千\d]+ *(?:章节|讲义|部分|单元|章|节|讲)|附录 *[A-Z0-9一二三四五六七八九十]+)(?: *[:：.\-—–] *| +)`;
 const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
-const englishContinuation = String.raw`(?:[ \t]*\([ \t]*(?:continued|cont(?:['’]?d)?\.?)[ \t]*\))?`;
-const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答)";
-const chineseContinuation = String.raw`(?:[ \t]*[（(](?:续|接上页)[）)])?[ \t]*`;
+const englishContinuation = String.raw`(?: *\( *(?:continued|cont(?:['’]?d)?\.?) *\))?`;
+const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
+const chineseContinuation = String.raw`(?: *[（(](?:续|接上页)[）)])? *`;
 const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;
 const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *| +(?:to|through) +)${assessmentNumber})?)?`;
 const assessmentTopic = String.raw`(?:(?:review +questions?|practice +problems?|self[- ]check +exercises?|exercises?|problems?|questions?)${assessmentTarget}|chapter +\d+|section +\d+(?:\.\d+)*)`;
-const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter[ \t]+\d+|section[ \t]+\d+(?:\.\d+)*)[ \t]+)*`;
-const explicitPdfAnswerLabel = new RegExp(String.raw`^(?:(?:answers?[ \t]+(?:key|section)|${englishAnswerQualifier}[ \t]+answers?|(?:official|reference)[ \t]+solutions?|solutions?[ \t]+manual|answers?[ \t]+and[ \t]+solutions?|answers?)${englishContinuation}[ \t]*(?:[:：]|$)|(?:answers?|solutions?|key)[ \t]+to[ \t]+${assessmentQualifier}${assessmentTopic}${englishContinuation}[ \t]*(?:[:：]|$)|(?:【[ \t]*)?${chineseAnswerHeading}${chineseContinuation}(?:】|[:：]|$))`, "iu");
-const numberedPdfAnswerLabel = new RegExp(String.raw`^(?:(?:(?:${englishAnswerQualifier}|worked|full)[ \t]+)?(?:answers?(?:[ \t]+key)?|solutions?)|key)(?:[ \t]+to[ \t]+(?:exercise|problem|question))?[ \t]*\d+(?:\.\d+)*${englishContinuation}[ \t]*(?:[:：]|[.。](?:[ \t]|$)|$)|^(?:${chineseAnswerHeading}|详解|解析|解)[ \t]*\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?:[ \t]|$)|$)`, "iu");
+const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter +\d+|section +\d+(?:\.\d+)*) +)*`;
+const assessmentAnswers = String.raw`(?:answers?|solutions?|key) +to +${assessmentQualifier}${assessmentTopic}`;
+const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numbered) +answers?|model +answers|(?:official|reference) +solutions|solutions? +manual|answers? +and +solutions?)`;
+const lineStart = String.raw`^ *(?:#{1,6} +)*`;
+// Standalone answer keys and bare "Answers" open a section. Numbered inline labels
+// and a singular "Answer:" affect the current chunk alone.
+const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading} *】|${chineseAnswerHeading}${chineseContinuation}[:：]?) *$|(?:答案|解答)${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
+const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案|解答)${chineseContinuation}(?:】|[:：]|$))`;
+const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?(?:answers?(?: +key)?|solutions?)|key)(?: +to +(?:exercise|problem|question))? *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)|(?:${chineseAnswerHeading}|答案|解答|详解|解析|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
+const sectionAnswerLine = lineStart + sectionAnswer;
+const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
+const answerLabel = new RegExp(answerLabelLine, "imu");
+const horizontalWhitespace = "[ \t\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+";
+const pdfHorizontalWhitespace = new RegExp(horizontalWhitespace, "gu");
 
 export function containsPdfAnswerLabel(text: string): boolean {
-  // Bare "Solution" may belong to a worked example spanning several pages.
-  return text.split(/\r?\n/u).some(line => {
-    const heading = line.replace(/[^\S\r\n]+/gu, " ").trim().replace(/^#{1,6} +/u, "").replace(/\*\*|__/gu, "").trim();
-    const container = pdfHeadingContainer.exec(heading)?.[0];
-    const title = container ? heading.slice(container.length) : heading;
-    return numberedPdfAnswerLabel.test(title) || explicitPdfAnswerLabel.test(title) || Boolean(container &&
-      /^(?:(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)[ \t]+)?solutions?[ \t]*(?:[:：]|$)/iu.test(title));
-  });
+  return answerLabel.test(text.replace(/\r|\*\*|__/gu, "").replace(pdfHorizontalWhitespace, " "));
 }
+
+// Reopen at the first content line, so earlier answer text on a physical page
+// cannot become public because a later line happens to look like a heading.
+const titledContainer = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?: *[:：.．—–-] *| +)|第 *[一二三四五六七八九十百千\d]+ *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]) *[:：.．—–-]? *)(?!(?:is|are|was|see)(?: |$))[[:alpha:]一-龥]`;
+const markdownTitle = String.raw`#{1,6} +(?!(?:chapter|section|part|unit|lecture|lesson|module|appendix)(?: |$)|第 *[一二三四五六七八九十百千\d]+|附录)(?:\d+(?:\.\d+)+ +)?[[:alpha:]一-龥]`;
+const reopeningHeading = String.raw`^ *(?:(?:#{1,6} +)?(?:${titledContainer}|appendix(?: +[A-Z0-9]+)?(?: *[:：—–-]? +.*| *$)|附录.*|(?:preface|introduction|bibliography|references|glossary|index)(?:[ :：]|$)|序言|前言|引言|参考文献)|${markdownTitle})`;
+const blockedReopeningHeading = String.raw`(?:^ *(?:#{1,6} +)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|[ivxlcdm]+[.。]? *$|true[.。]? *$|false[.。]? *$|yes[.。]? *$|no[.。]? *$|none[.。]? *$)(?:[ :：]|$)|\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|homework|assignments?|worksheets?|tutorials?|labs?|continued|cont(?:['’]?d)?)(?:\M)|(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千]+(?: *(?:[/／–-]|共) *(?:第 *)?[\d一二三四五六七八九十百千]+)? *[页頁]|答[案]|解答|习题|练习|复习题|自测题|续上页|接上页|[（(] *续 *[）)])`;
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -39,33 +50,66 @@ function pendingPdfSeal(sql: Sql, source: "s" | "ps") {
     ELSE (NOT (${historical}) AND (${state})) END`;
 }
 
-export function publicPdfSealBoundaries(sql: Sql, workspaceId: string, scope: { sourceIds: readonly string[] } | { chunkId: string }) {
-  const requested = "sourceIds" in scope ? sql`seal.source_id=ANY(${scope.sourceIds}::uuid[])`
-    : sql`seal.source_id=(SELECT source_id FROM opening_source_chunks WHERE id=${scope.chunkId})`;
+export function publicPdfSealBoundaries(sql: Sql, workspaceId: string,
+  scope: { sourceIds: readonly string[] } | { chunkId: string }) {
+  const requestedSources = "sourceIds" in scope ? sql`s.id=ANY(${scope.sourceIds}::uuid[])`
+    : sql`s.id=(SELECT source_id FROM opening_source_chunks WHERE id=${scope.chunkId})`;
   // Every newer tightening invalidates stale downstream chunks until replacement.
   // A verified reopening and all settled markers commit with that replacement.
-  return sql`WITH pdf_pending_seals AS MATERIALIZED (
+  return sql`WITH pdf_read_sources AS MATERIALIZED (
+    SELECT s.id,s.workspace_id,s.version,s.parse_state,s.updated_at
+    FROM opening_sources s WHERE s.workspace_id=${workspaceId} AND s.mime='application/pdf' AND ${requestedSources}
+  ), pdf_pending_seals AS MATERIALIZED (
     SELECT seal.source_id,seal.source_version,min(CASE WHEN seal.parser_profile='pdf-publication-page-seal-v1'
       THEN seal.page_start ELSE substring(seal.parser_profile FROM ${pendingPdfFailureBoundaryPattern})::int END) AS first_page
     FROM opening_pdf_parse_segments seal
-    JOIN opening_sources ps ON ps.id=seal.source_id AND ps.workspace_id=seal.workspace_id AND ps.mime='application/pdf'
-    WHERE seal.workspace_id=${workspaceId} AND ${requested}
+    JOIN pdf_read_sources ps ON ps.id=seal.source_id AND ps.workspace_id=seal.workspace_id
+    WHERE seal.workspace_id=${workspaceId}
       AND ((seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready' AND seal.page_end=seal.page_start
         AND (seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
           OR seal.pages->0->>'publicationSealUnknown'='true')
         AND (${pendingPdfSeal(sql, "ps")}))
         OR seal.parser_profile ~ ${pendingPdfFailureBoundaryPattern})
     GROUP BY seal.source_id,seal.source_version
+  )${"sourceIds" in scope ? sql`, ${archivedPdfSealSpans(sql, sql`c.source_id=ANY(ARRAY(SELECT id FROM pdf_read_sources))`)}` : sql``}`;
+}
+
+function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
+  return sql`pdf_archive_text AS (
+    SELECT c.id,c.source_id,c.source_version,c.page,c.created_at,
+      regexp_replace(replace(replace(replace(c.text,chr(13),''),'**',''),'__',''),${horizontalWhitespace},' ','g') AS body
+    FROM opening_source_chunks c
+    WHERE ${scope} AND c.page IS NOT NULL
+  ), pdf_archive_page_events AS (
+    SELECT source_id,source_version,page,
+      bool_or(body ~* ${"(?n)" + sectionAnswerLine}) AS section_answer,
+      bool_or(body ~* ${"(?n)" + answerLabelLine}) AS answer_label,
+      (array_agg(split_part(ltrim(body,' '||chr(10)),chr(10),1) ORDER BY created_at,id)
+        FILTER (WHERE ltrim(body,' '||chr(10))<>''))[1] AS first_line
+    FROM pdf_archive_text
+    GROUP BY source_id,source_version,page
+  ), pdf_archive_sealed_spans AS MATERIALIZED (
+    SELECT source_id,source_version,first_page,reopen_page FROM (
+      SELECT source_id,source_version,page AS first_page,section_answer,
+        lead(page) OVER (PARTITION BY source_id,source_version ORDER BY page) AS reopen_page
+      FROM pdf_archive_page_events
+      WHERE section_answer OR (NOT answer_label AND first_line ~* ${reopeningHeading}
+        AND first_line !~* ${blockedReopeningHeading})
+    ) events WHERE section_answer
   )`;
 }
 
 /** Chunk and source aliases are c and s at each publication read. */
-export function publicPdfChunkPredicate(sql: Sql) {
+export function publicPdfChunkPredicate(sql: Sql, { checkArchive = true } = {}) {
   return sql`(s.mime<>'application/pdf' OR c.page IS NULL OR (
     NOT EXISTS (
       SELECT 1 FROM pdf_pending_seals boundary
       WHERE boundary.source_id=c.source_id AND boundary.source_version=c.source_version AND boundary.first_page<=c.page
-    ) AND NOT EXISTS (
+    ) ${checkArchive ? sql`AND NOT EXISTS (
+      SELECT 1 FROM pdf_archive_sealed_spans archived
+      WHERE archived.source_id=c.source_id AND archived.source_version=c.source_version
+        AND archived.first_page<=c.page AND (archived.reopen_page IS NULL OR c.page<archived.reopen_page)
+    )` : sql``} AND NOT EXISTS (
       SELECT 1 FROM opening_pdf_parse_segments seal
       WHERE seal.workspace_id=s.workspace_id AND seal.source_id=c.source_id AND seal.source_version=c.source_version
         AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'
@@ -81,7 +125,10 @@ export function isPublicSourceChunk(row: Record<string, unknown>): boolean {
   return row.mime !== "application/pdf" || !containsPdfAnswerLabel(row.text as string);
 }
 
-async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string) {
+type ArchivedSealSpan = { first_page: number; reopen_page: number | null };
+
+async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string,
+  archivedSpans: Map<string, ArchivedSealSpan[]>) {
   // Read one text at a time. A single existing chunk can itself exceed 256 KiB in UTF-8.
   const [row] = await tx<Array<SourceChunk & { mime: string }>>`
     ${publicPdfSealBoundaries(tx, scope.workspaceId, { chunkId: id })}
@@ -98,11 +145,27 @@ async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string
       AND graph.owner_user_id=${scope.ownerUserId}
     WHERE c.id=${id} AND c.source_version::text=graph.source_versions->>s.id::text
       AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-      AND ${publicPdfChunkPredicate(tx)}
+      AND ${publicPdfChunkPredicate(tx, { checkArchive: false })}
     FOR SHARE OF c,s,v,m`;
   if (row?.id !== id) return undefined;
   const { mime, ...chunk } = row;
-  return mime === "application/pdf" && containsPdfAnswerLabel(chunk.text) ? undefined : chunk;
+  if (mime !== "application/pdf") return chunk;
+  if (containsPdfAnswerLabel(chunk.text)) return undefined;
+  if (chunk.page == null) return chunk;
+
+  // The source share lock from the citation read lasts through backfill, blocking
+  // chunk replacements. Reuse only page boundaries, keeping cited texts streamed.
+  const key = `${chunk.sourceId}:${chunk.sourceVersion}`;
+  let spans = archivedSpans.get(key);
+  if (!spans) {
+    const version = tx`c.source_id=${chunk.sourceId} AND c.source_version=${chunk.sourceVersion}`;
+    spans = await tx<ArchivedSealSpan[]>`WITH ${archivedPdfSealSpans(tx, version)}
+      SELECT first_page,reopen_page FROM pdf_archive_sealed_spans`;
+    archivedSpans.set(key, spans);
+  }
+  const page = chunk.page;
+  return spans.some(span => span.first_page <= page && (span.reopen_page == null || page < span.reopen_page))
+    ? undefined : chunk;
 }
 
 /** Upgrade pre-definition graphs before the parser replaces their evidence UUIDs.
@@ -129,6 +192,7 @@ export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, sc
       AND graph.source_versions->>${sourceId}=${String(sourceVersion)} AND missing.node_indexes IS NOT NULL
     ORDER BY graph.course_id FOR UPDATE OF graph`;
   let evidenceStageReady = false;
+  const archivedSpans = new Map<string, ArchivedSealSpan[]>();
   for (const { course_id: courseId, node_indexes: nodeIndexes } of graphs) {
     const [graph] = await tx`SELECT snapshot FROM opening_course_knowledge
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
@@ -151,7 +215,7 @@ export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, sc
       const node = parsed.data.nodes[index]!;
       const evidenceIds = new Set(node.evidenceChunkIds);
       if (evidenceIds.size === 1) {
-        const chunk = await readCitedChunk(tx, scope, courseId, node.evidenceChunkIds[0]!);
+        const chunk = await readCitedChunk(tx, scope, courseId, node.evidenceChunkIds[0]!, archivedSpans);
         const definition = chunk && knowledgeNodeDefinition(node, [chunk]);
         if (!definition) continue;
         const bytes = Buffer.byteLength(JSON.stringify(definition)) + node.id.length + 4;
@@ -171,7 +235,7 @@ export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, sc
       }
       let complete = true;
       for (const id of evidenceIds) {
-        const chunk = await readCitedChunk(tx, scope, courseId, id);
+        const chunk = await readCitedChunk(tx, scope, courseId, id, archivedSpans);
         const content = chunk && serializeKnowledgeEvidence(chunk);
         if (!content) { complete = false; break; }
         const sortKey = Buffer.from(content, "utf16le").swap16();

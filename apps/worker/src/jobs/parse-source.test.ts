@@ -82,7 +82,7 @@ describe("parse source handler", () => {
       stdout: JSON.stringify({ pages: [
         { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"],
           sectionSealedAtEnd: true, hadSealedContent: true },
-        { page: 2, text: "", imagePath: null, visualKinds: [], sectionSealedAtEnd: true },
+        { page: 2, text: "5 units.", imagePath: null, visualKinds: [] },
       ] }),
       recognizePage: async () => { throw new Error("Vision failed"); },
     });
@@ -128,6 +128,63 @@ describe("parse source handler", () => {
       state: "ready", pages: [expect.objectContaining({ page: 2, publicationSealUnknown: true, publicationSealCommitted: false })],
     }]]);
     expect(d.replaceInput()).toBeUndefined();
+  });
+
+  it.each([
+    { sourceOfSeal: "later native page", sealPage: 2, mode: "section" },
+    { sourceOfSeal: "archived Vision", sealPage: 1, mode: "inline" },
+  ])("persists a confirmed seal from $sourceOfSeal when recognition aborts the window", async ({ sealPage, mode }) => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const archivedText = "[原生提取]\nChapter 2: Geometry\n\n[视觉转写与描述]\n[原图忠实转写]\nChapter 2: Geometry\nSolution:";
+    const d = await deps({
+      pageCount: 3,
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      ...(mode === "inline" ? { published: [{
+        id: "saved-page", sourceId, sourceVersion: 7, page: 1, slideLabel: null, startMs: null, endMs: null,
+        text: archivedText, imageObjectKey: "archived/1",
+      }] } : {}),
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"] },
+        { page: 2, text: "", imagePath: null, visualKinds: [],
+          ...(mode === "section" ? { hadSealedContent: true, sectionSealedAtEnd: true } : {}) },
+        { page: 3, text: "5 units.", imagePath: null, visualKinds: [] },
+      ] }),
+      recognizePage: async () => { throw new Error("Vision failed"); },
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Vision failed");
+    const markers = save.mock.calls.filter(([, { parserProfile }]) => parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, { pageStart }, segment]) => [pageStart, segment])).toEqual([[sealPage, {
+      state: "ready", pages: [expect.objectContaining({
+        hadSealedContent: true, publicationSealHadPublicPrefix: mode === "inline",
+        sectionSealedAtEnd: mode === "section", inlineSealedAtEnd: mode === "inline", publicationSealUnknown: false,
+      })],
+    }]]);
+  });
+
+  it("keeps a verified archived scan outside the implicated visual inputs", async () => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const batch = vi.fn(async function* (inputs: ParseSourceVisualPageInput[]) {
+      expect(inputs.map(input => input.physicalPage)).toEqual([1, 3]);
+      yield Promise.reject(new Error("Page 3 cache unavailable"));
+    });
+    const d = await deps({
+      pageCount: 4,
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      published: [{ id: "saved-page", sourceId, sourceVersion: 7, page: 2, slideLabel: null, startMs: null, endMs: null,
+        text: "[视觉转写与描述]\n[原图忠实转写]\nPublic geometry notes.", imageObjectKey: "archived/2" }],
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"] },
+        { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
+        { page: 3, text: "123", imagePath: null, visualKinds: ["scan"] },
+        { page: 4, text: "5 units.", imagePath: null, visualKinds: [] },
+      ] }),
+      recognizePages: batch,
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Page 3 cache unavailable");
+    const markers = save.mock.calls.filter(([, { parserProfile }]) => parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, { pageStart }, segment]) => [pageStart, segment])).toEqual([[3, {
+      state: "ready", pages: [expect.objectContaining({ publicationSealUnknown: true, hadSealedContent: false })],
+    }]]);
   });
 
   it("reports low quality on a saved legacy page preserved beyond the UTF-16 staging limit", async () => {

@@ -1261,21 +1261,21 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 const evidence = { visionHandled: false, visionTranscribed: false, visionHadSeal: false, visionDetectedOnPage: false,
                   transcription: "" };
                 let chunk: NewSourceChunk | undefined;
-                let lastPageOnFailure = rawPage.page;
+                let implicatedVisualPages = new Set<number>();
                 try {
                   let prefetched: { value: ParseSourceVisualPageResult | null } | undefined;
                   if (visualInput && recognizePage) {
                     // The first pull of each render batch can fail while preparing any page in it.
                     const batchSize = yieldedVisualCount % MAX_PDF_RENDER_PAGES === 0 ? MAX_PDF_RENDER_PAGES : 1;
-                    const lastInput = Math.min(visualInputs.length, yieldedVisualCount + batchSize) - 1;
-                    lastPageOnFailure = visualInputs[lastInput]?.physicalPage ?? rawPage.page;
+                    implicatedVisualPages = new Set(visualInputs.slice(yieldedVisualCount, yieldedVisualCount + batchSize)
+                      .map(input => input.physicalPage));
                     try {
                       prefetched = { value: await recognizePage() };
                     } catch (error) {
                       if (!(error instanceof OpeningModelRoutingError)) throw error;
                       prefetched = { value: null };
                     }
-                    lastPageOnFailure = rawPage.page;
+                    implicatedVisualPages = new Set([rawPage.page]);
                   }
                   const effectivePrepared = previouslyBlocked || (preparedPage.visual && prefetched?.value)
                     ? { ...preparedPage, reusable: undefined }
@@ -1284,6 +1284,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                     ? recognizeSingleFromBatch
                     : deps.recognizePage ?? recognizeSingleFromBatch;
                   const pageRecognize = prefetched ? async () => prefetched.value : visualInput ? undefined : singlePageRecognition;
+                  if (visualInput || (effectivePrepared.visual && !effectivePrepared.reusable && pageRecognize)) {
+                    implicatedVisualPages.add(rawPage.page);
+                  }
                   chunk = await consumePage(effectivePrepared, pdfSealState, pageRecognize, evidence);
                 } catch (error) {
                   const cancelled = signal.aborted || error instanceof Error
@@ -1292,19 +1295,26 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                     for (let failedIndex = index; failedIndex < planned.length; failedIndex++) {
                       const failed = planned[failedIndex]!;
                       const { rawPage: page } = failed;
-                      if (page.page > lastPageOnFailure) break;
                       const prepared = failedIndex === index ? preparedPage : failed.prepared;
                       const visualKinds = (prepared.visual ?? failed.visualInput)?.visualKinds ?? page.visualKinds;
                       const endSeal = pdfPageEndSeal(page);
-                      const confirmed = prepared.nativeSealConfirmedOnPage || prepared.hadNativeSeal
-                        || Boolean(page.hadSealedContent || endSeal);
-                      const unknown = Boolean(visualKinds && needsVerifiedImage(visualKinds) && !hasVerifiedPageText(page.text));
+                      // A later page can inherit a fence from an earlier marker without opening its own seal.
+                      const nativeConfirmed = prepared.nativeSealConfirmedOnPage || Boolean(page.hadSealedContent || endSeal)
+                        || (failedIndex === index && prepared.hadNativeSeal);
+                      const archivedConfirmed = prepared.savedVisionDetectedOnPage || prepared.savedVisionWasSealed;
+                      const savedVisionMode = archivedConfirmed ? prepared.savedSeal?.mode : undefined;
+                      const confirmed = nativeConfirmed || archivedConfirmed;
+                      const unknown = implicatedVisualPages.has(page.page)
+                        && Boolean(visualKinds && needsVerifiedImage(visualKinds) && !hasVerifiedPageText(page.text));
                       if (!confirmed && !unknown) continue;
-                      const section = confirmed && (endSeal === "section_sealed" || prepared.nativeOutSeal.mode === "section_sealed");
-                      const inline = confirmed && !section && (endSeal === "inline_sealed" || prepared.nativeOutSeal.mode === "inline_sealed");
+                      const endModes = [endSeal, prepared.nativeOutSeal.mode, savedVisionMode];
+                      const section = confirmed && endModes.includes("section_sealed");
+                      const inline = confirmed && !section && endModes.includes("inline_sealed");
+                      const hasPublicPrefix = Boolean((nativeConfirmed && prepared.page.text.trim())
+                        || (archivedConfirmed && prepared.saved?.text.trim()));
                       await stagePageSeal(pageSeals.get(page.page), {
                         page: page.page, text: "", imagePath: null, visualKinds, hadSealedContent: confirmed,
-                        ...(confirmed ? { publicationSealHadPublicPrefix: Boolean(prepared.page.text.trim()) } : {}),
+                        ...(confirmed ? { publicationSealHadPublicPrefix: hasPublicPrefix } : {}),
                         sectionSealedAtEnd: section, inlineSealedAtEnd: inline, publicationSealUnknown: unknown,
                       }, true);
                     }

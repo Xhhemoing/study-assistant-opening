@@ -68,7 +68,8 @@ describe("source content self-read versus additional PDF retry access", () => {
       expect(query).toContain("pdf_pending_seals AS MATERIALIZED");
       expect(query).toContain("boundary.first_page<=c.page");
       expect(query).toContain("seal.page_start=c.page AND seal.page_end=c.page");
-      expect(query.match(/\b(?:FROM|JOIN) opening_\w+/gu)).toHaveLength(5);
+      expect(query).toContain("pdf_archive_sealed_spans AS MATERIALIZED");
+      expect(query.match(/\b(?:FROM|JOIN) opening_\w+/gu)).toHaveLength(6);
     }
     expect(reads[1]).toContain("c.id=ANY(?::uuid[])");
     await expect(readOpeningSourceContent(sql, scope, "source", { page: 3 })).rejects.toMatchObject({ code: "NOT_FOUND" });

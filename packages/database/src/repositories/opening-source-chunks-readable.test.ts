@@ -135,8 +135,8 @@ describe("cross-source legacy definition backfill", () => {
     const citedIds: unknown[] = [];
     const tx = (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = mockQueryText(strings, values);
-      if (strings[0]?.trimStart().startsWith("WITH pdf_pending_seals") || !query.startsWith("WITH") && query.includes("seal.pages->0")
-        || query.startsWith("seal.source_id=") || query.startsWith("s.parse_state") || query.startsWith("ps.parse_state") || query.startsWith("seal.source_version<")) {
+      if (strings[0]?.trimStart().startsWith("WITH pdf_read_sources") || !query.startsWith("WITH") && query.includes("seal.pages->0")
+        || query.startsWith("s.id=") || query.startsWith("s.parse_state") || query.startsWith("ps.parse_state") || query.startsWith("seal.source_version<")) {
         return { sqlFragment: query };
       }
       if (query.startsWith("SELECT id FROM workspaces")) return [{ id: "workspace" }];
@@ -213,6 +213,7 @@ it("withdraws unresolved PDF continuations and numbered labels from public reads
   for (const query of queries.slice(0, 2)) {
     expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR");
     expect(query).toContain("pdf_pending_seals AS MATERIALIZED");
+    expect(query).toContain("archived.first_page<=c.page AND (archived.reopen_page IS NULL OR c.page<archived.reopen_page)");
     expect(query).toContain("seal.source_id=c.source_id AND seal.source_version=c.source_version");
     expect(query.match(/\b(?:FROM|JOIN) (?:opening_\w+|workspaces)\b/gu)?.length).toBeLessThanOrEqual(10);
   }
