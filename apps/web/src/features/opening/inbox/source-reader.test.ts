@@ -138,10 +138,14 @@ describe("dedicated material reader", () => {
     // Simulate metadata load -> auto-seeks to startMs / 1000 = 65s and keeps highlight active while paused.
     Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
     await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
-    await act(async () => { video.dispatchEvent(new Event("seeked")); });
     expect(video.currentTime).toBe(65);
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("seeking_segment");
+    expect(status.textContent).toBe("正在跳到引用位置。");
+
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("ready_segment");
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
-    expect(status.textContent).toContain("已定位到引用片段，播放至末尾会自动暂停。");
+    expect(status.textContent).toBe("已定位到引用片段，播放至末尾会自动暂停。");
 
     // Mid-segment timeupdate does not pause.
     paused = false;
@@ -172,7 +176,9 @@ describe("dedicated material reader", () => {
     const replayButton = Array.from(reader.querySelectorAll("button")).find(b => b.textContent === "重播片段")!;
     await click(replayButton);
     expect(video.currentTime).toBe(65);
+    expect(status.textContent).toBe("正在跳到引用位置。");
     await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    expect(status.textContent).toBe("已定位到引用片段，播放至末尾会自动暂停。");
     expect(playSpy).toHaveBeenCalledOnce();
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
     video.currentTime = 90.2;
@@ -184,8 +190,10 @@ describe("dedicated material reader", () => {
     video.currentTime = 15;
     await act(async () => { video.dispatchEvent(new Event("seeked")); });
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("seeked_outside_range");
+    expect(status.textContent).toBe("已跳转到其他时间位置，可随时重播引用片段。");
   });
-  it("announces an audio citation point once metadata allows seeking", async () => {
+  it("announces an audio citation point once programmatic seeking finishes", async () => {
     const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg" };
     const reader = await render({ record: audioRecord, startMs: 30_000 });
     const player = reader.querySelector('[data-media-anchor-player="true"]')!;
@@ -199,9 +207,14 @@ describe("dedicated material reader", () => {
 
     Object.defineProperty(audio, "readyState", { configurable: true, value: 1 });
     await act(async () => { audio.dispatchEvent(new Event("loadedmetadata")); });
-    await act(async () => { audio.dispatchEvent(new Event("seeked")); });
     expect(audio.currentTime).toBe(30);
-    expect(status.textContent).toContain("已定位到引用时间点。");
+    expect(status.textContent).toBe("正在跳到引用位置。");
+
+    await act(async () => { audio.dispatchEvent(new Event("seeked")); });
+    expect(status.textContent).toBe("已定位到引用时间点。");
+    audio.currentTime = 45;
+    await act(async () => { audio.dispatchEvent(new Event("seeked")); });
+    expect(status.textContent).toBe("已跳转到其他时间位置，可随时跳回引用时间点。");
   });
   it("renders an audio player and rejects inverted [startMs, endMs] media ranges without seeking", async () => {
     const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg", version: 1 };

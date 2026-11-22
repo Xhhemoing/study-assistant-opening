@@ -97,7 +97,9 @@ const STANDALONE_PEDAGOGICAL_KINDS = new Set<PedagogicalBlockKind>([
 const SEALED_HEADING_RE =
   /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
-const DETAILS_OPEN_RE = /^<details(?:\s[^>]*)?>/i;
+const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
+const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\s/'"=<>]*)(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">";
+const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
 const ATX_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/;
 
 interface HeadingScope {
@@ -158,14 +160,36 @@ function findUnescapedToken(text: string, token: string, fromIndex: number): num
   return -1;
 }
 
-// Include "%" in the token pattern to consume a LaTeX comment as one unit.
+const LATEX_LITERAL_TOKENS = /%|(?<verb>\\verb(?![a-zA-Z])\*?)|\\begin\{(?<literalEnvironment>verbatim\*?|lstlisting)\}/.source;
+
+function endOfLatexVerb(text: string, start: number): number {
+  const codePoint = text.codePointAt(start);
+  if (codePoint === undefined) return start;
+  const delimiter = String.fromCodePoint(codePoint);
+  if (/\s/.test(delimiter)) return start;
+  const lineEnd = nextLineBreak(text, start)?.index ?? text.length;
+  const close = text.indexOf(delimiter, start + delimiter.length);
+  return close === -1 || close >= lineEnd ? lineEnd : close + delimiter.length;
+}
+
+// Include LATEX_LITERAL_TOKENS before the structural tokens in each pattern.
 function* scanLatexTokens(text: string, pattern: RegExp, from: number, limit = text.length) {
   pattern.lastIndex = from;
   for (let match = pattern.exec(text); match && pattern.lastIndex <= limit; match = pattern.exec(text)) {
-    if (match[0] !== "%") {
+    const environment = match.groups?.literalEnvironment;
+    const isVerb = match.groups?.verb;
+    if (match[0] !== "%" && !isVerb && !environment) {
       yield match;
     } else if (!isEscaped(text, match.index)) {
-      pattern.lastIndex = nextLineBreak(text, pattern.lastIndex)?.index ?? text.length;
+      if (environment) {
+        const closing = "\\end{" + environment + "}";
+        const close = text.indexOf(closing, pattern.lastIndex);
+        pattern.lastIndex = close === -1 ? text.length : close + closing.length;
+      } else if (isVerb) {
+        pattern.lastIndex = endOfLatexVerb(text, pattern.lastIndex);
+      } else {
+        pattern.lastIndex = nextLineBreak(text, pattern.lastIndex)?.index ?? text.length;
+      }
       if (pattern.lastIndex >= limit) break;
     }
   }
@@ -287,11 +311,11 @@ function findMatchingLatexEnvBounds(
   limit = text.length,
 ): { readonly closeStart: number; readonly closeEnd: number } {
   const stack: string[] = [envName];
-  const pattern = /%|\\(begin|end)\{([a-zA-Z][\w-]*\*?)\}/g;
+  const pattern = new RegExp(LATEX_LITERAL_TOKENS + "|" + /\\(?<directive>begin|end)\{(?<name>[a-zA-Z][\w-]*\*?)\}/.source, "g");
   for (const match of scanLatexTokens(text, pattern, searchFrom, limit)) {
     if (isEscaped(text, match.index)) continue;
-    const directive = match[1]!;
-    const name = match[2]!;
+    const directive = match.groups!.directive;
+    const name = match.groups!.name!;
     if (directive === "begin") {
       stack.push(name);
     } else if (stack.length > 0 && stack[stack.length - 1] === name) {
@@ -344,78 +368,131 @@ function endOfDetailsCodeFence(
   return text.length;
 }
 
+interface DetailsBounds {
+  readonly closeStart: number;
+  readonly closeEnd: number;
+  readonly summary?: {
+    readonly openStart: number;
+    readonly openEnd: number;
+    readonly closeStart: number;
+    readonly closeEnd: number;
+  };
+}
+
 function findMatchingDetailsBounds(
   text: string,
   searchFrom: number,
-): { readonly closeStart: number; readonly closeEnd: number } {
-  const tokenRe =
-    /<!--|(?<fence>^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)*(?:\x60{3,}[^\x60\r\n]*|~{3,}[^\r\n]*)(?=\r|\n|$))|(?<ticks>\x60+)|<(?<closing>\/?)details(?:\s[^>]*)?>/gim;
+): DetailsBounds {
+  const literals =
+    /<!--|(?<fence>^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)*(?:\x60{3,}[^\x60\r\n]*|~{3,}[^\r\n]*)(?=\r|\n|$))|(?<ticks>\x60+)/.source;
+  const tokenRe = new RegExp(literals + "|" + HTML_TAG_TOKEN, "gim");
   tokenRe.lastIndex = searchFrom;
   let containers: MarkdownContainer[] = [];
   let nextLineStart = containingLineStart(text, searchFrom);
-  const advanceContainers = (until: number) => {
-    while (nextLineStart < until) {
+  let body = "";
+  let inIndentedCode = false;
+  let afterBlockBoundary = true;
+  const readThroughLine = (offset: number) => {
+    while (nextLineStart <= offset && nextLineStart < text.length) {
       const newline = nextLineBreak(text, nextLineStart);
       const line = text.slice(nextLineStart, newline?.index ?? text.length);
-      containers = readMarkdownContainerLine(line, containers).containers;
+      const current = readMarkdownContainerLine(line, containers);
+      const sameContainer = current.continuedDepth === containers.length &&
+        current.containers.length === containers.length;
+      containers = current.containers;
+      body = current.body;
+      const endsSetext = sameContainer && !afterBlockBoundary && !inIndentedCode && SETEXT_UNDERLINE_RE.test(body);
+      inIndentedCode = /^(?: {4}| {0,3}\t)/.test(body) &&
+        (afterBlockBoundary || !sameContainer || inIndentedCode);
+      afterBlockBoundary = !body.trim() || endsSetext || /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) ||
+        THEMATIC_BREAK_RE.test(body);
       nextLineStart = newline ? newline.index + newline[0].length : text.length;
     }
   };
+  const skipLiteralLines = (end: number) => {
+    if (end < nextLineStart) return;
+    const newline = nextLineBreak(text, end);
+    nextLineStart = newline ? newline.index + newline[0].length : text.length;
+  };
 
   let depth = 1;
+  let summaryOpening: { openStart: number; openEnd: number } | undefined;
+  let summary: DetailsBounds["summary"];
   let match: RegExpExecArray | null;
   while ((match = tokenRe.exec(text)) !== null) {
+    readThroughLine(match.index);
+    if (inIndentedCode) {
+      tokenRe.lastIndex = nextLineStart;
+      continue;
+    }
     if (match[0] === "<!--") {
       tokenRe.lastIndex = endOfHtmlComment(text, tokenRe.lastIndex);
-      const lineStart = containingLineStart(text, match.index);
-      if (lineStart < containingLineStart(text, tokenRe.lastIndex)) {
-        advanceContainers(lineStart);
-        containers = readMarkdownContainerLine(text.slice(lineStart, match.index), containers).containers;
-        const newline = nextLineBreak(text, tokenRe.lastIndex);
-        nextLineStart = newline ? newline.index + newline[0].length : text.length;
+      skipLiteralLines(tokenRe.lastIndex);
+      if (body.trimStart().startsWith("<!--")) {
+        const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
+        if (!text.slice(tokenRe.lastIndex, end).trim()) afterBlockBoundary = true;
       }
       continue;
     }
     if (match.groups?.ticks) {
       if (!isEscaped(text, match.index)) {
         const end = endOfBacktickSpan(text, match.index);
-        if (end !== -1) tokenRe.lastIndex = end;
+        if (end !== -1) {
+          tokenRe.lastIndex = end;
+          skipLiteralLines(end);
+        }
       }
       continue;
     }
     if (match.groups?.fence) {
-      advanceContainers(match.index);
-      const fenceLine = readMarkdownContainerLine(match[0], containers);
-      const fence = matchFenceOpening(fenceLine.body)?.[1];
+      const fence = matchFenceOpening(body)?.[1];
       if (fence) {
-        containers = fenceLine.containers;
         nextLineStart = endOfDetailsCodeFence(text, tokenRe.lastIndex, fence, containers);
         tokenRe.lastIndex = nextLineStart;
+        afterBlockBoundary = true;
       } else {
         tokenRe.lastIndex = match.index + 1;
       }
       continue;
     }
-    if (match.groups?.closing === "/") {
+    skipLiteralLines(tokenRe.lastIndex);
+    const tag = match.groups?.tag?.toLowerCase();
+    const prefix = match.groups?.prefix;
+    if (tag === "summary") {
+      if (prefix === "/") {
+        const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
+        if (!text.slice(tokenRe.lastIndex, end).trim()) afterBlockBoundary = true;
+        if (depth === 1 && summaryOpening && !summary) {
+          summary = { ...summaryOpening, closeStart: match.index, closeEnd: tokenRe.lastIndex };
+        }
+      } else if (!prefix && depth === 1 && !summaryOpening) {
+        summaryOpening = { openStart: match.index, openEnd: tokenRe.lastIndex };
+      }
+    }
+    if (tag !== "details") continue;
+    if (prefix === "/") {
       depth--;
       if (depth === 0) {
-        return { closeStart: match.index, closeEnd: match.index + match[0].length };
+        return { closeStart: match.index, closeEnd: tokenRe.lastIndex, summary };
       }
-    } else {
+    } else if (!prefix) {
       depth++;
     }
   }
-  return { closeStart: text.length, closeEnd: text.length };
+  return { closeStart: text.length, closeEnd: text.length, summary };
 }
 
 function maskSummaryLiterals(text: string): string {
   const parts: string[] = [];
-  const tokens = /<!--|\x60+/g;
+  const tokens = new RegExp(/<!--|\x60+/.source + "|" + HTML_TAG_TOKEN, "gi");
   let copied = 0;
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
     if (match[0] === "<!--") {
       tokens.lastIndex = endOfHtmlComment(text, tokens.lastIndex);
       parts.push(text.slice(copied, match.index), " ".repeat(tokens.lastIndex - match.index));
+    } else if (match.groups?.tag) {
+      // Keep real tag boundaries while hiding markup inside quoted attributes.
+      parts.push(text.slice(copied, match.index + 1), match[0].slice(1, -1).replace(/[<>]/g, " "), ">");
     } else {
       const end = isEscaped(text, match.index) ? -1 : endOfBacktickSpan(text, match.index);
       if (end === -1) continue;
@@ -430,7 +507,7 @@ function maskSummaryLiterals(text: string): string {
 function classifyDetailsElement(
   text: string,
   openEnd: number,
-  closeStart: number,
+  { summary }: DetailsBounds,
   activeVisibility: PedagogicalVisibility,
 ): {
   readonly kind: PedagogicalBlockKind;
@@ -438,30 +515,27 @@ function classifyDetailsElement(
   readonly label: string;
   readonly summaryEndOffset: number | null;
 } {
-  // Mask literal markup while keeping summary offsets in the original text.
-  const inner = maskSummaryLiterals(text.slice(openEnd, closeStart));
-  const summaryMatch = /^\s*<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary\s*>/i.exec(inner);
-  if (summaryMatch) {
-    const summaryText = summaryMatch[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    const summaryEndOffset = openEnd + summaryMatch[0].length;
+  if (summary && !maskSummaryLiterals(text.slice(openEnd, summary.openStart)).trim()) {
+    const summaryContents = maskSummaryLiterals(text.slice(summary.openEnd, summary.closeStart));
+    const summaryText = summaryContents.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     if (
       !SEALED_HEADING_RE.test(summaryText) &&
       !/\bspoiler\b/i.test(summaryText) &&
-      !/<details\b/i.test(summaryMatch[1]!) &&
+      !/<details\b/i.test(summaryContents) &&
       HINT_HEADING_RE.test(summaryText)
     ) {
       return {
         kind: "hint",
         visibility: maxVisibility("hint_gated", activeVisibility),
         label: summaryText || "hint",
-        summaryEndOffset,
+        summaryEndOffset: summary.closeEnd,
       };
     }
     return {
       kind: "solution",
       visibility: maxVisibility("sealed", activeVisibility),
       label: summaryText || "solution",
-      summaryEndOffset,
+      summaryEndOffset: summary.closeEnd,
     };
   }
   // Fail closed: any <details> without an explicit hint-only <summary> is sealed.
@@ -950,11 +1024,13 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     }
     newline = nextNewline;
   }
-  const inline = /%|<details(?=[\s>])|\\begin\{([a-zA-Z][\w-]*\*?)\}/gi;
+  const inline = new RegExp(LATEX_LITERAL_TOKENS + "|" +
+    /<details(?=[\s>])|\\begin\{(?<name>[a-zA-Z][\w-]*\*?)\}/.source, "gi");
   for (const match of scanLatexTokens(text, inline, afterOpen, Math.min(boundary, through))) {
     const start = match.index;
-    if (!match[1]) return start;
-    const classified = classifyLabel(match[1], "public");
+    const name = match.groups!.name;
+    if (!name) return start;
+    const classified = classifyLabel(name, "public");
     if (classified && classified.visibility !== "public" && !isEscaped(text, start)) return start;
   }
   return boundary;
@@ -963,7 +1039,7 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
 function findMathDelimiter(text: string, start: number, token: "$$" | "\\]") {
   const afterOpen = start + 2;
   let close = -1;
-  const delimiters = token === "$$" ? /%|\$\$/g : /%|\\\]/g;
+  const delimiters = new RegExp(LATEX_LITERAL_TOKENS + "|" + (token === "$$" ? /\$\$/.source : /\\\]/.source), "g");
   for (const match of scanLatexTokens(text, delimiters, afterOpen)) {
     if (!isEscaped(text, match.index)) {
       close = match.index;
@@ -1183,7 +1259,7 @@ function findInlineConstructSpans(
       if (m) {
         const openEnd = i + m[0].length;
         const bounds = findMatchingDetailsBounds(text, openEnd);
-        const classified = classifyDetailsElement(text, openEnd, bounds.closeStart, activeVisibility);
+        const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility);
         spans.push({
           start: i,
           end: bounds.closeEnd,
@@ -2328,14 +2404,15 @@ function parsePedagogicalAstInternal(
     }
 
     // 4b. HTML <details> block (spoiler / hint / solution disclosure; fails closed if unclosed)
-    const detailsOpenMatch = /^[ \t]*(<details(?:\s[^>]*)?>)/i.exec(raw);
+    const detailsOpenMatch = DETAILS_OPEN_RE.exec(raw.trimStart());
     if (detailsOpenMatch) {
       const activeVis = blockVisibility;
-      const leadingWs = detailsOpenMatch[0].length - detailsOpenMatch[1]!.length;
+      const leadingWs = raw.length - raw.trimStart().length;
       const detailsStart = line.start + leadingWs;
-      const openEndOffset = line.start + detailsOpenMatch[0].length;
-      const { closeStart, closeEnd } = findMatchingDetailsBounds(text, openEndOffset);
-      const classified = classifyDetailsElement(text, openEndOffset, closeStart, activeVis);
+      const openEndOffset = detailsStart + detailsOpenMatch[0].length;
+      const bounds = findMatchingDetailsBounds(text, openEndOffset);
+      const { closeStart, closeEnd } = bounds;
+      const classified = classifyDetailsElement(text, openEndOffset, bounds, activeVis);
       const endLineIdx = lineIndexContaining(lines, Math.max(detailsStart, closeEnd - 1), i);
       const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
       const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);

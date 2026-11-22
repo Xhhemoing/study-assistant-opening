@@ -67,35 +67,46 @@ export function sourcePreviewHref(sourceId: string, version: number, page?: numb
   return page != null && page > 0 ? `${base}#page=${page}` : base;
 }
 
+type SourceViewerSearchParam = string | string[];
+
 export function parseSourceViewerSearchParams(input: {
-  source?: string;
-  version?: string;
-  page?: string;
-  startMs?: string;
-  endMs?: string;
-  keyframeChunkId?: string;
-  slide?: string;
-  conversation?: string;
+  source?: SourceViewerSearchParam;
+  version?: SourceViewerSearchParam;
+  page?: SourceViewerSearchParam;
+  startMs?: SourceViewerSearchParam;
+  endMs?: SourceViewerSearchParam;
+  keyframeChunkId?: SourceViewerSearchParam;
+  slide?: SourceViewerSearchParam;
+  conversation?: SourceViewerSearchParam;
 }): SourceViewerTarget | null {
+  const numeric = z.string().transform(Number);
+  const nonnegativeInteger = numeric.pipe(z.number().int().nonnegative());
+  const optionalLabel = z.preprocess(
+    value => typeof value === "string" ? value.trim() || undefined : value,
+    z.string().min(1).max(120).optional(),
+  );
   const parsed = z.object({
     source: z.string().uuid(),
-    version: z.coerce.number().int().nonnegative(),
-    page: z.coerce.number().int().positive().optional(),
-    startMs: z.coerce.number().int().nonnegative().optional(),
-    endMs: z.coerce.number().int().nonnegative().optional(),
-    keyframeChunkId: z.string().min(1).max(120).optional(),
-    slide: z.string().min(1).max(120).optional(),
+    version: nonnegativeInteger,
+    page: numeric.pipe(z.number().int().positive()).optional(),
+    startMs: nonnegativeInteger.optional(),
+    endMs: nonnegativeInteger.optional(),
+    keyframeChunkId: optionalLabel,
+    slide: optionalLabel,
+    conversation: z.string().optional(),
   }).safeParse({
     source: input.source,
     version: input.version ?? "0",
-    ...(input.page != null && input.page !== "" ? { page: input.page } : {}),
-    ...(input.startMs != null && input.startMs !== "" ? { startMs: input.startMs } : {}),
-    ...(input.endMs != null && input.endMs !== "" ? { endMs: input.endMs } : {}),
-    ...(input.keyframeChunkId?.trim() ? { keyframeChunkId: input.keyframeChunkId.trim() } : {}),
-    ...(input.slide?.trim() ? { slide: input.slide.trim() } : {}),
+    page: input.page === "" ? undefined : input.page,
+    startMs: input.startMs === "" ? undefined : input.startMs,
+    endMs: input.endMs === "" ? undefined : input.endMs,
+    keyframeChunkId: input.keyframeChunkId,
+    slide: input.slide,
+    conversation: input.conversation,
   });
   if (!parsed.success) return null;
-  const conversationId = input.conversation && validConversationId(input.conversation) ? input.conversation : undefined;
+  const conversation = parsed.data.conversation;
+  const conversationId = typeof conversation === "string" && validConversationId(conversation) ? conversation : undefined;
   return {
     ...(conversationId ? { conversationId } : {}),
     sourceId: parsed.data.source,

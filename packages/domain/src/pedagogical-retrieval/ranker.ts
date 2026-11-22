@@ -130,17 +130,34 @@ function normalizeTypedAdjacency(nodeCount: number, edges: readonly TypedGraphEd
   // Allocate per-family budgets per source node, then normalize across present families.
   const perNode = Array.from(
     { length: nodeCount },
-    () => new Map<string, Map<number, number>>(),
+    () => new Map<string, {
+      maxWeight: number;
+      targets: Map<number, number>;
+      underflowWeights?: Map<number, number>;
+    }>(),
   );
+  // Find each source family's scale before summing parallel or distinct edges.
   for (const edge of edges) {
     if (edge.weight <= 0 || !Number.isFinite(edge.weight)) continue;
     const families = perNode[edge.from]!;
-    let targets = families.get(edge.family);
-    if (!targets) {
-      targets = new Map();
-      families.set(edge.family, targets);
+    const family = families.get(edge.family);
+    if (family) {
+      family.maxWeight = Math.max(family.maxWeight, edge.weight);
+    } else {
+      families.set(edge.family, { maxWeight: edge.weight, targets: new Map() });
     }
-    targets.set(edge.to, (targets.get(edge.to) ?? 0) + edge.weight);
+  }
+  for (const edge of edges) {
+    if (edge.weight <= 0 || !Number.isFinite(edge.weight)) continue;
+    const family = perNode[edge.from]!.get(edge.family)!;
+    const scaledWeight = edge.weight / family.maxWeight;
+    if (scaledWeight === 0) {
+      // Individually unrepresentable terms can add up to representable target mass.
+      const weights = family.underflowWeights ??= new Map();
+      weights.set(edge.to, (weights.get(edge.to) ?? 0) + edge.weight);
+    } else {
+      family.targets.set(edge.to, (family.targets.get(edge.to) ?? 0) + scaledWeight);
+    }
   }
 
   const flattened: SparseWeightedEdge[] = [];
@@ -151,8 +168,12 @@ function normalizeTypedAdjacency(nodeCount: number, edges: readonly TypedGraphEd
     for (const family of families.keys()) {
       activeBudgetSum += EDGE_FAMILY_BUDGET[family] ?? 0.1;
     }
-    for (const [family, targets] of families.entries()) {
+    for (const [family, { targets, maxWeight, underflowWeights }] of families.entries()) {
       const familyMass = (EDGE_FAMILY_BUDGET[family] ?? 0.1) / activeBudgetSum;
+      for (const [target, weight] of underflowWeights ?? []) {
+        const scaledWeight = weight / maxWeight;
+        if (scaledWeight > 0) targets.set(target, (targets.get(target) ?? 0) + scaledWeight);
+      }
       let targetSum = 0;
       for (const w of targets.values()) targetSum += w;
       if (targetSum <= 0) continue;
@@ -768,6 +789,20 @@ export function rankPedagogicalEvidence(
       combinedScore,
       citationAnchor: buildCitationAnchor(chunk),
     });
+  }
+
+  const blendScale = Math.max(Math.abs(seedWeight), Math.abs(pprWeight), Math.abs(prerequisiteWeight));
+  if (Number.isFinite(blendScale) && candidates.some(item => !Number.isFinite(item.combinedScore))) {
+    // Rescale all candidates together only if the original sum actually overflowed.
+    for (const [index, item] of candidates.entries()) {
+      const normSeed = maxSeed > 0 ? item.seedScore / maxSeed : 0;
+      const normPpr = maxPpr > 0 ? item.pprScore / maxPpr : 0;
+      candidates[index] = {
+        ...item,
+        combinedScore: (seedWeight / blendScale) * normSeed + (pprWeight / blendScale) * normPpr +
+          (prerequisiteWeight / blendScale) * item.prerequisiteBoost,
+      };
+    }
   }
 
   candidates.sort(

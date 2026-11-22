@@ -1110,6 +1110,41 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     for (const candidate of [chunks, cueChunks]) expectSealedEvidence(candidate, text, [], "public-after");
   });
 
+  it.each([
+    ["double-quoted details closer", '<details>\n<summary>Answer</summary>\n<span title="</details>">example</span>\nforty-two\n</details>'],
+    ["quoted attribute on a non-ASCII custom tag", '<details>\n<summary>Answer</summary>\n<x-例 title="</details>">example</x-例>\nforty-two\n</details>'],
+    ["single-quoted details opener", "<details>\n<summary>Answer</summary>\n<span title='<details>'>example</span>\nforty-two\n</details>"],
+    ["quoted attribute on details", '<details title="> </details>">\n<summary>Answer</summary>\nforty-two\n</details>'],
+    ["quoted summary closer", '<details>\n<summary>Hint <span title="</summary>">Answer</span></summary>\nforty-two\n</details>'],
+    ["four-space code", "<details>\n<summary>Answer</summary>\n\n    </details>\n\nforty-two\n</details>"],
+    ["tab-indented code", "<details>\r\n<summary>Answer</summary>\r\n\t</details>\r\nforty-two\r\n</details>"],
+    ["indented code after a heading", "<details>\n<summary>Answer</summary>\n### Example\n    </details>\nforty-two\n</details>"],
+    ["indented code after an empty heading", "<details>\n<summary>Answer</summary>\n###\n    </details>\nforty-two\n</details>"],
+    ["indented code after a Setext heading", "<details>\n<summary>Answer</summary>\nExample\n===\n    </details>\nforty-two\n</details>"],
+    ["indented code after a thematic break", "<details>\n<summary>Answer</summary>\n---\n    </details>\nforty-two\n</details>"],
+    ["indented code after a block comment", "<details>\n<summary>Answer</summary>\n<!--\npreamble\n-->\n    </details>\nforty-two\n</details>"],
+    ["indented code nested in a list", "<details>\n<summary>Answer</summary>\n- Item\n\n      </details>\n\nforty-two\n</details>"],
+    ["indented closer after prose", "<details>\n<summary>Answer</summary>\nforty-two\n    </details>"],
+    ["indented hint summary literal", "<details>\n\n    <summary>Hint</summary>\nforty-two\n</details>"],
+    ["verb closer", "\\begin{solution}\n\\verb|\\end{solution}|\nforty-two\n\\end{solution}"],
+    ["verb star opener", "\\begin{solution}\n\\verb*!\\begin{solution}!\nforty-two\n\\end{solution}"],
+    ["verb percent delimiter in a proof", ":::exercise\r\\begin{proof}\r\\verb%\\end{proof}%\rforty-two\r\\end{proof}\r:::"],
+    ["longer control word before a solution", "$$\\verbose\\begin{solution}forty-two\\end{solution}$$"],
+    ["verbatim closer", "\\begin{solution}\n\\begin{verbatim}\n\\end{solution}\n\\end{verbatim}\nforty-two\n\\end{solution}"],
+    ["verbatim star opener", "\\begin{solution}\n\\begin{verbatim*}\n\\begin{solution}\n\\end{verbatim*}\nforty-two\n\\end{solution}"],
+    ["listing closer in a proof", ":::exercise\n\\begin{proof}\n\\begin{lstlisting}\n\\end{proof}\n\\end{lstlisting}\nforty-two\n\\end{proof}\n:::"],
+  ])("keeps literal delimiters opaque inside protected blocks (%s)", (_name, body) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = body + "\n\npublic-after";
+    const cues = [
+      { text: body, startMs: 0, endMs: 1000, keyframeChunkId: "frame" },
+      { text: "\npublic-after", startMs: 1000, endMs: 2000 },
+    ];
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], "public-after");
+    }
+  });
+
   it("ignores stronger callout markers inside quoted HTML comments", () => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     const text = "> ## Answer Key\n> [!example]\n> confidential\n> <!--\n> [!solution]\n> -->\n> ## Reset\n> public-after";
@@ -2139,6 +2174,68 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
       ...overrides,
     };
   }
+
+  it.each([false, true])("normalizes wide family weights before rank propagation (parallel=%s)", parallel => {
+    const chunks = ["seed", "a", "b", "support"].map(id => makeChunk({ id }));
+    const first: PedagogicalGraphEdge = { from: "seed", to: "a", kind: "defines", weight: 1e308, privacyEpoch: 7 };
+    const result = rankPedagogicalEvidence({
+      chunks,
+      seedScores: { seed: 1 },
+      edges: [
+        first,
+        { ...first, to: "b" },
+        ...(parallel ? [first] : []),
+        { ...first, to: "support", kind: "illustrates", weight: 1 },
+        { ...first, to: "support", weight: Number.MAX_VALUE, sourceId: "revoked" },
+      ],
+      authorization: { admissibleSourceIds: ["src-notes"], expectedPrivacyEpoch: 7 },
+      options: { alpha: 0.5, maxIterations: 1 },
+    });
+    expect(result.pprByNodeId.seed).toBeCloseTo(0.5);
+    expect(result.pprByNodeId.a).toBeCloseTo(parallel ? 0.25 : 0.1875);
+    expect(result.pprByNodeId.b).toBeCloseTo(parallel ? 0.125 : 0.1875);
+    expect(result.pprByNodeId.support).toBeCloseTo(0.125);
+    expect(result.diagnostics.totalPprMass).toBeCloseTo(1);
+    expect(result.diagnostics.filteredEdges).toBe(1);
+  });
+
+  it("keeps combined scores ordered with large finite blend coefficients", () => {
+    const chunks = ["first", "second"].map(id => makeChunk({ id }));
+    const result = rankPedagogicalEvidence({
+      chunks,
+      seedScores: { first: 2, second: 1 },
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { seedWeight: 1e308, pprWeight: 1e308, prerequisiteWeight: 0 },
+    });
+    expect(result.ranked.map(item => item.combinedScore)).toEqual([2, 1]);
+    expect(result.ranked.map(item => item.chunk.id)).toEqual(["first", "second"]);
+  });
+
+  it("preserves a finite score when large signed coefficients cancel", () => {
+    const chunks = ["a", "b"].map(id => makeChunk({ id }));
+    const result = rankPedagogicalEvidence({
+      chunks,
+      edges: [{ from: "b", to: "a", kind: "prerequisite" }],
+      seedScores: { a: 1, b: 1 },
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { seedWeight: 1e308, pprWeight: -1e308, prerequisiteWeight: 1e-100, orderFoundationsFirst: false },
+    });
+    expect(result.ranked.map(item => item.chunk.id)).toEqual(["b", "a"]);
+    expect(result.ranked[0]?.combinedScore).toBe(0.65 * 1e-100);
+  });
+
+  it("keeps representable target mass from several individually subnormal edges", () => {
+    const chunks = ["seed", "a", "b"].map(id => makeChunk({ id }));
+    const first: PedagogicalGraphEdge = { from: "seed", to: "a", kind: "defines", weight: 1e308 };
+    const result = rankPedagogicalEvidence({
+      chunks,
+      seedScores: { seed: 1 },
+      edges: [first, ...Array.from({ length: 8 }, () => ({ ...first, to: "b", weight: 2e-16 }))],
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { alpha: 0.5, maxIterations: 1 },
+    });
+    expect(result.pprByNodeId.b).toBeGreaterThan(0);
+  });
 
   it("guarantees ZERO score mass leakage from sealed blocks, revoked sources, stale privacyEpoch, or excluded item families", () => {
     const cDef = makeChunk({

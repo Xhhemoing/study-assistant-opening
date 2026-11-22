@@ -83,7 +83,58 @@ describe("source-reader media anchor validation and formatting", () => {
 });
 
 describe("media anchor bounded playback controller", () => {
-  it("seeks immediately when metadata is loaded and defers until loadedmetadata when readyState === 0", () => {
+  it("reports a native scrub that supersedes an in-flight citation seek", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
+    const media = createFakeMedia();
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    controller.handleSeeking(media);
+    media.currentTime = 5;
+    controller.handleSeeking(media);
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({ phase: "seeked_outside_range", boundActive: false });
+  });
+
+  it("reports a scrub that changes the target before the first seeking event", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
+    const media = createFakeMedia();
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    media.currentTime = 5;
+    controller.handleSeeking(media);
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({ phase: "seeked_outside_range", rangeHighlightActive: false });
+  });
+
+  it("becomes ready if a scrub supersedes the initial seek and stays within the citation", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
+    const media = createFakeMedia();
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    controller.handleSeeking(media);
+    media.currentTime = 18;
+    controller.handleSeeking(media);
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({ phase: "ready_segment", boundActive: true });
+  });
+
+  it("does not auto-pause when a playing user scrubs past the citation", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
+    const media = createFakeMedia();
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    controller.handleSeeked(media);
+    media.paused = false;
+    media.currentTime = 30;
+    controller.handleSeeking(media);
+    controller.handleTimeUpdate(media);
+    controller.handleSeeked(media);
+    expect(media.paused).toBe(false);
+    expect(media.pauseMock).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ phase: "seeked_outside_range", boundActive: false });
+  });
+
+  it("seeks once metadata is loaded and emits readiness only after seeked", () => {
     const anchor = validateMediaAnchorRange({ startMs: 12_500, endMs: 25_000 })!;
 
     const readyMedia = createFakeMedia(2);
@@ -91,9 +142,12 @@ describe("media anchor bounded playback controller", () => {
     c1.activate(readyMedia);
     expect(readyMedia.currentTime).toBe(12.5);
     expect(c1.snapshot().phase).toBe("seeking_segment");
+    c1.handleSeeked(readyMedia);
+    expect(c1.snapshot().phase).toBe("ready_segment");
 
     const loadingMedia = createFakeMedia(0);
-    const c2 = createMediaAnchorPlaybackController(anchor);
+    const onChange = vi.fn();
+    const c2 = createMediaAnchorPlaybackController(anchor, onChange);
     c2.activate(loadingMedia);
     expect(loadingMedia.currentTime).toBe(0);
     expect(c2.snapshot().phase).toBe("pending_metadata");
@@ -107,6 +161,13 @@ describe("media anchor bounded playback controller", () => {
     c2.handleLoadedMetadata(loadingMedia);
     expect(loadingMedia.currentTime).toBe(12.5);
     expect(c2.snapshot().phase).toBe("seeking_segment");
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ phase: "seeking_segment" }));
+    c2.handleTimeUpdate(loadingMedia);
+    expect(c2.snapshot().phase).toBe("seeking_segment");
+
+    c2.handleSeeked(loadingMedia);
+    expect(c2.snapshot().phase).toBe("ready_segment");
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ phase: "ready_segment" }));
   });
 
   it("auto-pauses at currentTime * 1000 >= endMs and allows uninterrupted playback once user manually resumes", () => {
@@ -157,6 +218,11 @@ describe("media anchor bounded playback controller", () => {
     controller.handleTimeUpdate(media);
     expect(media.pauseMock).toHaveBeenCalledOnce();
 
+    // A manual seek while already playing after the citation updates the status.
+    media.currentTime = 5;
+    controller.handleSeeked(media);
+    expect(controller.snapshot().phase).toBe("seeked_outside_range");
+
     // Clicking Replay re-arms the bounded segment and seeks back to startMs / 1000.
     controller.replay(media);
     expect(media.currentTime).toBe(10);
@@ -174,6 +240,27 @@ describe("media anchor bounded playback controller", () => {
     expect(media.pauseMock).toHaveBeenCalledTimes(2);
     expect(phases).toContain("paused_at_end");
     expect(phases).toContain("continued_past_end");
+  });
+
+  it.each([5, 45])("releases the citation bound when manually scrubbing while paused to %ss", destination => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
+    const media = createFakeMedia(2);
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    controller.handleSeeked(media);
+
+    media.currentTime = destination;
+    controller.handleTimeUpdate(media);
+    controller.handleSeeked(media);
+    expect(media.paused).toBe(true);
+    expect(media.pauseMock).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seeked_outside_range",
+      boundActive: false,
+      autoPausedAtEnd: false,
+      userReleasedBound: true,
+      rangeHighlightActive: false,
+    });
   });
 
   it("does not auto-pause on unbounded point anchors (endMs === startMs or omitted)", () => {
@@ -302,7 +389,7 @@ describe("media anchor bounded playback controller", () => {
     media.currentTime = 18;
     controller.handleSeeked(media);
     expect(controller.snapshot()).toMatchObject({
-      phase: "seeking_segment",
+      phase: "ready_segment",
       boundActive: true,
       rangeHighlightActive: true,
     });
@@ -316,7 +403,7 @@ describe("media anchor bounded playback controller", () => {
     media.currentTime = 45;
     controller.handleSeeked(media);
     expect(controller.snapshot()).toMatchObject({
-      phase: "continued_past_end",
+      phase: "seeked_outside_range",
       userReleasedBound: true,
       rangeHighlightActive: false,
     });
@@ -337,7 +424,7 @@ describe("media anchor bounded playback controller", () => {
     c1.activate(m1);
     c1.handleSeeked(m1);
     expect(c1.snapshot()).toMatchObject({
-      phase: "seeking_segment",
+      phase: "ready_segment",
       boundActive: true,
       rangeHighlightActive: true,
       userReleasedBound: false,
@@ -353,7 +440,7 @@ describe("media anchor bounded playback controller", () => {
     m2.currentTime = 64.7;
     c2.handleSeeked(m2);
     expect(c2.snapshot()).toMatchObject({
-      phase: "seeking_segment",
+      phase: "ready_segment",
       boundActive: true,
       rangeHighlightActive: true,
       userReleasedBound: false,
@@ -375,7 +462,7 @@ describe("media anchor bounded playback controller", () => {
     m2.currentTime = 15;
     c2.handleSeeked(m2);
     expect(c2.snapshot()).toMatchObject({
-      phase: "continued_past_end",
+      phase: "seeked_outside_range",
       userReleasedBound: true,
       rangeHighlightActive: false,
     });

@@ -13,6 +13,7 @@ import {
   formatMediaAnchorRange,
   mediaKindFromMime,
   validateMediaAnchorRange,
+  type MediaAnchorPlaybackPhase,
   type MediaAnchorPlaybackSnapshot,
 } from "./source-reader-media-anchor";
 import { buildSourceDownloadView, sourcePreviewHref, SourceViewer } from "./source-viewer";
@@ -65,6 +66,25 @@ export function SourceReaderFrame({ title, onClose, onEscapeKeyDown, returnPoint
     <div className="flex min-h-0 w-full flex-1 flex-col gap-2 px-3 py-2 sm:px-5">{children}</div>
     </Dialog.Content>
   </Dialog.Portal></Dialog.Root>;
+}
+
+function mediaAnchorStatus(phase: MediaAnchorPlaybackPhase, bounded: boolean) {
+  switch (phase) {
+    case "pending_metadata":
+      return "正在加载媒体信息，加载后将自动跳到引用位置。";
+    case "seeking_segment":
+      return "正在跳到引用位置。";
+    case "ready_segment":
+      return bounded ? "已定位到引用片段，播放至末尾会自动暂停。" : "已定位到引用时间点。";
+    case "paused_at_end":
+      return "已播放到引用片段末尾；点击继续播放可查看后续内容。";
+    case "continued_past_end":
+      return "已继续播放后续内容。";
+    case "seeked_outside_range":
+      return bounded ? "已跳转到其他时间位置，可随时重播引用片段。" : "已跳转到其他时间位置，可随时跳回引用时间点。";
+    case "idle":
+      return null;
+  }
 }
 
 function SourceReaderContent({ record, latestRecord = record, requestedVersion, page, startMs, endMs, keyframeChunkId, slideLabel, returnPoint, onClose, onRetry, courseId, originalConversationId, questionProtected = false }: {
@@ -195,15 +215,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             ) : null}
             {mediaAnchor ? (
               <p role="status" className="text-xs text-text-3">
-                {mediaPlayback.phase === "pending_metadata"
-                  ? "正在加载媒体信息，加载后将自动跳到引用位置。"
-                  : mediaPlayback.phase === "paused_at_end"
-                    ? "已播放到引用片段末尾；点击继续播放可查看后续内容。"
-                    : mediaPlayback.phase === "continued_past_end"
-                      ? "已继续播放后续内容。"
-                      : mediaAnchor.bounded
-                        ? "已定位到引用片段，播放至末尾会自动暂停。"
-                        : "已定位到引用时间点。"}
+                {mediaAnchorStatus(mediaPlayback.phase, mediaAnchor.bounded)}
               </p>
             ) : hasInvalidMediaRange ? (
               <p role="status" className="text-xs text-warn">引用时间范围无效，请从头查看原件。</p>
@@ -230,6 +242,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onSeeking={event => mediaController.handleSeeking(event.currentTarget)}
             onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
           />
         ) : (
@@ -243,6 +256,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onSeeking={event => mediaController.handleSeeking(event.currentTarget)}
             onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
           />
         )}

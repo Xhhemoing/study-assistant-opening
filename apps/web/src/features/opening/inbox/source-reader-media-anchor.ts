@@ -16,6 +16,7 @@ export interface SeekableMediaElement {
   currentTime: number;
   readonly readyState: number;
   readonly paused: boolean;
+  readonly seeking?: boolean;
   pause(): void;
   play(): Promise<void> | void;
 }
@@ -24,8 +25,10 @@ export type MediaAnchorPlaybackPhase =
   | "idle"
   | "pending_metadata"
   | "seeking_segment"
+  | "ready_segment"
   | "paused_at_end"
-  | "continued_past_end";
+  | "continued_past_end"
+  | "seeked_outside_range";
 
 export interface MediaAnchorPlaybackSnapshot {
   readonly anchor: MediaAnchorRange | null;
@@ -42,6 +45,7 @@ export interface MediaAnchorPlaybackController {
   handleLoadedMetadata(media: SeekableMediaElement): void;
   handleTimeUpdate(media: SeekableMediaElement): void;
   handlePlay(media: SeekableMediaElement): void;
+  handleSeeking(media: SeekableMediaElement): void;
   handleSeeked(media: SeekableMediaElement): void;
   seekToStart(media: SeekableMediaElement | null): void;
   replay(media: SeekableMediaElement | null): void;
@@ -122,7 +126,8 @@ export function createMediaAnchorPlaybackController(
   onChange?: (snapshot: MediaAnchorPlaybackSnapshot) => void,
 ): MediaAnchorPlaybackController {
   let pendingSeek = anchor !== null;
-  let awaitingProgrammaticSeeked = false;
+  let seekOrigin: "programmatic_requested" | "programmatic_started" | "manual" | null = null;
+  let requestedPosition = 0;
   let boundActive = anchor?.bounded ?? false;
   let autoPausedAtEnd = false;
   let userReleasedBound = false;
@@ -134,12 +139,14 @@ export function createMediaAnchorPlaybackController(
     boundActive,
     autoPausedAtEnd,
     userReleasedBound,
-    rangeHighlightActive: anchor !== null && phase !== "idle" && phase !== "continued_past_end",
+    rangeHighlightActive: anchor !== null && phase !== "idle" && !userReleasedBound,
   });
 
   const emit = () => {
     onChange?.(snapshot());
   };
+
+  const isProgrammaticSeek = () => seekOrigin === "programmatic_requested" || seekOrigin === "programmatic_started";
 
   const applySeek = (media: SeekableMediaElement | null, rearm: boolean) => {
     if (!anchor) return;
@@ -150,20 +157,23 @@ export function createMediaAnchorPlaybackController(
     }
     if (!media || media.readyState < 1) {
       pendingSeek = true;
-      awaitingProgrammaticSeeked = false;
+      seekOrigin = null;
       phase = "pending_metadata";
       emit();
       return;
     }
     pendingSeek = false;
-    awaitingProgrammaticSeeked = true;
-    media.currentTime = anchor.startMs / 1000;
+    seekOrigin = "programmatic_requested";
     phase = "seeking_segment";
+    requestedPosition = anchor.startMs / 1000;
+    media.currentTime = requestedPosition;
+    requestedPosition = media.currentTime;
     emit();
   };
 
   const pauseAtEnd = (media: SeekableMediaElement) => {
-    if (!anchor || !boundActive || pendingSeek || media.paused) return;
+    if (!anchor || !boundActive || pendingSeek || media.paused || seekOrigin === "manual" ||
+      (media.seeking && !isProgrammaticSeek())) return;
     if (!Number.isFinite(media.currentTime) || media.currentTime < anchor.endMs / 1000) return;
     autoPausedAtEnd = true;
     boundActive = false;
@@ -185,9 +195,9 @@ export function createMediaAnchorPlaybackController(
       pauseAtEnd(media);
     },
     handlePlay(media) {
-      if (media.paused) return;
+      if (media.paused || seekOrigin === "manual") return;
       if (autoPausedAtEnd) {
-        if (awaitingProgrammaticSeeked) {
+        if (isProgrammaticSeek()) {
           media.pause();
           return;
         }
@@ -200,27 +210,44 @@ export function createMediaAnchorPlaybackController(
         pauseAtEnd(media);
       }
     },
-    handleSeeked(media) {
+    handleSeeking(media) {
       if (!anchor || pendingSeek) return;
-      if (awaitingProgrammaticSeeked) {
-        awaitingProgrammaticSeeked = false;
+      // A late seeking event may arrive after the programmatic seek has already rounded.
+      const atRequestedPosition = Math.abs(media.currentTime - requestedPosition) * 1000 <= POINT_SEEK_TOLERANCE_MS;
+      if (isProgrammaticSeek() && (atRequestedPosition ||
+        (seekOrigin === "programmatic_requested" && media.seeking === false))) {
+        seekOrigin = "programmatic_started";
+      } else {
+        seekOrigin = "manual";
+      }
+    },
+    handleSeeked(media) {
+      if (!anchor || pendingSeek || media.seeking) return;
+      const completedProgrammaticSeek = isProgrammaticSeek();
+      seekOrigin = null;
+      if (completedProgrammaticSeek) {
+        // A timeupdate can already have paused playback at the end of a short segment.
+        if (phase === "seeking_segment") {
+          phase = "ready_segment";
+          emit();
+        }
         return;
       }
       const time = media.currentTime;
-      if (!Number.isFinite(time) || userReleasedBound) return;
+      if (!Number.isFinite(time)) return;
       const outsideRange = anchor.bounded
         ? time < anchor.startMs / 1000 || time >= anchor.endMs / 1000
         : Math.abs(time * 1000 - anchor.startMs) > POINT_SEEK_TOLERANCE_MS;
-      if (outsideRange) {
+      if (outsideRange && phase !== "seeked_outside_range") {
         userReleasedBound = true;
         autoPausedAtEnd = false;
         boundActive = false;
-        phase = "continued_past_end";
+        phase = "seeked_outside_range";
         emit();
-      } else if (autoPausedAtEnd) {
+      } else if (!outsideRange && (autoPausedAtEnd || phase === "seeking_segment")) {
         autoPausedAtEnd = false;
-        boundActive = true;
-        phase = "seeking_segment";
+        boundActive = anchor.bounded;
+        phase = "ready_segment";
         emit();
       }
     },

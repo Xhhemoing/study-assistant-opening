@@ -29,7 +29,13 @@ export function citationReaderTarget(click: CitationClick): SourceViewerTarget |
   let url: URL;
   try { url = new URL(click.href, click.origin); } catch { return null; }
   if (url.origin !== click.origin || url.pathname !== "/opening/library" || url.searchParams.get("tab") !== "materials") return null;
-  return parseSourceViewerSearchParams(Object.fromEntries(url.searchParams));
+  const params = new Map<string, string | string[]>();
+  for (const [key, value] of url.searchParams) {
+    const previous = params.get(key);
+    if (Array.isArray(previous)) previous.push(value);
+    else params.set(key, previous === undefined ? value : [previous, value]);
+  }
+  return parseSourceViewerSearchParams(Object.fromEntries(params));
 }
 
 export async function loadCitationReaderRecord(api: Pick<OpeningApi, "listSources">, target: SourceViewerTarget): Promise<SourceRecord> {
