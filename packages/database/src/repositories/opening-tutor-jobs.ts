@@ -20,8 +20,9 @@ import {
   turnPinnedSourceRefs, type ContextSourceRef,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockActiveMemoryCourse, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
-import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
+import { lockActiveMemoryCourse, lockActiveMemoryCourses, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
+import { historyMaterialsActive, loadTutorHistory, loadTutorHistoryContext, readTutorHistoryAncestors,
+  type HistoryCourseBinding, type TutorHistoryPurpose } from "./opening-tutor-history";
 import {
   fenceCancelledOpeningTutorStream, isUnconfirmedStreamSealError, markFallbackStreamSealAttempted,
 } from "./opening-tutor-stream-fence";
@@ -69,6 +70,7 @@ type StreamPublicationContext = {
   materialPurposePin?: OpeningMaterialPurposePin;
   memoryLineageSourceIds?: readonly string[];
   globalMemoryIds?: readonly string[];
+  historyCourseBindings?: readonly HistoryCourseBinding[];
 };
 
 type StreamTurnBinding = {
@@ -122,6 +124,7 @@ type SendAuthorizationContext = {
   materialPurposePin?: OpeningMaterialPurposePin;
   memoryLineageSourceIds?: readonly string[];
   globalMemoryIds?: readonly string[];
+  historyCourseBindings?: readonly HistoryCourseBinding[];
   attemptContext?: TutorAttemptContext;
 };
 
@@ -164,6 +167,7 @@ async function assertStreamMaterialAdmission(
     deferSourceFreeCourseLock?: boolean;
     memoryLineageSourceIds?: readonly string[];
     globalMemoryIds?: readonly string[];
+    historyCourseBindings?: readonly HistoryCourseBinding[];
   } = {},
 ): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[] }> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
@@ -257,33 +261,62 @@ async function assertStreamMaterialAdmission(
   );
   const memoryOnlySet = new Set(memoryOnlySourceIds);
   const courseDerivedSourceIds = derivedSourceIds.filter(sourceId => !memoryOnlySet.has(sourceId));
-  const deferredCourseId = admissionOptions.deferSourceFreeCourseLock && !pin
+  const historyBindings = admissionOptions.historyCourseBindings ?? [];
+  const originCourseIds = new Set(historyBindings.flatMap(binding => binding.courseId === null ? [] : [binding.courseId]));
+  const historySourceIds = historyBindings.flatMap(binding => binding.sourceIds);
+  const deferredCourseId = admissionOptions.deferSourceFreeCourseLock && !pin && !historyBindings.length
     && !contextSourceRefs.length && !derivedSourceIds.length && !globalMemoryIdList.length ? courseId : null;
-  if (courseId !== null && deferredCourseId === null) {
-    await lockStreamCourse(tx, scope, courseId);
-  }
   const collectSourceIds = new Set<string>();
   let graph = globalMemoryIdList.length
-    ? await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, { materialUse, collectSourceIds }) : undefined;
-  if (derivedSourceIds.length || collectSourceIds.size) {
+    ? await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, { materialUse, collectSourceIds, collectCourseIds: originCourseIds }) : undefined;
+  if (originCourseIds.size) {
+    if (courseId !== null) originCourseIds.add(courseId);
+    if (!await lockActiveMemoryCourses(tx, scope, [...originCourseIds])) {
+      throw Object.assign(new Error("history course is no longer available"), { code: "CONFLICT" });
+    }
+  } else if (courseId !== null && deferredCourseId === null) {
+    await lockStreamCourse(tx, scope, courseId);
+  }
+  let lockedSourceIds: string[] = [];
+  if (derivedSourceIds.length || collectSourceIds.size || historySourceIds.length || verifiedAttemptSourceIds.size) {
     // Lock courses -> all opening_sources (pinned + derived + memory lineage) in deterministic ID order
     // BEFORE any course_asset_memberships lock so addAssetMembership(FOR UPDATE on opening_sources)
     // can never deadlock or race standalone/mock_exam classification.
-    const allSourceIds = [...new Set([...pinnedSourceIds, ...derivedSourceIds, ...collectSourceIds])].sort();
+    const allSourceIds = [...new Set([
+      ...pinnedSourceIds, ...derivedSourceIds, ...collectSourceIds, ...historySourceIds, ...verifiedAttemptSourceIds,
+    ])].sort();
     const lockedSources = await tx`SELECT s.id,s.version FROM opening_sources s
       WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${allSourceIds}::uuid[])
       ORDER BY s.id FOR SHARE OF s`;
     if (lockedSources.length !== allSourceIds.length) {
       throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
     }
-    if (collectSourceIds.size) {
+    lockedSourceIds = lockedSources.map(row => String(row.id));
+    const membershipSourceIds = [...new Set([...collectSourceIds, ...historySourceIds])].sort();
+    if (membershipSourceIds.length) {
       await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
-        AND asset_type='source' AND asset_id=ANY(${[...collectSourceIds].sort()}::uuid[])
+        AND asset_type='source' AND asset_id=ANY(${membershipSourceIds}::uuid[])
         ORDER BY asset_id,course_id FOR SHARE`;
-      graph = await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, {
-        materialUse, lockedSourceIds: lockedSources.map(row => String(row.id)),
-      });
     }
+  }
+  if (graph && (collectSourceIds.size || originCourseIds.size)) {
+    const currentCourses = new Set<string>();
+    graph = await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, {
+      materialUse, lockedSourceIds, collectCourseIds: currentCourses,
+    });
+    if ([...currentCourses].some(id => !originCourseIds.has(id))) {
+      throw Object.assign(new Error("history course is no longer available"), { code: "CONFLICT" });
+    }
+  }
+  if (historyBindings.length) {
+    const [admitted] = await tx`SELECT 1 WHERE NOT EXISTS (
+      SELECT 1 FROM jsonb_to_recordset(${tx.json(historyBindings as never)}::jsonb)
+        AS binding("courseId" uuid, "sourceIds" uuid[], "sourceRefs" jsonb, "materialUse" text)
+      WHERE NOT (${historyMaterialsActive(tx, scope.workspaceId,
+        () => tx`binding."sourceIds"`, () => tx`binding."courseId"`, () => tx`binding."materialUse"`)}
+        AND ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`binding."sourceRefs"`)})
+    )`;
+    if (!admitted) throw Object.assign(new Error("history material no longer permits this use"), { code: "CONFLICT" });
   }
   if (graph) {
     const resolved = resolveMemoryDependencyStatus(graph, globalMemoryIdList, [], courseId);
@@ -582,6 +615,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   const [target] = await db`
     WITH candidate_target AS MATERIALIZED (
       SELECT j.conversation_id, j.user_turn_id, j.mode, t.text AS answer, u.text AS question,
+        (COALESCE(u.query_system, false) OR COALESCE(t.query_system, false) OR t.system_query IS NOT NULL) AS query_system,
         t.context_source_refs, u.context_source_refs AS user_context_source_refs, w.privacy_epoch,
         u.source_ids || t.source_ids || assistant_pins.source_ids || user_pins.source_ids AS source_ids,
         t.source_ids AS assistant_source_ids,
@@ -620,7 +654,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
           WHERE candidate.workspace_id=j.workspace_id AND candidate.source_turn_id=t.id)
       FOR SHARE OF j
     )
-    SELECT t.conversation_id, t.user_turn_id, t.mode, t.answer, t.question, t.context_source_refs, t.privacy_epoch, t.course_id,
+    SELECT t.conversation_id, t.user_turn_id, t.mode, t.answer, t.question, t.context_source_refs, t.privacy_epoch, t.course_id, t.query_system,
       CASE WHEN jsonb_typeof(t.context_source_refs) IS DISTINCT FROM 'array'
         OR t.user_context_source_refs IS NOT NULL AND jsonb_typeof(t.user_context_source_refs) IS DISTINCT FROM 'array'
         OR t.context_source_refs <> '[]'::jsonb OR COALESCE(t.user_context_source_refs, '[]'::jsonb) <> '[]'::jsonb
@@ -642,27 +676,43 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       )
     )`;
   if (!target) return;
-  if (typeof target.course_id === "string" && !await lockActiveMemoryCourse(db, input.scope, target.course_id)) return;
-  if (!target.evidence) return target;
-  let admitted = await readCompletedCandidateEvidence(db, input, target.evidence);
-  if (!admitted) return;
-  const { assistant_refs, user_refs } = target.evidence as { assistant_refs: unknown; user_refs: unknown };
-  const assistantIds = parseContextMemoryDependencyIds(assistant_refs);
-  const userIds = user_refs === null ? [] : parseContextMemoryDependencyIds(user_refs);
+  const checkAncestors = target.query_system === false;
+  const collectCourseIds = new Set<string>(typeof target.course_id === "string" ? [target.course_id] : []);
+  const collectSourceIds = new Set<string>();
+  if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { collectCourseIds, collectSourceIds })) return;
+  let admitted = target.evidence ? await readCompletedCandidateEvidence(db, input, target.evidence) : undefined;
+  if (target.evidence && !admitted) return;
+  const evidence = target.evidence as { assistant_refs: unknown; user_refs: unknown } | null;
+  const assistantIds = evidence ? parseContextMemoryDependencyIds(evidence.assistant_refs) : [];
+  const userIds = evidence && evidence.user_refs !== null ? parseContextMemoryDependencyIds(evidence.user_refs) : [];
   if (!assistantIds || !userIds) return;
   const exactIds = [...assistantIds, ...userIds];
-  const collectSourceIds = new Set(admitted.sources.map(row => row.id));
-  let graph = await readMemoryDependencyStatus(db, input.scope, [
-    ...exactIds, ...admitted.backings.map(row => row.id),
-  ], { materialUse: admitted.material_use, collectSourceIds });
+  for (const row of admitted?.sources ?? []) collectSourceIds.add(row.id);
+  const dependencyIds = () => [...exactIds, ...(admitted?.backings.map(row => row.id) ?? [])];
+  let graph = await readMemoryDependencyStatus(db, input.scope, dependencyIds(),
+    { materialUse: admitted?.material_use, collectSourceIds, collectCourseIds });
+  if (collectCourseIds.size === 1) {
+    if (!await lockActiveMemoryCourse(db, input.scope, [...collectCourseIds][0]!)) return;
+  } else if (!await lockActiveMemoryCourses(db, input.scope, [...collectCourseIds])) return;
+  const lockedSourceIds = await lockMemoryMaterialSources(db, input.scope, collectSourceIds);
+  const locked = new Set(lockedSourceIds);
+  if (locked.size !== collectSourceIds.size) return;
+  if (checkAncestors) {
+    const currentSources = new Set<string>(), currentCourses = new Set<string>();
+    if (!await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, {
+      lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
+    }) || [...currentSources].some(id => !locked.has(id)) || [...currentCourses].some(id => !collectCourseIds.has(id))) return;
+  }
+  if (!admitted) return target;
   if (collectSourceIds.size) {
-    const lockedSourceIds = await lockMemoryMaterialSources(db, input.scope, collectSourceIds);
-    const locked = new Set(lockedSourceIds);
     admitted = await readCompletedCandidateEvidence(db, input, target.evidence);
     if (!admitted || admitted.sources.some(row => !locked.has(row.id))) return;
-    graph = await readMemoryDependencyStatus(db, input.scope, [
-      ...exactIds, ...admitted.backings.map(row => row.id),
-    ], { materialUse: admitted.material_use, lockedSourceIds });
+  }
+  if (dependencyIds().length) {
+    const currentCourses = new Set<string>();
+    graph = await readMemoryDependencyStatus(db, input.scope, dependencyIds(),
+      { materialUse: admitted.material_use, lockedSourceIds, collectCourseIds: currentCourses });
+    if ([...currentCourses].some(id => !collectCourseIds.has(id))) return;
   }
   const courseId = admitted.course_id;
   const current = (id: string) => {
@@ -1020,18 +1070,19 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       if (!job) {
         throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
       }
-      if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
-        if (!context.attemptContext) {
-          throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
-        }
-        await assertTutorAttemptContext(tx, scope,
-          { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+      if ((job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId) && !context.attemptContext) {
+        throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
       }
       const { courseId, resolvedMemoryIds } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
         context.contextSourceRefs, context.attemptContext?.sourceRefs, {
           memoryLineageSourceIds: context.memoryLineageSourceIds,
           globalMemoryIds: context.globalMemoryIds,
+          historyCourseBindings: context.historyCourseBindings,
         });
+      if (context.attemptContext) {
+        await assertTutorAttemptContext(tx, scope,
+          { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+      }
       if (context.contextSourceRefs.length) {
         await assertStreamSources(
           tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
@@ -1235,16 +1286,19 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid
               AND (j.claim_token IS NULL OR j.timing_execution_id IS NOT NULL) FOR SHARE OF j`;
           if (!job) throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
-          if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
-            if (!context.attemptContext) throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
-            await assertTutorAttemptContext(tx, scope,
-              { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+          if ((job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId) && !context.attemptContext) {
+            throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
           }
           const { courseId, resolvedMemoryIds } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
             context.contextSourceRefs, context.attemptContext?.sourceRefs, {
               memoryLineageSourceIds: context.memoryLineageSourceIds,
               globalMemoryIds: context.globalMemoryIds,
+              historyCourseBindings: context.historyCourseBindings,
             });
+          if (context.attemptContext) {
+            await assertTutorAttemptContext(tx, scope,
+              { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+          }
           if (context.contextSourceRefs.length) {
             await assertStreamSources(
               tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
@@ -1508,6 +1562,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       materialPurposePin?: OpeningMaterialPurposePin;
       memoryLineageSourceIds?: readonly string[];
       globalMemoryIds?: readonly string[];
+      historyCourseBindings?: readonly HistoryCourseBinding[];
       attemptContext?: { target: TutorAttemptContextTarget; snapshot: TutorAttemptContext };
     }): Promise<void> {
       await sql.begin(async (tx) => {
@@ -1547,9 +1602,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             throw new Error(`privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`);
           }
         }
-        if (options?.attemptContext) {
-          if (options.attemptContext.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
-          await assertTutorAttemptContext(tx, input.scope, options.attemptContext.target, options.attemptContext.snapshot);
+        const attempt = options?.attemptContext;
+        const verifyAttemptAfterMaterial = Boolean(options?.historyCourseBindings?.length || options?.globalMemoryIds?.length);
+        if (attempt) {
+          if (attempt.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
+          if (!verifyAttemptAfterMaterial) await assertTutorAttemptContext(tx, input.scope, attempt.target, attempt.snapshot);
         }
         const refs = input.contextSourceRefs ?? [];
         const memoryBearing = hasMemoryBearingRef(refs);
@@ -1567,7 +1624,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (boundTurn.assistant_turn_id !== input.assistantTurnId.toLowerCase()) throw new Error("assistant turn was not persisted");
         const boundCourseId = boundTurnCourseId(boundTurn);
         if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
-          || options?.memoryLineageSourceIds !== undefined || input.contextSourceRefs !== undefined || receipt !== null) {
+          || options?.memoryLineageSourceIds !== undefined || options?.historyCourseBindings !== undefined
+          || options?.attemptContext !== undefined
+          || input.contextSourceRefs !== undefined || receipt !== null) {
           const pinnedCourseId = options?.materialPurposePin?.courseId;
           if (pinnedCourseId && pinnedCourseId.toLowerCase() !== boundCourseId) {
             throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
@@ -1579,8 +1638,12 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               allowMissingPin: options?.materialPurposePin === undefined,
               memoryLineageSourceIds: options?.memoryLineageSourceIds,
               globalMemoryIds: options?.globalMemoryIds,
+              historyCourseBindings: options?.historyCourseBindings,
             },
           );
+          if (attempt && verifyAttemptAfterMaterial) {
+            await assertTutorAttemptContext(tx, input.scope, attempt.target, attempt.snapshot);
+          }
           if (!receipt && refs.length) {
             await assertStreamSources(tx, input.scope, refs, options?.attemptContext?.snapshot.sourceRefs,
               boundTurn.source_versions as Record<string, unknown> | null | undefined);

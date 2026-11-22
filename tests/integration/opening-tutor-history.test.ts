@@ -125,26 +125,36 @@ it.each(["empty", "memory-only", "conflicting", "malformed"] as const)("omits on
   });
 });
 
-it("keeps earlier independent history and fences later answers after an unpinned source is revoked", async () => {
+it.each([false, true])("keeps the independent prefix and fences derivatives after source replacement (pinned: %s)", async pinned => {
   const { sql, scope } = f;
   const { c, current, jobs, prior, repo } = await seed();
   const sourceId = await insertSource(sql, scope);
-  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[] WHERE id=${prior.assistantTurnId}`;
+  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],
+    source_versions=${sql.json(pinned ? { [sourceId]: 0 } : {})} WHERE id=${prior.assistantTurnId}`;
   for (const [text, answer, minutes] of [["Independent question", "Independent answer", 120], ["Continue that answer", "Derived from the revoked material", 30]] as const) {
     const turn = await repo.appendSavedTurn({ scope, conversationId: c.id, text, mode: "hint", clientKey: randomUUID(),
       sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
     await sql`UPDATE opening_turns SET created_at=now()-make_interval(mins=>${minutes}) WHERE id=${turn.turnId}`;
     await sql`UPDATE opening_turns SET status='complete',text=${answer},context_source_refs='[]'::jsonb WHERE id=${turn.assistantTurnId}`;
+    if (minutes === 30) {
+      await sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${turn.jobId}`;
+      const target = { scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId };
+      if (pinned) await expect(jobs.canAppendCompletedTurnCandidates(target)).resolves.toBe(true);
+      await sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
+      const callback = vi.fn(async () => {});
+      await expect(jobs.authorizeMetadataSend(target, callback)).rejects.toThrow("authorization changed");
+      await expect(jobs.appendCompletedTurnCandidates({ ...target, candidates: [] })).resolves.toBe(false);
+      expect(callback).not.toHaveBeenCalled();
+    }
   }
-  await sql`UPDATE opening_sources SET upload_state='rejected' WHERE id=${sourceId}`;
   await expect(jobs.loadHistoryContext(scope, current.turnId)).resolves.toEqual({
     history: [{ role: "user", text: "Independent question" }, { role: "assistant", text: "Independent answer" }], sourceRefs: [],
   });
 });
 
-it("excludes direct assistant history from an archived origin course even with an active destination membership", async () => {
+it.each(["archive", "detach", "mock_exam"] as const)("fences origin revocation (%s) for derived history and in-flight authorization", async change => {
   const { sql, scope } = f;
-  const { current, jobs, prior } = await seed();
+  const { current, jobs, prior, repo, c } = await seed();
   const sourceId = await insertSource(sql, scope);
   const courses = createCourseMembershipRepository(sql);
   const origin = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Origin", slug: randomUUID() });
@@ -155,12 +165,37 @@ it("excludes direct assistant history from an archived origin course even with a
   }
   await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: origin.id })} WHERE id=${prior.turnId}`;
   await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: destination.id })} WHERE id=${current.turnId}`;
-  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],source_versions=${sql.json({ [sourceId]: 0 })}
+  await sql`UPDATE opening_turns SET citations=${sql.json([{ sourceId, sourceVersion: 0 }])}
     WHERE id=${prior.assistantTurnId}`;
+  const derivative = await repo.appendSavedTurn({ scope, conversationId: c.id, text: "A follow-up in B", mode: "hint",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
+  await sql`UPDATE opening_turns SET created_at=now()-interval '30 minutes',context_anchor=${sql.json({ courseId: destination.id })}
+    WHERE id=${derivative.turnId}`;
+  await sql`UPDATE opening_turns SET status='complete',text='Derived in B',context_source_refs='[]'::jsonb
+    WHERE id=${derivative.assistantTurnId}`;
   const history = () => jobs.loadHistoryContext(scope, current.turnId);
-  await expect(history()).resolves.toMatchObject({ sourceRefs: [{ sourceId, sourceVersion: 0 }] });
-  await courses.setArchived({ ...scope, courseId: origin.id, archived: true });
-  await expect(history()).resolves.toEqual({ history: [], sourceRefs: [] });
+  const saved = await history();
+  expect(saved.sourceRefs).toEqual([{ sourceId, sourceVersion: 0 }]);
+  expect(saved.history).toHaveLength(4);
+  const claim = (await jobs.claim(current.jobId))!;
+  const authorization = { claimToken: claim.claimToken, executionId: claim.executionId, contextSourceRefs: saved.sourceRefs,
+    historyCourseBindings: saved.historyCourseBindings };
+  const callback = vi.fn(async () => {});
+  await jobs.authorizeSend(scope, current.jobId, authorization, callback);
+  expect(callback).toHaveBeenCalledOnce();
+  callback.mockClear();
+  if (change === "archive") await courses.setArchived({ ...scope, courseId: origin.id, archived: true });
+  else if (change === "detach") await sql`DELETE FROM course_asset_memberships WHERE course_id=${origin.id} AND asset_id=${sourceId}`;
+  else await sql`UPDATE course_asset_memberships SET purpose='mock_exam' WHERE course_id=${origin.id} AND asset_id=${sourceId}`;
+  await expect(history()).resolves.toEqual({ history: [], sourceRefs: [], revokedDirectSourceIds: [sourceId] });
+  const privacyEpoch = await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope);
+  await expect(jobs.authorizeSend(scope, current.jobId, authorization, callback)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(jobs.withStreamPublication(scope, current.jobId, { ...authorization, privacyEpoch }, callback))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(jobs.completeTurn({ scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId,
+    claimToken: claim.claimToken, text: "Derived answer", citations: [], candidates: [], contextSourceRefs: saved.sourceRefs },
+  { historyCourseBindings: saved.historyCourseBindings })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(callback).not.toHaveBeenCalled();
 });
 
 it.each(["mock_exam", "reference"] as const)("uses pins for assistant direct sources and enforces %s on model history and send", async purpose => {
@@ -185,7 +220,7 @@ it.each(["mock_exam", "reference"] as const)("uses pins for assistant direct sou
   const send = () => jobs.assertSendAuthorized(scope, current.jobId, { claimToken: claim.claimToken, executionId: claim.executionId, contextSourceRefs: sourceRefs });
   await expect(send()).resolves.toBeUndefined();
   await sql`UPDATE course_asset_memberships SET purpose=${purpose} WHERE course_id=${course.id} AND asset_id=${sourceId}`;
-  await expect(history()).resolves.toEqual({ history: [], sourceRefs: [] });
+  await expect(history()).resolves.toMatchObject({ history: [], sourceRefs: [] });
   await expect(send()).rejects.toMatchObject({ code: "CONFLICT" });
 });
 
@@ -272,6 +307,7 @@ it("skips citation-only memory for a practice turn while keeping independent his
   await f.sql`UPDATE opening_turns SET context_anchor=${f.sql.json({ itemVersionId: randomUUID() })} WHERE id=${next.turnId}`;
   expect(await jobs.loadHistoryContext(f.scope, next.turnId)).toEqual({
     history: [{ role: "user", text: "previous question" }, { role: "assistant", text: "step two" }], sourceRefs: [],
+    historyCourseBindings: [{ courseId: course.id, materialUse: "citation", sourceIds: [], sourceRefs: [] }],
   });
 
   await f.sql`UPDATE opening_memories SET expires_at=now()-interval '1 second' WHERE id=${memory.id}`;
@@ -302,6 +338,27 @@ it("tracks temporary ancestors of legacy global memory-only history", async () =
   expect(await jobs.loadHistoryContext(f.scope, current.turnId)).toEqual({ history: [], sourceRefs: [] });
 });
 
+it("blocks metadata for a source-free derivative after the earlier exchange's memory expires", async () => {
+  const { sql, scope } = f;
+  const { prior, current, jobs } = await seed();
+  const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+    text: "Temporary context", sourceTurnIds: [await insertOwnedTurn(sql, scope)],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await sql`UPDATE opening_turns SET context_source_refs=${sql.json([{ memoryDependencyIds: [memory.id] }])}
+    WHERE id=${prior.assistantTurnId}`;
+  await sql`UPDATE opening_turns SET status='complete',text='Derived answer',context_source_refs='[]'::jsonb
+    WHERE id=${current.assistantTurnId}`;
+  await sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${current.jobId}`;
+  const target = { scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId };
+  await expect(jobs.canAppendCompletedTurnCandidates(target)).resolves.toBe(true);
+  await sql`UPDATE opening_memories SET expires_at=now()-interval '1 second' WHERE id=${memory.id}`;
+  const callback = vi.fn(async () => {});
+  await expect(jobs.authorizeMetadataSend(target, callback)).rejects.toThrow("authorization changed");
+  await expect(jobs.appendCompletedTurnCandidates({ ...target, candidates: [] })).resolves.toBe(false);
+  expect(callback).not.toHaveBeenCalled();
+});
+
 it("keeps course-scoped memory history only while both turns resolve to its active course", async () => {
   const { current, jobs, prior, c, repo } = await seed();
   const courses = createCourseMembershipRepository(f.sql);
@@ -324,7 +381,9 @@ it("keeps course-scoped memory history only while both turns resolve to its acti
     SET context_anchor=${courseId === null ? null : f.sql.json({ purpose: "learning_help", courseId })} WHERE id=${id}`;
   const history = () => jobs.loadHistoryContext(f.scope, current.turnId);
   const expected = { history: [{ role: "user", text: "previous question" }, { role: "assistant", text: "step two" }],
-    sourceRefs: [{ sourceId: source!.id, sourceVersion: 0 }], memoryIds: [memory.id], temporaryMemoryExpiresAt: expiresAt };
+    sourceRefs: [{ sourceId: source!.id, sourceVersion: 0 }], memoryIds: [memory.id], temporaryMemoryExpiresAt: expiresAt,
+    historyCourseBindings: [{ courseId: courseA.id, materialUse: "citation", sourceIds: [source!.id],
+      sourceRefs: [{ sourceId: source!.id, sourceVersion: 0 }] }] };
 
   await anchor(prior.turnId, courseA.id.toUpperCase());
   await anchor(current.turnId, courseA.id);
@@ -346,6 +405,7 @@ it("keeps course-scoped memory history only while both turns resolve to its acti
   expect(await jobs.loadHistoryContext(f.scope, third.turnId)).toEqual({
     history: [{ role: "user", text: "continue" }, { role: "assistant", text: "Course B answer" }],
     sourceRefs: [], memoryIds: [memoryB.id], temporaryMemoryExpiresAt: expiresAt,
+    historyCourseBindings: [{ courseId: courseB.id, materialUse: "citation", sourceIds: [], sourceRefs: [] }],
   });
   await f.sql`UPDATE opening_memories SET status='deleted' WHERE id=${memory.id}`;
   expect(await jobs.loadHistoryContext(f.scope, third.turnId)).toEqual({ history: [], sourceRefs: [] });
@@ -359,5 +419,5 @@ it("keeps course-scoped memory history only while both turns resolve to its acti
   expect(await history()).toEqual({ history: [], sourceRefs: [] });
   await f.sql`UPDATE opening_memories SET status='active' WHERE id=${memory.id}`;
   await courses.setArchived({ ...f.scope, courseId: courseA.id, archived: true });
-  expect(await history()).toEqual({ history: [], sourceRefs: [] });
+  expect(await history()).toEqual({ history: [], sourceRefs: [], revokedDirectSourceIds: [source!.id] });
 });

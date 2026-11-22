@@ -126,6 +126,7 @@ export function contextSourceRefsIncluded(
           jsonb_typeof(provenance_ref) IS DISTINCT FROM 'object'
           OR jsonb_typeof(provenance_ref->'sourceId') IS DISTINCT FROM 'string'
           OR (provenance_ref->>'sourceId') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          OR (provenance_ref ? 'memoryOnly' AND jsonb_typeof(provenance_ref->'memoryOnly') IS DISTINCT FROM 'boolean')
           OR (NOT ${versionless()} AND (jsonb_typeof(provenance_ref->'sourceVersion') IS DISTINCT FROM 'number'
             OR (provenance_ref->>'sourceVersion') !~ '^[0-9]+$'))
           OR CASE WHEN jsonb_typeof(provenance_ref->'sourceVersion') = 'number'
@@ -193,25 +194,32 @@ export function turnPinnedSourcesIncluded(
 
 /** User turns are original leaves; assistant turns must carry their full consumed lineage. */
 export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fragment {
-  const column = (name: string): Fragment => db`${db.unsafe(`${alias}.${name}`)}`;
-  const versions = () => column("source_versions");
-  const context = () => column("context_source_refs");
-  const pins = () => turnPinnedSourceRefs(db, versions, () => column("context_anchor"));
+  const turn = () => {
+    switch (alias) {
+      case "t": return db`t`;
+      case "u": return db`u`;
+      case "a": return db`a`;
+      case "mt": return db`mt`;
+    }
+  };
+  const versions: FragmentFactory = () => db`${turn()}.source_versions`;
+  const context: FragmentFactory = () => db`${turn()}.context_source_refs`;
+  const pins = () => turnPinnedSourceRefs(db, versions, () => db`${turn()}.context_anchor`);
   return db`CASE
     WHEN jsonb_typeof(${versions()}) IS DISTINCT FROM 'object' THEN NULL
-    WHEN ${column("role")} = 'assistant' AND jsonb_typeof(${context()}) IS DISTINCT FROM 'array' THEN ${context()}
-    ELSE (CASE WHEN ${column("role")} = 'assistant' THEN ${context()} ELSE (
+    WHEN ${turn()}.role = 'assistant' AND jsonb_typeof(${context()}) IS DISTINCT FROM 'array' THEN ${context()}
+    ELSE (CASE WHEN ${turn()}.role = 'assistant' THEN ${context()} ELSE (
       SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM (
         SELECT jsonb_build_object('sourceId', sid.id, 'sourceVersion', NULL) AS ref
-        FROM unnest(${column("source_ids")}) sid(id)
+        FROM unnest(${turn()}.source_ids) sid(id)
         WHERE NOT EXISTS (
           SELECT 1 FROM (${pins()}) pin
           WHERE lower(pin.source_id) = sid.id::text AND pin.source_version IS NOT NULL
         )
         UNION ALL
         SELECT jsonb_build_object('sourceId', citation->'sourceId', 'sourceVersion', citation->'sourceVersion')
-        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${column("citations")})='array'
-          THEN ${column("citations")} ELSE '[null]'::jsonb END) citation
+        FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.citations)='array'
+          THEN ${turn()}.citations ELSE '[null]'::jsonb END) citation
       ) direct_refs
     ) END) || (
       SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version)), '[]'::jsonb)
@@ -242,6 +250,16 @@ export function turnDirectSourcesVersioned(
             ELSE false END)
     )
   )`;
+}
+
+/** Saved assistant material needs its own pin, citation, or direct context ref. */
+export function assistantDirectSourcesVersioned(db: Db, alias: "t" | "a"): Fragment {
+  const turn = () => alias === "t" ? db`t` : db`a`;
+  return db`(${turn()}.role <> 'assistant' OR cardinality(${turn()}.source_ids) = 0 OR (
+    jsonb_typeof(${turn()}.citations) = 'array'
+    AND ${turnDirectSourcesVersioned(db, () => db`${turn()}.source_ids`,
+      () => turnContextSourceRefs(db, alias), () => db`${turn()}.citations`)}
+  ))`;
 }
 
 /** Expose metadata filters to the planner before expanding their dependency arrays. */
@@ -317,7 +335,7 @@ export function isLineageUuid(value: unknown): value is string {
   return typeof value === "string" && UUID.test(value);
 }
 
-function pairedUserTurnId(db: Db, turn: FragmentFactory): Fragment {
+export function pairedUserTurnId(db: Db, turn: FragmentFactory): Fragment {
   return db`SELECT tj.user_turn_id FROM opening_tutor_jobs tj
     WHERE tj.assistant_turn_id = ${turn()}.id AND tj.workspace_id = ${turn()}.workspace_id
       AND tj.conversation_id = ${turn()}.conversation_id`;
@@ -574,7 +592,11 @@ export async function readTurnsWithActiveMemoryDependencies(
           OR COALESCE(u.context_anchor->>'itemVersionId', a.context_anchor->>'itemVersionId') IS NOT NULL
           THEN 'practice' ELSE 'citation' END)
       ELSE to_jsonb(a.id) END AS id) t
-    WHERE a.workspace_id = ${workspaceId} AND a.id = ANY(${turnIds}::uuid[]) AND a.status='complete'`;
+    WHERE a.workspace_id = ${workspaceId} AND a.id = ANY(${turnIds}::uuid[]) AND a.status='complete'
+      AND ${assistantDirectSourcesVersioned(db, "a")}
+      AND (a.role <> 'assistant' OR cardinality(a.source_ids) = 0 OR
+        ${contextSourceRefsIncluded(db, workspaceId, () => turnContextSourceRefs(db, "a"), false, true,
+          () => db`a.source_ids`, () => db`a.citations`)})`;
   const active = new Set<string>();
   const groups = new Map<string, Array<TurnMemoryEvidence & { ids: string[]; memoryOnlyCount: number }>>();
   for (const { id } of rows) {

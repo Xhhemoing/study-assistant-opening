@@ -64,6 +64,30 @@ function handler(text: string, memoryText?: string) {
 }
 
 describe("saved tutor material provenance", () => {
+  it.each(["assistant-source", "candidate-only"] as const)("requires saved versions for task material from %s records", async origin => {
+    const { sql, scope } = f;
+    const sourceId = await source();
+    const conversations = createOpeningConversationRepository(sql);
+    const conversation = await conversations.create(scope, { title: "Versioned task evidence", courseId: null });
+    const saved = await append(conversation.id);
+    const assistantIds = origin === "assistant-source" ? [sourceId] : [];
+    await sql`UPDATE opening_turns SET status='complete',source_ids=${assistantIds}::uuid[],context_source_refs='[]'::jsonb
+      WHERE id=${saved.assistantTurnId}`;
+    const id = randomUUID();
+    await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+      VALUES (${id}, ${scope.workspaceId}, ${conversation.id}, ${saved.assistantTurnId}, ${sql.json([sourceId])},
+        ${sql.json({ kind: "task", title: "Review evidence", minutes: 15, dueText: null })})`;
+    const admit = () => sql.begin(tx => admitTaskCandidate(tx, scope, id));
+    await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
+    const versionOwner = origin === "assistant-source" ? saved.assistantTurnId : saved.turnId;
+    await sql`UPDATE opening_turns SET source_versions=${sql.json({ [sourceId]: 0 })} WHERE id=${versionOwner}`;
+    await expect(admit()).resolves.toBeNull();
+    await sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
+    await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
+    await sql`UPDATE opening_turns SET source_versions='{}'::jsonb WHERE id=${versionOwner}`;
+    await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
   it("confirms and replays practice memory suggestions scoped by a saved turn in an unscoped conversation", async () => {
     const { sql, scope } = f;
     const courses = createCourseMembershipRepository(sql);

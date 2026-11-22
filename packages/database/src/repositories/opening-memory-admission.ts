@@ -1,7 +1,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import {
-  isLineageUuid, lineageUuid, memoryCourseAllows, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
+  assistantDirectSourcesVersioned, isLineageUuid, lineageUuid, memoryCourseAllows, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
   turnDependencyWalk, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs,
   type FragmentFactory,
   type MemoryDependencyStatus,
@@ -23,6 +23,14 @@ export async function lockActiveMemoryCourse(db: Db, scope: OpeningScope, course
   const rows = await db`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
     AND archived_at IS NULL ORDER BY id FOR SHARE`;
   return rows.length > 0;
+}
+
+export async function lockActiveMemoryCourses(db: Db, scope: OpeningScope, courseIds: readonly string[]): Promise<boolean> {
+  const ids = [...new Set(courseIds)].sort();
+  if (!ids.length) return true;
+  const rows = await db`SELECT id FROM courses WHERE id=ANY(${ids}::uuid[]) AND workspace_id=${scope.workspaceId}
+    AND archived_at IS NULL ORDER BY id FOR SHARE`;
+  return rows.length === ids.length;
 }
 
 /** Lock sources before memberships to serialize both first classification and removal. */
@@ -119,6 +127,7 @@ export function turnSourceMaterialsActive(
   return db`${sourceMaterialsActive(db, workspaceId, () => turnMaterialRows(db), options)}
     AND jsonb_typeof(t.source_versions) = 'object'
     AND jsonb_typeof(t.citations) = 'array'
+    AND ${assistantDirectSourcesVersioned(db, "t")}
     AND (t.role <> 'assistant' OR t.context_source_refs IS NULL OR jsonb_typeof(t.context_source_refs) = 'array')`;
 }
 
@@ -185,6 +194,7 @@ type MemoryMaterialRules = {
   excluded?: readonly string[];
   materialUse?: MaterialUse | "origin";
   collectSourceIds?: Set<string>;
+  collectCourseIds?: Set<string>;
   lockedSourceIds?: readonly string[];
   allowClassifiedGlobal?: boolean;
 };
@@ -234,10 +244,15 @@ async function readOriginBindings(
       ...rules, memoryCourse: () => db`m.course_id`, originUse,
       standaloneOrigin: () => db`course.id IS NULL AND ${turnHasStandaloneSessions(db, () => db`c.owner_user_id`)}`,
     })}
+      AND (course.id IS NULL OR EXISTS (
+        SELECT 1 FROM courses saved_course WHERE saved_course.id=course.id
+          AND saved_course.workspace_id=t.workspace_id AND saved_course.archived_at IS NULL
+      ))
       ${rules ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}
     ORDER BY m.id, m.ordinality`;
   for (const row of rows) {
     for (const id of row.source_ids ?? []) if (id) rules?.collectSourceIds?.add(id);
+    if (typeof row.turn_course_id === "string") rules?.collectCourseIds?.add(row.turn_course_id);
     const binding = { ...row, ids: row.refs == null ? [] : parseContextMemoryDependencyIds(row.refs) };
     const group = byMemory.get(row.id);
     if (group) group.push(binding);
@@ -284,6 +299,7 @@ export async function readMemoryDependencyStatus(
     const origins = memories.map(row => ({ ...row, turn_ids: row.source_turn_ids, excludedId: row.id }));
     const bindings = await readOriginBindings(db, scope, origins, rules && { ...rules, allowClassifiedGlobal: true });
     for (const memory of origins) {
+      if (memory.course_id !== null) rules?.collectCourseIds?.add(memory.course_id);
       pending.set(memory.id, { ...memory, bindings: bindings.get(memory.id) ?? [] });
     }
     frontier = [];

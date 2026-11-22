@@ -54,11 +54,29 @@ describe("opening memory context admission", () => {
     await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${matching}`;
     await sql`UPDATE opening_memories SET course_id=${foreign.id} WHERE id=${wrongWorkspace}`;
     const ids = async (courseId: string | null) => (await memories.listForContext(scope, courseId)).map(row => row.id);
-    expect(await ids(course.id.toUpperCase())).toEqual([global, matching]);
+    expect((await ids(course.id.toUpperCase())).sort()).toEqual([global, matching].sort());
     expect(await ids(null)).toEqual([global]);
     expect(await ids(foreign.id)).toEqual([global]);
     await courses.setArchived({ ...scope, courseId: course.id, archived: true });
     expect(await ids(course.id)).toEqual([global]);
+  });
+
+  it.each(["pin", "citation"] as const)("requires and carries an assistant origin's saved %s before replacement", async evidence => {
+    const { sql, scope } = fixture;
+    const sourceId = await insertSource(sql, scope);
+    const sourceRef = { sourceId, sourceVersion: 0 };
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [sourceId], role: "assistant", contextSourceRefs: [] });
+    const memoryId = await insertMemory(sql, scope, "assistant evidence", [origin]);
+    const load = () => memories.listContext(scope, new Date().toISOString());
+    await sql`UPDATE opening_turns SET source_versions='{}'::jsonb WHERE id=${origin}`;
+    await expect(load()).resolves.toEqual({ memories: [], sourceRefs: [] });
+    await expect(memories.proposeMemory(scope, { text: "unversioned suggestion", sourceTurnIds: [origin], expiresAt: null }))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    await sql`UPDATE opening_turns SET source_versions=${sql.json(evidence === "pin" ? { [sourceId]: 0 } : {})},
+      citations=${sql.json(evidence === "citation" ? [sourceRef] : [])} WHERE id=${origin}`;
+    await expect(load()).resolves.toMatchObject({ memories: [{ id: memoryId }], sourceRefs: [sourceRef] });
+    await sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
+    await expect(load()).resolves.toEqual({ memories: [], sourceRefs: [] });
   });
 
   it("filters memories when source purpose or course membership no longer allows their material", async () => {

@@ -64,7 +64,11 @@ async function readMemoryContextInTx(
       SELECT m.*, (
         SELECT jsonb_build_object(
           'turn_ids', COALESCE(jsonb_agg(t.id), '[]'::jsonb),
-          'refs', jsonb_path_query_array(COALESCE(jsonb_agg(${turnContextSourceRefs(db, "t")}), '[]'::jsonb), '$[*][*]')
+          'refs', jsonb_path_query_array(COALESCE(jsonb_agg(${turnContextSourceRefs(db, "t")}
+            || CASE WHEN t.role = 'assistant' AND jsonb_typeof(t.citations) = 'array' THEN (
+              SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId', cite->'sourceId', 'sourceVersion', cite->'sourceVersion')), '[]'::jsonb)
+              FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END) cite
+            ) ELSE '[]'::jsonb END), '[]'::jsonb), '$[*][*]')
         )
         FROM ${savedOrigins(() => db`m.source_turn_ids`, workspace)}
       ) AS source_evidence

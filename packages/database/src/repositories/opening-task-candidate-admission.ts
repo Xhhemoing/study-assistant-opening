@@ -2,10 +2,14 @@ import type { TransactionSql } from "postgres";
 import { assistantCandidateSchema } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
-import { lineageUuid, parseContextMemoryDependencyIds, readTurnsWithActiveMemoryDependencies, turnHasMemoryDependencies, turnLineageCourse, turnMaterialUse, type FragmentFactory } from "./opening-context-provenance";
+import {
+  assistantDirectSourcesVersioned, contextSourceRefsIncluded, lineageUuid, pairedUserTurnId, parseContextMemoryDependencyIds,
+  readTurnsWithActiveMemoryDependencies, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasMemoryDependencies,
+  turnLineageCourse, turnMaterialUse, turnPinnedSourceRefs, type FragmentFactory,
+} from "./opening-context-provenance";
 import { lockActiveMemoryCourse, lockMemoryMaterialSources, sourceMaterialsActive, turnMaterialRows } from "./opening-memory-admission";
 
-function candidateMaterialRows(tx: TransactionSql, scope: OpeningScope): ReturnType<FragmentFactory> {
+function candidateListedMaterials(tx: TransactionSql): ReturnType<FragmentFactory> {
   // Candidate source_ids also includes inherited references. Every direct use
   // of the same source still gets its own row and must satisfy the saved policy.
   return tx`
@@ -16,7 +20,12 @@ function candidateMaterialRows(tx: TransactionSql, scope: OpeningScope): ReturnT
           THEN t.context_source_refs ELSE '[]'::jsonb END) saved_ref
         WHERE lower(saved_ref->>'sourceId') = lower(ref.id)
       ), false) AS memory_only
-    FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(c.source_ids) = 'array' THEN c.source_ids ELSE '[]'::jsonb END) ref(id)
+    FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(c.source_ids) = 'array' THEN c.source_ids ELSE '[]'::jsonb END) ref(id)`;
+}
+
+function candidateMaterialRows(tx: TransactionSql, scope: OpeningScope): ReturnType<FragmentFactory> {
+  return tx`
+    ${candidateListedMaterials(tx)}
     UNION ALL
     ${turnMaterialRows(tx, true)}
     UNION ALL
@@ -28,6 +37,43 @@ function candidateMaterialRows(tx: TransactionSql, scope: OpeningScope): ReturnT
       AND activity.workspace_id = session.workspace_id AND activity.owner_user_id = session.owner_user_id
     CROSS JOIN LATERAL unnest(CASE WHEN activity.id IS NULL THEN ARRAY[NULL]::uuid[]
       ELSE session.source_ids || activity.source_ids END) ref(id)`;
+}
+
+function assistantCandidateSourcesVersioned(tx: TransactionSql, workspaceId: string) {
+  const array = (items: FragmentFactory) => tx`CASE WHEN jsonb_typeof(${items()}) = 'array' THEN ${items()} ELSE '[]'::jsonb END`;
+  return tx`(t.role <> 'assistant' OR (
+    ${assistantDirectSourcesVersioned(tx, "t")}
+    AND EXISTS (
+      SELECT 1 FROM LATERAL (
+        SELECT array_remove(ARRAY(SELECT ${lineageUuid(tx, () => tx`material.source_id`)}
+          FROM (${candidateListedMaterials(tx)}) material WHERE NOT material.memory_only), NULL::uuid) AS ids
+      ) direct
+      CROSS JOIN LATERAL (
+        SELECT COALESCE(jsonb_agg(refs.ref), '[]'::jsonb) AS refs
+        FROM (
+          SELECT ref FROM jsonb_array_elements(${array(() => turnContextSourceRefs(tx, "t"))}) ref
+          UNION ALL
+          SELECT citation - 'memoryOnly' FROM jsonb_array_elements(${array(() => tx`t.citations`)}) citation
+          UNION ALL
+          SELECT user_ref.ref FROM opening_turns u
+          CROSS JOIN LATERAL (
+            SELECT ref FROM jsonb_array_elements(${array(() => tx`u.context_source_refs`)}) ref
+            UNION ALL
+            SELECT citation - 'memoryOnly' FROM jsonb_array_elements(${array(() => tx`u.citations`)}) citation
+            UNION ALL
+            SELECT jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version)
+            FROM (${turnPinnedSourceRefs(tx, () => tx`u.source_versions`, () => tx`u.context_anchor`)}) pin
+            WHERE pin.version_required OR pin.source_version IS NOT NULL
+          ) user_ref(ref)
+          WHERE u.id = (${pairedUserTurnId(tx, () => tx`t`)}) AND u.workspace_id=t.workspace_id
+            AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
+        ) refs(ref)
+        WHERE ${lineageUuid(tx, () => tx`refs.ref->>'sourceId'`)} = ANY(direct.ids)
+      ) evidence
+      WHERE ${turnDirectSourcesVersioned(tx, () => tx`direct.ids`, () => tx`evidence.refs`, () => tx`'[]'::jsonb`)}
+        AND ${contextSourceRefsIncluded(tx, workspaceId, () => tx`evidence.refs`)}
+    )
+  ))`;
 }
 
 /** Share locks admit parallel accepts but serialize against owner/privacy deletion. */
@@ -74,6 +120,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}
       AND jsonb_typeof(c.source_ids) = 'array'
       AND jsonb_typeof(t.source_versions) = 'object' AND jsonb_typeof(t.citations) = 'array'
+      AND ${assistantCandidateSourcesVersioned(tx, scope.workspaceId)}
       AND ${sourceMaterialsActive(tx, scope.workspaceId, () => candidateMaterialRows(tx, scope), {
         lockedSourceIds,
         memoryCourse: () => tx`${candidate.course_id ?? null}::uuid`,
