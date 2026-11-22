@@ -1399,13 +1399,6 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (options.attemptContext.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
           await assertTutorAttemptContext(tx, input.scope, options.attemptContext.target, options.attemptContext.snapshot);
         }
-        const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,j.assistant_turn_id FROM opening_tutor_jobs j
-          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
-          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
-          WHERE j.id=${input.jobId} AND j.workspace_id=${input.scope.workspaceId} AND c.owner_user_id=${input.scope.ownerUserId}
-            AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR UPDATE OF j`;
-        if (!boundTurn) return;
-        if (boundTurn.assistant_turn_id !== input.assistantTurnId.toLowerCase()) throw new Error("assistant turn was not persisted");
         const receipt = input.systemQuery ? systemQueryReceiptSchema.parse(input.systemQuery) : null;
         if (receipt) {
           if (receipt.authorization.purpose !== "system_record_lookup" || receipt.authorization.workspaceId !== input.scope.workspaceId
@@ -1423,7 +1416,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           throw Object.assign(new Error("stream global memory binding missing or invalid"), { code: "CONFLICT" });
         }
         if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
-          || options?.memoryLineageSourceIds !== undefined || (input.contextSourceRefs !== undefined && (!receipt || memoryBearing))) {
+          || options?.memoryLineageSourceIds !== undefined || input.contextSourceRefs !== undefined) {
+          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,j.assistant_turn_id FROM opening_tutor_jobs j
+            JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+            JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
+            WHERE j.id=${input.jobId} AND j.workspace_id=${input.scope.workspaceId} AND c.owner_user_id=${input.scope.ownerUserId}
+              AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR UPDATE OF j`;
+          if (!boundTurn) return;
+          if (boundTurn.assistant_turn_id !== input.assistantTurnId.toLowerCase()) throw new Error("assistant turn was not persisted");
           const pinnedCourseId = options?.materialPurposePin?.courseId;
           if (pinnedCourseId && pinnedCourseId.toLowerCase() !== boundTurnCourseId(boundTurn)) {
             throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
@@ -1447,6 +1447,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           UPDATE opening_tutor_jobs SET status = 'succeeded', timing_execution_id = NULL, error = NULL, updated_at = now()
           WHERE id = ${input.jobId}
             AND workspace_id = ${input.scope.workspaceId}
+            AND assistant_turn_id = ${input.assistantTurnId}
             AND status = 'running'
             AND claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
           RETURNING id

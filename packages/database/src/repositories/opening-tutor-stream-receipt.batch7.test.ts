@@ -56,6 +56,7 @@ function fixture(options: Options = {}) {
         source_ids: options.sourceIds ?? [], source_versions: options.sourceVersions ?? null, course_id: options.courseId ?? null }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
+    if (sql === "SELECT ? AS included") return [{ included: true }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
     if (sql.startsWith("SELECT s.id,s.version FROM opening_sources")) {
       if (options.unavailableSource) return [];
@@ -643,9 +644,24 @@ describe("stream receipt release waits for current job authorization and assista
       expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(false);
     });
     hooks.assertAttempt.mockImplementationOnce(verify);
-    await f.repo.completeTurn({ scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token },
+    await f.repo.completeTurn({ scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token, contextSourceRefs: [] },
       { attemptContext: { target: { jobId, userTurnId: user, claimToken: token }, snapshot: { sourceRefs: [] } as never } });
     expect(verify).toHaveBeenCalledOnce();
+    expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(true);
+  });
+
+  it("checks the bound turn when a record receipt supplies context refs and no options", async () => {
+    const f = fixture();
+    await f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+      contextSourceRefs: [],
+      systemQuery: {
+        authorization: { purpose: "system_record_lookup", workspaceId: workspace,
+          principalId: owner, role: "workspace_owner", permissionRevision: "1" },
+        version: "study-query-v1", asOf: time, privacyEpoch: 2,
+        mode: "deterministic", status: "ok", reason: "read", results: [],
+      },
+    });
     expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(true);
   });
 });
