@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { OpeningBackup } from "@aistudy/domain";
-import { OPENING_RESTORE_APPLY_ORDER } from "@aistudy/domain";
+import { OPENING_RESTORE_APPLY_ORDER, planOpeningRestoreApply } from "@aistudy/domain";
+import { validateOpeningRestore } from "../../../domain/src/opening/backup-policy";
 import { OPENING_BACKUP_TABLES } from "./opening-backup-records";
 import {
   createOpeningS3RestoreObjectPut,
@@ -14,6 +15,7 @@ import type { OpeningRestoreNamespaceCounts } from "./opening-backup-empty-names
 
 const workspaceId = "a1000000-0000-4000-8000-000000000001";
 const sourceId = "c3000000-0000-4000-8000-000000000010";
+const revisionText = { concept_key: "limit", misconception_code: "conditions", summary: "Review the conditions." };
 
 function zeroCounts(): OpeningRestoreNamespaceCounts {
   return Object.fromEntries(OPENING_BACKUP_TABLES.map((t) => [t, 0])) as OpeningRestoreNamespaceCounts;
@@ -52,6 +54,109 @@ function draft(): OpeningBackup {
 }
 
 describe("executeOpeningRestoreApply fail-closed gates", () => {
+  it.each([
+    ["verified public handoff", { status: "verified" }],
+    ["public handoff attached to a course", { course_id: sourceId }],
+    ["public handoff with a predecessor", { prior_revision_id: sourceId }],
+    ["public handoff with evidence", { evidence_attempt_ids: [sourceId] }],
+    ["diagnosis with invalid evidence UUID", { origin: "system_diagnosis", evidence_attempt_ids: ["invalid"] }],
+    ["diagnosis with dangling evidence", { origin: "system_diagnosis", evidence_attempt_ids: [sourceId] }],
+    ["diagnosis with dangling course", { origin: "system_diagnosis", course_id: sourceId }],
+    ["diagnosis with learner disposition", { origin: "system_diagnosis", learner_disposition: "disputed" }],
+    ["diagnosis marked learner-reported", { origin: "system_diagnosis", status: "learner_reported" }],
+    ["learner correction without a predecessor", { origin: "learner_correction", status: "learner_reported", learner_disposition: "clarified" }],
+    ["missing valid range", { valid_range: undefined }],
+    ["missing transaction range", { tx_range: undefined }],
+    ["malformed valid range", { valid_range: "[yesterday,)" }],
+    ["malformed transaction range", { tx_range: '[2026-11-21T00:00:00Z,2026-11-21T00:00:00Z)' }],
+  ])("rejects %s before opening a restore transaction", async (_name, patch) => {
+    const backup = draft();
+    const candidate = {
+      ...revisionText,
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
+      status: "candidate", origin: "public_try_handoff", privacy_epoch: 4,
+      valid_range: '["2026-11-21 00:00:00+00",)', tx_range: '["2026-11-21 00:00:00+00",)',
+    };
+    backup.tables.v3_bitemporal_misconception_edges = [candidate];
+    expect(validateOpeningRestore(backup, []).allowed).toBe(true);
+    backup.tables.v3_bitemporal_misconception_edges = [{ ...candidate, ...patch }];
+    expect(validateOpeningRestore(backup, []).allowed).toBe(false);
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+    expect(sql.begin).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("rejects an epoch-0 root in an epoch-1 archive before starting a transaction (correction: %s)", async withCorrection => {
+    const backup = draft();
+    backup.privacyEpoch = 1;
+    const root = {
+      ...revisionText,
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
+      status: "candidate", origin: "public_try_handoff", privacy_epoch: 0,
+      valid_range: '["2026-11-21 00:00:00+00",)', tx_range: '["2026-11-21 00:00:00+00",)',
+    };
+    const correction = {
+      ...root, revision_id: "c3000000-0000-4000-8000-000000000011", prior_revision_id: root.revision_id,
+      status: "learner_reported", origin: "learner_correction", learner_disposition: "clarified", privacy_epoch: 1,
+      tx_range: "[2026-11-22T00:00:00Z,)",
+    };
+    if (withCorrection) root.tx_range = "[2026-11-21T00:00:00Z,2026-11-22T00:00:00Z)";
+    backup.tables.v3_bitemporal_misconception_edges = withCorrection ? [root, correction] : [root];
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+    expect(sql.begin).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "overlapping bitemporal slices", predecessor: null, childRange: "[2026-11-22T00:00:00Z,)",
+      error: "misconception revisions overlap in valid and transaction time" },
+    { name: "reversed transaction history", predecessor: sourceId, childRange: "[2026-11-20T00:00:00Z,2026-11-21T00:00:00Z)",
+      error: "misconception revision precedes the closure of its predecessor" },
+  ])("rejects $name in preview and plan before opening a transaction", async ({ predecessor, childRange, error }) => {
+    const backup = draft();
+    const root = {
+      ...revisionText,
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      status: "verified", origin: "system_diagnosis", privacy_epoch: 4, evidence_attempt_ids: [],
+      valid_range: "[-infinity,)", tx_range: "[2026-11-21T00:00:00Z,)",
+    };
+    backup.tables.v3_bitemporal_misconception_edges = [root, {
+      ...root, revision_id: "c3000000-0000-4000-8000-000000000011", prior_revision_id: predecessor, tx_range: childRange,
+    }];
+    expect(validateOpeningRestore(backup, [])).toMatchObject({ allowed: false, errors: [error] });
+    expect(planOpeningRestoreApply(backup, [], { confirmLocalRestore: true }))
+      .toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", errors: [error] });
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false, errors: [error] });
+    expect(sql.begin).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["concept_key", undefined],
+    ["misconception_code", null],
+    ["summary", "invalid\uD800text"],
+  ])("rejects invalid %s before opening a transaction", async (column, value) => {
+    const backup = draft();
+    const row = {
+      ...revisionText,
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      status: "verified", origin: "system_diagnosis", privacy_epoch: 4, evidence_attempt_ids: [],
+      valid_range: "[-infinity,)", tx_range: "[2026-11-21T00:00:00Z,)",
+    };
+    backup.tables.v3_bitemporal_misconception_edges = [{ ...row, [column]: value }];
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false,
+        errors: [`misconception revision has invalid ${column}`],
+      });
+    expect(sql.begin).not.toHaveBeenCalled();
+  });
+
   it("strips timetable revision metadata before restoring strict intervention settings", () => {
     const row = { workspace_id: workspaceId, intervention_settings: { quietMode: "focus", timetableRevision: "legacy" } };
     expect(stripLegacyTimetableRevision(row)).toEqual({

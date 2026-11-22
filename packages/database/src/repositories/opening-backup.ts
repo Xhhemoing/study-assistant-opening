@@ -234,6 +234,7 @@ export type OpeningRestoreApplyArgs = {
   dryRun?: boolean;
   /** Required for dry-run and for confirm+counts empty-namespace preflight. */
   backup?: unknown;
+  currentPrivacyEpoch?: number;
   currentDeletionJournal?: readonly OpeningDeletionMark[];
   currentMemoryDeletions?: OpeningMemoryDeletions;
   availableCourseIds?: readonly string[];
@@ -350,6 +351,7 @@ export async function applyOpeningRestore(
     const preview = validateOpeningRestore(args.backup, journal, args.currentMemoryDeletions);
     const planned = planOpeningRestoreApply(args.backup, journal, {
       confirmLocalRestore: true,
+      currentPrivacyEpoch: args.currentPrivacyEpoch,
       availableCourseIds: args.availableCourseIds,
       currentLearningState: args.currentLearningState,
       currentMemoryDeletions: args.currentMemoryDeletions,
@@ -386,6 +388,7 @@ export async function applyOpeningRestore(
     const preview = validateOpeningRestore(args.backup, journal, args.currentMemoryDeletions);
     const planned = planOpeningRestoreApply(args.backup, journal, {
       confirmLocalRestore: true,
+      currentPrivacyEpoch: args.currentPrivacyEpoch,
       availableCourseIds: args.availableCourseIds,
       currentLearningState: args.currentLearningState,
       currentMemoryDeletions: args.currentMemoryDeletions,
@@ -437,6 +440,7 @@ export async function applyOpeningRestore(
     const executed = await executeOpeningRestoreApply(args.sql, {
       confirmLocalRestore: true,
       backup: args.backup,
+      currentPrivacyEpoch: args.currentPrivacyEpoch,
       currentDeletionJournal: journal,
       currentMemoryDeletions: args.currentMemoryDeletions,
       availableCourseIds: args.availableCourseIds,

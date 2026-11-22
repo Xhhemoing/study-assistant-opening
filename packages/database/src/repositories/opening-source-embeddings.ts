@@ -1,6 +1,5 @@
 import type { Sql, TransactionSql } from "postgres";
-import type { SourceChunk } from "@aistudy/contracts";
-import type { MaterialSegment } from "@aistudy/ai";
+import type { MaterialSegment, SourceChunk } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { parentBudgetFamilyPredicate } from "./opening-budget";
 import { lockOpeningJobExecution } from "./opening-job-execution";

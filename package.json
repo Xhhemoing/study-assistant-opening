@@ -1,7 +1,7 @@
 {
   "name": "aistudy",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "UNLICENSED",
   "version": "0.0.0",
   "description": "AIstudy lifelong learning platform",
   "workspaces": [

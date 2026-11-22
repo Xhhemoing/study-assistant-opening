@@ -16,6 +16,7 @@ export type OpeningRestoreApplyPlan = {
 
 type OpeningRestoreApplyOptions = {
   confirmLocalRestore: boolean;
+  currentPrivacyEpoch?: number;
   /** IDs already present in the target workspace, queried by the DB executor. */
   availableCourseIds?: readonly string[];
   /** Actual owner-scoped target state, not values read from the archive. */
@@ -78,6 +79,9 @@ export function planOpeningRestoreApply(
     return { ok: false, code: "PREFLIGHT_REJECTED", errors: preview.errors };
   }
   const journal = normalizeOpeningRestoreHistory(backup as OpeningBackup);
+  if (options.currentPrivacyEpoch !== undefined && journal.privacyEpoch !== options.currentPrivacyEpoch) {
+    return { ok: false, code: "PREFLIGHT_REJECTED", errors: ["backup privacy epoch differs from restore workspace"] };
+  }
   if (journal !== backup) {
     const normalizedPreview = validateOpeningRestore(structuralCopy(journal), currentDeletionJournal, options.currentMemoryDeletions);
     if (!normalizedPreview.allowed) return { ok: false, code: "PREFLIGHT_REJECTED", errors: normalizedPreview.errors };
@@ -127,7 +131,10 @@ function structuralCopy(value: unknown): unknown {
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(structuralCopy);
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, structuralCopy(child)]));
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+      // Misconception archive rows already use serialized ranges. Preserve field types for validation.
+      key, key === "v3_bitemporal_misconception_edges" ? child : structuralCopy(child),
+    ]));
   }
   return value;
 }

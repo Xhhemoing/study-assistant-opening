@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
-import type { Scope } from "@aistudy/contracts";
-import { buildAnswerGradingInput, reservationTerms, mediaInputCostBound, resolveBudgetLocalDay, resolveBudgetTimeZone, type ResolvedTaskModel } from "@aistudy/ai";
+import type { OpeningReservationModel, Scope } from "@aistudy/contracts";
+import { buildAnswerGradingInput, reservationTerms, mediaInputCostBound, resolveBudgetLocalDay, resolveBudgetTimeZone } from "@aistudy/domain/opening/ai-policy";
 import { checkOpeningBudgetAvailable, type OpeningBudgetAvailability, type OpeningBudgetRepositoryOptions } from "./opening-budget";
 
 export type OpeningAutoGradePolicy = {
@@ -8,8 +8,8 @@ export type OpeningAutoGradePolicy = {
   modelUnavailableReason?: "budget" | "no_model";
   /** Legacy snapshots are accepted but never authorize admission. */
   dayStart: Date; dayEnd: Date;
-  primaryModel?: Omit<ResolvedTaskModel, "provider"> | null;
-  fallbackModel?: Omit<ResolvedTaskModel, "provider"> | null;
+  primaryModel?: OpeningReservationModel | null;
+  fallbackModel?: OpeningReservationModel | null;
   budgetOptions?: OpeningBudgetRepositoryOptions;
 };
 
@@ -47,7 +47,7 @@ export type OpeningAutoGradeBudgetContext = {
  * data URLs over 2,800,000 characters, hence each decoded page is <=2,100,000 bytes.
  * PDF file size is not used as a rendered-page size estimate. */
 export async function checkOpeningAutoGradeBudget(tx: Sql | TransactionSql, scope: Scope, policy: OpeningAutoGradePolicy, context: OpeningAutoGradeBudgetContext): Promise<OpeningBudgetAvailability | { allowed: false; reason: "budget_unavailable" }> {
-  const check = async (model: Omit<ResolvedTaskModel, "provider"> | null | undefined) => {
+  const check = async (model: OpeningReservationModel | null | undefined) => {
     if (!model) return { allowed: false, reason: "budget_unavailable" } as const;
     const imageParts: Parameters<typeof buildAnswerGradingInput>[0]["imageParts"] = [];
     const media = [...(context.referenceSources ?? []), ...(context.workSource ? [context.workSource] : [])];

@@ -29,7 +29,7 @@ const alias = Object.entries({
   "@aistudy/jingwei/react": path.resolve(root, "packages/jingwei/src/react/index.ts"),
   "@aistudy/jingwei": path.resolve(root, "packages/jingwei/src/index.ts"),
 }).map(([find, replacement]) => ({
-  find: find === "@aistudy/domain" ? /^@aistudy\/domain$/ : find,
+  find: find === "@aistudy/domain" || find === "@aistudy/contracts" ? new RegExp(`^${find}$`) : find,
   replacement,
 }));
 

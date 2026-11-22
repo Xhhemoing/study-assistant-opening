@@ -32,6 +32,14 @@ function backup(): OpeningBackup {
 }
 
 describe("planOpeningRestoreApply", () => {
+  it("requires an archive to match the live privacy epoch when supplied", () => {
+    const options = { confirmLocalRestore: true };
+    expect(planOpeningRestoreApply(backup(), [], { ...options, currentPrivacyEpoch: 4 }).ok).toBe(true);
+    expect(planOpeningRestoreApply(backup(), [], { ...options, currentPrivacyEpoch: 5 }))
+      .toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED" });
+    expect(planOpeningRestoreApply(backup(), [], { ...options, currentPrivacyEpoch: 0 }))
+      .toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED" });
+  });
   it("does not let a legacy exclusion-only backup erase a later asset deletion", () => {
     const mark = { sourceId, deletedAt: "2026-09-22T00:00:00.000Z" };
     const value = backup(); value.objects = []; value.tables.opening_sources = [];

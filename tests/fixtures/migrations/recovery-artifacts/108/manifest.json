@@ -25,11 +25,13 @@
     },
     {
       "path": "package.json",
-      "sha256": "b4881ae0185d7a83bb0b380961d358c6299fb596aabec674ccbadb3452ef12f8"
+      "sha256": "b4881ae0185d7a83bb0b380961d358c6299fb596aabec674ccbadb3452ef12f8",
+      "fixture": "108/package.json.bin"
     },
     {
       "path": "packages/database/package.json",
-      "sha256": "4371bcac50a3c3e256755e4bcf17ce6555d11e749d5358f0c175268dab2b5d18"
+      "sha256": "4371bcac50a3c3e256755e4bcf17ce6555d11e749d5358f0c175268dab2b5d18",
+      "fixture": "108/packages/database/package.json.bin"
     }
   ],
   "migrations": [

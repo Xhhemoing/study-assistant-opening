@@ -50,6 +50,7 @@ export {
   type UploadTicket,
   type SourceDownload,
   type SourceChunk,
+  type MaterialSegment,
   type Citation,
   type SourceCourseLinkInput,
   type SourceCourseUnlinkInput,

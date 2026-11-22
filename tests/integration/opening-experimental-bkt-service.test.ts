@@ -36,9 +36,9 @@ describe("card 1 — real PG → repository → service → pinned wrapper → d
   it("compares five legal independent canonical items from multiple families without upgrading the authoritative rule", async () => {
     const f = await seedBktService(fixture);
     const migrations = await f.sql`SELECT id,verification_state,checksum FROM schema_migrations ORDER BY id`;
-    expect(migrations).toHaveLength(112);
+    expect(migrations).toHaveLength(113);
     expect(migrations[0]!.id).toBe("0001_library.sql");
-    expect(migrations.at(-1)!.id).toBe("0112_opening_text_capture_intent.sql");
+    expect(migrations.at(-1)!.id).toBe("0113_v3_bitemporal_misconception_memory.sql");
     expect(migrations.every(r => r.verification_state === "verified" && /^[a-f0-9]{64}$/.test(String(r.checksum)))).toBe(true);
     expect(f.heads.every(h => h.observation.verdictSource === "deterministic" && h.observation.outcome === "correct")).toBe(true);
     await assertCompared(f);

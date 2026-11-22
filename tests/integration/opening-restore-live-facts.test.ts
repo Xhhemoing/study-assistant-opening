@@ -3,11 +3,12 @@ import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { createSqlClient } from "../../packages/database/src/migrate";
 import { applyOpeningRestore, exportOpeningBackup, readOpeningRestoreNamespaceCounts } from "../../packages/database/src/repositories/opening-backup";
 import { readOpeningRestoreCurrentFacts, snapshotOpeningRestoreCurrentFacts } from "../../packages/database/src/repositories/opening-restore-current-facts";
+import { readTryMisconceptionHandoffClock } from "../../packages/database/src/repositories/v3-bitemporal-misconception-memory";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const enabled = process.env.OPENING_TEST_DB === "1" && Boolean(process.env.OPENING_TEST_DATABASE_URL);
@@ -50,9 +51,9 @@ describe.skipIf(!enabled)("real export → serialized CLI live facts", () => {
     } } }));
     async function cli(args: string[] = []) {
       return new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-        const child = spawn(process.execPath, ["--import",path.join(root,"node_modules/tsx/dist/loader.mjs"),
+        const child = spawn(process.execPath, ["--import",pathToFileURL(path.join(root,"node_modules/tsx/dist/loader.mjs")).href,
           "scripts/opening-restore.ts","--confirm-local-restore","--draft",draft,...args],
-        { cwd: root, env: { ...process.env, TSX_TSCONFIG_PATH: config,
+        { cwd: root, windowsHide: true, env: { ...process.env, TSX_TSCONFIG_PATH: config,
           OPENING_RESTORE_DATABASE_URL: process.env.OPENING_TEST_DATABASE_URL }, stdio: ["ignore","pipe","pipe"] });
         let output = "";
         // A cold real CLI import takes ~21s on the shared host; bound this one child,
@@ -70,12 +71,31 @@ describe.skipIf(!enabled)("real export → serialized CLI live facts", () => {
     return { scope, backup, draft, cli };
   }
   it("restores an actual empty-inventory export without inventing deletion facts", async () => {
-    const { cli, backup } = await fixture();
+    const { cli, backup, scope } = await fixture();
     expect(backup.memoryDeletions).toBeDefined();
+    const before = await readTryMisconceptionHandoffClock(sql);
     const result = await cli();
     expect(result.output).toContain("code=APPLY_OK");
     expect(result.code).toBe(0);
+    const [block] = await sql<{ cutoff: string }[]>`
+      SELECT restore_cutoff_seq::text AS cutoff FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
+    const after = await readTryMisconceptionHandoffClock(sql);
+    expect(Number(block?.cutoff)).toBeGreaterThan(before.issueSeq);
+    expect(Number(block?.cutoff)).toBeLessThan(after.issueSeq);
   }, 90000);
+  it("rejects an older archive in live dry-run and apply on an empty target", async () => {
+    const { scope, backup } = await fixture();
+    const oldFacts = await snapshotOpeningRestoreCurrentFacts(sql, backup);
+    await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
+    const facts = await snapshotOpeningRestoreCurrentFacts(sql, backup);
+    const before = await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId);
+    const args = { confirmLocalRestore: true, backup } as const;
+    const rejected = { ok: false, code: "PREFLIGHT_REJECTED", mutated: false };
+    await expect(applyOpeningRestore({ ...args, dryRun: true, ...facts })).resolves.toMatchObject(rejected);
+    expect(facts.currentPrivacyEpoch).toBe(1);
+    await expect(applyOpeningRestore({ ...args, ...oldFacts, sql })).resolves.toMatchObject(rejected);
+    expect(await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId)).toEqual(before);
+  });
   it("live dry-run reads preferences/courses without writes or S3; offline remains closed", async () => {
     const f = await fixture(true);
     const before = await readOpeningRestoreNamespaceCounts(sql, f.scope.workspaceId);

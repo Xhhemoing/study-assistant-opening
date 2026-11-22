@@ -42,6 +42,8 @@ import {
 import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
+import { orderBackupMisconceptionRevisions, validateBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
+import { refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
 
 export type OpeningRestoreObjectSideEffects = {
   status: "clean" | "remaining" | "unknown";
@@ -73,6 +75,7 @@ export type OpeningRestoreApplyGuarantees = {
 export type OpeningRestoreExecuteArgs = {
   confirmLocalRestore: true;
   backup: unknown;
+  currentPrivacyEpoch?: number;
   currentDeletionJournal?: readonly OpeningDeletionMark[];
   currentMemoryDeletions?: OpeningMemoryDeletions;
   availableCourseIds?: readonly string[];
@@ -136,6 +139,9 @@ export const OPENING_RESTORE_ROW_COLUMNS: Record<(typeof OPENING_RESTORE_APPLY_O
   library_relations: ["id", "workspace_id", "from_type", "from_id", "to_type", "to_id", "relation_type", "created_at", "source"],
   library_properties: ["id", "workspace_id", "subject_type", "subject_id", "key", "value_type", "value", "created_at", "updated_at"],
   opening_note_provenance: ["document_id", "workspace_id", "context_source_refs", "created_at"],
+  v3_bitemporal_misconception_edges: ["revision_id", "workspace_id", "owner_user_id", "edge_id", "course_id",
+    "concept_key", "misconception_code", "summary", "status", "origin", "learner_disposition",
+    "evidence_attempt_ids", "privacy_epoch", "valid_range", "tx_range", "prior_revision_id"],
   opening_course_knowledge: ["workspace_id", "owner_user_id", "course_id", "version", "snapshot", "source_versions", "updated_at"],
   opening_knowledge_confirmations: ["id", "workspace_id", "owner_user_id", "course_id", "node_id", "node_label", "node_kind", "confirmed_at", "graph_version_before", "graph_version_after", "source_versions", "evidence_chunk_ids"],
   opening_exam_sprints: ["id", "workspace_id", "owner_user_id", "course_id", "pack_snapshot", "state", "created_at", "updated_at"],
@@ -442,6 +448,7 @@ async function assertOpeningRestoreTarget(tx: TransactionSql, backup: OpeningBac
   const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, owner);
   const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
     confirmLocalRestore: true,
+    currentPrivacyEpoch: facts.currentPrivacyEpoch,
     availableCourseIds: facts.availableCourseIds,
     currentMemoryDeletions: facts.currentMemoryDeletions,
     currentLearningState: facts.currentLearningState,
@@ -483,6 +490,13 @@ export async function executeOpeningRestoreApply(
   }
   const normalized = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
   const rawTables = normalized.tables as Record<string, Record<string, unknown>[]>;
+  const misconceptionRevisions = orderBackupMisconceptionRevisions(rawTables.v3_bitemporal_misconception_edges ?? []);
+  const misconceptionErrors = validateBackupMisconceptionRevisions(rawTables, normalized.privacyEpoch);
+  if (!misconceptionRevisions) misconceptionErrors.push("invalid misconception revision lineage");
+  if (!misconceptionRevisions || misconceptionErrors.length) return {
+    ok: false, code: "PREFLIGHT_REJECTED", mutated: false, guarantees: RESTORE_GUARANTEES, preview,
+    errors: misconceptionErrors,
+  };
   const tables = projectOpeningRestoreLibrary(rawTables);
   const backup: OpeningBackup = { ...normalized, tables: {
     ...tables, ...(tables.cards && { cards: projectOpeningBackupCardSources(tables,
@@ -490,6 +504,7 @@ export async function executeOpeningRestoreApply(
   } };
   const planned = planOpeningRestoreApply(backup, journal, {
     confirmLocalRestore: true,
+    currentPrivacyEpoch: args.currentPrivacyEpoch,
     availableCourseIds: args.availableCourseIds,
     currentLearningState: args.currentLearningState,
     currentMemoryDeletions: args.currentMemoryDeletions,
@@ -541,6 +556,9 @@ export async function executeOpeningRestoreApply(
       const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`;
       if (!workspace) throw new Error("restore workspace owner is missing");
       const owner = String(workspace.owner_user_id);
+      if (misconceptionRevisions.some(row => String(row.owner_user_id).toLowerCase() !== owner)) {
+        throw Object.assign(new Error("misconception revision owner differs from restore workspace owner"), { restoreCode: "PREFLIGHT_REJECTED" });
+      }
       const assetErrors: string[] = [];
       validateBackupWorkspaceAssets(backup.tables as Record<string, Record<string, unknown>[]>, assetErrors, owner);
       if (assetErrors.length) throw new Error(assetErrors.join("; "));
@@ -575,8 +593,12 @@ export async function executeOpeningRestoreApply(
         VALUES(${workspaceId},${owner},0) ON CONFLICT DO NOTHING RETURNING workspace_id`;
       await tx`SELECT revision FROM opening_workspace_history_revisions
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
-      const [lockedWorkspace] = await tx`SELECT id FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
+      const [lockedWorkspace] = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
       if (!lockedWorkspace) throw new Error("restore workspace owner changed");
+      const privacyEpoch = Number(lockedWorkspace.privacy_epoch);
+      if (privacyEpoch !== backup.privacyEpoch) {
+        throw Object.assign(new Error("backup privacy epoch differs from restore workspace"), { restoreCode: "PREFLIGHT_REJECTED" });
+      }
       // Drift can commit while we wait for either lock, so only this read authorizes apply.
       await assertOpeningRestoreTarget(tx, backup, owner, seeded.length > 0);
 
@@ -605,7 +627,8 @@ export async function executeOpeningRestoreApply(
         const orderedRows = table === "opening_learning_decisions"
           ? [...rows].sort((a, b) => ["plan", "session", "activity"].indexOf(String(a.layer)) - ["plan", "session", "activity"].indexOf(String(b.layer)))
           : table === "opening_learning_observations" ? restoredObservations
-          : table === "opening_exam_sprints" ? restoredSprints : rows;
+          : table === "opening_exam_sprints" ? restoredSprints
+          : table === "v3_bitemporal_misconception_edges" ? misconceptionRevisions : rows;
         for (const row of orderedRows) {
           if (!row || typeof row !== "object") continue;
           // Observation root/head references are cyclic and immediate FKs.
@@ -656,6 +679,13 @@ export async function executeOpeningRestoreApply(
       if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
       if (!history) await tx`DELETE FROM opening_workspace_history_revisions
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
+      const [clock] = await tx<{ at: string; seq: string }[]>`
+        SELECT clock_timestamp()::text AS at, nextval('v3_try_misconception_handoff_seq')::text AS seq`;
+      const restoreCutoffSeq = Number(clock?.seq);
+      if (!clock || !Number.isSafeInteger(restoreCutoffSeq) || restoreCutoffSeq <= 0) {
+        throw new Error("Invalid PostgreSQL misconception handoff restore cutoff");
+      }
+      await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock.at, restoreCutoffSeq);
 
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;
