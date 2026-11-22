@@ -39,16 +39,14 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
         AND ${publicPdfChunkPredicate(tx)}` : tx``;
     let stats: PageStats[];
     if (pdf) {
-      // Send full text for potential labels only. The broad SQL words cover every
-      // label family, while the shared checker decides from the complete lines.
+      // Stream complete chunks so the shared label check can normalize every line.
       const query = tx`${pdfBoundary}
-        SELECT c.id,c.page,length(c.text)::int AS characters,c.text ~ '[^[:space:]]' AS readable,
-          CASE WHEN c.text ~* '(answer|solution|key|答案|解|解析)' THEN c.text ELSE '' END AS answer_candidate
+        SELECT c.id,c.page,length(c.text)::int AS characters,c.text ~ '[^[:space:]]' AS readable,c.text
         ${fromPdf} ORDER BY c.page NULLS LAST`;
       const byPage = new Map<number | null, PageStats>();
       for await (const rows of query.cursor(16)) {
         for (const row of rows) {
-          if (containsPdfAnswerLabel(row.answer_candidate)) continue;
+          if (containsPdfAnswerLabel(String(row.text))) continue;
           const page = row.page == null ? null : Number(row.page);
           const current = byPage.get(page);
           byPage.set(page, { page, characters: (current?.characters ?? 0) + Number(row.characters), readable: Boolean(current?.readable || row.readable) });

@@ -771,7 +771,8 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
 
     def test_model_answer_section_headings_still_seal_the_following_page(self):
         for title in ("Model answers", "Model Answers:", "Selected answers", "Official solutions",
-                      "Reference solutions", "Answer key", "Solutions manual"):
+                      "Reference solutions", "Answer key", "Solutions manual", "Answers to Exercises 1–5",
+                      "**Solu**tions to Problems 1.1—1.8", "Answers\u00a0to Review Questions #1 through #5"):
             with self.subTest(title=title):
                 result = result_for(
                     [text_element(10, "Exercise 1: Find x.\n" + title + "\n1. x = 3.")],

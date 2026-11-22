@@ -110,6 +110,10 @@ describe("cross-source legacy definition backfill", () => {
     { reason: "answers to review questions", available: true, text: "# Answers to Review Questions\nx = 3." },
     { reason: "solutions to practice problems", available: true, text: "Solutions to Practice Problems (continued)\nx = 3." },
     { reason: "selected exercise answers", available: true, text: "Answers to Selected Odd-Numbered Exercises\nx = 3." },
+    { reason: "numbered exercise range", available: true, text: "Answers to Exercises 1–5\nx = 3." },
+    { reason: "numbered decimal problem range", available: true, text: "Solutions to Problems 1.1—1.8\nx = 3." },
+    { reason: "wide spaces in assessment heading", available: true, text: "Answers\u00a0to\u202fReview\u3000Questions\nx = 3." },
+    { reason: "ordinary common questions prose", available: true, text: "Answers to common questions are discussed in Chapter 2.", preservesDefinition: true },
     { reason: "Chinese review assessment heading", available: true, text: "复习题答案\nx = 3." },
     { reason: "ordinary solutions prose", available: true, text: "Solutions to problems of this type need more constraints.", preservesDefinition: true },
     { reason: "ordinary linear algebra prose", available: true, text: "Solutions to linear systems form a subspace.", preservesDefinition: true },
@@ -128,7 +132,7 @@ describe("cross-source legacy definition backfill", () => {
     const tx = (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = mockQueryText(strings, values);
       if (strings[0]?.trimStart().startsWith("WITH pdf_pending_seals") || !query.startsWith("WITH") && query.includes("seal.pages->0")
-        || query.startsWith("seal.source_id=") || query.startsWith("s.parse_state") || query.startsWith("ps.parse_state")) {
+        || query.startsWith("seal.source_id=") || query.startsWith("s.parse_state") || query.startsWith("ps.parse_state") || query.startsWith("seal.source_version<")) {
         return { sqlFragment: query };
       }
       if (query.startsWith("SELECT id FROM workspaces")) return [{ id: "workspace" }];

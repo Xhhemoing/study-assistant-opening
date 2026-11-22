@@ -10,7 +10,9 @@ const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|c
 const englishContinuation = String.raw`(?:[ \t]*\([ \t]*(?:continued|cont\.?|cont['’]?d)[ \t]*\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答)";
 const chineseContinuation = String.raw`(?:[ \t]*[（(](?:续|接上页)[）)])?[ \t]*`;
-const assessmentTopic = String.raw`(?:review[ \t]+questions?|practice[ \t]+problems?|self[- ]check[ \t]+exercises?|exercises?|problems?|questions?|chapter[ \t]+\d+|section[ \t]+\d+(?:\.\d+)*)`;
+const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;
+const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *| +(?:to|through) +)${assessmentNumber})?)?`;
+const assessmentTopic = String.raw`(?:(?:review +questions?|practice +problems?|self[- ]check +exercises?|exercises?|problems?|questions?)${assessmentTarget}|chapter +\d+|section +\d+(?:\.\d+)*)`;
 const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter[ \t]+\d+|section[ \t]+\d+(?:\.\d+)*)[ \t]+)*`;
 const explicitPdfAnswerLabel = new RegExp(String.raw`^(?:(?:answers?[ \t]+(?:key|section)|${englishAnswerQualifier}[ \t]+answers?|(?:official|reference)[ \t]+solutions?|solutions?[ \t]+manual|answers?[ \t]+and[ \t]+solutions?|answers?)${englishContinuation}[ \t]*(?:[:：]|$)|(?:answers?|solutions?|key)[ \t]+to[ \t]+${assessmentQualifier}${assessmentTopic}${englishContinuation}[ \t]*(?:[:：]|$)|(?:【[ \t]*)?${chineseAnswerHeading}${chineseContinuation}(?:】|[:：]|$))`, "iu");
 const numberedPdfAnswerLabel = new RegExp(String.raw`^(?:(?:(?:${englishAnswerQualifier}|worked|full)[ \t]+)?(?:answers?(?:[ \t]+key)?|solutions?)|key)(?:[ \t]+to[ \t]+(?:exercise|problem|question))?[ \t]*\d+(?:\.\d+)*${englishContinuation}[ \t]*(?:[:：]|[.。](?:[ \t]|$)|$)|^(?:${chineseAnswerHeading}|详解|解析|解)[ \t]*\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?:[ \t]|$)|$)`, "iu");
@@ -18,7 +20,7 @@ const numberedPdfAnswerLabel = new RegExp(String.raw`^(?:(?:(?:${englishAnswerQu
 export function containsPdfAnswerLabel(text: string): boolean {
   // Bare "Solution" may belong to a worked example spanning several pages.
   return text.split(/\r?\n/u).some(line => {
-    const heading = line.trim().replace(/^#{1,6}[ \t]+/u, "").replace(/\*\*|__/gu, "");
+    const heading = line.replace(/[^\S\r\n]+/gu, " ").trim().replace(/^#{1,6} +/u, "").replace(/\*\*|__/gu, "").trim();
     const container = pdfHeadingContainer.exec(heading)?.[0];
     const title = container ? heading.slice(container.length) : heading;
     return numberedPdfAnswerLabel.test(title) || explicitPdfAnswerLabel.test(title) || Boolean(container &&
@@ -31,8 +33,10 @@ export function containsPdfAnswerLabel(text: string): boolean {
 function pendingPdfSeal(sql: Sql, source: "s" | "ps") {
   const state = source === "s" ? sql`s.parse_state<>'ready' OR seal.updated_at>s.updated_at`
     : sql`ps.parse_state<>'ready' OR seal.updated_at>ps.updated_at`;
+  const historical = source === "s" ? sql`seal.source_version<s.version` : sql`seal.source_version<ps.version`;
   return sql`CASE seal.pages->0->>'publicationSealCommitted'
-    WHEN 'true' THEN FALSE WHEN 'false' THEN TRUE ELSE (${state}) END`;
+    WHEN 'true' THEN FALSE WHEN 'false' THEN TRUE
+    ELSE (NOT (${historical}) AND (${state})) END`;
 }
 
 export function publicPdfSealBoundaries(sql: Sql, workspaceId: string, scope: { sourceIds: readonly string[] } | { chunkId: string }) {

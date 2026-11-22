@@ -6,7 +6,7 @@ const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const source = { version: 1, mime: "application/pdf", parse_state: "ready", upload_state: "uploaded",
   published: false, ai_excluded: true, error: null };
 
-const defaultChunks = [{ id: "public", page: 1, text: "private", answer_candidate: "", characters: 7, readable: true }];
+const defaultChunks = [{ id: "public", page: 1, text: "private", characters: 7, readable: true }];
 
 function database(row: Record<string, unknown> | undefined, chunks = defaultChunks, reads: string[] = []): Sql {
   const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
@@ -16,7 +16,7 @@ function database(row: Record<string, unknown> | undefined, chunks = defaultChun
         : index < values.length ? "?" : "");
     }).join("").replace(/\s+/gu, " ").trim();
     if (query.includes("AS ai_excluded")) return Promise.resolve(row ? [row] : []);
-    if (query.includes("AS answer_candidate")) {
+    if (query.includes("AS readable,c.text")) {
       reads.push(query);
       return { async *cursor() { yield chunks; } };
     }
@@ -53,11 +53,11 @@ describe("source content self-read versus additional PDF retry access", () => {
 
   it("uses the same publication scope for inventory and bodies and excludes whole answer chunks", async () => {
     const reads: string[] = [];
-    const answer = "Answers to Review Questions\n5 units.";
+    const answer = "**Ans**wers to Review Questions\n5 units.";
     const chunks = [...defaultChunks,
-      { id: "blank", page: 2, text: "", answer_candidate: "", characters: 0, readable: false },
-      { id: "mixed-page-answer", page: 2, text: answer, answer_candidate: answer, characters: answer.length, readable: true },
-      { id: "answer-only", page: 3, text: answer, answer_candidate: answer, characters: answer.length, readable: true },
+      { id: "blank", page: 2, text: "", characters: 0, readable: false },
+      { id: "mixed-page-answer", page: 2, text: answer, characters: answer.length, readable: true },
+      { id: "answer-only", page: 3, text: answer, characters: answer.length, readable: true },
     ];
     const sql = database(source, chunks, reads);
     expect(await readOpeningSourceContent(sql, scope, "source", { page: 2 })).toMatchObject({

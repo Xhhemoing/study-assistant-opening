@@ -98,6 +98,7 @@ export async function parsePdfSegments(input: {
   onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean, initialInWorkedExample?: boolean, cached?: boolean) =>
     PdfSegmentContinuation | Promise<PdfSegmentContinuation>;
   onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
+  shouldRevalidateSegment?: (pageStart: number, pageEnd: number) => Promise<boolean>;
   onFailedSegment?: (segment: FailedPdfSegment) => readonly PdfSegmentPage[] | void | Promise<readonly PdfSegmentPage[] | void>;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
   maxPages?: number; maxSegmentBytes?: number; maxPageTextBytes?: number; maxBookBytes?: number;
@@ -203,7 +204,10 @@ export async function parsePdfSegments(input: {
     };
     const cached = await input.segments?.read(input.scope, identity);
     input.signal.throwIfAborted();
-    const ready = cached?.state === "ready";
+    const revalidate = cached?.state === "ready" && (cached.requiresRevalidation === true
+      || await input.shouldRevalidateSegment?.(start, end) === true);
+    input.signal.throwIfAborted();
+    const ready = cached?.state === "ready" && !revalidate;
     let parsed = ready ? validateSegment(cached.pages, start, end) : undefined;
     let error: unknown;
     for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
@@ -238,7 +242,7 @@ export async function parsePdfSegments(input: {
         { page: start, text: "", imagePath: null, publicationSealUnknown: true },
       ];
       input.signal.throwIfAborted();
-      await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal, blockingSeals);
+      await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal, blockingSeals, revalidate);
       failedSegments.push(failure);
       // Seeing an incomplete range cannot end a confirmed answer seal or extend an example.
       initialInWorkedExample = false;
@@ -251,7 +255,7 @@ export async function parsePdfSegments(input: {
       }
       if (!ready) {
         input.signal.throwIfAborted();
-        await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed.pages }, input.signal);
+        await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed.pages }, input.signal, [], revalidate);
         input.signal.throwIfAborted();
       }
       const resumeFromPage = await emitSegment(start, end, parsed, ready);

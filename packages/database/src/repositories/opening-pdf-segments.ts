@@ -4,7 +4,7 @@ import { OpeningSourceError } from "./opening-source-errors";
 
 export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
-export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[] } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
+export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[]; requiresRevalidation?: true } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
 const conflict = () => new OpeningSourceError("CONFLICT", "PDF parse execution or source version is no longer current");
 
@@ -126,12 +126,13 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
       validateIdentity(input);
       return sql.begin(async (tx): Promise<PdfSegment | null> => {
         await assertSource(tx, scope, input);
-        const [row] = await tx`SELECT state,pages,error_code FROM opening_pdf_parse_segments
+        const [row] = await tx`SELECT state,pages,error_code,parser_profile FROM opening_pdf_parse_segments
           WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND source_version=${input.sourceVersion}
           AND page_start=${input.pageStart} AND page_end=${input.pageEnd} AND ${storedSegmentKey(tx, input)}
           LIMIT 1`;
         if (!row) return null;
-        return row.state === "ready" ? { state: "ready", pages: validatePdfSegmentPages(row.pages, input.pageStart, input.pageEnd) }
+        return row.state === "ready" ? { state: "ready", pages: validatePdfSegmentPages(row.pages, input.pageStart, input.pageEnd),
+          ...(pendingFailureBoundary.test(row.parser_profile) ? { requiresRevalidation: true } : {}) }
           : { state: "failed", errorCode: row.error_code as "conversion_failed" | "timeout" | "invalid_output" };
       });
     },
@@ -164,7 +165,7 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
       });
     },
     async save(scope: OpeningJobScope, input: PdfSegmentIdentity, segment: PdfSegment, signal?: AbortSignal,
-      blockingSeals: readonly PdfSegmentPage[] = []): Promise<void> {
+      blockingSeals: readonly PdfSegmentPage[] = [], replaceReady = false): Promise<void> {
       validateIdentity(input);
       if (blockingSeals.length && (segment.state !== "failed" || blockingSeals.some(marker =>
         marker.page < input.pageStart || marker.page > input.pageEnd || !marker.publicationSealUnknown || marker.reopenedSection))) {
@@ -182,7 +183,7 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
             WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND source_version=${input.sourceVersion}
               AND page_start=${input.pageStart} AND page_end=${input.pageEnd} AND ${storedSegmentKey(tx, input)}
             LIMIT 1 FOR UPDATE`;
-          if (existing?.state === "ready") return;
+          if (existing?.state === "ready" && !replaceReady) return;
           if (existing) profile = existing.parser_profile;
           if (blockingSeals.length) {
             const previousPending = Number(pendingFailureBoundary.exec(profile)?.[1] ?? Infinity);
@@ -202,7 +203,7 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
           ON CONFLICT(source_id,source_version,parser_profile,page_start,page_end) DO UPDATE
             SET state=EXCLUDED.state,pages=EXCLUDED.pages,error_code=EXCLUDED.error_code,updated_at=now()
             WHERE opening_pdf_parse_segments.state <> 'ready'
-               OR EXCLUDED.parser_profile = 'pdf-publication-page-seal-v1'`;
+               OR EXCLUDED.parser_profile = 'pdf-publication-page-seal-v1' OR ${replaceReady}`;
         // A failure or abort rolls back both the conversion state and its publication boundary.
         signal?.throwIfAborted();
       });
