@@ -1598,9 +1598,9 @@ const ARTICLE_DIMENSION_SEPARATOR = /(?:[ \t]+(?:by|[x×*])[ \t]+|-by-)/.source;
 const ARTICLE_DIMENSION_TOKEN =
   `${ARTICLE_DIMENSION}(?:${ARTICLE_DIMENSION_SEPARATOR}${ARTICLE_DIMENSION})+(?![\\w-])`;
 const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
-const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps))$/;
-const ARTICLE_PLURAL_OS_RE =
-  /(?:[eiu]os|^(?:zeros|photos|memos|demos|solos|halos|silos|kilos|combos|echoes|heroes|potatoes|tomatoes|volcanoes|vetoes|torpedoes))$/;
+const ARTICLE_SINGULAR_S_RE = new RegExp("(?:[sui]s|ics|^(?:" +
+  "series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps|" +
+  "rhinoceros|chaos|cosmos|pathos|ethos|thermos|asbestos|kudos|eros|telos|topos|ouroboros))$");
 const ARTICLE_IRREGULAR_PLURAL_RE = /^(?:children|people|men|women|teeth|feet|mice|geese|criteria|phenomena)$/;
 // Option normalization spells Greek unit symbols as "mu" and "omega".
 const ARTICLE_MEASUREMENT_UNIT =
@@ -1655,9 +1655,12 @@ const ARTICLE_HOMOGRAPH_VERB_RE = new RegExp("^(?:" +
   "includes|excludes|requires|matches|applies|follows|depends|lies|falls|rises|grows|decays|reduces|simplifies|" +
   "cancels|persists|forces|determines|reaches|attains|intersects|crosses|starts|begins|ends|stops|continues|produces|returns|" +
   "approaches|touches|passes|meets|moves|shifts|scales|maps|projects|transforms|increases|decreases|doubles|halves|peaks|drops|jumps|hits)$");
-const ARTICLE_NON_GEOMETRIC_VERB_RE = new RegExp("^(?:" +
-  "increases|decreases|rises|falls|grows|decays|remains|stays|holds|equals|means|states|shows|gives|yields|makes|" +
+const ARTICLE_SCALAR_CHANGE_HOMOGRAPH_RE = new RegExp("^(?:" +
+  "increases|decreases|doubles|halves|rises|falls|grows|decays|remains|stays|holds|equals|means|states|shows|gives|yields|makes|" +
   "takes|uses|needs|lacks|contains|includes|excludes|requires|matches|applies|follows|depends|lies|persists|continues|produces|returns|approaches)$");
+const ARTICLE_TEMPORAL_SPATIAL_ADVERB_RE = new RegExp("^(?:" +
+  "overnight|early|late|soon|today|tomorrow|yesterday|daily|weekly|monthly|yearly|hourly|annually|forever|abroad|ahead|apart|" +
+  "aside|away|back|down|forth|home|indoors|outdoors|online|offline|upstairs|downstairs)$");
 const ARTICLE_INTRANSITIVE_PAST_RE = new RegExp("^(?:" +
   "failed|converged|diverged|vanished|occurred|appeared|existed|remained|stayed|persisted|worked|held|fell|rose|" +
   "grew|decayed|began|ended|stopped|became|differed|succeeded|commuted|terminated|depended|lay|continued|" +
@@ -1805,7 +1808,7 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
 }
 
 function isArticleRegularPlural(word: string): boolean {
-  return word.endsWith("s") && (!ARTICLE_SINGULAR_S_RE.test(word) || ARTICLE_PLURAL_OS_RE.test(word));
+  return word.endsWith("s") && !ARTICLE_SINGULAR_S_RE.test(word);
 }
 
 function articlePrepositionalRelationEnd(tokens: readonly string[], start: number): number {
@@ -1836,6 +1839,11 @@ function articlePrepositionalRelationEnd(tokens: readonly string[], start: numbe
 
 function isArticleMannerAdverb(word: string): boolean {
   return word.endsWith("ly") && word !== "only" && word !== "early" && !ARTICLE_LY_NOUN_RE.test(word);
+}
+
+function isArticleHeadNounCandidate(word: string): boolean {
+  return ARTICLE_IDENTIFIER_RE.test(word) && !isArticlePrepositionalBoundary(word) &&
+    !isArticleMannerAdverb(word) && !ARTICLE_TEMPORAL_SPATIAL_ADVERB_RE.test(word);
 }
 
 function hasConditionalClausePredicate(remainder: string): boolean {
@@ -1877,6 +1885,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     if (RELATION_OP_RE.test(token)) return true;
 
     const next = tokens[index + 1]?.toLowerCase() ?? "";
+    const afterNext = tokens[index + 2]?.toLowerCase() ?? "";
     const determiner = ARTICLE_DETERMINER_RE.test(token);
     if (expectsPluralHead && (determiner || relationComplement || ARTICLE_STOP_WORD_RE.test(token))) {
       expectsPluralHead = false;
@@ -1896,7 +1905,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
       if (!inInfinitive) {
         if (ARTICLE_INTRANSITIVE_PAST_RE.test(token)) return true;
         if (ARTICLE_TRANSITIVE_PAST_RE.test(token)) {
-          const complement = next.endsWith("ly") ? tokens[index + 2]?.toLowerCase() ?? "" : next;
+          const complement = next.endsWith("ly") ? afterNext : next;
           if (!ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(complement) &&
             !ARTICLE_PARTICIPLE_DIRECTION_RE.test(complement)) return true;
         }
@@ -1916,13 +1925,15 @@ function hasConditionalClausePredicate(remainder: string): boolean {
       ((beforeArticle === "in" && (token === "red" || token === "black")) ||
         (beforeArticle === "on" && token === "green") ||
         (beforeArticle === "of" && token === "blue" && tokens[index - 3]?.toLowerCase() === "out"));
-    const colorModifier = ARTICLE_COLOR_RE.test(token) && !colorNoun;
-    // "The diagonal" and "a straight" can be complete countable noun phrases.
-    const prenominalAdjective = ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) &&
-      !((token === "diagonal" || token === "straight") &&
-        ARTICLE_DETERMINER_RE.test(previous) && ARTICLE_NON_GEOMETRIC_VERB_RE.test(next));
-    const wordModifier = ARTICLE_MODIFIER_WORD_RE.test(token) &&
-      (!ARTICLE_LY_NOUN_RE.test(token) || (token === "elderly" && previous !== "the"));
+    // "The orange doubles overnight" ends the noun phrase at "orange".
+    const followedByPredicate = (token === "orange" || token === "diagonal" || token === "straight") &&
+      ARTICLE_DETERMINER_RE.test(previous) && ARTICLE_SCALAR_CHANGE_HOMOGRAPH_RE.test(next) &&
+      !isArticleHeadNounCandidate(afterNext);
+    const colorModifier = ARTICLE_COLOR_RE.test(token) && !colorNoun && !followedByPredicate;
+    const prenominalAdjective = ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) && !followedByPredicate;
+    const wordModifier = token === "elderly"
+      ? isArticleHeadNounCandidate(next) || (ARTICLE_HOMOGRAPH_VERB_RE.test(next) && isArticleHeadNounCandidate(afterNext))
+      : ARTICLE_MODIFIER_WORD_RE.test(token) && !ARTICLE_LY_NOUN_RE.test(token);
     expectsNoun = determiner ||
       (nounSlot && (quantity || participle || prenominalAdjective || colorModifier || wordModifier ||
         ARTICLE_NOUN_COMPOUND_RE.test(token + " " + next)));

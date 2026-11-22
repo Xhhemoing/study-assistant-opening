@@ -2944,6 +2944,21 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Select a given car on a straight approaches."].map(text => ({
         answerKey: "A", text, ok: false,
       })),
+      ...["Choose a given photo of the elderly doubles champions.",
+        "Choose a given photo of the orange doubles champions.",
+        "Choose a given program with the elderly patients."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
+      ...["Select a given demand for two pianos rises.",
+        "Select a given price of two avocados rises.",
+        "Select a given price of the orange doubles overnight.",
+        "Select a given price of the orange doubles early.",
+        "Select a given price of an orange rises.",
+        "Select a given distance from the diagonal doubles every minute.",
+        "Select a given distance from the diagonal halves indoors.",
+        "Select a given aid for the elderly doubles every year."].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),
