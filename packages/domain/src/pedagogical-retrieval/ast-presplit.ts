@@ -155,6 +155,7 @@ const HTML_WINDOWS_1252 = [
   0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
 ];
 const ATX_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/;
+const ATX_HEADING_START_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 
 interface HeadingScope {
   readonly level: number;
@@ -808,8 +809,8 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
       if (opener) fence = { opener, containers };
       indented = INDENTED_CODE_RE.test(body) && (atBoundary || indented);
       afterBlockBoundary = Boolean(opener) || indented || isMarkdownBlankLine(body) || THEMATIC_BREAK_RE.test(body) ||
-        /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) || (!atBoundary && SETEXT_UNDERLINE_RE.test(body)) ||
-        /^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(body) ||
+        ATX_HEADING_START_RE.test(body) || (!atBoundary && SETEXT_UNDERLINE_RE.test(body)) ||
+        /^ {0,3}:{3,}[ \t]*[a-zA-Z]/.test(body) ||
         (containers.includes("quote") && CALLOUT_HEADER_RE.test(body));
       return { body, containers, continuedDepth, mode: opener || indented ? "code" as const : "text" as const, atBoundary };
     },
@@ -850,14 +851,73 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedCustomProps = EMPT
   };
 }
 
+type MarkdownInlineScope = "#markdown-p" | "#markdown-heading" | "#markdown-td";
+
 type HtmlScopeLine = {
   offset: number;
   containerDepth: number;
   continuedDepth: number;
-  endsParagraph: boolean;
-  hasInlineContent: boolean;
-  closesRawParagraph: boolean;
+  endsInline: boolean;
+  inlineScope?: MarkdownInlineScope;
+  closesRawParagraph?: boolean;
+  startsTable?: boolean;
 };
+
+function createHtmlScopeLineProjector(lines: readonly SourceLine[], emit: (line: HtmlScopeLine) => void) {
+  let paragraphStart: HtmlScopeLine | undefined;
+  let table: { depth: number; delimiterIndex: number } | undefined;
+  return (index: number, state: ReturnType<ReturnType<typeof createMarkdownBlockScanner>["scan"]>, continuedLiteral: boolean) => {
+    const line = lines[index]!;
+    const { body, containers, continuedDepth, mode, atBoundary } = state;
+    const depth = containers.length;
+    const base = { offset: line.start, containerDepth: depth, continuedDepth };
+    const text = mode === "text" && !continuedLiteral;
+    const inTable = text && table?.depth === depth && continuedDepth === depth;
+    if (inTable && index === table?.delimiterIndex) {
+      emit({ ...base, endsInline: true });
+      return;
+    }
+    const tableBody = inTable && isPipeTableBodyRow(body);
+    const nextLine = lines[index + 1];
+    const next = nextLine && continueMarkdownContainers(nextLine.raw, containers);
+    const nextBody = next?.depth === depth ? next.body : undefined;
+    const row = { raw: body, start: line.contentEnd - body.length };
+    const header = text && !tableBody ? pipeTableHeaderCells(row, nextBody) : null;
+    if (header || tableBody) {
+      if (header) table = { depth, delimiterIndex: index + 1 };
+      paragraphStart = undefined;
+      emit({ ...base, endsInline: true, startsTable: Boolean(header) });
+      for (const cell of header ?? parseTableRowCells(row).cells) {
+        emit({
+          offset: Math.max(line.start, cell.start), containerDepth: depth, continuedDepth: depth,
+          endsInline: true, inlineScope: "#markdown-td",
+        });
+      }
+      return;
+    }
+    const afterTable = table !== undefined;
+    table = undefined;
+
+    const blank = isMarkdownBlankLine(body);
+    const underline = text && !atBoundary && paragraphStart?.containerDepth === continuedDepth &&
+      continuedDepth === depth && SETEXT_UNDERLINE_RE.test(body);
+    if (underline && paragraphStart) paragraphStart.inlineScope = "#markdown-heading";
+    const atx = text && ATX_HEADING_START_RE.test(body);
+    const thematic = text && !underline && THEMATIC_BREAK_RE.test(body);
+    const endsInline = !continuedLiteral && (mode !== "text" || blank || underline || atBoundary || afterTable ||
+      startsMarkdownBlock(body, nextBody, true));
+    const event: HtmlScopeLine = {
+      ...base,
+      endsInline,
+      inlineScope: text && !blank && !underline && !thematic
+        ? (atx ? "#markdown-heading" : "#markdown-p") : undefined,
+      closesRawParagraph: !continuedLiteral && (mode === "code" || thematic || depth > continuedDepth),
+    };
+    if (endsInline) paragraphStart = undefined;
+    if (event.inlineScope === "#markdown-p") paragraphStart ??= event;
+    emit(event);
+  };
+}
 
 function projectDisclosureCommentMarkdown(
   markdown: string,
@@ -869,6 +929,7 @@ function projectDisclosureCommentMarkdown(
   const lines = splitLinesWithOffsets(markdown);
   const rawLines = lines.map(line => line.raw);
   const scanner = createMarkdownBlockScanner(containers);
+  const projectScopeLine = onScopeLine && createHtmlScopeLineProjector(lines, onScopeLine);
   const escapes = "\\\\(?<escape>" + ASCII_PUNCTUATION.source + ")";
   const inline = /(?<ticks>\x60+)|(?<bracket>!?\[|\])|--!?>/.source;
   const tokens = new RegExp([escapes, MARKDOWN_AUTOLINK, inline, HTML_MARKUP_TOKEN].join("|"), "gi");
@@ -897,22 +958,7 @@ function projectDisclosureCommentMarkdown(
     const line = lines[index]!;
     const continuedLiteral = line.start < literalEnd;
     const state = scanner.scan(line.raw, continuedLiteral);
-    if (onScopeLine) {
-      const blank = isMarkdownBlankLine(state.body);
-      const underline = !state.atBoundary && SETEXT_UNDERLINE_RE.test(state.body);
-      const thematic = !underline && THEMATIC_BREAK_RE.test(state.body);
-      const endsParagraph = !continuedLiteral && (state.mode !== "text" || blank || underline ||
-        state.atBoundary || startsMarkdownBlock(state.body, undefined, true));
-      onScopeLine({
-        offset: line.start,
-        containerDepth: state.containers.length,
-        continuedDepth: state.continuedDepth,
-        endsParagraph,
-        hasInlineContent: !continuedLiteral && state.mode === "text" && !blank && !underline && !thematic,
-        closesRawParagraph: !continuedLiteral && (state.mode === "code" || thematic ||
-          state.containers.length > state.continuedDepth),
-      });
-    }
+    projectScopeLine?.(index, state, continuedLiteral);
     if (state.mode !== "text" || state.atBoundary) brackets.length = 0;
     if (state.mode === "code") {
       if (maskCode) mask(line.start, line.end);
@@ -1414,13 +1460,22 @@ function renderedMarkdownLinkEnd(
   const inlineEnd = markdownLabelLinkEnd(label, suffixStart);
   const respectsParagraph = (end: number) => {
     if (!/[\r\n]/.test(label.slice(contentStart, end))) return true;
-    const lineEnd = nextLineBreak(label, end)?.index ?? label.length;
-    const lines = splitLinesWithOffsets(label.slice(contentStart, lineEnd));
-    return lines.slice(1).every(({ raw }) => {
-      const { body } = continueMarkdownContainers(raw, containers);
-      return !startsMarkdownHtmlBlock(body, false) && !startsMarkdownBlock(body, undefined, true) &&
-        !SETEXT_UNDERLINE_RE.test(body);
-    });
+    const lineEnd = nextLineBreak(label, end);
+    const followingEnd = lineEnd && nextLineBreak(label, lineEnd.index + lineEnd[0].length);
+    const start = containingLineStart(label, contentStart);
+    const lines = splitLinesWithOffsets(label.slice(start, followingEnd?.index ?? label.length));
+    const first = readMarkdownContainerLine(lines[0]!.raw, containers);
+    const second = lines[1] && continueMarkdownContainers(lines[1]!.raw, first.containers);
+    if (ATX_HEADING_START_RE.test(first.body) ||
+      (second?.depth === first.containers.length && isPipeTableStart(first.body, second.body))) return false;
+    for (let line = 1; line < lines.length && lines[line]!.start < end - start; line++) {
+      const { body } = continueMarkdownContainers(lines[line]!.raw, containers);
+      const next = lines[line + 1] && continueMarkdownContainers(lines[line + 1]!.raw, containers);
+      const nextBody = next?.depth === containers.length ? next.body : undefined;
+      if (startsMarkdownHtmlBlock(body, false) || startsMarkdownBlock(body, nextBody, true) ||
+        SETEXT_UNDERLINE_RE.test(body)) return false;
+    }
+    return true;
   };
   if (inlineEnd !== -1) return respectsParagraph(inlineEnd) ? inlineEnd : -1;
   if (!definedLinkLabels.size) return -1;
@@ -1790,22 +1845,32 @@ function resolveElementStyle(
 const HTML_CLOSES_PARAGRAPH_RE =
   /^(?:address|article|aside|blockquote|dd|details|dialog|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hgroup|hr|li|main|menu|nav|ol|p|pre|search|section|table|ul)$/;
 
-// Optional sibling end tags close within their own HTML parsing scope.
-const HTML_IMPLIED_SIBLING_ENDS = new Map<RegExp, { siblings: RegExp; scope: RegExp }>([
-  [/^li$/, { siblings: /^li$/, scope: /^(?:ul|ol|menu|table|template)$/ }],
-  [/^(?:dd|dt)$/, { siblings: /^(?:dd|dt)$/, scope: /^(?:dl|table|template)$/ }],
-  [/^option$/, { siblings: /^option$/, scope: /^(?:optgroup|select|datalist|template)$/ }],
-  [/^optgroup$/, { siblings: /^(?:option|optgroup)$/, scope: /^(?:select|datalist|template)$/ }],
-  [/^(?:td|th)$/, { siblings: /^(?:td|th)$/, scope: /^(?:tr|table|template)$/ }],
-  [/^tr$/, { siblings: /^tr$/, scope: /^(?:thead|tbody|tfoot|table|template)$/ }],
-  [/^(?:thead|tbody|tfoot|colgroup)$/, {
-    siblings: /^(?:thead|tbody|tfoot|colgroup)$/, scope: /^(?:table|template)$/,
-  }],
-  [/^(?:rt|rp)$/, { siblings: /^(?:rb|rt|rp)$/, scope: /^(?:rtc|ruby|template)$/ }],
-  [/^(?:rb|rtc)$/, { siblings: /^(?:rb|rt|rp|rtc)$/, scope: /^(?:ruby|template)$/ }],
-]);
-const MARKDOWN_PARAGRAPH_TAG = "#markdown-p";
+const HTML_SCOPE_TAGS = "applet|caption|html|marquee|object|table|td|th|template|#markdown-td";
+const HTML_ELEMENT_SCOPE_RE = new RegExp("^(?:" + HTML_SCOPE_TAGS + ")$");
+const HTML_BUTTON_SCOPE_RE = new RegExp("^(?:button|" + HTML_SCOPE_TAGS + ")$");
+const HTML_FORMATTING_SCOPE_RE = /^(?:applet|caption|marquee|object|td|th|template|#markdown-td)$/;
+const HTML_NESTED_TABLE_SCOPE_RE = /^(?:caption|html|td|th|template|#markdown-td)$/;
+const HTML_HEADING_SCOPE_RE = /^(?:h[1-6]|#markdown-heading)$/;
 const HTML_FORMATTING_TAG_RE = /^(?:a|b|big|code|em|font|i|nobr|s|small|strike|strong|tt|u)$/;
+const MARKDOWN_PARAGRAPH_OR_CELL_RE = /^#markdown-(?:p|td)$/;
+
+// Search back to the matching parsing scope even if inline elements are still open.
+const HTML_IMPLIED_SIBLING_ENDS: ReadonlyArray<readonly [RegExp, RegExp, RegExp]> = [
+  [/^li$/, /^li$/, /^(?:ul|ol|menu|table|template)$/],
+  [/^(?:dd|dt)$/, /^(?:dd|dt)$/, /^(?:dl|table|template)$/],
+  [/^option$/, /^option$/, /^(?:optgroup|select|datalist|template)$/],
+  [/^optgroup$/, /^(?:option|optgroup)$/, /^(?:select|datalist|template)$/],
+  [/^(?:td|th)$/, /^(?:td|th|caption|colgroup)$/, /^(?:tr|table|template)$/],
+  [/^tr$/, /^(?:tr|td|th|caption|colgroup)$/, /^(?:thead|tbody|tfoot|table|template)$/],
+  [/^col$/, /^(?:caption|thead|tbody|tfoot|tr|td|th)$/, /^(?:colgroup|table|template)$/],
+  [/^(?:thead|tbody|tfoot|colgroup|caption)$/,
+    /^(?:caption|colgroup|thead|tbody|tfoot|tr|td|th)$/, /^(?:table|template)$/],
+  [/^(?:rt|rp)$/, /^(?:rb|rt|rp)$/, /^(?:rtc|ruby|template)$/],
+  [/^(?:rb|rtc)$/, /^(?:rb|rt|rp|rtc)$/, /^(?:ruby|template)$/],
+  [/^button$/, /^button$/, HTML_ELEMENT_SCOPE_RE],
+  [/^a$/, /^a$/, HTML_FORMATTING_SCOPE_RE],
+  [/^nobr$/, /^nobr$/, HTML_ELEMENT_SCOPE_RE],
+];
 
 function createHtmlCustomPropertiesLookup(
   html: string,
@@ -1823,35 +1888,57 @@ function createHtmlCustomPropertiesLookup(
   const scopes = [inheritedProps];
   let lineIndex = 0;
   let containerDepth = 0;
+  let generatedHeading = false;
   const getProps = () => stack.at(-1)?.customProps ?? inheritedProps;
   const closeTag = (tag: string) => {
     const index = lastOpenHtmlTagIndex(stack, tag);
     if (index >= 0) stack.length = index;
   };
-  const closeGeneratedParagraph = () => {
-    const index = lastOpenHtmlTagIndex(stack, MARKDOWN_PARAGRAPH_TAG);
-    if (index < 0) return;
-    const closed = stack.splice(index);
-    // HTML reconstructs active formatting when it consumes the block separator.
+  const findInScope = (tags: RegExp, boundary?: RegExp, outermost = false) => {
+    let found = -1;
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const tag = stack[index]!.tag;
+      if (boundary?.test(tag)) break;
+      if (tags.test(tag)) {
+        found = index;
+        if (!outermost) break;
+      }
+    }
+    return found;
+  };
+  const closeRawParagraph = () => {
+    const index = findInScope(/^p$/, HTML_BUTTON_SCOPE_RE);
+    if (index >= 0) stack.length = index;
+  };
+  const closeCurrentHeading = () => {
+    if (HTML_HEADING_SCOPE_RE.test(stack.at(-1)?.tag ?? "")) stack.pop();
+  };
+  const closeTableForNewTable = () => {
+    const index = findInScope(/^table$/, HTML_NESTED_TABLE_SCOPE_RE);
+    if (index >= 0) stack.length = index;
+  };
+  const reconstructFormatting = (closed: readonly OpenStyledTag[]) => {
     for (const entry of closed) {
       if (entry.formattingStyle === undefined) continue;
       const { customProps } = resolveElementStyle(entry.formattingStyle, undefined, getProps());
       stack.push({ ...entry, customProps });
     }
   };
+  const closeGeneratedInline = (index = findInScope(MARKDOWN_PARAGRAPH_OR_CELL_RE)) => {
+    if (index < 0) return;
+    const closed = stack.splice(index);
+    // Separating whitespace reconstructs active formatting after a heading or paragraph.
+    if (closed[0]!.tag !== "#markdown-td") reconstructFormatting(closed.slice(1));
+  };
   const closeOptionalSibling = (tag: string) => {
-    for (const [open, { siblings, scope }] of HTML_IMPLIED_SIBLING_ENDS) {
-      if (!open.test(tag)) continue;
-      let previous = -1;
-      for (let index = stack.length - 1; index >= 0; index--) {
-        const candidate = stack[index]!.tag;
-        if (scope.test(candidate)) break;
-        if (siblings.test(candidate)) previous = index;
-        else if (previous >= 0) break;
-      }
-      if (previous >= 0) stack.length = previous;
-      return;
-    }
+    const rule = HTML_IMPLIED_SIBLING_ENDS.find(([open]) => open.test(tag));
+    if (!rule) return;
+    const [, siblings, scope] = rule;
+    const index = findInScope(siblings, scope, true);
+    if (index < 0) return;
+    const closed = stack.splice(index);
+    if (/^(?:li|dt|dd)$/.test(tag)) return closed.slice(1);
+    if (/^(?:a|nobr|button)$/.test(tag)) reconstructFormatting(closed.slice(1));
   };
   const recordScope = (offset: number) => {
     const active = getProps();
@@ -1862,15 +1949,27 @@ function createHtmlCustomPropertiesLookup(
   };
   const advanceLines = (offset: number) => {
     for (let line = blockLines[lineIndex]; line && line.offset <= offset; line = blockLines[++lineIndex]) {
+      if (line.endsInline) {
+        // An inline HTML heading can replace the generated heading on the open-element stack.
+        if (generatedHeading) closeGeneratedInline(findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE));
+        else closeGeneratedInline();
+        generatedHeading = false;
+      }
       // Generated Markdown container closing tags also close their raw HTML descendants.
       while (stack.length && stack.at(-1)!.containerDepth > line.continuedDepth) stack.pop();
       containerDepth = line.containerDepth;
-      if (line.endsParagraph) closeGeneratedParagraph();
-      if (line.closesRawParagraph) closeTag("p");
-      if (line.hasInlineContent && lastOpenHtmlTagIndex(stack, MARKDOWN_PARAGRAPH_TAG) < 0) {
-        closeTag("p");
+      if (line.startsTable) closeTableForNewTable();
+      if (line.closesRawParagraph || line.startsTable) closeRawParagraph();
+      if (line.inlineScope === "#markdown-heading") {
+        closeRawParagraph();
+        closeCurrentHeading();
+        generatedHeading = true;
+      }
+      if (line.inlineScope && (line.inlineScope === "#markdown-heading" ||
+        (!generatedHeading && findInScope(MARKDOWN_PARAGRAPH_OR_CELL_RE) < 0))) {
+        if (line.inlineScope === "#markdown-p") closeRawParagraph();
         stack.push({
-          tag: MARKDOWN_PARAGRAPH_TAG,
+          tag: line.inlineScope,
           containerDepth,
           customProps: getProps(),
           childrenNamespace: stack.at(-1)?.childrenNamespace,
@@ -1890,14 +1989,15 @@ function createHtmlCustomPropertiesLookup(
     if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
+    let resumeFormatting: readonly OpenStyledTag[] | undefined;
     if (!namespace && tag && prefix === "") {
+      if (tag === "table") closeTableForNewTable();
       if (HTML_CLOSES_PARAGRAPH_RE.test(tag)) {
-        closeGeneratedParagraph();
-        closeTag("p");
+        closeGeneratedInline(findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE));
+        closeRawParagraph();
       }
-      closeOptionalSibling(tag);
-    } else if (!namespace && tag === "p" && prefix === "/") {
-      closeGeneratedParagraph();
+      if (HTML_HEADING_SCOPE_RE.test(tag)) closeCurrentHeading();
+      resumeFormatting = closeOptionalSibling(tag);
     }
     const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
     if (raw || (!namespace && tag === "template" && prefix === "")) {
@@ -1912,9 +2012,18 @@ function createHtmlCustomPropertiesLookup(
           formattingStyle: !current && HTML_FORMATTING_TAG_RE.test(tag) ? style ?? "" : undefined,
           childrenNamespace: htmlChildNamespace(current, tag, htmlEncodedAnnotation(current, tag, match[0])),
         });
+        if (resumeFormatting) reconstructFormatting(resumeFormatting);
       }
     } else if (tag && prefix === "/") {
-      closeTag(tag);
+      if (!namespace && tag === "p") {
+        closeGeneratedInline(findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE));
+        closeRawParagraph();
+      } else if (!namespace && HTML_HEADING_SCOPE_RE.test(tag)) {
+        const index = findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE);
+        if (index >= 0) stack.length = index;
+      } else {
+        closeTag(tag);
+      }
     }
     // Multi-line HTML tokens and raw text consume the intervening source lines.
     while (blockLines[lineIndex] && blockLines[lineIndex]!.offset < tokens.lastIndex) lineIndex++;
@@ -2732,11 +2841,11 @@ function startsMarkdownBlock(raw: string, next?: string, interruptsParagraph = f
   if (isMarkdownBlankLine(raw)) return true;
   // Indented code cannot interrupt a paragraph, even if its content resembles a block opener.
   if (interruptsParagraph && INDENTED_CODE_RE.test(raw)) return false;
-  if (/^[ \t]{0,3}(\x60{3,}|~{3,})/.test(raw)) return true;
-  if (/^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(raw)) return true;
-  if (DETAILS_OPEN_RE.test(raw.trimStart())) return true;
-  if (/^[ \t]*>/.test(raw)) return true;
-  if (/^[ \t]{0,3}#{1,6}(?:[ \t]+|$)/.test(raw)) return true;
+  if (matchFenceOpening(raw)) return true;
+  if (/^ {0,3}:{3,}[ \t]*[a-zA-Z]/.test(raw)) return true;
+  if (DETAILS_OPEN_RE.test(raw.replace(/^ {0,3}/, ""))) return true;
+  if (/^ {0,3}>/.test(raw)) return true;
+  if (ATX_HEADING_START_RE.test(raw)) return true;
   if (THEMATIC_BREAK_RE.test(raw)) return true;
   const list = LIST_ITEM_RE.exec(raw);
   if (list && (!interruptsParagraph ||
@@ -2757,16 +2866,13 @@ interface QuoteParagraph {
 }
 
 function updateQuotedParagraph(state: QuoteParagraph, rawBody: string) {
-  const body = rawBody.replace(/^[ \t]+/, "");
-  const fence = /^(\x60{3,}|~{3,}|\$\$(?=[ \t]*$))(.*)$/.exec(body);
+  const mathFence = /^ {0,3}\$\$[ \t]*$/.test(rawBody);
   if (state.fence) {
-    if (fence && fence[1]![0] === state.fence[0] && fence[1]!.length >= state.fence.length && isMarkdownBlankLine(fence[2]!)) {
-      state.fence = undefined;
-    }
+    if (state.fence === "$$" ? mathFence : closesFence(rawBody, state.fence)) state.fence = undefined;
     return;
   }
-  state.fence = fence?.[1];
-  state.open = !startsSpecialLine(body);
+  state.fence = matchFenceOpening(rawBody)?.[1] ?? (mathFence ? "$$" : undefined);
+  state.open = !startsSpecialLine(rawBody);
 }
 
 function continuesLazyQuote(state: QuoteParagraph, raw: string, next?: string): boolean {
