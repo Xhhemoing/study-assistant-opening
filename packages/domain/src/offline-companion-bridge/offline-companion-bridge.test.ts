@@ -2959,6 +2959,29 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Select a given aid for the elderly doubles every year."].map(text => ({
         answerKey: "A", text, ok: false,
       })),
+      ...["Choose a given photo of the orange halves on the plate.",
+        "Choose a given photo of the orange halves in the bowl.",
+        "Choose a given photo of the orange halves.",
+        "Choose a given photo of the orange doubles court.",
+        "Choose a mythos for the story.",
+        "Choose a logos.",
+        "Choose a basis for the vector space.",
+        "Choose a physics problem."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
+      ...["Select a given distance from the diagonal approaches zero.",
+        "Select a given distance from the diagonal reaches the origin.",
+        "Select a given aid for the elderly falls short.",
+        "Select a given price of the orange doubles zero.",
+        "Select a given distance from the diagonal doubles.",
+        "Select a given price of the orange halves overnight.",
+        "Select a given distance from the diagonal halves rapidly.",
+        "Select a given price of the orange halves each week."].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
+      ...["taxis", "skis", "menus", "bureaus", "topics", "characteristics", "logos"].map(noun => ({
+        answerKey: "A", text: `Select a given demand for two ${noun} rises.`, ok: false,
+      })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),
