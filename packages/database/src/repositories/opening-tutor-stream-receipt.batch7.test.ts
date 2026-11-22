@@ -650,7 +650,7 @@ describe("stream receipt release waits for current job authorization and assista
   });
 });
 
-it("keeps ordinary proposal and confirmation SQL free of recursive subplans", async () => {
+it("uses one dependency closure per proposal and confirmation statement", async () => {
   const statements: string[] = [];
   const memory = { id: receipt, workspace_id: workspace, course_id: null, kind: "candidate", text: "Ordinary evidence",
     source_turn_ids: [user], version: 0, status: "active", created_at: time, updated_at: time };
@@ -660,7 +660,8 @@ it("keeps ordinary proposal and confirmation SQL free of recursive subplans", as
     return { toString: () => query, then: (resolve: (rows: unknown[]) => unknown) => {
       statements.push(query);
       if (query.startsWith("SELECT id FROM workspaces")) return resolve([{ id: workspace }]);
-      if (query.startsWith("SELECT t.id, t.role")) return resolve([{ id: user, context_source_refs: [] }]);
+      if (query.startsWith("SELECT t.id FROM opening_turns")) return resolve([{ id: user }]);
+      if (query.startsWith("SELECT m.id,")) return resolve([{ id: receipt, ancestor_temporary_expires_at: null }]);
       if (query.startsWith("INSERT INTO opening_memories") || query.startsWith("SELECT * FROM opening_memories")) return resolve([memory]);
       if (query.startsWith("UPDATE opening_memories SET kind")) return resolve([{ ...memory, kind: "confirmed", version: 1 }]);
       return resolve([]);
@@ -670,6 +671,9 @@ it("keeps ordinary proposal and confirmation SQL free of recursive subplans", as
   const repo = createOpeningMemoryRepository(sql);
   const proposed = await repo.proposeMemory(scope, { text: memory.text, sourceTurnIds: [user], expiresAt: null });
   await expect(repo.confirm(scope, proposed.id, proposed.version, "confirm-ordinary")).resolves.toMatchObject({ kind: "confirmed" });
-  expect(statements.filter(query => query.startsWith("SELECT t.id, t.role"))).toHaveLength(3);
-  expect(statements.join("\n")).not.toMatch(/\bWITH\s+RECURSIVE\b/i);
+  const admission = statements.filter(query => query.startsWith("SELECT t.id FROM opening_turns") || query.startsWith("SELECT m.id,"));
+  expect(admission).toHaveLength(3);
+  for (const query of admission) {
+    expect(query.match(/\bWITH\s+RECURSIVE\b/gi)).toHaveLength(1);
+  }
 });

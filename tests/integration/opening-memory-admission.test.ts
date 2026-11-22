@@ -119,12 +119,11 @@ describe("opening memory owner and source admission", () => {
       .rejects.toMatchObject({ code: "VALIDATION" });
     await expect(memories.replaceMemory(scope, { ...replace, id: scoped.id, expectedVersion: scoped.version + 1 }))
       .resolves.toMatchObject({ courseId: courseA.id });
-    // Even a legacy source reference without exact dependency IDs cannot make scoped lineage global.
+    // A course-anchored legacy source reference has no attributable memory authority.
     await saveRefs([memoryRef]);
-    for (const courseId of [null, courseB.id]) {
+    for (const courseId of [null, courseA.id, courseB.id]) {
       await expect(memories.proposeMemory(scope, { ...proposal, courseId })).rejects.toMatchObject({ code: "VALIDATION" });
     }
-    await expect(memories.proposeMemory(scope, { ...proposal, courseId: courseA.id })).resolves.toMatchObject({ courseId: courseA.id });
     await expect(memories.replaceMemory(scope, { ...replace, id: global.id, expectedVersion: confirmedGlobal.version, clientKey: randomUUID() }))
       .rejects.toMatchObject({ code: "VALIDATION" });
   });

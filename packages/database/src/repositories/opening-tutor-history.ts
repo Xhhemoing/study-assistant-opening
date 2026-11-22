@@ -4,8 +4,9 @@ import type { OpeningScope } from "./opening-sources";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 import {
-  contextSourceRefsIncluded, lineageUuid, mergeContextSourceRefs,
-  parseContextSourceRefs, readTurnMemoryLineages, turnContextSourceRefs, type ContextSourceRef, type FragmentFactory,
+  contextSourceRefsIncluded, lineageUuid, memoryDependencySummary, mergeContextSourceRefs,
+  parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnMemoryOnlySourcesBacked,
+  turnTransitiveDepsCte, type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 type HistoryTurn = { role: "user" | "assistant"; text: string };
 export type TutorHistoryPurpose = "model" | "record_referents";
@@ -28,10 +29,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch,
         ${turnContextSourceRefs(sql, "u")} AS user_source_refs,
         ${turnContextSourceRefs(sql, "a")} AS assistant_source_refs,
-        a.context_source_refs AS memory_refs, ${priorCourse()} AS prior_course_id,
-        ${currentCourse()} AS current_course_id,
-        COALESCE(a.context_source_refs @? '$[*].memoryDependencyIds[*]'
-          OR a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb, false) AS memory_bearing,
+        chain.temporary_expires_at AS memory_temporary_expires_at, chain.memory_ids AS memory_dependency_ids,
+        (NOT chain.has_course_memory OR ${priorCourse()} IS NOT DISTINCT FROM ${currentCourse()}) AS in_target_course,
         EXISTS (
           SELECT 1 FROM unnest(u.source_ids || a.source_ids) AS ref(id)
           WHERE NOT EXISTS (SELECT 1 FROM opening_sources s WHERE s.id=ref.id
@@ -49,13 +48,17 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
           WHERE citation->>'sourceId' = ANY(${excludedSourceIds}::text[])
         ) OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => turnContextSourceRefs(sql, "u"))})
           OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => turnContextSourceRefs(sql, "a"))})
-          AS invalid
+          OR NOT chain.all_active
+          OR NOT (${turnMemoryOnlySourcesBacked(sql, "a", scope.workspaceId, scope.ownerUserId, priorCourse)}) AS invalid
       FROM opening_turns current
       JOIN opening_conversations c ON c.id=current.conversation_id
       JOIN workspaces w ON w.id=c.workspace_id
       JOIN opening_tutor_jobs j ON j.conversation_id=c.id AND j.workspace_id=c.workspace_id
       JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=c.workspace_id AND u.conversation_id=c.id AND u.role='user'
       JOIN opening_turns a ON a.id=j.assistant_turn_id AND a.workspace_id=c.workspace_id AND a.conversation_id=c.id AND a.role='assistant'
+      CROSS JOIN LATERAL (
+        ${memoryDependencySummary(sql, turnTransitiveDepsCte(sql, "a"), () => sql`a.workspace_id`, priorCourse)}
+      ) chain
       WHERE current.id=${currentTurnId} AND current.role='user'
         AND current.workspace_id=${scope.workspaceId} AND c.workspace_id=${scope.workspaceId}
         AND c.owner_user_id=${scope.ownerUserId}
@@ -64,23 +67,13 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         -- Never promote their text into a later ordinary model conversation.
         AND (${recordReferents} OR (NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL))
     )
-    , ranked AS (
-      SELECT prior.*, count(*) FILTER (WHERE NOT memory_bearing)
-        OVER (ORDER BY created_at DESC, id DESC) AS ordinary_rank
-      FROM prior
-    )
     SELECT left(question,12001) AS question,
       CASE WHEN ${recordReferents} THEN '' ELSE left(answer,12001) END AS answer,
-      user_source_refs, assistant_source_refs, memory_refs, prior_course_id, current_course_id,
+      user_source_refs, assistant_source_refs, memory_temporary_expires_at, memory_dependency_ids,
       query_system, system_query, current_privacy_epoch
-    FROM ranked WHERE NOT EXISTS (SELECT 1 FROM prior WHERE invalid)
-      AND (memory_bearing OR ordinary_rank <= 20)
-    ORDER BY created_at DESC, id DESC
+    FROM prior WHERE NOT EXISTS (SELECT 1 FROM prior WHERE invalid) AND in_target_course
+    ORDER BY created_at DESC, id DESC LIMIT 20
   `;
-  const lineages = await readTurnMemoryLineages(sql, scope, rows.map(row => ({
-    refs: row.memory_refs, courseId: (row.prior_course_id as string | null) ?? null,
-  })));
-  if (lineages.some(lineage => lineage === null)) return { history: [], sourceRefs: [] };
   const history: HistoryTurn[] = [];
   let characters = 0;
   const sourceRefs: ContextSourceRef[] = [];
@@ -88,10 +81,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   let earliestTempExpiresAtMs: number | undefined;
   let earliestTempExpiresAtIso: string | undefined;
   const nowMs = Date.now();
-  for (const [index, row] of rows.entries()) {
-    const lineage = lineages[index]!;
-    if (lineage.courseId !== null && lineage.courseId !== row.current_course_id) continue;
-    if (history.length >= (recordReferents ? 20 : 40)) break;
+  for (const row of rows) {
     if (recordReferents && (row.query_system || row.system_query != null)) {
       const receipt = systemQueryReceiptSchema.safeParse(row.system_query);
       const lineage = parseContextSourceRefs(row.assistant_source_refs) ?? [];
@@ -107,8 +97,10 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     const question = row.question as string;
     const answer = recordReferents ? "" : row.answer as string;
     if (characters + question.length + answer.length > 12_000) break;
-    if (lineage.temporaryExpiresAt) {
-      const parsedDate = new Date(lineage.temporaryExpiresAt);
+    const directMemoryIds = row.assistant_source_refs === undefined ? [] : parseContextMemoryDependencyIds(row.assistant_source_refs);
+    if (directMemoryIds === null) return { history: [], sourceRefs: [] };
+    if (row.memory_temporary_expires_at != null) {
+      const parsedDate = new Date(row.memory_temporary_expires_at as string | Date);
       const parsedMs = parsedDate.getTime();
       if (Number.isNaN(parsedMs) || parsedMs <= nowMs) return { history: [], sourceRefs: [] };
       if (earliestTempExpiresAtMs === undefined || parsedMs < earliestTempExpiresAtMs) {
@@ -120,7 +112,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     if (recordReferents) history.unshift({ role: "user", text: question });
     else history.unshift({ role: "user", text: question }, { role: "assistant", text: answer });
     sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []), ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
-    for (const memoryId of lineage.memoryIds) memoryIdSet.add(memoryId);
+    const ancestorMemoryIds = parseContextMemoryDependencyIds([{ memoryDependencyIds: row.memory_dependency_ids }]) ?? [];
+    for (const memoryId of [...directMemoryIds, ...ancestorMemoryIds]) memoryIdSet.add(memoryId);
     characters += question.length + answer.length;
   }
   const memoryIds = [...memoryIdSet].sort();

@@ -2,11 +2,12 @@ import type { Sql, TransactionSql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import { isMemoryEligible } from "@aistudy/domain";
 import {
-  contextSourceRefsIncluded, memoryCourseAllows,
-  mergeContextSourceRefs, parseContextSourceRefs, readTurnMemoryLineages, turnContextSourceRefs, turnLineageCourse, type ContextSourceRef,
+  contextSourceRefsIncluded, memoryCourseAllows, memoryDependencySummary, memoryTransitiveDepsCte,
+  mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs,
+  type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockOwnedWorkspace } from "./opening-memory-admission";
+import { lockOwnedWorkspace, memorySourceTurnLineageActive } from "./opening-memory-admission";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
 import { mapMemoryRow } from "./opening-memory-types";
 
@@ -38,6 +39,8 @@ async function readMemoryContext(
   await lockOwnedWorkspace(db, scope);
   const excluded = excludedSourceIds
     ?? await createOpeningPrivacyRepository(db).listExcludedSourceIds(scope);
+  const workspace: FragmentFactory = () => db`m.workspace_id`;
+  const course: FragmentFactory = () => db`m.course_id`;
   const rows = await db`
     SELECT m.*, (
       SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM opening_turns t
@@ -45,21 +48,17 @@ async function readMemoryContext(
       WHERE t.id::text IN (SELECT lower(elem) FROM jsonb_array_elements_text(m.source_turn_ids) AS elem)
         AND t.workspace_id = ${scope.workspaceId}
     ) AS material_source_refs,
-    (
-      SELECT COALESCE(jsonb_agg(jsonb_build_object(
-        'refs', t.context_source_refs, 'courseId', ${turnLineageCourse(db, "t")}
-      )), '[]'::jsonb)
-      FROM opening_turns t
-      WHERE t.workspace_id = m.workspace_id
-        AND t.id::text IN (SELECT lower(elem) FROM jsonb_array_elements_text(m.source_turn_ids) elem)
-        AND (t.context_source_refs @? '$[*].memoryDependencyIds[*]'
-          OR t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb)
-    ) AS lineage_turns
+    chain.temporary_expires_at AS ancestor_temporary_expires_at,
+    chain.memory_ids AS ancestor_memory_ids
     FROM opening_memories m
+    CROSS JOIN LATERAL (
+      ${memoryDependencySummary(db, memoryTransitiveDepsCte(db), workspace, course, () => db`m.id`)}
+    ) chain
     WHERE m.workspace_id = ${scope.workspaceId}
       AND m.status = 'active'
-      AND ${memoryCourseAllows(db, () => db`m.course_id`, () => db`${activeCourseId}::uuid`, () => db`m.workspace_id`)}
+      AND ${memoryCourseAllows(db, course, () => db`${activeCourseId}::uuid`, workspace)}
       AND jsonb_array_length(m.source_turn_ids) > 0
+      AND chain.all_active
       AND NOT EXISTS (
         SELECT 1 FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
         WHERE NOT EXISTS (
@@ -75,6 +74,7 @@ async function readMemoryContext(
           WHERE t.id::text = lower(ref.turn_id) AND t.workspace_id = ${scope.workspaceId}
             AND (
               NOT (${contextSourceRefsIncluded(db, scope.workspaceId, () => turnContextSourceRefs(db, "t"))}) OR
+              NOT (${memorySourceTurnLineageActive(db, scope)}) OR
               EXISTS (
                 SELECT 1 FROM unnest(t.source_ids) AS sid(id)
                 WHERE NOT EXISTS (
@@ -101,27 +101,16 @@ async function readMemoryContext(
         )
       )
     ORDER BY m.created_at ASC`;
-  const requests = rows.flatMap(row => ((row.lineage_turns ?? []) as Array<{ refs: unknown; courseId: string | null }>).map(
-    turn => ({ ...turn, excludeMemoryId: String(row.id) }),
-  ));
-  const lineages = await readTurnMemoryLineages(db, scope, requests);
-  let offset = 0;
   return rows.flatMap(row => {
-    const count = Array.isArray(row.lineage_turns) ? row.lineage_turns.length : 0;
-    const ancestors = lineages.slice(offset, offset + count);
-    offset += count;
-    const memory = mapMemoryRow(row as Record<string, unknown>);
-    const ancestorMemoryIds = new Set<string>();
     let ancestorTemporaryExpiresAt: string | undefined;
-    for (const ancestor of ancestors) {
-      if (!ancestor || (ancestor.courseId !== null && ancestor.courseId !== memory.courseId)) return [];
-      for (const id of ancestor.memoryIds) ancestorMemoryIds.add(id);
-      if (ancestor.temporaryExpiresAt && (!ancestorTemporaryExpiresAt || ancestor.temporaryExpiresAt < ancestorTemporaryExpiresAt)) {
-        ancestorTemporaryExpiresAt = ancestor.temporaryExpiresAt;
-      }
+    if (row.ancestor_temporary_expires_at != null) {
+      const expiry = new Date(row.ancestor_temporary_expires_at as Date | string);
+      if (Number.isNaN(expiry.getTime())) return [];
+      ancestorTemporaryExpiresAt = expiry.toISOString();
     }
-    return [{ memory, sourceRefs: parseContextSourceRefs(row.material_source_refs) ?? [],
-      ancestorTemporaryExpiresAt, ancestorMemoryIds: [...ancestorMemoryIds].sort() }];
+    const ancestorMemoryIds = parseContextMemoryDependencyIds([{ memoryDependencyIds: row.ancestor_memory_ids }]) ?? [];
+    return [{ memory: mapMemoryRow(row as Record<string, unknown>),
+      sourceRefs: parseContextSourceRefs(row.material_source_refs) ?? [], ancestorTemporaryExpiresAt, ancestorMemoryIds }];
   });
 }
 

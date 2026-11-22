@@ -534,7 +534,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         SELECT m.id, m.course_id FROM opening_memories m
         WHERE m.workspace_id=${workspaceId} AND m.status='active'
           AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at > clock_timestamp()))
-          AND (NOT r.attributed OR m.id IN (SELECT d.id FROM direct_deps d WHERE d.origin=r.origin))
+          AND (r.attributed AND m.id IN (SELECT d.id FROM direct_deps d WHERE d.origin=r.origin)
+            OR NOT r.attributed AND r.course_id IS NULL AND m.course_id IS NULL)
           AND (m.course_id IS NULL OR m.course_id=r.course_id)
           AND ${memoryBacksSource(db, () => db`m.source_turn_ids`, () => db`r.id`, workspaceId,
             input.scope.ownerUserId, () => db`r.attributed`)}

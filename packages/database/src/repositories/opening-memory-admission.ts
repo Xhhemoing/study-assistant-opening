@@ -1,6 +1,9 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
-import { hasMemoryBearingRef, readTurnMemoryLineages, turnLineageCourse, turnPinnedSourcesIncluded } from "./opening-context-provenance";
+import {
+  globalMemoryDoesNotDependOnCourseMemory, lineageUuid, memoryCourseAllows, memoryDependencyRows,
+  turnDependencyWalk, turnLineageCourse, turnMemoryOnlySourcesBacked, turnPinnedSourcesIncluded, type FragmentFactory,
+} from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -98,34 +101,47 @@ export async function assertSourceTurnsOwned(
   sourceTurnIds: readonly string[],
   excludeMemoryId: string | null = null,
   targetCourseId: string | null = null,
-): Promise<string | undefined> {
-  if (!sourceTurnIds.length) return undefined;
+): Promise<void> {
+  if (!sourceTurnIds.length) return;
   const unique = [...new Set(sourceTurnIds.map(id => id.toLowerCase()))];
-  const rows = await db<{ id: string; context_source_refs: unknown; effective_course_id: string | null }[]>`
-    SELECT t.id, t.role, t.context_source_refs, t.context_anchor, c.course_id,
-      CASE WHEN t.context_source_refs @? '$[*].memoryDependencyIds[*]'
-        OR t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-        THEN ${turnLineageCourse(db, "t")} END AS effective_course_id
-    FROM opening_turns t
+  const ownCourseId = () => turnLineageCourse(db, "t");
+  const workspace: FragmentFactory = () => db`t.workspace_id`;
+  const dependencyCourse: FragmentFactory = () => db`dep_m.course_id`;
+  const rows = await db<{ id: string }[]>`
+    SELECT t.id FROM opening_turns t
     JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id
     WHERE t.workspace_id = ${scope.workspaceId} AND c.owner_user_id = ${scope.ownerUserId}
       AND t.id = ANY(${unique}::uuid[])
-      AND ${turnSourceMaterialsActive(db, scope.workspaceId)}`;
-  const denied = () => new OpeningMemoryError("VALIDATION", "source turns must belong to an owned conversation");
-  if (rows.length !== unique.length) throw denied();
-  const lineageRows = rows.filter(row => hasMemoryBearingRef(row.context_source_refs));
-  if (!lineageRows.length) return undefined;
-  const lineages = await readTurnMemoryLineages(db, scope, lineageRows.map(row => ({
-    refs: row.context_source_refs, courseId: row.effective_course_id, excludeMemoryId,
-  })));
-  let expiry: string | undefined;
-  for (const lineage of lineages) {
-    if (!lineage || (lineage.courseId !== null && lineage.courseId !== targetCourseId?.toLowerCase())) throw denied();
-    if (lineage.temporaryExpiresAt && (!expiry || lineage.temporaryExpiresAt < expiry)) expiry = lineage.temporaryExpiresAt;
+      AND ${turnSourceMaterialsActive(db, scope.workspaceId)}
+      AND NOT EXISTS (
+        WITH RECURSIVE mem_deps(dep_id) AS (${turnDependencyWalk(db, "t")})
+        SELECT 1 FROM mem_deps d
+        WHERE d.dep_id = ${excludeMemoryId}::uuid::text OR NOT EXISTS (
+          SELECT 1 FROM opening_memories dep_m
+          WHERE dep_m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND dep_m.workspace_id = t.workspace_id
+            AND dep_m.status = 'active'
+            AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp()))
+            AND ${memoryCourseAllows(db, dependencyCourse, () => db`${targetCourseId}::uuid`, workspace)}
+            AND ${memoryCourseAllows(db, dependencyCourse, ownCourseId, workspace)}
+            AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`dep_m`)}
+        )
+      )
+      AND ${turnMemoryOnlySourcesBacked(db, "t", scope.workspaceId, scope.ownerUserId, ownCourseId, () => db`${excludeMemoryId}::uuid`)}`;
+  if (rows.length !== unique.length) {
+    throw new OpeningMemoryError("VALIDATION", "source turns must belong to an owned conversation");
   }
-  return expiry;
 }
 
+/** A memory-level closure checks liveness and target course. Keep this turn-level check to direct edges. */
+export function memorySourceTurnLineageActive(db: Db, scope: OpeningScope): ReturnType<Db> {
+  const ownCourseId = () => turnLineageCourse(db, "t");
+  return db`NOT EXISTS (
+    SELECT 1 FROM ${memoryDependencyRows(db, () => db`t.context_source_refs`)} edge
+    JOIN opening_memories direct_memory ON direct_memory.id = ${lineageUuid(db, () => db`edge.id`)}
+      AND direct_memory.workspace_id = t.workspace_id AND direct_memory.course_id IS NOT NULL
+    WHERE direct_memory.course_id IS DISTINCT FROM ${ownCourseId()}
+  ) AND ${turnMemoryOnlySourcesBacked(db, "t", scope.workspaceId, scope.ownerUserId, ownCourseId, () => db`m.id`)}`;
+}
 
 /** courses has workspace_id only; ownership is the already-locked workspace owner. */
 export async function assertCourseInWorkspace(
