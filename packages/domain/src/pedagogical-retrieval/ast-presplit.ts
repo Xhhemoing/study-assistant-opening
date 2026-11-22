@@ -526,7 +526,9 @@ function endOfBogusHtmlComment(text: string, from: number): number {
 }
 
 type HtmlNamespace = "svg" | "math" | undefined;
-type OpenHtmlTag = { tag: string; childrenNamespace: HtmlNamespace };
+type OpenHtmlTag = { tag: string; namespace?: HtmlNamespace; htmlAnnotation?: boolean };
+const MATH_TEXT_INTEGRATION_POINT_RE = /^(?:mi|mo|mn|ms|mtext)$/;
+const SVG_HTML_INTEGRATION_POINT_RE = /^(?:desc|foreignobject|title)$/;
 
 function exitsHtmlForeignContent(tag: string, prefix: string | undefined, markup: string): boolean {
   if (prefix === "/") return tag === "br" || tag === "p";
@@ -539,24 +541,35 @@ function htmlEncodedAnnotation(namespace: HtmlNamespace, tag: string, markup: st
     /^(?:text\/html|application\/xhtml\+xml)$/i.test(decodeHtmlLabelText(htmlAttributeValue(markup, tag, "encoding") ?? ""));
 }
 
-function htmlChildNamespace(namespace: HtmlNamespace, tag: string, htmlAnnotation: boolean): HtmlNamespace {
-  const htmlChildren = htmlAnnotation || (namespace === "svg" && /^(?:desc|foreignobject|title)$/.test(tag)) ||
-    (namespace === "math" && /^(?:mi|mo|mn|ms|mtext)$/.test(tag));
-  return htmlChildren ? undefined : namespace;
+function htmlChildNamespace(parent: OpenHtmlTag | undefined, startTag?: string): HtmlNamespace {
+  if (!parent?.namespace) return undefined;
+  if (parent.namespace === "math") {
+    if (parent.tag === "annotation-xml" && (parent.htmlAnnotation || startTag === "svg")) return undefined;
+    if (MATH_TEXT_INTEGRATION_POINT_RE.test(parent.tag) && startTag !== "mglyph" && startTag !== "malignmark") {
+      return undefined;
+    }
+  }
+  if (parent.namespace === "svg" && SVG_HTML_INTEGRATION_POINT_RE.test(parent.tag)) return undefined;
+  return parent.namespace;
+}
+
+function htmlStartTagNamespace(parentNamespace: HtmlNamespace, tag: string): HtmlNamespace {
+  return parentNamespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
 }
 
 function markupNamespace(openTags: OpenHtmlTag[], match: RegExpExecArray): HtmlNamespace {
   const tag = match.groups?.tag?.toLowerCase();
   const prefix = match.groups?.prefix;
-  if (tag && openTags.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
-    while (openTags.at(-1)?.childrenNamespace) openTags.pop();
+  const startTag = prefix === "" ? tag : undefined;
+  if (tag && htmlChildNamespace(openTags.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
+    while (htmlChildNamespace(openTags.at(-1))) openTags.pop();
   }
-  const namespace = openTags.at(-1)?.childrenNamespace;
+  const namespace = htmlChildNamespace(openTags.at(-1), startTag);
   if (!tag) return namespace;
-  if (prefix === "" && !HTML_VOID_TAGS.has(tag)) {
-    const current = namespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
-    if ((openTags.length || current) && !(current && hasSelfClosingFlag(match[0], tag))) {
-      openTags.push({ tag, childrenNamespace: htmlChildNamespace(current, tag, htmlEncodedAnnotation(current, tag, match[0])) });
+  if (prefix === "") {
+    const current = htmlStartTagNamespace(namespace, tag);
+    if (current ? !hasSelfClosingFlag(match[0], tag) : openTags.length > 0 && !HTML_VOID_TAGS.has(tag)) {
+      openTags.push({ tag, namespace: current, htmlAnnotation: htmlEncodedAnnotation(current, tag, match[0]) });
     }
   } else if (prefix === "/") {
     const index = lastOpenHtmlTagIndex(openTags, tag);
@@ -574,7 +587,7 @@ function htmlElementEnd(
 ): number | undefined {
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   tokens.lastIndex = from;
-  const openTags: OpenHtmlTag[] = namespace ? [{ tag, childrenNamespace: htmlChildNamespace(namespace, tag, htmlAnnotation) }] : [];
+  const openTags: OpenHtmlTag[] = namespace ? [{ tag, namespace, htmlAnnotation }] : [];
   let depth = 1;
   let templateDepth = 0;
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
@@ -1867,12 +1880,13 @@ const MARKDOWN_PARAGRAPH_OR_CELL_RE = /^#markdown-(?:p|td)$/;
 const HTML_SPECIAL_TAG_RE =
   /^(?:address|applet|area|article|aside|base|basefont|bgsound|blockquote|body|br|button|caption|center|col|colgroup|dd|details|dir|div|dl|dt|embed|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hgroup|hr|html|iframe|img|input|li|link|listing|main|marquee|menu|meta|nav|noembed|noframes|noscript|object|ol|p|param|plaintext|pre|script|search|section|select|source|style|summary|table|tbody|td|template|textarea|tfoot|th|thead|title|tr|track|ul|wbr|xmp|#markdown-heading|#markdown-p|#markdown-td)$/;
 const HTML_LIST_ITEM_SCOPE_RE = new RegExp("^(?:ol|ul|" + HTML_SCOPE_TAGS + ")$");
+const HTML_IMPLIED_END_TAG_RE = /^(?:dd|dt|li|optgroup|option|p|rb|rp|rt|rtc|#markdown-p)$/;
 const HTML_NON_RECONSTRUCTING_START_RE =
   /^(?:base|basefont|bgsound|body|center|dir|form|frame|frameset|head|html|iframe|link|listing|meta|noembed|noframes|noscript|param|plaintext|rb|rp|rt|rtc|script|source|style|template|textarea|title|track)$/;
 
 function isSpecialHtmlElement({ tag, namespace }: { tag: string; namespace?: HtmlNamespace }): boolean {
-  if (namespace === "svg") return /^(?:desc|foreignobject|title)$/.test(tag);
-  if (namespace === "math") return /^(?:annotation-xml|mi|mn|mo|ms|mtext)$/.test(tag);
+  if (namespace === "svg") return SVG_HTML_INTEGRATION_POINT_RE.test(tag);
+  if (namespace === "math") return tag === "annotation-xml" || MATH_TEXT_INTEGRATION_POINT_RE.test(tag);
   return HTML_SPECIAL_TAG_RE.test(tag);
 }
 
@@ -1894,7 +1908,6 @@ function createHtmlScopeLookup(
   type OpenStyledTag = OpenHtmlTag & {
     customProps: CssCustomProperties;
     containerDepth: number;
-    namespace?: HtmlNamespace;
     style?: string;
     formattingMarker?: number;
     stackIndex: number;
@@ -1909,6 +1922,7 @@ function createHtmlScopeLookup(
   let containerDepth = 0;
   let generatedHeading = false;
   let cursor = 0;
+  let formElement: OpenStyledTag | undefined;
   const getProps = () => stack.at(-1)?.customProps ?? inheritedProps;
   const inTableInsertionContext = (entry = stack.at(-1)) =>
     !entry?.namespace && HTML_TABLE_INSERTION_RE.test(entry?.tag ?? "");
@@ -1925,7 +1939,7 @@ function createHtmlScopeLookup(
     }
     return parent?.customProps ?? inheritedProps;
   };
-  const pushTag = (element: OpenHtmlTag & Pick<OpenStyledTag, "customProps" | "namespace" | "style">) => {
+  const pushTag = (element: OpenHtmlTag & Pick<OpenStyledTag, "customProps" | "style">) => {
     const entry: OpenStyledTag = { ...element, containerDepth, stackIndex: stack.length };
     if (!entry.namespace && HTML_FORMATTING_SCOPE_RE.test(entry.tag)) {
       entry.formattingMarker = activeFormatting.length;
@@ -1941,7 +1955,7 @@ function createHtmlScopeLookup(
     }
   };
   const leaveForeignContent = () => {
-    while (stack.at(-1)?.childrenNamespace) popTo(stack.length - 1);
+    while (htmlChildNamespace(stack.at(-1))) popTo(stack.length - 1);
   };
   const isScopeBoundary = (entry: OpenStyledTag, boundary: RegExp) => {
     if (!entry.namespace) return boundary.test(entry.tag);
@@ -1966,6 +1980,20 @@ function createHtmlScopeLookup(
     }
     return true;
   };
+  const closeForm = () => {
+    // Template content is skipped separately and cannot change the outer form pointer.
+    const form = formElement;
+    formElement = undefined;
+    if (!form || stack[form.stackIndex] !== form || !isInScope(form.stackIndex, HTML_ELEMENT_SCOPE_RE)) return;
+    while (stack.length > form.stackIndex + 1) {
+      const top = stack.at(-1)!;
+      if (top.namespace || !HTML_IMPLIED_END_TAG_RE.test(top.tag)) break;
+      popTo(stack.length - 1);
+    }
+    // Removing the form from the open stack leaves its existing DOM children in place.
+    stack.splice(form.stackIndex, 1);
+    for (let index = form.stackIndex; index < stack.length; index++) stack[index]!.stackIndex = index;
+  };
   const closeOtherEndTag = (tag: string) => {
     // Foreign end tags fall back to the HTML rules at the first HTML ancestor.
     for (let index = stack.length - 1; stack[index]?.namespace; index--) {
@@ -1973,6 +2001,10 @@ function createHtmlScopeLookup(
         popTo(index);
         return;
       }
+    }
+    if (tag === "form") {
+      closeForm();
+      return;
     }
     const boundary = tag === "li" ? HTML_LIST_ITEM_SCOPE_RE : tag === "table" ? HTML_TABLE_SCOPE_RE :
       HTML_TABLE_STRUCTURE_RE.test(tag) ? HTML_TABLE_ELEMENT_BOUNDARY_RE :
@@ -2020,7 +2052,7 @@ function createHtmlScopeLookup(
     for (; index < activeFormatting.length; index++) {
       const entry = activeFormatting[index]!;
       const { customProps } = resolveElementStyle(entry.style, undefined, insertionProps());
-      activeFormatting[index] = pushTag({ tag: entry.tag, customProps, childrenNamespace: undefined, style: entry.style });
+      activeFormatting[index] = pushTag({ tag: entry.tag, customProps, style: entry.style });
     }
   };
   const activeFormattingIndex = (tag: string) => {
@@ -2085,21 +2117,21 @@ function createHtmlScopeLookup(
     if (tag === "col") {
       const group = findInScope(/^colgroup$/, HTML_TABLE_ELEMENT_BOUNDARY_RE);
       popTo((group < 0 ? table : group) + 1);
-      if (group < 0) pushTag({ tag: "colgroup", customProps: getProps(), childrenNamespace: undefined });
+      if (group < 0) pushTag({ tag: "colgroup", customProps: getProps() });
     } else if (tag === "tr" || tag === "td" || tag === "th") {
       const row = tag === "tr" ? -1 : findInScope(/^tr$/, HTML_TABLE_ELEMENT_BOUNDARY_RE);
       if (row >= 0) popTo(row + 1);
       else {
         const section = findInScope(HTML_TABLE_SECTION_RE, HTML_TABLE_ELEMENT_BOUNDARY_RE);
         popTo((section < 0 ? table : section) + 1);
-        if (section < 0) pushTag({ tag: "tbody", customProps: getProps(), childrenNamespace: undefined });
-        if (tag !== "tr") pushTag({ tag: "tr", customProps: getProps(), childrenNamespace: undefined });
+        if (section < 0) pushTag({ tag: "tbody", customProps: getProps() });
+        if (tag !== "tr") pushTag({ tag: "tr", customProps: getProps() });
       }
     } else popTo(table + 1);
     return true;
   };
   const recordScope = (offset: number, customProps = getProps()) => {
-    const namespace = stack.at(-1)?.childrenNamespace;
+    const namespace = htmlChildNamespace(stack.at(-1));
     const previous = scopes.at(-1)!;
     if (customProps !== previous.customProps || namespace !== previous.namespace) {
       positions.push(offset);
@@ -2109,7 +2141,7 @@ function createHtmlScopeLookup(
   const readText = (end: number) => {
     if (end <= cursor) return;
     if (stack.at(-1)?.tag === "colgroup" && /[^\t\n\f\r ]/.test(html.slice(cursor, end))) popTo(stack.length - 1);
-    if (!stack.at(-1)?.childrenNamespace && activeFormatting.length &&
+    if (!htmlChildNamespace(stack.at(-1)) && activeFormatting.length &&
       (!inTableInsertionContext() || /[^\t\n\f\r ]/.test(html.slice(cursor, end)))) {
       reconstructFormatting();
       recordScope(cursor, insertionProps());
@@ -2141,7 +2173,7 @@ function createHtmlScopeLookup(
         (!generatedHeading && findInScope(MARKDOWN_PARAGRAPH_OR_CELL_RE) < 0))) {
         if (line.inlineScope === "#markdown-p") closeRawParagraph();
         if (stack.at(-1)?.tag === "colgroup") popTo(stack.length - 1);
-        pushTag({ tag: line.inlineScope, customProps: insertionProps(), childrenNamespace: undefined });
+        pushTag({ tag: line.inlineScope, customProps: insertionProps() });
         reconstructFormatting();
       }
       recordScope(line.offset);
@@ -2152,17 +2184,19 @@ function createHtmlScopeLookup(
     readText(match.index);
     const prefix = match.groups?.prefix;
     const tag = match.groups?.tag?.toLowerCase();
-    if (tag && stack.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
+    const startTag = prefix === "" ? tag : undefined;
+    if (tag && htmlChildNamespace(stack.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
       leaveForeignContent();
     }
-    const namespace = stack.at(-1)?.childrenNamespace;
+    const namespace = htmlChildNamespace(stack.at(-1), startTag);
     if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
     const start = tag && prefix === "";
     const tableStructure = start && !namespace && HTML_TABLE_STRUCTURE_RE.test(tag);
-    const ignored = tableStructure && !prepareTableStructure(tag);
-    const tableForm = start && !namespace && tag === "form" &&
+    const htmlForm = start && !namespace && tag === "form";
+    const ignored = (tableStructure && !prepareTableStructure(tag)) || (htmlForm && formElement !== undefined);
+    const tableForm = htmlForm &&
       findInScope(HTML_TABLE_INSERTION_RE, /^(?:caption|td|th|template|#markdown-td)$/) >= 0;
     if (!namespace && start && !ignored) {
       if (!tableStructure && tag !== "template" && tag !== "html" && stack.at(-1)?.tag === "colgroup") {
@@ -2190,13 +2224,17 @@ function createHtmlScopeLookup(
     const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
     if (raw || (!namespace && tag === "template" && prefix === "")) {
       tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(html, "template", tokens.lastIndex) ?? html.length;
-    } else if (tag && tag !== "head" && start && !ignored && !tableForm) {
-      const current = namespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
-      if (!HTML_VOID_TAGS.has(tag) && !(current && hasSelfClosingFlag(match[0], tag))) {
+    } else if (tag && tag !== "head" && start && !ignored) {
+      const current = htmlStartTagNamespace(namespace, tag);
+      if (current ? !hasSelfClosingFlag(match[0], tag) : !HTML_VOID_TAGS.has(tag)) {
         const style = htmlAttributeValue(match[0], tag, "style");
         const { customProps } = resolveElementStyle(style, undefined, tableStructure ? getProps() : insertionProps());
-        const childrenNamespace = htmlChildNamespace(current, tag, htmlEncodedAnnotation(current, tag, match[0]));
-        const entry = pushTag({ tag, customProps, namespace: current, childrenNamespace, style });
+        const htmlAnnotation = htmlEncodedAnnotation(current, tag, match[0]);
+        const entry = pushTag({ tag, customProps, namespace: current, htmlAnnotation, style });
+        if (htmlForm) {
+          formElement = entry;
+          if (tableForm) popTo(stack.length - 1);
+        }
         if (!current && HTML_FORMATTING_TAG_RE.test(tag)) activeFormatting.push(entry);
       }
     } else if (tag && prefix === "/") {
@@ -2249,14 +2287,14 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
   const rendersText = () => {
     const parent = openTags.at(-1);
     return annotationIndex === undefined && !parent?.suppressedSubtree &&
-      (parent?.childrenNamespace !== "svg" || parent.svgText);
+      (htmlChildNamespace(parent) !== "svg" || parent?.svgText === true);
   };
   for (let match = tokens.exec(label); match; match = tokens.exec(label)) {
     let visibleTag = !openTags.at(-1)?.suppressedSubtree;
     if (rendersText()) appendText(cursor, match.index);
     cursor = tokens.lastIndex;
     if (match.groups?.cdata) {
-      if (openTags.at(-1)?.childrenNamespace && match[0].startsWith("<![CDATA[")) {
+      if (htmlChildNamespace(openTags.at(-1)) && match[0].startsWith("<![CDATA[")) {
         if (rendersText()) {
           appendText(match.index + 9, match[0].endsWith("]]>") ? cursor - 3 : cursor, false);
         }
@@ -2267,22 +2305,25 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
     }
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
-    if (tag && openTags.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
-      while (openTags.at(-1)?.childrenNamespace) openTags.pop();
+    const startTag = prefix === "" ? tag : undefined;
+    if (tag && htmlChildNamespace(openTags.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
+      while (htmlChildNamespace(openTags.at(-1))) openTags.pop();
       if (annotationIndex !== undefined && annotationIndex >= openTags.length) annotationIndex = undefined;
       visibleTag = !openTags.at(-1)?.suppressedSubtree;
     }
     if (tag === "head") continue;
     const parent = openTags.at(-1);
+    const parentNamespace = htmlChildNamespace(parent, startTag);
     const rubyTextTag = tag === "rt" || tag === "rp";
     const rubyIndex = rubyTextTag || tag === "rb" ? lastOpenHtmlTagIndex(openTags, "ruby") : -1;
     const rubyAnnotation = rubyTextTag && rubyIndex >= 0;
     if (tag && prefix === "") {
-      const namespace = openTags.at(-1)?.childrenNamespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
+      const namespace = htmlStartTagNamespace(parentNamespace, tag);
       const htmlAnnotation = htmlEncodedAnnotation(namespace, tag, match[0]);
       const foreignHidden = (namespace === "svg" && SVG_NON_RENDERED_LABEL_TAGS.has(tag)) ||
         (namespace === "math" && MATH_NON_RENDERED_LABEL_TAGS.has(tag) && !htmlAnnotation);
       const selfClosingForeignTag = namespace !== undefined && hasSelfClosingFlag(match[0], tag);
+      const isVoid = namespace === undefined && HTML_VOID_TAGS.has(tag);
       const styleParent = rubyIndex >= 0 && annotationIndex !== undefined && annotationIndex > rubyIndex
         ? openTags[annotationIndex - 1] : parent;
       const { displayIsNone, customProps } = resolveElementStyle(
@@ -2297,7 +2338,7 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
       const inertTag = HTML_NON_RENDERED_LABEL_TAGS.has(tag);
       if (!foreignHidden && (hidden || inertTag)) {
         // When an end tag is omitted, keep potentially visible text available for protection.
-        const hiddenEnd = HTML_VOID_TAGS.has(tag) || selfClosingForeignTag ? cursor :
+        const hiddenEnd = isVoid || selfClosingForeignTag ? cursor :
           raw ? (raw.closeStart < label.length || inertTag ? raw.closeEnd : undefined) :
           htmlElementEnd(label, tag, cursor, namespace, htmlAnnotation);
         if (hiddenEnd !== undefined || tag === "template") {
@@ -2316,10 +2357,11 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
       }
       if (rubyAnnotation && annotationIndex === undefined) annotationIndex = openTags.length;
       visibleTag = visibleTag && !foreignHidden;
-      if (!HTML_VOID_TAGS.has(tag) && !selfClosingForeignTag) {
+      if (!isVoid && !selfClosingForeignTag) {
         openTags.push({
           tag,
-          childrenNamespace: htmlChildNamespace(namespace, tag, htmlAnnotation),
+          namespace,
+          htmlAnnotation,
           suppressedSubtree: !visibleTag,
           customProps,
           svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
@@ -2332,9 +2374,9 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
         if (annotationIndex !== undefined && index <= annotationIndex) annotationIndex = undefined;
       }
     }
-    if (visibleTag && tag && tag !== "svg" && tag !== "ruby" && parent?.childrenNamespace !== "svg" &&
+    if (visibleTag && tag && tag !== "svg" && tag !== "ruby" && parentNamespace !== "svg" &&
       !rubyAnnotation && annotationIndex === undefined) {
-      if (tag === "details" && prefix === "") hasDetails = true;
+      if (!parentNamespace && tag === "details" && prefix === "") hasDetails = true;
       if (HTML_LABEL_BREAK_TAGS.has(tag)) inline.push(" ");
       spaced.push(" ");
     }

@@ -1558,6 +1558,8 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     "<math><details/></math>",
     "<svg><details><summary>Answer</summary></details></svg>",
     "<math>\n<details/>\n</math>",
+    "<math><mi><mglyph><details/></mglyph></mi></math>",
+    "<math><mtext><malignmark><details/></malignmark></mtext></math>",
     "<svg><foreignObject><div><math><mrow></svg><details/></mrow></math></div></foreignObject></svg>",
     "A diagram <svg><details /></svg>.",
   ])("keeps subsequent prose public after foreign disclosure markup %s", markup => {
@@ -1576,6 +1578,8 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["<svg><foreignObject>", "</foreignObject></svg>"],
     ["<math><mtext>", "</mtext></math>"],
     ["<svg><g><div>", "</div>"],
+    ["<math><annotation-xml><svg><foreignObject>", "</foreignObject></svg></annotation-xml></math>"],
+    ['<math><annotation-xml encoding="text/html"><svg><foreignObject>', "</foreignObject></svg></annotation-xml></math>"],
   ])("seals an HTML disclosure entered through %s", (open, close) => {
     const text = open + "<details><summary>Answer</summary>forty-two</details>" + close + "\n\nPublic theorem.";
     const source = { sourceId: "captions", sourceVersion: 1 };
@@ -1584,6 +1588,15 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }));
     for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
       expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it("keeps a hint gated when its summary contains a foreign details tag", () => {
+    const text = "<details><summary>Hint<math><mi><mglyph><details/></mglyph></mi></math></summary>try factoring</details>";
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const cues = [{ text, startMs: 0, endMs: 1000 }];
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expect(chunks.find(chunk => chunk.text.includes("try factoring"))?.visibility).toBe("hint_gated");
     }
   });
 
@@ -1601,6 +1614,21 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }));
     for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
       expectSealedEvidence(chunks, text, [], "Public theorem.");
+    }
+  });
+
+  it.each([
+    ["the style of a section kept open by a form end", '<form><section style="--mode:inline"></form>'],
+    ["the inherited style of a section whose form leaves the stack", '<form style="--mode:inline"><section></form>'],
+    ["the style of a section moved by a formatting end", '<div><b><section style="--mode:inline"></b>'],
+  ])("seals a heading using %s", (_name, prefix) => {
+    const text = prefix + '\n\n## <span style="display:var(--mode,none)">Answer key</span>\n\nforty-two';
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const cues = text.split("\n").map((line, index) => ({
+      text: line, startMs: index * 1000, endMs: (index + 1) * 1000,
+    }));
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, ["forty-two"]);
     }
   });
 
