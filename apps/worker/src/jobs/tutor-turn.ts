@@ -476,14 +476,15 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+        ...(historyCourseBindings?.length ? { historyCourseBindings } : {}),
         ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}) };
-      const publicationContext = { ...streamContext, historyCourseBindings, attemptContext: attemptContext ?? undefined };
+      const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
       if (deps.stream) {
         const stream = deps.stream;
         const cacheContext = { ...streamContext, exposureReceiptId: exposureReceipt?.id ?? null,
-          ...(attemptFence ? { attemptFence } : {}) };
+          ...(attemptFence && attemptContext ? { attemptFence, attemptSourceRefs: attemptContext.sourceRefs } : {}) };
         await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
           assertTempMemoriesUnexpiredSync();
           try { await stream.begin(scope.workspaceId, claimed.id, cacheContext); }

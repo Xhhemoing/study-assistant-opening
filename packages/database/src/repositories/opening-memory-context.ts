@@ -7,7 +7,7 @@ import {
   type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockActiveMemoryCourse, lockMemoryMaterialSources, lockOwnedWorkspace, readMemoryOrigins } from "./opening-memory-admission";
+import { lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
 import { mapMemoryRow } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -35,8 +35,9 @@ async function readMemoryContextInTx(
   ancestorMemoryIds: string[];
 }>> {
   await lockOwnedWorkspace(db, scope);
-  const eligibleCourseId = activeCourseId !== null && await lockActiveMemoryCourse(db, scope, activeCourseId)
-    ? activeCourseId : null;
+  const activeCourses = activeCourseId === null ? [] : await db`SELECT id FROM courses
+    WHERE id=${activeCourseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
+  const eligibleCourseId = activeCourses.length ? activeCourseId : null;
   const workspace: FragmentFactory = () => db`m.workspace_id`;
   const course: FragmentFactory = () => db`m.course_id`;
   const eligibleForScope: FragmentFactory = () => db`m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
@@ -111,12 +112,7 @@ async function readMemoryContextInTx(
   // Suggestions validate the proposed origin under its own material policy.
   // Previously saved global context remains usable across non-exam classifications.
   const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin" };
-  const collectSourceIds = new Set<string>();
-  let origins = await readMemoryOrigins(db, scope, originRows, { ...materialRules, collectSourceIds });
-  if (collectSourceIds.size) {
-    const lockedSourceIds = await lockMemoryMaterialSources(db, scope, collectSourceIds);
-    origins = await readMemoryOrigins(db, scope, originRows, { ...materialRules, lockedSourceIds });
-  }
+  const origins = await lockAndReadMemoryOrigins(db, scope, originRows, materialRules, eligibleCourseId);
   return rows.flatMap(row => {
     const origin = origins.get(String(row.id));
     const sourceRefs = parseContextSourceRefs(row.material_source_refs);

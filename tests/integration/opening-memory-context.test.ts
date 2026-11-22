@@ -105,6 +105,28 @@ describe("opening memory context admission", () => {
     await courses.removeAssetMembership(membership);
     expect(await ids()).toEqual([global]);
   });
+
+  it("requires the source membership in both the saved origin and the memory's destination", async () => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const originCourse = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Origin", slug: randomUUID() });
+    const destination = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Destination", slug: randomUUID() });
+    const sourceId = await insertSource(sql, scope);
+    const membership = { workspaceId: scope.workspaceId, assetType: "source" as const, assetId: sourceId };
+    for (const course of [originCourse, destination]) await courses.addAssetMembership({
+      ...membership, courseId: course.id, role: "core", visibility: "course", purpose: "teaching",
+    });
+    const turnId = await insertOwnedTurn(sql, scope, { sourceIds: [sourceId] });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: originCourse.id })} WHERE id=${turnId}`;
+    const proposal = { courseId: destination.id, text: "Shared source", sourceTurnIds: [turnId], expiresAt: null };
+    const memory = await memories.proposeMemory(scope, proposal);
+    await memories.confirm(scope, memory.id, memory.version, randomUUID());
+    const context = () => memories.listContext(scope, new Date().toISOString(), destination.id);
+    expect((await context()).memories.map(item => item.id)).toContain(memory.id);
+    await courses.removeAssetMembership({ ...membership, courseId: originCourse.id });
+    expect((await context()).memories.map(item => item.id)).not.toContain(memory.id);
+    await expect(memories.proposeMemory(scope, proposal)).rejects.toMatchObject({ code: "VALIDATION" });
+  });
   it("rejects explicit ancestry that crosses an intermediate turn outside the memory's course", async () => {
     const { sql, scope } = fixture;
     const courses = createCourseMembershipRepository(sql);

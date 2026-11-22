@@ -59,6 +59,33 @@ it("parses cached materialPurposePin and rejects malformed pins before delivery"
   await expect(reader.read(id, id)).rejects.toThrow();
 });
 
+it("round-trips origin course authority through the cache and rejects malformed bindings", async () => {
+  const id = "10000000-0000-4000-8000-00000000000a";
+  const uppercaseId = id.toUpperCase();
+  const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null };
+  const ref = { sourceId: uppercaseId, sourceVersion: 1 };
+  const binding = { courseId: uppercaseId, materialUse: "citation" as const, sourceIds: [uppercaseId, id], sourceRefs: [ref] };
+  const evalScript = vi.fn().mockResolvedValue(undefined);
+  await createTutorStreamWriter({ eval: evalScript } as unknown as IORedis).begin(id, id, {
+    ...context, historyCourseBindings: [binding],
+  });
+  const cached = evalScript.mock.calls[0]?.[7] as string;
+  const hgetall = vi.fn().mockResolvedValueOnce({ context: cached, text: "buffered", sequence: "1" });
+  const invalidBindings = [null, {}, [null], [{ ...binding, courseId: "invalid" }],
+    [{ ...binding, materialUse: "exam" }], [{ ...binding, sourceIds: ["invalid"] }],
+    [{ ...binding, sourceRefs: [{ ...ref, memoryOnly: true }] }], [{ ...binding, sourceRefs: [{ ...ref, sourceVersion: "1" }] }],
+    [{ ...binding, sourceIds: [] }]];
+  for (const invalid of invalidBindings) {
+    hgetall.mockResolvedValueOnce({ context: JSON.stringify({ ...context, historyCourseBindings: invalid }), text: "buffered", sequence: "1" });
+  }
+  const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
+  await expect(reader.read(id, id)).resolves.toMatchObject({
+    text: "buffered", historyCourseBindings: [{ courseId: id, materialUse: "citation", sourceIds: [id],
+      sourceRefs: [{ sourceId: id, sourceVersion: 1 }] }],
+  });
+  for (const _binding of invalidBindings) await expect(reader.read(id, id)).rejects.toThrow("invalid tutor stream cache");
+});
+
 it("parses temporaryMemoryExpiresAt and memoryOnly provenance refs and rejects invalid timestamps", async () => {
   const id = "10000000-0000-4000-8000-000000000001";
   const expiresAt = "2026-11-21T01:00:00.000Z";

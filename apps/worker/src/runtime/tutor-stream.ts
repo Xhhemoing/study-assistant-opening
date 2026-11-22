@@ -3,6 +3,7 @@ import {
   isUnconfirmedStreamSealError, markUnconfirmedStreamSeal, parseContextSourceRefs, sealOpeningTutorStream,
   TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema, tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey,
   tutorStreamPreAnswerHeadKey, UnconfirmedStreamSealError, type ContextSourceRef, type TutorAttemptFence,
+  type OpeningTutorJobsRepository,
 } from "@aistudy/database";
 import { openingMaterialPurposePinSchema, uuidSchema, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 export { isUnconfirmedStreamSealError, UnconfirmedStreamSealError };
@@ -14,9 +15,11 @@ export type TutorStreamContext = {
   claimToken?: string;
   executionId?: string;
   attemptFence?: TutorAttemptFence;
+  attemptSourceRefs?: ContextSourceRef[];
   materialPurposePin?: OpeningMaterialPurposePin;
   memoryLineageSourceIds?: string[];
   globalMemoryIds?: string[];
+  historyCourseBindings?: Parameters<OpeningTutorJobsRepository["readStream"]>[2]["historyCourseBindings"];
   temporaryMemoryExpiresAt?: string;
 };
 export type TutorStreamDelta = { text: string; sequence: number };
@@ -551,6 +554,26 @@ export function createWorkerTutorStreamWriter(
   };
 }
 
+function parseHistoryCourseBindings(value: unknown): TutorStreamContext["historyCourseBindings"] {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("invalid tutor stream cache");
+  return value.map(binding => {
+    if (!binding || typeof binding !== "object"
+      || Object.keys(binding).length !== 4
+      || !(binding.courseId === null || uuidSchema.safeParse(binding.courseId).success)
+      || (binding.materialUse !== "citation" && binding.materialUse !== "practice")
+      || !Array.isArray(binding.sourceIds) || binding.sourceIds.some((id: unknown) => !uuidSchema.safeParse(id).success)
+      || !Array.isArray(binding.sourceRefs) || binding.sourceRefs.some((ref: ContextSourceRef) =>
+        !ref || typeof ref !== "object" || !uuidSchema.safeParse(ref.sourceId).success || ref.memoryOnly === true)) {
+      throw new Error("invalid tutor stream cache");
+    }
+    const sourceRefs = parseContextSourceRefs(binding.sourceRefs);
+    const sourceIds = [...new Set<string>(binding.sourceIds.map((id: string) => id.toLowerCase()))].sort();
+    if (!sourceRefs || sourceRefs.some(ref => !sourceIds.includes(ref.sourceId))) throw new Error("invalid tutor stream cache");
+    return { courseId: binding.courseId?.toLowerCase() ?? null, materialUse: binding.materialUse, sourceIds, sourceRefs };
+  });
+}
+
 function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null {
   if (!row.context) return null;
   const context = JSON.parse(row.context) as TutorStreamContext;
@@ -562,6 +585,9 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     || (context.claimToken !== undefined && typeof context.claimToken !== "string")
     || (context.executionId !== undefined && !uuidSchema.safeParse(context.executionId).success)) throw new Error("invalid tutor stream cache");
   const fence = context.attemptFence === undefined ? undefined : tutorAttemptFenceSchema.parse(context.attemptFence);
+  const attemptSourceRefs = context.attemptSourceRefs === undefined ? undefined : parseContextSourceRefs(context.attemptSourceRefs);
+  if (attemptSourceRefs === null || (attemptSourceRefs && !fence)) throw new Error("invalid tutor stream cache");
+  const historyCourseBindings = parseHistoryCourseBindings(context.historyCourseBindings);
   const materialPurposePin = context.materialPurposePin === undefined ? undefined
     : openingMaterialPurposePinSchema.parse(context.materialPurposePin);
   let memoryLineageSourceIds: string[] | undefined;
@@ -588,6 +614,8 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     temporaryMemoryExpiresAt = context.temporaryMemoryExpiresAt;
   }
   return { ...context, ...(fence ? { attemptFence: fence } : {}),
+    ...(attemptSourceRefs ? { attemptSourceRefs } : {}),
+    ...(historyCourseBindings ? { historyCourseBindings } : {}),
     ...(materialPurposePin ? { materialPurposePin } : {}),
     ...(memoryLineageSourceIds ? { memoryLineageSourceIds } : {}),
     ...(globalMemoryIds ? { globalMemoryIds } : {}),

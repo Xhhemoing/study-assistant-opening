@@ -16,8 +16,8 @@ import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryRecei
 import {
   contextSourceRefsIncluded, hasMemoryBearingRef, lineageUuid, memoryBacksSource, memoryCourseAllows,
   memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
-  resolveMemoryDependencyStatus, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
-  turnPinnedSourceRefs, type ContextSourceRef,
+  resolveMemoryDependencyStatus, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
+  turnMaterialUse, turnPinnedSourceRefs, type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import { lockActiveMemoryCourse, lockActiveMemoryCourses, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
@@ -423,7 +423,7 @@ async function assertStreamSources(
   tx: TransactionSql,
   scope: OpeningScope,
   refs: ContextSourceRef[],
-  verifiedAttemptRefs?: ContextSourceRef[],
+  verifiedAttemptRefs?: readonly ContextSourceRef[],
   turnSourceVersions?: Record<string, unknown> | null,
   deferredCourseId: string | null = null,
 ) {
@@ -527,7 +527,9 @@ type CompletedCandidateTarget = {
 
 async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: CompletedCandidateTarget, evidence: unknown) {
   const workspaceId = input.scope.workspaceId;
-  const [admitted] = await db<{
+  return db<{
+    origin: number;
+    refs: unknown;
     sources: Array<{ id: string; memory_only: boolean }>;
     scoped: Array<{ origin: number; id: string; attributed: boolean }>;
     backings: Array<{ origin: number; source_id: string; id: string; global_backed: boolean }>;
@@ -535,41 +537,38 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
     course_id: string | null; material_use: "citation" | "practice";
   }[]>`
     WITH candidate_evidence AS MATERIALIZED (
-      SELECT * FROM jsonb_to_record(${db.json(evidence as never)}::jsonb) AS evidence(
-        assistant_refs jsonb, user_refs jsonb, source_ids uuid[], citations jsonb, course_id uuid, material_use text,
-        standalone_sessions boolean, assistant_source_ids uuid[], assistant_version_refs jsonb
+      SELECT * FROM jsonb_to_recordset(${db.json(evidence as never)}::jsonb) AS evidence(
+        origin int, refs jsonb, source_ids uuid[], citations jsonb, course_id uuid, material_use text,
+        standalone_sessions boolean, version_required_ids uuid[]
       )
-      WHERE jsonb_typeof(assistant_refs)='array'
-        AND (user_refs IS NULL OR jsonb_typeof(user_refs)='array')
-        AND ${turnDirectSourcesVersioned(db, () => db`assistant_source_ids`, () => db`assistant_refs`, () => db`assistant_version_refs`)}
-        AND ${contextSourceRefsIncluded(db, workspaceId, () => db`assistant_refs || COALESCE(user_refs, '[]'::jsonb)`,
+      WHERE jsonb_typeof(refs)='array'
+        AND ${turnDirectSourcesVersioned(db, () => db`version_required_ids`, () => db`refs`, () => db`citations`)}
+        AND ${contextSourceRefsIncluded(db, workspaceId, () => db`refs`,
           false, true, () => db`source_ids`, () => db`citations`)}
-    ), lineage AS (
-      SELECT 1 AS origin, assistant_refs AS refs FROM candidate_evidence
-      UNION ALL
-      SELECT 2 AS origin, user_refs AS refs FROM candidate_evidence
     ), direct_deps AS MATERIALIZED (
       SELECT l.origin, ${lineageUuid(db, () => db`d.id`)} AS id
-      FROM lineage l CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`l.refs`)} d
+      FROM candidate_evidence l CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`l.refs`)} d
     ), context_sources AS MATERIALIZED (
       SELECT l.origin, ${lineageUuid(db, () => db`item->>'sourceId'`)} AS id,
         COALESCE(item->>'memoryOnly' = 'true', false) AS memory_only
-      FROM lineage l CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.refs, '[]'::jsonb)) item
+      FROM candidate_evidence l CROSS JOIN LATERAL jsonb_array_elements(l.refs) item
       WHERE item ? 'sourceId'
     ), source_refs AS (
-      SELECT id, bool_and(memory_only) AS memory_only FROM (
-        SELECT id, memory_only FROM context_sources
+      SELECT origin, id, bool_and(memory_only) AS memory_only FROM (
+        SELECT origin, id, memory_only FROM context_sources
         UNION ALL
-        SELECT id, false FROM candidate_evidence t CROSS JOIN LATERAL unnest(t.source_ids) s(id)
+        SELECT t.origin, id, false FROM candidate_evidence t CROSS JOIN LATERAL unnest(t.source_ids) s(id)
         UNION ALL
-        SELECT ${lineageUuid(db, () => db`citation->>'sourceId'`)}, false
+        SELECT t.origin, ${lineageUuid(db, () => db`citation->>'sourceId'`)}, false
         FROM candidate_evidence t CROSS JOIN LATERAL jsonb_array_elements(t.citations) citation
-      ) sources GROUP BY id
+      ) sources GROUP BY origin, id
     ), scoped_sources AS MATERIALIZED (
       SELECT source.origin, source.id, t.course_id, t.standalone_sessions,
         EXISTS (SELECT 1 FROM direct_deps d WHERE d.origin=source.origin) AS attributed
-      FROM context_sources source CROSS JOIN candidate_evidence t
-      WHERE source.memory_only
+      FROM context_sources source JOIN candidate_evidence t ON t.origin=source.origin
+      WHERE source.memory_only AND NOT EXISTS (
+        SELECT 1 FROM source_refs direct WHERE direct.origin=source.origin AND direct.id=source.id AND NOT direct.memory_only
+      )
     ), backing AS MATERIALIZED (
       SELECT r.origin, r.id AS source_id, m.id, m.course_id IS NULL AND (r.attributed OR r.course_id IS NULL) AS global_backed
       FROM scoped_sources r
@@ -584,17 +583,16 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
             input.scope.ownerUserId, () => db`r.attributed`)}
       ) m
     ), memberships AS (
-      SELECT cam.asset_id, cam.course_id, cam.purpose
+      SELECT s.origin, cam.asset_id, cam.course_id, cam.purpose
       FROM source_refs s JOIN course_asset_memberships cam ON cam.asset_id=s.id
       WHERE cam.workspace_id=${workspaceId} AND cam.asset_type='source'
     )
-    SELECT t.course_id, t.material_use,
-      (SELECT COALESCE(jsonb_agg(sources), '[]'::jsonb) FROM source_refs sources) AS sources,
-      (SELECT COALESCE(jsonb_agg(scoped), '[]'::jsonb) FROM scoped_sources scoped) AS scoped,
-      (SELECT COALESCE(jsonb_agg(backing), '[]'::jsonb) FROM backing) AS backings,
-      (SELECT COALESCE(jsonb_agg(memberships), '[]'::jsonb) FROM memberships) AS memberships
+    SELECT t.origin, t.refs, t.course_id, t.material_use,
+      (SELECT COALESCE(jsonb_agg(sources), '[]'::jsonb) FROM source_refs sources WHERE sources.origin=t.origin) AS sources,
+      (SELECT COALESCE(jsonb_agg(scoped), '[]'::jsonb) FROM scoped_sources scoped WHERE scoped.origin=t.origin) AS scoped,
+      (SELECT COALESCE(jsonb_agg(backing), '[]'::jsonb) FROM backing WHERE backing.origin=t.origin) AS backings,
+      (SELECT COALESCE(jsonb_agg(memberships), '[]'::jsonb) FROM memberships WHERE memberships.origin=t.origin) AS memberships
     FROM candidate_evidence t`;
-  return admitted;
 }
 
 /** Optional metadata consumes exactly the saved answer's still-authorized context. */
@@ -603,6 +601,18 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   const standaloneSessions = () => db`${turnHasStandaloneSession(db, () => db`t`, () => db`w.owner_user_id`)}
     AND ${turnHasStandaloneSession(db, () => db`u`, () => db`w.owner_user_id`)}
     AND ${lineageUuid(db, () => db`t.context_anchor->>'courseId'`)} IS NULL`;
+  const savedMemoryRootsActive = (role: "user" | "assistant") => {
+    const refs: FragmentFactory = () => role === "assistant" ? db`t.context_source_refs` : db`t.user_context_source_refs`;
+    const course = () => role === "assistant" ? db`t.assistant_course_id` : db`t.course_id`;
+    return db`NOT EXISTS (
+      SELECT 1 FROM ${memoryDependencyRows(db, refs)} dep
+      WHERE NOT EXISTS (
+        SELECT 1 FROM opening_memories m WHERE m.workspace_id=${workspaceId} AND m.status='active'
+          AND m.id=${lineageUuid(db, () => db`dep.id`)} AND (m.course_id IS NULL OR m.course_id=${course()})
+          AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at > clock_timestamp()))
+      )
+    )`;
+  };
   const savedPins = (role: "assistant" | "user") => {
     const turn = () => role === "assistant" ? db`t` : db`u`;
     return db`(
@@ -612,19 +622,21 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       FROM (${turnPinnedSourceRefs(db, () => db`${turn()}.source_versions`, () => db`${turn()}.context_anchor`)}) pin
     )`;
   };
-  const [target] = await db`
+  const readTarget = () => db`
     WITH candidate_target AS MATERIALIZED (
       SELECT j.conversation_id, j.user_turn_id, j.mode, t.text AS answer, u.text AS question,
         (COALESCE(u.query_system, false) OR COALESCE(t.query_system, false) OR t.system_query IS NOT NULL) AS query_system,
         t.context_source_refs, u.context_source_refs AS user_context_source_refs, w.privacy_epoch,
-        u.source_ids || t.source_ids || assistant_pins.source_ids || user_pins.source_ids AS source_ids,
+        u.source_ids || user_pins.source_ids AS user_material_ids,
+        t.source_ids || assistant_pins.source_ids AS assistant_material_ids,
         t.source_ids AS assistant_source_ids,
         t.citations || assistant_pins.version_refs AS assistant_version_refs,
         u.citations || user_pins.version_refs AS user_version_refs,
         ${turnLineageCourse(db, "u", () => db`c.course_id`, () => db`c.owner_user_id`)} AS course_id,
+        ${turnLineageCourse(db, "t", () => db`c.course_id`, () => db`c.owner_user_id`)} AS assistant_course_id,
         ${standaloneSessions()} AS standalone_sessions,
-        CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
-          THEN 'practice' ELSE 'citation' END AS material_use
+        ${turnMaterialUse(db, "u")} AS material_use,
+        ${turnMaterialUse(db, "t")} AS assistant_material_use
       FROM opening_tutor_jobs j
       JOIN workspaces w ON w.id=j.workspace_id AND w.owner_user_id=${input.scope.ownerUserId}
       JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
@@ -639,6 +651,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
         AND jsonb_typeof(u.citations)='array' AND jsonb_typeof(t.citations)='array'
         AND jsonb_typeof(u.source_versions)='object' AND jsonb_typeof(t.source_versions)='object'
+        AND ${turnHasOwnedSession(db, () => db`u`, () => db`c.owner_user_id`)}
+        AND ${turnHasOwnedSession(db, () => db`t`, () => db`c.owner_user_id`)}
         AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
         AND (${input.expectedPrivacyEpoch ?? null}::integer IS NULL OR w.privacy_epoch=${input.expectedPrivacyEpoch ?? null})
         AND (${input.metadataLease === undefined} OR EXISTS (
@@ -654,43 +668,58 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
           WHERE candidate.workspace_id=j.workspace_id AND candidate.source_turn_id=t.id)
       FOR SHARE OF j
     )
-    SELECT t.conversation_id, t.user_turn_id, t.mode, t.answer, t.question, t.context_source_refs, t.privacy_epoch, t.course_id, t.query_system,
-      CASE WHEN jsonb_typeof(t.context_source_refs) IS DISTINCT FROM 'array'
-        OR t.user_context_source_refs IS NOT NULL AND jsonb_typeof(t.user_context_source_refs) IS DISTINCT FROM 'array'
-        OR t.context_source_refs <> '[]'::jsonb OR COALESCE(t.user_context_source_refs, '[]'::jsonb) <> '[]'::jsonb
-        OR cardinality(t.source_ids) > 0 OR t.assistant_version_refs <> '[]'::jsonb OR t.user_version_refs <> '[]'::jsonb
-        THEN jsonb_build_object('assistant_refs', t.context_source_refs, 'user_refs', t.user_context_source_refs,
-          'source_ids', t.source_ids, 'citations', t.assistant_version_refs || t.user_version_refs,
-          'assistant_source_ids', t.assistant_source_ids, 'assistant_version_refs', t.assistant_version_refs,
-          'course_id', t.course_id, 'material_use', t.material_use, 'standalone_sessions', t.standalone_sessions) END AS evidence
+    SELECT t.conversation_id, t.user_turn_id, t.mode, t.answer, t.question, t.context_source_refs,
+      t.privacy_epoch, t.course_id, t.assistant_course_id, t.query_system,
+      (SELECT jsonb_agg(to_jsonb(evidence_row) ORDER BY evidence_row.origin) FROM (VALUES
+        (1, t.context_source_refs, t.assistant_material_ids, t.assistant_version_refs,
+          t.assistant_course_id, t.assistant_material_use, t.standalone_sessions, t.assistant_source_ids),
+        (2, COALESCE(t.user_context_source_refs, '[]'::jsonb), t.user_material_ids, t.user_version_refs,
+          t.course_id, t.material_use, t.standalone_sessions, '{}'::uuid[])
+      ) AS evidence_row(origin, refs, source_ids, citations, course_id, material_use, standalone_sessions, version_required_ids)
+      WHERE evidence_row.refs IS DISTINCT FROM '[]'::jsonb OR cardinality(evidence_row.source_ids) > 0
+        OR evidence_row.citations <> '[]'::jsonb) AS evidence
     FROM candidate_target t
-    WHERE (t.course_id IS NULL OR EXISTS (
-      SELECT 1 FROM courses c WHERE c.id=t.course_id AND c.workspace_id=${workspaceId} AND c.archived_at IS NULL
-    )) AND NOT EXISTS (
-      SELECT 1 FROM ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
-      WHERE NOT EXISTS (
-        SELECT 1 FROM opening_memories m
-        WHERE m.id=${lineageUuid(db, () => db`dep.id`)} AND m.workspace_id=${workspaceId}
-          AND m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at > clock_timestamp()))
-          AND (m.course_id IS NULL OR m.course_id=t.course_id)
+    WHERE NOT EXISTS (
+      SELECT 1 FROM unnest(ARRAY[t.course_id,t.assistant_course_id]) origin(id)
+      WHERE origin.id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM courses c WHERE c.id=origin.id AND c.workspace_id=${workspaceId} AND c.archived_at IS NULL
       )
-    )`;
+    ) AND ${savedMemoryRootsActive("user")} AND ${savedMemoryRootsActive("assistant")}`;
+  const [target] = await readTarget();
   if (!target) return;
   const checkAncestors = target.query_system === false;
-  const collectCourseIds = new Set<string>(typeof target.course_id === "string" ? [target.course_id] : []);
+  const collectCourseIds = new Set<string>([target.course_id, target.assistant_course_id].filter(id => typeof id === "string"));
   const collectSourceIds = new Set<string>();
   if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { collectCourseIds, collectSourceIds })) return;
-  let admitted = target.evidence ? await readCompletedCandidateEvidence(db, input, target.evidence) : undefined;
-  if (target.evidence && !admitted) return;
-  const evidence = target.evidence as { assistant_refs: unknown; user_refs: unknown } | null;
-  const assistantIds = evidence ? parseContextMemoryDependencyIds(evidence.assistant_refs) : [];
-  const userIds = evidence && evidence.user_refs !== null ? parseContextMemoryDependencyIds(evidence.user_refs) : [];
-  if (!assistantIds || !userIds) return;
-  const exactIds = [...assistantIds, ...userIds];
-  for (const row of admitted?.sources ?? []) collectSourceIds.add(row.id);
-  const dependencyIds = () => [...exactIds, ...(admitted?.backings.map(row => row.id) ?? [])];
-  let graph = await readMemoryDependencyStatus(db, input.scope, dependencyIds(),
-    { materialUse: admitted?.material_use, collectSourceIds, collectCourseIds });
+  const readEvidence = async (lockedSourceIds?: string[]) => {
+    if (!target.evidence) return true;
+    const rows = await readCompletedCandidateEvidence(db, input, target.evidence);
+    if (rows.length !== (target.evidence as unknown[]).length) return false;
+    const currentCourses = lockedSourceIds ? new Set<string>() : collectCourseIds;
+    for (const row of rows) {
+      const exactIds = parseContextMemoryDependencyIds(row.refs);
+      if (!exactIds) return false;
+      for (const source of row.sources) collectSourceIds.add(source.id);
+      const graph = await readMemoryDependencyStatus(db, input.scope, [...exactIds, ...row.backings.map(backing => backing.id)],
+        { materialUse: row.material_use, collectSourceIds, collectCourseIds: currentCourses, lockedSourceIds });
+      if (!lockedSourceIds) continue;
+      const current = (id: string) => resolveMemoryDependencyStatus(graph, [id], [], row.course_id)
+        ?.every(node => node.expires_at === null || new Date(node.expires_at).getTime() > Date.now()) === true;
+      if (!exactIds.every(current)) return false;
+      const activeBacking = row.backings.filter(backing => current(backing.id));
+      if (row.scoped.some(ref => row.memberships.some(membership => membership.asset_id === ref.id && membership.purpose === "mock_exam")
+        || !activeBacking.some(backing => backing.source_id === ref.id))) return false;
+      for (const ref of row.sources) {
+        if (ref.memory_only && activeBacking.some(backing => backing.source_id === ref.id && backing.global_backed)) continue;
+        const memberships = row.memberships.filter(membership => membership.asset_id === ref.id);
+        if ((row.course_id !== null && memberships.length === 0)
+          || !sourceMembershipAllows(memberships, row.course_id, row.material_use, ref.memory_only)) return false;
+      }
+    }
+    return !lockedSourceIds || ([...currentCourses].every(id => collectCourseIds.has(id))
+      && [...collectSourceIds].every(id => lockedSourceIds.includes(id)));
+  };
+  if (!await readEvidence()) return;
   if (collectCourseIds.size === 1) {
     if (!await lockActiveMemoryCourse(db, input.scope, [...collectCourseIds][0]!)) return;
   } else if (!await lockActiveMemoryCourses(db, input.scope, [...collectCourseIds])) return;
@@ -703,64 +732,9 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
     }) || [...currentSources].some(id => !locked.has(id)) || [...currentCourses].some(id => !collectCourseIds.has(id))) return;
   }
-  if (!admitted) return target;
-  if (collectSourceIds.size) {
-    admitted = await readCompletedCandidateEvidence(db, input, target.evidence);
-    if (!admitted || admitted.sources.some(row => !locked.has(row.id))) return;
-  }
-  if (dependencyIds().length) {
-    const currentCourses = new Set<string>();
-    graph = await readMemoryDependencyStatus(db, input.scope, dependencyIds(),
-      { materialUse: admitted.material_use, lockedSourceIds, collectCourseIds: currentCourses });
-    if ([...currentCourses].some(id => !collectCourseIds.has(id))) return;
-  }
-  const courseId = admitted.course_id;
-  const current = (id: string) => {
-    const dependencies = graph.get(id);
-    return dependencies?.length && dependencies.every(dep => (dep.course_id === null || dep.course_id === courseId)
-      && (dep.expires_at === null || new Date(dep.expires_at).getTime() > Date.now()));
-  };
-  if (!exactIds.every(current)) return;
-  const needsStandalone = admitted.scoped.some(ref => !ref.attributed);
-  // Recheck the target and lease after material admission, with the locks still held.
-  const [currentTarget] = await db`
-      SELECT j.id FROM opening_tutor_jobs j
-      JOIN workspaces w ON w.id=j.workspace_id AND w.owner_user_id=${input.scope.ownerUserId}
-      JOIN opening_conversations convo ON convo.id=j.conversation_id AND convo.workspace_id=j.workspace_id
-        AND convo.owner_user_id=w.owner_user_id
-      JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=j.workspace_id
-        AND u.conversation_id=convo.id AND u.role='user' AND u.status='complete'
-      ${needsStandalone ? db`JOIN opening_turns t ON t.id=j.assistant_turn_id AND t.workspace_id=j.workspace_id
-        AND t.conversation_id=convo.id AND t.role='assistant' AND t.status='complete'` : db``}
-      LEFT JOIN courses c ON c.id=${admitted.course_id}::uuid AND c.workspace_id=w.id AND c.archived_at IS NULL
-      WHERE j.id=${input.jobId} AND j.workspace_id=${workspaceId}
-        AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
-        AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
-        AND w.privacy_epoch=${target.privacy_epoch}
-        AND ${turnLineageCourse(db, "u", () => db`convo.course_id`, () => db`convo.owner_user_id`)}
-          IS NOT DISTINCT FROM ${admitted.course_id}::uuid
-        AND (${admitted.course_id}::uuid IS NULL OR c.id IS NOT NULL)
-        ${needsStandalone ? db`AND (${standaloneSessions()})` : db``}
-        AND (${input.metadataLease === undefined} OR EXISTS (
-          SELECT 1 FROM opening_jobs metadata WHERE metadata.id=${input.metadataLease?.id ?? null}::uuid
-            AND metadata.workspace_id=w.id AND metadata.owner_user_id=w.owner_user_id
-            AND metadata.kind='tutor-metadata' AND metadata.state='running'
-            AND metadata.claim_token IS NOT DISTINCT FROM ${input.metadataLease?.claimToken ?? null}::uuid
-            AND metadata.privacy_epoch=w.privacy_epoch AND metadata.payload->>'tutorJobId'=j.id::text
-            AND metadata.payload->>'assistantTurnId'=j.assistant_turn_id::text
-          FOR SHARE OF metadata
-        ))`;
-  if (!currentTarget || !exactIds.every(current)) return;
-  const activeBacking = admitted.backings.filter(row => current(row.id));
-  if (admitted.scoped.some(ref => admitted.memberships.some(row => row.asset_id === ref.id && row.purpose === "mock_exam")
-    || !activeBacking.some(row => row.origin === ref.origin && row.source_id === ref.id))) return;
-  for (const ref of admitted.sources) {
-    if (ref.memory_only && activeBacking.some(row => row.source_id === ref.id && row.global_backed)) continue;
-    const memberships = admitted.memberships.filter(row => row.asset_id === ref.id);
-    if ((admitted.course_id !== null && memberships.length === 0)
-      || !sourceMembershipAllows(memberships, admitted.course_id, admitted.material_use, ref.memory_only)) return;
-  }
-  return target;
+  // Compare both saved origins again while their courses and materials are locked.
+  const [currentTarget] = await readTarget();
+  if (isDeepStrictEqual(target, currentTarget) && await readEvidence(lockedSourceIds)) return target;
 }
 
 /** Dispatch admission uses the same course and material locks as candidate append. */
@@ -1371,6 +1345,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     async readStream(scope: OpeningScope, id: string, context: StreamPublicationContext & {
       exposureReceiptId: string | null;
       attemptFence?: TutorAttemptFence;
+      attemptSourceRefs?: readonly ContextSourceRef[];
+      temporaryMemoryExpiresAt?: string;
     }, commitAuthorized?: (job: OpeningTutorJobRecord) => void, canDeliver?: () => boolean): Promise<OpeningTutorJobRecord | null> {
       const verifyInTx = async (tx: TransactionSql, lockMode: "FOR UPDATE" | "FOR SHARE"): Promise<OpeningTutorJobRecord | null> => {
         if (lockMode === "FOR UPDATE") await lockWorkspaceLearningHistory(tx, scope);
@@ -1402,25 +1378,38 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           throw new Error("stream execution changed");
         }
         const boundAttempt = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId;
-        let verifiedAttemptRefs: ContextSourceRef[] | undefined;
-        if (boundAttempt || context.attemptFence) {
+        if (context.attemptSourceRefs && (!boundAttempt || !context.attemptFence)) throw new Error("stream attempt fence missing");
+        const verifyAttempt = async () => {
+          if (!boundAttempt && !context.attemptFence) return undefined;
           const fence = tutorAttemptFenceSchema.safeParse(context.attemptFence);
           if (!fence.success || !boundAttempt) throw new Error("stream attempt fence missing");
           const current = await readTutorAttemptContext(tx, scope, { jobId: id, userTurnId: String(row.user_turn_id), claimToken: context.claimToken });
           if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
-          verifiedAttemptRefs = current.sourceRefs;
-        }
+          return current.sourceRefs;
+        };
+        const verifyAttemptAfterMaterial = Boolean(context.historyCourseBindings?.length || context.globalMemoryIds?.length);
+        const attemptRefs = verifyAttemptAfterMaterial ? context.attemptSourceRefs : await verifyAttempt();
         const { courseId, deferredCourseId, resolvedMemoryIds } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
-          context.contextSourceRefs, verifiedAttemptRefs, {
+          context.contextSourceRefs, attemptRefs, {
             deferSourceFreeCourseLock: true,
             memoryLineageSourceIds: context.memoryLineageSourceIds,
             globalMemoryIds: context.globalMemoryIds,
+            historyCourseBindings: context.historyCourseBindings,
           });
+        if (verifyAttemptAfterMaterial && (boundAttempt || context.attemptFence)) {
+          const currentRefs = await verifyAttempt();
+          if (!isDeepStrictEqual(mergeContextSourceRefs([...(attemptRefs ?? [])]), currentRefs)) {
+            throw new Error("stream attempt materials changed");
+          }
+        }
         await assertStreamSources(
-          tx, scope, context.contextSourceRefs, verifiedAttemptRefs,
+          tx, scope, context.contextSourceRefs, attemptRefs,
           row.source_versions as Record<string, unknown> | null | undefined, deferredCourseId,
         );
         await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
+        if (context.temporaryMemoryExpiresAt !== undefined && !(Date.parse(context.temporaryMemoryExpiresAt) > Date.now())) {
+          throw new Error("stream temporary memory is no longer active");
+        }
         return job;
       };
 

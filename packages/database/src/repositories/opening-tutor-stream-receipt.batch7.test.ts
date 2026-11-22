@@ -59,11 +59,11 @@ function fixture(options: Options = {}) {
         if (kind !== "object" && sql.includes(`jsonb_typeof(${alias}.source_versions)='object'`)) return [];
       }
       return options.metadataTarget ? [{ course_id: options.courseId, context_source_refs: [],
-        ...(options.metadataDirectSource ? { evidence: { assistant_refs: [], user_refs: [] } } : {}),
+        ...(options.metadataDirectSource ? { evidence: [{ origin: 1, refs: [] }] } : {}),
       }] : [];
     }
     if (sql.startsWith("WITH candidate_evidence AS MATERIALIZED")) {
-      return [{ sources: [{ id: sourceId, memory_only: false }], scoped: [], backings: [],
+      return [{ origin: 1, refs: [], sources: [{ id: sourceId, memory_only: false }], scoped: [], backings: [],
         course_id: options.courseId, material_use: "citation", memberships: [
           { asset_id: sourceId, course_id: courseId, purpose: "practice" },
           { asset_id: sourceId, course_id: examCourse, purpose: "mock_exam" },
@@ -242,6 +242,25 @@ describe("stream receipt release waits for current job authorization and assista
       expect(hooks.readAttempt).toHaveBeenCalledExactlyOnceWith(f.tx, scope, { jobId, userTurnId: user, claimToken: token });
       expect(hooks.release).toHaveBeenCalledOnce();
     });
+  it("locks the history course and attempt sources before checking the attempt in both delivery phases", async () => {
+    const f = fixture({ boundAttempt: attempt });
+    const sourceRefs = [{ sourceId, sourceVersion: 0 }];
+    hooks.readAttempt.mockImplementation(async () => {
+      const locks = f.calls.filter(call => /FROM (courses|opening_sources|course_asset_memberships).*FOR SHARE/.test(call.sql));
+      expect(locks.slice(-3).map(call => call.sql.match(/FROM (\w+)/)?.[1])).toEqual([
+        "courses", "opening_sources", "course_asset_memberships",
+      ]);
+      return { anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null,
+        currentAnswer: null, sourceRefs };
+    });
+    const deliver = vi.fn();
+    await expect(f.repo.readStream(scope, jobId, { ...context, attemptFence: fence, attemptSourceRefs: sourceRefs,
+      historyCourseBindings: [{ courseId, materialUse: "citation", sourceIds: [sourceId], sourceRefs }],
+    }, deliver)).resolves.toMatchObject({ status: "running" });
+    expect(hooks.readAttempt).toHaveBeenCalledTimes(2);
+    expect(hooks.release).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledOnce();
+  });
   it.each([
     { label: "missing fence", value: undefined }, { label: "invalid fence", value: { ...fence, answerRevision: true } },
   ])("rejects $label before attempting provenance or release", async ({ value }) => {
@@ -657,7 +676,7 @@ describe("stream receipt release waits for current job authorization and assista
     const inFlight = new Promise<string>(resolve => { finish = resolve; });
     const startSend = vi.fn(() => {
       expect(f.txEvents).toEqual(["begin:1"]);
-      expect(f.calls.at(-1)?.sql).toMatch(/FROM courses .*FOR SHARE/);
+      expect(f.calls.some(call => /^SELECT id FROM courses .*FOR SHARE/.test(call.sql))).toBe(true);
       return inFlight;
     });
     const send = f.repo.authorizeMetadataSend(target, startSend);

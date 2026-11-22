@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { createCourseMembershipRepository, createOpeningConversationRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
-import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import { insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
+import { admitTaskCandidate } from "../../packages/database/src/repositories/opening-task-candidate-admission";
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
 beforeEach(async () => {
@@ -18,7 +19,7 @@ async function seed() {
   await f.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${prior.turnId}, ${prior.assistantTurnId})`;
   await f.sql`UPDATE opening_turns SET status='complete', text='step two', context_source_refs='[]'::jsonb WHERE id=${prior.assistantTurnId}`;
   const current = await append("continue");
-  return { repo, c, prior, current, jobs: createOpeningTutorJobsRepository(f.sql) };
+  return { repo, c, prior, current, append, jobs: createOpeningTutorJobsRepository(f.sql) };
 }
 it("loads only prior completed exchanges in the owned conversation", async () => {
   const { current, jobs, prior } = await seed();
@@ -97,6 +98,140 @@ it("bounds history by whole exchanges and excludes oversized recent turns", asyn
   const { current, jobs, prior } = await seed();
   await f.sql`UPDATE opening_turns SET text=${'x'.repeat(12001)} WHERE id=${prior.turnId}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
+});
+
+it.each(["exchange count", "character budget", "current scope"] as const)(
+  "preserves older course and expiry authority outside the %s",
+  async limit => {
+    const { sql, scope } = f;
+    const { jobs, prior, current, append } = await seed();
+    const courses = createCourseMembershipRepository(sql);
+    const origin = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Origin", slug: randomUUID() });
+    const destination = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Destination", slug: randomUUID() });
+    const sourceId = await insertSource(sql, scope);
+    const ref = { sourceId, sourceVersion: 0 };
+    for (const course of limit === "current scope" ? [origin] : [origin, destination]) {
+      await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id, assetType: "source",
+        assetId: sourceId, role: "core", visibility: "course", purpose: "teaching" });
+    }
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+      text: "Older input", sourceTurnIds: [await insertOwnedTurn(sql, scope)], expiresAt,
+    });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: origin.id })} WHERE id=${prior.turnId}`;
+    await sql`UPDATE opening_turns SET citations=${sql.json([ref])},
+      context_source_refs=${sql.json([{ memoryDependencyIds: [memory.id] }])},
+      text=${limit === "character budget" ? "x".repeat(12_000) : "Older answer"} WHERE id=${prior.assistantTurnId}`;
+    const retained = limit === "exchange count" ? 20 : 1;
+    for (let index = 0; index < retained; index++) {
+      const derivative = await append(`Follow-up ${index}`);
+      await sql`UPDATE opening_turns SET created_at=now()-make_interval(mins=>${30 - index})
+        WHERE id=${derivative.turnId}`;
+      await sql`UPDATE opening_turns SET status='complete',text='Derived answer',context_source_refs='[]' WHERE id=${derivative.assistantTurnId}`;
+    }
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: destination.id })} WHERE id=${current.turnId}`;
+    const history = await jobs.loadHistoryContext(scope, current.turnId);
+    expect(history.history).toHaveLength(retained * 2);
+    expect(history.sourceRefs).toEqual([]);
+    expect(history.temporaryMemoryExpiresAt).toBe(expiresAt);
+    expect(history.historyCourseBindings).toContainEqual({
+      courseId: origin.id, materialUse: "citation", sourceIds: [sourceId], sourceRefs: [ref],
+    });
+    const claim = (await jobs.claim(current.jobId))!;
+    const authorization = { claimToken: claim.claimToken, executionId: claim.executionId,
+      contextSourceRefs: history.sourceRefs, historyCourseBindings: history.historyCourseBindings };
+    await expect(jobs.assertSendAuthorized(scope, current.jobId, authorization)).resolves.toBeUndefined();
+    await courses.setArchived({ ...scope, courseId: origin.id, archived: true });
+    await expect(jobs.assertSendAuthorized(scope, current.jobId, authorization)).rejects.toMatchObject({ code: "CONFLICT" });
+  },
+);
+
+it("preserves an earlier independent exchange at the same timestamp as the cutoff", async () => {
+  const { sql, scope } = f;
+  const { jobs, prior, current, append } = await seed();
+  const extra = await append("Third exchange");
+  const ordered = [prior, current, extra].sort((left, right) => left.turnId.localeCompare(right.turnId));
+  const [earlier, invalid, target] = ordered;
+  const sourceId = await insertSource(sql, scope);
+  await sql`UPDATE opening_turns SET created_at='2026-01-01T12:00:00Z'
+    WHERE id=ANY(${ordered.map(exchange => exchange.turnId)}::uuid[])`;
+  await sql`UPDATE opening_turns SET status='complete', text='Independent same-time answer',context_source_refs='[]'
+    WHERE id=${earlier!.assistantTurnId}`;
+  await sql`UPDATE opening_turns SET status='complete',text='Unversioned',context_source_refs='[]',source_ids=ARRAY[${sourceId}]::uuid[]
+    WHERE id=${invalid!.assistantTurnId}`;
+  const history = await jobs.loadHistory(scope, target!.turnId);
+  expect(history).toHaveLength(2);
+  expect(history[1]).toEqual({ role: "assistant", text: "Independent same-time answer" });
+});
+
+it("keeps the independent prefix when a later exchange's backing memory loses its version", async () => {
+  const { sql, scope } = f;
+  const { jobs, current, append } = await seed();
+  const sourceId = await insertSource(sql, scope);
+  const origin = await insertOwnedTurn(sql, scope, { sourceIds: [sourceId], contextSourceRefs: [{ sourceId, sourceVersion: 0 }],
+    role: "assistant" });
+  const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+    text: "Versioned backing", sourceTurnIds: [origin], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  for (const [minutes, refs] of [[45, [{ memoryDependencyIds: [memory.id] }]], [30, []]] as const) {
+    const exchange = await append("Follow-up");
+    await sql`UPDATE opening_turns SET created_at=now()-make_interval(mins=>${minutes}) WHERE id=${exchange.turnId}`;
+    await sql`UPDATE opening_turns SET status='complete',text='Derived',context_source_refs=${sql.json(refs as never)}
+      WHERE id=${exchange.assistantTurnId}`;
+  }
+  expect(await jobs.loadHistory(scope, current.turnId)).toHaveLength(6);
+  await sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
+  expect(await jobs.loadHistory(scope, current.turnId)).toEqual([
+    { role: "user", text: "previous question" }, { role: "assistant", text: "step two" },
+  ]);
+});
+
+it("rejects source-free metadata when the assistant's own session course is archived", async () => {
+  const { sql, scope } = f;
+  const { jobs, prior } = await seed();
+  const courses = createCourseMembershipRepository(sql);
+  const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Assistant origin", slug: randomUUID() });
+  const sessionId = randomUUID();
+  const activity = await insertTestTeachingActivity(sql, scope, course.id);
+  await sql`INSERT INTO opening_learning_sessions (id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
+    VALUES (${sessionId},${scope.workspaceId},${scope.ownerUserId},${course.id},${activity},'Metadata')`;
+  await sql`UPDATE opening_turns SET learning_session_id=${sessionId} WHERE id=${prior.assistantTurnId}`;
+  await sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${prior.jobId}`;
+  const target = { scope, jobId: prior.jobId, assistantTurnId: prior.assistantTurnId };
+  expect(await jobs.canAppendCompletedTurnCandidates(target)).toBe(true);
+  await courses.setArchived({ ...scope, courseId: course.id, archived: true });
+  const callback = vi.fn(async () => {});
+  await expect(jobs.authorizeMetadataSend(target, callback)).rejects.toThrow("authorization changed");
+  await expect(jobs.appendCompletedTurnCandidates({ ...target, candidates: [] })).resolves.toBe(false);
+  expect(callback).not.toHaveBeenCalled();
+});
+
+it("blocks an empty-ref saved derivative from memory and task admission after origin archive", async () => {
+  const { sql, scope } = f;
+  const { prior, current, c } = await seed();
+  const courses = createCourseMembershipRepository(sql);
+  const origin = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Origin", slug: randomUUID() });
+  const destination = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Destination", slug: randomUUID() });
+  await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: origin.id })} WHERE id=${prior.turnId}`;
+  await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: destination.id })} WHERE id=${current.turnId}`;
+  await sql`UPDATE opening_turns SET status='complete',text='Derived in destination',context_source_refs='[]'
+    WHERE id=${current.assistantTurnId}`;
+  const memories = createOpeningMemoryRepository(sql);
+  const proposal = { courseId: destination.id, text: "Derived memory", sourceTurnIds: [current.assistantTurnId], expiresAt: null };
+  const memory = await memories.proposeMemory(scope, proposal);
+  await memories.confirm(scope, memory.id, memory.version, randomUUID());
+  const id = randomUUID();
+  await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
+    VALUES (${id}, ${scope.workspaceId}, ${c.id}, ${current.assistantTurnId}, '[]',
+      ${sql.json({ kind: "task", title: "Follow up", minutes: 15, dueText: null })})`;
+  const admit = () => sql.begin(tx => admitTaskCandidate(tx, scope, id));
+  const context = () => memories.listForContext(scope, destination.id);
+  expect((await context()).map(item => item.id)).toContain(memory.id);
+  await expect(admit()).resolves.toBe(current.assistantTurnId);
+  await courses.setArchived({ ...scope, courseId: origin.id, archived: true });
+  expect((await context()).map(item => item.id)).not.toContain(memory.id);
+  await expect(memories.proposeMemory(scope, proposal)).rejects.toMatchObject({ code: "VALIDATION" });
+  await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
 });
 
 it.each(["empty", "memory-only", "conflicting", "malformed"] as const)("omits only the exchange with %s direct assistant version evidence", async evidence => {
@@ -184,6 +319,12 @@ it.each(["archive", "detach", "mock_exam"] as const)("fences origin revocation (
   await jobs.authorizeSend(scope, current.jobId, authorization, callback);
   expect(callback).toHaveBeenCalledOnce();
   callback.mockClear();
+  const beforeEpoch = await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope);
+  const buffered = { ...authorization, exposureReceiptId: null, privacyEpoch: beforeEpoch };
+  const deliver = vi.fn();
+  await expect(jobs.readStream(scope, current.jobId, buffered, deliver)).resolves.toMatchObject({ status: "running" });
+  expect(deliver).toHaveBeenCalledOnce();
+  deliver.mockClear();
   if (change === "archive") await courses.setArchived({ ...scope, courseId: origin.id, archived: true });
   else if (change === "detach") await sql`DELETE FROM course_asset_memberships WHERE course_id=${origin.id} AND asset_id=${sourceId}`;
   else await sql`UPDATE course_asset_memberships SET purpose='mock_exam' WHERE course_id=${origin.id} AND asset_id=${sourceId}`;
@@ -192,6 +333,10 @@ it.each(["archive", "detach", "mock_exam"] as const)("fences origin revocation (
   await expect(jobs.authorizeSend(scope, current.jobId, authorization, callback)).rejects.toMatchObject({ code: "CONFLICT" });
   await expect(jobs.withStreamPublication(scope, current.jobId, { ...authorization, privacyEpoch }, callback))
     .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(privacyEpoch).toBe(beforeEpoch);
+  await expect(jobs.readStream(scope, current.jobId, buffered)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(jobs.readStream(scope, current.jobId, buffered, deliver)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(deliver).not.toHaveBeenCalled();
   await expect(jobs.completeTurn({ scope, jobId: current.jobId, assistantTurnId: current.assistantTurnId,
     claimToken: claim.claimToken, text: "Derived answer", citations: [], candidates: [], contextSourceRefs: saved.sourceRefs },
   { historyCourseBindings: saved.historyCourseBindings })).rejects.toMatchObject({ code: "CONFLICT" });
@@ -311,7 +456,9 @@ it("skips citation-only memory for a practice turn while keeping independent his
   });
 
   await f.sql`UPDATE opening_memories SET expires_at=now()-interval '1 second' WHERE id=${memory.id}`;
-  expect(await jobs.loadHistory(f.scope, next.turnId)).toEqual([]);
+  expect(await jobs.loadHistory(f.scope, next.turnId)).toEqual([
+    { role: "user", text: "previous question" }, { role: "assistant", text: "step two" },
+  ]);
 });
 
 it("tracks temporary ancestors of legacy global memory-only history", async () => {
@@ -405,7 +552,11 @@ it("keeps course-scoped memory history only while both turns resolve to its acti
   expect(await jobs.loadHistoryContext(f.scope, third.turnId)).toEqual({
     history: [{ role: "user", text: "continue" }, { role: "assistant", text: "Course B answer" }],
     sourceRefs: [], memoryIds: [memoryB.id], temporaryMemoryExpiresAt: expiresAt,
-    historyCourseBindings: [{ courseId: courseB.id, materialUse: "citation", sourceIds: [], sourceRefs: [] }],
+    historyCourseBindings: [
+      { courseId: courseB.id, materialUse: "citation", sourceIds: [], sourceRefs: [] },
+      { courseId: courseA.id, materialUse: "citation", sourceIds: [source!.id],
+        sourceRefs: [{ sourceId: source!.id, sourceVersion: 0 }] },
+    ],
   });
   await f.sql`UPDATE opening_memories SET status='deleted' WHERE id=${memory.id}`;
   expect(await jobs.loadHistoryContext(f.scope, third.turnId)).toEqual({ history: [], sourceRefs: [] });

@@ -507,10 +507,16 @@ it("never lets an active global memory exempt a detached course source shared wi
     context_source_refs = ${fixture.sql.json([{ sourceId: sharedSourceId, sourceVersion: 0 }])} WHERE id = ${priorTurn.assistantTurnId}`;
   await fixture.sql`UPDATE opening_tutor_jobs SET status = 'succeeded' WHERE id = ${priorTurn.jobId}`;
 
-  // Active global memory also cites the same turn / source lineage.
+  // An independent standalone memory also cites the source.
+  const standalone = await conversations.create(fixture.scope, { title: "Standalone evidence", courseId: null });
+  const globalEvidence = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: standalone.id, text: "Use step-by-step summaries",
+    mode: "explain", clientKey: randomUUID(), sourceIds: [sharedSourceId], learningSessionId: null,
+    currentPage: null, chunkId: null,
+  });
   const proposed = await memories.proposeMemory(fixture.scope, {
     text: "Learner likes step-by-step summaries",
-    sourceTurnIds: [priorTurn.turnId],
+    sourceTurnIds: [globalEvidence.turnId],
     courseId: null,
     expiresAt: null,
   });
@@ -834,8 +840,9 @@ it("blocks confirming or injecting a derived permanent memory once its temporary
     courseId: null,
     expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
   });
+  const freshConv = await conversations.create(fixture.scope, { title: "Independent temporary memory chat", courseId: null });
   const turnFromTemp2 = await conversations.appendSavedTurn({
-    scope: fixture.scope, conversationId: derivedConv.id, text: "Ask with temp 2", mode: "explain",
+    scope: fixture.scope, conversationId: freshConv.id, text: "Ask with temp 2", mode: "explain",
     clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
   });
   await expect(createTutorTurnHandler({

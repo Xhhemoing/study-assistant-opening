@@ -2,7 +2,7 @@ import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
-import { lockOwnedWorkspace, readMemoryOrigins } from "./opening-memory-admission";
+import { lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
@@ -72,9 +72,9 @@ export function confirmOwnedMemory(
           AND ${memoryCourseAllows(tx, memoryCourse, memoryCourse, workspace)}
           AND (m.kind <> 'temporary' OR m.expires_at > clock_timestamp()) AND chain.all_active`;
       if (!admitted) throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
-      const origin = admitted.origin_turn_ids?.length ? (await readMemoryOrigins(tx, scope, [{
+      const origin = admitted.origin_turn_ids?.length ? (await lockAndReadMemoryOrigins(tx, scope, [{
         id: id.toLowerCase(), excludedId: id.toLowerCase(), course_id: current.courseId, turn_ids: admitted.origin_turn_ids,
-      }])).get(id.toLowerCase()) : undefined;
+      }], { writeAdmission: true })).get(id.toLowerCase()) : undefined;
       if (origin === null) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }

@@ -2,6 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { Citation } from "@aistudy/contracts";
 import { notePublicationMetadata } from "@aistudy/domain";
 import { readMemoryDependencyStatus } from "./opening-memory-admission";
+import type { OpeningScope } from "./opening-sources";
 
 type Db = Sql | TransactionSql;
 type Fragment = ReturnType<Db>;
@@ -341,6 +342,15 @@ export function pairedUserTurnId(db: Db, turn: FragmentFactory): Fragment {
       AND tj.conversation_id = ${turn()}.conversation_id`;
 }
 
+/** Older imported assistant turns without a tutor job have no conversational prefix. */
+export function historicalUserTurnId(db: Db, turn: FragmentFactory = () => db`t`): Fragment {
+  return db`CASE WHEN ${turn()}.role='assistant' AND NOT ${turn()}.query_system AND ${turn()}.system_query IS NULL THEN (
+    SELECT u.id FROM opening_turns u
+    WHERE u.id=(${pairedUserTurnId(db, turn)}) AND u.workspace_id=${turn()}.workspace_id
+      AND u.conversation_id=${turn()}.conversation_id AND u.role='user' AND u.status='complete' AND NOT u.query_system
+  ) END`;
+}
+
 export function turnMaterialUse(db: Db, alias: "t" | "u"): Fragment {
   const turn: FragmentFactory = () => alias === "t" ? db`t` : db`u`;
   return db`CASE WHEN ${turn()}.attempt_id IS NOT NULL OR ${turn()}.context_anchor->>'itemVersionId' IS NOT NULL
@@ -361,6 +371,10 @@ function ownedTurnLearningSession(db: Db, turn: FragmentFactory, owner: Fragment
 
 export function turnLearningSessionCourse(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
   return db`(SELECT ls.course_id ${ownedTurnLearningSession(db, turn, owner)})`;
+}
+
+export function turnHasOwnedSession(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
+  return db`(${turn()}.learning_session_id IS NULL OR EXISTS (SELECT 1 ${ownedTurnLearningSession(db, turn, owner)}))`;
 }
 
 /** A missing or foreign session cannot establish that a saved turn was standalone. */
@@ -397,13 +411,13 @@ export function turnLineageCourse(
     WHERE tc.id = ${turn()}.conversation_id AND tc.workspace_id = ${turn()}.workspace_id)`);
   return db`(
     COALESCE(${course()}, ${lineageUuid(db, () => db`${turn()}.context_anchor->>'courseId'`)},
-      ${alias === "u" || alias === "current" ? db`` : db`CASE WHEN ${turn()}.role = 'assistant' THEN (
+      ${turnLearningSessionCourse(db, turn, owner)}
+      ${alias === "u" || alias === "current" ? db`` : db`, CASE WHEN ${turn()}.role = 'assistant' THEN (
         SELECT COALESCE(${lineageUuid(db, () => db`tu.context_anchor->>'courseId'`)},
           ${turnLearningSessionCourse(db, () => db`tu`, owner)}) FROM opening_turns tu
         WHERE tu.workspace_id = ${turn()}.workspace_id AND tu.conversation_id = ${turn()}.conversation_id AND tu.role = 'user'
           AND tu.id = (${pairedUserTurnId(db, turn)})
-      ) END,`}
-      ${turnLearningSessionCourse(db, turn, owner)})
+      ) END`})
   )`;
 }
 
@@ -432,8 +446,11 @@ function memoryDependencyStep(db: Db, workspaceId: FragmentFactory, deferLegacy 
     CROSS JOIN LATERAL jsonb_array_elements_text(
       CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
     ) AS st(turn_id)
-    ${deferLegacy ? db`LEFT JOIN` : db`JOIN`} opening_turns dt
-      ON dt.id = ${lineageUuid(db, () => db`st.turn_id`)} AND dt.workspace_id = ${workspaceId()}
+    ${deferLegacy ? db`LEFT JOIN LATERAL` : db`JOIN LATERAL`} (
+      SELECT saved.* FROM opening_turns saved
+      WHERE saved.id = ${lineageUuid(db, () => db`st.turn_id`)} AND saved.workspace_id = ${workspaceId()}
+      OFFSET 0
+    ) dt ON true
     ${deferLegacy ? db`LEFT JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep ON true`
       : db`CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep`}
     LEFT JOIN opening_memories child ON child.workspace_id = pm.workspace_id
@@ -563,29 +580,31 @@ type TurnMemoryEvidence = {
   refs: unknown;
   checkedAt: string;
   standaloneSessions: boolean;
+  historicalUserTurnId?: string;
 };
 
 /** Validate memory-bearing turns under their saved material policy, then resolve their backing graph. */
 export async function readTurnsWithActiveMemoryDependencies(
   db: Db, workspaceId: string, turnIds: string[], sourceLocks?: {
-    sourceIds: Set<string>; acquire: () => Promise<readonly string[]>;
+    sourceIds: Set<string>; courseIds?: Set<string>; acquire: () => Promise<readonly string[]>;
   },
+  verifyHistory?: (scope: OpeningScope, userTurnId: string) => Promise<boolean>,
 ): Promise<Set<string>> {
   if (!turnIds.length) return new Set();
   const course: FragmentFactory = () => db`course.id`;
   const refs: FragmentFactory = () => db`a.context_source_refs`;
+  const historical: FragmentFactory | undefined = verifyHistory ? () => historicalUserTurnId(db, () => db`a`) : undefined;
   const rows = await db<{ id: string | TurnMemoryEvidence }[]>`
     SELECT t.id FROM opening_turns a
     JOIN opening_conversations c ON c.id=a.conversation_id AND c.workspace_id=a.workspace_id
     LEFT JOIN opening_turns u ON a.role='assistant' AND u.id=(${pairedUserTurnId(db, () => db`a`)})
       AND u.workspace_id=a.workspace_id AND u.conversation_id=c.id AND u.role='user' AND u.status='complete'
-    CROSS JOIN LATERAL (SELECT COALESCE(c.course_id, ${lineageUuid(db, () => db`a.context_anchor->>'courseId'`)},
-      ${lineageUuid(db, () => db`u.context_anchor->>'courseId'`)},
-      ${turnLearningSessionCourse(db, () => db`u`, () => db`c.owner_user_id`)},
-      ${turnLearningSessionCourse(db, () => db`a`, () => db`c.owner_user_id`)}) AS id) course
+    CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "a", () => db`c.course_id`, () => db`c.owner_user_id`)} AS id) course
     CROSS JOIN LATERAL (SELECT CASE
       WHEN ${refs()} @? '$[*].memoryDependencyIds[*]' OR ${refs()} @> '[{"memoryOnly":true}]'::jsonb
+        ${historical ? db`OR ${historical()} IS NOT NULL` : db``}
       THEN jsonb_build_object('turnId', a.id, 'ownerUserId', c.owner_user_id, 'courseId', ${course()},
+        ${historical ? db`'historicalUserTurnId', ${historical()},` : db``}
         'refs', ${refs()}, 'checkedAt', clock_timestamp(),
         'standaloneSessions', ${turnHasStandaloneSessions(db, () => db`c.owner_user_id`, () => db`a`)},
         'materialUse', CASE WHEN COALESCE(u.attempt_id, a.attempt_id) IS NOT NULL
@@ -613,7 +632,9 @@ export async function readTurnsWithActiveMemoryDependencies(
     if (group) group.push(turn);
     else groups.set(key, [turn]);
   }
-  const readGroups = async (rules?: { collectSourceIds?: Set<string>; lockedSourceIds?: readonly string[] }) => {
+  const readGroups = async (rules?: {
+    collectSourceIds?: Set<string>; collectCourseIds?: Set<string>; lockedSourceIds?: readonly string[];
+  }) => {
     const admitted = new Set(active);
     for (const turns of groups.values()) {
       const { ownerUserId, materialUse } = turns[0]!;
@@ -634,15 +655,18 @@ export async function readTurnsWithActiveMemoryDependencies(
         if (turnBackings.length !== turn.memoryOnlyCount) continue;
         const resolved = resolveMemoryDependencyStatus(graph, turn.ids, turnBackings, turn.courseId);
         const checkedAt = Math.max(now, Date.parse(turn.checkedAt));
-        if (resolved?.every(memory => memory.expires_at === null || new Date(memory.expires_at).getTime() > checkedAt)) admitted.add(turn.turnId);
+        if (resolved?.every(memory => memory.expires_at === null || new Date(memory.expires_at).getTime() > checkedAt)
+          && (!turn.historicalUserTurnId || await verifyHistory?.(scope, turn.historicalUserTurnId))) admitted.add(turn.turnId);
       }
     }
     return admitted;
   };
   if (sourceLocks) {
-    await readGroups({ collectSourceIds: sourceLocks.sourceIds });
+    await readGroups({ collectSourceIds: sourceLocks.sourceIds, collectCourseIds: sourceLocks.courseIds });
     const lockedSourceIds = await sourceLocks.acquire();
-    return readGroups({ lockedSourceIds });
+    const currentCourses = new Set<string>();
+    const admitted = await readGroups({ lockedSourceIds, collectCourseIds: currentCourses });
+    return !sourceLocks.courseIds || [...currentCourses].every(id => sourceLocks.courseIds!.has(id)) ? admitted : new Set();
   }
   return readGroups();
 }

@@ -222,6 +222,8 @@ describe("saved tutor material provenance", () => {
     await courses.removeAssetMembership(membership);
     await courses.addAssetMembership({ ...membership, purpose: "practice" });
     const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: course.id, itemVersionId: randomUUID() })}
+      WHERE id=${origin}`;
     const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, { courseId: course.id,
       text: "Practice source memory", sourceTurnIds: [origin], expiresAt: new Date(Date.now() + 60_000).toISOString() });
     const inherited = [{ sourceId: material, sourceVersion: 0, memoryOnly: true }, { memoryDependencyIds: [memory.id] }];
@@ -304,6 +306,8 @@ describe("saved tutor material provenance", () => {
     const courseA = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Practice origin", slug: randomUUID() });
     const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Other course", slug: randomUUID() });
     const material = await source();
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: courseA.id, assetType: "source",
+      assetId: material, role: "core", visibility: "course" });
     const conversations = createOpeningConversationRepository(sql);
     let origin: string;
     if (binding === "anchor") {
@@ -354,8 +358,8 @@ describe("saved tutor material provenance", () => {
     const admit = () => sql.begin(tx => admitTaskCandidate(tx, scope, id));
     await expect(admit()).resolves.toBe(saved.assistantTurnId);
 
-    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: courseA.id, assetType: "source",
-      assetId: material, role: "core", visibility: "course", purpose: "practice" });
+    await sql`UPDATE course_asset_memberships SET purpose='practice'
+      WHERE workspace_id=${scope.workspaceId} AND asset_id=${material} AND course_id=${courseA.id}`;
     const startSend = vi.fn(async () => {});
     const publication = { ...send, privacyEpoch: await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope) };
     await expect(context()).resolves.toEqual([]);

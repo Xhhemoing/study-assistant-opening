@@ -3,11 +3,12 @@ import { assistantCandidateSchema } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
 import {
-  assistantDirectSourcesVersioned, contextSourceRefsIncluded, lineageUuid, pairedUserTurnId, parseContextMemoryDependencyIds,
+  assistantDirectSourcesVersioned, contextSourceRefsIncluded, historicalUserTurnId, lineageUuid, pairedUserTurnId, parseContextMemoryDependencyIds,
   readTurnsWithActiveMemoryDependencies, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasMemoryDependencies,
   turnLineageCourse, turnMaterialUse, turnPinnedSourceRefs, type FragmentFactory,
 } from "./opening-context-provenance";
-import { lockActiveMemoryCourse, lockMemoryMaterialSources, sourceMaterialsActive, turnMaterialRows } from "./opening-memory-admission";
+import { lockActiveMemoryCourses, lockMemoryMaterialSources, sourceMaterialsActive, turnMaterialRows } from "./opening-memory-admission";
+import { readTutorHistoryAncestors, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
 
 function candidateListedMaterials(tx: TransactionSql): ReturnType<FragmentFactory> {
   // Candidate source_ids also includes inherited references. Every direct use
@@ -83,10 +84,12 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     FOR SHARE`;
   if (!owners.length) throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
   const [candidate] = await tx<{ payload: unknown; source_turn_id: string; has_memory_dependencies: boolean | null;
-    course_id: string | null; material_use: "citation" | "practice"; source_ids: string[]; role: string; context_source_refs: unknown }[]>`
+    course_id: string | null; material_use: "citation" | "practice"; source_ids: string[]; role: string; context_source_refs: unknown;
+    historical_user_turn_id: string | null }[]>`
     SELECT c.payload, t.id AS source_turn_id, ${turnHasMemoryDependencies(tx)} AS has_memory_dependencies,
       ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} AS course_id,
       ${turnMaterialUse(tx, "t")} AS material_use, t.role, t.context_source_refs,
+      ${historicalUserTurnId(tx)} AS historical_user_turn_id,
       array_remove(ARRAY(SELECT DISTINCT ${lineageUuid(tx, () => tx`ref.source_id`)}
         FROM (${candidateMaterialRows(tx, scope)}) ref), NULL::uuid) AS source_ids
     FROM opening_assistant_candidates c
@@ -100,19 +103,33 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   if (!candidate || !payload.success || payload.data.kind !== "task") {
     throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
   }
-  if (candidate.course_id && !(await lockActiveMemoryCourse(tx, scope, candidate.course_id))) {
-    throw new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
-  }
-  const dependencyTurnId = candidate.has_memory_dependencies ? candidate.source_turn_id : null;
+  const historicalUserTurn = candidate.historical_user_turn_id;
   const sourceIds = new Set(candidate.source_ids?.filter(Boolean));
+  const courseIds = new Set(candidate.course_id ? [candidate.course_id] : []);
+  const invalidSource = () => new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
+  if (historicalUserTurn && !await readTutorHistoryAncestors(tx, scope, historicalUserTurn,
+    { collectSourceIds: sourceIds, collectCourseIds: courseIds })) throw invalidSource();
   let lockedSourceIds: string[] = [];
   const acquire = async () => {
+    if (!await lockActiveMemoryCourses(tx, scope, [...courseIds])) throw invalidSource();
     lockedSourceIds = await lockMemoryMaterialSources(tx, scope, sourceIds);
     return lockedSourceIds;
   };
-  const active = dependencyTurnId === null ? null :
-    await readTurnsWithActiveMemoryDependencies(tx, scope.workspaceId, [dependencyTurnId], { sourceIds, acquire });
-  if (dependencyTurnId === null) await acquire();
+  if (!candidate.has_memory_dependencies) await acquire();
+  const active = candidate.has_memory_dependencies
+    ? await readTurnsWithActiveMemoryDependencies(tx, scope.workspaceId, [candidate.source_turn_id], { sourceIds, courseIds, acquire })
+    : null;
+  let hasAncestors = false;
+  if (historicalUserTurn) {
+    const currentSources = new Set<string>(), currentCourses = new Set<string>();
+    const history = await readTutorHistoryAncestorStatus(tx, scope, historicalUserTurn, {
+      lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
+    });
+    if (!history.valid || [...currentCourses].some(id => !courseIds.has(id)) || [...currentSources].some(id => !lockedSourceIds.includes(id))) {
+      throw invalidSource();
+    }
+    hasAncestors = history.hasAncestors;
+  }
 
   const admitted = await tx`
     SELECT c.id FROM opening_assistant_candidates c
@@ -130,11 +147,11 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
       })}`;
   const refs = candidate.context_source_refs ?? (candidate.role === "assistant" ? null : []);
   const validRefs = parseContextMemoryDependencyIds(refs) !== null;
-  if (!admitted.length || !validRefs) throw new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
-  if (dependencyTurnId !== null && !active?.has(dependencyTurnId)) {
+  if (!admitted.length || !validRefs) throw invalidSource();
+  if (candidate.has_memory_dependencies && !active?.has(candidate.source_turn_id)) {
     throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
   }
-  return dependencyTurnId;
+  return candidate.has_memory_dependencies || hasAncestors ? candidate.source_turn_id : null;
 }
 
 /** Read-only so callers can repeat admission after locking the candidate. */
@@ -142,7 +159,8 @@ export async function assertTaskCandidateMemoryDependencies(
   tx: TransactionSql, workspaceId: string, dependencyTurnId: string | null,
 ): Promise<void> {
   if (dependencyTurnId === null) return;
-  const active = await readTurnsWithActiveMemoryDependencies(tx, workspaceId, [dependencyTurnId]);
+  const active = await readTurnsWithActiveMemoryDependencies(tx, workspaceId, [dependencyTurnId], undefined,
+    (scope, userTurnId) => readTutorHistoryAncestors(tx, scope, userTurnId));
   if (!active.has(dependencyTurnId)) {
     throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
   }
