@@ -296,6 +296,7 @@ function classifyLabel(
 ): { readonly kind: PedagogicalBlockKind; readonly visibility: PedagogicalVisibility } | null {
   if (!rawLabel) return null;
   const normalized = rawLabel.trim().replace(/\*$/, "").toLowerCase();
+  if (!Object.hasOwn(PEDAGOGICAL_LABELS, normalized)) return null;
   const entry = PEDAGOGICAL_LABELS[normalized];
   if (!entry) return null;
   const baseVisibility: PedagogicalVisibility =
@@ -557,27 +558,6 @@ function htmlStartTagNamespace(parentNamespace: HtmlNamespace, tag: string): Htm
   return parentNamespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
 }
 
-function markupNamespace(openTags: OpenHtmlTag[], match: RegExpExecArray): HtmlNamespace {
-  const tag = match.groups?.tag?.toLowerCase();
-  const prefix = match.groups?.prefix;
-  const startTag = prefix === "" ? tag : undefined;
-  if (tag && htmlChildNamespace(openTags.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
-    while (htmlChildNamespace(openTags.at(-1))) openTags.pop();
-  }
-  const namespace = htmlChildNamespace(openTags.at(-1), startTag);
-  if (!tag) return namespace;
-  if (prefix === "") {
-    const current = htmlStartTagNamespace(namespace, tag);
-    if (current ? !hasSelfClosingFlag(match[0], tag) : openTags.length > 0 && !HTML_VOID_TAGS.has(tag)) {
-      openTags.push({ tag, namespace: current, htmlAnnotation: htmlEncodedAnnotation(current, tag, match[0]) });
-    }
-  } else if (prefix === "/") {
-    const index = lastOpenHtmlTagIndex(openTags, tag);
-    if (index >= 0) openTags.length = index;
-  }
-  return namespace;
-}
-
 function htmlElementEnd(
   text: string,
   tag: string,
@@ -587,28 +567,33 @@ function htmlElementEnd(
 ): number | undefined {
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   tokens.lastIndex = from;
-  const openTags: OpenHtmlTag[] = namespace ? [{ tag, namespace, htmlAnnotation }] : [];
-  let depth = 1;
-  let templateDepth = 0;
+  const elements = createHtmlElementStack();
+  const root = elements.insertTag({ tag, namespace, htmlAnnotation, customProps: EMPTY_CUSTOM_PROPS }, false);
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
-    const namespace = markupNamespace(openTags, match);
-    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
-      tokens.lastIndex = endOfBogusHtmlComment(text, match.index);
+    const namespace = elements.namespaceForToken(match);
+    if (match.groups?.cdata && !isForeignCdata(elements.stack.at(-1), match)) {
+      tokens.lastIndex = endOfBogusHtmlComment(text, match.index + 2);
     }
-    const name = match.groups?.tag?.toLowerCase();
-    const prefix = match.groups?.prefix;
     const raw = namespace ? null : htmlRawTextBounds(text, match, tokens.lastIndex);
     if (raw) {
       tokens.lastIndex = raw.closeEnd;
-    } else if (!namespace && name === "template" && tag !== "template") {
-      if (prefix === "") templateDepth++;
-      else if (prefix === "/" && templateDepth > 0) templateDepth--;
-    } else if (name === tag && templateDepth === 0) {
-      if (prefix === "" && !(namespace && hasSelfClosingFlag(match[0], tag))) depth++;
-      else if (prefix === "/" && --depth === 0) return tokens.lastIndex;
+      continue;
+    }
+    elements.applyToken(match, namespace);
+    if (match.groups?.prefix === "/" && match.groups.tag?.toLowerCase() === tag && !elements.isOnStack(root)) {
+      return tokens.lastIndex;
     }
   }
   return undefined;
+}
+
+function isForeignCdata(node: OpenHtmlTag | undefined, match: RegExpExecArray): boolean {
+  // The tokenizer uses the adjusted current node's own namespace at integration points.
+  return Boolean(node?.namespace && match[0].startsWith("<![CDATA["));
+}
+
+function isOpenableHtmlTag(namespace: HtmlNamespace, tag: string, markup: string): boolean {
+  return namespace ? !hasSelfClosingFlag(markup, tag) : !HTML_VOID_TAGS.has(tag);
 }
 
 function hasSelfClosingFlag(markup: string, tag: string): boolean {
@@ -633,44 +618,33 @@ function htmlContainerCrossingCodeEnd(
   start: number,
   end: number,
   openerLimit: number,
-  liveTags: OpenHtmlTag[],
-  currentDepth: number,
-): { closeEnd?: number; nextDepth: number } {
-  if (!text.slice(start, openerLimit).includes("<")) return { nextDepth: currentDepth };
+  elements: ReturnType<typeof createHtmlElementStack>,
+  details: OpenStyledTag,
+): number | undefined {
+  if (!text.slice(start, openerLimit).includes("<")) return undefined;
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
-  const openTags = [...liveTags];
-  let nextDepth = currentDepth;
   tokens.lastIndex = start;
   for (let match = tokens.exec(text); match && match.index < openerLimit; match = tokens.exec(text)) {
-    const oldCount = openTags.length;
-    const namespace = markupNamespace(openTags, match);
+    const namespace = elements.namespaceForToken(match);
     const raw = namespace ? null : htmlRawTextBounds(text, match, tokens.lastIndex);
     const tag = match.groups?.tag?.toLowerCase();
     let closeEnd: number;
     if (match[0].startsWith("<!--")) {
       closeEnd = endOfHtmlComment(text, match.index + 4);
-    } else if (match.groups?.cdata && namespace && match[0].startsWith("<![CDATA[")) {
+    } else if (match.groups?.cdata && isForeignCdata(elements.stack.at(-1), match)) {
       closeEnd = tokens.lastIndex;
     } else if (/^<[!?]/.test(match[0])) {
       closeEnd = endOfBogusHtmlComment(text, match.index + 2);
     } else if (raw || (!namespace && tag === "template" && match.groups?.prefix === "")) {
       closeEnd = raw?.closeEnd ?? htmlElementEnd(text, "template", tokens.lastIndex) ?? text.length;
-      openTags.length = Math.min(openTags.length, oldCount);
     } else {
       closeEnd = tokens.lastIndex;
-      if (!namespace && tag === "details") {
-        if (match.groups?.prefix === "") nextDepth++;
-        else if (match.groups?.prefix === "/" && nextDepth > 1) nextDepth--;
-      }
+      elements.applyToken(match, namespace, details);
     }
-    if (closeEnd > end) {
-      liveTags.splice(0, liveTags.length, ...openTags);
-      return { closeEnd, nextDepth };
-    }
+    if (closeEnd > end) return closeEnd;
     tokens.lastIndex = closeEnd;
   }
-  liveTags.splice(0, liveTags.length, ...openTags);
-  return { nextDepth };
+  return undefined;
 }
 
 function endOfBacktickSpan(text: string, start: number, limit = text.length): number {
@@ -1064,9 +1038,9 @@ function findDisclosureCommentEnd(
   // A later, independent comment can own it instead if it opens in HTML data state.
   const closeEnd = firstClose.index + firstClose[0].length;
   const tokens = new RegExp(/<!--|--!?>/.source + "|" + HTML_OTHER_LITERAL + "|" + HTML_TAG_TOKEN, "gi");
-  const openTags: OpenHtmlTag[] = [];
+  const elements = createHtmlElementStack();
+  const details = elements.insertTag({ tag: "details", customProps: EMPTY_CUSTOM_PROPS }, false);
   let independent = false;
-  let detailsDepth = 0;
   for (let match = tokens.exec(html); match; match = tokens.exec(html)) {
     if (!independent && match.index >= firstClose.index) break;
     if (match[0] === "<!--") {
@@ -1075,23 +1049,17 @@ function findDisclosureCommentEnd(
       continue;
     }
     if (match[0].startsWith("--")) return markdownStart + closeEnd;
-    const oldCount = openTags.length;
-    const namespace = markupNamespace(openTags, match);
+    const namespace = elements.namespaceForToken(match);
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
-    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+    if (match.groups?.cdata && !isForeignCdata(elements.stack.at(-1), match)) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
     const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
     if (raw || (!namespace && tag === "template" && prefix === "")) {
-      openTags.length = Math.min(openTags.length, oldCount);
       tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(html, "template", tokens.lastIndex) ?? html.length;
-    } else if (!namespace && tag === "details") {
-      if (prefix === "") detailsDepth++;
-      else if (prefix === "/") {
-        if (detailsDepth > 0) detailsDepth--;
-        else if (independent) return markdownStart + closeEnd;
-      }
+    } else if (elements.applyToken(match, namespace, independent ? undefined : details) === details && prefix === "/") {
+      return markdownStart + closeEnd;
     }
   }
   return independent ? undefined : markdownStart + closeEnd;
@@ -1113,7 +1081,8 @@ function findMatchingDetailsBounds(
   let contiguousHtml = /^ {0,3}$/.test(text.slice(containingLineStart(text, openStart), openStart));
   let htmlBlock = inheritsHtmlBlock.htmlBlockAt(nextLineStart);
   let htmlBlockEndsHere = false;
-  const openTags: OpenHtmlTag[] = [];
+  const elements = createHtmlElementStack();
+  const details = elements.insertTag({ tag: "details", customProps: EMPTY_CUSTOM_PROPS }, false);
   let htmlStartedInBody = false;
   let markdownBodyStart = Infinity;
   let body = "";
@@ -1180,12 +1149,9 @@ function findMatchingDetailsBounds(
     const newline = nextLineBreak(text, end);
     nextLineStart = newline ? newline.index + newline[0].length : text.length;
   };
-  let depth = 1;
   const skipCodeBlock = (start: number, end: number) => {
     const openerLimit = htmlBlock ? htmlBlockEnd(end) : start;
-    const crossing = openerLimit > start ? htmlContainerCrossingCodeEnd(text, start, end, openerLimit, openTags, depth) : undefined;
-    const htmlEnd = crossing?.closeEnd;
-    depth = crossing?.nextDepth ?? depth;
+    const htmlEnd = htmlContainerCrossingCodeEnd(text, start, end, openerLimit, elements, details);
     tokenRe.lastIndex = htmlEnd ?? end;
     if (htmlEnd !== undefined) skipLiteralLines(htmlEnd);
     else {
@@ -1200,7 +1166,7 @@ function findMatchingDetailsBounds(
     afterBlockBoundary = true;
   };
 
-  let summaryOpening: { openStart: number; openEnd: number } | undefined;
+  let summaryOpening: { openStart: number; openEnd: number; element: OpenStyledTag } | undefined;
   let summary: DetailsBounds["summary"];
   const summaryCodeSpans: { start: number; end: number }[] = [];
   let match: RegExpExecArray | null;
@@ -1217,14 +1183,12 @@ function findMatchingDetailsBounds(
       tokenRe.lastIndex = match.index + 1;
       continue;
     }
-    const previousTagCount = openTags.length;
-    const namespace = markupNamespace(openTags, match);
-    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+    const namespace = elements.namespaceForToken(match);
+    if (match.groups?.cdata && !isForeignCdata(elements.stack.at(-1), match)) {
       tokenRe.lastIndex = endOfBogusHtmlComment(text, match.index + 2);
     }
     const rawText = namespace ? null : htmlRawTextBounds(text, match, tokenRe.lastIndex);
     if (rawText) {
-      openTags.length = Math.min(openTags.length, previousTagCount);
       tokenRe.lastIndex = rawText.closeEnd;
       skipLiteralLines(tokenRe.lastIndex);
       continue;
@@ -1239,7 +1203,7 @@ function findMatchingDetailsBounds(
       continue;
     }
     if (match.groups?.ticks) {
-      const insideSummary = depth === 1 && summaryOpening !== undefined && summary === undefined;
+      const insideSummary = summaryOpening !== undefined && elements.isOnStack(summaryOpening.element);
       if ((allowsMarkdown || insideSummary) && !isEscaped(text, match.index)) {
         const end = endOfBacktickSpan(text, match.index);
         if (end !== -1 && !crossesDetailsHtmlBoundary(text, match.index, end, containers)) {
@@ -1249,9 +1213,7 @@ function findMatchingDetailsBounds(
             if (/^\x60+[ \t]*<!--[ \t]*\x60+$/.test(text.slice(match.index, end))) {
               htmlEnd = findDisclosureCommentEnd(text, end, htmlBlockEnd(text.length), containers, definedLinkLabels);
             } else {
-              const crossing = htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end), openTags, depth);
-              htmlEnd = crossing.closeEnd;
-              depth = crossing.nextDepth;
+              htmlEnd = htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end), elements, details);
             }
           }
           if (insideSummary && htmlEnd === undefined) summaryCodeSpans.push({ start: match.index, end });
@@ -1275,32 +1237,28 @@ function findMatchingDetailsBounds(
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
     if (!namespace && tag === "template" && prefix === "") {
-      openTags.length = Math.min(openTags.length, previousTagCount);
       tokenRe.lastIndex = htmlElementEnd(text, tag, tokenRe.lastIndex) ?? text.length;
       skipLiteralLines(tokenRe.lastIndex);
       continue;
     }
-    if (!namespace && tag === "summary") {
-      if (prefix === "/") {
+    const parent = elements.stack.at(-1);
+    const element = elements.applyToken(match, namespace);
+    if (tag === "summary" && element && !element.namespace) {
+      if (prefix === "/" && element === summaryOpening?.element) {
         const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
         if (isMarkdownBlankLine(text.slice(tokenRe.lastIndex, end))) afterBlockBoundary = true;
-        if (depth === 1 && summaryOpening && !summary) {
-          summary = { ...summaryOpening, closeStart: match.index, closeEnd: tokenRe.lastIndex, codeSpans: summaryCodeSpans };
-          const newline = nextLineBreak(text, summary.closeEnd);
-          if (newline) markdownBodyStart = newline.index + newline[0].length;
-        }
-      } else if (!prefix && depth === 1 && !summaryOpening) {
-        summaryOpening = { openStart: match.index, openEnd: tokenRe.lastIndex };
+        summary = {
+          openStart: summaryOpening.openStart, openEnd: summaryOpening.openEnd,
+          closeStart: match.index, closeEnd: tokenRe.lastIndex, codeSpans: summaryCodeSpans,
+        };
+        const newline = nextLineBreak(text, summary.closeEnd);
+        if (newline) markdownBodyStart = newline.index + newline[0].length;
+      } else if (prefix === "" && parent === details && !summaryOpening) {
+        summaryOpening = { openStart: match.index, openEnd: tokenRe.lastIndex, element };
       }
     }
-    if (namespace || tag !== "details") continue;
-    if (prefix === "/") {
-      depth--;
-      if (depth === 0) {
-        return { closeStart: match.index, closeEnd: tokenRe.lastIndex, summary };
-      }
-    } else if (!prefix) {
-      depth++;
+    if (prefix === "/" && element === details) {
+      return { closeStart: match.index, closeEnd: tokenRe.lastIndex, summary };
     }
   }
   return { closeStart: text.length, closeEnd: text.length, summary };
@@ -1608,18 +1566,6 @@ function renderMarkdownLabelMarkup(
   return parts.length ? parts.join("") + label.slice(cursor) : label;
 }
 
-type OpenLabelTag = OpenHtmlTag & {
-  suppressedSubtree: boolean;
-  svgText: boolean;
-  readonly customProps: CssCustomProperties;
-};
-
-function lastOpenHtmlTagIndex(openTags: readonly OpenHtmlTag[], tag: string): number {
-  for (let index = openTags.length - 1; index >= 0; index--) {
-    if (openTags[index]!.tag === tag) return index;
-  }
-  return -1;
-}
 
 const CSS_DISPLAY_OUTSIDE = new Set(["block", "inline", "run-in"]);
 const CSS_DISPLAY_INSIDE = new Set(["flow", "flow-root", "table", "flex", "grid", "ruby", "math"]);
@@ -1864,7 +1810,7 @@ function resolveElementStyle(
 const HTML_CLOSES_PARAGRAPH_RE =
   /^(?:address|article|aside|blockquote|dd|details|dialog|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hgroup|hr|li|main|menu|nav|ol|p|pre|search|section|table|ul)$/;
 
-const HTML_SCOPE_TAGS = "applet|caption|html|marquee|object|table|td|th|template|#markdown-td";
+const HTML_SCOPE_TAGS = "applet|caption|html|marquee|object|select|table|td|th|template|#markdown-td";
 const HTML_ELEMENT_SCOPE_RE = new RegExp("^(?:" + HTML_SCOPE_TAGS + ")$");
 const HTML_BUTTON_SCOPE_RE = new RegExp("^(?:button|" + HTML_SCOPE_TAGS + ")$");
 const HTML_FORMATTING_SCOPE_RE = /^(?:applet|caption|marquee|object|td|th|template|#markdown-td)$/;
@@ -1899,47 +1845,41 @@ const HTML_IMPLIED_SIBLING_ENDS: ReadonlyArray<readonly [RegExp, RegExp, RegExp]
   [/^button$/, /^button$/, HTML_ELEMENT_SCOPE_RE],
 ];
 
-function createHtmlScopeLookup(
-  html: string,
-  inheritedProps: CssCustomProperties,
-  blockLines: readonly HtmlScopeLine[],
-) {
-  const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
-  type OpenStyledTag = OpenHtmlTag & {
-    customProps: CssCustomProperties;
-    containerDepth: number;
-    style?: string;
-    formattingMarker?: number;
-    stackIndex: number;
-  };
+type OpenStyledTag = OpenHtmlTag & {
+  customProps: CssCustomProperties;
+  containerDepth: number;
+  hidesLabel?: boolean;
+  honorDisplay?: boolean;
+  style?: string;
+  formattingMarker?: number;
+  stackIndex: number;
+  suppressedSubtree?: boolean;
+  svgText?: boolean;
+};
+
+function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
   const stack: OpenStyledTag[] = [];
   const activeFormatting: (OpenStyledTag | null)[] = [];
-  const positions = [0];
-  const scopes: { customProps: CssCustomProperties; namespace: HtmlNamespace }[] = [
-    { customProps: inheritedProps, namespace: undefined },
-  ];
-  let lineIndex = 0;
   let containerDepth = 0;
-  let generatedHeading = false;
-  let cursor = 0;
   let formElement: OpenStyledTag | undefined;
   const getProps = () => stack.at(-1)?.customProps ?? inheritedProps;
   const inTableInsertionContext = (entry = stack.at(-1)) =>
     !entry?.namespace && HTML_TABLE_INSERTION_RE.test(entry?.tag ?? "");
-  const insertionProps = (parentIndex = stack.length - 1) => {
+  const insertionParent = (parentIndex = stack.length - 1) => {
     const parent = stack[parentIndex];
     if (parent && inTableInsertionContext(parent)) {
       // Foster parenting inserts before the nearest table, in the table's parent.
       for (let index = parentIndex; index >= 0; index--) {
         const entry = stack[index]!;
         if (entry.namespace) continue;
-        if (entry.tag === "template") return entry.customProps;
-        if (entry.tag === "table") return stack[index - 1]?.customProps ?? inheritedProps;
+        if (entry.tag === "template") return entry;
+        if (entry.tag === "table") return stack[index - 1];
       }
     }
-    return parent?.customProps ?? inheritedProps;
+    return parent;
   };
-  const pushTag = (element: OpenHtmlTag & Pick<OpenStyledTag, "customProps" | "style">) => {
+  const insertionProps = (parentIndex?: number) => insertionParent(parentIndex)?.customProps ?? inheritedProps;
+  const pushTag = (element: Omit<OpenStyledTag, "containerDepth" | "stackIndex" | "formattingMarker">) => {
     const entry: OpenStyledTag = { ...element, containerDepth, stackIndex: stack.length };
     if (!entry.namespace && HTML_FORMATTING_SCOPE_RE.test(entry.tag)) {
       entry.formattingMarker = activeFormatting.length;
@@ -1981,7 +1921,6 @@ function createHtmlScopeLookup(
     return true;
   };
   const closeForm = () => {
-    // Template content is skipped separately and cannot change the outer form pointer.
     const form = formElement;
     formElement = undefined;
     if (!form || stack[form.stackIndex] !== form || !isInScope(form.stackIndex, HTML_ELEMENT_SCOPE_RE)) return;
@@ -1993,28 +1932,40 @@ function createHtmlScopeLookup(
     // Removing the form from the open stack leaves its existing DOM children in place.
     stack.splice(form.stackIndex, 1);
     for (let index = form.stackIndex; index < stack.length; index++) stack[index]!.stackIndex = index;
+    return form;
   };
-  const closeOtherEndTag = (tag: string) => {
-    // Foreign end tags fall back to the HTML rules at the first HTML ancestor.
-    for (let index = stack.length - 1; stack[index]?.namespace; index--) {
-      if (stack[index]!.tag === tag) {
+  const closeOtherEndTag = (tag: string, protectedElement?: OpenStyledTag) => {
+    if (tag === "template") {
+      const index = findInScope(/^template$/);
+      if (index >= 0) {
+        const entry = stack[index]!;
         popTo(index);
-        return;
+        return entry;
       }
+      return;
     }
     if (tag === "form") {
-      closeForm();
-      return;
+      if (findInScope(/^template$/) >= 0) {
+        const index = findInScope(/^form$/, HTML_ELEMENT_SCOPE_RE);
+        if (index >= 0) {
+          const entry = stack[index]!;
+          popTo(index);
+          return entry;
+        }
+        return;
+      }
+      return closeForm();
     }
     const boundary = tag === "li" ? HTML_LIST_ITEM_SCOPE_RE : tag === "table" ? HTML_TABLE_SCOPE_RE :
       HTML_TABLE_STRUCTURE_RE.test(tag) ? HTML_TABLE_ELEMENT_BOUNDARY_RE :
       HTML_CLOSES_PARAGRAPH_RE.test(tag) || HTML_FORMATTING_SCOPE_RE.test(tag) ||
-        /^(?:button|center|dir|listing|summary)$/.test(tag) ? HTML_ELEMENT_SCOPE_RE : undefined;
+        /^(?:button|center|dir|listing|select|summary)$/.test(tag) ? HTML_ELEMENT_SCOPE_RE : undefined;
     for (let index = stack.length - 1; index >= 0; index--) {
       const entry = stack[index]!;
       if (!entry.namespace && entry.tag === tag) {
+        if (entry === protectedElement) return;
         popTo(index);
-        return;
+        return entry;
       }
       if (boundary ? isScopeBoundary(entry, boundary) : isSpecialHtmlElement(entry)) return;
     }
@@ -2051,8 +2002,11 @@ function createHtmlScopeLookup(
     }
     for (; index < activeFormatting.length; index++) {
       const entry = activeFormatting[index]!;
-      const { customProps } = resolveElementStyle(entry.style, undefined, insertionProps());
-      activeFormatting[index] = pushTag({ tag: entry.tag, customProps, style: entry.style });
+      const { customProps, displayIsNone } = resolveElementStyle(entry.style, undefined, insertionProps());
+      activeFormatting[index] = pushTag({
+        tag: entry.tag, customProps, style: entry.style, hidesLabel: entry.hidesLabel, honorDisplay: entry.honorDisplay,
+        suppressedSubtree: entry.hidesLabel || (entry.honorDisplay && displayIsNone) || insertionParent()?.suppressedSubtree,
+      });
     }
   };
   const activeFormattingIndex = (tag: string) => {
@@ -2067,7 +2021,7 @@ function createHtmlScopeLookup(
     // Adoption agency steps affecting the open stack and inherited styles.
     for (let attempt = 0; attempt < 8; attempt++) {
       const activeIndex = activeFormattingIndex(tag);
-      if (activeIndex < 0) return;
+      if (activeIndex < 0) return closeOtherEndTag(tag);
       const entry = activeFormatting[activeIndex]!;
       const index = entry.stackIndex;
       if (!isOnStack(entry)) {
@@ -2106,7 +2060,10 @@ function createHtmlScopeLookup(
       for (let changed = index; changed < stack.length; changed++) {
         const candidate = stack[changed]!;
         candidate.stackIndex = changed;
-        candidate.customProps = resolveElementStyle(candidate.style, undefined, insertionProps(changed - 1)).customProps;
+        const parent = insertionParent(changed - 1);
+        const { customProps, displayIsNone } = resolveElementStyle(candidate.style, undefined, parent?.customProps ?? inheritedProps);
+        candidate.customProps = customProps;
+        candidate.suppressedSubtree = candidate.hidesLabel || (candidate.honorDisplay && displayIsNone) || parent?.suppressedSubtree;
       }
     }
   };
@@ -2130,6 +2087,117 @@ function createHtmlScopeLookup(
     } else popTo(table + 1);
     return true;
   };
+  const namespaceForToken = (match: RegExpExecArray) => {
+    const prefix = match.groups?.prefix;
+    const tag = match.groups?.tag?.toLowerCase();
+    const startTag = prefix === "" ? tag : undefined;
+    if (tag && htmlChildNamespace(stack.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
+      leaveForeignContent();
+    }
+    return htmlChildNamespace(stack.at(-1), startTag);
+  };
+  const prepareStart = (tag: string, namespace: HtmlNamespace) => {
+    if (namespace) return { tableStructure: false, tableForm: false };
+    if (tag === "head") return null;
+    const tableStructure = HTML_TABLE_STRUCTURE_RE.test(tag);
+    const htmlForm = tag === "form";
+    const hasTemplate = htmlForm && findInScope(/^template$/) >= 0;
+    if ((tableStructure && !prepareTableStructure(tag)) || (htmlForm && !hasTemplate && formElement)) return null;
+    const tableForm = htmlForm && !hasTemplate &&
+      findInScope(HTML_TABLE_INSERTION_RE, /^(?:caption|td|th|template|#markdown-td)$/) >= 0;
+    if (!tableStructure && tag !== "template" && tag !== "html" && stack.at(-1)?.tag === "colgroup") {
+      popTo(stack.length - 1);
+    }
+    if (tag === "table") closeTableForNewTable();
+    if (tag === "li" || tag === "dd" || tag === "dt") closeListItem(tag);
+    if (!tableForm && HTML_CLOSES_PARAGRAPH_RE.test(tag)) {
+      const index = findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE);
+      if (index >= 0) popTo(index);
+      closeRawParagraph();
+    }
+    if (HTML_HEADING_SCOPE_RE.test(tag)) closeCurrentHeading();
+    const sibling = HTML_IMPLIED_SIBLING_ENDS.find(([open]) => open.test(tag));
+    if (sibling) {
+      const index = findInScope(sibling[1], sibling[2], true);
+      if (index >= 0) popTo(index);
+    }
+    if (!tableStructure && !HTML_CLOSES_PARAGRAPH_RE.test(tag) && !HTML_NON_RECONSTRUCTING_START_RE.test(tag)) {
+      if (tag === "a" || tag === "nobr") closeFormatting(tag);
+      reconstructFormatting();
+    }
+    return { tableStructure, tableForm };
+  };
+  const insertTag = (element: Parameters<typeof pushTag>[0], tableForm: boolean) => {
+    const entry = pushTag(element);
+    if (!entry.namespace && entry.tag === "form" && findInScope(/^template$/) < 0) {
+      formElement = entry;
+      if (tableForm) popTo(stack.length - 1);
+    }
+    if (!entry.namespace && HTML_FORMATTING_TAG_RE.test(entry.tag)) activeFormatting.push(entry);
+    return entry;
+  };
+  const closeTag = (tag: string, protectedElement?: OpenStyledTag) => {
+    // Foreign end tags fall back to the HTML rules at the first HTML ancestor.
+    for (let index = stack.length - 1; stack[index]?.namespace; index--) {
+      const entry = stack[index]!;
+      if (entry.tag === tag) {
+        popTo(index);
+        return entry;
+      }
+    }
+    if (tag === "p") {
+      const index = findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE);
+      if (index >= 0) popTo(index);
+      closeRawParagraph();
+    } else if (HTML_HEADING_SCOPE_RE.test(tag)) {
+      const index = findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE);
+      if (index >= 0) popTo(index);
+    } else if (HTML_FORMATTING_TAG_RE.test(tag)) {
+      return closeFormatting(tag);
+    } else {
+      return closeOtherEndTag(tag, protectedElement);
+    }
+  };
+  const applyToken = (match: RegExpExecArray, namespace: HtmlNamespace, protectedElement?: OpenStyledTag) => {
+    const tag = match.groups?.tag?.toLowerCase();
+    if (!tag) return;
+    const prefix = match.groups?.prefix;
+    if (prefix === "/") return closeTag(tag, protectedElement);
+    if (prefix !== "") return;
+    const start = prepareStart(tag, namespace);
+    if (!start) return;
+    const current = htmlStartTagNamespace(namespace, tag);
+    if (!isOpenableHtmlTag(current, tag, match[0])) return;
+    return insertTag({
+      tag, namespace: current, htmlAnnotation: htmlEncodedAnnotation(current, tag, match[0]),
+      customProps: EMPTY_CUSTOM_PROPS,
+    }, start.tableForm);
+  };
+  return {
+    stack, getProps, insertionParent, insertionProps, pushTag, popTo, leaveForeignContent, findInScope,
+    closeRawParagraph, closeCurrentHeading, closeTableForNewTable, reconstructFormatting, inTableInsertionContext,
+    namespaceForToken, prepareStart, insertTag, closeTag, applyToken, isOnStack,
+    hasActiveFormatting: () => activeFormatting.length > 0,
+    setContainerDepth(depth: number) { containerDepth = depth; },
+  };
+}
+
+function createHtmlScopeLookup(
+  html: string,
+  inheritedProps: CssCustomProperties,
+  blockLines: readonly HtmlScopeLine[],
+) {
+  const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
+  const elements = createHtmlElementStack(inheritedProps);
+  const { stack, getProps, insertionProps, pushTag, popTo, leaveForeignContent, findInScope,
+    closeRawParagraph, closeCurrentHeading, closeTableForNewTable, reconstructFormatting, inTableInsertionContext } = elements;
+  const positions = [0];
+  const scopes: { customProps: CssCustomProperties; namespace: HtmlNamespace }[] = [
+    { customProps: inheritedProps, namespace: undefined },
+  ];
+  let lineIndex = 0;
+  let generatedHeading = false;
+  let cursor = 0;
   const recordScope = (offset: number, customProps = getProps()) => {
     const namespace = htmlChildNamespace(stack.at(-1));
     const previous = scopes.at(-1)!;
@@ -2141,7 +2209,7 @@ function createHtmlScopeLookup(
   const readText = (end: number) => {
     if (end <= cursor) return;
     if (stack.at(-1)?.tag === "colgroup" && /[^\t\n\f\r ]/.test(html.slice(cursor, end))) popTo(stack.length - 1);
-    if (!htmlChildNamespace(stack.at(-1)) && activeFormatting.length &&
+    if (!htmlChildNamespace(stack.at(-1)) && elements.hasActiveFormatting() &&
       (!inTableInsertionContext() || /[^\t\n\f\r ]/.test(html.slice(cursor, end)))) {
       reconstructFormatting();
       recordScope(cursor, insertionProps());
@@ -2160,7 +2228,7 @@ function createHtmlScopeLookup(
       }
       // Generated Markdown container closing tags also close their raw HTML descendants.
       while (stack.length && stack.at(-1)!.containerDepth > line.continuedDepth) popTo(stack.length - 1);
-      containerDepth = line.containerDepth;
+      elements.setContainerDepth(line.containerDepth);
       if (line.inlineScope || line.startsTable || line.closesRawParagraph) leaveForeignContent();
       if (line.startsTable) closeTableForNewTable();
       if (line.closesRawParagraph || line.startsTable) closeRawParagraph();
@@ -2184,72 +2252,24 @@ function createHtmlScopeLookup(
     readText(match.index);
     const prefix = match.groups?.prefix;
     const tag = match.groups?.tag?.toLowerCase();
-    const startTag = prefix === "" ? tag : undefined;
-    if (tag && htmlChildNamespace(stack.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
-      leaveForeignContent();
-    }
-    const namespace = htmlChildNamespace(stack.at(-1), startTag);
-    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+    const namespace = elements.namespaceForToken(match);
+    if (match.groups?.cdata && !isForeignCdata(stack.at(-1), match)) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
-    const start = tag && prefix === "";
-    const tableStructure = start && !namespace && HTML_TABLE_STRUCTURE_RE.test(tag);
-    const htmlForm = start && !namespace && tag === "form";
-    const ignored = (tableStructure && !prepareTableStructure(tag)) || (htmlForm && formElement !== undefined);
-    const tableForm = htmlForm &&
-      findInScope(HTML_TABLE_INSERTION_RE, /^(?:caption|td|th|template|#markdown-td)$/) >= 0;
-    if (!namespace && start && !ignored) {
-      if (!tableStructure && tag !== "template" && tag !== "html" && stack.at(-1)?.tag === "colgroup") {
-        popTo(stack.length - 1);
-      }
-      if (tag === "table") closeTableForNewTable();
-      if (tag === "li" || tag === "dd" || tag === "dt") closeListItem(tag);
-      if (!tableForm && HTML_CLOSES_PARAGRAPH_RE.test(tag)) {
-        const index = findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE);
-        if (index >= 0) popTo(index);
-        closeRawParagraph();
-      }
-      if (HTML_HEADING_SCOPE_RE.test(tag)) closeCurrentHeading();
-      const sibling = HTML_IMPLIED_SIBLING_ENDS.find(([open]) => open.test(tag));
-      if (sibling) {
-        const index = findInScope(sibling[1], sibling[2], true);
-        if (index >= 0) popTo(index);
-      }
-      if (!tableStructure && !HTML_CLOSES_PARAGRAPH_RE.test(tag) && !HTML_NON_RECONSTRUCTING_START_RE.test(tag)) {
-        if (tag === "a" || tag === "nobr") closeFormatting(tag);
-        reconstructFormatting();
-      }
-      recordScope(match.index, tableStructure ? getProps() : insertionProps());
-    }
+    const start = tag && prefix === "" ? elements.prepareStart(tag, namespace) : null;
+    if (start && !namespace) recordScope(match.index, start.tableStructure ? getProps() : insertionProps());
     const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
     if (raw || (!namespace && tag === "template" && prefix === "")) {
       tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(html, "template", tokens.lastIndex) ?? html.length;
-    } else if (tag && tag !== "head" && start && !ignored) {
+    } else if (tag && start) {
       const current = htmlStartTagNamespace(namespace, tag);
-      if (current ? !hasSelfClosingFlag(match[0], tag) : !HTML_VOID_TAGS.has(tag)) {
+      if (isOpenableHtmlTag(current, tag, match[0])) {
         const style = htmlAttributeValue(match[0], tag, "style");
-        const { customProps } = resolveElementStyle(style, undefined, tableStructure ? getProps() : insertionProps());
-        const htmlAnnotation = htmlEncodedAnnotation(current, tag, match[0]);
-        const entry = pushTag({ tag, customProps, namespace: current, htmlAnnotation, style });
-        if (htmlForm) {
-          formElement = entry;
-          if (tableForm) popTo(stack.length - 1);
-        }
-        if (!current && HTML_FORMATTING_TAG_RE.test(tag)) activeFormatting.push(entry);
+        const { customProps } = resolveElementStyle(style, undefined, start.tableStructure ? getProps() : insertionProps());
+        elements.insertTag({ tag, customProps, namespace: current, htmlAnnotation: htmlEncodedAnnotation(current, tag, match[0]), style }, start.tableForm);
       }
     } else if (tag && prefix === "/") {
-      if (!namespace && tag === "p") {
-        const index = findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE);
-        if (index >= 0) popTo(index);
-        closeRawParagraph();
-      } else if (!namespace && HTML_HEADING_SCOPE_RE.test(tag)) {
-        const index = findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE);
-        if (index >= 0) popTo(index);
-      } else if (!namespace && HTML_FORMATTING_TAG_RE.test(tag)) {
-        closeFormatting(tag);
-      } else {
-        closeOtherEndTag(tag);
-      }
+      elements.closeTag(tag);
     }
     // Multi-line HTML tokens and raw text consume the intervening source lines.
     while (blockLines[lineIndex] && blockLines[lineIndex]!.offset < tokens.lastIndex) lineIndex++;
@@ -2280,108 +2300,88 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
     inline.push(text);
     spaced.push(text);
   };
-  let cursor = 0;
-  const openTags: OpenLabelTag[] = [];
-  let annotationIndex: number | undefined;
-  let hasDetails = false;
+  const elements = createHtmlElementStack(inheritedCustomProps);
+  const { stack } = elements;
   const rendersText = () => {
-    const parent = openTags.at(-1);
-    return annotationIndex === undefined && !parent?.suppressedSubtree &&
-      (htmlChildNamespace(parent) !== "svg" || parent?.svgText === true);
+    const current = stack.at(-1);
+    return !current?.suppressedSubtree &&
+      (htmlChildNamespace(current) !== "svg" || current?.svgText === true);
   };
+  const appendData = (start: number, end: number) => {
+    if (start >= end) return;
+    if (!htmlChildNamespace(stack.at(-1))) elements.reconstructFormatting();
+    if (rendersText()) appendText(start, end);
+  };
+  let cursor = 0;
+  let hasDetails = false;
   for (let match = tokens.exec(label); match; match = tokens.exec(label)) {
-    let visibleTag = !openTags.at(-1)?.suppressedSubtree;
-    if (rendersText()) appendText(cursor, match.index);
+    appendData(cursor, match.index);
     cursor = tokens.lastIndex;
     if (match.groups?.cdata) {
-      if (htmlChildNamespace(openTags.at(-1)) && match[0].startsWith("<![CDATA[")) {
-        if (rendersText()) {
-          appendText(match.index + 9, match[0].endsWith("]]>") ? cursor - 3 : cursor, false);
-        }
+      if (isForeignCdata(stack.at(-1), match)) {
+        if (rendersText()) appendText(match.index + 9, match[0].endsWith("]]>") ? cursor - 3 : cursor, false);
       } else {
-        tokens.lastIndex = cursor = endOfBogusHtmlComment(label, match.index);
+        tokens.lastIndex = cursor = endOfBogusHtmlComment(label, match.index + 2);
       }
       continue;
     }
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
-    const startTag = prefix === "" ? tag : undefined;
-    if (tag && htmlChildNamespace(openTags.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
-      while (htmlChildNamespace(openTags.at(-1))) openTags.pop();
-      if (annotationIndex !== undefined && annotationIndex >= openTags.length) annotationIndex = undefined;
-      visibleTag = !openTags.at(-1)?.suppressedSubtree;
-    }
-    if (tag === "head") continue;
-    const parent = openTags.at(-1);
-    const parentNamespace = htmlChildNamespace(parent, startTag);
-    const rubyTextTag = tag === "rt" || tag === "rp";
-    const rubyIndex = rubyTextTag || tag === "rb" ? lastOpenHtmlTagIndex(openTags, "ruby") : -1;
-    const rubyAnnotation = rubyTextTag && rubyIndex >= 0;
-    if (tag && prefix === "") {
+    if (!tag || (prefix !== "" && prefix !== "/")) continue;
+    const parentNamespace = elements.namespaceForToken(match);
+    let visibleTag = !stack.at(-1)?.suppressedSubtree;
+    if (prefix === "") {
+      const start = elements.prepareStart(tag, parentNamespace);
+      if (!start) continue;
       const namespace = htmlStartTagNamespace(parentNamespace, tag);
       const htmlAnnotation = htmlEncodedAnnotation(namespace, tag, match[0]);
+      const parent = parentNamespace || start.tableStructure ? stack.at(-1) : elements.insertionParent();
+      const rubyAnnotation = !namespace && (tag === "rt" || tag === "rp") && elements.findInScope(/^ruby$/) >= 0;
       const foreignHidden = (namespace === "svg" && SVG_NON_RENDERED_LABEL_TAGS.has(tag)) ||
         (namespace === "math" && MATH_NON_RENDERED_LABEL_TAGS.has(tag) && !htmlAnnotation);
-      const selfClosingForeignTag = namespace !== undefined && hasSelfClosingFlag(match[0], tag);
-      const isVoid = namespace === undefined && HTML_VOID_TAGS.has(tag);
-      const styleParent = rubyIndex >= 0 && annotationIndex !== undefined && annotationIndex > rubyIndex
-        ? openTags[annotationIndex - 1] : parent;
+      const canOpen = isOpenableHtmlTag(namespace, tag, match[0]);
+      const style = htmlAttributeValue(match[0], tag, "style");
       const { displayIsNone, customProps } = resolveElementStyle(
-        htmlAttributeValue(match[0], tag, "style"),
-        namespace ? htmlAttributeValue(match[0], tag, "display") : undefined,
-        styleParent?.customProps ?? inheritedCustomProps,
+        style, namespace ? htmlAttributeValue(match[0], tag, "display") : undefined,
+        parent?.customProps ?? inheritedCustomProps,
       );
-      // Browsers can close these elements implicitly before the next visible sibling.
-      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) &&
-        (htmlAttributeValue(match[0], tag, "hidden") !== undefined || displayIsNone);
-      const raw = namespace === undefined ? htmlRawTextBounds(label, match, cursor) : null;
-      const inertTag = HTML_NON_RENDERED_LABEL_TAGS.has(tag);
-      if (!foreignHidden && (hidden || inertTag)) {
-        // When an end tag is omitted, keep potentially visible text available for protection.
-        const hiddenEnd = isVoid || selfClosingForeignTag ? cursor :
-          raw ? (raw.closeStart < label.length || inertTag ? raw.closeEnd : undefined) :
-          htmlElementEnd(label, tag, cursor, namespace, htmlAnnotation);
-        if (hiddenEnd !== undefined || tag === "template") {
-          tokens.lastIndex = cursor = hiddenEnd ?? label.length;
-          continue;
-        }
+      const hiddenAttribute = htmlAttributeValue(match[0], tag, "hidden") !== undefined;
+      const raw = namespace ? null : htmlRawTextBounds(label, match, cursor);
+      const inertTag = !namespace && HTML_NON_RENDERED_LABEL_TAGS.has(tag);
+      // Keep potentially visible text available for protection when a close tag is absent.
+      const shouldCheckHidden = !HTML_OPTIONAL_END_TAGS.has(tag) && (hiddenAttribute || displayIsNone);
+      const hiddenEnd = !foreignHidden && (shouldCheckHidden || inertTag)
+        ? !canOpen ? cursor : raw ? (raw.closeStart < label.length || inertTag ? raw.closeEnd : undefined) :
+          htmlElementEnd(label, tag, cursor, namespace, htmlAnnotation)
+        : undefined;
+      if (inertTag && (hiddenEnd !== undefined || tag === "template")) {
+        tokens.lastIndex = cursor = hiddenEnd ?? label.length;
+        continue;
       }
+      const hidesLabel = foreignHidden || rubyAnnotation || (hiddenAttribute && hiddenEnd !== undefined);
+      const honorDisplay = displayIsNone && hiddenEnd !== undefined;
+      visibleTag = !parent?.suppressedSubtree && !hidesLabel && !honorDisplay;
       if (raw) {
-        if (annotationIndex === undefined && visibleTag) appendText(cursor, raw.closeStart, tag === "textarea");
+        if (visibleTag) appendText(cursor, raw.closeStart, tag === "textarea");
         tokens.lastIndex = cursor = raw.closeEnd;
         continue;
       }
-      if (rubyIndex >= 0 && annotationIndex !== undefined && annotationIndex > rubyIndex) {
-        openTags.length = annotationIndex;
-        annotationIndex = undefined;
-      }
-      if (rubyAnnotation && annotationIndex === undefined) annotationIndex = openTags.length;
-      visibleTag = visibleTag && !foreignHidden;
-      if (!isVoid && !selfClosingForeignTag) {
-        openTags.push({
-          tag,
-          namespace,
-          htmlAnnotation,
-          suppressedSubtree: !visibleTag,
-          customProps,
+      if (canOpen) {
+        elements.insertTag({
+          tag, namespace, htmlAnnotation, style, customProps, hidesLabel, honorDisplay, suppressedSubtree: !visibleTag,
           svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
-        });
+        }, start.tableForm);
       }
-    } else if (tag && prefix === "/") {
-      const index = lastOpenHtmlTagIndex(openTags, tag);
-      if (index >= 0) {
-        openTags.length = index;
-        if (annotationIndex !== undefined && index <= annotationIndex) annotationIndex = undefined;
-      }
+    } else if (elements.closeTag(tag)) {
+      visibleTag ||= !stack.at(-1)?.suppressedSubtree;
     }
-    if (visibleTag && tag && tag !== "svg" && tag !== "ruby" && parentNamespace !== "svg" &&
-      !rubyAnnotation && annotationIndex === undefined) {
+    if (visibleTag && tag !== "svg" && tag !== "ruby" && parentNamespace !== "svg") {
       if (!parentNamespace && tag === "details" && prefix === "") hasDetails = true;
       if (HTML_LABEL_BREAK_TAGS.has(tag)) inline.push(" ");
       spaced.push(" ");
     }
   }
-  if (rendersText()) appendText(cursor);
+  appendData(cursor, label.length);
   const normalize = (parts: readonly string[]) => parts.join("").replace(INVISIBLE_LABEL_TEXT, "").replace(/\s+/g, " ").trim();
   return { inline: normalize(inline), spaced: normalize(spaced), hasDetails };
 }

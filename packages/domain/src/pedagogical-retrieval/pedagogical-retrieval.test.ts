@@ -1600,6 +1600,93 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }
   });
 
+  function chunkDocumentAndCues(text: string) {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const cues = text.split("\n").map((line, index) => ({
+      text: line, startMs: index * 1000, endMs: (index + 1) * 1000,
+    }));
+    return [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })];
+  }
+
+  it.each([
+    ...["mi", "mo", "mn", "ms", "mtext", "annotation-xml"].map(tag => `<math><${tag}></details></${tag}></math>`),
+    ...["foreignObject", "desc", "title"].map(tag => `<svg><${tag}></details></${tag}></svg>`),
+    ...["applet", "marquee", "object", "select", "template"].map(tag => `<${tag}></details></${tag}>`),
+    "<table></details></table>",
+    "<table><caption></details></caption></table>",
+    "<table><tr><td></details></td><th></details></th></tr></table>",
+    "<svg><details></details></svg>",
+    "<table><tbody><tr><td><details><summary>Nested</summary>nested answer</details></td></tr></tbody></table>",
+    "<math><mtext><![CDATA[> </mtext></math></details>]]></mtext></math>",
+    "<svg><foreignObject><![CDATA[> </foreignObject></svg></details>]]></foreignObject></svg>",
+  ])("keeps the disclosure open through %s", inner => {
+    const text = `<details><summary>Answer</summary>${inner}\nforty-two</details>\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+  });
+
+  it.each([
+    ["<summary><math><mtext></summary></mtext></math>Answer</summary>", "Answer"],
+    ["<summary><svg><foreignObject></summary></foreignObject></svg>Hint</summary>", "Hint"],
+    ["<summary><table><tr><td></summary></td></tr></table>Hint</summary>", "Hint"],
+    ["<math><mtext><summary>Fake</summary></mtext></math><summary>Answer</summary>", "details"],
+    ["<summary><template><summary>Fake</summary></template>Hint</summary>", "Hint"],
+  ])("uses the in-scope summary in %s", (inner, label) => {
+    const text = `<details>${inner}\nforty-two</details>\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      const disclosure = chunks.find(chunk => chunk.text.includes("forty-two"));
+      if (label === "Hint") {
+        expect(disclosure?.visibility).toBe("hint_gated");
+        const ranked = rankPedagogicalEvidence({
+          chunks,
+          authorization: { admissibleSourceIds: ["captions"], allowHintGated: false },
+          lexicalRanking: chunks.map(chunk => ({ id: chunk.id, score: 1 })),
+        });
+        expect(ranked.ranked.some(result => result.chunk.text.includes("forty-two"))).toBe(false);
+      } else {
+        expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+      }
+    }
+    expect(parsePedagogicalAst(text).find(block => block.visibility !== "public")?.label).toBe(label);
+  });
+
+  it.each([
+    ...["mi", "mo", "mn", "ms", "mtext"].map(tag => `<math><${tag}><![CDATA[Answer]]></${tag}></math>`),
+    "<svg><foreignObject><![CDATA[Answer]]></foreignObject></svg>",
+    '<math><annotation-xml encoding=text/html><![CDATA[Answer]]></annotation-xml></math>',
+    '<table><math><mtext><![CDATA[Answer]]></mtext></math></table>',
+    '<form><span style="--mode:inline"></form><span style="display:var(--mode,none)">Answer</span></span>',
+    '<form style="--mode:inline"><span></form><span style="display:var(--mode,none)">Answer</span></span>',
+    '<b><section style="--mode:inline"></b><span style="display:var(--mode,none)">Answer</span></section>',
+    '<b hidden><section style="--mode:inline">ignore</b> <span style="display:var(--mode,none)">Answer</span></section>',
+    '<b style="display:none"><section style="--mode:inline">ignore</b> <span style="display:var(--mode,none)">Answer</span></section>',
+    '<span><section style="--mode:inline"></span><span style="display:var(--mode,none)">Answer</span></section>',
+  ])("keeps visible answer labels in heading, summary, and table markup %s", label => {
+    for (const text of [
+      `## ${label}\n\nforty-two\n\n## Next topic\nPublic theorem.`,
+      `<details><summary>Hint / ${label}</summary>forty-two</details>\n\nPublic theorem.`,
+      `| ${label} | Notes |\n| --- | --- |\n| forty-two | Public theorem. |`,
+    ]) {
+      for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it.each(Object.getOwnPropertyNames(Object.prototype))("treats %s as an ordinary label or identifier", key => {
+    for (const source of [
+      (label: string) => `:::${label}\nLesson.\n:::`,
+      (label: string) => `> [!${label}]\n> Lesson.`,
+      (label: string) => `\\begin{${label}}\nLesson.\n\\end{${label}}`,
+    ]) {
+      const shape = (text: string) => chunkDocumentAndCues(text).map(chunks => chunks.map(chunk => ({
+        kind: chunk.kind, constructKinds: chunk.constructKinds, visibility: chunk.visibility,
+      })));
+      expect(shape(source(key))).toEqual(shape(source("ordinary")));
+    }
+    const text = `## An[sw][${key}]er\n\nforty-two\n\n## Next topic\nPublic theorem.\n\n[${key}]: /lesson`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    const css = `## <span style="--${key}:inline;display:var(--${key},none)">Answer</span>\n\nforty-two`;
+    for (const chunks of chunkDocumentAndCues(css)) expectSealedEvidence(chunks, css, ["forty-two"]);
+  });
+
   it.each([
     ["a stray span end across a section", '<div><span><section style="--mode:none"></span>'],
     ["a stray span end across an article", '<div><span><article style="--mode:none"></span>'],
@@ -1761,7 +1848,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["an independent comment before raw HTML and a template", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\n<textarea></details></textarea>\n\n<template></details></template>", "Public theorem."],
     ["SVG closed in an HTML-block fence", "<details><summary>Answer</summary><svg>\n~~~\n</svg>\n~~~\n<![CDATA[> </details>]]>Public theorem.", "Public theorem."],
     ["an independent comment before another disclosure", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nfirst secret\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\n<details><summary>Answer</summary>second secret</details>", "Public theorem."],
-    ["a bogus CDATA opener in an SVG HTML integration point", "<details><summary>Answer</summary><svg><foreignObject><![CDATA[ignored></foreignObject></svg>Answer</details>forty-two]]>", "forty-two"],
+    ["a bogus CDATA opener in an HTML child of an SVG integration point", "<details><summary>Answer</summary><svg><foreignObject><div><![CDATA[ignored></div></foreignObject></svg>Answer</details>forty-two]]>", "forty-two"],
     ["escaped emphasis markers", "## An\\*sw\\*er\nforty-two", "forty-two"],
     ["literal intraword underscores", "## An_sw_er\nforty-two", "forty-two"],
     ["an answer marker used only as a link destination", "## [Lecture](Answer)\nforty-two", "forty-two"],
@@ -3099,6 +3186,19 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
       expect(Object.hasOwn(roundTrip, id)).toBe(true);
       expect(roundTrip[id]).toBe(0.5);
     }
+  });
+
+  it.each(Object.getOwnPropertyNames(Object.prototype))("treats an unknown chunk kind %s as prose for foundation ordering", kind => {
+    const result = rankPedagogicalEvidence({
+      chunks: [
+        makeChunk({ id: "ordinary", kind: kind as PedagogicalChunk["kind"], conceptIds: ["concept"] }),
+        makeChunk({ id: "foundation", kind: "definition", conceptIds: ["concept"] }),
+      ],
+      concepts: [{ id: "concept", label: "Concept", supportingSourceIds: ["src-notes"] }],
+      seedScores: { ordinary: 9, foundation: 1 },
+      authorization: { admissibleSourceIds: ["src-notes"], allowHintGated: false },
+    });
+    expect(result.ranked.map(({ chunk }) => chunk.id)).toEqual(["foundation", "ordinary"]);
   });
 
   it("keeps combined scores ordered with large finite blend coefficients", () => {

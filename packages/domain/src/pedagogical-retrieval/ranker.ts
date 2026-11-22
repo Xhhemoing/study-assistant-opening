@@ -394,15 +394,17 @@ function orderFoundationsBeforeDependents(
 
   // Pass 2: Add inferred shared-concept foundational tier edges (e.g., Definition -> Theorem)
   // only when `i` is NOT reachable from `j` in the accumulated DAG (`!isReachable(j, i)`).
+  const tiers = selected.map(({ chunk: { kind } }) => Object.hasOwn(PEDAGOGICAL_FOUNDATION_TIER, kind)
+    ? PEDAGOGICAL_FOUNDATION_TIER[kind] : PEDAGOGICAL_FOUNDATION_TIER.prose);
   for (let i = 0; i < n; i++) {
     const chunkA = selected[i]!.chunk;
     const conceptsA = conceptsByChunkId.get(chunkA.id);
     if (!conceptsA || conceptsA.size === 0) continue;
-    const tierA = PEDAGOGICAL_FOUNDATION_TIER[chunkA.kind];
+    const tierA = tiers[i]!;
     for (let j = 0; j < n; j++) {
       if (i === j) continue;
       const chunkB = selected[j]!.chunk;
-      const tierB = PEDAGOGICAL_FOUNDATION_TIER[chunkB.kind];
+      const tierB = tiers[j]!;
       if (tierA >= tierB) continue;
       const conceptsB = conceptsByChunkId.get(chunkB.id);
       if (!conceptsB || conceptsB.size === 0) continue;
@@ -447,9 +449,7 @@ function orderFoundationsBeforeDependents(
   const isBetter = (a: number, b: number): boolean => {
     const prioDiff = effectivePriority[a]! - effectivePriority[b]!;
     if (prioDiff !== 0) return prioDiff < 0;
-    const tierDiff =
-      PEDAGOGICAL_FOUNDATION_TIER[selected[a]!.chunk.kind] -
-      PEDAGOGICAL_FOUNDATION_TIER[selected[b]!.chunk.kind];
+    const tierDiff = tiers[a]! - tiers[b]!;
     if (tierDiff !== 0) return tierDiff < 0;
     return a < b;
   };
