@@ -2838,6 +2838,26 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Choose a given point in the open interval 0 < x < 1."].map(text => ({
         answerKey: "A", text, ok: true,
       })),
+      ...["Choose a given state with nRT = PV.", "Choose a given state with mgh = K.",
+        "Choose a given point with xyz = 1.", "Choose a given point with 1 = xyz.",
+        "Choose a given point with 2xyz_0 = 1.", "Choose a given state with pV = nrt.",
+        "Choose a given state with RLC = kBT.", "Choose a given sample with gAS = p.",
+        "Choose a given value with ABCD = x.", "Choose a given value with x = ABCD.",
+        "Choose a given point on the straight line x + y = 1.",
+        "Choose a given point on the vertical line x = 1.",
+        "Choose a given point on the flat tangent line y = 2.",
+        "Choose a given value in the small closed interval 0 <= x <= 1."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
+      ...["Choose a given sample in gas > 0.", "Choose a given sample in gas = 0.",
+        "Choose a given sample in water > 0.", "Choose a given value with x = sum.",
+        "Choose a given state with nRT = PV fails.",
+        "Choose a given point on the straight line x + y = 1 fails.",
+        "Select a given current in the loop approached I = 0.",
+        "Select a given current in the loop approached x = 0.",
+        "Select a given result in the circuit carefully x = 0."].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),
@@ -4224,6 +4244,83 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
         "concept-with-colons", "course-with-colons",
       ]);
     }
+  });
+
+  describe("duplicate direct evidence", () => {
+    const target = { targetCourseId: "target", targetConceptId: "geometry" };
+    const context = {
+      ...target,
+      activeCourseSharingEnabled: { math: true, physics: true },
+      coursePrivacyEpochs: { math: 1, physics: 1 },
+      revokedSourceIds: new Set<string>(),
+    };
+    const sharedEdge = {
+      ...target,
+      sourceCourseId: "math",
+      sourceConceptId: "angles",
+      alignmentWeight: 0.3,
+      sourceDirectObservationCount: 9,
+      edgePrivacyEpoch: 1,
+      supportingSourceIds: [],
+    };
+
+    it.each([0.3, 0.2])("decouples conflicting mastery in both orders with starting weight %s", alignmentWeight => {
+      const edges = [
+        { ...sharedEdge, edgeId: "no-successes", alignmentWeight, sourceDirectObservationCount: 3, sourceDirectSuccessCount: 0 },
+        { ...sharedEdge, edgeId: "invalid-alignment", alignmentWeight: 0, sourceDirectSuccessCount: 6 },
+        { ...sharedEdge, edgeId: "six-successes", sourceDirectSuccessCount: 6 },
+      ];
+
+      for (const orderedEdges of [edges, [...edges].reverse()]) {
+        const result = computeCrossCourseWeakPrior({ ...context, edges: orderedEdges });
+
+        expect(result).toMatchObject({ alpha: 1, beta: 1, posteriorMean: 0.5, acceptedEdges: [] });
+        expect(result.decoupledEdges.map(({ edgeId, reason, reasons }) => ({ edgeId, reason, reasons }))).toEqual(
+          orderedEdges.map(({ edgeId }) => ({
+            edgeId, reason: "invalid_edge_parameters", reasons: ["invalid_edge_parameters"],
+          })),
+        );
+      }
+    });
+
+    it("selects consistent duplicates by weight, observation count, evidence source, and edge ID", () => {
+      const edges = [
+        { ...sharedEdge, edgeId: "valid-dup-1", sourceDirectSuccessCount: 3 },
+        { ...sharedEdge, edgeId: "valid-dup-2", sourceDirectSuccessCount: 3 },
+        { ...sharedEdge, edgeId: "a-lower-weight", alignmentWeight: 0.2, sourceDirectObservationCount: 12, sourceDirectSuccessCount: 4 },
+        { ...sharedEdge, edgeId: "a-fewer-observations", sourceDirectObservationCount: 3, sourceDirectSuccessCount: 1 },
+        { ...sharedEdge, edgeId: "a-certified", certifiedDirectObservationCount: 9, sourceDirectOnlyMasteryProbability: 1 / 3 },
+        { ...sharedEdge, edgeId: "distinct-source", sourceCourseId: "physics", sourceDirectSuccessCount: 6 },
+      ];
+
+      const result = computeCrossCourseWeakPrior({ ...context, edges });
+
+      expect(computeCrossCourseWeakPrior({ ...context, edges: [...edges].reverse() })).toEqual(result);
+      expect(result.acceptedEdges.map(edge => edge.edgeId)).toEqual(["valid-dup-1", "distinct-source"]);
+      expect(result.decoupledEdges).toEqual([]);
+    });
+
+    it("breaks same-ID ties between probabilities within the mastery tolerance", () => {
+      const edges = [0.5 + 0.5e-12, 0.5].map(sourceDirectOnlyMasteryProbability => ({
+        ...sharedEdge, edgeId: "same-id", certifiedDirectObservationCount: 9, sourceDirectOnlyMasteryProbability,
+      }));
+
+      const result = computeCrossCourseWeakPrior({ ...context, edges });
+
+      expect(computeCrossCourseWeakPrior({ ...context, edges: [...edges].reverse() })).toEqual(result);
+      expect(result.acceptedEdges[0]?.sourceDirectOnlyMasteryProbability).toBe(0.5);
+    });
+
+    it("compares the most distant records even when the first record agrees with both", () => {
+      const edges = [0.5 + 0.75e-12, 0.5, 0.5 + 1.5e-12].map((sourceDirectOnlyMasteryProbability, index) => ({
+        ...sharedEdge, edgeId: `nearby-${index}`, certifiedDirectObservationCount: 9, sourceDirectOnlyMasteryProbability,
+      }));
+
+      const result = computeCrossCourseWeakPrior({ ...context, edges });
+
+      expect(result).toMatchObject({ alpha: 1, beta: 1, posteriorMean: 0.5, acceptedEdges: [] });
+      expect(result.decoupledEdges.map(edge => edge.edgeId)).toEqual(edges.map(edge => edge.edgeId));
+    });
   });
 
   it("enforces strict 1-hop propagation only (ignores A->B upstream and bridge-only B->C)", () => {

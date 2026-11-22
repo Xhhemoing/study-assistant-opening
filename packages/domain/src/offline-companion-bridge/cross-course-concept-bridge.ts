@@ -17,6 +17,44 @@ import {
   type IgnoredNonDirectBridgeEdge,
 } from "./types";
 
+interface AdmissibleBridgeEdge {
+  readonly edge: CrossCourseConceptEdge;
+  readonly edgeId: string;
+  readonly inputIndex: number;
+  readonly canonicalSourceCourseId: string;
+  readonly canonicalSourceConceptId: string;
+  readonly directOnlyMastery: number;
+  readonly evidenceSource: AcceptedConceptBridgeEdge["directEvidenceSource"];
+}
+
+const DIRECT_MASTERY_TOLERANCE = 1e-12;
+
+function compareBridgeCandidates(a: AdmissibleBridgeEdge, b: AdmissibleBridgeEdge): number {
+  const weightOrder = b.edge.alignmentWeight - a.edge.alignmentWeight;
+  const observationOrder = b.edge.sourceDirectObservationCount - a.edge.sourceDirectObservationCount;
+  const evidenceOrder = Number(b.evidenceSource === "direct_counts") - Number(a.evidenceSource === "direct_counts");
+  const idOrder = a.edgeId < b.edgeId ? -1 : Number(a.edgeId > b.edgeId);
+  // Equal IDs can carry distinct probabilities within the tolerance.
+  return weightOrder || observationOrder || evidenceOrder || idOrder || a.directOnlyMastery - b.directOnlyMastery;
+}
+
+function decoupledBridgeEdge(
+  edge: CrossCourseConceptEdge,
+  edgeId: string,
+  reasons: readonly CrossCourseDecoupleReason[],
+): DecoupledConceptBridgeEdge {
+  const reason = reasons[0] ?? "bridged_prior_contamination";
+  return {
+    edgeId,
+    sourceCourseId: edge.sourceCourseId,
+    sourceConceptId: edge.sourceConceptId,
+    targetCourseId: edge.targetCourseId,
+    targetConceptId: edge.targetConceptId,
+    reason,
+    reasons: reasons.length > 0 ? reasons : [reason],
+  };
+}
+
 function resolveEdgeId(edge: CrossCourseConceptEdge): string {
   return (
     edge.edgeId ??
@@ -162,20 +200,10 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
   }
 
   const ignoredNonDirectEdges: IgnoredNonDirectBridgeEdge[] = [];
-  const decoupledEdges: DecoupledConceptBridgeEdge[] = [];
-  const survivingBySourceKey = new Map<
-    string,
-    {
-      edge: CrossCourseConceptEdge;
-      edgeId: string;
-      canonicalSourceCourseId: string;
-      canonicalSourceConceptId: string;
-      directOnlyMastery: number;
-      evidenceSource: "direct_counts" | "certified_direct_only_probability";
-    }
-  >();
+  const decoupledByIndex: Array<DecoupledConceptBridgeEdge | undefined> = [];
+  const admissibleBySourceKey = new Map<string, AdmissibleBridgeEdge[]>();
 
-  for (const edge of edges) {
+  for (const [inputIndex, edge] of edges.entries()) {
     const edgeId = resolveEdgeId(edge);
     const edgeTargetIdsValid =
       isSafeIdentifier(edge.targetCourseId) && isSafeIdentifier(edge.targetConceptId);
@@ -291,35 +319,51 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     }
 
     if (decoupleReasons.length > 0 || !directResolution || !directResolution.ok) {
-      decoupledEdges.push({
-        edgeId,
-        sourceCourseId: edge.sourceCourseId,
-        sourceConceptId: edge.sourceConceptId,
-        targetCourseId: edge.targetCourseId,
-        targetConceptId: edge.targetConceptId,
-        reason: decoupleReasons[0] ?? "bridged_prior_contamination",
-        reasons: decoupleReasons.length > 0 ? decoupleReasons : ["bridged_prior_contamination"],
-      });
+      decoupledByIndex[inputIndex] = decoupledBridgeEdge(edge, edgeId, decoupleReasons);
       continue;
     }
 
-    // Deduplicate identical canonical `(sourceCourseId, sourceConceptId)` edges deterministically
-    // so repeating the same neighbor (or whitespace-padded aliases) cannot inflate alignment weight.
     const sourceKey = JSON.stringify([canonicalSourceCourseId, canonicalSourceConceptId]);
-    const existing = survivingBySourceKey.get(sourceKey);
-    if (!existing || edge.alignmentWeight > existing.edge.alignmentWeight) {
-      survivingBySourceKey.set(sourceKey, {
-        edge,
-        edgeId,
-        canonicalSourceCourseId,
-        canonicalSourceConceptId,
-        directOnlyMastery: directResolution.directOnlyMastery,
-        evidenceSource: directResolution.evidenceSource,
-      });
+    const candidate = {
+      edge,
+      edgeId,
+      inputIndex,
+      canonicalSourceCourseId,
+      canonicalSourceConceptId,
+      directOnlyMastery: directResolution.directOnlyMastery,
+      evidenceSource: directResolution.evidenceSource,
+    };
+    const group = admissibleBySourceKey.get(sourceKey);
+    if (group) {
+      group.push(candidate);
+    } else {
+      admissibleBySourceKey.set(sourceKey, [candidate]);
     }
   }
 
-  const surviving = [...survivingBySourceKey.values()];
+  const surviving: AdmissibleBridgeEdge[] = [];
+  // A stable source order also keeps the floating-point accumulation deterministic.
+  for (const sourceKey of [...admissibleBySourceKey.keys()].sort()) {
+    const group = admissibleBySourceKey.get(sourceKey)!;
+    let preferred = group[0]!;
+    let minimumMastery = preferred.directOnlyMastery;
+    let maximumMastery = preferred.directOnlyMastery;
+    for (const candidate of group) {
+      minimumMastery = Math.min(minimumMastery, candidate.directOnlyMastery);
+      maximumMastery = Math.max(maximumMastery, candidate.directOnlyMastery);
+      if (compareBridgeCandidates(candidate, preferred) < 0) preferred = candidate;
+    }
+
+    if (maximumMastery - minimumMastery > DIRECT_MASTERY_TOLERANCE) {
+      for (const { edge, edgeId, inputIndex } of group) {
+        decoupledByIndex[inputIndex] = decoupledBridgeEdge(edge, edgeId, ["invalid_edge_parameters"]);
+      }
+    } else {
+      surviving.push(preferred);
+    }
+  }
+
+  const decoupledEdges = decoupledByIndex.filter(edge => edge !== undefined);
 
   if (surviving.length === 0) {
     return {

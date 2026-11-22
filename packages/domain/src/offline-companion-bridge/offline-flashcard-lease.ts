@@ -1652,10 +1652,19 @@ const ARTICLE_PARTICIPLE_FORM_RE = /^(?:[a-z]{2,}(?:ed|ing)|shown|given|taken|kn
 const ARTICLE_PLURAL_VERB_RE = /^(?:fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist|work|remain|stay|appear|occur|apply|follow|depend)$/;
 const ARTICLE_IMPERATIVE_RE = /^(?:compute|find|show|prove|check|explain|determine|evaluate|verify|state|give|write|list|sketch|plot)$/;
 
-const ARTICLE_IMPLICIT_PRODUCT_RE = /^\d*([a-z]{2,3})(?:_[\p{L}\p{N}]+)?$/u;
+const ARTICLE_IMPLICIT_PRODUCT_RE = /^\d*([a-z]{2,3})(?:_[\p{L}\p{N}]+)?$/iu;
 const ARTICLE_TWO_LETTER_PROSE_RE = /^(?:in|on|at|to|of|by|as|up|or|if|so|no|an|is|am|be|do|go|we|he|me|my|us|it|ox)$/;
+const ARTICLE_THREE_LETTER_PROSE_RE = new RegExp("^(?:" +
+  "act|add|age|aid|aim|air|arm|art|ash|bag|bar|bat|bed|bet|big|bit|bow|box|boy|bus|buy|cab|can|cap|car|cat|cow|" +
+  "cup|cut|day|den|dew|did|dog|dot|dry|due|dye|ear|eat|egg|end|era|eye|fan|far|fat|fee|few|fit|fix|fly|fog|fun|" +
+  "gap|gas|get|got|gun|gut|guy|had|hat|hay|hen|her|hid|hip|his|hit|hot|how|ice|icy|ink|ion|jam|jar|jaw|jet|job|" +
+  "joy|key|kid|kit|lab|lag|lap|law|lay|led|leg|let|lid|lie|lip|lit|log|lot|low|mad|man|map|mat|max|may|met|min|" +
+  "mix|mob|mop|mud|mug|nap|net|new|nod|nor|not|now|nut|odd|off|oil|old|one|opt|ore|out|owe|own|pad|pan|pat|paw|" +
+  "pay|pea|pen|pet|pie|pig|pin|pit|pop|pot|pro|put|rag|ran|rap|rat|raw|ray|red|rib|rid|rip|rob|rod|rot|row|rub|" +
+  "rug|run|rye|sad|sap|sat|saw|say|sea|see|set|sew|she|shy|sin|sip|sir|sit|six|ski|sky|sly|sob|son|spa|spy|sub|" +
+  "sue|sum|sun|tab|tag|tan|tap|tar|tax|tea|tee|ten|the|tie|tin|tip|toe|ton|too|top|tow|toy|try|tub|two|use|van|" +
+  "vet|via|war|was|wax|way|web|wed|wet|who|why|wig|win|wit|won|wow|yam|yes|yet|you|zip|zoo|all|bad)$");
 const ARTICLE_PRODUCT_OPERATOR_RE = /^[+\-*/^]$/;
-const ARTICLE_RELATION_MODIFIER_RE = /^(?:unit|coordinate|open|real|upper|lower)$/;
 
 function isArticleRelationBoundaryWord(word: string): boolean {
   return ARTICLE_STOP_WORD_RE.test(word) || ARTICLE_DETERMINER_RE.test(word) || ARTICLE_SUBORDINATE_RE.test(word) ||
@@ -1663,22 +1672,34 @@ function isArticleRelationBoundaryWord(word: string): boolean {
     ARTICLE_INTRANSITIVE_PAST_RE.test(word) || ARTICLE_TRANSITIVE_PAST_RE.test(word) || ARTICLE_PLURAL_VERB_RE.test(word);
 }
 
-function isArticleImplicitProduct(token: string, sawRelation: boolean, nearArithmetic: boolean): boolean {
+function isArticleImplicitProduct(token: string, nearArithmetic: boolean): boolean {
   return token.split("-").every(term => {
-    if (ARTICLE_SYMBOLIC_LHS_RE.test(term) || DECIMAL_LITERAL_RE.test(term)) return true;
+    const lowerTerm = term.toLowerCase();
+    if (ARTICLE_SYMBOLIC_LHS_RE.test(lowerTerm) || DECIMAL_LITERAL_RE.test(lowerTerm)) return true;
+    if (ARTICLE_IDENTIFIER_RE.test(term) && /\p{Lu}/u.test(term.slice(1)) && !isArticleRelationBoundaryWord(lowerTerm)) {
+      return true;
+    }
     const variables = ARTICLE_IMPLICIT_PRODUCT_RE.exec(term)?.[1];
     if (variables === undefined) return false;
+    const word = variables.toLowerCase();
     // "by" is b times y when an explicit arithmetic operator connects the terms.
-    if (variables === "by") return nearArithmetic;
-    return !isArticleRelationBoundaryWord(variables) && (sawRelation || nearArithmetic ||
-      (variables.length === 2 && !ARTICLE_TWO_LETTER_PROSE_RE.test(variables)));
+    if (word === "by") return nearArithmetic;
+    if (isArticleRelationBoundaryWord(word)) return false;
+    return /[A-Z]/.test(variables.slice(1)) ||
+      !(ARTICLE_TWO_LETTER_PROSE_RE.test(word) || ARTICLE_THREE_LETTER_PROSE_RE.test(word));
   });
+}
+
+function isArticlePrepositionalBoundary(word: string): boolean {
+  return isArticleRelationBoundaryWord(word) || ARTICLE_RELATION_COMPLEMENT_RE.test(word) ||
+    ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(word) || ARTICLE_IMPERATIVE_RE.test(word) ||
+    (word.endsWith("ly") && word !== "early" && !ARTICLE_LY_NOUN_RE.test(word));
 }
 
 function articleClauseTokens(remainder: string): string[] {
   const tokens: string[] = [];
   let depth = 0;
-  for (const [token] of remainder.toLowerCase().matchAll(ARTICLE_CLAUSE_TOKEN_RE)) {
+  for (const [token] of remainder.matchAll(ARTICLE_CLAUSE_TOKEN_RE)) {
     if ("([{".includes(token)) {
       // Keep one token for the entire group, including function arguments.
       if (depth === 0) tokens.push(token);
@@ -1699,8 +1720,9 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
   let insideAbsoluteValue = false;
   let end = start;
   for (let index = start; index < tokens.length; index += 1) {
-    const token = tokens[index]!;
-    const argument = tokens[index + 1] ?? "";
+    const rawToken = tokens[index]!;
+    const token = rawToken.toLowerCase();
+    const argument = tokens[index + 1]?.toLowerCase() ?? "";
     if (RELATION_OP_RE.test(token)) {
       if (expectsOperand || insideAbsoluteValue) break;
       sawRelation = true;
@@ -1720,7 +1742,7 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
         ARTICLE_FINITE_VERB_RE.test(token) || ARTICLE_HOMOGRAPH_VERB_RE.test(token) ||
         ARTICLE_INTRANSITIVE_PAST_RE.test(token) || ARTICLE_TRANSITIVE_PAST_RE.test(token))) break;
       expectsOperand = true;
-    } else if ("([{".includes(token) || isArticleImplicitProduct(token, sawRelation,
+    } else if ("([{".includes(token) || isArticleImplicitProduct(rawToken,
       ARTICLE_PRODUCT_OPERATOR_RE.test(tokens[index - 1] ?? "") || ARTICLE_PRODUCT_OPERATOR_RE.test(argument))) {
       expectsOperand = false;
     } else {
@@ -1736,20 +1758,19 @@ function articlePrepositionalRelationEnd(tokens: readonly string[], start: numbe
   const directEnd = articleRelationComplementEnd(tokens, start);
   if (directEnd > start) return directEnd;
 
-  const headStart = ARTICLE_DETERMINER_RE.test(tokens[start] ?? "") ? start + 1 : start;
+  const headStart = ARTICLE_DETERMINER_RE.test(tokens[start]?.toLowerCase() ?? "") ? start + 1 : start;
   for (let headIndex = headStart; headIndex < headStart + 3; headIndex += 1) {
-    const word = tokens[headIndex] ?? "";
-    if (!ARTICLE_IDENTIFIER_RE.test(word) || isArticleRelationBoundaryWord(word)) break;
+    const word = tokens[headIndex]?.toLowerCase() ?? "";
+    if (!ARTICLE_IDENTIFIER_RE.test(word) || isArticlePrepositionalBoundary(word)) break;
 
-    // After the head, the equation needs its own LHS, as in "the line x + y = 1".
+    // The appositive needs its own LHS, as in "the straight line x + y = 1".
     const appositiveStart = headIndex + 1;
-    if (isArticleRelationBoundaryWord(tokens[appositiveStart] ?? "")) break;
+    if (isArticlePrepositionalBoundary(tokens[appositiveStart]?.toLowerCase() ?? "")) break;
     const end = articleRelationComplementEnd(tokens, appositiveStart);
-    if (end > appositiveStart) return end;
-
-    if (!(ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(word) || ARTICLE_PARTICIPLE_FORM_RE.test(word) ||
-      ARTICLE_RELATION_MODIFIER_RE.test(word) ||
-      (ARTICLE_MODIFIER_WORD_RE.test(word) && !ARTICLE_LY_NOUN_RE.test(word)))) break;
+    if (end > appositiveStart) {
+      // "The loop approached x = 0" starts a predicate after the noun.
+      return headIndex > headStart && word.endsWith("ed") ? start : end;
+    }
   }
 
   return start;
@@ -1763,7 +1784,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
   let inInfinitive = false;
   let hasConjoinedSubject = false;
   for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index]!;
+    const token = tokens[index]!.toLowerCase();
     if (token === ",") {
       const closingComma = tokens.indexOf(",", index + 2);
       if (closingComma < 0) break;
@@ -1801,7 +1822,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
         return true;
       }
       if (!inInfinitive && (ARTICLE_INTRANSITIVE_PAST_RE.test(token) ||
-        (ARTICLE_TRANSITIVE_PAST_RE.test(token) && !ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(tokens[index + 1] ?? "")))) {
+        (ARTICLE_TRANSITIVE_PAST_RE.test(token) && !ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(tokens[index + 1]?.toLowerCase() ?? "")))) {
         return true;
       }
     }
