@@ -49,7 +49,8 @@ _TABLE_CAPTION_REF_RE = re.compile(r"^(?:Table|表|附表)\b", re.IGNORECASE)
 _VISUAL_CAPTION_REF_RE = re.compile(r"^(?:Figure|Fig\.?|Chart|Diagram|Scheme|图|插图)\b", re.IGNORECASE)
 
 # Standalone assessment headings can open a seal across physical pages.
-_SEALED_SECTION_CONTAINER = r"(?:Appendix\s+[A-Z0-9]+|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*|(?:Lecture|Part|Unit)\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)"
+_SEALED_SECTION_CONTAINER = r"(?:Appendix\b(?:\s+[A-Z0-9]+)?|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*|(?:Lecture|Part|Unit)\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)"
+_SEALED_CONTAINER_PREFIX = rf"(?:{_SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+)|附录)"
 _SEALED_HEADING_CONTINUATION = r"(?:\s*\(\s*(?:continued|cont(?:['’]?d)?\.?)\s*\))?"
 _ASSESSMENT_NUMBER = r"#?\d+(?:\.\d+)*"
 _ASSESSMENT_TARGET = rf"(?:\s+{_ASSESSMENT_NUMBER}(?:(?:\s*[-–—]\s*|\s+(?:to|through)\s+){_ASSESSMENT_NUMBER})?)?"
@@ -60,9 +61,11 @@ _ASSESSMENT_ANSWER_HEADING = (
 )
 _QUALIFIED_ANSWER_SECTION = r"(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|(?:Official|Reference)\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)"
 _CONTAINER_SEALED_HEADING = (
-    rf"{_SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+)"
-    r"(?:Answers?\s+Key|(?:(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Even-Numbered)\s+)?(?:Answers?|Solutions?)|参考答案|标准答案|参考解答|详细解答|答案|解答)"
-    rf"{_SEALED_HEADING_CONTINUATION}\s*(?:[:：]|$)"
+    rf"{_SEALED_CONTAINER_PREFIX}(?:(?:Answers?\s+Key|"
+    r"(?:(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Even-Numbered)\s+)?(?:Answers?|Solutions?))"
+    rf"{_SEALED_HEADING_CONTINUATION}"
+    r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答)"
+    r"(?:\s*[（(](?:续|接上页)[）)])?)\s*(?:[:：]|$)"
 )
 
 _SECTION_SEALED_RE = re.compile(
@@ -220,11 +223,12 @@ _TEXTBOOK_NON_ANSWER_HEADING_RE = re.compile(
 )
 _MAJOR_NON_ANSWER_HEADING_RE = re.compile(
     r"^(?:"
-    r"(?:Bibliography|References|Works\s+Cited|Index|Subject\s+Index|Author\s+Index|Glossary|Notation\s+Index|Acknowledgements?|About\s+the\s+Authors?)"
-    r"|(?:参考文献|索引|名词索引|主题索引|符号表|后记|致谢)"
-    r"|Appendix\s+[A-Z0-9]+(?:\s*[:.\-—]\s*(?!.*(?:Answer|Solution)).*)?$"
-    r"|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.\-—]\s*(?!.*(?:答案|解答)).*)?$"
-    r")(?:\s*[:：.\-—]|$)",
+    r"(?:Bibliography|References|Works\s+Cited|Index|Subject\s+Index|Author\s+Index|Glossary|Notation\s+Index"
+    r"|Acknowledg(?:e)?ments?|About\s+the\s+Authors?|Afterword|Colophon|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢)"
+    r"(?:\s*[:：.\-—–]|$)"
+    r"|(?:Appendix(?:\s+[A-Z0-9]+)?|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)"
+    r"(?:\s*[:：.\-—–]\s*(?!.*(?:\b(?:Answers?|Solutions?|Keys?)\b|答案|解答)).*)?$"
+    r")",
     re.IGNORECASE,
 )
 _PREV_CONTINUATION_RE = re.compile(
@@ -511,6 +515,8 @@ def _is_running_page_heading(stripped: str) -> bool:
 
 def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
     if _is_section_sealed_opener(stripped) or _is_running_page_heading(stripped):
+        return False
+    if re.fullmatch(r"\d+(?:\.\d+)*\s+(?:true|false|yes|no|none|[a-f](?:\s*,\s*[a-f])*)[.。]?", stripped, re.IGNORECASE):
         return False
     if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True

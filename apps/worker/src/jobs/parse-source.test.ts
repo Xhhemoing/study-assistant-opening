@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpeningModelRoutingError, type ModelGateway } from "@aistudy/ai";
 import { sourceRecordSchema, type ApiFailure, type SourceChunk, type SourceRecord } from "@aistudy/contracts";
 import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
-import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, OpeningSourceChunksRepository } from "@aistudy/database";
+import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, OpeningSourceChunksRepository, PdfSegmentPage } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
 import { createSourceVisualRecognition } from "../runtime/source-visual-recognition";
 import { createParseSourceHandler, type ParseSourceVisualPageInput } from "./parse-source";
@@ -159,6 +159,45 @@ describe("parse source handler", () => {
         sectionSealedAtEnd: mode === "section", inlineSealedAtEnd: mode === "inline", publicationSealUnknown: false,
       })],
     }]]);
+  });
+
+  it.each(["new", "legacy empty array"])("recovers a native page on the first retry with %s marker provenance", async provenance => {
+    const markers = new Map<number, PdfSegmentPage>();
+    const segments: OpeningPdfSegmentsRepository = {
+      assertCurrent: async () => {},
+      read: async () => null,
+      readPageSeals: async (_scope, { pageStart, pageEnd }) => [...markers.values()]
+        .filter(({ page }) => page >= pageStart && page <= pageEnd),
+      save: async (_scope, { parserProfile, pageStart }, segment) => {
+        if (parserProfile === "pdf-publication-page-seal-v1" && segment.state === "ready") markers.set(pageStart, segment.pages[0]!);
+      },
+    };
+    const first = await deps({
+      pageCount: 3, segments,
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Public geometry introduction.", visualKinds: ["picture"], imagePath: null },
+        { page: 2, text: "", visualKinds: [], imagePath: null, hadSealedContent: true, sectionSealedAtEnd: true },
+        { page: 3, text: "5 units.", imagePath: null },
+      ] }),
+      recognizePage: async () => { throw new Error("Vision failed"); },
+    });
+    await expect(first.handler(job, { sourceId })).rejects.toThrow("Vision failed");
+    const marker = markers.get(2)!;
+    expect(marker).toMatchObject({ hadSealedContent: true, sectionSealedAtEnd: true, publicationSealHadPublicPrefix: false });
+    expect(marker.visualKinds).toBeUndefined();
+    if (provenance === "legacy empty array") markers.set(2, { ...marker, visualKinds: [] });
+
+    const texts = ["Public geometry introduction.", "Chapter 2: Geometry\nPublic prose.", "Public continuation."];
+    const retry = await deps({
+      pageCount: 3, segments,
+      stdout: JSON.stringify({ pages: texts.map((text, index) => ({ page: index + 1, text, imagePath: null, visualKinds: [] })) }),
+    });
+    await expect(retry.handler(job, { sourceId })).resolves.toEqual({ pages: 3 });
+    expect(retry.replaceInput()).toMatchObject({
+      chunks: texts.map((text, index) => ({ page: index + 1, text, imageObjectKey: null })),
+      publicationSeals: [expect.objectContaining({ page: 2, hadSealedContent: false })],
+    });
+    expect(retry.warnings).toEqual([]);
   });
 
   it("keeps a verified archived scan outside the implicated visual inputs", async () => {

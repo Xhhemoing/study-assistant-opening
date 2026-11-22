@@ -70,11 +70,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v19-discourse/text",
     "docling-2.126.0/pdf-segments-v20-discourse/text",
     "docling-2.126.0/pdf-segments-v21-discourse/text",
+    "docling-2.126.0/pdf-segments-v22-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v22-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v23-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -147,6 +148,45 @@ describe("bounded resumable PDF parser", () => {
     expect(d.segments.save).toHaveBeenCalledOnce();
   });
 
+  it.each(["unchanged seed", "recognition seal", "worked example", "observer only"] as const)(
+    "limits an over-quota window before side effects with %s", async scenario => {
+      const d = setup(2);
+      const firstPage = { page: 1, text: "é".repeat(300), imagePath: null, visualKinds: ["scan"] };
+      const secondPage = { ...firstPage, page: 2 };
+      const onSegment = vi.fn();
+      const processed = vi.fn();
+      d.input.runner = async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        d.ranges.push([start, argv.includes("section_sealed") ? 1 : argv.includes("--initial-in-worked-example") ? 2 : 0]);
+        return { exitCode: 0, stdout: JSON.stringify({ pages: start === 1 ? [firstPage, secondPage]
+          : [{ ...secondPage, text: "x".repeat(100) }] }) };
+      };
+      const parse = () => parsePdfSegments({ ...d.input, maxBookBytes: 1024, onSegment,
+        onPages: scenario === "observer only" ? undefined : pages => {
+          for (const page of pages) processed(page.page, Buffer.byteLength(page.text, "utf8"));
+          if (pages[0]?.page !== 1) return;
+          if (scenario === "recognition seal") return { nextSealMode: "section_sealed" };
+          if (scenario === "worked example") return { nextSealMode: null, nextInWorkedExample: true };
+        },
+      });
+      if (scenario === "recognition seal" || scenario === "worked example") {
+        await expect(parse()).resolves.toEqual({ pageCount: 2, failedRanges: [] });
+        expect(processed.mock.calls).toEqual([[1, 600], [2, 100]]);
+        expect(d.ranges).toEqual([[1, 0], [2, scenario === "recognition seal" ? 1 : 2]]);
+        expect(d.segments.save).toHaveBeenCalledOnce();
+        expect(d.segments.save).toHaveBeenCalledWith(scope, expect.objectContaining({ pageStart: 2, pageEnd: 2 }),
+          expect.objectContaining({ state: "ready", pages: [expect.objectContaining({ page: 2 })] }), d.input.signal, [], false);
+      } else {
+        await expect(parse()).rejects.toThrow("1200 > 1024");
+        expect(processed.mock.calls).toEqual(scenario === "unchanged seed" ? [[1, 600]] : []);
+        expect(d.segments.save).not.toHaveBeenCalled();
+      }
+      if (scenario === "observer only") expect(onSegment).not.toHaveBeenCalled();
+      else expect(onSegment).toHaveBeenNthCalledWith(1, expect.objectContaining({ pageStart: 1, pageEnd: 1, pages: [firstPage] }));
+    },
+  );
+
   it("charges a speculative window's consumed prefix to the book quota on live and cached reads", async () => {
     const d = setup(4);
     d.input.runner = async argv => {
@@ -165,9 +205,15 @@ describe("bounded resumable PDF parser", () => {
     });
     await expect(parse()).resolves.toEqual({ pageCount: 4, failedRanges: [] });
     expect(d.ranges).toEqual([[1, 4], [4, 4]]);
+    expect(d.data.has("source/0/text-v1/1-4")).toBe(false);
+    // A previous run with a larger quota could have cached the complete window.
+    d.data.set("source/0/text-v1/1-4", { state: "ready",
+      pages: Array.from({ length: 4 }, (_, i) => ({ page: i + 1, text: "x".repeat(i === 3 ? 220 : 300), imagePath: null })),
+    });
     d.ranges.length = 0;
     await expect(parse()).resolves.toEqual({ pageCount: 4, failedRanges: [] });
     expect(d.ranges).toEqual([]);
+    expect(d.segments.save).toHaveBeenCalledOnce();
   });
 
   it.each(["inline_sealed", "section_sealed"])("passes cached page 10's %s state to page 11 and separates differently seeded cache entries", async mode => {
@@ -391,8 +437,8 @@ describe("bounded resumable PDF parser", () => {
     const seen: number[] = [];
     await expect(parsePdfSegments({ ...oversizedBook.input, maxBookBytes: 25_000, onPages: pages => { seen.push(...pages.map(p => p.page)); } }))
       .rejects.toBeInstanceOf(BoundsExceededError);
-    // The consumer must be able to discard a speculative tail before the book quota is assessed.
-    expect(seen).toEqual(Array.from({ length: 30 }, (_, i) => i + 1));
+    expect(seen).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
+    expect(oversizedBook.segments.save).toHaveBeenCalledTimes(2);
 
     const tooManyPages = setup(MAX_PDF_BOOK_PAGES + 1);
     await expect(collectPdfSegments(tooManyPages.input)).rejects.toBeInstanceOf(BoundsExceededError);
@@ -1090,6 +1136,29 @@ describe("bounded resumable PDF parser", () => {
       expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
     },
   );
+
+  it.each([
+    "Appendix: Solutions", "Appendix Answers", "Appendix — Answer Key", "Appendix: Selected Answers",
+    "附录：参考答案", "附录：习题解答", "附录 答案", "附录答案",
+  ])("opens an unlettered answer appendix after a public section (%s)", async appendix => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Answer Key" }, { page: 2, text: "Works Cited" },
+      { page: 3, text: appendix }, { page: 4, text: "5 units." },
+    ] });
+    expect(result.requests[3]).toEqual({ start: 4, seed: "section_sealed" });
+    expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[2, "Works Cited"]]);
+  });
+
+  it.each([
+    "Acknowledgments", "# Acknowledgments", "Afterword", "# Afterword", "Colophon", "# Colophon",
+    "Appendix: Proofs", "Appendix", "附录：符号表", "# 1.2 True Values in Logic",
+  ])("reopens at a clean %s heading after numbered answers", async heading => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Answer Key" }, { page: 2, text: "# 1 True\n# 1.2 False.\n# 1.3 A, C" },
+      { page: 3, text: heading }, { page: 4, text: "Public continuation." },
+    ] });
+    expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[3, heading], [4, "Public continuation."]]);
+  });
 
   it.each([{ kinds: [] as VisualPageKind[] }, { kinds: ["picture" as const] }])(
     "restores an archived Vision seal on native-cache replay and after changing the OCR profile (visual kinds: $kinds)", async ({ kinds }) => {

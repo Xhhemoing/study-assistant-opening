@@ -5,7 +5,7 @@ import { storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
 import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 
 const definitionPatchByteLimit = 256 * 1024;
-const pdfHeadingContainer = String.raw`(?:(?:chapter|section|lecture|lesson|module|part|unit|appendix) +[\w.]+|第 *[一二三四五六七八九十百千\d]+ *(?:章节|讲义|部分|单元|章|节|讲)|附录 *[A-Z0-9一二三四五六七八九十]+)(?: *[:：.\-—–] *| +)`;
+const pdfHeadingContainer = String.raw`(?:(?:appendix(?: +[\w.]+)?|(?:chapter|section|lecture|lesson|module|part|unit) +[\w.]+|第 *[一二三四五六七八九十百千\d]+ *(?:章节|讲义|部分|单元|章|节|讲)|附录(?: *[A-Z0-9一二三四五六七八九十]+)?)(?: *[:：.\-—–] *| +)|附录)`;
 const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
 const englishContinuation = String.raw`(?: *\( *(?:continued|cont(?:['’]?d)?\.?) *\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
@@ -36,11 +36,12 @@ export function containsPdfAnswerLabel(text: string): boolean {
 // cannot become public because a later line happens to look like a heading.
 const titledContainer = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?: *[:：.．—–-] *| +)|第 *[一二三四五六七八九十百千\d]+ *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]) *[:：.．—–-]? *)(?!(?:is|are|was|see)(?: |$))[[:alpha:]一-龥]`;
 const markdownTitle = String.raw`#{1,6} +(?!(?:chapter|section|part|unit|lecture|lesson|module|appendix)(?: |$)|第 *[一二三四五六七八九十百千\d]+|附录)(?:\d+(?:\.\d+)+ +)?[[:alpha:]一-龥]`;
-const backMatterHeading = String.raw`(?:preface|introduction|bibliography|references|works +cited|index|subject +index|author +index|glossary|notation +index|acknowledgements?|about +the +authors?|序言|前言|引言|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢) *(?:[:：.—–-]|$)`;
-const reopeningHeading = String.raw`^ *(?:(?:#{1,6} +)?(?:${titledContainer}|appendix(?: +[A-Z0-9]+)?(?: *[:：—–-]? +.*| *$)|附录.*|${backMatterHeading})|${markdownTitle})`;
+const backMatterHeading = String.raw`(?:preface|introduction|bibliography|references|works +cited|index|subject +index|author +index|glossary|notation +index|acknowledg(?:e)?ments?|about +the +authors?|afterword|colophon|序言|前言|引言|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢) *(?:[:：.—–-]|$)`;
+const reopeningHeading = String.raw`^ *(?:(?:#{1,6} +)?(?:${titledContainer}|appendix(?: +[A-Z0-9]+)?(?: *[:：.—–-].*| +.*| *$)|附录.*|${backMatterHeading})|${markdownTitle})`;
 const blockedReopeningHeading = [
   String.raw`${lineStart}(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|(?:[ivxlcdm]+|true|false|yes|no|none)[.。]? *$)(?:[ :：]|$)`,
   String.raw`${lineStart}(?:(?:\d+|[a-z])[.)](?: |$)|[a-z] *$|[（(] *(?:\d+|[a-z]|[一二三四五六七八九十]+) *[)）])`,
+  String.raw`${lineStart}\d+(?:\.\d+)* +(?:true|false|yes|no|none|[a-f](?: *, *[a-f])*)[.。]? *$`,
   String.raw`\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|drills?|self[- ]check|homework|assignments?|problem +sets?|worksheets?|tutorials?|recitations?|labs?|continued|cont(?:['’]?d)?)\M`,
   String.raw`(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千]+(?: *(?:[/／–-]|共) *(?:第 *)?[\d一二三四五六七八九十百千]+)? *[页頁]`,
   String.raw`答案|解答|习题|练习|复习题|自测题|思考题|作业|课后题|单元测试|第 *[一二三四五六七八九十百千\d]+ *[题小题]|续上页|接上页|[（(] *续 *[）)]`,

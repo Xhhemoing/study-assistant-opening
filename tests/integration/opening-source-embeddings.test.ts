@@ -299,8 +299,26 @@ describe("pgvector material repository", () => {
   it.each([
     "Works Cited", "Subject Index", "Author Index: Mathematicians", "Acknowledgements",
     "About the Authors", "Notation Index", "符号表", "致谢", "名词索引", "主题索引", "词汇表", "后记",
+    "Acknowledgments", "# Acknowledgments", "Afterword", "# Afterword", "Colophon", "# Colophon",
+    "Appendix: Proofs", "Appendix", "Appendix B Geometry", "附录：符号表", "附录符号表",
   ])("reopens archived back matter at %s", async heading => {
     await expectArchivedPdfPages(["Answer Key", "5 units.", heading, "Public continuation."], [3, 4], 2);
+  });
+
+  it.each(["# 1.2 Algebra", "# 1.2 True Values in Logic"])(
+    "keeps numbered answer headings sealed until %s", async reopening => {
+      const answers = ["# 1.2 True", "# 1.2 False.", "# 2.1 Yes", "# 2.1 No", "# 2.1 None",
+        "# 1.2 B", "# 1.2 A, C", "# 1 True"];
+      const texts = ["Answer Key", ...answers.flatMap(answer => [answer, "5 units."]), reopening, "Public continuation."];
+      await expectArchivedPdfPages(texts, [texts.length - 1, texts.length], 3);
+    },
+  );
+
+  it.each([
+    "Appendix: Solutions", "Appendix: Answers", "Appendix Solutions", "Appendix — Answer Key",
+    "Appendix: Selected Answers", "附录：参考答案", "附录：习题解答", "附录 答案", "附录答案",
+  ])("opens a second archived answer section at %s", async heading => {
+    await expectArchivedPdfPages(["Answer Key", "Works Cited", heading, "5 units."], [2], 4);
   });
 
   it("keeps historical legacy seals settled while the current PDF version is retried", async () => {

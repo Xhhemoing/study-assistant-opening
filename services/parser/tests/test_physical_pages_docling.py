@@ -173,6 +173,31 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertTrue(extracted.section_sealed_by_page[1])
                 self.assertEqual(extracted.texts_by_page, {1: [], 2: [], 3: ["Chapter 5: Vectors"]})
 
+    def test_unlettered_answer_appendix_starts_a_second_seal(self):
+        for heading in ("Appendix: Solutions", "Appendix: Answers", "Appendix Solutions", "Appendix — Answer Key",
+                        "Appendix: Selected Answers", "附录：参考答案", "附录：习题解答", "附录 答案", "附录答案"):
+            with self.subTest(heading=heading):
+                conversion = worker_pdf_conversion(
+                    {1: "Answer Key", 2: "Works Cited", 3: heading, 4: "5 units."}, (),
+                )
+                extracted = physical_pages.extract_physical_pages(conversion)
+                self.assertEqual(extracted.texts_by_page, {1: [], 2: ["Works Cited"], 3: [], 4: []})
+                self.assertTrue(extracted.section_sealed_by_page[3])
+                self.assertTrue(extracted.section_sealed_by_page[4])
+
+    def test_back_matter_can_reopen_after_numbered_answer_headings(self):
+        for heading in ("Acknowledgments", "# Acknowledgments", "Afterword", "# Afterword", "Colophon",
+                        "# Colophon", "Appendix: Proofs", "Appendix", "附录：符号表", "# 1.2 True Values in Logic"):
+            with self.subTest(heading=heading):
+                conversion = worker_pdf_conversion({
+                    1: "Answer Key",
+                    2: "# 1 True\n# 1.2 False.\n# 1.3 A, C",
+                    3: heading,
+                    4: "Public continuation.",
+                }, ())
+                extracted = physical_pages.extract_physical_pages(conversion)
+                self.assertEqual(extracted.texts_by_page, {1: [], 2: [], 3: [heading], 4: ["Public continuation."]})
+
     def test_container_prefixed_worked_examples_keep_the_solution_public(self):
         for heading in ("Chapter 3: Worked Example", "Section 2.1: Worked Example 2", "Unit 2 Worked Example 3"):
             with self.subTest(heading=heading):

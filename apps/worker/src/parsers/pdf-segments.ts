@@ -166,29 +166,32 @@ export async function parsePdfSegments(input: {
   let initialInWorkedExample = false;
   let afterFailedSegment = false;
   let parsedPageCount = 0;
-  const emitSegment = async (pageStart: number, pageEnd: number, parsed: ReturnType<typeof validateSegment>, cached: boolean) => {
+  const emitSegment = async (pageStart: number, parsed: ReturnType<typeof validateSegment>, cached: boolean, firstOverQuotaPage?: number) => {
     const { pages, segmentBytes, segmentTextBytes } = parsed;
-    const lastPage = pages.at(-1);
+    const lastPage = pages.at(-1)!;
+    const pageEnd = lastPage.page;
     await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
     const workerEnd = await input.onPages?.(pages, initialSealMode, afterFailedSegment, initialInWorkedExample, cached);
     afterFailedSegment = false;
     const continuation = workerEnd && typeof workerEnd === "object" ? workerEnd : undefined;
     const resumeFromPage = continuation?.resumeFromPage;
-    if (resumeFromPage !== undefined && (!Number.isInteger(resumeFromPage) || resumeFromPage <= pageStart || resumeFromPage > pageEnd)) {
+    if (resumeFromPage !== undefined && (!Number.isInteger(resumeFromPage) || resumeFromPage <= pageStart
+      || resumeFromPage > (firstOverQuotaPage ?? pageEnd))) {
       throw new RangeError("invalid PDF segment resume page");
     }
     const consumed = resumeFromPage === undefined ? pages : pages.slice(0, resumeFromPage - pageStart);
     cumulativeBookBytes += resumeFromPage === undefined ? segmentTextBytes
       : consumed.reduce((bytes, page) => bytes + Buffer.byteLength(page.text, "utf8"), 0);
-    if (cumulativeBookBytes > maxBookBytes) {
-      throw new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${cumulativeBookBytes} > ${maxBookBytes})`);
-    }
     parsedPageCount += consumed.length;
+    const doclingEndSeal = pdfPageEndSeal(lastPage);
+    const doclingEndWorkedExample = Boolean(lastPage.inWorkedExampleAtEnd);
     initialSealMode = continuation ? continuation.nextSealMode ?? undefined
-      : workerEnd === undefined ? pdfPageEndSeal(lastPage) : typeof workerEnd === "string" ? workerEnd : undefined;
+      : workerEnd === undefined ? doclingEndSeal : typeof workerEnd === "string" ? workerEnd : undefined;
     initialInWorkedExample = continuation?.nextInWorkedExample
-      ?? Boolean(resumeFromPage === undefined && lastPage?.inWorkedExampleAtEnd);
-    return resumeFromPage;
+      ?? (resumeFromPage === undefined && doclingEndWorkedExample);
+    const changedSeed = workerEnd !== undefined
+      && (initialSealMode !== doclingEndSeal || initialInWorkedExample !== doclingEndWorkedExample);
+    return resumeFromPage ?? (changedSeed ? firstOverQuotaPage : undefined);
   };
   const failedSegments: FailedPdfSegment[] = [];
   for (let start = 1, end = Math.min(pageCount, size); start <= pageCount;) {
@@ -248,17 +251,36 @@ export async function parsePdfSegments(input: {
       initialInWorkedExample = false;
       afterFailedSegment = true;
     } else {
-      // The first page cannot be discarded by a worker continuation.
-      const mandatoryBytes = cumulativeBookBytes + Buffer.byteLength(parsed.pages[0]!.text, "utf8");
-      if (mandatoryBytes > maxBookBytes) {
-        throw new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${mandatoryBytes} > ${maxBookBytes})`);
+      const remainingBytes = maxBookBytes - cumulativeBookBytes;
+      let resumeFromPage: number | undefined;
+      if (parsed.segmentTextBytes > remainingBytes) {
+        // Recognition can change the seed for a speculative tail. Give it only
+        // the pages already within quota, and cache only complete, bounded windows.
+        let fitCount = 0;
+        let fitBytes = 0;
+        for (const page of parsed.pages) {
+          const pageBytes = Buffer.byteLength(page.text, "utf8");
+          if (fitBytes + pageBytes > remainingBytes) break;
+          fitBytes += pageBytes;
+          fitCount++;
+        }
+        const firstOverQuota = parsed.pages[fitCount]!;
+        const exceededBytes = cumulativeBookBytes + fitBytes + Buffer.byteLength(firstOverQuota.text, "utf8");
+        const limitError = new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${exceededBytes} > ${maxBookBytes})`);
+        if (fitCount === 0 || !input.onPages) throw limitError;
+        const pages = parsed.pages.slice(0, fitCount);
+        resumeFromPage = await emitSegment(start, {
+          pages, segmentTextBytes: fitBytes, segmentBytes: Buffer.byteLength(JSON.stringify({ pages }), "utf8"),
+        }, ready, firstOverQuota.page);
+        if (resumeFromPage === undefined) throw limitError;
+      } else {
+        if (!ready) {
+          input.signal.throwIfAborted();
+          await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed.pages }, input.signal, [], revalidate);
+          input.signal.throwIfAborted();
+        }
+        resumeFromPage = await emitSegment(start, parsed, ready);
       }
-      if (!ready) {
-        input.signal.throwIfAborted();
-        await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed.pages }, input.signal, [], revalidate);
-        input.signal.throwIfAborted();
-      }
-      const resumeFromPage = await emitSegment(start, end, parsed, ready);
       if (resumeFromPage !== undefined) {
         start = resumeFromPage;
         continue;
