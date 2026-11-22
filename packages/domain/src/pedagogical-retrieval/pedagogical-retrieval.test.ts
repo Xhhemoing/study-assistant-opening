@@ -1609,6 +1609,19 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   }
 
   it.each([
+    'An<span style="position:absolute;content-visibility:hidden">noise</span>swer',
+    'An<span hidden="until-found" style="position:fixed">noise</span>swer',
+    'An<span style="position:absolute"></span>swer',
+    'An<span style="float:left;content-visibility:hidden">noise</span>swer',
+    'An<span style="--mode:inline-end;float:var(--mode)!important;float:none;content-visibility:hidden">noise</span>swer',
+    'An<span style="position:absolute;display:table-cell;content-visibility:hidden">noise</span>swer',
+    'An<span style="position:absolute;display:ruby-base;content-visibility:hidden">noise</span>swer',
+    'Topic <span style="--mode:absolute;position:var(--mode)!important;position:relative">Answer</span>',
+    'An<details hidden></details>swer',
+    'An<details style="display:none"></details>swer',
+    'An<span style="display:inline-block;content-visibility:hidden"><details></details></span>swer',
+    'An<details style="display:inline"><summary style="display:none">Info</summary></details>swer',
+    'Topic <details open>Answer</details>',
     "An<table>swer</table>",
     "An<table>sw<table>er</table></table>",
     "An<table><tr><td>Key</td></tr>swer</table>",
@@ -1643,6 +1656,20 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
+    'An<span style="position:absolute">noise</span>swer',
+    'An<span style="float:right">noise</span>swer',
+    'An<span style="position:relative;content-visibility:hidden">noise</span>swer',
+    'An<span style="position:sticky;content-visibility:hidden">noise</span>swer',
+    'An<span style="position:absolute;display:contents;content-visibility:hidden">noise</span>swer',
+    'Topic <span style="position:absolute;display:inline-grid;content-visibility:hidden">Answer</span>',
+    'Topic <span style="position:absolute;display:inline-flex;content-visibility:hidden">Answer</span>',
+    'An<span style="position:absolute;display:inline-table;content-visibility:hidden">noise</span>swer',
+    ...["flex", "inline-flex", "grid", "inline grid"].map(
+      display => `Topic <span style="display:${display}"><span style="display:contents"><span style="content-visibility:hidden">Answer</span></span></span>`,
+    ),
+    'An<details style="display:inline"></details>swer',
+    'An<details style="visibility:hidden;display:inline"></details>swer',
+    'An<details style="display:inline"><span><summary>Info</summary></span></details>swer',
     "An<span hidden>sw</span>er",
     'An<span hidden style="display:bogus">sw</span>er',
     'An<span hidden="until-found" style="display:block">sw</span>er',
@@ -1668,6 +1695,16 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   ])("keeps body evidence public when the rendered label is split or hidden in %s", label => {
     const text = `## ${label}\n\nPublic theorem.`;
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it("seals a standalone summaryless disclosure through its closing tag", () => {
+    const text = "<details>forty-two</details>\n\nPublic theorem.";
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+  });
+
+  it("includes the open summaryless disclosure body in a Markdown heading label", () => {
+    const text = "## <details open>Answer</details>\n\nforty-two";
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
   });
 
   it.each([

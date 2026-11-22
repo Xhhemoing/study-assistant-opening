@@ -1605,6 +1605,10 @@ const EMPTY_CUSTOM_PROPS: CssCustomProperties = new Map();
 type LabelStyle = {
   customProps: CssCustomProperties;
   display: string;
+  position: string;
+  float: string;
+  outOfFlow: boolean;
+  flexOrGridItems: boolean;
   suppressedSubtree: boolean;
   visibilityHidden: boolean;
   contentVisibility: string;
@@ -1613,6 +1617,7 @@ type LabelStyle = {
 };
 const DEFAULT_LABEL_STYLE: LabelStyle = {
   customProps: EMPTY_CUSTOM_PROPS, display: "inline", suppressedSubtree: false,
+  position: "static", float: "none", outOfFlow: false, flexOrGridItems: false,
   visibilityHidden: false, contentVisibility: "visible", ownContentHidden: false, contentVisibilityHidden: false,
 };
 
@@ -1828,13 +1833,36 @@ function cssContentVisibilityKeyword(tokens: readonly CssToken[]): string | unde
   if (tokens.length === 1 && tokens[0]?.kind === "ident" && tokens[0].value.toLowerCase() === "auto") return "auto";
 }
 
+function cssLayoutKeyword(tokens: readonly CssToken[], allowed: RegExp): string | undefined {
+  const [token] = tokens;
+  if (tokens.length !== 1 || token?.kind !== "ident") return undefined;
+  const word = token.value.toLowerCase();
+  return allowed.test(word) || CSS_WIDE_KEYWORDS.has(word) ? word : undefined;
+}
+
 const LABEL_STYLE_PROPERTIES = {
   display: (tokens: readonly CssToken[]) => cssDisplayKeyword(tokens, false),
+  position: (tokens: readonly CssToken[]) => cssLayoutKeyword(tokens, /^(?:static|relative|absolute|fixed|sticky)$/),
+  float: (tokens: readonly CssToken[]) => cssLayoutKeyword(tokens, /^(?:none|left|right|inline-start|inline-end)$/),
   visibility: cssVisibilityKeyword,
   "content-visibility": cssContentVisibilityKeyword,
 };
 type LabelStyleProperty = keyof typeof LABEL_STYLE_PROPERTIES;
 const LABEL_STYLE_PROPERTY_NAMES = Object.keys(LABEL_STYLE_PROPERTIES) as LabelStyleProperty[];
+
+const FLEX_OR_GRID_DISPLAY_RE = /(?:^| )(?:inline-)?(?:flex|grid)(?: |$)/;
+
+function blockifyLabelDisplay(display: string): string {
+  if (display === "none" || display === "contents") return display;
+  if (/^inline-(?:flex|grid|table)$/.test(display)) return display.slice("inline-".length);
+  if (/^(?:table-|ruby(?:-|$))/.test(display)) return "block";
+  const types = display.split(" ");
+  if (types.includes("inline") || types.includes("run-in")) {
+    const inner = types.find(type => type === "flex" || type === "grid" || type === "table");
+    return inner ?? (types.includes("list-item") ? "list-item" : "block");
+  }
+  return display === "inline-block" || display === "-webkit-inline-box" ? "block" : display;
+}
 
 function resolveElementStyle(
   tag: string,
@@ -1853,14 +1881,18 @@ function resolveElementStyle(
     HTML_DEFAULT_DISPLAY.get(tag) ?? (HTML_BLOCK_DISPLAY_RE.test(tag) ? "block" : "inline");
   const ancestorContentHidden = skipsLabelContents(parent);
   if (!styleAttr && namespace !== "svg") {
+    const display = parent.flexOrGridItems ? blockifyLabelDisplay(displayDefault) : displayDefault;
+    const flexOrGridItems = display === "contents" ? parent.flexOrGridItems : FLEX_OR_GRID_DISPLAY_RE.test(display);
     const contentVisibility = untilFound ? "hidden" : "visible";
-    const ownContentHidden = untilFound && supportsContentVisibility(displayDefault, namespace, outerSvg);
-    const suppressedSubtree = parent.suppressedSubtree || displayDefault === "none";
-    if (displayDefault === parent.display && contentVisibility === parent.contentVisibility &&
+    const ownContentHidden = untilFound && supportsContentVisibility(display, namespace, outerSvg);
+    const suppressedSubtree = parent.suppressedSubtree || display === "none";
+    if (display === parent.display && contentVisibility === parent.contentVisibility &&
+      parent.position === "static" && parent.float === "none" && flexOrGridItems === parent.flexOrGridItems &&
       ownContentHidden === parent.ownContentHidden &&
       suppressedSubtree === parent.suppressedSubtree && ancestorContentHidden === parent.contentVisibilityHidden) return parent;
     return {
-      customProps: parent.customProps, display: displayDefault, contentVisibility, ownContentHidden, suppressedSubtree,
+      customProps: parent.customProps, display, position: "static", float: "none", outOfFlow: false, flexOrGridItems,
+      contentVisibility, ownContentHidden, suppressedSubtree,
       visibilityHidden: parent.visibilityHidden, contentVisibilityHidden: ancestorContentHidden,
     };
   }
@@ -1898,7 +1930,8 @@ function resolveElementStyle(
   }
   const keyword = (property: LabelStyleProperty) => {
     const declaration = declarations.get(property);
-    const presentation = namespace === "svg" && property !== "content-visibility" ? attribute(property) : undefined;
+    const presentation = namespace === "svg" && (property === "display" || property === "visibility")
+      ? attribute(property) : undefined;
     const parse = LABEL_STYLE_PROPERTIES[property];
     if (declaration) {
       const value = cssVariableDependencies(declaration.value)?.size
@@ -1923,10 +1956,18 @@ function resolveElementStyle(
     return value === undefined || value === "revert" || value === "revert-layer" ? fallback : value;
   };
   const inheritedVisibility = parent.visibilityHidden ? "hidden" : "visible";
-  const display = compute("display", "inline", parent.display, displayDefault);
+  const position = compute("position", "static", parent.position, "static");
+  const positioned = position === "absolute" || position === "fixed";
+  const float = positioned ? "none" : compute("float", "none", parent.float, "none");
+  const specifiedDisplay = compute("display", "inline", parent.display, displayDefault);
+  const blockifies = positioned || float !== "none" || parent.flexOrGridItems;
+  const display = blockifies ? blockifyLabelDisplay(specifiedDisplay) : specifiedDisplay;
+  const outOfFlow = display !== "none" && display !== "contents" &&
+    (positioned || (float !== "none" && !parent.flexOrGridItems));
+  const flexOrGridItems = display === "contents" ? parent.flexOrGridItems : FLEX_OR_GRID_DISPLAY_RE.test(display);
   const contentVisibility = compute("content-visibility", "visible", parent.contentVisibility, untilFound ? "hidden" : "visible");
   return {
-    customProps, display, contentVisibility,
+    customProps, display, position, float, outOfFlow, flexOrGridItems, contentVisibility,
     ownContentHidden: contentVisibility === "hidden" && supportsContentVisibility(display, namespace, outerSvg),
     suppressedSubtree: parent.suppressedSubtree || display === "none",
     visibilityHidden: compute("visibility", "visible", inheritedVisibility, inheritedVisibility) !== "visible",
@@ -1975,13 +2016,15 @@ const HTML_IMPLIED_SIBLING_ENDS: ReadonlyArray<readonly [RegExp, RegExp, RegExp]
   [/^button$/, /^button$/, HTML_ELEMENT_SCOPE_RE],
 ];
 
+type LabelDisclosure = { open: boolean; summary?: OpenStyledTag };
+
 type OpenStyledTag = OpenHtmlTag & {
   labelStyle: LabelStyle;
   containerDepth: number;
   markup?: string;
   outerSvg?: boolean;
   preserveUnclosedLabel?: boolean;
-  closedDetails?: { summary?: OpenStyledTag };
+  disclosure?: LabelDisclosure;
   formattingMarker?: number;
   stackIndex: number;
   svgText?: boolean;
@@ -2163,7 +2206,7 @@ function createHtmlElementStack(
       const style = styleForOpenTag(entry, parent?.labelStyle ?? inheritedStyle);
       const copy = pushTag({
         tag: entry.tag, markup: entry.markup, preserveUnclosedLabel: entry.preserveUnclosedLabel,
-        labelStyle: parent?.closedDetails ? { ...style, suppressedSubtree: true } : style,
+        labelStyle: parent?.disclosure?.open === false ? { ...style, suppressedSubtree: true } : style,
       });
       activeFormatting[index] = copy;
       onReconstruct?.(copy, parent, before);
@@ -2224,7 +2267,7 @@ function createHtmlElementStack(
         candidate.stackIndex = changed;
         const parent = insertionParent(changed - 1);
         const style = styleForOpenTag(candidate, parent?.labelStyle ?? inheritedStyle);
-        candidate.labelStyle = parent?.closedDetails && parent.closedDetails.summary !== candidate
+        candidate.labelStyle = parent?.disclosure?.open === false && parent.disclosure.summary !== candidate
           ? { ...style, suppressedSubtree: true } : style;
       }
     }
@@ -2543,15 +2586,26 @@ function seedPipeTableCell(elements: ReturnType<typeof createHtmlElementStack>, 
   for (const tag of ["table", cell === "th" ? "thead" : "tbody", "tr", cell]) elements.pushImplicitTableTag(tag);
 }
 
-type LabelOutput = { parts: (string | boolean | LabelTableOutput)[]; hasText: boolean };
-type LabelTableOutput = { parent: LabelOutput; before: LabelOutput; inside: LabelOutput; block: boolean };
+type LabelOutput = { parts: (string | boolean | LabelBoxOutput | LabelDetailsLegend)[]; hasText: boolean };
+type LabelBoxOutput = { parent: LabelOutput; before?: LabelOutput; inside: LabelOutput; block: boolean };
+type LabelDetailsLegend = { disclosure: LabelDisclosure; parent: LabelOutput; visibilityHidden: boolean };
 
 function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STYLE, pipeCell?: "th" | "td") {
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const root: LabelOutput = { parts: [], hasText: false };
-  const tableBuffers: LabelTableOutput[] = [];
-  const tableOutputs = new WeakMap<OpenStyledTag, LabelTableOutput>();
+  const boxBuffers: LabelBoxOutput[] = [];
+  const detailsLegends: LabelDetailsLegend[] = [];
+  const tableOutputs = new WeakMap<OpenStyledTag, LabelBoxOutput>();
   const entryOutputs = new WeakMap<OpenStyledTag, LabelOutput>();
+  const rendersBox = (style: LabelStyle) => !style.suppressedSubtree && !style.contentVisibilityHidden && style.display !== "contents";
+  const bufferBox = (parent: LabelOutput, block: boolean, before?: LabelOutput) => {
+    const box: LabelBoxOutput = { parent, before, inside: { parts: [], hasText: false }, block };
+    boxBuffers.push(box);
+    parent.parts.push(box);
+    return box;
+  };
+  const bufferOutOfFlow = (output: LabelOutput, style: LabelStyle) =>
+    style.outOfFlow && rendersBox(style) ? bufferBox(output, true).inside : output;
   const outputAt = (parent: OpenStyledTag | undefined, before?: OpenStyledTag) => {
     if (before) {
       const fostered = tableOutputs.get(before)?.before;
@@ -2564,7 +2618,7 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
     return root;
   };
   const elements = createHtmlElementStack(inheritedStyle, (entry, parent, before) => {
-    entryOutputs.set(entry, outputAt(parent, before));
+    entryOutputs.set(entry, bufferOutOfFlow(outputAt(parent, before), entry.labelStyle));
   });
   const { stack } = elements;
   if (pipeCell) seedPipeTableCell(elements, pipeCell);
@@ -2572,12 +2626,11 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
     output.parts.push(text);
     output.hasText ||= /\S/.test(text.replace(INVISIBLE_LABEL_TEXT, ""));
   };
-  const rendersBox = (style: LabelStyle) => !style.suppressedSubtree && !style.contentVisibilityHidden && style.display !== "contents";
   const breaksLine = (display: string) => /(?:^| )block(?: |$)/.test(display) ||
     !/(?:^| )(?:inline(?:-\S+)?|run-in|ruby(?:-\S+)?|-webkit-inline-box)(?: |$)/.test(display);
   const rendersText = (current: OpenStyledTag | undefined) => {
     const style = current?.labelStyle ?? inheritedStyle;
-    return !current?.closedDetails && !style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden &&
+    return current?.disclosure?.open !== false && !style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden &&
       (htmlChildNamespace(current) !== "svg" || current?.svgText === true);
   };
   const appendData = (start: number, end: number) => {
@@ -2635,42 +2688,46 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
       // The label alone cannot prove the extent of an unclosed hidden HTML tag.
       const preserveUnclosedLabel = mayNeedClose && !hiddenEnd && !inertTag;
       if (preserveUnclosedLabel) style = styleForOpenTag({ ...element, preserveUnclosedLabel }, parentStyle, style);
-      const disclosure = parent?.closedDetails;
+      const disclosure = parent?.disclosure;
       const firstSummary = disclosure && !disclosure.summary && !namespace && tag === "summary";
-      if (rubyAnnotation || (disclosure && !firstSummary)) style = { ...style, suppressedSubtree: true };
+      if (rubyAnnotation || (disclosure?.open === false && !firstSummary)) style = { ...style, suppressedSubtree: true };
       if (raw) {
         if (!style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden) {
           const text = label.slice(cursor, raw.closeStart);
-          appendText(output, tag === "textarea" ? decodeHtmlLabelText(text) : text);
+          appendText(bufferOutOfFlow(output, style), tag === "textarea" ? decodeHtmlLabelText(text) : text);
         }
         tokens.lastIndex = cursor = raw.closeEnd;
         continue;
       }
+      if (rendersBox(style) && parentNamespace !== "svg") {
+        if (!namespace && tag === "details") hasDetails = true;
+        if (!style.outOfFlow && (namespace || tag !== "table")) {
+          const block = tag === "br" || breaksLine(style.display);
+          if (block || (tag !== "svg" && tag !== "ruby")) output.parts.push(block);
+        }
+      }
       if (canOpen) {
         const opened = elements.insertTag({
           ...element, labelStyle: style, preserveUnclosedLabel,
-          closedDetails: !namespace && tag === "details" && htmlAttributeValue(markup, tag, "open") === undefined ? {} : undefined,
+          disclosure: !namespace && tag === "details" ? { open: htmlAttributeValue(markup, tag, "open") !== undefined } : undefined,
           svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
         }, start.tableForm);
         if (firstSummary) disclosure.summary = opened;
         if (!namespace && tag === "table") {
           // The table's position is fixed at insertion. Later fostered siblings still go before it.
-          const table = {
-            parent: output, before: { parts: [], hasText: false }, inside: { parts: [], hasText: false },
-            block: rendersBox(style) && breaksLine(style.display),
-          };
-          tableBuffers.push(table);
-          output.parts.push(table);
+          const block = rendersBox(style) && (style.outOfFlow || breaksLine(style.display));
+          const table = bufferBox(output, block, { parts: [], hasText: false });
           tableOutputs.set(opened, table);
           entryOutputs.set(opened, table.inside);
           continue;
         }
-        entryOutputs.set(opened, output);
-      }
-      if (rendersBox(style) && parentNamespace !== "svg") {
-        if (!namespace && tag === "details") hasDetails = true;
-        const block = tag === "br" || breaksLine(style.display);
-        if (block || (tag !== "svg" && tag !== "ruby")) output.parts.push(block);
+        const contents = bufferOutOfFlow(output, style);
+        entryOutputs.set(opened, contents);
+        if (opened.disclosure && !style.suppressedSubtree && !skipsLabelContents(style)) {
+          const legend = { disclosure: opened.disclosure, parent: contents, visibilityHidden: style.visibilityHidden };
+          detailsLegends.push(legend);
+          contents.parts.push(legend);
+        }
       }
     } else {
       const parent = elements.insertionParent();
@@ -2678,7 +2735,7 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
       const closed = elements.closeTag(tag);
       if (tag === "table" || (parentNamespace === "svg" &&
         (tag !== "svg" || htmlChildNamespace(stack.at(-1)) === "svg"))) continue;
-      if (closed && rendersBox(closed.labelStyle)) {
+      if (closed && !closed.labelStyle.outOfFlow && rendersBox(closed.labelStyle)) {
         const block = breaksLine(closed.labelStyle.display);
         if (block || (tag !== "svg" && tag !== "ruby")) {
           (entryOutputs.get(closed) ?? outputAt(stack.at(-1))).parts.push(block);
@@ -2690,10 +2747,13 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
     }
   }
   appendData(cursor, label.length);
+  for (const { disclosure, parent, visibilityHidden } of detailsLegends) {
+    if (!disclosure.summary && !visibilityHidden) parent.hasText = true;
+  }
   // Measure child buffers before their parents, then emit in tree order without recursion.
-  for (let index = tableBuffers.length - 1; index >= 0; index--) {
-    const { parent, before, inside } = tableBuffers[index]!;
-    parent.hasText ||= before.hasText || inside.hasText;
+  for (let index = boxBuffers.length - 1; index >= 0; index--) {
+    const { parent, before, inside } = boxBuffers[index]!;
+    parent.hasText ||= (before?.hasText ?? false) || inside.hasText;
   }
   const inline: string[] = [];
   const spaced: string[] = [];
@@ -2708,6 +2768,13 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
     } else if (typeof next.value === "boolean") {
       if (next.value) inline.push(" ");
       spaced.push(" ");
+    } else if ("disclosure" in next.value) {
+      const { disclosure, visibilityHidden } = next.value;
+      if (!disclosure.summary) {
+        const legend = visibilityHidden ? " " : " Details ";
+        inline.push(legend);
+        spaced.push(legend);
+      }
     } else {
       const { before, inside, block } = next.value;
       if (inside.hasText) {
@@ -2715,7 +2782,7 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
         pending.push(inside.parts[Symbol.iterator]());
         if (block) pending.push([true][Symbol.iterator]());
       }
-      pending.push(before.parts[Symbol.iterator]());
+      if (before) pending.push(before.parts[Symbol.iterator]());
     }
   }
   const normalize = (parts: readonly string[]) => parts.join("").replace(INVISIBLE_LABEL_TEXT, "").replace(/\s+/g, " ").trim();

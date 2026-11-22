@@ -310,6 +310,7 @@ describe("media anchor bounded playback controller", () => {
 
   it.each([
     { startMs: 10_000, endMs: 10_100, ranges: [[10.4, 90]], reachable: false },
+    { startMs: 5_000, endMs: 12_000, ranges: [[0, 4.9], [10.4, 90]], reachable: false },
     { startMs: 10_000, endMs: 10_100, ranges: [[0, 10], [10.1, 90]], reachable: false },
     { startMs: 10_000, endMs: 10_100, ranges: [[10.05, 10.05], [10.09, 10.02]], reachable: false },
     { startMs: 10_000, endMs: undefined, ranges: [[10.4, 90]], reachable: false },
@@ -369,6 +370,56 @@ describe("media anchor bounded playback controller", () => {
     expect(media.playMock).toHaveBeenCalledTimes(reaches ? 1 : 0);
   });
 
+  it.each([9.9, 10.2, 10.5])("seeks to the overlapping range and checks the landing at %s", landing => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 10_500 })!;
+    const media = Object.assign(createFakeMedia(), {
+      seeking: true,
+      seekable: { length: 2, start: (index: number) => [0, 10.2][index]!, end: (index: number) => [9.9, 90][index]! },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    expect(media.currentTime).toBe(10.2);
+    controller.handleSeeking(media);
+    media.seeking = false;
+    controller.handleSeeked(media);
+    expect(controller.snapshot().phase).toBe("ready_segment");
+
+    media.seeking = true;
+    controller.replay(media);
+    expect(media.currentTime).toBe(10.2);
+    expect(media.playMock).not.toHaveBeenCalled();
+    media.currentTime = landing;
+    controller.handleSeeking(media);
+    media.seeking = false;
+    controller.handleSeeked(media);
+    const reached = landing === 10.2;
+    expect(controller.snapshot().phase).toBe(reached ? "ready_segment" : "seek_unreached");
+    expect(media.playMock).toHaveBeenCalledTimes(reached ? 1 : 0);
+    if (reached) {
+      media.currentTime = 10.5;
+      controller.handleTimeUpdate(media);
+      expect(media.pauseMock).toHaveBeenCalledOnce();
+      expect(controller.snapshot().phase).toBe("paused_at_end");
+    }
+  });
+
+  it("accepts pre-roll within the range containing the citation start", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 10_500 })!;
+    const media = Object.assign(createFakeMedia(), {
+      seeking: true,
+      seekable: { length: 2, start: (index: number) => [0, 9.8][index]!, end: (index: number) => [9.5, 90][index]! },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.replay(media);
+    expect(media.currentTime).toBe(10);
+    media.currentTime = 9.9;
+    controller.handleSeeking(media);
+    media.seeking = false;
+    controller.handleSeeked(media);
+    expect(controller.snapshot().phase).toBe("ready_segment");
+    expect(media.playMock).toHaveBeenCalledOnce();
+  });
+
   it.each([0, 1])("defers replay until metadata reveals %i seekable ranges", rangeCount => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
     const media = Object.assign(createFakeMedia(), {
@@ -425,15 +476,17 @@ describe("media anchor bounded playback controller", () => {
 
   it("recognizes the first seeking event clamped to the start of a seekable range", () => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
+    let rangeStart = 0;
     const media = Object.assign(createFakeMedia(), {
       duration: 90,
       seeking: false,
-      seekable: { length: 1, start: () => 18, end: () => 90 },
+      seekable: { length: 1, start: () => rangeStart, end: () => 90 },
     });
     const controller = createMediaAnchorPlaybackController(anchor);
     controller.activate(media);
     expect(media.currentTime).toBe(10);
 
+    rangeStart = 18;
     media.currentTime = media.seekable.start();
     media.seeking = true;
     controller.handleSeeking(media);
@@ -449,12 +502,14 @@ describe("media anchor bounded playback controller", () => {
     "recognizes a seekable gap clamp to $landed seconds when seeking from $from seconds",
     ({ from, landed }) => {
       const anchor = validateMediaAnchorRange({ startMs: 40_000, endMs: 65_000 })!;
+      let ranges = [[0, 45], [60, 90]];
       const media = Object.assign(createFakeMedia(), {
         currentTime: from, duration: 90, seeking: true,
-        seekable: { length: 2, start: (index: number) => [0, 60][index]!, end: (index: number) => [20, 90][index]! },
+        seekable: { length: 2, start: (index: number) => ranges[index]![0]!, end: (index: number) => ranges[index]![1]! },
       });
       const controller = createMediaAnchorPlaybackController(anchor);
       controller.activate(media);
+      ranges = [[0, 20], [60, 90]];
       media.currentTime = landed;
       controller.handleSeeking(media);
       media.seeking = false;

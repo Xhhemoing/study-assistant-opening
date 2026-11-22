@@ -221,6 +221,33 @@ describe("dedicated material reader", () => {
     expect(currentTime).toBe(0);
     expect(play).not.toHaveBeenCalled();
   });
+  it.each([9.9, 10.2])("validates replay at %s when the video has a gap at the citation start", async landing => {
+    const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
+    const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 10_500 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const video = player.querySelector("video")!;
+    const replay = Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!;
+    let seeking = true;
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    vi.spyOn(video, "seeking", "get").mockImplementation(() => seeking);
+    vi.spyOn(video, "seekable", "get").mockReturnValue({
+      length: 2, start: index => [0, 10.2][index]!, end: index => [9.9, 90][index]!,
+    });
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
+    await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+    expect(video.currentTime).toBe(10.2);
+    await click(replay);
+    expect(video.currentTime).toBe(10.2);
+    expect(play).not.toHaveBeenCalled();
+    video.currentTime = landing;
+    await act(async () => { video.dispatchEvent(new Event("seeking")); });
+    seeking = false;
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
+    const reached = landing === 10.2;
+    expect(player.getAttribute("data-media-anchor-phase")).toBe(reached ? "ready_segment" : "seek_unreached");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe(reached ? "active" : "inactive");
+    expect(play).toHaveBeenCalledTimes(reached ? 1 : 0);
+  });
   it("clears the citation highlight when metadata arrives without a seekable range", async () => {
     const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
     const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 20_000 });
