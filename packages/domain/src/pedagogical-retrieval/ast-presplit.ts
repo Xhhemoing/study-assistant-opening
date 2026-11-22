@@ -1,3 +1,4 @@
+import { decodeHTML } from "entities";
 import type {
   ChunkPedagogicalDocumentInput,
   ChunkTranscriptCuesInput,
@@ -101,12 +102,13 @@ const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
 const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\s/'"=<>]*)(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">";
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\s/>])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
 const HTML_RAW_TEXT_TAGS = new Set(["textarea", "title", "script", "style", "xmp", "iframe", "noembed", "noframes"]);
-const HTML_PHRASING_TAGS = new Set([
-  "wbr", "span", "b", "strong", "i", "em", "u", "s", "mark", "small", "sub", "sup", "abbr", "cite",
-  "code", "dfn", "kbd", "q", "samp", "var", "font", "bdi", "bdo", "ruby", "rt", "rp",
-  "a", "data", "del", "ins", "label", "time",
+const HTML_LABEL_BREAK_TAGS = new Set([
+  "br", "hr", "div", "p", "li", "ul", "ol", "table", "tr", "td", "th",
+  "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "section",
+  "article", "header", "footer", "aside", "nav",
 ]);
-const INVISIBLE_LABEL_TEXT = /&(?:shy|zerowidthspace|zwnj|zwj|#0*(?:173|820[345]|65279)|#x0*(?:ad|200[bcd]|feff));|\u00AD|\u200B|\u200C|\u200D|\uFEFF/gi;
+const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+const INVISIBLE_LABEL_TEXT = /\u00AD|\u200B|\u200C|\u200D|\u2060|\uFEFF/g;
 const ATX_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/;
 
 interface HeadingScope {
@@ -167,16 +169,30 @@ function findUnescapedToken(text: string, token: string, fromIndex: number): num
   return -1;
 }
 
+const LATEX_ENV_GAP = /[ \t]*(?:(?:%[^\r\n]*)?(?:\r\n|\r(?!\n)|\n)[ \t]*)?/.source;
+
 function latexEnvironmentArgument(name: string): string {
-  return /[ \t]*\{[ \t]*/.source + name + /[ \t]*\}/.source;
+  return LATEX_ENV_GAP + /\{[ \t\r\n]*/.source + name + /[ \t\r\n]*\}/.source;
 }
 
 const LATEX_ENV_ARGUMENT = latexEnvironmentArgument(/(?<name>[a-zA-Z][\w-]*\*?)/.source);
+const LATEX_ENV_ARGUMENT_RE = new RegExp("^" + LATEX_ENV_ARGUMENT);
+const LATEX_ENV_ARGUMENT_PREFIX_RE = new RegExp("^" + LATEX_ENV_GAP + /\{[ \t\r\n]*(?:[a-zA-Z][\w-]*\*?[ \t\r\n]*)?$/.source);
+const LATEX_LITERAL_ENVIRONMENT = /(?:verbatim|lstlisting|minted|comment|filecontents)\*?/.source;
+const LATEX_LITERAL_ENVIRONMENT_RE = new RegExp("^" + LATEX_LITERAL_ENVIRONMENT + "$");
 const LATEX_BEGIN = /\\begin/.source + LATEX_ENV_ARGUMENT;
 const LATEX_BEGIN_RE = new RegExp("^" + LATEX_BEGIN);
 const LATEX_BLOCK_BEGIN_RE = new RegExp(/^[ \t]*/.source + LATEX_BEGIN);
+const LATEX_BLOCK_END_RE = new RegExp(/^[ \t]*\\end/.source + LATEX_ENV_ARGUMENT);
 const LATEX_LITERAL_TOKENS = /%|(?<verb>\\verb(?![a-zA-Z])[ \t]*\*?[ \t]*)|\\begin/.source +
-  latexEnvironmentArgument(/(?<literalEnvironment>verbatim\*?|lstlisting)/.source);
+  latexEnvironmentArgument("(?<literalEnvironment>" + LATEX_LITERAL_ENVIRONMENT + ")");
+
+function findLatexLiteralEnd(text: string, environment: string, from: number) {
+  const closing = new RegExp(/\\end/.source + latexEnvironmentArgument(environment.replace(/\*/g, "\\*")), "g");
+  closing.lastIndex = from;
+  const match = closing.exec(text);
+  return match && { closeStart: match.index, closeEnd: closing.lastIndex };
+}
 
 function endOfLatexVerb(text: string, start: number): number {
   const codePoint = text.codePointAt(start);
@@ -198,9 +214,7 @@ function* scanLatexTokens(text: string, pattern: RegExp, from: number, limit = t
       yield match;
     } else if (!isEscaped(text, match.index)) {
       if (environment) {
-        const closing = new RegExp(/\\end/.source + latexEnvironmentArgument(environment.replace(/\*/g, "\\*")), "g");
-        closing.lastIndex = pattern.lastIndex;
-        pattern.lastIndex = closing.exec(text) ? closing.lastIndex : text.length;
+        pattern.lastIndex = findLatexLiteralEnd(text, environment, pattern.lastIndex)?.closeEnd ?? text.length;
       } else if (isVerb) {
         pattern.lastIndex = endOfLatexVerb(text, pattern.lastIndex);
       } else {
@@ -241,6 +255,50 @@ function classifyLabel(
   const baseVisibility: PedagogicalVisibility =
     sealProofs && entry.kind === "proof" ? "sealed" : entry.visibility;
   return { kind: entry.kind, visibility: maxVisibility(baseVisibility, fallbackVisibility) };
+}
+
+function classifyLatexEnvironment(
+  name: string,
+  visibility: PedagogicalVisibility,
+  sealProofs = false,
+) {
+  if (MATH_ENVS.has(name)) return { kind: "display_math" as const, visibility };
+  if (LATEX_LITERAL_ENVIRONMENT_RE.test(name)) return { kind: "code" as const, visibility };
+  return classifyLabel(name, visibility, sealProofs);
+}
+
+function matchLatexBlockOpening(line: string, readContinuation?: () => string) {
+  if (!/^[ \t]*\\begin(?=[ \t{%]|$)/.test(line)) return null;
+  return LATEX_BLOCK_BEGIN_RE.exec(line) ??
+    (readContinuation ? LATEX_BLOCK_BEGIN_RE.exec(readContinuation()) : null);
+}
+
+function readLatexCueCommand(line: string, readNext: (distance: number) => string | undefined, from = 0) {
+  if (!line.includes("\\begin") && !line.includes("\\end")) return undefined;
+  const command = /\\(begin|end)(?=[ \t{%]|$)/g;
+  command.lastIndex = from;
+  const comment = findUnescapedToken(line, "%", 0);
+  for (let match = command.exec(line); match && (comment === -1 || match.index < comment); match = command.exec(line)) {
+    if (isEscaped(line, match.index)) continue;
+    let argument = line.slice(command.lastIndex);
+    let endLine = 0;
+    while (true) {
+      const complete = LATEX_ENV_ARGUMENT_RE.exec(argument);
+      if (complete) {
+        return {
+          directive: match[1], name: complete[1]!, start: match.index, endLine,
+          nextColumn: command.lastIndex + complete[0].length,
+          rest: argument.slice(complete[0].length),
+        };
+      }
+      if (!(endLine === 0 && /^[ \t]*(?:%[^\r\n]*)?$/.test(argument)) &&
+        !LATEX_ENV_ARGUMENT_PREFIX_RE.test(argument)) break;
+      const next = readNext(++endLine);
+      if (next === undefined) break;
+      argument += "\n" + next;
+    }
+  }
+  return undefined;
 }
 
 function tableDelimiterColumnCount(line: string): number {
@@ -437,6 +495,21 @@ interface DetailsBounds {
   };
 }
 
+function crossesHtmlBlockStart(
+  text: string,
+  start: number,
+  end: number,
+  initialContainers: readonly MarkdownContainer[],
+): boolean {
+  let containers = initialContainers;
+  for (const { raw } of splitLinesWithOffsets(text.slice(start, end)).slice(1)) {
+    const next = readMarkdownContainerLine(raw, containers);
+    if (HTML_TYPE_6_BLOCK_START_RE.test(next.body)) return true;
+    containers = next.containers;
+  }
+  return false;
+}
+
 function findMatchingDetailsBounds(
   text: string,
   openStart: number,
@@ -456,18 +529,27 @@ function findMatchingDetailsBounds(
     while (nextLineStart <= offset && nextLineStart < text.length) {
       const newline = nextLineBreak(text, nextLineStart);
       const line = text.slice(nextLineStart, newline?.index ?? text.length);
+      nextLineStart = newline ? newline.index + newline[0].length : text.length;
+      if (contiguousHtml) {
+        const continued = continueMarkdownContainers(line, containers);
+        if (continued.depth === containers.length && continued.body.trim()) {
+          body = continued.body;
+          inIndentedCode = false;
+          afterBlockBoundary = false;
+          continue;
+        }
+      }
       const current = readMarkdownContainerLine(line, containers);
       const sameContainer = current.continuedDepth === containers.length &&
         current.containers.length === containers.length;
       containers = current.containers;
       body = current.body;
-      if (!body.trim()) contiguousHtml = false;
+      contiguousHtml = HTML_TYPE_6_BLOCK_START_RE.test(body);
       const endsSetext = sameContainer && !afterBlockBoundary && !inIndentedCode && SETEXT_UNDERLINE_RE.test(body);
       inIndentedCode = /^(?: {4}| {0,3}\t)/.test(body) &&
         (afterBlockBoundary || !sameContainer || inIndentedCode);
       afterBlockBoundary = !body.trim() || endsSetext || /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) ||
         THEMATIC_BREAK_RE.test(body);
-      nextLineStart = newline ? newline.index + newline[0].length : text.length;
     }
   };
   const skipLiteralLines = (end: number) => {
@@ -488,7 +570,7 @@ function findMatchingDetailsBounds(
       skipLiteralLines(tokenRe.lastIndex);
       continue;
     }
-    if (inIndentedCode) {
+    if (!contiguousHtml && inIndentedCode) {
       tokenRe.lastIndex = nextLineStart;
       continue;
     }
@@ -502,9 +584,9 @@ function findMatchingDetailsBounds(
       continue;
     }
     if (match.groups?.ticks) {
-      if (!isEscaped(text, match.index)) {
+      if (!contiguousHtml && !isEscaped(text, match.index)) {
         const end = endOfBacktickSpan(text, match.index);
-        if (end !== -1) {
+        if (end !== -1 && !crossesHtmlBlockStart(text, match.index, end, containers)) {
           tokenRe.lastIndex = end;
           skipLiteralLines(end);
         }
@@ -512,7 +594,7 @@ function findMatchingDetailsBounds(
       continue;
     }
     if (match.groups?.fence) {
-      const fence = matchFenceOpening(body)?.[1];
+      const fence = contiguousHtml ? undefined : matchFenceOpening(body)?.[1];
       if (fence) {
         nextLineStart = endOfDetailsCodeFence(text, tokenRe.lastIndex, fence, containers);
         tokenRe.lastIndex = nextLineStart;
@@ -551,13 +633,13 @@ function findMatchingDetailsBounds(
 
 function maskSummaryLiterals(text: string): string {
   const parts: string[] = [];
-  const tokens = new RegExp(/<!--|\x60+/.source + "|" + HTML_TAG_TOKEN, "gi");
+  const tokens = new RegExp("<!--|" + HTML_TAG_TOKEN, "gi");
   let copied = 0;
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
     if (match[0] === "<!--") {
       tokens.lastIndex = endOfHtmlComment(text, tokens.lastIndex);
-      parts.push(text.slice(copied, match.index), " ".repeat(tokens.lastIndex - match.index));
-    } else if (match.groups?.tag) {
+      parts.push(text.slice(copied, tokens.lastIndex));
+    } else {
       // Keep real tag boundaries while hiding markup inside quoted attributes.
       parts.push(text.slice(copied, match.index + 1), match[0].slice(1, -1).replace(/[<>]/g, " "), ">");
       const rawText = htmlRawTextBounds(text, match, tokens.lastIndex);
@@ -566,26 +648,49 @@ function maskSummaryLiterals(text: string): string {
           text.slice(rawText.closeStart, rawText.closeEnd));
         tokens.lastIndex = rawText.closeEnd;
       }
-    } else {
-      const end = isEscaped(text, match.index) ? -1 : endOfBacktickSpan(text, match.index);
-      if (end === -1) continue;
-      tokens.lastIndex = end;
-      parts.push(text.slice(copied, match.index), text.slice(match.index, end).replace(/[<>]/g, " "));
     }
     copied = tokens.lastIndex;
   }
   return parts.length > 0 ? parts.join("") + text.slice(copied) : text;
 }
 
-function htmlLabelTextVariants(label: string) {
-  const text = label.replace(INVISIBLE_LABEL_TEXT, "");
-  const tags = new RegExp(HTML_TAG_TOKEN, "gi");
-  const trim = (value: string) => value.replace(/\s+/g, " ").trim();
-  return {
-    inline: trim(text.replace(tags, (_tag, prefix: string, name: string) =>
-      (prefix === "" || prefix === "/") && HTML_PHRASING_TAGS.has(name.toLowerCase()) ? "" : " ")),
-    spaced: trim(text.replace(tags, " ")),
+function htmlLabelTextVariants(label: string, removeRubyAnnotations = false) {
+  const tokens = new RegExp(HTML_COMMENT_RE.source + "|" + HTML_TAG_TOKEN, "gi");
+  const inline: string[] = [];
+  const spaced: string[] = [];
+  const appendText = (start: number, end?: number) => {
+    // References cannot continue into the next HTML text node.
+    const text = decodeHTML(label.slice(start, end));
+    inline.push(text);
+    spaced.push(text);
   };
+  let cursor = 0;
+  let rubyDepth = 0;
+  let annotationStart: number | undefined;
+  let hasDetails = false;
+  for (let match = tokens.exec(label); match; match = tokens.exec(label)) {
+    if (annotationStart === undefined) appendText(cursor, match.index);
+    cursor = tokens.lastIndex;
+    const tag = match.groups?.tag?.toLowerCase();
+    const prefix = match.groups?.prefix;
+    if (removeRubyAnnotations && tag === "ruby") {
+      if (prefix === "/") {
+        rubyDepth = Math.max(0, rubyDepth - 1);
+        annotationStart = undefined;
+      } else if (prefix === "") rubyDepth++;
+    } else if (removeRubyAnnotations && rubyDepth > 0 && (tag === "rt" || tag === "rp")) {
+      if (prefix === "/") annotationStart = undefined;
+      else if (prefix === "" && annotationStart === undefined) annotationStart = cursor;
+    } else if (tag && annotationStart === undefined) {
+      if (tag === "details" && prefix === "") hasDetails = true;
+      if (HTML_LABEL_BREAK_TAGS.has(tag)) inline.push(" ");
+      spaced.push(" ");
+    }
+  }
+  if (annotationStart === undefined) appendText(cursor);
+  else spaced.push(decodeHTML(label.slice(annotationStart)));
+  const normalize = (parts: readonly string[]) => parts.join("").replace(INVISIBLE_LABEL_TEXT, "").replace(/\s+/g, " ").trim();
+  return { inline: normalize(inline), spaced: normalize(spaced), hasDetails };
 }
 
 function classifyDetailsElement(
@@ -599,13 +704,13 @@ function classifyDetailsElement(
   readonly label: string;
   readonly summaryEndOffset: number | null;
 } {
-  if (summary && !maskSummaryLiterals(text.slice(openEnd, summary.openStart)).trim()) {
+  if (summary && !maskSummaryLiterals(text.slice(openEnd, summary.openStart)).replace(HTML_COMMENT_RE, "").trim()) {
     const summaryContents = maskSummaryLiterals(text.slice(summary.openEnd, summary.closeStart));
-    const { inline: summaryText, spaced } = htmlLabelTextVariants(summaryContents);
+    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, true);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
-      !/<details\b/i.test(summaryContents) &&
-      (HINT_HEADING_RE.test(summaryText) || HINT_HEADING_RE.test(spaced))
+      !hasDetails &&
+      HINT_HEADING_RE.test(summaryText)
     ) {
       return {
         kind: "hint",
@@ -775,14 +880,15 @@ function innermostQuoteBody(line: string): string | null {
   return containers.includes("quote") ? body : null;
 }
 
-const HTML_BLOCK_START_RE =
-  /^[ ]{0,3}<(?:\?|!(?:--|\[CDATA\[|[A-Z])|\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|script|search|section|style|summary|table|tbody|td|textarea|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$))/i;
+const HTML_TYPE_6_BLOCK_START_RE =
+  /^ {0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$)/i;
+const HTML_OTHER_BLOCK_START_RE = /^ {0,3}<(?:\?|!(?:--|\[CDATA\[|[A-Z])|\/?(?:pre|script|style|textarea)(?=[ \t/>]|$))/i;
 const STANDALONE_HTML_TAG_RE = /^[ ]{0,3}<\/?[A-Za-z][\w-]*(?:[ \t]+[^<>]*?)?\/?>[ \t]*$/;
 
 function interruptsPipeTable(line: string): boolean {
   return matchFenceOpening(line) !== null || /^[ \t]{0,3}(?::{3,}|#{1,6}(?:[ \t]|$)|>)/.test(line) ||
     THEMATIC_BREAK_RE.test(line) || LIST_ITEM_RE.test(line) ||
-    HTML_BLOCK_START_RE.test(line) || STANDALONE_HTML_TAG_RE.test(line);
+    HTML_TYPE_6_BLOCK_START_RE.test(line) || HTML_OTHER_BLOCK_START_RE.test(line) || STANDALONE_HTML_TAG_RE.test(line);
 }
 
 function isPipeTableBodyRow(line: string): boolean {
@@ -919,13 +1025,19 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine) {
 function startsTimedTableBoundary(
   { body, containers, continuedDepth }: ReturnType<typeof readMarkdownContainerLine>,
   tableActive = true,
+  readNext: (distance: number) => string | undefined = () => undefined,
 ): boolean {
   if (interruptsPipeTable(body) || (tableActive && containers.includes("quote", continuedDepth))) return true;
   if (containers.at(-1) === "quote" && CALLOUT_HEADER_RE.test(body.trimStart())) return true;
-  const trimmed = body.trim();
-  const latex = LATEX_BEGIN_RE.exec(trimmed);
-  return latex !== null && latex[0].length === trimmed.length &&
-    (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null);
+  const latex = readLatexCueCommand(body, readNext);
+  return latex?.directive === "begin" && !body.slice(0, latex.start).trim() &&
+    !latex.rest.trim() && classifyLatexEnvironment(latex.name, "public") !== null;
+}
+
+function nextBodyInContainer(raw: string | undefined, containers: readonly MarkdownContainer[]): string | undefined {
+  if (raw === undefined) return undefined;
+  const continued = continueMarkdownContainers(raw, containers);
+  return continued.depth === containers.length ? continued.body : undefined;
 }
 
 function isListLikeTableRow(line: string): boolean {
@@ -972,6 +1084,9 @@ function createTranscriptCueSeparator(
   let previousBody = "";
   let tableColumns: PedagogicalVisibility[] | undefined;
   let setextThrough = -1;
+  let latexArgumentThrough = -1;
+  let literalEnvironment: string | undefined;
+  const mathEnvironments: string[] = [];
   const protectedUnderline = createProtectedSetextLookup(index => lines[index]);
   const readCaptionRow = (index: number) => ({
     ...continueMarkdownContainers(lines[index]!, containers),
@@ -986,6 +1101,9 @@ function createTranscriptCueSeparator(
       containers = readMarkdownContainerLine("", containers).containers;
       previousBody = "";
       tableColumns = undefined;
+      literalEnvironment = undefined;
+      mathEnvironments.length = 0;
+      latexArgumentThrough = -1;
       const underline = protectedUnderline(start, readMarkdownContainerLine(lines[start]!, containers));
       if (underline !== undefined) setextThrough = underline;
     }
@@ -993,8 +1111,24 @@ function createTranscriptCueSeparator(
       const line = lines[index]!;
       const continuation = continueMarkdownContainers(line, containers);
       const current = readMarkdownContainerLine(line, containers);
+      const readNext = (distance: number) => nextBodyInContainer(lines[index + distance], current.containers);
+      let latex = readLatexCueCommand(current.body, readNext);
+      while (latex) {
+        const { directive, name, endLine, nextColumn } = latex;
+        if (endLine > 0) latexArgumentThrough = Math.max(latexArgumentThrough, index + endLine);
+        if (literalEnvironment !== undefined) {
+          if (directive === "end" && name === literalEnvironment) literalEnvironment = undefined;
+        } else if (directive === "begin" && LATEX_LITERAL_ENVIRONMENT_RE.test(name)) {
+          literalEnvironment = name;
+        } else if (MATH_ENVS.has(name)) {
+          if (directive === "begin") mathEnvironments.push(name);
+          else if (mathEnvironments.at(-1) === name) mathEnvironments.pop();
+        }
+        if (endLine > 0) break;
+        latex = readLatexCueCommand(current.body, readNext, nextColumn);
+      }
       if (tableColumns && continuation.depth === containers.length) {
-        const explicitBoundary = startsTimedTableBoundary(current);
+        const explicitBoundary = startsTimedTableBoundary(current, true, readNext);
         const canContinue = isCaptionTableBodyRow(continuation.body);
         const underline = !explicitBoundary && canContinue
           ? protectedUnderline(index, current, tableColumns, true)
@@ -1018,9 +1152,12 @@ function createTranscriptCueSeparator(
     const nextLine = lines[end];
     if (!joinNext || nextLine === undefined) return "";
     const continued = continueMarkdownContainers(nextLine, containers);
+    if (end <= latexArgumentThrough) return newline;
     if (tableColumns && continued.depth === containers.length) {
       const next = readMarkdownContainerLine(nextLine, containers);
-      const explicitBoundary = startsTimedTableBoundary(next);
+      const explicitBoundary = startsTimedTableBoundary(
+        next, true, distance => nextBodyInContainer(lines[end + distance], next.containers),
+      );
       const underline = explicitBoundary ? undefined : protectedUnderline(end, next, tableColumns, true);
       if (explicitBoundary || underline !== undefined) {
         if (underline !== undefined) setextThrough = underline;
@@ -1039,7 +1176,9 @@ function createTranscriptCueSeparator(
       (continued.depth === containers.length && SETEXT_UNDERLINE_RE.test(continued.body));
     const continuesPipeParagraph = continued.depth === containers.length &&
       isPipeParagraphLine(previousBody) && isPipeParagraphLine(continued.body);
-    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph) return newline;
+    const continuesLatexEnvironment = continued.depth === containers.length &&
+      (mathEnvironments.length > 0 || literalEnvironment !== undefined);
+    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph || continuesLatexEnvironment) return newline;
 
     // The synthetic paragraph break also ends any table.
     previousBody = "";
@@ -1088,7 +1227,21 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     }
     containers = current.containers;
     const body = stripLatexComment(current.body).trimStart();
-    const latex = LATEX_BEGIN_RE.exec(body);
+    const latex = matchLatexBlockOpening(current.body, () => text.slice(lineStart));
+    if (/^[ \t]*\\end(?=[ \t{%]|$)/.test(current.body)) {
+      const closing = LATEX_BLOCK_END_RE.exec(text.slice(lineStart));
+      if (closing) {
+        paragraphStart = undefined;
+        newline = nextLineBreak(text, lineStart + closing[0].length);
+        continue;
+      }
+    }
+    if (latex && LATEX_LITERAL_ENVIRONMENT_RE.test(latex[1]!)) {
+      const closing = findLatexLiteralEnd(text, latex[1]!, lineStart + latex[0].length);
+      paragraphStart = undefined;
+      newline = closing ? nextLineBreak(text, closing.closeEnd) : null;
+      continue;
+    }
     const beforeLine = newline.index;
     if (
       !line.trim() ||
@@ -1102,7 +1255,7 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
       boundary = beforeLine;
       break;
     }
-    if (body && !/^(?:\$\$|\\\[|\\\]|\\end[ \t]*\{)/.test(body) && !/^(?: {4}| {0,3}\t)/.test(current.body)) {
+    if (body && !/^(?:\$\$|\\\[|\\\])/.test(body) && !/^(?: {4}| {0,3}\t)/.test(current.body)) {
       paragraphStart ??= beforeLine;
       const underline = continueMarkdownContainers(nextLine, containers);
       if (underline.depth === containers.length && SETEXT_UNDERLINE_RE.test(underline.body)) {
@@ -1166,12 +1319,9 @@ function findMathEnvironment(text: string, envName: string, afterOpen: number) {
   return { ...bounds, closed: bounds.closeStart < limit };
 }
 
-function startsLatexBlock(raw: string): boolean {
-  const latexEnv = LATEX_BLOCK_BEGIN_RE.exec(raw);
-  if (latexEnv) {
-    const env = latexEnv[1]!;
-    if (MATH_ENVS.has(env) || classifyLabel(env, "public") !== null) return true;
-  }
+function startsLatexBlock(raw: string, readContinuation?: () => string): boolean {
+  const latexEnv = matchLatexBlockOpening(raw, readContinuation);
+  if (latexEnv && classifyLatexEnvironment(latexEnv[1]!, "public") !== null) return true;
   if (/^[ \t]*\$\$/.test(raw) && !isEscaped(raw, raw.indexOf("$$"))) return true;
   return /^[ \t]*\\\[/.test(raw);
 }
@@ -1193,7 +1343,8 @@ function startsMarkdownBlock(raw: string, next?: string, interruptsParagraph = f
 }
 
 function startsSpecialLine(raw: string, next?: string, interruptsParagraph = false): boolean {
-  return startsLatexBlock(raw) || startsMarkdownBlock(raw, next, interruptsParagraph);
+  return startsLatexBlock(raw, next === undefined ? undefined : () => raw + "\n" + next) ||
+    startsMarkdownBlock(raw, next, interruptsParagraph);
 }
 
 interface QuoteParagraph {
@@ -1329,21 +1480,23 @@ function findInlineConstructSpans(
       const m = LATEX_BEGIN_RE.exec(text.slice(i));
       if (m) {
         const envName = m[1]!;
-        const isMath = MATH_ENVS.has(envName);
-        const classified = isMath
-          ? { kind: "display_math" as const, visibility: activeVisibility }
-          : classifyLabel(envName, activeVisibility, sealProofs);
+        const classified = classifyLatexEnvironment(envName, activeVisibility, sealProofs);
         if (classified) {
           const openEnd = i + m[0].length;
+          const isMath = classified.kind === "display_math";
+          const isLiteral = classified.kind === "code";
           const math = isMath ? findMathEnvironment(text, envName, openEnd) : null;
-          const bounds = math ?? findMatchingLatexEnvBounds(text, envName, openEnd);
+          const bounds = math ?? (isLiteral
+            ? findLatexLiteralEnd(text, envName, openEnd) ?? { closeStart: text.length, closeEnd: text.length }
+            : findMatchingLatexEnvBounds(text, envName, openEnd));
           spans.push({
             start: i,
             end: bounds.closeEnd,
             kind: classified.kind,
-            visibility: math?.closed === false ? "sealed" : classified.visibility,
+            visibility: math?.closed === false || (isLiteral && bounds.closeStart === text.length)
+              ? "sealed" : classified.visibility,
             label: envName,
-            ...(isMath ? {} : { openEnd, closeStart: bounds.closeStart }),
+            ...(isMath || isLiteral ? {} : { openEnd, closeStart: bounds.closeStart }),
           });
           i = bounds.closeEnd;
           continue;
@@ -1626,8 +1779,15 @@ function scanInlineCueTimings(
     const cueLine = timing && readMarkdownContainerLine(cueBody, containers);
     const documentLine = readMarkdownContainerLine(raw, containers);
     const next = lines[index + 1];
+    const readNext = (distance: number, activeContainers: readonly MarkdownContainer[]) => {
+      const offset = index + distance;
+      const nextCueBody = lines[offset]?.raw.slice(cueTimings[offset]?.prefixLength ?? 0);
+      return nextBodyInContainer(nextCueBody, activeContainers);
+    };
     const markedBoundary = boundaryFloors?.has(start);
-    let explicitBoundary = markedBoundary || (cueLine !== null && startsTimedTableBoundary(cueLine, table !== undefined));
+    let explicitBoundary = markedBoundary || (cueLine !== null && startsTimedTableBoundary(
+      cueLine, table !== undefined, distance => readNext(distance, cueLine.containers),
+    ));
     if (table && !markedBoundary) {
       const timedTable = table.timed;
       const readTableRow = (rowIndex: number) => {
@@ -1643,7 +1803,9 @@ function scanInlineCueTimings(
       const canContinue = isPipeTableBodyRow(continuation.body) || (captionRow && isCaptionTableBodyRow(continuation.body));
       if (continuation.depth === containers.length && (canContinue || table.timed)) {
         const candidate = cueLine ?? documentLine;
-        explicitBoundary ||= table.timed && startsTimedTableBoundary(candidate);
+        explicitBoundary ||= table.timed && startsTimedTableBoundary(
+          candidate, true, distance => readNext(distance, candidate.containers),
+        );
         const underline = !explicitBoundary
           ? protectedUnderline(index, candidate, table.columns, captionRow)
           : undefined;
@@ -2441,26 +2603,27 @@ function parsePedagogicalAstInternal(
     const tableHeaderCells = pipeTableHeaderCells(line, lines[i + 1]?.raw);
 
     // 4. LaTeX environment (\begin{equation|align|theorem|lemma|proof|definition|solution}...)
-    const envMatch = LATEX_BLOCK_BEGIN_RE.exec(raw);
+    const envMatch = matchLatexBlockOpening(raw, () => text.slice(line.start));
     if (envMatch && !tableHeaderCells) {
       const envName = envMatch[1]!;
       const activeVis = blockVisibility;
-      const isMath = MATH_ENVS.has(envName);
-      const classified = isMath
-        ? { kind: "display_math" as const, visibility: activeVis }
-        : classifyLabel(envName, activeVis, sealProofs);
+      const classified = classifyLatexEnvironment(envName, activeVis, sealProofs);
       if (classified) {
         const leadingWs = envMatch[0].length - envMatch[0].trimStart().length;
         const envStart = line.start + leadingWs;
         const openEndOffset = line.start + envMatch[0].length;
+        const isMath = classified.kind === "display_math";
+        const isLiteral = classified.kind === "code";
         const math = isMath ? findMathEnvironment(text, envName, openEndOffset) : null;
-        const { closeStart, closeEnd } = math ?? findMatchingLatexEnvBounds(text, envName, openEndOffset);
+        const { closeStart, closeEnd } = math ?? (isLiteral
+          ? findLatexLiteralEnd(text, envName, openEndOffset) ?? { closeStart: text.length, closeEnd: text.length }
+          : findMatchingLatexEnvBounds(text, envName, openEndOffset));
         const endLineIdx = lineIndexContaining(lines, Math.max(envStart, closeEnd - 1), i);
         const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
         const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
         const outerEnd = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
 
-        if (!isMath && classified.visibility !== "sealed" && closeStart > openEndOffset) {
+        if (!isMath && !isLiteral && classified.visibility !== "sealed" && closeStart > openEndOffset) {
           const innerBlocks = parseInnerSlice(openEndOffset, closeStart, classified.visibility, classified.kind);
           emitContainerWithExtraction(
             classified.kind,
@@ -2474,7 +2637,8 @@ function parsePedagogicalAstInternal(
             innerBlocks,
           );
         } else {
-          const visibility = math?.closed === false ? "sealed" : classified.visibility;
+          const visibility = math?.closed === false || (isLiteral && closeStart === text.length)
+            ? "sealed" : classified.visibility;
           pushBlock(classified.kind, visibility, true, envStart, outerEnd, {
             label: envName,
           });
@@ -2974,7 +3138,7 @@ function parsePedagogicalAstInternal(
     let j = i + 1;
     while (j < lines.length && !endsParagraph(j)) {
       const continuation = lines[j]!;
-      if (startsLatexBlock(continuation.raw)) {
+      if (startsLatexBlock(continuation.raw, () => text.slice(continuation.start))) {
         if (!inlineSpans) {
           // A LaTeX-looking line may occur inside an inline code span, but a
           // Markdown block boundary still ends the search for a closing backtick.

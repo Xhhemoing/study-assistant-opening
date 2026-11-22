@@ -739,7 +739,7 @@ export function rankPedagogicalEvidence(
   });
 
   let totalPprMass = 0;
-  const pprByNodeId: Record<string, number> = {};
+  const pprByNodeId: Record<string, number> = Object.create(null) as Record<string, number>;
   for (let idx = 0; idx < nodeIds.length; idx++) {
     const mass = ppr[idx]!;
     totalPprMass += mass;
