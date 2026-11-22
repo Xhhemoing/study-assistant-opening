@@ -109,10 +109,12 @@ describe("learner portability", () => {
       "costLedgerRef", "generatorModelIdentity", "modelSnapshot", "retainedQuestionEligibility", "questionEligibility",
       "correctAnswer", "correctAnswers", "workedSolution", "workedSolutions", "sampleSolutions", "canonicalAnswers",
       "expectedAnswers", "solverAnswers", "keyTexts", "trustedKeys", "teachingAnswerKeys",
+      "correctOptionId", "correctOptionIds", "solution", "answer", "answerId", "evaluator", "partSnapshot",
+      "resultMetadata", "questionIdentityRefId", "keyRefId", "unexposedReceipt", "lessonExposureIds",
     ]) {
       const publicKey = "x".repeat(key.length);
       const metadata = [["details:", "  - " + publicKey + ": example"]];
-      if (key === "pinnedKey") metadata.push([publicKey + ": example"]);
+      if (["pinnedKey", "correctOptionId", "correctOptionIds"].includes(key)) metadata.push([publicKey + ": example"]);
       for (const lines of metadata) {
         const markdown = ["---", "title: Algebra", ...lines, "---", "# Note"].join(newline);
         const original = importObsidianNote("notes/algebra.md", markdown);
@@ -183,12 +185,14 @@ describe("learner portability", () => {
     },
   );
 
-  it.each(["\n", "\r", "\r\n"])("round-trips Unicode and spaced public keys with %j line endings", newline => {
+  it.each(["\n", "\r", "\r\n"])("round-trips public frontmatter with %j line endings", newline => {
     const markdown = ["\uFEFF---", "课程: 数学", "course name: Algebra", 'details: { "yes": "string", 学习 进度: 3 }',
       "title: Matrix", "tags: [math]", "aliases: [Algebra]", "created: 2026-11-20", "updated: 2026-11-21",
       "summary: Practice", "course: Math", "deck: Algebra", "author: Learner", "lang: en", "id: note-1",
+      'properties: { "16": first, "0x10": second }', "items: [Matrix]",
       "---", "# 课程", ""].join(newline);
     const note = importObsidianNote("note.md", markdown);
+    expect(exportObsidianNote(note).markdown).toBe(markdown);
     expect(exportMarkdown(importMarkdown(note.path, markdown))).toBe(markdown);
     const archive = exportLearnerZip(createLearnerPackage({ notes: [note], decks: [], reviews: [] }));
     expect(importLearnerZip(archive).notes.map(exportMarkdown)).toEqual([markdown]);
