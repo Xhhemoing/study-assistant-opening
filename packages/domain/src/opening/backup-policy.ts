@@ -12,8 +12,8 @@ import { validateBackupPlanFeedback } from "./backup-plan-feedback";
 import { validateBackupSystemQuery } from "./backup-system-query";
 import { validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, libraryBlockSourceReferences,
-  libraryRevisionSourceReferences, noteProvenanceSourceReferences, parseUuidArray, sourceReferences,
-  turnMemoryDependencyIds, turnSourceReferences, unavailableBackupMemoryLineage, validObject } from "./backup-validation";
+  libraryRevisionSourceReferences, noteProvenanceSourceReferences, orderBackupMisconceptionRevisions, parseUuidArray, sourceReferences,
+  turnMemoryDependencyIds, turnSourceReferences, unavailableBackupMemoryLineage, validObject, validateBackupMisconceptionRevisions } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
 export type OpeningMemoryDeletions = {
@@ -274,7 +274,7 @@ export function validateOpeningRestore(
   const forbidden = findForbiddenBackupTable(backup);
   if (forbidden) return reject(`table ${forbidden} is not allowlisted`);
   if (!isUuid(backup.workspaceId) || !Number.isSafeInteger(backup.privacyEpoch)
-    || (backup.privacyEpoch as number) < 0 || !isJournal(backup.deletionJournal)
+    || (backup.privacyEpoch as number) < 0 || (backup.privacyEpoch as number) >= 2 ** 31 || !isJournal(backup.deletionJournal)
     || !isJournal(currentDeletionJournal) || !isTables(backup.tables)
     || !Array.isArray(backup.objects) || !backup.objects.every(validObject)) {
     return reject("invalid backup structure or privacy metadata");
@@ -404,6 +404,9 @@ export function validateOpeningRestore(
       }
     }
   }
+  const misconceptionHistory = tables.v3_bitemporal_misconception_edges ?? [];
+  if (!orderBackupMisconceptionRevisions(misconceptionHistory)) errors.push("invalid misconception revision lineage");
+  errors.push(...validateBackupMisconceptionRevisions(tables, backup.privacyEpoch as number));
   validateBackupWorkspaceAssets(tables, errors);
   validateWorkspaceHistory(tables, errors);
   validateRetestReferences(tables, errors);

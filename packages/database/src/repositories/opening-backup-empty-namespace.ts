@@ -20,6 +20,7 @@ export const EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES = [
   "explorations", "exploration_branches", "exploration_blocks", "promotion_records", "promotion_targets", // Native collections.
   "content_packages", "syllabus_nodes", // Legacy practice catalog.
   "opening_source_embeddings", // Rebuilt embedding index.
+  "v3_learner_context_blocks", // Rebuilt from retained misconception history.
   "opening_learning_experience_events", // Operational experience telemetry.
 ] as const;
 
@@ -135,6 +136,7 @@ export async function readOpeningRestoreNamespaceCounts(
     UNION ALL SELECT 'opening_source_versions', count(*)::int FROM opening_source_versions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_item_versions', count(*)::int FROM opening_learning_item_versions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_attempts', count(*)::int FROM opening_learning_attempts WHERE workspace_id = ${id}
+    UNION ALL SELECT 'v3_bitemporal_misconception_edges', count(*)::int FROM v3_bitemporal_misconception_edges WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_history_revisions', count(*)::int FROM opening_learning_history_revisions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_learning_activity_history_revisions', count(*)::int FROM opening_learning_activity_history_revisions WHERE workspace_id = ${id}
     UNION ALL SELECT 'opening_workspace_history_revisions', count(*)::int FROM opening_workspace_history_revisions WHERE workspace_id = ${id}

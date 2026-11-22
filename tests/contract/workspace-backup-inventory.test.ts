@@ -35,6 +35,13 @@ describe("learner backup inventory", () => {
     expect(OPENING_RESTORE_NEVER_TABLES).toEqual(BACKUP_FORBIDDEN_TABLES);
   });
 
+  it("keeps misconception history durable, context derived, and receipt claims forbidden", () => {
+    expect(OPENING_BACKUP_TABLES).toContain("v3_bitemporal_misconception_edges");
+    expect(EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES).toContain("v3_learner_context_blocks");
+    expect(BACKUP_FORBIDDEN_TABLES).toContain("v3_try_misconception_handoff_receipts");
+    expect(validateOpeningRestore({ ...draft, tables: { v3_learner_context_blocks: [] } }, []).allowed).toBe(false);
+  });
+
   it("keeps private supply, exposure and quota ledgers permanently forbidden", () => {
     for (const name of ["opening_course_reserved_questions", "opening_course_question_exposures", "opening_course_question_exposure_coverage",
       "opening_budget_reservations", "opening_budget_reconcile_events", "opening_parent_interaction_budgets"]) {

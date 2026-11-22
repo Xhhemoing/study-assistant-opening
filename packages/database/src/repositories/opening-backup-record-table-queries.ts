@@ -1,3 +1,4 @@
+import { orderBackupMisconceptionRevisions, uuidList } from "../../../domain/src/opening/backup-validation";
 import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences, unavailableBackupMemoryLineage } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
 import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, projectOpeningBackupProvenance, readBackupLibrary, readBackupNoteProvenance } from "./opening-backup-library";
@@ -498,5 +499,27 @@ export async function readOpeningBackupTableRows(
   Object.assign(tables, libraryTables);
   tables.opening_note_provenance = projectOpeningBackupProvenance(libraryTables.opening_note_provenance, cardIds);
   await readBackupCourseAssets(tx, id, userId, tables);
+  // Export only complete lineages at the workspace's current privacy epoch.
+  const revisions = asRows(await tx`
+    SELECT e.revision_id, e.workspace_id, e.owner_user_id, e.edge_id, e.course_id, e.concept_key, e.misconception_code,
+      e.summary, e.status, e.origin, e.learner_disposition, e.evidence_attempt_ids, e.privacy_epoch,
+      e.valid_range::text, e.tx_range::text, e.prior_revision_id
+    FROM v3_bitemporal_misconception_edges e
+    JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
+    WHERE e.workspace_id = ${id} AND e.owner_user_id = ${userId} AND e.privacy_epoch = w.privacy_epoch
+      AND NOT EXISTS (
+        SELECT 1 FROM v3_bitemporal_misconception_edges other
+        WHERE other.workspace_id = e.workspace_id AND other.owner_user_id = e.owner_user_id
+          AND other.edge_id = e.edge_id AND other.privacy_epoch <> w.privacy_epoch
+      )
+    ORDER BY lower(e.tx_range), e.revision_id`);
+  const courseIds = new Set(tables.courses.map(row => row.id));
+  const excludedEdges = new Set(revisions.filter(row =>
+    (row.course_id != null && !courseIds.has(row.course_id))
+    || !uuidList(row.evidence_attempt_ids)
+    || row.evidence_attempt_ids.some(id => !completeAttemptIds.has(id))).map(row => row.edge_id));
+  const misconceptionRevisions = orderBackupMisconceptionRevisions(revisions.filter(row => !excludedEdges.has(row.edge_id)));
+  if (!misconceptionRevisions) throw new Error("Invalid stored misconception revision lineage");
+  tables.v3_bitemporal_misconception_edges = misconceptionRevisions;
   return tables;
 }

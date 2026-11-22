@@ -379,3 +379,6 @@ export {
   type DayAdjustmentFaultStage,
   type OpeningDayAdjustmentOptions,
 } from "./repositories/opening-day-adjustment";
+
+export * from "./schema/v3-bitemporal-memory";
+export * from "./repositories/v3-bitemporal-misconception-memory";

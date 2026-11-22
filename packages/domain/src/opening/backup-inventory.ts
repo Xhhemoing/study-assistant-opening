@@ -25,6 +25,7 @@ export const OPENING_RESTORE_APPLY_ORDER = [
   "opening_workspace_history_revisions",
   "opening_learning_item_versions",
   "opening_learning_attempts",
+  "v3_bitemporal_misconception_edges",
   "opening_turns",
   "opening_assistant_candidates",
   "opening_help_exposures",
@@ -49,4 +50,6 @@ export const OPENING_RESTORE_APPLY_ORDER = [
 ] as const;
 
 export const OPENING_BACKUP_TABLE_SET: ReadonlySet<string> = new Set(OPENING_RESTORE_APPLY_ORDER);
-export const OPTIONAL_ASSET_TABLES: ReadonlySet<string> = new Set([...LIBRARY_BACKUP_TABLES, ...COURSE_BACKUP_TABLES]);
+export const OPTIONAL_ASSET_TABLES: ReadonlySet<string> = new Set([
+  ...LIBRARY_BACKUP_TABLES, ...COURSE_BACKUP_TABLES, "v3_bitemporal_misconception_edges",
+]);
