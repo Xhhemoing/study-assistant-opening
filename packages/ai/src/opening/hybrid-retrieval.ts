@@ -70,6 +70,19 @@ function hasAdjacentInlineFormula(text: string, opener: number, commentEnd?: (st
   return false;
 }
 
+function hasClosingDisplayDollar(text: string, opener: number): boolean {
+  // Traverse to the next unescaped dollar pair, as the display scan does.
+  for (let index = opener + 2; index < text.length - 1;) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "\\" && (next === "\\" || next === "$" || next === "%")) { index += 2; continue; }
+    if (char === "%") { index = endOfLatexComment(text, index, text.length); continue; }
+    if (char === "$" && next === "$") return true;
+    index++;
+  }
+  return false;
+}
+
 function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (start: number) => number): boolean {
   const first = text[dollarIndex + 1];
   if (!first || first < "0" || first > "9") return false;
@@ -102,7 +115,10 @@ function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (st
   if (validClose) {
     const inner = bodyParts.join("") + text.slice(bodyStart, closeIdx);
     if ((MATH_COMMAND_OR_OP_RE.test(inner) || !CURRENCY_PROSE_OR_NON_MATH_RE.test(inner))
-      && (next !== "$" || (!PUNCTUATED_CURRENCY_RE.test(inner) && hasAdjacentInlineFormula(text, closeIdx + 1, commentEnd)))) {
+      && (next !== "$" || (!PUNCTUATED_CURRENCY_RE.test(inner) && (
+        text[closeIdx + 2] === "$" ? hasClosingDisplayDollar(text, closeIdx + 1)
+          : hasAdjacentInlineFormula(text, closeIdx + 1, commentEnd)
+      )))) {
       return false;
     }
   }
@@ -304,14 +320,25 @@ function findCodePointForOffset(cpStarts: number[], offset: number): number {
 }
 
 function selectSafeMathSpans(text: string, prefixBytes: Int32Array, maxBytes: number): MathSpan[] {
-  const valid = scanMathSpans(text)
-    .filter(span => prefixBytes[span.end]! - prefixBytes[span.start]! <= maxBytes)
-    .sort((a, b) => a.start - b.start || b.end - a.end);
-
+  const spans = scanMathSpans(text);
+  if (spans.length === 0) return [];
+  // Delimiter families can cross on malformed input. Index by opening offset so
+  // rejecting a crossing span never discards a later, disjoint formula.
+  const endByStart = new Int32Array(text.length);
+  for (const { start, end } of spans) {
+    if (prefixBytes[end]! - prefixBytes[start]! <= maxBytes) {
+      endByStart[start] = Math.max(endByStart[start]!, end);
+    }
+  }
   const topLevel: MathSpan[] = [];
-  for (const span of valid) {
-    const prev = topLevel[topLevel.length - 1];
-    if (!prev || span.start >= prev.end) topLevel.push(span);
+  for (let start = 0; start < endByStart.length;) {
+    const end = endByStart[start]!;
+    if (end > start) {
+      topLevel.push({ start, end });
+      start = end;
+    } else {
+      start++;
+    }
   }
   return topLevel;
 }

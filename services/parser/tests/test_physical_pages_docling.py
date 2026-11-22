@@ -267,6 +267,16 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertFalse(extracted.in_exercise_by_page[5])
         self.assertTrue(extracted.section_sealed_by_page[6])
 
+    def test_chinese_explanations_keep_inline_seals_open_through_running_footers(self):
+        for heading in ("【解析】", "【详解（续）】", "解析（接上页）", "详解：", "【解答(续)】"):
+            with self.subTest(heading=heading):
+                stem = "Exercise 1. Solve x - 3 = 0."
+                texts = {1: f"{stem}\n{heading}\nIV.", 2: "x = 3.", 3: "Public prose continues here."}
+                extracted = physical_pages.extract_physical_pages(worker_pdf_conversion(texts, ()))
+                self.assertEqual(extracted.texts_by_page, {1: [stem], 2: [], 3: [texts[3]]})
+                self.assertTrue(extracted.inline_sealed_by_page[1])
+                self.assertFalse(extracted.inline_sealed_by_page[2])
+
     def test_container_prefixed_worked_examples_keep_the_solution_public(self):
         for heading in ("Chapter 3: Worked Example", "Section 2.1: Worked Example 2", "Unit 2 Worked Example 3"):
             with self.subTest(heading=heading):

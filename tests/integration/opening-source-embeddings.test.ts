@@ -373,6 +373,36 @@ describe("pgvector material repository", () => {
     await expectArchivedPdfPages([stem, "x =", "Chapter 2: Rings", "Public prose continues here."], [3, 4], 2);
   });
 
+  it.each(["IV.", "pp. 12.", "12 / 300.", "- 12 -.", "第 十二页。", "第十二 / 三百頁。"])(
+    "ignores the running footer %j after a pending archived exercise answer", async footer => {
+      const stem = "Exercise 1. Solve x - 3 = 0.\n【答案】";
+      await expectArchivedPdfPages([stem + "\n" + footer, "x = 3.", "Public prose continues here."], [3], 2);
+    },
+  );
+
+  it.each(["Figure out the roots by factoring.", "Claim I can factor the polynomial.", "Note how the factors cancel.",
+    "Definition of the notation is given below.", "Theorem 2.1 states this fact."])(
+    "keeps ordinary %j inside an archived inline answer", async line => {
+      const stem = "Exercise 1. Solve x - 3 = 0.\n【解答】";
+      await expectArchivedPdfPages([stem, line + "\nx = 3.", "Public prose continues here."], [3], 2);
+    },
+  );
+
+  it.each(["Figure 1 The rings", "Table A.2: Ring operations", "Fig. IV: Ring diagram", "Tab. 2.1 Data",
+    "# Section 2.2 Ring operations", "Theorem 2.1"])(
+    "reopens an archived inline answer at the structural heading %j", async heading => {
+      const stem = "Exercise 1. Solve x - 3 = 0.\n【解答】";
+      await expectArchivedPdfPages([stem, "x =", heading, "Public prose continues here."], [3, 4], 2);
+    },
+  );
+
+  it.each(["【解析】", "【详解（续）】", "解析（接上页）", "解析：", "详解", "详解：", "【解答(续)】"])(
+    "seals an archived exercise explanation opened by %s across the page break", async label => {
+      const stem = "Exercise 1. Solve x - 3 = 0.";
+      await expectArchivedPdfPages([stem + "\n" + label, "x = 3.", "Public prose continues here."], [3], 2);
+    },
+  );
+
   it("treats a label-only Chinese answer as a section after a structural heading ends the exercise", async () => {
     await expectArchivedPdfPages([
       "Exercise 1. Solve x - 3 = 0.", "Chapter 2: Rings", "【正确答案】", "5 units.", "Chapter 3: Fields",
@@ -623,6 +653,35 @@ describe("pgvector material repository", () => {
     expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks.map(({ page }) => page)).toEqual([3]);
     await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
+
+  it.each(["x = 3.", "Chapter 2: Rings\nx = 3."])(
+    "filters native %j when live Vision reopens an archived seal with no saved marker", async nativeText => {
+      const pdf = await seed(["Unavailable.", "[视觉转写与描述]\nAnswer Key\nx = 3.", "Rings have two operations."]);
+      await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page=1`;
+      await f.sql`UPDATE opening_source_chunks SET image_object_key='vision/key' WHERE source_id=${pdf.sourceId} AND page=2`;
+      expect(await f.sql`SELECT 1 FROM opening_pdf_parse_segments
+        WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`).toHaveLength(0);
+      const recognizePage = vi.fn(async () => ({
+        text: "【原图忠实转写，尚需核对】\nChapter 2: Rings\nThis chapter studies polynomial rings.",
+        imageObjectKey: "vision/page-two",
+      }));
+      const retry = await startPdfRetry(pdf.sourceId, [
+        { page: 1, text: "Unavailable.", imagePath: null, visualKinds: [] },
+        { page: 2, text: nativeText, imagePath: null, visualKinds: ["picture"] },
+        { page: 3, text: "Rings have two operations.", imagePath: null, visualKinds: [] },
+      ], { recognizePage }, [1]);
+      await expect(retry.run()).resolves.toEqual({ pages: 2 });
+      await retry.finish(2);
+      expect(recognizePage).toHaveBeenCalledOnce();
+      expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ error: { code: "PARSE_PARTIAL" } });
+      const published = await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, undefined, { unpublishedPdfForRecovery: true });
+      expect(published.map(({ page }) => page)).toEqual([2, 3]);
+      expect(published[0]?.text).toContain("This chapter studies polynomial rings.");
+      expect(published[0]?.text).not.toContain("x = 3.");
+      const content = await readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 });
+      expect(content.text).not.toContain("x = 3.");
+    },
+  );
 
   it("seals sentence-case assessment sections before publication and index admission", async () => {
     const texts = ["Answers to exercises 1–5", "5 units.", "Chapter 2: Geometry"];

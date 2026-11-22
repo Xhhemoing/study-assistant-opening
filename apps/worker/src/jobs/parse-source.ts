@@ -92,12 +92,13 @@ const QUALIFIED_MULTI_SECTION_RE = new RegExp(
 const QUALIFIED_ANSWER_LABEL = String.raw`(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)`;
 const ENGLISH_SOLUTION_LABEL = String.raw`(?:(?:Worked|Full|Sample|Official|Reference)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)`;
 const CONTINUED_LABEL = String.raw`(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?`;
+const CHINESE_SOLUTION_LABEL = "(?:参考解答|详细解答|解答|详解|解析)";
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
   String.raw`(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*[:：]` +
   String.raw`|${QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:[:：]|$)` +
-  String.raw`|【\s*(?:${CHINESE_ANSWER_HEADING}|答案)\s*】` +
+  String.raw`|【\s*(?:${CHINESE_ANSWER_HEADING}|答案)${CHINESE_ANSWER_CONTINUATION}\s*】` +
   String.raw`|(?:${CHINESE_ANSWER_HEADING}|答案)\s*(?:\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
   ")",
   "u",
@@ -106,17 +107,17 @@ const INLINE_SEALED_ALWAYS_RE = new RegExp(
 const INLINE_SEALED_NON_EXAMPLE_RE = new RegExp(
   "^(?:" +
   String.raw`${ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*[:：]` +
-  "|【\\s*(?:参考解答|详细解答|解答|详解|解析)\\s*】" +
-  "|(?:参考解答|详细解答|解答|详解|解析|解)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*[:：]" +
+  String.raw`|【\s*${CHINESE_SOLUTION_LABEL}${CHINESE_ANSWER_CONTINUATION}\s*】` +
+  String.raw`|(?:${CHINESE_SOLUTION_LABEL}|解)\s*(?:\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
   ")",
   "u",
 );
 
-const STANDALONE_SOLUTION_HEADING_RE = new RegExp(String.raw`^(?!(?:Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|解答|详细解答|参考解答|解析|详解)${CONTINUED_LABEL}\s*$`, "u");
+const STANDALONE_SOLUTION_HEADING_RE = new RegExp(String.raw`^(?!(?:Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|${CHINESE_SOLUTION_LABEL}${CHINESE_ANSWER_CONTINUATION})${CONTINUED_LABEL}\s*$`, "u");
 const WORKED_EXAMPLE_RE = new RegExp(String.raw`^(?:${SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+))?(?:(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+|$)|(?:\s*\([^)]+\))?\s*(?:[:：.—-]|$))|例题(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*(?:[:：.．—-]|$))|例(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*[:：]))`, "iu");
 const WORKED_EXAMPLE_INTERNAL_RE = new RegExp(
   String.raw`^(?:(?!(?:(?:Official|Reference)\s+[Ss]olutions|(?:OFFICIAL|REFERENCE)\s+SOLUTIONS|Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|Proof|PROOF)${CONTINUED_LABEL}\s*(?:[:：]|\.(?:\s|$)|$)` +
-  String.raw`|(?:详细解答|参考解答|解答|详解|解析|证明|证|解|分析)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)|【\s*(?:解答|证明|证|解|分析|详解|解析)\s*】)`, "u",
+  String.raw`|(?:${CHINESE_SOLUTION_LABEL}|证明|证|解|分析)${CHINESE_ANSWER_CONTINUATION}\s*(?:[:：]|$)|【\s*(?:解答|证明|证|解|分析|详解|解析)${CHINESE_ANSWER_CONTINUATION}\s*】)`, "u",
 );
 const EXERCISE_OPENER_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problem\s+\d+|PROBLEM\s+\d+|Question\s+\d+|QUESTION\s+\d+)\b|(?:习题|练习题|练习|思考题|作业题))/u;
 const PUBLIC_BLOCK_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Axiom|AXIOM|Conjecture|CONJECTURE|Claim|CLAIM|Proof|PROOF|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+|SECTION\s+\d+|Part\s+\d+|PART\s+\d+|Figure\s+\d+|Fig\.?\s+\d+|Table\s+\d+)\b|(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|图\s*\d+|表\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))|\d+(?:\.\d+)+\s+\S)/u;
@@ -1388,7 +1389,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                   && (isStandaloneRecoverySection(rawPage.text)
                     || onlyUncertainty && !preparedPage.incomingSeal.unknownAfterFailure
                       && preparedPage.incomingSeal.mode === "none" && isStandaloneRecoveryProse(rawPage.text));
-                const recoveredVision = previouslyBlocked && evidence.visionTranscribed && !evidence.visionDetectedOnPage
+                const archivedVisionSeal = preparedPage.savedVisionDetectedOnPage && preparedPage.savedVisionWasSealed;
+                const visionRecoveryBoundary = previouslyBlocked || archivedVisionSeal
+                  || preparedPage.incomingSeal.unknownAfterFailure || preparedPage.incomingSeal.mode !== "none";
+                const recoveredVision = visionRecoveryBoundary && evidence.visionTranscribed && !evidence.visionDetectedOnPage
                   && (!previouslySealed || !evidence.visionHadSeal) && chunk
                   ? splitPdfChunk(chunk.text) : undefined;
                 const recoveryTranscription = recoveredVision ? evidence.transcription : "";
@@ -1396,7 +1400,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                   ? marker?.visualKinds !== undefined && marker.publicationSealHadPublicPrefix === false
                     && isStandaloneRecoverySection(recoveryTranscription)
                   : isStandaloneRecoverySection(recoveryTranscription) || (
-                    !evidence.visionHadSeal && preparedPage.incomingSeal.mode === "none"
+                    !archivedVisionSeal && !evidence.visionHadSeal && preparedPage.incomingSeal.mode === "none"
                     && !preparedPage.incomingSeal.unknownAfterFailure && isStandaloneRecoveryProse(recoveryTranscription)
                   );
                 const recoveredNative = onlyUncertainty && verifiedNativeRecovery && !confirmedSeal;
@@ -1434,8 +1438,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 } else if (verifiedRecovery && recoveredVision && chunk) {
                   // The verified transcription cannot vouch for unheaded text from a separate native extraction.
                   const native = stripSealedSolutionLines(recoveredVision.nativeBody, { ...cleanSeal }, undefined, "heading-only");
-                  const vision = "[视觉转写与描述]\n" + recoveredVision.vision;
-                  chunk = { ...chunk, text: native ? recoveredVision.nativeHeader + native + "\n\n" + vision : vision };
+                  const vision = recoveredVision.vision ? "[视觉转写与描述]\n" + recoveredVision.vision : "";
+                  const text = [native && recoveredVision.nativeHeader + native, vision].filter(Boolean).join("\n\n");
+                  chunk = text ? { ...chunk, text } : undefined;
                 }
                 const unverifiedImage = preparedPage.visual && needsVerifiedImage(preparedPage.visual.visualKinds);
                 const unverifiedPage = !confirmedSeal && !previouslySealed && pdfSealState.mode === "none"

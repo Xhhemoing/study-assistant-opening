@@ -184,6 +184,57 @@ describe("material hybrid retrieval", () => {
     expect(segments.map(({ chunk }) => chunk.text)).toEqual([prefix, formulas]);
   });
 
+  it("keeps a numeric inline formula followed immediately by display math intact", () => {
+    const prefix = "a".repeat(5998);
+    for (const display of ["$$z$$", "$$" + "z".repeat(6400) + "$$", "$$% ignored $$\nz$$"]) {
+      const text = prefix + "$2x$" + display;
+      const segments = segmentMaterialChunks([chunk("adjacent-display", text)]);
+      expect(segments.map(({ chunk }) => chunk.text)).toEqual(
+        display.length > 6000 ? [prefix, "$2x$", display] : [prefix, "$2x$" + display],
+      );
+    }
+  });
+
+  it("matches start-sorted span selection for nested, oversized, crossing and rescanned spans", () => {
+    const nested = "\\[\\(x + y\\) = z\\]";
+    const oversized = "\\[" + "b".repeat(8190) + "$x + y$\\]";
+    const crossing = "\\[\\(a\\]" + "b".repeat(50) + "$x + y$\\)";
+    const unclosed = "$x$ $$ unclosed " + "b".repeat(35) + nested;
+    const cases = [
+      { body: nested, formulas: [nested, "\\(x + y\\)"] },
+      { body: oversized, formulas: [oversized, "$x + y$"] },
+      { body: crossing, formulas: ["\\[\\(a\\]", crossing.slice(2), "$x + y$"] },
+      { body: unclosed, formulas: ["$x$", nested, "\\(x + y\\)"] },
+    ];
+
+    for (const { body, formulas } of cases) {
+      const text = "a".repeat(61) + body + " tail";
+      const spans = formulas.flatMap(formula => {
+        const start = text.indexOf(formula);
+        expect(start).toBeGreaterThanOrEqual(0);
+        return formula.length <= 8192 ? [{ start, end: start + formula.length }] : [];
+      }).sort((a, b) => a.start - b.start || b.end - a.end);
+      const topLevel: typeof spans = [];
+      for (const span of spans) {
+        if (span.start >= (topLevel.at(-1)?.end ?? 0)) topLevel.push(span);
+      }
+
+      for (const maxBytes of [24, 64, 117]) {
+        const expected = [];
+        let start = 0;
+        while (start < text.length) {
+          const limit = Math.min(start + maxBytes, text.length);
+          const spanAtCut = topLevel.find(span => span.start < limit && limit < span.end);
+          const end = spanAtCut ? (spanAtCut.start > start ? spanAtCut.start : spanAtCut.end) : limit;
+          expected.push(text.slice(start, end));
+          start = end;
+        }
+        const actual = segmentMaterialChunks([chunk("span-oracle", text)], maxBytes);
+        expect(actual.map(segment => segment.chunk.text)).toEqual(expected);
+      }
+    }
+  });
+
   it("preserves a display formula after an unclosed numeric dollar amount", () => {
     const prefix = "a".repeat(5996) + "$2 in cash ";
     const formula = "$$" + "x".repeat(6400) + "$$";

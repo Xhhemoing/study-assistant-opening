@@ -74,11 +74,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v23-discourse/text",
     "docling-2.126.0/pdf-segments-v24-discourse/text",
     "docling-2.126.0/pdf-segments-v25-discourse/text",
+    "docling-2.126.0/pdf-segments-v26-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v26-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v27-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -1270,20 +1271,36 @@ describe("bounded resumable PDF parser", () => {
     },
   );
 
-  it("accepts a fresh recovery transcription in place of an archived Vision seal", async () => {
-    const result = await runPdfScenario({
-      segmentPages: 1, failedStarts: [1],
-      pages: [{ page: 1, text: "Unavailable." }, { page: 2, text: "Chapter 2: Rings", visualKinds: ["picture"] },
-        { page: 3, text: "Polynomial rings have an addition operation." }],
-      savedChunks: [{ page: 2, slideLabel: null, startMs: null, endMs: null,
-        text: "[视觉转写与描述]\nAnswer Key", imageObjectKey: "vision/key" }],
-      recognizePage: async () => ({
-        text: "【原图忠实转写，尚需核对】\nChapter 2: Rings\nThis chapter studies polynomial rings.",
-        imageObjectKey: "vision/page-two",
-      }),
-    });
-    expect(result.publishedChunks.map(({ page }) => page)).toEqual([2, 3]);
-  });
+  it.each(["x = 3.", "Chapter 2: Rings\nx = 3."])(
+    "accepts fresh Vision but excludes unverified native text %j after an archived Vision seal", async nativeText => {
+      const result = await runPdfScenario({
+        segmentPages: 1, failedStarts: [1],
+        pages: [{ page: 1, text: "Unavailable." }, { page: 2, text: nativeText, visualKinds: ["picture"] },
+          { page: 3, text: "Polynomial rings have an addition operation." }],
+        savedChunks: [{ page: 2, slideLabel: null, startMs: null, endMs: null,
+          text: "[视觉转写与描述]\nAnswer Key\nx = 3.", imageObjectKey: "vision/key" }],
+        recognizePage: async () => ({
+          text: "【原图忠实转写，尚需核对】\nChapter 2: Rings\nThis chapter studies polynomial rings.",
+          imageObjectKey: "vision/page-two",
+        }),
+      });
+      expect(result.publishedChunks.map(({ page }) => page)).toEqual([2, 3]);
+      expect(result.publishedChunks[0]?.text).toContain("This chapter studies polynomial rings.");
+      expect(result.publishedChunks[0]?.text).not.toContain("x = 3.");
+    },
+  );
+
+  it.each(["【解析】", "【详解（续）】", "解析（接上页）", "详解：", "【解答(续)】"])(
+    "carries %s through the exercise answer page and ignores a Roman footer", async label => {
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: "Exercise 1. Solve x - 3 = 0.\n" + label + "\nIV." },
+        { page: 2, text: "x = 3." },
+        { page: 3, text: "Public prose continues here." },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 2, seed: "inline_sealed", exercise: true });
+      expect(result.publishedChunks.map(({ page }) => page)).toEqual([1, 3]);
+    },
+  );
 
   it("reuses a clean legacy Vision transcription on a scan with no native text", async () => {
     const saved = { page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey: "old/scan", text: "A public definition." };

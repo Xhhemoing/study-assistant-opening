@@ -99,13 +99,14 @@ _QUALIFIED_MULTI_SECTION_RE = re.compile(
 _QUALIFIED_ANSWER_LABEL = r"(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)"
 _ENGLISH_SOLUTION_LABEL = r"(?:(?:Worked|Full|Sample|Official|Reference)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)"
 _CONTINUED_LABEL = r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?"
+_CHINESE_SOLUTION_LABEL = r"(?:参考解答|详细解答|解答|详解|解析)"
 
 # Single-item answers use a colon or a standalone qualified heading.
 _INLINE_SEALED_ALWAYS_RE = re.compile(
     r"^(?:"
     rf"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*[:：]"
     rf"|{_QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:[:：]|$)"
-    rf"|【\s*(?:{_CHINESE_ANSWER_HEADING}|答案)\s*】"
+    rf"|【\s*(?:{_CHINESE_ANSWER_HEADING}|答案){_CHINESE_ANSWER_CONTINUATION}\s*】"
     rf"|(?:{_CHINESE_ANSWER_HEADING}|答案)\s*(?:\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
     r")"
 )
@@ -114,20 +115,20 @@ _INLINE_SEALED_ALWAYS_RE = re.compile(
 _INLINE_SEALED_NON_EXAMPLE_RE = re.compile(
     r"^(?:"
     rf"{_ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*[:：]"
-    r"|【\s*(?:参考解答|详细解答|解答|详解|解析)\s*】"
-    r"|(?:参考解答|详细解答|解答|详解|解析|解)\s*(?:\d+(?:[.\-]\d+)*)?\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：]"
+    rf"|【\s*{_CHINESE_SOLUTION_LABEL}{_CHINESE_ANSWER_CONTINUATION}\s*】"
+    rf"|(?:{_CHINESE_SOLUTION_LABEL}|解)\s*(?:\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
     r")"
 )
 _STANDALONE_SOLUTION_HEADING_RE = re.compile(
-    rf"^(?!(?:Solutions|SOLUTIONS)\b)(?:{_ENGLISH_SOLUTION_LABEL}|解答|详细解答|参考解答|解析|详解){_CONTINUED_LABEL}\s*$"
+    rf"^(?!(?:Solutions|SOLUTIONS)\b)(?:{_ENGLISH_SOLUTION_LABEL}|{_CHINESE_SOLUTION_LABEL}{_CHINESE_ANSWER_CONTINUATION}){_CONTINUED_LABEL}\s*$"
 )
 
 _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE = re.compile(
     r"^(?:"
     rf"(?!(?:(?:Official|Reference)\s+[Ss]olutions|(?:OFFICIAL|REFERENCE)\s+SOLUTIONS|Solutions|SOLUTIONS)\b)"
     rf"(?:{_ENGLISH_SOLUTION_LABEL}|Proof|PROOF){_CONTINUED_LABEL}\s*(?:[:：]|\.(?:\s|$)|$)"
-    r"|(?:详细解答|参考解答|解答|详解|解析|证明|证|解|分析)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
-    r"|【\s*(?:解答|证明|证|解|详解|解析|分析)\s*】"
+    rf"|(?:{_CHINESE_SOLUTION_LABEL}|证明|证|解|分析){_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：]|$)"
+    rf"|【\s*(?:解答|证明|证|解|详解|解析|分析){_CHINESE_ANSWER_CONTINUATION}\s*】"
     r")"
 )
 _PROOF_RE = re.compile(

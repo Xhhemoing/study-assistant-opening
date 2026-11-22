@@ -10,6 +10,7 @@ const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|c
 const englishContinuation = String.raw`(?: *\( *(?:continued|cont(?:['’]?d)?\.?) *\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
 const chineseContinuation = String.raw`(?: *[（(](?:续|接上页)[）)])? *`;
+const chineseExplanation = "(?:解析|详解)";
 const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;
 const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *| +(?:to|through) +)${assessmentNumber})?)?`;
 const assessmentTopic = String.raw`(?:(?:review +questions?|practice +problems?|self[- ]check +exercises?|exercises?|problems?|questions?)${assessmentTarget}|chapter +\d+|section +\d+(?:\.\d+)*)`;
@@ -20,7 +21,7 @@ const lineStart = String.raw`^ *(?:#{1,6} +)*`;
 // Standalone answer keys and bare "Answers" open a section. Numbered inline labels
 // and a singular "Answer:" affect the current chunk alone.
 const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|(?:答案|解答)${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
-const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案|解答)${chineseContinuation}(?:】|[:：]|$))`;
+const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案|解答|${chineseExplanation})${chineseContinuation}(?:】|[:：]|$)|解${chineseContinuation}[:：])`;
 const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?(?:answers?(?: +key)?|solutions?)|key)(?: +to +(?:exercise|problem|question))? *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)|(?:${chineseAnswerHeading}|答案|解答|详解|解析|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
 const sectionAnswerLine = lineStart + sectionAnswer;
 const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
@@ -56,9 +57,16 @@ const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +proble
 const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
 const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
 const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|(?:答案|解答) *[:：] *$|${qualifiedExerciseAnswer})`;
-const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|解答) *】 *[:：]? *|(?:答案|解答)${chineseContinuation}[:：] *|${qualifiedExerciseAnswer}|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
-const inlinePublicHeading = String.raw`${lineStart}(?:(?:worked +example|example|definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof|figure|table)\M|例题|例 *\d+|定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|\d+(?:\.\d+)+ +[^ ])`;
-const inlineRunningHeading = String.raw`${lineStart}(?:\d+ *$|(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +\d+\M|(?:第 *)?\d+ *[页頁] *$)`;
+const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|解答|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解答|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
+
+const headingId = String.raw`(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*|[ivxlcdm]{2,})\M`;
+const headingPunctuation = String.raw`(?:[:：．—–]|\.(?!\d)|-(?!\d))`;
+const headingSuffix = String.raw`(?: *[:：]| +${headingId}(?: *${headingPunctuation}| *$| +(?!(?:shows|illustrates|demonstrates|depicts|presents|indicates|states|says|is|was|are|can|will)\M)[^ ])| +[ivxlcdm]\M *(?:${headingPunctuation}|$))`;
+const inlinePublicHeading = String.raw`${lineStart}(?:(?:worked +example|example|definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof)(?:${headingSuffix}| *$)|(?:figure|fig\.?|table|tab\.?)${headingSuffix}|proof +of +(?:theorem|lemma|proposition|corollary) +${headingId} *(?:${headingPunctuation}|$)|例题|例 *\d+|定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|\d+(?:\.\d+)+ +[^ ])`;
+
+const pageNumberRatio = String.raw`\d+ *(?:of +|[/／–—-] *)\d+`;
+const chinesePageNumber = String.raw`(?:第 *)?[\d一二三四五六七八九十百千零〇]+`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)* *$|[(（\[]? *[ivxlcdm]+ *[)）\].。．、]? *$|[(（\[] *\d+(?:\.\d+)* *[)）\]] *[.。]? *$|[-–—] *\d+ *[-–—] *[.。]? *$|${pageNumberRatio} *[.)。]? *$|[(（\[【]? *(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+\M|${chinesePageNumber}(?: *(?:[/／–—-]|共) *${chinesePageNumber})? *[页頁] *[.。]? *$)`;
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
 const inlineTerminator = String.raw`(?:[□■∎]|end +of +answers?|答案完|解答完) *[.。]? *$`;
