@@ -59,7 +59,7 @@ export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: 
       if (mounted.current) setOrganizationError(userFacingMessage(reason, "整理结果尚未确认，请刷新后核对。"));
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }
-  async function createCourse(title: string) {
+  async function createCourse(title: string, onCreated?: (course: { id: string; title: string }) => void) {
     if (locked.current || !organizationReady) return;
     locked.current = true; setBusy(true);
     try {
@@ -67,6 +67,7 @@ export function useMaterialLibrary(api: OpeningApi, options: { uploadCourseId?: 
       if (!mounted.current) return;
       setOrganization(value => ({ ...value, courses: [...value.courses, { ...course, archived: false }] }));
       setSpace(`course:${course.id}`); setSelected([]); setResult(null);
+      onCreated?.(course);
       try { await refresh(); } catch { setOrganizationError("课程已创建，但列表刷新失败；请重新读取。"); }
     } finally { locked.current = false; if (mounted.current) setBusy(false); }
   }

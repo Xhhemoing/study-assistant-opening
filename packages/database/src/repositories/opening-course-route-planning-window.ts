@@ -135,6 +135,25 @@ export function projectCourseRoutePlanningWindow(
     : null;
 
   if (!activityId) {
+    let ordinaryNotBefore = taskNotBefore;
+    if (
+      row.origin === "agent"
+      && typeof row.client_key === "string"
+      && row.client_key.startsWith("text-retell:")
+      && row.client_key.endsWith(":deferred")
+    ) {
+      if (row.retest_hold_open_ended === true) {
+        ordinaryNotBefore = parseInstant("9999-12-31T23:59:59.000Z");
+      } else {
+        const holdEnd = parseInstant(row.retest_hold_end_at);
+        if (holdEnd) {
+          const afterHold = parseInstant(new Date(holdEnd.ms + 1000));
+          if (afterHold && (!ordinaryNotBefore || afterHold.ms > ordinaryNotBefore.ms)) {
+            ordinaryNotBefore = afterHold;
+          }
+        }
+      }
+    }
     return {
       isCourseRouteRetest: false,
       hasRetestActivity: false,
@@ -142,7 +161,7 @@ export function projectCourseRoutePlanningWindow(
       retestActive: true,
       legacyMiswrittenDueAt: false,
       dueAt: taskDueAt?.iso ?? null,
-      notBefore: taskNotBefore?.iso ?? null,
+      notBefore: ordinaryNotBefore?.iso ?? null,
       recommendedAt: null,
       scheduledStartAt: null,
       deadlineAt: null,
@@ -350,6 +369,10 @@ export async function readLockedTaskPlanningWindows(
       t.course_id,
       t.candidate_id,
       t.origin,
+      t.client_key,
+      t.created_at,
+      retest_hold.retest_hold_open_ended,
+      retest_hold.retest_hold_end_at,
       a.id AS retest_activity_id,
       a.workspace_id AS retest_workspace_id,
       a.owner_user_id AS retest_owner_user_id,
@@ -373,6 +396,26 @@ export async function readLockedTaskPlanningWindows(
       j.payload AS retest_job_payload,
       j.result AS retest_job_result
     FROM opening_tasks t
+    LEFT JOIN LATERAL (
+      SELECT
+        bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
+          AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp())) AS retest_hold_open_ended,
+        max(CASE
+          WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
+          ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
+        END) AS retest_hold_end_at
+      FROM (SELECT 1) AS _gate
+      JOIN opening_retest_activities r
+        ON t.origin = 'agent'
+        AND t.client_key LIKE 'text-retell:%:deferred'
+        AND r.workspace_id = t.workspace_id
+        AND r.owner_user_id = t.owner_user_id
+        AND (t.course_id IS NULL OR r.course_id = t.course_id)
+        AND (
+          r.status IN ('proposed', 'accepted', 'in_progress')
+          OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= t.created_at
+        )
+    ) retest_hold ON (t.origin = 'agent' AND t.client_key LIKE 'text-retell:%:deferred')
     LEFT JOIN opening_retest_activities a
       ON a.task_id = t.id
       AND a.workspace_id = t.workspace_id

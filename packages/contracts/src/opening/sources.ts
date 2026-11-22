@@ -192,6 +192,7 @@ export type SourceRecord = z.infer<typeof sourceRecordSchema>;
 export type UploadTicket = z.infer<typeof uploadTicketSchema>;
 export type SourceDownload = z.infer<typeof sourceDownloadSchema>;
 export type SourceChunk = z.infer<typeof sourceChunkSchema>;
+export type MaterialSegment = { chunk: SourceChunk; segmentIndex: number };
 export type Citation = z.infer<typeof citationSchema>;
 
 /** RU-01: attach opening source to a course via membership (not ownership). */

@@ -8,6 +8,7 @@ const taskReads = vi.hoisted(() => ({
   upsertHardBlocks: vi.fn(),
   listHardBlocks: vi.fn(),
   listTimetable: vi.fn(),
+  replaceTimetable: vi.fn(),
   findDraftByProposeClientKey: vi.fn(),
   ensureAutoDraft: vi.fn(),
 }));
@@ -51,6 +52,16 @@ it("projects persisted minutes without replacing the legacy task field and keeps
   expect(await createOpeningPlanService({} as Sql).listTasks(scope))
     .toEqual([{ ...task(1), estimateMinutes: 30 }]);
   expect(taskReads.listTasks).toHaveBeenCalledWith(scope);
+});
+
+it("accepts composite digest timetable revisions and rejects malformed expectedRevision tokens", async () => {
+  const scope = { workspaceId: id(1), ownerUserId: id(1) };
+  const service = createOpeningPlanService({} as Sql);
+  const digest = "0123456789abcdef0123456789abcdef";
+  taskReads.replaceTimetable.mockResolvedValue([]);
+  await expect(service.saveTimetable(scope, [], `empty:${id(1)}:${digest}`)).resolves.toEqual([]);
+  await expect(service.saveTimetable(scope, [], `${id(2)}:${digest}`)).resolves.toEqual([]);
+  await expect(service.saveTimetable(scope, [], "not-a-revision")).rejects.toThrow();
 });
 
 it("filters inactive retests in proposePlan and proposeDeltaPlan (when a retest task is requested)", async () => {

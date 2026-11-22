@@ -3,7 +3,7 @@ import { StudyNoteComposer } from "../learning-links/study-note-composer";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { terminalTurnStatusForJobError, type ConversationResume, type ConversationSummary, type LearningAttempt, type ComposerPurpose, type SourceRecord, type TutorMode, type TurnRecord } from "@aistudy/contracts";
-import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi } from "../client/api";
+import { OpeningApiError, createOpeningApi, type JobStatusResponse, type OpeningApi, type ScopedJobLookupResponse } from "../client/api";
 import { Composer, logicalSendFingerprint, nextClientKey, type ComposerPrivacy, type ComposerSubmit, type ComposerSubmitResult } from "./composer";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { CLARIFY_FOLLOW_UP, MessageList } from "./message-list";
@@ -121,6 +121,15 @@ export type PendingJobDiscovery =
   | { kind: "unknown"; pending: false; hint: string };
 
 /** Null is no pending job. A lookup error must stay unavailable, not empty. */
+function matchesDeferredStopJob(
+  job: ScopedJobLookupResponse | null,
+  stop: { clientKey: string; jobId?: string },
+): boolean {
+  if (!job) return false;
+  if (typeof job.clientKey === "string") return job.clientKey === stop.clientKey;
+  return stop.jobId !== undefined && job.id === stop.jobId;
+}
+
 export function pendingJobDiscoveryState(
   result: { ok: true; job: JobStatusResponse | null } | { ok: false; error: unknown },
 ): PendingJobDiscovery {
@@ -387,9 +396,11 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const [queuedRetry, setQueuedRetry] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
+  const [pendingStopRecovery, setPendingStopRecovery] = useState(false);
   const [reload, setReload] = useState(0);
   const [contextOpen, setContextOpen] = useState(false);
   const [error, setError] = useState("");
+  const [stoppingSaved, setStoppingSaved] = useState(false);
   const [pendingHint, setPendingHint] = useState("");
   /** Package C: dismissible / cleared on next submit when server echoes effectiveSourceIds. */
   const [autoSelectNotice, setAutoSelectNotice] = useState<string | null>(null);
@@ -652,11 +663,74 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         return true;
       }
       const pendingJob = discovery.job;
+      const deferredStop = pendingStop.current?.conversationId === id ? pendingStop.current : null;
       setRecoveryRequired(false);
       setUnknownJob(pendingJob?.status === "outcome_unknown" ? pendingJob : null);
       setRecoveryNow(Date.now());
       const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
-      if (discovered.kind === "active") {
+      if (deferredStop) {
+        if (discovered.kind === "active" && matchesDeferredStopJob(pendingJob, deferredStop)) {
+          setActiveJobId(null);
+          setPending(false);
+          await stopSavedJobRef.current(discovered.activeJobId, id, { fromDeferredStop: true });
+          return true;
+        }
+        // Resolve deferred Stop authoritatively via ?clientKey= so interleaved multi-tab
+        // turns or unfiltered responses can never clear an unresolved Stop or cancel Tab B.
+        let scopedJob: ScopedJobLookupResponse | null;
+        try {
+          scopedJob = await api.getPendingJob(id, signal, { clientKey: deferredStop.clientKey });
+        } catch (scopedError) {
+          if (signal?.aborted) return false;
+          const unavailable = pendingJobDiscoveryState({ ok: false, error: scopedError });
+          if (unavailable.kind === "unavailable") {
+            setPendingHint(`尚未确认是否有进行中的回答：${unavailable.message}`);
+          }
+          setActiveJobId(null);
+          setPending(false);
+          setRecoveryRequired(true);
+          setPendingStopRecovery(true);
+          return true;
+        }
+        if (signal?.aborted) return false;
+        if (matchesDeferredStopJob(scopedJob, deferredStop)) {
+          const scopedStatus = scopedJob!.status;
+          if (scopedStatus === "queued" || scopedStatus === "running") {
+            setActiveJobId(null);
+            setPending(false);
+            await stopSavedJobRef.current(scopedJob!.id, id, { fromDeferredStop: true });
+            return true;
+          }
+          if (scopedStatus === "succeeded" || scopedStatus === "failed" || scopedStatus === "cancelled") {
+            // Positively confirmed terminal in opening_tutor_jobs for this exact clientKey.
+            pendingStop.current = null;
+            setPendingStopRecovery(false);
+            try {
+              const refreshedTurns = await api.listTurns(id, signal);
+              if (signal?.aborted) return false;
+              const turnsValid = !guard.receipt || !refreshedTurns.some(turn => turn.conversationId !== id
+                || turn.contextAnchor?.attemptId !== learningAttempt?.id
+                || turn.contextAnchor?.itemVersionId !== learningAttempt?.itemVersionId);
+              if (turnsValid) {
+                observedTurns.current = refreshedTurns;
+                setTurns(refreshedTurns);
+              }
+            } catch {
+              if (signal?.aborted) return false;
+            }
+          }
+          // outcome_unknown leaves pendingStop armed so recovery stays explicit.
+        }
+      }
+      const remainingStop = pendingStop.current?.conversationId === id ? pendingStop.current : null;
+      if (remainingStop) {
+        // Keep pendingStop armed and do not adopt another tab's active stream over an unresolved Stop.
+        setActiveJobId(null);
+        setPending(false);
+        setRecoveryRequired(true);
+        setPendingStopRecovery(true);
+        setPendingHint(discovered.kind === "unknown" ? discovered.hint : "尚未确认发送结果，请重新读取对话。");
+      } else if (discovered.kind === "active") {
         setActiveJobId(discovered.activeJobId);
         setPending(discovered.pending);
         setPendingHint(discovered.hint);
@@ -667,11 +741,13 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       } else {
         setActiveJobId(null);
         setPending(false);
-        if (!guard.receipt || nextTurns.length) setPendingHint("");
+        if (!guard.receipt || observedTurns.current.length) {
+          setPendingHint("");
+        }
       }
       return true;
     },
-    [conversationReader, draftStore, initialCourseId, initialSourceIds, initialPage, learningAttempt, resumeBoundConversation, setConversationId],
+    [api, conversationReader, draftStore, initialCourseId, initialSourceIds, initialPage, learningAttempt, resumeBoundConversation, setConversationId],
   );
 
 
@@ -730,13 +806,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
 
   useEffect(() => {
     const guard = gradedGuard.current;
-    const id = guard.receipt?.conversationId;
+    const id = guard.receipt?.phase === "submitted" ? guard.receipt.conversationId : null;
     if (!id || !guard.available) {
       if (guard.receipt && !guard.available) {
         setTurns([]); setResume(null); setConversationId(null); setActiveJobId(null); setPending(false);
       }
       return;
     }
+    // The local submission refreshes after acknowledgement. Reading an empty
+    // conversation during dispatch would clear its pending state and hide Stop.
+    if (savedSubmission.current?.dispatched) return;
     let active = true;
     void refreshConversation(id).then(ok => {
       if (active && ok) setConversationId(id);
@@ -744,7 +823,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       if (active) { setTurns([]); setResume(null); setConversationId(null); setActiveJobId(null); setPending(false); }
     });
     return () => { active = false; conversationReader.cancel(); };
-  }, [gradedExplanation.receipt?.conversationId, gradedExplanation.available, reload, refreshConversation, setConversationId, conversationReader]);
+  }, [gradedExplanation.receipt?.phase, gradedExplanation.receipt?.conversationId, gradedExplanation.available, reload, refreshConversation, setConversationId, conversationReader]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -822,26 +901,54 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   }
 
   const turnStopLock = useRef(false);
+  const savedSubmission = useRef<{ conversationId: string | null; clientKey: string; dispatched: boolean; stopRequested: boolean } | null>(null);
+  const pendingStop = useRef<{ conversationId: string; clientKey: string; jobId?: string } | null>(null);
+
+  async function stopSavedJob(jobId: string, id: string | null, options?: { fromDeferredStop?: boolean }) {
+    if (turnStopLock.current) return;
+    turnStopLock.current = true;
+    try {
+      const job = await api.cancelJob(jobId);
+      if (options?.fromDeferredStop && id && pendingStop.current?.conversationId === id) {
+        pendingStop.current = null;
+        setPendingStopRecovery(false);
+      }
+      setActiveJobId(null);
+      setPending(false);
+      setPendingHint(jobStatusHint(job) || "已停止这次回答。");
+      if (id) await refreshConversation(id);
+    } catch (cancelError) {
+      if (options?.fromDeferredStop) {
+        setActiveJobId(null);
+        setPending(false);
+        setRecoveryRequired(true);
+        if (pendingStop.current) setPendingStopRecovery(true);
+      }
+      setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
+    } finally { turnStopLock.current = false; }
+  }
+  const stopSavedJobRef = useRef(stopSavedJob);
+  stopSavedJobRef.current = stopSavedJob;
+
   function cancelCurrentTurn(): void {
     if (activeJobId && turnStopLock.current) return;
     cancelJobStream();
+    if (activeJobId) {
+      void stopSavedJob(activeJobId, conversationId);
+      return;
+    }
+    const saved = savedSubmission.current;
+    if (saved) {
+      saved.stopRequested = true;
+      setStoppingSaved(true);
+      setPendingHint(saved.dispatched ? "提问已发出，正在等待确认后停止回答。" : "已停止，提问尚未发送。");
+      return;
+    }
+    if (privacy !== "ephemeral") return;
     abortRef.current?.abort();
     abortRef.current = null;
     setEphemeralPendingMessages([]);
-    const jobId = activeJobId;
-    if (jobId) {
-      turnStopLock.current = true;
-      void api.cancelJob(jobId).then((job) => {
-        setActiveJobId(null);
-        setPending(false);
-        setPendingHint(jobStatusHint(job) || "已停止这次回答。");
-        if (conversationId) return refreshConversation(conversationId);
-      }).catch((cancelError) => {
-        setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
-      }).finally(() => { turnStopLock.current = false; });
-      return;
-    }
-    if (privacy === "ephemeral") submissionLock.current = null;
+    submissionLock.current = null;
     setPending(false);
     setPendingHint("已停止。这是临时对话，内容不会保存。");
   }
@@ -857,17 +964,37 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     submitClocks.current.set(target.clientKey, startedAt);
     setWaitRequestKey(target.clientKey);
     let submitted = false;
+    pendingStop.current = null;
+    setPendingStopRecovery(false);
+    const saved = { conversationId, clientKey: target.clientKey, dispatched: true, stopRequested: false };
+    savedSubmission.current = saved;
     try {
       const result = await submitFailedTurnRetry(conversationId, target, input => api.submitTurn(input));
       submitted = true;
-      setActiveJobId(result.jobId); setUnknownJob(null);
-      setFirstTextTiming({ jobId: result.jobId, clientKey: target.clientKey, startedAt });
-      setPendingHint("已按原提问重试，正在准备回答…");
-      await refreshConversation(conversationId);
+      setUnknownJob(null);
+      if (saved.stopRequested) {
+        pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey, jobId: result.jobId };
+        setActiveJobId(null);
+        setPending(false);
+        await stopSavedJob(result.jobId, conversationId, { fromDeferredStop: true });
+      } else {
+        setActiveJobId(result.jobId);
+        setFirstTextTiming({ jobId: result.jobId, clientKey: target.clientKey, startedAt });
+        setPendingHint("已按原提问重试，正在准备回答…");
+        await refreshConversation(conversationId);
+      }
     } catch (error) {
       if (!submitted) setPending(false);
+      if (saved.stopRequested && !submitted) {
+        pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
+        setPendingStopRecovery(true);
+        setPendingHint("尚未确认发送结果，请重新读取对话。");
+        setRecoveryRequired(true);
+      }
       setError(formatTurnError(error));
     } finally {
+      savedSubmission.current = null;
+      setStoppingSaved(false);
       if (submissionLock.current === token) submissionLock.current = null;
     }
   }
@@ -959,8 +1086,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     let jobSubmitted = false;
     const abortController = new AbortController();
     abortRef.current = abortController;
+    const saved = input.privacy === "ephemeral" && !learningAttempt
+      ? null
+      : { conversationId: null as string | null, clientKey: input.clientKey, dispatched: false, stopRequested: false };
+    if (saved) {
+      pendingStop.current = null;
+      setPendingStopRecovery(false);
+    }
+    savedSubmission.current = saved;
     try {
-      if (input.privacy === "ephemeral" && !learningAttempt) {
+      if (!saved) {
         const history = ephemeralHistoryFromMessages(ephemeralMessages);
         let receivedDelta = false;
         setEphemeralPendingMessages([
@@ -1017,11 +1152,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         abortRef.current = null;
         return { accepted: true };
       }
-      if (options?.gradedAttempt) { await gradedExplanation.authorize(); gradedExplanation.begin(input.clientKey); }
-      const id = await ensureConversation();
+      const id = options?.gradedAttempt
+        ? await gradedExplanation.prepareConversation(input.clientKey, ensureConversation, () => saved.stopRequested)
+        : await ensureConversation();
+      if (!id || saved.stopRequested) return { accepted: false };
       if (options?.gradedAttempt) {
-        await gradedExplanation.authorize(); gradedExplanation.bindConversation(id); gradedExplanation.markStarted();
+        gradedExplanation.markStarted(id, input.clientKey);
+        setConversationId(id);
       }
+      saved.conversationId = id;
+      saved.dispatched = true;
       const submitted = await api.submitTurn({
         ...(input.purpose ? { purpose: input.purpose } : {}),
         ...(input.querySystem ? { querySystem: true } : {}),
@@ -1039,19 +1179,38 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         ...(!options?.gradedAttempt && !querySystem && materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
         ...(!options?.gradedAttempt && !querySystem && studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
       });
-      if (submitted.replayed === false || priorSubmittedAt !== undefined) {
-        setFirstTextTiming({ jobId: submitted.jobId, clientKey: input.clientKey, startedAt: submittedAt });
-      }
-      setActiveJobId(submitted.jobId);
       setUnknownJob(null);
       jobSubmitted = true;
-      setPendingHint("已发送，正在准备回答…");
       abortRef.current = null;
       preserveEntrySelection.current = false;
       if (!options?.preserveDraft) setDraft("");
-      await refreshConversation(id);
+      if (saved.stopRequested) {
+        pendingStop.current = { conversationId: id, clientKey: saved.clientKey, jobId: submitted.jobId };
+        setActiveJobId(null);
+        setPending(false);
+        await stopSavedJob(submitted.jobId, id, { fromDeferredStop: true });
+      } else {
+        if (submitted.replayed === false || priorSubmittedAt !== undefined) {
+          setFirstTextTiming({ jobId: submitted.jobId, clientKey: input.clientKey, startedAt: submittedAt });
+        }
+        setActiveJobId(submitted.jobId);
+        setPendingHint("已发送，正在准备回答…");
+        await refreshConversation(id);
+      }
       return { accepted: true };
     } catch (err) {
+      if (saved?.stopRequested && !jobSubmitted) {
+        if (saved.dispatched) {
+          if (saved.conversationId) {
+            pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
+            setPendingStopRecovery(true);
+          }
+          setPendingHint("尚未确认发送结果，请重新读取对话。");
+          setRecoveryRequired(true);
+        }
+        setPending(false);
+        return { accepted: false };
+      }
       // A cancelled temporary request must not clear a newer request's partial reply.
       if (abortController.signal.aborted && abortRef.current !== abortController) return { accepted: false };
       abortRef.current = null;
@@ -1079,6 +1238,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         return { accepted: false, retryNotSent: true };
       }
       return { accepted: false };
+    } finally {
+      if (saved && savedSubmission.current === saved) {
+        savedSubmission.current = null;
+        setStoppingSaved(false);
+        if (abortRef.current === abortController) abortRef.current = null;
+        if (saved.stopRequested && !saved.dispatched) {
+          setPending(false);
+          setPendingHint("已停止，提问尚未发送。");
+        }
+      }
     }
   }
 
@@ -1124,12 +1293,13 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const gradedExplainKey = useRef<string | null>(null);
   const gradedExplainBusy = useRef(false);
   const [gradedExplainSubmitted, setGradedExplainSubmitted] = useState(false);
+  const gradedReceiptBlocksSend = Boolean(gradedExplanation.receipt && gradedExplanation.receipt.phase !== "ready");
   async function explainGradedAttempt() {
     if (!gradedExplanation.available || pending || loading || recoveryRequired || interactionDisabled
-      || waitingForUnknown || unknownJob || gradedExplanation.receipt || gradedExplainBusy.current || gradedExplainSubmitted || submissionLock.current) return;
+      || waitingForUnknown || unknownJob || gradedReceiptBlocksSend || gradedExplainBusy.current || gradedExplainSubmitted || submissionLock.current) return;
     gradedExplainBusy.current = true;
     // Keep the original key after every uncertain response; terminal retries use the existing reply controls.
-    gradedExplainKey.current ??= nextClientKey({ clientKey: null, fingerprint: null, nextFingerprint: "graded-attempt-explain" }).clientKey;
+    gradedExplainKey.current = gradedExplanation.receipt?.clientKey ?? gradedExplainKey.current ?? nextClientKey({ clientKey: null, fingerprint: null, nextFingerprint: "graded-attempt-explain" }).clientKey;
     try {
       await gradedExplanation.withOperationLock(async () => {
         const result = await handleSubmit({ text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", purpose: "answer",
@@ -1233,7 +1403,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}
       </div> : null}
       {startScreen ? loading ? <p role="status" className="mb-2 text-xs text-text-3">正在读取提问背景…</p> : null : loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={inset} objectHref={objectHref} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown || interactionDisabled} retryTurnId={retryTarget?.assistantTurnId ?? null} onRetry={() => retryFailedTurn()} pendingLabel={waitPhase === "normal" ? undefined : TURN_WAIT_COPY.slow} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onReplyMode={prepareReplyMode} onSaveSnippet={saveSnippet} directSaveApi={embedded && studyContext ? api : undefined} onCreateCard={createCard} />}
-      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? (waitPhase === "stalled" ? <section aria-label="回答较慢" className="mx-5 mb-2 rounded-xl border border-warn/25 bg-warn-soft p-3 text-xs leading-6 text-warn">
+      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending && !stoppingSaved ? (waitPhase === "stalled" ? <section aria-label="回答较慢" className="mx-5 mb-2 rounded-xl border border-warn/25 bg-warn-soft p-3 text-xs leading-6 text-warn">
         <p role="status">{privacy === "saved" && activeJobId ? TURN_WAIT_COPY.stalled : TURN_WAIT_COPY.stalledEphemeral}</p>
         <div className="mt-2 flex flex-wrap gap-2">
           {privacy === "saved" && activeJobId ? <button type="button" className={secondaryButtonClass} onClick={() => void retryStalledTurn()}>重试</button> : null}
@@ -1246,7 +1416,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
           <button type="button" className="min-h-6 min-w-6 shrink-0 rounded px-1.5 py-0.5 text-accent underline decoration-accent/40 underline-offset-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" onClick={() => setAutoSelectNotice(null)} aria-label="关闭自动选入提示">关闭</button>
         </div>
       ) : null}
-      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}{error === TUTOR_MODEL_SETUP_MESSAGE ? <Link href={objectHref ? objectHref(MODEL_SETUP_HREF) : MODEL_SETUP_HREF} className="ml-2 font-medium underline underline-offset-2">去设置</Link> : null}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
+      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}{error === TUTOR_MODEL_SETUP_MESSAGE ? <Link href={objectHref ? objectHref(MODEL_SETUP_HREF) : MODEL_SETUP_HREF} className="ml-2 font-medium underline underline-offset-2">去设置</Link> : null}</p> : null}{recoveryRequired ? <div className="mt-2 flex flex-wrap gap-2"><button type="button" className={secondaryButtonClass} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button>{pendingStopRecovery ? <button type="button" className={secondaryButtonClass} onClick={() => { pendingStop.current = null; setPendingStopRecovery(false); setRecoveryRequired(false); setPendingHint(""); }} disabled={loading}>继续提问</button> : null}</div> : null}</div> : null}
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{tutorActionError}</p> : null}
       {tutorActions.length > 0 && learningAttempt ? (
         <div className="mx-5 mb-2 flex flex-wrap gap-1.5">
@@ -1257,9 +1427,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       ) : null}
 
       {gradedExplanation.available ? <div className="mx-5 mb-2"><button type="button" className={secondaryButtonClass}
-        disabled={pending || loading || recoveryRequired || interactionDisabled || Boolean(unknownJob) || Boolean(gradedExplanation.receipt) || gradedExplainSubmitted}
+        disabled={pending || loading || recoveryRequired || interactionDisabled || Boolean(unknownJob) || gradedReceiptBlocksSend || gradedExplainSubmitted}
         onClick={() => void explainGradedAttempt()}>讲解这次作答</button>
-        {gradedExplanation.receipt?.conversationId ? <button type="button" className={secondaryButtonClass}
+        {gradedExplanation.receipt?.phase === "submitted" ? <button type="button" className={secondaryButtonClass}
           disabled={pending || loading || interactionDisabled} onClick={() => setReload(value => value + 1)}>重新读取原讲解（不调用 AI）</button> : null}
       </div> : null}
       {gradedExplanation.recoveryMessage ? <p role="status" className="mx-5 mb-2 text-xs text-warn">{gradedExplanation.recoveryMessage}</p> : null}
@@ -1273,7 +1443,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         contextChips={ordinaryQuestion ? selectedSourceIds.map(id => ({ id, label: sourceNames[id] ?? "所选资料" })) : undefined}
         onRemoveContext={ordinaryQuestion && !studyContext?.sourceId ? id => { const next = selectedSourceIds.filter(sourceId => sourceId !== id); setSelectedSourceIds(next); setSourceSelection(next.length ? "selected" : "none"); if (!next.length) setCurrentPage(""); } : undefined}
         attachments={ordinaryQuestion ? <StartUploads api={api} sources={sources} courseId={boundCourseId} objectHref={objectHref} disabled={pending || loading || recoveryRequired || interactionDisabled} onBusyChange={setUploadPending} onUploaded={handleUploaded} /> : undefined}
-        defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={inset} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown || interactionDisabled} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+        defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={inset} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending && !stoppingSaved} disabled={stoppingSaved || loading || recoveryRequired || waitingForUnknown || interactionDisabled} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
       {startScreen && start ? <StartSuggestions {...start} objectHref={objectHref} onExample={setPrompt} /> : null}
     </div>
     {showProposalRail ? <section aria-label="产出与待确认" className="flex w-full shrink-0 flex-col border-t border-line bg-bg/60 px-4 py-3 xl:w-(--layout-companion) xl:overflow-y-auto xl:border-l xl:border-t-0">

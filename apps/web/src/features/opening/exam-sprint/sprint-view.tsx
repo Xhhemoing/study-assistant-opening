@@ -3,7 +3,7 @@
 import type { ExamMode, ExamSprintOverview } from "@aistudy/contracts";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { Download, RefreshCw } from "lucide-react";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { EmptyState, LoadingRows, LoadError, PageHeader, ui } from "../design/ui";
 import { ActiveRun, CompletedRun } from "./active-run";
 import { createExamSprintClient, type ExamSprintIntent } from "./client";
@@ -55,10 +55,10 @@ function StartTraining({ overview, disabled, send, onNavigate }: { overview: Exa
     <details className="border-t border-line pt-3"><summary className="min-h-11 cursor-pointer text-xs font-medium text-text-2 py-2">选择其他训练</summary><div className="mt-3 flex flex-wrap gap-2">{(["diagnostic", "practice", "retest", "mock-a", "mock-b"] as const).filter(mode => mode !== primaryMode).map(mode => <button key={mode} type="button" className={ui.secondary} disabled={disabled || (mode.startsWith("mock") && overview.state.runs.some(run => run.mode === mode))} onClick={() => send({ action: "start", mode })}>{modeLabels[mode]}{mode.startsWith("mock") && overview.state.runs.some(run => run.mode === mode) ? " · 已使用" : ""}</button>)}</div><p className="mt-3 text-xs leading-6 text-text-3">模拟 A/B 各可开启一次，为约 20–30 分钟短模拟，交卷后显示解析。完整 120 分钟训练卷仍需扩充题包；这里不提供正式考试预测。</p></details></section>;
 }
 
-export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { courseId?: string; embedded?: boolean; onCourseBound?: () => void }) {
+export function ExamSprintView({ workspaceId, courseId, embedded = false, onCourseBound }: { workspaceId?: string; courseId?: string; embedded?: boolean; onCourseBound?: () => void }) {
   const diagnostics = useDiagnosticsEnabled();
   const objectHref = useConversationObjectHref();
-  const [client] = useState(() => createExamSprintClient({ fetcher: sprintLessonFetcher() }));
+  const client = useMemo(() => createExamSprintClient({ workspaceId, courseId, fetcher: sprintLessonFetcher() }), [workspaceId, courseId]);
   const snapshot = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   const [tab, setTab] = useState<Tab>("practice");
   useEffect(() => { if (!diagnostics && tab === "estimates") setTab("practice"); }, [diagnostics, tab]);
@@ -122,9 +122,10 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
     if (!focusSprintTarget(document, returnNavigation.id)) focusSprintTarget(document, `sprint-tab-${tab}`);
     setReturnNavigation(null);
   }, [tab, returnNavigation]);
-  const acceptLesson = (request: LessonRequest, result: ExamSprintOverview) => {
-    const content = confirmedSprintLessonRequest(request, pendingLesson.current, result, client.getSnapshot().overview);
-    if (pendingLesson.current !== request) return;
+  const settleLesson = (request: LessonRequest, result: ExamSprintOverview | null) => {
+    const current = client.getSnapshot();
+    if (pendingLesson.current !== request || current.uncertain) return;
+    const content = result && confirmedSprintLessonRequest(request, pendingLesson.current, result, current.overview);
     pendingLesson.current = null;
     if (!content) return;
     setLessonNavigation({ ...request, exposureId: content.exposureId, open: true });
@@ -138,13 +139,12 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
     pendingLesson.current = request;
     setLessonError(null);
     const result = await client.send(intent);
-    if (result) acceptLesson(request, result);
-    else if (!client.getSnapshot().uncertain && pendingLesson.current === request) pendingLesson.current = null;
+    settleLesson(request, result);
   };
   const recover = async () => {
     const request = pendingLesson.current;
     const result = await client.recover();
-    if (request && result) acceptLesson(request, result);
+    if (request) settleLesson(request, result);
   };
   const selectTab = (next: Tab) => {
     pendingLesson.current = null;

@@ -310,4 +310,77 @@ describe("opening tutor polling handlers", () => {
     expect(jobs[0].count).toBe(1);
     expect(turns[0].count).toBe(1);
   });
+
+  it("discovers an older active job by clientKey even after a newer turn is queued in the same conversation", async () => {
+    const conversationResponse = await createConversation(new Request("http://localhost/api/opening/conversations", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ title: "two-tab pending-job", courseId: null }),
+    }));
+    expect(conversationResponse.status).toBe(201);
+    const conversation = await conversationResponse.json() as { id: string };
+    const clientKeyA = `tab-a-${randomUUID()}`;
+    const clientKeyB = `tab-b-${randomUUID()}`;
+
+    const subA = await submitTurn(new Request("http://localhost/api/opening/turns", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({
+        conversationId: conversation.id, text: "Tab A question", sourceIds: [], mode: "explain", clientKey: clientKeyA, privacy: "saved",
+      }),
+    }));
+    expect(subA.status).toBe(201);
+    const jobA = await subA.json() as { jobId: string };
+
+    const subB = await submitTurn(new Request("http://localhost/api/opening/turns", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({
+        conversationId: conversation.id, text: "Tab B question", sourceIds: [], mode: "explain", clientKey: clientKeyB, privacy: "saved",
+      }),
+    }));
+    expect(subB.status).toBe(201);
+    const jobB = await subB.json() as { jobId: string };
+
+    const unfiltered = await getPendingJob(request(`/api/opening/conversations/${conversation.id}/pending-job`), {
+      params: Promise.resolve({ id: conversation.id }),
+    });
+    expect(unfiltered.status).toBe(200);
+    const unfilteredBody = await unfiltered.json() as Record<string, unknown>;
+    expect(unfilteredBody).toMatchObject({ id: jobB.jobId, status: "queued" });
+    expect(unfilteredBody).not.toHaveProperty("clientKey");
+
+    const scopedA = await getPendingJob(
+      request(`/api/opening/conversations/${conversation.id}/pending-job?clientKey=${encodeURIComponent(clientKeyA)}`),
+      { params: Promise.resolve({ id: conversation.id }) },
+    );
+    expect(scopedA.status).toBe(200);
+    await expect(scopedA.json()).resolves.toMatchObject({ id: jobA.jobId, status: "queued", clientKey: clientKeyA });
+
+    const invalidQuery = await getPendingJob(
+      request(`/api/opening/conversations/${conversation.id}/pending-job?clientKey=`),
+      { params: Promise.resolve({ id: conversation.id }) },
+    );
+    expect(invalidQuery.status).toBe(400);
+
+    const cancelledA = await cancelJob(request(`/api/opening/jobs/${jobA.jobId}`), {
+      params: Promise.resolve({ id: jobA.jobId }),
+    });
+    expect(cancelledA.status).toBe(200);
+
+    const scopedAAfterCancel = await getPendingJob(
+      request(`/api/opening/conversations/${conversation.id}/pending-job?clientKey=${encodeURIComponent(clientKeyA)}`),
+      { params: Promise.resolve({ id: conversation.id }) },
+    );
+    expect(scopedAAfterCancel.status).toBe(200);
+    await expect(scopedAAfterCancel.json()).resolves.toMatchObject({ id: jobA.jobId, status: "cancelled", clientKey: clientKeyA });
+
+    const stillB = await getPendingJob(request(`/api/opening/conversations/${conversation.id}/pending-job`), {
+      params: Promise.resolve({ id: conversation.id }),
+    });
+    expect(stillB.status).toBe(200);
+    const stillBBody = await stillB.json() as Record<string, unknown>;
+    expect(stillBBody).toMatchObject({ id: jobB.jobId, status: "queued" });
+    expect(stillBBody).not.toHaveProperty("clientKey");
+  });
 });

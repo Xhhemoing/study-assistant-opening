@@ -7,7 +7,9 @@ type Rows = Record<string, unknown>[];
 /** The caller owns the workspace owner gate and repeatable-read transaction. */
 export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspaceId: string, sourceIds: readonly string[]) {
   const workspace_preferences: Rows = [...await tx`
-    SELECT workspace_id, default_entry, ai_settings, planning_settings, adaptive_planning, learning_management, intervention_settings, auto_grade_on_save, assessment_enabled, retest_suggestions_enabled, automatic_reminders_enabled,
+    SELECT workspace_id, default_entry, ai_settings, planning_settings, adaptive_planning, learning_management,
+      intervention_settings - 'timetableRevision' AS intervention_settings,
+      auto_grade_on_save, assessment_enabled, retest_suggestions_enabled, automatic_reminders_enabled,
       to_char(retest_suggestions_enabled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS retest_suggestions_enabled_at,
       to_char(automatic_reminders_enabled_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS automatic_reminders_enabled_at,
       created_at, updated_at

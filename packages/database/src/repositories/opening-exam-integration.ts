@@ -10,7 +10,7 @@ import { createExamSprintState, reportExamBkt } from "@aistudy/domain";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 import { ensureExamCourseBinding, type ExamPublicSourceWriter } from "./opening-exam-integration-binding";
-import { lockExamCourse, parseExamBinding, readExamBinding, readExamEligibleAttemptIds } from "./opening-exam-integration-facts";
+import { lockExamCourse, readCommittedExamReceipt, parseExamBinding, readExamBinding, readExamEligibleAttemptIds } from "./opening-exam-integration-facts";
 import type { OpeningSourceQuota } from "./opening-source-quota";
 
 type ExamIntegrationOptions = { writePublicSource?: ExamPublicSourceWriter; quota?: OpeningSourceQuota };
@@ -81,7 +81,6 @@ export function createOpeningExamIntegrationRepository(
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
         await owner(tx, scope, true);
-        await lockExamCourse(tx, scope, input.courseId);
         const now = await clock(tx);
         let [row] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
           WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
@@ -92,7 +91,13 @@ export function createOpeningExamIntegrationRepository(
         }
         const sprintId = String(row!.id), snapshot = parseExamSprintSnapshot(row!.pack_snapshot, row!.state);
         const intent = { action: options?.addMissingMaterials ? "add_missing_materials" : "bind", ...input };
-        if (await commandReplay(tx, sprintId, input.clientKey, intent)) return readExamIntegrationInTx(tx, scope, snapshot.pack);
+        if (await commandReplay(tx, sprintId, input.clientKey, intent)) {
+          return readCommittedExamReceipt(async () => {
+            await lockExamCourse(tx, scope, input.courseId);
+            return readExamIntegrationInTx(tx, scope, snapshot.pack);
+          });
+        }
+        await lockExamCourse(tx, scope, input.courseId);
         const existing = await readExamBinding(tx, sprintId);
         const binding = await ensureExamCourseBinding(tx, scope, snapshot.pack, input, now, existing ?? undefined,
           integrationOptions.writePublicSource, integrationOptions.quota, options);
@@ -109,14 +114,21 @@ export function createOpeningExamIntegrationRepository(
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
         await owner(tx, scope, true);
-        const [located] = await tx`SELECT s.id,b.binding FROM opening_exam_sprints s JOIN opening_exam_bindings b ON b.sprint_id=s.id
-          WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}`;
+        const [located] = await tx`SELECT s.id,s.pack_snapshot,s.state,b.binding FROM opening_exam_sprints s
+          LEFT JOIN opening_exam_bindings b ON b.sprint_id=s.id
+          WHERE s.course_id IS NULL AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId} FOR UPDATE OF s`;
         if (!located) throw learningError("CONFLICT", "请先将冲刺绑定课程");
+        const snapshot = parseExamSprintSnapshot(located.pack_snapshot, located.state), intent = { action: "map_source", ...input };
+        if (await commandReplay(tx, String(located.id), input.clientKey, intent)) {
+          return readCommittedExamReceipt(async () => {
+            if (!located.binding) throw learningError("CONFLICT", "请先将冲刺绑定课程");
+            await lockExamCourse(tx, scope, parseExamBinding(located.binding).courseId);
+            return readExamIntegrationInTx(tx, scope, snapshot.pack);
+          });
+        }
+        if (!located.binding) throw learningError("CONFLICT", "请先将冲刺绑定课程");
         const binding = parseExamBinding(located.binding);
         await lockExamCourse(tx, scope, binding.courseId);
-        const [row] = await tx`SELECT pack_snapshot,state FROM opening_exam_sprints WHERE id=${String(located.id)} FOR UPDATE`;
-        const snapshot = parseExamSprintSnapshot(row!.pack_snapshot, row!.state), intent = { action: "map_source", ...input };
-        if (await commandReplay(tx, String(located.id), input.clientKey, intent)) return readExamIntegrationInTx(tx, scope, snapshot.pack);
         if (!snapshot.pack.sourceItems.some(item => item.id === input.sourceItemId) || new Set(input.skillIds).size !== input.skillIds.length
           || input.skillIds.some(id => !binding.skills.some(skill => skill.skillId === id))) throw learningError("VALIDATION", "原题或技能映射无效");
         const now = await clock(tx);

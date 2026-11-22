@@ -1,5 +1,5 @@
 import { isRecord, isUuid } from "./backup-validation";
-import { courseSourcePurposeSchema, interventionPrefsPatchSchema, interventionPrefsSchema, openingAiSettingsSchema } from "@aistudy/contracts";
+import { courseSourcePurposeSchema, interventionPrefsPatchSchema, storedWorkspaceInterventionPrefsSchema, openingAiSettingsSchema } from "@aistudy/contracts";
 
 type Row = Record<string, unknown>;
 export type OpeningRestoreLearningState = {
@@ -35,7 +35,7 @@ export function validateBackupLearningState(tables: Record<string, Row[]>, error
     if (row.ai_settings != null && !openingAiSettingsSchema.safeParse(row.ai_settings).success) {
       errors.push("workspace AI settings are invalid");
     }
-    if (row.intervention_settings != null && !interventionPrefsSchema.safeParse(row.intervention_settings).success) {
+    if (row.intervention_settings != null && !storedWorkspaceInterventionPrefsSchema.safeParse(row.intervention_settings).success) {
       errors.push("workspace intervention settings are invalid");
     }
     if (!validState(row) || (row.default_entry != null && !["learn", "explore", "library"].includes(String(row.default_entry)))) {

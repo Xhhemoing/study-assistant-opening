@@ -18,6 +18,7 @@ import {
 } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
+import { assertPlanningDay, TIMETABLE_REVISION_DAY } from "./opening-plan-day";
 import { insertOpeningTask, insertOpeningTaskWithOutcome, type TaskCreateOutcome } from "./opening-retest-task";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
@@ -90,7 +91,11 @@ function mapTask(
   scope?: OpeningScope,
   window = projectCourseRoutePlanningWindow(row, scope),
 ): TaskItem {
-  const projectedRow = window.isCourseRouteRetest && window.notBefore !== null
+  const isDeferredRetell = row.origin === "agent"
+    && typeof row.client_key === "string"
+    && row.client_key.startsWith("text-retell:")
+    && row.client_key.endsWith(":deferred");
+  const projectedRow = (window.isCourseRouteRetest || isDeferredRetell) && window.notBefore !== null
     ? { ...row, not_before: window.notBefore }
     : row;
   const base: TaskItem = {
@@ -156,6 +161,54 @@ export function mapOpeningPlanDraft(row: Record<string, unknown>): PlanDraft {
   return draft;
 }
 
+function toWeekSession(row: Record<string, unknown>): WeekSession {
+  return {
+    courseName: row.course_name as string,
+    courseId: (row.course_id as string | null) ?? null,
+    weekday: Number(row.weekday),
+    weeks: (row.weeks as number[]) ?? [],
+    startPeriod: Number(row.start_period),
+    endPeriod: Number(row.end_period),
+  };
+}
+
+const TIMETABLE_REVISION_PREFIX = "timetable-revision:";
+
+function timetableSessionsDigest(rows: readonly Record<string, unknown>[]): string {
+  const entries = rows
+    .filter(row => row.id != null)
+    .map(row => ({
+      id: String(row.id),
+      courseName: String(row.course_name ?? ""),
+      courseId: row.course_id == null ? null : String(row.course_id),
+      weekday: Number(row.weekday),
+      weeks: Array.isArray(row.weeks) ? row.weeks.map(Number) : [],
+      startPeriod: Number(row.start_period),
+      endPeriod: Number(row.end_period),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0, 32);
+}
+
+async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
+  const rows = await sql`
+    SELECT s.*, ps.hard_blocks_fingerprint FROM workspaces w
+    LEFT JOIN opening_plan_state ps ON ps.workspace_id = w.id AND ps.day = ${TIMETABLE_REVISION_DAY}::date
+    LEFT JOIN opening_timetable_sessions s ON s.workspace_id = w.id AND s.owner_user_id = w.owner_user_id
+    WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
+    ORDER BY s.weekday, s.start_period, s.id`;
+  const sessions = rows.filter(row => row.id != null).map(toWeekSession);
+  const fingerprint = rows[0]?.hard_blocks_fingerprint as string | null | undefined;
+  // Combine the sentinel UUID (tracks empty-to-empty replaces) with a canonical digest of all
+  // opening_timetable_sessions rows (including generated row UUIDs) so rolling-deploy base
+  // instances that replace sessions directly without touching opening_plan_state still invalidate stale previews.
+  const sentinel = fingerprint?.startsWith(TIMETABLE_REVISION_PREFIX)
+    ? fingerprint.slice(TIMETABLE_REVISION_PREFIX.length)
+    : `empty:${scope.workspaceId}`;
+  const revision = `${sentinel}:${timetableSessionsDigest(rows)}`;
+  return { sessions, revision };
+}
+
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
   return {
     async listTasks(scope: OpeningScope, listOptions: ListTasksOptions = {}): Promise<TaskItem[]> {
@@ -164,6 +217,8 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           t.*,
           target.binding_ids AS teaching_binding_ids,
           target.onboarding_binding_exists,
+          retest_hold.retest_hold_open_ended,
+          retest_hold.retest_hold_end_at,
           a.id AS retest_activity_id,
           a.workspace_id AS retest_workspace_id,
           a.owner_user_id AS retest_owner_user_id,
@@ -202,6 +257,26 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
               OR (t.origin IN ('manual', 'course_seed') AND t.client_key = 'first-learning-activity:' || teaching.id::text
                 AND teaching.create_intent->>'source' = 'onboarding' AND teaching.client_key LIKE 'first-learning:%'))
         ) target ON true
+        LEFT JOIN LATERAL (
+          SELECT
+            bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
+              AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp())) AS retest_hold_open_ended,
+            max(CASE
+              WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
+              ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
+            END) AS retest_hold_end_at
+          FROM (SELECT 1) AS _gate
+          JOIN opening_retest_activities r
+            ON t.origin = 'agent'
+            AND t.client_key LIKE 'text-retell:%:deferred'
+            AND r.workspace_id = t.workspace_id
+            AND r.owner_user_id = t.owner_user_id
+            AND (t.course_id IS NULL OR r.course_id = t.course_id)
+            AND (
+              r.status IN ('proposed', 'accepted', 'in_progress')
+              OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= t.created_at
+            )
+        ) retest_hold ON (t.origin = 'agent' AND t.client_key LIKE 'text-retell:%:deferred')
         LEFT JOIN opening_retest_activities a
           ON a.task_id = t.id
           AND a.workspace_id = t.workspace_id
@@ -328,9 +403,48 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         };
         const before = current.not_before ? new Date(current.not_before as string | Date).getTime() : null;
         const after = input.notBefore === null ? null : new Date(input.notBefore).getTime();
-        if (before === after) return readTask();
+        const deferredRetell = current.origin === "agent"
+          && typeof current.client_key === "string"
+          && current.client_key.startsWith("text-retell:")
+          && current.client_key.endsWith(":deferred");
+        if (deferredRetell) {
+          const courseId = (current.course_id as string | null) ?? null;
+          const createdAt = current.created_at instanceof Date || typeof current.created_at === "string"
+            ? current.created_at
+            : new Date(0);
+          const [hold] = await tx<{ blocked: boolean | null }[]>`
+            SELECT
+              bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
+                AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp()))
+              OR max(CASE
+                WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
+                ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
+              END) + interval '1 second' > COALESCE(${input.notBefore}::timestamptz, statement_timestamp()) AS blocked
+            FROM (SELECT 1) AS _gate
+            JOIN opening_retest_activities r
+              ON r.workspace_id = ${scope.workspaceId}
+              AND r.owner_user_id = ${scope.ownerUserId}
+              AND (${courseId}::uuid IS NULL OR r.course_id = ${courseId})
+              AND (
+                r.status IN ('proposed', 'accepted', 'in_progress')
+                OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= ${createdAt}
+              )`;
+          if (hold?.blocked) {
+            throw new OpeningPlanError("CONFLICT", "retell task remains deferred behind an active retest");
+          }
+        }
+        const clearHold = deferredRetell && input.notBefore === null;
+        if (before === after && !clearHold) return readTask();
+        if (clearHold) {
+          // A manual task saved before the namespace was reserved may own the resume key.
+          // Its task remains intact. Only that obsolete quick-add key can be released.
+          await tx`UPDATE opening_tasks SET client_key=NULL WHERE workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND client_key=${String(current.client_key).slice(0, -":deferred".length)}
+            AND origin IN ('manual', 'course_seed')`;
+        }
         const updated = await tx`UPDATE opening_tasks
-          SET not_before=${input.notBefore}, version=version + 1, updated_at=now()
+          SET not_before=${input.notBefore}, version=version + 1, updated_at=now(),
+            client_key=CASE WHEN ${clearHold} THEN left(client_key, -length(':deferred')) ELSE client_key END
           WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
         await recordOpeningPlanFeedback(tx, scope, updated[0] as Record<string, unknown>,
           input.notBefore === null ? "resumed" : "deferred", input.feedback);
@@ -339,29 +453,26 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
       });
     },
 
-    async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {
-      const rows = await sql`
-        SELECT * FROM opening_timetable_sessions
-        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-        ORDER BY weekday, start_period`;
-      return rows.map((row) => {
-        const r = row as Record<string, unknown>;
-        return {
-          courseName: r.course_name as string,
-          courseId: (r.course_id as string | null) ?? null,
-          weekday: Number(r.weekday),
-          weeks: (r.weeks as number[]) ?? [],
-          startPeriod: Number(r.start_period),
-          endPeriod: Number(r.end_period),
-        };
-      });
+    timetableSnapshot(scope: OpeningScope) {
+      return readTimetableSnapshot(sql, scope);
     },
 
-    async replaceTimetable(scope: OpeningScope, sessions: WeekSession[]): Promise<WeekSession[]> {
-      await sql.begin(async (tx) => {
+    async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {
+      const rows = await sql`
+        SELECT course_name, course_id, weekday, weeks, start_period, end_period FROM opening_timetable_sessions
+        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+        ORDER BY weekday, start_period, id`;
+      return rows.map(toWeekSession);
+    },
+
+    async replaceTimetable(scope: OpeningScope, sessions: WeekSession[], expectedRevision?: string): Promise<WeekSession[]> {
+      return sql.begin(async (tx) => {
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
+        if (expectedRevision !== undefined && (await readTimetableSnapshot(tx, scope)).revision !== expectedRevision) {
+          throw new OpeningPlanError("CONFLICT", "课表已更新，请核对最新课表后重新导入。");
+        }
         await tx`DELETE FROM opening_timetable_sessions
           WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
         for (const s of sessions) {
@@ -373,8 +484,17 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
               ${s.courseId ?? null}, ${s.weekday}, ${s.weeks}, ${s.startPeriod}, ${s.endPeriod}
             )`;
         }
+        const revision = TIMETABLE_REVISION_PREFIX + randomUUID();
+        const saved = await tx`INSERT INTO opening_plan_state
+          (workspace_id, day, accepted_version, accepted_blocks, hard_blocks_fingerprint)
+          VALUES (${scope.workspaceId}, ${TIMETABLE_REVISION_DAY}::date, 0, '[]'::jsonb, ${revision})
+          ON CONFLICT (workspace_id, day) DO UPDATE
+          SET hard_blocks_fingerprint = EXCLUDED.hard_blocks_fingerprint, updated_at = now()
+          WHERE starts_with(opening_plan_state.hard_blocks_fingerprint, ${TIMETABLE_REVISION_PREFIX})
+          RETURNING day`;
+        if (!saved.length) throw new OpeningPlanError("CONFLICT", "课表版本的保留日期已有计划，无法保存课表。");
+        return (await readTimetableSnapshot(tx, scope)).sessions;
       });
-      return this.listTimetable(scope);
     },
 
     async listHardBlocks(scope: OpeningScope, day: string): Promise<TimeBlock[]> {
@@ -393,6 +513,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     },
 
     async upsertHardBlocks(scope: OpeningScope, day: string, blocks: TimeBlock[]): Promise<void> {
+      assertPlanningDay(day);
       await sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
@@ -424,7 +545,8 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     } | null> {
       const rows = await sql`
         SELECT accepted_version, accepted_blocks, hard_blocks_fingerprint FROM opening_plan_state
-        WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date`;
+        WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date
+          AND NOT (day = ${TIMETABLE_REVISION_DAY}::date AND starts_with(hard_blocks_fingerprint, ${TIMETABLE_REVISION_PREFIX}))`;
       if (!rows.length) return null;
       const r = rows[0] as Record<string, unknown>;
       return {
@@ -435,9 +557,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     },
 
     async proposePlan(scope: OpeningScope, input: ProposePlanInput): Promise<PlanDraft> {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
-        throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD (no invented dates)");
-      }
+      assertPlanningDay(input.date);
       if (input.clientKey && isReservedDayAdjustmentProposePrefix(input.clientKey)) {
         throw new OpeningPlanError("VALIDATION", "clientKey cannot start with reserved day-exception: or day-adjustment: prefix");
       }
@@ -517,9 +637,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
       /** The open draft is still executable but newer suggestions exist. */
       hasNewerSuggestion?: boolean;
     }> {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-        throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
-      }
+      assertPlanningDay(day);
       const [lockA, lockB] = dailyDraftAdvisoryLockKeys(scope.workspaceId, day);
       return sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(${lockA}, ${lockB})`;
