@@ -1609,7 +1609,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   }
 
   it.each([
-    ...["-webkit-inline-flex", "-webkit-inline-box", "-ms-inline-flexbox", "-ms-inline-grid", "inline flow-root", "flow-root inline", "inline flex", "inline grid"].map(
+    ...["-webkit-inline-flex", "-webkit-inline-box", "inline flow-root", "flow-root inline", "inline flex", "inline grid"].map(
       display => `An<span style="display:${display};content-visibility:hidden">noise</span>swer`,
     ),
     'An<span style="--layout:-webkit-inline-flex;display:var(--layout)!important;display:block;content-visibility:hidden">noise</span>swer',
@@ -1664,7 +1664,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
-    ...["-webkit-flex", "-webkit-box", "-ms-flexbox", "-ms-grid", "block flex", "block grid", "block flow-root", "block list-item", "flow-root list-item"].map(
+    ...["-webkit-flex", "-webkit-box", "block flex", "block grid", "block flow-root", "block list-item", "flow-root list-item"].map(
       display => `An<span style="display:${display};content-visibility:hidden">noise</span>swer`,
     ),
     ...["-webkit-flex", "-webkit-inline-box", "block flex", "grid block"].map(
@@ -1711,6 +1711,46 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   ])("keeps body evidence public when the rendered label is split or hidden in %s", label => {
     const text = `## ${label}\n\nPublic theorem.`;
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it.each([
+    ["&eacute;", "é", "public"],
+    ["&eacute", "é", "public"],
+    ["&eacuteX", "éX", "sealed"],
+    ["?x=1&copy=2", "?x=1&copy=2", "public"],
+    ["?x=1&copy=2", "?x=1©=2", "sealed"],
+    ["?x=1&copy;=2", "?x=1©=2", "public"],
+    ["&NotEqualTilde;", "≂̸", "public"],
+    ["&#xD800;", "�", "public"],
+    ["&#128", "€", "public"],
+  ] as const)("compares accordion names %s and %s as HTML attribute values", (first, second, visibility) => {
+    const text = `## <details name="${first}" open hidden></details>Topic <details name="${second}" open><summary>Notes</summary>Answer</details>\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "public") expectSealedEvidence(chunks, text, [], "Public theorem.");
+      else expectSealedEvidence(chunks, text, ["Public theorem."]);
+    }
+  });
+
+  it.each([
+    ['<span style="display&colon;none">Answer</span>', "public"],
+    ['<span style="display&amp;colon;none">Answer</span>', "sealed"],
+    ['<span hidden="until&hyphen;found">Answer</span>', "public"],
+    ['<span hidden="until&#45;found">Answer</span>', "sealed"],
+    ['<math><annotation-xml encoding="text&sol;html"><details open><summary>Notes</summary>Answer</details></annotation-xml></math>', "sealed"],
+    ['<svg><text visibility="&#104;idden">Answer</text></svg>', "public"],
+    ['<svg><text visibility="&amp;#104;idden">Answer</text></svg>', "sealed"],
+    ...["-ms-flexbox", "-ms-inline-flexbox", "-ms-grid", "-ms-inline-grid", "-moz-box", "inline-list-item", "run-in", "run-in flex"].map(
+      display => [`<span style="display:none;display:${display}">Answer</span>`, "public"] as const,
+    ),
+    ...["-webkit-inline-flex", "flex inline", "inline flex", "inline list-item", "inline flow list-item", "list-item flow-root inline"].map(
+      display => [`<span style="display:none;display:${display}">Answer</span>`, "sealed"] as const,
+    ),
+  ] as const)("honors HTML attribute and display value parsing for %s", (markup, visibility) => {
+    const text = `## Topic ${markup}\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "public") expectSealedEvidence(chunks, text, [], "Public theorem.");
+      else expectSealedEvidence(chunks, text, ["Public theorem."]);
+    }
   });
 
   it("seals a standalone summaryless disclosure through its closing tag", () => {
