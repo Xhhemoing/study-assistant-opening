@@ -31,7 +31,8 @@ async function seed(text: string | string[], scope = f.scope) {
 }
 
 async function startPdfRetry(sourceId: string, pages: PdfSegmentPage[],
-  recognition: Pick<Parameters<typeof createParseSourceHandler>[0], "recognizePage" | "recognizePages"> = {}) {
+  recognition: Pick<Parameters<typeof createParseSourceHandler>[0], "recognizePage" | "recognizePages"> = {},
+  failedStarts: number[] = []) {
   const bytes = Buffer.from("%PDF synthetic retry");
   await f.sql`UPDATE opening_sources SET mime='application/pdf',parse_state='running',bytes=${bytes.length},
     sha256=${createHash("sha256").update(bytes).digest("hex")} WHERE id=${sourceId}`;
@@ -46,11 +47,13 @@ async function startPdfRetry(sourceId: string, pages: PdfSegmentPage[],
   const handler = createParseSourceHandler({
     ...recognition, sources, chunks, tempDir: os.tmpdir(),
     segments: createOpeningPdfSegmentsRepository(f.sql),
+    ...(failedStarts.length ? { segmentPages: 1 } : {}),
     storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${bytes.toString("base64")}` },
     runner: async argv => {
       if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: pages.length }) };
       const start = Number(argv[argv.indexOf("--page-start") + 1]);
       const end = Number(argv[argv.indexOf("--page-end") + 1]);
+      if (failedStarts.includes(start)) return { exitCode: 4, stdout: "" };
       return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, end) }) };
     },
   });
@@ -525,6 +528,72 @@ describe("pgvector material repository", () => {
     }
   });
 
+  it("persists a same-mode Vision seal across a subsequent native-only retry", async () => {
+    const texts = ["Answer Key", "5 units.", "Chapter 3: Fields"];
+    const pdf = await seed(texts);
+    const pages: PdfSegmentPage[] = texts.map((text, index) => ({
+      page: index + 1, text, imagePath: null, visualKinds: [],
+    }));
+    const first = await startPdfRetry(pdf.sourceId, pages);
+    await expect(first.run()).resolves.toEqual({ pages: 3 });
+    await first.finish(3);
+    const readMarker = async () => {
+      const [marker] = await f.sql`SELECT pages FROM opening_pdf_parse_segments
+        WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1' AND page_start=1`;
+      return marker?.pages?.[0];
+    };
+    expect(await readMarker()).toMatchObject({ sectionSealedAtEnd: true, publicationSealCommitted: true });
+    expect(await readMarker()).not.toHaveProperty("visualKinds");
+
+    const nativeRecovery = { ...pages[0]!, text: "Chapter 2: Rings" };
+    const recognizePage = vi.fn(async () => ({ text: "Answer Key", imageObjectKey: "vision/key" }));
+    const vision = await startPdfRetry(pdf.sourceId,
+      [{ ...nativeRecovery, visualKinds: ["picture"] }, ...pages.slice(1)], { recognizePage });
+    await expect(vision.run()).resolves.toEqual({ pages: 3 });
+    await vision.finish(3);
+    expect(recognizePage).toHaveBeenCalledOnce();
+    expect(await readMarker()).toMatchObject({ sectionSealedAtEnd: true, publicationSealCommitted: true, visualKinds: ["picture"] });
+
+    const retry = await startPdfRetry(pdf.sourceId, [nativeRecovery, ...pages.slice(1)]);
+    await expect(retry.run()).resolves.toEqual({ pages: 3 });
+    await retry.finish(3);
+    expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(({ page, text }) => [page, text]))
+      .toEqual([[3, texts[2]]]);
+  });
+
+  it("honors an archived Vision seal after a failed page despite a fresh native recovery heading", async () => {
+    const texts = ["Unavailable.", "Chapter 2: Rings", "5 units.", "Chapter 3: Fields"];
+    const pdf = await seed([texts[0]!, "[视觉转写与描述]\nAnswer Key", ...texts.slice(2)]);
+    await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page=1`;
+    await f.sql`UPDATE opening_source_chunks SET image_object_key='vision/key' WHERE source_id=${pdf.sourceId} AND page=2`;
+    const pages: PdfSegmentPage[] = texts.map((text, index) => ({
+      page: index + 1, text, imagePath: null, visualKinds: [],
+    }));
+    const retry = await startPdfRetry(pdf.sourceId, pages, {}, [1]);
+    await expect(retry.run()).resolves.toEqual({ pages: 3 });
+    await retry.finish(3);
+    expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ error: { code: "PARSE_PARTIAL" } });
+    const [marker] = await f.sql`SELECT pages FROM opening_pdf_parse_segments
+      WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1' AND page_start=2`;
+    expect(marker?.pages).toMatchObject([{ sectionSealedAtEnd: true, publicationSealCommitted: true, visualKinds: [] }]);
+    expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(({ page, text }) => [page, text]))
+      .toEqual([[4, texts[3]]]);
+  });
+
+  it("retains a bracketed qualified section seal after publication drops its heading", async () => {
+    const texts = ["【参考答案】x = 3.", "5 units.", "Chapter 2: Rings"];
+    const pdf = await seed(texts);
+    const retry = await startPdfRetry(pdf.sourceId, texts.map((text, index) => ({
+      page: index + 1, text, imagePath: null, visualKinds: [],
+    })));
+    await expect(retry.run()).resolves.toEqual({ pages: 3 });
+    await retry.finish(3);
+    expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, undefined, { unpublishedPdfForRecovery: true }))
+      .map(({ page, text }) => [page, text])).toEqual([[3, texts[2]]]);
+    expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks.map(({ page }) => page)).toEqual([3]);
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
   it("seals sentence-case assessment sections before publication and index admission", async () => {
     const texts = ["Answers to exercises 1–5", "5 units.", "Chapter 2: Geometry"];
     const pdf = await seed(texts);
@@ -712,5 +781,15 @@ describe("pgvector material repository", () => {
     const second = await seed("delete cascade");
     await f.sql`DELETE FROM opening_sources WHERE id=${second.sourceId}`;
     expect(await f.sql`SELECT 1 FROM opening_source_embeddings WHERE source_id=${second.sourceId}`).toHaveLength(0);
+  });
+
+  it("stores and retrieves adjacent numeric-leading formulas without splitting their math", async () => {
+    const prefix = "a".repeat(5998);
+    const formulas = "$2x$$y$";
+    const pdf = await seed(prefix + formulas);
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+    const results = await pdf.repository.search(f.scope, query);
+    expect(results.sort((a, b) => a.segmentIndex - b.segmentIndex).map(({ chunk }) => chunk.text))
+      .toEqual([prefix, formulas]);
   });
 });

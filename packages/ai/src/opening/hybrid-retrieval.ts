@@ -71,7 +71,8 @@ function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (st
     }
     if (ch === "\n" && isBlankLineBreakAt(text, j)) break;
     if (ch === "$") {
-      if (text[j + 1] !== "$") closeIdx = j;
+      // The first dollar of a pair can close an inline span, as in $2x$$y$.
+      closeIdx = j;
       break;
     }
     j += 1;

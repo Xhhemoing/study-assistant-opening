@@ -177,6 +177,22 @@ describe("material hybrid retrieval", () => {
     expect(segments[1]?.chunk.text).toBe(formula);
   });
 
+  it("keeps adjacent numeric-leading inline formulas whole at the byte boundary", () => {
+    const prefix = "a".repeat(5998);
+    const formulas = "$2x$$y$";
+    const segments = segmentMaterialChunks([chunk("adjacent-inline", prefix + formulas)]);
+    expect(segments.map(({ chunk }) => chunk.text)).toEqual([prefix, formulas]);
+  });
+
+  it("preserves a display formula after an unclosed numeric dollar amount", () => {
+    const prefix = "a".repeat(5996) + "$2 in cash ";
+    const formula = "$$" + "x".repeat(6400) + "$$";
+    const segments = segmentMaterialChunks([chunk("display-after-price", prefix + formula)]);
+    const texts = segments.map(({ chunk }) => chunk.text);
+    expect(texts.join("")).toBe(prefix + formula);
+    expect(texts.at(-1)).toBe(formula);
+  });
+
   it.each(["$2% ignore $$\n+2=4$", "$2% ignore $$\r\nx+2=4$", "$2% ignore $$\n% ignore $\n+2=4$", "$2% ignore $$\n3$"])(
     "ignores false dollar closers in comments following a numeric inline opener", formula => {
       const prefix = "a".repeat(5997);

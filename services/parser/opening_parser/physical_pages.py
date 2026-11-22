@@ -65,6 +65,7 @@ _CHINESE_ANSWER_HEADING = (
     "练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)"
 )
 _CHINESE_ANSWER_CONTINUATION = r"(?:\s*[（(](?:续|接上页)[）)])?"
+_BRACKETED_CHINESE_ANSWER_HEADING = rf"【\s*{_CHINESE_ANSWER_HEADING}{_CHINESE_ANSWER_CONTINUATION}\s*】"
 _CONTAINER_SEALED_HEADING = (
     rf"{_SEALED_CONTAINER_PREFIX}(?:(?:Answers?\s+Key|"
     r"(?:(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Even-Numbered)\s+)?(?:Answers?|Solutions?))"
@@ -76,7 +77,7 @@ _SECTION_SEALED_RE = re.compile(
     r"^(?:"
     rf"(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
     rf"(?:(?:Answers?\s+Key|{_ASSESSMENT_ANSWER_HEADING}|{_QUALIFIED_ANSWER_SECTION}|Answer\s+Section|Answers){_SEALED_HEADING_CONTINUATION}\s*(?:[:：]|$)"
-    rf"|【\s*{_CHINESE_ANSWER_HEADING}\s*】\s*$"
+    rf"|{_BRACKETED_CHINESE_ANSWER_HEADING}"
     rf"|{_CHINESE_ANSWER_HEADING}{_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：]|$)"
     r"|(?:习题\s*)?(?:答案|解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r")"
@@ -91,7 +92,7 @@ _CHINESE_EXERCISE_ANSWER_RE = re.compile(
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
     rf"^(?:(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
     rf"(?:{_ASSESSMENT_ANSWER_HEADING}|{_QUALIFIED_ANSWER_SECTION}|{_CHINESE_ANSWER_HEADING})"
-    rf"|{_CONTAINER_SEALED_HEADING})",
+    rf"|{_BRACKETED_CHINESE_ANSWER_HEADING}|{_CONTAINER_SEALED_HEADING})",
     re.IGNORECASE,
 )
 

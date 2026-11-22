@@ -223,12 +223,23 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             "思考题答案", "部分习题答案", "答案与解析", "参考解答", "详细解答",
         ):
             with self.subTest(title=title):
-                texts = {1: f"附录：{title}", 2: "5 units.", 3: "Works Cited",
-                         4: f"{title}：x = 3.", 5: "5 units.", 6: "Chapter 2: Rings"}
+                texts = {
+                    1: f"附录：{title}", 2: "5 units.", 3: "Works Cited",
+                    4: f"{title}：x = 3.", 5: "5 units.", 6: "Chapter 2: Rings",
+                    7: f"【{title}】x = 3.", 8: "5 units.", 9: "Chapter 3: Fields",
+                    10: f"【 {title}（接上页） 】：x = 3.", 11: "5 units.", 12: "Chapter 4: Modules",
+                }
                 extracted = physical_pages.extract_physical_pages(worker_pdf_conversion(texts, ()))
                 self.assertEqual(extracted.texts_by_page, {
-                    page: [text] if page in (3, 6) else [] for page, text in texts.items()
+                    page: [text] if page in (3, 6, 9, 12) else [] for page, text in texts.items()
                 })
+
+    def test_same_line_bare_chinese_answer_stays_inline(self):
+        for label in ("【答案】", "【解答】", "答案：", "解答："):
+            with self.subTest(label=label):
+                texts = {1: f"Exercise 1: Find x.\n{label}x = 3.", 2: "Public continuation."}
+                extracted = physical_pages.extract_physical_pages(worker_pdf_conversion(texts, ()))
+                self.assertEqual(extracted.texts_by_page, {1: ["Exercise 1: Find x."], 2: [texts[2]]})
 
     def test_container_prefixed_worked_examples_keep_the_solution_public(self):
         for heading in ("Chapter 3: Worked Example", "Section 2.1: Worked Example 2", "Unit 2 Worked Example 3"):
