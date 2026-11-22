@@ -104,17 +104,26 @@ describe("learner portability", () => {
       "solutionText", "hiddenRubric", "reservedItems", "privateAssessmentNotes", "trustedKey",
       "keyText", "solverAnswer", "blindSolveReceipt", "blind solve outcome", "Trusted.Question-Key-Version",
       "expectedAnswer", "canonical_answer", "referenceAnswer", "modelAnswer", "sampleSolution",
+      "pinnedKey", "pinnedKeys", "teachingBlindSolveReceipt", "teachingBlindSolveReceipts", "answerBlockId",
+      "answerKeyBlockIds", "publicationCardIds", "unrevealedAnswer", "unrevealedAnswers", "answerRef", "revealState",
+      "costLedgerRef", "generatorModelIdentity", "modelSnapshot", "retainedQuestionEligibility", "questionEligibility",
+      "correctAnswer", "correctAnswers", "workedSolution", "workedSolutions", "sampleSolutions", "canonicalAnswers",
+      "expectedAnswers", "solverAnswers", "keyTexts", "trustedKeys", "teachingAnswerKeys",
     ]) {
       const publicKey = "x".repeat(key.length);
-      const markdown = ["---", "title: Algebra", "details:", "  - " + publicKey + ": example", "---", "# Note"].join(newline);
-      const original = importObsidianNote("notes/algebra.md", markdown);
-      const bundle = createLearnerPackage({ notes: [original], decks: [], reviews: [] });
-      const imported = markdown.replace(publicKey, key);
-      expect(() => importMarkdown(original.path, imported)).toThrow(/YAML frontmatter/u);
-      expect(() => importObsidianNote(original.path, imported)).toThrow(/YAML frontmatter/u);
-      expect(() => exportLearnerZip({ ...bundle, notes: [{ ...original, markdown: imported }] })).toThrow(/YAML frontmatter/u);
-      const historical = changeZipKey(exportLearnerZip(bundle), publicKey, key);
-      expect(() => importLearnerZip(historical)).toThrow(/YAML frontmatter/u);
+      const metadata = [["details:", "  - " + publicKey + ": example"]];
+      if (key === "pinnedKey") metadata.push([publicKey + ": example"]);
+      for (const lines of metadata) {
+        const markdown = ["---", "title: Algebra", ...lines, "---", "# Note"].join(newline);
+        const original = importObsidianNote("notes/algebra.md", markdown);
+        const bundle = createLearnerPackage({ notes: [original], decks: [], reviews: [] });
+        const imported = markdown.replace(publicKey, key);
+        expect(() => importMarkdown(original.path, imported), key).toThrow(/YAML frontmatter/u);
+        expect(() => importObsidianNote(original.path, imported), key).toThrow(/YAML frontmatter/u);
+        expect(() => exportLearnerZip({ ...bundle, notes: [{ ...original, markdown: imported }] }), key).toThrow(/YAML frontmatter/u);
+        const historical = changeZipKey(exportLearnerZip(bundle), publicKey, key);
+        expect(() => importLearnerZip(historical), key).toThrow(/YAML frontmatter/u);
+      }
     }
   });
 
@@ -176,6 +185,8 @@ describe("learner portability", () => {
 
   it.each(["\n", "\r", "\r\n"])("round-trips Unicode and spaced public keys with %j line endings", newline => {
     const markdown = ["\uFEFF---", "课程: 数学", "course name: Algebra", 'details: { "yes": "string", 学习 进度: 3 }',
+      "title: Matrix", "tags: [math]", "aliases: [Algebra]", "created: 2026-11-20", "updated: 2026-11-21",
+      "summary: Practice", "course: Math", "deck: Algebra", "author: Learner", "lang: en", "id: note-1",
       "---", "# 课程", ""].join(newline);
     const note = importObsidianNote("note.md", markdown);
     expect(exportMarkdown(importMarkdown(note.path, markdown))).toBe(markdown);

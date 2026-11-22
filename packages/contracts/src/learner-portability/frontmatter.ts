@@ -13,8 +13,13 @@ const privateKeys = new Set([
   "examforecast", "diagnosticplacement", "openingcoursereservedquestions", "reservedquestions", "internalrubric", "<<",
   "privateanswerkey", "privateanswerkeys", "answerkey", "answerkeys", "officialanswer", "officialanswers", "modelanswer",
   "modelanswers", "referenceanswer", "referenceanswers", "solutions", "solutiontext", "rubric", "hiddenrubric", "reserveditems",
-  "trustedkey", "teachinganswerkey", "answerorrubricanchors",
-  "keytext", "solveranswer", "expectedanswer", "canonicalanswer", "samplesolution",
+  "trustedkey", "trustedkeys", "teachinganswerkey", "teachinganswerkeys", "answerorrubricanchors",
+  "pinnedkey", "pinnedkeys", "keytext", "keytexts", "solveranswer", "solveranswers",
+  "expectedanswer", "expectedanswers", "canonicalanswer", "canonicalanswers", "correctanswer", "correctanswers",
+  "samplesolution", "samplesolutions", "workedsolution", "workedsolutions", "unrevealedanswer", "unrevealedanswers",
+  "teachingblindsolvereceipt", "teachingblindsolvereceipts", "answerblockid", "answerkeyblockids", "publicationcardids",
+  "answerref", "revealstate", "costledgerref", "generatormodelidentity", "modelsnapshot",
+  "retainedquestioneligibility", "questioneligibility",
 ]);
 const privateKeyPrefix = /^(?:private|blindsolve|trustedquestionkey)/u;
 const yamlEscapes: Readonly<Record<string, string>> = {
