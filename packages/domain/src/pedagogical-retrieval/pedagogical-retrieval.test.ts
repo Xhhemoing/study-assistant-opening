@@ -16,6 +16,35 @@ import {
   type PedagogicalGraphEdge,
 } from "./index";
 
+
+function expectSealedEvidence(
+  chunks: readonly PedagogicalChunk[],
+  text: string,
+  secrets: readonly string[],
+  publicText?: string,
+) {
+  for (const chunk of chunks) expect(text.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+  for (const allowHintGated of [false, true]) {
+    const { sealedChunks, indexableChunks } = partitionPedagogicalChunks(chunks, { allowHintGated });
+    const ranked = rankPedagogicalEvidence({
+      chunks,
+      authorization: { admissibleSourceIds: ["captions"], allowHintGated },
+      lexicalRanking: chunks.map(chunk => ({ id: chunk.id, score: 1 })),
+      options: { maxResults: chunks.length },
+    });
+    expect(ranked.diagnostics.filteredSealedChunks).toBe(sealedChunks.length);
+    for (const secret of secrets) {
+      expect(sealedChunks.some(chunk => chunk.text.includes(secret))).toBe(true);
+      expect(indexableChunks.some(chunk => chunk.text.includes(secret))).toBe(false);
+      expect(ranked.ranked.some(result => result.chunk.text.includes(secret))).toBe(false);
+    }
+    if (publicText) {
+      expect(indexableChunks.find(chunk => chunk.text.includes(publicText))?.visibility).toBe("public");
+      expect(ranked.ranked.some(result => result.chunk.text.includes(publicText))).toBe(true);
+    }
+  }
+}
+
 describe("AST pre-split structure-preserving pedagogical chunker", () => {
   it("seals display math ($$, \\[\\], align/equation/pmatrix/cases) without slicing inside formulas", () => {
     const doc = [
@@ -935,6 +964,136 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       }
       expect(indexableChunks.find(chunk => chunk.text.includes("public example"))?.visibility).toBe("public");
     }
+  });
+
+
+  it.each([
+    {
+      name: "all lines of a Setext title",
+      bodies: ["Topic | Answer Key", "--- | ---", "Unit 1", "Hints | forty-two", "---"],
+      inline: "Topic | Answer Key\n--- | ---\nUnit 1\nHints | forty-two\n[00:00-00:01] ---",
+      secrets: ["forty-two"],
+    },
+    {
+      name: "table boundary inside an exercise",
+      bodies: [":::exercise", "Topic | Answer Key", "--- | ---", "## Lecture | forty-two", ":::"],
+      secrets: ["forty-two"],
+    },
+    {
+      name: "short table row inside a details hint",
+      bodies: ["<details>", "<summary>Hint</summary>", "Topic | Answer Key", "--- | ---", "| forty-two",
+        "Hints", "---", "</details>"],
+      secrets: ["forty-two"],
+    },
+    {
+      name: "heading visibility across a quoted callout",
+      bodies: ["> Topic | Answer Key", "> --- | ---", "> ## Lecture | first-value",
+        "> [!example]", "> second-value", "> ## New topic", "> public-after"],
+      plainDocument: true,
+      secrets: ["first-value", "second-value"],
+      publicText: "public-after",
+    },
+    {
+      name: "heading inside a callout continuing into another callout",
+      bodies: ["> [!example]", "> ## Answer Key", "> first-value",
+        "> [!hint]", "> second-value", "> ## New topic", "> public-after"],
+      plainDocument: true,
+      secrets: ["first-value", "second-value"],
+      publicText: "public-after",
+    },
+    {
+      name: "heading formatted as a callout title",
+      bodies: ["> [!example] ## Answer Key", "> first-value", "", "public-after"],
+      plainDocument: true,
+      secrets: ["first-value"],
+      publicText: "public-after",
+    },
+    {
+      name: "nested directive heading does not end its enclosing quote section",
+      bodies: ["> ## Answer Key", "> [!example]", "> :::example", "> ## Nested heading",
+        "> :::", "> second-value", "> ## New topic", "> public-after"],
+      plainDocument: true,
+      secrets: ["second-value"],
+      publicText: "public-after",
+    },
+    {
+      name: "proof inside an exercise hint directive",
+      bodies: ["::::exercise", ":::hint", "\\begin{proof}forty-two\\end{proof}", ":::", "::::"],
+      plainDocument: true,
+      secrets: ["forty-two"],
+    },
+    {
+      name: "proof inside a details hint nested in an exercise quote",
+      bodies: ["::::exercise", "> [!hint]", "> <details>", "> <summary>Hint</summary>",
+        "> \\begin{proof}forty-two\\end{proof}", "> </details>", "::::"],
+      plainDocument: true,
+      secrets: ["forty-two"],
+    },
+  ])("keeps sealed evidence out of retrieval ($name)", ({ bodies, inline, plainDocument, secrets, publicText }) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const document = bodies.join("\n");
+    const cues = bodies.map((text, index) => ({
+      text, startMs: index * 1000, endMs: (index + 1) * 1000, keyframeChunkId: "k" + index,
+    }));
+    const timed = inline ?? bodies.map((body, index) => "[00:0" + index + "-00:0" + (index + 1) + "] " + body).join("\n");
+    for (const { chunks, text } of [
+      { chunks: chunkTranscriptCues({ ...source, cues }), text: document },
+      { chunks: chunkTranscriptCues({ ...source, cues: [{ text: document, startMs: 0, endMs: 1000 }] }), text: document },
+      { chunks: chunkPedagogicalDocument({ ...source, text: timed }), text: timed },
+      ...(plainDocument ? [{ chunks: chunkPedagogicalDocument({ ...source, text: document }), text: document }] : []),
+    ]) {
+      expectSealedEvidence(chunks, text, secrets, publicText);
+    }
+  });
+
+  it.each(["\n", "\r\n", "\r"])("preserves UTF-16 offsets and visibility with %j line endings", newline => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const bodies = ["## Answer Key", "🔒 forty-two", "## New topic", "📖 public-after"];
+    const text = bodies.join(newline) + newline;
+    const inline = bodies.map((body, index) => "[00:0" + index + "-00:0" + (index + 1) + "] " + body).join(newline);
+    for (const candidate of [text, inline]) {
+      const chunks = chunkPedagogicalDocument({ ...source, text: candidate });
+      expectSealedEvidence(chunks, candidate, ["forty-two"], "public-after");
+    }
+    const chunks = chunkTranscriptCues({ ...source, cues: [{ text, startMs: 1000, endMs: 2000, keyframeChunkId: "key" }] });
+    expectSealedEvidence(chunks, text, ["forty-two"], "public-after");
+    expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      startMs: 1000, endMs: 2000, keyframeChunkId: "key",
+    });
+  });
+
+  it.each(["\n", "\r\n", "\r"])("recognizes fence and math boundaries with %j line endings", newline => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = [
+      "## Answer Key", "~~~text", "[00:00-00:01] ~~~", "## Decoy", "🔒 fenced-value", "~~~",
+      "## Lecture", "$$", "## Answer Key", "🔒 math-value", "$$x = 2$$", "## New topic", "📖 public-after",
+    ].join(newline);
+    const cues = [{ text, startMs: 0, endMs: 1000 }];
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, ["fenced-value", "math-value"], "public-after");
+    }
+  });
+
+  it.each(["\n", "\r\n", "\r"])("keeps a cue ending in %j separate from a Setext underline", newline => {
+    const bodies = ["Answer Key" + newline, "---", "public-after"];
+    const cues = bodies.map((text, index) => ({ text, startMs: index * 1000, endMs: (index + 1) * 1000 }));
+    const chunks = chunkTranscriptCues({ sourceId: "captions", sourceVersion: 1, cues });
+    expectSealedEvidence(chunks, bodies.join("\n"), [], "public-after");
+  });
+
+  it.each(["\n", "\r\n", "\r"])("prefers paragraph breaks when splitting long text with %j", newline => {
+    const paragraph = "12345" + newline.repeat(2);
+    const text = paragraph + "abcdefghijklmnopqrstuvwxyz";
+    const parts = safeSubsplitText(text, 12);
+    expect(parts[0]?.text).toBe(paragraph);
+    expect(parts.map(part => part.text).join("")).toBe(text);
+    for (const part of parts) expect(text.slice(part.start, part.end)).toBe(part.text);
+  });
+
+  it("keeps CRLF intact at a hard chunk limit", () => {
+    const parts = safeSubsplitText("1234\r\nabcdef", 5);
+    expect(parts[0]?.text).toBe("1234");
+    expect(parts[1]?.text.startsWith("\r\n")).toBe(true);
   });
 
   it("keeps a protected title that begins inside a multiline cue or on an untimed line", () => {

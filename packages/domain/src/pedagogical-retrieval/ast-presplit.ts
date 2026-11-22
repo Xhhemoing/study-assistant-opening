@@ -98,22 +98,49 @@ const SEALED_HEADING_RE =
   /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
 const DETAILS_OPEN_RE = /^<details(?:\s[^>]*)?>/i;
+const ATX_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/;
+
+interface HeadingScope {
+  readonly level: number;
+  readonly visibility: PedagogicalVisibility;
+}
+
+interface HeadingContext {
+  readonly stack?: HeadingScope[];
+  readonly baseVisibility?: PedagogicalVisibility;
+  readonly firstHeadingIsLocal?: boolean;
+  readonly onHeading?: (offset: number, level: number) => void;
+}
 
 function splitLinesWithOffsets(text: string): SourceLine[] {
   const lines: SourceLine[] = [];
   let start = 0;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text.charCodeAt(i);
-    if (ch === 10) {
-      const contentEnd = i > start && text.charCodeAt(i - 1) === 13 ? i - 1 : i;
-      lines.push({ start, contentEnd, end: i + 1, raw: text.slice(start, contentEnd) });
-      start = i + 1;
-    }
+  for (const newline of text.matchAll(/\r\n?|\n/g)) {
+    const contentEnd = newline.index;
+    const end = contentEnd + newline[0].length;
+    lines.push({ start, contentEnd, end, raw: text.slice(start, contentEnd) });
+    start = end;
   }
   if (start < text.length) {
     lines.push({ start, contentEnd: text.length, end: text.length, raw: text.slice(start) });
   }
   return lines;
+}
+
+function nextLineBreak(text: string, from: number) {
+  const newline = /\r\n?|\n/g;
+  newline.lastIndex = from;
+  return newline.exec(text);
+}
+
+function containingLineStart(text: string, offset: number): number {
+  while (offset > 0 && text[offset - 1] !== "\r" && text[offset - 1] !== "\n") offset--;
+  return offset;
+}
+
+function precedingLineBreakStart(text: string, lineStart: number): number {
+  const last = lineStart - 1;
+  return text[last] === "\n" && text[last - 1] === "\r" ? last - 1 : last;
 }
 
 function isEscaped(text: string, index: number): boolean {
@@ -548,6 +575,20 @@ function timedTableRowVisibility(
   return visibility;
 }
 
+function tableBoundaryVisibility(
+  start: number,
+  end: number,
+  columns: readonly PedagogicalVisibility[],
+  readRow: (index: number) => { body: string; captionRow: boolean },
+): PedagogicalVisibility {
+  let visibility: PedagogicalVisibility = "public";
+  for (let index = start; index < end && visibility !== "sealed"; index++) {
+    const { body, captionRow } = readRow(index);
+    visibility = maxVisibility(visibility, timedTableRowVisibility(body, columns, captionRow));
+  }
+  return visibility;
+}
+
 function getTableColumnVisibilities(header: string, cells: readonly { start: number; end: number }[], start = 0) {
   return cells.map(cell => tableColumnVisibility(header.slice(cell.start - start, cell.end - start)));
 }
@@ -644,7 +685,8 @@ function createTranscriptCueSeparator(
       lines.push(line.raw);
       offsets.push(line.start);
     }
-    if (!text || text.endsWith("\n")) {
+    const last = text.at(-1);
+    if (last === undefined || last === "\r" || last === "\n") {
       lines.push("");
       offsets.push(text.length);
     }
@@ -655,9 +697,15 @@ function createTranscriptCueSeparator(
   let tableColumns: PedagogicalVisibility[] | undefined;
   let setextThrough = -1;
   const protectedUnderline = createProtectedSetextLookup(index => lines[index]);
+  const readCaptionRow = (index: number) => ({
+    ...continueMarkdownContainers(lines[index]!, containers),
+    captionRow: true,
+  });
   return (cueIndex: number, joinNext = true, breakBefore = false): string => {
     const start = cueLineStarts[cueIndex]!;
     const end = cueLineStarts[cueIndex + 1] ?? lines.length;
+    // Keep the synthetic separator separate from a cue's terminal bare CR.
+    const newline = cueTexts[cueIndex]!.endsWith("\r") ? "\r" : "\n";
     if (breakBefore) {
       containers = readMarkdownContainerLine("", containers).containers;
       previousBody = "";
@@ -677,7 +725,8 @@ function createTranscriptCueSeparator(
           : undefined;
         if (explicitBoundary || underline !== undefined) {
           if (underline !== undefined) setextThrough = underline;
-          preserveBoundaryVisibility?.(cueIndex, offsets[index]!, timedTableRowVisibility(continuation.body, tableColumns, true));
+          preserveBoundaryVisibility?.(cueIndex, offsets[index]!,
+            tableBoundaryVisibility(index, underline ?? index + 1, tableColumns, readCaptionRow));
         } else if (canContinue) {
           previousBody = continuation.body;
           continue;
@@ -699,10 +748,11 @@ function createTranscriptCueSeparator(
       const underline = explicitBoundary ? undefined : protectedUnderline(end, next, tableColumns, true);
       if (explicitBoundary || underline !== undefined) {
         if (underline !== undefined) setextThrough = underline;
-        preserveBoundaryVisibility?.(cueIndex + 1, offsets[end]!, timedTableRowVisibility(continued.body, tableColumns, true));
+        preserveBoundaryVisibility?.(cueIndex + 1, offsets[end]!,
+          tableBoundaryVisibility(end, underline ?? end + 1, tableColumns, readCaptionRow));
         previousBody = "";
         tableColumns = undefined;
-        return "\n\n";
+        return newline.repeat(2);
       }
     }
     const continuesTable = continued.depth === containers.length && (
@@ -713,12 +763,12 @@ function createTranscriptCueSeparator(
       (continued.depth === containers.length && SETEXT_UNDERLINE_RE.test(continued.body));
     const continuesPipeParagraph = continued.depth === containers.length &&
       isPipeParagraphLine(previousBody) && isPipeParagraphLine(continued.body);
-    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph) return "\n";
+    if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph) return newline;
 
     // The synthetic paragraph break also ends any table.
     previousBody = "";
     tableColumns = undefined;
-    return "\n\n";
+    return newline.repeat(2);
   };
 }
 
@@ -749,14 +799,13 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
   let boundary = text.length;
   let containers: MarkdownContainer[] = [];
   let paragraphStart: number | undefined;
-  let newline = text.indexOf("\n", afterOpen);
-  while (newline >= 0 && newline < through) {
-    const lineStart = newline + 1;
-    const nextNewline = text.indexOf("\n", lineStart);
-    const lineEnd = nextNewline === -1 ? text.length : nextNewline;
-    const line = text.slice(lineStart, lineEnd).replace(/\r$/, "");
-    const nextLineEnd = nextNewline === -1 ? -1 : text.indexOf("\n", nextNewline + 1);
-    const nextLine = nextNewline === -1 ? "" : text.slice(nextNewline + 1, nextLineEnd === -1 ? text.length : nextLineEnd).replace(/\r$/, "");
+  let newline = nextLineBreak(text, afterOpen);
+  while (newline && newline.index < through) {
+    const lineStart = newline.index + newline[0].length;
+    const nextNewline = nextLineBreak(text, lineStart);
+    const line = text.slice(lineStart, nextNewline?.index ?? text.length);
+    const nextLineStart = nextNewline ? nextNewline.index + nextNewline[0].length : text.length;
+    const nextLine = text.slice(nextLineStart, nextLineBreak(text, nextLineStart)?.index ?? text.length);
     const current = readMarkdownContainerLine(line, containers);
     if (current.continuedDepth !== containers.length || current.continuedDepth !== current.containers.length) {
       paragraphStart = undefined;
@@ -764,7 +813,7 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     containers = current.containers;
     const body = current.body.trimStart();
     const latex = /^\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(body);
-    const beforeLine = text[newline - 1] === "\r" ? newline - 1 : newline;
+    const beforeLine = newline.index;
     if (
       !line.trim() ||
       /^(?:#{1,6}(?:[ \t]|$)|:{3,}|\x60{3,}|~{3,})/.test(body) ||
@@ -807,23 +856,20 @@ function findMathDelimiter(text: string, start: number, token: "$$" | "\\]") {
   if (close === -1 || close >= boundary) return { end: boundary, closed: false };
 
   if (token === "$$") {
-    const openerLineStart = text.lastIndexOf("\n", start - 1) + 1;
-    const closerLineStart = text.lastIndexOf("\n", close - 1) + 1;
-    const closerNewline = text.indexOf("\n", close + 2);
-    const closerLineEnd = closerNewline === -1 ? text.length : closerNewline;
-    const openerNewline = text.indexOf("\n", afterOpen);
+    const openerLineStart = containingLineStart(text, start);
+    const closerLineStart = containingLineStart(text, close);
+    const closerLineEnd = nextLineBreak(text, close + 2)?.index ?? text.length;
+    const openerLineEnd = nextLineBreak(text, afterOpen)?.index ?? text.length;
     const flowOpener = closerLineStart > openerLineStart
       && !text.slice(openerLineStart, start).trim()
-      && !text.slice(afterOpen, openerNewline).trim();
+      && !text.slice(afterOpen, openerLineEnd).trim();
     const standaloneCloser = !text.slice(closerLineStart, close).trim()
       && !text.slice(close + 2, closerLineEnd).trim();
     const startsLaterFormula = closerLineStart > openerLineStart
       && !text.slice(closerLineStart, close).trim()
       && !standaloneCloser;
     if ((flowOpener && !standaloneCloser) || startsLaterFormula) {
-      const newline = closerLineStart - 1;
-      const end = text[newline - 1] === "\r" ? newline - 1 : newline;
-      return { end, closed: false };
+      return { end: precedingLineBreakStart(text, closerLineStart), closed: false };
     }
   }
   return { end: close + 2, closed: true };
@@ -887,13 +933,13 @@ function continuesLazyQuote(state: QuoteParagraph, raw: string, next?: string): 
 function findBlockquoteEnd(
   lines: readonly SourceLine[],
   start: number,
-  interruptsQuote: (line: string) => boolean,
+  interruptsQuote: (line: string, index: number) => boolean,
 ): number {
   const state: QuoteParagraph = { open: false };
   for (let index = start; index < lines.length; index++) {
     const raw = lines[index]!.raw;
     if (BLOCKQUOTE_PREFIX_RE.test(raw)) {
-      if (!state.fence && index > start && interruptsQuote(raw)) return index;
+      if (!state.fence && index > start && interruptsQuote(raw, index)) return index;
       updateQuotedParagraph(state, innermostQuoteBody(raw)!);
     } else if (!continuesLazyQuote(state, raw, lines[index + 1]?.raw)) {
       return index;
@@ -933,8 +979,7 @@ interface InlineConstructSpan {
 function findTableLiteralEnd(text: string, start: number, end: number): number {
   const marker = text[start]!;
   if (isEscaped(text, start) || (text[start - 1] === marker && !isEscaped(text, start - 1))) return -1;
-  const newline = text.indexOf("\n", start);
-  const lineEnd = newline === -1 ? end : Math.min(end, newline);
+  const lineEnd = Math.min(end, nextLineBreak(text, start)?.index ?? end);
   if (marker === "\x60") {
     const runs = /\x60+/g;
     runs.lastIndex = start;
@@ -1060,10 +1105,10 @@ function trimWhitespaceBounds(
   let e = end;
   if (isBlockquote) {
     while (s < e) {
-      const nl = text.indexOf("\n", s);
-      const lineContentEnd = nl === -1 || nl >= e ? e : nl;
-      const lineNext = nl === -1 || nl >= e ? e : nl + 1;
-      const lineSlice = text.slice(s, lineContentEnd).replace(/\r$/, "");
+      const nl = nextLineBreak(text, s);
+      const lineContentEnd = Math.min(e, nl?.index ?? e);
+      const lineNext = nl ? Math.min(e, nl.index + nl[0].length) : e;
+      const lineSlice = text.slice(s, lineContentEnd);
       if (/^[ \t]*(?:>[ \t]*)*$/.test(lineSlice)) {
         s = lineNext;
       } else {
@@ -1071,12 +1116,10 @@ function trimWhitespaceBounds(
       }
     }
     while (e > s) {
-      const prevNl = text.lastIndexOf("\n", e - 1);
-      const lineStart = prevNl < s ? s : prevNl + 1;
-      const lineSlice = text.slice(lineStart, e).replace(/\r$/, "");
+      const lineStart = Math.max(s, containingLineStart(text, e));
+      const lineSlice = text.slice(lineStart, e);
       if (/^[ \t]*(?:>[ \t]*)*$/.test(lineSlice)) {
-        e = prevNl < s ? s : prevNl;
-        if (e > s && text.charCodeAt(e - 1) === 13) e--;
+        e = Math.max(s, precedingLineBreakStart(text, lineStart));
       } else {
         break;
       }
@@ -1100,6 +1143,7 @@ function parsePrefixedInnerBlocks(
   readPrefix = (line: SourceLine, _index: number) => ({
     length: BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0, padding: 0,
   }),
+  headingContext?: HeadingContext,
 ): MappedInnerBlock[] {
   const bodyParts: string[] = [];
   const charOrigStart: number[] = [];
@@ -1145,6 +1189,7 @@ function parsePrefixedInnerBlocks(
   const virtualText = bodyParts.join("");
   if (!virtualText.trim()) return [];
 
+  const observeHeading = headingContext?.onHeading;
   const innerAst = parsePedagogicalAstInternal(
     virtualText,
     {
@@ -1154,6 +1199,13 @@ function parsePrefixedInnerBlocks(
     innerSealProofs,
     projectedCaptionRows,
     projectedBoundaryFloors,
+    observeHeading ? {
+      ...headingContext,
+      onHeading: (offset, level) => {
+        const original = vLineToOrigLine.get(offset);
+        if (original) observeHeading(original.start, level);
+      },
+    } : headingContext,
   );
 
   return innerAst.map(b => {
@@ -1286,9 +1338,17 @@ function scanInlineCueTimings(
     const markedBoundary = boundaryFloors?.has(start);
     let explicitBoundary = markedBoundary || (cueLine !== null && startsTimedTableBoundary(cueLine, table !== undefined));
     if (table && !markedBoundary) {
-      const projectedRow = table.timed && timing;
-      const continuation = continueMarkdownContainers(projectedRow ? cueBody : raw, containers);
-      const captionRow = Boolean(projectedRow || captionRowStarts?.has(start));
+      const timedTable = table.timed;
+      const readTableRow = (rowIndex: number) => {
+        const row = lines[rowIndex]!;
+        const projectedRow = timedTable && cueTimings[rowIndex];
+        return {
+          ...continueMarkdownContainers(projectedRow ? readCueBody(rowIndex)! : row.raw, containers),
+          captionRow: Boolean(projectedRow || captionRowStarts?.has(row.start)),
+        };
+      };
+      const continuation = readTableRow(index);
+      const { captionRow } = continuation;
       const canContinue = isPipeTableBodyRow(continuation.body) || (captionRow && isCaptionTableBodyRow(continuation.body));
       if (continuation.depth === containers.length && (canContinue || table.timed)) {
         const candidate = cueLine ?? documentLine;
@@ -1299,7 +1359,8 @@ function scanInlineCueTimings(
         explicitBoundary ||= underline !== undefined && cueCounts[underline + 1]! > cueCounts[index]!;
         if (!explicitBoundary && canContinue) return table.timed ? timing : null;
         if (explicitBoundary) {
-          tableBreakVisibilities.set(index, timedTableRowVisibility(continuation.body, table.columns, captionRow));
+          tableBreakVisibilities.set(index,
+            tableBoundaryVisibility(index, underline ?? index + 1, table.columns, readTableRow));
         }
       }
     }
@@ -1349,11 +1410,14 @@ function parseInlineCuedDocument(
   sealProofs: boolean,
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
+  headingContext?: HeadingContext,
 ): PedagogicalAstBlock[] {
   const parts: string[] = [];
   const regions: TranscriptRegion[] = [];
   const timedRows = new Set<number>();
   const boundaryFloorByProjectedOffset = new Map<number, PedagogicalVisibility>();
+  const observeHeading = headingContext?.onHeading;
+  const projectedLineOrigins = observeHeading && new Map<number, number>();
   const bodies = lines.map((line, index) => line.raw.slice(timings[index]?.prefixLength ?? 0));
   const cueSeparator = createTranscriptCueSeparator(bodies);
   let offset = 0;
@@ -1361,6 +1425,7 @@ function parseInlineCuedDocument(
     const timing = timings[index];
     const next = timings[index + 1];
     const body = bodies[index]!;
+    projectedLineOrigins?.set(offset, line.start);
     const tableFloor = tableBreakVisibilities.get(index);
     const priorFloor = boundaryFloors?.get(line.start);
     const breakBefore = tableFloor !== undefined || priorFloor !== undefined;
@@ -1393,7 +1458,13 @@ function parseInlineCuedDocument(
   const readRange = readAstRanges(parsePedagogicalAstInternal(markdown, {
     defaultVisibility: options.defaultVisibility,
     propagateSectionVisibility: options.propagateSectionVisibility,
-  }, sealProofs, timedRows, boundaryFloorByProjectedOffset));
+  }, sealProofs, timedRows, boundaryFloorByProjectedOffset, observeHeading ? {
+    ...headingContext,
+    onHeading: (projectedOffset, level) => {
+      const original = projectedLineOrigins?.get(projectedOffset);
+      if (original !== undefined) observeHeading(original, level);
+    },
+  } : headingContext));
   const blocks: PedagogicalAstBlock[] = [];
   for (const region of regions) {
     const { start, end, sourceStart, cue } = region;
@@ -1453,6 +1524,7 @@ function parsePedagogicalAstInternal(
   sealProofs: boolean,
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
+  headingContext?: HeadingContext,
 ): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
@@ -1460,13 +1532,47 @@ function parsePedagogicalAstInternal(
   const lines = splitLinesWithOffsets(text);
   const { timings, tableBreakVisibilities } = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors);
   if (timings.some(Boolean)) {
-    return parseInlineCuedDocument(text, lines, timings, tableBreakVisibilities, options, sealProofs, captionRowStarts, boundaryFloors);
+    return parseInlineCuedDocument(text, lines, timings, tableBreakVisibilities,
+      options, sealProofs, captionRowStarts, boundaryFloors, headingContext);
   }
   const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(index => lines[index]?.raw);
   const blocks: PedagogicalAstBlock[] = [];
-  const headingStack: Array<{ readonly level: number; readonly visibility: PedagogicalVisibility }> = [];
+  const headingStack = headingContext?.stack ?? [];
+  const sectionBaseVisibility = headingContext?.baseVisibility ?? defaultVisibility;
+  let localHeading: HeadingScope | undefined;
   const getActiveSectionVisibility = (): PedagogicalVisibility =>
-    headingStack.length > 0 ? headingStack[headingStack.length - 1]!.visibility : defaultVisibility;
+    maxVisibility(localHeading?.visibility ?? defaultVisibility,
+      maxVisibility(defaultVisibility, headingStack.at(-1)?.visibility ?? sectionBaseVisibility));
+
+  const parseInnerSlice = (
+    start: number,
+    end: number,
+    visibility: PedagogicalVisibility,
+    kind: PedagogicalBlockKind,
+  ): MappedInnerBlock[] => {
+    const slice = text.slice(start, end);
+    const rebasedCaptions = captionRowStarts && new Set<number>();
+    const rebasedFloors = boundaryFloors && new Map<number, PedagogicalVisibility>();
+    if (rebasedCaptions || rebasedFloors) {
+      for (const line of splitLinesWithOffsets(slice)) {
+        const offset = start + line.start;
+        if (captionRowStarts?.has(offset)) rebasedCaptions?.add(line.start);
+        const floor = boundaryFloors?.get(offset);
+        if (floor !== undefined) rebasedFloors?.set(line.start, floor);
+      }
+    }
+    return parsePedagogicalAstInternal(
+      slice,
+      { defaultVisibility: visibility, propagateSectionVisibility },
+      sealProofs || kind === "exercise",
+      rebasedCaptions,
+      rebasedFloors,
+    ).map(block => ({
+      ...block,
+      startOffset: start + block.startOffset,
+      endOffset: start + block.endOffset,
+    }));
+  };
 
   const pushBlock = (
     kind: PedagogicalBlockKind,
@@ -1583,18 +1689,7 @@ function parsePedagogicalAstInternal(
         span.visibility !== "sealed" &&
         span.closeStart > span.openEnd
       ) {
-        const innerBlocks = parsePedagogicalAstInternal(
-          text.slice(span.openEnd, span.closeStart),
-          {
-            defaultVisibility: span.visibility,
-            propagateSectionVisibility,
-          },
-          span.kind === "exercise",
-        ).map(b => ({
-          ...b,
-          startOffset: span.openEnd! + b.startOffset,
-          endOffset: span.openEnd! + b.endOffset,
-        }));
+        const innerBlocks = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind);
         const higherBlocks = innerBlocks.filter(
           b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
         );
@@ -1668,15 +1763,7 @@ function parsePedagogicalAstInternal(
       ];
     }
 
-    const inner = parsePedagogicalAstInternal(
-      text.slice(span.openEnd, span.closeStart),
-      { defaultVisibility: span.visibility, propagateSectionVisibility },
-      span.kind === "exercise",
-    ).map(b => ({
-      ...b,
-      startOffset: span.openEnd! + b.startOffset,
-      endOffset: span.openEnd! + b.endOffset,
-    }));
+    const inner = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind);
     const higherInner = inner.filter(
       b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
     );
@@ -1775,23 +1862,10 @@ function parsePedagogicalAstInternal(
         span.closeStart !== undefined &&
         span.closeStart > span.openEnd
       ) {
-        const inner = parsePedagogicalAstInternal(
-          text.slice(span.openEnd, span.closeStart),
-          { defaultVisibility: span.visibility, propagateSectionVisibility },
-          span.kind === "exercise",
-        );
+        const inner = parseInnerSlice(span.openEnd, span.closeStart, span.visibility, span.kind);
         for (const b of inner) {
           if (VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis]) {
-            extracted.push({
-              kind: b.kind,
-              visibility: b.visibility,
-              atomicConstruct: b.atomicConstruct,
-              startOffset: span.openEnd + b.startOffset,
-              endOffset: span.openEnd + b.endOffset,
-              startMs: b.startMs,
-              endMs: b.endMs,
-              ...(b.label ? { label: b.label } : {}),
-            });
+            extracted.push(b);
           }
         }
       }
@@ -1799,6 +1873,10 @@ function parsePedagogicalAstInternal(
     return extracted;
   };
 
+  let quotedHeadings: HeadingScope[] = [];
+  let quotedHeadingLevels: Map<number, number> | undefined;
+  let quoteContinuesAt = -1;
+  let tableHeadingFloor: { offset: number; visibility: PedagogicalVisibility } | undefined;
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
@@ -1810,10 +1888,11 @@ function parsePedagogicalAstInternal(
     }
 
     // 1. Heading (and monotonic heading-stack section visibility propagation)
-    const headingMatch = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/.exec(raw);
+    const headingMatch = ATX_HEADING_RE.exec(raw);
     const setext = headingMatch ? null : readSetextParagraph(index => lines[index]?.raw, i);
     const level = headingMatch?.[1]?.length ?? setext?.level;
-    const boundaryFloor = boundaryFloors?.get(line.start) ?? "public";
+    const boundaryFloor = boundaryFloors?.get(line.start) ??
+      (tableHeadingFloor?.offset === line.start ? tableHeadingFloor.visibility : "public");
     if (level !== undefined) {
       const headingLastIndex = setext?.index ?? i;
       const headingEnd = lines[headingLastIndex]!.contentEnd;
@@ -1843,21 +1922,25 @@ function parsePedagogicalAstInternal(
               "",
             )
           : headingText;
+      const isSectionHeading = line.start > 0 || !headingContext?.firstHeadingIsLocal;
+      if (isSectionHeading) headingContext?.onHeading?.(line.start, level);
       if (propagateSectionVisibility) {
-        while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= level) {
-          headingStack.pop();
-        }
-        const parentVisibility =
-          headingStack.length > 0 ? headingStack[headingStack.length - 1]!.visibility : defaultVisibility;
         const ownVisibility: PedagogicalVisibility = SEALED_HEADING_RE.test(cleanHeadingTitle)
           ? "sealed"
           : HINT_HEADING_RE.test(cleanHeadingTitle)
             ? "hint_gated"
-            : defaultVisibility;
-        headingStack.push({
-          level,
-          visibility: maxVisibility(parentVisibility, maxVisibility(ownVisibility, boundaryFloor)),
-        });
+            : sectionBaseVisibility;
+        const visibility = maxVisibility(ownVisibility, boundaryFloor);
+        if (isSectionHeading) {
+          if (localHeading && localHeading.level >= level) localHeading = undefined;
+          while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= level) {
+            headingStack.pop();
+          }
+          const parentVisibility = headingStack.at(-1)?.visibility ?? sectionBaseVisibility;
+          headingStack.push({ level, visibility: maxVisibility(parentVisibility, visibility) });
+        } else {
+          localHeading = { level, visibility };
+        }
       }
       const activeVis = maxVisibility(getActiveSectionVisibility(), boundaryFloor);
       const headingInlineSpans =
@@ -1952,18 +2035,7 @@ function parsePedagogicalAstInternal(
           : outerEnd;
         const fallbackLabel = infoMatch![1]!;
         if (classified.visibility !== "sealed" && bodyEnd > headerRestStart) {
-          const innerBlocks = parsePedagogicalAstInternal(
-            text.slice(headerRestStart, bodyEnd),
-            {
-              defaultVisibility: classified.visibility,
-              propagateSectionVisibility,
-            },
-            classified.kind === "exercise",
-          ).map(b => ({
-            ...b,
-            startOffset: headerRestStart + b.startOffset,
-            endOffset: headerRestStart + b.endOffset,
-          }));
+          const innerBlocks = parseInnerSlice(headerRestStart, bodyEnd, classified.visibility, classified.kind);
           const higherBlocks = innerBlocks.filter(
             b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
           );
@@ -2047,18 +2119,7 @@ function parsePedagogicalAstInternal(
           : outerEnd;
 
         if (classified.visibility !== "sealed" && bodyEnd > headerRestStart) {
-          const innerBlocks = parsePedagogicalAstInternal(
-            text.slice(headerRestStart, bodyEnd),
-            {
-              defaultVisibility: classified.visibility,
-              propagateSectionVisibility,
-            },
-            classified.kind === "exercise",
-          ).map(b => ({
-            ...b,
-            startOffset: headerRestStart + b.startOffset,
-            endOffset: headerRestStart + b.endOffset,
-          }));
+          const innerBlocks = parseInnerSlice(headerRestStart, bodyEnd, classified.visibility, classified.kind);
           const higherBlocks = innerBlocks.filter(
             b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
           );
@@ -2112,18 +2173,7 @@ function parsePedagogicalAstInternal(
         const outerEnd = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
 
         if (!isMath && classified.visibility !== "sealed" && closeStart > openEndOffset) {
-          const innerBlocks = parsePedagogicalAstInternal(
-            text.slice(openEndOffset, closeStart),
-            {
-              defaultVisibility: classified.visibility,
-              propagateSectionVisibility,
-            },
-            classified.kind === "exercise",
-          ).map(b => ({
-            ...b,
-            startOffset: openEndOffset + b.startOffset,
-            endOffset: openEndOffset + b.endOffset,
-          }));
+          const innerBlocks = parseInnerSlice(openEndOffset, closeStart, classified.visibility, classified.kind);
           emitContainerWithExtraction(
             classified.kind,
             classified.visibility,
@@ -2173,18 +2223,7 @@ function parsePedagogicalAstInternal(
       const outerEnd = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
 
       if (classified.visibility !== "sealed" && closeStart > openEndOffset) {
-        const innerBlocks = parsePedagogicalAstInternal(
-          text.slice(openEndOffset, closeStart),
-          {
-            defaultVisibility: classified.visibility,
-            propagateSectionVisibility,
-          },
-          false,
-        ).map(b => ({
-          ...b,
-          startOffset: openEndOffset + b.startOffset,
-          endOffset: openEndOffset + b.endOffset,
-        }));
+        const innerBlocks = parseInnerSlice(openEndOffset, closeStart, classified.visibility, classified.kind);
         const higherBlocks = innerBlocks.filter(
           b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
         );
@@ -2252,15 +2291,35 @@ function parsePedagogicalAstInternal(
     }
 
     // 7. Markdown callout (> [!theorem], > [!proof], > [!solution], ...) and blockquotes
+    if (i !== quoteContinuesAt) {
+      quotedHeadings = [];
+      quotedHeadingLevels = undefined;
+    }
     const calloutMatch = CALLOUT_RE.exec(raw);
     if (calloutMatch) {
-      const activeVis = blockVisibility;
+      const quotedHeading = quotedHeadings.at(-1);
+      const activeVis = maxVisibility(blockVisibility, quotedHeading?.visibility ?? "public");
       const classified = classifyLabel(calloutMatch[1], activeVis, sealProofs);
       if (classified) {
-        const j = findBlockquoteEnd(lines, i, candidate => {
+        if (quotedHeading && quotedHeading.visibility !== "public" && !quotedHeadingLevels) {
+          // Only a heading at this quote depth can end the inherited section.
+          const levels = new Map<number, number>();
+          const quoteEnd = findBlockquoteEnd(lines, i, () => false);
+          parsePrefixedInnerBlocks(
+            lines, i, quoteEnd - 1, null, activeVis, false, sealProofs, captionRowStarts, boundaryFloors,
+            undefined, { onHeading: (offset, level) => levels.set(offset, level) },
+          );
+          quotedHeadingLevels = levels;
+        }
+        const j = findBlockquoteEnd(lines, i, (candidate, index) => {
+          const level = quotedHeadingLevels?.get(lines[index]!.start);
+          if (quotedHeading && quotedHeading.visibility !== "public" && level !== undefined && level <= quotedHeading.level) {
+            return true;
+          }
           const next = classifyLabel(CALLOUT_RE.exec(candidate)?.[1], activeVis, sealProofs);
           return next !== null && VISIBILITY_RANK[next.visibility] > VISIBILITY_RANK[classified.visibility];
         });
+        quoteContinuesAt = j;
         let endLineIdx = j - 1;
         while (endLineIdx > i && /^[ \t]*>[ \t]*$/.test(lines[endLineIdx]!.raw)) {
           endLineIdx--;
@@ -2278,9 +2337,11 @@ function parsePedagogicalAstInternal(
             headerRestStart,
             classified.visibility,
             propagateSectionVisibility,
-            classified.kind === "exercise",
+            sealProofs || classified.kind === "exercise",
             captionRowStarts,
             boundaryFloors,
+            undefined,
+            { stack: quotedHeadings, baseVisibility: getActiveSectionVisibility(), firstHeadingIsLocal: true },
           );
           const higherBlocks = innerBlocks.filter(
             b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
@@ -2317,6 +2378,7 @@ function parsePedagogicalAstInternal(
       const j = findBlockquoteEnd(lines, i, candidate =>
         classifyLabel(CALLOUT_RE.exec(candidate)?.[1], activeVis, sealProofs) !== null,
       );
+      quoteContinuesAt = j;
       let endLineIdx = j - 1;
       while (endLineIdx > i && /^[ \t]*>[ \t]*$/.test(lines[endLineIdx]!.raw)) {
         endLineIdx--;
@@ -2335,6 +2397,8 @@ function parsePedagogicalAstInternal(
           sealProofs,
           captionRowStarts,
           boundaryFloors,
+          undefined,
+          { stack: quotedHeadings, baseVisibility: activeVis },
         );
         if (innerBlocks.some(b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis])) {
           emitContainerWithExtraction(
@@ -2416,7 +2480,13 @@ function parsePedagogicalAstInternal(
         const row = lines[j]!;
         if (boundaryFloors?.has(row.start)) break;
         const isCaptionRow = captionRowStarts?.has(row.start);
-        if (!isPipeTableBodyRow(row.raw) && !(isCaptionRow && isCaptionTableBodyRow(row.raw))) break;
+        if (!isPipeTableBodyRow(row.raw) && !(isCaptionRow && isCaptionTableBodyRow(row.raw))) {
+          // A pipe-separated heading can also carry values from the table it ends.
+          if (ATX_HEADING_RE.test(row.raw) && parseTableRowCells(row).hasSeparator) {
+            tableHeadingFloor = { offset: row.start, visibility: timedTableRowVisibility(row.raw, columns, false) };
+          }
+          break;
+        }
         if (isCaptionRow && protectedCaptionUnderline) {
           const candidate = readMarkdownContainerLine(row.raw);
           if (protectedCaptionUnderline(j, candidate, columns, true) !== undefined) break;
@@ -2687,23 +2757,22 @@ export function safeSubsplitText(
     const limit = start + maxChars;
     const minBreak = start + Math.max(1, Math.floor(maxChars * 0.25));
     const windowText = text.slice(start, limit);
-    let cut = -1;
-
-    // 1. Paragraph break
-    const paraBreak = windowText.lastIndexOf("\n\n");
-    if (paraBreak >= minBreak - start) cut = start + paraBreak + 2;
-
-    // 2. LaTeX row break (\\ followed by newline)
-    if (cut === -1) {
-      const latexRowBreak = windowText.lastIndexOf("\\\\\n");
-      if (latexRowBreak >= minBreak - start) cut = start + latexRowBreak + 3;
+    let paragraphCut: number | undefined;
+    let latexCut: number | undefined;
+    let lineCut: number | undefined;
+    let previousBreakStart = -1;
+    let previousBreakEnd = -1;
+    for (const newline of windowText.matchAll(/\r\n?|\n/g)) {
+      const offset = start + newline.index;
+      const end = offset + newline[0].length;
+      if (end === limit && text[end - 1] === "\r" && text[end] === "\n") break;
+      if (offset === previousBreakEnd && previousBreakStart >= minBreak) paragraphCut = end;
+      if (offset - 2 >= minBreak && text.slice(offset - 2, offset) === "\\\\") latexCut = end;
+      if (offset >= minBreak) lineCut = end;
+      previousBreakStart = offset;
+      previousBreakEnd = end;
     }
-
-    // 3. Line break
-    if (cut === -1) {
-      const lineBreak = windowText.lastIndexOf("\n");
-      if (lineBreak >= minBreak - start) cut = start + lineBreak + 1;
-    }
+    let cut = paragraphCut ?? latexCut ?? lineCut ?? -1;
 
     // 4. Sentence / whitespace boundary
     if (cut === -1) {
@@ -2716,7 +2785,9 @@ export function safeSubsplitText(
       }
     }
 
-    const safeCut = adjustAwayFromSurrogateAndLatex(text, start, cut === -1 ? limit : cut);
+    if (cut === -1) cut = limit;
+    if (text[cut - 1] === "\r" && text[cut] === "\n") cut--;
+    const safeCut = adjustAwayFromSurrogateAndLatex(text, start, cut);
     parts.push({ start, end: safeCut, text: text.slice(start, safeCut) });
     start = safeCut;
   }
