@@ -105,6 +105,7 @@ function fixture(options: Options = {}) {
       return (options.activeGlobalMemoryIds ?? []).filter(id => requested.includes(id))
         .map(id => ({ id, course_id: null, expires_at: null, source_turn_ids: options.storedMemoryOrigins?.[id] ? [user] : [] }));
     }
+    if (sql.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
     if (sql.startsWith("SELECT m.id, course.id AS turn_course_id")) {
       const origins = values.find(Array.isArray) as string[];
       return origins.flatMap(id => {
@@ -904,7 +905,7 @@ describe("stream receipt release waits for current job authorization and assista
   });
 });
 
-it("uses one dependency closure per proposal and confirmation statement", async () => {
+it("uses the bare user probe for each proposal admission and one closure for confirmation", async () => {
   const statements: string[] = [];
   const memory = { id: receipt, workspace_id: workspace, course_id: null, kind: "candidate", text: "Ordinary evidence",
     source_turn_ids: [user], version: 0, status: "active", created_at: time, updated_at: time };
@@ -914,7 +915,7 @@ it("uses one dependency closure per proposal and confirmation statement", async 
     return { toString: () => query, then: (resolve: (rows: unknown[]) => unknown) => {
       statements.push(query);
       if (query.startsWith("SELECT id FROM workspaces")) return resolve([{ id: workspace }]);
-      if (query.startsWith("SELECT t.id FROM opening_turns")) return resolve([{ id: user }]);
+      if (query.startsWith("SELECT t.id FROM opening_turns AS t")) return resolve([{ id: user }]);
       if (query.startsWith("SELECT m.id,")) return resolve([{ id: receipt, ancestor_temporary_expires_at: null }]);
       if (query.startsWith("INSERT INTO opening_memories") || query.startsWith("SELECT * FROM opening_memories")) return resolve([memory]);
       if (query.startsWith("UPDATE opening_memories SET kind")) return resolve([{ ...memory, kind: "confirmed", version: 1 }]);
@@ -925,9 +926,9 @@ it("uses one dependency closure per proposal and confirmation statement", async 
   const repo = createOpeningMemoryRepository(sql);
   const proposed = await repo.proposeMemory(scope, { text: memory.text, sourceTurnIds: [user], expiresAt: null });
   await expect(repo.confirm(scope, proposed.id, proposed.version, "confirm-ordinary")).resolves.toMatchObject({ kind: "confirmed" });
-  const admission = statements.filter(query => query.startsWith("SELECT t.id FROM opening_turns") || query.startsWith("SELECT m.id,"));
-  expect(admission).toHaveLength(3);
-  for (const query of admission) {
-    expect(query.match(/\bWITH\s+RECURSIVE\b/gi)).toHaveLength(1);
-  }
+  const probes = statements.filter(query => query.startsWith("SELECT t.id FROM opening_turns AS t"));
+  expect(probes).toHaveLength(2);
+  expect(probes.every(query => !/\bWITH\s+RECURSIVE\b/i.test(query))).toBe(true);
+  expect(statements.filter(query => query.startsWith("SELECT m.id,")).map(query =>
+    query.match(/\bWITH\s+RECURSIVE\b/gi)?.length)).toEqual([1]);
 });

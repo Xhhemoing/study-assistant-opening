@@ -351,10 +351,10 @@ export function historicalUserTurnId(db: Db, turn: FragmentFactory = () => db`t`
   ) END`;
 }
 
-export function turnMaterialUse(db: Db, alias: "t" | "u"): Fragment {
-  const turn: FragmentFactory = () => alias === "t" ? db`t` : db`u`;
+export function turnMaterialUse(db: Db, alias: "t" | "u" | "a"): Fragment {
+  const turn: FragmentFactory = () => alias === "t" ? db`t` : alias === "a" ? db`a` : db`u`;
   return db`CASE WHEN ${turn()}.attempt_id IS NOT NULL OR ${turn()}.context_anchor->>'itemVersionId' IS NOT NULL
-    ${alias === "t" ? db`OR (${turn()}.role = 'assistant' AND EXISTS (
+    ${alias !== "u" ? db`OR (${turn()}.role = 'assistant' AND EXISTS (
       SELECT 1 FROM opening_turns tu
       WHERE tu.id = (${pairedUserTurnId(db, turn)}) AND tu.workspace_id = ${turn()}.workspace_id
         AND tu.conversation_id = ${turn()}.conversation_id AND tu.role = 'user'
@@ -589,6 +589,7 @@ export async function readTurnsWithActiveMemoryDependencies(
     sourceIds: Set<string>; courseIds?: Set<string>; acquire: () => Promise<readonly string[]>;
   },
   verifyHistory?: (scope: OpeningScope, userTurnId: string) => Promise<boolean>,
+  verifyOrigins?: FragmentFactory,
 ): Promise<Set<string>> {
   if (!turnIds.length) return new Set();
   const course: FragmentFactory = () => db`course.id`;
@@ -612,6 +613,7 @@ export async function readTurnsWithActiveMemoryDependencies(
           THEN 'practice' ELSE 'citation' END)
       ELSE to_jsonb(a.id) END AS id) t
     WHERE a.workspace_id = ${workspaceId} AND a.id = ANY(${turnIds}::uuid[]) AND a.status='complete'
+      ${verifyOrigins ? db`AND ${verifyOrigins()}` : db``}
       AND ${assistantDirectSourcesVersioned(db, "a")}
       AND (a.role <> 'assistant' OR cardinality(a.source_ids) = 0 OR
         ${contextSourceRefsIncluded(db, workspaceId, () => turnContextSourceRefs(db, "a"), false, true,

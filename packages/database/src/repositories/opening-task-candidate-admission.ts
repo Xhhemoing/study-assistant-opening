@@ -5,7 +5,7 @@ import { OpeningPlanError } from "./opening-plan-error";
 import {
   assistantDirectSourcesVersioned, contextSourceRefsIncluded, historicalUserTurnId, lineageUuid, pairedUserTurnId, parseContextMemoryDependencyIds,
   readTurnsWithActiveMemoryDependencies, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasMemoryDependencies,
-  turnLineageCourse, turnMaterialUse, turnPinnedSourceRefs, type FragmentFactory,
+  turnHasOwnedSession, turnLineageCourse, turnMaterialUse, turnPinnedSourceRefs, type FragmentFactory,
 } from "./opening-context-provenance";
 import { lockActiveMemoryCourses, lockMemoryMaterialSources, sourceMaterialsActive, turnMaterialRows } from "./opening-memory-admission";
 import { readTutorHistoryAncestors, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
@@ -77,6 +77,18 @@ function assistantCandidateSourcesVersioned(tx: TransactionSql, workspaceId: str
   ))`;
 }
 
+function taskTurnOriginActive(tx: TransactionSql, workspaceId: string, alias: "a" | "u",
+  conversationCourse: FragmentFactory, owner: FragmentFactory, lockedSourceIds?: string[],
+) {
+  const turn: FragmentFactory = () => alias === "a" ? tx`a` : tx`u`;
+  return tx`${turnHasOwnedSession(tx, turn, owner)}
+    AND jsonb_typeof(${turn()}.source_versions)='object' AND jsonb_typeof(${turn()}.citations)='array'
+    AND ${sourceMaterialsActive(tx, workspaceId, () => turnMaterialRows(tx, true, alias), {
+      lockedSourceIds, memoryCourse: () => turnLineageCourse(tx, alias, conversationCourse, owner),
+      originUse: () => turnMaterialUse(tx, alias), directMaterialPolicy: true, authorizeMemoryOnlySeparately: true,
+    })}`;
+}
+
 /** Share locks admit parallel accepts but serialize against owner/privacy deletion. */
 export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope, id: string): Promise<string | null> {
   const owners = await tx`
@@ -85,18 +97,25 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   if (!owners.length) throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
   const [candidate] = await tx<{ payload: unknown; source_turn_id: string; has_memory_dependencies: boolean | null;
     course_id: string | null; material_use: "citation" | "practice"; source_ids: string[]; role: string; context_source_refs: unknown;
-    historical_user_turn_id: string | null }[]>`
+    historical_user_turn_id: string | null; paired_user_turn_id: string | null;
+    user_course_id: string | null; user_source_ids: string[] | null }[]>`
     SELECT c.payload, t.id AS source_turn_id, ${turnHasMemoryDependencies(tx)} AS has_memory_dependencies,
       ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} AS course_id,
       ${turnMaterialUse(tx, "t")} AS material_use, t.role, t.context_source_refs,
       ${historicalUserTurnId(tx)} AS historical_user_turn_id,
       array_remove(ARRAY(SELECT DISTINCT ${lineageUuid(tx, () => tx`ref.source_id`)}
-        FROM (${candidateMaterialRows(tx, scope)}) ref), NULL::uuid) AS source_ids
+        FROM (${candidateMaterialRows(tx, scope)}) ref), NULL::uuid) AS source_ids,
+      u.id AS paired_user_turn_id,
+      CASE WHEN u.id IS NOT NULL THEN ${turnLineageCourse(tx, "u", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} END AS user_course_id,
+      CASE WHEN u.id IS NOT NULL THEN array_remove(ARRAY(SELECT DISTINCT ${lineageUuid(tx, () => tx`ref.source_id`)}
+        FROM (${turnMaterialRows(tx, true, "u")}) ref), NULL::uuid) END AS user_source_ids
     FROM opening_assistant_candidates c
     JOIN opening_conversations conv ON conv.id = c.conversation_id AND conv.workspace_id = c.workspace_id
       AND conv.owner_user_id = ${scope.ownerUserId}
     JOIN opening_turns t ON t.id = c.source_turn_id AND t.conversation_id = c.conversation_id
       AND t.workspace_id = c.workspace_id AND t.status = 'complete'
+    LEFT JOIN opening_turns u ON t.role='assistant' AND u.id=(${pairedUserTurnId(tx, () => tx`t`)})
+      AND u.workspace_id=t.workspace_id AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
     WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}
     FOR SHARE OF conv, t`;
   const payload = assistantCandidateSchema.safeParse(candidate?.payload);
@@ -104,8 +123,8 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
   }
   const historicalUserTurn = candidate.historical_user_turn_id;
-  const sourceIds = new Set(candidate.source_ids?.filter(Boolean));
-  const courseIds = new Set(candidate.course_id ? [candidate.course_id] : []);
+  const sourceIds = new Set([...(candidate.source_ids ?? []), ...(candidate.user_source_ids ?? [])].filter(Boolean));
+  const courseIds = new Set([candidate.course_id, candidate.user_course_id].filter((course): course is string => !!course));
   const invalidSource = () => new OpeningPlanError("VALIDATION", "task candidate source is unavailable or excluded");
   if (historicalUserTurn && !await readTutorHistoryAncestors(tx, scope, historicalUserTurn,
     { collectSourceIds: sourceIds, collectCourseIds: courseIds })) throw invalidSource();
@@ -134,10 +153,23 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   const admitted = await tx`
     SELECT c.id FROM opening_assistant_candidates c
     JOIN opening_turns t ON t.id = c.source_turn_id AND t.id = ${candidate.source_turn_id}
+    JOIN opening_conversations conv ON conv.id=t.conversation_id AND conv.workspace_id=t.workspace_id
+    LEFT JOIN opening_turns u ON t.role='assistant' AND u.id=(${pairedUserTurnId(tx, () => tx`t`)})
+      AND u.workspace_id=t.workspace_id AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
     WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}
       AND jsonb_typeof(c.source_ids) = 'array'
       AND jsonb_typeof(t.source_versions) = 'object' AND jsonb_typeof(t.citations) = 'array'
       AND ${assistantCandidateSourcesVersioned(tx, scope.workspaceId)}
+      AND ${turnHasOwnedSession(tx, () => tx`t`, () => tx`conv.owner_user_id`)}
+      AND ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)}
+        IS NOT DISTINCT FROM ${candidate.course_id ?? null}::uuid
+      AND u.id IS NOT DISTINCT FROM ${candidate.paired_user_turn_id ?? null}::uuid
+      AND (u.id IS NULL OR (
+        ${turnLineageCourse(tx, "u", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)}
+          IS NOT DISTINCT FROM ${candidate.user_course_id ?? null}::uuid
+        AND ${taskTurnOriginActive(tx, scope.workspaceId, "u", () => tx`conv.course_id`,
+          () => tx`conv.owner_user_id`, lockedSourceIds)}
+      ))
       AND ${sourceMaterialsActive(tx, scope.workspaceId, () => candidateMaterialRows(tx, scope), {
         lockedSourceIds,
         memoryCourse: () => tx`${candidate.course_id ?? null}::uuid`,
@@ -151,7 +183,8 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   if (candidate.has_memory_dependencies && !active?.has(candidate.source_turn_id)) {
     throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
   }
-  return candidate.has_memory_dependencies || hasAncestors ? candidate.source_turn_id : null;
+  return candidate.has_memory_dependencies || hasAncestors || candidate.user_course_id || candidate.user_source_ids?.length
+    ? candidate.source_turn_id : null;
 }
 
 /** Read-only so callers can repeat admission after locking the candidate. */
@@ -160,7 +193,9 @@ export async function assertTaskCandidateMemoryDependencies(
 ): Promise<void> {
   if (dependencyTurnId === null) return;
   const active = await readTurnsWithActiveMemoryDependencies(tx, workspaceId, [dependencyTurnId], undefined,
-    (scope, userTurnId) => readTutorHistoryAncestors(tx, scope, userTurnId));
+    (scope, userTurnId) => readTutorHistoryAncestors(tx, scope, userTurnId),
+    () => tx`${taskTurnOriginActive(tx, workspaceId, "a", () => tx`c.course_id`, () => tx`c.owner_user_id`)}
+      AND (u.id IS NULL OR ${taskTurnOriginActive(tx, workspaceId, "u", () => tx`c.course_id`, () => tx`c.owner_user_id`)})`);
   if (!active.has(dependencyTurnId)) {
     throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
   }

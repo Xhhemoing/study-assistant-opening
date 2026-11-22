@@ -17,11 +17,11 @@ import {
   contextSourceRefsIncluded, hasMemoryBearingRef, lineageUuid, memoryBacksSource, memoryCourseAllows,
   memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
   resolveMemoryDependencyStatus, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
-  turnMaterialUse, turnPinnedSourceRefs, type ContextSourceRef, type FragmentFactory,
+  turnMaterialUse, turnPinnedSourceRefs, type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import { lockActiveMemoryCourse, lockActiveMemoryCourses, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
-import { historyMaterialsActive, loadTutorHistory, loadTutorHistoryContext, readTutorHistoryAncestors,
+import { historyMaterialsActive, loadTutorHistory, loadTutorHistoryContext, readTutorHistoryAncestorStatus, readTutorHistoryAncestors,
   type HistoryCourseBinding, type TutorHistoryPurpose } from "./opening-tutor-history";
 import {
   fenceCancelledOpeningTutorStream, isUnconfirmedStreamSealError, markFallbackStreamSealAttempted,
@@ -154,6 +154,17 @@ async function assertGlobalMemoriesUnexpiredInTx(
   }
 }
 
+function memoryExpiry(nodes: readonly MemoryDependencyStatus[]): number {
+  return nodes.reduce((expiry, node) => node.expires_at === null ? expiry
+    : Math.min(expiry, new Date(node.expires_at).getTime()), Infinity);
+}
+
+function assertHistoryMemoryUnexpired(expiresAt: number) {
+  if (!(expiresAt > Date.now())) {
+    throw Object.assign(new Error("history memory is no longer active"), { code: "CONFLICT" });
+  }
+}
+
 async function assertStreamMaterialAdmission(
   sql: Sql,
   tx: TransactionSql,
@@ -169,7 +180,7 @@ async function assertStreamMaterialAdmission(
     globalMemoryIds?: readonly string[];
     historyCourseBindings?: readonly HistoryCourseBinding[];
   } = {},
-): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[] }> {
+): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[]; historyExpiresAt: number }> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
   const courseId = boundTurnCourseId(turn);
   const materialUse = turn.attempt_id || anchor?.itemVersionId ? "practice" as const : "citation" as const;
@@ -267,8 +278,27 @@ async function assertStreamMaterialAdmission(
   const deferredCourseId = admissionOptions.deferSourceFreeCourseLock && !pin && !historyBindings.length
     && !contextSourceRefs.length && !derivedSourceIds.length && !globalMemoryIdList.length ? courseId : null;
   const collectSourceIds = new Set<string>();
-  let graph = globalMemoryIdList.length
-    ? await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, { materialUse, collectSourceIds, collectCourseIds: originCourseIds }) : undefined;
+  const memoryBindings = historyBindings.filter(binding => binding.memoryIds?.length || binding.memoryBackings?.length);
+  const roots = { citation: new Set<string>(), practice: new Set<string>() };
+  for (const id of globalMemoryIdList) roots[materialUse].add(id);
+  for (const binding of memoryBindings) {
+    for (const id of [...(binding.memoryIds ?? []), ...(binding.memoryBackings ?? []).flat()]) roots[binding.materialUse].add(id);
+  }
+  const readGraphs = async (lockedSourceIds?: string[]) => {
+    const currentCourses = lockedSourceIds ? new Set<string>() : originCourseIds;
+    const graphs = new Map<"citation" | "practice", Map<string, MemoryDependencyStatus[]>>();
+    for (const use of ["citation", "practice"] as const) {
+      if (roots[use].size) graphs.set(use, await readMemoryDependencyStatus(tx, scope, [...roots[use]], {
+        materialUse: use, collectSourceIds: lockedSourceIds ? undefined : collectSourceIds,
+        collectCourseIds: currentCourses, lockedSourceIds,
+      }));
+    }
+    if (lockedSourceIds && [...currentCourses].some(id => !originCourseIds.has(id))) {
+      throw Object.assign(new Error("history course is no longer available"), { code: "CONFLICT" });
+    }
+    return graphs;
+  };
+  let graphs = roots.citation.size || roots.practice.size ? await readGraphs() : undefined;
   if (originCourseIds.size) {
     if (courseId !== null) originCourseIds.add(courseId);
     if (!await lockActiveMemoryCourses(tx, scope, [...originCourseIds])) {
@@ -299,14 +329,13 @@ async function assertStreamMaterialAdmission(
         ORDER BY asset_id,course_id FOR SHARE`;
     }
   }
-  if (graph && (collectSourceIds.size || originCourseIds.size)) {
-    const currentCourses = new Set<string>();
-    graph = await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, {
-      materialUse, lockedSourceIds, collectCourseIds: currentCourses,
-    });
-    if ([...currentCourses].some(id => !originCourseIds.has(id))) {
-      throw Object.assign(new Error("history course is no longer available"), { code: "CONFLICT" });
-    }
+  if (graphs && (collectSourceIds.size || originCourseIds.size)) graphs = await readGraphs(lockedSourceIds);
+  let historyExpiresAt = Infinity;
+  for (const binding of memoryBindings) {
+    const nodes = resolveMemoryDependencyStatus(graphs!.get(binding.materialUse)!,
+      binding.memoryIds ?? [], binding.memoryBackings ?? [], binding.courseId);
+    if (!nodes) throw Object.assign(new Error("history memory is no longer active"), { code: "CONFLICT" });
+    historyExpiresAt = Math.min(historyExpiresAt, memoryExpiry(nodes));
   }
   if (historyBindings.length) {
     const [admitted] = await tx`SELECT 1 WHERE NOT EXISTS (
@@ -318,8 +347,8 @@ async function assertStreamMaterialAdmission(
     )`;
     if (!admitted) throw Object.assign(new Error("history material no longer permits this use"), { code: "CONFLICT" });
   }
-  if (graph) {
-    const resolved = resolveMemoryDependencyStatus(graph, globalMemoryIdList, [], courseId);
+  if (globalMemoryIdList.length) {
+    const resolved = resolveMemoryDependencyStatus(graphs!.get(materialUse)!, globalMemoryIdList, [], courseId);
     if (!resolved) throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
     globalMemoryIdList = [...new Set(resolved.map(memory => memory.dep_id))].sort();
   }
@@ -416,7 +445,7 @@ async function assertStreamMaterialAdmission(
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
     }
   }
-  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList };
+  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList, historyExpiresAt };
 }
 
 async function assertStreamSources(
@@ -690,6 +719,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   const checkAncestors = target.query_system === false;
   const collectCourseIds = new Set<string>([target.course_id, target.assistant_course_id].filter(id => typeof id === "string"));
   const collectSourceIds = new Set<string>();
+  const turnExpiry = target.memory_temporary_expires_at;
+  let earliestExpiresAtMs = turnExpiry == null ? Infinity : new Date(turnExpiry).getTime();
   if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { collectCourseIds, collectSourceIds })) return;
   const readEvidence = async (lockedSourceIds?: string[]) => {
     if (!target.evidence) return true;
@@ -703,14 +734,30 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       const graph = await readMemoryDependencyStatus(db, input.scope, [...exactIds, ...row.backings.map(backing => backing.id)],
         { materialUse: row.material_use, collectSourceIds, collectCourseIds: currentCourses, lockedSourceIds });
       if (!lockedSourceIds) continue;
-      const current = (id: string) => resolveMemoryDependencyStatus(graph, [id], [], row.course_id)
-        ?.every(node => node.expires_at === null || new Date(node.expires_at).getTime() > Date.now()) === true;
-      if (!exactIds.every(current)) return false;
-      const activeBacking = row.backings.filter(backing => current(backing.id));
-      if (row.scoped.some(ref => row.memberships.some(membership => membership.asset_id === ref.id && membership.purpose === "mock_exam")
-        || !activeBacking.some(backing => backing.source_id === ref.id))) return false;
+      const expiryFor = (id: string) => {
+        const nodes = resolveMemoryDependencyStatus(graph, [id], [], row.course_id);
+        return nodes ? memoryExpiry(nodes) : -Infinity;
+      };
+      for (const id of exactIds) {
+        const expiry = expiryFor(id);
+        if (!(expiry > Date.now())) return false;
+        earliestExpiresAtMs = Math.min(earliestExpiresAtMs, expiry);
+      }
+      const backingExpiry = (id: string, globalOnly = false) => Math.max(-Infinity, ...row.backings
+        .filter(backing => backing.source_id === id && (!globalOnly || backing.global_backed))
+        .map(backing => expiryFor(backing.id)));
+      for (const ref of row.scoped) {
+        const expiry = backingExpiry(ref.id);
+        if (!(expiry > Date.now())
+          || row.memberships.some(membership => membership.asset_id === ref.id && membership.purpose === "mock_exam")) return false;
+        earliestExpiresAtMs = Math.min(earliestExpiresAtMs, expiry);
+      }
       for (const ref of row.sources) {
-        if (ref.memory_only && activeBacking.some(backing => backing.source_id === ref.id && backing.global_backed)) continue;
+        const expiry = ref.memory_only ? backingExpiry(ref.id, true) : -Infinity;
+        if (expiry > Date.now()) {
+          earliestExpiresAtMs = Math.min(earliestExpiresAtMs, expiry);
+          continue;
+        }
         const memberships = row.memberships.filter(membership => membership.asset_id === ref.id);
         if ((row.course_id !== null && memberships.length === 0)
           || !sourceMembershipAllows(memberships, row.course_id, row.material_use, ref.memory_only)) return false;
@@ -728,13 +775,15 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   if (locked.size !== collectSourceIds.size) return;
   if (checkAncestors) {
     const currentSources = new Set<string>(), currentCourses = new Set<string>();
-    if (!await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, {
+    const history = await readTutorHistoryAncestorStatus(db, input.scope, target.user_turn_id, {
       lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
-    }) || [...currentSources].some(id => !locked.has(id)) || [...currentCourses].some(id => !collectCourseIds.has(id))) return;
+    });
+    if (!history.valid || [...currentSources].some(id => !locked.has(id)) || [...currentCourses].some(id => !collectCourseIds.has(id))) return;
+    earliestExpiresAtMs = Math.min(earliestExpiresAtMs, history.earliestExpiresAtMs);
   }
   // Compare both saved origins again while their courses and materials are locked.
   const [currentTarget] = await readTarget();
-  if (isDeepStrictEqual(target, currentTarget) && await readEvidence(lockedSourceIds)) return target;
+  if (isDeepStrictEqual(target, currentTarget) && await readEvidence(lockedSourceIds)) return { row: target, earliestExpiresAtMs };
 }
 
 /** Dispatch admission uses the same course and material locks as candidate append. */
@@ -1047,7 +1096,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       if ((job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId) && !context.attemptContext) {
         throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
       }
-      const { courseId, resolvedMemoryIds } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+      const { courseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
         context.contextSourceRefs, context.attemptContext?.sourceRefs, {
           memoryLineageSourceIds: context.memoryLineageSourceIds,
           globalMemoryIds: context.globalMemoryIds,
@@ -1065,6 +1114,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       }
       await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
       beforeStartSend?.();
+      assertHistoryMemoryUnexpired(historyExpiresAt);
       inFlight = startSend();
       void inFlight.catch(() => undefined);
     });
@@ -1263,7 +1313,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if ((job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId) && !context.attemptContext) {
             throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
           }
-          const { courseId, resolvedMemoryIds } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+          const { courseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
             context.contextSourceRefs, context.attemptContext?.sourceRefs, {
               memoryLineageSourceIds: context.memoryLineageSourceIds,
               globalMemoryIds: context.globalMemoryIds,
@@ -1282,7 +1332,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
           try {
             publicationStarted = true;
-            publishPromise = Promise.resolve().then(() => publish());
+            publishPromise = Promise.resolve().then(() => {
+              assertHistoryMemoryUnexpired(historyExpiresAt);
+              return publish();
+            });
             void publishPromise.catch(() => undefined);
             await publishPromise;
           } catch (error) {
@@ -1356,20 +1409,34 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           : await tx`SELECT privacy_epoch FROM workspaces
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!workspace) return null;
+        const hasPriorExchanges = () => tx`${context.historyCourseBindings === undefined} AND NOT COALESCE(t.query_system, false) AND EXISTS (
+          SELECT 1 FROM opening_tutor_jobs prior_job
+          JOIN LATERAL (
+            SELECT 1 FROM opening_turns prior_u
+            WHERE prior_u.id=prior_job.user_turn_id AND prior_u.workspace_id=j.workspace_id
+              AND prior_u.conversation_id=j.conversation_id AND prior_u.role='user' AND prior_u.status='complete'
+              AND (prior_u.created_at, prior_u.id) < (t.created_at, t.id)
+            OFFSET 0
+          ) prior ON true
+          WHERE prior_job.workspace_id=j.workspace_id AND prior_job.conversation_id=j.conversation_id
+        )`;
         const [row] = lockMode === "FOR UPDATE"
           ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
-              ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
+              ${jobUserSessionCourse(tx)} AS session_course_id, ${hasPriorExchanges()} AS has_prior_exchanges FROM opening_tutor_jobs j
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`
           : await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
-              ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
+              ${jobUserSessionCourse(tx)} AS session_course_id, ${hasPriorExchanges()} AS has_prior_exchanges FROM opening_tutor_jobs j
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR SHARE OF j`;
         if (!row) return null;
         const job = mapJob(row as Record<string, unknown>);
         if (job.status !== "running") return job;
+        if (context.historyCourseBindings === undefined && row.has_prior_exchanges) {
+          throw Object.assign(new Error("stream history bindings missing"), { code: "CONFLICT" });
+        }
         if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
           throw new Error("stream authorization changed");
         }
@@ -1389,7 +1456,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         };
         const verifyAttemptAfterMaterial = Boolean(context.historyCourseBindings?.length || context.globalMemoryIds?.length);
         const attemptRefs = verifyAttemptAfterMaterial ? context.attemptSourceRefs : await verifyAttempt();
-        const { courseId, deferredCourseId, resolvedMemoryIds } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
+        const { courseId, deferredCourseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
           context.contextSourceRefs, attemptRefs, {
             deferSourceFreeCourseLock: true,
             memoryLineageSourceIds: context.memoryLineageSourceIds,
@@ -1407,6 +1474,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           row.source_versions as Record<string, unknown> | null | undefined, deferredCourseId,
         );
         await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
+        assertHistoryMemoryUnexpired(historyExpiresAt);
         if (context.temporaryMemoryExpiresAt !== undefined && !(Date.parse(context.temporaryMemoryExpiresAt) > Date.now())) {
           throw new Error("stream temporary memory is no longer active");
         }
@@ -1620,7 +1688,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (pinnedCourseId && pinnedCourseId.toLowerCase() !== boundCourseId) {
             throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
           }
-          const { courseId, resolvedMemoryIds } = await assertStreamMaterialAdmission(
+          const { courseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(
             sql, tx, input.scope, boundTurn, options?.materialPurposePin,
             receipt ? refs.filter(ref => ref.memoryOnly === true) : refs, options?.attemptContext?.snapshot.sourceRefs,
             {
@@ -1638,6 +1706,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               boundTurn.source_versions as Record<string, unknown> | null | undefined);
           }
           await assertGlobalMemoriesUnexpiredInTx(tx, input.scope, resolvedMemoryIds, courseId);
+          assertHistoryMemoryUnexpired(historyExpiresAt);
         } else if (boundCourseId !== null) {
           await lockStreamCourse(tx, input.scope, boundCourseId);
         }
@@ -1696,18 +1765,20 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       question: string; answer: string; mode: string; userTurnId: string;
     } | null> {
       const target = await sql.begin(tx => readCompletedCandidateTarget(tx, input));
-      return target ? { question: String(target.question), answer: String(target.answer),
-        mode: String(target.mode), userTurnId: String(target.user_turn_id) } : null;
+      return target && target.earliestExpiresAtMs > Date.now() ? { question: String(target.row.question), answer: String(target.row.answer),
+        mode: String(target.row.mode), userTurnId: String(target.row.user_turn_id) } : null;
     },
 
     async canAppendCompletedTurnCandidates(input: CompletedCandidateTarget): Promise<boolean> {
-      return Boolean(await sql.begin(tx => readCompletedCandidateTarget(tx, input)));
+      const target = await sql.begin(tx => readCompletedCandidateTarget(tx, input));
+      return !!target && target.earliestExpiresAtMs > Date.now();
     },
 
     async authorizeMetadataSend<T>(input: CompletedCandidateTarget, startSend: () => Promise<T>): Promise<T> {
       let inFlight: Promise<T> | undefined;
       await sql.begin(async tx => {
-        if (!await readCompletedCandidateTarget(tx, input)) throw new Error("tutor metadata authorization changed");
+        const target = await readCompletedCandidateTarget(tx, input);
+        if (!target || !(target.earliestExpiresAtMs > Date.now())) throw new Error("tutor metadata authorization changed");
         inFlight = startSend();
         void inFlight.catch(() => undefined);
       });
@@ -1723,13 +1794,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (!workspace) return false;
         const target = await findCompletedCandidateTarget(tx, input);
         if (!target) return false;
-        const parsedRefs = parseContextSourceRefs(target.context_source_refs);
+        const parsedRefs = parseContextSourceRefs(target.row.context_source_refs);
         if (!parsedRefs) return false;
         const sourceIds = [...new Set(parsedRefs.map(ref => ref.sourceId))];
+        if (!(target.earliestExpiresAtMs > Date.now())) return false;
         for (const payload of input.candidates) {
           await tx`INSERT INTO opening_assistant_candidates
             (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
-            VALUES (${randomUUID()}, ${input.scope.workspaceId}, ${target.conversation_id}, ${input.assistantTurnId},
+            VALUES (${randomUUID()}, ${input.scope.workspaceId}, ${target.row.conversation_id}, ${input.assistantTurnId},
               ${tx.json(sourceIds)}, ${tx.json(payload as never)})`;
         }
         return true;

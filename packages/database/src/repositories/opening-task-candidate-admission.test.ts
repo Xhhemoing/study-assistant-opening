@@ -183,6 +183,7 @@ it.each([false, true])("keeps the preferred temporary legacy backing with revers
   const expiresAt = new Date(Date.now() + 60_000);
   const order = reverse ? [parent, higher, lower, cycle] : [parent, lower, higher, cycle];
   const { tx } = simulatedSql(query => {
+    if (query.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
     if (query.startsWith("SELECT dep_m.id")) return order.map(id => ({
       id, course_id: null, expires_at: id === lower ? expiresAt : null, source_turn_ids: id === higher ? [] : [turnId],
     }));
@@ -203,6 +204,7 @@ it("looks up valid origin UUIDs and rejects a memory with a malformed origin", a
   const memoryId = "88888888-8888-4888-8888-888888888888";
   const uppercaseTurn = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
   const { tx, queries } = simulatedSql(query => {
+    if (query.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
     if (query.startsWith("SELECT dep_m.id")) return [{
       id: memoryId, course_id: null, source_turn_ids: [uppercaseTurn, "not-a-uuid"], expires_at: null,
     }];

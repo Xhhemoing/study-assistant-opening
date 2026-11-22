@@ -15,7 +15,7 @@ function deferred() {
 
 it("sm95 parses the cached attempt fence and rejects malformed identities before delivery", async () => {
   const id = "10000000-0000-4000-8000-000000000001";
-  const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+  const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null, historyCourseBindings: [],
     attemptFence: { attemptId: id, itemVersionId: id, rootObservationId: id, headObservationId: id, answerRevision: 1 } };
   const hgetall = vi.fn().mockResolvedValueOnce({ context: JSON.stringify(context), text: "cached", sequence: "1" })
     .mockResolvedValueOnce({ context: JSON.stringify({ ...context, attemptFence: { ...context.attemptFence, headRevision: 7 } }), text: "cached", sequence: "1" })
@@ -51,7 +51,8 @@ it("parses cached materialPurposePin and rejects malformed pins before delivery"
   const materialPurposePin = { courseId: id, materialUse: "citation" as const, sources: [{
     sourceId: id, sourceVersion: 0, membershipId: id, purposeRevision: "2026-11-20T00:00:00.000000Z", purpose: "teaching" as const,
   }] };
-  const context = { privacyEpoch: 0, contextSourceRefs: [{ sourceId: id, sourceVersion: 0 }], exposureReceiptId: null, materialPurposePin };
+  const context = { privacyEpoch: 0, contextSourceRefs: [{ sourceId: id, sourceVersion: 0 }], exposureReceiptId: null,
+    materialPurposePin, historyCourseBindings: [] };
   const hgetall = vi.fn().mockResolvedValueOnce({ context: JSON.stringify(context), text: "cached", sequence: "1" })
     .mockResolvedValueOnce({ context: JSON.stringify({ ...context, materialPurposePin: { ...materialPurposePin, materialUse: "unknown" } }), text: "cached", sequence: "1" });
   const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
@@ -64,24 +65,25 @@ it("round-trips origin course authority through the cache and rejects malformed 
   const uppercaseId = id.toUpperCase();
   const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null };
   const ref = { sourceId: uppercaseId, sourceVersion: 1 };
-  const binding = { courseId: uppercaseId, materialUse: "citation" as const, sourceIds: [uppercaseId, id], sourceRefs: [ref] };
+  const binding = { courseId: uppercaseId, materialUse: "citation" as const, sourceIds: [uppercaseId, id], sourceRefs: [ref],
+    memoryIds: [uppercaseId, id], memoryBackings: [[uppercaseId]] };
   const evalScript = vi.fn().mockResolvedValue(undefined);
   await createTutorStreamWriter({ eval: evalScript } as unknown as IORedis).begin(id, id, {
     ...context, historyCourseBindings: [binding],
   });
   const cached = evalScript.mock.calls[0]?.[7] as string;
   const hgetall = vi.fn().mockResolvedValueOnce({ context: cached, text: "buffered", sequence: "1" });
-  const invalidBindings = [null, {}, [null], [{ ...binding, courseId: "invalid" }],
+  const invalidBindings = [undefined, null, {}, [null], [{ ...binding, courseId: "invalid" }],
     [{ ...binding, materialUse: "exam" }], [{ ...binding, sourceIds: ["invalid"] }],
     [{ ...binding, sourceRefs: [{ ...ref, memoryOnly: true }] }], [{ ...binding, sourceRefs: [{ ...ref, sourceVersion: "1" }] }],
-    [{ ...binding, sourceIds: [] }]];
+    [{ ...binding, sourceIds: [] }], [{ ...binding, memoryIds: ["invalid"] }], [{ ...binding, memoryBackings: [[]] }]];
   for (const invalid of invalidBindings) {
     hgetall.mockResolvedValueOnce({ context: JSON.stringify({ ...context, historyCourseBindings: invalid }), text: "buffered", sequence: "1" });
   }
   const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
   await expect(reader.read(id, id)).resolves.toMatchObject({
     text: "buffered", historyCourseBindings: [{ courseId: id, materialUse: "citation", sourceIds: [id],
-      sourceRefs: [{ sourceId: id, sourceVersion: 1 }] }],
+      sourceRefs: [{ sourceId: id, sourceVersion: 1 }], memoryIds: [id], memoryBackings: [[id]] }],
   });
   for (const _binding of invalidBindings) await expect(reader.read(id, id)).rejects.toThrow("invalid tutor stream cache");
 });
@@ -93,6 +95,7 @@ it("parses temporaryMemoryExpiresAt and memoryOnly provenance refs and rejects i
     privacyEpoch: 0,
     contextSourceRefs: [{ sourceId: id, sourceVersion: 0, memoryOnly: true }],
     exposureReceiptId: null,
+    historyCourseBindings: [],
     temporaryMemoryExpiresAt: expiresAt,
   };
   const hgetall = vi.fn()

@@ -82,6 +82,40 @@ describe("opening memory owner and source admission", () => {
     }
   });
 
+  it.each(["source_ids", "context_source_refs"] as const)(
+    "takes course, source and membership share locks for a same-course user origin with %s", async evidence => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory locks", slug: randomUUID() });
+    const sourceId = await insertSource(sql, scope);
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id, assetType: "source",
+      assetId: sourceId, role: "core", visibility: "course", purpose: "teaching" });
+    const turnId = await insertOwnedTurn(sql, scope, evidence === "source_ids"
+      ? { sourceIds: [sourceId] } : { contextSourceRefs: [{ sourceId, sourceVersion: 0 }] });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: course.id })} WHERE id=${turnId}`;
+    const statements: string[] = [];
+    const observed = postgres(process.env.OPENING_TEST_DATABASE_URL!, {
+      max: 1, debug: (_connection, query) => statements.push(query.replace(/\s+/g, " ").trim()),
+    });
+    try {
+      await createOpeningMemoryRepository(observed).proposeMemory(scope, {
+        courseId: course.id, text: "Own course material", sourceTurnIds: [turnId], expiresAt: null,
+      });
+      const locks = statements.filter(query => query.endsWith("FOR SHARE"));
+      const courseLock = locks.findIndex(query => query.startsWith("SELECT id FROM courses"));
+      const sourceLock = locks.findIndex(query => query.startsWith("SELECT id FROM opening_sources"));
+      const membershipLock = locks.findIndex(query => query.startsWith("SELECT id FROM course_asset_memberships"));
+      expect(courseLock).toBeGreaterThanOrEqual(0);
+      expect(sourceLock).toBeGreaterThan(courseLock);
+      expect(membershipLock).toBeGreaterThan(sourceLock);
+      expect(statements.indexOf(locks[membershipLock]!)).toBeLessThan(
+        statements.findIndex(query => query.startsWith("INSERT INTO opening_memories")),
+      );
+    } finally {
+      await observed.end({ timeout: 5 });
+    }
+  });
+
   it("admits same-course memory descendants and rejects laundering through global or other-course memory", async () => {
     const { sql, scope } = fixture;
     const courses = createCourseMembershipRepository(sql);

@@ -81,7 +81,7 @@ describe("saved tutor material provenance", () => {
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
     const versionOwner = origin === "assistant-source" ? saved.assistantTurnId : saved.turnId;
     await sql`UPDATE opening_turns SET source_versions=${sql.json({ [sourceId]: 0 })} WHERE id=${versionOwner}`;
-    await expect(admit()).resolves.toBeNull();
+    await expect(admit()).resolves.toBe(origin === "candidate-only" ? saved.assistantTurnId : null);
     await sql`UPDATE opening_sources SET version=1 WHERE id=${sourceId}`;
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
     await sql`UPDATE opening_turns SET source_versions='{}'::jsonb WHERE id=${versionOwner}`;
@@ -203,16 +203,16 @@ describe("saved tutor material provenance", () => {
     const accept = () => insertOpeningTaskWithOutcome(sql, scope,
       { candidateId: id, courseId: course.id, title: "Practice", minutes: 15, dueAt: null, priority: 0 });
     const admit = () => sql.begin(tx => admitTaskCandidate(tx, scope, id));
-    await expect(admit()).resolves.toBeNull();
+    await expect(admit()).resolves.toBe(saved.assistantTurnId);
     await setUse(false);
-    await expect(admit()).resolves.toBeNull();
+    await expect(admit()).resolves.toBe(saved.assistantTurnId);
     await setUse(false, other.id);
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
     await setUse(false, null);
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
     await setUse(false);
     await sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${course.id} AND asset_id=${material}`;
-    await expect(admit()).resolves.toBeNull();
+    await expect(admit()).resolves.toBe(saved.assistantTurnId);
     await setUse(true);
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
     await courses.removeAssetMembership(membership);
@@ -592,7 +592,7 @@ describe("saved tutor material provenance", () => {
     const checkCandidateTurn = () => readTurnsWithActiveMemoryDependencies(sql, scope.workspaceId, [idOnly.assistantTurnId]);
     await expect(checkCandidateTurn()).resolves.toEqual(new Set([idOnly.assistantTurnId]));
 
-    const publication = { ...send, privacyEpoch: await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope) };
+    const publication = { ...send, historyCourseBindings: [], privacyEpoch: await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope) };
     const publish = vi.fn(async () => {});
     const deliver = vi.fn();
     await courses.removeAssetMembership(courseAMaterial);
