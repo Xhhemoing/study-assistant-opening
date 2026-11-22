@@ -1,5 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
+ALTER TABLE workspaces ADD CONSTRAINT v3_workspaces_id_owner_key UNIQUE (id, owner_user_id);
+
 CREATE TABLE v3_bitemporal_misconception_edges (
   revision_id uuid PRIMARY KEY,
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -22,6 +24,8 @@ CREATE TABLE v3_bitemporal_misconception_edges (
     AND (status = 'learner_reported') = (learner_disposition IS NOT NULL)
     AND (status <> 'learner_reported' OR prior_revision_id IS NOT NULL)
   ),
+  CONSTRAINT v3_misconception_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
+    REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
   CONSTRAINT v3_misconception_revision_scope UNIQUE (workspace_id, owner_user_id, edge_id, revision_id),
   CONSTRAINT v3_misconception_course_scope FOREIGN KEY (workspace_id, course_id)
     REFERENCES courses(workspace_id, id) ON DELETE CASCADE,
@@ -35,6 +39,18 @@ CREATE TABLE v3_bitemporal_misconception_edges (
 
 CREATE FUNCTION v3_misconception_close_tx_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  IF TG_OP = 'DELETE' THEN
+    -- Referential actions run after the owning parent row is gone.
+    IF NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id)
+      OR NOT EXISTS (SELECT 1 FROM users WHERE id = OLD.owner_user_id)
+      OR (OLD.course_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM courses WHERE workspace_id = OLD.workspace_id AND id = OLD.course_id
+      ))
+    THEN
+      RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'Misconception revisions cannot be deleted directly' USING ERRCODE = '23514';
+  END IF;
   IF NOT upper_inf(OLD.tx_range)
     OR upper_inf(NEW.tx_range)
     OR NOT isfinite(upper(NEW.tx_range))
@@ -49,7 +65,7 @@ END;
 $$;
 
 CREATE TRIGGER v3_misconception_close_tx_only
-  BEFORE UPDATE ON v3_bitemporal_misconception_edges
+  BEFORE UPDATE OR DELETE ON v3_bitemporal_misconception_edges
   FOR EACH ROW EXECUTE FUNCTION v3_misconception_close_tx_only();
 
 CREATE TABLE v3_learner_context_blocks (
@@ -60,6 +76,8 @@ CREATE TABLE v3_learner_context_blocks (
   revision integer NOT NULL CHECK (revision > 0),
   privacy_epoch integer NOT NULL CHECK (privacy_epoch >= 0),
   updated_at timestamptz NOT NULL,
+  CONSTRAINT v3_learner_context_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
+    REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
   PRIMARY KEY (workspace_id, owner_user_id)
 );
 
@@ -71,10 +89,13 @@ CREATE TABLE v3_try_misconception_handoff_receipts (
   edge_id uuid NOT NULL,
   initial_revision_id uuid NOT NULL,
   redeemed_at timestamptz NOT NULL,
+  CONSTRAINT v3_try_receipt_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
+    REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
   CONSTRAINT v3_try_misconception_initial_scope FOREIGN KEY (workspace_id, owner_user_id, edge_id, initial_revision_id)
-    REFERENCES v3_bitemporal_misconception_edges(workspace_id, owner_user_id, edge_id, revision_id)
+    REFERENCES v3_bitemporal_misconception_edges(workspace_id, owner_user_id, edge_id, revision_id) ON DELETE CASCADE
 );
 
 -- Roll back the application first and retain these tables to preserve learner history and receipt claims.
 -- Before retiring the schema, stop writes and export the three tables. Then drop the receipt table,
--- context-block table, edge table and v3_misconception_close_tx_only(). Keep the shared extension installed.
+-- context-block table, edge table and v3_misconception_close_tx_only(). Drop v3_workspaces_id_owner_key after dropping the dependent tables.
+-- Keep the shared extension installed.

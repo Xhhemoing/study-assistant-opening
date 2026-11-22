@@ -1,6 +1,6 @@
 /** Server authority, queues and private content never travel through learner archives. */
 export const BACKUP_FORBIDDEN_TABLES = Object.freeze([
-  "schema_migrations", "users", "sessions",
+  "schema_migrations", "users", "sessions", "v3_try_misconception_handoff_receipts",
   "opening_connections", "opening_connection_credentials", "opening_connection_credential_requests",
   "opening_model_providers", "opening_model_provider_models", "opening_model_provider_credentials",
   "opening_jobs", "opening_tutor_jobs", "opening_outbox", "opening_import_cursors", "opening_import_receipts",

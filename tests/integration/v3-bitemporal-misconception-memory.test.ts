@@ -4,9 +4,13 @@ import {
   applyLearnerMisconceptionCorrection,
   createOpeningLearningAttemptRepository,
   createOpeningLearningRepository,
+  executeOpeningRestoreApply,
+  readOpeningBackupRecords,
+  readOpeningRestoreNamespaceCounts,
   queryMisconceptionEdgesAsOf,
   type OpeningScope,
 } from "@aistudy/database";
+import { composeOpeningBackupDraft, type OpeningBackup } from "@aistudy/domain";
 import { POST as redeem, PUT as issue } from "../../apps/web/src/app/api/opening/public-try/misconception-handoff/route";
 import { POST as correct } from "../../apps/web/src/app/api/opening/memory/bitemporal-correction/route";
 import { issueTryMisconceptionReceipt } from "../../apps/web/src/features/opening/public-try/v3-try-misconception-handoff";
@@ -211,4 +215,123 @@ it("issues and redeems one signed candidate under concurrent retries and rejects
     redeem(tryRequest("POST", { receipt: contested })), redeem(tryRequest("POST", { receipt: contested }, "other")),
   ]);
   expect(race.map(result => result.status).sort()).toEqual([201, 409]);
+});
+
+it("enforces owner binding on all three tables and preserves course and workspace cascades", async () => {
+  const { sql, scope, otherScope } = f;
+  await expect(seedEdge({ scope: { ...scope, ownerUserId: otherScope.ownerUserId } })).rejects.toMatchObject({
+    code: "23503", constraint_name: "v3_misconception_workspace_owner",
+  });
+  await expect(sql`INSERT INTO v3_learner_context_blocks
+    (workspace_id, owner_user_id, rendered_markdown, byte_length, revision, privacy_epoch, updated_at)
+    VALUES (${scope.workspaceId}, ${otherScope.ownerUserId}, '', 0, 1, 0, clock_timestamp())`)
+    .rejects.toMatchObject({ code: "23503", constraint_name: "v3_learner_context_workspace_owner" });
+
+  const courseId = randomUUID();
+  await sql`INSERT INTO courses(id, workspace_id, title, slug)
+    VALUES (${courseId}, ${scope.workspaceId}, 'Cascade fixture', ${courseId})`;
+  const first = await seedEdge({ courseId });
+  await applyLearnerMisconceptionCorrection(sql, scope,
+    { edgeId: first.edgeId, disposition: "clarified", summary: "Course correction" });
+  const receiptId = randomUUID();
+  const insertReceipt = (ownerId: string) => sql`INSERT INTO v3_try_misconception_handoff_receipts
+    (receipt_id, workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
+    VALUES (${receiptId}, ${scope.workspaceId}, ${ownerId}, ${"a".repeat(64)}, ${first.edgeId}, ${first.revisionId}, clock_timestamp())`;
+  await expect(insertReceipt(otherScope.ownerUserId)).rejects.toMatchObject({
+    code: "23503", constraint_name: "v3_try_receipt_workspace_owner",
+  });
+  await insertReceipt(scope.ownerUserId);
+  await expect(sql`DELETE FROM v3_bitemporal_misconception_edges WHERE edge_id=${first.edgeId}`)
+    .rejects.toMatchObject({ code: "23514" });
+  expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${first.edgeId}`).toHaveLength(2);
+  await sql`DELETE FROM courses WHERE id=${courseId}`;
+  expect(await sql`SELECT edge_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${first.edgeId}`).toEqual([]);
+  expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE receipt_id=${receiptId}`).toEqual([]);
+
+  const independent = await seedEdge();
+  await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
+  expect(await sql`SELECT edge_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${independent.edgeId}`).toEqual([]);
+  expect(await sql`SELECT revision FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
+});
+
+it("rejects a stale expected privacy epoch even when it matches the stored revision", async () => {
+  const { sql, scope } = f;
+  const first = await seedEdge();
+  const query = { validAt, txAt: first.txAt, expectedPrivacyEpoch: 0 };
+  await expect(queryMisconceptionEdgesAsOf(sql, scope, query)).resolves.toMatchObject([{ revisionId: first.revisionId }]);
+  await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
+  await expect(queryMisconceptionEdgesAsOf(sql, scope, query)).resolves.toEqual([]);
+  await expect(queryMisconceptionEdgesAsOf(sql, scope, { ...query, expectedPrivacyEpoch: 1 })).resolves.toEqual([]);
+});
+
+it("renders only edges recorded and valid at the context timestamp", async () => {
+  const { sql, scope } = f;
+  const future = await seedEdge({ future: true });
+  const present = await seedEdge();
+  const correction = await applyLearnerMisconceptionCorrection(sql, scope,
+    { edgeId: present.edgeId, disposition: "clarified", summary: "Current diagnosis" });
+  expect(correction.contextBlock.renderedMarkdown).toBe("- 学习者补充说明：Current diagnosis");
+  const [block] = await sql`SELECT updated_at::text AS at, privacy_epoch FROM v3_learner_context_blocks
+    WHERE workspace_id=${scope.workspaceId}`;
+  const at = String(block!.at);
+  const visible = await queryMisconceptionEdgesAsOf(sql, scope, {
+    validAt: at, txAt: at, expectedPrivacyEpoch: Number(block!.privacy_epoch),
+  });
+  expect(visible.map(row => row.edgeId)).toEqual([present.edgeId]);
+  const atFuture = await queryMisconceptionEdgesAsOf(sql, scope, {
+    validAt: future.txAt, txAt: future.txAt, expectedPrivacyEpoch: 0,
+  });
+  expect(atFuture.map(row => row.edgeId)).toContain(future.edgeId);
+});
+
+it("round-trips misconception corrections through a v1 workspace backup and rebuilds derived context", async () => {
+  const { sql, scope } = f;
+  const receipt = issueTryMisconceptionReceipt(selection, secret);
+  const redeemed = await redeem(tryRequest("POST", { receipt }));
+  expect(redeemed.status).toBe(201);
+  const { edgeId, revisionId } = await redeemed.json();
+  const firstCorrection = await applyLearnerMisconceptionCorrection(sql, scope,
+    { edgeId, disposition: "disputed", summary: "I worked through the limit again" });
+  const secondCorrection = await applyLearnerMisconceptionCorrection(sql, scope,
+    { edgeId, disposition: "clarified", summary: "I can explain the condition now" });
+  const records = await readOpeningBackupRecords(sql, scope);
+  const composed = composeOpeningBackupDraft({ records, staging: {
+    snapshot: { workspaceId: scope.workspaceId, privacyEpoch: records.privacyEpoch,
+      deletionJournal: records.deletionJournal, memoryDeletions: records.memoryDeletions, sources: [] },
+    objects: [],
+  } });
+  if (!composed.ok) throw new Error(composed.errors.join(", "));
+  const archive: OpeningBackup = JSON.parse(JSON.stringify(composed.backup));
+  const rows = archive.tables.v3_bitemporal_misconception_edges as Record<string, unknown>[];
+  expect(rows.map(row => row.revision_id)).toEqual([revisionId, firstCorrection.revisionId, secondCorrection.revisionId]);
+  expect(archive.tables).not.toHaveProperty("v3_try_misconception_handoff_receipts");
+  expect(archive.tables).not.toHaveProperty("v3_learner_context_blocks");
+  const exported = [...rows];
+  rows.reverse();
+
+  // Opening restore preserves IDs in a clean copy of the original workspace.
+  await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
+  // The history counter predates this migration and is independent of workspace cascades.
+  await sql`DELETE FROM opening_workspace_history_revisions
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  await sql`INSERT INTO workspaces(id, owner_user_id) VALUES (${scope.workspaceId}, ${scope.ownerUserId})`;
+  const counts = await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId);
+  expect(counts.v3_bitemporal_misconception_edges).toBe(0);
+  const restore = () => executeOpeningRestoreApply(sql, { confirmLocalRestore: true, backup: archive,
+    currentMemoryDeletions: archive.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] },
+  });
+  await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
+  await expect(restore()).resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  expect(await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId)).toEqual(counts);
+  await sql`UPDATE workspaces SET privacy_epoch=0 WHERE id=${scope.workspaceId}`;
+  const restored = await restore();
+  expect(restored, restored.errors.join(", ")).toMatchObject({ ok: true });
+  const roundTrip = await readOpeningBackupRecords(sql, scope);
+  expect(roundTrip.tables.v3_bitemporal_misconception_edges).toEqual(exported);
+  expect((await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId)).v3_bitemporal_misconception_edges).toBe(3);
+  const [block] = await sql`SELECT rendered_markdown, byte_length, revision FROM v3_learner_context_blocks
+    WHERE workspace_id=${scope.workspaceId}`;
+  expect(block).toMatchObject({ rendered_markdown: "- 学习者补充说明：I can explain the condition now", revision: 1 });
+  expect(block!.byte_length).toBe(Buffer.byteLength(block!.rendered_markdown));
+  expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
 });

@@ -9,6 +9,39 @@ export function isUuid(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
+/** Order an archive's revisions independently of storage order and timestamp precision. */
+export function orderBackupMisconceptionRevisions(rows: readonly Record<string, unknown>[]) {
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    if (!isUuid(row.revision_id) || !isUuid(row.edge_id) || !isUuid(row.workspace_id) || !isUuid(row.owner_user_id)) return null;
+    const id = row.revision_id.toLowerCase();
+    if (byId.has(id)) return null;
+    byId.set(id, row);
+  }
+
+  const ordered: Record<string, unknown>[] = [];
+  const children = new Map<string, Record<string, unknown>[]>();
+  for (const row of rows) {
+    if (row.prior_revision_id == null) {
+      ordered.push(row);
+      continue;
+    }
+    if (!isUuid(row.prior_revision_id)) return null;
+    const prior = row.prior_revision_id.toLowerCase();
+    const parent = byId.get(prior);
+    if (!parent || String(parent.edge_id).toLowerCase() !== String(row.edge_id).toLowerCase()
+      || String(parent.workspace_id).toLowerCase() !== String(row.workspace_id).toLowerCase()
+      || String(parent.owner_user_id).toLowerCase() !== String(row.owner_user_id).toLowerCase()) return null;
+    const siblings = children.get(prior);
+    if (siblings) siblings.push(row);
+    else children.set(prior, [row]);
+  }
+  for (const row of ordered) {
+    for (const child of children.get(String(row.revision_id).toLowerCase()) ?? []) ordered.push(child);
+  }
+  return ordered.length === rows.length ? ordered : null;
+}
+
 export function isJournal(value: unknown): value is Array<{ sourceId: string; deletedAt: string; assetDeletedAt?: string | null }> {
   return Array.isArray(value) && value.every((mark) => isRecord(mark)
     && isUuid(mark.sourceId) && typeof mark.deletedAt === "string"

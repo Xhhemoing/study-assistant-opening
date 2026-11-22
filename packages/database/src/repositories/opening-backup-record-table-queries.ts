@@ -1,3 +1,4 @@
+import { orderBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
 import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences, unavailableBackupMemoryLineage } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
 import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, projectOpeningBackupProvenance, readBackupLibrary, readBackupNoteProvenance } from "./opening-backup-library";
@@ -498,5 +499,14 @@ export async function readOpeningBackupTableRows(
   Object.assign(tables, libraryTables);
   tables.opening_note_provenance = projectOpeningBackupProvenance(libraryTables.opening_note_provenance, cardIds);
   await readBackupCourseAssets(tx, id, userId, tables);
+  const misconceptionRevisions = orderBackupMisconceptionRevisions(asRows(await tx`
+    SELECT revision_id, workspace_id, owner_user_id, edge_id, course_id, concept_key, misconception_code,
+      summary, status, origin, learner_disposition, evidence_attempt_ids, privacy_epoch,
+      valid_range::text, tx_range::text, prior_revision_id
+    FROM v3_bitemporal_misconception_edges
+    WHERE workspace_id = ${id} AND owner_user_id = ${userId}
+    ORDER BY lower(tx_range), revision_id`));
+  if (!misconceptionRevisions) throw new Error("Invalid stored misconception revision lineage");
+  tables.v3_bitemporal_misconception_edges = misconceptionRevisions;
   return tables;
 }

@@ -68,12 +68,14 @@ async function lockWorkspace(tx: TransactionSql, scope: OpeningScope): Promise<n
   return workspace.privacy_epoch;
 }
 
-async function refreshContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
+export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
   const items = await tx<ContextItem[]>`
     SELECT status, learner_disposition AS "learnerDisposition", left(summary, ${LEARNER_CONTEXT_MAX_BYTES}) AS summary
-    FROM v3_bitemporal_misconception_edges
-    WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-      AND privacy_epoch = ${privacyEpoch} AND upper_inf(tx_range) AND valid_range @> ${at}::text::timestamptz
+    FROM v3_bitemporal_misconception_edges e
+    JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
+    WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
+      AND e.privacy_epoch = w.privacy_epoch
+      AND e.valid_range @> ${at}::text::timestamptz AND e.tx_range @> ${at}::text::timestamptz
       AND status IN ('candidate', 'verified', 'learner_reported')
     ORDER BY (status = 'learner_reported') DESC, lower(tx_range) DESC, edge_id
     LIMIT ${LEARNER_CONTEXT_MAX_BYTES}`;
@@ -112,7 +114,8 @@ export async function queryMisconceptionEdgesAsOf(
       AND e.valid_range @> ${validAt instanceof Date ? validAt.toISOString() : validAt}::text::timestamptz
       AND e.tx_range @> ${txAt instanceof Date ? txAt.toISOString() : txAt}::text::timestamptz
       AND (${courseId ?? null}::uuid IS NULL OR e.course_id = ${courseId ?? null}::uuid)
-      AND (${expectedPrivacyEpoch ?? null}::integer IS NULL OR e.privacy_epoch = ${expectedPrivacyEpoch ?? null}::integer)
+      AND (${expectedPrivacyEpoch ?? null}::integer IS NULL
+        OR (w.privacy_epoch = ${expectedPrivacyEpoch ?? null}::integer AND e.privacy_epoch = w.privacy_epoch))
     ORDER BY e.edge_id`;
 }
 
@@ -145,7 +148,7 @@ export async function applyLearnerMisconceptionCorrection(sql: Sql, scope: Openi
       FROM closed
       RETURNING edge_id AS "edgeId", revision_id AS "revisionId", lower(tx_range)::text AS "txAt"`;
     if (!revision) throw learningError("NOT_FOUND", "找不到这条待纠偏的学习记录。");
-    const contextBlock = await refreshContextBlock(tx, scope, privacyEpoch, revision.txAt);
+    const contextBlock = await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, revision.txAt);
     return { ...revision, status: "learner_reported" as const, disposition: input.disposition, contextBlock };
   });
 }
@@ -184,7 +187,7 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
         (receipt_id, workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
       VALUES (${claim.receiptId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${claim.payloadSha256},
         ${edgeId}, ${revisionId}, ${at}::text::timestamptz)`;
-    await refreshContextBlock(tx, scope, privacyEpoch, at);
+    await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
     return { edgeId, revisionId, replayed: false };
   });
 }

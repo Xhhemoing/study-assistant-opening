@@ -11,7 +11,7 @@ export const learnerMisconceptionDispositions = ["disputed", "clarified", "resol
 export type LearnerMisconceptionDisposition = typeof learnerMisconceptionDispositions[number];
 export const LEARNER_CONTEXT_MAX_BYTES = 2048;
 
-// Migration 0113 owns the GiST exclusions and the close-only trigger.
+// Migration 0113 owns the GiST exclusions, workspace owner key and revision trigger.
 export const v3BitemporalMisconceptionEdges = pgTable("v3_bitemporal_misconception_edges", {
   revisionId: uuid("revision_id").primaryKey(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -30,6 +30,8 @@ export const v3BitemporalMisconceptionEdges = pgTable("v3_bitemporal_misconcepti
   txRange: tstzrange("tx_range").notNull(),
   priorRevisionId: uuid("prior_revision_id"),
 }, t => [
+  foreignKey({ name: "v3_misconception_workspace_owner", columns: [t.workspaceId, t.ownerUserId],
+    foreignColumns: [workspaces.id, workspaces.ownerUserId] }).onDelete("cascade"),
   unique("v3_misconception_revision_scope").on(t.workspaceId, t.ownerUserId, t.edgeId, t.revisionId),
   foreignKey({ name: "v3_misconception_course_scope", columns: [t.workspaceId, t.courseId],
     foreignColumns: [courses.workspaceId, courses.id] }).onDelete("cascade"),
@@ -46,6 +48,8 @@ export const v3LearnerContextBlocks = pgTable("v3_learner_context_blocks", {
   privacyEpoch: integer("privacy_epoch").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }, t => [
+  foreignKey({ name: "v3_learner_context_workspace_owner", columns: [t.workspaceId, t.ownerUserId],
+    foreignColumns: [workspaces.id, workspaces.ownerUserId] }).onDelete("cascade"),
   primaryKey({ columns: [t.workspaceId, t.ownerUserId] }),
   check("v3_learner_context_blocks_rendered_markdown_check", sql`octet_length(${t.renderedMarkdown}) <= ${sql.raw(String(LEARNER_CONTEXT_MAX_BYTES))}`),
   check("v3_learner_context_blocks_byte_length_check",
@@ -61,8 +65,10 @@ export const v3TryMisconceptionHandoffReceipts = pgTable("v3_try_misconception_h
   initialRevisionId: uuid("initial_revision_id").notNull(),
   redeemedAt: timestamp("redeemed_at", { withTimezone: true }).notNull(),
 }, t => [
+  foreignKey({ name: "v3_try_receipt_workspace_owner", columns: [t.workspaceId, t.ownerUserId],
+    foreignColumns: [workspaces.id, workspaces.ownerUserId] }).onDelete("cascade"),
   foreignKey({ name: "v3_try_misconception_initial_scope",
     columns: [t.workspaceId, t.ownerUserId, t.edgeId, t.initialRevisionId],
     foreignColumns: [v3BitemporalMisconceptionEdges.workspaceId, v3BitemporalMisconceptionEdges.ownerUserId,
-      v3BitemporalMisconceptionEdges.edgeId, v3BitemporalMisconceptionEdges.revisionId] }),
+      v3BitemporalMisconceptionEdges.edgeId, v3BitemporalMisconceptionEdges.revisionId] }).onDelete("cascade"),
 ]);
