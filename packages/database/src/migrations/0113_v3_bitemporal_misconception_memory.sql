@@ -110,10 +110,9 @@ CREATE TABLE v3_learner_context_blocks (
   invalidated boolean NOT NULL DEFAULT false,
   privacy_epoch integer NOT NULL CHECK (privacy_epoch >= 0),
   updated_at timestamptz NOT NULL,
-  restore_cutoff_ms bigint,
-  restore_cutoff_seq integer,
+  restore_cutoff_seq bigint,
   CONSTRAINT v3_learner_context_blocks_restore_cutoff_check
-    CHECK ((restore_cutoff_ms IS NULL) = (restore_cutoff_seq IS NULL)),
+    CHECK (restore_cutoff_seq > 0),
   CONSTRAINT v3_learner_context_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
     REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
   PRIMARY KEY (workspace_id, owner_user_id)
@@ -139,28 +138,37 @@ CREATE CONSTRAINT TRIGGER v3_invalidate_misconception_context
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION v3_invalidate_misconception_context();
 
+CREATE SEQUENCE v3_try_misconception_handoff_seq AS bigint MINVALUE 1;
+
 CREATE TABLE v3_try_misconception_handoff_receipts (
   receipt_id uuid PRIMARY KEY,
+  original_workspace_id uuid NOT NULL,
+  original_owner_user_id uuid NOT NULL,
+  redeemed_privacy_epoch integer NOT NULL CHECK (redeemed_privacy_epoch >= 0),
   workspace_id uuid,
-  owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  owner_user_id uuid,
   payload_sha256 text NOT NULL CHECK (payload_sha256 ~ '^[a-f0-9]{64}$'),
   edge_id uuid,
   initial_revision_id uuid,
   redeemed_at timestamptz NOT NULL,
   CONSTRAINT v3_try_receipt_attachment CHECK (
-    (workspace_id IS NULL) = (edge_id IS NULL) AND (workspace_id IS NULL) = (initial_revision_id IS NULL)
+    (workspace_id IS NULL AND owner_user_id IS NULL AND edge_id IS NULL AND initial_revision_id IS NULL)
+    OR (workspace_id IS NOT NULL AND workspace_id = original_workspace_id
+      AND owner_user_id IS NOT NULL AND owner_user_id = original_owner_user_id
+      AND edge_id IS NOT NULL AND initial_revision_id IS NOT NULL)
   ),
   -- The edge cascade clears the whole attachment. Check workspace ownership after that action.
   CONSTRAINT v3_try_receipt_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
     REFERENCES workspaces(id, owner_user_id) DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT v3_try_misconception_initial_scope FOREIGN KEY (workspace_id, owner_user_id, edge_id, initial_revision_id)
     REFERENCES v3_bitemporal_misconception_edges(workspace_id, owner_user_id, edge_id, revision_id)
-    ON DELETE SET NULL (workspace_id, edge_id, initial_revision_id)
+    ON DELETE SET NULL (workspace_id, owner_user_id, edge_id, initial_revision_id)
 );
 
 -- Roll back the application first and retain these tables to preserve learner history and receipt claims.
 -- Before retiring the schema, stop writes and export the three tables. Then drop the receipt table,
 -- context-block table, edge table, v3_misconception_close_tx_only(), v3_invalidate_misconception_context()
 -- and v3_reject_misconception_revision_cycles().
+-- DROP SEQUENCE v3_try_misconception_handoff_seq;
 -- Drop v3_workspaces_id_owner_key after dropping the dependent tables.
 -- Keep the shared extension installed.

@@ -43,7 +43,7 @@ import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
 import { orderBackupMisconceptionRevisions, validateBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
-import { allocateTryHandoffStamp, refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
+import { refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
 
 export type OpeningRestoreObjectSideEffects = {
   status: "clean" | "remaining" | "unknown";
@@ -75,8 +75,6 @@ export type OpeningRestoreApplyGuarantees = {
 export type OpeningRestoreExecuteArgs = {
   confirmLocalRestore: true;
   backup: unknown;
-  /** Optional receipt-clock sample for deterministic restore tests. */
-  restoreNowMs?: number;
   currentPrivacyEpoch?: number;
   currentDeletionJournal?: readonly OpeningDeletionMark[];
   currentMemoryDeletions?: OpeningMemoryDeletions;
@@ -681,9 +679,13 @@ export async function executeOpeningRestoreApply(
       if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
       if (!history) await tx`DELETE FROM opening_workspace_history_revisions
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
-      const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
-      const restoreCutoff = allocateTryHandoffStamp(args.restoreNowMs);
-      await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock!.at, restoreCutoff);
+      const [clock] = await tx<{ at: string; seq: string }[]>`
+        SELECT clock_timestamp()::text AS at, nextval('v3_try_misconception_handoff_seq')::text AS seq`;
+      const restoreCutoffSeq = Number(clock?.seq);
+      if (!clock || !Number.isSafeInteger(restoreCutoffSeq) || restoreCutoffSeq <= 0) {
+        throw new Error("Invalid PostgreSQL misconception handoff restore cutoff");
+      }
+      await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock.at, restoreCutoffSeq);
 
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;

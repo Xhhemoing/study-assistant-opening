@@ -8,6 +8,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { createSqlClient } from "../../packages/database/src/migrate";
 import { applyOpeningRestore, exportOpeningBackup, readOpeningRestoreNamespaceCounts } from "../../packages/database/src/repositories/opening-backup";
 import { readOpeningRestoreCurrentFacts, snapshotOpeningRestoreCurrentFacts } from "../../packages/database/src/repositories/opening-restore-current-facts";
+import { readTryMisconceptionHandoffClock } from "../../packages/database/src/repositories/v3-bitemporal-misconception-memory";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const enabled = process.env.OPENING_TEST_DB === "1" && Boolean(process.env.OPENING_TEST_DATABASE_URL);
@@ -70,11 +71,17 @@ describe.skipIf(!enabled)("real export → serialized CLI live facts", () => {
     return { scope, backup, draft, cli };
   }
   it("restores an actual empty-inventory export without inventing deletion facts", async () => {
-    const { cli, backup } = await fixture();
+    const { cli, backup, scope } = await fixture();
     expect(backup.memoryDeletions).toBeDefined();
+    const before = await readTryMisconceptionHandoffClock(sql);
     const result = await cli();
     expect(result.output).toContain("code=APPLY_OK");
     expect(result.code).toBe(0);
+    const [block] = await sql<{ cutoff: string }[]>`
+      SELECT restore_cutoff_seq::text AS cutoff FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
+    const after = await readTryMisconceptionHandoffClock(sql);
+    expect(Number(block?.cutoff)).toBeGreaterThan(before.issueSeq);
+    expect(Number(block?.cutoff)).toBeLessThan(after.issueSeq);
   }, 90000);
   it("rejects an older archive in live dry-run and apply on an empty target", async () => {
     const { scope, backup } = await fixture();

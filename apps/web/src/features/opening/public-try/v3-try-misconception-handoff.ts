@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { allocateTryHandoffStamp, applyLearnerMisconceptionCorrection, learnerMisconceptionDispositions, redeemTryMisconceptionHandoff, type OpeningScope } from "@aistudy/database";
+import { applyLearnerMisconceptionCorrection, learnerMisconceptionDispositions, readTryMisconceptionHandoffClock, redeemTryMisconceptionHandoff, type OpeningScope } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
@@ -8,7 +8,8 @@ import { readOpeningRawBody } from "../request-body";
 import { challenges, gradeTry, type TryChallenge } from "./challenges";
 
 const receiptTtlMs = 15 * 60 * 1000;
-const receiptNamespace = "opening:try-misconception:v1";
+// The sequence in v2 is PostgreSQL-wide. Earlier signatures used a process-local counter.
+const receiptNamespace = "opening:try-misconception:v2";
 export const tryMisconceptionReceiptMaxLength = 4096;
 
 function isPostgresText(value: string) {
@@ -29,7 +30,7 @@ const selectionSchema = z.object({
 const receiptPayloadSchema = z.object({
   receiptId: z.string().uuid(),
   issuedAt: z.number().int().nonnegative(),
-  issueSeq: z.number().int().nonnegative().max(999_999).default(0),
+  issueSeq: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   expiresAt: z.number().int().positive(),
   conceptKey: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
   misconceptionCode: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
@@ -42,28 +43,52 @@ const signals: Record<TryChallenge["id"], { misconceptionCode: string; summary: 
   matrix: { misconceptionCode: "matrix-cancellation", summary: "公开挑战提示可复习矩阵左消去的成立条件。" },
 };
 
-function sign(encodedPayload: string, secret: string | undefined): string {
+function requireSigningSecret(secret: string | undefined): asserts secret is string {
   if (!secret || secret.trim().length < 32) {
     throw new ApiError("CONFIGURATION", "体验记录服务暂不可用。", 503);
   }
+}
+
+function sign(encodedPayload: string, secret: string): string {
   return createHmac("sha256", secret).update(receiptNamespace + "." + encodedPayload).digest("base64url");
 }
 
-export function issueTryMisconceptionReceipt(input: unknown, secret = process.env.AUTH_SECRET, now = Date.now()): string | null {
+function selectedMisconception(input: unknown): TryChallenge["id"] | null {
   const { challenge, step, reason } = selectionSchema.parse(input);
   const question = challenges.find(item => item.id === challenge);
   if (!question || step >= question.steps.length || reason >= question.reasons.length) {
     throw new ApiError("VALIDATION", "请选择有效的挑战和答案。", 400);
   }
   const { stepCorrect, reasonCorrect } = gradeTry(question, step, reason);
-  if (stepCorrect && reasonCorrect) return null;
-  const { issuedAt, issueSeq } = allocateTryHandoffStamp(now);
+  return stepCorrect && reasonCorrect ? null : question.id;
+}
+
+type ReceiptStamp = Awaited<ReturnType<typeof readTryMisconceptionHandoffClock>>;
+
+function signReceipt(conceptKey: TryChallenge["id"], secret: string, { nowMs, issueSeq }: ReceiptStamp): string {
   const payload = receiptPayloadSchema.parse({
-    receiptId: randomUUID(), issuedAt, issueSeq, expiresAt: issuedAt + receiptTtlMs,
-    conceptKey: question.id, ...signals[question.id],
+    receiptId: randomUUID(), issuedAt: nowMs, issueSeq, expiresAt: nowMs + receiptTtlMs,
+    conceptKey, ...signals[conceptKey],
   });
   const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   return encodedPayload + "." + sign(encodedPayload, secret);
+}
+
+export function issueTryMisconceptionReceipt(input: unknown, secret: string | undefined, stamp: ReceiptStamp): string | null {
+  const conceptKey = selectedMisconception(input);
+  if (!conceptKey) return null;
+  requireSigningSecret(secret);
+  return signReceipt(conceptKey, secret, stamp);
+}
+
+export async function issueSignedTryMisconceptionReceipt(
+  database: Sql | { readonly sql: Sql }, input: unknown, secret = process.env.AUTH_SECRET,
+): Promise<string | null> {
+  const conceptKey = selectedMisconception(input);
+  if (!conceptKey) return null;
+  requireSigningSecret(secret);
+  const stamp = await readTryMisconceptionHandoffClock("sql" in database ? database.sql : database);
+  return signReceipt(conceptKey, secret, stamp);
 }
 
 export function verifyTryMisconceptionReceipt(receipt: string, secret = process.env.AUTH_SECRET) {
@@ -72,6 +97,7 @@ export function verifyTryMisconceptionReceipt(receipt: string, secret = process.
   const [encodedPayload, signature, extra] = receipt.split(".");
   if (!encodedPayload || !signature || extra !== undefined
     || !/^[A-Za-z0-9_-]+$/.test(encodedPayload) || !/^[A-Za-z0-9_-]{43}$/.test(signature)) throw invalid();
+  requireSigningSecret(secret);
   const expected = sign(encodedPayload, secret);
   if (!timingSafeEqual(Buffer.from(signature, "ascii"), Buffer.from(expected, "ascii"))) throw invalid();
   const bytes = Buffer.from(encodedPayload, "base64url");

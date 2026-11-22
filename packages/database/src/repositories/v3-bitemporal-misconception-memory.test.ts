@@ -1,11 +1,11 @@
 import type { Sql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { allocateTryHandoffStamp, queryMisconceptionEdgesAsOf, readLearnerMisconceptionContextBlock, redeemTryMisconceptionHandoff, renderLearnerContextBlock } from "./v3-bitemporal-misconception-memory";
+import { queryMisconceptionEdgesAsOf, readLearnerMisconceptionContextBlock, readTryMisconceptionHandoffClock, redeemTryMisconceptionHandoff, renderLearnerContextBlock } from "./v3-bitemporal-misconception-memory";
 
 const scope = { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerUserId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
 const at = "2026-11-21 12:00:00.000001+00";
 const claim = {
-  receiptId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", issuedAt: Date.UTC(2026, 10, 21, 11, 59),
+  receiptId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", issueSeq: 41,
   expiresAt: Date.UTC(2026, 10, 21, 12, 0, 1),
   payloadSha256: "a".repeat(64), conceptKey: "limit", misconceptionCode: "conditions", summary: "Review the conditions.",
 };
@@ -45,25 +45,37 @@ it.each(["ledger", "restored root"])("rejects replay from the %s when it does no
   if (path === "restored root") expect(query.mock.lastCall?.slice(1)).toEqual(expect.arrayContaining([stale.edgeId, stale.revisionId]));
 });
 
-it.each([[10_000, 100], [100_000, 0]])("orders receipt issuance and a restore at %i + %i on the receipt clock", async (ms, gap) => {
-  const original = allocateTryHandoffStamp(ms);
-  const cutoff = allocateTryHandoffStamp(ms + gap);
-  const fresh = allocateTryHandoffStamp(ms + gap);
-  expect(original).toEqual({ issuedAt: ms, issueSeq: 0 });
-  expect(cutoff).toEqual({ issuedAt: ms + gap, issueSeq: gap ? 0 : 1 });
-  expect(fresh).toEqual({ issuedAt: ms + gap, issueSeq: cutoff.issueSeq + 1 });
-  const earlierDbTime = new Date(ms - 100).toISOString();
+it("reads database clock values independently and rejects a sequence outside the safe integer range", async () => {
+  const issuer = vi.fn().mockResolvedValue([{ nowMs: "10000", issueSeq: "41" }]);
+  const otherIssuer = vi.fn().mockResolvedValue([{ nowMs: "10000", issueSeq: "43" }]);
+  await expect(readTryMisconceptionHandoffClock(issuer as unknown as Sql)).resolves.toEqual({ nowMs: 10_000, issueSeq: 41 });
+  await expect(readTryMisconceptionHandoffClock(otherIssuer as unknown as Sql)).resolves.toEqual({ nowMs: 10_000, issueSeq: 43 });
+  otherIssuer.mockResolvedValueOnce([{ nowMs: "10000", issueSeq: "9007199254740993" }]);
+  await expect(readTryMisconceptionHandoffClock(otherIssuer as unknown as Sql)).rejects.toThrow("Invalid PostgreSQL");
+});
+
+it("lets the database cutoff decide first-use eligibility using only the issue sequence", async () => {
   const start = [[{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 1 }], [],
-    [{ at: earlierDbTime, expired: false }], [], []];
+    [{ at, expired: false }], [], []];
   const oldTx = mockTransaction(...start, [{ blocked: true }]);
-  await expect(redeemTryMisconceptionHandoff(oldTx.sql, scope, { ...claim, ...original })).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(redeemTryMisconceptionHandoff(oldTx.sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(oldTx.query).toHaveBeenCalledTimes(9);
-  expect(oldTx.query.mock.lastCall?.slice(-2)).toEqual([original.issuedAt, original.issueSeq]);
+  expect(oldTx.query.mock.lastCall?.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId, 41]);
 
   const freshTx = mockTransaction(...start, [], [{ revision_id: "revision" }], [{ receipt_id: claim.receiptId }],
     [], [], [], [], [{ renderedMarkdown: "", byteLength: 0, revision: 1 }]);
-  await expect(redeemTryMisconceptionHandoff(freshTx.sql, scope, { ...claim, ...fresh })).resolves.toMatchObject({ replayed: false });
-  expect(freshTx.query.mock.calls[8]?.slice(-2)).toEqual([fresh.issuedAt, fresh.issueSeq]);
+  await expect(redeemTryMisconceptionHandoff(freshTx.sql, scope, { ...claim, issueSeq: 43 })).resolves.toMatchObject({ replayed: false });
+  expect(freshTx.query.mock.calls[8]?.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId, 43]);
+});
+
+it("rejects a detached claim whose recorded provenance differs before looking up a root", async () => {
+  const { sql, query } = mockTransaction(
+    [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 1 }], [],
+    [{ at, expired: false }], [{ workspaceId: null, claimMatches: false, matches: null }],
+  );
+  await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query).toHaveBeenCalledTimes(7);
+  expect(query.mock.lastCall?.slice(1)).toEqual(expect.arrayContaining([scope.workspaceId, scope.ownerUserId, 1]));
 });
 
 it("does not mint a new root for a detached spent receipt with matching owner and digest", async () => {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { redeemTryMisconceptionHandoff, type OpeningScope } from "@aistudy/database";
+import { readTryMisconceptionHandoffClock, redeemTryMisconceptionHandoff, type OpeningScope } from "@aistudy/database";
 import { COURSE_BACKUP_TABLES, LIBRARY_BACKUP_TABLES } from "../../packages/contracts/src/opening/backup-inventory";
 import { OPENING_BACKUP_TABLES, readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 import { insertTestTeachingActivity } from "./opening-fixture";
@@ -13,10 +13,13 @@ afterEach(async () => { await fixture?.dispose(); });
 it("exports durable tables and version metadata with owner isolation and no object locators", async () => {
   const own = await seedBackupGraph(fixture.sql, fixture.scope);
   const other = await seedBackupGraph(fixture.sql, fixture.otherScope);
-  const createEdge = (scope: OpeningScope) => redeemTryMisconceptionHandoff(fixture.sql, scope, {
-    receiptId: randomUUID(), payloadSha256: "a".repeat(64), issuedAt: Date.now(), expiresAt: Date.now() + 60_000,
-    conceptKey: "limits", misconceptionCode: "preconditions", summary: "Review when the rule applies",
-  });
+  const createEdge = async (scope: OpeningScope) => {
+    const { nowMs, issueSeq } = await readTryMisconceptionHandoffClock(fixture.sql);
+    return redeemTryMisconceptionHandoff(fixture.sql, scope, {
+      receiptId: randomUUID(), payloadSha256: "a".repeat(64), issueSeq, expiresAt: nowMs + 60_000,
+      conceptKey: "limits", misconceptionCode: "preconditions", summary: "Review when the rule applies",
+    });
+  };
   const ownEdge = await createEdge(fixture.scope);
   const foreignEdge = await createEdge(fixture.otherScope);
   const pdfWarning = { code: "PARSE_PARTIAL", retryable: true, pdfTextCap: [3, 7] };
