@@ -10,6 +10,7 @@ import {
   readOpeningBackupRecords,
   readOpeningRestoreNamespaceCounts,
   readTryMisconceptionHandoffClock,
+  redeemTryMisconceptionHandoff,
   queryMisconceptionEdgesAsOf,
   type OpeningScope,
 } from "@aistudy/database";
@@ -590,8 +591,8 @@ it("renders only edges recorded and valid at the context timestamp", async () =>
   expect(atFuture.map(row => row.edgeId)).toContain(future.edgeId);
 });
 
-async function exportMisconceptionArchive(): Promise<OpeningBackup> {
-  const { sql, scope } = f;
+async function exportMisconceptionArchive(sql = f.sql): Promise<OpeningBackup> {
+  const { scope } = f;
   const records = await readOpeningBackupRecords(sql, scope);
   const composed = composeOpeningBackupDraft({ records, staging: {
     snapshot: { workspaceId: scope.workspaceId, privacyEpoch: records.privacyEpoch,
@@ -601,6 +602,20 @@ async function exportMisconceptionArchive(): Promise<OpeningBackup> {
   if (!composed.ok) throw new Error(composed.errors.join(", "));
   return JSON.parse(JSON.stringify(composed.backup));
 }
+
+it("exports restorable range text even when the session default DateStyle differs", async () => {
+  await seedEdge();
+  const session = await openRaceSession().ready;
+  try {
+    await session.sql`SET DateStyle TO 'German, DMY'`;
+    const archive = await exportMisconceptionArchive(session.sql);
+    expect(archive.tables.v3_bitemporal_misconception_edges).toHaveLength(1);
+    expect(validateOpeningRestore(archive, [], archive.memoryDeletions)).toMatchObject({ allowed: true, errors: [] });
+    expect(await session.sql`SHOW DateStyle`).toEqual([{ DateStyle: "German, DMY" }]);
+  } finally {
+    await session.sql.end({ timeout: 5 });
+  }
+});
 
 async function recreateEmptyWorkspace(workspaceId = f.scope.workspaceId) {
   const { sql, scope } = f;
@@ -865,6 +880,71 @@ it("retains spent receipt provenance after owner deletion and rejects redemption
   expect(await replay.json()).toMatchObject({ error: { code: "CONFLICT" } });
   expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE workspace_id=${otherScope.workspaceId}`).toEqual([]);
   expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${otherScope.workspaceId}`).toEqual([]);
+});
+
+it("allows workspace writers to finish while owner deletion holds the user row lock", async () => {
+  const { sql, scope } = f;
+  const receipt = (await issueSignedTryMisconceptionReceipt(sql, selection, secret))!;
+  const claim = verifyTryMisconceptionReceipt(receipt, secret);
+  const writer = await openRaceSession().ready;
+  try {
+    await sql.begin(async tx => {
+      await tx`SELECT id FROM users WHERE id=${scope.ownerUserId} FOR UPDATE`;
+      await writer.sql`SET lock_timeout = '1500ms'`;
+      await expect(redeemTryMisconceptionHandoff(writer.sql, scope, claim)).resolves.toMatchObject({ replayed: false });
+      await tx`DELETE FROM users WHERE id=${scope.ownerUserId}`;
+    });
+    expect(await sql`SELECT id FROM workspaces WHERE id=${scope.workspaceId}`).toEqual([]);
+    expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
+    expect(await sql`SELECT revision FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
+    expect(await sql`SELECT workspace_id, owner_user_id, edge_id, initial_revision_id
+      FROM v3_try_misconception_handoff_receipts WHERE receipt_id=${claim.receiptId}`)
+      .toEqual([{ workspace_id: null, owner_user_id: null, edge_id: null, initial_revision_id: null }]);
+  } finally {
+    await writer.sql.end({ timeout: 5 });
+  }
+});
+
+it("rejects changes to all original receipt provenance fields while detached", async () => {
+  const { sql, scope } = f;
+  const receipt = (await issueSignedTryMisconceptionReceipt(sql, selection, secret))!;
+  const claim = verifyTryMisconceptionReceipt(receipt, secret);
+  expect((await redeem(tryRequest("POST", { receipt }))).status).toBe(201);
+  await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
+  const changes = {
+    receipt_id: randomUUID(), original_workspace_id: randomUUID(), original_owner_user_id: randomUUID(),
+    redeemed_privacy_epoch: 1, payload_sha256: "b".repeat(64),
+  };
+  for (const [column, value] of Object.entries(changes)) {
+    await expect(sql`UPDATE v3_try_misconception_handoff_receipts SET ${sql(column)}=${value}
+      WHERE receipt_id=${claim.receiptId}`).rejects.toMatchObject({
+      code: "23514", constraint_name: "v3_try_receipt_immutable_provenance",
+    });
+  }
+  expect(await sql`SELECT workspace_id, owner_user_id FROM v3_try_misconception_handoff_receipts WHERE receipt_id=${claim.receiptId}`)
+    .toEqual([{ workspace_id: null, owner_user_id: null }]);
+});
+
+it("refuses to create a receipt claim from an exact same-epoch archived root alone", async () => {
+  const { sql, scope } = f;
+  const receipt = (await issueSignedTryMisconceptionReceipt(sql, selection, secret))!;
+  const claim = verifyTryMisconceptionReceipt(receipt, secret);
+  const first = await redeem(tryRequest("POST", { receipt }));
+  expect(first.status).toBe(201);
+  const { edgeId, revisionId } = await first.json();
+  const archive = await exportMisconceptionArchive();
+  await sql`DELETE FROM v3_try_misconception_handoff_receipts WHERE receipt_id=${claim.receiptId}`;
+  await recreateEmptyWorkspace();
+  expect(await restoreMisconceptionArchive(archive)).toMatchObject({ ok: true });
+  const [block] = await sql`SELECT restore_cutoff_seq::text FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
+  expect(Number(block?.restore_cutoff_seq)).toBeGreaterThan(claim.issueSeq);
+
+  const replay = await redeem(tryRequest("POST", { receipt }));
+  expect(replay.status).toBe(409);
+  expect(await replay.json()).toMatchObject({ error: { code: "CONFLICT" } });
+  expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE receipt_id=${claim.receiptId}`).toEqual([]);
+  expect(await sql`SELECT edge_id, revision_id FROM v3_bitemporal_misconception_edges WHERE workspace_id=${scope.workspaceId}`)
+    .toEqual([{ edge_id: edgeId, revision_id: revisionId }]);
 });
 
 it.each(["ledger", "restored root"])("rejects signed receipt replay from the %s after a privacy epoch advance", async path => {

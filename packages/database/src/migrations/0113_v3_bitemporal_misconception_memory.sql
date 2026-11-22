@@ -4,8 +4,8 @@ ALTER TABLE workspaces ADD CONSTRAINT v3_workspaces_id_owner_key UNIQUE (id, own
 
 CREATE TABLE v3_bitemporal_misconception_edges (
   revision_id uuid PRIMARY KEY,
-  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL,
+  owner_user_id uuid NOT NULL,
   edge_id uuid NOT NULL,
   course_id uuid,
   concept_key text NOT NULL,
@@ -75,7 +75,6 @@ BEGIN
   IF TG_OP = 'DELETE' THEN
     -- Referential actions run after the owning parent row is gone.
     IF NOT EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id)
-      OR NOT EXISTS (SELECT 1 FROM users WHERE id = OLD.owner_user_id)
       OR (OLD.course_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM courses WHERE workspace_id = OLD.workspace_id AND id = OLD.course_id
       ))
@@ -102,8 +101,8 @@ CREATE TRIGGER v3_misconception_close_tx_only
   FOR EACH ROW EXECUTE FUNCTION v3_misconception_close_tx_only();
 
 CREATE TABLE v3_learner_context_blocks (
-  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL,
+  owner_user_id uuid NOT NULL,
   rendered_markdown text NOT NULL CHECK (octet_length(rendered_markdown) <= 2048),
   byte_length integer NOT NULL CHECK (byte_length BETWEEN 0 AND 2048 AND byte_length = octet_length(rendered_markdown)),
   revision integer NOT NULL CHECK (revision > 0),
@@ -165,10 +164,29 @@ CREATE TABLE v3_try_misconception_handoff_receipts (
     ON DELETE SET NULL (workspace_id, owner_user_id, edge_id, initial_revision_id)
 );
 
+CREATE FUNCTION v3_protect_try_handoff_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.receipt_id IS DISTINCT FROM OLD.receipt_id
+    OR NEW.original_workspace_id IS DISTINCT FROM OLD.original_workspace_id
+    OR NEW.original_owner_user_id IS DISTINCT FROM OLD.original_owner_user_id
+    OR NEW.redeemed_privacy_epoch IS DISTINCT FROM OLD.redeemed_privacy_epoch
+    OR NEW.payload_sha256 IS DISTINCT FROM OLD.payload_sha256
+  THEN
+    RAISE EXCEPTION 'Try misconception receipt provenance cannot change'
+      USING ERRCODE = '23514', CONSTRAINT = 'v3_try_receipt_immutable_provenance';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER v3_protect_try_handoff_receipt
+  BEFORE UPDATE ON v3_try_misconception_handoff_receipts
+  FOR EACH ROW EXECUTE FUNCTION v3_protect_try_handoff_receipt();
+
 -- Roll back the application first and retain these tables to preserve learner history and receipt claims.
 -- Before retiring the schema, stop writes and export the three tables. Then drop the receipt table,
 -- context-block table, edge table, v3_misconception_close_tx_only(), v3_invalidate_misconception_context()
--- and v3_reject_misconception_revision_cycles().
+-- v3_reject_misconception_revision_cycles() and v3_protect_try_handoff_receipt().
 -- DROP SEQUENCE v3_try_misconception_handoff_seq;
 -- Drop v3_workspaces_id_owner_key after dropping the dependent tables.
 -- Keep the shared extension installed.

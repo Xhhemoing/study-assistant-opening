@@ -109,7 +109,7 @@ describe("readOpeningBackupRecords", () => {
   it("uses scope-bound filters and protects source chunks through their parent source", async () => {
     const sql = fakeSql((call) => call.query.includes("FROM workspaces") ? [{ privacy_epoch: 0 }] : []);
     await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
-    for (const call of sql.calls.slice(1)) {
+    for (const call of sql.calls.slice(1).filter(({ query }) => !/^\s*SET LOCAL\b/i.test(query))) {
       expect(call.query).not.toContain("SELECT * FROM ?");
       if (!call.query.includes("opening_privacy_exclusions")) expect(call.values).toContain(workspaceId);
     }

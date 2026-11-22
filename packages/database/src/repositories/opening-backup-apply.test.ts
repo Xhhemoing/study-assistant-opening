@@ -64,19 +64,26 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
     ["diagnosis with learner disposition", { origin: "system_diagnosis", learner_disposition: "disputed" }],
     ["diagnosis marked learner-reported", { origin: "system_diagnosis", status: "learner_reported" }],
     ["learner correction without a predecessor", { origin: "learner_correction", status: "learner_reported", learner_disposition: "clarified" }],
+    ["missing valid range", { valid_range: undefined }],
+    ["missing transaction range", { tx_range: undefined }],
+    ["malformed valid range", { valid_range: "[yesterday,)" }],
+    ["malformed transaction range", { tx_range: '[2026-11-21T00:00:00Z,2026-11-21T00:00:00Z)' }],
   ])("rejects %s before opening a restore transaction", async (_name, patch) => {
     const backup = draft();
     const candidate = {
       workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
       course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
       status: "candidate", origin: "public_try_handoff", privacy_epoch: 4,
+      valid_range: '["2026-11-21 00:00:00+00",)', tx_range: '["2026-11-21 00:00:00+00",)',
     };
     backup.tables.v3_bitemporal_misconception_edges = [candidate];
     expect(validateOpeningRestore(backup, []).allowed).toBe(true);
     backup.tables.v3_bitemporal_misconception_edges = [{ ...candidate, ...patch }];
     expect(validateOpeningRestore(backup, []).allowed).toBe(false);
-    await expect(executeOpeningRestoreApply({} as never, { confirmLocalRestore: true, backup }))
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
       .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+    expect(sql.begin).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("rejects an epoch-0 root in an epoch-1 archive before starting a transaction (correction: %s)", async withCorrection => {
@@ -86,6 +93,7 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
       workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
       course_id: null, prior_revision_id: null, evidence_attempt_ids: [], learner_disposition: null,
       status: "candidate", origin: "public_try_handoff", privacy_epoch: 0,
+      valid_range: '["2026-11-21 00:00:00+00",)', tx_range: '["2026-11-21 00:00:00+00",)',
     };
     const correction = {
       ...root, revision_id: "c3000000-0000-4000-8000-000000000011", prior_revision_id: root.revision_id,

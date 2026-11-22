@@ -49,6 +49,41 @@ export function orderBackupMisconceptionRevisions(rows: readonly Record<string, 
   return ordered.length === rows.length ? ordered : null;
 }
 
+// PostgreSQL ISO output uses a space and a numeric offset. Retain microseconds
+// so an adjacent pair of bounds within one millisecond remains distinguishable.
+function archiveTimestampMicros(bound: string): bigint | null {
+  const value = bound.startsWith('"') ? bound.slice(1, -1) : bound;
+  const parts = /^(\d{4,6})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2})(?::(\d{2})(?::(\d{2}))?)?)( BC)?$/.exec(value);
+  if (!parts) return null;
+  const [, year, month, day, hour, minute, second, fraction = "", , sign,
+    zoneHour = "0", zoneMinute = "0", zoneSecond = "0", bc] = parts;
+  if (Number(year) === 0 || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59
+    || Number(zoneHour) > 15 || Number(zoneMinute) > 59 || Number(zoneSecond) > 59) return null;
+
+  // Map to a Gregorian 400-year cycle within Date's range, even for PostgreSQL's extended years.
+  const astronomicalYear = bc ? 1 - Number(year) : Number(year);
+  const cycles = Math.floor((astronomicalYear - 2000) / 400);
+  const cycleYear = astronomicalYear - cycles * 400;
+  const date = new Date(Date.UTC(cycleYear, Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)));
+  if (date.getUTCFullYear() !== cycleYear || date.getUTCMonth() !== Number(month) - 1 || date.getUTCDate() !== Number(day)) return null;
+  const offsetSeconds = (sign === "-" ? -1 : 1) * (Number(zoneHour) * 3600 + Number(zoneMinute) * 60 + Number(zoneSecond));
+  const micros = (BigInt(date.getTime() - Date.UTC(2000, 0, 1)) + BigInt(cycles) * 146097n * 86400000n
+    - BigInt(offsetSeconds) * 1000n) * 1000n + BigInt(fraction.padEnd(6, "0"));
+  // Finite PostgreSQL timestamps are measured from 2000-01-01 UTC.
+  return micros >= -211813488000000000n && micros < 9223371331200000000n ? micros : null;
+}
+
+function validMisconceptionRange(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const bounds = /^\[("[^"]+"|[^",]+),("[^"]+"|[^",]+)?\)$/.exec(value);
+  if (!bounds) return false;
+  const lower = archiveTimestampMicros(bounds[1]!);
+  if (lower === null) return false;
+  if (bounds[2] === undefined) return true;
+  const upper = archiveTimestampMicros(bounds[2]);
+  return upper !== null && upper > lower;
+}
+
 export function validateBackupMisconceptionRevisions(
   tables: Record<string, Record<string, unknown>[]>,
   archivePrivacyEpoch: number,
@@ -59,6 +94,8 @@ export function validateBackupMisconceptionRevisions(
   const courseIds = new Set((tables.courses ?? []).map(row => row.id).filter(isUuid).map(id => id.toLowerCase()));
   const errors = new Set<string>();
   for (const row of rows) {
+    if (!validMisconceptionRange(row.valid_range)) errors.add("misconception revision has invalid valid_range");
+    if (!validMisconceptionRange(row.tx_range)) errors.add("misconception revision has invalid tx_range");
     if (row.privacy_epoch !== archivePrivacyEpoch) {
       errors.add("misconception revision privacy epoch does not match the archive epoch");
     }

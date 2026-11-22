@@ -4,12 +4,14 @@ import { orderBackupMisconceptionRevisions, sourceReferences } from "./backup-va
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const referenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const openRange = '["2026-11-21 12:00:00.000001+00",)';
 
 it.each(["self", "two revisions"])("rejects a %s predecessor cycle during restore preflight", cycle => {
   const a = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", b = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const root = {
     workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: a, prior_revision_id: a,
     status: "verified", origin: "system_diagnosis", course_id: null, privacy_epoch: 0, evidence_attempt_ids: [],
+    valid_range: openRange, tx_range: openRange,
   };
   const backup: OpeningBackup = {
     format: "opening-backup", version: 1, workspaceId, privacyEpoch: 0, deletionJournal: [], objects: [],
@@ -31,6 +33,7 @@ it.each([
     workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
     status: "verified", origin: "system_diagnosis", course_id: null, evidence_attempt_ids: [],
     privacy_epoch: 1,
+    valid_range: openRange, tx_range: openRange,
   };
   const correction = {
     ...root, revision_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", prior_revision_id: root.revision_id,
@@ -46,6 +49,42 @@ it.each([
   expect(validateOpeningRestore(backup, [])).toMatchObject({
     allowed: false, errors: ["misconception revision privacy epoch does not match the archive epoch"],
   });
+});
+
+it.each([
+  [undefined, false],
+  ["", false],
+  ["empty", false],
+  ["(2026-11-21T12:00:00Z,)", false],
+  ["[2026-11-21T12:00:00Z,2026-11-22T12:00:00Z]", false],
+  ["[,2026-11-21T12:00:00Z)", false],
+  ["[-infinity,)", false],
+  ["[2026-11-21T12:00:00Z,infinity)", false],
+  ['["2026-02-30 12:00:00+00",)', false],
+  ['["2026-11-21 12:00:00",)', false],
+  ['["2026-11-21 12:00:00.000002+00","2026-11-21 12:00:00.000001+00")', false],
+  ['["2026-11-21 12:00:00+01","2026-11-21 11:00:00+00")', false],
+  ['["2026-11-21 12:00:00+00",)', true],
+  ['["2026-11-21 12:00:00.000001+01","2026-11-21 11:00:00.000002+00")', true],
+  ["[2026-11-21T12:00:00Z,2026-11-22T12:00:00Z)", true],
+  ['["4714-11-24 04:36:48+04:36:48 BC","4714-11-24 04:36:48.000001+04:36:48 BC")', true],
+  ['["294277-01-01 04:29:59.999998+04:30","294277-01-01 04:29:59.999999+04:30")', true],
+  ['["294277-01-01 00:00:00+00",)', false],
+])("validates an archived time range %j (allowed: %s)", (range, allowed) => {
+  const root = {
+    workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
+    status: "verified", origin: "system_diagnosis", course_id: null, privacy_epoch: 0, evidence_attempt_ids: [],
+    valid_range: openRange, tx_range: openRange,
+  };
+  for (const column of ["valid_range", "tx_range"]) {
+    const backup: OpeningBackup = {
+      format: "opening-backup", version: 1, workspaceId, privacyEpoch: 0, deletionJournal: [], objects: [],
+      tables: { v3_bitemporal_misconception_edges: [{ ...root, [column]: range }] },
+    };
+    const result = validateOpeningRestore(backup, []);
+    expect(result.allowed).toBe(allowed);
+    expect(result.errors).toEqual(allowed ? [] : [`misconception revision has invalid ${column}`]);
+  }
 });
 
 it("requires the same normalized course across every revision of a misconception edge", () => {

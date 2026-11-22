@@ -282,8 +282,7 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
 
     const edgeId = deriveTryHandoffUuid("edge", claim.receiptId);
     const initialRevisionId = deriveTryHandoffUuid("initial-revision", `${claim.receiptId}:${claim.payloadSha256}`);
-    // Backups retain revisions and omit the receipt ledger. Look up both identities
-    // globally so a restored revision attached to another edge is still a conflict.
+    // Look up both identities globally to detect restored revision or edge collisions.
     const [root] = await tx<{ revisionId: string; matches: boolean }[]>`
       SELECT revision_id AS "revisionId",
         (edge_id = ${edgeId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
@@ -294,47 +293,54 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
       FROM v3_bitemporal_misconception_edges
       WHERE revision_id = ${initialRevisionId} OR (edge_id = ${edgeId} AND prior_revision_id IS NULL)
       ORDER BY (revision_id = ${initialRevisionId}) DESC, revision_id LIMIT 1`;
-    if (root && (!root.matches || root.revisionId.toLowerCase() !== initialRevisionId)) {
-      throw learningError("CONFLICT", "体验记录已被使用。");
-    }
     const at = clock!.at;
-    if (!root) {
-      if (prior) throw learningError("CONFLICT", "体验记录已被使用。");
-      // Restore and redemption serialize on the workspace lock. Read the cutoff without locking the cache row.
-      const [cutoff] = await tx<{ blocked: boolean }[]>`
-        SELECT true AS blocked FROM v3_learner_context_blocks
-        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-          AND ${claim.issueSeq}::bigint <= restore_cutoff_seq`;
-      if (cutoff?.blocked) throw learningError("CONFLICT", "体验记录已被使用。");
-      const [inserted] = await tx`
-        INSERT INTO v3_bitemporal_misconception_edges
-          (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin,
-           privacy_epoch, valid_range, tx_range)
-        VALUES (${initialRevisionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${claim.conceptKey},
-          ${claim.misconceptionCode}, ${claim.summary}, 'candidate', 'public_try_handoff', ${privacyEpoch},
-          tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))
-        ON CONFLICT DO NOTHING RETURNING revision_id`;
-      if (!inserted) throw learningError("CONFLICT", "体验记录已被使用。");
-    } else {
-      // Hold the existing revision before taking a receipt row lock in the upsert.
+    if (prior) {
+      if (!root?.matches || root.revisionId.toLowerCase() !== initialRevisionId) {
+        throw learningError("CONFLICT", "体验记录已被使用。");
+      }
+      // Hold the existing revision before taking a receipt row lock.
       const [locked] = await tx`
         SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE revision_id = ${initialRevisionId} FOR KEY SHARE`;
       if (!locked) throw learningError("CONFLICT", "体验记录已被使用。");
+      const [reattached] = await tx`
+        UPDATE v3_try_misconception_handoff_receipts
+        SET workspace_id = ${scope.workspaceId}, owner_user_id = ${scope.ownerUserId},
+          edge_id = ${edgeId}, initial_revision_id = ${initialRevisionId}, redeemed_at = ${at}::text::timestamptz
+        WHERE receipt_id = ${claim.receiptId} AND workspace_id IS NULL
+          AND original_workspace_id = ${scope.workspaceId} AND original_owner_user_id = ${scope.ownerUserId}
+          AND redeemed_privacy_epoch = ${privacyEpoch} AND payload_sha256 = ${claim.payloadSha256}
+        RETURNING receipt_id`;
+      if (!reattached) throw learningError("CONFLICT", "体验记录已被使用。");
+      return { edgeId, revisionId: initialRevisionId, replayed: true };
     }
+
+    // An archive root alone cannot establish a server receipt claim.
+    if (root) throw learningError("CONFLICT", "体验记录已被使用。");
+    // Restore and redemption serialize on the workspace lock, without locking the cache row here.
+    const [cutoff] = await tx<{ blocked: boolean }[]>`
+      SELECT true AS blocked FROM v3_learner_context_blocks
+      WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+        AND ${claim.issueSeq}::bigint <= restore_cutoff_seq`;
+    if (cutoff?.blocked) throw learningError("CONFLICT", "体验记录已被使用。");
+    const [inserted] = await tx`
+      INSERT INTO v3_bitemporal_misconception_edges
+        (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin,
+         privacy_epoch, valid_range, tx_range)
+      VALUES (${initialRevisionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${claim.conceptKey},
+        ${claim.misconceptionCode}, ${claim.summary}, 'candidate', 'public_try_handoff', ${privacyEpoch},
+        tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))
+      ON CONFLICT DO NOTHING RETURNING revision_id`;
+    if (!inserted) throw learningError("CONFLICT", "体验记录已被使用。");
     const [claimed] = await tx`
-      INSERT INTO v3_try_misconception_handoff_receipts AS r
+      INSERT INTO v3_try_misconception_handoff_receipts
         (receipt_id, original_workspace_id, original_owner_user_id, redeemed_privacy_epoch,
          workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
       VALUES (${claim.receiptId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${privacyEpoch},
         ${scope.workspaceId}, ${scope.ownerUserId}, ${claim.payloadSha256}, ${edgeId}, ${initialRevisionId}, ${at}::text::timestamptz)
-      ON CONFLICT (receipt_id) DO UPDATE SET workspace_id = EXCLUDED.workspace_id, owner_user_id = EXCLUDED.owner_user_id,
-        edge_id = EXCLUDED.edge_id, initial_revision_id = EXCLUDED.initial_revision_id, redeemed_at = EXCLUDED.redeemed_at
-      WHERE ${Boolean(root)} AND r.workspace_id IS NULL AND r.original_workspace_id = EXCLUDED.original_workspace_id
-        AND r.original_owner_user_id = EXCLUDED.original_owner_user_id AND r.redeemed_privacy_epoch = EXCLUDED.redeemed_privacy_epoch
-        AND r.payload_sha256 = EXCLUDED.payload_sha256
+      ON CONFLICT (receipt_id) DO NOTHING
       RETURNING receipt_id`;
     if (!claimed) throw learningError("CONFLICT", "体验记录已被使用。");
-    if (!root) await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
-    return { edgeId, revisionId: initialRevisionId, replayed: Boolean(root) };
+    await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
+    return { edgeId, revisionId: initialRevisionId, replayed: false };
   });
 }

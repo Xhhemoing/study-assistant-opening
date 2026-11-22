@@ -28,6 +28,8 @@ export async function readOpeningBackupRecords(
   return sql.begin("isolation level repeatable read, read only", async (tx) => {
     const owner = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id = ${id} AND owner_user_id = ${userId} LIMIT 1`;
     if (!owner.length) throw new OpeningBackupSourceError();
+    // Range text and textual timestamps must use the archive's ISO format.
+    await tx`SET LOCAL DateStyle TO 'ISO, YMD'`;
     const privacyEpoch = Number((owner[0] as { privacy_epoch: number }).privacy_epoch);
     const memoryDeletions = await readOpeningMemoryDeletions(tx, id);
     const tables = await readOpeningBackupTableRows(tx, id, userId);

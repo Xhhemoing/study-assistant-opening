@@ -96,10 +96,22 @@ it("preserves the database's masked predecessor in an as-of result", async () =>
 it("denies a restored root with a different revision identity even when its scope and content match", async () => {
   const { sql, query } = mockTransaction(
     [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],
-    [{ at, expired: false }], [], [{ matches: true, revisionId: scope.workspaceId }],
+    [{ at, expired: false }], [{ workspaceId: null, claimMatches: true }], [{ matches: true, revisionId: scope.workspaceId }],
   );
   await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(query).toHaveBeenCalledTimes(8);
+});
+
+it("rejects an exact restored root without a trusted receipt claim before taking a write lock", async () => {
+  const revisionId = "498ad0ef-8b34-45a8-872d-85bf108733dd";
+  const { sql, query } = mockTransaction(
+    [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],
+    [{ at, expired: false }], [], [{ matches: true, revisionId }],
+    [{ revision_id: revisionId }], [{ receipt_id: claim.receiptId }],
+  );
+  await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query).toHaveBeenCalledTimes(8);
+  expect(query.mock.lastCall?.slice(1)).toContain(revisionId);
 });
 
 it("rejects a competing revision insert without recording a receipt claim", async () => {

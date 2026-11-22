@@ -1,7 +1,6 @@
 import { sql } from "drizzle-orm";
 import { bigint, boolean, check, customType, foreignKey, integer, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { courses } from "./courses";
-import { users } from "./identity";
 import { workspaces } from "./library";
 
 const tstzrange = customType<{ data: string }>({ dataType: () => "tstzrange" });
@@ -14,8 +13,8 @@ export const LEARNER_CONTEXT_MAX_BYTES = 2048;
 // Migration 0113 owns the GiST exclusions, workspace owner key and revision trigger.
 export const v3BitemporalMisconceptionEdges = pgTable("v3_bitemporal_misconception_edges", {
   revisionId: uuid("revision_id").primaryKey(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  ownerUserId: uuid("owner_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
   edgeId: uuid("edge_id").notNull(),
   courseId: uuid("course_id"),
   conceptKey: text("concept_key").notNull(),
@@ -40,8 +39,8 @@ export const v3BitemporalMisconceptionEdges = pgTable("v3_bitemporal_misconcepti
 ]);
 
 export const v3LearnerContextBlocks = pgTable("v3_learner_context_blocks", {
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  ownerUserId: uuid("owner_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull(),
+  ownerUserId: uuid("owner_user_id").notNull(),
   renderedMarkdown: text("rendered_markdown").notNull(),
   byteLength: integer("byte_length").notNull(),
   revision: integer("revision").notNull(),
