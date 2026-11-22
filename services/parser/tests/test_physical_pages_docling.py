@@ -1067,25 +1067,39 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         for line in (
             "Figure:", "# Table:", "Table 1 gives the factorization.", "Theorem 2.1 states this fact.",
             "Lemma 1.2 implies x = 3.", "Definition 3.1 requires a field.", "Figure 2 illustrates the construction.",
+            "**Theorem 2.1** states this fact.", "**Theorem 2.1 states this fact.**", "__Table 1__ gives the factorization.",
+            "Chapter 2 explains why this equation holds.", "Section 2.1 shows the derivation.", "Appendix A gives the factorization.",
+            "表 1 给出了分解结果。", "图 2 显示了图像", "第 2 章解释了原因。", "定理 2.1 说明了该事实。", "引理 1 给出了条件",
         ):
-            with self.subTest(line=line):
-                ext = physical_pages.extract_physical_pages(result_for(
-                    [text_element(11, "Exercise 1: Find x.\n【解答】", 1)],
-                    [text_element(12, line + "\nx = 3.", 1)],
-                    [text_element(13, "Public explanation.", 1)],
-                ))
-                self.assertEqual(ext.texts_by_page[12], [])
-                self.assertEqual(ext.texts_by_page[13], ["Public explanation."])
+            for label in (DocItemLabel.TEXT, DocItemLabel.SECTION_HEADER):
+                with self.subTest(line=line, label=label):
+                    ext = physical_pages.extract_physical_pages(result_for(
+                        [text_element(11, "Exercise 1: Find x.\n【解答】", 1)],
+                        [text_element(12, line, 1, label), text_element(12, "x = 3.", 2)],
+                        [text_element(13, "Public explanation.", 1)],
+                    ))
+                    self.assertEqual(ext.texts_by_page[12], [])
+                    self.assertEqual(ext.texts_by_page[13], ["Public explanation."])
 
     def test_pending_exercise_answer_reopens_at_verified_headings(self):
         for line, label in (
             ("Theorem 2.1.", DocItemLabel.TEXT),
             ("Theorem 2.1 (Lagrange)", DocItemLabel.TEXT),
             ("# Theorem 2.1 finite rings", DocItemLabel.TEXT),
-            ("**Theorem 2.1 finite rings**", DocItemLabel.TEXT),
+            ("**Theorem 2.1.** finite rings", DocItemLabel.TEXT),
+            ("**Theorem 2.1**", DocItemLabel.TEXT),
             ("Theorem 2.1 finite rings", DocItemLabel.SECTION_HEADER),
             ("Table A.2 Summary", DocItemLabel.TEXT),
             ("Fig. IV: Ring diagram", DocItemLabel.TEXT),
+            ("**Table 1: Roots**", DocItemLabel.TEXT),
+            ("Chapter 2", DocItemLabel.TEXT),
+            ("Chapter 2 Rings", DocItemLabel.TEXT),
+            ("# Section 2.2 finite rings", DocItemLabel.TEXT),
+            ("第一章 环与域", DocItemLabel.TEXT),
+            ("第 2 章：群", DocItemLabel.TEXT),
+            ("表 1：分解结果", DocItemLabel.TEXT),
+            ("表 1 分解结果", DocItemLabel.TEXT),
+            ("定理 2.1：拉格朗日定理", DocItemLabel.TEXT),
         ):
             with self.subTest(line=line, label=label):
                 ext = physical_pages.extract_physical_pages(result_for(

@@ -76,11 +76,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v25-discourse/text",
     "docling-2.126.0/pdf-segments-v26-discourse/text",
     "docling-2.126.0/pdf-segments-v27-discourse/text",
+    "docling-2.126.0/pdf-segments-v28-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v28-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v29-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2647,7 +2648,10 @@ describe("bounded resumable PDF parser", () => {
   );
 
   it.each(["Figure:", "# Table:", "Table 1 gives the factorization.", "Theorem 2.1 states this fact.",
-    "Lemma 1.2 implies x = 3.", "Definition 3.1 requires a field.", "Figure 2 illustrates the construction."])(
+    "Lemma 1.2 implies x = 3.", "Definition 3.1 requires a field.", "Figure 2 illustrates the construction.",
+    "**Theorem 2.1** states this fact.", "**Theorem 2.1 states this fact.**", "__Table 1__ gives the factorization.",
+    "Chapter 2 explains why this equation holds.", "Section 2.1 shows the derivation.", "Appendix A gives the factorization.",
+    "表 1 给出了分解结果。", "图 2 显示了图像", "第 2 章解释了原因。", "定理 2.1 说明了该事实。", "引理 1 给出了条件"])(
     "keeps %j and its following answer inside the exercise seal", async reference => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解答】" },
@@ -2658,8 +2662,10 @@ describe("bounded resumable PDF parser", () => {
     },
   );
 
-  it.each(["Theorem 2.1.", "Theorem 2.1 (Lagrange)", "**Theorem 2.1 finite rings**", "# Theorem 2.1 finite rings",
-    "Table A.2 Summary", "Fig. IV: Ring diagram", "Listing 1: Program"])(
+  it.each(["Theorem 2.1.", "Theorem 2.1 (Lagrange)", "**Theorem 2.1.** finite rings", "# Theorem 2.1 finite rings",
+    "**Theorem 2.1**", "**Table 1: Roots**", "Table A.2 Summary", "Fig. IV: Ring diagram", "Listing 1: Program",
+    "Chapter 2", "Chapter 2 Rings", "# Section 2.2 finite rings", "第一章 环与域", "第 2 章：群",
+    "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理"])(
     "reopens a pending inline answer at %j", async heading => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解答】" },

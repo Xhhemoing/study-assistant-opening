@@ -44,10 +44,21 @@ _CAPTION_NAME_RE = re.compile(rf"^{_CAPTION_NAME}(?=\s|[:：]|$)", re.IGNORECASE
 _BLOCK_ID = r"(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*|[ivxlcdm]+)\b(?=[\s:：.．—–(-]|$)"
 _CAPTION_PREFIX_RE = re.compile(
     rf"^(?P<ref>{_CAPTION_NAME}\s+{_BLOCK_ID})"
-    r"|^(?P<zh_ref>(?:图|表|插图|附表|算法)\s*\d+(?:[.\-]\d+)*)(?:\s*[:：.．、\-—]|\s+|$)",
+    r"|^(?P<zh_ref>(?:图|表|插图|附表|算法)\s*\d+(?:[.-]\d+)*)",
     re.IGNORECASE,
 )
 _BLOCK_DELIMITER_RE = re.compile(r"^\s*(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)")
+_CHINESE_BLOCK_PREFIX_RE = re.compile(r"^(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明)\s*\d+(?:[.-]\d+)*")
+_CHINESE_HEADING_DELIMITER_RE = re.compile(r"^\s*(?:[:：.．、—–(（-]|$)")
+_CHINESE_PROSE_RE = re.compile(
+    r"[。！？；]\s*$|^\s*(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|"
+    r"满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)"
+)
+_PROSE_SENTENCE_RE = re.compile(r"[.!?;。！？；]\s*$")
+_ENGLISH_REFERENCE_VERB_RE = re.compile(
+    r"^\s*(?:am|is|are|was|were|can|will|explains|gives|shows|states|implies|requires|illustrates|"
+    r"demonstrates|depicts|presents|indicates|says|provides|contains|describes|lists|proves|discusses)\b"
+)
 _ENGLISH_BLOCK_PREFIX_RE = re.compile(
     r"^(?:Definition|Notation|Terminology|Convention|Axiom|Theorem|Lemma|Proposition|Corollary|Conjecture|Claim"
     r"|Proof(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary))?)\b",
@@ -187,20 +198,15 @@ _EXERCISE_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
-_SECTION_BREAK_RE = re.compile(
-    r"^(?:"
-    r"(?:Chapter|Section|Part|Unit)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)(?:\b|$)"
-    r"|(?:Appendix\s+[A-Z0-9]+|Lecture\s+(?:\d+|[IVXLCDM]+))(?:\b|$)"
-    r"|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])"
-    r"|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.\-—]|$|\s+\S)"
-    r"|\d+(?:\.\d+)+\s+\S"
-    r")",
+_SECTION_BREAK_RE = re.compile(r"^\d+(?:\.\d+)+\s+\S")
+_ENGLISH_CONTAINER_PREFIX_RE = re.compile(
+    r"^(?:(?:Chapter|Section|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)"
+    r"|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s:：.．—–(-]|$)",
     re.IGNORECASE,
 )
-_NUMBERED_CONTAINER_PREFIX_RE = re.compile(
-    r"^(?:(?:(?:Chapter|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|Section\s+\d+(?:\.\d+)*)(?=[\s:：.．—–-]|$)"
-    r"|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))",
-    re.IGNORECASE,
+_CHINESE_CONTAINER_PREFIX_RE = re.compile(
+    r"^(?:第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])"
+    r"|附录(?:\s*(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)"
 )
 _PAGE_METADATA_HEADING_RE = re.compile(
     r"^(?:[\[【(]\s*)?(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+\d+"
@@ -516,29 +522,39 @@ def _strip_heading_markup(line_text: str) -> str:
     return _MD_EDGE_EMPHASIS_RE.sub("", s).strip()
 
 
-def _is_titled_non_answer_chapter(stripped: str) -> bool:
-    m = _NUMBERED_CONTAINER_PREFIX_RE.match(stripped)
+def _chinese_heading_suffix(suffix: str, is_markdown_heading: bool) -> bool:
+    return is_markdown_heading or bool(_CHINESE_HEADING_DELIMITER_RE.match(suffix)) or not _CHINESE_PROSE_RE.search(suffix)
+
+
+def _is_titled_non_answer_chapter(stripped: str, is_markdown_heading: bool) -> bool:
+    chinese = _CHINESE_CONTAINER_PREFIX_RE.match(stripped)
+    m = chinese or _ENGLISH_CONTAINER_PREFIX_RE.match(stripped)
     if not m:
         return False
-    title = re.sub(r"^[\s:：.．—–-]+", "", stripped[m.end():])
-    if not any(char.isalpha() for char in title) or _ANSWER_TITLE_WORD_RE.search(title):
+    suffix = stripped[m.end():]
+    title = re.sub(r"^[\s:：.．—–-]+", "", suffix)
+    if _ANSWER_TITLE_WORD_RE.search(title):
         return False
     if re.match(r"^(?:\*\*|__)?(?:Key\b|\(?cont|\(?续)", title, re.IGNORECASE):
         return False
-    return not m[0].lower().startswith("section ") or bool(
-        re.match(r"^(?:\*\*|__)?(?!(?:is|are|was|see)\b)[A-Za-z\u4e00-\u9fff]", title, re.IGNORECASE)
-    )
+    if chinese:
+        return _chinese_heading_suffix(suffix, is_markdown_heading)
+    return is_markdown_heading or bool(_BLOCK_DELIMITER_RE.match(suffix) or re.match(r"^\s+[A-Z0-9\u4e00-\u9fff]", suffix))
 
 
-def _is_running_page_heading(stripped: str) -> bool:
+def _is_running_page_heading(stripped: str, *, bare_containers_are_counters: bool = True) -> bool:
     if (_PAGE_METADATA_HEADING_RE.match(stripped) or _CONTINUATION_HEADING_RE.search(stripped)
             or _RUNNING_COUNTER_RE.search(stripped) or _OCR_PLACEHOLDER_RE.match(stripped)):
         return True
-    container = _NUMBERED_CONTAINER_PREFIX_RE.match(stripped)
-    return bool(container and not stripped[container.end():].strip(" \t:：.．—–-"))
+    container = _ENGLISH_CONTAINER_PREFIX_RE.match(stripped) or _CHINESE_CONTAINER_PREFIX_RE.match(stripped)
+    return bool(bare_containers_are_counters and container and not container[0].lower().startswith(("appendix", "附录"))
+                and not stripped[container.end():].strip(" \t:：.．—–-"))
 
 
-def _is_english_block_heading(stripped: str, explicit_heading: bool) -> bool:
+def _is_textbook_block_heading(stripped: str, is_markdown_heading: bool, docling_heading: bool) -> bool:
+    chinese = _CHINESE_BLOCK_PREFIX_RE.match(stripped)
+    if chinese:
+        return _chinese_heading_suffix(stripped[chinese.end():], is_markdown_heading)
     prefix = _ENGLISH_BLOCK_PREFIX_RE.match(stripped)
     if not prefix:
         return True
@@ -547,34 +563,43 @@ def _is_english_block_heading(stripped: str, explicit_heading: bool) -> bool:
     if not identifier:
         return bool(_BLOCK_DELIMITER_RE.match(suffix))
     rest = suffix[identifier.end():]
-    return explicit_heading or bool(_BLOCK_DELIMITER_RE.match(rest) or re.match(r"^\s+[^a-z\s]", rest))
+    return _english_heading_suffix(rest, is_markdown_heading, docling_heading)
 
 
-def _caption_heading(stripped: str, explicit_heading: bool):
+def _english_heading_suffix(suffix: str, is_markdown_heading: bool, docling_heading: bool) -> bool:
+    return (is_markdown_heading or bool(_BLOCK_DELIMITER_RE.match(suffix) or re.match(r"^\s+[^a-z\s]", suffix))
+            or (docling_heading and not _PROSE_SENTENCE_RE.search(suffix) and not _ENGLISH_REFERENCE_VERB_RE.match(suffix)))
+
+
+def _caption_heading(stripped: str, is_markdown_heading: bool, docling_heading: bool):
     match = _CAPTION_PREFIX_RE.match(stripped)
-    if not match or match.group("zh_ref"):
-        return match
+    if not match:
+        return None
     rest = stripped[match.end():]
-    if explicit_heading or _BLOCK_DELIMITER_RE.match(rest) or re.match(r"^\s+[^a-z\s]", rest):
+    if match.group("zh_ref"):
+        return match if _chinese_heading_suffix(rest, is_markdown_heading) else None
+    if _english_heading_suffix(rest, is_markdown_heading, docling_heading):
         return match
     return None
 
 
-def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool,
-                            explicit_heading: bool = False) -> bool:
+def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
     if not stripped or _is_section_sealed_opener(stripped) or _is_running_page_heading(stripped):
         return False
     if re.fullmatch(r"(?:\d+(?:\.\d+)*[.)]?\s+)?(?:true|false|yes|no|none|[a-f](?:\s*,\s*[a-f])*)[.。]?", stripped, re.IGNORECASE):
         return False
     if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
-    if _TEXTBOOK_NON_ANSWER_HEADING_RE.match(stripped) and _is_english_block_heading(stripped, explicit_heading):
+    docling_heading = frag_label in _HEADING_LABELS
+    block_heading = _is_textbook_block_heading(stripped, is_markdown_heading, docling_heading)
+    if _TEXTBOOK_NON_ANSWER_HEADING_RE.match(stripped) and block_heading:
         return True
-    if _is_titled_non_answer_chapter(stripped):
+    if _is_titled_non_answer_chapter(stripped, is_markdown_heading):
         return True
     if _STANDALONE_SOLUTION_HEADING_RE.match(stripped):
         return False
-    if _CAPTION_NAME_RE.match(stripped) and not _caption_heading(stripped, explicit_heading):
+    if not block_heading or ((_CAPTION_NAME_RE.match(stripped) or _CAPTION_PREFIX_RE.match(stripped))
+                            and not _caption_heading(stripped, is_markdown_heading, docling_heading)):
         return False
     if re.match(
         r"^(?:(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])",
@@ -626,8 +651,7 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     """Return (kind, seal_kind, is_explicit_opener, is_section_break, is_major_non_answer, caption_ref, associated_visual_kind)."""
     raw_trimmed = line_text.strip()
     is_markdown_heading = bool(_MD_HEADING_LINE_RE.match(raw_trimmed))
-    explicit_heading = (is_markdown_heading or frag_label in _HEADING_LABELS
-                        or bool(_MD_WRAPPED_EMPHASIS_RE.match(raw_trimmed)))
+    docling_heading = frag_label in _HEADING_LABELS
     stripped = _strip_heading_markup(line_text)
     if frag_label in _FURNITURE_LABELS:
         if _is_section_sealed_opener(stripped):
@@ -636,15 +660,15 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
 
     exited_section_seal = False
     if seal_mode == "section_sealed":
-        if _is_section_sealed_exit(stripped, frag_label, is_markdown_heading, explicit_heading):
+        if _is_section_sealed_exit(stripped, frag_label, is_markdown_heading):
             # Re-classify the exiting line cleanly as its true public block kind.
             seal_mode = None
             exited_section_seal = True
         else:
             return "solution_sealed", "section_sealed", False, False, False, None, None
 
-    cap_match = _caption_heading(stripped, explicit_heading)
-    has_caption_name = bool(_CAPTION_NAME_RE.match(stripped))
+    cap_match = _caption_heading(stripped, is_markdown_heading, docling_heading)
+    has_caption_name = bool(_CAPTION_NAME_RE.match(stripped) or _CAPTION_PREFIX_RE.match(stripped))
     if frag_label == "caption" and not has_caption_name and not cap_match:
         return "figure_caption", None, True, False, exited_section_seal, None, _caption_visual_kind(stripped, page_visuals)
     if frag_label in ("table", "formula"):
@@ -663,12 +687,12 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     if not in_worked_example and (_INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) or _STANDALONE_SOLUTION_HEADING_RE.match(stripped)):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 
-    english_block_heading = _is_english_block_heading(stripped, explicit_heading)
-    if _PROOF_RE.match(stripped) and english_block_heading:
+    block_heading = _is_textbook_block_heading(stripped, is_markdown_heading, docling_heading)
+    if _PROOF_RE.match(stripped) and block_heading:
         return "proof", None, True, False, exited_section_seal, None, None
-    if _THEOREM_RE.match(stripped) and english_block_heading:
+    if _THEOREM_RE.match(stripped) and block_heading:
         return "theorem", None, True, False, True, None, None
-    if _DEFINITION_RE.match(stripped) and english_block_heading:
+    if _DEFINITION_RE.match(stripped) and block_heading:
         return "definition", None, True, False, True, None, None
     if _WORKED_EXAMPLE_RE.match(stripped):
         return "worked_example", None, True, False, True, None, None
@@ -681,11 +705,13 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
 
     section_exit_candidate = bool(
         _MAJOR_NON_ANSWER_HEADING_RE.match(stripped)
-        or _is_titled_non_answer_chapter(stripped)
+        or _is_titled_non_answer_chapter(stripped, is_markdown_heading)
         or _SECTION_BREAK_RE.match(stripped)
     )
-    if ((is_markdown_heading or frag_label in _HEADING_LABELS) and not has_caption_name) or section_exit_candidate or exited_section_seal:
-        return "narrative", None, True, True, _is_section_sealed_exit(stripped, frag_label, is_markdown_heading, explicit_heading) or exited_section_seal, None, None
+    generic_heading = ((is_markdown_heading or docling_heading) and block_heading and not has_caption_name
+                       and not (_ENGLISH_CONTAINER_PREFIX_RE.match(stripped) or _CHINESE_CONTAINER_PREFIX_RE.match(stripped)))
+    if generic_heading or section_exit_candidate or exited_section_seal:
+        return "narrative", None, True, True, _is_section_sealed_exit(stripped, frag_label, is_markdown_heading) or exited_section_seal, None, None
 
     return "narrative", None, False, False, False, None, None
 
@@ -776,7 +802,8 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             stripped = _strip_heading_markup(unit_text)
             numeric_exercise_answer = (in_exercise and not _MD_HEADING_LINE_RE.match(unit_text.strip())
                                        and re.fullmatch(r"\d+[.。]", stripped))
-            if _is_running_page_heading(stripped) and not _is_section_sealed_opener(stripped) and not numeric_exercise_answer:
+            if (_is_running_page_heading(stripped, bare_containers_are_counters=False)
+                    and not _is_section_sealed_opener(stripped) and not numeric_exercise_answer):
                 # A running header is neither a new section nor part of the answer body.
                 if current is None:
                     current = ["solution_sealed", unit_start, unit_end, None, None, False, False, active_seal, False]

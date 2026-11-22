@@ -10,7 +10,7 @@ const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|c
 const englishContinuation = String.raw`(?: *\( *(?:continued|cont(?:['’]?d)?\.?) *\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
 const chineseContinuation = String.raw`(?: *[（(](?:续|接上页)[）)])? *`;
-const chineseExplanation = "(?:解析|详解)";
+const chineseExplanation = "(?:解答|解析|详解)";
 const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;
 const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *| +(?:to|through) +)${assessmentNumber})?)?`;
 const assessmentTopic = String.raw`(?:(?:review +questions?|practice +problems?|self[- ]check +exercises?|exercises?|problems?|questions?)${assessmentTarget}|chapter +\d+|section +\d+(?:\.\d+)*)`;
@@ -20,10 +20,10 @@ const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numb
 const lineStart = String.raw`^ *(?:#{1,6} +)*`;
 // Standalone answer keys and bare "Answers" open a section. Numbered inline labels
 // and a singular "Answer:" affect the current chunk alone.
-const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|(?:答案|解答)${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
-const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案|解答)${chineseContinuation}(?:】|[:：]|$))`;
-const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?(?:answers?(?: +key)?|solutions?)|key)(?: +to +(?:exercise|problem|question))? *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)|(?:${chineseAnswerHeading}|答案|解答) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
-const sectionAnswerLine = lineStart + sectionAnswer;
+const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|答案${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
+const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案)${chineseContinuation}(?:】|[:：]|$))`;
+const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?(?:answers?(?: +key)?|solutions?)|key)(?: +to +(?:exercise|problem|question))? *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)|(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
+const sectionAnswerLine = String.raw`${lineStart}(?:${sectionAnswer}|解答${chineseContinuation}[:：]? *$)`;
 const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
 const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|[.。](?: |$)|$))`;
 const answerLabel = new RegExp(answerLabelLine, "imu");
@@ -35,10 +35,9 @@ const pdfClosingAtxHashes = new RegExp(closingAtxHashes, "gmu");
 
 // Reopen at the first content line, so earlier answer text on a physical page
 // cannot become public because a later line happens to look like a heading.
-const titledContainer = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?: *[:：.．—–-] *| +)|第 *[一二三四五六七八九十百千\d]+ *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]) *[:：.．—–-]? *)(?!(?:is|are|was|see)(?: |$))[[:alpha:]一-龥]`;
 const markdownTitle = String.raw`#{1,6} +(?!(?:chapter|section|part|unit|lecture|lesson|module|appendix)(?: |$)|第 *[一二三四五六七八九十百千\d]+|附录)(?:\d+(?:\.\d+)+ +)?[[:alpha:]一-龥]`;
 const backMatterHeading = String.raw`(?:preface|introduction|bibliography|references|works +cited|index|subject +index|author +index|glossary|notation +index|acknowledg(?:e)?ments?|about +the +authors?|afterword|colophon|序言|前言|引言|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢) *(?:[:：.—–-]|$)`;
-const reopeningHeading = String.raw`^ *(?:(?:#{1,6} +)?(?:${titledContainer}|appendix(?: +[A-Z0-9]+)?(?: *[:：.—–-].*| +.*| *$)|附录.*|${backMatterHeading})|${markdownTitle})`;
+const backMatterLine = lineStart + backMatterHeading;
 const blockedReopeningHeading = [
   String.raw`${lineStart}(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|[ivxlcdm]+[.。]? *$)(?:[ :：]|$)`,
   String.raw`${lineStart}(?:(?:\d+|[a-z])[.)](?: |$)|[a-z] *$|[（(] *(?:\d+|[a-z]|[一二三四五六七八九十]+) *[)）])`,
@@ -53,8 +52,8 @@ const pdfLeadingTextWrappers = String.raw`^(?: *(?:\[(?:原生提取|本地提�
 const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +problems?|(?:problem|question) +\d+)\M|习题|练习题?|思考题|作业题)`;
 const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
 const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
-const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|(?:答案|解答) *[:：] *$|${qualifiedExerciseAnswer})`;
-const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|解答|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解答|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
+const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|答案 *[:：] *$|解答${chineseContinuation}[:：]? *$|${qualifiedExerciseAnswer})`;
+const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
 
 const workedExampleHeading = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:(?:worked +example|example)(?= +\d| *[(:：.．—–-]| *$)|例题(?= *\d| *[（(:：.．—–-]| *$)|例 *(?=\d|[:：]))`;
 const englishBlock = String.raw`(?:definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof(?: +of +(?:theorem|lemma|proposition|corollary))?)`;
@@ -62,14 +61,30 @@ const captionName = String.raw`(?:figure|fig\.?|table|tab\.?|chart|diagram|schem
 const captionPrefix = String.raw`${lineStart}${captionName}(?= |[:：]|$)`;
 const headingId = String.raw`(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*|[ivxlcdm]+)(?=[ :：.．—–(-]|$)`;
 const numberedBlockPrefix = String.raw`${lineStart}(?:${englishBlock}|${captionName}) +${headingId}`;
-const inlinePublicHeading = String.raw`${lineStart}(?:${englishBlock} *(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)|定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|(?:图|表|插图|附表|算法) *\d+|\d+(?:\.\d+)+ +[^ ])`;
-const explicitHeadingMarkup = String.raw`^ *(?:#{1,6} +[^ ]|\*\*.+?\*\*|__.+?__)`;
+const englishContainerPrefix = String.raw`${lineStart}(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)|appendix(?: +(?:[a-z](?![a-z\d])|\d+))?)(?=[ :：.．—–(-]|$)`;
+const chineseContainerPrefix = String.raw`${lineStart}(?:第 *[一二三四五六七八九十百千\d]+ *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?: *(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)`;
+const chineseBlocks = "(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明)";
+const chineseNumberedBlock = String.raw`${lineStart}(?:${chineseBlocks}|图|表|插图|附表|算法) *\d+(?:[.-]\d+)*`;
+const chineseHeadingDelimiter = String.raw`^ *(?:[:：.．、—–(（-]|$)`;
+const chineseReferenceProse = String.raw`[。！？；] *$|^ *(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)`;
+const englishContainerSuffix = String.raw`^(?: *(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)| +[A-Z0-9一-龥])`;
+const appendixHeading = String.raw`${lineStart}(?:appendix(?= |[:：]|$)|附录)`;
+const bareContainerSuffix = String.raw`^[ :：.．—–-]*$`;
+const inlinePublicHeading = String.raw`${lineStart}(?:${englishBlock} *(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)|${chineseBlocks} *(?:[:：]|$)|\d+(?:\.\d+)+ +[^ ])`;
+const explicitHeadingMarkup = String.raw`^ *#{1,6} +[^ ]`;
 
 const jsWorkedExample = new RegExp(workedExampleHeading, "iu");
 const jsNumberedBlock = new RegExp(numberedBlockPrefix, "iu");
+const jsChineseNumberedBlock = new RegExp(chineseNumberedBlock, "u");
+const jsEnglishContainer = new RegExp(englishContainerPrefix, "iu");
+const jsChineseContainer = new RegExp(chineseContainerPrefix, "u");
+const jsChineseDelimiter = new RegExp(chineseHeadingDelimiter, "u");
+const jsChineseProse = new RegExp(chineseReferenceProse, "u");
+const jsEnglishContainerSuffix = new RegExp(englishContainerSuffix, "u");
 const jsPublicHeading = new RegExp(inlinePublicHeading, "iu");
 const jsCaptionPrefix = new RegExp(captionPrefix, "iu");
-const jsReopeningHeading = new RegExp(reopeningHeading.replaceAll("[[:alpha:]一-龥]", "[\\p{L}]"), "iu");
+const jsMarkdownTitle = new RegExp(("^ *" + markdownTitle).replaceAll("[[:alpha:]一-龥]", "[\\p{L}]"), "iu");
+const jsBackMatter = new RegExp(backMatterLine, "iu");
 const jsBlockedReopening = new RegExp(blockedReopeningHeading.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "iu");
 const jsExerciseHeading = new RegExp(exerciseHeading.replace(String.raw`\M`, String.raw`\b`), "iu");
 const jsExplicitHeading = new RegExp(explicitHeadingMarkup, "u");
@@ -89,9 +104,16 @@ export function containsPdfAnswerLabel(text: string, { checkContext = true } = {
       inWorkedExample = true;
     } else if (inWorkedExample) {
       const numbered = jsNumberedBlock.exec(line);
+      const chinese = jsChineseNumberedBlock.exec(line) ?? jsChineseContainer.exec(line);
+      const container = jsEnglishContainer.exec(line);
+      const atx = jsExplicitHeading.test(rawLine);
+      const chineseSuffix = chinese ? line.slice(chinese[0].length) : "";
       if (jsExerciseHeading.test(line) || jsPublicHeading.test(line)
-        || (numbered && (jsExplicitHeading.test(rawLine) || !/^ +[a-z]/u.test(line.slice(numbered[0].length))))
-        || (!jsCaptionPrefix.test(line) && jsReopeningHeading.test(line) && !jsBlockedReopening.test(line))) {
+        || (numbered && (atx || !/^ +[a-z]/u.test(line.slice(numbered[0].length))))
+        || (chinese && (atx || jsChineseDelimiter.test(chineseSuffix) || !jsChineseProse.test(chineseSuffix)))
+        || ((container && (atx || jsEnglishContainerSuffix.test(line.slice(container[0].length))))
+          || jsBackMatter.test(line) || (atx && !jsCaptionPrefix.test(line) && jsMarkdownTitle.test(line)))
+          && !jsBlockedReopening.test(line)) {
         inWorkedExample = false;
       }
     }
@@ -153,29 +175,48 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         ${"(?n)" + closingAtxHashes},${String.raw`\1`},'g'),chr(10)) AS lines
     FROM opening_source_chunks c
     WHERE ${scope} AND c.page IS NOT NULL
+  ), pdf_archive_headings AS (
+    SELECT *,
+      (english_container IS NOT NULL AND (atx OR english_container ~ ${englishContainerSuffix})
+        OR chinese_container IS NOT NULL AND (atx OR chinese_container ~ ${chineseHeadingDelimiter}
+          OR chinese_container !~ ${chineseReferenceProse})) AND line !~* ${blockedReopeningHeading} AS public_container,
+      (english_numbered IS NOT NULL AND (atx OR english_numbered !~ '^ +[a-z]')
+        OR chinese_numbered IS NOT NULL AND (atx OR chinese_numbered ~ ${chineseHeadingDelimiter}
+          OR chinese_numbered !~ ${chineseReferenceProse})) AS public_numbered,
+      (line ~* ${backMatterLine} OR (atx AND line ~* ${"^ *" + markdownTitle}
+        AND (line !~* ${captionPrefix} OR english_numbered IS NOT NULL)))
+        AND line !~* ${blockedReopeningHeading} AS other_reopening
+    FROM (
+      SELECT *, raw_line ~ ${explicitHeadingMarkup} AS atx,
+        NULLIF(regexp_replace(line,${englishContainerPrefix},'','i'),line) AS english_container,
+        NULLIF(regexp_replace(line,${chineseContainerPrefix},''),line) AS chinese_container,
+        NULLIF(regexp_replace(line,${numberedBlockPrefix},'','i'),line) AS english_numbered,
+        NULLIF(regexp_replace(line,${chineseNumberedBlock},''),line) AS chinese_numbered
+      FROM (
+        SELECT *,replace(replace(raw_line,'**',''),'__','') AS line
+        FROM (
+          SELECT id,source_id,source_version,page,created_at,unnest(lines) AS raw_line,
+            generate_subscripts(lines,1) AS line_number
+          FROM pdf_archive_text
+        ) raw_lines
+      ) normalized_lines
+    ) heading_suffixes
   ), pdf_archive_lines AS (
     SELECT id,source_id,source_version,page,line,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
       line ~* ${exerciseHeading} AS opens_exercise,
       line ~* ${workedExampleHeading} AS opens_worked_example,
       (line ~* ${inlinePublicHeading} OR line ~* ${workedExampleHeading}
-        OR (line ~* ${numberedBlockPrefix} AND (raw_line ~ ${explicitHeadingMarkup}
-          OR regexp_replace(line,${numberedBlockPrefix},'','i') !~ '^ +[a-z]'))
-        OR (line !~* ${captionPrefix} AND line ~* ${reopeningHeading} AND line !~* ${blockedReopeningHeading}))
+        OR public_numbered OR public_container OR other_reopening)
         AND line !~* ${answerLabelLine} AND line !~* ${explanationLabelLine} AS opens_public,
+      (other_reopening OR public_container AND (line ~* ${appendixHeading}
+        OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix})) AS reopens_section,
       line ~* ${sectionAnswerLine} AS opens_section,
       line ~* ${answerLabelLine} AS unconditional_answer,
       line ~* ${explanationLabelLine} AS explanation_label,
       line ~* ${exerciseSectionException} AS exercise_exception,
       line ~* ${pdfLeadingTextWrappers} AS wrapper
-    FROM (
-      SELECT *,replace(replace(raw_line,'**',''),'__','') AS line
-      FROM (
-        SELECT id,source_id,source_version,page,created_at,unnest(lines) AS raw_line,
-          generate_subscripts(lines,1) AS line_number
-        FROM pdf_archive_text
-      ) raw_lines
-    ) numbered_lines
+    FROM pdf_archive_headings
   ), pdf_archive_exercise_context AS (
     SELECT *, COALESCE(max(position) FILTER (WHERE opens_exercise) OVER context,0)
       > COALESCE(max(position) FILTER (WHERE (opens_section AND NOT exercise_exception)
@@ -186,15 +227,16 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     FROM pdf_archive_lines
     WINDOW context AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
   ), pdf_archive_line_events AS (
-    SELECT *, opens_section AND NOT (in_exercise AND exercise_exception) AS section_answer,
+    SELECT *, opens_section AND NOT (in_exercise AND exercise_exception)
+      AND NOT (in_worked_example AND explanation_label) AS section_answer,
       explanation_label AND NOT in_worked_example AS sealed_explanation,
       in_exercise AND line ~* ${exerciseInlineAnswer}
-        AND (NOT opens_section OR exercise_exception) AS inline_opener
+        AND (NOT opens_section OR exercise_exception) AND NOT (in_worked_example AND explanation_label) AS inline_opener
     FROM pdf_archive_exercise_context
   ), pdf_archive_page_events AS (
     SELECT source_id,source_version,page,bool_or(section_answer) AS section_answer,
       bool_or(inline_opener OR unconditional_answer OR sealed_explanation) AS answer_label,
-      (array_agg(line ORDER BY position) FILTER (WHERE NOT wrapper AND btrim(line)<>''))[1] AS first_line
+      (array_agg(reopens_section ORDER BY position) FILTER (WHERE NOT wrapper AND btrim(line)<>''))[1] AS reopens_section
     FROM pdf_archive_line_events
     GROUP BY source_id,source_version,page
   ), pdf_archive_inline_groups AS (
@@ -231,9 +273,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       SELECT source_id,source_version,page AS first_page,section_answer,
         lead(page) OVER (PARTITION BY source_id,source_version ORDER BY page) AS reopen_page
       FROM pdf_archive_page_events
-      WHERE section_answer OR (NOT answer_label AND first_line ~* ${reopeningHeading}
-        AND first_line !~* ${blockedReopeningHeading}
-        AND (first_line !~* ${captionPrefix} OR first_line ~* ${numberedBlockPrefix}))
+      WHERE section_answer OR (NOT answer_label AND reopens_section)
     ) events WHERE section_answer
     UNION ALL
     SELECT source_id,source_version,first_page,last_page+1,NULL::uuid
