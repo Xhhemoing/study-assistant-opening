@@ -77,6 +77,30 @@ async function backfilledPages(pdf: Awaited<ReturnType<typeof seed>>) {
   return nodes.flatMap(({ id }, index) => graph?.node_definitions?.[id] ? [index + 1] : []);
 }
 
+async function expectArchivedPdfPages(texts: string[], pages: number[], blockedPage: number) {
+  const pdf = await seed(texts);
+  await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+  const chunks = createOpeningSourceChunksRepository(f.sql);
+  const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+  const publicChunks = pdf.snapshot.chunks.filter(chunk => pages.includes(chunk.page!));
+  const blockedChunk = pdf.snapshot.chunks[blockedPage - 1]!;
+  expect(await chunks.listForSources(f.scope, [pdf.sourceId])).toEqual(publicChunks);
+  expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [blockedPage, ...pages])).toEqual(publicChunks);
+  await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: blockedPage }))
+    .rejects.toMatchObject({ code: "NOT_FOUND" });
+  for (const page of pages) {
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page }))
+      .resolves.toMatchObject({ pages, text: texts[page - 1] });
+  }
+  expect(await backfilledPages(pdf)).toEqual(pages);
+  expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks).toEqual(publicChunks);
+  expect((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.page).sort((a, b) => a! - b!)).toEqual(pages);
+  expect(await pdf.repository.search(f.scope, { ...query, chunkIds: [blockedChunk.id] })).toEqual([]);
+  expect((await pdf.repository.authorizeChunks(f.scope, pdf.snapshot.chunks)).chunks).toEqual(publicChunks);
+  expect(await pdf.repository.hasIndex(f.scope, { ...query, chunkIds: [blockedChunk.id] })).toBe(false);
+  expect(await pdf.repository.hasIndex(f.scope, query)).toBe(pages.length > 0);
+}
+
 describe("pgvector material repository", () => {
   it("stores a failed boundary on the conversion row and hides the archived continuation from direct reads", async () => {
     const pdf = await seed(["", "Public introduction.", "5 units.", "Answers to Review Questions\nx = 3."]);
@@ -242,6 +266,41 @@ describe("pgvector material repository", () => {
     const chunks = createOpeningSourceChunksRepository(f.sql);
     expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.page)).toEqual([1, 2, 4, 11, 12]);
     expect(await backfilledPages(pdf)).toEqual([1, 2, 4, 11, 12]);
+  });
+
+  it("keeps an archived answer section sealed through exercise subheadings", async () => {
+    const subheadings = [
+      "# Drills", "# Self-Check", "# Self Check", "# Problem Set 1", "# Recitation", "# 思考题",
+      "# 作业", "# 课后题", "# 单元测试", "# 第十二小题", "# A. Algebra", "# 2. Algebra", "# (a)", "# b", "# （三）",
+    ];
+    const texts = ["Answer Key", ...subheadings.flatMap(heading => [heading, "5 units."]),
+      "Chapter 2: Geometry", "Public continuation."];
+    await expectArchivedPdfPages(texts, [texts.length - 1, texts.length], 3);
+  });
+
+  it.each([
+    "[原生提取]\nChapter 2: Geometry\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nThis section introduces triangles.",
+    "[本地提取（可能含OCR）]\nChapter 2: Geometry",
+    "\n[视觉转写与描述]\n \n【原图忠实转写，尚需核对】\nChapter 2: Geometry",
+  ])("reopens an archived answer section at a wrapped public chapter (%j)", async chapter => {
+    await expectArchivedPdfPages(["Answer Key", "5 units.", chapter, "Public continuation."], [3, 4], 2);
+  });
+
+  it.each([
+    "[原生提取]\nChapter 2: Geometry\nAnswer Key",
+    "[原生提取]\nChapter 2: Geometry\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nAnswer 1: x = 3.",
+    "[视觉转写与描述]\n【图表观察描述，非原文或解答】\nChapter 2: Geometry",
+    "[视觉转写与描述]\n【识别不确定，不能据此判定正确】\nChapter 2: Geometry",
+    "[原生提取]\n5 units.\nChapter 2: Geometry",
+  ])("keeps a wrapped page sealed when it lacks a clean first heading (%j)", async page => {
+    await expectArchivedPdfPages(["Answer Key", "5 units.", page, "5 more units."], [], 4);
+  });
+
+  it.each([
+    "Works Cited", "Subject Index", "Author Index: Mathematicians", "Acknowledgements",
+    "About the Authors", "Notation Index", "符号表", "致谢", "名词索引", "主题索引", "词汇表", "后记",
+  ])("reopens archived back matter at %s", async heading => {
+    await expectArchivedPdfPages(["Answer Key", "5 units.", heading, "Public continuation."], [3, 4], 2);
   });
 
   it("keeps historical legacy seals settled while the current PDF version is retried", async () => {

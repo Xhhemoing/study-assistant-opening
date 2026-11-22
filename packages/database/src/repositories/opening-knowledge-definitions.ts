@@ -36,8 +36,18 @@ export function containsPdfAnswerLabel(text: string): boolean {
 // cannot become public because a later line happens to look like a heading.
 const titledContainer = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?: *[:：.．—–-] *| +)|第 *[一二三四五六七八九十百千\d]+ *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]) *[:：.．—–-]? *)(?!(?:is|are|was|see)(?: |$))[[:alpha:]一-龥]`;
 const markdownTitle = String.raw`#{1,6} +(?!(?:chapter|section|part|unit|lecture|lesson|module|appendix)(?: |$)|第 *[一二三四五六七八九十百千\d]+|附录)(?:\d+(?:\.\d+)+ +)?[[:alpha:]一-龥]`;
-const reopeningHeading = String.raw`^ *(?:(?:#{1,6} +)?(?:${titledContainer}|appendix(?: +[A-Z0-9]+)?(?: *[:：—–-]? +.*| *$)|附录.*|(?:preface|introduction|bibliography|references|glossary|index)(?:[ :：]|$)|序言|前言|引言|参考文献)|${markdownTitle})`;
-const blockedReopeningHeading = String.raw`(?:^ *(?:#{1,6} +)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|[ivxlcdm]+[.。]? *$|true[.。]? *$|false[.。]? *$|yes[.。]? *$|no[.。]? *$|none[.。]? *$)(?:[ :：]|$)|\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|homework|assignments?|worksheets?|tutorials?|labs?|continued|cont(?:['’]?d)?)(?:\M)|(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千]+(?: *(?:[/／–-]|共) *(?:第 *)?[\d一二三四五六七八九十百千]+)? *[页頁]|答[案]|解答|习题|练习|复习题|自测题|续上页|接上页|[（(] *续 *[）)])`;
+const backMatterHeading = String.raw`(?:preface|introduction|bibliography|references|works +cited|index|subject +index|author +index|glossary|notation +index|acknowledgements?|about +the +authors?|序言|前言|引言|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢) *(?:[:：.—–-]|$)`;
+const reopeningHeading = String.raw`^ *(?:(?:#{1,6} +)?(?:${titledContainer}|appendix(?: +[A-Z0-9]+)?(?: *[:：—–-]? +.*| *$)|附录.*|${backMatterHeading})|${markdownTitle})`;
+const blockedReopeningHeading = [
+  String.raw`${lineStart}(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|(?:[ivxlcdm]+|true|false|yes|no|none)[.。]? *$)(?:[ :：]|$)`,
+  String.raw`${lineStart}(?:(?:\d+|[a-z])[.)](?: |$)|[a-z] *$|[（(] *(?:\d+|[a-z]|[一二三四五六七八九十]+) *[)）])`,
+  String.raw`\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|drills?|self[- ]check|homework|assignments?|problem +sets?|worksheets?|tutorials?|recitations?|labs?|continued|cont(?:['’]?d)?)\M`,
+  String.raw`(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千]+(?: *(?:[/／–-]|共) *(?:第 *)?[\d一二三四五六七八九十百千]+)? *[页頁]`,
+  String.raw`答案|解答|习题|练习|复习题|自测题|思考题|作业|课后题|单元测试|第 *[一二三四五六七八九十百千\d]+ *[题小题]|续上页|接上页|[（(] *续 *[）)]`,
+].join("|");
+
+// Only extraction and transcription headers may precede a reopening heading.
+const pdfLeadingTextWrappers = String.raw`^(?: *(?:\[(?:原生提取|本地提取（可能含OCR）|视觉转写与描述)\]|【原图忠实转写，尚需核对】) *(?:\n[ \n]*|$))+`;
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -84,8 +94,9 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT source_id,source_version,page,
       bool_or(body ~* ${"(?n)" + sectionAnswerLine}) AS section_answer,
       bool_or(body ~* ${"(?n)" + answerLabelLine}) AS answer_label,
-      (array_agg(split_part(ltrim(body,' '||chr(10)),chr(10),1) ORDER BY created_at,id)
-        FILTER (WHERE ltrim(body,' '||chr(10))<>''))[1] AS first_line
+      (array_remove(array_agg(NULLIF(split_part(
+        regexp_replace(ltrim(body,' '||chr(10)),${pdfLeadingTextWrappers},''),chr(10),1),'')
+        ORDER BY created_at,id),NULL))[1] AS first_line
     FROM pdf_archive_text
     GROUP BY source_id,source_version,page
   ), pdf_archive_sealed_spans AS MATERIALIZED (

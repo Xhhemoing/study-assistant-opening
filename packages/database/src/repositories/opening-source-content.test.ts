@@ -53,7 +53,8 @@ describe("source content self-read versus additional PDF retry access", () => {
 
   it("uses the same publication scope for inventory and bodies and excludes whole answer chunks", async () => {
     const reads: string[] = [];
-    const answer = "**Ans**wers to Review Questions\n5 units.";
+    const answer = "[原生提取]\nChapter 2: Geometry\n\n[视觉转写与描述]\n"
+      + "【原图忠实转写，尚需核对】\n**Ans**wers to Review Questions\n5 units.";
     const chunks = [...defaultChunks,
       { id: "blank", page: 2, text: "", characters: 0, readable: false },
       { id: "mixed-page-answer", page: 2, text: answer, characters: answer.length, readable: true },
@@ -69,6 +70,9 @@ describe("source content self-read versus additional PDF retry access", () => {
       expect(query).toContain("boundary.first_page<=c.page");
       expect(query).toContain("seal.page_start=c.page AND seal.page_end=c.page");
       expect(query).toContain("pdf_archive_sealed_spans AS MATERIALIZED");
+      expect(query).toContain("bool_or(body ~* ?) AS section_answer");
+      expect(query).toContain("bool_or(body ~* ?) AS answer_label");
+      expect(query).toContain("regexp_replace(ltrim(body");
       expect(query.match(/\b(?:FROM|JOIN) opening_\w+/gu)).toHaveLength(6);
     }
     expect(reads[1]).toContain("c.id=ANY(?::uuid[])");
