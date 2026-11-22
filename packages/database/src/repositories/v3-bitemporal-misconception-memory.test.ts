@@ -11,7 +11,11 @@ const claim = {
 
 function mockTransaction(...responses: unknown[][]) {
   const query = vi.fn();
-  for (const rows of responses) query.mockResolvedValueOnce(rows);
+  for (const rows of responses) {
+    query.mockImplementationOnce(() => Object.assign(Promise.resolve(rows), {
+      async *cursor() { if (rows.length) yield rows; },
+    }));
+  }
   const sql = { begin: (run: (tx: typeof query) => unknown) => run(query) } as unknown as Sql;
   return { sql, query };
 }

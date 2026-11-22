@@ -68,15 +68,15 @@ function rewriteSignedReceipt(receipt: string, changes: (payload: { issuedAt: nu
 
 async function seedEdge({
   scope = f.scope, edgeId = randomUUID(), courseId = null, evidenceAttemptIds = [], future = false,
-  origin = "system_diagnosis", summary = "Initial diagnosis", priorRevisionId = null, status = "verified",
+  origin = "system_diagnosis", summary = "Initial diagnosis", priorRevisionId = null, status = "verified", privacyEpoch = 0,
 }: { scope?: OpeningScope; edgeId?: string; courseId?: string | null; evidenceAttemptIds?: string[]; future?: boolean;
-  origin?: string; summary?: string; priorRevisionId?: string | null; status?: string } = {}) {
+  origin?: string; summary?: string; priorRevisionId?: string | null; status?: string; privacyEpoch?: number } = {}) {
   const [row] = await f.sql<{ edgeId: string; revisionId: string; txAt: string }[]>`
     INSERT INTO v3_bitemporal_misconception_edges
       (revision_id, workspace_id, owner_user_id, edge_id, course_id, concept_key, misconception_code, summary, status, origin,
-       evidence_attempt_ids, valid_range, tx_range, prior_revision_id)
+       evidence_attempt_ids, privacy_epoch, valid_range, tx_range, prior_revision_id)
     VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${courseId},
-      'limit', 'conditions', ${summary}, ${status}, ${origin}, ${evidenceAttemptIds}::uuid[],
+      'limit', 'conditions', ${summary}, ${status}, ${origin}, ${evidenceAttemptIds}::uuid[], ${privacyEpoch},
       tstzrange('2000-01-01Z'::timestamptz, NULL, '[)'),
       tstzrange(clock_timestamp() + CASE WHEN ${future} THEN interval '5 seconds' ELSE interval '0' END, NULL, '[)'), ${priorRevisionId})
     RETURNING edge_id AS "edgeId", revision_id AS "revisionId", lower(tx_range)::text AS "txAt"`;
@@ -508,14 +508,48 @@ it("enforces owner binding on all three tables and preserves course and workspac
   expect(await sql`SELECT revision FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
 });
 
-it("rejects a stale expected privacy epoch even when it matches the stored revision", async () => {
+it("omits revoked history from point-in-time queries with or without an expected privacy epoch", async () => {
   const { sql, scope } = f;
   const first = await seedEdge();
-  const query = { validAt, txAt: first.txAt, expectedPrivacyEpoch: 0 };
+  const query = { validAt, txAt: first.txAt };
   await expect(queryMisconceptionEdgesAsOf(sql, scope, query)).resolves.toMatchObject([{ revisionId: first.revisionId }]);
   await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
   await expect(queryMisconceptionEdgesAsOf(sql, scope, query)).resolves.toEqual([]);
+  await expect(queryMisconceptionEdgesAsOf(sql, scope, { ...query, expectedPrivacyEpoch: 0 })).resolves.toEqual([]);
   await expect(queryMisconceptionEdgesAsOf(sql, scope, { ...query, expectedPrivacyEpoch: 1 })).resolves.toEqual([]);
+  const current = await seedEdge({ privacyEpoch: 1 });
+  await expect(queryMisconceptionEdgesAsOf(sql, scope, { ...query, txAt: current.txAt }))
+    .resolves.toMatchObject([{ revisionId: current.revisionId }]);
+});
+
+it("omits revoked misconception lineages from backup while retaining current history", async () => {
+  const { sql, scope } = f;
+  const old = await seedEdge({ summary: "Revoked diagnosis" });
+  await closeRevision(sql, old.revisionId);
+  await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
+  await seedEdge({ edgeId: old.edgeId, priorRevisionId: old.revisionId, privacyEpoch: 1 });
+  const current = await seedEdge({ privacyEpoch: 1 });
+  const backup = await readOpeningBackupRecords(sql, scope);
+  expect(backup.privacyEpoch).toBe(1);
+  expect(backup.tables.v3_bitemporal_misconception_edges.map(row => row.revision_id)).toEqual([current.revisionId]);
+});
+
+it.each([
+  { name: "skips 2,048 ASCII control-only summaries", summary: "\u0007", count: 2048, expected: "- 待确认：B" },
+  { name: "pages past 2,048 Unicode whitespace summaries", summary: "\uFEFF", count: 2048, expected: "- 待确认：B" },
+  { name: "stops paging at the byte budget", summary: "A", count: 200, expected: Array(128).fill("- 待确认：A").join("\n") },
+])("$name", async ({ summary, count, expected }) => {
+  const { sql, scope } = f;
+  const visible = await seedEdge({ status: "candidate", summary: "B" });
+  await sql`INSERT INTO v3_bitemporal_misconception_edges
+    (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
+      summary, status, origin, valid_range, tx_range)
+    SELECT gen_random_uuid(), workspace_id, owner_user_id, gen_random_uuid(), concept_key, misconception_code,
+      ${summary}, status, origin, valid_range, tstzrange(lower(tx_range) + interval '1 microsecond', NULL, '[)')
+    FROM v3_bitemporal_misconception_edges CROSS JOIN generate_series(1, ${count}::integer) WHERE revision_id=${visible.revisionId}`;
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({
+    renderedMarkdown: expected, byteLength: Buffer.byteLength(expected),
+  });
 });
 
 it("normalizes long whitespace runs before applying the context byte limit", async () => {

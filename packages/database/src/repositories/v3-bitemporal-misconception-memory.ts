@@ -6,7 +6,8 @@ import type { OpeningScope } from "./opening-sources";
 
 type Edge = typeof v3BitemporalMisconceptionEdges.$inferSelect;
 type ContextItem = Pick<Edge, "status" | "learnerDisposition" | "summary">;
-type ContextBlock = { renderedMarkdown: string; byteLength: number; revision: number };
+type RenderedContextBlock = { renderedMarkdown: string; byteLength: number };
+type ContextBlock = RenderedContextBlock & { revision: number };
 type Revision = { edgeId: string; revisionId: string; txAt: string };
 type TryMisconceptionClaim = Pick<Edge, "conceptKey" | "misconceptionCode" | "summary"> & {
   receiptId: string;
@@ -26,8 +27,13 @@ const dispositionLabels: Record<LearnerMisconceptionDisposition, string> = {
 };
 
 export function renderLearnerContextBlock(items: readonly ContextItem[]) {
-  let renderedMarkdown = "";
-  let byteLength = 0;
+  const block = { renderedMarkdown: "", byteLength: 0 };
+  appendLearnerContextItems(block, items);
+  return block;
+}
+
+/** Return false once the renderer has reached the byte limit. */
+function appendLearnerContextItems(block: RenderedContextBlock, items: readonly ContextItem[]): boolean {
   for (const item of items) {
     if (item.status === "retracted" || item.status === "superseded") continue;
     const text = item.summary.replace(/[\s\p{Cc}]+/gu, " ").trim()
@@ -35,7 +41,7 @@ export function renderLearnerContextBlock(items: readonly ContextItem[]) {
     if (!text) continue;
     const label = item.learnerDisposition ? dispositionLabels[item.learnerDisposition]
       : item.status === "verified" ? "已确认" : "待确认";
-    const prefix = (renderedMarkdown ? "\n- " : "- ") + label + "：";
+    const prefix = (block.renderedMarkdown ? "\n- " : "- ") + label + "：";
     const prefixBytes = Buffer.byteLength(prefix);
     const characters: string[] = [];
     let lineBytes = prefixBytes;
@@ -43,7 +49,7 @@ export function renderLearnerContextBlock(items: readonly ContextItem[]) {
     for (const character of text) {
       const literal = "\\`*_{}[]<>()#+-.!|&~".includes(character) ? "\\" + character : character;
       const bytes = Buffer.byteLength(literal);
-      if (byteLength + lineBytes + bytes > LEARNER_CONTEXT_MAX_BYTES) {
+      if (block.byteLength + lineBytes + bytes > LEARNER_CONTEXT_MAX_BYTES) {
         truncated = true;
         break;
       }
@@ -51,12 +57,12 @@ export function renderLearnerContextBlock(items: readonly ContextItem[]) {
       lineBytes += bytes;
     }
     if (characters.length) {
-      renderedMarkdown += prefix + characters.join("");
-      byteLength += lineBytes;
+      block.renderedMarkdown += prefix + characters.join("");
+      block.byteLength += lineBytes;
     }
-    if (truncated) break;
+    if (truncated || block.byteLength === LEARNER_CONTEXT_MAX_BYTES) return false;
   }
-  return { renderedMarkdown, byteLength };
+  return true;
 }
 
 /** Acquire the workspace lock before any course or revision row locks. */
@@ -84,17 +90,23 @@ export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql
 }
 
 async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
-  const items = await tx<ContextItem[]>`
-    SELECT status, learner_disposition AS "learnerDisposition", e.summary
+  // Exclude ASCII blanks and controls in SQL. The renderer handles Unicode whitespace across pages.
+  const blankSummary = "^[ \u0001-\u001f\u007f-\u009f]*$";
+  const pages = tx<ContextItem[]>`
+    SELECT e.status, e.learner_disposition AS "learnerDisposition", e.summary
     FROM v3_bitemporal_misconception_edges e
     JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
     WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
       AND e.privacy_epoch = w.privacy_epoch
       AND e.valid_range @> ${at}::text::timestamptz AND e.tx_range @> ${at}::text::timestamptz
-      AND status IN ('candidate', 'verified', 'learner_reported')
-    ORDER BY (status = 'learner_reported') DESC, lower(tx_range) DESC, edge_id
-    LIMIT ${LEARNER_CONTEXT_MAX_BYTES}`;
-  const { renderedMarkdown, byteLength } = renderLearnerContextBlock(items);
+      AND e.status IN ('candidate', 'verified', 'learner_reported')
+      AND e.summary COLLATE "C" !~ ${blankSummary}
+    ORDER BY (e.status = 'learner_reported') DESC, lower(e.tx_range) DESC, e.edge_id, e.revision_id`.cursor(64);
+  const rendered = { renderedMarkdown: "", byteLength: 0 };
+  for await (const items of pages) {
+    if (!appendLearnerContextItems(rendered, items)) break;
+  }
+  const { renderedMarkdown, byteLength } = rendered;
   const [block] = await tx<ContextBlock[]>`
     INSERT INTO v3_learner_context_blocks
       (workspace_id, owner_user_id, rendered_markdown, byte_length, revision, privacy_epoch, updated_at)
@@ -156,8 +168,9 @@ export async function queryMisconceptionEdgesAsOf(
       AND e.valid_range @> ${validAt instanceof Date ? validAt.toISOString() : validAt}::text::timestamptz
       AND e.tx_range @> ${txAt instanceof Date ? txAt.toISOString() : txAt}::text::timestamptz
       AND (${courseId ?? null}::uuid IS NULL OR e.course_id = ${courseId ?? null}::uuid)
+      AND e.privacy_epoch = w.privacy_epoch
       AND (${expectedPrivacyEpoch ?? null}::integer IS NULL
-        OR (w.privacy_epoch = ${expectedPrivacyEpoch ?? null}::integer AND e.privacy_epoch = w.privacy_epoch))
+        OR w.privacy_epoch = ${expectedPrivacyEpoch ?? null}::integer)
     ORDER BY e.edge_id`;
 }
 

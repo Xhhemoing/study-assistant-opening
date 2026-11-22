@@ -499,13 +499,20 @@ export async function readOpeningBackupTableRows(
   Object.assign(tables, libraryTables);
   tables.opening_note_provenance = projectOpeningBackupProvenance(libraryTables.opening_note_provenance, cardIds);
   await readBackupCourseAssets(tx, id, userId, tables);
+  // Export only complete lineages at the workspace's current privacy epoch.
   const revisions = asRows(await tx`
-    SELECT revision_id, workspace_id, owner_user_id, edge_id, course_id, concept_key, misconception_code,
-      summary, status, origin, learner_disposition, evidence_attempt_ids, privacy_epoch,
-      valid_range::text, tx_range::text, prior_revision_id
-    FROM v3_bitemporal_misconception_edges
-    WHERE workspace_id = ${id} AND owner_user_id = ${userId}
-    ORDER BY lower(tx_range), revision_id`);
+    SELECT e.revision_id, e.workspace_id, e.owner_user_id, e.edge_id, e.course_id, e.concept_key, e.misconception_code,
+      e.summary, e.status, e.origin, e.learner_disposition, e.evidence_attempt_ids, e.privacy_epoch,
+      e.valid_range::text, e.tx_range::text, e.prior_revision_id
+    FROM v3_bitemporal_misconception_edges e
+    JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
+    WHERE e.workspace_id = ${id} AND e.owner_user_id = ${userId} AND e.privacy_epoch = w.privacy_epoch
+      AND NOT EXISTS (
+        SELECT 1 FROM v3_bitemporal_misconception_edges other
+        WHERE other.workspace_id = e.workspace_id AND other.owner_user_id = e.owner_user_id
+          AND other.edge_id = e.edge_id AND other.privacy_epoch <> w.privacy_epoch
+      )
+    ORDER BY lower(e.tx_range), e.revision_id`);
   const courseIds = new Set(tables.courses.map(row => row.id));
   const excludedEdges = new Set(revisions.filter(row =>
     (row.course_id != null && !courseIds.has(row.course_id))
