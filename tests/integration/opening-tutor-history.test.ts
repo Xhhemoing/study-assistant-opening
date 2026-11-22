@@ -75,7 +75,7 @@ it("bounds history by whole exchanges and excludes oversized recent turns", asyn
 });
 
 it("keeps course-scoped memory history only while both turns resolve to its active course", async () => {
-  const { current, jobs, prior, c } = await seed();
+  const { current, jobs, prior, c, repo } = await seed();
   const courses = createCourseMembershipRepository(f.sql);
   const courseA = await courses.createCourse({ workspaceId: f.scope.workspaceId, title: "History course A", slug: "history-a" });
   const courseB = await courses.createCourse({ workspaceId: f.scope.workspaceId, title: "History course B", slug: "history-b" });
@@ -103,6 +103,23 @@ it("keeps course-scoped memory history only while both turns resolve to its acti
   expect(await history()).toEqual({ history: [], sourceRefs: [] });
   await anchor(current.turnId, courseB.id);
   expect(await history()).toEqual({ history: [], sourceRefs: [] });
+
+  const memoryB = await createOpeningMemoryRepository(f.sql).proposeMemory(f.scope, {
+    courseId: courseB.id, text: "Course B study preference", sourceTurnIds: [current.turnId], expiresAt,
+  });
+  await f.sql`UPDATE opening_turns SET created_at=now()-interval '30 minutes' WHERE id=${current.turnId}`;
+  await f.sql`UPDATE opening_turns SET status='complete', text='Course B answer',
+    context_source_refs=${f.sql.json([{ memoryDependencyIds: [memoryB.id] }])} WHERE id=${current.assistantTurnId}`;
+  const third = await repo.appendSavedTurn({ scope: f.scope, conversationId: c.id, text: "Continue course B", mode: "hint",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
+  await anchor(third.turnId, courseB.id);
+  expect(await jobs.loadHistoryContext(f.scope, third.turnId)).toEqual({
+    history: [{ role: "user", text: "continue" }, { role: "assistant", text: "Course B answer" }],
+    sourceRefs: [], memoryIds: [memoryB.id], temporaryMemoryExpiresAt: expiresAt,
+  });
+  await f.sql`UPDATE opening_memories SET status='deleted' WHERE id=${memory.id}`;
+  expect(await jobs.loadHistoryContext(f.scope, third.turnId)).toEqual({ history: [], sourceRefs: [] });
+  await f.sql`UPDATE opening_memories SET status='active' WHERE id=${memory.id}`;
 
   await f.sql`UPDATE opening_conversations SET course_id=${courseA.id} WHERE id=${c.id}`;
   expect(await history()).toEqual(expected);

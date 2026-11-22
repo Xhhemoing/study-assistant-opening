@@ -1,7 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
-import { globalMemoryDoesNotDependOnCourseMemory, lineageUuid, memoryCourseAllows, memoryDependencyRows,
-  turnLineageCourse, turnMemoryOnlySourcesBacked, turnPinnedSourcesIncluded, type FragmentFactory } from "./opening-context-provenance";
+import { hasMemoryBearingRef, readTurnMemoryLineages, turnLineageCourse, turnPinnedSourcesIncluded } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -99,51 +98,34 @@ export async function assertSourceTurnsOwned(
   sourceTurnIds: readonly string[],
   excludeMemoryId: string | null = null,
   targetCourseId: string | null = null,
-): Promise<void> {
-  if (!sourceTurnIds.length) return;
+): Promise<string | undefined> {
+  if (!sourceTurnIds.length) return undefined;
   const unique = [...new Set(sourceTurnIds.map(id => id.toLowerCase()))];
-  const targetCourse: FragmentFactory = () => db`${targetCourseId}::uuid`;
-  const depCourse: FragmentFactory = () => db`dep_m.course_id`;
-  const workspace: FragmentFactory = () => db`t.workspace_id`;
-  const rows = await db`
-    SELECT t.id FROM opening_turns t
-    INNER JOIN opening_conversations c ON c.id = t.conversation_id
-    WHERE t.workspace_id = ${scope.workspaceId}
-      AND c.workspace_id = ${scope.workspaceId}
-      AND c.owner_user_id = ${scope.ownerUserId}
+  const rows = await db<{ id: string; context_source_refs: unknown; effective_course_id: string | null }[]>`
+    SELECT t.id, t.role, t.context_source_refs, t.context_anchor, c.course_id,
+      CASE WHEN t.context_source_refs @? '$[*].memoryDependencyIds[*]'
+        OR t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+        THEN ${turnLineageCourse(db, "t")} END AS effective_course_id
+    FROM opening_turns t
+    JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id
+    WHERE t.workspace_id = ${scope.workspaceId} AND c.owner_user_id = ${scope.ownerUserId}
       AND t.id = ANY(${unique}::uuid[])
-      AND ${turnSourceMaterialsActive(db, scope.workspaceId)}
-      AND NOT EXISTS (
-        WITH RECURSIVE mem_deps(dep_id) AS (
-          SELECT lower(dep.id)
-          FROM ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
-          UNION
-          SELECT lower(dep.id)
-          FROM mem_deps prev
-          JOIN opening_memories pm ON pm.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND pm.workspace_id = t.workspace_id
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-          ) st(turn_id)
-          JOIN opening_turns dt ON dt.id = ${lineageUuid(db, () => db`st.turn_id`)} AND dt.workspace_id = t.workspace_id
-          CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} dep
-        )
-        SELECT 1 FROM mem_deps d
-        WHERE d.dep_id = ${excludeMemoryId}::uuid::text OR NOT EXISTS (
-          SELECT 1 FROM opening_memories dep_m
-          WHERE dep_m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND dep_m.workspace_id = t.workspace_id
-            AND dep_m.status = 'active'
-            AND ${memoryCourseAllows(db, depCourse, targetCourse, workspace)}
-            AND ${memoryCourseAllows(db, depCourse, () => turnLineageCourse(db, "t"), workspace)}
-            AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`dep_m`)}
-            AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp()))
-        )
-      )
-      AND ${turnMemoryOnlySourcesBacked(db, "t", scope.workspaceId, scope.ownerUserId, targetCourse,
-        undefined, () => db`${excludeMemoryId}::uuid`)}`;
-  if (rows.length !== unique.length) {
-    throw new OpeningMemoryError("VALIDATION", "source turns must belong to an owned conversation");
+      AND ${turnSourceMaterialsActive(db, scope.workspaceId)}`;
+  const denied = () => new OpeningMemoryError("VALIDATION", "source turns must belong to an owned conversation");
+  if (rows.length !== unique.length) throw denied();
+  const lineageRows = rows.filter(row => hasMemoryBearingRef(row.context_source_refs));
+  if (!lineageRows.length) return undefined;
+  const lineages = await readTurnMemoryLineages(db, scope, lineageRows.map(row => ({
+    refs: row.context_source_refs, courseId: row.effective_course_id, excludeMemoryId,
+  })));
+  let expiry: string | undefined;
+  for (const lineage of lineages) {
+    if (!lineage || (lineage.courseId !== null && lineage.courseId !== targetCourseId?.toLowerCase())) throw denied();
+    if (lineage.temporaryExpiresAt && (!expiry || lineage.temporaryExpiresAt < expiry)) expiry = lineage.temporaryExpiresAt;
   }
+  return expiry;
 }
+
 
 /** courses has workspace_id only; ownership is the already-locked workspace owner. */
 export async function assertCourseInWorkspace(

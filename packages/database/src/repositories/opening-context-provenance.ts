@@ -5,7 +5,7 @@ import { notePublicationMetadata } from "@aistudy/domain";
 type Db = Sql | TransactionSql;
 type Fragment = ReturnType<Db>;
 export type FragmentFactory = () => Fragment;
-type MemoryAlias = "" | "m" | "backing";
+type MemoryAlias = "" | "m";
 export type ContextSourceRef = Pick<Citation, "sourceId" | "sourceVersion"> & {
   memoryOnly?: boolean;
 };
@@ -227,10 +227,8 @@ export function memoryDependencyRows(db: Db, refs: FragmentFactory): Fragment {
 
 /** Cycle-safe recursive CTE walking a memory's source_turn_ids -> turn memoryDependencyIds -> ancestor memories. */
 export function memoryTransitiveDepsCte(db: Db, alias: MemoryAlias = "m"): Fragment {
-  const sourceTurnIds = () => alias === "m" ? db`m.source_turn_ids`
-    : alias === "backing" ? db`backing.source_turn_ids` : db`opening_memories.source_turn_ids`;
-  const workspaceId: FragmentFactory = () => alias === "m" ? db`m.workspace_id`
-    : alias === "backing" ? db`backing.workspace_id` : db`opening_memories.workspace_id`;
+  const sourceTurnIds = () => alias === "m" ? db`m.source_turn_ids` : db`opening_memories.source_turn_ids`;
+  const workspaceId: FragmentFactory = () => alias === "m" ? db`m.workspace_id` : db`opening_memories.workspace_id`;
   return db`WITH RECURSIVE mem_deps(dep_id) AS (
     SELECT lower(dep.id)
     FROM jsonb_array_elements_text(
@@ -262,10 +260,8 @@ export function memoryCourseAllows(
 
 /** TRUE iff every transitive memory referenced by a memory's source turns is usable in its course. */
 export function memoryTransitiveDependenciesActive(db: Db, alias: MemoryAlias = "m"): Fragment {
-  const workspaceId: FragmentFactory = () => alias === "m" ? db`m.workspace_id`
-    : alias === "backing" ? db`backing.workspace_id` : db`opening_memories.workspace_id`;
-  const courseId: FragmentFactory = () => alias === "m" ? db`m.course_id`
-    : alias === "backing" ? db`backing.course_id` : db`opening_memories.course_id`;
+  const workspaceId: FragmentFactory = () => alias === "m" ? db`m.workspace_id` : db`opening_memories.workspace_id`;
+  const courseId: FragmentFactory = () => alias === "m" ? db`m.course_id` : db`opening_memories.course_id`;
   return db`NOT EXISTS (
     ${memoryTransitiveDepsCte(db, alias)}
     SELECT 1
@@ -363,7 +359,7 @@ export function turnTransitiveDependenciesActive(
 }
 
 /** The source must be present in an owned source turn of the exact backing memory. */
-function memoryBacksSource(
+export function memoryBacksSource(
   db: Db, sourceTurnIds: FragmentFactory, sourceId: FragmentFactory, workspaceId: string, ownerUserId: string,
   allowInheritedRefs: FragmentFactory,
 ): Fragment {
@@ -388,33 +384,142 @@ function memoryBacksSource(
   )`;
 }
 
-/** Legacy memory-only refs without IDs still require an independent source-backed memory. */
-export function turnMemoryOnlySourcesBacked(
-  db: Db, alias: "a" | "t", workspaceId: string, ownerUserId: string, targetCourseId: FragmentFactory,
-  ownCourseId: FragmentFactory = () => turnLineageCourse(db, alias), excludeMemoryId: FragmentFactory = () => db`NULL::uuid`,
-): Fragment {
-  const refs: FragmentFactory = () => alias === "a" ? db`a.context_source_refs` : db`t.context_source_refs`;
-  const hasIds: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
-  return db`NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements(
-      CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END
-    ) AS mem_ref
-    WHERE (mem_ref->>'memoryOnly') = 'true' AND NOT EXISTS (
-      SELECT 1 FROM opening_memories backing
-      WHERE backing.workspace_id = ${workspaceId} AND backing.status = 'active'
-        AND backing.id IS DISTINCT FROM ${excludeMemoryId()}
-        AND ${memoryCourseAllows(db, () => db`backing.course_id`, ownCourseId, () => db`backing.workspace_id`)}
-        AND ${memoryCourseAllows(db, () => db`backing.course_id`, targetCourseId, () => db`backing.workspace_id`)}
-        AND (backing.kind = 'confirmed' OR (backing.kind = 'temporary' AND backing.expires_at > clock_timestamp()))
-        AND ((${hasIds()}) AND EXISTS (
-          SELECT 1 FROM ${memoryDependencyRows(db, refs)} d WHERE lower(d.id) = backing.id::text
-        ) OR (NOT (${hasIds()}) AND backing.course_id IS NULL))
-        AND ${memoryBacksSource(db, () => db`backing.source_turn_ids`,
-          () => lineageUuid(db, () => db`mem_ref->>'sourceId'`), workspaceId, ownerUserId, hasIds)}
-        AND CASE WHEN ${hasIds()} THEN true ELSE ${memoryTransitiveDependenciesActive(db, "backing")} END
-    )
-  )`;
+export function hasMemoryBearingRef(refs: unknown): boolean {
+  return Array.isArray(refs) && refs.some(ref => ref && typeof ref === "object"
+    && (ref.memoryOnly === true || Object.hasOwn(ref, "memoryDependencyIds")));
 }
+
+type MemoryLineageRequest = { refs: unknown; courseId: string | null; excludeMemoryId?: string | null };
+
+export type TurnMemoryLineage = {
+  courseId: string | null;
+  memoryIds: string[];
+  temporaryExpiresAt?: string;
+};
+
+type MemoryDependencyRow = {
+  root_id: string;
+  dep_id: string;
+  course_id: string | null;
+  usable: boolean;
+  expires_at: Date | null;
+};
+
+/** Set-based closure shared by batched readers and the single-statement metadata gate. */
+export function memoryDependencyGraphCtes(db: Db, workspaceId: string, seeds: FragmentFactory): Fragment {
+  return db`
+    mem_deps(root_id, parent_id, dep_id) AS (
+      SELECT id, NULL::uuid, id::text FROM (${seeds()}) roots
+      UNION
+      SELECT prev.root_id, parent.id, lower(dep.id)
+      FROM mem_deps prev
+      JOIN opening_memories parent ON parent.id = ${lineageUuid(db, () => db`prev.dep_id`)}
+        AND parent.workspace_id = ${workspaceId}
+      CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(parent.source_turn_ids) = 'array' THEN parent.source_turn_ids ELSE '[]'::jsonb END
+      ) origin(turn_id)
+      JOIN opening_turns t ON t.id = ${lineageUuid(db, () => db`origin.turn_id`)} AND t.workspace_id = parent.workspace_id
+      CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
+    ), dependency_status AS (
+    SELECT d.root_id, d.dep_id, m.course_id,
+      m.status = 'active'
+        AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at > clock_timestamp()))
+        AND (m.course_id IS NULL OR (c.id IS NOT NULL AND (d.parent_id IS NULL OR parent.course_id = m.course_id))) AS usable,
+      CASE WHEN m.kind = 'temporary' THEN m.expires_at END AS expires_at
+    FROM mem_deps d
+    LEFT JOIN opening_memories m ON m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND m.workspace_id = ${workspaceId}
+    LEFT JOIN opening_memories parent ON parent.id = d.parent_id AND parent.workspace_id = m.workspace_id
+    LEFT JOIN courses c ON c.id = m.course_id AND c.workspace_id = m.workspace_id AND c.archived_at IS NULL
+    )`;
+}
+
+async function readMemoryDependencyGraph(db: Db, workspaceId: string, rootIds: string[]) {
+  const byRoot = new Map<string, MemoryDependencyRow[]>();
+  if (!rootIds.length) return byRoot;
+  const rows = await db<MemoryDependencyRow[]>`
+    WITH RECURSIVE ${memoryDependencyGraphCtes(db, workspaceId,
+      () => db`SELECT id FROM unnest(${rootIds}::uuid[]) AS root(id)`)}
+    SELECT * FROM dependency_status`;
+  for (const row of rows) {
+    const group = byRoot.get(row.root_id);
+    if (group) group.push(row);
+    else byRoot.set(row.root_id, [row]);
+  }
+  return byRoot;
+}
+
+/** Ordinary turns never send a recursive statement. Resolve attributed and legacy backing in batches. */
+export async function readTurnMemoryLineages(
+  db: Db, scope: { workspaceId: string; ownerUserId: string }, requests: readonly MemoryLineageRequest[],
+): Promise<Array<TurnMemoryLineage | null>> {
+  const parsed = requests.map(request => {
+    if (!hasMemoryBearingRef(request.refs)) return { ids: [], sourceIds: [] };
+    const ids = parseContextMemoryDependencyIds(request.refs);
+    const refs = parseContextSourceRefs(request.refs);
+    return ids && refs ? { ids, sourceIds: refs.filter(ref => ref.memoryOnly).map(ref => ref.sourceId) } : null;
+  });
+  const lookups = parsed.flatMap((turn, index) => turn?.sourceIds.map(sourceId => ({
+    request_index: index, source_id: sourceId, memory_ids: turn.ids, course_id: requests[index]!.courseId,
+    excluded_id: requests[index]!.excludeMemoryId ?? null,
+  })) ?? []);
+  const backingRows = lookups.length ? await db<{ request_index: number; source_id: string; id: string; course_id: string | null }[]>`
+    WITH requested AS (
+      SELECT * FROM jsonb_to_recordset(${db.json(lookups)}::jsonb)
+        AS req(request_index integer, source_id uuid, memory_ids uuid[], course_id uuid, excluded_id uuid)
+    )
+    SELECT r.request_index, r.source_id, backing.id, backing.course_id
+    FROM requested r
+    JOIN opening_memories backing ON backing.workspace_id = ${scope.workspaceId} AND backing.status = 'active'
+      AND backing.id IS DISTINCT FROM r.excluded_id
+      AND (cardinality(r.memory_ids) = 0 OR backing.id = ANY(r.memory_ids))
+      AND ${memoryCourseAllows(db, () => db`backing.course_id`, () => db`r.course_id`, () => db`backing.workspace_id`)}
+    LEFT JOIN courses own ON own.id = r.course_id AND own.workspace_id = backing.workspace_id AND own.archived_at IS NULL
+    WHERE (cardinality(r.memory_ids) > 0 OR r.course_id IS NULL OR own.id IS NOT NULL)
+      AND ${memoryBacksSource(db, () => db`backing.source_turn_ids`, () => db`r.source_id`, scope.workspaceId,
+        scope.ownerUserId, () => db`cardinality(r.memory_ids) > 0`)}
+    ORDER BY r.request_index, r.source_id, backing.course_id NULLS LAST, backing.id` : [];
+  const roots = [...new Set([...parsed.flatMap(turn => turn?.ids ?? []), ...backingRows.map(row => row.id)])];
+  const graph = await readMemoryDependencyGraph(db, scope.workspaceId, roots);
+  const backingByRequest = new Map<number, typeof backingRows[number][]>();
+  for (const row of backingRows) {
+    const group = backingByRequest.get(row.request_index);
+    if (group) group.push(row);
+    else backingByRequest.set(row.request_index, [row]);
+  }
+  return parsed.map((turn, index) => {
+    if (!turn) return null;
+    const request = requests[index]!;
+    const usable = (id: string) => {
+      const rows = graph.get(id);
+      return rows?.length && rows.every(row => row.usable && row.dep_id !== request.excludeMemoryId
+        && (row.course_id === null || row.course_id === request.courseId)) ? rows : null;
+    };
+    const selected = new Map<string, MemoryDependencyRow>();
+    const take = (rows: MemoryDependencyRow[]) => rows.forEach(row => selected.set(row.dep_id, row));
+    for (const id of turn.ids) {
+      const rows = usable(id);
+      if (!rows) return null;
+      take(rows);
+    }
+    for (const sourceId of turn.sourceIds) {
+      const backing = (backingByRequest.get(index) ?? [])
+        .filter(row => row.source_id === sourceId)
+        .map(row => usable(row.id)).find(rows => rows !== null);
+      if (!backing) return null;
+      take(backing);
+    }
+    const dependencies = [...selected.values()];
+    const expiresAt = dependencies.reduce((earliest, row) => row.expires_at == null
+      ? earliest : Math.min(earliest, new Date(row.expires_at).getTime()), Infinity);
+    return {
+      courseId: (!turn.ids.length && turn.sourceIds.length > 0) || dependencies.some(row => row.course_id !== null)
+        ? request.courseId : null,
+      memoryIds: [...selected.keys()].sort(),
+      ...(Number.isFinite(expiresAt) ? { temporaryExpiresAt: new Date(expiresAt).toISOString() } : {}),
+    };
+  });
+}
+
 
 export function turnHasMemoryDependencies(db: Db): Fragment {
   return db`t.context_source_refs @? '$[*].memoryDependencyIds[*]'`;

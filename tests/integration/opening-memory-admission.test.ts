@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCourseMembershipRepository,
@@ -59,6 +60,24 @@ afterAll(async () => {
 });
 
 describe("opening memory owner and source admission", () => {
+  it("proposes and confirms an ordinary sourced memory without planning any recursive statement", async () => {
+    const turnId = await insertTurn(fixture.scope.workspaceId, fixture.scope.ownerUserId);
+    const statements: string[] = [];
+    const sql = postgres(process.env.OPENING_TEST_DATABASE_URL!, {
+      max: 1, debug: (_connection, query) => { statements.push(query); },
+    });
+    try {
+      const repository = createOpeningMemoryRepository(sql);
+      const memory = await repository.proposeMemory(fixture.scope, { text: "Ordinary source", sourceTurnIds: [turnId], expiresAt: null });
+      await expect(repository.confirm(fixture.scope, memory.id, memory.version, randomUUID())).resolves.toMatchObject({ kind: "confirmed" });
+      const admission = statements.filter(query => /SELECT t\.id, t\.role, t\.context_source_refs/.test(query));
+      expect(admission).toHaveLength(3);
+      expect(statements.some(query => /\bWITH\s+RECURSIVE\b/i.test(query))).toBe(false);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+  });
+
   it("admits same-course memory descendants and rejects laundering through global or other-course memory", async () => {
     const { sql, scope } = fixture;
     const courses = createCourseMembershipRepository(sql);
@@ -67,7 +86,7 @@ describe("opening memory owner and source admission", () => {
     const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage B", slug: "memory-lineage-b" });
     const material = await insertSource(sql, scope);
     const evidence = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
-    const unrelatedEvidence = await insertOwnedTurn(sql, scope);
+    const unrelatedEvidence = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
     const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
     const ancestor = await memories.proposeMemory(scope, {
       courseId: courseA.id, text: "Temporary course A ancestor", sourceTurnIds: [evidence], expiresAt,
@@ -102,7 +121,10 @@ describe("opening memory owner and source admission", () => {
       .resolves.toMatchObject({ courseId: courseA.id });
     // Even a legacy source reference without exact dependency IDs cannot make scoped lineage global.
     await saveRefs([memoryRef]);
-    await expect(memories.proposeMemory(scope, proposal)).rejects.toMatchObject({ code: "VALIDATION" });
+    for (const courseId of [null, courseB.id]) {
+      await expect(memories.proposeMemory(scope, { ...proposal, courseId })).rejects.toMatchObject({ code: "VALIDATION" });
+    }
+    await expect(memories.proposeMemory(scope, { ...proposal, courseId: courseA.id })).resolves.toMatchObject({ courseId: courseA.id });
     await expect(memories.replaceMemory(scope, { ...replace, id: global.id, expectedVersion: confirmedGlobal.version, clientKey: randomUUID() }))
       .rejects.toMatchObject({ code: "VALIDATION" });
   });

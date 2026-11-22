@@ -101,13 +101,18 @@ describe("saved tutor material provenance", () => {
     await expect(jobs.assertGlobalMemoriesCurrent(scope, [b.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).resolves.toBeUndefined();
     const membership = { workspaceId: scope.workspaceId, courseId: courseB.id, assetType: "source" as const, assetId: material };
-    await courses.addAssetMembership({ ...membership, role: "core", purpose: "teaching", visibility: "course" });
-    await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
-    await courses.removeAssetMembership(membership);
+    for (const purpose of [null, "teaching", "mock_exam"] as const) {
+      await courses.addAssetMembership({ ...membership, role: "core", purpose, visibility: "course" });
+      await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(false);
+      await courses.removeAssetMembership(membership);
+    }
     const sameCourse = { ...membership, courseId: courseA.id };
     await courses.addAssetMembership({ ...sameCourse, role: "core", purpose: "practice", visibility: "course" });
     await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(false);
     await courses.removeAssetMembership(sameCourse);
+    await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(true);
     const publication = { ...send, privacyEpoch: await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope) };
     const publish = vi.fn(async () => {});
     await jobs.withStreamPublication(scope, pending.jobId, publication, publish);
@@ -137,6 +142,11 @@ describe("saved tutor material provenance", () => {
       version: "study-query-v1", asOf: new Date().toISOString(), privacyEpoch: publication.privacyEpoch,
       mode: "deterministic", status: "ok", reason: "read", results: [] },
     };
+    await expect(jobs.completeTurn({ ...completion, contextSourceRefs: [sourceRef] }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.completeTurn({ ...completion, contextSourceRefs: [{ memoryDependencyIds: [a.id] }] as never }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await jobs.get(scope, record.jobId)).toMatchObject({ status: "running" });
     await expect(jobs.completeTurn(completion, { globalMemoryIds: [b.id] })).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.completeTurn(completion, { globalMemoryIds: [a.id] })).resolves.toBeUndefined();
     expect(await jobs.get(scope, record.jobId)).toMatchObject({ status: "succeeded" });

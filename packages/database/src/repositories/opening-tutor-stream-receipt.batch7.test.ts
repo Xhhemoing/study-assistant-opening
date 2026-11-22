@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
+import { createOpeningMemoryRepository } from "./opening-memory";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 import { hasAttemptedFallbackStreamSeal, UnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
-const hooks = vi.hoisted(() => ({ release: vi.fn(), lock: vi.fn(), readAttempt: vi.fn() }));
+const hooks = vi.hoisted(() => ({ release: vi.fn(), lock: vi.fn(), readAttempt: vi.fn(), assertAttempt: vi.fn() }));
 vi.mock("./opening-study-exposure", async original => ({ ...await original<typeof import("./opening-study-exposure")>(), releaseOpeningStudyExposure: hooks.release }));
 vi.mock("./opening-learning-facts", async original => ({ ...await original<typeof import("./opening-learning-facts")>(), lockWorkspaceLearningHistory: hooks.lock }));
-vi.mock("./opening-tutor-attempt-context", async original => ({ ...await original<typeof import("./opening-tutor-attempt-context")>(), readTutorAttemptContext: hooks.readAttempt }));
+vi.mock("./opening-tutor-attempt-context", async original => ({ ...await original<typeof import("./opening-tutor-attempt-context")>(), readTutorAttemptContext: hooks.readAttempt, assertTutorAttemptContext: hooks.assertAttempt }));
 vi.mock("./opening-context-provenance", async original => ({ ...await original<typeof import("./opening-context-provenance")>(), contextSourceRefsIncluded: () => "synthetic-admission-expression" }));
 const workspace = "12000000-0000-4000-8000-000000000001", owner = "12000000-0000-4000-8000-000000000002";
 const jobId = "12000000-0000-4000-8000-000000000003", assistant = "12000000-0000-4000-8000-000000000004";
@@ -70,7 +71,7 @@ function fixture(options: Options = {}) {
     }
     if (sql.startsWith("SELECT asset_id,course_id,purpose FROM course_asset_memberships")) {
       return options.classifiedMemoryCourseId ? [{ asset_id: sourceId, course_id: options.classifiedMemoryCourseId,
-        purpose: options.derivedMembershipPurpose ?? "teaching" }] : [];
+        purpose: options.derivedMembershipPurpose === undefined ? "teaching" : options.derivedMembershipPurpose }] : [];
     }
     if (sql.startsWith("SELECT id FROM course_asset_memberships")) {
       if (sql.includes("purpose='mock_exam'")) {
@@ -623,15 +624,52 @@ describe("stream receipt release waits for current job authorization and assista
     expect(blocked).not.toHaveBeenCalled();
   });
 
-  it.each(["other course", "practice", "mock exam"])("blocks course-only memory lineage classified for %s", async purpose => {
+  it.each(["other course", "other course without a purpose", "practice", "mock exam"])("blocks course-only memory lineage classified for %s", async purpose => {
     const memoryId = "12000000-0000-4000-8000-0000000000ad";
     const f = fixture({ courseId, activeGlobalMemoryIds: [memoryId], courseOnlyMemorySourceIds: [sourceId],
-      classifiedMemoryCourseId: purpose === "other course" ? "12000000-0000-4000-8000-0000000000ea" : courseId,
-      derivedMembershipPurpose: purpose === "practice" ? "practice" : "teaching",
+      classifiedMemoryCourseId: purpose.startsWith("other course") ? "12000000-0000-4000-8000-0000000000ea" : courseId,
+      derivedMembershipPurpose: purpose === "practice" ? "practice" : purpose === "other course without a purpose" ? null : "teaching",
       mockExamSourceIds: purpose === "mock exam" ? [sourceId] : [] });
     await expect(f.repo.assertSendAuthorized(scope, jobId, { ...context,
       contextSourceRefs: [{ sourceId, sourceVersion: 0, memoryOnly: true }],
       memoryLineageSourceIds: [sourceId], globalMemoryIds: [memoryId],
     })).rejects.toMatchObject({ code: "CONFLICT" });
   });
+
+  it("checks the attempt binding after the workspace lock and before locking the job on completion", async () => {
+    const f = fixture({ boundAttempt: attempt, courseId });
+    const verify = vi.fn(() => {
+      expect(f.calls.some(call => call.sql.startsWith("SELECT privacy_epoch FROM workspaces") && call.sql.includes("FOR UPDATE"))).toBe(true);
+      expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(false);
+    });
+    hooks.assertAttempt.mockImplementationOnce(verify);
+    await f.repo.completeTurn({ scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token },
+      { attemptContext: { target: { jobId, userTurnId: user, claimToken: token }, snapshot: { sourceRefs: [] } as never } });
+    expect(verify).toHaveBeenCalledOnce();
+    expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(true);
+  });
+});
+
+it("keeps ordinary proposal and confirmation SQL free of recursive subplans", async () => {
+  const statements: string[] = [];
+  const memory = { id: receipt, workspace_id: workspace, course_id: null, kind: "candidate", text: "Ordinary evidence",
+    source_turn_ids: [user], version: 0, status: "active", created_at: time, updated_at: time };
+  const tx = Object.assign((parts: TemplateStringsArray, ...values: unknown[]) => {
+    const query = parts.reduce((text, part, index) => text + (index ? String(values[index - 1]) : "") + part, "")
+      .replace(/\s+/g, " ").trim();
+    return { toString: () => query, then: (resolve: (rows: unknown[]) => unknown) => {
+      statements.push(query);
+      if (query.startsWith("SELECT id FROM workspaces")) return resolve([{ id: workspace }]);
+      if (query.startsWith("SELECT t.id, t.role")) return resolve([{ id: user, context_source_refs: [] }]);
+      if (query.startsWith("INSERT INTO opening_memories") || query.startsWith("SELECT * FROM opening_memories")) return resolve([memory]);
+      if (query.startsWith("UPDATE opening_memories SET kind")) return resolve([{ ...memory, kind: "confirmed", version: 1 }]);
+      return resolve([]);
+    } };
+  }, { json: JSON.stringify });
+  const sql = Object.assign(tx, { begin: async (run: (tx: unknown) => Promise<unknown>) => run(tx) }) as unknown as Sql;
+  const repo = createOpeningMemoryRepository(sql);
+  const proposed = await repo.proposeMemory(scope, { text: memory.text, sourceTurnIds: [user], expiresAt: null });
+  await expect(repo.confirm(scope, proposed.id, proposed.version, "confirm-ordinary")).resolves.toMatchObject({ kind: "confirmed" });
+  expect(statements.filter(query => query.startsWith("SELECT t.id, t.role"))).toHaveLength(3);
+  expect(statements.join("\n")).not.toMatch(/\bWITH\s+RECURSIVE\b/i);
 });

@@ -350,6 +350,13 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const memoryContext = deps.memories
         ? await deps.memories.listContext(scope, contextNow, resolvedCourseId)
         : { memories: [], sourceRefs: [] };
+      const ineligibleCourseMemoryIds = new Set(memoryContext.memories.filter(memory => memory.courseId != null
+        && memory.courseId.toLowerCase() !== resolvedCourseId?.toLowerCase()).map(memory => memory.id.toLowerCase()));
+      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow)
+        && !ineligibleCourseMemoryIds.has(memory.id.toLowerCase()));
+      const memorySourceRefs = eligibleMemories.length ? memoryContext.sourceRefs : [];
+      const memoryDependencyIds = eligibleMemories.length ? (memoryContext.dependencyMemoryIds ?? [])
+        .map(id => id.toLowerCase()).filter(id => !ineligibleCourseMemoryIds.has(id)) : [];
       const learnerContext = await deps.learnerContext?.read(scope, { courseId: resolvedCourseId,
         sourceIds: allowedSourceIds }) ?? null;
       const nonMemorySourceIds = new Set(
@@ -364,18 +371,16 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       );
       const memoryLineageSourceIds = [...new Set(
         [
-          ...memoryContext.sourceRefs,
+          ...memorySourceRefs,
           ...historySourceRefs.filter(ref => ref.memoryOnly === true),
         ]
           .map(({ sourceId }) => sourceId.toLowerCase())
           .filter(sourceId => !nonMemorySourceIds.has(sourceId)),
       )].sort();
-      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow)
-        && (memory.courseId == null || (resolvedCourseId != null && memory.courseId.toLowerCase() === resolvedCourseId.toLowerCase())));
       const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
       const temporaryExpiryCandidates = [
         ...injectedTemporaryMemories.map(memory => memory.expiresAt!),
-        ...(memoryContext.temporaryMemoryExpiresAt ? [memoryContext.temporaryMemoryExpiresAt] : []),
+        ...(eligibleMemories.length && memoryContext.temporaryMemoryExpiresAt ? [memoryContext.temporaryMemoryExpiresAt] : []),
         ...(historyTempExpiresAt ? [historyTempExpiresAt] : []),
       ];
       const earliestTemporaryMemoryExpiresAt = temporaryExpiryCandidates.length
@@ -392,10 +397,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       };
       const globalMemoryIds = [...new Set([
         ...eligibleMemories.map(memory => memory.id.toLowerCase()),
-        ...(memoryContext.dependencyMemoryIds ?? []).map(id => id.toLowerCase()),
+        ...memoryDependencyIds,
         ...historyMemoryIds.map(id => id.toLowerCase()),
       ])].sort();
-      const memoryTaggedSourceRefs = memoryContext.sourceRefs.map(ref =>
+      const memoryTaggedSourceRefs = memorySourceRefs.map(ref =>
         nonMemorySourceIds.has(ref.sourceId.toLowerCase()) ? ref : { ...ref, memoryOnly: true },
       );
       const contextSourceRefs = mergeContextSourceRefs(

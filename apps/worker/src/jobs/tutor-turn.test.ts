@@ -1387,7 +1387,11 @@ describe("tutor turn handler", () => {
       chunkA.id],
       requestId: null, candidates: [{ kind: "memory", text: "mixed memory", temporary: false }], inputTokens: 1, outputTokens: 1 }) });
     tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 1 }] });
-    const memories = { listContext: vi.fn(async () => ({ sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 2 }], memories: [] })) };
+    const memories = { listContext: vi.fn(async () => ({ sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 2 }], memories: [{
+      id: "00000000-0000-4000-8000-0000000000a1", workspaceId: claimedJob.workspaceId, courseId: null,
+      kind: "confirmed" as const, text: "Retained study preference", sourceTurnIds: [claimedJob.userTurnId], version: 0,
+      expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+    }] })) };
     await createTutorTurnHandler({ ...deps, memories })(claimedJob.id);
     expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       contextSourceRefs: [
@@ -1792,7 +1796,8 @@ describe("tutor turn handler", () => {
     const foreign = memory("00000000-0000-4000-8000-0000000000a3", courseB, "Foreign course text");
     const sourceRefs = [{ sourceId: secondSourceId, sourceVersion: 0 },
       ...(binding === "unbound" ? [] : [{ sourceId: "00000000-0000-4000-8000-000000000098", sourceVersion: 0 }])];
-    const listContext = vi.fn(async () => ({ memories: [global, matching, foreign], sourceRefs }));
+    const listContext = vi.fn(async () => ({ memories: [global, matching, foreign], sourceRefs,
+      dependencyMemoryIds: [matching.id.toUpperCase(), foreign.id] }));
     const assertGlobalMemoriesCurrent = vi.fn(async () => {});
     const stream = { begin: vi.fn(async () => {}), seal: vi.fn(async () => {}), append: vi.fn(async () => 1) };
     await createTutorTurnHandler({ ...deps, stream, memories: { listContext },
@@ -1812,6 +1817,23 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
       contextSourceRefs: expect.arrayContaining(sourceRefs.map(ref => ({ ...ref, memoryOnly: true }))),
     }), expect.objectContaining({ globalMemoryIds: expectedIds }));
+  });
+
+  it("discards a memory snapshot's refs, dependency IDs and expiry when none of its memories are eligible", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const memoryId = "00000000-0000-4000-8000-0000000000b1";
+    const listContext = async () => ({
+      memories: [{ id: memoryId, workspaceId: claimedJob.workspaceId, courseId: claimedJob.conversationId,
+        kind: "confirmed" as const, text: "Foreign memory", sourceTurnIds: [claimedJob.userTurnId], version: 0,
+        expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt }],
+      sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 0 }], dependencyMemoryIds: [memoryId],
+      temporaryMemoryExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+    await expect(createTutorTurnHandler({ ...deps, memories: { listContext } })(claimedJob.id)).resolves.toEqual({ skipped: false });
+    expect(provider.complete.mock.calls[0]?.[0].instruction).not.toContain("Foreign memory");
+    const [completion, options] = tutorJobs.completeTurn.mock.calls[0]!;
+    expect(completion.contextSourceRefs).toEqual([{ sourceId: chunkA.sourceId, sourceVersion: 0 }]);
+    expect(options).not.toHaveProperty("globalMemoryIds");
   });
 
   it("blocks provider dispatch when an injected temporary memory expires before send or fails DB re-check", async () => {
