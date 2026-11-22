@@ -1,5 +1,6 @@
 import type { Sql } from "postgres";
 import { describe, expect, it } from "vitest";
+import { containsPdfAnswerLabel } from "./opening-knowledge-definitions";
 import { readOpeningSourceContent } from "./opening-source-content";
 
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
@@ -7,6 +8,17 @@ const source = { version: 1, mime: "application/pdf", parse_state: "ready", uplo
   published: false, ai_excluded: true, error: null };
 
 const defaultChunks = [{ id: "public", page: 1, text: "private", characters: 7, readable: true }];
+
+it("keeps PDF worked-example context until a genuine structural heading", () => {
+  const exampleWith = (line: string) => `Worked Example 1: Factor x.\n${line}\n【解析】\nThe derivation follows.`;
+  for (const line of ["Chapter 2 Algebra — Page 12", "3.14 V", "3.14 厘米",
+    "Theorem 2.1 (Lagrange), applied to G, gives the result."]) {
+    expect(containsPdfAnswerLabel(exampleWith(line)), line).toBe(false);
+  }
+  for (const line of ["2.1 有限群", "定理 2.1（拉格朗日定理）", "Definition 1.2"]) {
+    expect(containsPdfAnswerLabel(exampleWith(line)), line).toBe(true);
+  }
+});
 
 function database(row: Record<string, unknown> | undefined, chunks = defaultChunks, reads: string[] = []): Sql {
   const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {

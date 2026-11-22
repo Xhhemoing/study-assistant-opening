@@ -78,11 +78,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v27-discourse/text",
     "docling-2.126.0/pdf-segments-v28-discourse/text",
     "docling-2.126.0/pdf-segments-v29-discourse/text",
+    "docling-2.126.0/pdf-segments-v30-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v30-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v31-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -975,6 +976,13 @@ describe("bounded resumable PDF parser", () => {
       expect(result.publishedChunks.map(({ page, text }) => [page, text]))
         .toEqual([[1, "Exercise 1. Solve x - 3 = 0."], [3, "Public prose continues here."]]);
       if (segmentPages === 1) expect(result.requests[1]).toEqual({ start: 2, exercise: true });
+    });
+
+    it.each([1, 5])("preserves section boundaries from Python CLI in %i-page ranges", async segmentPages => {
+      const result = await runCliScenario("qualified_section_exit", { segmentPages });
+      expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([
+        [5, "定理 2.1（拉格朗日定理）\nPublic explanation."],
+      ]);
     });
 
     it("re-extracts a speculative tail when Vision establishes exercise context", async () => {
@@ -2654,7 +2662,9 @@ describe("bounded resumable PDF parser", () => {
     expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Find x.", "Public explanation."]);
   });
 
-  it.each(["(iv).", "第十二页（共三百页）", "共三百页 第十二页", "Page 12", "Chapter 2 — Page 12", "第 2 章 | 第 12 页", "- 12 -"])(
+  it.each(["(iv).", "第十二页（共三百页）", "共三百页 第十二页", "Page 12", "Chapter 2 — Page 12", "第 2 章 | 第 12 页", "- 12 -",
+    "Chapter 2 Algebra — Page 12", "Chapter 2: Algebra | Page 12", "Section 2.1 Rings - Page 12",
+    "第 2 章 线性代数 — 第 12 页", "2.1 Finite Groups — Page 12", "Algebra — Page 12"])(
     "carries an inline answer past the running footer %j", async footer => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解析】\n" + footer },
@@ -2673,7 +2683,10 @@ describe("bounded resumable PDF parser", () => {
     "图 2（a）显示了函数图像。", "图 2(a) 显示了函数图像。", "表 3（1）列出了数据。",
     "Figure 2(a) shows the graph.", "Table 3 (b) lists the values.", "Theorem 2.1 (Lagrange) states that G is finite.",
     "Figure 2 a: shows the graph.", "Example 1 (Lagrange) gives the construction.",
-    "3.14 is the desired approximation.", "3.14 Euler's constant is irrational.", "2.718 = e", "3.14 是所需近似值。"])(
+    "Figure 2(a), which shows the graph, is useful here.", "Theorem 2.1 (Lagrange), applied to G, gives the result.",
+    "定理 2.1（拉格朗日），应用于 G，可得结果。", "Figure 2(a):, which shows the graph.", "Theorem 2.1: This gives the result.",
+    "3.14 is the desired approximation.", "3.14 Euler's constant is irrational.", "2.718 = e", "3.14 是所需近似值。",
+    "3.14 V", "3.14 厘米", "3.14 kPa", "3.14 kg/m^3", "3.14 Mmol", "3.14 平方公里/秒", "3.14 有三个解"])(
     "keeps %j and its following answer inside the exercise seal", async reference => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解答】" },
@@ -2689,7 +2702,8 @@ describe("bounded resumable PDF parser", () => {
     "Chapter 2", "Chapter 2 Rings", "# Section 2.2 finite rings", "第一章 环与域", "第 2 章：群",
     "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理", "图 2（a）：函数图像",
     "Figure 2(a): Function graph", "定理 2.1（拉格朗日定理）",
-    "2.1 Ring Homomorphisms", "2.1.3 Kernel of a Homomorphism", "2.3 线性变换的矩阵"])(
+    "2.1 Ring Homomorphisms", "2.1.3 Kernel of a Homomorphism", "2.3 线性变换的矩阵",
+    "2.1 有限群", "2.2 有理数域", "2.3 有界算子", "2.4 在线算法"])(
     "reopens a pending inline answer at %j", async heading => {
       const result = await runPdfScenario({ pages: [
         { page: 1, text: "Exercise 1: Find x.\n【解答】" },
@@ -2699,6 +2713,35 @@ describe("bounded resumable PDF parser", () => {
       expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Find x.", heading + "\nPublic explanation."]);
     },
   );
+
+  it.each(["Theorem 2.1 (Lagrange)", "定理 2.1（拉格朗日定理）", "Definition 1.2", "定义 1.2",
+    "Worked Example 2.1", "例题 2.1", "2.1 有限群"])("reopens an answer section at %j after withholding proofs", async heading => {
+    const result = await runPdfScenario({ pages: [
+      { page: 1, text: "Answer Key" },
+      { page: 2, text: "Proof:\n证明：\n5 units." },
+      { page: 3, text: heading + "\nPublic explanation." },
+    ] });
+    expect(result.publishedChunks.map(chunk => chunk.text)).toEqual([heading + "\nPublic explanation."]);
+  });
+
+  it.each([false, true])("recognizes reflowed archived answers after extraction (failed retry: %s)", async failed => {
+    const chapter = "Chapter 3: Fields";
+    const archived = ["Answer Key", "The equation has three roots.\nThe value is deter-\nmined by factoring.", chapter];
+    const savedChunks = archived.map((text, index) => ({
+      page: index + 1, text, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null,
+    }));
+    const pages = ["This introduction explains polynomials.", "The equation has three roots. The value is determined by factoring.", chapter]
+      .map((text, index) => ({ page: index + 1, text }));
+    const segmentData = new Map<string, PdfSegment>();
+    const savedOnRetry = failed ? (await runPdfScenario({
+      pages, savedChunks, segmentData, segmentPages: 1, failedStarts: [2],
+    })).publishedChunks : savedChunks;
+    const result = await runPdfScenario({ pages, savedChunks: savedOnRetry, segmentData });
+    expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([1, 3]);
+    expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
+      state: "ready", pages: [{ hadSealedContent: true, sectionSealedAtEnd: true }],
+    });
+  });
 
   it.each([true, false])("withholds a continuation after conversion failure and replays safely after recovery (answer: %s)", async answer => {
     const segmentData = new Map<string, PdfSegment>();

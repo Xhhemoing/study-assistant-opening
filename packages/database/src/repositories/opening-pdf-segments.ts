@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true; withheldNativeDigest?: string; withheldNativeMode?: "section_sealed" | "inline_sealed" };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[]; requiresRevalidation?: true } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -48,6 +48,13 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
     if (row.publicationSealHadPublicPrefix !== undefined && typeof row.publicationSealHadPublicPrefix !== "boolean") throw new TypeError("invalid PDF publicationSealHadPublicPrefix metadata");
     if (row.publicationSealCommitted !== undefined && typeof row.publicationSealCommitted !== "boolean") throw new TypeError("invalid PDF publicationSealCommitted metadata");
     if (row.reopenedSection !== undefined && typeof row.reopenedSection !== "boolean") throw new TypeError("invalid PDF reopenedSection metadata");
+    if (row.withheldNativeDigest !== undefined || row.withheldNativeMode !== undefined || row.failedRangeBoundary !== undefined) {
+      if (typeof row.withheldNativeDigest !== "string" || !/^[a-f0-9]{64}$/u.test(row.withheldNativeDigest)
+        || (row.withheldNativeMode !== "section_sealed" && row.withheldNativeMode !== "inline_sealed")
+        || row.failedRangeBoundary !== true || row.publicationSealUnknown !== true || row.text !== "") {
+        throw new TypeError("invalid PDF withheld native metadata");
+      }
+    }
     return { page: row.page as number, text: row.text, imagePath: null,
       ...(row.visualKinds === undefined ? {} : { visualKinds: row.visualKinds as PdfSegmentPage["visualKinds"] }),
       ...(row.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: row.sectionSealedAtEnd }),
@@ -58,7 +65,11 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       ...(row.publicationSealUnknown === undefined ? {} : { publicationSealUnknown: row.publicationSealUnknown }),
       ...(row.publicationSealHadPublicPrefix === undefined ? {} : { publicationSealHadPublicPrefix: row.publicationSealHadPublicPrefix }),
       ...(row.publicationSealCommitted === undefined ? {} : { publicationSealCommitted: row.publicationSealCommitted }),
-      ...(row.reopenedSection === undefined ? {} : { reopenedSection: row.reopenedSection }) };
+      ...(row.reopenedSection === undefined ? {} : { reopenedSection: row.reopenedSection }),
+      ...(typeof row.withheldNativeDigest === "string" ? {
+        failedRangeBoundary: true, withheldNativeDigest: row.withheldNativeDigest,
+        withheldNativeMode: row.withheldNativeMode as PdfSegmentPage["withheldNativeMode"],
+      } : {}) };
   });
 }
 

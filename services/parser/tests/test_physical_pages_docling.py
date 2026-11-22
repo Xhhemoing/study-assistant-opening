@@ -116,6 +116,14 @@ def worker_pdf_cli_fixtures():
                                 3: "Public prose continues here."}, (), [
             (1, 3, None), (2, 3, None, False, True),
         ]),
+        "qualified_section_exit": (5, {
+            1: "Answer Key",
+            2: "Chapter 2 Algebra — Page 12\nFigure 2(a), which shows the graph, is useful here.\nx = 3.",
+            3: "3.14 V\n3.14 厘米",
+            4: "Proof:\n证明：\n5 units.",
+            5: "定理 2.1（拉格朗日定理）\nPublic explanation.",
+        }, (), [(1, 5, None), (1, 1, None), (2, 2, "section_sealed"), (3, 3, "section_sealed"),
+                (4, 4, "section_sealed"), (5, 5, "section_sealed")]),
     }
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -1073,7 +1081,11 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             "图 2（a）显示了函数图像。", "图 2(a) 显示了函数图像。", "表 3（1）列出了数据。",
             "Figure 2(a) shows the graph.", "Table 3 (b) lists the values.", "Theorem 2.1 (Lagrange) states that G is finite.",
             "Figure 2 a: shows the graph.", "Example 1 (Lagrange) gives the construction.",
+            "Figure 2(a), which shows the graph, is useful here.", "Theorem 2.1 (Lagrange), applied to G, gives the result.",
+            "定理 2.1（拉格朗日），应用于 G，可得结果。", "Figure 2(a):, which shows the graph.",
+            "Theorem 2.1: This gives the result.",
             "3.14 is the desired approximation.", "3.14 Euler's constant is irrational.", "2.718 = e", "3.14 是所需近似值。",
+            "3.14 V", "3.14 厘米", "3.14 kPa", "3.14 kg/m^3", "3.14 Mmol", "3.14 平方公里/秒", "3.14 有三个解",
         ):
             for label in (DocItemLabel.TEXT, DocItemLabel.SECTION_HEADER):
                 with self.subTest(line=line, label=label):
@@ -1110,6 +1122,10 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             ("2.1 Ring Homomorphisms", DocItemLabel.TEXT),
             ("2.1.3 Kernel of a Homomorphism", DocItemLabel.TEXT),
             ("2.3 线性变换的矩阵", DocItemLabel.TEXT),
+            ("2.1 有限群", DocItemLabel.TEXT),
+            ("2.2 有理数域", DocItemLabel.TEXT),
+            ("2.3 有界算子", DocItemLabel.TEXT),
+            ("2.4 在线算法", DocItemLabel.TEXT),
         ):
             with self.subTest(line=line, label=label):
                 ext = physical_pages.extract_physical_pages(result_for(
@@ -1121,7 +1137,9 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertEqual(ext.texts_by_page[13], [line])
 
     def test_inline_exercise_answer_ignores_parenthesized_footer_punctuation(self):
-        for footer in ("(iv).", "第十二页（共三百页）", "共三百页 第十二页", "Page 12", "Chapter 2 — Page 12", "第 2 章 | 第 12 页", "- 12 -"):
+        for footer in ("(iv).", "第十二页（共三百页）", "共三百页 第十二页", "Page 12", "Chapter 2 — Page 12", "第 2 章 | 第 12 页", "- 12 -",
+                       "Chapter 2 Algebra — Page 12", "Chapter 2: Algebra | Page 12", "Section 2.1 Rings - Page 12",
+                       "第 2 章 线性代数 — 第 12 页", "2.1 Finite Groups — Page 12", "Algebra — Page 12"):
             with self.subTest(footer=footer):
                 ext = physical_pages.extract_physical_pages(result_for(
                     [text_element(11, "Exercise 1: Find x.\n【解析】\n" + footer, 1)],
@@ -1130,6 +1148,18 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 ))
                 self.assertEqual(ext.texts_by_page[12], [])
                 self.assertEqual(ext.texts_by_page[13], ["Public explanation."])
+
+    def test_section_seal_withholds_proofs_and_reopens_at_structural_headings(self):
+        for heading in ("Theorem 2.1 (Lagrange)", "定理 2.1（拉格朗日定理）", "Definition 1.2", "定义 1.2",
+                        "Worked Example 2.1", "例题 2.1", "2.1 有限群"):
+            with self.subTest(heading=heading):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, "Answer Key", 1)],
+                    [text_element(12, "Proof:\n证明：\n5 units.", 1)],
+                    [text_element(13, heading, 1), text_element(13, "Public explanation.", 2)],
+                ))
+                self.assertEqual(ext.texts_by_page[12], [])
+                self.assertEqual(ext.texts_by_page[13], [heading, "Public explanation."])
 
     def test_running_counters_do_not_match_prose_page_references(self):
         for line in ("The complete construction is shown on page 12.", "The derivation appears at page 12.",

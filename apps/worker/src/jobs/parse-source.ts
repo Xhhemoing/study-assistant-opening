@@ -51,13 +51,7 @@ function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading
     if (/^#{1,6}$/u.test(s)) return { stripped: "", isMarkdownHeading };
     s = s.replace(/^(?:#{1,6}\s+)+/u, "").trim();
   }
-  while (true) {
-    const fullEmphasis = /^(?:\*\*((?:(?!\*\*).)+?)\*\*|__((?:(?!__).)+?)__)$/u.exec(s);
-    if (!fullEmphasis) break;
-    s = (fullEmphasis[1] ?? fullEmphasis[2] ?? "").trim();
-  }
-  s = s.replace(/^(?:\*\*((?:(?!\*\*).)+?)\*\*|__((?:(?!__).)+?)__)(?=\s*[:：.—–\s-]|$)/u, "$1$2");
-  return { stripped: s, isMarkdownHeading };
+  return { stripped: s.replace(/\*\*|__/gu, "").trim(), isMarkdownHeading };
 }
 
 const SEALED_SECTION_CONTAINER = String.raw`(?:Appendix\b(?:\s+[A-Z0-9]+)?|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*|(?:Lecture|Part|Unit)\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)`;
@@ -123,8 +117,10 @@ const EXERCISE_OPENER_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PR
 const DOTTED_SECTION_PREFIX_RE = /^\d+(?:\.\d+)+\s+/u;
 const LATIN_SECTION_TITLE_RE = /^[A-Z][A-Za-z0-9'’&-]*(?:[ ,]+(?:[A-Z0-9][A-Za-z0-9'’&-]*|and|as|at|by|for|from|in|of|on|or|the|to|a|an|with|without|via)){0,12}$/u;
 const CJK_SECTION_TITLE_RE = /^[【「『〈《（(]?[\u4e00-\u9fff]/u;
-const SECTION_PROSE_RE = /[=<>≈%％。！？；]|[.!?;]$|\b(?:is|are|was|were|has|have|had|gives|shows|yields|equals|approximates|denotes|represents|follows)\b|^(?:是|为|有|在)|可得|得到|满足|成立|显示|表明|说明/u;
-const CJK_SECTION_UNITS_RE = /^(?:倍|个|米|秒|克|元|度)(?=$|[\s/每。！？；])/u;
+const SECTION_PROSE_RE = /[=<>≈%％。！？；]|[.!?;]$|\b(?:am|is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides|depicts|presents|indicates|says|proves|discusses)\b|^(?:是|为|有\s*[一二三四五六七八九十百千两几多\d])|可得|得到|满足|成立|显示|表明|说明/u;
+const LATIN_UNIT = String.raw`(?:[kKMGTPEZYmunpfµμ]|da|d|c)?(?:V|A|W|J|N|C|F|H|T|S|K|M|B|G|L|l|m|g|s|h|b|Ω|Hz|Pa|Wb|Bq|Gy|Sv|lm|lx|cd|sr|mol|rad|deg|kat|bar|atm|psi|cal|eV|dB|rpm|mph|fps|min|sec|hrs?|iB|[KMGTPEZY]iB|volts?|amps?|watts?|joules?|meters?|metres?|seconds?|liters?|litres?|grams?)(?:\^?[+-]?\d+|[²³])?`;
+const LATIN_SECTION_UNITS_RE = new RegExp(String.raw`^\s*${LATIN_UNIT}(?:\s*(?:[/·⋅*]\s*|\s+)${LATIN_UNIT})*\s*$`, "u");
+const CJK_SECTION_UNITS_RE = /^(?:(?:平方|立方|千|毫|微|纳|皮|飞|吉|兆|太|分|厘|公|市|摄氏|华氏|十|百|万|亿)*(?:米|里|克|斤|两|吨|秒|分|分钟|时|小时|天|日|周|月|年|升|伏|伏特|安|安培|瓦|瓦特|焦|焦耳|牛|牛顿|帕|帕斯卡|赫|赫兹|欧|欧姆|法|法拉|亨|亨利|韦伯|特|特斯拉|库|库仑|摩|摩尔|坎|坎德拉|流明|勒克斯|贝可|戈瑞|希沃特|开|开尔文|度|弧度|球面度|分贝|字节|比特|位|元|角|毛|块|美元|欧元|日元|英镑|人民币|倍|个|次|项|种|类|条|件|张|页|题|人|成|折)(?=$|[\s/／每，。！？；、.,;:：)）]|(?:左右|以上|以下|以内|以外|的|是|为|重|长|宽|高))|[十百千万亿]+(?=$|[\s，。！？；、]))/u;
 const NON_ANSWER_AFTER_BLANK_RE = /^(?:(?:Exercises?|Practice\s+Problems?|Problems?|Questions?)\b|(?:习题|练习题|练习|问题|思考题|作业题|证明|第\s*\d+\s*题|题\s*\d+))/iu;
 const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Bibliography|References|Works\s+Cited|Index|Subject\s+Index|Author\s+Index|Glossary|Notation\s+Index|Acknowledg(?:e)?ments?|About\s+the\s+Authors?|Afterword|Colophon|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢)(?:\s*[:：.—–-]|$)|(?:Appendix(?:\s+[A-Z0-9]+)?|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)(?:\s*[:：.—–-]\s*(?!.*(?:\b(?:Answers?|Solutions?|Keys?)\b|答案|解答)).*)?$)/iu;
 const SECTION_SEALED_SUBHEADER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT|Section|SECTION|Lecture|LECTURE)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review|REVIEW|Practice|PRACTICE|Quiz|QUIZ|Drills?|DRILLS?|Self-Check|SELF-CHECK)\b|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])\s*$|(?:习题|练习题?|思考题|复习题|作业题|自测题|第\s*[一二三四五六七八九十百千\d]+\s*[题小题])|(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])/u;
@@ -136,7 +132,12 @@ const CHINESE_BLOCK_PREFIX_RE = /^(?:定义|记号|术语|约定|定理|引理|�
 const HEADING_QUALIFIERS_RE = /^(?:\s*(?:\([^()（）]*\)|（[^()（）]*）)|\s+[a-zA-Z](?=\s|[:：.．、—–(（-]|$))*\s*/u;
 const HEADING_DELIMITER_RE = /^(?:[:：．、—–]|\.(?!\d)|-(?!\d))/u;
 const CHINESE_REFERENCE_VERB_RE = /^(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)/u;
-const ENGLISH_REFERENCE_VERB_RE = /^(?:is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides)\b/u;
+const ENGLISH_REFERENCE_VERB_RE = /\b(?:am|is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides|depicts|presents|indicates|says|proves|discusses)\b/u;
+const REFERENCE_BODY_RE = /^[A-Za-z0-9\u4e00-\u9fff【「『〈《]/u;
+const ENGLISH_REFERENCE_CLAUSE_RE = /,\s*(?:which|where|applied|used|shown|given|as)\b/u;
+const ENGLISH_REFERENCE_SUBJECT_RE = /^(?:[a-z]+|This|That|It|They|We)\b/u;
+const CHINESE_REFERENCE_CLAUSE_RE = /[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)/u;
+const ANSWER_PROOF_HEADING_RE = /^(?:Proof\b|证明(?=[\s\d:：.．—–(（-]|$))/iu;
 const ENGLISH_CONTAINER_PREFIX_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s|:：.．—–(（-]|$)/iu;
 const CHINESE_CONTAINER_PREFIX_RE = /^(?:第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)/u;
 const BLOCK_IDENTIFIER_RE = /^\s+(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)\b(?=[\s:：.．、—–(（-]|$)/iu;
@@ -148,7 +149,8 @@ function isNumberedSectionHeading(stripped: string): boolean {
   const title = stripped.slice(prefix[0].length);
   return !SECTION_PROSE_RE.test(title) && !ANSWER_OR_REVIEW_TITLE_RE.test(title)
     && !/^(?:True|False|Yes|No|None|[A-F](?:\s*,\s*[A-F])*)$/u.test(title)
-    && (LATIN_SECTION_TITLE_RE.test(title) || (CJK_SECTION_TITLE_RE.test(title) && !CJK_SECTION_UNITS_RE.test(title)));
+    && (LATIN_SECTION_TITLE_RE.test(title) && /[A-Za-z]{3}/u.test(title) && !LATIN_SECTION_UNITS_RE.test(title)
+      || CJK_SECTION_TITLE_RE.test(title) && !CJK_SECTION_UNITS_RE.test(title));
 }
 
 function hasReferenceHeadingSuffix(suffix: string, isMarkdownHeading: boolean, chinese: boolean): boolean {
@@ -157,8 +159,13 @@ function hasReferenceHeadingSuffix(suffix: string, isMarkdownHeading: boolean, c
   const delimiter = HEADING_DELIMITER_RE.exec(remainder)?.[0];
   const body = delimiter ? remainder.slice(delimiter.length).trimStart() : remainder;
   if (!body) return true;
-  if (chinese) return !CHINESE_REFERENCE_VERB_RE.test(body) && (Boolean(delimiter) || !/[。！？；]$/u.test(body));
-  return !/^[a-z]/u.test(body) || Boolean(delimiter) && !ENGLISH_REFERENCE_VERB_RE.test(body);
+  if (!REFERENCE_BODY_RE.test(body)) return false;
+  if (chinese) return !CHINESE_REFERENCE_VERB_RE.test(body) && !CHINESE_REFERENCE_CLAUSE_RE.test(body)
+    && (Boolean(delimiter) || !/[。！？；]$/u.test(body));
+  const qualified = remainder !== suffix.trimStart();
+  return !ENGLISH_REFERENCE_CLAUSE_RE.test(body)
+    && !(ENGLISH_REFERENCE_VERB_RE.test(body) && (!delimiter || qualified || ENGLISH_REFERENCE_SUBJECT_RE.test(body)))
+    && (Boolean(delimiter) || !/^[a-z]|[.!?;]$/u.test(body));
 }
 
 function hasBlockHeadingSuffix(suffix: string, explicitHeading: boolean, requireId: boolean): boolean {
@@ -189,6 +196,9 @@ const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|End\s+of\s+Answers?|答案�
 const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
 const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/u;
 const SAVED_NATIVE_HEADER_RE = /^\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n/u;
+const normalizeArchivedNative = (text: string) =>
+  text.replace(/\u00ad|(?<=\p{L})-\s+(?=\p{L})/gu, "").replace(/\s+/gu, " ").trim();
+const archivedNativeDigest = (text: string) => createHash("sha256").update(normalizeArchivedNative(text)).digest("hex");
 const TERMINAL_PUNCTUATION_RE = /[.。!?！？;；)）\]】□■∎]$/u;
 const NEXT_CONTINUATION_RE = /(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|[（(]\s*(?:下接下页|转下页|未完待续)\s*[）)]|接下页|转下页)$/iu;
 const CONTINUATION_HEADING_RE = /(?:\b(?:continued|cont(?:['’]?d)?)(?:\s+(?:from|on)\s+.+)?[.\s:：]*$|[([（【]\s*(?:(?:to\s+be\s+)?continued|cont(?:['’]?d)?\.?|续|续上页|接上页)\s*[)\]）】]|(?:接上页|续上页|\s续)\s*[:：.]?$)/iu;
@@ -198,6 +208,8 @@ const CHINESE_PAGE_COUNTER = String.raw`(?:(?:第\s*)?${CHINESE_COUNTER_NUMBER}(
 const PAGE_COUNTER = String.raw`(?:[(（[【]?\s*(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+|pp?\.\s*)\d+(?:\s*(?:of\s+|[/／–—-]\s*)\d+)?\s*[)）\]】]?|${CHINESE_PAGE_COUNTER})\s*[.。．、]?$`;
 const PAGE_COUNTER_RE = new RegExp("^" + PAGE_COUNTER, "iu");
 const FURNITURE_PAGE_COUNTER_RE = new RegExp(String.raw`^\s*[|:：—–-]\s*${PAGE_COUNTER}`, "iu");
+const TITLED_PAGE_COUNTER_RE = new RegExp(String.raw`^([^|｜—–\r\n]{1,96}?)(?:\s*[|｜—–]\s*|\s+-\s+|\s*[:：]\s+)${PAGE_COUNTER}`, "iu");
+const FURNITURE_PROSE_RE = /\b(?:on|see|at|pages?)\s+(?:page\s+)?\d+\b|[。！？；!?]|(?:见|参见)第\s*\d+\s*页/iu;
 const PARENTHESIZED_COUNTER_RE = /^(.*?)\s*[（(]([^()（）]+)[）)]\s*[.。]?$/u;
 const RUNNING_COUNTER_RE = /^(?:[(（[【]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8}|\d+\s*(?:of|[/／–—-])\s*\d+)\s*[)）\]】]?|[-–—]\s*(?:\d+|[ivxlcdm]{1,8})\s*[-–—])\s*[.。．、]?$/iu;
 const OCR_PLACEHOLDER_RE = /^[[【(（]\s*(?:illegible|unreadable|blank|unclear|ocr|no\s+(?:readable\s+)?text|无法识别|无法辨认|空白页|图片描述|图像描述|图示与版面描述|不确定处)(?=[\s\]】)）：:]|$)/iu;
@@ -205,15 +217,17 @@ const OCR_PLACEHOLDER_RE = /^[[【(（]\s*(?:illegible|unreadable|blank|unclear|
 function isRunningPageHeading(stripped: string, bareContainersAreCounters = true): boolean {
   if (PAGE_METADATA_HEADING_RE.test(stripped) || CONTINUATION_HEADING_RE.test(stripped)
     || RUNNING_COUNTER_RE.test(stripped) || PAGE_COUNTER_RE.test(stripped) || OCR_PLACEHOLDER_RE.test(stripped)) return true;
+  const furnitureTitle = TITLED_PAGE_COUNTER_RE.exec(stripped)?.[1];
+  if (furnitureTitle && !FURNITURE_PROSE_RE.test(furnitureTitle) && !ENGLISH_REFERENCE_VERB_RE.test(furnitureTitle)) return true;
   const container = ENGLISH_CONTAINER_PREFIX_RE.exec(stripped)?.[0] ?? CHINESE_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
   if (!container) return false;
   const suffix = stripped.slice(container.length);
   const bracketed = PARENTHESIZED_COUNTER_RE.exec(suffix);
-  const furnitureTitle = bracketed?.[1]?.trim().replace(HEADING_DELIMITER_RE, "").trim() ?? "";
+  const bracketedTitle = bracketed?.[1]?.trim().replace(HEADING_DELIMITER_RE, "").trim() ?? "";
   if (FURNITURE_PAGE_COUNTER_RE.test(suffix)
     || (bracketed?.[2] && PAGE_COUNTER_RE.test(bracketed[2].trim())
-      && (!furnitureTitle || LATIN_SECTION_TITLE_RE.test(furnitureTitle)
-        || CJK_SECTION_TITLE_RE.test(furnitureTitle) && !SECTION_PROSE_RE.test(furnitureTitle)))) return true;
+      && (!bracketedTitle || LATIN_SECTION_TITLE_RE.test(bracketedTitle)
+        || CJK_SECTION_TITLE_RE.test(bracketedTitle) && !SECTION_PROSE_RE.test(bracketedTitle)))) return true;
   return Boolean(bareContainersAreCounters && !/^(?:Appendix\b|附录)/iu.test(container)
     && /^[\s:：.．—–-]*$/u.test(suffix));
 }
@@ -236,18 +250,18 @@ function isSectionSealedHeader(stripped: string): boolean {
 }
 
 function isSectionSealedExit(stripped: string, isMarkdownHeading: boolean): boolean {
-  if (!stripped || isSectionSealedHeader(stripped) || isRunningPageHeading(stripped)
+  if (!stripped || isSectionSealedHeader(stripped) || isRunningPageHeading(stripped) || ANSWER_PROOF_HEADING_RE.test(stripped)
+    || CAPTION_PREFIX_RE.test(stripped) || CHINESE_CAPTION_PREFIX_RE.test(stripped)
     || /^(?:\d+(?:\.\d+)*[.)]?\s+)?(?:true|false|yes|no|none|[a-f](?:\s*,\s*[a-f])*)[.。]?$/iu.test(stripped)) return false;
   if (MAJOR_NON_ANSWER_HEADING_RE.test(stripped) && !ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return true;
   if (isTextbookStructuralHeading(stripped, isMarkdownHeading)) return true;
   if (isTitledPublicContainer(stripped, isMarkdownHeading)) return true;
+  if (isNumberedSectionHeading(stripped)) return true;
   if (!isMarkdownHeading) return false;
-  const captionPrefix = CAPTION_PREFIX_RE.exec(stripped)?.[0];
-  if (captionPrefix && !hasBlockHeadingSuffix(stripped.slice(captionPrefix.length), true, true)) return false;
   if (INLINE_SEALED_ALWAYS_RE.test(stripped) || INLINE_SEALED_NON_EXAMPLE_RE.test(stripped)) return false;
   if (STANDALONE_SOLUTION_HEADING_RE.test(stripped) || SECTION_SEALED_SUBHEADER_RE.test(stripped)) return false;
   if (ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return false;
-  return isNumberedSectionHeading(stripped) || !CONTAINER_OR_NUMBERED_HEADING_RE.test(stripped);
+  return !CONTAINER_OR_NUMBERED_HEADING_RE.test(stripped);
 }
 
 function isTitledPublicContainer(stripped: string, isMarkdownHeading = false): boolean {
@@ -941,7 +955,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       };
       const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState,
         doclingIncomingSeal?: PdfSealMode, doclingIncomingWorkedExample?: boolean, doclingIncomingExercise?: boolean,
-        archived?: { nativeWithheld: boolean; incomingSeal: SealState; endSeal: SealState }) => {
+        archived?: { nativeWithheld: boolean; incomingSeal: SealState; endSeal: SealState; withheldDigest?: string; withheldMode?: PdfSealMode }) => {
         const hadRawText = Boolean(rawPage.text.trim());
         const doclingSealedBlank = isPdf && rawPage.text === "" && Array.isArray(rawPage.visualKinds) && rawPage.visualKinds.length === 0;
         const closedInlineAnswer = rawPage.inlineSealedAtEnd === false && !rawPage.sectionSealedAtEnd;
@@ -952,10 +966,13 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const incomingSeal: SealState = { ...sealState };
         const nativeOutSeal: SealState = { ...incomingSeal };
         const archivedNative = archived?.nativeWithheld && saved ? splitPdfChunk(saved.text).nativeBody : undefined;
-        const archiveStillApplies = archivedNative !== undefined && (!hadRawText || rawPage.text.trim() === archivedNative.trim());
+        const archiveStillApplies = archivedNative !== undefined
+          ? !hadRawText || normalizeArchivedNative(rawPage.text) === normalizeArchivedNative(archivedNative)
+          : Boolean(hadRawText && archived?.withheldDigest && archivedNativeDigest(rawPage.text) === archived.withheldDigest);
         if (archiveStillApplies && archived && nativeOutSeal.mode === "none") {
           const savedSeal = hadRawText ? archived.incomingSeal : archived.endSeal;
           if (savedSeal.mode !== "none") Object.assign(nativeOutSeal, savedSeal);
+          else if (archived.withheldMode) Object.assign(nativeOutSeal, { mode: archived.withheldMode, unknownAfterFailure: false });
         }
         // Docling already removed the sealed prefix with this same input state.
         // Keep worker-only seals in effect and still scan the remaining text.
@@ -1223,6 +1240,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           const tighter = next.hadSealedContent && !marker?.hadSealedContent
             || next.hadSealedContent && hasNewVisualSealEvidence(marker, next.visualKinds)
             || next.publicationSealUnknown && !marker?.publicationSealUnknown
+            || next.withheldNativeDigest && next.withheldNativeDigest !== marker?.withheldNativeDigest
             || nextMode && nextMode !== previousMode && previousMode !== "section_sealed"
             || republish && marker?.publicationSealCommitted !== false;
           if (!tighter) return;
@@ -1304,7 +1322,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           // archive's native seals so fresh headings cannot promote archived answers.
           const nativeWithheld = Boolean(saved && (nativeOnly && changed
             || incoming.mode !== "none" && (changed || endSeal.mode !== "none")));
-          return { incomingSeal: incoming, endSeal, nativeWithheld };
+          return {
+            incomingSeal: incoming, endSeal, nativeWithheld,
+            withheldDigest: marker?.withheldNativeDigest,
+            withheldMode: marker?.withheldNativeMode,
+          };
         };
         const unsafeLegacyPages = new Set<number>();
         const recognizePages = deps.recognizePages;
@@ -1345,8 +1367,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               archivedSavedSeal = archive.endSeal;
               const incomingUnresolved = pdfSealState.unknownAfterFailure || pdfSealState.mode !== "none";
               const check = chunk && inspectSavedPdfChunk(chunk, { ...pdfSealState });
-              const sectionSealed = pdfSealState.mode === "section_sealed" || check?.endSeal.mode === "section_sealed"
-                || marker?.sectionSealedAtEnd === true || archive.nativeWithheld && archive.endSeal.mode === "section_sealed";
+              const confirmedMarker = marker && !marker.failedRangeBoundary
+                && (marker.hadSealedContent || pdfPageEndSeal(marker));
+              const sectionSealed = pdfSealState.mode === "section_sealed"
+                || confirmedMarker && marker.sectionSealedAtEnd === true
+                || !archive.nativeWithheld && check?.endSeal.mode === "section_sealed";
               const markedSealed = Boolean(marker?.hadSealedContent || marker?.publicationSealUnknown || pdfPageEndSeal(marker));
               const savedIsClean = Boolean(chunk?.text.trim() && check && !check.unsafe && !markedSealed && !archive.nativeWithheld);
               const preserve = savedIsClean && (!incomingUnresolved || (
@@ -1367,13 +1392,17 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               });
               if (!preserve) {
                 blockingSeals.push({ page, text: "", imagePath: null, publicationSealUnknown: true });
-                if (archive.nativeWithheld && (!markedSealed || marker?.failedRangeBoundary)) {
+                const unsafeNative = archive.nativeWithheld && chunk ? splitPdfChunk(chunk.text).nativeBody : "";
+                if (unsafeNative.trim() && !confirmedMarker) {
+                  // The unsafe chunk is deleted in publication. Its digest survives retries without
+                  // retaining the answer in a marker or treating a failed conversion as evidence.
                   await stagePageSeal(marker, {
-                    page, text: "", imagePath: null, hadSealedContent: true, publicationSealHadPublicPrefix: false,
-                    sectionSealedAtEnd: sectionSealed,
-                    inlineSealedAtEnd: !sectionSealed && archive.endSeal.mode === "inline_sealed",
+                    page, text: "", imagePath: null, publicationSealUnknown: true, failedRangeBoundary: true,
+                    withheldNativeDigest: archivedNativeDigest(unsafeNative),
+                    withheldNativeMode: archive.incomingSeal.mode === "none"
+                      ? archive.endSeal.mode === "none" ? "section_sealed" : archive.endSeal.mode : archive.incomingSeal.mode,
                   });
-                } else if (marker && !marker.failedRangeBoundary) {
+                } else if (marker && (!marker.failedRangeBoundary || marker.withheldNativeDigest)) {
                   publicationSeals.set(page, marker);
                 }
               }
@@ -1559,11 +1588,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 const replayMarker = previouslyBlocked && !verifiedRecovery;
                 let withheldSealedRecovery = false;
                 if (replayMarker) {
-                  if (onlyUncertainty && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
+                  if (onlyUncertainty && !preparedPage.archiveStillApplies && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
                   hasSealedContent ||= previouslySealed;
                   if (recordedMode === "section_sealed" || recordedMode === "inline_sealed" && pdfSealState.mode === "none" && !pdfSealState.unknownAfterFailure) {
                     Object.assign(pdfSealState, cleanSeal, { mode: recordedMode });
-                  } else if (previouslyUnverified && pdfSealState.mode === "none") {
+                  } else if (previouslyUnverified && !preparedPage.archiveStillApplies && pdfSealState.mode === "none") {
                     Object.assign(pdfSealState, cleanSeal, { unknownAfterFailure: true });
                   }
                   const verifiedNative = preparedPage.page.text;
@@ -1629,7 +1658,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                   await stagePageSeal(marker, {
                     page: rawPage.page, text: "", imagePath: null, hadSealedContent: pageHadSealedContent,
                     ...(pageHadSealedContent && publicPrefix !== undefined ? { publicationSealHadPublicPrefix: publicPrefix } : {}),
-                    ...(unverifiedPage || replayMarker && previouslyUnverified && pdfSealState.unknownAfterFailure
+                    ...(unverifiedPage || replayMarker && !preparedPage.archiveStillApplies && previouslyUnverified && pdfSealState.unknownAfterFailure
                       ? { publicationSealUnknown: true } : {}),
                     // Retain visual provenance when the current evidence only strengthens the existing seal.
                     ...(visualSealKinds !== undefined || withheldSealedRecovery && archivedVisionSeal
@@ -1639,7 +1668,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                       : pdfSealState.mode === "inline_sealed" ? { inlineSealedAtEnd: true } : {}),
                     ...(reopenedSection ? { reopenedSection: true } : {}),
                   });
-                } else if (replayMarker && marker && !marker.failedRangeBoundary) {
+                } else if (replayMarker && marker && (!marker.failedRangeBoundary || marker.withheldNativeDigest)) {
                   publicationSeals.set(rawPage.page, marker);
                 }
                 if (!chunk) {
