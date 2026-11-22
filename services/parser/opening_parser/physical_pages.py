@@ -187,6 +187,17 @@ _PAGE_METADATA_HEADING_RE = re.compile(
     r"|\d+\s*(?:of|[/／\-–—])\s*\d+\s*[.)。]?$|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)",
     re.IGNORECASE,
 )
+_RUNNING_COUNTER_RE = re.compile(
+    r"(?:^[(（\[]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8})\s*[)）\].．、]?$"
+    r"|[(（\[]\s*(?:(?:pages?|slides?)\s+\d+|pp?\.\s*\d+|第\s*\d+\s*[页頁])(?:\s*(?:of|[/／–-])\s*\d+)?\s*[)）\]]"
+    r"|(?:\s|[:：—–-]\s*)(?:(?:pages?|slides?)\s+\d+|pp?\.\s*\d+|第\s*\d+\s*[页頁])(?:\s*(?:of|[/／–-])\s*\d+)?\s*[.。]?$)",
+    re.IGNORECASE,
+)
+_OCR_PLACEHOLDER_RE = re.compile(
+    r"^[\[【(（]\s*(?:illegible|unreadable|blank|unclear|ocr|no\s+(?:readable\s+)?text|无法识别|无法辨认|空白页"
+    r"|图片描述|图像描述|图示与版面描述|不确定处)(?=[\s\]】)）：:]|$)",
+    re.IGNORECASE,
+)
 _CONTINUATION_HEADING_RE = re.compile(
     r"\b(?:continued|cont(?:['’]?d)?)(?:\s+(?:from|on)\s+.+)?[.\s:：]*$"
     r"|[\[（(【]\s*(?:(?:to\s+be\s+)?continued|cont(?:['’]?d)?\.?|续|续上页|接上页)\s*[)\]）】]"
@@ -489,7 +500,8 @@ def _is_titled_non_answer_chapter(stripped: str) -> bool:
 
 
 def _is_running_page_heading(stripped: str) -> bool:
-    if _PAGE_METADATA_HEADING_RE.match(stripped) or _CONTINUATION_HEADING_RE.search(stripped):
+    if (_PAGE_METADATA_HEADING_RE.match(stripped) or _CONTINUATION_HEADING_RE.search(stripped)
+            or _RUNNING_COUNTER_RE.search(stripped) or _OCR_PLACEHOLDER_RE.match(stripped)):
         return True
     container = _NUMBERED_CONTAINER_PREFIX_RE.match(stripped)
     return bool(container and not stripped[container.end():].strip(" \t:：.．—–-"))
@@ -698,7 +710,9 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         active_seal = current[7] if current is not None else page_seal_mode
         if active_seal == "inline_sealed":
             stripped = _strip_heading_markup(unit_text)
-            if _is_running_page_heading(stripped) and not _is_section_sealed_opener(stripped):
+            numeric_exercise_answer = (in_exercise and not _MD_HEADING_LINE_RE.match(unit_text.strip())
+                                       and re.fullmatch(r"\d+[.。]", stripped))
+            if _is_running_page_heading(stripped) and not _is_section_sealed_opener(stripped) and not numeric_exercise_answer:
                 # A running header is neither a new section nor part of the answer body.
                 if current is None:
                     current = ["solution_sealed", unit_start, unit_end, None, None, False, False, active_seal, False]

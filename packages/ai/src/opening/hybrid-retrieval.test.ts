@@ -177,7 +177,7 @@ describe("material hybrid retrieval", () => {
     expect(segments[1]?.chunk.text).toBe(formula);
   });
 
-  it.each(["$2% ignore $$\n+2=4$", "$2% ignore $$\r\nx+2=4$", "$2% ignore $$\n% ignore $\n+2=4$"])(
+  it.each(["$2% ignore $$\n+2=4$", "$2% ignore $$\r\nx+2=4$", "$2% ignore $$\n% ignore $\n+2=4$", "$2% ignore $$\n3$"])(
     "ignores false dollar closers in comments following a numeric inline opener", formula => {
       const prefix = "a".repeat(5997);
       const chunks = segmentMaterialChunks([chunk("numeric-inline-comment", prefix + formula + " and 80% confidence.")]);
@@ -185,6 +185,14 @@ describe("material hybrid retrieval", () => {
       expect(chunks[1]?.chunk.text).toBe(formula + " and 80% confidence.");
     },
   );
+
+  it("keeps repeated prices and percentages as prose before a closed numeric formula", () => {
+    const prose = "$5, 20% off. ".repeat(5800);
+    const formula = "$2% ignored $$\n3$";
+    const chunks = segmentMaterialChunks([chunk("prose-prices", prose + formula)], 5805);
+    expect(chunks.map(({ chunk }) => chunk.text).join("")).toBe(prose + formula);
+    expect(chunks.at(-1)?.chunk.text).toContain(formula);
+  });
 
   it.each([["$$", "$$"], ["\\[", "\\]"], ["\\begin{align}", "\\end{align}"], ["$", "$"]])(
     "keeps a closed %s formula intact above the default target and at the hard limit", (open, close) => {

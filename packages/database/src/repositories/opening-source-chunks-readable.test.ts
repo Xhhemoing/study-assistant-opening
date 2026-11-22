@@ -43,7 +43,8 @@ describe("empty PDF chunk publication", () => {
 
   it("withdraws the old same-version chunks and queues indexing in the same transaction", async () => {
     const { repo, input, begin, statements } = setup();
-    await repo.replacePdfChunks(scope, { ...input, allowSealedEmpty: true });
+    const reopened = { page: 1, text: "", imagePath: null, hadSealedContent: false, reopenedSection: true };
+    await repo.replacePdfChunks(scope, { ...input, allowSealedEmpty: true, publicationSeals: [reopened] });
     expect(begin).toHaveBeenCalledTimes(1);
 
     const position = (prefix: string) => {
@@ -57,9 +58,11 @@ describe("empty PDF chunk publication", () => {
     const source = position("SELECT id,version,upload_state FROM opening_sources");
     const backfill = position("UPDATE opening_course_knowledge graph");
     const deletion = position("DELETE FROM opening_source_chunks c");
+    const seals = position("INSERT INTO opening_pdf_parse_segments");
+    expect(statements[seals]?.values).toContainEqual([{ ...reopened, publicationSealCommitted: true }]);
     const ready = position("UPDATE opening_sources SET parse_state='ready'");
     const index = position("INSERT INTO opening_jobs");
-    const steps = [history, execution, workspace, source, backfill, deletion, ready, index];
+    const steps = [history, execution, workspace, source, backfill, deletion, seals, ready, index];
     expect(steps).toEqual([...steps].sort((a, b) => a - b));
     expect(statements[deletion]?.values).toEqual([sourceId, 4]);
     expect(statements.some(({ query }) => query.includes("node_definitions"))).toBe(false);
@@ -100,6 +103,10 @@ describe("cross-source legacy definition backfill", () => {
     { reason: "numbered answer", available: true, text: "**Answer 1:** x = 3." },
     { reason: "numbered decimal solution", available: true, text: "Solution 2.1: x = 3." },
     { reason: "numbered answer key", available: true, text: "Answer Key 3: x = 3." },
+    { reason: "numbered qualified heading", available: true, text: "Official Answer 1\nx = 3." },
+    { reason: "numbered Chinese exercise answer", available: true, text: "课后习题答案 1：x = 3。" },
+    { reason: "numbered Chinese chapter answer", available: true, text: "章节答案 1、x = 3。" },
+    { reason: "worked example continuation", available: true, text: "Solution:\nTake the square root.", preservesDefinition: true },
     { reason: "completed public publication", available: true, text: "Public introduction.", preservesDefinition: true },
     { reason: "Markdown answer label", available: true, text: "Answer: an HTTP response to a request.", mime: "text/markdown", preservesDefinition: true },
   ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition, mime = "application/pdf" }) => {
@@ -113,27 +120,31 @@ describe("cross-source legacy definition backfill", () => {
     const citedIds: unknown[] = [];
     const tx = (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = mockQueryText(strings, values);
-      if (query.startsWith("(s.mime")) return { sqlFragment: query };
+      if (strings[0]?.trimStart().startsWith("WITH pdf_pending_seals") || !query.startsWith("WITH") && query.includes("seal.pages->0")
+        || query.startsWith("seal.source_id=") || query.startsWith("s.parse_state") || query.startsWith("ps.parse_state")) {
+        return { sqlFragment: query };
+      }
       if (query.startsWith("SELECT id FROM workspaces")) return [{ id: "workspace" }];
       if (query.startsWith("SELECT graph.course_id, missing.node_indexes")) {
         expect(values).toContain("source-B");
         return [{ course_id: courseId, node_indexes: [0] }];
       }
       if (query.startsWith("SELECT snapshot")) return [{ snapshot }];
-      if (query.startsWith("SELECT c.id,")) {
+      if (query.includes('SELECT c.id,c.source_id AS "sourceId"')) {
         const id = values.findLast(value => typeof value === "string");
         citedIds.push(id);
         if (id === chunkA && mime === "text/markdown") {
           expect(query).toContain("s.mime AS mime");
-          expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR NOT EXISTS");
+          expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR");
         }
         if (id === chunkA && marker) {
           expect(query).toContain("seal.workspace_id=s.workspace_id AND seal.source_id=c.source_id AND seal.source_version=c.source_version");
           expect(query).toContain("seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'");
-          expect(query).toContain("seal.page_start<=c.page");
-          expect(query).toContain("s.parse_state<>'ready' OR seal.updated_at>s.updated_at");
+          expect(query).toContain("boundary.first_page<=c.page");
+          expect(query).toContain("seal.page_start=c.page AND seal.page_end=c.page");
+          expect(query).toContain("WHEN 'true' THEN FALSE WHEN 'false' THEN TRUE");
           expect(query).toContain("c.image_object_key IS NOT NULL");
-          const predecessor = query.split("OR (seal.page_start=c.page")[0];
+          const predecessor = query.split('SELECT c.id,c.source_id AS "sourceId"')[0];
           expect(marker === "hadSealedContent" ? query : predecessor).toContain("seal.pages->0->>'" + marker + "'='true'");
         }
         if (id === chunkA && !available) return [];
@@ -149,7 +160,7 @@ describe("cross-source legacy definition backfill", () => {
       { workspaceId: "workspace", ownerUserId: "owner" }, "source-B", 4);
     expect(citedIds).toEqual([chunkB, chunkA]);
     expect(writes).toHaveLength(preservesDefinition ? 1 : 0);
-    if (preservesDefinition) expect(evidence).toContainEqual(expect.stringContaining(text));
+    if (preservesDefinition) expect(evidence).toContainEqual(expect.stringContaining(JSON.stringify(text).slice(1, -1)));
   });
 });
 
@@ -166,13 +177,13 @@ it("withdraws unresolved PDF continuations and numbered labels from public reads
   const sql = (strings: TemplateStringsArray | string[], ...values: unknown[]) => {
     if (!("raw" in strings)) return { sqlFragment: "(?)" };
     const query = mockQueryText(strings, values);
-    if (!query.startsWith("SELECT c.*")) return { sqlFragment: query };
+    if (!query.includes("SELECT c.*")) return { sqlFragment: query };
     queries.push(query);
     // Model the database returning the stale chunk when the inline predecessor is unguarded.
-    const earlierSeal = query.split("OR (seal.page_start=c.page")[0]!;
-    const rejectsStale = earlierSeal.includes("seal.page_start<=c.page") &&
+    const earlierSeal = query.split("SELECT c.*")[0]!;
+    const rejectsStale = query.includes("boundary.first_page<=c.page") &&
       earlierSeal.includes("seal.pages->0->>'inlineSealedAtEnd'='true'") &&
-      earlierSeal.includes("s.parse_state<>'ready' OR seal.updated_at>s.updated_at");
+      earlierSeal.includes("WHEN 'true' THEN FALSE WHEN 'false' THEN TRUE");
     if (!rejectsStale) return [stale, numbered, clean];
     return query.includes("JOIN workspaces") ? [numbered, clean, markdown] : [numbered, clean];
   };
@@ -185,9 +196,10 @@ it("withdraws unresolved PDF continuations and numbered labels from public reads
     { id: "stale", text: stale.text, imageObjectKey: "stale-image" }, { id: "numbered" }, { id: "clean" },
   ]);
   for (const query of queries.slice(0, 2)) {
-    expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR NOT EXISTS");
+    expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR");
+    expect(query).toContain("pdf_pending_seals AS MATERIALIZED");
     expect(query).toContain("seal.source_id=c.source_id AND seal.source_version=c.source_version");
-    expect(query.match(/\b(?:FROM|JOIN) (?:opening_\w+|workspaces)\b/gu)?.length).toBeLessThanOrEqual(12);
+    expect(query.match(/\b(?:FROM|JOIN) (?:opening_\w+|workspaces)\b/gu)?.length).toBeLessThanOrEqual(10);
   }
   expect(queries.at(-1)).not.toContain("opening_pdf_parse_segments");
 });

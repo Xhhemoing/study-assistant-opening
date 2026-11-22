@@ -50,21 +50,22 @@ function endOfLatexComment(text: string, start: number, end: number): number {
   return index;
 }
 
-function isBareCurrencyStart(text: string, dollarIndex: number, tryComments = true): boolean {
+function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (start: number) => number): boolean {
   const first = text[dollarIndex + 1];
   if (!first || first < "0" || first > "9") return false;
   let closeIdx = -1;
   let bodyStart = dollarIndex + 1;
   const bodyParts: string[] = [];
-  for (let j = bodyStart; j < text.length; ) {
+  const limit = Math.min(text.length, dollarIndex + EMBEDDING_SEGMENT_HARD_LIMIT);
+  for (let j = bodyStart; j < limit; ) {
     const ch = text[j]!;
     if (ch === "\\") {
       j += 2;
       continue;
     }
-    if (ch === "%" && tryComments) {
+    if (ch === "%" && commentEnd) {
       bodyParts.push(text.slice(bodyStart, j));
-      j = endOfLatexComment(text, j, text.length);
+      j = commentEnd(j);
       bodyStart = j;
       continue;
     }
@@ -78,17 +79,12 @@ function isBareCurrencyStart(text: string, dollarIndex: number, tryComments = tr
   const prev = text[closeIdx - 1] ?? "";
   const next = text[closeIdx + 1] ?? "";
   const validClose = closeIdx >= 0 && !/\s/.test(prev) && !(next >= "0" && next <= "9");
-  if (bodyParts.length) {
-    const uncommented = bodyParts.join("") + text.slice(bodyStart, closeIdx);
-    if (validClose && (MATH_COMMAND_OR_OP_RE.test(uncommented) || /\\%|^\d[\d,.]*\s*[a-z]\b/iu.test(uncommented))) return false;
-    // There is no verified math span. Keep percentage signs literal when checking prose currency.
-    return isBareCurrencyStart(text, dollarIndex, false);
+  if (validClose) {
+    const inner = bodyParts.join("") + text.slice(bodyStart, closeIdx);
+    if (MATH_COMMAND_OR_OP_RE.test(inner) || !CURRENCY_PROSE_OR_NON_MATH_RE.test(inner)) return false;
   }
-  if (!validClose) return true;
-  const inner = text.slice(dollarIndex + 1, closeIdx);
-  if (MATH_COMMAND_OR_OP_RE.test(inner)) return false;
-  if (CURRENCY_PROSE_OR_NON_MATH_RE.test(inner)) return true;
-  return false;
+  // If the candidate was not math, retry with literal percentages for prose.
+  return bodyParts.length ? isBareCurrencyStart(text, dollarIndex) : true;
 }
 
 function isBlankLineBreakAt(text: string, newlineIndex: number): boolean {
@@ -108,6 +104,17 @@ function scanMathSpans(text: string): MathSpan[] {
   const envCounts = new Map<string, number>();
   let displayDollarStart: number | null = null;
   let inlineDollarStart: number | null = null;
+  let commentStart = -1;
+  let commentStop = -1;
+  const endOfInlineComment = (start: number) => {
+    // Multiple ambiguous dollar amounts on the same line share the scan to its end.
+    if (start < commentStart || start >= commentStop) {
+      commentStart = start;
+      commentStop = endOfLatexComment(text, start, text.length);
+    }
+    return commentStop;
+  };
+  const opensInlineMath = (index: number) => !isBareCurrencyStart(text, index, endOfInlineComment);
 
   const scanRange = (from: number, to: number) => {
     for (let i = from; i < to; ) {
@@ -213,14 +220,14 @@ function scanMathSpans(text: string): MathSpan[] {
           if (!/\s/.test(prev) && !/[0-9]/.test(next)) {
             spans.push({ start: inlineDollarStart, end: i + 1 });
             inlineDollarStart = null;
-          } else if (/\s/.test(prev) && next && !/\s/.test(next) && !isBareCurrencyStart(text, i)) {
+          } else if (/\s/.test(prev) && next && !/\s/.test(next) && opensInlineMath(i)) {
             inlineDollarStart = i;
           }
           i += 1;
           continue;
         }
         const next = text[i + 1] ?? "";
-        if (next && !/\s/.test(next) && !isBareCurrencyStart(text, i)) {
+        if (next && !/\s/.test(next) && opensInlineMath(i)) {
           inlineDollarStart = i;
         }
         i += 1;

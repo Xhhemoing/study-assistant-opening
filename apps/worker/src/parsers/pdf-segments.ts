@@ -240,6 +240,11 @@ export async function parsePdfSegments(input: {
       initialInWorkedExample = false;
       afterFailedSegment = true;
     } else {
+      // The first page cannot be discarded by a worker continuation.
+      const mandatoryBytes = cumulativeBookBytes + Buffer.byteLength(parsed.pages[0]!.text, "utf8");
+      if (mandatoryBytes > maxBookBytes) {
+        throw new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${mandatoryBytes} > ${maxBookBytes})`);
+      }
       if (!ready) {
         input.signal.throwIfAborted();
         await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed.pages }, input.signal);

@@ -5,6 +5,7 @@ import type { OpeningScope } from "./opening-sources";
 import { parentBudgetFamilyPredicate } from "./opening-budget";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { mapChunk } from "./opening-source-chunks";
+import { isPublicSourceChunk, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 export { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 
@@ -23,9 +24,16 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         AND (${sourceVersion ?? null}::integer IS NULL OR s.version=${sourceVersion ?? null})
         AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=w.id AND e.source_id=s.id)`;
     if (!source) return null;
-    const rows = await db`SELECT c.* FROM opening_source_chunks c WHERE c.source_id=${sourceId}
-      AND c.source_version=${Number(source.version)} ORDER BY c.page NULLS LAST,c.id`;
-    return { sourceId, sourceVersion: Number(source.version), privacyEpoch: Number(source.privacy_epoch), chunks: rows.map(row => mapChunk(row)) };
+    const rows = await db`
+      ${publicPdfSealBoundaries(db, scope.workspaceId, { sourceIds: [sourceId] })}
+      SELECT c.*,s.mime FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
+      WHERE c.source_id=${sourceId} AND s.workspace_id=${scope.workspaceId}
+        AND c.source_version=${Number(source.version)} AND s.version=c.source_version
+        AND s.upload_state='uploaded' AND s.parse_state='ready'
+        AND ${publicPdfChunkPredicate(db)}
+      ORDER BY c.page NULLS LAST,c.id`;
+    return { sourceId, sourceVersion: Number(source.version), privacyEpoch: Number(source.privacy_epoch),
+      chunks: rows.filter(isPublicSourceChunk).map(mapChunk) };
   };
   return {
     async isTurnWithRetrievalNotSent(scope: OpeningScope, tutorId: string, retrievalId: string): Promise<boolean> {
@@ -49,13 +57,20 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
       if (!owner) throw Object.assign(new Error("workspace not found"), { code: "NOT_FOUND" });
       if (!chunks.length) return { chunks: [], privacyEpoch: Number(owner.privacy_epoch) };
       const sourceIds = [...new Set(chunks.map(chunk => chunk.sourceId))];
-      const rows = await sql`SELECT c.id,c.source_version FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
+      const rows = await sql`
+        ${publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds })}
+        SELECT c.id,c.source_version,c.text,s.mime FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
         JOIN workspaces w ON w.id=s.workspace_id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(sourceIds)} AND s.upload_state='uploaded'
           AND c.source_version<=s.version AND (c.source_version<s.version OR s.parse_state='ready')
+          AND c.id=ANY(${sql.array(chunks.map(chunk => chunk.id))}::uuid[])
+          AND ${publicPdfChunkPredicate(sql)}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=w.id AND e.source_id=s.id)`;
-      const allowed = new Map(rows.map(row => [String(row.id), Number(row.source_version)]));
-      return { chunks: chunks.filter(chunk => allowed.get(chunk.id) === chunk.sourceVersion), privacyEpoch: Number(owner.privacy_epoch) };
+      const allowed = new Map(rows.filter(isPublicSourceChunk).map(row => [String(row.id), row]));
+      return { chunks: chunks.filter(chunk => {
+        const row = allowed.get(chunk.id);
+        return row && Number(row.source_version) === chunk.sourceVersion && isPublicSourceChunk({ mime: row.mime, text: chunk.text });
+      }), privacyEpoch: Number(owner.privacy_epoch) };
     },
     snapshot: (scope: OpeningScope, sourceId: string, version?: number) => readSnapshot(sql, scope, sourceId, version),
     async assertCurrent(scope: OpeningScope, snapshot: SourceIndexSnapshot): Promise<void> {
@@ -107,9 +122,10 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
     async search(scope: OpeningScope, input: ModelIdentity & SearchScope & { vector: number[] }): Promise<MaterialSegment[]> {
       if (!input.sourceIds.length || input.chunkIds?.length === 0) return [];
       const queryVector = JSON.stringify(input.vector);
-      const rows = await sql`
+      const query = sql`
+        ${publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds: input.sourceIds })}
         SELECT c.id,c.source_id,c.source_version,c.page,c.slide_label,c.start_ms,c.end_ms,c.image_object_key,
-          e.text,e.segment_index
+          CASE WHEN s.mime='application/pdf' THEN c.text END AS text,s.mime,e.text AS segment_text,e.segment_index
         FROM opening_source_embeddings e
         JOIN opening_source_chunks c ON c.id=e.chunk_id
           AND c.source_id=e.source_id AND c.source_version=e.source_version
@@ -119,20 +135,40 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
           AND s.id IN ${sql(input.sourceIds)} AND s.version=c.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
           ${routeFilter(input)}
+          AND ${publicPdfChunkPredicate(sql)}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id)
-        ORDER BY e.embedding <=> ${queryVector}::vector, c.id, e.segment_index
-        LIMIT 48`;
-      return rows.map(row => ({ chunk: mapChunk(row), segmentIndex: Number(row.segment_index) }));
+        ORDER BY e.embedding <=> ${queryVector}::vector, c.id, e.segment_index`;
+      const results: MaterialSegment[] = [];
+      const eligibility = new Map<unknown, boolean>();
+      for await (const batch of query.cursor(48)) {
+        for (const row of batch) {
+          const publicChunk = eligibility.get(row.id) ?? isPublicSourceChunk(row);
+          eligibility.set(row.id, publicChunk);
+          if (!publicChunk) continue;
+          results.push({ chunk: mapChunk({ ...row, text: row.segment_text }), segmentIndex: Number(row.segment_index) });
+          if (results.length === 48) return results;
+        }
+      }
+      return results;
     },
     async hasIndex(scope: OpeningScope, input: ModelIdentity & SearchScope): Promise<boolean> {
       if (!input.sourceIds.length || input.chunkIds?.length === 0) return false;
-      const rows = await sql`SELECT 1 FROM opening_source_embeddings e JOIN opening_sources s ON s.id=e.source_id
-        JOIN workspaces w ON w.id=s.workspace_id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
-          AND s.id IN ${sql(input.sourceIds)} AND s.version=e.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
-          AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
-          ${routeFilter(input)}
-          AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id) LIMIT 1`;
-      return rows.length > 0;
+      const query = sql`
+        ${publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds: input.sourceIds })}
+        SELECT CASE WHEN s.mime='application/pdf' THEN c.text END AS text,s.mime FROM opening_source_chunks c
+        JOIN opening_sources s ON s.id=c.source_id JOIN workspaces w ON w.id=s.workspace_id
+        WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
+          AND s.id IN ${sql(input.sourceIds)} AND s.version=c.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
+          AND ${publicPdfChunkPredicate(sql)}
+          AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id)
+          AND EXISTS (SELECT 1 FROM opening_source_embeddings e
+            WHERE e.chunk_id=c.id AND e.source_id=c.source_id AND e.source_version=c.source_version
+              AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
+              ${routeFilter(input)})`;
+      for await (const batch of query.cursor(16)) {
+        if (batch.some(isPublicSourceChunk)) return true;
+      }
+      return false;
     },
     async reindex(scope: OpeningScope, sourceId: string): Promise<{ jobId: string }> {
       return sql.begin(async tx => {

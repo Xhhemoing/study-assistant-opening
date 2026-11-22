@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[] } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -31,6 +31,8 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
     if (row.inWorkedExampleAtEnd !== undefined && typeof row.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid PDF inWorkedExampleAtEnd metadata");
     if (row.publicationSealUnknown !== undefined && typeof row.publicationSealUnknown !== "boolean") throw new TypeError("invalid PDF publicationSealUnknown metadata");
     if (row.publicationSealHadPublicPrefix !== undefined && typeof row.publicationSealHadPublicPrefix !== "boolean") throw new TypeError("invalid PDF publicationSealHadPublicPrefix metadata");
+    if (row.publicationSealCommitted !== undefined && typeof row.publicationSealCommitted !== "boolean") throw new TypeError("invalid PDF publicationSealCommitted metadata");
+    if (row.reopenedSection !== undefined && typeof row.reopenedSection !== "boolean") throw new TypeError("invalid PDF reopenedSection metadata");
     return { page: row.page as number, text: row.text, imagePath: null,
       ...(row.visualKinds === undefined ? {} : { visualKinds: row.visualKinds as PdfSegmentPage["visualKinds"] }),
       ...(row.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: row.sectionSealedAtEnd }),
@@ -38,8 +40,26 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       ...(row.hadSealedContent === undefined ? {} : { hadSealedContent: row.hadSealedContent }),
       ...(row.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: row.inWorkedExampleAtEnd }),
       ...(row.publicationSealUnknown === undefined ? {} : { publicationSealUnknown: row.publicationSealUnknown }),
-      ...(row.publicationSealHadPublicPrefix === undefined ? {} : { publicationSealHadPublicPrefix: row.publicationSealHadPublicPrefix }) };
+      ...(row.publicationSealHadPublicPrefix === undefined ? {} : { publicationSealHadPublicPrefix: row.publicationSealHadPublicPrefix }),
+      ...(row.publicationSealCommitted === undefined ? {} : { publicationSealCommitted: row.publicationSealCommitted }),
+      ...(row.reopenedSection === undefined ? {} : { reopenedSection: row.reopenedSection }) };
   });
+}
+
+/** Called after chunk reconciliation, under the publication transaction's execution and source locks. */
+export async function commitPdfPageSeals(tx: TransactionSql, workspaceId: string, sourceId: string, sourceVersion: number,
+  markers: readonly PdfSegmentPage[]) {
+  if (!markers.length) return;
+  const pages = markers.map(marker => {
+    const [page] = validatePdfSegmentPages([marker], marker.page, marker.page);
+    return { ...page, publicationSealCommitted: true };
+  });
+  await tx`INSERT INTO opening_pdf_parse_segments(workspace_id,source_id,source_version,parser_profile,page_start,page_end,state,pages,error_code)
+    SELECT ${workspaceId}::uuid,${sourceId}::uuid,${sourceVersion}::int,'pdf-publication-page-seal-v1',entry.page,entry.page,'ready',jsonb_build_array(entry.marker),NULL
+    FROM jsonb_array_elements(${tx.json(pages)}::jsonb) AS data(marker)
+    CROSS JOIN LATERAL (SELECT (data.marker->>'page')::int AS page,data.marker) entry
+    ON CONFLICT(source_id,source_version,parser_profile,page_start,page_end) DO UPDATE
+      SET state=EXCLUDED.state,pages=EXCLUDED.pages,error_code=NULL,updated_at=now()`;
 }
 
 async function assertSource(tx: Sql | TransactionSql, scope: OpeningJobScope, input: { sourceId: string; sourceVersion: number }) {

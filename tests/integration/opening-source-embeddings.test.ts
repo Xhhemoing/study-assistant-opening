@@ -25,6 +25,48 @@ async function seed(text: string | string[], scope = f.scope) {
 }
 
 describe("pgvector material repository", () => {
+  it("filters PDF answer labels and unsettled seals from all embedding entry points", async () => {
+    const texts = ["Public notes.", "Official Answer 1\nx = 3.", "5 units."];
+    const pdf = await seed(texts);
+    const markdown = await seed(texts[1]!);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    await f.sql`UPDATE opening_sources SET mime='text/markdown' WHERE id=${markdown.sourceId}`;
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+    const [notes, answer, continuation] = pdf.snapshot.chunks;
+    const repo = pdf.repository;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const before = await repo.snapshot(f.scope, pdf.sourceId);
+    expect(before?.chunks).toEqual([notes, continuation]);
+    await expect(repo.assertCurrent(f.scope, pdf.snapshot)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await repo.hasIndex(f.scope, { ...query, chunkIds: [answer!.id] })).toBe(false);
+    expect((await repo.search(f.scope, { ...query, sourceIds: [markdown.sourceId] })).map(row => row.chunk.text)).toEqual([texts[1]]);
+
+    await f.sql`INSERT INTO opening_pdf_parse_segments(workspace_id,source_id,source_version,parser_profile,page_start,page_end,state,pages)
+      VALUES(${f.scope.workspaceId},${pdf.sourceId},1,'pdf-publication-page-seal-v1',2,2,'ready',
+        ${f.sql.json([{ page: 2, text: "", imagePath: null, publicationSealUnknown: true, publicationSealCommitted: false }])})`;
+    // A later status write cannot settle an uncommitted withdrawal.
+    await f.sql`UPDATE opening_sources SET updated_at=clock_timestamp() WHERE id=${pdf.sourceId}`;
+    expect((await repo.snapshot(f.scope, pdf.sourceId))?.chunks).toEqual([notes]);
+    expect((await repo.authorizeChunks(f.scope, pdf.snapshot.chunks)).chunks).toEqual([notes]);
+    expect((await repo.search(f.scope, query)).map(row => row.chunk.id)).toEqual([notes!.id]);
+    expect(await repo.hasIndex(f.scope, { ...query, chunkIds: [continuation!.id] })).toBe(false);
+    expect(await chunks.listForSources(f.scope, [pdf.sourceId])).toEqual([notes]);
+    expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, undefined, { unpublishedPdfForRecovery: true })))
+      .toEqual(pdf.snapshot.chunks);
+
+    const recovered = "Chapter 2: Vectors";
+    await chunks.replacePdfChunks(f.scope, { sourceId: pdf.sourceId, sourceVersion: 1, preservePages: [1],
+      chunks: (async function* () {
+        yield { page: 2, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null, text: recovered };
+      })(),
+      publicationSeals: [{ page: 2, text: "", imagePath: null, hadSealedContent: false, reopenedSection: true }],
+    });
+    expect((await repo.snapshot(f.scope, pdf.sourceId))?.chunks.map(chunk => chunk.text)).toEqual([notes!.text, recovered]);
+    const [marker] = await f.sql`SELECT pages FROM opening_pdf_parse_segments
+      WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`;
+    expect(marker?.pages).toMatchObject([{ reopenedSection: true, publicationSealCommitted: true }]);
+  });
+
   it("ranks the three admitted pages even with 55 closer pages in the same book", async () => {
     const book = await seed(Array.from({ length: 58 }, (_, i) => `page ${i + 1}`));
     const other = await seed("another book");

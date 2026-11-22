@@ -55,22 +55,25 @@ def result_for(*page_elements, start_page=11):
 
 
 def worker_pdf_conversion(texts, picture_pages):
+    fragments = {page: text if isinstance(text, list) else [(text, "text")] if text else []
+                 for page, text in texts.items()}
     if not USE_DOCLING:
         # Draft CI installs only the PDF renderer wheels. Still run the real CLI
         # and extraction, using its page-local document interface for the input.
         return SimpleNamespace(
             pages=list(texts),
-            texts=[SimpleNamespace(text=text, label="text", prov=[SimpleNamespace(page_no=page)])
-                   for page, text in texts.items() if text],
+            texts=[SimpleNamespace(text=text, label=label, prov=[SimpleNamespace(page_no=page)])
+                   for page, items in fragments.items() for text, label in items],
             pictures=[SimpleNamespace(label="picture", prov=[SimpleNamespace(page_no=page)])
                       for page in texts if page in picture_pages],
         )
-    pages = [[text_element(page, text)] if text else [] for page, text in texts.items()]
+    pages = [[text_element(page, text, index, label=label) for index, (text, label) in enumerate(items, 1)]
+             for page, items in fragments.items()]
     conversion = result_for(*pages, start_page=next(iter(texts)))
     for page, elements in zip(conversion.pages, pages):
         if elements:
             page.parsed_page = SegmentedPdfPage.model_construct(textline_cells=[
-                TextCell.model_construct(text=elements[0].text, from_ocr=False),
+                TextCell.model_construct(text=element.text, from_ocr=False) for element in elements
             ])
         if page.page_no in picture_pages:
             page.predictions.layout = LayoutPrediction(clusters=[cluster(2, DocItemLabel.PICTURE)])
@@ -83,7 +86,12 @@ def worker_pdf_cli_fixtures():
             (1, 10, None), (11, 20, "section_sealed"), (12, 20, None), (21, 23, None),
         ]),
         "same_segment_answer_key": (23, {12: "Answer Key", 13: "", 14: "1. Find x.", 15: "5 units."}, (1, 14), [
-            (1, 10, None), (11, 20, None), (14, 20, None), (21, 23, None),
+            (1, 10, None), (11, 20, None), (14, 20, None), (15, 20, "inline_sealed"), (21, 23, None),
+        ]),
+        "vision_section_exit": (3, {1: "", 2: [("5 units.", "text"), ("Vector Spaces", "section_header"),
+                                              ("A vector space has two operations.", "text")], 3: "Public continuation."}, (), [
+            (1, 1, None), (2, 2, "section_sealed"), (3, 3, None),
+            (1, 2, None), (1, 3, None), (2, 3, "section_sealed"),
         ]),
         "completed_inline": (12, {10: "Model Answer: x = 3.", 11: "2. Calculate y.", 12: "Use the diagram for this exercise."}, (), [
             (1, 10, None), (11, 12, None), (11, 12, "section_sealed"),
@@ -836,7 +844,8 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertEqual(public, ["## 第 4 部分 向量空间\n定义：向量空间。"])
 
     def test_running_header_fragments_cannot_end_a_sealed_section(self):
-        for header in ("Page 1 of 3", "# Page 1/3", "OCR text for page 1", "Chapter 1 (continued)", "Section 2"):
+        for header in ("Page 1 of 3", "# Page 1/3", "OCR text for page 1", "Chapter 1 (continued)", "Section 2",
+                       "Chapter 1 (page 2 of 3)", "Chapter 1 (p. 4)", "Chapter 1 (第 2 页)", "# 123", "XVII", "[illegible]"):
             with self.subTest(header=header):
                 conversion = result_for([
                     text_element(11, "Answer Key", 1),
@@ -848,6 +857,14 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertTrue(extracted.section_sealed_by_page[11])
                 self.assertEqual(extracted.texts_by_page[12], ["Chapter 2: Vectors"])
                 self.assertFalse(extracted.section_sealed_by_page[12])
+
+    def test_numeric_heading_does_not_end_inherited_inline_seal(self):
+        conversion = result_for([
+            text_element(11, "# 123", 1, label="section_header"),
+            text_element(11, "5 units.", 2),
+        ])
+        extracted = physical_pages.extract_physical_pages(conversion, initial_seal_mode="inline_sealed")
+        self.assertEqual(extracted.texts_by_page[11], [])
 
     def test_round7_caption_inside_seal_lecture_answer_guard_and_had_sealed(self):
         import io
