@@ -6,7 +6,7 @@ import { createOpeningPrivacyRepository } from "./opening-privacy";
 import {
   contextSourceRefsIncluded, isLineageUuid, lineageUuid, mergeContextSourceRefs, resolveMemoryDependencyStatus,
   parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnDirectSourcesVersioned,
-  turnHasOwnedSession, turnHasStandaloneSession, turnLineageCourse, turnMemoryOnlyBackingIds,
+  turnHasOwnedSession, turnHasStandaloneSession, turnLineageCourse, turnMemoryOnlyBackingIds, turnSessionMaterialIds,
   type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
@@ -81,8 +81,10 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
           jsonb_typeof(refs.assistant_refs) = 'array' AND jsonb_typeof(a.citations) = 'array'
           AND ${turnDirectSourcesVersioned(sql, () => sql`a.source_ids`, () => sql`refs.assistant_refs`, () => sql`a.citations`)}
         )`} AS assistant_direct_versioned,
-        ${recordReferents ? sql`` : sql`${directSourceIds(sql, () => sql`u.source_ids`, () => sql`refs.user_refs`, () => sql`u.citations`)} AS user_direct_ids,
-          ${directSourceIds(sql, () => sql`a.source_ids`, () => sql`refs.assistant_refs`, () => sql`a.citations`)} AS assistant_direct_ids,`}
+        ${recordReferents ? sql`` : sql`${directSourceIds(sql, () => sql`u.source_ids`, () => sql`refs.user_refs`, () => sql`u.citations`)}
+          || ${turnSessionMaterialIds(sql, () => sql`u`, () => sql`c.owner_user_id`)} AS user_direct_ids,
+          ${directSourceIds(sql, () => sql`a.source_ids`, () => sql`refs.assistant_refs`, () => sql`a.citations`)}
+          || ${turnSessionMaterialIds(sql, () => sql`a`, () => sql`c.owner_user_id`)} AS assistant_direct_ids,`}
         CASE WHEN a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
           THEN ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, assistantCourse, standaloneSessions, scope)}
           ELSE '[]'::jsonb END AS memory_backing_ids,

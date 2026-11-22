@@ -28,27 +28,7 @@ function candidateMaterialRows(tx: TransactionSql, scope: OpeningScope): ReturnT
   return tx`
     ${candidateListedMaterials(tx)}
     UNION ALL
-    ${turnMaterialRows(tx, true)}
-    UNION ALL
-    ${sessionMaterialRows(tx, scope.workspaceId, () => tx`${scope.ownerUserId}::uuid`, () => tx`t.learning_session_id`)}`;
-}
-
-function sessionMaterialRows(tx: TransactionSql, workspaceId: string, owner: FragmentFactory, sessionId: FragmentFactory) {
-  return tx`
-    SELECT ref.id::text, NULL::text, false, false
-    FROM (SELECT ${sessionId()} AS id WHERE ${sessionId()} IS NOT NULL) saved
-    LEFT JOIN opening_learning_sessions session ON session.id = saved.id AND session.workspace_id = ${workspaceId}
-      AND session.owner_user_id = ${owner()}
-    LEFT JOIN opening_teaching_activities activity ON activity.id = session.activity_id
-      AND activity.workspace_id = session.workspace_id AND activity.owner_user_id = session.owner_user_id
-    CROSS JOIN LATERAL unnest(CASE WHEN activity.id IS NULL THEN ARRAY[NULL]::uuid[]
-      ELSE session.source_ids || activity.source_ids END) ref(id)`;
-}
-
-function taskTurnMaterials(tx: TransactionSql, workspaceId: string, alias: "a" | "u", owner: FragmentFactory): ReturnType<FragmentFactory> {
-  return tx`${turnMaterialRows(tx, true, alias)}
-    UNION ALL ${sessionMaterialRows(tx, workspaceId, owner,
-      () => alias === "a" ? tx`a.learning_session_id` : tx`u.learning_session_id`)}`;
+    ${turnMaterialRows(tx, () => tx`${scope.ownerUserId}::uuid`)}`;
 }
 
 function assistantCandidateSourcesVersioned(tx: TransactionSql, workspaceId: string) {
@@ -96,7 +76,7 @@ function taskTurnOriginActive(tx: TransactionSql, workspaceId: string, alias: "a
   return tx`${turnHasOwnedSession(tx, turn, owner)}
     AND jsonb_typeof(${turn()}.source_versions)='object' AND jsonb_typeof(${turn()}.citations)='array'
     ${alias === "u" ? tx`AND ${contextSourceRefsIncluded(tx, workspaceId, userRefs)}` : tx``}
-    AND ${sourceMaterialsActive(tx, workspaceId, () => taskTurnMaterials(tx, workspaceId, alias, owner), {
+    AND ${sourceMaterialsActive(tx, workspaceId, () => turnMaterialRows(tx, owner, alias), {
       lockedSourceIds, memoryCourse: () => turnLineageCourse(tx, alias, conversationCourse, owner),
       originUse: () => turnMaterialUse(tx, alias), directMaterialPolicy: true, authorizeMemoryOnlySeparately: true,
     })}`;
@@ -122,7 +102,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
       u.id AS paired_user_turn_id,
       CASE WHEN u.id IS NOT NULL THEN ${turnLineageCourse(tx, "u", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} END AS user_course_id,
       CASE WHEN u.id IS NOT NULL THEN array_remove(ARRAY(SELECT DISTINCT ${lineageUuid(tx, () => tx`ref.source_id`)}
-        FROM (${taskTurnMaterials(tx, scope.workspaceId, "u", () => tx`conv.owner_user_id`)}) ref), NULL::uuid) END AS user_source_ids
+        FROM (${turnMaterialRows(tx, () => tx`conv.owner_user_id`, "u")}) ref), NULL::uuid) END AS user_source_ids
     FROM opening_assistant_candidates c
     JOIN opening_conversations conv ON conv.id = c.conversation_id AND conv.workspace_id = c.workspace_id
       AND conv.owner_user_id = ${scope.ownerUserId}

@@ -17,6 +17,7 @@ const attempt = "12000000-0000-4000-8000-000000000009", item = "12000000-0000-40
 const courseId = "12000000-0000-4000-8000-000000000011", sourceId = "12000000-0000-4000-8000-000000000012";
 const membershipId = "12000000-0000-4000-8000-000000000013", purposeRevision = "2026-11-20T00:00:00.000000Z";
 const examCourse = "12000000-0000-4000-8000-000000000014";
+const attemptSourceId = "12000000-0000-4000-8000-000000000015";
 const fence = { attemptId: attempt, itemVersionId: item, rootObservationId: null, headObservationId: null, answerRevision: null };
 const pin = { courseId, materialUse: "citation" as const, sources: [{ sourceId, sourceVersion: 0, membershipId, purposeRevision, purpose: "teaching" as const }] };
 const scope = { workspaceId: workspace, ownerUserId: owner }, time = "2026-11-10T00:00:00.000Z";
@@ -34,6 +35,7 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   missingCompletionAssistant?: boolean;
   metadataTarget?: boolean;
   sessionCourseId?: string;
+  discoveredAttemptSourceIds?: string[];
   metadataVersionMaps?: Partial<Record<"u" | "t", unknown>>;
   metadataDirectSource?: boolean;
   storedMemoryOrigins?: Record<string, { refs: unknown[]; backings?: string[][]; sourceIds?: string[] }>;
@@ -86,6 +88,10 @@ function fixture(options: Options = {}) {
         session_course_id: sql.includes("AS session_course_id") ? options.sessionCourseId : undefined }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
+    if (sql.startsWith("SELECT jsonb_build_array(")) {
+      const ids = options.discoveredAttemptSourceIds ?? [];
+      return [{ materials: [{ ids, versions: Object.fromEntries(ids.map(id => [id, 0])) }], work_source: null }];
+    }
     if (sql === "SELECT ? AS included") return [{ included: true }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
     if (sql.startsWith("SELECT id FROM opening_sources")) return [{ id: sourceId }];
@@ -175,7 +181,7 @@ function fixture(options: Options = {}) {
   };
 }
 beforeEach(() => { vi.resetAllMocks(); hooks.lock.mockResolvedValue(undefined); hooks.release.mockResolvedValue({ id: receipt });
-  hooks.readAttempt.mockResolvedValue({ anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null, currentAnswer: null }); });
+  hooks.readAttempt.mockResolvedValue({ anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null, currentAnswer: null, sourceRefs: [] }); });
 // SQL rows and material admission are preset; no database authorization is proven.
 describe("stream receipt release waits for current job authorization and assistant-turn binding", () => {
   it("releases the exact assistant receipt after admitted job and before returning running status", async () => {
@@ -260,6 +266,28 @@ describe("stream receipt release waits for current job authorization and assista
     }, deliver)).resolves.toMatchObject({ status: "running" });
     expect(hooks.readAttempt).toHaveBeenCalledTimes(2);
     expect(hooks.release).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+  it.each(["cached", "discovered"] as const)("locks both first-exchange sources before attempt membership verification with %s refs", async mode => {
+    const f = fixture({ boundAttempt: attempt, courseId, sourceIds: [sourceId], discoveredAttemptSourceIds: [attemptSourceId] });
+    const sourceRefs = [{ sourceId: attemptSourceId, sourceVersion: 0 }];
+    hooks.readAttempt.mockImplementation(async () => {
+      const lastWorkspace = f.calls.findLastIndex(call => call.sql.startsWith("SELECT privacy_epoch"));
+      const locks = f.calls.slice(lastWorkspace).filter(call =>
+        /FROM (courses|opening_sources|course_asset_memberships).*FOR SHARE/.test(call.sql));
+      const sourceLock = locks.findIndex(call => call.sql.includes("FROM opening_sources") && call.values.some(value =>
+        Array.isArray(value) && value.includes(sourceId) && value.includes(attemptSourceId)));
+      expect(sourceLock).toBeGreaterThanOrEqual(0);
+      expect(locks.findIndex(call => call.sql.includes("FROM course_asset_memberships"))).toBeGreaterThan(sourceLock);
+      return { anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null,
+        currentAnswer: null, sourceRefs };
+    });
+    const deliver = vi.fn();
+    await expect(f.repo.readStream(scope, jobId, { ...context, attemptFence: fence,
+      materialPurposePin: { ...pin, materialUse: "practice" },
+      ...(mode === "cached" ? { attemptSourceRefs: sourceRefs } : {}),
+    }, deliver)).resolves.toMatchObject({ status: "running" });
+    expect(hooks.readAttempt).toHaveBeenCalledTimes(2);
     expect(deliver).toHaveBeenCalledOnce();
   });
   it.each([

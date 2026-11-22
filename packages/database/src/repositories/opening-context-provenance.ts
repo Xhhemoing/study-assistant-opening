@@ -377,6 +377,31 @@ export function turnHasOwnedSession(db: Db, turn: FragmentFactory, owner: Fragme
   return db`(${turn()}.learning_session_id IS NULL OR EXISTS (SELECT 1 ${ownedTurnLearningSession(db, turn, owner)}))`;
 }
 
+/** A NULL element marks a saved session or activity that could not be resolved. */
+export function turnSessionMaterialIds(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
+  return db`CASE WHEN ${turn()}.learning_session_id IS NULL AND ${turn()}.context_anchor->>'activityId' IS NULL
+    THEN '{}'::uuid[] ELSE (
+    SELECT CASE
+      WHEN (saved.session_id IS NOT NULL AND session.id IS NULL)
+        OR (session.activity_id IS NOT NULL AND activity.id IS NULL)
+        OR (saved.anchor_activity_id IS NOT NULL AND anchor_activity.id IS NULL)
+      THEN ARRAY[NULL]::uuid[]
+      ELSE COALESCE(session.source_ids, '{}'::uuid[])
+        || COALESCE(activity.source_ids, '{}'::uuid[])
+        || COALESCE(anchor_activity.source_ids, '{}'::uuid[])
+      END
+    FROM (SELECT ${turn()}.learning_session_id AS session_id,
+      ${turn()}.context_anchor->>'activityId' AS anchor_activity_id,
+      ${turn()}.workspace_id AS workspace_id, ${owner()} AS owner_user_id) saved
+    LEFT JOIN opening_learning_sessions session ON session.id=saved.session_id
+      AND session.workspace_id=saved.workspace_id AND session.owner_user_id=saved.owner_user_id
+    LEFT JOIN opening_teaching_activities activity ON activity.id=session.activity_id
+      AND activity.workspace_id=saved.workspace_id AND activity.owner_user_id=saved.owner_user_id
+    LEFT JOIN opening_teaching_activities anchor_activity ON anchor_activity.id=${lineageUuid(db, () => db`saved.anchor_activity_id`)}
+      AND anchor_activity.workspace_id=saved.workspace_id AND anchor_activity.owner_user_id=saved.owner_user_id
+  ) END`;
+}
+
 /** A missing or foreign session cannot establish that a saved turn was standalone. */
 export function turnHasStandaloneSession(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
   return db`(${turn()}.learning_session_id IS NULL OR EXISTS (

@@ -3,7 +3,7 @@ import type { OpeningScope } from "./opening-sources";
 import {
   assistantDirectSourcesVersioned, historicalUserTurnId, isLineageUuid, lineageUuid, memoryCourseAllows, pairedUserTurnId,
   parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
-  turnDependencyWalk, turnHasOwnedSession, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs,
+  turnDependencyWalk, turnHasOwnedSession, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs, turnSessionMaterialIds,
   type FragmentFactory,
   type MemoryDependencyStatus,
 } from "./opening-context-provenance";
@@ -50,19 +50,19 @@ export async function lockMemoryMaterialSources(db: Db, scope: OpeningScope, sou
 }
 
 /** Turn material rows retain version pins and document identity independent of context provenance. */
-export function turnMaterialRows(db: Db, includeUserContext = false, alias: "t" | "u" | "a" = "t"): ReturnType<Db> {
-  const turn = () => alias === "u" ? db`u` : alias === "a" ? db`a` : db`t`;
+export function turnMaterialRows(db: Db, owner: FragmentFactory, alias: "t" | "u" | "a" = "t"): ReturnType<Db> {
+  const turn: FragmentFactory = () => alias === "u" ? db`u` : alias === "a" ? db`a` : db`t`;
   return db`
     SELECT sid.id::text AS source_id, NULL::text AS version, false AS version_required, false AS memory_only
-    FROM unnest(${turn()}.source_ids) sid(id)
+    FROM unnest(${turn()}.source_ids || ${turnSessionMaterialIds(db, turn, owner)}) sid(id)
     UNION ALL
     SELECT citation->>'sourceId', CASE WHEN jsonb_typeof(citation->'sourceVersion') = 'number' THEN citation->>'sourceVersion' END, true, false
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.citations) = 'array' THEN ${turn()}.citations ELSE '[]'::jsonb END) citation
     UNION ALL
     SELECT ref->>'sourceId', CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number' THEN ref->>'sourceVersion' END,
       true, COALESCE(ref->'memoryOnly' = 'true'::jsonb, false)
-    FROM jsonb_array_elements(CASE WHEN (${includeUserContext} OR ${turn()}.role = 'assistant')
-      AND jsonb_typeof(${turn()}.context_source_refs) = 'array' THEN ${turn()}.context_source_refs ELSE '[]'::jsonb END) ref
+    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.context_source_refs) = 'array'
+      THEN ${turn()}.context_source_refs ELSE '[]'::jsonb END) ref
     WHERE NOT (ref = jsonb_build_object('memoryDependencyIds', ref->'memoryDependencyIds')
       AND jsonb_typeof(ref->'memoryDependencyIds') = 'array'
       AND ref->'memoryDependencyIds' <> '[]'::jsonb)
@@ -121,14 +121,14 @@ export function sourceMaterialsActive(
   )`;
 }
 
-export function turnSourceMaterialsActive(
+function turnSourceMaterialsActive(
   db: Db, workspaceId: string, options?: MemoryMaterialRules & {
     memoryCourse: FragmentFactory;
     originUse?: FragmentFactory;
     standaloneOrigin?: FragmentFactory;
   },
 ): ReturnType<Db> {
-  return db`${sourceMaterialsActive(db, workspaceId, () => turnMaterialRows(db, true), options)}
+  return db`${sourceMaterialsActive(db, workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`), options)}
     AND jsonb_typeof(t.source_versions) = 'object'
     AND jsonb_typeof(t.citations) = 'array'
     AND ${assistantDirectSourcesVersioned(db, "t")}
@@ -143,7 +143,7 @@ function turnOriginPolicies(db: Db, scope: OpeningScope, rules?: MemoryMaterialR
     directMaterialPolicy: true, authorizeMemoryOnlySeparately: true,
   });
   return db`${turnHasOwnedSession(db, () => db`t`, () => db`c.owner_user_id`)}
-    AND ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, true),
+    AND ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`),
       directPolicy(ownCourse, () => turnMaterialUse(db, "t"), () => db`course.id IS NULL
         AND ${turnHasStandaloneSessions(db, () => db`c.owner_user_id`)}`))}
     AND (t.role <> 'assistant' OR NOT EXISTS (
@@ -151,11 +151,11 @@ function turnOriginPolicies(db: Db, scope: OpeningScope, rules?: MemoryMaterialR
       WHERE u.id=(${pairedUserTurnId(db, () => db`t`)}) AND u.workspace_id=t.workspace_id
         AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
         AND NOT (${turnHasOwnedSession(db, () => db`u`, () => db`c.owner_user_id`)}
-          AND ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, true, "u"),
+          AND ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`, "u"),
             directPolicy(userCourse, () => turnMaterialUse(db, "u"),
               () => db`${userCourse()} IS NULL AND ${turnHasStandaloneSession(db, () => db`u`, () => db`c.owner_user_id`)}`))}
           ${destination ? db`AND (${userCourse()} IS NULL OR ${userCourse()} IS NOT DISTINCT FROM ${destination()} OR
-            ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, true, "u"), {
+            ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`, "u"), {
               ...rules, memoryCourse: destination, originUse: !rules?.materialUse || rules.materialUse === "origin"
                 ? () => turnMaterialUse(db, "u") : undefined,
             })})` : db``}
@@ -213,7 +213,7 @@ export async function assertSourceTurnsOwned(
       AND ${turnSourceMaterialsActive(db, scope.workspaceId)}
       AND ${turnOriginPolicies(db, scope, undefined, () => db`${targetCourseId}::uuid`)}
       AND (course.id IS NULL OR course.id IS NOT DISTINCT FROM ${targetCourseId}::uuid OR
-        ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, true), {
+        ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`), {
           memoryCourse: () => db`${targetCourseId}::uuid`, originUse: () => turnMaterialUse(db, "t"),
         })})
       AND NOT EXISTS (
@@ -312,8 +312,8 @@ async function readOriginBindings(
       ${originUse ? originUse() : db`NULL::text`} AS material_use
       ${rules?.collectSourceIds ? db`, ARRAY(
         SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
-        FROM (${turnMaterialRows(db, true)} UNION ALL
-          SELECT paired.* FROM (${turnMaterialRows(db, true, "u")}) paired WHERE u.id IS NOT NULL
+        FROM (${turnMaterialRows(db, () => db`c.owner_user_id`)} UNION ALL
+          SELECT paired.* FROM (${turnMaterialRows(db, () => db`c.owner_user_id`, "u")}) paired WHERE u.id IS NOT NULL
         ) material
       ) AS source_ids` : db``}
     FROM unnest(${originIds}::uuid[], ${courseIds}::uuid[], ${turnIds}::uuid[], ${ordinalities}::int[]) m(id, course_id, turn_id, ordinality)
@@ -333,7 +333,7 @@ async function readOriginBindings(
     } : undefined)}
       AND ${turnOriginPolicies(db, scope, rules, () => db`m.course_id`)}
       ${rules && !rules.writeAdmission ? db`` : db`AND (course.id IS NULL OR course.id IS NOT DISTINCT FROM m.course_id OR
-        ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, true), {
+        ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`), {
           memoryCourse: () => db`m.course_id`, originUse: () => turnMaterialUse(db, "t"),
         })})`}
       ${rules && !rules.writeAdmission ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}

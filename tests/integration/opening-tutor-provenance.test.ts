@@ -64,7 +64,7 @@ function handler(text: string, memoryText?: string) {
 }
 
 describe("saved tutor material provenance", () => {
-  it.each(["session", "activity"] as const)("fences a task against material held only by the paired user %s", async origin => {
+  it.each(["session", "activity"] as const)("fences saved tutor reuse against material held only by the paired user %s", async origin => {
     const { sql, scope } = f;
     const courses = createCourseMembershipRepository(sql);
     const createCourse = (title: string) => courses.createCourse({ workspaceId: scope.workspaceId, title, slug: randomUUID() });
@@ -75,6 +75,10 @@ describe("saved tutor material provenance", () => {
     await courses.addAssetMembership({ ...membership, role: "core", visibility: "course", purpose: "teaching" });
     const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Paired session task", courseId: null });
     const turn = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const claim = (await jobs.claim(turn.jobId))!;
+    const target = { scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId, claimToken: claim.claimToken };
+    await jobs.completeTurn({ ...target, text: "Saved session answer", citations: [], candidates: [], contextSourceRefs: [] });
     for (const [courseId, turnId] of [[userCourse.id, turn.turnId], [assistantCourse.id, turn.assistantTurnId]] as const) {
       const sessionId = randomUUID();
       const activityId = await insertTestTeachingActivity(sql, scope, courseId);
@@ -87,6 +91,19 @@ describe("saved tutor material provenance", () => {
       }
       await sql`UPDATE opening_turns SET learning_session_id=${sessionId},status='complete',context_source_refs='[]' WHERE id=${turnId}`;
     }
+    const next = await append(conversation.id);
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: userCourse.id })} WHERE id=${next.turnId}`;
+    const history = () => jobs.loadHistoryContext(scope, next.turnId);
+    const memories = createOpeningMemoryRepository(sql);
+    const propose = () => memories.proposeMemory(scope, {
+      courseId: userCourse.id, text: "Saved session material", sourceTurnIds: [turn.turnId], expiresAt: null,
+    });
+    await expect(jobs.canAppendCompletedTurnCandidates(target)).resolves.toBe(true);
+    await expect(history()).resolves.toMatchObject({
+      history: [{ role: "user", text: "continue" }, { role: "assistant", text: "Saved session answer" }],
+      historyCourseBindings: expect.arrayContaining([expect.objectContaining({ courseId: userCourse.id, sourceIds: [assetId] })]),
+    });
+    await expect(propose()).resolves.toMatchObject({ sourceTurnIds: [turn.turnId] });
     const id = randomUUID();
     await sql`INSERT INTO opening_assistant_candidates (id, workspace_id, conversation_id, source_turn_id, source_ids, payload)
       VALUES (${id}, ${scope.workspaceId}, ${conversation.id}, ${turn.assistantTurnId}, '[]',
@@ -101,7 +118,13 @@ describe("saved tutor material provenance", () => {
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
     await expect(sql.begin(tx => assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, turn.assistantTurnId)))
       .rejects.toMatchObject({ code: "VALIDATION" });
-  });
+    await sql`DELETE FROM opening_assistant_candidates WHERE id=${id}`;
+    const startSend = vi.fn(async () => true);
+    await expect(jobs.authorizeMetadataSend(target, startSend)).rejects.toThrow("tutor metadata authorization changed");
+    expect(startSend).not.toHaveBeenCalled();
+    await expect(history()).resolves.toMatchObject({ history: [], revokedDirectSourceIds: [assetId] });
+    await expect(propose()).rejects.toMatchObject({ code: "VALIDATION" });
+  }, 15_000);
 
   it("checks a task's paired user memory and its backing course under the user's scope", async () => {
     const { sql, scope } = f;
