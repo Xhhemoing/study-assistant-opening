@@ -1611,13 +1611,10 @@ const ARTICLE_MEASURE_WORD_RE = new RegExp(
   "unit|term|factor|second|minute|hour|day|week|month|year|inch|foot|yard|mile|met(?:er|re)|" +
   "(?:centi|milli|kilo)met(?:er|re)|gram|kilogram|milligram|pound|ounce|tonne?|lit(?:er|re)|gallon|degree)$",
 );
-// Keep -al explicit: signal, material, and integral can complete the noun phrase.
-const ARTICLE_PRENOMINAL_ADJECTIVE_RE = new RegExp("^(?:" +
-  "new|old|small|large|simple|complex|straight|flat|steep|smooth|acute|obtuse|convex|concave|" +
-  "horizontal|orthogonal|linear|nonlinear|collinear|coplanar|planar|angular|circular|rectangular|triangular|" +
-  "lateral|radial|axial|spatial|temporal|directional|translational|rotational|thermal|optimal|minimal|maximal|internal|external|" +
-  "nonzero|finite|infinite|discrete|uniform|random|strict|weak|strong|upper|lower|inner|outer|red|blue|green|" +
-  "[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$");
+// A word like "flat" can complete a noun phrase before a finite verb.
+const ARTICLE_PRENOMINAL_ADJECTIVE_RE =
+  /^(?:new|old|small|large|simple|complex|steep|horizontal|orthogonal|collinear|coplanar|nonzero|[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$/;
+const ARTICLE_COLOR_RE = /^(?:red|blue|green)$/;
 
 const ARTICLE_CLAUSE_END_RE = /[.!?。！？;；:：\r\n\u2028\u2029]/u;
 const ARTICLE_SUBORDINATE_RE = /^(?:that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$/;
@@ -1667,7 +1664,7 @@ const ARTICLE_TRANSITIVE_PAST_RE = new RegExp("^(?:" +
 const ARTICLE_PARTICIPLE_FORM_RE = /^(?:[a-z]{2,}(?:ed|ing)|shown|given|taken|known|written|drawn|seen)$/;
 const ARTICLE_PLURAL_VERB_RE = new RegExp("^(?:" +
   "fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist|work|remain|stay|appear|occur|apply|follow|depend|" +
-  "approach|tend|touch|pass|meet|move|shift|scale|rotate|map|project|transform|increase|decrease|double|halve|peak|drop|jump|" +
+  "approach|tend|touch|pass|meet|move|shift|scale|rotate|map|project|transform|intersect|increase|decrease|double|halve|peak|drop|jump|" +
   "fluctuate|oscillate|tremble|seem|stabilize|maximize|minimize|solve|obey|govern|describe|represent|denote|assume|hit)$");
 const ARTICLE_IMPERATIVE_RE = /^(?:compute|find|show|prove|check|explain|determine|evaluate|verify|state|give|write|list|sketch|plot)$/;
 const ARTICLE_ED_NOUN_RE = /^(?:speed|seed|feed|need|weed|reed|bed|sled|shed|shred|thread|bread|head|lead|spread|tread|stead|med|ped|biped|quadruped|hundred)$/;
@@ -1825,11 +1822,16 @@ function articlePrepositionalRelationEnd(tokens: readonly string[], start: numbe
   return start;
 }
 
+function isArticleMannerAdverb(word: string): boolean {
+  return word.endsWith("ly") && word !== "only" && word !== "early" && !ARTICLE_LY_NOUN_RE.test(word);
+}
+
 function hasConditionalClausePredicate(remainder: string): boolean {
   const tokens = articleClauseTokens(remainder);
   let previous = "";
   let expectsNoun = false;
-  let afterQuantifier = false;
+  let expectsPluralHead = false;
+  let afterQuantifiedPluralHead = false;
   let inInfinitive = false;
   let hasConjoinedSubject = false;
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1839,6 +1841,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
       if (closingComma < 0) break;
       // Resume the main clause after the aside rather than scanning its verbs.
       index = closingComma;
+      expectsPluralHead = false;
       continue;
     }
     if (ARTICLE_SUBORDINATE_RE.test(token)) break;
@@ -1846,34 +1849,41 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     if (afterConjunction && ARTICLE_IMPERATIVE_RE.test(token)) break;
     hasConjoinedSubject ||= afterConjunction;
 
-    if (ARTICLE_RELATION_COMPLEMENT_RE.test(token)) {
+    const relationComplement = ARTICLE_RELATION_COMPLEMENT_RE.test(token);
+    if (relationComplement) {
       const end = articlePrepositionalRelationEnd(tokens, index + 1);
       if (end > index + 1) {
         index = end - 1;
         previous = "";
         expectsNoun = false;
-        afterQuantifier = false;
+        expectsPluralHead = false;
+        afterQuantifiedPluralHead = false;
         inInfinitive = false;
         continue;
       }
     }
     if (RELATION_OP_RE.test(token)) return true;
 
+    const next = tokens[index + 1]?.toLowerCase() ?? "";
+    const determiner = ARTICLE_DETERMINER_RE.test(token);
+    if (expectsPluralHead && (determiner || relationComplement || ARTICLE_STOP_WORD_RE.test(token))) {
+      expectsPluralHead = false;
+    }
     const participle = ARTICLE_PARTICIPLE_FORM_RE.test(token) && !ARTICLE_ED_NOUN_RE.test(token);
     const infinitiveAuxiliary = ARTICLE_INFINITIVE_CHAIN_RE.test(token);
-    const nounSlot: boolean = afterConjunction || expectsNoun || afterQuantifier ||
+    const nounSlot: boolean = afterConjunction || expectsNoun || expectsPluralHead ||
       previous === "of" || previous === "by" || ARTICLE_RELATION_COMPLEMENT_RE.test(previous);
     if (ARTICLE_FINITE_AUXILIARY_RE.test(token) &&
       !(inInfinitive && (infinitiveAuxiliary || token === "do"))) return true;
     if (ARTICLE_FINITE_VERB_RE.test(token)) return true;
+    if (ARTICLE_HOMOGRAPH_VERB_RE.test(token) && (!nounSlot || isArticleMannerAdverb(next))) return true;
     if (!nounSlot) {
-      if (ARTICLE_HOMOGRAPH_VERB_RE.test(token) || (hasConjoinedSubject && ARTICLE_PLURAL_VERB_RE.test(token))) {
+      if ((hasConjoinedSubject || afterQuantifiedPluralHead) && ARTICLE_PLURAL_VERB_RE.test(token)) {
         return true;
       }
       if (!inInfinitive) {
         if (ARTICLE_INTRANSITIVE_PAST_RE.test(token)) return true;
         if (ARTICLE_TRANSITIVE_PAST_RE.test(token)) {
-          const next = tokens[index + 1]?.toLowerCase() ?? "";
           const complement = next.endsWith("ly") ? tokens[index + 2]?.toLowerCase() ?? "" : next;
           if (!ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(complement) &&
             !ARTICLE_PARTICIPLE_DIRECTION_RE.test(complement)) return true;
@@ -1883,11 +1893,17 @@ function hasConditionalClausePredicate(remainder: string): boolean {
 
     // A number opens a noun slot after "among the", but is a label in "theorem 1".
     const quantity = ARTICLE_CARDINAL_RE.test(token) || DECIMAL_LITERAL_RE.test(token);
-    afterQuantifier = nounSlot && quantity;
-    expectsNoun = ARTICLE_DETERMINER_RE.test(token) ||
+    // A plural quantity can span a noun used as a modifier, as in "two speed increases".
+    const pluralHead: boolean = expectsPluralHead &&
+      ((token.endsWith("s") && !ARTICLE_SINGULAR_S_RE.test(token)) || ARTICLE_IRREGULAR_PLURAL_RE.test(token));
+    afterQuantifiedPluralHead = pluralHead || (afterQuantifiedPluralHead && isArticleMannerAdverb(token));
+    expectsPluralHead = (expectsPluralHead && !pluralHead) ||
+      (nounSlot && quantity && token !== "one" && token !== "1" && next !== "of");
+    const colorModifier = previous !== "the" && ARTICLE_COLOR_RE.test(token);
+    expectsNoun = determiner ||
       (nounSlot && (quantity || participle ||
-        ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) ||
-        ARTICLE_NOUN_COMPOUND_RE.test(token + " " + (tokens[index + 1]?.toLowerCase() ?? "")) ||
+        ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) || colorModifier ||
+        ARTICLE_NOUN_COMPOUND_RE.test(token + " " + next) ||
         (ARTICLE_MODIFIER_WORD_RE.test(token) && !ARTICLE_LY_NOUN_RE.test(token))));
     inInfinitive = token === "to" || (inInfinitive && infinitiveAuxiliary);
     previous = token;
