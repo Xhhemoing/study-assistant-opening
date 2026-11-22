@@ -1652,6 +1652,29 @@ const ARTICLE_PARTICIPLE_FORM_RE = /^(?:[a-z]{2,}(?:ed|ing)|shown|given|taken|kn
 const ARTICLE_PLURAL_VERB_RE = /^(?:fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist|work|remain|stay|appear|occur|apply|follow|depend)$/;
 const ARTICLE_IMPERATIVE_RE = /^(?:compute|find|show|prove|check|explain|determine|evaluate|verify|state|give|write|list|sketch|plot)$/;
 
+const ARTICLE_IMPLICIT_PRODUCT_RE = /^\d*([a-z]{2,3})(?:_[\p{L}\p{N}]+)?$/u;
+const ARTICLE_TWO_LETTER_PROSE_RE = /^(?:in|on|at|to|of|by|as|up|or|if|so|no|an|is|am|be|do|go|we|he|me|my|us|it|ox)$/;
+const ARTICLE_PRODUCT_OPERATOR_RE = /^[+\-*/^]$/;
+const ARTICLE_RELATION_MODIFIER_RE = /^(?:unit|coordinate|open|real|upper|lower)$/;
+
+function isArticleRelationBoundaryWord(word: string): boolean {
+  return ARTICLE_STOP_WORD_RE.test(word) || ARTICLE_DETERMINER_RE.test(word) || ARTICLE_SUBORDINATE_RE.test(word) ||
+    ARTICLE_FINITE_AUXILIARY_RE.test(word) || ARTICLE_FINITE_VERB_RE.test(word) || ARTICLE_HOMOGRAPH_VERB_RE.test(word) ||
+    ARTICLE_INTRANSITIVE_PAST_RE.test(word) || ARTICLE_TRANSITIVE_PAST_RE.test(word) || ARTICLE_PLURAL_VERB_RE.test(word);
+}
+
+function isArticleImplicitProduct(token: string, sawRelation: boolean, nearArithmetic: boolean): boolean {
+  return token.split("-").every(term => {
+    if (ARTICLE_SYMBOLIC_LHS_RE.test(term) || DECIMAL_LITERAL_RE.test(term)) return true;
+    const variables = ARTICLE_IMPLICIT_PRODUCT_RE.exec(term)?.[1];
+    if (variables === undefined) return false;
+    // "by" is b times y when an explicit arithmetic operator connects the terms.
+    if (variables === "by") return nearArithmetic;
+    return !isArticleRelationBoundaryWord(variables) && (sawRelation || nearArithmetic ||
+      (variables.length === 2 && !ARTICLE_TWO_LETTER_PROSE_RE.test(variables)));
+  });
+}
+
 function articleClauseTokens(remainder: string): string[] {
   const tokens: string[] = [];
   let depth = 0;
@@ -1697,7 +1720,8 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
         ARTICLE_FINITE_VERB_RE.test(token) || ARTICLE_HOMOGRAPH_VERB_RE.test(token) ||
         ARTICLE_INTRANSITIVE_PAST_RE.test(token) || ARTICLE_TRANSITIVE_PAST_RE.test(token))) break;
       expectsOperand = true;
-    } else if ("([{".includes(token) || ARTICLE_SYMBOLIC_LHS_RE.test(token) || DECIMAL_LITERAL_RE.test(token)) {
+    } else if ("([{".includes(token) || isArticleImplicitProduct(token, sawRelation,
+      ARTICLE_PRODUCT_OPERATOR_RE.test(tokens[index - 1] ?? "") || ARTICLE_PRODUCT_OPERATOR_RE.test(argument))) {
       expectsOperand = false;
     } else {
       break;
@@ -1715,15 +1739,17 @@ function articlePrepositionalRelationEnd(tokens: readonly string[], start: numbe
   const headStart = ARTICLE_DETERMINER_RE.test(tokens[start] ?? "") ? start + 1 : start;
   for (let headIndex = headStart; headIndex < headStart + 3; headIndex += 1) {
     const word = tokens[headIndex] ?? "";
-    if (!ARTICLE_IDENTIFIER_RE.test(word) || ARTICLE_DETERMINER_RE.test(word) || ARTICLE_SUBORDINATE_RE.test(word) ||
-      ARTICLE_FINITE_AUXILIARY_RE.test(word) || ARTICLE_FINITE_VERB_RE.test(word)) break;
+    if (!ARTICLE_IDENTIFIER_RE.test(word) || isArticleRelationBoundaryWord(word)) break;
 
     // After the head, the equation needs its own LHS, as in "the line x + y = 1".
     const appositiveStart = headIndex + 1;
-    const first = tokens[appositiveStart] ?? "";
-    if (ARTICLE_FINITE_AUXILIARY_RE.test(first) || ARTICLE_FINITE_VERB_RE.test(first)) break;
+    if (isArticleRelationBoundaryWord(tokens[appositiveStart] ?? "")) break;
     const end = articleRelationComplementEnd(tokens, appositiveStart);
     if (end > appositiveStart) return end;
+
+    if (!(ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(word) || ARTICLE_PARTICIPLE_FORM_RE.test(word) ||
+      ARTICLE_RELATION_MODIFIER_RE.test(word) ||
+      (ARTICLE_MODIFIER_WORD_RE.test(word) && !ARTICLE_LY_NOUN_RE.test(word)))) break;
   }
 
   return start;
@@ -3429,8 +3455,9 @@ export function reconcileOfflineLeaseOutbox(
     });
 
   const results: OfflineOutboxItemResult[] = [];
+  // Each entry is checked against the active lease before in-batch deduplication.
   const seenSeqInBatch = new Map<
-    string,
+    number,
     { readonly payloadFingerprint: string; readonly payloadSummary: OfflineOutboxPayloadSummary }
   >();
   let settledCount = 0;
@@ -3553,7 +3580,7 @@ export function reconcileOfflineLeaseOutbox(
       continue;
     }
 
-    const priorBatchSeq = seenSeqInBatch.get(idempotencyKey);
+    const priorBatchSeq = seenSeqInBatch.get(entry.seq);
     if (priorBatchSeq) {
       if (priorBatchSeq.payloadFingerprint !== payloadFingerprint) {
         conflictCount += 1;
@@ -3570,7 +3597,7 @@ export function reconcileOfflineLeaseOutbox(
         continue;
       }
     } else {
-      seenSeqInBatch.set(idempotencyKey, { payloadFingerprint, payloadSummary });
+      seenSeqInBatch.set(entry.seq, { payloadFingerprint, payloadSummary });
     }
 
     const leasedCard = leasedCardById.get(canonicalEntryCardId);

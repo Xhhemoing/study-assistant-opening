@@ -2819,6 +2819,25 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Select a given result in the process fails x > 0."].map(text => ({
         answerKey: "A", text, ok: false,
       })),
+      ...["Select a given current in the circuit reaches I = 0.",
+        "Select a given current in the circuit reached I = 0.",
+        "Select a given sample in the model gave x = 0.",
+        "Select a given point on the plane holds (in this case) x = 1.",
+        "Select a given current in the circuit and x = 0.",
+        "Select a given value in the interval works x = 1.",
+        "Select a given pressure in gas > 0.", "Select a given pressure in air > 0.",
+        "Select a given point on y = mx + b fails."].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
+      ...["Choose a given point on the line y = mx + b.",
+        "Choose a given point on the line y = mx - b.",
+        "Choose a given point on the line y = mx-b.",
+        "Choose a given point on ax + by = c.", "Choose a given point on xy = 1.",
+        "Choose a given state with PV = nRT.", "Choose a given height with U = mgh.",
+        "Choose a given point on the line y = mx_0 + b.",
+        "Choose a given point in the open interval 0 < x < 1."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),
@@ -4164,6 +4183,49 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
 });
 
 describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () => {
+  it("keeps course and concept IDs separate when deduplicating bridge evidence", () => {
+    const sharedEdge = {
+      targetCourseId: "target",
+      targetConceptId: "geometry",
+      alignmentWeight: 0.15,
+      sourceDirectObservationCount: 4,
+      edgePrivacyEpoch: 1,
+      supportingSourceIds: [],
+    };
+    const edges = [
+      {
+        ...sharedEdge,
+        edgeId: "course-with-colons",
+        sourceCourseId: "math::101",
+        sourceConceptId: "angles",
+        sourceDirectSuccessCount: 4,
+      },
+      {
+        ...sharedEdge,
+        edgeId: "concept-with-colons",
+        sourceCourseId: "math",
+        sourceConceptId: "101::angles",
+        sourceDirectSuccessCount: 0,
+      },
+    ];
+
+    for (const orderedEdges of [edges, [...edges].reverse()]) {
+      const result = computeCrossCourseWeakPrior({
+        targetCourseId: sharedEdge.targetCourseId,
+        targetConceptId: sharedEdge.targetConceptId,
+        edges: orderedEdges,
+        coursePrivacyEpochs: { "math::101": 1, math: 1 },
+        activeCourseSharingEnabled: { "math::101": true, math: true },
+        revokedSourceIds: new Set(),
+      });
+
+      expect(result.posteriorMean).toBe(0.5);
+      expect(result.acceptedEdges.map(edge => edge.edgeId).sort()).toEqual([
+        "concept-with-colons", "course-with-colons",
+      ]);
+    }
+  });
+
   it("enforces strict 1-hop propagation only (ignores A->B upstream and bridge-only B->C)", () => {
     expect(BASE_PRIOR_ALPHA).toBe(1);
     expect(BASE_PRIOR_BETA).toBe(1);

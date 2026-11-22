@@ -305,7 +305,7 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
 
     // Deduplicate identical canonical `(sourceCourseId, sourceConceptId)` edges deterministically
     // so repeating the same neighbor (or whitespace-padded aliases) cannot inflate alignment weight.
-    const sourceKey = `${canonicalSourceCourseId}::${canonicalSourceConceptId}`;
+    const sourceKey = JSON.stringify([canonicalSourceCourseId, canonicalSourceConceptId]);
     const existing = survivingBySourceKey.get(sourceKey);
     if (!existing || edge.alignmentWeight > existing.edge.alignmentWeight) {
       survivingBySourceKey.set(sourceKey, {
