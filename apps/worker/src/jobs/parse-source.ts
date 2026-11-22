@@ -117,12 +117,14 @@ const EXERCISE_OPENER_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PR
 const DOTTED_SECTION_PREFIX_RE = /^\d+(?:\.\d+)+\s+/u;
 const LATIN_SECTION_TITLE_RE = /^[A-Z][A-Za-z0-9'’&-]*(?:[ ,]+(?:[A-Z0-9][A-Za-z0-9'’&-]*|and|as|at|by|for|from|in|of|on|or|the|to|a|an|with|without|via)){0,12}$/u;
 const CJK_SECTION_TITLE_RE = /^[【「『〈《（(]?[\u4e00-\u9fff]/u;
-const SECTION_PROSE_RE = /[=<>≈%％。！？；]|[.!?;]$|\b(?:am|is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides|depicts|presents|indicates|says|proves|discusses)\b|^(?:是|为|有\s*[一二三四五六七八九十百千两几多\d])|可得|得到|满足|成立|显示|表明|说明/u;
-const LATIN_UNIT = String.raw`(?:[kKMGTPEZYmunpfµμ]|da|d|c)?(?:V|A|W|J|N|C|F|H|T|S|K|M|B|G|L|l|m|g|s|h|b|Ω|Hz|Pa|Wb|Bq|Gy|Sv|lm|lx|cd|sr|mol|rad|deg|kat|bar|atm|psi|cal|eV|dB|rpm|mph|fps|min|sec|hrs?|iB|[KMGTPEZY]iB|volts?|amps?|watts?|joules?|meters?|metres?|seconds?|liters?|litres?|grams?)(?:\^?[+-]?\d+|[²³])?`;
-const LATIN_SECTION_UNITS_RE = new RegExp(String.raw`^\s*${LATIN_UNIT}(?:\s*(?:[/·⋅*]\s*|\s+)${LATIN_UNIT})*\s*$`, "u");
-const CJK_SECTION_UNITS_RE = /^(?:(?:平方|立方|千|毫|微|纳|皮|飞|吉|兆|太|分|厘|公|市|摄氏|华氏|十|百|万|亿)*(?:米|里|克|斤|两|吨|秒|分|分钟|时|小时|天|日|周|月|年|升|伏|伏特|安|安培|瓦|瓦特|焦|焦耳|牛|牛顿|帕|帕斯卡|赫|赫兹|欧|欧姆|法|法拉|亨|亨利|韦伯|特|特斯拉|库|库仑|摩|摩尔|坎|坎德拉|流明|勒克斯|贝可|戈瑞|希沃特|开|开尔文|度|弧度|球面度|分贝|字节|比特|位|元|角|毛|块|美元|欧元|日元|英镑|人民币|倍|个|次|项|种|类|条|件|张|页|题|人|成|折)(?=$|[\s/／每，。！？；、.,;:：)）]|(?:左右|以上|以下|以内|以外|的|是|为|重|长|宽|高))|[十百千万亿]+(?=$|[\s，。！？；、]))/u;
+const SECTION_PROSE_RE = /[=<>≈%％。！？；]|[.!?;]$|\b(?:am|is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides|depicts|presents|indicates|says|proves|discusses)\b|^(?:是|为|有(?!(?:限|理|界|向|效|序|机|源|偏|噪|穷))|在(?!(?:线|位|途)))|可得|得到|满足|成立|显示|表明|说明|实数解|整数解|唯一解|无解|有解|位于|属于|大于|小于|等于/u;
+const LATIN_UNIT = String.raw`(?:[kKMGTPEZYmunpfµμ]|da|d|c)?(?:V|A|W|J|N|C|F|H|T|S|K|M|B|G|L|l|m|g|s|h|b|Ω|Hz|Pa|Wb|Bq|Gy|Sv|lm|lx|cd|sr|mol|rad|deg|kat|bar|atm|psi|cal|eV|dB|rpm|mph|fps|min|sec|hrs?|iB|[KMGTPEZY]iB|volts?|amps?|watts?|joules?|meters?|metres?|seconds?|liters?|litres?|grams?|ft|yd|mi|in|lb|oz|Ah|Wh|hp|ac|qt)(?:\^?[+-]?\d+|[²³])?`;
+const LATIN_SECTION_UNITS_RE = new RegExp(String.raw`^(?!ML$)\s*${LATIN_UNIT}(?:\s*(?:[/·⋅*]\s*|\s+)${LATIN_UNIT})*\s*$`, "u");
+const CJK_UNIT_ATOM = "(?:平方|立方|千|毫|微|纳|皮|飞|吉|兆|太|分|厘|公|市|摄氏|华氏|十|百|万|亿)*(?:米|里|顷|亩|丈|尺|寸|斗|石|克|斤|两|吨|秒|分钟|分|小时|时|天|日|周|月|年|升|伏特|伏|安培|安|瓦特|瓦|焦耳|焦|牛顿|牛|帕斯卡|帕|赫兹|赫|欧姆|欧|法拉|法|亨利|亨|韦伯|韦|特斯拉|特|库仑|库|摩尔|摩|坎德拉|坎|流明|流|勒克斯|勒|贝可|贝|戈瑞|戈|希沃特|希|开尔文|开|弧度|弧|球面度|度|分贝|字节|比特|位|美元|欧元|日元|英镑|人民币|元|角|毛|块|倍|个|次|项|种|类|条|件|张|页|题|人|成|折)";
+// Match each unit greedily once, even when its prefix is also a standalone unit.
+const CJK_SECTION_UNITS_RE = new RegExp(String.raw`^(?:(?=(${CJK_UNIT_ATOM}))\1(?:(?=([·⋅/／每]?${CJK_UNIT_ATOM}))\2)*(?=$|[\s/／每，。！？；、.,;:：)）]|(?:左右|以上|以下|以内|以外|的|是|为|重|长|宽|高))|[十百千万亿]+(?=$|[\s，。！？；、]))`, "u");
 const NON_ANSWER_AFTER_BLANK_RE = /^(?:(?:Exercises?|Practice\s+Problems?|Problems?|Questions?)\b|(?:习题|练习题|练习|问题|思考题|作业题|证明|第\s*\d+\s*题|题\s*\d+))/iu;
-const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Bibliography|References|Works\s+Cited|Index|Subject\s+Index|Author\s+Index|Glossary|Notation\s+Index|Acknowledg(?:e)?ments?|About\s+the\s+Authors?|Afterword|Colophon|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢)(?:\s*[:：.—–-]|$)|(?:Appendix(?:\s+[A-Z0-9]+)?|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)(?:\s*[:：.—–-]\s*(?!.*(?:\b(?:Answers?|Solutions?|Keys?)\b|答案|解答)).*)?$)/iu;
+const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Preface|Introduction|序言|前言|引言|Bibliography|References|Works\s+Cited|Index|Subject\s+Index|Author\s+Index|Glossary|Notation\s+Index|Acknowledg(?:e)?ments?|About\s+the\s+Authors?|Afterword|Colophon|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢)(?:\s*[:：.—–-]|$)|(?:Appendix(?:\s+[A-Z0-9]+)?|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)(?:\s*[:：.—–-]\s*(?!.*(?:\b(?:Answers?|Solutions?|Keys?)\b|答案|解答)).*)?$)/iu;
 const SECTION_SEALED_SUBHEADER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT|Section|SECTION|Lecture|LECTURE)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review|REVIEW|Practice|PRACTICE|Quiz|QUIZ|Drills?|DRILLS?|Self-Check|SELF-CHECK)\b|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])\s*$|(?:习题|练习题?|思考题|复习题|作业题|自测题|第\s*[一二三四五六七八九十百千\d]+\s*[题小题])|(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])/u;
 const TEXTBOOK_STRUCTURAL_OPENER_RE = /^(?:定义|记号|术语|约定|公理|定理|引理|推论|命题|猜想|证明)(?:\b|\s*[:：]|$)/u;
 const ENGLISH_BLOCK_PREFIX_RE = /^(?:Definition|Notation|Terminology|Convention|Axiom|Theorem|Lemma|Proposition|Corollary|Conjecture|Claim|Proof(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary))?)\b/iu;
@@ -149,12 +151,11 @@ function isNumberedSectionHeading(stripped: string): boolean {
   const title = stripped.slice(prefix[0].length);
   return !SECTION_PROSE_RE.test(title) && !ANSWER_OR_REVIEW_TITLE_RE.test(title)
     && !/^(?:True|False|Yes|No|None|[A-F](?:\s*,\s*[A-F])*)$/u.test(title)
-    && (LATIN_SECTION_TITLE_RE.test(title) && /[A-Za-z]{3}/u.test(title) && !LATIN_SECTION_UNITS_RE.test(title)
+    && (LATIN_SECTION_TITLE_RE.test(title) && /[A-Za-z]{2}/u.test(title) && !LATIN_SECTION_UNITS_RE.test(title)
       || CJK_SECTION_TITLE_RE.test(title) && !CJK_SECTION_UNITS_RE.test(title));
 }
 
-function hasReferenceHeadingSuffix(suffix: string, isMarkdownHeading: boolean, chinese: boolean): boolean {
-  if (isMarkdownHeading) return true;
+function hasReferenceHeadingSuffix(suffix: string, chinese: boolean): boolean {
   const remainder = suffix.replace(HEADING_QUALIFIERS_RE, "");
   const delimiter = HEADING_DELIMITER_RE.exec(remainder)?.[0];
   const body = delimiter ? remainder.slice(delimiter.length).trimStart() : remainder;
@@ -168,24 +169,27 @@ function hasReferenceHeadingSuffix(suffix: string, isMarkdownHeading: boolean, c
     && (Boolean(delimiter) || !/^[a-z]|[.!?;]$/u.test(body));
 }
 
-function hasBlockHeadingSuffix(suffix: string, explicitHeading: boolean, requireId: boolean): boolean {
+function hasBlockHeadingSuffix(suffix: string, requireId: boolean): boolean {
   const identifier = BLOCK_IDENTIFIER_RE.exec(suffix)?.[0];
-  if (!identifier) return !requireId && BLOCK_DELIMITER_RE.test(suffix);
-  return hasReferenceHeadingSuffix(suffix.slice(identifier.length), explicitHeading, false);
+  if (!identifier) return !requireId && BLOCK_DELIMITER_RE.test(suffix)
+    && (!/^\s*[(（]/u.test(suffix) || hasReferenceHeadingSuffix(suffix, false));
+  return hasReferenceHeadingSuffix(suffix.slice(identifier.length), false);
 }
 
-function isTextbookStructuralHeading(stripped: string, explicitHeading: boolean): boolean {
+function isTextbookStructuralHeading(stripped: string): boolean {
   const prefix = ENGLISH_BLOCK_PREFIX_RE.exec(stripped)?.[0];
-  if (prefix) return hasBlockHeadingSuffix(stripped.slice(prefix.length), explicitHeading, false);
+  if (prefix) return hasBlockHeadingSuffix(stripped.slice(prefix.length), false);
   const chinese = CHINESE_BLOCK_PREFIX_RE.exec(stripped)?.[0];
-  if (chinese) return hasReferenceHeadingSuffix(stripped.slice(chinese.length), explicitHeading, true);
-  return TEXTBOOK_STRUCTURAL_OPENER_RE.test(stripped) || isWorkedExampleHeading(stripped, explicitHeading);
+  if (chinese) return hasReferenceHeadingSuffix(stripped.slice(chinese.length), true);
+  return TEXTBOOK_STRUCTURAL_OPENER_RE.test(stripped) || isWorkedExampleHeading(stripped);
 }
 
-function isWorkedExampleHeading(stripped: string, isMarkdownHeading: boolean): boolean {
+const WORKED_EXAMPLE_PREFIX_RE = new RegExp(String.raw`^(?:${SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+))?(?:(?:Worked\s+)?Example\b(?:\s+\d+(?:[.-]\d+)*)?|(?<chinese>例题|例)(?:\s*\d+(?:[.-]\d+)*)?)`, "iu");
+
+function isWorkedExampleHeading(stripped: string): boolean {
   if (!WORKED_EXAMPLE_RE.test(stripped)) return false;
-  const numbered = /^(?:(?:Worked\s+)?Example\s+\d+(?:[.-]\d+)*|(?:例题|例)\s*\d+(?:[.-]\d+)*)/iu.exec(stripped)?.[0];
-  return !numbered || hasReferenceHeadingSuffix(stripped.slice(numbered.length), isMarkdownHeading, /^例/u.test(numbered));
+  const prefix = WORKED_EXAMPLE_PREFIX_RE.exec(stripped);
+  return Boolean(prefix && hasReferenceHeadingSuffix(stripped.slice(prefix[0].length), Boolean(prefix.groups?.chinese)));
 }
 const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+\)|\(\s*[a-zA-Z]\s*\)|[a-zA-Z][.)]|第\s*[一二三四五六七八九十百千\d]+\s*[题小题]|[（(]\s*[一二三四五六七八九十]+\s*[)）])(?:\s+|$)|(?:Chapter|CHAPTER|Section|SECTION|Part|PART|Unit|UNIT|Lecture|LECTURE)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])\s*$)/u;
 const ANSWER_OR_REVIEW_TITLE_RE = /\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?|Review|Practice|Quiz|Drills?|Self-Check|Homework|Assignments?|Problem\s*Sets?|Worksheets?|Tutorials?|Recitations?|Labs?)\b|答案|解答|习题|练习|思考题|复习题|自测题|作业|课后题|单元测试/iu;
@@ -197,7 +201,9 @@ const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
 const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/u;
 const SAVED_NATIVE_HEADER_RE = /^\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n/u;
 const normalizeArchivedNative = (text: string) =>
-  text.replace(/\u00ad|(?<=\p{L})-\s+(?=\p{L})/gu, "").replace(/\s+/gu, " ").trim();
+  text.replace(/(?<=\p{L})[-\u00ad]\s*(?=\p{L})|\u00ad(?:\r?\n\s*)?/gu, "")
+    .replace(/(?<=[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef])\s+|\s+(?=[\u3000-\u303f\u3400-\u9fff\uf900-\ufaff\uff00-\uffef])/gu, "")
+    .replace(/\s+/gu, " ").trim();
 const archivedNativeDigest = (text: string) => createHash("sha256").update(normalizeArchivedNative(text)).digest("hex");
 const TERMINAL_PUNCTUATION_RE = /[.。!?！？;；)）\]】□■∎]$/u;
 const NEXT_CONTINUATION_RE = /(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|[（(]\s*(?:下接下页|转下页|未完待续)\s*[）)]|接下页|转下页)$/iu;
@@ -208,8 +214,10 @@ const CHINESE_PAGE_COUNTER = String.raw`(?:(?:第\s*)?${CHINESE_COUNTER_NUMBER}(
 const PAGE_COUNTER = String.raw`(?:[(（[【]?\s*(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+|pp?\.\s*)\d+(?:\s*(?:of\s+|[/／–—-]\s*)\d+)?\s*[)）\]】]?|${CHINESE_PAGE_COUNTER})\s*[.。．、]?$`;
 const PAGE_COUNTER_RE = new RegExp("^" + PAGE_COUNTER, "iu");
 const FURNITURE_PAGE_COUNTER_RE = new RegExp(String.raw`^\s*[|:：—–-]\s*${PAGE_COUNTER}`, "iu");
-const TITLED_PAGE_COUNTER_RE = new RegExp(String.raw`^([^|｜—–\r\n]{1,96}?)(?:\s*[|｜—–]\s*|\s+-\s+|\s*[:：]\s+)${PAGE_COUNTER}`, "iu");
-const FURNITURE_PROSE_RE = /\b(?:on|see|at|pages?)\s+(?:page\s+)?\d+\b|[。！？；!?]|(?:见|参见)第\s*\d+\s*页/iu;
+const FURNITURE_SEPARATOR = String.raw`(?:[|｜—–]\s*|(?<=\s)-\s+)`;
+const CONTAINER_TITLE_COUNTER_RE = new RegExp(String.raw`^.*${FURNITURE_SEPARATOR}${PAGE_COUNTER}`, "iu");
+const TITLED_PAGE_COUNTER_RE = new RegExp(String.raw`^([^|｜—–\r\n]{1,96}?)(?:${FURNITURE_SEPARATOR}|\s*[:：]\s+)${PAGE_COUNTER}`, "iu");
+const FURNITURE_PROSE_RE = /\b(?:on|see|at|pages?)\s+(?:page\s+)?\d+\b|[。！；!]|(?:见|参见)第\s*\d+\s*页/iu;
 const PARENTHESIZED_COUNTER_RE = /^(.*?)\s*[（(]([^()（）]+)[）)]\s*[.。]?$/u;
 const RUNNING_COUNTER_RE = /^(?:[(（[【]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8}|\d+\s*(?:of|[/／–—-])\s*\d+)\s*[)）\]】]?|[-–—]\s*(?:\d+|[ivxlcdm]{1,8})\s*[-–—])\s*[.。．、]?$/iu;
 const OCR_PLACEHOLDER_RE = /^[[【(（]\s*(?:illegible|unreadable|blank|unclear|ocr|no\s+(?:readable\s+)?text|无法识别|无法辨认|空白页|图片描述|图像描述|图示与版面描述|不确定处)(?=[\s\]】)）：:]|$)/iu;
@@ -217,9 +225,10 @@ const OCR_PLACEHOLDER_RE = /^[[【(（]\s*(?:illegible|unreadable|blank|unclear|
 function isRunningPageHeading(stripped: string, bareContainersAreCounters = true): boolean {
   if (PAGE_METADATA_HEADING_RE.test(stripped) || CONTINUATION_HEADING_RE.test(stripped)
     || RUNNING_COUNTER_RE.test(stripped) || PAGE_COUNTER_RE.test(stripped) || OCR_PLACEHOLDER_RE.test(stripped)) return true;
+  const container = ENGLISH_CONTAINER_PREFIX_RE.exec(stripped)?.[0] ?? CHINESE_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
+  if (container && CONTAINER_TITLE_COUNTER_RE.test(stripped.slice(container.length))) return true;
   const furnitureTitle = TITLED_PAGE_COUNTER_RE.exec(stripped)?.[1];
   if (furnitureTitle && !FURNITURE_PROSE_RE.test(furnitureTitle) && !ENGLISH_REFERENCE_VERB_RE.test(furnitureTitle)) return true;
-  const container = ENGLISH_CONTAINER_PREFIX_RE.exec(stripped)?.[0] ?? CHINESE_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
   if (!container) return false;
   const suffix = stripped.slice(container.length);
   const bracketed = PARENTHESIZED_COUNTER_RE.exec(suffix);
@@ -254,17 +263,16 @@ function isSectionSealedExit(stripped: string, isMarkdownHeading: boolean): bool
     || CAPTION_PREFIX_RE.test(stripped) || CHINESE_CAPTION_PREFIX_RE.test(stripped)
     || /^(?:\d+(?:\.\d+)*[.)]?\s+)?(?:true|false|yes|no|none|[a-f](?:\s*,\s*[a-f])*)[.。]?$/iu.test(stripped)) return false;
   if (MAJOR_NON_ANSWER_HEADING_RE.test(stripped) && !ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return true;
-  if (isTextbookStructuralHeading(stripped, isMarkdownHeading)) return true;
-  if (isTitledPublicContainer(stripped, isMarkdownHeading)) return true;
+  if (isTextbookStructuralHeading(stripped)) return true;
+  if (isTitledPublicContainer(stripped)) return true;
   if (isNumberedSectionHeading(stripped)) return true;
   if (!isMarkdownHeading) return false;
   if (INLINE_SEALED_ALWAYS_RE.test(stripped) || INLINE_SEALED_NON_EXAMPLE_RE.test(stripped)) return false;
   if (STANDALONE_SOLUTION_HEADING_RE.test(stripped) || SECTION_SEALED_SUBHEADER_RE.test(stripped)) return false;
-  if (ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return false;
-  return !CONTAINER_OR_NUMBERED_HEADING_RE.test(stripped);
+  return !ANSWER_OR_REVIEW_TITLE_RE.test(stripped) && isGenericPublicMarkdownHeading(stripped);
 }
 
-function isTitledPublicContainer(stripped: string, isMarkdownHeading = false): boolean {
+function isTitledPublicContainer(stripped: string): boolean {
   const chinese = CHINESE_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
   const prefix = chinese ?? ENGLISH_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
   if (!prefix) return false;
@@ -272,7 +280,18 @@ function isTitledPublicContainer(stripped: string, isMarkdownHeading = false): b
   const title = suffix.replace(/^[\s:：.．—–-]+/u, "");
   if (ANSWER_OR_REVIEW_TITLE_RE.test(title)) return false;
   if (/^(?:\*\*|__)?(?:Key\b|\(?cont|\(?续)/iu.test(title)) return false;
-  return hasReferenceHeadingSuffix(suffix, isMarkdownHeading, Boolean(chinese));
+  return hasReferenceHeadingSuffix(suffix, Boolean(chinese));
+}
+
+function isGenericPublicMarkdownHeading(stripped: string): boolean {
+  return /^\p{L}/u.test(stripped) && !/[=<>≈]|[.!?;。！？；]$/u.test(stripped)
+    && !ENGLISH_REFERENCE_VERB_RE.test(stripped) && !ENGLISH_REFERENCE_CLAUSE_RE.test(stripped)
+    && !CHINESE_REFERENCE_CLAUSE_RE.test(stripped)
+    && !(/^(?:Preface\b|Introduction\b|序言|前言|引言)/iu.test(stripped) && ANSWER_OR_REVIEW_TITLE_RE.test(stripped))
+    && !CONTAINER_OR_NUMBERED_HEADING_RE.test(stripped)
+    && !ENGLISH_BLOCK_PREFIX_RE.test(stripped) && !CHINESE_BLOCK_PREFIX_RE.test(stripped)
+    && !WORKED_EXAMPLE_PREFIX_RE.test(stripped) && !CAPTION_PREFIX_RE.test(stripped)
+    && !CHINESE_CAPTION_PREFIX_RE.test(stripped) && !STANDALONE_SOLUTION_HEADING_RE.test(stripped);
 }
 
 function splitPdfChunk(text: string) {
@@ -283,16 +302,15 @@ function splitPdfChunk(text: string) {
   return { nativeBody: native.slice(nativeHeader.length).trimEnd(), nativeHeader, vision, marker };
 }
 
-function isRecoverySectionHeading(stripped: string, isMarkdownHeading = false): boolean {
+function isRecoverySectionHeading(stripped: string): boolean {
   if (isSectionSealedHeader(stripped) || isRunningPageHeading(stripped) || ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return false;
-  return isTitledPublicContainer(stripped, isMarkdownHeading) || isNumberedSectionHeading(stripped)
-    || MAJOR_NON_ANSWER_HEADING_RE.test(stripped)
-    || /^(?:(?:Preface|Introduction)\b|序言|前言|引言)/iu.test(stripped);
+  return isTitledPublicContainer(stripped) || isNumberedSectionHeading(stripped)
+    || MAJOR_NON_ANSWER_HEADING_RE.test(stripped);
 }
 
 function beginsWithRecoverySection(text: string): boolean {
-  const { stripped, isMarkdownHeading } = stripHeadingMarkup(text.trimStart().split(/\r?\n/u, 1)[0] ?? "");
-  return isRecoverySectionHeading(stripped, isMarkdownHeading);
+  const { stripped } = stripHeadingMarkup(text.trimStart().split(/\r?\n/u, 1)[0] ?? "");
+  return isRecoverySectionHeading(stripped);
 }
 
 function isRecoveryProseLine(line: string): boolean {
@@ -381,22 +399,23 @@ function stripSealedSolutionLines(
       continue;
     }
     if (state.unknownAfterFailure) {
-      if (!sectionHeader && !isRecoverySectionHeading(stripped, isMarkdownHeading)) {
+      if (!sectionHeader && !isRecoverySectionHeading(stripped)) {
         changed = true;
         continue;
       }
       state.unknownAfterFailure = false;
     }
-    const titledPublicContainer = isTitledPublicContainer(stripped, isMarkdownHeading);
-    const structuralHeading = isTextbookStructuralHeading(stripped, isMarkdownHeading);
+    const titledPublicContainer = isTitledPublicContainer(stripped);
+    const structuralHeading = isTextbookStructuralHeading(stripped);
+    const majorPublicHeading = MAJOR_NON_ANSWER_HEADING_RE.test(stripped) && !ANSWER_OR_REVIEW_TITLE_RE.test(stripped);
     const captionPrefix = CAPTION_PREFIX_RE.exec(stripped)?.[0];
     const chineseCaption = CHINESE_CAPTION_PREFIX_RE.exec(stripped)?.[0];
-    const captionHeading = chineseCaption ? hasReferenceHeadingSuffix(stripped.slice(chineseCaption.length), isMarkdownHeading, true)
-      : captionPrefix !== undefined && hasBlockHeadingSuffix(stripped.slice(captionPrefix.length), isMarkdownHeading, true);
+    const captionHeading = chineseCaption ? hasReferenceHeadingSuffix(stripped.slice(chineseCaption.length), true)
+      : captionPrefix !== undefined && hasBlockHeadingSuffix(stripped.slice(captionPrefix.length), true);
     if (requirePublicVisionHeading === "heading-only") publish = false;
     if (requirePublicVisionHeading && !sectionHeader && (
       titledPublicContainer || structuralHeading
-      || MAJOR_NON_ANSWER_HEADING_RE.test(stripped) || EXERCISE_OPENER_RE.test(stripped)
+      || majorPublicHeading || EXERCISE_OPENER_RE.test(stripped)
       || EXERCISE_INSTRUCTION_RE.test(stripped)
       || (firstContentLine && hasSectionSeal && isMarkdownHeading && isSectionSealedExit(stripped, true))
     )) publish = true;
@@ -405,7 +424,7 @@ function stripSealedSolutionLines(
     if (state.mode === "section_sealed") {
       if (isSectionSealedExit(stripped, isMarkdownHeading)) {
         setMode("none");
-        state.inWorkedExample = isWorkedExampleHeading(stripped, isMarkdownHeading);
+        state.inWorkedExample = isWorkedExampleHeading(stripped);
         keep(line);
       } else {
         changed = true;
@@ -420,7 +439,7 @@ function stripSealedSolutionLines(
         !isMarkdownHeading
         && !isSectionSealedExit(stripped, isMarkdownHeading)
         && !NON_ANSWER_AFTER_BLANK_RE.test(stripped)
-        && !isWorkedExampleHeading(stripped, isMarkdownHeading)
+        && !isWorkedExampleHeading(stripped)
         && !isNumberedSectionHeading(stripped)
         && UNHEADED_ANSWER_CONTINUATION_RE.test(stripped)
       ) {
@@ -458,7 +477,7 @@ function stripSealedSolutionLines(
       continue;
     }
 
-    if (isWorkedExampleHeading(stripped, isMarkdownHeading)) {
+    if (isWorkedExampleHeading(stripped)) {
       setMode("none");
       state.inWorkedExample = true;
       state.inExercise = false;
@@ -469,9 +488,9 @@ function stripSealedSolutionLines(
     const exerciseOpener = EXERCISE_OPENER_RE.test(stripped);
     if (
       exerciseOpener || structuralHeading || captionHeading || isNumberedSectionHeading(stripped)
-      || MAJOR_NON_ANSWER_HEADING_RE.test(stripped)
+      || majorPublicHeading
       || titledPublicContainer
-      || (isMarkdownHeading && !captionPrefix && !DOTTED_SECTION_PREFIX_RE.test(stripped) && !STANDALONE_SOLUTION_HEADING_RE.test(stripped))
+      || (isMarkdownHeading && isGenericPublicMarkdownHeading(stripped))
     ) {
       setMode("none");
       state.inWorkedExample = false;

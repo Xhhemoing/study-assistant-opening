@@ -11,11 +11,15 @@ const defaultChunks = [{ id: "public", page: 1, text: "private", characters: 7, 
 
 it("keeps PDF worked-example context until a genuine structural heading", () => {
   const exampleWith = (line: string) => `Worked Example 1: Factor x.\n${line}\n【解析】\nThe derivation follows.`;
-  for (const line of ["Chapter 2 Algebra — Page 12", "3.14 V", "3.14 厘米",
-    "Theorem 2.1 (Lagrange), applied to G, gives the result."]) {
+  for (const line of ["Chapter 2: What Is Algebra? — Page 12", "What Is Algebra? — Page 12", "3.14 Hz", "3.14 MB",
+    "3.14 千瓦时", "3.14 毫安时", "3.14 公顷", "3.14 有实数解", "3.14 在区间内",
+    "Theorem 2.1 (Lagrange), applied to G, gives the result.", "## Theorem 2.1 (Lagrange), applied to G, gives the result.",
+    "## Chapter 2 gives the result.", "## 图 2（a）显示了函数图像。", "## Example 1 gives the result.",
+    "## The construction is shown below."]) {
     expect(containsPdfAnswerLabel(exampleWith(line)), line).toBe(false);
   }
-  for (const line of ["2.1 有限群", "定理 2.1（拉格朗日定理）", "Definition 1.2"]) {
+  for (const line of ["2.1 有限群", "2.1 AI", "2.1 ML", "2.1 OS", "2.1 LP", "定理 2.1（拉格朗日定理）", "Definition 1.2",
+    "Chapter 2: What Is Algebra? — Page 12\nTheorem 2.1 (Lagrange)", "Preface", "前言"]) {
     expect(containsPdfAnswerLabel(exampleWith(line)), line).toBe(true);
   }
 });

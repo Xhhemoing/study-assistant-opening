@@ -79,11 +79,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v28-discourse/text",
     "docling-2.126.0/pdf-segments-v29-discourse/text",
     "docling-2.126.0/pdf-segments-v30-discourse/text",
+    "docling-2.126.0/pdf-segments-v31-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v31-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v32-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2697,9 +2698,9 @@ describe("bounded resumable PDF parser", () => {
     },
   );
 
-  it.each(["Theorem 2.1.", "Theorem 2.1 (Lagrange)", "**Theorem 2.1.** finite rings", "# Theorem 2.1 finite rings",
+  it.each(["Theorem 2.1.", "Theorem 2.1 (Lagrange)", "**Theorem 2.1.** finite rings", "# Theorem 2.1: finite rings",
     "**Theorem 2.1**", "**Table 1: Roots**", "Table A.2 Summary", "Fig. IV: Ring diagram", "Listing 1: Program",
-    "Chapter 2", "Chapter 2 Rings", "# Section 2.2 finite rings", "第一章 环与域", "第 2 章：群",
+    "Chapter 2", "Chapter 2 Rings", "# Section 2.2: finite rings", "第一章 环与域", "第 2 章：群",
     "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理", "图 2（a）：函数图像",
     "Figure 2(a): Function graph", "定理 2.1（拉格朗日定理）",
     "2.1 Ring Homomorphisms", "2.1.3 Kernel of a Homomorphism", "2.3 线性变换的矩阵",
@@ -2715,22 +2716,29 @@ describe("bounded resumable PDF parser", () => {
   );
 
   it.each(["Theorem 2.1 (Lagrange)", "定理 2.1（拉格朗日定理）", "Definition 1.2", "定义 1.2",
-    "Worked Example 2.1", "例题 2.1", "2.1 有限群"])("reopens an answer section at %j after withholding proofs", async heading => {
+    "Worked Example 2.1", "例题 2.1", "2.1 有限群", "2.1 AI", "2.1 ML", "2.1 OS", "2.1 LP",
+    "Preface", "Introduction: Rings", "序言", "前言", "引言：环"])("reopens an answer section at %j after withholding proofs", async heading => {
     const result = await runPdfScenario({ pages: [
       { page: 1, text: "Answer Key" },
       { page: 2, text: "Proof:\n证明：\n5 units." },
-      { page: 3, text: heading + "\nPublic explanation." },
+      { page: 3, text: "Chapter 2: What Is Algebra? — Page 12\n" + heading + "\nPublic explanation." },
     ] });
     expect(result.publishedChunks.map(chunk => chunk.text)).toEqual([heading + "\nPublic explanation."]);
   });
 
-  it.each([false, true])("recognizes reflowed archived answers after extraction (failed retry: %s)", async failed => {
+  it.each([false, true].flatMap(failed => [
+    { failed, form: "ordinary hyphen", archivedAnswer: "The equation has three roots.\nThe value is deter-\nmined by factoring.",
+      freshAnswer: "The equation has three roots. The value is determined by factoring." },
+    { failed, form: "soft hyphen", archivedAnswer: "The value is deter\u00ad\nmined by factoring.",
+      freshAnswer: "The value is determined by factoring." },
+    { failed, form: "CJK wrap", archivedAnswer: "此式由因式分\n解得到。", freshAnswer: "此式由因式分解得到。" },
+  ]))("withholds a reflowed archived answer ($form, failed retry: $failed)", async ({ failed, archivedAnswer, freshAnswer }) => {
     const chapter = "Chapter 3: Fields";
-    const archived = ["Answer Key", "The equation has three roots.\nThe value is deter-\nmined by factoring.", chapter];
+    const archived = ["Answer Key", archivedAnswer, chapter];
     const savedChunks = archived.map((text, index) => ({
       page: index + 1, text, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null,
     }));
-    const pages = ["This introduction explains polynomials.", "The equation has three roots. The value is determined by factoring.", chapter]
+    const pages = ["This introduction explains polynomials.", freshAnswer, chapter]
       .map((text, index) => ({ page: index + 1, text }));
     const segmentData = new Map<string, PdfSegment>();
     const savedOnRetry = failed ? (await runPdfScenario({
@@ -2741,6 +2749,20 @@ describe("bounded resumable PDF parser", () => {
     expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
       state: "ready", pages: [{ hadSealedContent: true, sectionSealedAtEnd: true }],
     });
+  });
+
+  it("keeps measured results, prose headings, and running questions inside an answer section", async () => {
+    const lines = ["3.14 千瓦时", "3.14 毫安时", "3.14 千瓦·时", "3.14 千伏安", "3.14 牛·米", "3.14 米每秒",
+      "3.14 千米每小时", "3.14 公顷", "3.14 亩", "3.14 有实数解", "3.14 有唯一解", "3.14 在区间内", "3.14 在实数域上",
+      "3.14 V", "3.14 Hz", "3.14 cm", "3.14 dB", "3.14 mL", "3.14 MB",
+      "## Theorem 2.1 (Lagrange), applied to G, gives the result.", "## Figure 2(a), which shows the graph, is useful here.",
+      "## Chapter 2 explains why this is true.", "## 图 2（a）显示了函数图像。", "## Example 2 gives the result.",
+      "## The construction is shown below.", "## Introduction to Answers",
+      "Chapter 2: What Is Algebra? — Page 12", "Section 1: What is a Ring? | Page 12",
+      "第 2 章：什么是代数？｜第 12 页", "What Is Algebra? — Page 12"];
+    const result = await runPdfScenario({ pages: [ "Answer Key", ...lines.map(line => line + "\nx = 3."), "Chapter 3: Fields" ]
+      .map((text, index) => ({ page: index + 1, text })) });
+    expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Chapter 3: Fields"]);
   });
 
   it.each([true, false])("withholds a continuation after conversion failure and replays safely after recovery (answer: %s)", async answer => {

@@ -118,10 +118,10 @@ def worker_pdf_cli_fixtures():
         ]),
         "qualified_section_exit": (5, {
             1: "Answer Key",
-            2: "Chapter 2 Algebra — Page 12\nFigure 2(a), which shows the graph, is useful here.\nx = 3.",
-            3: "3.14 V\n3.14 厘米",
+            2: "Chapter 2: What Is Algebra? — Page 12\n## Figure 2(a), which shows the graph, is useful here.\nx = 3.",
+            3: "3.14 千瓦时\n3.14 有实数解\n3.14 在区间内",
             4: "Proof:\n证明：\n5 units.",
-            5: "定理 2.1（拉格朗日定理）\nPublic explanation.",
+            5: "What Is Algebra? — Page 12\n定理 2.1（拉格朗日定理）\nPublic explanation.",
         }, (), [(1, 5, None), (1, 1, None), (2, 2, "section_sealed"), (3, 3, "section_sealed"),
                 (4, 4, "section_sealed"), (5, 5, "section_sealed")]),
     }
@@ -1101,7 +1101,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         for line, label in (
             ("Theorem 2.1.", DocItemLabel.TEXT),
             ("Theorem 2.1 (Lagrange)", DocItemLabel.TEXT),
-            ("# Theorem 2.1 finite rings", DocItemLabel.TEXT),
+            ("# Theorem 2.1: finite rings", DocItemLabel.TEXT),
             ("**Theorem 2.1.** finite rings", DocItemLabel.TEXT),
             ("**Theorem 2.1**", DocItemLabel.TEXT),
             ("Theorem 2.1 finite rings", DocItemLabel.SECTION_HEADER),
@@ -1110,7 +1110,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             ("**Table 1: Roots**", DocItemLabel.TEXT),
             ("Chapter 2", DocItemLabel.TEXT),
             ("Chapter 2 Rings", DocItemLabel.TEXT),
-            ("# Section 2.2 finite rings", DocItemLabel.TEXT),
+            ("# Section 2.2: finite rings", DocItemLabel.TEXT),
             ("第一章 环与域", DocItemLabel.TEXT),
             ("第 2 章：群", DocItemLabel.TEXT),
             ("表 1：分解结果", DocItemLabel.TEXT),
@@ -1151,15 +1151,39 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
 
     def test_section_seal_withholds_proofs_and_reopens_at_structural_headings(self):
         for heading in ("Theorem 2.1 (Lagrange)", "定理 2.1（拉格朗日定理）", "Definition 1.2", "定义 1.2",
-                        "Worked Example 2.1", "例题 2.1", "2.1 有限群"):
+                        "Worked Example 2.1", "例题 2.1", "2.1 有限群", "2.1 AI", "2.1 ML", "2.1 OS", "2.1 LP",
+                        "Preface", "Introduction: Rings", "序言", "前言", "引言：环"):
             with self.subTest(heading=heading):
                 ext = physical_pages.extract_physical_pages(result_for(
                     [text_element(11, "Answer Key", 1)],
                     [text_element(12, "Proof:\n证明：\n5 units.", 1)],
-                    [text_element(13, heading, 1), text_element(13, "Public explanation.", 2)],
+                    [text_element(13, "Chapter 2: What Is Algebra? — Page 12", 1),
+                     text_element(13, heading, 2), text_element(13, "Public explanation.", 3)],
                 ))
                 self.assertEqual(ext.texts_by_page[12], [])
                 self.assertEqual(ext.texts_by_page[13], [heading, "Public explanation."])
+
+    def test_measurements_result_clauses_and_markup_do_not_end_answer_seals(self):
+        lines = (
+            "3.14 千瓦时", "3.14 毫安时", "3.14 千瓦·时", "3.14 千伏安", "3.14 牛·米", "3.14 米每秒",
+            "3.14 千米每小时", "3.14 公顷", "3.14 亩", "3.14 有实数解", "3.14 有唯一解", "3.14 在区间内", "3.14 在实数域上",
+            "3.14 V", "3.14 Hz", "3.14 cm", "3.14 dB", "3.14 mL", "3.14 MB",
+            "## Theorem 2.1 (Lagrange), applied to G, gives the result.", "## Figure 2(a), which shows the graph, is useful here.",
+            "## Chapter 2 explains why this is true.", "## 图 2（a）显示了函数图像。", "## Example 2 gives the result.",
+            "## The construction is shown below.", "## Introduction to Answers",
+            "Chapter 2: What Is Algebra? — Page 12", "Section 1: What is a Ring? | Page 12",
+            "第 2 章：什么是代数？｜第 12 页", "What Is Algebra? — Page 12",
+        )
+        for opener in ("Answer Key", "Exercise 1: Find x.\n【解答】"):
+            for line in lines:
+                with self.subTest(line=line, opener=opener):
+                    ext = physical_pages.extract_physical_pages(result_for(
+                        [text_element(11, opener, 1)],
+                        [text_element(12, line, 1), text_element(12, "x = 3.", 2)],
+                        [text_element(13, "Chapter 3: Fields", 1)],
+                    ))
+                    self.assertEqual(ext.texts_by_page[12], [])
+                    self.assertEqual(ext.texts_by_page[13], ["Chapter 3: Fields"])
 
     def test_running_counters_do_not_match_prose_page_references(self):
         for line in ("The complete construction is shown on page 12.", "The derivation appears at page 12.",

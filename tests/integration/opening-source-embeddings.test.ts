@@ -407,9 +407,9 @@ describe("pgvector material repository", () => {
   );
 
   it.each(["Figure 1 The rings", "Table A.2: Ring operations", "Fig. IV: Ring diagram", "Tab. 2.1 Data",
-    "Table 1 Summary", "Diagram I", "# Section 2.2 Ring operations", "Theorem 2.1", "Theorem 2.1.",
-    "Theorem 2.1 (Lagrange)", "# Theorem 2.1 finite rings", "**Theorem 2.1.** finite rings",
-    "**Theorem 2.1**", "**Table 1: Roots**", "Chapter 2", "Lesson 2 Finite Fields", "# Section 2.2 finite rings",
+    "Table 1 Summary", "Diagram I", "# Section 2.2: Ring operations", "Theorem 2.1", "Theorem 2.1.",
+    "Theorem 2.1 (Lagrange)", "# Theorem 2.1: finite rings", "**Theorem 2.1.** finite rings",
+    "**Theorem 2.1**", "**Table 1: Roots**", "Chapter 2", "Lesson 2 Finite Fields", "# Section 2.2: finite rings",
     "第一章 环与域", "第 2 章：群", "表 1：分解结果", "表 1 分解结果", "定理 2.1：拉格朗日定理",
     "图 2（a）：函数图像", "Figure 2(a): Function graph", "定理 2.1（拉格朗日定理）",
     "2.1 Ring Homomorphisms", "2.1.3 Kernel of a Homomorphism", "2.3 线性变换的矩阵",
@@ -427,11 +427,30 @@ describe("pgvector material repository", () => {
   );
 
   it.each(["Theorem 2.1 (Lagrange)", "定理 2.1（拉格朗日定理）", "Definition 1.2", "定义 1.2",
-    "Worked Example 2.1", "例题 2.1", "2.1 有限群"])("reopens an archived answer section at %j after proofs and furniture", async heading => {
+    "Worked Example 2.1", "例题 2.1", "2.1 有限群", "2.1 AI", "2.1 ML", "2.1 OS", "2.1 LP",
+    "Preface", "Introduction: Rings", "序言", "前言", "引言：环"])("reopens an archived answer section at %j after proofs and furniture", async heading => {
     await expectArchivedPdfPages([
       "Answer Key", "Proof:\n证明：\n5 units.", "Chapter 2 Algebra — Page 12\nx = 3.",
-      heading + "\nPublic explanation.", "Public continuation.",
+      "Chapter 2: What Is Algebra? — Page 12\n" + heading + "\nPublic explanation.", "Public continuation.",
     ], [4, 5], 3);
+  });
+
+  it("keeps measurements, result clauses, ATX prose references and titled furniture sealed across archive readers", async () => {
+    const answerLines = [
+      "3.14 千瓦时", "3.14 毫安时", "3.14 千瓦·时", "3.14 千伏安", "3.14 牛·米", "3.14 米每秒",
+      "3.14 千米每小时", "3.14 公顷", "3.14 亩", "3.14 有实数解", "3.14 有唯一解", "3.14 在区间内", "3.14 在实数域上",
+      "3.14 V", "3.14 Hz", "3.14 cm", "3.14 dB", "3.14 mL", "3.14 MB",
+      "## Theorem 2.1 (Lagrange), applied to G, gives the result.", "## Figure 2(a), which shows the graph, is useful here.",
+      "## Chapter 2 explains why this is true.", "## 图 2（a）显示了函数图像。", "## Example 2 gives the result.",
+      "## The construction is shown below.", "## Introduction to Answers",
+      "Chapter 2: What Is Algebra? — Page 12", "Section 1: What is a Ring? | Page 12",
+      "第 2 章：什么是代数？｜第 12 页", "What Is Algebra? — Page 12",
+    ];
+    const chapter = "What Is Algebra? — Page 12\nTheorem 2.1 (Lagrange)\nPublic explanation.";
+    await expectArchivedPdfPages(["Answer Key", ...answerLines.map(line => line + "\nx = 3."), chapter],
+      [answerLines.length + 2], 2);
+    await expectArchivedPdfPages(["Exercise 1. Solve for x.\n【解答】", answerLines.slice(0, 24).join("\n") + "\nx = 3.",
+      "Chapter 3: Fields"], [3], 2);
   });
 
   it.each(["【解析】", "【详解（续）】", "解析（接上页）", "解析：", "详解", "详解：", "【解答(续)】"])(
@@ -644,16 +663,19 @@ describe("pgvector material repository", () => {
     }
   });
 
-  it.each([
-    { failed: false, reflowed: false }, { failed: false, reflowed: true },
-    { failed: true, reflowed: false }, { failed: true, reflowed: true },
-  ])("retries an archived native answer (failure: $failed, reflow: $reflowed)", async ({ failed, reflowed }) => {
-    const archived = ["Answer Key", "The polynomial has three roots.\nThe answer is deter-\nmined by factoring.",
+  it.each([false, true].flatMap(failed => [
+    { failed, form: "new prose", archivedAnswer: "The answer is deter-\nmined by factoring.",
+      freshAnswer: "Voltage is a potential difference.", reflowed: false },
+    { failed, form: "ordinary hyphen", archivedAnswer: "The polynomial has three roots.\nThe answer is deter-\nmined by factoring.",
+      freshAnswer: "The polynomial has three roots. The answer is determined by factoring.", reflowed: true },
+    { failed, form: "soft hyphen", archivedAnswer: "The answer is deter\u00ad\nmined by factoring.",
+      freshAnswer: "The answer is determined by factoring.", reflowed: true },
+    { failed, form: "CJK wrap", archivedAnswer: "此式由因式分\n解得到。", freshAnswer: "此式由因式分解得到。", reflowed: true },
+  ]))("retries an archived native answer ($form, failed retry: $failed)", async ({ failed, archivedAnswer, freshAnswer, reflowed }) => {
+    const archived = ["Answer Key", archivedAnswer,
       "Chapter 3: Fields\nThis chapter introduces fields."];
     const pdf = await expectArchivedPdfPages(archived, [3], 2);
-    const fresh = ["This introduction explains polynomial rings.", reflowed
-      ? "The polynomial has three roots. The answer is determined by factoring."
-      : "Voltage is a potential difference.", archived[2]!];
+    const fresh = ["This introduction explains polynomial rings.", freshAnswer, archived[2]!];
     const pages = fresh.map((text, index) => ({
       page: index + 1, text, imagePath: null, visualKinds: [],
     }));
