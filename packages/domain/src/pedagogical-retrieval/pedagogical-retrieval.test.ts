@@ -1325,6 +1325,8 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["SVG CDATA opening inside a fence in an HTML block", "<details><summary>Answer</summary>\n~~~\n<svg><defs><![CDATA[\n~~~\n</details>]]></defs></svg>forty-two</details>"],
     ["a disclosure closer inside a Markdown link destination", "<details><summary>Answer</summary>\n\nExample: [example](</details>)\n\nforty-two\n</details>"],
     ["a disclosure closer in a link title after a nonbreaking space in the destination", "<details><summary>Answer</summary>\n\nExample: [example](/part\u00a0more \"</details>\")\n\nforty-two\n</details>"],
+    ["a disclosure closer in a multiline link title with an escaped newline", "<details><summary>Answer</summary>\n\nExample: [ex](/a \"one\\\ntwo </details>\")\n\nforty-two\n</details>"],
+    ["a disclosure closer in a multiline parenthesized link title", "<details><summary>Answer</summary>\n\nExample: [ex](/a (one\\\r\ntwo </details>))\n\nforty-two\n</details>"],
     ["a disclosure closer escaped in Markdown prose", "<details><summary>Answer</summary>\n\nExample: \\</details>\n\nforty-two\n</details>"],
     ["a disclosure closer inside Markdown image alt text", "<details><summary>Answer</summary>\n\nExample: ![</details>](/figure.png)\n\nforty-two\n</details>"],
     ["a resolved shortcut image containing a closer", "<details><summary>Answer</summary>\n\nExample: ![</details>]\n\nforty-two\n</details>\n\n[</details>]: /figure"],
@@ -1380,6 +1382,21 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       [`${name} in a table header`, `Topic | ${label}\n--- | ---\nrow | forty-two`, definition],
       [`${name} in a summary`, `<details><summary>Hint / ${label}</summary>forty-two</details>`, definition],
     ]),
+    ["a heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\n## An<span style="display:var(--mode)">x</span>swer\n\nforty-two\n</div>', ""],
+    ["a Setext heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\nAn<span style="display:var(--mode)">x</span>swer\n---\n\nforty-two\n</div>', ""],
+    ["a quoted heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\n> ## An<span style="display:var(--mode)">x</span>swer\n> forty-two\n\n</div>', ""],
+    ["a table header inheriting CSS from an HTML block", '<div style="--mode:none">\n\nTopic | An<span style="display:var(--mode)">x</span>swer\n--- | ---\nrow | forty-two\n\n</div>', ""],
+    ["an ATX heading following an implicitly closed paragraph", '<p style="--mode:none">\n\n## An<span style="display:var(--mode)">sw</span>er\nforty-two', ""],
+    ["a table following an implicitly closed paragraph", '<p style="--mode:none">\n\nTopic | An<span style="display:var(--mode)">sw</span>er\n--- | ---\nrow | forty-two', ""],
+    ["a summary after details implicitly closes a paragraph", '<p style="--mode:none"><details><summary>Hint / An<span style="display:var(--mode)">sw</span>er</summary>forty-two</details>', ""],
+    ["a heading after a blockquote closes a styled HTML descendant", '> <div style="--mode:none">\n\n## An<span style="display:var(--mode)">sw</span>er\nforty-two', ""],
+    ["a heading inheriting the outer scope after a blockquote closes", '<div style="--mode:none">\n\n> <div style="--mode:inline">\n\n## An<span style="display:var(--mode)">x</span>swer\nforty-two\n\n</div>', ""],
+    ["a summary inheriting CSS from details", '<details style="--mode:none"><summary>Hint / An<span style="display:var(--mode)">x</span>swer</summary>forty-two</details>', ""],
+    ["a summary declaring CSS for its own children", '<details><summary style="--mode:none">Hint / An<span style="display:var(--mode)">x</span>swer</summary>forty-two</details>', ""],
+    ["a summary inheriting CSS from an enclosing element", '<div style="--mode:none"><details><summary>Hint / An<span style="display:var(--mode)">x</span>swer</summary>forty-two</details></div>', ""],
+    ["an HTML hidden summary", '<details><summary hidden>Hint</summary>forty-two</details>', ""],
+    ["a CSS hidden summary", '<details style="--mode:none"><summary style="display:var(--mode)">Hint</summary>forty-two</details>', ""],
+    ["a trailing CSS escape in a variable name", '## An<span style="display:none;display:var(--mode\\">sw</span>er\nforty-two', ""],
     ["a reference link nested inside an image", "## An![s[w][inner]][outer]er\nforty-two", "[inner]: /inner\n[outer]: /outer"],
     ["single-tilde strikethrough", "## An~sw~er\nforty-two", ""],
     ["visible SVG text", "## An<svg><g><text><tspan>sw</tspan></text></g></svg>er\nforty-two", ""],
@@ -1564,6 +1581,12 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\n" + example,
       "Public theorem.",
     ]),
+    ["a blank line before a purported link title", "<details><summary>Answer</summary>\n\nExample: [ex](/a\n\n\"</details>\")\n\nPublic theorem.", "Public theorem."],
+    ["a blank line in a purported link title", "<details><summary>Answer</summary>\n\nExample: [ex](/a \"one\n\n two </details>\")\n\nPublic theorem.", "Public theorem."],
+    ["an ATX heading interrupting a purported link title", "<details><summary>Answer</summary>\n\nExample: [ex](/a \"one\\\n## unrelated </details>\")\n\nPublic theorem.", "Public theorem."],
+    ["a quoted blank line in a purported link title", "> <details><summary>Answer</summary>\n>\n> Example: [ex](/a \"one\n>\n> two </details>\")\n>\n> Public theorem.", "Public theorem."],
+    ["a closed ancestor scope", '<div style="--mode:none"></div>\n\n## An<span style="display:var(--mode)">x</span>swer\nforty-two', "forty-two"],
+    ["a CSS declaration shown inside fenced code", '~~~\n<div style="--mode:none">\n~~~\n\n## An<span style="display:var(--mode)">x</span>swer\nforty-two', "forty-two"],
     ["an independent comment before an inline code example", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\nExample: \x60</details>\x60", "Public theorem."],
     ["an independent comment before raw HTML and a template", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\n<textarea></details></textarea>\n\n<template></details></template>", "Public theorem."],
     ["SVG closed in an HTML-block fence", "<details><summary>Answer</summary><svg>\n~~~\n</svg>\n~~~\n<![CDATA[> </details>]]>Public theorem.", "Public theorem."],
@@ -2656,6 +2679,15 @@ describe("sparsePpr exactness, dangling-node mass conservation, and validation",
     expect(parallel[0]).toEqual([[0, 1 / 3], [1, 2 / 3]]);
     expect(parallel[1]).toEqual([]);
   });
+  it("combines parallel weights before their normalized shares underflow", () => {
+    const adj = normalizeSparseAdjacency(2, [
+      { from: 0, to: 0, weight: 4 },
+      ...Array.from({ length: 16 }, () => ({ from: 0, to: 1, weight: Number.MIN_VALUE })),
+    ]);
+    expect(adj[0]).toEqual([[0, 1], [1, 4 * Number.MIN_VALUE]]);
+    expect(sparsePpr(adj, Float64Array.of(1, 0), { alpha: 0.5, maxIterations: 1 })[1]).toBe(2 * Number.MIN_VALUE);
+  });
+
   it("matches exact analytical Personalized PageRank and conserves probability mass at 1.0 with dangling nodes", () => {
     // Graph: 0 -> 1 (weight 1), 1 is dangling!
     // Seed s = [1, 0].
@@ -2751,6 +2783,54 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
       ...overrides,
     };
   }
+
+  it("preserves and filters explicit empty item family IDs in both chunkers", () => {
+    const source = { sourceId: "captions", sourceVersion: 1, privacyEpoch: 7 };
+    const text = "Public theorem.";
+    const chunks = [
+      chunkPedagogicalDocument({ ...source, text, itemFamilyId: "" })[0]!,
+      chunkTranscriptCues({ ...source, cues: [{ text, itemFamilyId: "", startMs: 0, endMs: 1000 }] })[0]!,
+    ];
+    for (const chunk of chunks) {
+      expect(chunk.itemFamilyId).toBe("");
+      const result = rankPedagogicalEvidence({
+        chunks: [chunk],
+        seedScores: { [chunk.id]: 1 },
+        authorization: { admissibleSourceIds: ["captions"], excludedItemFamilyIds: [""] },
+      });
+      expect(result.ranked).toEqual([]);
+      expect(result.pprByNodeId[chunk.id]).toBeUndefined();
+      expect(result.diagnostics.totalPprMass).toBe(0);
+    }
+  });
+
+  it("applies the diversity cap to the empty family ID", () => {
+    const result = rankPedagogicalEvidence({
+      chunks: [makeChunk({ id: "a", itemFamilyId: "" }), makeChunk({ id: "b", itemFamilyId: "" }), makeChunk({ id: "c" })],
+      seedScores: { a: 1, b: 1, c: 1 },
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { maxChunksPerItemFamily: 1 },
+    });
+    expect(result.ranked).toHaveLength(2);
+    expect(result.ranked.filter(item => item.chunk.itemFamilyId === "")).toHaveLength(1);
+  });
+
+  it("propagates the aggregate mass of parallel minimum-weight edges", () => {
+    const result = rankPedagogicalEvidence({
+      chunks: ["seed", "small"].map(id => makeChunk({ id })),
+      seedScores: { seed: 1 },
+      edges: [
+        { from: "seed", to: "seed", kind: "defines", weight: 4 },
+        ...Array.from({ length: 16 }, () => ({
+          from: "seed", to: "small", kind: "defines" as const, weight: Number.MIN_VALUE,
+        })),
+      ],
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { alpha: 0.5, maxIterations: 1 },
+    });
+    // The definition self-loop contributes weight 4 in each direction.
+    expect(result.pprByNodeId.small).toBe(Number.MIN_VALUE);
+  });
 
   it.each([false, true])("normalizes wide family weights before rank propagation (parallel=%s)", parallel => {
     const chunks = ["seed", "a", "b", "support"].map(id => makeChunk({ id }));

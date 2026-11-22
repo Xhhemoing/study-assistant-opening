@@ -780,7 +780,7 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
         if (body !== undefined) {
           const block = htmlBlock;
           if (endsMarkdownHtmlBlockLine(block.kind, body)) htmlBlock = undefined;
-          return { body, containers: block.containers, mode: "html" as const, atBoundary: false };
+          return { body, containers: block.containers, continuedDepth: block.containers.length, mode: "html" as const, atBoundary: false };
         }
         htmlBlock = undefined;
       }
@@ -788,21 +788,21 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
         const { body, depth } = continueMarkdownContainers(raw, fence.containers);
         if (depth === fence.containers.length) {
           if (closesFence(body, fence.opener)) fence = undefined;
-          return { body, containers, mode: "code" as const, atBoundary: false };
+          return { body, containers, continuedDepth: depth, mode: "code" as const, atBoundary: false };
         }
         fence = undefined;
       }
       const next = readMarkdownContainerLine(raw, containers);
       const atBoundary = afterBlockBoundary || next.containers.length > next.continuedDepth;
       containers = next.containers;
-      const { body } = next;
-      if (continuesInlineLiteral) return { body, containers, mode: "text" as const, atBoundary: false };
+      const { body, continuedDepth } = next;
+      if (continuesInlineLiteral) return { body, containers, continuedDepth, mode: "text" as const, atBoundary: false };
       const htmlKind = startsMarkdownHtmlBlock(body, atBoundary);
       if (htmlKind) {
         if (!endsMarkdownHtmlBlockLine(htmlKind, body)) htmlBlock = { kind: htmlKind, containers };
         afterBlockBoundary = true;
         indented = false;
-        return { body, containers, mode: "html" as const, atBoundary };
+        return { body, containers, continuedDepth, mode: "html" as const, atBoundary };
       }
       const opener = matchFenceOpening(body)?.[1];
       if (opener) fence = { opener, containers };
@@ -811,16 +811,17 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
         /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) || (!atBoundary && SETEXT_UNDERLINE_RE.test(body)) ||
         /^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(body) ||
         (containers.includes("quote") && CALLOUT_HEADER_RE.test(body));
-      return { body, containers, mode: opener || indented ? "code" as const : "text" as const, atBoundary };
+      return { body, containers, continuedDepth, mode: opener || indented ? "code" as const : "text" as const, atBoundary };
     },
   };
 }
 
-function createMarkdownHtmlBlockLookup(text: string) {
+function createMarkdownHtmlBlockLookup(text: string, inheritedCustomProps = EMPTY_CUSTOM_PROPS) {
   const scanner = createMarkdownBlockScanner();
   const activeAtLine = new Map<number, MarkdownHtmlBlock>();
   let cursor = 0;
   let projected: string | undefined;
+  let cssPropertiesAt: ((offset: number) => CssCustomProperties) | undefined;
   return {
     htmlBlockAt(lineStart: number) {
       while (cursor < lineStart) {
@@ -834,14 +835,34 @@ function createMarkdownHtmlBlockLookup(text: string) {
     maskedLiterals(definedLinkLabels: ReadonlySet<string>) {
       return projected ??= projectDisclosureCommentMarkdown(text, [], definedLinkLabels, false);
     },
+    customPropertiesAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
+      if (!cssPropertiesAt) {
+        if (/style[ \t\r\n\f]*=/i.test(text)) {
+          const blockLines: HtmlScopeLine[] = [];
+          const html = projectDisclosureCommentMarkdown(text, [], definedLinkLabels, true, line => blockLines.push(line));
+          cssPropertiesAt = createHtmlCustomPropertiesLookup(html, inheritedCustomProps, blockLines);
+        } else {
+          cssPropertiesAt = () => inheritedCustomProps;
+        }
+      }
+      return cssPropertiesAt(offset);
+    },
   };
 }
+
+type HtmlScopeLine = {
+  offset: number;
+  containerDepth: number;
+  continuedDepth: number;
+  closesParagraph: boolean;
+};
 
 function projectDisclosureCommentMarkdown(
   markdown: string,
   containers: readonly MarkdownContainer[],
   definedLinkLabels: ReadonlySet<string>,
   maskCode = true,
+  onScopeLine?: (line: HtmlScopeLine) => void,
 ): string {
   const lines = splitLinesWithOffsets(markdown);
   const rawLines = lines.map(line => line.raw);
@@ -870,10 +891,17 @@ function projectDisclosureCommentMarkdown(
     }
   };
 
-  for (let index = 0; index < lines.length && match; index++) {
+  for (let index = 0; index < lines.length && (match || onScopeLine); index++) {
     const line = lines[index]!;
     const continuedLiteral = line.start < literalEnd;
     const state = scanner.scan(line.raw, continuedLiteral);
+    onScopeLine?.({
+      offset: line.start,
+      containerDepth: state.containers.length,
+      continuedDepth: state.continuedDepth,
+      closesParagraph: !continuedLiteral && state.mode !== "html" && !isMarkdownBlankLine(state.body) &&
+        (state.mode === "code" || state.atBoundary || startsMarkdownBlock(state.body, undefined, true)),
+    });
     if (state.mode !== "text" || state.atBoundary) brackets.length = 0;
     if (state.mode === "code") {
       if (maskCode) mask(line.start, line.end);
@@ -909,7 +937,7 @@ function projectDisclosureCommentMarkdown(
         } else if (groups.bracket === "]") {
           const opener = brackets.pop();
           if (opener?.active) {
-            maskedEnd = renderedMarkdownLinkEnd(markdown, match.index, opener.contentStart, definedLinkLabels);
+            maskedEnd = renderedMarkdownLinkEnd(markdown, match.index, opener.contentStart, definedLinkLabels, state.containers);
             if (maskedEnd !== -1) {
               if (opener.image) maskedStart = opener.start;
               else for (const previous of brackets) if (!previous.image) previous.active = false;
@@ -1254,7 +1282,7 @@ function markdownLabelLinkEnd(label: string, start: number): number {
   while (/[ \t\r\n]/.test(label[cursor] ?? "")) cursor++;
   if (label[cursor] === ")") return cursor + 1;
   if (cursor === whitespaceStart) return -1;
-  const title = /(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\))[ \t\r\n]*\)/y;
+  const title = /(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\((?:\\[\s\S]|[^()\\])*\))[ \t\r\n]*\)/y;
   title.lastIndex = cursor;
   return title.exec(label) ? title.lastIndex : -1;
 }
@@ -1369,16 +1397,27 @@ function collectLinkReferenceLabels(lines: readonly string[]): ReadonlySet<strin
 
 function renderedMarkdownLinkEnd(
   label: string, closeIndex: number, contentStart: number, definedLinkLabels: ReadonlySet<string>,
+  containers: readonly MarkdownContainer[] = [],
 ): number {
   const suffixStart = closeIndex + 1;
   const inlineEnd = markdownLabelLinkEnd(label, suffixStart);
-  if (inlineEnd !== -1 || !definedLinkLabels.size) return inlineEnd;
+  const respectsParagraph = (end: number) => {
+    if (!/[\r\n]/.test(label.slice(contentStart, end))) return true;
+    const lineEnd = nextLineBreak(label, end)?.index ?? label.length;
+    const lines = splitLinesWithOffsets(label.slice(contentStart, lineEnd));
+    return lines.slice(1).every(({ raw }) => {
+      const { body } = continueMarkdownContainers(raw, containers);
+      return !startsMarkdownHtmlBlock(body, false) && !startsMarkdownBlock(body, undefined, true) &&
+        !SETEXT_UNDERLINE_RE.test(body);
+    });
+  };
+  if (inlineEnd !== -1) return respectsParagraph(inlineEnd) ? inlineEnd : -1;
+  if (!definedLinkLabels.size) return -1;
   const suffix = readLinkReferenceLabel(label, suffixStart);
   const raw = suffix?.raw || label.slice(contentStart, closeIndex);
   const candidate = readLinkReferenceLabel("[" + raw + "]", 0);
-  return candidate?.raw === raw && definedLinkLabels.has(normalizeLinkReferenceLabel(raw))
-    ? suffix?.end ?? suffixStart
-    : -1;
+  const end = suffix?.end ?? suffixStart;
+  return candidate?.raw === raw && definedLinkLabels.has(normalizeLinkReferenceLabel(raw)) && respectsParagraph(end) ? end : -1;
 }
 
 function renderMarkdownLabelMarkup(
@@ -1514,7 +1553,7 @@ type CssDeclaration = { name: string; value: readonly CssToken[]; important: boo
 type CssCustomProperties = ReadonlyMap<string, readonly CssToken[]>;
 const EMPTY_CUSTOM_PROPS: CssCustomProperties = new Map();
 
-const CSS_ESCAPE = /\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f])/.source;
+const CSS_ESCAPE = /\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f]|(?![\s\S]))/.source;
 const CSS_IDENT = "(?:[-_a-zA-Z0-9\\u0080-\\uFFFF]|" + CSS_ESCAPE + ")+";
 const CSS_COMPONENT = [
   /(?<trivia>[ \t\r\n\f]+|\/\*[\s\S]*?(?:\*\/|$))/.source,
@@ -1549,8 +1588,8 @@ function cssValueTokens(text: string): CssToken[] {
 }
 
 function unescapeCssDisplay(text: string): string {
-  return text.replace(/\\(?:([0-9a-f]{1,6})(?:\r\n|[ \t\r\n\f])?|([^\r\n\f]))/gi, (_, hex?: string, literal?: string) => {
-    if (!hex) return literal ?? "";
+  return text.replace(/\\(?:([0-9a-f]{1,6})(?:\r\n|[ \t\r\n\f])?|([^\r\n\f])|(?![\s\S]))/gi, (_, hex?: string, literal?: string) => {
+    if (!hex) return literal ?? "\ufffd";
     const code = Number.parseInt(hex, 16);
     return code && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff) ? String.fromCodePoint(code) : "\ufffd";
   });
@@ -1737,7 +1776,85 @@ function resolveElementStyle(
   };
 }
 
-function htmlLabelTextVariants(label: string) {
+const HTML_CLOSES_PARAGRAPH_RE =
+  /^(?:address|article|aside|blockquote|dd|details|dialog|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hgroup|hr|li|main|menu|nav|ol|p|pre|search|section|table|ul)$/;
+
+function createHtmlCustomPropertiesLookup(
+  html: string,
+  inheritedProps: CssCustomProperties,
+  blockLines: readonly HtmlScopeLine[],
+) {
+  const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
+  const stack: (OpenHtmlTag & { customProps: CssCustomProperties; containerDepth: number })[] = [];
+  const positions = [0];
+  const scopes = [inheritedProps];
+  let lineIndex = 0;
+  let containerDepth = 0;
+  const getProps = () => stack.at(-1)?.customProps ?? inheritedProps;
+  const closeTag = (tag: string) => {
+    const index = lastOpenHtmlTagIndex(stack, tag);
+    if (index >= 0) stack.length = index;
+  };
+  const recordScope = (offset: number) => {
+    const active = getProps();
+    if (active !== scopes.at(-1)) {
+      positions.push(offset);
+      scopes.push(active);
+    }
+  };
+  const advanceLines = (offset: number) => {
+    for (let line = blockLines[lineIndex]; line && line.offset <= offset; line = blockLines[++lineIndex]) {
+      // Generated Markdown container closing tags also close their raw HTML descendants.
+      while (stack.length && stack.at(-1)!.containerDepth > line.continuedDepth) stack.pop();
+      containerDepth = line.containerDepth;
+      if (line.closesParagraph) closeTag("p");
+      recordScope(line.offset);
+    }
+  };
+  for (let match = tokens.exec(html); match; match = tokens.exec(html)) {
+    advanceLines(match.index);
+    const prefix = match.groups?.prefix;
+    const tag = match.groups?.tag?.toLowerCase();
+    if (tag && stack.at(-1)?.childrenNamespace && exitsHtmlForeignContent(tag, prefix, match[0])) {
+      while (stack.at(-1)?.childrenNamespace) stack.pop();
+    }
+    const namespace = stack.at(-1)?.childrenNamespace;
+    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+      tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
+    }
+    if (!namespace && tag && prefix === "" && HTML_CLOSES_PARAGRAPH_RE.test(tag)) closeTag("p");
+    const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
+    if (raw || (!namespace && tag === "template" && prefix === "")) {
+      tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(html, "template", tokens.lastIndex) ?? html.length;
+    } else if (tag && tag !== "head" && prefix === "") {
+      const current = namespace ?? (tag === "svg" || tag === "math" ? tag : undefined);
+      if (!HTML_VOID_TAGS.has(tag) && !(current && hasSelfClosingFlag(match[0], tag))) {
+        const { customProps } = resolveElementStyle(htmlAttributeValue(match[0], tag, "style"), undefined, getProps());
+        stack.push({ tag, customProps, containerDepth, childrenNamespace: htmlChildNamespace(
+          current, tag, htmlEncodedAnnotation(current, tag, match[0]),
+        ) });
+      }
+    } else if (tag && prefix === "/") {
+      closeTag(tag);
+    }
+    // Multi-line HTML tokens and raw text consume the intervening source lines.
+    while (blockLines[lineIndex] && blockLines[lineIndex]!.offset < tokens.lastIndex) lineIndex++;
+    recordScope(tokens.lastIndex);
+  }
+  advanceLines(html.length);
+  return (offset: number) => {
+    let low = 0;
+    let high = positions.length;
+    while (low + 1 < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (positions[middle]! <= offset) low = middle;
+      else high = middle;
+    }
+    return scopes[low]!;
+  };
+}
+
+function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTOM_PROPS) {
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const inline: string[] = [];
   const spaced: string[] = [];
@@ -1794,7 +1911,7 @@ function htmlLabelTextVariants(label: string) {
       const { displayIsNone, customProps } = resolveElementStyle(
         htmlAttributeValue(match[0], tag, "style"),
         namespace ? htmlAttributeValue(match[0], tag, "display") : undefined,
-        styleParent?.customProps ?? EMPTY_CUSTOM_PROPS,
+        styleParent?.customProps ?? inheritedCustomProps,
       );
       // Browsers can close these elements implicitly before the next visible sibling.
       const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) &&
@@ -1856,6 +1973,7 @@ function classifyDetailsElement(
   { summary }: DetailsBounds,
   activeVisibility: PedagogicalVisibility,
   definedLinkLabels: ReadonlySet<string>,
+  htmlContext: ReturnType<typeof createMarkdownHtmlBlockLookup>,
 ): {
   readonly kind: PedagogicalBlockKind;
   readonly visibility: PedagogicalVisibility;
@@ -1863,8 +1981,15 @@ function classifyDetailsElement(
   readonly summaryEndOffset: number | null;
 } {
   if (summary && !text.slice(openEnd, summary.openStart).replace(HTML_COMMENT_RE, "").trim()) {
-    const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false, definedLinkLabels);
-    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents);
+    const markup = text.slice(summary.openStart, summary.openEnd);
+    const { customProps, displayIsNone } = resolveElementStyle(
+      htmlAttributeValue(markup, "summary", "style"),
+      undefined,
+      htmlContext.customPropertiesAt(summary.openStart, definedLinkLabels),
+    );
+    const summaryContents = displayIsNone || htmlAttributeValue(markup, "summary", "hidden") !== undefined
+      ? "" : renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false, definedLinkLabels);
+    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, customProps);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
       !hasDetails &&
@@ -2071,9 +2196,11 @@ function isPipeTableStart(header: string, delimiter?: string): boolean {
   return pipeTableHeaderCells({ raw: header, start: 0 }, delimiter) !== null;
 }
 
-function tableColumnVisibility(label: string, definedLinkLabels = EMPTY_LINK_LABELS): PedagogicalVisibility {
+function tableColumnVisibility(
+  label: string, definedLinkLabels = EMPTY_LINK_LABELS, inheritedCustomProps = EMPTY_CUSTOM_PROPS,
+): PedagogicalVisibility {
   if (/[<\\*_[~\x60]/.test(label)) label = renderMarkdownLabelMarkup(label, true, definedLinkLabels);
-  const { inline, spaced } = /[<&]|\p{Cf}/u.test(label) ? htmlLabelTextVariants(label) : { inline: label, spaced: label };
+  const { inline, spaced } = /[<&]|\p{Cf}/u.test(label) ? htmlLabelTextVariants(label, inheritedCustomProps) : { inline: label, spaced: label };
   if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
   if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";
   return "public";
@@ -2126,18 +2253,36 @@ function tableBoundaryVisibility(
 }
 
 function getTableColumnVisibilities(
-  header: string, cells: readonly { start: number; end: number }[], definedLinkLabels: ReadonlySet<string>, start = 0,
+  header: string, cells: readonly { start: number; end: number }[], definedLinkLabels: ReadonlySet<string>,
+  start = 0, customProps = EMPTY_CUSTOM_PROPS,
 ) {
-  return cells.map(cell => tableColumnVisibility(header.slice(cell.start - start, cell.end - start), definedLinkLabels));
+  return cells.map(cell => tableColumnVisibility(header.slice(cell.start - start, cell.end - start), definedLinkLabels, customProps));
 }
 
 type ReadMarkdownLine = (index: number) => string | undefined;
 
-function createProtectedSetextLookup(readRaw: ReadMarkdownLine, definedLinkLabels: ReadonlySet<string>) {
+function createCueCustomPropertiesLookup(
+  lines: readonly string[], definedLinkLabels: ReadonlySet<string>, inheritedCustomProps: CssCustomProperties,
+) {
+  if (!lines.some(line => /style[ \t]*=/i.test(line))) return (_index: number) => inheritedCustomProps;
+  let offset = 0;
+  const offsets = lines.map(line => {
+    const start = offset;
+    offset += line.length + 1;
+    return start;
+  });
+  const html = createMarkdownHtmlBlockLookup(lines.join("\n"), inheritedCustomProps);
+  return (index: number) => html.customPropertiesAt(offsets[index] ?? 0, definedLinkLabels);
+}
+
+function createProtectedSetextLookup(
+  readRaw: ReadMarkdownLine, definedLinkLabels: ReadonlySet<string>, customPropertiesAt = (_index: number) => EMPTY_CUSTOM_PROPS,
+) {
   let checkedBefore = -1;
   let checkedContainers: readonly MarkdownContainer[] = [];
   let checkedColumns: readonly PedagogicalVisibility[] | undefined;
   let checkedCaptionRow = false;
+  let checkedProps: CssCustomProperties | undefined;
   return (
     start: number,
     { body, containers }: ReturnType<typeof readMarkdownContainerLine>,
@@ -2145,7 +2290,8 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine, definedLinkLabel
     captionRow = false,
   ): number | undefined => {
     // A suffix of a checked, unprotected paragraph cannot introduce a protected title.
-    if (start < checkedBefore && columns === checkedColumns && captionRow === checkedCaptionRow &&
+    const activeProps = customPropertiesAt(start);
+    if (start < checkedBefore && columns === checkedColumns && captionRow === checkedCaptionRow && activeProps === checkedProps &&
       containers.length === checkedContainers.length &&
       containers.every((container, index) => container === checkedContainers[index])) return undefined;
 
@@ -2156,7 +2302,7 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine, definedLinkLabel
       const line = continueMarkdownContainers(raw, containers);
       if (index !== start && line.depth !== containers.length) return undefined;
       const titleLine = index === start ? body : line.body;
-      if (columns && tableColumnVisibility(titleLine, definedLinkLabels) !== "public") {
+      if (columns && tableColumnVisibility(titleLine, definedLinkLabels, customPropertiesAt(index)) !== "public") {
         firstProtectedTitleLine = Math.min(firstProtectedTitleLine, index);
       }
       // Data rows cannot become an earlier part of a later hint heading and lose column protection.
@@ -2170,12 +2316,13 @@ function createProtectedSetextLookup(readRaw: ReadMarkdownLine, definedLinkLabel
     if (paragraph.level !== undefined) {
       const title: string[] = [];
       for (let index = start; index < paragraph.index; index++) title.push(readLine(index)!);
-      if (tableColumnVisibility(title.join("\n"), definedLinkLabels) !== "public") return paragraph.index;
+      if (tableColumnVisibility(title.join("\n"), definedLinkLabels, activeProps) !== "public") return paragraph.index;
     }
     checkedBefore = paragraph.index;
     checkedContainers = containers;
     checkedColumns = columns;
     checkedCaptionRow = captionRow;
+    checkedProps = activeProps;
     return undefined;
   };
 }
@@ -2223,6 +2370,7 @@ function createTranscriptCueSeparator(
   cueTexts: readonly string[],
   definedLinkLabels: ReadonlySet<string>,
   preserveBoundaryVisibility?: (cueIndex: number, offset: number, visibility: PedagogicalVisibility) => void,
+  inheritedCustomProps = EMPTY_CUSTOM_PROPS,
 ) {
   const lines: string[] = [];
   const offsets: number[] = [];
@@ -2246,7 +2394,8 @@ function createTranscriptCueSeparator(
   let latexArgumentThrough = -1;
   let literalEnvironment: string | undefined;
   const mathEnvironments: string[] = [];
-  const protectedUnderline = createProtectedSetextLookup(index => lines[index], definedLinkLabels);
+  const customPropertiesAt = createCueCustomPropertiesLookup(lines, definedLinkLabels, inheritedCustomProps);
+  const protectedUnderline = createProtectedSetextLookup(index => lines[index], definedLinkLabels, customPropertiesAt);
   const readCaptionRow = (index: number) => ({
     ...continueMarkdownContainers(lines[index]!, containers),
     captionRow: true,
@@ -2304,7 +2453,7 @@ function createTranscriptCueSeparator(
       const sameContainer = current.continuedDepth === containers.length &&
         current.continuedDepth === current.containers.length;
       const headerCells = sameContainer ? pipeTableHeaderCells({ raw: previousBody, start: 0 }, current.body) : null;
-      tableColumns = headerCells ? getTableColumnVisibilities(previousBody, headerCells, definedLinkLabels) : undefined;
+      tableColumns = headerCells ? getTableColumnVisibilities(previousBody, headerCells, definedLinkLabels, 0, customPropertiesAt(index - 1)) : undefined;
       containers = current.containers;
       previousBody = current.body;
     }
@@ -2684,7 +2833,7 @@ function findInlineConstructSpans(
       if (m) {
         const openEnd = i + m[0].length;
         const bounds = findMatchingDetailsBounds(text, i, openEnd, inheritsHtmlBlock, definedLinkLabels);
-        const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility, definedLinkLabels);
+        const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility, definedLinkLabels, inheritsHtmlBlock);
         spans.push({
           start: i,
           end: bounds.closeEnd,
@@ -2765,6 +2914,7 @@ function parsePrefixedInnerBlocks(
     length: BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0, padding: 0,
   }),
   headingContext?: HeadingContext,
+  inheritedCustomProps = EMPTY_CUSTOM_PROPS,
 ): MappedInnerBlock[] {
   const bodyParts: string[] = [];
   const charOrigStart: number[] = [];
@@ -2828,6 +2978,7 @@ function parsePrefixedInnerBlocks(
       },
     } : headingContext,
     definedLinkLabels,
+    inheritedCustomProps,
   );
 
   return innerAst.map(b => {
@@ -2928,6 +3079,7 @@ function scanInlineCueTimings(
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   definedLinkLabels: ReadonlySet<string> = EMPTY_LINK_LABELS,
+  inheritedCustomProps = EMPTY_CUSTOM_PROPS,
 ) {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
@@ -2939,7 +3091,9 @@ function scanInlineCueTimings(
     const raw = lines[index]?.raw;
     return raw?.slice(cueTimings[index]?.prefixLength ?? 0);
   };
-  const protectedUnderline = createProtectedSetextLookup(readCueBody, definedLinkLabels);
+  const customPropertiesAt = createCueCustomPropertiesLookup(lines.map((_, index) => readCueBody(index)!),
+    definedLinkLabels, inheritedCustomProps);
+  const protectedUnderline = createProtectedSetextLookup(readCueBody, definedLinkLabels, customPropertiesAt);
   const tableBreakVisibilities = new Map<number, PedagogicalVisibility>();
   const timings = lines.map(({ raw, start }, index) => {
     const timing = cueTimings[index]!;
@@ -3017,7 +3171,7 @@ function scanInlineCueTimings(
       const header = timedHeader ? projectedHeader : documentLine;
       containers = header.containers;
       table = {
-        columns: getTableColumnVisibilities(header.body, cells, definedLinkLabels),
+        columns: getTableColumnVisibilities(header.body, cells, definedLinkLabels, 0, customPropertiesAt(index)),
         timed: timedHeader !== null,
         delimiterIndex: index + 1,
       };
@@ -3044,6 +3198,7 @@ function parseInlineCuedDocument(
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   headingContext?: HeadingContext,
+  inheritedCustomProps = EMPTY_CUSTOM_PROPS,
 ): PedagogicalAstBlock[] {
   const parts: string[] = [];
   const regions: TranscriptRegion[] = [];
@@ -3052,7 +3207,7 @@ function parseInlineCuedDocument(
   const observeHeading = headingContext?.onHeading;
   const projectedLineOrigins = observeHeading && new Map<number, number>();
   const bodies = lines.map((line, index) => line.raw.slice(timings[index]?.prefixLength ?? 0));
-  const cueSeparator = createTranscriptCueSeparator(bodies, definedLinkLabels);
+  const cueSeparator = createTranscriptCueSeparator(bodies, definedLinkLabels, undefined, inheritedCustomProps);
   let offset = 0;
   for (const [index, line] of lines.entries()) {
     const timing = timings[index];
@@ -3097,7 +3252,7 @@ function parseInlineCuedDocument(
       const original = projectedLineOrigins?.get(projectedOffset);
       if (original !== undefined) observeHeading(original, level);
     },
-  } : headingContext, definedLinkLabels));
+  } : headingContext, definedLinkLabels, inheritedCustomProps));
   const blocks: PedagogicalAstBlock[] = [];
   for (const region of regions) {
     const { start, end, sourceStart, cue } = region;
@@ -3159,12 +3314,13 @@ function parsePedagogicalAstInternal(
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   headingContext?: HeadingContext,
   inheritedLinkLabels?: ReadonlySet<string>,
+  inheritedCustomProps = EMPTY_CUSTOM_PROPS,
 ): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
-  const initialTimings = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, inheritedLinkLabels);
+  const initialTimings = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, inheritedLinkLabels, inheritedCustomProps);
   const hasCueTimings = initialTimings.timings.some(Boolean);
   const boundaryBefore = (index: number) => initialTimings.tableBreakVisibilities.has(index) ||
     boundaryFloors?.has(lines[index]?.start ?? -1) === true;
@@ -3178,15 +3334,18 @@ function parsePedagogicalAstInternal(
       : collectLinkReferenceLabels(lines.map(line => line.raw))
     : EMPTY_LINK_LABELS);
   const { timings, tableBreakVisibilities } = hasCueTimings && !inheritedLinkLabels && definedLinkLabels.size
-    ? scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, definedLinkLabels)
+    ? scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, definedLinkLabels, inheritedCustomProps)
     : initialTimings;
   if (timings.some(Boolean)) {
     return parseInlineCuedDocument(text, lines, timings, tableBreakVisibilities,
-      options, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors, headingContext);
+      options, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors, headingContext, inheritedCustomProps);
   }
-  const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(index => lines[index]?.raw, definedLinkLabels);
+  const inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text, inheritedCustomProps);
+  const customPropertiesAt = (offset: number) => inheritsHtmlBlock.customPropertiesAt(offset, definedLinkLabels);
+  const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(
+    index => lines[index]?.raw, definedLinkLabels, index => customPropertiesAt(lines[index]?.start ?? 0),
+  );
   const blocks: PedagogicalAstBlock[] = [];
-  const inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text);
   const headingStack = headingContext?.stack ?? [];
   const sectionBaseVisibility = headingContext?.baseVisibility ?? defaultVisibility;
   let localHeading: HeadingScope | undefined;
@@ -3219,6 +3378,7 @@ function parsePedagogicalAstInternal(
       rebasedFloors,
       undefined,
       definedLinkLabels,
+      customPropertiesAt(start),
     ).map(block => ({
       ...block,
       startOffset: start + block.startOffset,
@@ -3581,7 +3741,7 @@ function parsePedagogicalAstInternal(
       const isSectionHeading = line.start > 0 || !headingContext?.firstHeadingIsLocal;
       if (isSectionHeading) headingContext?.onHeading?.(line.start, level);
       if (propagateSectionVisibility) {
-        const titleVisibility = tableColumnVisibility(cleanHeadingTitle, definedLinkLabels);
+        const titleVisibility = tableColumnVisibility(cleanHeadingTitle, definedLinkLabels, customPropertiesAt(headingTextStart));
         const ownVisibility = titleVisibility === "public" ? sectionBaseVisibility : titleVisibility;
         const visibility = maxVisibility(ownVisibility, boundaryFloor);
         if (isSectionHeading) {
@@ -3872,7 +4032,7 @@ function parsePedagogicalAstInternal(
       const openEndOffset = detailsStart + detailsOpenMatch[0].length;
       const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset, inheritsHtmlBlock, definedLinkLabels);
       const { closeStart, closeEnd } = bounds;
-      const classified = classifyDetailsElement(text, openEndOffset, bounds, activeVis, definedLinkLabels);
+      const classified = classifyDetailsElement(text, openEndOffset, bounds, activeVis, definedLinkLabels, inheritsHtmlBlock);
       const endLineIdx = lineIndexContaining(lines, Math.max(detailsStart, closeEnd - 1), i);
       const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
       const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
@@ -3971,6 +4131,7 @@ function parsePedagogicalAstInternal(
               padding: 0,
             }),
             { onHeading: (offset, level) => levels.set(offset, level) },
+            customPropertiesAt(line.start),
           );
           quotedHeadingLevels = levels;
         }
@@ -4003,6 +4164,7 @@ function parsePedagogicalAstInternal(
             lines, resetAt, endLineIdx, null, intrinsic.visibility, propagateSectionVisibility, sealProofs,
             definedLinkLabels, captionRowStarts, boundaryFloors, undefined,
             { stack: quotedHeadings, baseVisibility: getActiveSectionVisibility() },
+            customPropertiesAt(resetStart),
           );
           emitContainerWithExtraction(
             intrinsic.kind, intrinsic.visibility, true, resetStart, outerEnd, outerEnd, undefined, true, innerBlocks,
@@ -4022,6 +4184,7 @@ function parsePedagogicalAstInternal(
             boundaryFloors,
             undefined,
             { stack: quotedHeadings, baseVisibility: getActiveSectionVisibility(), firstHeadingIsLocal: true },
+            customPropertiesAt(headerRestStart),
           );
           const higherBlocks = innerBlocks.filter(
             b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
@@ -4080,6 +4243,7 @@ function parsePedagogicalAstInternal(
           boundaryFloors,
           undefined,
           { stack: quotedHeadings, baseVisibility: activeVis },
+          customPropertiesAt(line.start),
         );
         if (innerBlocks.some(b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis])) {
           emitContainerWithExtraction(
@@ -4147,6 +4311,8 @@ function parsePedagogicalAstInternal(
         (bodyLine, index) => index === i
           ? { length: listMatch[0].length, padding: 0 }
           : listContinuationPrefix(bodyLine.raw, contentIndent),
+        undefined,
+        customPropertiesAt(line.start),
       );
       const end = lines[endLineIdx]!.contentEnd;
       emitContainerWithExtraction("prose", activeVis, false, line.start, end, end, undefined, false, innerBlocks);
@@ -4157,7 +4323,7 @@ function parsePedagogicalAstInternal(
     // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
     if (tableHeaderCells) {
       let j = i + 2;
-      const columns = getTableColumnVisibilities(raw, tableHeaderCells, definedLinkLabels, line.start);
+      const columns = getTableColumnVisibilities(raw, tableHeaderCells, definedLinkLabels, line.start, customPropertiesAt(line.start));
       while (j < lines.length) {
         const row = lines[j]!;
         if (boundaryFloors?.has(row.start)) break;
@@ -4189,7 +4355,7 @@ function parsePedagogicalAstInternal(
       const headerCells = activeVis === "sealed" ? [] : tableHeaderCells;
       const colPolicies = headerCells.map(cell => {
         const cellText = sanitizeHeaderLabel(text, cell.start, cell.end, extracted, "");
-        const visibility = tableColumnVisibility(cellText, definedLinkLabels);
+        const visibility = tableColumnVisibility(cellText, definedLinkLabels, customPropertiesAt(line.start));
         if (visibility === "sealed") {
           return { kind: "solution" as const, visibility: maxVisibility("sealed", activeVis), label: cellText };
         }
@@ -4607,7 +4773,7 @@ export function chunkPedagogicalDocument(input: ChunkPedagogicalDocumentInput): 
       endMs: params.endMs,
       keyframeChunkId: params.keyframeChunkId,
       oversizedSplit: params.oversizedSplit,
-      ...(input.itemFamilyId ? { itemFamilyId: input.itemFamilyId } : {}),
+      ...(input.itemFamilyId !== undefined ? { itemFamilyId: input.itemFamilyId } : {}),
       ...(input.itemRevisionId ? { itemRevisionId: input.itemRevisionId } : {}),
       ...(input.conceptIds?.length ? { conceptIds: [...input.conceptIds] } : {}),
       ...(params.label ? { label: params.label } : {}),
@@ -4763,7 +4929,7 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
           endMs: cue.endMs,
           keyframeChunkId: cue.keyframeChunkId ?? null,
           oversizedSplit,
-          ...(cue.itemFamilyId ? { itemFamilyId: cue.itemFamilyId } : {}),
+          ...(cue.itemFamilyId !== undefined ? { itemFamilyId: cue.itemFamilyId } : {}),
           ...(cue.conceptIds?.length ? { conceptIds: [...cue.conceptIds] } : {}),
           ...(cue.label && spans.length === 1 ? { label: cue.label } : {}),
         });

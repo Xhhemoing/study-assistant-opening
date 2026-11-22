@@ -237,6 +237,12 @@ describe("dedicated material reader", () => {
     expect(player.getAttribute("data-media-anchor-phase")).toBe("seek_unreached");
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
     expect(player.querySelector('[role="status"]')?.textContent).toBe("未能跳到引用位置。");
+
+    video.currentTime = 37;
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
+    await click(Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!);
+    expect(play).not.toHaveBeenCalled();
+    expect(video.currentTime).toBe(37);
   });
 
   it("announces an audio citation point once programmatic seeking finishes", async () => {

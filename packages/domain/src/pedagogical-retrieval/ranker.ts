@@ -548,7 +548,7 @@ export function rankPedagogicalEvidence(
       quarantinedNodeIds.add(chunk.id);
       continue;
     }
-    if (chunk.itemFamilyId && excludedFamilies.has(chunk.itemFamilyId)) {
+    if (chunk.itemFamilyId !== undefined && excludedFamilies.has(chunk.itemFamilyId)) {
       filteredExcludedFamilyChunks++;
       quarantinedNodeIds.add(chunk.id);
       continue;
@@ -847,7 +847,7 @@ export function rankPedagogicalEvidence(
   for (const item of candidates) {
     if (selected.length >= maxResults) break;
     const family = item.chunk.itemFamilyId;
-    if (family && options.maxChunksPerItemFamily !== undefined) {
+    if (family !== undefined && options.maxChunksPerItemFamily !== undefined) {
       const count = familyCounts.get(family) ?? 0;
       if (count >= options.maxChunksPerItemFamily) continue;
       familyCounts.set(family, count + 1);

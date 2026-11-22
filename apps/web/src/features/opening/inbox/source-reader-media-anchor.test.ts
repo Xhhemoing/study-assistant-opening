@@ -232,10 +232,10 @@ describe("media anchor bounded playback controller", () => {
     expect(controller.snapshot().phase).toBe(phase);
   });
 
-  it("recognizes a scrub before the first seeking event when the citation is seekable", () => {
+  it.each([true, false])("recognizes a scrub before the first callback when media.seeking is %s", seeking => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
     const media = Object.assign(createFakeMedia(), {
-      duration: 90, seeking: true, seekable: { length: 1, start: () => 0, end: () => 90 },
+      duration: 90, seeking, seekable: { length: 1, start: () => 0, end: () => 90 },
     });
     const controller = createMediaAnchorPlaybackController(anchor);
     controller.activate(media);
@@ -247,6 +247,22 @@ describe("media anchor bounded playback controller", () => {
     expect(controller.snapshot()).toMatchObject({
       phase: "seeked_outside_range", boundActive: false, userReleasedBound: true,
     });
+  });
+
+  it.each([
+    { duration: 90, rangeCount: 0, seekableStart: 0 },
+    { duration: 39, rangeCount: 1, seekableStart: 0 },
+    { duration: 90, rangeCount: 1, seekableStart: 60 },
+  ])("does not replay an unreachable anchor (duration $duration, seekable start $seekableStart)", ({ duration, rangeCount, seekableStart }) => {
+    const anchor = validateMediaAnchorRange({ startMs: 45_000, endMs: 50_000 })!;
+    const media = Object.assign(createFakeMedia(), {
+      currentTime: 37, duration, seekable: { length: rangeCount, start: () => seekableStart, end: () => duration },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.replay(media);
+    expect(media.playMock).not.toHaveBeenCalled();
+    expect(media.paused).toBe(true);
+    if (!rangeCount) expect(media.currentTime).toBe(37);
   });
 
   it.each(["seekToStart", "replay"] as const)("reports an empty seekable range and retries with %s", retry => {

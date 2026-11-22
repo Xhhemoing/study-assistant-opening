@@ -42,23 +42,37 @@ export function normalizeSparseAdjacency(
     maxWeights[edge.from] = Math.max(maxWeights[edge.from]!, edge.weight);
   }
 
-  // Scale before aggregating parallel edges so finite weights cannot overflow.
-  const sumsByNode = Array.from({ length: nodeCount }, () => new Map<number, number>());
-  for (const edge of edges) {
-    if (edge.weight === 0) continue;
-    const row = sumsByNode[edge.from]!;
-    const scaledWeight = edge.weight / maxWeights[edge.from]!;
-    row.set(edge.to, (row.get(edge.to) ?? 0) + scaledWeight);
+  // Keep parallel weights unscaled while their sum fits, so tiny edges combine before rounding.
+  const sumsByNode = Array.from({ length: nodeCount }, () => new Map<number, { weight: number; scaled: boolean }>());
+  for (const { from, to, weight } of edges) {
+    if (weight === 0) continue;
+    const row = sumsByNode[from]!;
+    const target = row.get(to);
+    if (!target) {
+      row.set(to, { weight, scaled: false });
+    } else if (target.scaled) {
+      target.weight += weight / maxWeights[from]!;
+    } else {
+      const combined = target.weight + weight;
+      if (Number.isFinite(combined)) target.weight = combined;
+      else {
+        target.weight = target.weight / maxWeights[from]! + weight / maxWeights[from]!;
+        target.scaled = true;
+      }
+    }
   }
 
-  return sumsByNode.map(row => {
+  return sumsByNode.map((row, from) => {
     let total = 0;
-    for (const w of row.values()) total += w;
+    for (const target of row.values()) {
+      if (!target.scaled) target.weight /= maxWeights[from]!;
+      total += target.weight;
+    }
     if (total <= 0) return [];
     const entries: SparseAdjacencyEntry[] = [];
     const targets = [...row.keys()].sort((a, b) => a - b);
     for (const target of targets) {
-      entries.push([target, row.get(target)! / total]);
+      entries.push([target, row.get(target)!.weight / total]);
     }
     return entries;
   });

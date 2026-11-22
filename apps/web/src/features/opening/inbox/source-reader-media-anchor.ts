@@ -265,8 +265,7 @@ export function createMediaAnchorPlaybackController(
       const clampedTarget = seekable && nearestSeekablePosition(seekable, target, positionBeforeSeek);
       const clampedToSeekable = clampedTarget !== undefined && clampedTarget !== target &&
         Math.abs(media.currentTime - clampedTarget) * 1000 <= SEEK_TOLERANCE_MS;
-      if (isProgrammaticSeek() && (atRequestedPosition || clampedToEnd || clampedToSeekable ||
-        (seekOrigin === "programmatic_requested" && media.seeking === false))) {
+      if (isProgrammaticSeek() && (atRequestedPosition || clampedToEnd || clampedToSeekable)) {
         seekOrigin = "programmatic_started";
       } else {
         seekOrigin = "manual";
@@ -313,6 +312,11 @@ export function createMediaAnchorPlaybackController(
     replay(media) {
       if (!anchor || !media) return;
       applySeek(media, true);
+      if (phase === "seek_unreached" || mediaEndsBeforeAnchor(media, anchor)) return;
+      if (media.readyState >= 1 && media.seekable) {
+        const reachableStart = nearestSeekablePosition(media.seekable, anchor.startMs / 1000, positionBeforeSeek);
+        if (reachableStart !== undefined && !isWithinSeekTolerance(anchor, reachableStart)) return;
+      }
       try {
         void Promise.resolve(media.play()).catch(() => undefined);
       } catch {
