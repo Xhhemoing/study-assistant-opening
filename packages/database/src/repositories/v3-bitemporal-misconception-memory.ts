@@ -9,12 +9,29 @@ type ContextItem = Pick<Edge, "status" | "learnerDisposition" | "summary">;
 type RenderedContextBlock = { renderedMarkdown: string; byteLength: number };
 type ContextBlock = RenderedContextBlock & { revision: number };
 type Revision = { edgeId: string; revisionId: string; txAt: string };
+type TryHandoffStamp = { readonly issuedAt: number; readonly issueSeq: number };
 type TryMisconceptionClaim = Pick<Edge, "conceptKey" | "misconceptionCode" | "summary"> & {
   receiptId: string;
   payloadSha256: string;
   issuedAt: number;
+  issueSeq?: number;
   expiresAt: number;
 };
+
+let lastHandoffMs = -Infinity;
+let lastHandoffSeq = 0;
+
+/** Order issuance and restore calls sharing this process, including calls in the same millisecond. */
+export function allocateTryHandoffStamp(nowMs = Date.now()): TryHandoffStamp {
+  const ms = Math.trunc(nowMs);
+  if (ms <= lastHandoffMs && lastHandoffMs - ms <= 60_000) {
+    lastHandoffSeq += 1;
+  } else {
+    lastHandoffMs = ms;
+    lastHandoffSeq = 0;
+  }
+  return { issuedAt: lastHandoffMs, issueSeq: lastHandoffSeq };
+}
 type LearnerCorrection = {
   edgeId: string;
   disposition: LearnerMisconceptionDisposition;
@@ -84,16 +101,16 @@ async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string)
 
 /** Call after the final revision mutation, with the workspace lock still held. */
 export async function refreshLearnerMisconceptionContextBlock(
-  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoredAt?: string,
+  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoreCutoff?: TryHandoffStamp,
 ): Promise<ContextBlock> {
   await lockMisconceptionContext(tx, scope.workspaceId);
   await tx`SET CONSTRAINTS v3_invalidate_misconception_context IMMEDIATE`;
   await tx`SET CONSTRAINTS v3_invalidate_misconception_context DEFERRED`;
-  return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at, restoredAt);
+  return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at, restoreCutoff);
 }
 
 async function writeLearnerMisconceptionContextBlock(
-  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoredAt: string | null = null,
+  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoreCutoff?: TryHandoffStamp,
 ): Promise<ContextBlock> {
   // Exclude ASCII blanks and controls in SQL. The renderer handles Unicode whitespace across pages.
   const blankSummary = "^[ \u0001-\u001f\u007f-\u009f]*$";
@@ -114,13 +131,17 @@ async function writeLearnerMisconceptionContextBlock(
   const { renderedMarkdown, byteLength } = rendered;
   const [block] = await tx<ContextBlock[]>`
     INSERT INTO v3_learner_context_blocks
-      (workspace_id, owner_user_id, rendered_markdown, byte_length, revision, privacy_epoch, updated_at, restored_at)
+      (workspace_id, owner_user_id, rendered_markdown, byte_length, revision, privacy_epoch, updated_at, restore_cutoff_ms, restore_cutoff_seq)
     VALUES (${scope.workspaceId}, ${scope.ownerUserId}, ${renderedMarkdown}, ${byteLength}, 1, ${privacyEpoch},
-      ${at}::text::timestamptz, ${restoredAt}::text::timestamptz)
+      ${at}::text::timestamptz, ${restoreCutoff?.issuedAt ?? null}::bigint, ${restoreCutoff?.issueSeq ?? null}::integer)
     ON CONFLICT (workspace_id, owner_user_id) DO UPDATE
     SET rendered_markdown = EXCLUDED.rendered_markdown, byte_length = EXCLUDED.byte_length, invalidated = false,
       revision = v3_learner_context_blocks.revision + 1, privacy_epoch = EXCLUDED.privacy_epoch, updated_at = EXCLUDED.updated_at,
-      restored_at = GREATEST(EXCLUDED.restored_at, v3_learner_context_blocks.restored_at)
+      restore_cutoff_ms = GREATEST(EXCLUDED.restore_cutoff_ms, v3_learner_context_blocks.restore_cutoff_ms),
+      restore_cutoff_seq = CASE WHEN v3_learner_context_blocks.restore_cutoff_ms IS NULL
+        OR (EXCLUDED.restore_cutoff_ms, EXCLUDED.restore_cutoff_seq) >
+           (v3_learner_context_blocks.restore_cutoff_ms, v3_learner_context_blocks.restore_cutoff_seq)
+        THEN EXCLUDED.restore_cutoff_seq ELSE v3_learner_context_blocks.restore_cutoff_seq END
     RETURNING rendered_markdown AS "renderedMarkdown", byte_length AS "byteLength", revision`;
   return block!;
 }
@@ -247,17 +268,22 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
       WITH tick AS MATERIALIZED (SELECT clock_timestamp() AS at)
       SELECT at::text, at >= to_timestamp(${claim.expiresAt}::double precision / 1000) AS expired FROM tick`;
     if (clock!.expired) throw learningError("CONFLICT", "体验记录已过期。");
-    const [prior] = await tx<{ edgeId: string; revisionId: string; matches: boolean }[]>`
-      SELECT r.edge_id AS "edgeId", r.initial_revision_id AS "revisionId",
-        (r.workspace_id = ${scope.workspaceId} AND r.owner_user_id = ${scope.ownerUserId}
-          AND r.payload_sha256 = ${claim.payloadSha256} AND e.privacy_epoch = ${privacyEpoch}) AS matches
+    const [prior] = await tx<{
+      workspaceId: string | null; edgeId: string | null; revisionId: string | null; claimMatches: boolean; matches: boolean | null;
+    }[]>`
+      SELECT r.workspace_id AS "workspaceId", r.edge_id AS "edgeId", r.initial_revision_id AS "revisionId",
+        (r.owner_user_id = ${scope.ownerUserId} AND r.payload_sha256 = ${claim.payloadSha256}) AS "claimMatches",
+        (r.workspace_id = ${scope.workspaceId} AND e.privacy_epoch = ${privacyEpoch}) AS matches
       FROM v3_try_misconception_handoff_receipts r
-      JOIN v3_bitemporal_misconception_edges e ON e.workspace_id = r.workspace_id AND e.owner_user_id = r.owner_user_id
+      LEFT JOIN v3_bitemporal_misconception_edges e ON e.workspace_id = r.workspace_id AND e.owner_user_id = r.owner_user_id
         AND e.edge_id = r.edge_id AND e.revision_id = r.initial_revision_id
       WHERE r.receipt_id = ${claim.receiptId}`;
     if (prior) {
-      if (!prior.matches) throw learningError("CONFLICT", "体验记录已被使用。");
-      return { edgeId: prior.edgeId, revisionId: prior.revisionId, replayed: true };
+      if (!prior.claimMatches) throw learningError("CONFLICT", "体验记录已被使用。");
+      if (prior.workspaceId !== null) {
+        if (!prior.matches || !prior.edgeId || !prior.revisionId) throw learningError("CONFLICT", "体验记录已被使用。");
+        return { edgeId: prior.edgeId, revisionId: prior.revisionId, replayed: true };
+      }
     }
 
     const edgeId = deriveTryHandoffUuid("edge", claim.receiptId);
@@ -279,11 +305,13 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
     }
     const at = clock!.at;
     if (!root) {
+      if (prior) throw learningError("CONFLICT", "体验记录已被使用。");
       // Restore and redemption serialize on the workspace lock. Read the cutoff without locking the cache row.
       const [cutoff] = await tx<{ blocked: boolean }[]>`
         SELECT true AS blocked FROM v3_learner_context_blocks
         WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-          AND to_timestamp(${claim.issuedAt}::double precision / 1000) < restored_at`;
+          AND restore_cutoff_ms IS NOT NULL
+          AND (${claim.issuedAt}::bigint, ${claim.issueSeq ?? 0}::integer) <= (restore_cutoff_ms, restore_cutoff_seq)`;
       if (cutoff?.blocked) throw learningError("CONFLICT", "体验记录已被使用。");
       const [inserted] = await tx`
         INSERT INTO v3_bitemporal_misconception_edges
@@ -294,13 +322,20 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
           tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))
         ON CONFLICT DO NOTHING RETURNING revision_id`;
       if (!inserted) throw learningError("CONFLICT", "体验记录已被使用。");
+    } else {
+      // Hold the existing revision before taking a receipt row lock in the upsert.
+      await tx`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE revision_id = ${initialRevisionId} FOR KEY SHARE`;
     }
     const [claimed] = await tx`
-      INSERT INTO v3_try_misconception_handoff_receipts
+      INSERT INTO v3_try_misconception_handoff_receipts AS r
         (receipt_id, workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
       VALUES (${claim.receiptId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${claim.payloadSha256},
         ${edgeId}, ${initialRevisionId}, ${at}::text::timestamptz)
-      ON CONFLICT (receipt_id) DO NOTHING RETURNING receipt_id`;
+      ON CONFLICT (receipt_id) DO UPDATE SET workspace_id = EXCLUDED.workspace_id, edge_id = EXCLUDED.edge_id,
+        initial_revision_id = EXCLUDED.initial_revision_id, redeemed_at = EXCLUDED.redeemed_at
+      WHERE ${Boolean(root)} AND r.workspace_id IS NULL AND r.owner_user_id = EXCLUDED.owner_user_id
+        AND r.payload_sha256 = EXCLUDED.payload_sha256
+      RETURNING receipt_id`;
     if (!claimed) throw learningError("CONFLICT", "体验记录已被使用。");
     if (!root) await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
     return { edgeId, revisionId: initialRevisionId, replayed: Boolean(root) };

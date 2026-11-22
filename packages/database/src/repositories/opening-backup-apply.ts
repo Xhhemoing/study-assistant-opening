@@ -43,7 +43,7 @@ import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
 import { orderBackupMisconceptionRevisions, validateBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
-import { refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
+import { allocateTryHandoffStamp, refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
 
 export type OpeningRestoreObjectSideEffects = {
   status: "clean" | "remaining" | "unknown";
@@ -75,6 +75,8 @@ export type OpeningRestoreApplyGuarantees = {
 export type OpeningRestoreExecuteArgs = {
   confirmLocalRestore: true;
   backup: unknown;
+  /** Optional receipt-clock sample for deterministic restore tests. */
+  restoreNowMs?: number;
   currentPrivacyEpoch?: number;
   currentDeletionJournal?: readonly OpeningDeletionMark[];
   currentMemoryDeletions?: OpeningMemoryDeletions;
@@ -679,15 +681,9 @@ export async function executeOpeningRestoreApply(
       if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
       if (!history) await tx`DELETE FROM opening_workspace_history_revisions
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
-      // Separate the restore cutoff from pre-restore receipts even when both clocks report the same millisecond.
-      await tx`SELECT pg_sleep(0.005)`;
-      // The receipt issuer uses Date.now(), which can report an earlier millisecond than PostgreSQL.
-      const receiptClockMs = Date.now();
-      const [clock] = await tx<{ at: string; restoredAt: string }[]>`
-        WITH tick AS MATERIALIZED (SELECT clock_timestamp() AS at)
-        SELECT at::text, LEAST(date_trunc('milliseconds', at),
-          to_timestamp(${receiptClockMs}::double precision / 1000))::text AS "restoredAt" FROM tick`;
-      await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock!.at, clock!.restoredAt);
+      const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
+      const restoreCutoff = allocateTryHandoffStamp(args.restoreNowMs);
+      await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock!.at, restoreCutoff);
 
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;

@@ -110,7 +110,10 @@ CREATE TABLE v3_learner_context_blocks (
   invalidated boolean NOT NULL DEFAULT false,
   privacy_epoch integer NOT NULL CHECK (privacy_epoch >= 0),
   updated_at timestamptz NOT NULL,
-  restored_at timestamptz,
+  restore_cutoff_ms bigint,
+  restore_cutoff_seq integer,
+  CONSTRAINT v3_learner_context_blocks_restore_cutoff_check
+    CHECK ((restore_cutoff_ms IS NULL) = (restore_cutoff_seq IS NULL)),
   CONSTRAINT v3_learner_context_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
     REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
   PRIMARY KEY (workspace_id, owner_user_id)
@@ -138,16 +141,21 @@ CREATE CONSTRAINT TRIGGER v3_invalidate_misconception_context
 
 CREATE TABLE v3_try_misconception_handoff_receipts (
   receipt_id uuid PRIMARY KEY,
-  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id uuid,
   owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   payload_sha256 text NOT NULL CHECK (payload_sha256 ~ '^[a-f0-9]{64}$'),
-  edge_id uuid NOT NULL,
-  initial_revision_id uuid NOT NULL,
+  edge_id uuid,
+  initial_revision_id uuid,
   redeemed_at timestamptz NOT NULL,
+  CONSTRAINT v3_try_receipt_attachment CHECK (
+    (workspace_id IS NULL) = (edge_id IS NULL) AND (workspace_id IS NULL) = (initial_revision_id IS NULL)
+  ),
+  -- The edge cascade clears the whole attachment. Check workspace ownership after that action.
   CONSTRAINT v3_try_receipt_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
-    REFERENCES workspaces(id, owner_user_id) ON DELETE CASCADE,
+    REFERENCES workspaces(id, owner_user_id) DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT v3_try_misconception_initial_scope FOREIGN KEY (workspace_id, owner_user_id, edge_id, initial_revision_id)
-    REFERENCES v3_bitemporal_misconception_edges(workspace_id, owner_user_id, edge_id, revision_id) ON DELETE CASCADE
+    REFERENCES v3_bitemporal_misconception_edges(workspace_id, owner_user_id, edge_id, revision_id)
+    ON DELETE SET NULL (workspace_id, edge_id, initial_revision_id)
 );
 
 -- Roll back the application first and retain these tables to preserve learner history and receipt claims.

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, customType, foreignKey, integer, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, customType, foreignKey, integer, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { courses } from "./courses";
 import { users } from "./identity";
 import { workspaces } from "./library";
@@ -48,11 +48,13 @@ export const v3LearnerContextBlocks = pgTable("v3_learner_context_blocks", {
   invalidated: boolean("invalidated").notNull().default(false),
   privacyEpoch: integer("privacy_epoch").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
-  restoredAt: timestamp("restored_at", { withTimezone: true }),
+  restoreCutoffMs: bigint("restore_cutoff_ms", { mode: "number" }),
+  restoreCutoffSeq: integer("restore_cutoff_seq"),
 }, t => [
   foreignKey({ name: "v3_learner_context_workspace_owner", columns: [t.workspaceId, t.ownerUserId],
     foreignColumns: [workspaces.id, workspaces.ownerUserId] }).onDelete("cascade"),
   primaryKey({ columns: [t.workspaceId, t.ownerUserId] }),
+  check("v3_learner_context_blocks_restore_cutoff_check", sql`(${t.restoreCutoffMs} IS NULL) = (${t.restoreCutoffSeq} IS NULL)`),
   check("v3_learner_context_blocks_rendered_markdown_check", sql`octet_length(${t.renderedMarkdown}) <= ${sql.raw(String(LEARNER_CONTEXT_MAX_BYTES))}`),
   check("v3_learner_context_blocks_byte_length_check",
     sql`${t.byteLength} BETWEEN 0 AND ${sql.raw(String(LEARNER_CONTEXT_MAX_BYTES))} AND ${t.byteLength} = octet_length(${t.renderedMarkdown})`),
@@ -60,17 +62,20 @@ export const v3LearnerContextBlocks = pgTable("v3_learner_context_blocks", {
 
 export const v3TryMisconceptionHandoffReceipts = pgTable("v3_try_misconception_handoff_receipts", {
   receiptId: uuid("receipt_id").primaryKey(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id"),
   ownerUserId: uuid("owner_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   payloadSha256: text("payload_sha256").notNull(),
-  edgeId: uuid("edge_id").notNull(),
-  initialRevisionId: uuid("initial_revision_id").notNull(),
+  edgeId: uuid("edge_id"),
+  initialRevisionId: uuid("initial_revision_id"),
   redeemedAt: timestamp("redeemed_at", { withTimezone: true }).notNull(),
 }, t => [
+  check("v3_try_receipt_attachment",
+    sql`(${t.workspaceId} IS NULL) = (${t.edgeId} IS NULL) AND (${t.workspaceId} IS NULL) = (${t.initialRevisionId} IS NULL)`),
+  // Migration 0113 defines deferral and the SET NULL column list, which Drizzle cannot express.
   foreignKey({ name: "v3_try_receipt_workspace_owner", columns: [t.workspaceId, t.ownerUserId],
-    foreignColumns: [workspaces.id, workspaces.ownerUserId] }).onDelete("cascade"),
+    foreignColumns: [workspaces.id, workspaces.ownerUserId] }),
   foreignKey({ name: "v3_try_misconception_initial_scope",
     columns: [t.workspaceId, t.ownerUserId, t.edgeId, t.initialRevisionId],
     foreignColumns: [v3BitemporalMisconceptionEdges.workspaceId, v3BitemporalMisconceptionEdges.ownerUserId,
-      v3BitemporalMisconceptionEdges.edgeId, v3BitemporalMisconceptionEdges.revisionId] }).onDelete("cascade"),
+      v3BitemporalMisconceptionEdges.edgeId, v3BitemporalMisconceptionEdges.revisionId] }).onDelete("set null"),
 ]);

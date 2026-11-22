@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { queryMisconceptionEdgesAsOf, readLearnerMisconceptionContextBlock, redeemTryMisconceptionHandoff, renderLearnerContextBlock } from "./v3-bitemporal-misconception-memory";
+import { allocateTryHandoffStamp, queryMisconceptionEdgesAsOf, readLearnerMisconceptionContextBlock, redeemTryMisconceptionHandoff, renderLearnerContextBlock } from "./v3-bitemporal-misconception-memory";
 
 const scope = { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerUserId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
 const at = "2026-11-21 12:00:00.000001+00";
@@ -32,7 +32,8 @@ it("replaces an unusable cached context using the same database timestamp for re
 it.each(["ledger", "restored root"])("rejects replay from the %s when it does not match the locked privacy epoch", async path => {
   const privacyEpoch = 1;
   const stale = {
-    edgeId: "77216238-c966-44b8-ab40-d9150e131e51", revisionId: "498ad0ef-8b34-45a8-872d-85bf108733dd", matches: false,
+    workspaceId: scope.workspaceId, claimMatches: true, matches: false,
+    edgeId: "77216238-c966-44b8-ab40-d9150e131e51", revisionId: "498ad0ef-8b34-45a8-872d-85bf108733dd",
   };
   const { sql, query } = mockTransaction(
     [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: privacyEpoch }], [],
@@ -44,14 +45,34 @@ it.each(["ledger", "restored root"])("rejects replay from the %s when it does no
   if (path === "restored root") expect(query.mock.lastCall?.slice(1)).toEqual(expect.arrayContaining([stale.edgeId, stale.revisionId]));
 });
 
-it("rejects first use before the restore cutoff without attempting an insert", async () => {
+it.each([[10_000, 100], [100_000, 0]])("orders receipt issuance and a restore at %i + %i on the receipt clock", async (ms, gap) => {
+  const original = allocateTryHandoffStamp(ms);
+  const cutoff = allocateTryHandoffStamp(ms + gap);
+  const fresh = allocateTryHandoffStamp(ms + gap);
+  expect(original).toEqual({ issuedAt: ms, issueSeq: 0 });
+  expect(cutoff).toEqual({ issuedAt: ms + gap, issueSeq: gap ? 0 : 1 });
+  expect(fresh).toEqual({ issuedAt: ms + gap, issueSeq: cutoff.issueSeq + 1 });
+  const earlierDbTime = new Date(ms - 100).toISOString();
+  const start = [[{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 1 }], [],
+    [{ at: earlierDbTime, expired: false }], [], []];
+  const oldTx = mockTransaction(...start, [{ blocked: true }]);
+  await expect(redeemTryMisconceptionHandoff(oldTx.sql, scope, { ...claim, ...original })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(oldTx.query).toHaveBeenCalledTimes(9);
+  expect(oldTx.query.mock.lastCall?.slice(-2)).toEqual([original.issuedAt, original.issueSeq]);
+
+  const freshTx = mockTransaction(...start, [], [{ revision_id: "revision" }], [{ receipt_id: claim.receiptId }],
+    [], [], [], [], [{ renderedMarkdown: "", byteLength: 0, revision: 1 }]);
+  await expect(redeemTryMisconceptionHandoff(freshTx.sql, scope, { ...claim, ...fresh })).resolves.toMatchObject({ replayed: false });
+  expect(freshTx.query.mock.calls[8]?.slice(-2)).toEqual([fresh.issuedAt, fresh.issueSeq]);
+});
+
+it("does not mint a new root for a detached spent receipt with matching owner and digest", async () => {
   const { sql, query } = mockTransaction(
     [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 1 }], [],
-    [{ at, expired: false }], [], [], [{ blocked: true }],
+    [{ at, expired: false }], [{ workspaceId: null, edgeId: null, revisionId: null, claimMatches: true, matches: null }], [],
   );
   await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
-  expect(query).toHaveBeenCalledTimes(9);
-  expect(query.mock.lastCall?.slice(1)).toContain(claim.issuedAt);
+  expect(query).toHaveBeenCalledTimes(8);
 });
 
 it("preserves the database's masked predecessor in an as-of result", async () => {

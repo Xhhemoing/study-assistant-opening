@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { applyLearnerMisconceptionCorrection, learnerMisconceptionDispositions, redeemTryMisconceptionHandoff, type OpeningScope } from "@aistudy/database";
+import { allocateTryHandoffStamp, applyLearnerMisconceptionCorrection, learnerMisconceptionDispositions, redeemTryMisconceptionHandoff, type OpeningScope } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { z } from "zod";
 import { ApiError } from "../../auth/service";
@@ -29,6 +29,7 @@ const selectionSchema = z.object({
 const receiptPayloadSchema = z.object({
   receiptId: z.string().uuid(),
   issuedAt: z.number().int().nonnegative(),
+  issueSeq: z.number().int().nonnegative().max(999_999).default(0),
   expiresAt: z.number().int().positive(),
   conceptKey: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
   misconceptionCode: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
@@ -56,8 +57,9 @@ export function issueTryMisconceptionReceipt(input: unknown, secret = process.en
   }
   const { stepCorrect, reasonCorrect } = gradeTry(question, step, reason);
   if (stepCorrect && reasonCorrect) return null;
+  const { issuedAt, issueSeq } = allocateTryHandoffStamp(now);
   const payload = receiptPayloadSchema.parse({
-    receiptId: randomUUID(), issuedAt: now, expiresAt: now + receiptTtlMs,
+    receiptId: randomUUID(), issuedAt, issueSeq, expiresAt: issuedAt + receiptTtlMs,
     conceptKey: question.id, ...signals[question.id],
   });
   const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
@@ -81,8 +83,8 @@ export function verifyTryMisconceptionReceipt(receipt: string, secret = process.
   }
   const result = receiptPayloadSchema.safeParse(parsed);
   if (!result.success) throw invalid();
-  const { receiptId, issuedAt, expiresAt, conceptKey, misconceptionCode, summary } = result.data;
-  return { receiptId, issuedAt, expiresAt, conceptKey, misconceptionCode, summary,
+  const { receiptId, issuedAt, issueSeq, expiresAt, conceptKey, misconceptionCode, summary } = result.data;
+  return { receiptId, issuedAt, issueSeq, expiresAt, conceptKey, misconceptionCode, summary,
     payloadSha256: createHash("sha256").update(bytes).digest("hex") };
 }
 

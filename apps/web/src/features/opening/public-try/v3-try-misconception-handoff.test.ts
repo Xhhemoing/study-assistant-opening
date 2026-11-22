@@ -12,13 +12,22 @@ it("issues a bounded signed receipt with only the server's candidate signal", ()
   const now = Date.UTC(2026, 10, 21);
   const token = issueTryMisconceptionReceipt(selection, secret, now);
   const claim = verifyTryMisconceptionReceipt(token!, secret);
-  expect(claim).toMatchObject({ conceptKey: "limit", issuedAt: now, expiresAt: now + 900_000 });
+  expect(claim).toMatchObject({ conceptKey: "limit", issuedAt: now, issueSeq: 0, expiresAt: now + 900_000 });
   expect(claim.payloadSha256).toMatch(/^[a-f0-9]{64}$/);
   const encoded = token!.split(".")[0]!;
   expect(Object.keys(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))).sort()).toEqual([
-    "conceptKey", "expiresAt", "issuedAt", "misconceptionCode", "receiptId", "summary",
+    "conceptKey", "expiresAt", "issueSeq", "issuedAt", "misconceptionCode", "receiptId", "summary",
   ]);
   expect(issueTryMisconceptionReceipt({ ...selection, step: 2 }, secret, now)).toBeNull();
+});
+
+it("defaults old signed receipts without an issue sequence to zero", () => {
+  const [body] = issueTryMisconceptionReceipt(selection, secret)!.split(".");
+  const payload = JSON.parse(Buffer.from(body!, "base64url").toString("utf8"));
+  delete payload.issueSeq;
+  const legacy = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = createHmac("sha256", secret).update(`opening:try-misconception:v1.${legacy}`).digest("base64url");
+  expect(verifyTryMisconceptionReceipt(`${legacy}.${signature}`, secret).issueSeq).toBe(0);
 });
 
 it("rejects tampering, unsafe selection fields and even signed unexpected fields", () => {
