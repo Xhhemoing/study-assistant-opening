@@ -265,6 +265,7 @@ function selectSafeMathSpans(text: string, cpStarts: number[], prefixBytes: Int3
 }
 
 const DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES = 6000;
+const EMBEDDING_SEGMENT_HARD_LIMIT = 8192;
 const SEGMENT_HASH_STRIDE = 262_144;
 
 type SegmentedEntry = {
@@ -300,9 +301,9 @@ function splitChunkOffsets(
       const segmentStartOffset = cpStarts[cpStart]!;
       while (spanIdx < mathSpans.length && mathSpans[spanIdx]!.end <= cutOffset) spanIdx++;
       const activeSpan = mathSpans[spanIdx];
-      if (activeSpan && activeSpan.start < cutOffset && cutOffset < activeSpan.end && activeSpan.start > segmentStartOffset) {
-        const backedUpCp = findCodePointForOffset(cpStarts, activeSpan.start);
-        if (backedUpCp > cpStart) cpSplit = backedUpCp;
+      if (activeSpan && activeSpan.start < cutOffset && cutOffset < activeSpan.end) {
+        // Isolate a formula larger than the target so only that formula exceeds it.
+        cpSplit = findCodePointForOffset(cpStarts, activeSpan.start > segmentStartOffset ? activeSpan.start : activeSpan.end);
       }
     }
 
@@ -332,7 +333,7 @@ function hashSegmentCuts(maxBytes: number, cpStarts: number[], cuts: number[]): 
 }
 
 function segmentChunksWithRanges(chunks: SourceChunk[], maxBytes = DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES): SegmentedEntry[] {
-  if (!Number.isInteger(maxBytes) || maxBytes < 4 || maxBytes > 8192) {
+  if (!Number.isInteger(maxBytes) || maxBytes < 4 || maxBytes > EMBEDDING_SEGMENT_HARD_LIMIT) {
     throw new Error("embedding segment byte limit must be 4..8192");
   }
   const entries: SegmentedEntry[] = [];
@@ -345,7 +346,7 @@ function segmentChunksWithRanges(chunks: SourceChunk[], maxBytes = DEFAULT_EMBED
     }
     const { cpStarts, prefixBytes } = buildCodePointIndex(chunk.text);
     const blindCuts = splitChunkOffsets(cpStarts, prefixBytes, maxBytes, null);
-    const mathSpans = selectSafeMathSpans(chunk.text, cpStarts, prefixBytes, maxBytes);
+    const mathSpans = selectSafeMathSpans(chunk.text, cpStarts, prefixBytes, EMBEDDING_SEGMENT_HARD_LIMIT);
     const mathCuts = splitChunkOffsets(cpStarts, prefixBytes, maxBytes, mathSpans);
     const cutsDifferFromLegacy = mathCuts.length !== blindCuts.length
       || mathCuts.some((cut, idx) => cut !== blindCuts[idx]);
@@ -367,7 +368,7 @@ function segmentChunksWithRanges(chunks: SourceChunk[], maxBytes = DEFAULT_EMBED
   return entries;
 }
 
-/** Split at Unicode code points while keeping closed LaTeX math spans <= maxBytes unbroken. */
+/** Split at Unicode code points while keeping closed LaTeX math spans up to 8192 bytes unbroken. */
 export function segmentMaterialChunks(chunks: SourceChunk[], maxBytes = DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES): MaterialSegment[] {
   return segmentChunksWithRanges(chunks, maxBytes).map(entry => entry.segment);
 }

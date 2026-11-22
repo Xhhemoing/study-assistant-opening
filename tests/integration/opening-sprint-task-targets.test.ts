@@ -169,7 +169,10 @@ it("isolates owner, workspace and course and refuses client-key-only bindings", 
   const courseId = await course(), wrongCourse = await course(), foreignCourse = await course(f.otherScope), selected = await task(courseId);
   const request = input(selected);
   await teaching().create(f.scope, { ...request, courseId: wrongCourse });
-  await teaching().create(f.otherScope, { ...request, courseId: foreignCourse });
+  await expect(teaching().create(f.otherScope, { ...request, courseId: foreignCourse })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  // Model a historical cross-workspace binding without bypassing today's creation guard.
+  const foreign = await teaching().create(f.otherScope, { ...request, courseId: foreignCourse, createIntent: {} });
+  await f.sql`UPDATE opening_teaching_activities SET create_intent=${f.sql.json(request.createIntent as never)} WHERE id=${foreign.id}`;
   await teaching().create(f.scope, { ...request, clientKey: `task:${selected.id}:next:${randomUUID()}`, createIntent: { taskId: selected.id } });
   const wrongOwner = await teaching().create(f.scope, { ...request, clientKey: `wrong-owner:${randomUUID()}` });
   await f.sql`UPDATE opening_teaching_activities SET owner_user_id=${f.otherScope.ownerUserId} WHERE id=${wrongOwner.id}`;

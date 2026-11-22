@@ -32,3 +32,9 @@ it("roundtrips explicit worked-example context on a cached physical page", () =>
   }
   expect(() => validatePdfSegmentPages([{ ...page, inWorkedExampleAtEnd: "true" }], 1, 1)).toThrow();
 });
+
+it("keeps publication uncertainty separate from a confirmed answer seal", () => {
+  const marker = { page: 4, text: "", imagePath: null, hadSealedContent: false, publicationSealUnknown: true };
+  expect(validatePdfSegmentPages([marker], 4, 4)).toEqual([marker]);
+  expect(() => validatePdfSegmentPages([{ ...marker, publicationSealUnknown: "true" }], 4, 4)).toThrow();
+});

@@ -55,6 +55,24 @@ describe("empty PDF chunk publication", () => {
     expect(statements.some(({ query }) => query.includes("node_definitions"))).toBe(false);
   });
 
+  it("removes unsafe archived PDF evidence before the legacy definition backfill", async () => {
+    const { repo, input, statements } = setup();
+    async function* mixedStage() {
+      yield { ...base, text: "Public replacement", imageObjectKey: null };
+    }
+    await repo.replacePdfChunks(scope, { ...input, chunks: mixedStage(), unsafeLegacyPages: [1] });
+
+    const evidenceRemoval = statements.findIndex(({ query }) =>
+      query.startsWith("DELETE FROM opening_source_chunks c") && query.includes("pdf-publication-page-seal-v1"));
+    const evidenceRead = statements.findIndex(({ query }) => query.startsWith("SELECT graph.course_id, missing.node_indexes"));
+    const finalDeletion = statements.findLastIndex(({ query }) => query.startsWith("DELETE FROM opening_source_chunks c"));
+    expect(evidenceRemoval).toBeGreaterThanOrEqual(0);
+    expect(evidenceRead).toBeGreaterThan(evidenceRemoval);
+    expect(finalDeletion).toBeGreaterThan(evidenceRead);
+    expect(statements[evidenceRemoval]?.values).toEqual([sourceId, 4, [1], scope.workspaceId]);
+    expect(statements[evidenceRemoval]?.query).toContain("staged.matched_id=c.id");
+  });
+
   it("rejects an ordinarily empty PDF before deleting old chunks", async () => {
     const { repo, input, statements } = setup();
     await expect(repo.replacePdfChunks(scope, input)).rejects.toThrow("source has no readable text");

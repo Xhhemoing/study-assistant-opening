@@ -83,7 +83,7 @@ describe("material hybrid retrieval", () => {
     expect(segUnclosed.map(s => s.chunk.text).join("")).toBe(unclosed);
     expect(segUnclosed.every(s => encoder.encode(s.chunk.text).length <= 100)).toBe(true);
 
-    const oversizedFormula = "$$" + "\\alpha + ".repeat(40) + "\\beta$$";
+    const oversizedFormula = "$$" + "\\alpha + ".repeat(950) + "\\beta$$";
     const segOver = segmentMaterialChunks([chunk("oversized", oversizedFormula)], 80);
     expect(segOver.length).toBeGreaterThan(1);
     expect(segOver.map(s => s.chunk.text).join("")).toBe(oversizedFormula);
@@ -152,6 +152,18 @@ describe("material hybrid retrieval", () => {
     expect(segments.map(segment => segment.chunk.text.length)).toEqual([prefix.length, formula.length]);
     expect(segments[1]?.chunk.text).toBe(formula);
   });
+
+  it.each([["$$", "$$"], ["\\[", "\\]"], ["\\begin{align}", "\\end{align}"], ["$", "$"]])(
+    "keeps a closed %s formula intact above the default target and at the hard limit", (open, close) => {
+      for (const bytes of [7005, 8192]) {
+        const formula = open + "x".repeat(bytes - open.length - close.length) + close;
+        const prefix = "Public introduction. ".repeat(10);
+        const segments = segmentMaterialChunks([chunk("large-formula", prefix + formula + "\nTail.")]);
+        expect(segments.map(segment => segment.chunk.text)).toEqual([prefix, formula, "\nTail."]);
+        expect(segments.every(segment => Buffer.byteLength(segment.chunk.text) <= 8192)).toBe(true);
+      }
+    },
+  );
 
   it("scans pathological backslash and mismatched-env inputs in linear O(N) time", () => {
     const backslashes = "\\".repeat(100_000);

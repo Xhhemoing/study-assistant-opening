@@ -145,7 +145,8 @@ _DEFINITION_RE = re.compile(
     re.IGNORECASE,
 )
 _WORKED_EXAMPLE_RE = re.compile(
-    r"^(?:"
+    rf"^(?:{_SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+))?"
+    r"(?:"
     r"(?:Worked\s+Example|Example)"
     r"(?:\s+\d+(?:[.\-]\d+)*(?:\s*\([^)]+\))?(?:\s*\(\s*continued\s*\))?(?:\s*[:：.\-—]|\s+|$)|(?:\s*\([^)]+\))?(?:\s*\(\s*continued\s*\))?\s*(?:[:：.\-—]|$))"
     r"|例题(?:\s*\d+(?:[.\-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*(?:（续）|\(续\)))?(?:\s*[:：.．\-—]|\s+|$)|\s*(?:（续）|\(续\))?\s*(?:[:：.．\-—]|$))"

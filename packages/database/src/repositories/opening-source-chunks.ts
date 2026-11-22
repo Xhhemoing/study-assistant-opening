@@ -19,6 +19,8 @@ export type OpeningPdfChunkPublisher = {
   /** The stream must be staged locally before publication, with one chunk per physical page. */
   replacePdfChunks(scope: OpeningScope, input: ChunkPublication & {
     chunks: AsyncIterable<NewSourceChunk>; preservePages: number[];
+    /** Pages whose archived bytes may contain sealed or unverified content. */
+    unsafeLegacyPages?: number[];
     /** Exact page numbers stored with the warning for a same-version retry. */
     warning?: ApiFailure & { pdfTextCap?: number[] };
   }): Promise<void>;
@@ -57,14 +59,19 @@ async function backfillLegacyChunkDigest(tx: TransactionSql, scope: OpeningScope
 }
 
 async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: ChunkPublication,
-  reconcile: (sourceId: string) => Promise<void>, preservePages: number[] = []) {
+  reconcile: (sourceId: string, preservePdfDefinitions?: () => Promise<void>) => Promise<void>, preservePages?: number[]) {
   // Privacy takes history before workspace. A rejected execution rolls back the ensure too.
   await lockWorkspaceLearningHistory(tx, scope);
   await lockOpeningJobExecution(tx, scope);
-  if (input.allowSealedEmpty && !preservePages.length) {
-    // Take the same workspace lock without copying withdrawn content into knowledge definitions.
+  const withdrawAll = input.allowSealedEmpty && !preservePages?.length;
+  if (preservePages || withdrawAll) {
+    // For PDFs, remove unsafe evidence after taking the workspace and graph locks.
     const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
     if (!owner) throw new Error("workspace not found");
+    if (preservePages && !withdrawAll) await tx`SELECT course_id FROM opening_course_knowledge
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND source_versions->>${input.sourceId}=${String(input.sourceVersion)}
+      ORDER BY course_id FOR UPDATE`;
   } else {
     await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion);
   }
@@ -72,7 +79,9 @@ async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: Chu
     WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
   if (!source) throw new Error("source not found");
   if (Number(source.version) !== input.sourceVersion || source.upload_state !== "uploaded") throw new Error("CONFLICT: source version changed during parse");
-  await reconcile(String(source.id));
+  await reconcile(String(source.id), preservePages && !withdrawAll
+    ? () => preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion)
+    : undefined);
   await tx`UPDATE opening_sources SET parse_state='ready',error=${input.warning ? tx.json(input.warning) : null}::jsonb,updated_at=now()
     WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} AND version=${input.sourceVersion}`;
   await enqueueOpeningSourceIndex(tx, scope, input.sourceId, input.sourceVersion);
@@ -110,8 +119,9 @@ async function stagePdfChunks(tx: TransactionSql, chunks: AsyncIterable<NewSourc
 }
 
 async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope,
-  { sourceId, sourceVersion, preservePages, allowSealedEmpty }: ChunkPublication & { preservePages: number[] },
-  stagedReadable: boolean) {
+  { sourceId, sourceVersion, preservePages, allowSealedEmpty, unsafeLegacyPages = [] }:
+    ChunkPublication & { preservePages: number[]; unsafeLegacyPages?: number[] },
+  stagedReadable: boolean, preserveDefinitions?: () => Promise<void>) {
   // Retained pages are references only. PostgreSQL keeps the original rows and citation IDs.
   if (preservePages.length) await tx`INSERT INTO pg_temp.opening_pdf_chunk_stage (page,matched_id)
     SELECT page,id FROM opening_source_chunks
@@ -137,6 +147,24 @@ async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope,
       const digest = knowledgeChunkDigests(previous.map(({ id }) => ({ id, sourceId })))[sourceId]!;
       await backfillLegacyChunkDigest(tx, scope, sourceId, sourceVersion, digest);
     }
+  }
+  if (preserveDefinitions) {
+    // Keep ordinary replacements available for legacy definitions, but remove withdrawn or
+    // contaminated rows before the backfill reads evidence. An exact staged match is public.
+    await tx`DELETE FROM opening_source_chunks c
+      WHERE c.source_id=${sourceId} AND c.source_version=${sourceVersion}
+        AND NOT EXISTS (SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged WHERE staged.page=c.page AND staged.matched_id=c.id)
+        AND (c.page=ANY(${unsafeLegacyPages}::int[]) OR NOT EXISTS (
+          SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged WHERE staged.page=c.page
+        ) OR EXISTS (
+          SELECT 1 FROM opening_pdf_parse_segments seal
+          WHERE seal.workspace_id=${scope.workspaceId} AND seal.source_id=c.source_id AND seal.source_version=c.source_version
+            AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'
+            AND seal.page_start=c.page AND seal.page_end=c.page
+            AND (seal.pages->0->>'hadSealedContent'='true' OR seal.pages->0->>'sectionSealedAtEnd'='true'
+              OR seal.pages->0->>'inlineSealedAtEnd'='true' OR seal.pages->0->>'publicationSealUnknown'='true')
+        ))`;
+    await preserveDefinitions();
   }
   await tx`DELETE FROM opening_source_chunks c WHERE c.source_id=${sourceId} AND c.source_version=${sourceVersion}
     AND NOT EXISTS (SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged WHERE staged.page=c.page AND staged.matched_id=c.id)`;
@@ -183,7 +211,8 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
       const stagedReadable = await stagePdfChunks(tx, input.chunks);
       if (!input.preservePages.length && !input.allowSealedEmpty) requireReadableContent(stagedReadable);
       await publishChunks(tx, scope, input,
-        sourceId => reconcilePdfChunks(tx, scope, { ...input, sourceId }, stagedReadable), input.preservePages);
+        (sourceId, preserveDefinitions) => reconcilePdfChunks(tx, scope, { ...input, sourceId }, stagedReadable, preserveDefinitions),
+        input.preservePages);
     });
   },
   async listChunks(scope, sourceId) { sourceId = controlledLearningTools.open_fragment.input.parse(sourceId); const rows = await sql`SELECT version FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${scope.workspaceId} AND upload_state = 'uploaded'`; const row = rows[0] as Record<string, unknown> | undefined; return row ? fetchChunks(sql, scope, sourceId, Number(row.version)) : []; },

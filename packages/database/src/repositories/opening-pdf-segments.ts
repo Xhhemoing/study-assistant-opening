@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; publicationSealUnknown?: boolean };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[] } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -29,12 +29,14 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
     if (row.sectionSealedAtEnd && row.inlineSealedAtEnd) throw new TypeError("conflicting PDF page end seal metadata");
     if (row.hadSealedContent !== undefined && typeof row.hadSealedContent !== "boolean") throw new TypeError("invalid PDF hadSealedContent metadata");
     if (row.inWorkedExampleAtEnd !== undefined && typeof row.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid PDF inWorkedExampleAtEnd metadata");
+    if (row.publicationSealUnknown !== undefined && typeof row.publicationSealUnknown !== "boolean") throw new TypeError("invalid PDF publicationSealUnknown metadata");
     return { page: row.page as number, text: row.text, imagePath: null,
       ...(row.visualKinds === undefined ? {} : { visualKinds: row.visualKinds as PdfSegmentPage["visualKinds"] }),
       ...(row.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: row.sectionSealedAtEnd }),
       ...(row.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: row.inlineSealedAtEnd }),
       ...(row.hadSealedContent === undefined ? {} : { hadSealedContent: row.hadSealedContent }),
-      ...(row.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: row.inWorkedExampleAtEnd }) };
+      ...(row.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: row.inWorkedExampleAtEnd }),
+      ...(row.publicationSealUnknown === undefined ? {} : { publicationSealUnknown: row.publicationSealUnknown }) };
   });
 }
 

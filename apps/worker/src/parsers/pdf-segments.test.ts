@@ -68,7 +68,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v15-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v16-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -865,10 +865,12 @@ describe("bounded resumable PDF parser", () => {
 
     it("withdraws a previously public continuation after a newly confirmed seal and two conversion failures", async () => {
       const segmentData = new Map<string, PdfSegment>();
-      const first = await runCliScenario("failed_sealed_retry", { segmentData });
+      const first = await runCliScenario("failed_sealed_retry", { segmentData,
+        recognizePage: async () => ({ text: "Chapter 1: Geometry", imageObjectKey: "vision/chapter" }),
+      });
       expect(first.publishedChunks.at(-1)).toMatchObject({ page: 11, text: "5 units." });
       const retry = await runCliScenario("failed_sealed_retry", {
-        segmentData, savedChunks: first.publishedChunks, failedStarts: [11],
+        segmentData, savedChunks: first.publishedChunks.filter(chunk => chunk.page !== 10), failedStarts: [11],
         recognizePage: async () => ({ text: "Answer Key", imageObjectKey: "vision/key" }),
       });
       expect(retry.requests).toEqual([{ start: 11, seed: "section_sealed" }, { start: 11, seed: "section_sealed" }]);
@@ -1013,7 +1015,9 @@ describe("bounded resumable PDF parser", () => {
       recognizePage: async () => ({ text: "5 units.", imageObjectKey: "vision/unknown" }),
     });
     expect(failed.publishedChunks.map(chunk => chunk.page)).toEqual([4]);
-    expect(segmentData.has("pdf-publication-page-seal-v1/2-2")).toBe(false);
+    expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
+      state: "ready", pages: [{ hadSealedContent: false, publicationSealUnknown: true }],
+    });
     expect(segmentData.has("pdf-publication-page-seal-v1/3-3")).toBe(false);
 
     const sealed = await runPdfScenario({ pages, segmentData, segmentPages: 1,
@@ -1023,6 +1027,8 @@ describe("bounded resumable PDF parser", () => {
     expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
       state: "ready", pages: [{ hadSealedContent: true, sectionSealedAtEnd: true }],
     });
+    // Recovery also needs a fresh native parse of the previously sealed continuation.
+    segmentData.delete(pdfParserProfile() + "/3-3");
     const recovered = await runPdfScenario({ pages, segmentData, segmentPages: 1,
       recognizePage: async () => ({ text: "Chapter 1: Geometry", imageObjectKey: "vision/recovered" }),
     });
@@ -1036,6 +1042,138 @@ describe("bounded resumable PDF parser", () => {
     expect(failedAgain.preservePages).toEqual([1, 2]);
     expect(failedAgain.publishedChunks.map(chunk => chunk.page)).toEqual([3, 4]);
   });
+
+  it.each(["live", "archived"] as const)("keeps %s Vision within a native-sealed public prefix", async origin => {
+    const stem = "Exercise 1: Solve x + 2 = 5.";
+    const header = "【原图忠实转写，尚需核对】";
+    for (const boundary of ["", "\nModel answer: x = 3."]) {
+      const vision = [header, stem, "x = 3." + boundary, "【图表观察描述，非原文或解答】", "Shows the answer."].join("\n");
+      const result = await runPdfScenario({
+        pages: [{ page: 1, text: stem, visualKinds: ["picture"], hadSealedContent: true, inlineSealedAtEnd: false }],
+        ...(origin === "live" ? { recognizePage: async () => ({ text: vision, imageObjectKey: "answer" }) } : {
+          savedChunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey: "answer",
+            text: "[原生提取]\n" + stem + "\n\n[视觉转写与描述]\n" + vision }],
+        }),
+      });
+      expect(result.publishedChunks).toMatchObject([{
+        text: boundary ? "[原生提取]\n" + stem + "\n\n[视觉转写与描述]\n" + header + "\n" + stem : stem,
+        imageObjectKey: null,
+      }]);
+    }
+  });
+
+  it("keeps confirmed seals when switching back to cached non-OCR pages", async () => {
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [{ page: 1, text: "x = 3." }, { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" }];
+    vi.stubEnv("PARSER_OCR_MODEL_DIR", "");
+    try {
+      const initial = await runPdfScenario({ pages, segmentData });
+      expect(initial.publishedChunks.map(chunk => chunk.page)).toEqual([1, 2, 3]);
+      vi.stubEnv("PARSER_OCR_MODEL_DIR", "ocr-test");
+      const sealed = await runPdfScenario({ pages: [{ ...pages[0]!, visualKinds: ["picture"] }, ...pages.slice(1)], segmentData,
+        savedChunks: initial.publishedChunks,
+        recognizePage: async () => ({ text: "Answer Key", imageObjectKey: "answer" }),
+      });
+      expect(sealed.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
+      const key = "pdf-publication-page-seal-v1/1-1";
+      const marker = segmentData.get(key);
+      expect(marker?.state).toBe("ready");
+      if (marker?.state === "ready") delete marker.pages[0]!.visualKinds;
+      vi.stubEnv("PARSER_OCR_MODEL_DIR", "");
+      const replay = await runPdfScenario({ pages, segmentData, savedChunks: sealed.publishedChunks });
+      expect(replay.requests).toEqual([]);
+      expect(replay.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
+      expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({
+        state: "ready", pages: [{ hadSealedContent: true, sectionSealedAtEnd: true }],
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps an earlier Vision seal when a retry returns only a diagram description", async () => {
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [{ page: 1, text: "x = 3.", visualKinds: ["picture" as const] },
+      { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" }];
+    const first = await runPdfScenario({ pages, segmentData,
+      recognizePage: async () => ({ text: "Answer Key", imageObjectKey: "answer" }),
+    });
+    const retry = await runPdfScenario({ pages, segmentData, savedChunks: first.publishedChunks,
+      recognizePage: async () => ({ text: "【图表观察描述，非原文或解答】\nA red curve.", imageObjectKey: "full-page" }),
+    });
+    expect(retry.requests).toEqual([]);
+    expect(retry.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
+    expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({
+      state: "ready", pages: [{ hadSealedContent: true, sectionSealedAtEnd: true }],
+    });
+  });
+
+  it.each([1, 2])("carries an unreadable scan across %i-page ranges until a public structural heading", async segmentPages => {
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [{ page: 1, text: "", visualKinds: ["scan" as const] },
+      { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" }, { page: 4, text: "Public continuation." }];
+    const result = await runPdfScenario({ pages, segmentData, segmentPages });
+    expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([3, 4]);
+    expect(result.pdfWarning).toMatchObject({ code: "PARSE_PARTIAL" });
+    expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({
+      state: "ready", pages: [{ hadSealedContent: false, publicationSealUnknown: true }],
+    });
+    const retry = await runPdfScenario({ pages, segmentData, segmentPages, savedChunks: result.publishedChunks });
+    expect(retry.requests).toEqual([]);
+    expect(retry.publishedChunks).toEqual(result.publishedChunks);
+  });
+
+  it("withholds an unheaded raw cached transcription after a skipped scan", async () => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "", visualKinds: ["scan"] }, { page: 2, text: "", visualKinds: ["scan"] },
+      { page: 3, text: "Chapter 2: Vectors" },
+    ], recognizePages: async function* (inputs) {
+      for (const input of inputs) {
+        yield input.physicalPage === 1 ? null : {
+          text: "【原图忠实转写，尚需核对】\n5 units.", imageObjectKey: "archived-unheaded",
+        };
+      }
+    } });
+    expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([3]);
+  });
+
+  it("ends persisted scan uncertainty when Vision supplies a public structural heading", async () => {
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [{ page: 1, text: "", visualKinds: ["scan" as const] }, { page: 2, text: "", visualKinds: ["scan" as const] },
+      { page: 3, text: "Public continuation." }, { page: 4, text: "Chapter 2: Vectors" }];
+    const first = await runPdfScenario({ pages, segmentData, segmentPages: 1 });
+    expect(first.publishedChunks.map(chunk => chunk.page)).toEqual([4]);
+    const recovered = await runPdfScenario({ pages, segmentData, segmentPages: 1, savedChunks: first.publishedChunks,
+      recognizePages: async function* (inputs) {
+        for (const input of inputs) {
+          yield input.physicalPage === 1 ? null : { text: "Chapter 1: Geometry", imageObjectKey: "new-section" };
+        }
+      },
+    });
+    expect(recovered.publishedChunks.map(chunk => chunk.page)).toEqual([2, 3, 4]);
+    expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
+      state: "ready", pages: [{ hadSealedContent: false }],
+    });
+  });
+
+  it("carries uncertainty past an unverified low-quality native page", async () => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "\uFFFD".repeat(12), visualKinds: [] },
+      { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" },
+    ] });
+    expect(result.publishedChunks.map(chunk => chunk.page)).toEqual([1, 3]);
+    expect(result.pdfWarning).toMatchObject({ code: "PARSE_PARTIAL" });
+  });
+
+  it.each(["Chapter 3: Worked Example", "Section 2.1: Worked Example 2", "Unit 2 Worked Example 3"])(
+    "carries worked-example state after %s", async heading => {
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: heading }, { page: 2, text: "Solution:\nx = 3." },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 2, workedExample: true });
+      expect(result.publishedChunks.map(chunk => chunk.text)).toEqual([heading, "Solution:\nx = 3."]);
+    },
+  );
 
   it("publishes the current native text and clears its marker after a clean recovery", async () => {
     const segmentData = new Map<string, PdfSegment>([["pdf-publication-page-seal-v1/1-1", {
@@ -1662,11 +1800,9 @@ describe("bounded resumable PDF parser", () => {
       ],
     });
     expect(recognizePage).toHaveBeenCalledOnce();
-    expect(result.outcome).toEqual({ pages: 4, warnings: 2, degraded: true });
-    expect(result.pdfWarning).toMatchObject({ message: "第 2–3 页未能识别，可以重新解析" });
-    expect(result.publishedChunks.map(({ text }) => text)).toEqual([
-      "Native prose.", "Local formula.", "Local OCR.", "[视觉转写与描述]\n【原图忠实转写，尚需核对】\nCached readable text.",
-    ]);
+    expect(result.outcome).toEqual({ pages: 4, warnings: 3, degraded: true });
+    expect(result.pdfWarning).toMatchObject({ message: "第 2–4 页未能识别，可以重新解析；第 4 页识别质量低" });
+    expect(result.publishedChunks.map(({ text }) => text)).toEqual(["Native prose.", "Local formula.", "Local OCR."]);
   });
 
   it.each(["Answer:", "ANSWER:", "Correct Answer:", "Official Answer:", "Model Answer:", "Solution:",
@@ -1825,7 +1961,7 @@ describe("bounded resumable PDF parser", () => {
   });
 
   it("does not waive readability when Vision only reports uncertainty after a blank page", async () => {
-    const result = await runPdfScenario({
+    await expect(runPdfScenario({
       pages: [
         { page: 1, text: "", visualKinds: [] },
         { page: 2, text: "", visualKinds: ["scan"] },
@@ -1833,9 +1969,7 @@ describe("bounded resumable PDF parser", () => {
       recognizePages: async function* () {
         yield { text: "【识别不确定，不能据此判定正确】\nNo legible text.", imageObjectKey: "vision/blank-scan" };
       },
-    });
-    expect(result.publishedChunks).toEqual([]);
-    expect(result.allowSealedEmpty).toBeUndefined();
+    })).rejects.toThrow("第 2 页未能识别");
   });
 
   it.each(["live", "saved"] as const)("rejects a first-page scan containing only %s Vision uncertainty", async origin => {
@@ -1907,7 +2041,7 @@ describe("bounded resumable PDF parser", () => {
         text: "Old stem.\n1.1 x = 3" + vision, imageObjectKey: "vision/old",
       }],
     });
-    expect(publishedChunks[0]?.text).toBe(vision ? "[原生提取]\nCurrent stem." + vision : "Current stem.");
+    expect(publishedChunks[0]?.text).toBe("Current stem.");
     expect(publishedChunks[0]?.imageObjectKey).toBeNull();
   });
 

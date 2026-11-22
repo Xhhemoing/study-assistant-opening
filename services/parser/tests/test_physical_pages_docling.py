@@ -165,6 +165,15 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertTrue(extracted.section_sealed_by_page[1])
                 self.assertEqual(extracted.texts_by_page, {1: [], 2: [], 3: ["Chapter 5: Vectors"]})
 
+    def test_container_prefixed_worked_examples_keep_the_solution_public(self):
+        for heading in ("Chapter 3: Worked Example", "Section 2.1: Worked Example 2", "Unit 2 Worked Example 3"):
+            with self.subTest(heading=heading):
+                conversion = worker_pdf_conversion({1: heading, 2: "Solution:\nx = 3."}, ())
+                extracted = physical_pages.extract_physical_pages(conversion)
+                self.assertIs(extracted.in_worked_example_by_page[1], True)
+                self.assertEqual(extracted.texts_by_page[2], ["Solution:\nx = 3."])
+                self.assertFalse(extracted.had_sealed_by_page[2])
+
     def test_converter_keeps_text_regions_without_native_cells_for_visual_routing(self):
         with patch.dict(os.environ, {"PARSER_OCR_MODEL_DIR": ""}), patch("docling.document_converter.DocumentConverter") as converter:
             cli.create_converter()

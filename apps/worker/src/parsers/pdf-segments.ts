@@ -95,7 +95,7 @@ export async function watchPdfExecution(assertCurrent: () => Promise<void>, poll
 export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
   runner: ParserRunner; segments?: Pick<OpeningPdfSegmentsRepository, "read" | "save">; signal: AbortSignal;
-  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean, initialInWorkedExample?: boolean) =>
+  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean, initialInWorkedExample?: boolean, cached?: boolean) =>
     PdfSegmentContinuation | Promise<PdfSegmentContinuation>;
   onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
   onFailedSegment?: (segment: FailedPdfSegment) => void | Promise<void>;
@@ -172,7 +172,7 @@ export async function parsePdfSegments(input: {
     const { pages, segmentBytes, segmentTextBytes } = parsed;
     const lastPage = pages.at(-1);
     await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
-    const workerEnd = await input.onPages?.(pages, initialSealMode, afterFailedSegment, initialInWorkedExample);
+    const workerEnd = await input.onPages?.(pages, initialSealMode, afterFailedSegment, initialInWorkedExample, cached);
     afterFailedSegment = false;
     const continuation = workerEnd && typeof workerEnd === "object" ? workerEnd : undefined;
     const resumeFromPage = continuation?.resumeFromPage;

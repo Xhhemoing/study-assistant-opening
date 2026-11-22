@@ -86,6 +86,13 @@ describe("teaching activity service: compile enqueue seam", () => {
     })).rejects.toMatchObject({ code: "VALIDATION", status: 400 });
     expect(create).not.toHaveBeenCalled();
   });
+  it("maps a held task at the transactional create boundary to HTTP conflict", async () => {
+    readTask.mockResolvedValue({ title: "复述", courseId: null });
+    create.mockRejectedValueOnce(Object.assign(new Error("这项任务尚未到开始时间。"), { code: "CONFLICT" }));
+    await expect(createOpeningTeachingActivityService(sql, {}).create(scope, {
+      ...input, createIntent: { taskId: activityId },
+    })).rejects.toMatchObject({ status: 409, code: "CONFLICT" });
+  });
   it("preserves the real task course and materials when adaptive planning is disabled", async () => {
     readTask.mockResolvedValue({ title: "Real task", courseId: activityId, skillLabel: "Matrix rank" });
     await createOpeningTeachingActivityService(sql, { OPENING_ADAPTIVE_PLANNING: "0", OPENING_TEACHING_COMPILER_ENABLED: "0" }).create(scope, {
