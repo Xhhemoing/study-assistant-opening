@@ -119,9 +119,25 @@ export function formatMediaAnchorRange(anchor: MediaAnchorRange): string {
 
 const SEEK_TOLERANCE_MS = 500;
 
-function isWithinSeekTolerance(anchor: MediaAnchorRange, time: number): boolean {
+function isValidSeekLanding(anchor: MediaAnchorRange, time: number): boolean {
   return time >= (anchor.startMs - SEEK_TOLERANCE_MS) / 1000 &&
-    time <= (anchor.endMs + SEEK_TOLERANCE_MS) / 1000;
+    time <= (anchor.startMs + SEEK_TOLERANCE_MS) / 1000 &&
+    (!anchor.bounded || time < anchor.endMs / 1000);
+}
+
+function hasSeekableCitation(media: SeekableMediaElement, anchor: MediaAnchorRange): boolean {
+  const seekable = media.seekable;
+  if (!seekable) return true;
+  const start = anchor.startMs / 1000;
+  const end = anchor.endMs / 1000;
+  for (let index = 0; index < seekable.length; index++) {
+    const rangeStart = seekable.start(index);
+    const rangeEnd = seekable.end(index);
+    if (!Number.isFinite(rangeStart) || !Number.isFinite(rangeEnd)) continue;
+    if (anchor.bounded ? Math.min(rangeEnd, end) > Math.max(rangeStart, start)
+      : rangeStart <= start && start <= rangeEnd) return true;
+  }
+  return false;
 }
 
 function mediaEndsBeforeAnchor(media: SeekableMediaElement, anchor: MediaAnchorRange): boolean {
@@ -137,6 +153,7 @@ function nearestSeekablePosition(
   for (let index = 0; index < seekable.length; index++) {
     const start = seekable.start(index);
     const end = seekable.end(index);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) continue;
     if (start <= target && target <= end) return target;
     const boundary = target < start ? start : end;
     const candidateDistance = Math.abs(boundary - target);
@@ -201,6 +218,20 @@ export function createMediaAnchorPlaybackController(
     emit();
   };
 
+  const markSeekUnreached = (media: SeekableMediaElement) => {
+    pendingReplayPlay = false;
+    seekOrigin = null;
+    boundActive = false;
+    autoPausedAtEnd = false;
+    phase = "seek_unreached";
+    if (!media.paused) media.pause();
+    emit();
+  };
+
+  const reachedCitation = (media: SeekableMediaElement, citation: MediaAnchorRange) =>
+    !mediaEndsBeforeAnchor(media, citation) && hasSeekableCitation(media, citation) &&
+    isValidSeekLanding(citation, media.currentTime);
+
   const applySeek = (media: SeekableMediaElement | null, rearm: boolean) => {
     if (!anchor) return;
     if (media?.error != null) {
@@ -220,12 +251,8 @@ export function createMediaAnchorPlaybackController(
       return;
     }
     pendingSeek = false;
-    if (media.seekable?.length === 0) {
-      seekOrigin = null;
-      boundActive = false;
-      autoPausedAtEnd = false;
-      phase = "seek_unreached";
-      emit();
+    if (!hasSeekableCitation(media, anchor)) {
+      markSeekUnreached(media);
       return;
     }
     seekOrigin = "programmatic_requested";
@@ -238,13 +265,12 @@ export function createMediaAnchorPlaybackController(
   };
 
   const playPendingReplay = (media: SeekableMediaElement) => {
-    if (!anchor || pendingSeek || !pendingReplayPlay) return;
-    pendingReplayPlay = false;
-    if (phase === "seek_unreached" || mediaEndsBeforeAnchor(media, anchor)) return;
-    if (media.readyState >= 1 && media.seekable) {
-      const reachableStart = nearestSeekablePosition(media.seekable, anchor.startMs / 1000, positionBeforeSeek);
-      if (reachableStart !== undefined && !isWithinSeekTolerance(anchor, reachableStart)) return;
+    if (!anchor || pendingSeek || !pendingReplayPlay || media.seeking) return;
+    if (!reachedCitation(media, anchor)) {
+      markSeekUnreached(media);
+      return;
     }
+    pendingReplayPlay = false;
     try {
       void Promise.resolve(media.play()).catch(() => undefined);
     } catch {
@@ -253,11 +279,9 @@ export function createMediaAnchorPlaybackController(
   };
 
   const pauseAtEnd = (media: SeekableMediaElement) => {
-    if (!anchor || !boundActive || pendingSeek || media.paused || seekOrigin === "manual" ||
-      (media.seeking && !isProgrammaticSeek())) return;
+    if (!anchor || !boundActive || pendingSeek || media.paused || seekOrigin !== null || media.seeking) return;
     const time = media.currentTime;
-    if (!Number.isFinite(time) || time < anchor.endMs / 1000 ||
-      (isProgrammaticSeek() && !isWithinSeekTolerance(anchor, time))) return;
+    if (!Number.isFinite(time) || time < anchor.endMs / 1000) return;
     autoPausedAtEnd = true;
     boundActive = false;
     phase = "paused_at_end";
@@ -318,20 +342,18 @@ export function createMediaAnchorPlaybackController(
     },
     handleSeeked(media) {
       if (pendingSeek) pendingReplayPlay = false;
-      if (!anchor || pendingSeek || media.seeking || phase === "media_error") return;
+      if (!anchor || pendingSeek || media.seeking || phase === "media_error" ||
+        (phase === "seek_unreached" && seekOrigin !== "manual")) return;
       const completedProgrammaticSeek = isProgrammaticSeek();
       seekOrigin = null;
       const time = media.currentTime;
       if (completedProgrammaticSeek) {
-        if (mediaEndsBeforeAnchor(media, anchor) || !isWithinSeekTolerance(anchor, time)) {
-          boundActive = false;
-          autoPausedAtEnd = false;
-          phase = "seek_unreached";
-          emit();
-        } else if (phase === "seeking_segment") {
-          // Playback can already be paused at the end of a short segment.
+        if (!reachedCitation(media, anchor)) {
+          markSeekUnreached(media);
+        } else {
           phase = "ready_segment";
           emit();
+          playPendingReplay(media);
         }
         return;
       }

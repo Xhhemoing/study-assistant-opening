@@ -837,7 +837,7 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedStyle = DEFAULT_LA
       return projected ??= projectDisclosureCommentMarkdown(text, [], definedLinkLabels, false);
     },
     labelStyleAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
-      hasStyles ??= /(?:\bstyle[ \t\r\n\f]*=|\bhidden(?=[ \t\r\n\f=/>])|<(?:datalist|svg|math)\b)/i.test(text);
+      hasStyles ??= /(?:\bstyle[ \t\r\n\f]*=|\bhidden(?=[ \t\r\n\f=/>])|<(?:datalist|dialog|svg|math)\b)/i.test(text);
       return hasStyles ? getScopeLookup(definedLinkLabels).scopeAt(offset).style : inheritedStyle;
     },
     pipeCellAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
@@ -1608,15 +1608,28 @@ type LabelStyle = {
   suppressedSubtree: boolean;
   visibilityHidden: boolean;
   contentVisibility: string;
+  ownContentHidden: boolean;
   contentVisibilityHidden: boolean;
 };
 const DEFAULT_LABEL_STYLE: LabelStyle = {
   customProps: EMPTY_CUSTOM_PROPS, display: "inline", suppressedSubtree: false,
-  visibilityHidden: false, contentVisibility: "visible", contentVisibilityHidden: false,
+  visibilityHidden: false, contentVisibility: "visible", ownContentHidden: false, contentVisibilityHidden: false,
 };
 
 function skipsLabelContents(style: LabelStyle) {
-  return style.contentVisibilityHidden || style.contentVisibility === "hidden";
+  return style.contentVisibilityHidden || style.ownContentHidden;
+}
+
+function supportsContentVisibility(display: string, namespace: HtmlNamespace, outerSvg: boolean) {
+  // Size containment excludes non-atomic inline boxes, internal ruby/table boxes,
+  // and boxes with table layout. Table captions are block containers.
+  if (namespace === "svg" && !outerSvg) return false;
+  if (/^(?:none|contents|inline-table|table-(?!caption$)\S+|ruby-\S+)$/.test(display)) return false;
+  const types = display.split(" ");
+  if (types.includes("table")) return false;
+  if (types.includes("block") || outerSvg) return true;
+  if (types.includes("run-in") || types.includes("ruby")) return false;
+  return !types.includes("inline") || types.some(type => /^(?:flow-root|flex|grid)$/.test(type));
 }
 
 const CSS_ESCAPE = /\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f]|(?![\s\S]))/.source;
@@ -1828,22 +1841,26 @@ function resolveElementStyle(
   parent: LabelStyle,
   markup?: string,
   namespace?: HtmlNamespace,
+  outerSvg = false,
 ): LabelStyle {
   const attribute = (name: string) => markup === undefined ? undefined : htmlAttributeValue(markup, tag, name);
   const styleAttr = attribute("style");
   const hidden = namespace ? undefined : attribute("hidden");
   const untilFound = hidden !== undefined && decodeHtmlLabelText(hidden).toLowerCase() === "until-found";
-  const displayDefault = namespace ? "inline" :
-    (hidden !== undefined && !untilFound) || HTML_NON_RENDERED_LABEL_TAGS.has(tag) || tag === "head" ? "none" :
-      HTML_DEFAULT_DISPLAY.get(tag) ?? (HTML_BLOCK_DISPLAY_RE.test(tag) ? "block" : "inline");
+  const hiddenByDefault = (hidden !== undefined && !untilFound) || HTML_NON_RENDERED_LABEL_TAGS.has(tag) ||
+    tag === "head" || (tag === "dialog" && attribute("open") === undefined);
+  const displayDefault = namespace ? "inline" : hiddenByDefault ? "none" :
+    HTML_DEFAULT_DISPLAY.get(tag) ?? (HTML_BLOCK_DISPLAY_RE.test(tag) ? "block" : "inline");
   const ancestorContentHidden = skipsLabelContents(parent);
   if (!styleAttr && namespace !== "svg") {
     const contentVisibility = untilFound ? "hidden" : "visible";
+    const ownContentHidden = untilFound && supportsContentVisibility(displayDefault, namespace, outerSvg);
     const suppressedSubtree = parent.suppressedSubtree || displayDefault === "none";
     if (displayDefault === parent.display && contentVisibility === parent.contentVisibility &&
+      ownContentHidden === parent.ownContentHidden &&
       suppressedSubtree === parent.suppressedSubtree && ancestorContentHidden === parent.contentVisibilityHidden) return parent;
     return {
-      customProps: parent.customProps, display: displayDefault, contentVisibility, suppressedSubtree,
+      customProps: parent.customProps, display: displayDefault, contentVisibility, ownContentHidden, suppressedSubtree,
       visibilityHidden: parent.visibilityHidden, contentVisibilityHidden: ancestorContentHidden,
     };
   }
@@ -1910,6 +1927,7 @@ function resolveElementStyle(
   const contentVisibility = compute("content-visibility", "visible", parent.contentVisibility, untilFound ? "hidden" : "visible");
   return {
     customProps, display, contentVisibility,
+    ownContentHidden: contentVisibility === "hidden" && supportsContentVisibility(display, namespace, outerSvg),
     suppressedSubtree: parent.suppressedSubtree || display === "none",
     visibilityHidden: compute("visibility", "visible", inheritedVisibility, inheritedVisibility) !== "visible",
     contentVisibilityHidden: ancestorContentHidden,
@@ -1961,15 +1979,17 @@ type OpenStyledTag = OpenHtmlTag & {
   labelStyle: LabelStyle;
   containerDepth: number;
   markup?: string;
+  outerSvg?: boolean;
   preserveUnclosedLabel?: boolean;
+  closedDetails?: { summary?: OpenStyledTag };
   formattingMarker?: number;
   stackIndex: number;
   svgText?: boolean;
 };
 
 function styleForOpenTag(
-  element: OpenHtmlTag & { markup?: string; preserveUnclosedLabel?: boolean }, parent: LabelStyle,
-  style = resolveElementStyle(element.tag, parent, element.markup, element.namespace),
+  element: OpenHtmlTag & { markup?: string; preserveUnclosedLabel?: boolean; outerSvg?: boolean }, parent: LabelStyle,
+  style = resolveElementStyle(element.tag, parent, element.markup, element.namespace, element.outerSvg),
 ): LabelStyle {
   const { tag, namespace, htmlAnnotation, preserveUnclosedLabel } = element;
   const inert = (namespace === "svg" && SVG_NON_RENDERED_LABEL_TAGS.has(tag)) ||
@@ -1978,7 +1998,7 @@ function styleForOpenTag(
   if (inert) return { ...style, suppressedSubtree: true };
   if (preserveUnclosedLabel) {
     return {
-      ...style, suppressedSubtree: parent.suppressedSubtree, contentVisibility: "visible",
+      ...style, suppressedSubtree: parent.suppressedSubtree, ownContentHidden: false,
     };
   }
   return style;
@@ -2140,9 +2160,10 @@ function createHtmlElementStack(
       const entry = activeFormatting[index]!;
       const parent = insertionParent();
       const before = fosterTable();
+      const style = styleForOpenTag(entry, parent?.labelStyle ?? inheritedStyle);
       const copy = pushTag({
         tag: entry.tag, markup: entry.markup, preserveUnclosedLabel: entry.preserveUnclosedLabel,
-        labelStyle: styleForOpenTag(entry, parent?.labelStyle ?? inheritedStyle),
+        labelStyle: parent?.closedDetails ? { ...style, suppressedSubtree: true } : style,
       });
       activeFormatting[index] = copy;
       onReconstruct?.(copy, parent, before);
@@ -2202,7 +2223,9 @@ function createHtmlElementStack(
         const candidate = stack[changed]!;
         candidate.stackIndex = changed;
         const parent = insertionParent(changed - 1);
-        candidate.labelStyle = styleForOpenTag(candidate, parent?.labelStyle ?? inheritedStyle);
+        const style = styleForOpenTag(candidate, parent?.labelStyle ?? inheritedStyle);
+        candidate.labelStyle = parent?.closedDetails && parent.closedDetails.summary !== candidate
+          ? { ...style, suppressedSubtree: true } : style;
       }
     }
     return closed;
@@ -2487,7 +2510,10 @@ function createHtmlScopeLookup(
     } else if (tag && start) {
       const current = htmlStartTagNamespace(namespace, tag);
       if (isOpenableHtmlTag(current, tag, match[0])) {
-        const element = { tag, namespace: current, markup: match[0], htmlAnnotation: htmlEncodedAnnotation(current, tag, match[0]) };
+        const element = {
+          tag, namespace: current, markup: match[0], htmlAnnotation: htmlEncodedAnnotation(current, tag, match[0]),
+          outerSvg: current === "svg" && tag === "svg" && namespace !== "svg",
+        };
         const labelStyle = styleForOpenTag(element, namespace || start.tableStructure ? getStyle() : insertionStyle());
         elements.insertTag({ ...element, labelStyle }, start.tableForm);
       }
@@ -2551,7 +2577,7 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
     !/(?:^| )(?:inline(?:-\S+)?|run-in|ruby(?:-\S+)?|-webkit-inline-box)(?: |$)/.test(display);
   const rendersText = (current: OpenStyledTag | undefined) => {
     const style = current?.labelStyle ?? inheritedStyle;
-    return !style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden &&
+    return !current?.closedDetails && !style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden &&
       (htmlChildNamespace(current) !== "svg" || current?.svgText === true);
   };
   const appendData = (start: number, end: number) => {
@@ -2592,12 +2618,13 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
       const rubyAnnotation = !namespace && (tag === "rt" || tag === "rp") && elements.findInScope(/^ruby$/) >= 0;
       const canOpen = isOpenableHtmlTag(namespace, tag, match[0]);
       const markup = match[0];
-      const element = { tag, namespace, htmlAnnotation, markup };
+      const outerSvg = namespace === "svg" && tag === "svg" && parentNamespace !== "svg";
+      const element = { tag, namespace, htmlAnnotation, markup, outerSvg };
       let style = styleForOpenTag(element, parentStyle);
       const raw = namespace ? null : htmlRawTextBounds(label, match, cursor);
       const inertTag = !namespace && (tag === "template" || (HTML_NON_RENDERED_LABEL_TAGS.has(tag) && style.display === "none"));
       const mayNeedClose = canOpen && !start.tableStructure && tag !== "table" &&
-        ((!namespace && (style.display === "none" || style.contentVisibility === "hidden")) || inertTag);
+        ((!namespace && (style.display === "none" || style.ownContentHidden)) || inertTag);
       const hiddenEnd = mayNeedClose && (raw
         ? (raw.closeStart < label.length || inertTag ? raw.closeEnd : undefined)
         : htmlElementEnd(label, tag, cursor, namespace, htmlAnnotation));
@@ -2608,7 +2635,9 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
       // The label alone cannot prove the extent of an unclosed hidden HTML tag.
       const preserveUnclosedLabel = mayNeedClose && !hiddenEnd && !inertTag;
       if (preserveUnclosedLabel) style = styleForOpenTag({ ...element, preserveUnclosedLabel }, parentStyle, style);
-      if (rubyAnnotation) style = { ...style, suppressedSubtree: true };
+      const disclosure = parent?.closedDetails;
+      const firstSummary = disclosure && !disclosure.summary && !namespace && tag === "summary";
+      if (rubyAnnotation || (disclosure && !firstSummary)) style = { ...style, suppressedSubtree: true };
       if (raw) {
         if (!style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden) {
           const text = label.slice(cursor, raw.closeStart);
@@ -2620,8 +2649,10 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
       if (canOpen) {
         const opened = elements.insertTag({
           ...element, labelStyle: style, preserveUnclosedLabel,
+          closedDetails: !namespace && tag === "details" && htmlAttributeValue(markup, tag, "open") === undefined ? {} : undefined,
           svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
         }, start.tableForm);
+        if (firstSummary) disclosure.summary = opened;
         if (!namespace && tag === "table") {
           // The table's position is fixed at insertion. Later fostered siblings still go before it.
           const table = {
@@ -3473,6 +3504,10 @@ interface InlineConstructSpan {
   readonly openEnd?: number;
   readonly closeStart?: number;
   readonly summaryEndOffset?: number | null;
+}
+
+function isCompleteHtmlDisclosure(span: InlineConstructSpan, end: number): boolean {
+  return span.summaryEndOffset !== undefined && span.closeStart !== undefined && span.closeStart < span.end && span.end <= end;
 }
 
 function findInlineLiteralEnd(text: string, start: number, end: number, tableLiterals: boolean): number {
@@ -4457,14 +4492,16 @@ function parsePedagogicalAstInternal(
         definedLinkLabels,
         inheritsHtmlBlock,
       );
-      const nonMathInlineSpans = rawInlineSpans.filter(s => s.kind !== "display_math");
+      // Render the visible part of a complete disclosure when classifying the
+      // heading. Its source text is still extracted as a protected construct.
+      const maskedLabelSpans = rawInlineSpans.filter(s => s.kind !== "display_math" && !isCompleteHtmlDisclosure(s, inlineEnd));
       const cleanHeadingTitle =
-        nonMathInlineSpans.length > 0
+        maskedLabelSpans.length > 0
           ? sanitizeHeaderLabel(
               text,
               headingTextStart,
               headingTextEnd,
-              nonMathInlineSpans.map(s => ({ startOffset: s.start, endOffset: s.end })),
+              maskedLabelSpans.map(s => ({ startOffset: s.start, endOffset: s.end })),
               "",
             )
           : headingText;
@@ -5083,9 +5120,15 @@ function parsePedagogicalAstInternal(
 
       // Extract data cells belonging to sealed / hint-gated columns (e.g. Answer Key / Solution / Hint).
       const headerCells = activeVis === "sealed" ? [] : tableHeaderCells;
+      const headerDisclosures = inlineSpans.filter(span => isCompleteHtmlDisclosure(span, line.contentEnd) &&
+        headerCells.some(cell => cell.start <= span.start && span.end <= cell.end));
+      const maskedLabelBlocks = headerDisclosures.length === 0 ? extracted : extracted.filter(block =>
+        !headerDisclosures.some(span => block.startOffset >= span.start && block.endOffset <= span.end));
       const colPolicies = headerCells.map(cell => {
         const cellText = sanitizeHeaderLabel(text, cell.start, cell.end, extracted, "");
-        const visibility = tableColumnVisibility(cellText, definedLinkLabels, labelStyleAt(cell.start), "th");
+        const renderedLabelSource = maskedLabelBlocks === extracted ? cellText :
+          sanitizeHeaderLabel(text, cell.start, cell.end, maskedLabelBlocks, "");
+        const visibility = tableColumnVisibility(renderedLabelSource, definedLinkLabels, labelStyleAt(cell.start), "th");
         if (visibility === "sealed") {
           return { kind: "solution" as const, visibility: maxVisibility("sealed", activeVis), label: cellText };
         }

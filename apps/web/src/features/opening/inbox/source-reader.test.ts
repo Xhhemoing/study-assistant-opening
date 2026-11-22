@@ -198,30 +198,28 @@ describe("dedicated material reader", () => {
     expect(player.getAttribute("data-media-anchor-phase")).toBe("seeked_outside_range");
     expect(status.textContent).toBe("已跳转到其他时间位置，可随时重播引用片段。");
   });
-  it("announces a clamped video citation seek and clears its active highlight", async () => {
+  it("announces an unseekable video citation and keeps replay from playing it", async () => {
     const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
-    const reader = await render({ record: videoRecord, startMs: 65_000, endMs: 70_000 });
+    const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 10_100 });
     const player = reader.querySelector('[data-media-anchor-player="true"]')!;
     const video = player.querySelector("video")!;
     const status = player.querySelector('[role="status"]')!;
     let currentTime = 0;
-    mockSeekableRange(video, 30);
+    vi.spyOn(video, "seekable", "get").mockReturnValue({ length: 1, start: () => 10.4, end: () => 90 });
+    const play = vi.spyOn(video, "play").mockResolvedValue(undefined);
     Object.defineProperty(video, "currentTime", {
       get: () => currentTime,
-      set: (time: number) => { currentTime = Math.min(time, 30); },
+      set: (time: number) => { currentTime = Math.max(time, 10.4); },
     });
     Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
     await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
-    expect(currentTime).toBe(30);
-    expect(status.textContent).toBe("正在跳到引用位置。");
-
-    await act(async () => {
-      video.dispatchEvent(new Event("seeking"));
-      video.dispatchEvent(new Event("seeked"));
-    });
     expect(player.getAttribute("data-media-anchor-phase")).toBe("seek_unreached");
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
     expect(status.textContent).toBe("未能跳到引用位置。");
+    await click(Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!);
+    expect(status.textContent).toBe("未能跳到引用位置。");
+    expect(currentTime).toBe(0);
+    expect(play).not.toHaveBeenCalled();
   });
   it("clears the citation highlight when metadata arrives without a seekable range", async () => {
     const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };

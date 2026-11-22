@@ -255,7 +255,8 @@ describe("media anchor bounded playback controller", () => {
   });
 
   it.each([
-    { endMs: 70_000, landing: 68, phase: "ready_segment" },
+    { endMs: 70_000, landing: 65.5, phase: "ready_segment" },
+    { endMs: 70_000, landing: 68, phase: "seek_unreached" },
     { endMs: 70_000, landing: 70.501, phase: "seek_unreached" },
     { endMs: undefined, landing: 64.5, phase: "ready_segment" },
     { endMs: undefined, landing: 64.499, phase: "seek_unreached" },
@@ -270,7 +271,7 @@ describe("media anchor bounded playback controller", () => {
     controller.handleTimeUpdate(media);
     controller.handleSeeked(media);
 
-    expect(media.pauseMock).not.toHaveBeenCalled();
+    expect(media.pauseMock).toHaveBeenCalledTimes(phase === "seek_unreached" ? 1 : 0);
     expect(controller.snapshot().phase).toBe(phase);
   });
 
@@ -305,6 +306,67 @@ describe("media anchor bounded playback controller", () => {
     expect(media.playMock).not.toHaveBeenCalled();
     expect(media.paused).toBe(true);
     if (!rangeCount) expect(media.currentTime).toBe(37);
+  });
+
+  it.each([
+    { startMs: 10_000, endMs: 10_100, ranges: [[10.4, 90]], reachable: false },
+    { startMs: 10_000, endMs: 10_100, ranges: [[0, 10], [10.1, 90]], reachable: false },
+    { startMs: 10_000, endMs: 10_100, ranges: [[10.05, 10.05], [10.09, 10.02]], reachable: false },
+    { startMs: 10_000, endMs: undefined, ranges: [[10.4, 90]], reachable: false },
+    { startMs: 10_000, endMs: 10_000, ranges: [[0, 10], [10.4, 90]], reachable: true },
+    { startMs: 10_000, endMs: undefined, ranges: [[0, 8], [10, 90]], reachable: true },
+  ])("requires a playable seekable intersection for $startMs–$endMs in $ranges", ({ startMs, endMs, ranges, reachable }) => {
+    const anchor = validateMediaAnchorRange({ startMs, endMs })!;
+    const media = Object.assign(createFakeMedia(), {
+      currentTime: 2,
+      paused: false,
+      seekable: {
+        length: ranges.length,
+        start: (index: number) => ranges[index]![0]!,
+        end: (index: number) => ranges[index]![1]!,
+      },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    expect(media.playMock).not.toHaveBeenCalled();
+    controller.handleSeeked(media);
+    expect(controller.snapshot().phase).toBe(reachable ? "ready_segment" : "seek_unreached");
+    expect(media.pauseMock).toHaveBeenCalledTimes(reachable ? 0 : 1);
+    controller.replay(media);
+    controller.handleSeeked(media);
+    expect(media.currentTime).toBe(reachable ? 10 : 2);
+    expect(media.playMock).toHaveBeenCalledTimes(reachable ? 1 : 0);
+    expect(controller.snapshot()).toMatchObject({
+      phase: reachable ? "ready_segment" : "seek_unreached",
+      rangeHighlightActive: reachable,
+    });
+  });
+
+  it.each([
+    { startMs: 10_000, endMs: 12_000, landing: 10.4, seekableStart: 10.4, reaches: true },
+    { startMs: 5_000, endMs: 12_000, landing: 10.4, seekableStart: 10.4, reaches: false },
+    { startMs: 10_000, endMs: 10_100, landing: 10.1, seekableStart: 0, reaches: false },
+    { startMs: 10_000, endMs: 10_100, landing: 10.2, seekableStart: undefined, reaches: false },
+  ])("waits for the async replay landing at $landing for $startMs–$endMs", ({ startMs, endMs, landing, seekableStart, reaches }) => {
+    const anchor = validateMediaAnchorRange({ startMs, endMs })!;
+    let currentTime = 1;
+    const media = Object.assign(createFakeMedia(), {
+      seeking: false,
+      seekable: seekableStart === undefined ? undefined : { length: 1, start: () => seekableStart, end: () => 90 },
+    });
+    Object.defineProperty(media, "currentTime", {
+      get: () => currentTime,
+      set: (time: number) => { currentTime = time; media.seeking = true; },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.replay(media);
+    expect(media.playMock).not.toHaveBeenCalled();
+    currentTime = landing;
+    controller.handleSeeking(media);
+    media.seeking = false;
+    controller.handleSeeked(media);
+    expect(controller.snapshot().phase).toBe(reaches ? "ready_segment" : "seek_unreached");
+    expect(media.playMock).toHaveBeenCalledTimes(reaches ? 1 : 0);
   });
 
   it.each([0, 1])("defers replay until metadata reveals %i seekable ranges", rangeCount => {
@@ -366,7 +428,7 @@ describe("media anchor bounded playback controller", () => {
     const media = Object.assign(createFakeMedia(), {
       duration: 90,
       seeking: false,
-      seekable: { length: 1, start: () => 30, end: () => 90 },
+      seekable: { length: 1, start: () => 18, end: () => 90 },
     });
     const controller = createMediaAnchorPlaybackController(anchor);
     controller.activate(media);
@@ -386,7 +448,7 @@ describe("media anchor bounded playback controller", () => {
   it.each([{ from: 10, landed: 20 }, { from: 80, landed: 60 }])(
     "recognizes a seekable gap clamp to $landed seconds when seeking from $from seconds",
     ({ from, landed }) => {
-      const anchor = validateMediaAnchorRange({ startMs: 40_000, endMs: 45_000 })!;
+      const anchor = validateMediaAnchorRange({ startMs: 40_000, endMs: 65_000 })!;
       const media = Object.assign(createFakeMedia(), {
         currentTime: from, duration: 90, seeking: true,
         seekable: { length: 2, start: (index: number) => [0, 60][index]!, end: (index: number) => [20, 90][index]! },
@@ -479,6 +541,7 @@ describe("media anchor bounded playback controller", () => {
       userReleasedBound: false,
       autoPausedAtEnd: false,
     });
+    controller.handleSeeked(media);
     // Subsequent play event fired inside segment does NOT release the bound.
     controller.handlePlay(media);
     expect(controller.snapshot().boundActive).toBe(true);
@@ -522,7 +585,7 @@ describe("media anchor bounded playback controller", () => {
     expect(media.pauseMock).not.toHaveBeenCalled();
   });
 
-  it.each([10.05, 10.35])("keeps the first play bounded after an initial seek rounds to %ss", roundedTime => {
+  it.each([10.05, 10.35])("rejects an initial seek that lands at or beyond the end at %ss", roundedTime => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 10_050 })!;
     const media = createFakeMedia(2);
     const controller = createMediaAnchorPlaybackController(anchor);
@@ -531,30 +594,19 @@ describe("media anchor bounded playback controller", () => {
     controller.handleTimeUpdate(media);
     controller.handleSeeked(media);
     expect(media.pauseMock).not.toHaveBeenCalled();
-    expect(controller.snapshot()).toMatchObject({ boundActive: true, autoPausedAtEnd: false });
-
-    void media.play();
-    controller.handlePlay(media);
-    expect(media.pauseMock).toHaveBeenCalledOnce();
-    expect(controller.snapshot()).toMatchObject({ phase: "paused_at_end", autoPausedAtEnd: true });
-
-    void media.play();
-    controller.handlePlay(media);
-    expect(media.pauseMock).toHaveBeenCalledOnce();
-    expect(controller.snapshot()).toMatchObject({ phase: "continued_past_end", userReleasedBound: true });
+    expect(controller.snapshot()).toMatchObject({ phase: "seek_unreached", boundActive: false, autoPausedAtEnd: false });
   });
 
-  it.each(["play", "timeupdate"] as const)("keeps a 510ms overshoot bounded on the first %s, including replay", firstEvent => {
+  it.each(["play", "timeupdate"] as const)("pauses a 510ms playback overshoot on %s after a confirmed seek", firstEvent => {
     const anchor = validateMediaAnchorRange({ startMs: 1_000, endMs: 1_010 })!;
     const media = createFakeMedia(2);
     const controller = createMediaAnchorPlaybackController(anchor);
     controller.activate(media);
     for (const expectedPauses of [1, 2]) {
-      media.currentTime = 1.51;
-      controller.handleTimeUpdate(media);
       controller.handleSeeked(media);
       expect(controller.snapshot()).toMatchObject({ boundActive: true, userReleasedBound: false });
       if (media.paused) void media.play();
+      media.currentTime = 1.51;
       if (firstEvent === "play") controller.handlePlay(media);
       else controller.handleTimeUpdate(media);
       expect(media.pauseMock).toHaveBeenCalledTimes(expectedPauses);
@@ -570,7 +622,7 @@ describe("media anchor bounded playback controller", () => {
     }
   });
 
-  it("keeps the auto-pause state when the programmatic seeked event arrives after timeupdate", () => {
+  it("rejects a seek past the end even if timeupdate arrives before seeked", () => {
     const anchor = validateMediaAnchorRange({ startMs: 1_000, endMs: 1_010 })!;
     const media = createFakeMedia(2);
     const controller = createMediaAnchorPlaybackController(anchor);
@@ -580,31 +632,23 @@ describe("media anchor bounded playback controller", () => {
     controller.handleTimeUpdate(media);
     controller.handleSeeked(media);
     expect(controller.snapshot()).toMatchObject({
-      phase: "paused_at_end", autoPausedAtEnd: true, userReleasedBound: false,
+      phase: "seek_unreached", autoPausedAtEnd: false, userReleasedBound: false,
     });
-    void media.play();
-    controller.handlePlay(media);
-    expect(controller.snapshot()).toMatchObject({ phase: "continued_past_end", userReleasedBound: true });
     expect(media.pauseMock).toHaveBeenCalledOnce();
   });
 
   it("ignores a queued play delivered while paused before replay seeked", () => {
     const anchor = validateMediaAnchorRange({ startMs: 1_000, endMs: 1_010 })!;
-    const media = createFakeMedia(2);
+    const media = Object.assign(createFakeMedia(2), { seeking: true });
     const controller = createMediaAnchorPlaybackController(anchor);
     controller.replay(media);
-    media.currentTime = 1.015;
-    controller.handleTimeUpdate(media);
     expect(media.paused).toBe(true);
     controller.handlePlay(media);
+    expect(media.playMock).not.toHaveBeenCalled();
+    media.seeking = false;
     controller.handleSeeked(media);
-    expect(controller.snapshot()).toMatchObject({
-      phase: "paused_at_end", autoPausedAtEnd: true, userReleasedBound: false,
-    });
-    expect(media.pauseMock).toHaveBeenCalledOnce();
-    void media.play();
-    controller.handlePlay(media);
-    expect(controller.snapshot()).toMatchObject({ phase: "continued_past_end", userReleasedBound: true });
+    expect(controller.snapshot()).toMatchObject({ phase: "ready_segment", boundActive: true, userReleasedBound: false });
+    expect(media.playMock).toHaveBeenCalledOnce();
   });
 
   it("keeps rangeHighlightActive true while paused on jumped range and after auto-pause at endMs until manual play or seek elsewhere", () => {

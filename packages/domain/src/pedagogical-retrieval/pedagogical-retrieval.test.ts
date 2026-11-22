@@ -1195,7 +1195,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["template in summary", "<details><summary>Hint / An<template>x</template>swer</summary>forty-two</details>"],
     ["nested template in summary", "<details><summary>Hint / An<template>a<template>b</template>c</template>swer</summary>forty-two</details>"],
     ["summary closer in a template", "<details><summary>Hint / An<template></summary></template>swer</summary>forty-two</details>"],
-    ["hidden element in summary", "<details><summary>Hint / An<span data-note='a > b' hidden='until-found'>x<span>y</span></span>swer</summary>forty-two</details>"],
+    ["hidden atomic inline element in summary", "<details><summary>Hint / An<span data-note='a > b' hidden='until-found' style='display:inline-block'>x<span>y</span></span>swer</summary>forty-two</details>"],
     ["hidden void element in summary", "<details><summary>Hint / An<br hidden>swer</summary>forty-two</details>"],
     ["non-rendered raw text in summary", "<details><summary>Hint / An<script>x</script><style>y</style><title>z</title>swer</summary>forty-two</details>"],
     ["nested datalist in summary", "<details><summary>Hint / An<datalist><option>x</option><datalist><option>y</option></datalist></datalist>swer</summary>forty-two</details>"],
@@ -1620,10 +1620,22 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     'An<span hidden style="display:inline!important">sw</span>er',
     'An<span hidden style="display:inline">sw</span>er',
     'An<span hidden style="display:inline;display:bogus">sw</span>er',
+    'An<span hidden="until-found">sw</span>er',
     'An<span hidden="until-found" style="content-visibility:visible">sw</span>er',
+    '<span style="content-visibility:hidden">Answer</span>',
+    '<span hidden="until-found">Answer</span>',
+    ...["inline flow", "contents", "table", "inline-table", "table-cell", "ruby"].map(
+      display => `<span style="display:${display};content-visibility:hidden">Answer</span>`,
+    ),
+    "An<dialog>noise</dialog>swer",
+    'An<dialog style="display:inline">sw</dialog>er',
+    "Topic <dialog open>Answer</dialog>",
+    "Topic <details open><summary>Info</summary>Answer</details>",
+    "Topic <details><summary>Answer</summary>Info</details>",
     '<svg><g visibility="hidden"><text visibility="visible">Answer</text></g></svg>',
     '<svg><text visibility="hidden" style="visibility:visible">Answer</text></svg>',
     '<svg><text visibility="hidden"><tspan visibility="visible">Answer</tspan></text></svg>',
+    '<svg><text style="display:block;content-visibility:hidden">Answer</text></svg>',
   ])("protects an answer label in rendered HTML for %s", label => {
     for (const text of [`## ${label}\n\nforty-two`, `${label}\n===\n\nforty-two`]) {
       for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
@@ -1633,11 +1645,20 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   it.each([
     "An<span hidden>sw</span>er",
     'An<span hidden style="display:bogus">sw</span>er',
-    'An<span hidden="until-found">sw</span>er',
     'An<span hidden="until-found" style="display:block">sw</span>er',
     'An<div hidden="until-found">extra</div>swer',
     'An<div style="content-visibility:hidden">extra</div>swer',
+    'Topic <div hidden="until-found">Answer</div>',
+    'Topic <span hidden="until-found" style="display:inline-block">Answer</span>',
+    ...["block", "flow-root", "flex", "inline-flex", "grid", "inline-grid", "inline flow-root", "list-item"].map(
+      display => `Topic <span style="display:${display};content-visibility:hidden">Answer</span>`,
+    ),
+    "Topic <dialog>Answer</dialog>",
+    "Topic <details><summary>Info</summary>Answer</details>",
+    "Topic <details>Answer<summary>Info</summary><summary>Answer</summary></details>",
+    "Topic <details><span><summary>Answer</summary></span></details>",
     'An<svg style="display:block"><text>sw</text></svg>er',
+    'Topic <svg style="content-visibility:hidden"><text>Answer</text></svg>',
     ...["block", "flex", "grid", "table", "list-item", "flow-root", "flow-root block"].map(
       display => `An<span style="display:${display}">sw</span>er`,
     ),
@@ -1647,6 +1668,20 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   ])("keeps body evidence public when the rendered label is split or hidden in %s", label => {
     const text = `## ${label}\n\nPublic theorem.`;
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it.each([
+    ["<details><summary>Info</summary>Answer</details>", "public"],
+    ["<details open><summary>Info</summary>Answer</details>", "sealed"],
+    ["<details><summary>Answer</summary>Info</details>", "sealed"],
+    ["<dialog>Answer</dialog>", "public"],
+    ["<dialog open>Answer</dialog>", "sealed"],
+  ] as const)("classifies a pipe-table column by the visible label in %s", (label, visibility) => {
+    const text = `Topic | Unit ${label}\n--- | ---\nExample | forty-two`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "sealed") expectSealedEvidence(chunks, text, ["forty-two"]);
+      else expectSealedEvidence(chunks, text, [], "forty-two");
+    }
   });
 
   it.each([
