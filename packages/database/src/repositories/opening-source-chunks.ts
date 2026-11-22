@@ -4,7 +4,7 @@ import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
-import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
+import { containsPdfAnswerLabel, preserveOpeningKnowledgeDefinitions, publicPdfChunkPredicate } from "./opening-knowledge-definitions";
 import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
 import { resolvedKnowledgeCoverage } from "./opening-knowledge-legacy-coverage";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
@@ -12,7 +12,8 @@ type ChunkPublication = { sourceId: string; sourceVersion: number; warning?: Api
 export type OpeningSourceChunksRepository = {
   replaceChunks(scope: OpeningScope, input: ChunkPublication & { chunks: NewSourceChunk[] }): Promise<void>;
   listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>;
-  listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number, pages?: number[]): Promise<SourceChunk[]>;
+  listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number, pages?: number[],
+    options?: { unpublishedPdfForRecovery: true }): Promise<SourceChunk[]>;
   listForSources(scope: OpeningScope, sourceIds: string[]): Promise<SourceChunk[]>;
 };
 export type OpeningPdfChunkPublisher = {
@@ -26,13 +27,20 @@ export type OpeningPdfChunkPublisher = {
   }): Promise<void>;
 };
 export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
-async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number, pages?: number[]): Promise<SourceChunk[]> {
-  const rows = await sql`SELECT c.* FROM opening_source_chunks c
+function isPublicChunk(row: Record<string, unknown>): boolean {
+  return row.mime !== "application/pdf" || !containsPdfAnswerLabel(row.text as string);
+}
+
+async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number, pages?: number[],
+  options?: { unpublishedPdfForRecovery: true }): Promise<SourceChunk[]> {
+  const recovery = options?.unpublishedPdfForRecovery === true;
+  const rows = await sql`SELECT c.*, s.mime FROM opening_source_chunks c
     JOIN opening_sources s ON s.id=c.source_id
     WHERE c.source_id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
       AND c.source_version=${version} ${pages ? sql`AND c.page=ANY(${pages}::int[])` : sql``}
+      AND ${recovery ? sql`TRUE` : publicPdfChunkPredicate(sql)}
     ORDER BY c.page NULLS LAST, c.created_at`;
-  return rows.map(mapChunk);
+  return (recovery ? rows : rows.filter(isPublicChunk)).map(mapChunk);
 }
 export function chunksHaveReadableContent(chunks: NewSourceChunk[]): boolean {
   return chunks.some((chunk) => chunk.text.trim().length > 0 || Boolean(chunk.imageObjectKey?.trim()));
@@ -216,11 +224,11 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
     });
   },
   async listChunks(scope, sourceId) { sourceId = controlledLearningTools.open_fragment.input.parse(sourceId); const rows = await sql`SELECT version FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${scope.workspaceId} AND upload_state = 'uploaded'`; const row = rows[0] as Record<string, unknown> | undefined; return row ? fetchChunks(sql, scope, sourceId, Number(row.version)) : []; },
-  listChunksAtVersion: (scope, sourceId, version, pages) => fetchChunks(sql, scope, sourceId, version, pages),
+  listChunksAtVersion: (scope, sourceId, version, pages, options) => fetchChunks(sql, scope, sourceId, version, pages, options),
   async listForSources(scope, sourceIds) {
     if (!sourceIds.length) return [];
     const rows = await sql`
-      SELECT c.* FROM opening_source_chunks c
+      SELECT c.*, s.mime FROM opening_source_chunks c
       JOIN opening_sources s ON s.id = c.source_id
       JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
       WHERE s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
@@ -234,9 +242,10 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
             AND j.payload->>'sourceId'=s.id::text AND j.payload->>'sourceVersion'=s.version::text)))
         AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
         AND c.source_version = s.version
+        AND ${publicPdfChunkPredicate(sql)}
         AND c.source_id IN ${sql(sourceIds)}
       ORDER BY c.source_id, c.source_version DESC, c.page NULLS LAST, c.created_at
     `;
-    return rows.map((row) => mapChunk(row as Record<string, unknown>));
+    return rows.filter(isPublicChunk).map(mapChunk);
   },
 }; }

@@ -835,6 +835,20 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 public = physical_pages.extract_physical_pages(result).texts_by_page[11]
                 self.assertEqual(public, ["## 第 4 部分 向量空间\n定义：向量空间。"])
 
+    def test_running_header_fragments_cannot_end_a_sealed_section(self):
+        for header in ("Page 1 of 3", "# Page 1/3", "OCR text for page 1", "Chapter 1 (continued)", "Section 2"):
+            with self.subTest(header=header):
+                conversion = result_for([
+                    text_element(11, "Answer Key", 1),
+                    text_element(11, header, 2, label="section_header"),
+                    text_element(11, "x = 3.", 3),
+                ], [text_element(12, "Chapter 2: Vectors", 1, label="section_header")])
+                extracted = physical_pages.extract_physical_pages(conversion)
+                self.assertEqual(extracted.texts_by_page[11], [])
+                self.assertTrue(extracted.section_sealed_by_page[11])
+                self.assertEqual(extracted.texts_by_page[12], ["Chapter 2: Vectors"])
+                self.assertFalse(extracted.section_sealed_by_page[12])
+
     def test_round7_caption_inside_seal_lecture_answer_guard_and_had_sealed(self):
         import io
         import json

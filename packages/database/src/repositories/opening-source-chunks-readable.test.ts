@@ -5,6 +5,15 @@ import { chunksHaveReadableContent, createOpeningSourceChunksRepository, type Ne
 
 const base = { page: 1, slideLabel: null, startMs: null, endMs: null };
 
+function mockQueryText(strings: TemplateStringsArray, values: unknown[]): string {
+  return strings.reduce((query, part, index) => {
+    const value = values[index];
+    const fragment = value && typeof value === "object" && "sqlFragment" in value && typeof value.sqlFragment === "string"
+      ? value.sqlFragment : "?";
+    return query + part + (index < values.length ? fragment : "");
+  }, "").replace(/\s+/gu, " ").trim();
+}
+
 describe("empty PDF chunk publication", () => {
   const sourceId = "source";
   const scope = {
@@ -88,6 +97,9 @@ describe("cross-source legacy definition backfill", () => {
     { reason: "unresolved earlier inline answer", marker: "inlineSealedAtEnd", available: false, text: "5 units." },
     { reason: "unknown earlier scan", marker: "publicationSealUnknown", available: false, text: "5 units." },
     { reason: "unstripped answer", available: true, text: "Answer Key\nx = 3." },
+    { reason: "numbered answer", available: true, text: "**Answer 1:** x = 3." },
+    { reason: "numbered decimal solution", available: true, text: "Solution 2.1: x = 3." },
+    { reason: "numbered answer key", available: true, text: "Answer Key 3: x = 3." },
     { reason: "completed public publication", available: true, text: "Public introduction.", preservesDefinition: true },
     { reason: "Markdown answer label", available: true, text: "Answer: an HTTP response to a request.", mime: "text/markdown", preservesDefinition: true },
   ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition, mime = "application/pdf" }) => {
@@ -99,8 +111,9 @@ describe("cross-source legacy definition backfill", () => {
     const writes: string[] = [];
     const evidence: unknown[] = [];
     const citedIds: unknown[] = [];
-    const tx = async (strings: TemplateStringsArray, ...values: unknown[]) => {
-      const query = strings.join("?").replace(/\s+/gu, " ").trim();
+    const tx = (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = mockQueryText(strings, values);
+      if (query.startsWith("(s.mime")) return { sqlFragment: query };
       if (query.startsWith("SELECT id FROM workspaces")) return [{ id: "workspace" }];
       if (query.startsWith("SELECT graph.course_id, missing.node_indexes")) {
         expect(values).toContain("source-B");
@@ -108,7 +121,7 @@ describe("cross-source legacy definition backfill", () => {
       }
       if (query.startsWith("SELECT snapshot")) return [{ snapshot }];
       if (query.startsWith("SELECT c.id,")) {
-        const id = values.at(-1);
+        const id = values.findLast(value => typeof value === "string");
         citedIds.push(id);
         if (id === chunkA && mime === "text/markdown") {
           expect(query).toContain("s.mime AS mime");
@@ -138,6 +151,45 @@ describe("cross-source legacy definition backfill", () => {
     expect(writes).toHaveLength(preservesDefinition ? 1 : 0);
     if (preservesDefinition) expect(evidence).toContainEqual(expect.stringContaining(text));
   });
+});
+
+it("withdraws unresolved PDF continuations and numbered labels from public reads while keeping recovery rows", async () => {
+  const scope = { workspaceId: "workspace", ownerUserId: "owner" };
+  function row(id: string, source_id: string, text: string, mime = "application/pdf", image_object_key: string | null = null) {
+    return { id, source_id, source_version: 4, page: 2, slide_label: null, start_ms: null, end_ms: null, text, mime, image_object_key };
+  }
+  const stale = row("stale", "pdf", "5 units.", "application/pdf", "stale-image");
+  const numbered = row("numbered", "pdf", "Answer 1: x = 3.");
+  const clean = row("clean", "pdf", "Public geometry notes.");
+  const markdown = row("markdown", "markdown", numbered.text, "text/markdown");
+  const queries: string[] = [];
+  const sql = (strings: TemplateStringsArray | string[], ...values: unknown[]) => {
+    if (!("raw" in strings)) return { sqlFragment: "(?)" };
+    const query = mockQueryText(strings, values);
+    if (!query.startsWith("SELECT c.*")) return { sqlFragment: query };
+    queries.push(query);
+    // Model the database returning the stale chunk when the inline predecessor is unguarded.
+    const earlierSeal = query.split("OR (seal.page_start=c.page")[0]!;
+    const rejectsStale = earlierSeal.includes("seal.page_start<=c.page") &&
+      earlierSeal.includes("seal.pages->0->>'inlineSealedAtEnd'='true'") &&
+      earlierSeal.includes("s.parse_state<>'ready' OR seal.updated_at>s.updated_at");
+    if (!rejectsStale) return [stale, numbered, clean];
+    return query.includes("JOIN workspaces") ? [numbered, clean, markdown] : [numbered, clean];
+  };
+  const repository = createOpeningSourceChunksRepository(sql as unknown as Sql);
+  await expect(repository.listForSources(scope, ["pdf", "markdown"])).resolves.toMatchObject([
+    { id: "clean", text: clean.text }, { id: "markdown", text: markdown.text },
+  ]);
+  await expect(repository.listChunksAtVersion(scope, "pdf", 4)).resolves.toMatchObject([{ id: "clean" }]);
+  await expect(repository.listChunksAtVersion(scope, "pdf", 4, [2], { unpublishedPdfForRecovery: true })).resolves.toMatchObject([
+    { id: "stale", text: stale.text, imageObjectKey: "stale-image" }, { id: "numbered" }, { id: "clean" },
+  ]);
+  for (const query of queries.slice(0, 2)) {
+    expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR NOT EXISTS");
+    expect(query).toContain("seal.source_id=c.source_id AND seal.source_version=c.source_version");
+    expect(query.match(/\b(?:FROM|JOIN) (?:opening_\w+|workspaces)\b/gu)?.length).toBeLessThanOrEqual(12);
+  }
+  expect(queries.at(-1)).not.toContain("opening_pdf_parse_segments");
 });
 
 describe("chunksHaveReadableContent", () => {

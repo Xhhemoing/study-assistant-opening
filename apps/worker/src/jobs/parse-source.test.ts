@@ -215,26 +215,26 @@ describe("parse source handler", () => {
       {page:2,text:"[原生提取]\noriginal caption\n\n[视觉转写与描述]\n转写：∫₀¹ x² dx；描述：图中箭头向右",imageObjectKey:"trusted/page-2"},
     ]});
   });
-  it("publishes a native PDF page and an honestly described blank page together", async () => {
+  it("publishes a native PDF page and a blank-page description without an unverified scan image", async () => {
     const description = "该页为空白页，没有可见文字或图形。";
     const recognizePage = vi.fn(async () => {
       const result = parseSourceVisualRecognitionOutput(JSON.stringify({
         transcription: "", description, uncertainties: [], contentKinds: [],
       }));
-      return { text: result.description, imageObjectKey: "trusted/page-2" };
+      return { text: "【图表观察描述，非原文或解答】\n" + result.description, imageObjectKey: "trusted/page-2" };
     });
     const d = await deps({ recognizePage, stdout: JSON.stringify({ pages: [
       { page: 1, text: "native prose", imagePath: null, visualKinds: [] },
       { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
     ] }) });
-    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2, warnings: 1, degraded: true });
     expect(recognizePage).toHaveBeenCalledOnce();
     expect(recognizePage).toHaveBeenCalledWith(expect.objectContaining({
       physicalPage: 2, nativeText: "", visualKinds: ["scan"],
     }));
     expect(d.replaceInput()).toMatchObject({ chunks: [
       { page: 1, text: "native prose", imageObjectKey: null },
-      { page: 2, text: `[视觉转写与描述]\n${description}`, imageObjectKey: "trusted/page-2" },
+      { page: 2, text: `[视觉转写与描述]\n【图表观察描述，非原文或解答】\n${description}`, imageObjectKey: null },
     ] });
     expect(d.states).toEqual(["ready"]);
   });
@@ -282,7 +282,7 @@ describe("parse source handler", () => {
     const modelSnapshot = { id: "vision", providerId: "test", modelName: "vision", inputCentsPerMillion: 10, outputCentsPerMillion: 50 };
     const call = vi.fn<ModelGateway["call"]>(async (_scope, _task, options) => {
       const page = options.input.imageParts[0]!.physicalPage;
-      const output = { text: JSON.stringify({ transcription: `Transcription of page ${page}`, description: "",
+      const output = { text: JSON.stringify({ transcription: `Chapter ${page}: Segment overview`, description: "",
         uncertainties: [], contentKinds: ["text"] }), requestId: null, citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1 };
       options.onModel?.({ modelSnapshot, provider: { complete: async () => output },
         inputCentsPerMillion: 10, outputCentsPerMillion: 50 }, { fallback: false });
@@ -293,7 +293,7 @@ describe("parse source handler", () => {
     const save = vi.fn(async () => {});
     const visual = createSourceVisualRecognition({
       repository: { read: async (_scope, { physicalPage }) => physicalPage === cachedPage ? {
-        result: { transcription: `Transcription of page ${cachedPage}`, description: "", uncertainties: [], contentKinds: ["text"] },
+        result: { transcription: `Chapter ${cachedPage}: Segment overview`, description: "", uncertainties: [], contentKinds: ["text"] },
         modelSnapshot, operationId: "saved-operation", imageObjectKey: "final",
       } : null, save, assertCurrent: async () => {},
         ledger: async () => "unsent", releasedReservation: async () => null },
@@ -310,7 +310,7 @@ describe("parse source handler", () => {
       ...(publishedPage ? {
         segments: { assertCurrent: async () => {}, read: async () => ({ state: "ready", pages }), save: async () => {} },
         published: [{ id: "published", sourceId, sourceVersion: 7, page: publishedPage, slideLabel: null,
-          startMs: null, endMs: null, text: `Transcription of page ${publishedPage}`, imageObjectKey: "final" }],
+          startMs: null, endMs: null, text: `Chapter ${publishedPage}: Segment overview`, imageObjectKey: "final" }],
       } : {}),
     });
     vi.mocked(readFile).mockClear();
@@ -323,7 +323,7 @@ describe("parse source handler", () => {
       .toEqual(batches.flat().map(page => [page]));
     expect(save).toHaveBeenCalledTimes(batches.flat().length);
     expect(d.replaceInput()).toMatchObject({ chunks: pages.map(({ page }) => ({
-      page, text: expect.stringContaining(`Transcription of page ${page}`), imageObjectKey: "final",
+      page, text: expect.stringContaining(`Chapter ${page}: Segment overview`), imageObjectKey: "final",
     })) });
   });
 

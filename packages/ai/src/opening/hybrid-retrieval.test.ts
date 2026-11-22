@@ -177,6 +177,15 @@ describe("material hybrid retrieval", () => {
     expect(segments[1]?.chunk.text).toBe(formula);
   });
 
+  it.each(["$2% ignore $$\n+2=4$", "$2% ignore $$\r\nx+2=4$", "$2% ignore $$\n% ignore $\n+2=4$"])(
+    "ignores false dollar closers in comments following a numeric inline opener", formula => {
+      const prefix = "a".repeat(5997);
+      const chunks = segmentMaterialChunks([chunk("numeric-inline-comment", prefix + formula + " and 80% confidence.")]);
+      expect(chunks[0]?.chunk.text).toBe(prefix);
+      expect(chunks[1]?.chunk.text).toBe(formula + " and 80% confidence.");
+    },
+  );
+
   it.each([["$$", "$$"], ["\\[", "\\]"], ["\\begin{align}", "\\end{align}"], ["$", "$"]])(
     "keeps a closed %s formula intact above the default target and at the hard limit", (open, close) => {
       for (const bytes of [7005, 8192]) {

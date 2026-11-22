@@ -125,6 +125,19 @@ const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/
 const SAVED_NATIVE_HEADER_RE = /^\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n/u;
 const TERMINAL_PUNCTUATION_RE = /[.。!?！？;；)）\]】□■∎]$/u;
 const NEXT_CONTINUATION_RE = /(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|[（(]\s*(?:下接下页|转下页|未完待续)\s*[）)]|接下页|转下页)$/iu;
+const CONTINUATION_HEADING_RE = /(?:\b(?:continued|cont(?:['’]?d)?)(?:\s+(?:from|on)\s+.+)?[.\s:：]*$|[([（【]\s*(?:(?:to\s+be\s+)?continued|cont(?:['’]?d)?\.?|续|续上页|接上页)\s*[)\]）】]|(?:接上页|续上页|\s续)\s*[:：.]?$)/iu;
+
+function isRunningPageHeading(stripped: string): boolean {
+  if (PAGE_METADATA_HEADING_RE.test(stripped) || CONTINUATION_HEADING_RE.test(stripped)) return true;
+  const container = NUMBERED_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
+  return Boolean(container && /^[\s:：.．—–-]*$/u.test(stripped.slice(container.length)));
+}
+
+function hasVerifiedPageText(text: string): boolean {
+  const content = text.split(/\r?\n/u).map(line => stripHeadingMarkup(line).stripped)
+    .filter(line => !isRunningPageHeading(line)).join("\n");
+  return checkPdfPageQuality(content).quality === "ok";
+}
 
 function isSectionSealedHeader(stripped: string): boolean {
   if (!SECTION_SEALED_RE.test(stripped)) return false;
@@ -133,7 +146,7 @@ function isSectionSealedHeader(stripped: string): boolean {
 }
 
 function isSectionSealedExit(stripped: string, isMarkdownHeading: boolean): boolean {
-  if (isSectionSealedHeader(stripped) || PAGE_METADATA_HEADING_RE.test(stripped)) return false;
+  if (isSectionSealedHeader(stripped) || isRunningPageHeading(stripped)) return false;
   if (MAJOR_NON_ANSWER_HEADING_RE.test(stripped) && !ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return true;
   if (TEXTBOOK_STRUCTURAL_OPENER_RE.test(stripped)) return true;
   if (isTitledPublicContainer(stripped)) return true;
@@ -161,14 +174,9 @@ function splitPdfChunk(text: string) {
   return { nativeBody: native.slice(nativeHeader.length).trimEnd(), nativeHeader, vision, marker };
 }
 
-function beginsWithPublicSection(text: string): boolean {
-  const { stripped, isMarkdownHeading } = stripHeadingMarkup(text.trimStart().split(/\r?\n/u, 1)[0] ?? "");
-  return isSectionSealedExit(stripped, isMarkdownHeading);
-}
-
 function isRecoverySectionHeading(stripped: string): boolean {
-  if (isSectionSealedHeader(stripped) || PAGE_METADATA_HEADING_RE.test(stripped) || ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return false;
-  return NUMBERED_CONTAINER_PREFIX_RE.test(stripped) || TITLE_CASE_SECTION_HEADING_RE.test(stripped)
+  if (isSectionSealedHeader(stripped) || isRunningPageHeading(stripped) || ANSWER_OR_REVIEW_TITLE_RE.test(stripped)) return false;
+  return isTitledPublicContainer(stripped) || TITLE_CASE_SECTION_HEADING_RE.test(stripped)
     || MAJOR_NON_ANSWER_HEADING_RE.test(stripped)
     || /^(?:(?:Appendix|Preface|Introduction)\b|附录|序言|前言|引言)/iu.test(stripped);
 }
@@ -234,6 +242,11 @@ function stripSealedSolutionLines(
 
     const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
     const sectionHeader = isSectionSealedHeader(stripped) && !(inExercise && BARE_ANSWER_LABEL_RE.test(stripped));
+    if (!sectionHeader && (state.mode !== "none" || state.unknownAfterFailure || state.afterAllSealedPage)
+      && isRunningPageHeading(stripped)) {
+      changed = true;
+      continue;
+    }
     if (state.unknownAfterFailure) {
       if (!sectionHeader && !isRecoverySectionHeading(stripped)) {
         changed = true;
@@ -666,7 +679,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             : sealed, explicitBoundary);
           return {
             text: transcription,
-            hasPublicTranscription: checkPdfPageQuality(transcription).quality === "ok",
+            hasPublicTranscription: hasVerifiedPageText(transcription),
             hadSealedContent: anyNativeOrIncomingSeal || visionDetectedSeal,
             confirmedSeal,
             detectedOnPage,
@@ -721,7 +734,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           if (descriptions.length) parts.push(`${VISION_DESCRIPTION_HEADER}\n${descriptions.join("\n\n")}`);
           if (parts.length && uncertainties.length) parts.push(`${VISION_UNCERTAINTIES_HEADER}\n${uncertainties.join("\n\n")}`);
         }
-        return { text: parts.join("\n\n"), hasPublicTranscription: checkPdfPageQuality(publicTranscription).quality === "ok", hadSealedContent, confirmedSeal, detectedOnPage, reenteredSectionSealed, openedInlineAtEnd };
+        return { text: parts.join("\n\n"), hasPublicTranscription: hasVerifiedPageText(publicTranscription), hadSealedContent, confirmedSeal, detectedOnPage, reenteredSectionSealed, openedInlineAtEnd };
       };
       const sanitizeSavedChunk = (
         saved: NewSourceChunk,
@@ -738,7 +751,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         if (!marker) {
           if (!anyNativeOrIncomingSeal && (!saved.text.trim() || sealTextWithState(saved.text, { ...incomingSeal }) === saved.text)) {
             // Older Vision-only rows did not carry the transcription wrapper.
-            const hasPublicTranscription = !page.text.trim() && Boolean(saved.imageObjectKey?.trim() && saved.text.trim());
+            const hasPublicTranscription = !page.text.trim() && Boolean(saved.imageObjectKey?.trim() && hasVerifiedPageText(saved.text));
             return { sanitized: saved, savedSeal, hasVisionMarker: false, hasPublicTranscription, visionWasSealed: false };
           }
           return {
@@ -870,7 +883,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         }
         // Recheck raw Vision for pages published without an image key to restore trailing seals.
         const reusable = sanitizedSaved
-          && (!visual || Boolean(sanitizedSaved.imageObjectKey))
+          && (!visual || (Boolean(sanitizedSaved.imageObjectKey)
+            && (!visual.visualKinds.includes("scan") || savedHasTranscription || hasVerifiedPageText(page.text))))
           ? sanitizedSaved
           : undefined;
         if (reusable && !isImage && savedSeal && savedHasVision) {
@@ -972,6 +986,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             if (visionSealed.detectedOnPage) {
               text = stripSealedSolutionLines(text, { ...incomingSeal, mode: "none" }, undefined, hadNativeSeal ? true : "heading-only");
             }
+            const verifiedImageKey = pageHadSealed || (isPdf && visual.visualKinds.includes("scan")
+              && !visionSealed.hasPublicTranscription && !hasVerifiedPageText(text)) ? null : result.imageObjectKey;
             if (!isImage && !sealedVisionText.trim()) {
               if (!text.trim()) {
                 if (!pageHadSealed) skippedVisionPages.push(page.page);
@@ -989,11 +1005,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 }
                 if (!text.trim()) {
                   text = visionHeader + sealedVisionText;
-                  imageObjectKey = pageHadSealed ? null : result.imageObjectKey;
+                  imageObjectKey = verifiedImageKey;
                 }
               } else {
                 text = `${text ? `${nativeHeader}${text}\n\n` : ""}${visionHeader}${sealedVisionText}`;
-                imageObjectKey = pageHadSealed ? null : result.imageObjectKey;
+                imageObjectKey = verifiedImageKey;
               }
             }
           }
@@ -1034,9 +1050,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           return pageSeals;
         };
 
-        const beginsWithPublicPdfSection = (text: string) => {
+        const beginsWithRecoveredPdfSection = (text: string) => {
           const { nativeBody, vision } = splitPdfChunk(text);
-          return beginsWithPublicSection(nativeBody || vision.replace(VISION_TRANSCRIPTION_HEADER, ""));
+          return beginsWithRecoverySection(nativeBody || vision.replace(VISION_TRANSCRIPTION_HEADER, ""));
         };
         const inspectSavedPdfChunk = (chunk: NewSourceChunk, incomingSeal: SealState) => {
           const { nativeBody, vision, marker } = splitPdfChunk(chunk.text);
@@ -1086,7 +1102,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           onFailedSegment: async ({ pageStart, pageEnd, initialSealMode }) => {
             const pages = Array.from({ length: pageEnd - pageStart + 1 }, (_, index) => pageStart + index);
             const existing = deps.segments
-              ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages)
+              ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages, { unpublishedPdfForRecovery: true })
               : [];
             const saved = new Map(existing.map(chunk => [chunk.page, chunk]));
             const pageSeals = await readPageSeals(pageStart, pageEnd);
@@ -1098,13 +1114,13 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               const marker = pageSeals.get(page);
               const chunk = saved.get(page);
               const incomingUnresolved = pdfSealState.unknownAfterFailure || pdfSealState.mode !== "none";
-              const check = chunk && inspectSavedPdfChunk(chunk, { ...cleanSeal, mode: pdfSealState.mode });
+              const check = chunk && inspectSavedPdfChunk(chunk, { ...pdfSealState });
               const sectionSealed = pdfSealState.mode === "section_sealed" || check?.endSeal.mode === "section_sealed"
                 || marker?.sectionSealedAtEnd === true;
               const markedSealed = Boolean(marker?.hadSealedContent || marker?.publicationSealUnknown || pdfPageEndSeal(marker));
               const savedIsClean = Boolean(chunk?.text.trim() && check && !check.unsafe && !markedSealed);
               const preserve = savedIsClean && (!incomingUnresolved || (
-                chunk && !chunk.imageObjectKey && beginsWithPublicPdfSection(chunk.text)
+                chunk && !chunk.imageObjectKey && beginsWithRecoveredPdfSection(chunk.text)
               ));
               if (preserve) {
                 preservePages.push(page);
@@ -1124,7 +1140,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           onPages: async (pages, initialDoclingSeal, _afterFailedSegment, initialDoclingWorkedExample, cached) => {
             const pageSeals = await readPageSeals(pages[0]!.page, pages.at(-1)!.page);
             const existing = deps.segments
-              ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages.map(page => page.page))
+              ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages.map(page => page.page), { unpublishedPdfForRecovery: true })
               : [];
             const published = new Map(existing.map(({ page, slideLabel, startMs, endMs, text, imageObjectKey }) =>
               [page, { page, slideLabel, startMs, endMs, text, imageObjectKey }]));
@@ -1231,12 +1247,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 const unverifiedScan = !confirmedSeal && !previouslySealed && pdfSealState.mode === "none"
                   && !(evidence.visionTranscribed || preparedPage.savedHasTranscription && chunk?.imageObjectKey)
                   && !preparedPage.sealedAllText
-                  && (effectiveScan
+                  && ((effectiveScan && !hasVerifiedPageText(preparedPage.page.text))
                     || (Boolean(rawPage.text.trim()) && checkPdfPageQuality(rawPage.text).quality === "low_quality"));
                 if (unverifiedScan) {
                   // Keep Docling's raw extractions usable for recovery. The worker carries the unknown boundary across ranges.
                   Object.assign(pdfSealState, cleanSeal, { unknownAfterFailure: true });
                   if (effectiveScan && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
+                }
+                if (chunk?.imageObjectKey && (confirmedSeal || pdfSealState.mode !== "none" || pdfSealState.unknownAfterFailure)) {
+                  chunk = { ...chunk, imageObjectKey: null };
                 }
                 if (preparedPage.originalSaved && (previouslyBlocked || preparedPage.hadNativeSeal || confirmedSeal || unverifiedScan
                   || preparedPage.incomingSeal.unknownAfterFailure || preparedPage.saved !== preparedPage.originalSaved)) {

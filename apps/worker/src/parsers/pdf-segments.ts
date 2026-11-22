@@ -149,9 +149,6 @@ export async function parsePdfSegments(input: {
         }
         segmentTextBytes += pageBytes;
       }
-      if (cumulativeBookBytes + segmentTextBytes > maxBookBytes) {
-        throw new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${cumulativeBookBytes + segmentTextBytes} > ${maxBookBytes})`);
-      }
     }
     const pages = validatePdfSegmentPages(rawPages, start, end);
     const segmentBytes = Buffer.byteLength(JSON.stringify({ pages }), "utf8");
@@ -182,6 +179,9 @@ export async function parsePdfSegments(input: {
     const consumed = resumeFromPage === undefined ? pages : pages.slice(0, resumeFromPage - pageStart);
     cumulativeBookBytes += resumeFromPage === undefined ? segmentTextBytes
       : consumed.reduce((bytes, page) => bytes + Buffer.byteLength(page.text, "utf8"), 0);
+    if (cumulativeBookBytes > maxBookBytes) {
+      throw new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${cumulativeBookBytes} > ${maxBookBytes})`);
+    }
     parsedPageCount += consumed.length;
     initialSealMode = continuation ? continuation.nextSealMode ?? undefined
       : workerEnd === undefined ? pdfPageEndSeal(lastPage) : typeof workerEnd === "string" ? workerEnd : undefined;

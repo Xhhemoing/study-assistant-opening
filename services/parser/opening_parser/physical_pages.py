@@ -176,8 +176,21 @@ _SECTION_BREAK_RE = re.compile(
     re.IGNORECASE,
 )
 _NUMBERED_CONTAINER_PREFIX_RE = re.compile(
-    r"^(?:(?:(?:Chapter|Part|Unit|Lecture)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|Section\s+\d+(?:\.\d+)*)(?=[\s:：.．—–-]|$)"
+    r"^(?:(?:(?:Chapter|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|Section\s+\d+(?:\.\d+)*)(?=[\s:：.．—–-]|$)"
     r"|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))",
+    re.IGNORECASE,
+)
+_PAGE_METADATA_HEADING_RE = re.compile(
+    r"^(?:[\[【(]\s*)?(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\b|(?:p|pp)\.\s*\d"
+    r"|(?:(?:cached|raw|readable|verified|automatic)\s+)*(?:transcription|ocr)\b"
+    r"|(?:第\s*)?[\d一二三四五六七八九十百千]+(?:\s*(?:[/／\-–—]|共)\s*(?:第\s*)?[\d一二三四五六七八九十百千]+)?\s*[页頁张張]"
+    r"|\d+\s*(?:of|[/／\-–—])\s*\d+\s*[.)。]?$|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)",
+    re.IGNORECASE,
+)
+_CONTINUATION_HEADING_RE = re.compile(
+    r"\b(?:continued|cont(?:['’]?d)?)(?:\s+(?:from|on)\s+.+)?[.\s:：]*$"
+    r"|[\[（(【]\s*(?:(?:to\s+be\s+)?continued|cont(?:['’]?d)?\.?|续|续上页|接上页)\s*[)\]）】]"
+    r"|(?:接上页|续上页|\s续)\s*[:：.]?$",
     re.IGNORECASE,
 )
 _ANSWER_TITLE_WORD_RE = re.compile(
@@ -475,8 +488,15 @@ def _is_titled_non_answer_chapter(stripped: str) -> bool:
     )
 
 
+def _is_running_page_heading(stripped: str) -> bool:
+    if _PAGE_METADATA_HEADING_RE.match(stripped) or _CONTINUATION_HEADING_RE.search(stripped):
+        return True
+    container = _NUMBERED_CONTAINER_PREFIX_RE.match(stripped)
+    return bool(container and not stripped[container.end():].strip(" \t:：.．—–-"))
+
+
 def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
-    if _is_section_sealed_opener(stripped):
+    if _is_section_sealed_opener(stripped) or _is_running_page_heading(stripped):
         return False
     if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
@@ -674,6 +694,17 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             elif current is not None and current[0] == "figure_caption":
                 flush()
             continue
+
+        active_seal = current[7] if current is not None else page_seal_mode
+        if active_seal == "inline_sealed":
+            stripped = _strip_heading_markup(unit_text)
+            if _is_running_page_heading(stripped) and not _is_section_sealed_opener(stripped):
+                # A running header is neither a new section nor part of the answer body.
+                if current is None:
+                    current = ["solution_sealed", unit_start, unit_end, None, None, False, False, active_seal, False]
+                else:
+                    current[2] = unit_end
+                continue
 
         is_furniture = frag_label in _FURNITURE_LABELS
         if inline_break_pending and not is_furniture:
