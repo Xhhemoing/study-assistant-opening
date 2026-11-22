@@ -102,6 +102,8 @@ describe("learner portability", () => {
       "workspaceId", "ownerUserId", "privacyEpoch", "memoryDependencyIds", "workspace_id", "workspace-id", "workspace id", "Workspace.ID",
       "privateAnswerKeys", "Private.Answer-Keys", "answerKey", "officialAnswers", "modelAnswer", "referenceAnswer",
       "solutionText", "hiddenRubric", "reservedItems", "privateAssessmentNotes", "trustedKey",
+      "keyText", "solverAnswer", "blindSolveReceipt", "blind solve outcome", "Trusted.Question-Key-Version",
+      "expectedAnswer", "canonical_answer", "referenceAnswer", "modelAnswer", "sampleSolution",
     ]) {
       const publicKey = "x".repeat(key.length);
       const markdown = ["---", "title: Algebra", "details:", "  - " + publicKey + ": example", "---", "# Note"].join(newline);
@@ -118,7 +120,14 @@ describe("learner portability", () => {
 
   it.each(["\u2028", "\u2029"])("rejects internal metadata across ambiguous YAML separators %j", newline => {
     for (const importNote of [importMarkdown, importObsidianNote]) {
-      expect(() => importNote("notes/algebra.md", ["---", "workspaceId: example", "---", "# Note"].join(newline))).toThrow(/YAML frontmatter/u);
+      const path = "notes/algebra.md";
+      for (const key of ["workspaceId", "keyText", "solverAnswer", "title"]) {
+        expect(() => importNote(path, ["---", key + ": example", "---", "# Note"].join(newline))).toThrow(/YAML frontmatter/u);
+        expect(() => importNote(path, "---\ntitle: example" + newline + key + ": hidden\n---\n# Note")).toThrow(/YAML frontmatter/u);
+      }
+      const markdown = "---\ntitle: example\n---\n# Note" + newline + "Paragraph";
+      const bundle = createLearnerPackage({ notes: [importNote(path, markdown)], decks: [], reviews: [] });
+      expect(importLearnerZip(exportLearnerZip(bundle)).notes[0]?.markdown).toBe(markdown);
     }
   });
 

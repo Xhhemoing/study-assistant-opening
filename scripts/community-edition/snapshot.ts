@@ -31,6 +31,7 @@ export function isPublicFile(file: string): boolean {
     && !file.split("/").some(part => closedProduct.test(part) || closedSegment.test(part.replace(
       isDeclaration(part) ? declarationExtension : /\.(?:json|[cm]?[jt]sx?)$/u, "",
     )))
+    && (file === "packages/contracts/src/opening/backup-inventory.ts" || !/^packages\/(?:domain|contracts)\/src\/opening\//iu.test(file))
     && !/(?:^|\/)opening\/(?:cartridges|exam-sprint|share|teachback-arena|span-[^/]+)\//iu.test(file)
     && !/(?:^|\/)(?:fixtures|__fixtures__|__tests__|seeds|migrations)\//iu.test(file)
     && !/\.(?:test|spec)\.(?:d\.[^./]+\.ts|json|[cm]?[jt]sx?)$/iu.test(file)

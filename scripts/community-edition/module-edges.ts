@@ -5,9 +5,12 @@ export type ResolutionMode = "import" | "require";
 export type ModuleEdge = { spec: string; line: number; kind: "module" | "type" | "path" | "ambient"; mode: ResolutionMode };
 type Loader = "require" | "module" | "wrapper";
 const bundler = { module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler };
+const nodeNext = { module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext };
 
 function sourceMode(file: string, packageType?: unknown): ResolutionMode {
-  return /\.m[jt]s$/u.test(file) ? "import" : /\.c[jt]s$/u.test(file) || packageType === "commonjs" ? "require" : "import";
+  if (/\.m[jt]s$/u.test(file)) return "import";
+  if (/\.c[jt]s$/u.test(file) || packageType === "commonjs") return "require";
+  return isDeclaration(file) && packageType !== "module" ? "require" : "import";
 }
 
 function lexicalChecker(source: ts.SourceFile): ts.TypeChecker {
@@ -125,7 +128,7 @@ export function readModuleEdges(file: string, text: string, packageType?: unknow
     if (!spec || !ts.isStringLiteralLike(spec)) return fail(origin, "Nonliteral module specifier");
     const offset = spec.getStart(source);
     literals.add(offset);
-    const typeMode = kind === "type" ? ts.getModeForUsageLocation(source, spec, bundler) : undefined;
+    const typeMode = kind === "type" ? ts.getModeForUsageLocation(source, spec, declarationFile ? nodeNext : bundler) : undefined;
     const resolution = mode ?? (typeMode === undefined ? fileMode : typeMode === ts.ModuleKind.CommonJS ? "require" : "import");
     edges.push({ spec: spec.text, line: lineAt(offset), kind, mode: resolution });
   };

@@ -19,7 +19,7 @@ const publicEntries = [
   ["@aistudy/ui", "packages/ui", ".", "src/index.ts", "browser-ui"],
   ["@aistudy/domain/native", "packages/domain", "./native", "src/portability/native/index.ts", "portable-runtime"],
   ["@aistudy/domain/cartridge-sdk-lite", "packages/domain", "./cartridge-sdk-lite", "src/cartridge-sdk-lite/index.ts", "portable-runtime"],
-  ["@aistudy/contracts", "packages/contracts", ".", "src/index.ts", "portable-runtime"],
+  ["@aistudy/contracts", "packages/contracts", ".", "src/community.ts", "portable-runtime", "./community"],
   ["@aistudy/contracts/learner-portability", "packages/contracts", "./learner-portability", "src/learner-portability/index.ts", "portable-runtime"],
   ["@aistudy/contracts/cartridge-lite", "packages/contracts", "./cartridge-lite", "src/cartridge-lite/index.ts", "portable-runtime"],
 ] as const;
@@ -162,10 +162,10 @@ export class CommunityGraph {
   }
 
   scan(): void {
-    for (const [spec, owner, key, source, profile] of publicEntries) {
+    for (const [spec, owner, key, source, profile, sourceKey = key] of publicEntries) {
       this.walk(`${owner}/${source}`, profile, [spec]);
       this.workspace(spec, profile, [spec], "import", false);
-      const match = exportMapping(this.manifest(owner).source, key);
+      const match = exportMapping(this.manifest(owner).source, sourceKey);
       if (match && (selectTarget(match, "require", false) || selectTarget(match, "require", true))) {
         this.workspace(spec, profile, [spec], "require", false, true);
       }
@@ -261,16 +261,16 @@ export class CommunityGraph {
   }
 
   private workspace(spec: string, profile: Profile, chain: string[], mode: ResolutionMode, typeOnly: boolean, allowNodeOnly = false): void {
-    const [, owner, key] = entries.get(spec)!;
+    const [, owner, key, , , sourceKey = key] = entries.get(spec)!;
     const manifest = this.manifest(owner);
-    const match = exportMapping(manifest.source, key);
+    const match = exportMapping(manifest.source, sourceKey);
     if (!match) throw new Error(`Missing public export ${spec}`);
     const cacheKey = `export:${profile}:${spec}:${mode}:${typeOnly}:${allowNodeOnly}`;
     if (this.visited.has(cacheKey)) return;
     this.visited.add(cacheKey);
     const target = this.projectTarget(owner, match, "export", mode, typeOnly, profile, chain, allowNodeOnly);
     recordTarget(manifest.exports, key, mode, match, target);
-    const legacy = key === "." ? this.legacyTargets(owner, manifest, profile, chain) : [];
+    const legacy = key === "." && sourceKey === key ? this.legacyTargets(owner, manifest, profile, chain) : [];
     const names = [target.bundler.types, target.bundler.runtime?.file, target.node.types, target.node.runtime?.file]
       .filter(name => name !== undefined);
     this.versionTargets(owner, manifest, [...names, ...legacy.map(entry => entry.path)], profile, chain);
@@ -358,6 +358,7 @@ export class CommunityGraph {
     const ext = posix.extname(file);
     const declaration = declarationCompanion(file);
     if (ext !== ".json" && declaration && this.snapshot.entries.has(declaration)) {
+      if (!typeOnly) throw new Error(`Unsupported runtime asset ${file}`);
       this.walk(declaration, profile, chain);
       return;
     }
@@ -366,7 +367,11 @@ export class CommunityGraph {
     if (!isDeclaration(file) && ext !== ".json") {
       const extensionCandidates = substitutes[ext]?.map(replacement => file.slice(0, -ext.length) + replacement)
         ?? extensionlessSources.map(replacement => file + replacement);
-      for (const candidate of extensionCandidates) if (this.snapshot.entries.has(candidate)) found.add(candidate);
+      for (const candidate of extensionCandidates) {
+        if (!this.snapshot.entries.has(candidate)) continue;
+        found.add(candidate);
+        if (ext === ".js" || ext === ".jsx") break;
+      }
     }
     if (exact && exact.type !== "tree") found.add(file);
     else {

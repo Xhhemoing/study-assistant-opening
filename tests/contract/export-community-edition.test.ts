@@ -99,7 +99,8 @@ function compileIsolatedConsumer(directory: string): void {
 
 function fixture(root: string, extras: Record<string, string> = {}): string {
   const entries = {
-    contracts: { ".": "./src/index.ts", "./learner-portability": "./src/learner-portability/index.ts", "./cartridge-lite": "./src/cartridge-lite/index.ts" },
+    contracts: { ".": "./src/index.ts", "./community": "./src/community.ts",
+      "./learner-portability": "./src/learner-portability/index.ts", "./cartridge-lite": "./src/cartridge-lite/index.ts" },
     domain: { "./native": "./src/portability/native/index.ts", "./cartridge-sdk-lite": "./src/cartridge-sdk-lite/index.ts" },
     jingwei: { ".": "./src/index.ts", "./react": "./src/react/index.ts" },
     ui: { ".": "./src/index.ts" },
@@ -115,6 +116,8 @@ function fixture(root: string, extras: Record<string, string> = {}): string {
     write(root, `packages/${pkg}/package.json`, print({ name: `@aistudy/${pkg}`, license: "UNLICENSED", version: "0.0.0", type: "module", exports }));
     for (const file of Object.values(exports)) write(root, `packages/${pkg}/${file}`, "export {};\n");
   }
+  write(root, "packages/contracts/src/index.ts", 'export * from "./opening/teaching-content";\n');
+  write(root, "packages/contracts/src/opening/teaching-content.ts", "export const privateTrustedQuestionKeySchema = {};\n");
   for (const [file, content] of Object.entries(extras)) write(root, file, content);
   git(root, "add", "--all");
   return git(root, "commit-tree", git(root, "write-tree").toString("ascii").trim(), "-m", "test candidate").toString("ascii").trim();
@@ -139,6 +142,17 @@ describe("Community Edition extraction", () => {
       });
     expect(assertFiles().sort()).toEqual(result.files);
     expect(result.files.some(file => /(?:^|\/)(?:\.git|fixtures|migrations|ai-policy)(?:\/|$)|^packages\/(?:ai|database)\//u.test(file))).toBe(false);
+    expect(result.files.filter(file => /^packages\/(?:contracts|domain)\/src\/opening\//u.test(file)))
+      .toEqual(["packages/contracts/src/opening/backup-inventory.ts"]);
+    expect(result.files).not.toContain("packages/contracts/src/index.ts");
+    expect(result.files).not.toContain("packages/contracts/src/reviews.ts");
+    const contracts = JSON.parse(readFileSync(path.join(targetDirectory, "packages/contracts/package.json"), "utf8"));
+    expect(Object.keys(contracts.exports).sort()).toEqual([".", "./cartridge-lite", "./learner-portability"]);
+    expect(contracts.exports["."].import).toEqual({ types: "./src/community.ts", default: "./src/community.ts" });
+    expect(JSON.stringify(contracts)).not.toContain("./src/index.ts");
+    for (const file of result.files.filter(file => /^packages\/contracts\/src\/.*\.ts$/u.test(file))) {
+      expect(readFileSync(path.join(targetDirectory, file), "utf8")).not.toMatch(/privateTrustedQuestionKeySchema|retainedQuestionEligibilitySchema/u);
+    }
     expect(result.files).toContain("packages/domain/src/cartridge-sdk-lite/index.ts");
     for (const name of ["package.json", "packages/contracts/package.json", "packages/domain/package.json", "packages/ui/package.json", "packages/jingwei/package.json"]) {
       const original = JSON.parse(git(repo, "show", `${commit}:${name}`).toString("utf8"));
@@ -158,6 +172,18 @@ describe("Community Edition extraction", () => {
     expect(() => exportCommunityEdition({ commit, repository: repo, targetDirectory })).toThrow(/must not exist/u);
     compileIsolatedConsumer(targetDirectory);
   }), 120_000);
+
+  it.each([
+    ["packages/contracts/src/community.ts", "./opening/teaching-content", "packages/contracts/src/opening/teaching-content.ts"],
+    [sdkEntry, "../opening/internal", "packages/domain/src/opening/internal.ts"],
+  ])("rejects private Opening dependencies of %s", (source, specifier, privateFile) => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const commit = fixture(repository, {
+      [source]: 'export * from ' + JSON.stringify(specifier) + ';',
+      [privateFile]: "export const privateValue = 'internal';",
+    });
+    expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Closed or unlisted.*\/opening\//u);
+  }));
 
   it("uses committed bytes and ignores unlisted and modified working-tree files", () => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
@@ -447,6 +473,38 @@ describe("Community Edition extraction", () => {
     expect(readModuleEdges("api" + extension, source).map(edge => edge.kind)).toEqual(["type", "type", "type"]);
   });
 
+  it.each(["commonjs", undefined])("preserves static declaration imports in a %s package under NodeNext", type => inLocalTemp(directory => {
+    const repository = path.join(directory, "source");
+    const scope = sdkDirectory + "/scoped";
+    const declaration = scope + "/api.d.ts";
+    const commit = fixture(repository, {
+      [sdkEntry]: 'export type { Default, Override } from "./scoped/api.js";',
+      [scope + "/package.json"]: print({ type, imports: { "#shape": {
+        import: { types: "./esm.d.mts" }, require: { types: "./cjs.d.cts" },
+      } } }),
+      [declaration]: [
+        'import type { Mode as Cjs } from "#shape";',
+        'import type { Mode as Esm } from "#shape" with { "resolution-mode": "import" };',
+        'type RequireMode<T extends "cjs"> = T; type ImportMode<T extends "esm"> = T;',
+        'export type Default = RequireMode<Cjs>; export type Override = ImportMode<Esm>;',
+      ].join("\n"),
+      [scope + "/esm.d.mts"]: 'export type Mode = "esm";',
+      [scope + "/cjs.d.cts"]: 'export type Mode = "cjs";',
+    });
+    const targetDirectory = path.join(directory, "edition");
+    const result = exportCommunityEdition({ commit, repository, targetDirectory });
+    expect(result.files).toEqual(expect.arrayContaining([scope + "/esm.d.mts", scope + "/cjs.d.cts"]));
+    const projected = JSON.parse(readFileSync(path.join(targetDirectory, scope, "package.json"), "utf8"));
+    expect(projected.type).toBe(type);
+    expect(projected.imports["#shape"]).toEqual({ require: { types: "./cjs.d.cts" }, import: { types: "./esm.d.mts" } });
+    for (const root of [repository, targetDirectory]) {
+      const program = ts.createProgram([path.join(root, declaration)], {
+        module: ts.ModuleKind.NodeNext, moduleResolution: ts.ModuleResolutionKind.NodeNext, strict: true, noEmit: true, types: [],
+      });
+      expect(ts.getPreEmitDiagnostics(program).map(diagnostic => diagnostic.messageText)).toEqual([]);
+    }
+  }));
+
   it("keeps ESM imports and ignores lexically local require bindings", () => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
     const runtime = sdkDirectory + "/format.ts";
@@ -690,8 +748,8 @@ describe("Community Edition extraction", () => {
     const commit = fixture(repository, {
       "packages/domain/package.json": domainManifest({ "#shape": { types: "./src/cartridge-sdk-lite/shape.d.ts" } }),
       [sdkEntry]: [
-        'import { label } from "./leaf.jsx";', 'import css from "./card.css";', 'import icon from "./icon.svg";',
-        'export const model: { title: string } = { title: label + css + icon };',
+        'import { label } from "./leaf.jsx";', 'import type css from "./card.css";', 'import type icon from "./icon.svg";',
+        'export const title: string = label; export type Assets = [typeof css, typeof icon];',
       ].join("\n"),
       [sdkDirectory + "/leaf.jsx"]: 'export const label = "fallback";',
       [sdkDirectory + "/leaf.ts"]: 'export const label: string = "typed";',
@@ -708,10 +766,45 @@ describe("Community Edition extraction", () => {
     expect(ts.getPreEmitDiagnostics(program).map(diagnostic => diagnostic.messageText)).toEqual([]);
   }));
 
+  it.each(['import "./card.css";', 'import css from "./card.css"; export { css };'])(
+    "rejects a runtime asset edge even when a declaration companion exists (%s)", source => inLocalTemp(directory => {
+      const repository = path.join(directory, "source");
+      const commit = fixture(repository, {
+        [sdkEntry]: source,
+        [sdkDirectory + "/card.d.css.ts"]: "declare const css: string; export default css;",
+      });
+      expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/Unsupported runtime asset.*card\.css/u);
+    }),
+  );
+
+  it.each([["jsx", "tsx", "ts"], ["js", "ts", "tsx"]])(
+    "copies the .%s runtime file and only the first TypeScript substitute", (extension, selected, shadowed) => inLocalTemp(directory => {
+      const repository = path.join(directory, "source");
+      const leaf = sdkDirectory + "/leaf.";
+      const specifier = "./leaf." + extension;
+      const commit = fixture(repository, {
+        [sdkEntry]: `import { label } from "${specifier}"; export const title: "first" = label;`,
+        [leaf + extension]: 'export const label = "runtime";',
+        [leaf + selected]: 'export const label = "first" as const;',
+        [leaf + shadowed]: 'export const label = "shadowed" as const;',
+        [leaf + "d.ts"]: 'export declare const label: "declaration";',
+      });
+      const targetDirectory = path.join(directory, "edition");
+      const result = exportCommunityEdition({ commit, repository, targetDirectory });
+      expect(result.files.filter(file => file.startsWith(leaf)).sort()).toEqual([leaf + extension, leaf + selected].sort());
+      for (const root of [repository, targetDirectory]) {
+        const from = path.join(root, sdkEntry);
+        expect(path.normalize(resolveBundler(specifier, from)!)).toBe(path.join(root, leaf + selected));
+        const program = ts.createProgram([from], { ...bundlerOptions, strict: true, noEmit: true, jsx: ts.JsxEmit.Preserve, types: [] });
+        expect(ts.getPreEmitDiagnostics(program).map(diagnostic => diagnostic.messageText)).toEqual([]);
+      }
+    }),
+  );
+
   it("rejects a forbidden edge reached through an arbitrary declaration companion", () => inLocalTemp(directory => {
     const repository = path.join(directory, "source");
     const commit = fixture(repository, {
-      [sdkEntry]: 'import "./card.css";',
+      [sdkEntry]: 'export type Theme = typeof import("./card.css").default;',
       [sdkDirectory + "/card.d.css.ts"]: 'export type Secret = import("@aistudy/ai").T;',
     });
     expect(() => exportCommunityEdition({ commit, repository, dryRun: true })).toThrow(/@aistudy\/ai/u);

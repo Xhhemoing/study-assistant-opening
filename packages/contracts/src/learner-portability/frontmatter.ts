@@ -14,7 +14,9 @@ const privateKeys = new Set([
   "privateanswerkey", "privateanswerkeys", "answerkey", "answerkeys", "officialanswer", "officialanswers", "modelanswer",
   "modelanswers", "referenceanswer", "referenceanswers", "solutions", "solutiontext", "rubric", "hiddenrubric", "reserveditems",
   "trustedkey", "teachinganswerkey", "answerorrubricanchors",
+  "keytext", "solveranswer", "expectedanswer", "canonicalanswer", "samplesolution",
 ]);
+const privateKeyPrefix = /^(?:private|blindsolve|trustedquestionkey)/u;
 const yamlEscapes: Readonly<Record<string, string>> = {
   "0": "\0", a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", e: "\x1b",
   " ": " ", "\t": "\t", '"': '"', "/": "/", "\\": "\\", N: "\u0085", _: "\u00a0", L: "\u2028", P: "\u2029",
@@ -26,7 +28,7 @@ function invalid(): never {
 
 function isPrivateKey(key: string): boolean {
   const normalized = key.normalize("NFKC").replace(/[-_.\s]/gu, "").toLowerCase();
-  return normalized.startsWith("private") || privateKeys.has(normalized);
+  return privateKeyPrefix.test(normalized) || privateKeys.has(normalized);
 }
 
 // Walk the data-only YAML grammar without materializing values. Advanced YAML
@@ -273,6 +275,8 @@ export function hasPortableFrontmatter(markdown: string): boolean {
   const metadata = lines.slice(1, end);
   if (metadata.some(line => documentMarker.test(line))) return false;
   const body = metadata.join("\n");
+  // YAML readers disagree on Unicode line separators. Preserve them in the
+  // Markdown body, but decline frontmatter with ambiguous line boundaries.
   if (/(?![\t\n])[\p{Cc}\u2028\u2029]/u.test(body)) return false;
   try {
     new FrontmatterReader(body).read();

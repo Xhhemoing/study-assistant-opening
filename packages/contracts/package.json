@@ -11,6 +11,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./community": {
+      "types": "./src/community.ts",
+      "default": "./src/community.ts"
+    },
     "./learner-portability": {
       "types": "./src/learner-portability/index.ts",
       "default": "./src/learner-portability/index.ts"
