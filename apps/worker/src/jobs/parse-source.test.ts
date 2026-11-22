@@ -161,7 +161,7 @@ describe("parse source handler", () => {
     }]]);
   });
 
-  it.each(["new", "legacy empty array"])("recovers a native page on the first retry with %s marker provenance", async provenance => {
+  it("recovers a native-only seal on the first retry after Vision fails on an earlier page", async () => {
     const markers = new Map<number, PdfSegmentPage>();
     const segments: OpeningPdfSegmentsRepository = {
       assertCurrent: async () => {},
@@ -185,7 +185,6 @@ describe("parse source handler", () => {
     const marker = markers.get(2)!;
     expect(marker).toMatchObject({ hadSealedContent: true, sectionSealedAtEnd: true, publicationSealHadPublicPrefix: false });
     expect(marker.visualKinds).toBeUndefined();
-    if (provenance === "legacy empty array") markers.set(2, { ...marker, visualKinds: [] });
 
     const texts = ["Public geometry introduction.", "Chapter 2: Geometry\nPublic prose.", "Public continuation."];
     const retry = await deps({

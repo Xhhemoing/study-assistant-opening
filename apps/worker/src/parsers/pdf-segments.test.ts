@@ -71,11 +71,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v20-discourse/text",
     "docling-2.126.0/pdf-segments-v21-discourse/text",
     "docling-2.126.0/pdf-segments-v22-discourse/text",
+    "docling-2.126.0/pdf-segments-v23-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v23-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v24-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -1158,6 +1159,47 @@ describe("bounded resumable PDF parser", () => {
       { page: 3, text: heading }, { page: 4, text: "Public continuation." },
     ] });
     expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[3, heading], [4, "Public continuation."]]);
+  });
+
+  it("keeps a Vision-only archived seal across fresh native retries without current visual inputs", async () => {
+    const pages = [
+      { page: 1, text: "Chapter 1: Intro", visualKinds: [] },
+      { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Rings" },
+    ];
+    const segmentData = new Map<string, PdfSegment>();
+    const first = await runPdfScenario({ pages, segmentData, savedChunks: [{
+      page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey: "old/full-page",
+      text: "[视觉转写与描述]\nChapter 1: Intro\nAnswer Key",
+    }] });
+    expect(first.publishedChunks.map(({ page }) => page)).toEqual([3]);
+    expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({ state: "ready", pages: [{
+      hadSealedContent: true, sectionSealedAtEnd: true, publicationSealHadPublicPrefix: false, visualKinds: [],
+    }] });
+    const retry = await runPdfScenario({ pages, segmentData, savedChunks: first.publishedChunks });
+    expect(retry.requests[0]).toEqual({ start: 1 });
+    expect(retry.publishedChunks.map(({ page }) => page)).toEqual([3]);
+  });
+
+  it("normalizes ATX closing hashes and withholds numbered and unnumbered answer choices", async () => {
+    const texts = [
+      "# Answer Key #", "# 1.2 True #\n# A, C #\n# B, D.\n# ###", "5 units.",
+      "## Works Cited ##", "## Appendix: Solutions ##", "5 units.",
+      "# Algebra, Calculus #", "Public continuation.",
+    ];
+    const result = await runPdfScenario({ segmentPages: 1, pages: texts.map((text, index) => ({ page: index + 1, text })) });
+    expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([4, 7, 8].map(page => [page, texts[page - 1]]));
+  });
+
+  it.each([
+    "参考答案与解析", "参考答案", "标准答案", "正确答案", "课后习题答案",
+    "课后练习答案", "课后练习解答", "课后答案", "课后解答", "章节答案",
+    "习题答案", "习题解答", "练习题答案", "练习题解答", "练习答案",
+    "练习解答", "复习题答案", "复习题解答", "自测题答案", "自测题解答",
+    "思考题答案", "部分习题答案", "答案与解析", "参考解答", "详细解答",
+  ])("keeps Chinese answer sections sealed at %s", async title => {
+    const texts = [`附录：${title}`, "5 units.", "Works Cited", `${title}：x = 3.`, "5 units.", "Chapter 2: Rings"];
+    const result = await runPdfScenario({ segmentPages: 1, pages: texts.map((text, index) => ({ page: index + 1, text })) });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual([3, 6]);
   });
 
   it.each([{ kinds: [] as VisualPageKind[] }, { kinds: ["picture" as const] }])(

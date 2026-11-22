@@ -321,6 +321,22 @@ describe("pgvector material repository", () => {
     await expectArchivedPdfPages(["Answer Key", "Works Cited", heading, "5 units."], [2], 4);
   });
 
+  it.each(["# A, C #", "# B, D.", "# A, C", "# 1.2 True #", "# ###"])(
+    "keeps archived answer continuations sealed through %s", async choice => {
+      await expectArchivedPdfPages([
+        "# Answer Key #", choice, "5 units.", "## Works Cited ##", "## Appendix: Solutions ##", "5 units.",
+        "# Algebra, Calculus #", "Public continuation.",
+      ], [4, 7, 8], 3);
+    },
+  );
+
+  it.each([
+    "正确答案", "课后练习解答", "章节答案", "练习题答案", "练习题解答",
+    "复习题答案", "复习题解答", "自测题答案", "自测题解答",
+  ])("keeps an archived Chinese appendix sealed at %s", async title => {
+    await expectArchivedPdfPages(["Works Cited", `## 附录：${title} ##`, "5 units."], [1], 3);
+  });
+
   it("keeps historical legacy seals settled while the current PDF version is retried", async () => {
     const pdf = await seed(["Public exercise prompt.", "Chapter 2: Vectors"]);
     const marker = { page: 1, text: "", imagePath: null, sectionSealedAtEnd: true, hadSealedContent: true };
@@ -463,6 +479,23 @@ describe("pgvector material repository", () => {
     const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
     expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks.map(({ page }) => page)).toEqual(expectedPages);
     expect((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.page).sort()).toEqual(expectedPages);
+  });
+
+  it("keeps archived Vision provenance when a native-only retry has no archive left to inspect", async () => {
+    const texts = ["Chapter 1: Intro", "5 units.", "Chapter 2: Rings"];
+    const pdf = await seed(["[视觉转写与描述]\nChapter 1: Intro\nAnswer Key", ...texts.slice(1)]);
+    const pages: PdfSegmentPage[] = texts.map((text, index) => ({ page: index + 1, text, imagePath: null, visualKinds: [] }));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const retry = await startPdfRetry(pdf.sourceId, pages);
+      await expect(retry.run()).resolves.toEqual({ pages: 3 });
+      await retry.finish(3);
+      const published = await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1);
+      expect(published.map(({ page, text }) => [page, text])).toEqual([[3, texts[2]]]);
+      const [marker] = await f.sql`SELECT pages FROM opening_pdf_parse_segments
+        WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1' AND page_start=1`;
+      expect(marker?.pages).toMatchObject([{ hadSealedContent: true, publicationSealCommitted: true,
+        sectionSealedAtEnd: true, publicationSealHadPublicPrefix: false, visualKinds: [] }]);
+    }
   });
 
   it("seals sentence-case assessment sections before publication and index admission", async () => {

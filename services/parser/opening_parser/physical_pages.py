@@ -60,20 +60,24 @@ _ASSESSMENT_ANSWER_HEADING = (
     rf"(?:(?:Exercises?|Problems?|Questions?|Review\s+Questions?|Practice\s+Problems?|Self[- ]Check\s+Exercises?){_ASSESSMENT_TARGET}|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)"
 )
 _QUALIFIED_ANSWER_SECTION = r"(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|(?:Official|Reference)\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)"
+_CHINESE_ANSWER_HEADING = (
+    "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|"
+    "练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)"
+)
+_CHINESE_ANSWER_CONTINUATION = r"(?:\s*[（(](?:续|接上页)[）)])?"
 _CONTAINER_SEALED_HEADING = (
     rf"{_SEALED_CONTAINER_PREFIX}(?:(?:Answers?\s+Key|"
     r"(?:(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Even-Numbered)\s+)?(?:Answers?|Solutions?))"
     rf"{_SEALED_HEADING_CONTINUATION}"
-    r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答)"
-    r"(?:\s*[（(](?:续|接上页)[）)])?)\s*(?:[:：]|$)"
+    rf"|(?:{_CHINESE_ANSWER_HEADING}|答案|解答){_CHINESE_ANSWER_CONTINUATION})\s*(?:[:：]|$)"
 )
 
 _SECTION_SEALED_RE = re.compile(
     r"^(?:"
     rf"(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
     rf"(?:(?:Answers?\s+Key|{_ASSESSMENT_ANSWER_HEADING}|{_QUALIFIED_ANSWER_SECTION}|Answer\s+Section|Answers){_SEALED_HEADING_CONTINUATION}\s*(?:[:：]|$)"
-    r"|【\s*(?:参考答案|标准答案|习题答案|习题解答|练习答案|练习解答|课后答案|课后练习答案|课后习题答案|课后解答|思考题答案|答案与解析|参考解答|详细解答|参考答案与解析|部分习题答案)\s*】\s*$"
-    r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
+    rf"|【\s*{_CHINESE_ANSWER_HEADING}\s*】\s*$"
+    rf"|{_CHINESE_ANSWER_HEADING}{_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：]|$)"
     r"|(?:习题\s*)?(?:答案|解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r")"
     rf"|{_CONTAINER_SEALED_HEADING}"
@@ -81,10 +85,12 @@ _SECTION_SEALED_RE = re.compile(
     re.IGNORECASE,
 )
 _INLINE_WITH_BODY_CHECK_RE = re.compile(r"[:：]\s*\S")
+_CHINESE_EXERCISE_ANSWER_RE = re.compile(
+    rf"^(?:【\s*正确答案\s*】\s*$|(?:参考答案|标准答案|正确答案|参考解答|详细解答){_CHINESE_ANSWER_CONTINUATION}\s*[:：]\s*\S)"
+)
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
     rf"^(?:(?:{_SEALED_SECTION_CONTAINER}\s*[:：.\-—–]?\s*)?"
-    rf"(?:{_ASSESSMENT_ANSWER_HEADING}|{_QUALIFIED_ANSWER_SECTION}|"
-    r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)"
+    rf"(?:{_ASSESSMENT_ANSWER_HEADING}|{_QUALIFIED_ANSWER_SECTION}|{_CHINESE_ANSWER_HEADING})"
     rf"|{_CONTAINER_SEALED_HEADING})",
     re.IGNORECASE,
 )
@@ -98,8 +104,8 @@ _INLINE_SEALED_ALWAYS_RE = re.compile(
     r"^(?:"
     rf"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*[:：]"
     rf"|{_QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:[:：]|$)"
-    r"|【\s*(?:参考答案|标准答案|正确答案|答案)\s*】"
-    r"|(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案|答案与解析|答案)\s*(?:\d+(?:[.\-]\d+)*)?\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：]"
+    rf"|【\s*(?:{_CHINESE_ANSWER_HEADING}|答案)\s*】"
+    rf"|(?:{_CHINESE_ANSWER_HEADING}|答案)\s*(?:\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
     r")"
 )
 
@@ -484,7 +490,12 @@ def _collect_page_fragments(conversion):
 
 
 def _strip_heading_markup(line_text: str) -> str:
-    s = _MD_HASH_PREFIX_RE.sub("", line_text.strip())
+    s = line_text.strip()
+    if _MD_HEADING_LINE_RE.match(s):
+        s = re.sub(r"\s+#+$", "", s)
+        if re.fullmatch(r"#{1,6}", s):
+            return ""
+        s = _MD_HASH_PREFIX_RE.sub("", s)
     m = _MD_WRAPPED_EMPHASIS_RE.match(s)
     if m:
         s = f"{m.group(2)}{m.group(3)}"
@@ -514,9 +525,9 @@ def _is_running_page_heading(stripped: str) -> bool:
 
 
 def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
-    if _is_section_sealed_opener(stripped) or _is_running_page_heading(stripped):
+    if not stripped or _is_section_sealed_opener(stripped) or _is_running_page_heading(stripped):
         return False
-    if re.fullmatch(r"\d+(?:\.\d+)*\s+(?:true|false|yes|no|none|[a-f](?:\s*,\s*[a-f])*)[.。]?", stripped, re.IGNORECASE):
+    if re.fullmatch(r"(?:\d+(?:\.\d+)*[.)]?\s+)?(?:true|false|yes|no|none|[a-f](?:\s*,\s*[a-f])*)[.。]?", stripped, re.IGNORECASE):
         return False
     if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
@@ -527,7 +538,7 @@ def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_h
     if _STANDALONE_SOLUTION_HEADING_RE.match(stripped):
         return False
     if re.match(
-        r"^(?:(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）]|(?:True|False|Yes|No|None)\.?$)",
+        r"^(?:(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])",
         stripped,
         re.IGNORECASE,
     ):
@@ -601,7 +612,8 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     if in_worked_example and _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE.match(stripped):
         return "worked_example", None, False, False, False, None, None
 
-    if _is_section_sealed_opener(stripped) and not (in_exercise and _BARE_ANSWER_LABEL_RE.match(stripped)):
+    exercise_answer = in_exercise and (_BARE_ANSWER_LABEL_RE.match(stripped) or _CHINESE_EXERCISE_ANSWER_RE.match(stripped))
+    if not exercise_answer and _is_section_sealed_opener(stripped):
         return "solution_sealed", "section_sealed", True, False, False, None, None
 
     if _INLINE_SEALED_ALWAYS_RE.match(stripped):

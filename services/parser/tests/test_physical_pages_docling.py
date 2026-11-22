@@ -198,6 +198,38 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 extracted = physical_pages.extract_physical_pages(conversion)
                 self.assertEqual(extracted.texts_by_page, {1: [], 2: [], 3: [heading], 4: ["Public continuation."]})
 
+    def test_closing_hashes_and_unnumbered_answer_choices(self):
+        texts = {
+            1: "# Answer Key #",
+            2: "# 1.2 True #\n# A, C #\n# B, D.\n# ###",
+            3: "5 units.",
+            4: "## Works Cited ##",
+            5: "## Appendix: Solutions ##",
+            6: "5 units.",
+            7: "# Algebra, Calculus #",
+            8: "Public continuation.",
+        }
+        extracted = physical_pages.extract_physical_pages(worker_pdf_conversion(texts, ()))
+        self.assertEqual(extracted.texts_by_page, {
+            page: [text] if page in (4, 7, 8) else [] for page, text in texts.items()
+        })
+
+    def test_chinese_answer_heading_vocabulary_seals_continuations(self):
+        for title in (
+            "参考答案与解析", "参考答案", "标准答案", "正确答案", "课后习题答案",
+            "课后练习答案", "课后练习解答", "课后答案", "课后解答", "章节答案",
+            "习题答案", "习题解答", "练习题答案", "练习题解答", "练习答案",
+            "练习解答", "复习题答案", "复习题解答", "自测题答案", "自测题解答",
+            "思考题答案", "部分习题答案", "答案与解析", "参考解答", "详细解答",
+        ):
+            with self.subTest(title=title):
+                texts = {1: f"附录：{title}", 2: "5 units.", 3: "Works Cited",
+                         4: f"{title}：x = 3.", 5: "5 units.", 6: "Chapter 2: Rings"}
+                extracted = physical_pages.extract_physical_pages(worker_pdf_conversion(texts, ()))
+                self.assertEqual(extracted.texts_by_page, {
+                    page: [text] if page in (3, 6) else [] for page, text in texts.items()
+                })
+
     def test_container_prefixed_worked_examples_keep_the_solution_public(self):
         for heading in ("Chapter 3: Worked Example", "Section 2.1: Worked Example 2", "Unit 2 Worked Example 3"):
             with self.subTest(heading=heading):
@@ -687,6 +719,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             ("inline_sealed", "答案：", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "解答：", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "【正确答案】", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "参考答案：x =", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "【答案】", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "Answer:\n\n", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "Solution (continued)", "5 units.", "inlineSealedAtEnd"),

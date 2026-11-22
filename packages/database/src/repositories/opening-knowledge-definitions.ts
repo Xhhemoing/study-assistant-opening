@@ -27,9 +27,12 @@ const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadi
 const answerLabel = new RegExp(answerLabelLine, "imu");
 const horizontalWhitespace = "[ \t\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+";
 const pdfHorizontalWhitespace = new RegExp(horizontalWhitespace, "gu");
+const closingAtxHashes = String.raw`^( *#{1,6}(?: +.*?)?) +#+ *$`;
+const pdfClosingAtxHashes = new RegExp(closingAtxHashes, "gmu");
 
 export function containsPdfAnswerLabel(text: string): boolean {
-  return answerLabel.test(text.replace(/\r|\*\*|__/gu, "").replace(pdfHorizontalWhitespace, " "));
+  return answerLabel.test(text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ")
+    .replace(pdfClosingAtxHashes, "$1").replace(/\*\*|__/gu, ""));
 }
 
 // Reopen at the first content line, so earlier answer text on a physical page
@@ -39,9 +42,9 @@ const markdownTitle = String.raw`#{1,6} +(?!(?:chapter|section|part|unit|lecture
 const backMatterHeading = String.raw`(?:preface|introduction|bibliography|references|works +cited|index|subject +index|author +index|glossary|notation +index|acknowledg(?:e)?ments?|about +the +authors?|afterword|colophon|序言|前言|引言|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢) *(?:[:：.—–-]|$)`;
 const reopeningHeading = String.raw`^ *(?:(?:#{1,6} +)?(?:${titledContainer}|appendix(?: +[A-Z0-9]+)?(?: *[:：.—–-].*| +.*| *$)|附录.*|${backMatterHeading})|${markdownTitle})`;
 const blockedReopeningHeading = [
-  String.raw`${lineStart}(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|(?:[ivxlcdm]+|true|false|yes|no|none)[.。]? *$)(?:[ :：]|$)`,
+  String.raw`${lineStart}(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|[ivxlcdm]+[.。]? *$)(?:[ :：]|$)`,
   String.raw`${lineStart}(?:(?:\d+|[a-z])[.)](?: |$)|[a-z] *$|[（(] *(?:\d+|[a-z]|[一二三四五六七八九十]+) *[)）])`,
-  String.raw`${lineStart}\d+(?:\.\d+)* +(?:true|false|yes|no|none|[a-f](?: *, *[a-f])*)[.。]? *$`,
+  String.raw`${lineStart}(?:\d+(?:\.\d+)*[.)]? +)?(?:true|false|yes|no|none|[a-f](?: *, *[a-f])*)[.。]? *$`,
   String.raw`\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|drills?|self[- ]check|homework|assignments?|problem +sets?|worksheets?|tutorials?|recitations?|labs?|continued|cont(?:['’]?d)?)\M`,
   String.raw`(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千]+(?: *(?:[/／–-]|共) *(?:第 *)?[\d一二三四五六七八九十百千]+)? *[页頁]`,
   String.raw`答案|解答|习题|练习|复习题|自测题|思考题|作业|课后题|单元测试|第 *[一二三四五六七八九十百千\d]+ *[题小题]|续上页|接上页|[（(] *续 *[）)]`,
@@ -88,7 +91,9 @@ export function publicPdfSealBoundaries(sql: Sql, workspaceId: string,
 function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   return sql`pdf_archive_text AS (
     SELECT c.id,c.source_id,c.source_version,c.page,c.created_at,
-      regexp_replace(replace(replace(replace(c.text,chr(13),''),'**',''),'__',''),${horizontalWhitespace},' ','g') AS body
+      replace(replace(regexp_replace(
+        regexp_replace(replace(c.text,chr(13),''),${horizontalWhitespace},' ','g'),
+        ${"(?n)" + closingAtxHashes},${String.raw`\1`},'g'),'**',''),'__','') AS body
     FROM opening_source_chunks c
     WHERE ${scope} AND c.page IS NOT NULL
   ), pdf_archive_page_events AS (
