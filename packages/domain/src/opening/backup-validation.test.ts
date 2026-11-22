@@ -5,6 +5,22 @@ import { orderBackupMisconceptionRevisions, sourceReferences } from "./backup-va
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const referenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
+it.each(["self", "two revisions"])("rejects a %s predecessor cycle during restore preflight", cycle => {
+  const a = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", b = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const root = {
+    workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: a, prior_revision_id: a,
+    status: "verified", origin: "system_diagnosis", course_id: null, privacy_epoch: 0, evidence_attempt_ids: [],
+  };
+  const backup: OpeningBackup = {
+    format: "opening-backup", version: 1, workspaceId, privacyEpoch: 0, deletionJournal: [], objects: [],
+    tables: { v3_bitemporal_misconception_edges: cycle === "self"
+      ? [root] : [{ ...root, prior_revision_id: b }, { ...root, revision_id: b }] },
+  };
+  expect(validateOpeningRestore(backup, [])).toMatchObject({
+    allowed: false, errors: ["invalid misconception revision lineage"],
+  });
+});
+
 it("requires the same normalized course across every revision of a misconception edge", () => {
   const course = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const root = {

@@ -59,7 +59,7 @@ export function renderLearnerContextBlock(items: readonly ContextItem[]) {
   return { renderedMarkdown, byteLength };
 }
 
-/** Acquire workspace and context locks before reading or mutating revision rows for a write. */
+/** Acquire the workspace lock before any course or revision row locks. */
 export async function lockMisconceptionWorkspaceForWrite(tx: TransactionSql, scope: OpeningScope): Promise<number> {
   await lockWorkspaceLearningHistory(tx, scope);
   // Serialize writers and context rebuilds while allowing foreign-key key shares.
@@ -67,18 +67,23 @@ export async function lockMisconceptionWorkspaceForWrite(tx: TransactionSql, sco
     SELECT privacy_epoch FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
     FOR NO KEY UPDATE`;
   if (!workspace) throw learningError("NOT_FOUND", "学习空间不存在。");
-  await lockMisconceptionContext(tx, scope.workspaceId);
   return workspace.privacy_epoch;
 }
 
-/** With the workspace row already locked, fence revision writes and cache refreshes. */
-export async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
+async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
   // The migration's revision trigger holds this same lock when invalidating the cache.
   await tx`SELECT pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || ${workspaceId}::uuid::text, 0))`;
 }
 
-/** The caller already holds the workspace row and context advisory locks. */
+/** Call after the final revision mutation, with the workspace lock still held. */
 export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
+  await lockMisconceptionContext(tx, scope.workspaceId);
+  await tx`SET CONSTRAINTS v3_invalidate_misconception_context IMMEDIATE`;
+  await tx`SET CONSTRAINTS v3_invalidate_misconception_context DEFERRED`;
+  return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
+}
+
+async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
   const items = await tx<ContextItem[]>`
     SELECT status, learner_disposition AS "learnerDisposition", left(summary, ${LEARNER_CONTEXT_MAX_BYTES}) AS summary
     FROM v3_bitemporal_misconception_edges e
@@ -124,7 +129,7 @@ export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: Open
                 (e.valid_range @> ${at}::text::timestamptz AND e.tx_range @> ${at}::text::timestamptz)
         )`;
     if (cached) return cached;
-    return refreshLearnerMisconceptionContextBlock(tx, scope, workspace.privacy_epoch, at);
+    return writeLearnerMisconceptionContextBlock(tx, scope, workspace.privacy_epoch, at);
   });
 }
 
@@ -159,11 +164,23 @@ export async function queryMisconceptionEdgesAsOf(
 export async function applyLearnerMisconceptionCorrection(sql: Sql, scope: OpeningScope, input: LearnerCorrection) {
   return sql.begin(async tx => {
     const privacyEpoch = await lockMisconceptionWorkspaceForWrite(tx, scope);
+    // Protect the successor's course FK before locking any revision rows.
+    const [course] = await tx<{ id: string }[]>`
+      SELECT c.id FROM courses c
+      WHERE c.workspace_id = ${scope.workspaceId} AND c.id IN (
+        SELECT e.course_id FROM v3_bitemporal_misconception_edges e
+        WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
+          AND e.edge_id = ${input.edgeId} AND e.course_id IS NOT NULL
+      )
+      ORDER BY c.id FOR KEY SHARE OF c`;
+    // A direct insert between statements must not introduce a course we did not lock.
+    const lockedCourseId = course?.id ?? null;
     // Lock all open transaction slices for this edge before sampling the mutation time.
     await tx`
       SELECT revision_id FROM v3_bitemporal_misconception_edges
       WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
         AND edge_id = ${input.edgeId} AND privacy_epoch = ${privacyEpoch} AND upper_inf(tx_range)
+        AND (course_id IS NULL OR course_id = ${lockedCourseId}::uuid)
       ORDER BY revision_id FOR UPDATE`;
     const [revision] = await tx<Revision[]>`
       WITH tick AS MATERIALIZED (SELECT clock_timestamp() AS at),
@@ -173,6 +190,7 @@ export async function applyLearnerMisconceptionCorrection(sql: Sql, scope: Openi
         FROM tick
         WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
           AND e.edge_id = ${input.edgeId} AND e.privacy_epoch = ${privacyEpoch} AND upper_inf(e.tx_range)
+          AND (e.course_id IS NULL OR e.course_id = ${lockedCourseId}::uuid)
           AND e.valid_range @> tick.at
         RETURNING e.*
       )

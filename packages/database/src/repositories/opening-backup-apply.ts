@@ -43,7 +43,7 @@ import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
 import { orderBackupMisconceptionRevisions, validateBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
-import { lockMisconceptionContext, refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
+import { refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
 
 export type OpeningRestoreObjectSideEffects = {
   status: "clean" | "remaining" | "unknown";
@@ -592,7 +592,6 @@ export async function executeOpeningRestoreApply(
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
       const [lockedWorkspace] = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
       if (!lockedWorkspace) throw new Error("restore workspace owner changed");
-      if (misconceptionRevisions.length) await lockMisconceptionContext(tx, workspaceId);
       // Drift can commit while we wait for either lock, so only this read authorizes apply.
       await assertOpeningRestoreTarget(tx, backup, owner, seeded.length > 0);
       const privacyEpoch = Number(lockedWorkspace.privacy_epoch);
@@ -674,13 +673,13 @@ export async function executeOpeningRestoreApply(
           }
         }
       }
+      if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
+      if (!history) await tx`DELETE FROM opening_workspace_history_revisions
+        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
       if (misconceptionRevisions.length) {
         const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
         await refreshLearnerMisconceptionContextBlock(tx, { workspaceId, ownerUserId: owner }, privacyEpoch, clock!.at);
       }
-      if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
-      if (!history) await tx`DELETE FROM opening_workspace_history_revisions
-        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
 
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;

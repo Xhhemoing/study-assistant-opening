@@ -19,6 +19,7 @@ CREATE TABLE v3_bitemporal_misconception_edges (
   valid_range tstzrange NOT NULL CHECK (NOT isempty(valid_range) AND lower_inc(valid_range) AND NOT upper_inc(valid_range)),
   tx_range tstzrange NOT NULL CHECK (NOT isempty(tx_range) AND lower_inc(tx_range) AND NOT upper_inc(tx_range)),
   prior_revision_id uuid,
+  CONSTRAINT v3_misconception_no_self_predecessor CHECK (prior_revision_id IS DISTINCT FROM revision_id),
   CONSTRAINT v3_misconception_learner_revision CHECK (
     (status = 'learner_reported') = (origin = 'learner_correction')
     AND (status = 'learner_reported') = (learner_disposition IS NOT NULL)
@@ -43,6 +44,31 @@ CREATE TABLE v3_bitemporal_misconception_edges (
   CONSTRAINT v3_misconception_single_course EXCLUDE USING gist (edge_id WITH =, course_id WITH <>),
   CONSTRAINT v3_misconception_course_nullability EXCLUDE USING gist (edge_id WITH =, ((course_id IS NULL)::integer) WITH <>)
 );
+
+CREATE FUNCTION v3_reject_misconception_revision_cycles() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- A new cycle must include a newly inserted revision because predecessors are immutable.
+  IF EXISTS (
+    WITH RECURSIVE lineage(start_id, next_id) AS (
+      SELECT revision_id, prior_revision_id FROM inserted WHERE prior_revision_id IS NOT NULL
+      UNION
+      SELECT l.start_id, e.prior_revision_id
+        FROM lineage l JOIN v3_bitemporal_misconception_edges e ON e.revision_id = l.next_id
+        WHERE l.next_id <> l.start_id AND e.prior_revision_id IS NOT NULL
+    )
+    SELECT 1 FROM lineage WHERE start_id = next_id
+  ) THEN
+    RAISE EXCEPTION 'Misconception revision predecessors must be acyclic'
+      USING ERRCODE = '23514', CONSTRAINT = 'v3_misconception_acyclic_predecessors';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER v3_reject_misconception_revision_cycles
+  AFTER INSERT ON v3_bitemporal_misconception_edges
+  REFERENCING NEW TABLE AS inserted
+  FOR EACH STATEMENT EXECUTE FUNCTION v3_reject_misconception_revision_cycles();
 
 CREATE FUNCTION v3_misconception_close_tx_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -94,9 +120,8 @@ DECLARE
   affected_workspace_id uuid := COALESCE(NEW.workspace_id, OLD.workspace_id);
 BEGIN
   IF EXISTS (SELECT 1 FROM workspaces WHERE id = affected_workspace_id) THEN
-    -- Multi-statement SQL revision writers must lock the workspace row and then take
-    -- this advisory lock before the first revision mutation (including inserts).
-    -- The trigger reuses that lock and also fences standalone cache invalidations.
+    -- Invalidation runs after workspace, course and revision locks, before commit.
+    -- Repository writers flush it only after their final revision mutation.
     PERFORM pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || affected_workspace_id::text, 0));
     UPDATE v3_learner_context_blocks SET invalidated = true, rendered_markdown = '', byte_length = 0
       WHERE workspace_id = affected_workspace_id AND NOT invalidated;
@@ -105,8 +130,9 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER v3_invalidate_misconception_context
+CREATE CONSTRAINT TRIGGER v3_invalidate_misconception_context
   AFTER INSERT OR UPDATE OR DELETE ON v3_bitemporal_misconception_edges
+  DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION v3_invalidate_misconception_context();
 
 CREATE TABLE v3_try_misconception_handoff_receipts (
@@ -125,6 +151,7 @@ CREATE TABLE v3_try_misconception_handoff_receipts (
 
 -- Roll back the application first and retain these tables to preserve learner history and receipt claims.
 -- Before retiring the schema, stop writes and export the three tables. Then drop the receipt table,
--- context-block table, edge table, v3_misconception_close_tx_only() and v3_invalidate_misconception_context().
+-- context-block table, edge table, v3_misconception_close_tx_only(), v3_invalidate_misconception_context()
+-- and v3_reject_misconception_revision_cycles().
 -- Drop v3_workspaces_id_owner_key after dropping the dependent tables.
 -- Keep the shared extension installed.
