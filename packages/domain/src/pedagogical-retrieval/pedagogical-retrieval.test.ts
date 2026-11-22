@@ -1323,6 +1323,13 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   it.each([
     ["a textarea inside a pre HTML block after a blank line", "<details><summary>Answer</summary>\n\n<pre>\n\n~~~\n<textarea>\n~~~\n</details></textarea>forty-two</pre></details>"],
     ["SVG CDATA opening inside a fence in an HTML block", "<details><summary>Answer</summary>\n~~~\n<svg><defs><![CDATA[\n~~~\n</details>]]></defs></svg>forty-two</details>"],
+    ["a nested disclosure opened inside an HTML-block fence", "<details><summary>Answer</summary>\n~~~\n<details>\n~~~\n</details>forty-two</details>"],
+    ["a multiline attribute spanning an HTML-block fence", "<details><summary>Answer</summary>\n~~~\n<span title=\"\n~~~\n</details>\">forty-two</span></details>"],
+    ["a nonbreaking space in an HTML closing tag name", "<details><summary>Answer</summary>\n</details\u00a0>\nforty-two\n</details>"],
+    ["an ideographic space in an HTML closing tag name", "<details><summary>Answer</summary>\n</details\u3000>\nforty-two\n</details>"],
+    ["a comment closed by text inside an apparent attribute", "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n<div title=\"-->\">forty-two</div></details>"],
+    ["a real disclosure closer inside text resembling an invalid autolink", "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n<!-- note -->forty-two\n\nExample: <https://example.com/</details>>"],
+    ["a real comment terminator after a fenced literal terminator", "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n~~~\n-->\n~~~\n\n</details>\n\n<div title=\"-->\">forty-two</div></details>"],
     ["SVG opened in the preceding fence of an HTML block", "<details><summary>Answer</summary>\n~~~\n<svg>\n~~~\n<![CDATA[> </details>]]></svg>forty-two</details>"],
     ["an apparent comment opener inside an attribute", "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n<div title=\"<!--\">-->forty-two<details></details></div></details>"],
     ["an unmatched closer after a balanced disclosure", "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n<!-- note -->forty-two<details></details></details>"],
@@ -1336,6 +1343,17 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     const cues = [{ text: body, startMs: 0, endMs: 1000 }, { text: tail, startMs: 1000, endMs: 2000 }];
     for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
       expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it("seals an unclosed disclosure after an orphan comment terminator", () => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n<!-- note -->-->forty-two";
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text }),
+      chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] }),
+    ]) {
+      expectSealedEvidence(chunks, text, ["forty-two"]);
     }
   });
 
@@ -1367,10 +1385,18 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       ["a hidden SVG group", '<svg><g display=" &#78;ONE "><g/><text>x</text></g></svg>'],
       ["hidden HTML inside SVG foreignObject", '<svg><foreignObject style="display: none !important"><span>x</span></foreignObject></svg>'],
       ["hidden HTML inline text", '<span style="color: red; display: none">x</span>'],
+      ["an important display declaration", '<span style="display:none !important; display:inline">x</span>'],
+      ["a valid display declaration followed by an invalid one", '<span style="display:none; display:invalid">x</span>'],
+      ["an escaped display value and CSS comment", '<span style="display:/**/\\6e one">x</span>'],
     ].flatMap(([name, markup]) => [
       [name, "## An" + markup + "swer\nforty-two", ""],
       [name + " in a summary", "<details><summary>Hint / An" + markup + "swer</summary>forty-two</details>", ""],
     ]),
+    ["a later inline declaration making answer text visible", '## An<span style="display:none;display:inline">sw</span>er\nforty-two', ""],
+    ["a nonbreaking space inside an invalid CSS display value", '## An<span style="display:&nbsp;none">sw</span>er\nforty-two', ""],
+    ["quoted CSS content containing an apparent display declaration", '## An<span style="content: \x27;display:none;\x27">sw</span>er\nforty-two', ""],
+    ["CSS overriding an SVG presentation attribute", '## An<svg><text display="none" style="display:inline">sw</text></svg>er\nforty-two', ""],
+    ["a later important inline declaration making answer text visible", '## An<span style="display:none !important;display:inline !important">sw</span>er\nforty-two', ""],
     ["an unclosed styled HTML span with answer text", '## <span style="display:none">Answer\nforty-two', ""],
     ["an unclosed styled raw-text element with answer text", '## <textarea style="display:none">Answer\nforty-two', ""],
     ["SVG text in defs", "## An<svg><defs><text>x</text></defs></svg>swer\nforty-two", ""],
@@ -1484,6 +1510,17 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["raw text and a disclosure closer in inline Markdown code", "<details>\n<summary>Answer</summary>\n\nUse \x60</details><textarea>\x60\n</details>\n</textarea>\nforty-two\n</details>", "forty-two"],
     ["comment in a Markdown fence", "<details><summary>Answer</summary>\n\n~~~\n<!--\n~~~\n</details>\n\nPublic theorem.\n\n~~~\n-->\n~~~", "Public theorem."],
     ["an independent comment after a literal inline comment opener", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->", "Public theorem."],
+    ...[
+      ["a backslash-escaped tag", "Example: \\</details>"],
+      ["an inline link destination", "Example: [example](</details>)"],
+      ["an inline image destination", "Example: ![example](</details>)"],
+      ["an autolink whose closing angle follows two hyphens", "Example: <https://example.com/-->"],
+      ["a link reference definition destination", "[example]: </details>"],
+    ].map(([name, example]) => [
+      "an independent comment before " + name,
+      "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\n" + example,
+      "Public theorem.",
+    ]),
     ["an independent comment before an inline code example", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\nExample: \x60</details>\x60", "Public theorem."],
     ["an independent comment before raw HTML and a template", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>\n\nPublic theorem.\n\n<!-- independent note -->\n\n<textarea></details></textarea>\n\n<template></details></template>", "Public theorem."],
     ["SVG closed in an HTML-block fence", "<details><summary>Answer</summary><svg>\n~~~\n</svg>\n~~~\n<![CDATA[> </details>]]>Public theorem.", "Public theorem."],
