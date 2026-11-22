@@ -14,6 +14,7 @@ export interface MediaAnchorRange {
 
 export interface SeekableMediaElement {
   currentTime: number;
+  readonly duration?: number;
   readonly readyState: number;
   readonly paused: boolean;
   readonly seeking?: boolean;
@@ -25,6 +26,7 @@ export type MediaAnchorPlaybackPhase =
   | "idle"
   | "pending_metadata"
   | "seeking_segment"
+  | "seek_unreached"
   | "ready_segment"
   | "paused_at_end"
   | "continued_past_end"
@@ -110,6 +112,18 @@ export function formatMediaAnchorRange(anchor: MediaAnchorRange): string {
   return `${start}–${formatMediaTimestampMs(anchor.endMs)}`;
 }
 
+const SEEK_TOLERANCE_MS = 500;
+
+function isWithinSeekTolerance(anchor: MediaAnchorRange, time: number): boolean {
+  return time >= (anchor.startMs - SEEK_TOLERANCE_MS) / 1000 &&
+    time <= (anchor.endMs + SEEK_TOLERANCE_MS) / 1000;
+}
+
+function mediaEndsBeforeAnchor(media: SeekableMediaElement, anchor: MediaAnchorRange): boolean {
+  const duration = media.duration;
+  return duration !== undefined && Number.isFinite(duration) && duration < anchor.startMs / 1000;
+}
+
 /**
  * Stateful playback controller for a validated `[startMs, endMs]` anchor:
  * - Seeks to `startMs / 1000` immediately when `readyState >= 1`, or upon
@@ -119,8 +133,6 @@ export function formatMediaAnchorRange(anchor: MediaAnchorRange): string {
  * - Releases the stop bound when the learner manually resumes playback at or
  *   after the auto-paused end, allowing uninterrupted continued viewing.
  */
-const POINT_SEEK_TOLERANCE_MS = 500;
-
 export function createMediaAnchorPlaybackController(
   anchor: MediaAnchorRange | null,
   onChange?: (snapshot: MediaAnchorPlaybackSnapshot) => void,
@@ -139,7 +151,7 @@ export function createMediaAnchorPlaybackController(
     boundActive,
     autoPausedAtEnd,
     userReleasedBound,
-    rangeHighlightActive: anchor !== null && phase !== "idle" && !userReleasedBound,
+    rangeHighlightActive: anchor !== null && phase !== "idle" && phase !== "seek_unreached" && !userReleasedBound,
   });
 
   const emit = () => {
@@ -174,7 +186,9 @@ export function createMediaAnchorPlaybackController(
   const pauseAtEnd = (media: SeekableMediaElement) => {
     if (!anchor || !boundActive || pendingSeek || media.paused || seekOrigin === "manual" ||
       (media.seeking && !isProgrammaticSeek())) return;
-    if (!Number.isFinite(media.currentTime) || media.currentTime < anchor.endMs / 1000) return;
+    const time = media.currentTime;
+    if (!Number.isFinite(time) || time < anchor.endMs / 1000 ||
+      (isProgrammaticSeek() && !isWithinSeekTolerance(anchor, time))) return;
     autoPausedAtEnd = true;
     boundActive = false;
     phase = "paused_at_end";
@@ -213,8 +227,9 @@ export function createMediaAnchorPlaybackController(
     handleSeeking(media) {
       if (!anchor || pendingSeek) return;
       // A late seeking event may arrive after the programmatic seek has already rounded.
-      const atRequestedPosition = Math.abs(media.currentTime - requestedPosition) * 1000 <= POINT_SEEK_TOLERANCE_MS;
-      if (isProgrammaticSeek() && (atRequestedPosition ||
+      const atRequestedPosition = Math.abs(media.currentTime - requestedPosition) * 1000 <= SEEK_TOLERANCE_MS;
+      const clampedToEnd = media.currentTime === media.duration && mediaEndsBeforeAnchor(media, anchor);
+      if (isProgrammaticSeek() && (atRequestedPosition || clampedToEnd ||
         (seekOrigin === "programmatic_requested" && media.seeking === false))) {
         seekOrigin = "programmatic_started";
       } else {
@@ -225,19 +240,24 @@ export function createMediaAnchorPlaybackController(
       if (!anchor || pendingSeek || media.seeking) return;
       const completedProgrammaticSeek = isProgrammaticSeek();
       seekOrigin = null;
+      const time = media.currentTime;
       if (completedProgrammaticSeek) {
-        // A timeupdate can already have paused playback at the end of a short segment.
-        if (phase === "seeking_segment") {
+        if (mediaEndsBeforeAnchor(media, anchor) || !isWithinSeekTolerance(anchor, time)) {
+          boundActive = false;
+          autoPausedAtEnd = false;
+          phase = "seek_unreached";
+          emit();
+        } else if (phase === "seeking_segment") {
+          // Playback can already be paused at the end of a short segment.
           phase = "ready_segment";
           emit();
         }
         return;
       }
-      const time = media.currentTime;
       if (!Number.isFinite(time)) return;
       const outsideRange = anchor.bounded
         ? time < anchor.startMs / 1000 || time >= anchor.endMs / 1000
-        : Math.abs(time * 1000 - anchor.startMs) > POINT_SEEK_TOLERANCE_MS;
+        : Math.abs(time * 1000 - anchor.startMs) > SEEK_TOLERANCE_MS;
       if (outsideRange && phase !== "seeked_outside_range") {
         userReleasedBound = true;
         autoPausedAtEnd = false;

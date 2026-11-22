@@ -20,6 +20,8 @@ const DEFAULT_SEED_WEIGHT = 0.55;
 const DEFAULT_PPR_WEIGHT = 0.45;
 const DEFAULT_PREREQUISITE_WEIGHT = 0.15;
 const DEFAULT_MAX_RESULTS = 24;
+const PREREQUISITE_SUPPORT_MULTIPLIER = 0.25;
+const MIN_NORMAL_WEIGHT = 2 ** -1022;
 
 /**
  * Per-relation mass budget so high-degree example/illustration hubs cannot
@@ -123,7 +125,16 @@ interface TypedGraphEdge {
   readonly from: number;
   readonly to: number;
   readonly family: keyof typeof EDGE_FAMILY_BUDGET;
-  readonly weight: number;
+  readonly rawWeight: number;
+  readonly directionMultiplier?: typeof PREREQUISITE_SUPPORT_MULTIPLIER | 0.5;
+}
+
+function scaleEdgeWeight(weight: number, maxRawWeight: number, multiplier: number): number {
+  const ratio = weight / maxRawWeight;
+  if (multiplier === 1 || ratio >= MIN_NORMAL_WEIGHT) return ratio * multiplier;
+  // Apply the multiplier before rounding the ratio into the subnormal range.
+  const divisor = maxRawWeight / multiplier;
+  return Number.isFinite(divisor) ? weight / divisor : (weight * multiplier) / maxRawWeight;
 }
 
 function normalizeTypedAdjacency(nodeCount: number, edges: readonly TypedGraphEdge[]) {
@@ -131,30 +142,41 @@ function normalizeTypedAdjacency(nodeCount: number, edges: readonly TypedGraphEd
   const perNode = Array.from(
     { length: nodeCount },
     () => new Map<string, {
-      maxWeight: number;
+      maxRawWeight: number;
+      maxScaledWeight: number;
       targets: Map<number, number>;
       underflowWeights?: Map<number, number>;
     }>(),
   );
   // Find each source family's scale before summing parallel or distinct edges.
   for (const edge of edges) {
-    if (edge.weight <= 0 || !Number.isFinite(edge.weight)) continue;
+    if (edge.rawWeight <= 0 || !Number.isFinite(edge.rawWeight)) continue;
     const families = perNode[edge.from]!;
     const family = families.get(edge.family);
     if (family) {
-      family.maxWeight = Math.max(family.maxWeight, edge.weight);
+      family.maxRawWeight = Math.max(family.maxRawWeight, edge.rawWeight);
     } else {
-      families.set(edge.family, { maxWeight: edge.weight, targets: new Map() });
+      families.set(edge.family, { maxRawWeight: edge.rawWeight, maxScaledWeight: 0, targets: new Map() });
     }
   }
+  // Cancel a common direction factor before rounding very small target shares.
   for (const edge of edges) {
-    if (edge.weight <= 0 || !Number.isFinite(edge.weight)) continue;
+    if (edge.rawWeight <= 0 || !Number.isFinite(edge.rawWeight)) continue;
     const family = perNode[edge.from]!.get(edge.family)!;
-    const scaledWeight = edge.weight / family.maxWeight;
+    const relativeWeight = (edge.rawWeight / family.maxRawWeight) * (edge.directionMultiplier ?? 1);
+    family.maxScaledWeight = Math.max(family.maxScaledWeight, relativeWeight);
+  }
+  for (const edge of edges) {
+    if (edge.rawWeight <= 0 || !Number.isFinite(edge.rawWeight)) continue;
+    const family = perNode[edge.from]!.get(edge.family)!;
+    const directionMultiplier = edge.directionMultiplier ?? 1;
+    const scaledWeight = scaleEdgeWeight(edge.rawWeight, family.maxRawWeight, directionMultiplier / family.maxScaledWeight);
     if (scaledWeight === 0) {
       // Individually unrepresentable terms can add up to representable target mass.
       const weights = family.underflowWeights ??= new Map();
-      weights.set(edge.to, (weights.get(edge.to) ?? 0) + edge.weight);
+      // Accumulate in quarter units so even a subnormal raw weight retains its contribution.
+      const weight = edge.rawWeight * (directionMultiplier / PREREQUISITE_SUPPORT_MULTIPLIER);
+      weights.set(edge.to, (weights.get(edge.to) ?? 0) + weight);
     } else {
       family.targets.set(edge.to, (family.targets.get(edge.to) ?? 0) + scaledWeight);
     }
@@ -168,10 +190,10 @@ function normalizeTypedAdjacency(nodeCount: number, edges: readonly TypedGraphEd
     for (const family of families.keys()) {
       activeBudgetSum += EDGE_FAMILY_BUDGET[family] ?? 0.1;
     }
-    for (const [family, { targets, maxWeight, underflowWeights }] of families.entries()) {
+    for (const [family, { targets, maxRawWeight, maxScaledWeight, underflowWeights }] of families.entries()) {
       const familyMass = (EDGE_FAMILY_BUDGET[family] ?? 0.1) / activeBudgetSum;
       for (const [target, weight] of underflowWeights ?? []) {
-        const scaledWeight = weight / maxWeight;
+        const scaledWeight = scaleEdgeWeight(weight, maxRawWeight, PREREQUISITE_SUPPORT_MULTIPLIER / maxScaledWeight);
         if (scaledWeight > 0) targets.set(target, (targets.get(target) ?? 0) + scaledWeight);
       }
       let targetSum = 0;
@@ -222,28 +244,34 @@ function edgeDirectionPlan(
   kind: PedagogicalEdgeKind,
   fromIdx: number,
   toIdx: number,
-  weight: number,
+  rawWeight: number,
 ): TypedGraphEdge[] {
   switch (kind) {
     case "prerequisite":
       // `from` is a prerequisite of `to` (matches opening_course_knowledge).
       // Walk backward (`to -> from`) with high weight to retrieve foundations!
       return [
-        { from: toIdx, to: fromIdx, family: "prerequisite_walk", weight },
-        { from: fromIdx, to: toIdx, family: "support_walk", weight: weight * 0.25 },
+        { from: toIdx, to: fromIdx, family: "prerequisite_walk", rawWeight },
+        {
+          from: fromIdx, to: toIdx, family: "support_walk", rawWeight,
+          directionMultiplier: PREREQUISITE_SUPPORT_MULTIPLIER,
+        },
       ];
     case "requires":
     case "uses_formula":
       // `from` directly requires `to`.
       return [
-        { from: fromIdx, to: toIdx, family: "prerequisite_walk", weight },
-        { from: toIdx, to: fromIdx, family: "support_walk", weight: weight * 0.25 },
+        { from: fromIdx, to: toIdx, family: "prerequisite_walk", rawWeight },
+        {
+          from: toIdx, to: fromIdx, family: "support_walk", rawWeight,
+          directionMultiplier: PREREQUISITE_SUPPORT_MULTIPLIER,
+        },
       ];
     case "defines":
     case "states":
       return [
-        { from: fromIdx, to: toIdx, family: "definition_link", weight },
-        { from: toIdx, to: fromIdx, family: "definition_link", weight },
+        { from: fromIdx, to: toIdx, family: "definition_link", rawWeight },
+        { from: toIdx, to: fromIdx, family: "definition_link", rawWeight },
       ];
     case "proves":
     case "illustrates":
@@ -251,8 +279,8 @@ function edgeDirectionPlan(
     case "contains":
     case "next_step":
       return [
-        { from: fromIdx, to: toIdx, family: "support_walk", weight },
-        { from: toIdx, to: fromIdx, family: "support_walk", weight: weight * 0.5 },
+        { from: fromIdx, to: toIdx, family: "support_walk", rawWeight },
+        { from: toIdx, to: fromIdx, family: "support_walk", rawWeight, directionMultiplier: 0.5 },
       ];
     case "solves":
       return [];
@@ -677,8 +705,8 @@ export function rankPedagogicalEvidence(
       const chunk = survivingChunks[chunkIdx]!;
       const family = chunk.kind === "definition" ? "definition_link" : "concept_evidence";
       typedEdges.push(
-        { from: chunkIdx, to: conceptIdx, family, weight: 1 },
-        { from: conceptIdx, to: chunkIdx, family, weight: 1 },
+        { from: chunkIdx, to: conceptIdx, family, rawWeight: 1 },
+        { from: conceptIdx, to: chunkIdx, family, rawWeight: 1 },
       );
     }
   }

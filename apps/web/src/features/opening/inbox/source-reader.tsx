@@ -74,6 +74,8 @@ function mediaAnchorStatus(phase: MediaAnchorPlaybackPhase, bounded: boolean) {
       return "正在加载媒体信息，加载后将自动跳到引用位置。";
     case "seeking_segment":
       return "正在跳到引用位置。";
+    case "seek_unreached":
+      return "未能跳到引用位置。";
     case "ready_segment":
       return bounded ? "已定位到引用片段，播放至末尾会自动暂停。" : "已定位到引用时间点。";
     case "paused_at_end":

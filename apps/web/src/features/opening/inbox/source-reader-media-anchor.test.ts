@@ -170,6 +170,81 @@ describe("media anchor bounded playback controller", () => {
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ phase: "ready_segment" }));
   });
 
+  it.each([
+    { endMs: 70_000, kind: "bounded citation" },
+    { endMs: undefined, kind: "point citation" },
+  ])("reports a $kind seek clamped to the media duration", ({ endMs }) => {
+    const anchor = validateMediaAnchorRange({ startMs: 65_000, endMs })!;
+    const media = createFakeMedia();
+    let duration = 30;
+    let currentTime = 0;
+    Object.defineProperty(media, "currentTime", {
+      get: () => currentTime,
+      set: (time: number) => { currentTime = Math.min(time, duration); },
+    });
+    const onChange = vi.fn();
+    const controller = createMediaAnchorPlaybackController(anchor, onChange);
+    controller.activate(media);
+    controller.handleSeeking(media);
+    controller.handleSeeked(media);
+
+    expect(media.currentTime).toBe(30);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seek_unreached",
+      boundActive: false,
+      autoPausedAtEnd: false,
+      userReleasedBound: false,
+      rangeHighlightActive: false,
+    });
+    expect(onChange.mock.calls.map(([snapshot]) => snapshot.phase)).toEqual([
+      "seeking_segment", "seek_unreached",
+    ]);
+
+    duration = 90;
+    controller.seekToStart(media);
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "ready_segment",
+      boundActive: anchor.bounded,
+      rangeHighlightActive: true,
+    });
+  });
+
+  it.each([
+    { endMs: 70_000, landing: 68, phase: "ready_segment" },
+    { endMs: 70_000, landing: 70.501, phase: "seek_unreached" },
+    { endMs: undefined, landing: 64.5, phase: "ready_segment" },
+    { endMs: undefined, landing: 64.499, phase: "seek_unreached" },
+  ])("checks the completed seek at $landing s against the citation tolerance", ({ endMs, landing, phase }) => {
+    const anchor = validateMediaAnchorRange({ startMs: 65_000, endMs })!;
+    const media = createFakeMedia();
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    controller.handleSeeking(media);
+    void media.play();
+    media.currentTime = landing;
+    controller.handleTimeUpdate(media);
+    controller.handleSeeked(media);
+
+    expect(media.pauseMock).not.toHaveBeenCalled();
+    expect(controller.snapshot().phase).toBe(phase);
+  });
+
+  it.each([30, 64.7])("recognizes a deferred clamp at the known duration %ss", duration => {
+    const anchor = validateMediaAnchorRange({ startMs: 65_000, endMs: 70_000 })!;
+    const media = Object.assign(createFakeMedia(), { duration, seeking: true });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    media.currentTime = duration;
+    controller.handleSeeking(media);
+    media.seeking = false;
+    controller.handleSeeked(media);
+
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seek_unreached", boundActive: false, userReleasedBound: false,
+    });
+  });
+
   it("auto-pauses at currentTime * 1000 >= endMs and allows uninterrupted playback once user manually resumes", () => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
     const media = createFakeMedia(2);

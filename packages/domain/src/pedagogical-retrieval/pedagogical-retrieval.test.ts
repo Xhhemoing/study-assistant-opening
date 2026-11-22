@@ -1145,6 +1145,100 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }
   });
 
+  it.each([
+    ...["textarea", "title", "script", "style", "xmp", "iframe", "noembed", "noframes"]
+      .map(tag => [tag, '<details><summary>Answer</summary><' + tag +
+        ' data-note=">"></details></' + tag.toUpperCase() + ' >forty-two</details>']),
+    ["unclosed raw text", "<details><summary>Answer</summary><textarea></details>forty-two"],
+    ["unclosed plaintext", "<details><summary>Answer</summary><plaintext></details>forty-two"],
+    ["non-ASCII space in a false closer", "<details><summary>Answer</summary><textarea></textarea\u00a0></details>forty-two</textarea></details>"],
+    ["indented opener in contiguous HTML", "<details>\n<summary>Answer</summary>\n    <textarea>\n</details>\nforty-two\n</textarea>\n</details>"],
+    ["summary closer in raw text", "<details><summary>Hint <style></summary></style> Answer</summary>forty-two</details>"],
+    ["slash on non-void raw text", "<details><summary>Answer</summary><textarea/></details>forty-two</textarea></details>"],
+    ["double-escaped script", "<details><summary>Answer</summary><script><!--<script></script></details>--></script>forty-two</details>"],
+    ["word break in summary", "<details><summary>Hint / An<wbr>swer</summary>forty-two</details>"],
+    ["emphasis in summary", "<details><summary>Hint / An<em>sw</em>er</summary>forty-two</details>"],
+    ["link in summary", "<details><summary>Hint / An<a>sw</a>er</summary>forty-two</details>"],
+    ["soft hyphen entity in summary", "<details><summary>Hint / An&shy;swer</summary>forty-two</details>"],
+    ["decimal soft hyphen in summary", "<details><summary>Hint / An&#173;swer</summary>forty-two</details>"],
+    ["hex soft hyphen in summary", "<details><summary>Hint / An&#x00ad;swer</summary>forty-two</details>"],
+    ["zero-width characters in summary", "<details><summary>Hint / An\u00AD\u200B\u200C\u200D\uFEFFswer</summary>forty-two</details>"],
+    ["zero-width entities in summary", "<details><summary>Hint / An&ZeroWidthSpace;&#8203;&#x0200c;swer</summary>forty-two</details>"],
+    ["block tags in summary", "<details><summary><div>Hint</div><div>Answer</div></summary>forty-two</details>"],
+    ["spoiler in summary", "<details><summary>Hint / Spo<wbr>iler</summary>forty-two</details>"],
+    ["zero-width joiner in spoiler", "<details><summary>Hint / Spo&zwj;iler</summary>forty-two</details>"],
+    ["word break in heading", "## Hint / An<wbr>swer\nforty-two\n\n## Next topic"],
+    ["word break in table header", "Hint / An<wbr>swer | Note\n--- | ---\nforty-two | x"],
+    ["spaced verbatim", "\\begin{solution}\n\\begin {verbatim}\n\\end{solution}\n\\end{verbatim}\nforty-two\n\\end{solution}"],
+    ["spaced starred verbatim", "\\begin{solution}\n\\begin\t{ verbatim* }\n\\end{solution}\n\\end\t{ verbatim* }\nforty-two\n\\end{solution}"],
+    ["spaced block environment", "\\begin { solution }\nforty-two\n\\end { solution }"],
+    ["spaced inline environment", "Read this: \\begin {solution}forty-two\\end {solution}."],
+    ["spaced starred verb", ":::exercise\n\\begin {proof}\n\\verb *|\\end {proof}|\nforty-two\n\\end {proof}\n:::"],
+  ])("preserves protected visibility for %s", (name, body) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const publicText = name.startsWith("unclosed") ? undefined : "Public theorem.";
+    const text = publicText ? body + "\n\n" + publicText : body;
+    const cues = [
+      { text: body, startMs: 0, endMs: 1000 },
+      ...(publicText ? [{ text: "\n" + publicText, startMs: 1000, endMs: 2000 }] : []),
+    ];
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], publicText);
+    }
+  });
+
+  it.each(["<details>", "$$", "\\[", "\\begin{solution}", "\\begin {solution}"])(
+    "keeps inline code mentioning %s and the following prose public",
+    opener => {
+      const source = { sourceId: "captions", sourceVersion: 1 };
+      const code = "\x60" + opener + "\x60";
+      const intro = "Use " + code + " as an example.";
+      const publicText = "Public theorem.";
+      const text = intro + "\n\n" + publicText;
+      const cues = [
+        { text: intro, startMs: 0, endMs: 1000 },
+        { text: "\n" + publicText, startMs: 1000, endMs: 2000 },
+      ];
+      for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+        expectSealedEvidence(chunks, text, [], publicText);
+        expect(chunks.find(chunk => chunk.text.includes(code))?.visibility).toBe("public");
+      }
+    },
+  );
+
+  it("recognizes spaced display-math environments without consuming following prose", () => {
+    const text = "\\begin { align* }\na &= b\n\\end\t{align*}\n\nPublic theorem.";
+    const chunks = chunkPedagogicalDocument({ sourceId: "captions", sourceVersion: 1, text });
+    expectSealedEvidence(chunks, text, [], "Public theorem.");
+    expect(chunks.find(chunk => chunk.text.includes("a &= b"))).toMatchObject({
+      visibility: "public", constructKinds: expect.arrayContaining(["display_math"]),
+    });
+  });
+
+  it.each(["$$", "\\[", "\\begin {solution}"])(
+    "keeps %s literal at the start of a line within inline code",
+    opener => {
+      const source = { sourceId: "captions", sourceVersion: 1 };
+      const example = "Use \x60for example\n" + opener + "\x60 here.";
+      const publicText = "Public theorem.";
+      const text = example + "\n\n" + publicText;
+      const cues = [
+        { text: example, startMs: 0, endMs: 1000 },
+        { text: "\n" + publicText, startMs: 1000, endMs: 2000 },
+      ];
+      for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+        expectSealedEvidence(chunks, text, [], publicText);
+        expect(chunks.find(chunk => chunk.text.includes(example))?.visibility).toBe("public");
+      }
+    },
+  );
+
+  it("keeps the answer section boundary when an earlier backtick is unmatched", () => {
+    const text = "Use \x60 as an example.\n## Answer Key\n\x60 forty-two\n\n## New topic\nPublic theorem.";
+    const chunks = chunkPedagogicalDocument({ sourceId: "captions", sourceVersion: 1, text });
+    expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+  });
+
   it("ignores stronger callout markers inside quoted HTML comments", () => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     const text = "> ## Answer Key\n> [!example]\n> confidential\n> <!--\n> [!solution]\n> -->\n> ## Reset\n> public-after";
@@ -2197,6 +2291,39 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
     expect(result.pprByNodeId.support).toBeCloseTo(0.125);
     expect(result.diagnostics.totalPprMass).toBeCloseTo(1);
     expect(result.diagnostics.filteredEdges).toBe(1);
+  });
+
+  it.each([1, Number.MIN_VALUE])("preserves fractional reverse edges when the raw weight is %s", weight => {
+    const result = rankPedagogicalEvidence({
+      chunks: ["a", "b", "c", "d"].map(id => makeChunk({ id })),
+      seedScores: { a: 1 },
+      edges: [
+        { from: "b", to: "a", kind: "illustrates", weight },
+        { from: "c", to: "a", kind: "requires", weight },
+        { from: "a", to: "d", kind: "illustrates", weight },
+      ],
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { alpha: 0.5, maxIterations: 1 },
+    });
+    expect(result.pprByNodeId.a).toBeCloseTo(0.5);
+    expect(result.pprByNodeId.b).toBeCloseTo(1 / 7);
+    expect(result.pprByNodeId.c).toBeCloseTo(1 / 14);
+    expect(result.pprByNodeId.d).toBeCloseTo(2 / 7);
+    expect(result.diagnostics.totalPprMass).toBeCloseTo(1);
+  });
+
+  it.each([9e-16, 1e-15])("cancels a common reverse multiplier before subnormal rounding at %s", weight => {
+    const result = rankPedagogicalEvidence({
+      chunks: ["seed", "small", "large"].map(id => makeChunk({ id })),
+      seedScores: { seed: 1 },
+      edges: [
+        { from: "small", to: "seed", kind: "requires", weight },
+        { from: "large", to: "seed", kind: "requires", weight: 1e308 },
+      ],
+      authorization: { admissibleSourceIds: ["src-notes"] },
+      options: { alpha: 0.5, maxIterations: 1 },
+    });
+    expect(result.pprByNodeId.small).toBe(Number.MIN_VALUE);
   });
 
   it("keeps combined scores ordered with large finite blend coefficients", () => {
