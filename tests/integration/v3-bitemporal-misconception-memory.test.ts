@@ -716,6 +716,32 @@ it("rejects a course change on the same edge at the database and restore boundar
   expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${root.edgeId}`).toEqual([]);
 });
 
+it.each(["ledger", "restored root"])("rejects signed receipt replay from the %s after a privacy epoch advance", async path => {
+  const { sql, scope } = f;
+  const receipt = issueTryMisconceptionReceipt(selection, secret);
+  if (!receipt) throw new Error("Expected a receipt for the fixture selection");
+  const response = await redeem(tryRequest("POST", { receipt }));
+  expect(response.status).toBe(201);
+  const { revisionId } = await response.json();
+  if (path === "restored root") {
+    const archive = await exportMisconceptionArchive();
+    await recreateEmptyWorkspace();
+    expect(await restoreMisconceptionArchive(archive)).toMatchObject({ ok: true });
+  }
+  const readClaims = () => sql`SELECT receipt_id, initial_revision_id, payload_sha256, redeemed_at::text
+    FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`;
+  const claims = await readClaims();
+  expect(claims).toHaveLength(path === "ledger" ? 1 : 0);
+  await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
+
+  const replay = await redeem(tryRequest("POST", { receipt }));
+  expect(replay.status).toBe(409);
+  expect(await replay.json()).toMatchObject({ error: { code: "CONFLICT" } });
+  expect(await readClaims()).toEqual(claims);
+  expect(await sql`SELECT revision_id, privacy_epoch FROM v3_bitemporal_misconception_edges
+    WHERE workspace_id=${scope.workspaceId}`).toEqual([{ revision_id: revisionId, privacy_epoch: 0 }]);
+});
+
 it.each(["revision_id", "edge_id"] as const)("rejects a substituted archived root %s on signed receipt replay", async field => {
   const { sql, scope } = f;
   const receipt = issueTryMisconceptionReceipt(selection, secret);

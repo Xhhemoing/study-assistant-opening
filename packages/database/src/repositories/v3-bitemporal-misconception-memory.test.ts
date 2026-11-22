@@ -28,6 +28,18 @@ it("replaces an unusable cached context using the same database timestamp for re
   for (const call of query.mock.calls.slice(3)) expect(call.slice(1)).toContain(at);
 });
 
+it.each(["ledger", "restored root"])("rejects replay from the %s when it does not match the locked privacy epoch", async path => {
+  const privacyEpoch = 1;
+  const stale = { edgeId: scope.workspaceId, revisionId: scope.ownerUserId, matches: false };
+  const { sql, query } = mockTransaction(
+    [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: privacyEpoch }], [],
+    [{ at, expired: false }], ...(path === "ledger" ? [[stale]] : [[], [stale]]),
+  );
+  await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query).toHaveBeenCalledTimes(path === "ledger" ? 7 : 8);
+  expect(query.mock.lastCall?.slice(1)).toContain(privacyEpoch);
+});
+
 it("denies a restored root with a different revision identity even when its scope and content match", async () => {
   const { sql, query } = mockTransaction(
     [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],

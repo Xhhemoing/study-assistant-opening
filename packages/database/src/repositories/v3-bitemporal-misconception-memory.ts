@@ -239,10 +239,13 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
       SELECT at::text, at >= to_timestamp(${claim.expiresAt}::double precision / 1000) AS expired FROM tick`;
     if (clock!.expired) throw learningError("CONFLICT", "体验记录已过期。");
     const [prior] = await tx<{ edgeId: string; revisionId: string; matches: boolean }[]>`
-      SELECT edge_id AS "edgeId", initial_revision_id AS "revisionId",
-        (workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-          AND payload_sha256 = ${claim.payloadSha256}) AS matches
-      FROM v3_try_misconception_handoff_receipts WHERE receipt_id = ${claim.receiptId}`;
+      SELECT r.edge_id AS "edgeId", r.initial_revision_id AS "revisionId",
+        (r.workspace_id = ${scope.workspaceId} AND r.owner_user_id = ${scope.ownerUserId}
+          AND r.payload_sha256 = ${claim.payloadSha256} AND e.privacy_epoch = ${privacyEpoch}) AS matches
+      FROM v3_try_misconception_handoff_receipts r
+      JOIN v3_bitemporal_misconception_edges e ON e.workspace_id = r.workspace_id AND e.owner_user_id = r.owner_user_id
+        AND e.edge_id = r.edge_id AND e.revision_id = r.initial_revision_id
+      WHERE r.receipt_id = ${claim.receiptId}`;
     if (prior) {
       if (!prior.matches) throw learningError("CONFLICT", "体验记录已被使用。");
       return { edgeId: prior.edgeId, revisionId: prior.revisionId, replayed: true };
@@ -255,6 +258,7 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
     const [root] = await tx<{ revisionId: string; matches: boolean }[]>`
       SELECT revision_id AS "revisionId",
         (edge_id = ${edgeId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+          AND privacy_epoch = ${privacyEpoch}
           AND prior_revision_id IS NULL AND course_id IS NULL AND cardinality(evidence_attempt_ids) = 0
           AND origin = 'public_try_handoff' AND status = 'candidate' AND concept_key = ${claim.conceptKey}
           AND misconception_code = ${claim.misconceptionCode} AND summary = ${claim.summary}) AS matches
