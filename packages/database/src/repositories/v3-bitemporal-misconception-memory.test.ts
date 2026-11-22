@@ -1,5 +1,37 @@
-import { describe, expect, it } from "vitest";
-import { renderLearnerContextBlock } from "./v3-bitemporal-misconception-memory";
+import type { Sql } from "postgres";
+import { describe, expect, it, vi } from "vitest";
+import { readLearnerMisconceptionContextBlock, redeemTryMisconceptionHandoff, renderLearnerContextBlock } from "./v3-bitemporal-misconception-memory";
+
+const scope = { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerUserId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
+const at = "2026-11-21 12:00:00.000001+00";
+
+function mockTransaction(...responses: unknown[][]) {
+  const query = vi.fn();
+  for (const rows of responses) query.mockResolvedValueOnce(rows);
+  const sql = { begin: (run: (tx: typeof query) => unknown) => run(query) } as unknown as Sql;
+  return { sql, query };
+}
+
+it("replaces an unusable cached context using the same database timestamp for read and write", async () => {
+  const empty = { renderedMarkdown: "", byteLength: 0, revision: 2 };
+  const { sql, query } = mockTransaction([{ privacy_epoch: 0 }], [], [{ at }], [], [], [empty]);
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toEqual(empty);
+  expect(query).toHaveBeenCalledTimes(6);
+  for (const call of query.mock.calls.slice(3)) expect(call.slice(1)).toContain(at);
+});
+
+it("denies a restored root with a different revision identity even when its scope and content match", async () => {
+  const receiptId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const { sql, query } = mockTransaction(
+    [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],
+    [{ at, expired: false }], [], [{ matches: true, revisionId: scope.workspaceId }],
+  );
+  await expect(redeemTryMisconceptionHandoff(sql, scope, {
+    receiptId, expiresAt: Date.parse(at) + 1000, payloadSha256: "a".repeat(64),
+    conceptKey: "limit", misconceptionCode: "conditions", summary: "Review the conditions.",
+  })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query).toHaveBeenCalledTimes(8);
+});
 
 describe("LearnerContextBlock rendering", () => {
   it("fits multibyte text into the UTF-8 budget without truncating a code point", () => {

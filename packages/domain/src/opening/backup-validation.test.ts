@@ -1,9 +1,24 @@
 import { expect, it } from "vitest";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
-import { sourceReferences } from "./backup-validation";
+import { orderBackupMisconceptionRevisions, sourceReferences } from "./backup-validation";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const referenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+it("requires the same normalized course across every revision of a misconception edge", () => {
+  const course = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const root = {
+    workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId, course_id: course,
+  };
+  const correction = {
+    ...root, revision_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", prior_revision_id: root.revision_id,
+    course_id: course.toUpperCase(),
+  };
+  expect(orderBackupMisconceptionRevisions([correction, root])).toEqual([root, correction]);
+  expect(orderBackupMisconceptionRevisions([{ ...correction, course_id: null }, root])).toBeNull();
+  expect(orderBackupMisconceptionRevisions([root, { ...correction, course_id: referenceId }])).toBeNull();
+  expect(orderBackupMisconceptionRevisions([root, { ...correction, prior_revision_id: null, course_id: null }])).toBeNull();
+});
 
 it.each(["library_blocks", "library_revisions"])("checks only typed block citations in %s", table => {
   const documentId = "33333333-3333-4333-8333-333333333333";

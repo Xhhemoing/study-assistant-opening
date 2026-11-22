@@ -107,14 +107,22 @@ export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: Open
       SELECT privacy_epoch FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
     if (!workspace) return null;
     await lockMisconceptionContext(tx, scope.workspaceId);
-    const [cached] = await tx<ContextBlock[]>`
-      SELECT rendered_markdown AS "renderedMarkdown", byte_length AS "byteLength", revision
-      FROM v3_learner_context_blocks
-      WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-        AND privacy_epoch = ${workspace.privacy_epoch}`;
-    if (cached) return cached;
     const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
-    return writeLearnerMisconceptionContextBlock(tx, scope, workspace.privacy_epoch, clock!.at);
+    const at = clock!.at;
+    const [cached] = await tx<ContextBlock[]>`
+      SELECT b.rendered_markdown AS "renderedMarkdown", b.byte_length AS "byteLength", b.revision
+      FROM v3_learner_context_blocks b
+      WHERE b.workspace_id = ${scope.workspaceId} AND b.owner_user_id = ${scope.ownerUserId}
+        AND b.privacy_epoch = ${workspace.privacy_epoch}
+        AND b.updated_at <= ${at}::text::timestamptz
+        AND NOT EXISTS (
+          SELECT 1 FROM v3_bitemporal_misconception_edges e
+          WHERE e.workspace_id = b.workspace_id AND e.owner_user_id = b.owner_user_id AND e.privacy_epoch = b.privacy_epoch
+            AND (e.valid_range @> b.updated_at AND e.tx_range @> b.updated_at) IS DISTINCT FROM
+                (e.valid_range @> ${at}::text::timestamptz AND e.tx_range @> ${at}::text::timestamptz)
+        )`;
+    if (cached) return cached;
+    return writeLearnerMisconceptionContextBlock(tx, scope, workspace.privacy_epoch, at);
   });
 }
 
@@ -217,15 +225,16 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
           AND misconception_code = ${claim.misconceptionCode} AND summary = ${claim.summary}) AS matches
       FROM v3_bitemporal_misconception_edges WHERE edge_id = ${edgeId} AND prior_revision_id IS NULL
       ORDER BY (revision_id = ${initialRevisionId}) DESC, revision_id LIMIT 1`;
-    if (root && !root.matches) throw learningError("CONFLICT", "体验记录已被使用。");
-    const revisionId = root?.revisionId ?? initialRevisionId;
+    if (root && (!root.matches || root.revisionId.toLowerCase() !== initialRevisionId)) {
+      throw learningError("CONFLICT", "体验记录已被使用。");
+    }
     const at = clock!.at;
     if (!root) {
       await tx`
         INSERT INTO v3_bitemporal_misconception_edges
           (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin,
            privacy_epoch, valid_range, tx_range)
-        VALUES (${revisionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${claim.conceptKey},
+        VALUES (${initialRevisionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${claim.conceptKey},
           ${claim.misconceptionCode}, ${claim.summary}, 'candidate', 'public_try_handoff', ${privacyEpoch},
           tstzrange(${at}::text::timestamptz, NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))`;
     }
@@ -233,10 +242,10 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
       INSERT INTO v3_try_misconception_handoff_receipts
         (receipt_id, workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
       VALUES (${claim.receiptId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${claim.payloadSha256},
-        ${edgeId}, ${revisionId}, ${at}::text::timestamptz)
+        ${edgeId}, ${initialRevisionId}, ${at}::text::timestamptz)
       ON CONFLICT (receipt_id) DO NOTHING RETURNING receipt_id`;
     if (!claimed) throw learningError("CONFLICT", "体验记录已被使用。");
     if (!root) await refreshLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
-    return { edgeId, revisionId, replayed: Boolean(root) };
+    return { edgeId, revisionId: initialRevisionId, replayed: Boolean(root) };
   });
 }

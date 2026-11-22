@@ -39,7 +39,9 @@ CREATE TABLE v3_bitemporal_misconception_edges (
   CONSTRAINT v3_misconception_no_overlap
     EXCLUDE USING gist (workspace_id WITH =, edge_id WITH =, valid_range WITH &&, tx_range WITH &&),
   CONSTRAINT v3_misconception_single_workspace EXCLUDE USING gist (edge_id WITH =, workspace_id WITH <>),
-  CONSTRAINT v3_misconception_single_owner EXCLUDE USING gist (edge_id WITH =, owner_user_id WITH <>)
+  CONSTRAINT v3_misconception_single_owner EXCLUDE USING gist (edge_id WITH =, owner_user_id WITH <>),
+  CONSTRAINT v3_misconception_single_course EXCLUDE USING gist (edge_id WITH =, course_id WITH <>),
+  CONSTRAINT v3_misconception_course_nullability EXCLUDE USING gist (edge_id WITH =, ((course_id IS NULL)::integer) WITH <>)
 );
 
 CREATE FUNCTION v3_misconception_close_tx_only() RETURNS trigger LANGUAGE plpgsql AS $$

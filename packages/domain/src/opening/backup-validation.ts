@@ -12,10 +12,17 @@ export function isUuid(value: unknown): value is string {
 /** Order an archive's revisions independently of storage order and timestamp precision. */
 export function orderBackupMisconceptionRevisions(rows: readonly Record<string, unknown>[]) {
   const byId = new Map<string, Record<string, unknown>>();
+  const courseByEdgeId = new Map<string, string | null>();
   for (const row of rows) {
     if (!isUuid(row.revision_id) || !isUuid(row.edge_id) || !isUuid(row.workspace_id) || !isUuid(row.owner_user_id)) return null;
+    if (row.course_id != null && !isUuid(row.course_id)) return null;
     const id = row.revision_id.toLowerCase();
     if (byId.has(id)) return null;
+    const edgeId = row.edge_id.toLowerCase();
+    const course = row.course_id?.toLowerCase() ?? null;
+    const previousCourse = courseByEdgeId.get(edgeId);
+    if (previousCourse !== undefined && previousCourse !== course) return null;
+    courseByEdgeId.set(edgeId, course);
     byId.set(id, row);
   }
 

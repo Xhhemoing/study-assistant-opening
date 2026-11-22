@@ -324,6 +324,127 @@ it("renders only edges recorded and valid at the context timestamp", async () =>
   expect(atFuture.map(row => row.edgeId)).toContain(future.edgeId);
 });
 
+async function exportMisconceptionArchive(): Promise<OpeningBackup> {
+  const { sql, scope } = f;
+  const records = await readOpeningBackupRecords(sql, scope);
+  const composed = composeOpeningBackupDraft({ records, staging: {
+    snapshot: { workspaceId: scope.workspaceId, privacyEpoch: records.privacyEpoch,
+      deletionJournal: records.deletionJournal, memoryDeletions: records.memoryDeletions, sources: [] },
+    objects: [],
+  } });
+  if (!composed.ok) throw new Error(composed.errors.join(", "));
+  return JSON.parse(JSON.stringify(composed.backup));
+}
+
+async function recreateEmptyWorkspace() {
+  const { sql, scope } = f;
+  // Opening restore preserves IDs in a clean copy of the original workspace.
+  await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
+  // The history counter predates this migration and is independent of workspace cascades.
+  await sql`DELETE FROM opening_workspace_history_revisions
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+  await sql`INSERT INTO workspaces(id, owner_user_id) VALUES (${scope.workspaceId}, ${scope.ownerUserId})`;
+}
+
+function restoreMisconceptionArchive(backup: OpeningBackup) {
+  return executeOpeningRestoreApply(f.sql, { confirmLocalRestore: true, backup,
+    currentMemoryDeletions: backup.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] },
+  });
+}
+
+it("refreshes cached context after valid-time and transaction-time boundaries without a write", async () => {
+  const { sql, scope } = f;
+  const [boundary] = await sql<{ at: string }[]>`
+    SELECT (clock_timestamp() + interval '2 seconds')::text AS at`;
+  const at = boundary!.at;
+  await sql`INSERT INTO v3_bitemporal_misconception_edges
+    (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code, summary, status, origin, valid_range, tx_range)
+    VALUES
+      (${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${randomUUID()}, 'limit', 'conditions',
+       'Expiring diagnosis', 'verified', 'system_diagnosis',
+       tstzrange('-infinity', ${at}::text::timestamptz, '[)'), tstzrange('-infinity', NULL, '[)')),
+      (${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${randomUUID()}, 'limit', 'conditions',
+       'New diagnosis', 'verified', 'system_diagnosis',
+       tstzrange('-infinity', NULL, '[)'), tstzrange(${at}::text::timestamptz, NULL, '[)'))`;
+  const first = await readLearnerMisconceptionContextBlock(sql, scope);
+  expect(first).toMatchObject({ renderedMarkdown: "- 已确认：Expiring diagnosis", revision: 1 });
+  await sql`SELECT pg_sleep_until(${at}::text::timestamptz)`;
+  const after = await readLearnerMisconceptionContextBlock(sql, scope);
+  expect(after).toMatchObject({ renderedMarkdown: "- 已确认：New diagnosis", revision: 2 });
+  const [persisted] = await sql`SELECT rendered_markdown, revision FROM v3_learner_context_blocks
+    WHERE workspace_id=${scope.workspaceId}`;
+  expect(persisted).toEqual({ rendered_markdown: "- 已确认：New diagnosis", revision: 2 });
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toEqual(after);
+});
+
+it("rebuilds a context snapshot that was rendered at a future transaction boundary", async () => {
+  const { sql, scope } = f;
+  const edge = await seedEdge({ future: true });
+  const correction = await applyLearnerMisconceptionCorrection(sql, scope,
+    { edgeId: edge.edgeId, disposition: "clarified", summary: "Future correction" });
+  expect(correction.contextBlock.renderedMarkdown).toContain("Future correction");
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toEqual({
+    renderedMarkdown: "", byteLength: 0, revision: 2,
+  });
+});
+
+it("rejects a course change on the same edge at the database and restore boundaries", async () => {
+  const { sql, scope } = f;
+  const course = randomUUID(), otherCourse = randomUUID();
+  await sql`INSERT INTO courses(id, workspace_id, title, slug) VALUES
+    (${course}, ${scope.workspaceId}, 'First course', ${course}),
+    (${otherCourse}, ${scope.workspaceId}, 'Second course', ${otherCourse})`;
+  const root = await seedEdge({ courseId: course });
+  await applyLearnerMisconceptionCorrection(sql, scope,
+    { edgeId: root.edgeId, disposition: "clarified", summary: "Course correction" });
+  const archive = await exportMisconceptionArchive();
+  expect(validateOpeningRestore(archive, [], archive.memoryDeletions).allowed).toBe(true);
+  const correction = archive.tables.v3_bitemporal_misconception_edges![1] as Record<string, unknown>;
+  expect(correction).toMatchObject({ course_id: course, prior_revision_id: root.revisionId });
+  for (const [changedCourse, constraint] of [
+    [null, "v3_misconception_course_nullability"],
+    [otherCourse, "v3_misconception_single_course"],
+  ] as const) {
+    correction.course_id = changedCourse;
+    expect(validateOpeningRestore(archive, [], archive.memoryDeletions)).toMatchObject({
+      allowed: false, errors: expect.arrayContaining(["invalid misconception revision lineage"]),
+    });
+    await expect(restoreMisconceptionArchive(archive)).resolves.toMatchObject({
+      ok: false, code: "PREFLIGHT_REJECTED", mutated: false,
+    });
+    // Non-overlapping valid time isolates the course constraint from range exclusion.
+    await expect(sql`INSERT INTO v3_bitemporal_misconception_edges
+      (revision_id, workspace_id, owner_user_id, edge_id, course_id, prior_revision_id, concept_key, misconception_code,
+       summary, status, origin, learner_disposition, valid_range, tx_range)
+      VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${root.edgeId}, ${changedCourse}, ${root.revisionId},
+        'limit', 'conditions', 'Changed course', 'learner_reported', 'learner_correction', 'clarified',
+        tstzrange('1900-01-01Z', '1901-01-01Z', '[)'), tstzrange(clock_timestamp(), NULL, '[)'))`)
+      .rejects.toMatchObject({ code: "23P01", constraint_name: constraint });
+  }
+  await sql`DELETE FROM courses WHERE id=${course}`;
+  expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${root.edgeId}`).toEqual([]);
+});
+
+it("rejects a substituted archived root revision on signed receipt replay", async () => {
+  const { sql, scope } = f;
+  const receipt = issueTryMisconceptionReceipt(selection, secret);
+  const original = await redeem(tryRequest("POST", { receipt }));
+  expect(original.status).toBe(201);
+  const { edgeId, revisionId } = await original.json();
+  const archive = await exportMisconceptionArchive();
+  const root = archive.tables.v3_bitemporal_misconception_edges![0] as Record<string, unknown>;
+  expect(root).toMatchObject({ edge_id: edgeId, revision_id: revisionId });
+  const substitutedId = randomUUID();
+  root.revision_id = substitutedId;
+  await recreateEmptyWorkspace();
+  const restored = await restoreMisconceptionArchive(archive);
+  expect(restored, restored.errors.join(", ")).toMatchObject({ ok: true });
+  expect((await redeem(tryRequest("POST", { receipt }))).status).toBe(409);
+  expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${edgeId}`)
+    .toEqual([{ revision_id: substitutedId }]);
+  expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
+});
+
 it("round-trips misconception corrections through a v1 workspace backup and rebuilds derived context", async () => {
   const { sql, scope } = f;
   const receipt = issueTryMisconceptionReceipt(selection, secret);
@@ -335,14 +456,7 @@ it("round-trips misconception corrections through a v1 workspace backup and rebu
     { edgeId, disposition: "disputed", summary: "I worked through the limit again" });
   const secondCorrection = await applyLearnerMisconceptionCorrection(sql, scope,
     { edgeId, disposition: "clarified", summary: "I can explain the condition now" });
-  const records = await readOpeningBackupRecords(sql, scope);
-  const composed = composeOpeningBackupDraft({ records, staging: {
-    snapshot: { workspaceId: scope.workspaceId, privacyEpoch: records.privacyEpoch,
-      deletionJournal: records.deletionJournal, memoryDeletions: records.memoryDeletions, sources: [] },
-    objects: [],
-  } });
-  if (!composed.ok) throw new Error(composed.errors.join(", "));
-  const archive: OpeningBackup = JSON.parse(JSON.stringify(composed.backup));
+  const archive = await exportMisconceptionArchive();
   const rows = archive.tables.v3_bitemporal_misconception_edges as Record<string, unknown>[];
   expect(rows.map(row => row.revision_id)).toEqual([revisionId, firstCorrection.revisionId, secondCorrection.revisionId]);
   expect(archive.tables).not.toHaveProperty("v3_try_misconception_handoff_receipts");
@@ -353,17 +467,10 @@ it("round-trips misconception corrections through a v1 workspace backup and rebu
   const exported = [...rows];
   rows.reverse();
 
-  // Opening restore preserves IDs in a clean copy of the original workspace.
-  await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
-  // The history counter predates this migration and is independent of workspace cascades.
-  await sql`DELETE FROM opening_workspace_history_revisions
-    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-  await sql`INSERT INTO workspaces(id, owner_user_id) VALUES (${scope.workspaceId}, ${scope.ownerUserId})`;
+  await recreateEmptyWorkspace();
   const counts = await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId);
   expect(counts.v3_bitemporal_misconception_edges).toBe(0);
-  const restore = () => executeOpeningRestoreApply(sql, { confirmLocalRestore: true, backup: archive,
-    currentMemoryDeletions: archive.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] },
-  });
+  const restore = () => restoreMisconceptionArchive(archive);
   await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
   await expect(restore()).resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
   expect(await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId)).toEqual(counts);
