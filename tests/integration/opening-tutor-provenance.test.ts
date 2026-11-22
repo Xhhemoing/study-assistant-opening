@@ -67,6 +67,8 @@ describe("saved tutor material provenance", () => {
     const courseA = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Tutor memory course A", slug: "tutor-memory-a" });
     const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Tutor memory course B", slug: "tutor-memory-b" });
     const material = await source();
+    const courseAMaterial = { workspaceId: scope.workspaceId, courseId: courseA.id, assetType: "source" as const, assetId: material };
+    await courses.addAssetMembership({ ...courseAMaterial, role: "core", visibility: "course", purpose: "teaching" });
     const origin = await conversations.create(scope, { title: "Standalone origin", courseId: null });
     const evidence = await append(origin.id, [material]);
     const globalEvidence = await append(origin.id);
@@ -91,6 +93,15 @@ describe("saved tutor material provenance", () => {
     const metadataTarget = { scope, jobId: first.jobId, assistantTurnId: first.assistantTurnId, claimToken: completed?.claimToken };
     await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(true);
 
+    const direct = await append(conversation.id, [material]);
+    const directClaim = (await jobs.claim(direct.jobId))!;
+    await jobs.completeTurn({
+      scope, jobId: direct.jobId, assistantTurnId: direct.assistantTurnId, claimToken: directClaim.claimToken,
+      text: "Direct course citation", citations: [], candidates: [], contextSourceRefs: [{ sourceId: material, sourceVersion: 0 }],
+    });
+    const directTarget = { ...metadataTarget, jobId: direct.jobId, assistantTurnId: direct.assistantTurnId, claimToken: directClaim.claimToken };
+    await expect(jobs.canAppendCompletedTurnCandidates(directTarget)).resolves.toBe(true);
+
     const pending = await append(origin.id);
     await sql`UPDATE opening_turns SET context_anchor=${sql.json({ purpose: "learning_help", courseId: courseA.id.toUpperCase() })} WHERE id=${pending.turnId}`;
     const claim = (await jobs.claim(pending.jobId))!;
@@ -100,6 +111,8 @@ describe("saved tutor material provenance", () => {
     await expect(jobs.assertGlobalMemoriesCurrent(scope, [a.id])).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.assertGlobalMemoriesCurrent(scope, [b.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).resolves.toBeUndefined();
+    await courses.removeAssetMembership(courseAMaterial);
+    await expect(jobs.canAppendCompletedTurnCandidates(directTarget)).resolves.toBe(false);
     const membership = { workspaceId: scope.workspaceId, courseId: courseB.id, assetType: "source" as const, assetId: material };
     for (const purpose of [null, "teaching", "mock_exam"] as const) {
       await courses.addAssetMembership({ ...membership, role: "core", purpose, visibility: "course" });
@@ -112,7 +125,7 @@ describe("saved tutor material provenance", () => {
     await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(false);
     await courses.removeAssetMembership(sameCourse);
-    await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(true);
+    await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(false);
     const publication = { ...send, privacyEpoch: await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope) };
     const publish = vi.fn(async () => {});
     await jobs.withStreamPublication(scope, pending.jobId, publication, publish);
@@ -124,6 +137,8 @@ describe("saved tutor material provenance", () => {
       { ...publication, privacyEpoch: publication.privacyEpoch + 1 }, publish)).rejects.toMatchObject({ code: "PRIVACY_EPOCH_MISMATCH" });
     await sql`UPDATE opening_sources SET upload_state='rejected' WHERE id=${material}`;
     await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.assertSendAuthorized(scope, pending.jobId, { ...send, contextSourceRefs: [], memoryLineageSourceIds: [] }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
     await sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${material}`;
     await sql`UPDATE opening_turns SET context_anchor=NULL WHERE id=${pending.turnId}`;
     await expect(jobs.assertGlobalMemoriesCurrent(scope, [a.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });

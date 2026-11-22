@@ -93,13 +93,18 @@ export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
 /** SQL admission shared by live context and backup, with the latter retaining historical versions. */
 export function contextSourceRefsIncluded(
   db: Db, workspaceId: string, refs: FragmentFactory, allowHistoricalVersions = false, requireAvailability = !allowHistoricalVersions,
+  bareSourceIds?: FragmentFactory,
 ): Fragment {
+  const versionless: FragmentFactory = () => bareSourceIds ? db`input.unversioned` : db`false`;
+  const safeRefs: FragmentFactory = () => db`CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END`;
   return db`
     COALESCE(jsonb_typeof(${refs()}) = 'array', false)
     AND NOT EXISTS (
-      SELECT 1 FROM jsonb_array_elements(
-        CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END
-      ) provenance_ref
+      SELECT 1 FROM ${bareSourceIds ? db`(
+        SELECT elem, false AS unversioned FROM jsonb_array_elements(${safeRefs()}) elem
+        UNION ALL
+        SELECT jsonb_build_object('sourceId', sid.id), true FROM unnest(${bareSourceIds()}) sid(id)
+      ) AS input(provenance_ref, unversioned)` : db`jsonb_array_elements(${safeRefs()}) provenance_ref`}
       WHERE NOT (
           provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
           AND jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
@@ -116,8 +121,8 @@ export function contextSourceRefsIncluded(
           jsonb_typeof(provenance_ref) IS DISTINCT FROM 'object'
           OR jsonb_typeof(provenance_ref->'sourceId') IS DISTINCT FROM 'string'
           OR (provenance_ref->>'sourceId') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-          OR jsonb_typeof(provenance_ref->'sourceVersion') IS DISTINCT FROM 'number'
-          OR (provenance_ref->>'sourceVersion') !~ '^[0-9]+$'
+          OR (NOT ${versionless()} AND (jsonb_typeof(provenance_ref->'sourceVersion') IS DISTINCT FROM 'number'
+            OR (provenance_ref->>'sourceVersion') !~ '^[0-9]+$'))
           OR CASE WHEN jsonb_typeof(provenance_ref->'sourceVersion') = 'number'
             AND (provenance_ref->>'sourceVersion') ~ '^[0-9]+$'
             THEN (provenance_ref->>'sourceVersion')::numeric > 9007199254740991 ELSE false END
@@ -128,8 +133,9 @@ export function contextSourceRefsIncluded(
               AND provenance_source.upload_state = 'uploaded'
               AND (${!requireAvailability} OR NOT EXISTS (SELECT 1 FROM opening_source_versions provenance_version
                 WHERE provenance_version.workspace_id=${workspaceId} AND provenance_version.source_id=provenance_source.id
-                  AND provenance_version.version::text=provenance_ref->>'sourceVersion' AND provenance_version.availability='unavailable'))
-              AND (${allowHistoricalVersions} OR provenance_source.version::text = provenance_ref->>'sourceVersion')
+                  AND provenance_version.version::text=COALESCE(provenance_ref->>'sourceVersion', provenance_source.version::text)
+                  AND provenance_version.availability='unavailable'))
+              AND (${allowHistoricalVersions} OR ${versionless()} OR provenance_source.version::text = provenance_ref->>'sourceVersion')
               AND NOT EXISTS (
                 SELECT 1 FROM opening_privacy_exclusions provenance_exclusion
                 WHERE provenance_exclusion.workspace_id = ${workspaceId}
@@ -237,8 +243,8 @@ export function memoryDependencyWalk(db: Db, alias: MemoryAlias = "m"): Fragment
     SELECT lower(dep.id)
     FROM jsonb_array_elements_text(
       CASE WHEN jsonb_typeof(${sourceTurnIds()}) = 'array' THEN ${sourceTurnIds()} ELSE '[]'::jsonb END
-    ) AS st(turn_id)
-    JOIN opening_turns dt ON dt.id = ${lineageUuid(db, () => db`st.turn_id`)} AND dt.workspace_id = ${workspaceId()}
+    ) AS ref(turn_id)
+    JOIN opening_turns dt ON dt.id::text = lower(ref.turn_id) AND dt.workspace_id = ${workspaceId()}
     CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
     UNION ${memoryDependencyStep(db, workspaceId)}`;
 }
@@ -268,7 +274,6 @@ export function memoryTransitiveDependenciesActive(db: Db, alias: MemoryAlias = 
         AND dep_m.workspace_id = ${workspaceId()}
         AND dep_m.status = 'active'
         AND ${memoryCourseAllows(db, () => db`dep_m.course_id`, courseId, workspaceId)}
-        AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`dep_m`)}
         AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
     )
   )`;
@@ -278,40 +283,19 @@ export function lineageUuid(db: Db, value: FragmentFactory): Fragment {
   return db`CASE WHEN (${value()}) ~* ${UUID.source} THEN (${value()})::uuid END`;
 }
 
-/** Check intermediate global edges inside the same walk, including legacy stored lineage. */
-export function globalMemoryDoesNotDependOnCourseMemory(db: Db, memory: FragmentFactory): Fragment {
-  return db`(${memory()}.course_id IS NOT NULL OR NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${memory()}.source_turn_ids) = 'array'
-      THEN ${memory()}.source_turn_ids ELSE '[]'::jsonb END) st(turn_id)
-    JOIN opening_turns origin ON origin.id = ${lineageUuid(db, () => db`st.turn_id`)}
-      AND origin.workspace_id = ${memory()}.workspace_id
-    WHERE EXISTS (
-      SELECT 1 FROM ${memoryDependencyRows(db, () => db`origin.context_source_refs`)} edge
-      JOIN opening_memories ancestor ON ancestor.id = ${lineageUuid(db, () => db`edge.id`)}
-        AND ancestor.workspace_id = origin.workspace_id AND ancestor.course_id IS NOT NULL
-    ) OR (
-      origin.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-      AND NOT (origin.context_source_refs @? '$[*].memoryDependencyIds[*]')
-      AND ${turnLineageCourse(db, "origin")} IS NOT NULL
-    )
-  ))`;
-}
-
-export function turnLineageCourse(db: Db, alias: "a" | "t" | "origin"): Fragment {
-  const turn = () => alias === "a" ? db`a` : alias === "t" ? db`t` : db`origin`;
+export function turnLineageCourse(db: Db, alias: "a" | "t", conversationCourse?: FragmentFactory): Fragment {
+  const turn: FragmentFactory = () => alias === "a" ? db`a` : db`t`;
+  const course = conversationCourse ?? (() => db`(SELECT tc.course_id FROM opening_conversations tc
+    WHERE tc.id = ${turn()}.conversation_id AND tc.workspace_id = ${turn()}.workspace_id)`);
   return db`(
-    SELECT COALESCE(tc.course_id, CASE WHEN paired.id IS NOT NULL THEN paired.course_id
-      ELSE ${lineageUuid(db, () => db`${turn()}.context_anchor->>'courseId'`)} END)
-    FROM opening_conversations tc
-    LEFT JOIN LATERAL (
-      SELECT tu.id, ${lineageUuid(db, () => db`tu.context_anchor->>'courseId'`)} AS course_id
-      FROM opening_tutor_jobs tj
-      JOIN opening_turns tu ON tu.id = tj.user_turn_id AND tu.workspace_id = tj.workspace_id
-        AND tu.conversation_id = tj.conversation_id AND tu.role = 'user'
-      WHERE ${turn()}.role = 'assistant' AND tc.course_id IS NULL AND tj.assistant_turn_id = ${turn()}.id
-        AND tj.workspace_id = tc.workspace_id AND tj.conversation_id = tc.id
-    ) paired ON true
-    WHERE tc.id = ${turn()}.conversation_id AND tc.workspace_id = ${turn()}.workspace_id
+    COALESCE(${course()}, ${lineageUuid(db, () => db`${turn()}.context_anchor->>'courseId'`)},
+      CASE WHEN ${turn()}.role = 'assistant' THEN (
+        SELECT ${lineageUuid(db, () => db`tu.context_anchor->>'courseId'`)} FROM opening_turns tu
+        WHERE tu.workspace_id = ${turn()}.workspace_id AND tu.conversation_id = ${turn()}.conversation_id AND tu.role = 'user'
+          AND tu.id = (SELECT tj.user_turn_id FROM opening_tutor_jobs tj
+            WHERE tj.assistant_turn_id = ${turn()}.id AND tj.workspace_id = ${turn()}.workspace_id
+              AND tj.conversation_id = ${turn()}.conversation_id)
+      ) END)
   )`;
 }
 
@@ -324,21 +308,23 @@ export function turnDependencyWalk(db: Db, alias: "a" | "t"): Fragment {
   const contextRefs: FragmentFactory = () => alias === "a" ? db`a.context_source_refs` : db`t.context_source_refs`;
   const workspaceId: FragmentFactory = () => alias === "a" ? db`a.workspace_id` : db`t.workspace_id`;
   return db`
-    SELECT lower(dep.id)
-    FROM ${memoryDependencyRows(db, contextRefs)} AS dep
+    SELECT lower(dep.id) FROM ${memoryDependencyRows(db, contextRefs)} AS dep
     UNION ${memoryDependencyStep(db, workspaceId)}`;
 }
 
 function memoryDependencyStep(db: Db, workspaceId: FragmentFactory): Fragment {
   return db`
-    SELECT lower(dep.id)
+    SELECT CASE WHEN child.course_id IS NOT NULL AND child.course_id IS DISTINCT FROM pm.course_id
+      THEN NULL ELSE lower(dep.id) END
     FROM mem_deps prev
     JOIN opening_memories pm ON pm.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND pm.workspace_id = ${workspaceId()}
     CROSS JOIN LATERAL jsonb_array_elements_text(
       CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
     ) AS st(turn_id)
     JOIN opening_turns dt ON dt.id = ${lineageUuid(db, () => db`st.turn_id`)} AND dt.workspace_id = ${workspaceId()}
-    CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep`;
+    CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
+    LEFT JOIN opening_memories child ON child.workspace_id = pm.workspace_id
+      AND child.id = ${lineageUuid(db, () => db`dep.id`)}`;
 }
 
 /** A turn may carry only memory usable both there and in the new consumer's course. */
@@ -360,7 +346,6 @@ export function turnTransitiveDependenciesActive(
         AND dep_m.status = 'active'
         AND ${memoryCourseAllows(db, memoryCourseId, ownCourseId, workspaceId)}
         ${targetCourseId ? db`AND ${memoryCourseAllows(db, memoryCourseId, targetCourseId, workspaceId)}` : db``}
-        AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`dep_m`)}
         AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
     )
   )`;
@@ -397,30 +382,25 @@ export function hasMemoryBearingRef(refs: unknown): boolean {
     && (ref.memoryOnly === true || Object.hasOwn(ref, "memoryDependencyIds")));
 }
 
-/** Validate backing only. The calling statement validates the declared dependencies separately. */
-export function turnMemoryOnlySourcesBacked(
-  db: Db, alias: "a" | "t", workspaceId: string, ownerUserId: string,
-  ownCourseId: FragmentFactory, excludeMemoryId: FragmentFactory = () => db`NULL::uuid`,
+/** Candidate roots for a saved memory-only reference, grouped by reference. */
+export function turnMemoryOnlyBackingIds(
+  db: Db, refs: FragmentFactory, ownCourse: FragmentFactory, scope: { workspaceId: string; ownerUserId: string },
 ): Fragment {
-  const refs: FragmentFactory = () => alias === "a" ? db`a.context_source_refs` : db`t.context_source_refs`;
-  const hasIds: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
-  return db`NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements(
-      CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END
-    ) mem_ref
-    CROSS JOIN LATERAL (SELECT ${excludeMemoryId()} AS id) excluded
-    WHERE (mem_ref->>'memoryOnly') = 'true' AND NOT EXISTS (
-      SELECT 1 FROM opening_memories m
-      WHERE m.workspace_id = ${workspaceId} AND m.status = 'active'
-        AND m.id IS DISTINCT FROM excluded.id
+  const attributed: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
+  return db`(
+    SELECT COALESCE(jsonb_agg(to_jsonb(ARRAY(
+      SELECT m.id FROM opening_memories m
+      WHERE m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
         AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at > clock_timestamp()))
-        AND (${hasIds()} AND EXISTS (
-          SELECT 1 FROM ${memoryDependencyRows(db, refs)} d WHERE lower(d.id) = m.id::text
-        ) OR (NOT (${hasIds()}) AND ${ownCourseId()} IS NULL AND m.course_id IS NULL
-          AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`m`)}))
+        AND (m.course_id IS NULL OR m.course_id = ${ownCourse()})
+        AND (${attributed()} AND m.id::text IN (SELECT lower(d.id) FROM ${memoryDependencyRows(db, refs)} d)
+          OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND m.course_id IS NULL)
         AND ${memoryBacksSource(db, () => db`m.source_turn_ids`,
-          () => lineageUuid(db, () => db`mem_ref->>'sourceId'`), workspaceId, ownerUserId, hasIds)}
-    )
+          () => lineageUuid(db, () => db`mem_ref->>'sourceId'`), scope.workspaceId, scope.ownerUserId, attributed)}
+      ORDER BY m.id
+    ))), '[]'::jsonb)
+    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END) mem_ref
+    WHERE (mem_ref->>'memoryOnly') = 'true'
   )`;
 }
 
@@ -434,10 +414,8 @@ export function memoryDependencySummary(
         dep_m.id IS NOT NULL AND dep_m.id IS DISTINCT FROM ${excludeMemoryId()}
         AND dep_m.status = 'active'
         AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp()))
-        AND ${memoryCourseAllows(db, () => db`dep_m.course_id`, courseId, workspaceId)}
-        AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`dep_m`)}, false
+        AND ${memoryCourseAllows(db, () => db`dep_m.course_id`, courseId, workspaceId)}, false
       )), true) AS all_active,
-      count(dep_m.course_id) > 0 AS has_course_memory,
       min(dep_m.expires_at) FILTER (WHERE dep_m.kind = 'temporary') AS temporary_expires_at,
       COALESCE(jsonb_agg(d.dep_id ORDER BY d.dep_id), '[]'::jsonb) AS memory_ids
     FROM mem_deps d
@@ -461,17 +439,50 @@ export function memoryDependencyGraphCtes(db: Db, workspaceId: string, seeds: Fr
       JOIN opening_turns t ON t.id = ${lineageUuid(db, () => db`origin.turn_id`)} AND t.workspace_id = parent.workspace_id
       CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
     ), dependency_status AS (
-    SELECT d.root_id, d.dep_id, m.course_id,
+    SELECT d.root_id, d.dep_id, m.course_id, m.source_turn_ids,
       m.status = 'active'
         AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at > clock_timestamp()))
-        AND (m.course_id IS NULL OR (c.id IS NOT NULL AND (d.parent_id IS NULL OR parent.course_id = m.course_id)))
-        AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`m`)} AS usable,
+        AND (m.course_id IS NULL OR (c.id IS NOT NULL AND (d.parent_id IS NULL OR parent.course_id = m.course_id))) AS usable,
       CASE WHEN m.kind = 'temporary' THEN m.expires_at END AS expires_at
     FROM mem_deps d
     LEFT JOIN opening_memories m ON m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND m.workspace_id = ${workspaceId}
     LEFT JOIN opening_memories parent ON parent.id = d.parent_id AND parent.workspace_id = m.workspace_id
     LEFT JOIN courses c ON c.id = m.course_id AND c.workspace_id = m.workspace_id AND c.archived_at IS NULL
     )`;
+}
+
+export type MemoryDependencyStatus = {
+  root_id: string; dep_id: string; course_id: string | null; expires_at: Date | null; usable: boolean;
+};
+
+export async function readMemoryDependencyStatus(db: Db, workspaceId: string, rootIds: string[]) {
+  const byRoot = new Map<string, MemoryDependencyStatus[]>();
+  if (!rootIds.length) return byRoot;
+  const rows = await db<MemoryDependencyStatus[]>`
+    WITH RECURSIVE ${memoryDependencyGraphCtes(db, workspaceId,
+      () => db`SELECT id FROM unnest(${rootIds}::uuid[]) roots(id)`)}
+    SELECT root_id, dep_id, course_id, expires_at, usable FROM dependency_status`;
+  for (const row of rows) {
+    const group = byRoot.get(row.root_id);
+    if (group) group.push(row);
+    else byRoot.set(row.root_id, [row]);
+  }
+  return byRoot;
+}
+
+/** Resolve exact consumed IDs and choose an active authority for each unattributed reference. */
+export function resolveMemoryDependencyStatus(
+  graph: ReadonlyMap<string, MemoryDependencyStatus[]>, ids: string[], backings: string[][],
+  courseId: string | null, excludedId?: string,
+): MemoryDependencyStatus[] | null {
+  const usable = (id: string) => {
+    const nodes = graph.get(id);
+    return nodes?.length && nodes.every(node => node.usable && node.dep_id !== excludedId
+      && (node.course_id === null || node.course_id === courseId)) ? nodes : null;
+  };
+  const groups = [...ids.map(usable),
+    ...backings.map(candidates => candidates.map(usable).find(nodes => nodes !== null) ?? null)];
+  return groups.some(group => group === null) ? null : groups.flatMap(group => group ?? []);
 }
 
 export function turnHasMemoryDependencies(db: Db): Fragment {

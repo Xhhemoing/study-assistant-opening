@@ -2,13 +2,12 @@ import type { Sql, TransactionSql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import { isMemoryEligible } from "@aistudy/domain";
 import {
-  contextSourceRefsIncluded, memoryCourseAllows, memoryDependencySummary, memoryTransitiveDepsCte,
+  memoryCourseAllows, memoryDependencySummary, memoryTransitiveDepsCte,
   mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs,
   type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockOwnedWorkspace, memorySourceTurnLineageActive } from "./opening-memory-admission";
-import { createOpeningPrivacyRepository } from "./opening-privacy";
+import { lockOwnedWorkspace, readMemoryOrigins } from "./opening-memory-admission";
 import { mapMemoryRow } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -21,7 +20,7 @@ export type LoadedMemoryContext = {
 };
 
 /**
- * One scope query. A memory is excluded when any source turn is missing, foreign,
+ * Read eligible rows before validating their backing turns. Exclude missing, foreign,
  * unowned, references a missing, revoked, excluded, or version-drifted source,
  * or transitively depends on a memory that is no longer usable in its course.
  */
@@ -37,80 +36,53 @@ async function readMemoryContext(
   ancestorMemoryIds: string[];
 }>> {
   await lockOwnedWorkspace(db, scope);
-  const excluded = excludedSourceIds
-    ?? await createOpeningPrivacyRepository(db).listExcludedSourceIds(scope);
   const workspace: FragmentFactory = () => db`m.workspace_id`;
   const course: FragmentFactory = () => db`m.course_id`;
+  const eligibleForScope: FragmentFactory = () => db`m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
+    AND jsonb_array_length(m.source_turn_ids) > 0
+    AND ${memoryCourseAllows(db, course, () => db`${activeCourseId}::uuid`, workspace)}`;
+  // Avoid reaching the dependency planner at all when there is no sourced memory.
+  const [hasEvidence] = await db`SELECT m.id FROM opening_memories m WHERE ${eligibleForScope()} LIMIT 1`;
+  if (!hasEvidence) return [];
   const rows = await db`
-    SELECT m.*, (
-      SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM opening_turns t
-      CROSS JOIN LATERAL jsonb_array_elements(COALESCE(${turnContextSourceRefs(db, "t")}, '[]'::jsonb)) ref
-      WHERE t.id::text IN (SELECT lower(elem) FROM jsonb_array_elements_text(m.source_turn_ids) AS elem)
-        AND t.workspace_id = ${scope.workspaceId}
-    ) AS material_source_refs,
-    chain.temporary_expires_at AS ancestor_temporary_expires_at,
-    chain.memory_ids AS ancestor_memory_ids
-    FROM opening_memories m
-    CROSS JOIN LATERAL (
-      ${memoryDependencySummary(db, memoryTransitiveDepsCte(db), workspace, course, () => db`m.id`)}
-    ) chain
-    WHERE m.workspace_id = ${scope.workspaceId}
-      AND m.status = 'active'
-      AND ${memoryCourseAllows(db, course, () => db`${activeCourseId}::uuid`, workspace)}
-      AND jsonb_array_length(m.source_turn_ids) > 0
-      AND chain.all_active
-      AND NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
-        WHERE NOT EXISTS (
-          SELECT 1 FROM opening_turns t
-          INNER JOIN opening_conversations c ON c.id = t.conversation_id
-          WHERE t.id::text = lower(ref.turn_id)
-            AND t.workspace_id = ${scope.workspaceId}
-            AND c.workspace_id = ${scope.workspaceId}
-            AND c.owner_user_id = ${scope.ownerUserId}
+    WITH eligible AS MATERIALIZED (
+      SELECT m.*, (
+        SELECT jsonb_build_object(
+          'turn_ids', COALESCE(jsonb_agg(t.id), '[]'::jsonb),
+          'refs', jsonb_path_query_array(COALESCE(jsonb_agg(${turnContextSourceRefs(db, "t")}), '[]'::jsonb), '$[*][*]')
         )
-        OR EXISTS (
-          SELECT 1 FROM opening_turns t
-          WHERE t.id::text = lower(ref.turn_id) AND t.workspace_id = ${scope.workspaceId}
-            AND (
-              NOT (${contextSourceRefsIncluded(db, scope.workspaceId, () => turnContextSourceRefs(db, "t"))}) OR
-              NOT (${memorySourceTurnLineageActive(db, scope)}) OR
-              EXISTS (
-                SELECT 1 FROM unnest(t.source_ids) AS sid(id)
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM opening_sources s
-                  WHERE s.id = sid.id AND s.workspace_id = ${scope.workspaceId}
-                    AND s.upload_state = 'uploaded'
-                )
-                OR sid.id = ANY(${excluded}::uuid[])
-              )
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(
-                  CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END
-                ) AS citation
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM opening_sources s
-                  WHERE s.id::text = citation->>'sourceId'
-                    AND s.workspace_id = ${scope.workspaceId}
-                    AND s.upload_state = 'uploaded'
-                    AND s.version::text = citation->>'sourceVersion'
-                )
-                OR citation->>'sourceId' = ANY(${excluded}::text[])
-              )
-            )
-        )
-      )
-    ORDER BY m.created_at ASC`;
+        FROM jsonb_array_elements_text(m.source_turn_ids) ref(turn_id)
+        JOIN opening_turns t ON t.id::text = lower(ref.turn_id) AND t.workspace_id = m.workspace_id
+      ) AS source_evidence, (
+        SELECT to_jsonb(chain) FROM (
+          ${memoryDependencySummary(db, memoryTransitiveDepsCte(db), workspace, course, () => db`m.id`)}
+        ) chain
+      ) AS ancestry
+      FROM opening_memories m
+      WHERE ${eligibleForScope()}
+    )
+    SELECT eligible.*, source_evidence->'refs' AS material_source_refs,
+      source_evidence->'turn_ids' AS evidence_turn_ids,
+      ancestry->>'temporary_expires_at' AS ancestor_temporary_expires_at, ancestry->'memory_ids' AS ancestor_memory_ids
+    FROM eligible WHERE (ancestry->>'all_active')::boolean
+      AND jsonb_array_length(source_evidence->'turn_ids') = jsonb_array_length(source_turn_ids)
+    ORDER BY created_at ASC`;
+  const origins = await readMemoryOrigins(db, scope, rows.flatMap(row => Array.isArray(row.evidence_turn_ids) ? [{
+    id: String(row.id), excludedId: String(row.id), course_id: row.course_id as string | null, turn_ids: row.evidence_turn_ids as string[],
+  }] : []), { excluded: excludedSourceIds });
   return rows.flatMap(row => {
-    let ancestorTemporaryExpiresAt: string | undefined;
-    if (row.ancestor_temporary_expires_at != null) {
-      const expiry = new Date(row.ancestor_temporary_expires_at as Date | string);
-      if (Number.isNaN(expiry.getTime())) return [];
-      ancestorTemporaryExpiresAt = expiry.toISOString();
-    }
-    const ancestorMemoryIds = parseContextMemoryDependencyIds([{ memoryDependencyIds: row.ancestor_memory_ids }]) ?? [];
-    return [{ memory: mapMemoryRow(row as Record<string, unknown>),
-      sourceRefs: parseContextSourceRefs(row.material_source_refs) ?? [], ancestorTemporaryExpiresAt, ancestorMemoryIds }];
+    const origin = origins.get(String(row.id));
+    const sourceRefs = parseContextSourceRefs(row.material_source_refs);
+    if (origin === null || sourceRefs === null) return [];
+    const expiry = Math.min(row.ancestor_temporary_expires_at == null
+      ? Infinity : new Date(row.ancestor_temporary_expires_at as string | Date).getTime(), origin?.expiresAt ?? Infinity);
+    if (Number.isNaN(expiry)) return [];
+    const ancestorTemporaryExpiresAt = Number.isFinite(expiry) ? new Date(expiry).toISOString() : undefined;
+    const ancestorMemoryIds = [...new Set([
+      ...(parseContextMemoryDependencyIds([{ memoryDependencyIds: row.ancestor_memory_ids }]) ?? []),
+      ...(origin?.ids ?? []),
+    ])].sort();
+    return [{ memory: mapMemoryRow(row as Record<string, unknown>), sourceRefs, ancestorTemporaryExpiresAt, ancestorMemoryIds }];
   });
 }
 

@@ -60,6 +60,26 @@ describe("opening memory context admission", () => {
     await courses.setArchived({ ...scope, courseId: course.id, archived: true });
     expect(await ids(course.id)).toEqual([global]);
   });
+
+  it("filters memories when source purpose or course membership no longer allows their material", async () => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory materials", slug: "memory-materials" });
+    const sourceId = await insertSource(sql, scope);
+    const turnId = await insertOwnedTurn(sql, scope, { sourceIds: [sourceId] });
+    const scoped = await insertMemory(sql, scope, "Course evidence", [turnId]);
+    const global = await insertMemory(sql, scope, "Workspace evidence", [turnId]);
+    await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${scoped}`;
+    const membership = { workspaceId: scope.workspaceId, courseId: course.id, assetType: "source" as const, assetId: sourceId };
+    const ids = async () => (await memories.listContext(scope, new Date().toISOString(), course.id)).memories.map(memory => memory.id);
+    expect(await ids()).toEqual([global]);
+    await courses.addAssetMembership({ ...membership, role: "core", visibility: "course", purpose: "teaching" });
+    expect(await ids()).toEqual([scoped]);
+    await sql`UPDATE course_asset_memberships SET purpose='mock_exam' WHERE workspace_id=${scope.workspaceId} AND asset_id=${sourceId}`;
+    expect(await ids()).toEqual([]);
+    await courses.removeAssetMembership(membership);
+    expect(await ids()).toEqual([global]);
+  });
   it("hides memories with a missing or foreign turn and a foreign conversation owner", async () => {
     const missing = await insertMemory(fixture.sql, fixture.scope, "missing turn", [randomUUID()]);
     const foreignTurn = await insertOwnedTurn(fixture.sql, fixture.otherScope);

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import { createCourseMembershipRepository, createOpeningConversationRepository, createOpeningMemoryRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
 beforeEach(async () => {
@@ -72,6 +73,30 @@ it("bounds history by whole exchanges and excludes oversized recent turns", asyn
   const { current, jobs, prior } = await seed();
   await f.sql`UPDATE opening_turns SET text=${'x'.repeat(12001)} WHERE id=${prior.turnId}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
+});
+
+it("tracks temporary ancestors of legacy global memory-only history", async () => {
+  const { current, prior, jobs } = await seed();
+  const memories = createOpeningMemoryRepository(f.sql);
+  const sourceId = await insertSource(f.sql, f.scope);
+  const origin = await insertOwnedTurn(f.sql, f.scope);
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const temporary = await memories.proposeMemory(f.scope, { text: "Temporary fact", sourceTurnIds: [origin], expiresAt });
+  const sourceRef = { sourceId, sourceVersion: 0 };
+  const backingTurn = await insertOwnedTurn(f.sql, f.scope, {
+    role: "assistant", contextSourceRefs: [sourceRef, { memoryDependencyIds: [temporary.id] }],
+  });
+  const candidate = await memories.proposeMemory(f.scope, { text: "Derived global fact", sourceTurnIds: [backingTurn], expiresAt: null });
+  const backing = await memories.confirm(f.scope, candidate.id, candidate.version, randomUUID());
+  await f.sql`UPDATE opening_turns SET context_source_refs=${f.sql.json([{ ...sourceRef, memoryOnly: true }])}
+    WHERE id=${prior.assistantTurnId}`;
+
+  const active = await jobs.loadHistoryContext(f.scope, current.turnId);
+  expect(active.history).toHaveLength(2);
+  expect(active.memoryIds).toEqual([backing.id, temporary.id].sort());
+  expect(active.temporaryMemoryExpiresAt).toBe(expiresAt);
+  await f.sql`UPDATE opening_memories SET expires_at=clock_timestamp() - interval '1 second' WHERE id=${temporary.id}`;
+  expect(await jobs.loadHistoryContext(f.scope, current.turnId)).toEqual({ history: [], sourceRefs: [] });
 });
 
 it("keeps course-scoped memory history only while both turns resolve to its active course", async () => {

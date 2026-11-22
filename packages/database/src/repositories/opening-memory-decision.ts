@@ -1,8 +1,8 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { globalMemoryDoesNotDependOnCourseMemory, lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
-import { lockOwnedWorkspace, memorySourceTurnLineageActive, turnSourceMaterialsActive } from "./opening-memory-admission";
+import { lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
+import { lockOwnedWorkspace, readMemoryOrigins } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
@@ -53,8 +53,8 @@ export function confirmOwnedMemory(
     if (current.courseId !== null || current.kind === "temporary" || current.sourceTurnIds.length > 0) {
       const memoryCourse: FragmentFactory = () => tx`m.course_id`;
       const workspace: FragmentFactory = () => tx`m.workspace_id`;
-      const [admitted] = await tx<{ id: string; ancestor_temporary_expires_at: Date | null }[]>`
-        SELECT m.id, chain.temporary_expires_at AS ancestor_temporary_expires_at
+      const [admitted] = await tx<{ id: string; ancestor_temporary_expires_at: Date | null; origin_turn_ids: string[] }[]>`
+        SELECT m.id, chain.temporary_expires_at AS ancestor_temporary_expires_at, m.source_turn_ids AS origin_turn_ids
         FROM opening_memories m
         CROSS JOIN LATERAL (
           WITH RECURSIVE mem_deps(dep_id) AS (${memoryDependencyWalk(tx)})
@@ -63,7 +63,6 @@ export function confirmOwnedMemory(
               dep_m.id IS NOT NULL AND dep_m.id <> m.id AND dep_m.status = 'active'
               AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp())) IS TRUE
               AND ${memoryCourseAllows(tx, () => tx`dep_m.course_id`, memoryCourse, workspace)} IS TRUE
-              AND ${globalMemoryDoesNotDependOnCourseMemory(tx, () => tx`dep_m`)}
             ), true) AS all_active
           FROM mem_deps d
           LEFT JOIN opening_memories dep_m ON dep_m.id = ${lineageUuid(tx, () => tx`d.dep_id`)}
@@ -71,24 +70,19 @@ export function confirmOwnedMemory(
         ) chain
         WHERE m.id = ${id} AND m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
           AND ${memoryCourseAllows(tx, memoryCourse, memoryCourse, workspace)}
-          AND (m.kind <> 'temporary' OR m.expires_at > clock_timestamp())
-          AND chain.all_active
-          AND NOT EXISTS (
-            SELECT 1 FROM jsonb_array_elements_text(m.source_turn_ids) ref(turn_id)
-            WHERE NOT EXISTS (
-              SELECT 1 FROM opening_turns t
-              JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id
-              WHERE t.id = ${lineageUuid(tx, () => tx`ref.turn_id`)}
-                AND t.workspace_id = m.workspace_id AND c.owner_user_id = ${scope.ownerUserId}
-                AND ${turnSourceMaterialsActive(tx, scope.workspaceId)}
-                AND ${memorySourceTurnLineageActive(tx, scope)}
-            )
-          )`;
+          AND (m.kind <> 'temporary' OR m.expires_at > clock_timestamp()) AND chain.all_active`;
       if (!admitted) throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
+      const origin = admitted.origin_turn_ids?.length ? (await readMemoryOrigins(tx, scope, [{
+        id: id.toLowerCase(), excludedId: id.toLowerCase(), course_id: current.courseId, turn_ids: admitted.origin_turn_ids,
+      }])).get(id.toLowerCase()) : undefined;
+      if (origin === null) {
+        throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
+      }
       const ancestorExpiry = admitted.ancestor_temporary_expires_at;
       const expiry = Math.min(
         current.kind === "temporary" ? Date.parse(current.expiresAt ?? "") : Infinity,
         ancestorExpiry == null ? Infinity : new Date(ancestorExpiry).getTime(),
+        origin?.expiresAt ?? Infinity,
       );
       if (Number.isNaN(expiry) || expiry <= now().getTime()) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");

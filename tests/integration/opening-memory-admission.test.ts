@@ -60,19 +60,23 @@ afterAll(async () => {
 });
 
 describe("opening memory owner and source admission", () => {
-  it("proposes and confirms an ordinary sourced memory without planning any recursive statement", async () => {
+  it("proposes, confirms and lists ordinary memories within the PostgreSQL latency budget", async () => {
     const turnId = await insertTurn(fixture.scope.workspaceId, fixture.scope.ownerUserId);
-    const statements: string[] = [];
-    const sql = postgres(process.env.OPENING_TEST_DATABASE_URL!, {
-      max: 1, debug: (_connection, query) => { statements.push(query); },
-    });
+    const sql = postgres(process.env.OPENING_TEST_DATABASE_URL!, { max: 1 });
     try {
+      await sql`SELECT 1`;
       const repository = createOpeningMemoryRepository(sql);
+      let start = performance.now();
+      const sourceLess = await repository.proposeMemory(fixture.scope, { text: "Standalone note", sourceTurnIds: [], expiresAt: null });
+      await expect(repository.confirm(fixture.scope, sourceLess.id, sourceLess.version, randomUUID())).resolves.toMatchObject({ kind: "confirmed" });
+      await expect(repository.listForContext(fixture.scope, null)).resolves.toEqual([]);
+      expect(performance.now() - start).toBeLessThan(500);
+
+      start = performance.now();
       const memory = await repository.proposeMemory(fixture.scope, { text: "Ordinary source", sourceTurnIds: [turnId], expiresAt: null });
       await expect(repository.confirm(fixture.scope, memory.id, memory.version, randomUUID())).resolves.toMatchObject({ kind: "confirmed" });
-      const admission = statements.filter(query => /SELECT t\.id, t\.role, t\.context_source_refs/.test(query));
-      expect(admission).toHaveLength(3);
-      expect(statements.some(query => /\bWITH\s+RECURSIVE\b/i.test(query))).toBe(false);
+      await expect(repository.listForContext(fixture.scope, null)).resolves.toMatchObject([{ id: memory.id, kind: "confirmed" }]);
+      expect(performance.now() - start).toBeLessThan(500);
     } finally {
       await sql.end({ timeout: 5 });
     }
@@ -85,6 +89,8 @@ describe("opening memory owner and source admission", () => {
     const courseA = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage A", slug: "memory-lineage-a" });
     const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage B", slug: "memory-lineage-b" });
     const material = await insertSource(sql, scope);
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: courseA.id,
+      assetType: "source", assetId: material, role: "core", visibility: "course", purpose: null });
     const evidence = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
     const unrelatedEvidence = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
     const expiresAt = new Date(Date.now() + 3_600_000).toISOString();

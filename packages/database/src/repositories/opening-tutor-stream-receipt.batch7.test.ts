@@ -27,7 +27,8 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   anchorSourceId?: string; anchorCourseId?: string; courseId?: string | null; sourceIds?: string[]; sourceVersions?: Record<string, number>; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
   derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
   activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; courseOnlyMemorySourceIds?: string[];
-  classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string };
+  classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string;
+  storedMemoryMaterials?: Array<{ source_id: string; version: string; course_id: string | null; usable: boolean }> };
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
@@ -40,6 +41,10 @@ function fixture(options: Options = {}) {
       return [];
     }
     if (sql.startsWith("WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
+    if (sql.startsWith("WITH RECURSIVE ? SELECT mat.source_id")) {
+      calls.push({ sql, values });
+      return options.storedMemoryMaterials ?? [];
+    }
     if (sql.startsWith("NOT EXISTS ( ? SELECT 1 FROM mem_deps")) return values[0];
     if (!sql.startsWith("SELECT")) return "fragment";
     calls.push({ sql, values });
@@ -663,6 +668,32 @@ describe("stream receipt release waits for current job authorization and assista
       },
     });
     expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(true);
+  });
+
+  it("rejects receipt completion when the bound course was archived", async () => {
+    const f = fixture({ courseId, archivedCourse: true });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+      contextSourceRefs: [],
+      systemQuery: {
+        authorization: { purpose: "system_record_lookup", workspaceId: workspace,
+          principalId: owner, role: "workspace_owner", permissionRevision: "1" },
+        version: "study-query-v1", asOf: time, privacyEpoch: 2,
+        mode: "deterministic", status: "ok", reason: "read", results: [],
+      },
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.some(call => call.sql.startsWith("SELECT id FROM courses"))).toBe(true);
+  });
+
+  it("checks stored memory source availability without a caller source reference", async () => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ activeGlobalMemoryIds: [memoryId], unavailableSource: true,
+      storedMemoryMaterials: [{ source_id: sourceId, version: "0", course_id: null, usable: true }] });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [],
+      claimToken: token, contextSourceRefs: [],
+    }, { globalMemoryIds: [memoryId] })).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("material") });
+    expect(f.calls.some(call => call.sql.startsWith("SELECT s.id,s.version FROM opening_sources"))).toBe(true);
   });
 });
 
