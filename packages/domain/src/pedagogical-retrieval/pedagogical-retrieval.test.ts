@@ -1554,6 +1554,57 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
+    "<svg><details/></svg>",
+    "<math><details/></math>",
+    "<svg><details><summary>Answer</summary></details></svg>",
+    "<math>\n<details/>\n</math>",
+    "<svg><foreignObject><div><math><mrow></svg><details/></mrow></math></div></foreignObject></svg>",
+    "A diagram <svg><details /></svg>.",
+  ])("keeps subsequent prose public after foreign disclosure markup %s", markup => {
+    const text = markup + "\n\nPublic theorem.";
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const cues = text.split("\n").map((line, index) => ({
+      text: line, startMs: index * 1000, endMs: (index + 1) * 1000,
+    }));
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, [], "Public theorem.");
+      expect(chunks.every(chunk => chunk.visibility === "public")).toBe(true);
+    }
+  });
+
+  it.each([
+    ["<svg><foreignObject>", "</foreignObject></svg>"],
+    ["<math><mtext>", "</mtext></math>"],
+    ["<svg><g><div>", "</div>"],
+  ])("seals an HTML disclosure entered through %s", (open, close) => {
+    const text = open + "<details><summary>Answer</summary>forty-two</details>" + close + "\n\nPublic theorem.";
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const cues = text.split("\n").map((line, index) => ({
+      text: line, startMs: index * 1000, endMs: (index + 1) * 1000,
+    }));
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+    }
+  });
+
+  it.each([
+    ["a stray span end across a section", '<div><span><section style="--mode:none"></span>'],
+    ["a stray span end across an article", '<div><span><article style="--mode:none"></span>'],
+    ["a division end outside the table-cell scope", '<div style="--mode:none"><table><tr><td></div>'],
+    ["a list-item end outside the nested list scope", '<ul><li style="--mode:none"><ol></li>'],
+    ["a definition end outside the table-cell scope", '<dl><dt style="--mode:none"><table><tr><td></dt>'],
+  ])("keeps prose public after %s", (_name, prefix) => {
+    const text = prefix + '\n\n## <span style="display:var(--mode)">Answer key </span>Lecture outline\n\nPublic theorem.';
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const cues = text.split("\n").map((line, index) => ({
+      text: line, startMs: index * 1000, endMs: (index + 1) * 1000,
+    }));
+    for (const chunks of [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })]) {
+      expectSealedEvidence(chunks, text, [], "Public theorem.");
+    }
+  });
+
+  it.each([
     ["a nested nonimage reference", "An[s[w][inner]][outer]er", "[inner]: /inner\n[outer]: /outer"],
     ["an undefined reference", "An[sw][lesson]er", ""],
     ["a definition in a fenced code block", "An[sw][lesson]er", "~~~\n[lesson]: /lesson\n~~~"],

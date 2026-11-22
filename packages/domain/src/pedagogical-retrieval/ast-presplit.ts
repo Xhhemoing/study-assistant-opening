@@ -822,7 +822,17 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedCustomProps = EMPT
   const activeAtLine = new Map<number, MarkdownHtmlBlock>();
   let cursor = 0;
   let projected: string | undefined;
-  let cssPropertiesAt: ((offset: number) => CssCustomProperties) | undefined;
+  let scopeLookup: ReturnType<typeof createHtmlScopeLookup> | undefined;
+  let hasForeignMarkup: boolean | undefined;
+  let hasStyles: boolean | undefined;
+  const getScope = (offset: number, definedLinkLabels: ReadonlySet<string>) => {
+    if (!scopeLookup) {
+      const blockLines: HtmlScopeLine[] = [];
+      const html = projectDisclosureCommentMarkdown(text, [], definedLinkLabels, true, line => blockLines.push(line));
+      scopeLookup = createHtmlScopeLookup(html, inheritedCustomProps, blockLines);
+    }
+    return scopeLookup(offset);
+  };
   return {
     htmlBlockAt(lineStart: number) {
       while (cursor < lineStart) {
@@ -837,16 +847,12 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedCustomProps = EMPT
       return projected ??= projectDisclosureCommentMarkdown(text, [], definedLinkLabels, false);
     },
     customPropertiesAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
-      if (!cssPropertiesAt) {
-        if (/style[ \t\r\n\f]*=/i.test(text)) {
-          const blockLines: HtmlScopeLine[] = [];
-          const html = projectDisclosureCommentMarkdown(text, [], definedLinkLabels, true, line => blockLines.push(line));
-          cssPropertiesAt = createHtmlCustomPropertiesLookup(html, inheritedCustomProps, blockLines);
-        } else {
-          cssPropertiesAt = () => inheritedCustomProps;
-        }
-      }
-      return cssPropertiesAt(offset);
+      hasStyles ??= /style[ \t\r\n\f]*=/i.test(text);
+      return hasStyles ? getScope(offset, definedLinkLabels).customProps : inheritedCustomProps;
+    },
+    namespaceAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
+      hasForeignMarkup ??= /<(?:svg|math)(?=[\t\n\f\r />])/i.test(text);
+      return hasForeignMarkup ? getScope(offset, definedLinkLabels).namespace : undefined;
     },
   };
 }
@@ -1879,7 +1885,7 @@ const HTML_IMPLIED_SIBLING_ENDS: ReadonlyArray<readonly [RegExp, RegExp, RegExp]
   [/^button$/, /^button$/, HTML_ELEMENT_SCOPE_RE],
 ];
 
-function createHtmlCustomPropertiesLookup(
+function createHtmlScopeLookup(
   html: string,
   inheritedProps: CssCustomProperties,
   blockLines: readonly HtmlScopeLine[],
@@ -1896,7 +1902,9 @@ function createHtmlCustomPropertiesLookup(
   const stack: OpenStyledTag[] = [];
   const activeFormatting: (OpenStyledTag | null)[] = [];
   const positions = [0];
-  const scopes = [inheritedProps];
+  const scopes: { customProps: CssCustomProperties; namespace: HtmlNamespace }[] = [
+    { customProps: inheritedProps, namespace: undefined },
+  ];
   let lineIndex = 0;
   let containerDepth = 0;
   let generatedHeading = false;
@@ -1957,6 +1965,27 @@ function createHtmlCustomPropertiesLookup(
       if (isScopeBoundary(stack[above]!, boundary)) return false;
     }
     return true;
+  };
+  const closeOtherEndTag = (tag: string) => {
+    // Foreign end tags fall back to the HTML rules at the first HTML ancestor.
+    for (let index = stack.length - 1; stack[index]?.namespace; index--) {
+      if (stack[index]!.tag === tag) {
+        popTo(index);
+        return;
+      }
+    }
+    const boundary = tag === "li" ? HTML_LIST_ITEM_SCOPE_RE : tag === "table" ? HTML_TABLE_SCOPE_RE :
+      HTML_TABLE_STRUCTURE_RE.test(tag) ? HTML_TABLE_ELEMENT_BOUNDARY_RE :
+      HTML_CLOSES_PARAGRAPH_RE.test(tag) || HTML_FORMATTING_SCOPE_RE.test(tag) ||
+        /^(?:button|center|dir|listing|summary)$/.test(tag) ? HTML_ELEMENT_SCOPE_RE : undefined;
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const entry = stack[index]!;
+      if (!entry.namespace && entry.tag === tag) {
+        popTo(index);
+        return;
+      }
+      if (boundary ? isScopeBoundary(entry, boundary) : isSpecialHtmlElement(entry)) return;
+    }
   };
   const closeListItem = (tag: string) => {
     const siblings = tag === "li" ? /^li$/ : /^(?:dd|dt)$/;
@@ -2069,10 +2098,12 @@ function createHtmlCustomPropertiesLookup(
     } else popTo(table + 1);
     return true;
   };
-  const recordScope = (offset: number, active = getProps()) => {
-    if (active !== scopes.at(-1)) {
+  const recordScope = (offset: number, customProps = getProps()) => {
+    const namespace = stack.at(-1)?.childrenNamespace;
+    const previous = scopes.at(-1)!;
+    if (customProps !== previous.customProps || namespace !== previous.namespace) {
       positions.push(offset);
-      scopes.push(active);
+      scopes.push({ customProps, namespace });
     }
   };
   const readText = (end: number) => {
@@ -2179,13 +2210,7 @@ function createHtmlCustomPropertiesLookup(
       } else if (!namespace && HTML_FORMATTING_TAG_RE.test(tag)) {
         closeFormatting(tag);
       } else {
-        const index = lastOpenHtmlTagIndex(stack, tag);
-        if (index >= 0) {
-          const boundary = namespace ? undefined : tag === "li" ? HTML_LIST_ITEM_SCOPE_RE : tag === "table" ? HTML_TABLE_SCOPE_RE :
-            HTML_TABLE_STRUCTURE_RE.test(tag) ? HTML_TABLE_ELEMENT_BOUNDARY_RE :
-            HTML_CLOSES_PARAGRAPH_RE.test(tag) || HTML_FORMATTING_SCOPE_RE.test(tag) ? HTML_ELEMENT_SCOPE_RE : undefined;
-          if (!boundary || isInScope(index, boundary)) popTo(index);
-        }
+        closeOtherEndTag(tag);
       }
     }
     // Multi-line HTML tokens and raw text consume the intervening source lines.
@@ -3181,7 +3206,7 @@ function findInlineConstructSpans(
     }
     if (text.charCodeAt(i) === 60 && text.slice(i, i + 8).toLowerCase() === "<details") {
       const m = DETAILS_OPEN_RE.exec(text.slice(i));
-      if (m) {
+      if (m && inheritsHtmlBlock.namespaceAt(i, definedLinkLabels) === undefined) {
         const openEnd = i + m[0].length;
         const bounds = findMatchingDetailsBounds(text, i, openEnd, inheritsHtmlBlock, definedLinkLabels);
         const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility, definedLinkLabels, inheritsHtmlBlock);
@@ -4375,11 +4400,11 @@ function parsePedagogicalAstInternal(
     }
 
     // 4b. HTML <details> block (spoiler / hint / solution disclosure; fails closed if unclosed)
-    const detailsOpenMatch = DETAILS_OPEN_RE.exec(raw.trimStart());
-    if (detailsOpenMatch) {
+    const trimmedRaw = raw.trimStart();
+    const detailsOpenMatch = DETAILS_OPEN_RE.exec(trimmedRaw);
+    const detailsStart = line.start + raw.length - trimmedRaw.length;
+    if (detailsOpenMatch && inheritsHtmlBlock.namespaceAt(detailsStart, definedLinkLabels) === undefined) {
       const activeVis = blockVisibility;
-      const leadingWs = raw.length - raw.trimStart().length;
-      const detailsStart = line.start + leadingWs;
       const openEndOffset = detailsStart + detailsOpenMatch[0].length;
       const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset, inheritsHtmlBlock, definedLinkLabels);
       const { closeStart, closeEnd } = bounds;

@@ -76,6 +76,8 @@ function mediaAnchorStatus(phase: MediaAnchorPlaybackPhase, bounded: boolean) {
       return "正在跳到引用位置。";
     case "seek_unreached":
       return "未能跳到引用位置。";
+    case "media_error":
+      return "媒体加载失败，无法跳到引用位置。";
     case "ready_segment":
       return bounded ? "已定位到引用片段，播放至末尾会自动暂停。" : "已定位到引用时间点。";
     case "paused_at_end":
@@ -227,6 +229,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             <button
               type="button"
               className={ui.secondary}
+              disabled={mediaPlayback.phase === "media_error"}
               onClick={() => mediaController.replay(mediaRef.current)}
             >
               {mediaAnchor.bounded ? "重播片段" : "跳到起点"}
@@ -241,6 +244,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             src={mediaSrc}
             aria-label={`${latestRecord.name} 媒体播放`}
             className="max-h-72 w-full rounded-lg bg-ink"
+            onError={event => mediaController.handleError(event.currentTarget)}
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}
@@ -256,6 +260,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             src={mediaSrc}
             aria-label={`${latestRecord.name} 媒体播放`}
             className="w-full"
+            onError={event => mediaController.handleError(event.currentTarget)}
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}

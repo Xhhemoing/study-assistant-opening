@@ -263,6 +263,24 @@ describe("dedicated material reader", () => {
     expect(play).not.toHaveBeenCalled();
   });
 
+  it.each(["audio", "video"] as const)("announces a terminal %s error before citation metadata loads", async kind => {
+    const mediaRecord: SourceRecord = { ...record, mime: kind === "audio" ? "audio/mpeg" : "video/mp4" };
+    const reader = await render({ record: mediaRecord, startMs: 10_000, endMs: 20_000 });
+    const player = reader.querySelector("[data-media-anchor-player]")!;
+    const media = player.querySelector(kind)!;
+    const status = player.querySelector('[role="status"]')!;
+    expect(status.textContent).toBe("正在加载媒体信息，加载后将自动跳到引用位置。");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+
+    Object.defineProperty(media, "error", { configurable: true, value: { code: 4 } });
+    await act(async () => { media.dispatchEvent(new Event("error")); });
+    expect(status.textContent).toBe("媒体加载失败，无法跳到引用位置。");
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("media_error");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+    expect(player.querySelector("button")?.disabled).toBe(true);
+    expect(media.currentTime).toBe(0);
+  });
+
   it("announces an audio citation point once programmatic seeking finishes", async () => {
     const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg" };
     const reader = await render({ record: audioRecord, startMs: 30_000 });

@@ -18,6 +18,7 @@ export interface SeekableMediaElement {
   readonly readyState: number;
   readonly paused: boolean;
   readonly seeking?: boolean;
+  readonly error?: unknown;
   readonly seekable?: { readonly length: number; start(index: number): number; end(index: number): number };
   pause(): void;
   play(): Promise<void> | void;
@@ -28,6 +29,7 @@ export type MediaAnchorPlaybackPhase =
   | "pending_metadata"
   | "seeking_segment"
   | "seek_unreached"
+  | "media_error"
   | "ready_segment"
   | "paused_at_end"
   | "continued_past_end"
@@ -45,6 +47,7 @@ export interface MediaAnchorPlaybackSnapshot {
 export interface MediaAnchorPlaybackController {
   snapshot(): MediaAnchorPlaybackSnapshot;
   activate(media: SeekableMediaElement | null): void;
+  handleError(media?: SeekableMediaElement | null): void;
   handleLoadedMetadata(media: SeekableMediaElement): void;
   handleTimeUpdate(media: SeekableMediaElement): void;
   handlePlay(media: SeekableMediaElement): void;
@@ -176,7 +179,8 @@ export function createMediaAnchorPlaybackController(
     boundActive,
     autoPausedAtEnd,
     userReleasedBound,
-    rangeHighlightActive: anchor !== null && phase !== "idle" && phase !== "seek_unreached" && !userReleasedBound,
+    rangeHighlightActive: anchor !== null && phase !== "idle" && phase !== "seek_unreached" &&
+      phase !== "media_error" && !userReleasedBound,
   });
 
   const emit = () => {
@@ -185,8 +189,24 @@ export function createMediaAnchorPlaybackController(
 
   const isProgrammaticSeek = () => seekOrigin === "programmatic_requested" || seekOrigin === "programmatic_started";
 
+  const handleError = () => {
+    if (!anchor) return;
+    pendingSeek = false;
+    pendingReplayPlay = false;
+    seekOrigin = null;
+    boundActive = false;
+    autoPausedAtEnd = false;
+    if (phase === "media_error") return;
+    phase = "media_error";
+    emit();
+  };
+
   const applySeek = (media: SeekableMediaElement | null, rearm: boolean) => {
     if (!anchor) return;
+    if (media?.error != null) {
+      handleError();
+      return;
+    }
     if (rearm) {
       userReleasedBound = false;
       autoPausedAtEnd = false;
@@ -247,6 +267,7 @@ export function createMediaAnchorPlaybackController(
 
   return {
     snapshot,
+    handleError,
     activate(media) {
       pendingReplayPlay = false;
       applySeek(media, true);
@@ -280,7 +301,7 @@ export function createMediaAnchorPlaybackController(
     },
     handleSeeking(media) {
       if (pendingSeek) pendingReplayPlay = false;
-      if (!anchor || pendingSeek) return;
+      if (!anchor || pendingSeek || phase === "media_error") return;
       const atRequestedPosition = Math.abs(media.currentTime - requestedPosition) * 1000 <= SEEK_TOLERANCE_MS;
       const clampedToEnd = media.currentTime === media.duration && mediaEndsBeforeAnchor(media, anchor);
       const seekable = media.seekable;
@@ -297,7 +318,7 @@ export function createMediaAnchorPlaybackController(
     },
     handleSeeked(media) {
       if (pendingSeek) pendingReplayPlay = false;
-      if (!anchor || pendingSeek || media.seeking) return;
+      if (!anchor || pendingSeek || media.seeking || phase === "media_error") return;
       const completedProgrammaticSeek = isProgrammaticSeek();
       seekOrigin = null;
       const time = media.currentTime;

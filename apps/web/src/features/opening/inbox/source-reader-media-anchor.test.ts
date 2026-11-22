@@ -172,6 +172,48 @@ describe("media anchor bounded playback controller", () => {
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ phase: "ready_segment" }));
   });
 
+  it("clears the deferred seek and replay when media loading fails", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 12_500, endMs: 25_000 })!;
+    const media = createFakeMedia(0);
+    const onChange = vi.fn();
+    const controller = createMediaAnchorPlaybackController(anchor, onChange);
+    controller.activate(media);
+    controller.replay(media);
+    controller.handleError(media);
+
+    const failedState = {
+      phase: "media_error",
+      boundActive: false,
+      autoPausedAtEnd: false,
+      rangeHighlightActive: false,
+    };
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining(failedState));
+    media.readyState = 1;
+    controller.handleLoadedMetadata(media);
+    controller.handleSeeking(media);
+    controller.handleSeeked(media);
+    expect(media.currentTime).toBe(0);
+    expect(media.playMock).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject(failedState);
+  });
+
+  it("detects an existing media error before attempting a seek or replay", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 12_500, endMs: 25_000 })!;
+    const media = Object.assign(createFakeMedia(), { error: { code: 4 } });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    controller.replay(media);
+    expect(media.currentTime).toBe(0);
+    expect(media.playMock).not.toHaveBeenCalled();
+    expect(controller.snapshot()).toMatchObject({ phase: "media_error", rangeHighlightActive: false });
+
+    const replacement = createFakeMedia();
+    controller.activate(replacement);
+    controller.handleSeeked(replacement);
+    expect(replacement.currentTime).toBe(12.5);
+    expect(controller.snapshot()).toMatchObject({ phase: "ready_segment", rangeHighlightActive: true });
+  });
+
   it.each([
     { endMs: 70_000, kind: "bounded citation" },
     { endMs: undefined, kind: "point citation" },
