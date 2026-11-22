@@ -14,6 +14,8 @@ export function decodeParserOutput(text: string): ParsedPage[] {
   const start = text.indexOf("{");
   const value: unknown = JSON.parse(start < 0 ? text : text.slice(start));
   if (!value || typeof value !== "object" || !Array.isArray((value as { pages?: unknown }).pages)) throw new TypeError("invalid parser output");
+  const tracksExerciseContext = (value as { tracksExerciseContext?: unknown }).tracksExerciseContext;
+  if (tracksExerciseContext !== undefined && typeof tracksExerciseContext !== "boolean") throw new TypeError("invalid tracksExerciseContext metadata");
   const pages = (value as { pages: unknown[] }).pages.map((item) => {
     if (!item || typeof item !== "object") throw new TypeError("invalid page");
     const page = item as Record<string, unknown>;
@@ -26,12 +28,14 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (page.sectionSealedAtEnd && page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
     if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
     if (page.inWorkedExampleAtEnd !== undefined && typeof page.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid inWorkedExampleAtEnd metadata");
+    if (page.inExerciseAtEnd !== undefined && typeof page.inExerciseAtEnd !== "boolean") throw new TypeError("invalid inExerciseAtEnd metadata");
     return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null,
       ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }),
       ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }),
       ...(page.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: page.inlineSealedAtEnd }),
       ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }),
-      ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }) };
+      ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }),
+      ...(page.inExerciseAtEnd !== undefined || tracksExerciseContext ? { inExerciseAtEnd: page.inExerciseAtEnd ?? false } : {}) };
   });
   if (new Set(pages.map((page) => page.page)).size !== pages.length) throw new RangeError("duplicate page number");
   return pages;
@@ -44,6 +48,7 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
     if (input.pageStart !== undefined && input.pageEnd !== undefined) argv.push("--page-start", String(input.pageStart), "--page-end", String(input.pageEnd));
     if (input.initialSealMode !== undefined) argv.push("--initial-seal-mode", input.initialSealMode);
     if (input.initialInWorkedExample) argv.push("--initial-in-worked-example");
+    if (input.initialInExercise) argv.push("--initial-in-exercise");
     // The outer deadline includes imports/model initialization, which the
     // Python conversion thread timeout cannot cover.
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutSeconds * 1000)]);

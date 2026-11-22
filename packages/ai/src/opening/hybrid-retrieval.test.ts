@@ -193,6 +193,23 @@ describe("material hybrid retrieval", () => {
     expect(texts.at(-1)).toBe(formula);
   });
 
+  it.each(["$2.50.", "$2.50,"])("preserves a 6,404-byte display formula immediately after %s", amount => {
+    const prefix = "a".repeat(5998) + amount;
+    const formula = "$$" + "x".repeat(6400) + "$$";
+    const segments = segmentMaterialChunks([chunk("display-after-currency", prefix + formula)]);
+    const texts = segments.map(({ chunk }) => chunk.text);
+    expect(texts.slice(0, -1).join("")).toBe(prefix);
+    expect(texts.at(-1)).toBe(formula);
+  });
+
+  it("preserves 16,384 inline spans at UTF-16 and UTF-8 chunk boundaries", () => {
+    const text = "$x$ ".repeat(16_384) + "𝑥$y$";
+    const segments = segmentMaterialChunks([chunk("dense-inline-spans", text)], 14);
+    const texts = segments.map(({ chunk }) => chunk.text);
+    expect(texts.join("")).toBe(text);
+    expect(texts.every(part => Buffer.byteLength(part) <= 14 && (part.match(/\$/gu)?.length ?? 0) % 2 === 0)).toBe(true);
+  });
+
   it.each(["$2% ignore $$\n+2=4$", "$2% ignore $$\r\nx+2=4$", "$2% ignore $$\n% ignore $\n+2=4$", "$2% ignore $$\n3$"])(
     "ignores false dollar closers in comments following a numeric inline opener", formula => {
       const prefix = "a".repeat(5997);

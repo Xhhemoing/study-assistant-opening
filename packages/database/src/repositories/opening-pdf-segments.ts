@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[]; requiresRevalidation?: true } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -43,6 +43,7 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
     if (row.sectionSealedAtEnd && row.inlineSealedAtEnd) throw new TypeError("conflicting PDF page end seal metadata");
     if (row.hadSealedContent !== undefined && typeof row.hadSealedContent !== "boolean") throw new TypeError("invalid PDF hadSealedContent metadata");
     if (row.inWorkedExampleAtEnd !== undefined && typeof row.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid PDF inWorkedExampleAtEnd metadata");
+    if (row.inExerciseAtEnd !== undefined && typeof row.inExerciseAtEnd !== "boolean") throw new TypeError("invalid PDF inExerciseAtEnd metadata");
     if (row.publicationSealUnknown !== undefined && typeof row.publicationSealUnknown !== "boolean") throw new TypeError("invalid PDF publicationSealUnknown metadata");
     if (row.publicationSealHadPublicPrefix !== undefined && typeof row.publicationSealHadPublicPrefix !== "boolean") throw new TypeError("invalid PDF publicationSealHadPublicPrefix metadata");
     if (row.publicationSealCommitted !== undefined && typeof row.publicationSealCommitted !== "boolean") throw new TypeError("invalid PDF publicationSealCommitted metadata");
@@ -53,6 +54,7 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       ...(row.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: row.inlineSealedAtEnd }),
       ...(row.hadSealedContent === undefined ? {} : { hadSealedContent: row.hadSealedContent }),
       ...(row.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: row.inWorkedExampleAtEnd }),
+      ...(row.inExerciseAtEnd === undefined ? {} : { inExerciseAtEnd: row.inExerciseAtEnd }),
       ...(row.publicationSealUnknown === undefined ? {} : { publicationSealUnknown: row.publicationSealUnknown }),
       ...(row.publicationSealHadPublicPrefix === undefined ? {} : { publicationSealHadPublicPrefix: row.publicationSealHadPublicPrefix }),
       ...(row.publicationSealCommitted === undefined ? {} : { publicationSealCommitted: row.publicationSealCommitted }),

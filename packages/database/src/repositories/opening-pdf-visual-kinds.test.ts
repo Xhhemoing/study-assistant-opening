@@ -31,6 +31,11 @@ it("roundtrips explicit worked-example context on a cached physical page", () =>
     expect(validatePdfSegmentPages([annotated], 1, 1)).toEqual([annotated]);
   }
   expect(() => validatePdfSegmentPages([{ ...page, inWorkedExampleAtEnd: "true" }], 1, 1)).toThrow();
+  for (const inExerciseAtEnd of [true, false]) {
+    const annotated = { ...page, inExerciseAtEnd };
+    expect(validatePdfSegmentPages([annotated], 1, 1)).toEqual([annotated]);
+  }
+  expect(() => validatePdfSegmentPages([{ ...page, inExerciseAtEnd: "true" }], 1, 1)).toThrow();
 });
 
 it("keeps publication uncertainty separate from a confirmed answer seal", () => {

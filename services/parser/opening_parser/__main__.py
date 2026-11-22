@@ -26,6 +26,7 @@ def parser():
     result.add_argument("--page-end", type=int)
     result.add_argument("--initial-seal-mode", choices=("section_sealed", "inline_sealed"))
     result.add_argument("--initial-in-worked-example", action="store_true")
+    result.add_argument("--initial-in-exercise", action="store_true")
     result.add_argument("--inspect-pdf", action="store_true")
     return result
 
@@ -125,6 +126,8 @@ def main(argv=None):
         parser().error("initial seal mode requires a non-first PDF page range")
     if args.initial_in_worked_example and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
         parser().error("initial worked example requires a non-first PDF page range")
+    if args.initial_in_exercise and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
+        parser().error("initial exercise requires a non-first PDF page range")
     if args.mime not in (PDF, PPTX):
         print("unsupported mime", file=sys.stderr)
         return 3
@@ -149,7 +152,8 @@ def main(argv=None):
         conversion = convert(path, args.timeout_seconds, page_range) if page_range else convert(path, args.timeout_seconds)
         pages = []
         extraction = extract_physical_pages(conversion, initial_seal_mode=args.initial_seal_mode,
-                                            initial_in_worked_example=args.initial_in_worked_example)
+                                            initial_in_worked_example=args.initial_in_worked_example,
+                                            initial_in_exercise=args.initial_in_exercise)
         by_page = extraction.texts_by_page
         visual_kinds = extraction.visual_kinds_by_page if args.mime == PDF else {}
         sealed_by_page = extraction.section_sealed_by_page
@@ -172,10 +176,13 @@ def main(argv=None):
                 entry["hadSealedContent"] = True
             if args.mime == PDF and extraction.in_worked_example_by_page.get(page_number):
                 entry["inWorkedExampleAtEnd"] = True
+            if args.mime == PDF and extraction.in_exercise_by_page[page_number]:
+                entry["inExerciseAtEnd"] = True
             pages.append(entry)
         if len(pages) > args.max_pages:
             raise ValueError("max-pages would truncate pages")
-        output = json.dumps({"pages": pages}, ensure_ascii=False, separators=(",", ":"))
+        payload = {"pages": pages, "tracksExerciseContext": True} if args.mime == PDF else {"pages": pages}
+        output = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(output.encode("utf-8")) > CAP:
             raise OverflowError("output size cap exceeded")
         print(output)

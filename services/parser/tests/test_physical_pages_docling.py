@@ -108,6 +108,14 @@ def worker_pdf_cli_fixtures():
         "vision_worked_example": (10, {9: "", 10: "Solution: Take the square root."}, (), [
             (1, 10, None), (10, 10, None, True),
         ]),
+        "exercise_context": (3, {1: "Exercise 1. Solve x - 3 = 0.", 2: "【正确答案】\nx = 3.",
+                                 3: "Public prose continues here."}, (), [
+            (1, 3, None), (1, 1, None), (2, 2, None, False, True), (3, 3, None, False, True),
+        ]),
+        "vision_exercise": (3, {1: "", 2: "【正确答案】\nx = 3.",
+                                3: "Public prose continues here."}, (), [
+            (1, 3, None), (2, 3, None, False, True),
+        ]),
     }
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -117,6 +125,7 @@ def worker_pdf_cli_fixtures():
             outputs = {}
             for start, end, seal, *flags in ranges:
                 worked_example = bool(flags and flags[0])
+                exercise = len(flags) > 1 and flags[1]
                 conversion = worker_pdf_conversion({page: texts.get(page, "Public page.")
                                                     for page in range(start, end + 1)}, picture_pages)
                 argv = ["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", str(page_count),
@@ -125,12 +134,15 @@ def worker_pdf_cli_fixtures():
                     argv += ["--initial-seal-mode", seal]
                 if worked_example:
                     argv += ["--initial-in-worked-example"]
+                if exercise:
+                    argv += ["--initial-in-exercise"]
                 stdout = io.StringIO()
                 with patch.object(cli, "pdf_page_count", return_value=page_count), \
                      patch.object(cli, "convert", return_value=conversion), redirect_stdout(stdout):
                     if cli.main(argv) != 0:
                         raise RuntimeError(f"could not generate {name} fixture for pages {start}-{end}")
-                outputs[f"{start}-{end}/{seal or ''}{'/we' if worked_example else ''}"] = json.loads(stdout.getvalue())
+                suffix = ("/we" if worked_example else "") + ("/exercise" if exercise else "")
+                outputs[f"{start}-{end}/{seal or ''}{suffix}"] = json.loads(stdout.getvalue())
             fixtures[name] = {"pageCount": page_count, "ranges": outputs}
     return fixtures
 
@@ -240,6 +252,20 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 texts = {1: f"Exercise 1: Find x.\n{label}x = 3.", 2: "Public continuation."}
                 extracted = physical_pages.extract_physical_pages(worker_pdf_conversion(texts, ()))
                 self.assertEqual(extracted.texts_by_page, {1: ["Exercise 1: Find x."], 2: [texts[2]]})
+
+    def test_carries_exercise_context_to_a_label_on_the_next_page_until_a_structural_heading(self):
+        texts = {
+            1: "Exercise 1. Solve x - 3 = 0.", 2: "【正确答案】", 3: "x = 3.",
+            4: "Public prose continues here.", 5: "Chapter 2: Rings",
+            6: "【正确答案】", 7: "5 units.", 8: "Chapter 3: Fields",
+        }
+        extracted = physical_pages.extract_physical_pages(worker_pdf_conversion(texts, ()))
+        self.assertEqual(extracted.texts_by_page, {page: [text] if page in (1, 4, 5, 8) else []
+                                                   for page, text in texts.items()})
+        self.assertTrue(extracted.inline_sealed_by_page[2])
+        self.assertFalse(extracted.inline_sealed_by_page[3])
+        self.assertFalse(extracted.in_exercise_by_page[5])
+        self.assertTrue(extracted.section_sealed_by_page[6])
 
     def test_container_prefixed_worked_examples_keep_the_solution_public(self):
         for heading in ("Chapter 3: Worked Example", "Section 2.1: Worked Example 2", "Unit 2 Worked Example 3"):
@@ -770,7 +796,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         for title in ("【参考答案】", "【标准答案】", "【习题答案】", "【课后答案】", "参考答案", "标准答案", "答案："):
             with self.subTest(title=title):
                 result = result_for(
-                    [text_element(9, "Exercise 1: Find x.")],
+                    [text_element(9, "Public introduction.")],
                     [text_element(10, title + "\n1. x = 3.\n\n2. y = 4.")],
                     [text_element(11, "5 units.\nChapter 2: Vectors")],
                     start_page=9,

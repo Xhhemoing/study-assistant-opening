@@ -43,11 +43,31 @@ const BEGIN_ENV_RE = /\\begin\{([A-Za-z][A-Za-z0-9*]*)\}/y;
 const END_ENV_RE = /\\end\{([A-Za-z][A-Za-z0-9*]*)\}/y;
 const CURRENCY_PROSE_OR_NON_MATH_RE = /\b(?:and|to|or|per|for|in|of|at|from|with|by|on|million|billion|thousand|hundred|usd|eur|gbp|cad|aud|cny|rmb|jpy|hkd|sgd|dollars?|cents?|each|more|less|off|only|about|around|over|under|between|is|are|was|were|costs?|prices?)\b|^\d[\d,.]*[;:]\s*[a-z]|[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/iu;
 const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
+const PUNCTUATED_CURRENCY_RE = /^\d[\d,]*(?:\.\d+)?[.,]$/;
 
 function endOfLatexComment(text: string, start: number, end: number): number {
   let index = start + 1;
   while (index < end && text[index] !== "\n" && text[index] !== "\r") index++;
   return index;
+}
+
+function hasAdjacentInlineFormula(text: string, opener: number, commentEnd?: (start: number) => number): boolean {
+  const startsInline = (index: number) => Boolean(text[index + 1] && !/[\s$]/u.test(text[index + 1]!));
+  if (!startsInline(opener)) return false;
+  const limit = Math.min(text.length, opener + EMBEDDING_SEGMENT_HARD_LIMIT);
+  for (let index = opener + 1; index < limit;) {
+    const char = text[index];
+    if (char === "\\") { index += 2; continue; }
+    if (char === "%" && commentEnd) { index = commentEnd(index); continue; }
+    if (char === "\n" && isBlankLineBreakAt(text, index)) return false;
+    if (char === "$") {
+      const next = text[index + 1] ?? "";
+      return !/\s/u.test(text[index - 1]!) && !/[0-9]/u.test(next)
+        && (next !== "$" || startsInline(index + 1));
+    }
+    index++;
+  }
+  return false;
 }
 
 function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (start: number) => number): boolean {
@@ -71,7 +91,6 @@ function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (st
     }
     if (ch === "\n" && isBlankLineBreakAt(text, j)) break;
     if (ch === "$") {
-      // The first dollar of a pair can close an inline span, as in $2x$$y$.
       closeIdx = j;
       break;
     }
@@ -82,7 +101,10 @@ function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (st
   const validClose = closeIdx >= 0 && !/\s/.test(prev) && !(next >= "0" && next <= "9");
   if (validClose) {
     const inner = bodyParts.join("") + text.slice(bodyStart, closeIdx);
-    if (MATH_COMMAND_OR_OP_RE.test(inner) || !CURRENCY_PROSE_OR_NON_MATH_RE.test(inner)) return false;
+    if ((MATH_COMMAND_OR_OP_RE.test(inner) || !CURRENCY_PROSE_OR_NON_MATH_RE.test(inner))
+      && (next !== "$" || (!PUNCTUATED_CURRENCY_RE.test(inner) && hasAdjacentInlineFormula(text, closeIdx + 1, commentEnd)))) {
+      return false;
+    }
   }
   // If the candidate was not math, retry with literal percentages for prose.
   return bodyParts.length ? isBareCurrencyStart(text, dollarIndex) : true;
@@ -256,17 +278,18 @@ function scanMathSpans(text: string): MathSpan[] {
 
 function buildCodePointIndex(text: string): { cpStarts: number[]; prefixBytes: Int32Array } {
   const cpStarts: number[] = [];
-  const bytesList: number[] = [0];
+  // Math delimiters and chunk cuts are all at code-point boundaries.
+  const prefixBytes = new Int32Array(text.length + 1);
   let totalBytes = 0;
   for (let i = 0; i < text.length; ) {
     cpStarts.push(i);
     const cp = text.codePointAt(i)!;
     totalBytes += codePointUtf8Bytes(cp);
-    bytesList.push(totalBytes);
     i += cp > 0xffff ? 2 : 1;
+    prefixBytes[i] = totalBytes;
   }
   cpStarts.push(text.length);
-  return { cpStarts, prefixBytes: Int32Array.from(bytesList) };
+  return { cpStarts, prefixBytes };
 }
 
 function findCodePointForOffset(cpStarts: number[], offset: number): number {
@@ -280,13 +303,9 @@ function findCodePointForOffset(cpStarts: number[], offset: number): number {
   return lo;
 }
 
-function selectSafeMathSpans(text: string, cpStarts: number[], prefixBytes: Int32Array, maxBytes: number): MathSpan[] {
+function selectSafeMathSpans(text: string, prefixBytes: Int32Array, maxBytes: number): MathSpan[] {
   const valid = scanMathSpans(text)
-    .filter((span) => {
-      const startCp = findCodePointForOffset(cpStarts, span.start);
-      const endCp = findCodePointForOffset(cpStarts, span.end);
-      return prefixBytes[endCp]! - prefixBytes[startCp]! <= maxBytes;
-    })
+    .filter(span => prefixBytes[span.end]! - prefixBytes[span.start]! <= maxBytes)
     .sort((a, b) => a.start - b.start || b.end - a.end);
 
   const topLevel: MathSpan[] = [];
@@ -319,12 +338,12 @@ function splitChunkOffsets(
   let cpStart = 0;
 
   while (cpStart < cpTotal) {
-    const baseBytes = prefixBytes[cpStart]!;
+    const baseBytes = prefixBytes[cpStarts[cpStart]!]!;
     let lo = cpStart + 1;
     let hi = cpTotal;
     while (lo < hi) {
       const mid = (lo + hi + 1) >>> 1;
-      if (prefixBytes[mid]! - baseBytes <= maxBytes) lo = mid;
+      if (prefixBytes[cpStarts[mid]!]! - baseBytes <= maxBytes) lo = mid;
       else hi = mid - 1;
     }
     let cpSplit = lo;
@@ -379,7 +398,7 @@ function segmentChunksWithRanges(chunks: SourceChunk[], maxBytes = DEFAULT_EMBED
     }
     const { cpStarts, prefixBytes } = buildCodePointIndex(chunk.text);
     const blindCuts = splitChunkOffsets(cpStarts, prefixBytes, maxBytes, null);
-    const mathSpans = selectSafeMathSpans(chunk.text, cpStarts, prefixBytes, EMBEDDING_SEGMENT_HARD_LIMIT);
+    const mathSpans = selectSafeMathSpans(chunk.text, prefixBytes, EMBEDDING_SEGMENT_HARD_LIMIT);
     const mathCuts = splitChunkOffsets(cpStarts, prefixBytes, maxBytes, mathSpans);
     const cutsDifferFromLegacy = mathCuts.length !== blindCuts.length
       || mathCuts.some((cut, idx) => cut !== blindCuts[idx]);

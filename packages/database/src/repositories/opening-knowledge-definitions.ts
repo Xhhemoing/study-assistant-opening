@@ -19,7 +19,7 @@ const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numb
 const lineStart = String.raw`^ *(?:#{1,6} +)*`;
 // Standalone answer keys and bare "Answers" open a section. Numbered inline labels
 // and a singular "Answer:" affect the current chunk alone.
-const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading} *】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|(?:答案|解答)${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
+const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|(?:答案|解答)${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
 const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案|解答)${chineseContinuation}(?:】|[:：]|$))`;
 const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?(?:answers?(?: +key)?|solutions?)|key)(?: +to +(?:exercise|problem|question))? *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)|(?:${chineseAnswerHeading}|答案|解答|详解|解析|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
 const sectionAnswerLine = lineStart + sectionAnswer;
@@ -52,6 +52,16 @@ const blockedReopeningHeading = [
 
 // Only extraction and transcription headers may precede a reopening heading.
 const pdfLeadingTextWrappers = String.raw`^(?: *(?:\[(?:原生提取|本地提取（可能含OCR）|视觉转写与描述)\]|【原图忠实转写，尚需核对】) *(?:\n[ \n]*|$))+`;
+const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +problems?|(?:problem|question) +\d+)\M|习题|练习题?|思考题|作业题)`;
+const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
+const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
+const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|(?:答案|解答) *[:：] *$|${qualifiedExerciseAnswer})`;
+const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|解答) *】 *[:：]? *|(?:答案|解答)${chineseContinuation}[:：] *|${qualifiedExerciseAnswer}|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
+const inlinePublicHeading = String.raw`${lineStart}(?:(?:worked +example|example|definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof|figure|table)\M|例题|例 *\d+|定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|\d+(?:\.\d+)+ +[^ ])`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+ *$|(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +\d+\M|(?:第 *)?\d+ *[页頁] *$)`;
+const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
+const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
+const inlineTerminator = String.raw`(?:[□■∎]|end +of +answers?|答案完|解答完) *[.。]? *$`;
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -91,20 +101,71 @@ export function publicPdfSealBoundaries(sql: Sql, workspaceId: string,
 function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   return sql`pdf_archive_text AS (
     SELECT c.id,c.source_id,c.source_version,c.page,c.created_at,
-      replace(replace(regexp_replace(
+      string_to_array(replace(replace(regexp_replace(
         regexp_replace(replace(c.text,chr(13),''),${horizontalWhitespace},' ','g'),
-        ${"(?n)" + closingAtxHashes},${String.raw`\1`},'g'),'**',''),'__','') AS body
+        ${"(?n)" + closingAtxHashes},${String.raw`\1`},'g'),'**',''),'__',''),chr(10)) AS lines
     FROM opening_source_chunks c
     WHERE ${scope} AND c.page IS NOT NULL
+  ), pdf_archive_lines AS (
+    SELECT source_id,source_version,page,line,
+      row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
+      line ~* ${exerciseHeading} AS opens_exercise,
+      (line ~* ${inlinePublicHeading} OR (line ~* ${reopeningHeading} AND line !~* ${blockedReopeningHeading}))
+        AND line !~* ${answerLabelLine} AS opens_public,
+      line ~* ${sectionAnswerLine} AS opens_section,
+      line ~* ${exerciseSectionException} AS exercise_exception,
+      line ~* ${pdfLeadingTextWrappers} AS wrapper
+    FROM (
+      SELECT id,source_id,source_version,page,created_at,unnest(lines) AS line,
+        generate_subscripts(lines,1) AS line_number
+      FROM pdf_archive_text
+    ) numbered_lines
+  ), pdf_archive_exercise_context AS (
+    SELECT *, COALESCE(max(position) FILTER (WHERE opens_exercise) OVER context,0)
+      > COALESCE(max(position) FILTER (WHERE (opens_section AND NOT exercise_exception)
+        OR (opens_public AND NOT opens_exercise)) OVER context,0) AS in_exercise
+    FROM pdf_archive_lines
+    WINDOW context AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+  ), pdf_archive_line_events AS (
+    SELECT *, opens_section AND NOT (in_exercise AND exercise_exception) AS section_answer,
+      in_exercise AND line ~* ${exerciseInlineAnswer}
+        AND (NOT opens_section OR exercise_exception) AS inline_opener
+    FROM pdf_archive_exercise_context
   ), pdf_archive_page_events AS (
-    SELECT source_id,source_version,page,
-      bool_or(body ~* ${"(?n)" + sectionAnswerLine}) AS section_answer,
-      bool_or(body ~* ${"(?n)" + answerLabelLine}) AS answer_label,
-      (array_remove(array_agg(NULLIF(split_part(
-        regexp_replace(ltrim(body,' '||chr(10)),${pdfLeadingTextWrappers},''),chr(10),1),'')
-        ORDER BY created_at,id),NULL))[1] AS first_line
-    FROM pdf_archive_text
+    SELECT source_id,source_version,page,bool_or(section_answer) AS section_answer,
+      bool_or(inline_opener OR line ~* ${answerLabelLine}) AS answer_label,
+      (array_agg(line ORDER BY position) FILTER (WHERE NOT wrapper AND btrim(line)<>''))[1] AS first_line
+    FROM pdf_archive_line_events
     GROUP BY source_id,source_version,page
+  ), pdf_archive_inline_groups AS (
+    -- An opener and its continuation lines share a group until the next explicit boundary.
+    SELECT *, count(*) FILTER (WHERE inline_opener OR section_answer OR opens_exercise OR opens_public)
+      OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group,
+      CASE WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
+        WHEN wrapper OR line ~* ${inlineRunningHeading} THEN '' ELSE btrim(line) END AS body_line
+    FROM pdf_archive_line_events
+  ), pdf_archive_inline_body AS (
+    SELECT *, min(position) FILTER (WHERE body_line<>'')
+      OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body
+    FROM pdf_archive_inline_groups
+  ), pdf_archive_inline_pages AS (
+    SELECT source_id,source_version,inline_group,page,bool_or(inline_opener) AS starts_inline,
+      bool_or(inline_opener AND line !~* ${answerLabelLine}) AS hide_opening_page,
+      (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
+      min(position) FILTER (WHERE btrim(line)='' AND position>first_body)
+        < max(position) FILTER (WHERE body_line<>'') AS closed_after_blank,
+      bool_or(body_line ~* ${inlineTerminator}) AS ended_inline
+    FROM pdf_archive_inline_body
+    GROUP BY source_id,source_version,inline_group,page
+  ), pdf_archive_inline_spans AS (
+    -- A finished answer affects later pages only up to its first closing page.
+    SELECT source_id,source_version,min(page) FILTER (WHERE starts_inline) AS first_page,
+      bool_or(hide_opening_page) AS hide_opening_page,
+      COALESCE(min(page) FILTER (WHERE closed_after_blank OR ended_inline
+        OR (last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})),max(page)) AS last_page
+    FROM pdf_archive_inline_pages
+    GROUP BY source_id,source_version,inline_group
+    HAVING bool_or(starts_inline)
   ), pdf_archive_sealed_spans AS MATERIALIZED (
     SELECT source_id,source_version,first_page,reopen_page FROM (
       SELECT source_id,source_version,page AS first_page,section_answer,
@@ -113,6 +174,9 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       WHERE section_answer OR (NOT answer_label AND first_line ~* ${reopeningHeading}
         AND first_line !~* ${blockedReopeningHeading})
     ) events WHERE section_answer
+    UNION ALL
+    SELECT source_id,source_version,first_page,last_page+1
+    FROM pdf_archive_inline_spans WHERE first_page<last_page OR hide_opening_page
   )`;
 }
 
@@ -139,6 +203,7 @@ export function publicPdfChunkPredicate(sql: Sql, { checkArchive = true } = {}) 
 }
 
 export function isPublicSourceChunk(row: Record<string, unknown>): boolean {
+  // The shared SQL spans own cross-page context. This check also covers page-less chunks.
   return row.mime !== "application/pdf" || !containsPdfAnswerLabel(row.text as string);
 }
 

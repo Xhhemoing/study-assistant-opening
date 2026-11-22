@@ -309,6 +309,7 @@ class PhysicalPagesExtraction:
     inline_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     had_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     in_worked_example_by_page: dict[int, bool] = field(default_factory=dict)
+    in_exercise_by_page: dict[int, bool] = field(default_factory=dict)
 
 
 def _normalized_label(node):
@@ -678,7 +679,9 @@ def _inline_answer_body(line_text: str) -> str:
     return stripped
 
 
-def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]], page_visuals: set[str], *, initial_in_worked_example: bool = False, initial_seal_mode: str | None = None):
+def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]], page_visuals: set[str], *,
+                       initial_in_worked_example: bool = False, initial_in_exercise: bool = False,
+                       initial_seal_mode: str | None = None):
     page_text = "\n".join(text for text, _ in fragments)
     blocks = []
     # Track tuple entries: (block_index, is_furniture, explicit_opener, seal_mode, is_section_exit)
@@ -686,7 +689,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
     current = None  # [kind, start, end, visual_kind, caption_ref, is_furniture, explicit_opener, seal_mode, is_section_exit]
     page_seal_mode = initial_seal_mode
     in_worked_example = initial_in_worked_example
-    in_exercise = False
+    in_exercise = initial_in_exercise and initial_seal_mode != "section_sealed"
     last_inline_body = ""
     inline_break_pending = False
 
@@ -808,7 +811,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         if (page_seal_mode == "inline_sealed" and _TERMINAL_PUNCTUATION_RE.search(last_inline_body)
                 and not _NEXT_CONTINUATION_RE.search(last_inline_body)):
             page_seal_mode = None
-    return blocks, entries, in_worked_example, page_seal_mode
+    return blocks, entries, in_worked_example, in_exercise, page_seal_mode
 
 def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals):
     for index, page_number in enumerate(page_order):
@@ -1006,30 +1009,35 @@ def _seal_furniture_on_all_sealed_page(blocks: list[DiscourseBlock], entries: li
 
 
 def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_seal_mode: str | None = None,
-                           initial_in_worked_example: bool = False) -> PhysicalPagesExtraction:
+                           initial_in_worked_example: bool = False, initial_in_exercise: bool = False) -> PhysicalPagesExtraction:
     page_order, raw_fragments, visual_sets = _collect_page_fragments(conversion)
     blocks_by_page: dict[int, list[DiscourseBlock]] = {}
     entries_by_page = {}
     end_seals: dict[int, str | None] = {}
     worked_examples: dict[int, bool] = {}
+    exercises: dict[int, bool] = {}
     seal_mode = initial_seal_mode
     in_worked_example = initial_in_worked_example
+    in_exercise = initial_in_exercise
     prev_page_number: int | None = None
     for page_number in page_order:
         if prev_page_number is not None and page_number != prev_page_number + 1:
             in_worked_example = False
+            in_exercise = False
             seal_mode = None
-        blocks, entries, in_worked_example, seal_mode = _build_page_blocks(
+        blocks, entries, in_worked_example, in_exercise, seal_mode = _build_page_blocks(
             page_number,
             raw_fragments[page_number],
             visual_sets.get(page_number, set()),
             initial_in_worked_example=in_worked_example,
+            initial_in_exercise=in_exercise,
             initial_seal_mode=seal_mode,
         )
         blocks_by_page[page_number] = blocks
         entries_by_page[page_number] = entries
         end_seals[page_number] = seal_mode
         worked_examples[page_number] = in_worked_example
+        exercises[page_number] = in_exercise
         prev_page_number = page_number
 
     _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals)
@@ -1065,6 +1073,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         inline_sealed_by_page={page: mode == "inline_sealed" for page, mode in end_seals.items()},
         had_sealed_by_page=had_sealed_by_page,
         in_worked_example_by_page=worked_examples,
+        in_exercise_by_page=exercises,
     )
 
 

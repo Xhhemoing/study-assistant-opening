@@ -37,6 +37,7 @@ type AnnotatedParsedPage = ParsedPage & {
 export type SealState = {
   mode: "none" | PdfSealMode;
   inWorkedExample: boolean;
+  inExercise?: boolean;
   afterAllSealedPage: boolean;
   unknownAfterFailure?: boolean;
 };
@@ -247,7 +248,6 @@ function stripSealedSolutionLines(
   let changed = false;
   let publish = !requirePublicVisionHeading;
   let firstContentLine = true;
-  let inExercise = false;
   let lastInlineBodyLine = "";
   const hasSectionSeal = requirePublicVisionHeading
     && lines.some(line => {
@@ -264,7 +264,7 @@ function stripSealedSolutionLines(
     if (requirePublicVisionHeading && nextMode !== "none") publish = false;
     const prevMode = state.mode;
     state.mode = nextMode;
-    if (nextMode === "section_sealed") inExercise = false;
+    if (nextMode === "section_sealed") state.inExercise = false;
     if (prevMode !== nextMode || explicitOpener) onModeTransition?.(prevMode, nextMode, explicitOpener);
     if (nextMode !== "inline_sealed") lastInlineBodyLine = "";
   };
@@ -284,10 +284,10 @@ function stripSealedSolutionLines(
     }
 
     const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
-    const exerciseAnswer = inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped));
+    const exerciseAnswer = state.inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped));
     const sectionHeader = !exerciseAnswer && isSectionSealedHeader(stripped);
     if (!sectionHeader && (state.mode !== "none" || state.unknownAfterFailure || state.afterAllSealedPage)
-      && isRunningPageHeading(stripped) && !(inExercise && !isMarkdownHeading && /^\d+[.。]$/u.test(stripped))) {
+      && isRunningPageHeading(stripped) && !(state.inExercise && !isMarkdownHeading && /^\d+[.。]$/u.test(stripped))) {
       changed = true;
       continue;
     }
@@ -367,7 +367,7 @@ function stripSealedSolutionLines(
     if (WORKED_EXAMPLE_RE.test(stripped)) {
       setMode("none");
       state.inWorkedExample = true;
-      inExercise = false;
+      state.inExercise = false;
       keep(line);
       continue;
     }
@@ -381,7 +381,7 @@ function stripSealedSolutionLines(
     ) {
       setMode("none");
       state.inWorkedExample = false;
-      inExercise = exerciseOpener;
+      state.inExercise = exerciseOpener;
       keep(line);
       continue;
     }
@@ -656,7 +656,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const vision = options.visionOutSeal;
         const visionResolvedUnknown = options.nativeOutSeal.unknownAfterFailure && vision && !vision.unknownAfterFailure;
         const picked = options.hasNativeText && !visionResolvedUnknown ? options.nativeOutSeal : vision ?? options.nativeOutSeal;
-        Object.assign(target, picked);
+        Object.assign(target, picked, { inExercise: Boolean(picked.inExercise) });
         if (options.hasNativeText && options.visionOutSeal?.mode === "section_sealed") {
           const enteredNewSection = options.incomingSeal.mode !== "section_sealed" || Boolean(options.visionReenteredSection);
           if (enteredNewSection) {
@@ -666,8 +666,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           }
         }
         if (target.mode === "none" && !target.unknownAfterFailure && vision && !vision.unknownAfterFailure
-          && options.nativeOutSeal.inWorkedExample === options.incomingSeal.inWorkedExample) {
+          && options.nativeOutSeal.inWorkedExample === options.incomingSeal.inWorkedExample
+          && Boolean(options.nativeOutSeal.inExercise) === Boolean(options.incomingSeal.inExercise)) {
           target.inWorkedExample = vision.inWorkedExample;
+          target.inExercise = Boolean(vision.inExercise);
         }
         if (target.mode !== "section_sealed" && vision?.mode === "inline_sealed"
           && (options.incomingSeal.mode !== "inline_sealed" || options.visionOpenedInlineAtEnd)) {
@@ -681,6 +683,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           target.afterAllSealedPage = false;
           if (target.mode === "section_sealed") target.unknownAfterFailure = false;
         }
+        if (target.mode === "section_sealed") target.inExercise = false;
       };
       const sealVisionText = (
         rawVisionText: string,
@@ -856,7 +859,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         };
       };
       const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState,
-        doclingIncomingSeal?: PdfSealMode, doclingIncomingWorkedExample?: boolean) => {
+        doclingIncomingSeal?: PdfSealMode, doclingIncomingWorkedExample?: boolean, doclingIncomingExercise?: boolean) => {
         const hadRawText = Boolean(rawPage.text.trim());
         const doclingSealedBlank = isPdf && rawPage.text === "" && Array.isArray(rawPage.visualKinds) && rawPage.visualKinds.length === 0;
         const closedInlineAnswer = rawPage.inlineSealedAtEnd === false && !rawPage.sectionSealedAtEnd;
@@ -878,10 +881,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             (_, nextMode) => { nativeDetectedSeal ||= nextMode !== "none"; })
           : rawPage.text;
         const doclingHadSealedContent = !isImage && Boolean(rawPage.hadSealedContent);
+        const nativeContextUnchanged = nativeOutSeal.inWorkedExample === incomingSeal.inWorkedExample
+          && Boolean(nativeOutSeal.inExercise) === Boolean(incomingSeal.inExercise) && !nativeOutSeal.unknownAfterFailure;
         if (doclingIncomingWorkedExample === incomingSeal.inWorkedExample
-          && nativeOutSeal.inWorkedExample === incomingSeal.inWorkedExample && !nativeOutSeal.unknownAfterFailure
-          && nativeOutSeal.mode === "none" && (hadRawText || doclingHadSealedContent)) {
+          && nativeContextUnchanged && nativeOutSeal.mode === "none" && (hadRawText || doclingHadSealedContent)) {
           nativeOutSeal.inWorkedExample = Boolean(rawPage.inWorkedExampleAtEnd);
+        }
+        if (rawPage.inExerciseAtEnd !== undefined && doclingIncomingExercise === Boolean(incomingSeal.inExercise)
+          && nativeContextUnchanged) {
+          nativeOutSeal.inExercise = rawPage.inExerciseAtEnd;
         }
         // With no native fragments, the end flag only echoes Docling's incoming seal.
         const doclingEndSeal = isPdf && (hadRawText || doclingHadSealedContent || doclingSealedBlank)
@@ -977,6 +985,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           savedSeal,
           savedHasVision,
           savedVisionWasSealed,
+          savedVisionDetectedOnPage,
           nativeContaminatedOnPage,
           hadNativeSeal,
           withheldAfterFailure,
@@ -1018,13 +1027,18 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               ? sealVisionText(result.text, visionSeal, nativeContaminatedOnPage, hadNativeSeal ? page.text : undefined)
               : { text: result.text, transcription: result.text, hasPublicTranscription: true, hadSealedContent: false, confirmedSeal: false, detectedOnPage: false, reenteredSectionSealed: false, openedInlineAtEnd: false };
             const sealedVisionText = visionSealed.text;
-            const pageHadSealed = visionSealed.hadSealedContent;
+            const visionRecovered = visionSealed.hasPublicTranscription && !visionSealed.detectedOnPage
+              && visionSeal.mode === "none" && isStandaloneRecoverySection(visionSealed.transcription);
+            const archivedSeal = !visionRecovered && savedVisionDetectedOnPage && savedVisionWasSealed
+              && savedSeal && savedSeal.mode !== "none"
+              ? savedSeal : undefined;
+            const pageHadSealed = visionSealed.hadSealedContent || archivedSeal !== undefined;
             if (evidence) {
               evidence.visionHandled = true;
               evidence.visionTranscribed = visionSealed.hasPublicTranscription;
               evidence.transcription = visionSealed.transcription;
               evidence.visionHadSeal = pageHadSealed;
-              evidence.visionDetectedOnPage = visionSealed.detectedOnPage;
+              evidence.visionDetectedOnPage = visionSealed.detectedOnPage || archivedSeal !== undefined;
             }
             hasSealedContent ||= visionSealed.confirmedSeal;
             reconcileEndSealState(liveSealState, {
@@ -1036,6 +1050,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               visionReenteredSection: visionSealed.reenteredSectionSealed,
               visionOpenedInlineAtEnd: visionSealed.openedInlineAtEnd,
             });
+            if (archivedSeal && (liveSealState.mode === "none"
+              || archivedSeal.mode === "section_sealed" && liveSealState.mode !== "section_sealed")) {
+              Object.assign(liveSealState, archivedSeal);
+            }
+            if (archivedSeal && !visionSealed.detectedOnPage) return saved;
             if (visionSealed.detectedOnPage) {
               text = stripSealedSolutionLines(text, { ...incomingSeal, mode: "none" }, undefined, hadNativeSeal ? true : "heading-only");
             }
@@ -1171,7 +1190,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const preservePages: number[] = [];
         const withheldAfterFailurePages: number[] = [];
         let usablePages = 0;
-        const cleanSeal: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
+        const cleanSeal: SealState = { mode: "none", inWorkedExample: false, inExercise: false, afterAllSealedPage: false };
         const pdfSealState = { ...cleanSeal };
         const unsafeLegacyPages = new Set<number>();
         const recognizePages = deps.recognizePages;
@@ -1237,7 +1256,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             }
             return blockingSeals;
           },
-          onPages: async (pages, initialDoclingSeal, _afterFailedSegment, initialDoclingWorkedExample, cached) => {
+          onPages: async (pages, initialDoclingSeal, _afterFailedSegment, initialDoclingWorkedExample, cached, initialDoclingExercise) => {
             const pageSeals = await readPageSeals(pages[0]!.page, pages.at(-1)!.page);
             const existing = deps.segments
               ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages.map(page => page.page), { unpublishedPdfForRecovery: true })
@@ -1247,15 +1266,18 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             const drySealState: SealState = { ...pdfSealState };
             let doclingIncomingSeal = initialDoclingSeal;
             let doclingIncomingWorkedExample = initialDoclingWorkedExample;
+            let doclingIncomingExercise = initialDoclingExercise;
             const planned = pages.map(rawPage => {
               const seed = doclingIncomingSeal;
               const workedExample = doclingIncomingWorkedExample;
-              const prep = preparePage(rawPage, published.get(rawPage.page), drySealState, seed, workedExample);
+              const exercise = doclingIncomingExercise;
+              const prep = preparePage(rawPage, published.get(rawPage.page), drySealState, seed, workedExample, exercise);
               doclingIncomingSeal = pdfPageEndSeal(rawPage);
               doclingIncomingWorkedExample = Boolean(rawPage.inWorkedExampleAtEnd);
+              doclingIncomingExercise = rawPage.inExerciseAtEnd;
               const marker = pageSeals.get(rawPage.page);
               const blocked = marker?.hadSealedContent || marker?.publicationSealUnknown || pdfPageEndSeal(marker);
-              return { rawPage, doclingIncomingSeal: seed, workedExample, prepared: prep,
+              return { rawPage, doclingIncomingSeal: seed, workedExample, exercise, prepared: prep,
                 visualInput: prep.visual && (!prep.reusable || blocked) ? prep.visual : undefined };
             });
             const visualInputs = planned.flatMap(({ visualInput }) => visualInput ? [visualInput] : []);
@@ -1269,16 +1291,20 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               return next.value;
             } : undefined;
             try {
-              for (const [index, { rawPage, doclingIncomingSeal, workedExample, visualInput }] of planned.entries()) {
+              for (const [index, { rawPage, doclingIncomingSeal, workedExample, exercise, visualInput }] of planned.entries()) {
                 signal.throwIfAborted();
                 const actualSealMode = pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? undefined : pdfSealState.mode;
                 const actualWorkedExample = pdfSealState.inWorkedExample && !pdfSealState.unknownAfterFailure;
+                const actualExercise = Boolean(pdfSealState.inExercise && !pdfSealState.unknownAfterFailure);
                 if (index > 0 && (actualSealMode !== doclingIncomingSeal
-                  || (workedExample !== undefined && workedExample !== actualWorkedExample))) {
+                  || (workedExample !== undefined && workedExample !== actualWorkedExample)
+                  || (exercise !== undefined && exercise !== actualExercise))) {
                   // Docling may have filtered the remaining pages under a different context.
-                  return { resumeFromPage: rawPage.page, nextSealMode: actualSealMode ?? null, nextInWorkedExample: actualWorkedExample };
+                  return { resumeFromPage: rawPage.page, nextSealMode: actualSealMode ?? null,
+                    nextInWorkedExample: actualWorkedExample, nextInExercise: actualExercise };
                 }
-                const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState, doclingIncomingSeal, workedExample);
+                const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState,
+                  doclingIncomingSeal, workedExample, exercise);
                 const marker = pageSeals.get(rawPage.page);
                 const recordedMode = pdfPageEndSeal(marker);
                 const previouslySealed = Boolean(marker?.hadSealedContent || recordedMode);
@@ -1490,6 +1516,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             return {
               nextSealMode: pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? null : pdfSealState.mode,
               nextInWorkedExample: !pdfSealState.unknownAfterFailure && pdfSealState.inWorkedExample,
+              nextInExercise: Boolean(pdfSealState.inExercise && !pdfSealState.unknownAfterFailure),
             };
           },
         }).finally(() => stage.close());

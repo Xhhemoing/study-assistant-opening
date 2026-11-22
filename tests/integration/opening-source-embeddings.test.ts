@@ -87,6 +87,7 @@ async function expectArchivedPdfPages(texts: string[], pages: number[], blockedP
   const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
   const publicChunks = pdf.snapshot.chunks.filter(chunk => pages.includes(chunk.page!));
   const blockedChunk = pdf.snapshot.chunks[blockedPage - 1]!;
+  expect(await chunks.listChunks(f.scope, pdf.sourceId)).toEqual(publicChunks);
   expect(await chunks.listForSources(f.scope, [pdf.sourceId])).toEqual(publicChunks);
   expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [blockedPage, ...pages])).toEqual(publicChunks);
   await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: blockedPage }))
@@ -350,8 +351,32 @@ describe("pgvector material repository", () => {
     await expectArchivedPdfPages([`${title}：x = 3.`, "5 units.", "Chapter 2: Rings"], [3], 2);
   });
 
-  it("seals the continuation after a bracketed qualified heading with same-line content", async () => {
-    await expectArchivedPdfPages(["【参考答案】x = 3.", "5 units.", "Chapter 2: Rings"], [3], 2);
+  it.each(["【参考答案】", "【参考答案（续）】", "【 参考答案 (接上页) 】"])(
+    "seals the archived continuation after %s with same-line content", async heading => {
+      await expectArchivedPdfPages([heading + "x = 3.", "5 units.", "Chapter 2: Rings"], [3], 2);
+    },
+  );
+
+  it.each(["【答案】", "【正确答案】", "【解答】", "Solution:"])(
+    "withholds an archived exercise's pending %s through its answer page", async label => {
+      const stem = "Exercise 1. Solve x - 3 = 0.";
+      const publicText = "Public prose continues here.";
+      await expectArchivedPdfPages([stem + "\n" + label, "x = 3.", publicText], [3], 2);
+      await expectArchivedPdfPages([stem, label + "\nx = 3.", publicText], [1, 3], 2);
+    },
+  );
+
+  it("ends an archived inline answer after a paragraph break or a public heading", async () => {
+    const stem = "Exercise 1. Solve x - 3 = 0.\n【答案】";
+    await expectArchivedPdfPages([stem, "x = 3\n\nFollowing explanation", "Public prose continues here."], [3], 2);
+    await expectArchivedPdfPages([stem, "x =", "3.", "Public prose continues here."], [4], 3);
+    await expectArchivedPdfPages([stem, "x =", "Chapter 2: Rings", "Public prose continues here."], [3, 4], 2);
+  });
+
+  it("treats a label-only Chinese answer as a section after a structural heading ends the exercise", async () => {
+    await expectArchivedPdfPages([
+      "Exercise 1. Solve x - 3 = 0.", "Chapter 2: Rings", "【正确答案】", "5 units.", "Chapter 3: Fields",
+    ], [1, 2, 5], 4);
   });
 
   it.each(["答案：x = 3.", "解答：x = 3."])("keeps the following page public after the inline label %s", async label => {
@@ -561,21 +586,26 @@ describe("pgvector material repository", () => {
       .toEqual([[3, texts[2]]]);
   });
 
-  it("honors an archived Vision seal after a failed page despite a fresh native recovery heading", async () => {
+  it.each([false, true])("honors an archived Vision seal after a failed page (fresh description: %s)", async freshDescription => {
     const texts = ["Unavailable.", "Chapter 2: Rings", "5 units.", "Chapter 3: Fields"];
     const pdf = await seed([texts[0]!, "[视觉转写与描述]\nAnswer Key", ...texts.slice(2)]);
     await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page=1`;
     await f.sql`UPDATE opening_source_chunks SET image_object_key='vision/key' WHERE source_id=${pdf.sourceId} AND page=2`;
     const pages: PdfSegmentPage[] = texts.map((text, index) => ({
-      page: index + 1, text, imagePath: null, visualKinds: [],
+      page: index + 1, text, imagePath: null, visualKinds: freshDescription && index === 1 ? ["picture"] : [],
     }));
-    const retry = await startPdfRetry(pdf.sourceId, pages, {}, [1]);
+    const recognizePage = freshDescription ? vi.fn(async () => ({
+      text: "【图表观察描述，非原文或解答】\nA ring diagram.", imageObjectKey: "vision/page-two",
+    })) : undefined;
+    const retry = await startPdfRetry(pdf.sourceId, pages, { recognizePage }, [1]);
     await expect(retry.run()).resolves.toEqual({ pages: 3 });
+    if (recognizePage) expect(recognizePage).toHaveBeenCalledOnce();
     await retry.finish(3);
     expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ error: { code: "PARSE_PARTIAL" } });
     const [marker] = await f.sql`SELECT pages FROM opening_pdf_parse_segments
       WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1' AND page_start=2`;
-    expect(marker?.pages).toMatchObject([{ sectionSealedAtEnd: true, publicationSealCommitted: true, visualKinds: [] }]);
+    expect(marker?.pages).toMatchObject([{ sectionSealedAtEnd: true, publicationSealCommitted: true,
+      visualKinds: freshDescription ? ["picture"] : [] }]);
     expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(({ page, text }) => [page, text]))
       .toEqual([[4, texts[3]]]);
   });
@@ -791,5 +821,16 @@ describe("pgvector material repository", () => {
     const results = await pdf.repository.search(f.scope, query);
     expect(results.sort((a, b) => a.segmentIndex - b.segmentIndex).map(({ chunk }) => chunk.text))
       .toEqual([prefix, formulas]);
+  });
+
+  it("stores a long display formula intact after a punctuated currency amount", async () => {
+    const prefix = "a".repeat(5998) + "$2.50.";
+    const formula = "$$" + "x".repeat(6400) + "$$";
+    const pdf = await seed(prefix + formula);
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+    const results = await pdf.repository.search(f.scope, query);
+    const texts = results.sort((a, b) => a.segmentIndex - b.segmentIndex).map(({ chunk }) => chunk.text);
+    expect(texts.slice(0, -1).join("")).toBe(prefix);
+    expect(texts.at(-1)).toBe(formula);
   });
 });
