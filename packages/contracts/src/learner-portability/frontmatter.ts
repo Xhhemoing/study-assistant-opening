@@ -31,8 +31,40 @@ const privateKeys = new Set([
   "lessonexposures", "lessonexposureids", "seenexampleexposureids", "partialexampleexposureids",
   "exposurecoverage", "exposurereceipt", "exposurereceipts", "predictionsnapshot", "contentkey", "heldout", "heldoutitems",
   "candidaterationale", "candidateoutcome", "rawoutput", "promptdigest", "rubricversion", "instructionversion",
+  "comparatorversion", "answerrole", "protocolversion", "questionref", "sourcerefs", "conditionrefs", "figurerefs",
+  "questionblockid", "teachingrevisionid", "sourceversions", "operationid", "reasoncodes",
+  "inputcentspermillion", "outputcentspermillion", "historyrevision", "requirementkey", "partid", "verifier", "checker",
+  "questionmatch", "unmetcriteria", "spantutorgrants", "purposepin", "exposureidentity", "contentfingerprint",
+  "mappingversion", "displayedfamilyids", "partialfamilyids", "firstfamilyexposure", "restoredungraded",
+  "worksource", "worksourceid", "worksourceversion", "referencesourceid", "referencesourceversion", "referencechecked",
+  "imageevidenceref", "sourcecommit", "teachingunitid", "expectedversion", "expectedrevisionnumber", "blockorder",
+  "verificationstatus", "generationconfig", "budgetclass", "providerhint", "modelroutes", "taskroutes", "providerid",
+  "modelname", "modellabel", "bktcorrect", "baselinecorrect", "bktbrier", "baselinebrier", "nextcorrectprobability",
+  "answerrevision", "autogradeskipped", "answerproblemref", "assistedproblemref", "sessionexposures",
+  "weaknesses", "recentmistakes", "cohorttraprate", "cohortsamplesize",
+  "identitystatus", "unexposedeligibility", "rawanswer", "originalanswer", "copiedanswer", "answerexcerpt",
+  "answerrecordedat", "answersequences", "answerstrings", "answertruncated", "answerwithheld", "restrictedanswer",
+  "aigrading", "aievaluation", "gradingversion", "previousgradingversion", "serverevaluation", "verificationscope",
+  "datasetid", "datasetversion", "caseversion", "reviewerid", "dialogueevaluation",
+  "evidenceeligibility", "evidencecontext", "evidencecontexts", "evidenceverdict", "coreevidencecomplete",
+  "exposurehistoryuncertain", "intervalexposure", "intervalexposurecomplete", "firstquestionexposure",
+  "helpinputsnapshot", "evaluatedcontent", "evaluationspec", "scoringauthorized", "scoringeligible", "scoringevidence",
+  "coveredsourceversions", "currentsourceversions", "eligiblesourceversions", "sourceitemid", "coveredsourcechunkdigests",
+  "evidencechunkids", "evidenceattemptids", "evidencerootids", "connectionid", "connectionversion", "remoteid",
+  "retestid", "reteststatus", "expectedexceptionrevision", "beforeblocks", "afterblocks", "addedblocks",
+  "kcmappingversion", "qualificationversion", "packversion", "questionindexsha256",
+  "budgetcents", "budgetconfirmedat", "confirmbudget", "coststate", "ledger", "reservationid", "providerlabel",
+  "spentcents", "reservedcents",
+  "cachedinputtokens", "inputtokens", "outputtokens", "maxoutputtokens", "maxprovidercalls", "mediainputtokenupperbound",
+  "bankversion", "modelversion", "pairedbrierdifference", "meanprediction", "bkteligible", "bkteligibleattemptids",
 ]);
-const privateKeyPrefix = /^(?:private|blindsolve|trustedquestionkey)/u;
+// Receipt and lineage families include sibling field names added by Opening
+// without reserving generic public keys such as id, version, status, or source.
+const privateKeyPattern = /^(?:private|blindsolve|trustedquestionkey)|(?:receipts?|receiptids?|(?:identity|evaluation|key)refids?|(?:itemversion|observation|attempt)ids?)$/u;
+const privateEligibilityReasons: Readonly<Record<string, ReadonlySet<string>>> = {
+  unknown: new Set(["identity_unknown", "identity_candidate", "key_unknown", "exposure_unknown", "coverage_unknown"]),
+  unavailable: new Set(["identity_conflict", "key_unavailable", "reference_unavailable", "exposed", "stale_receipt"]),
+};
 const yamlEscapes: Readonly<Record<string, string>> = {
   "0": "\0", a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", e: "\x1b",
   " ": " ", "\t": "\t", '"': '"', "/": "/", "\\": "\\", N: "\u0085", _: "\u00a0", L: "\u2028", P: "\u2029",
@@ -44,10 +76,10 @@ function invalid(): never {
 
 function isPrivateKey(key: string): boolean {
   const normalized = key.normalize("NFKC").replace(/[-_.\s]/gu, "").toLowerCase();
-  return privateKeyPrefix.test(normalized) || privateKeys.has(normalized);
+  return privateKeyPattern.test(normalized) || privateKeys.has(normalized);
 }
 
-// Walk the data-only YAML grammar without materializing values. Advanced YAML
+// Walk the data-only YAML grammar without materializing records. Advanced YAML
 // constructs such as tags, anchors, aliases and complex keys fail closed.
 class FrontmatterReader {
   private offset = 0;
@@ -64,7 +96,7 @@ class FrontmatterReader {
     const first = this.source[this.offset + indent];
     if (first === "{" || first === "[") {
       this.offset += indent;
-      this.flowValue(0);
+      this.flowValue(0, indent);
       this.endLine();
     } else this.block(indent, 0);
     this.blankLines();
@@ -121,7 +153,25 @@ class FrontmatterReader {
     return this.current === token && (next === undefined || /[ \t\n]/u.test(next));
   }
 
-  private quoted(): string {
+  private quotedLineBreak(minIndent: number | undefined): number {
+    if (minIndent === undefined) invalid(); // Implicit mapping keys are single-line.
+    let breaks = 1;
+    while (!this.done) {
+      const start = this.offset;
+      while (this.current === " ") this.offset++;
+      const spaces = this.offset - start;
+      this.skipHorizontal();
+      if (this.current !== "\n") {
+        if (spaces < minIndent) invalid();
+        break;
+      }
+      this.offset++;
+      breaks++;
+    }
+    return breaks;
+  }
+
+  private quoted(minIndent?: number): string {
     const quote = this.current;
     this.offset++;
     let value = "";
@@ -132,6 +182,10 @@ class FrontmatterReader {
         this.offset++;
       } else if (quote === '"' && char === "\\") {
         const escape = this.source[this.offset++] ?? "";
+        if (escape === "\n") {
+          this.quotedLineBreak(minIndent);
+          continue;
+        }
         const width = escape === "x" ? 2 : escape === "u" ? 4 : escape === "U" ? 8 : 0;
         if (width) {
           const hex = this.source.slice(this.offset, this.offset + width);
@@ -141,7 +195,11 @@ class FrontmatterReader {
         } else if (Object.hasOwn(yamlEscapes, escape)) value += yamlEscapes[escape];
         else invalid();
         continue;
-      } else if (char === "\n") invalid();
+      } else if (char === "\n") {
+        const breaks = this.quotedLineBreak(minIndent);
+        value = value.replace(/[ \t]+$/u, "") + (breaks === 1 ? " " : "\n".repeat(breaks - 1));
+        continue;
+      }
       value += char;
     }
     return invalid();
@@ -162,30 +220,41 @@ class FrontmatterReader {
     return value;
   }
 
-  private key(flow: boolean, keys: Set<string>): void {
+  private key(flow: boolean, fields: Map<string, string | undefined>): string {
     const quoted = this.current === '"' || this.current === "'";
     const key = quoted ? this.quoted() : this.plain(flow);
     this.skipHorizontal();
-    if (!key || keys.has(key) || (flow ? this.current !== ":" : !this.indicator(":"))
+    if (!key || fields.has(key) || (flow ? this.current !== ":" : !this.indicator(":"))
       || (!quoted && (!plainKey.test(key) || scalarKeyword.test(key)))
       || isPrivateKey(key)) invalid();
-    keys.add(key);
+    fields.set(key, undefined);
     this.offset++;
+    return key;
   }
 
-  private flowValue(depth: number): void {
+  private recordScalar(fields: Map<string, string | undefined>, key: string | undefined, value: string | undefined): void {
+    if ((key !== "status" && key !== "reason") || value === undefined) return;
+    fields.set(key, value.trim());
+    const status = fields.get("status");
+    const reason = fields.get("reason");
+    if (status && reason && Object.hasOwn(privateEligibilityReasons, status) && privateEligibilityReasons[status]!.has(reason)) invalid();
+  }
+
+  private flowValue(depth: number, minIndent: number): string | undefined {
     if (depth > 100) invalid();
     this.flowTrivia();
     const opener = this.source[this.offset];
     if (opener === "[" || opener === "{") {
       const closer = opener === "[" ? "]" : "}";
-      const keys = new Set<string>();
+      const fields = new Map<string, string | undefined>();
       this.offset++;
       this.flowTrivia();
       while (this.current !== closer) {
-        if (opener === "{") this.key(true, keys);
+        const field = opener === "{" ? this.key(true, fields) : undefined;
         this.flowTrivia();
-        if (this.current !== closer && this.current !== ",") this.flowValue(depth + 1);
+        if (this.current !== closer && this.current !== ",") {
+          this.recordScalar(fields, field, this.flowValue(depth + 1, minIndent));
+        }
         else if (opener === "[") invalid();
         this.flowTrivia();
         if (this.current === closer) break;
@@ -194,14 +263,15 @@ class FrontmatterReader {
         this.flowTrivia();
       }
       this.offset++;
-    } else if (opener === '"' || opener === "'") this.quoted();
-    else this.plain(true);
+      return undefined;
+    }
+    return opener === '"' || opener === "'" ? this.quoted(minIndent) : this.plain(true);
   }
 
-  private inlineMapping(): boolean {
+  private inlineMapping(minIndent: number): boolean {
     const start = this.offset;
     if (!this.current || /^[[\]{},#?|>]/u.test(this.current)) return false;
-    if (this.current === '"' || this.current === "'") this.quoted();
+    if (this.current === '"' || this.current === "'") this.quoted(minIndent);
     else this.plain(false);
     this.skipHorizontal();
     const found = this.indicator(":");
@@ -212,7 +282,7 @@ class FrontmatterReader {
   private block(indent: number, depth: number, inline = false, indentlessSequence = false): void {
     if (depth > 100) invalid();
     let sequence: boolean | undefined;
-    const keys = new Set<string>();
+    const fields = new Map<string, string | undefined>();
     while (!this.done) {
       if (!inline) {
         this.blankLines();
@@ -228,8 +298,8 @@ class FrontmatterReader {
       if (sequence !== undefined && sequence !== item) invalid();
       sequence = item;
       const start = this.offset;
+      const field = item ? undefined : this.key(false, fields);
       if (item) this.offset++;
-      else this.key(false, keys);
       this.skipHorizontal();
       if (this.current === "#") this.offset = this.lineEnd();
       if (this.current === "\n" || this.done) {
@@ -240,13 +310,14 @@ class FrontmatterReader {
           if (nextIndent > indent) this.block(nextIndent, depth + 1);
           else if (!item && nextIndent === indent && this.sequenceAt(indent)) this.block(indent, depth + 1, false, true);
         }
-      } else if (item && (this.indicator("-") || this.inlineMapping())) {
+      } else if (item && (this.indicator("-") || this.inlineMapping(indent + 1))) {
         this.block(indent + this.offset - start, depth + 1, true);
       } else if (this.current === "|" || this.current === ">") {
-        this.blockScalar(indent);
+        this.recordScalar(fields, field, this.blockScalar(indent));
       } else {
-        if (this.current === "[" || this.current === "{" || this.current === '"' || this.current === "'") this.flowValue(depth + 1);
-        else this.plain(false);
+        const value = this.current === "[" || this.current === "{" || this.current === '"' || this.current === "'"
+          ? this.flowValue(depth + 1, indent + 1) : this.plain(false);
+        this.recordScalar(fields, field, value);
         // The plain-scalar scanner has already consumed whitespace before a comment.
         if (this.current === "#" && /[ \t]/u.test(this.source[this.offset - 1] ?? "")) this.offset = this.lineEnd();
         this.endLine();
@@ -262,22 +333,28 @@ class FrontmatterReader {
     return found;
   }
 
-  private blockScalar(parentIndent: number): void {
+  private blockScalar(parentIndent: number): string | undefined {
     this.offset++;
-    if (this.current === "+" || this.current === "-") this.offset++;
+    const flags = /^(?:[1-9][+-]?|[+-][1-9]?)?/u.exec(this.source.slice(this.offset, this.lineEnd()))![0];
+    this.offset += flags.length;
+    const digit = /[1-9]/u.exec(flags)?.[0];
     this.endLine();
-    let contentIndent: number | undefined;
+    let contentIndent = digit ? parentIndent + Number(digit) : undefined;
+    let firstLine: string | undefined;
+    let nonemptyLines = 0;
     while (!this.done) {
       const end = this.lineEnd();
       const line = this.source.slice(this.offset, end);
       if (line.trim()) {
         const indent = this.indent();
-        if (indent <= parentIndent) return;
+        if (indent <= parentIndent) break;
         contentIndent ??= indent;
         if (indent < contentIndent) invalid();
+        if (nonemptyLines++ === 0) firstLine = line.trim();
       }
       this.offset = Math.min(end + 1, this.source.length);
     }
+    return nonemptyLines === 1 ? firstLine : undefined;
   }
 }
 

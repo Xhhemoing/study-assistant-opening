@@ -124,6 +124,29 @@ function fixture(root: string, extras: Record<string, string> = {}): string {
 }
 
 describe("Community Edition extraction", () => {
+  it("keeps the private root and every registered workspace unlicensed in the candidate and its lockfile", () => {
+    const commit = process.env.AISTUDY_COMMUNITY_TEST_COMMIT ?? "HEAD";
+    const root = JSON.parse(git(repo, "show", `${commit}:package.json`).toString("utf8"));
+    const lock = JSON.parse(git(repo, "show", `${commit}:package-lock.json`).toString("utf8"));
+    expect(root.license).toBe("UNLICENSED");
+    expect(lock.packages[""].license).toBe("UNLICENSED");
+    const tree = git(repo, "ls-tree", "-r", "-z", "--name-only", commit).toString("utf8").split("\0");
+    for (const pattern of root.workspaces as string[]) {
+      expect(pattern).toMatch(/^[^/*]+\/\*$/u);
+      const group = pattern.slice(0, -2);
+      const manifests = tree.filter(file => {
+        const [prefix, workspace, manifest, ...rest] = file.split("/");
+        return prefix === group && workspace && manifest === "package.json" && rest.length === 0;
+      });
+      expect(manifests.length, pattern).toBeGreaterThan(0);
+      for (const file of manifests) {
+        const source = JSON.parse(git(repo, "show", `${commit}:${file}`).toString("utf8"));
+        expect(source.license, file).toBe("UNLICENSED");
+        expect(lock.packages[path.posix.dirname(file)]?.license, file).toBe("UNLICENSED");
+      }
+    }
+  });
+
   it("dry-runs and exports only public blobs from an exact repository commit", () => inLocalTemp(directory => {
     const requested = process.env.AISTUDY_COMMUNITY_TEST_COMMIT ?? "HEAD";
     const commit = git(repo, "rev-parse", "--verify", `${requested}^{commit}`).toString("ascii").trim();
