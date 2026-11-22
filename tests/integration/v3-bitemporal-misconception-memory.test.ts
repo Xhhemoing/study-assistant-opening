@@ -68,15 +68,15 @@ function rewriteSignedReceipt(receipt: string, changes: (payload: { issuedAt: nu
 
 async function seedEdge({
   scope = f.scope, edgeId = randomUUID(), courseId = null, evidenceAttemptIds = [], future = false,
-  origin = "system_diagnosis", summary = "Initial diagnosis", priorRevisionId = null,
+  origin = "system_diagnosis", summary = "Initial diagnosis", priorRevisionId = null, status = "verified",
 }: { scope?: OpeningScope; edgeId?: string; courseId?: string | null; evidenceAttemptIds?: string[]; future?: boolean;
-  origin?: string; summary?: string; priorRevisionId?: string | null } = {}) {
+  origin?: string; summary?: string; priorRevisionId?: string | null; status?: string } = {}) {
   const [row] = await f.sql<{ edgeId: string; revisionId: string; txAt: string }[]>`
     INSERT INTO v3_bitemporal_misconception_edges
       (revision_id, workspace_id, owner_user_id, edge_id, course_id, concept_key, misconception_code, summary, status, origin,
        evidence_attempt_ids, valid_range, tx_range, prior_revision_id)
     VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${courseId},
-      'limit', 'conditions', ${summary}, 'verified', ${origin}, ${evidenceAttemptIds}::uuid[],
+      'limit', 'conditions', ${summary}, ${status}, ${origin}, ${evidenceAttemptIds}::uuid[],
       tstzrange('2000-01-01Z'::timestamptz, NULL, '[)'),
       tstzrange(clock_timestamp() + CASE WHEN ${future} THEN interval '5 seconds' ELSE interval '0' END, NULL, '[)'), ${priorRevisionId})
     RETURNING edge_id AS "edgeId", revision_id AS "revisionId", lower(tx_range)::text AS "txAt"`;
@@ -218,7 +218,7 @@ it("uses fresh post-lock transaction time and advances rapid revisions by at lea
       correction = track(applyLearnerMisconceptionCorrection(writer.sql, scope,
         { edgeId: released.edgeId, disposition: "clarified", summary: "After the row lock" }));
       await waitUntilBlocked(sql, writer.pid, holder!.pid, "correction waits for edge lock",
-        /FROM v3_bitemporal_misconception_edges[\s\S]+FOR UPDATE/);
+        /FROM v3_bitemporal_misconception_edges[\s\S]+FOR NO KEY UPDATE/);
       context = track(readLearnerMisconceptionContextBlock(reader.sql, scope));
       await waitUntilBlocked(sql, reader.pid, writer.pid, "context waits for workspace before reading revisions",
         /FROM workspaces[\s\S]+FOR SHARE/);
@@ -258,7 +258,7 @@ function pauseBeforeRevisionLock(sql: Sql) {
   const gated = {
     begin: (run: (tx: TransactionSql) => Promise<unknown>) => sql.begin(tx => run(new Proxy(tx, {
       apply(target, thisArg, args) {
-        if (Array.isArray(args[0]) && /SELECT revision_id FROM v3_bitemporal_misconception_edges[\s\S]+FOR UPDATE/.test(args[0].join(" "))) {
+        if (Array.isArray(args[0]) && /SELECT revision_id FROM v3_bitemporal_misconception_edges[\s\S]+FOR NO KEY UPDATE/.test(args[0].join(" "))) {
           paused.resolve();
           return resume.promise.then(() => Reflect.apply(target, thisArg, args));
         }
@@ -373,6 +373,59 @@ it("lets a course cascade complete before correction can lock its revision", asy
   }
 });
 
+it("corrects an edge while a concurrent successor insert holds a predecessor key share", async () => {
+  const { sql, scope } = f;
+  const edgeId = randomUUID();
+  const orderedIds = [randomUUID(), randomUUID()].sort();
+  const earlierId = orderedIds[0]!;
+  const currentId = orderedIds[1]!;
+  const concurrentId = randomUUID();
+  await sql`INSERT INTO v3_bitemporal_misconception_edges
+    (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
+      summary, status, origin, valid_range, tx_range)
+    SELECT slice.id, ${scope.workspaceId}::uuid, ${scope.ownerUserId}::uuid, ${edgeId}::uuid,
+      'limit', 'conditions', 'Diagnosis', 'verified', 'system_diagnosis', slice.valid_range,
+      tstzrange(clock_timestamp(), NULL, '[)')
+    FROM (VALUES
+      (${earlierId}::uuid, tstzrange('1999-01-01Z', '2000-01-01Z', '[)')),
+      (${currentId}::uuid, tstzrange('2000-01-01Z', '2100-01-01Z', '[)'))
+    ) AS slice(id, valid_range)`;
+  const writer = await openRaceSession().ready;
+  let correction: ReturnType<typeof applyLearnerMisconceptionCorrection> | undefined;
+  let corrected = false;
+  try {
+    await sql.begin(async tx => {
+      const [holder] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      await tx`INSERT INTO v3_bitemporal_misconception_edges
+        (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
+          summary, status, origin, valid_range, tx_range, prior_revision_id)
+        SELECT ${concurrentId}, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
+          'Future diagnosis', status, origin, tstzrange('2100-01-01Z', NULL, '[)'), tx_range, revision_id
+        FROM v3_bitemporal_misconception_edges WHERE revision_id=${currentId}`;
+      correction = track(applyLearnerMisconceptionCorrection(writer.sql, scope,
+        { edgeId, disposition: "clarified", summary: "Concurrent correction" }).then(result => {
+        corrected = true;
+        return result;
+      }));
+      await vi.waitFor(async () => {
+        if (corrected) return;
+        const [wait] = await sql`SELECT ${holder!.pid} = ANY(pg_blocking_pids(${writer.pid})) AS blocked`;
+        if (!wait?.blocked) throw new Error("Correction has neither committed nor reached its lock wait");
+      }, { timeout: 5000, interval: 40 });
+      // The old prelock waits on the predecessor while holding the earlier row, so closing it completes the cycle.
+      const [closed] = await closeRevision(tx, earlierId);
+      expect(closed?.revision_id).toBe(earlierId);
+    });
+    const result = await correction!;
+    const [successor] = await sql`SELECT prior_revision_id FROM v3_bitemporal_misconception_edges
+      WHERE revision_id=${result.revisionId}`;
+    expect(successor?.prior_revision_id).toBe(currentId);
+  } finally {
+    await correction?.catch(() => undefined);
+    await writer.sql.end({ timeout: 5 });
+  }
+});
+
 it("issues and redeems one signed candidate under concurrent retries and rejects conflicting claims and expiry", async () => {
   const issuance = await issue(tryRequest("PUT", selection));
   expect(issuance.status).toBe(201);
@@ -463,6 +516,19 @@ it("rejects a stale expected privacy epoch even when it matches the stored revis
   await sql`UPDATE workspaces SET privacy_epoch=1 WHERE id=${scope.workspaceId}`;
   await expect(queryMisconceptionEdgesAsOf(sql, scope, query)).resolves.toEqual([]);
   await expect(queryMisconceptionEdgesAsOf(sql, scope, { ...query, expectedPrivacyEpoch: 1 })).resolves.toEqual([]);
+});
+
+it("normalizes long whitespace runs before applying the context byte limit", async () => {
+  const { sql, scope } = f;
+  await seedEdge({ status: "candidate", summary: "A" + " ".repeat(2047) + "B" });
+  const expected = "- 待确认：A B";
+  const byteLength = Buffer.byteLength(expected);
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({
+    renderedMarkdown: expected, byteLength,
+  });
+  const [block] = await sql`SELECT rendered_markdown, octet_length(rendered_markdown) AS bytes
+    FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
+  expect(block).toEqual({ rendered_markdown: expected, bytes: byteLength });
 });
 
 it("renders only edges recorded and valid at the context timestamp", async () => {

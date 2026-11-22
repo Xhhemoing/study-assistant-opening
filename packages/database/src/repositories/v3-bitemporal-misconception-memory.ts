@@ -85,7 +85,7 @@ export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql
 
 async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
   const items = await tx<ContextItem[]>`
-    SELECT status, learner_disposition AS "learnerDisposition", left(summary, ${LEARNER_CONTEXT_MAX_BYTES}) AS summary
+    SELECT status, learner_disposition AS "learnerDisposition", e.summary
     FROM v3_bitemporal_misconception_edges e
     JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
     WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
@@ -175,13 +175,13 @@ export async function applyLearnerMisconceptionCorrection(sql: Sql, scope: Openi
       ORDER BY c.id FOR KEY SHARE OF c`;
     // A direct insert between statements must not introduce a course we did not lock.
     const lockedCourseId = course?.id ?? null;
-    // Lock all open transaction slices for this edge before sampling the mutation time.
+    // Lock open transaction slices before sampling time while allowing predecessor FK key shares.
     await tx`
       SELECT revision_id FROM v3_bitemporal_misconception_edges
       WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
         AND edge_id = ${input.edgeId} AND privacy_epoch = ${privacyEpoch} AND upper_inf(tx_range)
         AND (course_id IS NULL OR course_id = ${lockedCourseId}::uuid)
-      ORDER BY revision_id FOR UPDATE`;
+      ORDER BY revision_id FOR NO KEY UPDATE`;
     const [revision] = await tx<Revision[]>`
       WITH tick AS MATERIALIZED (SELECT clock_timestamp() AS at),
       closed AS (

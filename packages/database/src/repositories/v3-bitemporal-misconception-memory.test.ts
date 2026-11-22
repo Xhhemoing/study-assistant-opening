@@ -43,6 +43,13 @@ it("rejects a competing revision insert without recording a receipt claim", asyn
 });
 
 describe("LearnerContextBlock rendering", () => {
+  it.each([" ", "\u3000", "\u0007"])("normalizes a long run of %j before applying the byte limit", whitespace => {
+    const expected = "- 待确认：A B";
+    expect(renderLearnerContextBlock([
+      { status: "candidate", learnerDisposition: null, summary: "A" + whitespace.repeat(2047) + "B" },
+    ])).toEqual({ renderedMarkdown: expected, byteLength: Buffer.byteLength(expected) });
+  });
+
   it("fits multibyte text into the UTF-8 budget without truncating a code point", () => {
     const result = renderLearnerContextBlock([
       { status: "candidate", learnerDisposition: null, summary: "汉🧠".repeat(1000) },
