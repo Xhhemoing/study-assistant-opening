@@ -16,7 +16,8 @@ import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryRecei
 import {
   contextSourceRefsIncluded, hasMemoryBearingRef, lineageUuid, memoryBacksSource, memoryCourseAllows,
   memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
-  resolveMemoryDependencyStatus, turnContextSourceRefs, turnLearningSessionCourse, turnLineageCourse, turnPinnedSourceRefs, type ContextSourceRef,
+  resolveMemoryDependencyStatus, turnContextSourceRefs, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
+  turnPinnedSourceRefs, type ContextSourceRef,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import { lockActiveMemoryCourse, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
@@ -495,14 +496,15 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
   const workspaceId = input.scope.workspaceId;
   const [admitted] = await db<{
     sources: Array<{ id: string; memory_only: boolean }>;
-    scoped: Array<{ origin: number; id: string }>;
+    scoped: Array<{ origin: number; id: string; attributed: boolean }>;
     backings: Array<{ origin: number; source_id: string; id: string; global_backed: boolean }>;
     memberships: Array<{ asset_id: string; course_id: string; purpose: CourseSourcePurpose | null }>;
     course_id: string | null; material_use: "citation" | "practice";
   }[]>`
     WITH candidate_evidence AS MATERIALIZED (
       SELECT * FROM jsonb_to_record(${db.json(evidence as never)}::jsonb) AS evidence(
-        assistant_refs jsonb, user_refs jsonb, source_ids uuid[], citations jsonb, course_id uuid, material_use text
+        assistant_refs jsonb, user_refs jsonb, source_ids uuid[], citations jsonb, course_id uuid, material_use text,
+        standalone_sessions boolean
       )
       WHERE jsonb_typeof(assistant_refs)='array'
         AND (user_refs IS NULL OR jsonb_typeof(user_refs)='array')
@@ -530,7 +532,7 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
         FROM candidate_evidence t CROSS JOIN LATERAL jsonb_array_elements(t.citations) citation
       ) sources GROUP BY id
     ), scoped_sources AS MATERIALIZED (
-      SELECT source.origin, source.id, t.course_id,
+      SELECT source.origin, source.id, t.course_id, t.standalone_sessions,
         EXISTS (SELECT 1 FROM direct_deps d WHERE d.origin=source.origin) AS attributed
       FROM context_sources source CROSS JOIN candidate_evidence t
       WHERE source.memory_only
@@ -542,7 +544,7 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
         WHERE m.workspace_id=${workspaceId} AND m.status='active'
           AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at > clock_timestamp()))
           AND (r.attributed AND m.id IN (SELECT d.id FROM direct_deps d WHERE d.origin=r.origin)
-            OR NOT r.attributed AND r.course_id IS NULL AND m.course_id IS NULL)
+            OR NOT r.attributed AND r.course_id IS NULL AND r.standalone_sessions AND m.course_id IS NULL)
           AND (m.course_id IS NULL OR m.course_id=r.course_id)
           AND ${memoryBacksSource(db, () => db`m.source_turn_ids`, () => db`r.id`, workspaceId,
             input.scope.ownerUserId, () => db`r.attributed`)}
@@ -564,6 +566,9 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
 /** Optional metadata consumes exactly the saved answer's still-authorized context. */
 async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: CompletedCandidateTarget) {
   const workspaceId = input.scope.workspaceId;
+  const standaloneSessions = () => db`${turnHasStandaloneSession(db, () => db`t`, () => db`w.owner_user_id`)}
+    AND ${turnHasStandaloneSession(db, () => db`u`, () => db`w.owner_user_id`)}
+    AND ${lineageUuid(db, () => db`t.context_anchor->>'courseId'`)} IS NULL`;
   const [target] = await db`
     WITH candidate_target AS MATERIALIZED (
       SELECT j.conversation_id, j.user_turn_id, j.mode, t.text AS answer, u.text AS question,
@@ -581,6 +586,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
           WHERE pin.version_required OR pin.source_version IS NOT NULL
         ) AS versioned_pins,
         ${turnLineageCourse(db, "u", () => db`c.course_id`, () => db`c.owner_user_id`)} AS course_id,
+        ${standaloneSessions()} AS standalone_sessions,
         CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
           THEN 'practice' ELSE 'citation' END AS material_use
       FROM opening_tutor_jobs j
@@ -617,7 +623,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         OR cardinality(t.direct_source_ids || t.pinned_source_ids) > 0 OR t.citations <> '[]'::jsonb
         THEN jsonb_build_object('assistant_refs', t.context_source_refs, 'user_refs', t.user_context_source_refs,
           'source_ids', t.direct_source_ids || t.pinned_source_ids, 'citations', t.citations || t.versioned_pins,
-          'course_id', t.course_id, 'material_use', t.material_use) END AS evidence
+          'course_id', t.course_id, 'material_use', t.material_use, 'standalone_sessions', t.standalone_sessions) END AS evidence
     FROM candidate_target t
     WHERE (t.course_id IS NULL OR EXISTS (
       SELECT 1 FROM courses c WHERE c.id=t.course_id AND c.workspace_id=${workspaceId} AND c.archived_at IS NULL
@@ -660,6 +666,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       && (dep.expires_at === null || new Date(dep.expires_at).getTime() > Date.now()));
   };
   if (!exactIds.every(current)) return;
+  const needsStandalone = admitted.scoped.some(ref => !ref.attributed);
   // Recheck the target and lease after material admission, with the locks still held.
   const [currentTarget] = await db`
       SELECT j.id FROM opening_tutor_jobs j
@@ -668,6 +675,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         AND convo.owner_user_id=w.owner_user_id
       JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=j.workspace_id
         AND u.conversation_id=convo.id AND u.role='user' AND u.status='complete'
+      ${needsStandalone ? db`JOIN opening_turns t ON t.id=j.assistant_turn_id AND t.workspace_id=j.workspace_id
+        AND t.conversation_id=convo.id AND t.role='assistant' AND t.status='complete'` : db``}
       LEFT JOIN courses c ON c.id=${admitted.course_id}::uuid AND c.workspace_id=w.id AND c.archived_at IS NULL
       WHERE j.id=${input.jobId} AND j.workspace_id=${workspaceId}
         AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
@@ -676,6 +685,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         AND ${turnLineageCourse(db, "u", () => db`convo.course_id`, () => db`convo.owner_user_id`)}
           IS NOT DISTINCT FROM ${admitted.course_id}::uuid
         AND (${admitted.course_id}::uuid IS NULL OR c.id IS NOT NULL)
+        ${needsStandalone ? db`AND (${standaloneSessions()})` : db``}
         AND (${input.metadataLease === undefined} OR EXISTS (
           SELECT 1 FROM opening_jobs metadata WHERE metadata.id=${input.metadataLease?.id ?? null}::uuid
             AND metadata.workspace_id=w.id AND metadata.owner_user_id=w.owner_user_id

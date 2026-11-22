@@ -220,6 +220,30 @@ export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fr
   END`;
 }
 
+/** A direct source needs one consistent version, with evidence outside inherited memory. */
+export function turnDirectSourcesVersioned(
+  db: Db, ids: FragmentFactory, refs: FragmentFactory, citations: FragmentFactory,
+): Fragment {
+  const array = (items: FragmentFactory) => db`CASE WHEN jsonb_typeof(${items()}) = 'array' THEN ${items()} ELSE '[]'::jsonb END`;
+  return db`NOT EXISTS (
+    SELECT 1 FROM unnest(${ids()}) direct(id)
+    WHERE NOT EXISTS (
+      SELECT 1 FROM (
+        SELECT ref, COALESCE(ref->'memoryOnly' = 'true'::jsonb, false) AS memory_only
+        FROM jsonb_array_elements(${array(refs)}) ref
+        UNION ALL
+        SELECT citation, false FROM jsonb_array_elements(${array(citations)}) citation
+      ) evidence
+      WHERE lower(ref->>'sourceId') = direct.id::text
+      HAVING count(*) FILTER (WHERE NOT memory_only) > 0 AND count(DISTINCT ref->'sourceVersion') = 1
+        AND bool_and((NOT ref ? 'memoryOnly' OR jsonb_typeof(ref->'memoryOnly') = 'boolean')
+          AND CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number'
+            THEN (ref->>'sourceVersion') ~ '^[0-9]+$' AND (ref->'sourceVersion')::numeric <= 9007199254740991
+            ELSE false END)
+    )
+  )`;
+}
+
 /** Expose metadata filters to the planner before expanding their dependency arrays. */
 export function memoryDependencyRows(db: Db, refs: FragmentFactory): Fragment {
   return db`(
@@ -321,16 +345,18 @@ export function turnLearningSessionCourse(db: Db, turn: FragmentFactory, owner: 
 }
 
 /** A missing or foreign session cannot establish that a saved turn was standalone. */
-export function turnHasStandaloneSessions(db: Db, owner: FragmentFactory): Fragment {
-  const turn: FragmentFactory = () => db`t`;
-  const standaloneSession = (saved: FragmentFactory) => db`(${saved()}.learning_session_id IS NULL OR EXISTS (
-    SELECT 1 ${ownedTurnLearningSession(db, saved, owner)} AND ls.course_id IS NULL
+export function turnHasStandaloneSession(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
+  return db`(${turn()}.learning_session_id IS NULL OR EXISTS (
+    SELECT 1 ${ownedTurnLearningSession(db, turn, owner)} AND ls.course_id IS NULL
   ))`;
-  return db`${standaloneSession(turn)} AND (t.role <> 'assistant' OR NOT EXISTS (
+}
+
+export function turnHasStandaloneSessions(db: Db, owner: FragmentFactory, turn: FragmentFactory = () => db`t`): Fragment {
+  return db`${turnHasStandaloneSession(db, turn, owner)} AND (${turn()}.role <> 'assistant' OR NOT EXISTS (
     SELECT 1 FROM opening_turns tu
     WHERE tu.id = (${pairedUserTurnId(db, turn)})
-      AND tu.workspace_id = t.workspace_id AND tu.conversation_id = t.conversation_id AND tu.role = 'user'
-      AND NOT ${standaloneSession(() => db`tu`)}
+      AND tu.workspace_id = ${turn()}.workspace_id AND tu.conversation_id = ${turn()}.conversation_id AND tu.role = 'user'
+      AND NOT ${turnHasStandaloneSession(db, () => db`tu`, owner)}
   ))`;
 }
 
@@ -465,7 +491,8 @@ export function hasMemoryBearingRef(refs: unknown): boolean {
 
 /** Candidate roots for a saved memory-only reference, grouped by reference. */
 export function turnMemoryOnlyBackingIds(
-  db: Db, refs: FragmentFactory, ownCourse: FragmentFactory, scope: { workspaceId: string; ownerUserId: string | FragmentFactory },
+  db: Db, refs: FragmentFactory, ownCourse: FragmentFactory, standaloneSessions: FragmentFactory,
+  scope: { workspaceId: string; ownerUserId: string | FragmentFactory },
 ): Fragment {
   const attributed: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
   return db`(
@@ -475,7 +502,7 @@ export function turnMemoryOnlyBackingIds(
         AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at > clock_timestamp()))
         AND (m.course_id IS NULL OR m.course_id = ${ownCourse()})
         AND (${attributed()} AND m.id::text IN (SELECT lower(d.id) FROM ${memoryDependencyRows(db, refs)} d)
-          OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND m.course_id IS NULL)
+          OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND (${standaloneSessions()}) AND m.course_id IS NULL)
         AND ${memoryBacksSource(db, () => db`m.source_turn_ids`,
           () => lineageUuid(db, () => db`mem_ref->>'sourceId'`), scope.workspaceId, scope.ownerUserId, attributed)}
       ORDER BY m.id
@@ -516,6 +543,7 @@ type TurnMemoryEvidence = {
   materialUse: "citation" | "practice";
   refs: unknown;
   checkedAt: string;
+  standaloneSessions: boolean;
 };
 
 /** Validate memory-bearing turns under their saved material policy, then resolve their backing graph. */
@@ -540,6 +568,7 @@ export async function readTurnsWithActiveMemoryDependencies(
       WHEN ${refs()} @? '$[*].memoryDependencyIds[*]' OR ${refs()} @> '[{"memoryOnly":true}]'::jsonb
       THEN jsonb_build_object('turnId', a.id, 'ownerUserId', c.owner_user_id, 'courseId', ${course()},
         'refs', ${refs()}, 'checkedAt', clock_timestamp(),
+        'standaloneSessions', ${turnHasStandaloneSessions(db, () => db`c.owner_user_id`, () => db`a`)},
         'materialUse', CASE WHEN COALESCE(u.attempt_id, a.attempt_id) IS NOT NULL
           OR COALESCE(u.context_anchor->>'itemVersionId', a.context_anchor->>'itemVersionId') IS NOT NULL
           THEN 'practice' ELSE 'citation' END)
@@ -568,9 +597,11 @@ export async function readTurnsWithActiveMemoryDependencies(
       const scope = { workspaceId, ownerUserId };
       const memoryOnlyTurns = turns.filter(turn => turn.memoryOnlyCount > 0);
       const backingRows = memoryOnlyTurns.length ? await db<{ id: string; backings: string[][] }[]>`
-        SELECT saved.id, ${turnMemoryOnlyBackingIds(db, () => db`saved.refs`, () => db`saved.course_id`, scope)} AS backings
+        SELECT saved.id, ${turnMemoryOnlyBackingIds(db, () => db`saved.refs`, () => db`saved.course_id`,
+          () => db`saved.standalone_sessions`, scope)} AS backings
         FROM jsonb_to_recordset(${db.json(memoryOnlyTurns.map(turn => ({ id: turn.turnId, refs: turn.refs as never,
-          course_id: turn.courseId })))}::jsonb) saved(id uuid, refs jsonb, course_id uuid)` : [];
+          course_id: turn.courseId, standalone_sessions: turn.standaloneSessions })))}::jsonb)
+          saved(id uuid, refs jsonb, course_id uuid, standalone_sessions boolean)` : [];
       const backings = new Map(backingRows.map(row => [row.id, row.backings]));
       const graph = await readMemoryDependencyStatus(db, scope,
         [...turns.flatMap(turn => turn.ids), ...backingRows.flatMap(row => row.backings.flat())], { ...rules, materialUse });

@@ -672,6 +672,52 @@ describe("saved tutor material provenance", () => {
     }
   }, 15_000);
 
+  it.each(["assistant", "paired user"] as const)("requires an owned standalone %s binding for legacy memory backing", async binding => {
+    const { sql, scope, otherScope } = f;
+    const material = await source();
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const memories = createOpeningMemoryRepository(sql);
+    const proposed = await memories.proposeMemory(scope, { text: "Independent global backing", sourceTurnIds: [origin], expiresAt: null });
+    const memory = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Legacy exchange", courseId: null });
+    const prior = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const claim = (await jobs.claim(prior.jobId))!;
+    const target = { scope, jobId: prior.jobId, assistantTurnId: prior.assistantTurnId, claimToken: claim.claimToken };
+    await jobs.completeTurn({ ...target, text: "Legacy answer", citations: [], candidates: [], contextSourceRefs: [] });
+    await sql`UPDATE opening_turns SET context_source_refs=${sql.json([{ sourceId: material, sourceVersion: 0, memoryOnly: true }])}
+      WHERE id=${prior.assistantTurnId}`;
+    await sql`UPDATE opening_turns SET created_at=now()-interval '1 hour' WHERE id=${prior.turnId}`;
+    const next = await append(conversation.id);
+    const history = () => jobs.loadHistoryContext(scope, next.turnId);
+    const active = () => readTurnsWithActiveMemoryDependencies(sql, scope.workspaceId, [prior.assistantTurnId]);
+    const insertSession = async (sessionScope: typeof scope) => {
+      const id = randomUUID();
+      const activityId = await insertTestTeachingActivity(sql, sessionScope);
+      await sql`INSERT INTO opening_learning_sessions (id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
+        VALUES (${id},${sessionScope.workspaceId},${sessionScope.ownerUserId},NULL,${activityId},'Course-less')`;
+      return id;
+    };
+    const turnId = binding === "assistant" ? prior.assistantTurnId : prior.turnId;
+    const bind = (id: string) => sql`UPDATE opening_turns SET learning_session_id=${id} WHERE id=${turnId}`;
+    const expectUsable = async () => {
+      await expect(history()).resolves.toMatchObject({ memoryIds: [memory.id] });
+      await expect(jobs.canAppendCompletedTurnCandidates(target)).resolves.toBe(true);
+      await expect(active()).resolves.toEqual(new Set([prior.assistantTurnId]));
+    };
+    await expectUsable();
+    await bind(await insertSession(scope));
+    await expectUsable();
+    const unresolved = [randomUUID(), await insertSession({ ...scope, ownerUserId: otherScope.ownerUserId }),
+      await insertSession({ ...scope, workspaceId: otherScope.workspaceId })];
+    for (const id of unresolved) {
+      await bind(id);
+      await expect(history()).resolves.toEqual({ history: [], sourceRefs: [] });
+      await expect(jobs.canAppendCompletedTurnCandidates(target)).resolves.toBe(false);
+      await expect(active()).resolves.toEqual(new Set());
+    }
+  }, 15_000);
+
   it("tracks legacy backing below a named memory across metadata, history, and memory context", async () => {
     const { sql, scope } = f;
     const memories = createOpeningMemoryRepository(sql);

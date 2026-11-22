@@ -41,6 +41,14 @@ describe("context lineage parser is all-or-unknown across mixed entries", () => 
     expect(mergeContextSourceRefs([{ sourceId: id.toUpperCase(), sourceVersion: 0 }, { sourceId: other, sourceVersion: 2 }],
       [{ sourceId: id, sourceVersion: 0 }, { sourceId: id, sourceVersion: 1 }])).toEqual([ref, { sourceId: other, sourceVersion: 2 }, { sourceId: id, sourceVersion: 1 }]);
   });
+  it.each([
+    [[{ ...ref, memoryOnly: true }], [ref]],
+    [[ref], [{ ...ref, memoryOnly: true }]],
+    [[{ ...ref, sourceId: id.toUpperCase(), memoryOnly: true }], [ref]],
+    [[{ ...ref, memoryOnly: true }, { ...ref, memoryOnly: false }], []],
+  ])("keeps shared material direct when either ref records a direct use (%#)", (first, second) => {
+    expect(mergeContextSourceRefs(first, second)).toEqual([ref]);
+  });
 });
 
 describe("context lineage SQL mode and scope emission", () => {

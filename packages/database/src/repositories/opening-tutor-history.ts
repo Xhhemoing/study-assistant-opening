@@ -4,11 +4,12 @@ import type { OpeningScope } from "./opening-sources";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 import {
-  contextSourceRefsIncluded, mergeContextSourceRefs, resolveMemoryDependencyStatus,
-  parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnLineageCourse, turnMemoryOnlyBackingIds,
+  contextSourceRefsIncluded, lineageUuid, mergeContextSourceRefs, resolveMemoryDependencyStatus,
+  parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnDirectSourcesVersioned,
+  turnHasStandaloneSession, turnLineageCourse, turnMemoryOnlyBackingIds,
   type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
-import { readMemoryDependencyStatus } from "./opening-memory-admission";
+import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
 
 type HistoryTurn = { role: "user" | "assistant"; text: string };
 export type TutorHistoryPurpose = "model" | "record_referents";
@@ -27,18 +28,36 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   const currentCourse: FragmentFactory = () => turnLineageCourse(sql, "current", () => sql`c.course_id`, () => sql`c.owner_user_id`);
   const citations: FragmentFactory = () => sql`CASE WHEN jsonb_typeof(u.citations) = 'array' AND jsonb_typeof(a.citations) = 'array'
     THEN u.citations || a.citations END`;
+  const priorUse: FragmentFactory = () => sql`CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
+    THEN 'practice' ELSE 'citation' END`;
+  const currentUse: FragmentFactory = () => sql`CASE WHEN current.attempt_id IS NOT NULL OR current.context_anchor->>'itemVersionId' IS NOT NULL
+    THEN 'practice' ELSE 'citation' END`;
+  const assistantCourse: FragmentFactory = () => turnLineageCourse(sql, "a", () => sql`c.course_id`, () => sql`c.owner_user_id`);
+  const assistantUse: FragmentFactory = () => sql`CASE WHEN a.attempt_id IS NOT NULL OR a.context_anchor->>'itemVersionId' IS NOT NULL
+    THEN 'practice' ELSE ${priorUse()} END`;
+  const standaloneSessions: FragmentFactory = () => sql`${turnHasStandaloneSession(sql, () => sql`a`, () => sql`c.owner_user_id`)}
+    AND ${turnHasStandaloneSession(sql, () => sql`u`, () => sql`c.owner_user_id`)}
+    AND ${lineageUuid(sql, () => sql`a.context_anchor->>'courseId'`)} IS NULL`;
+  const assistantDirectMaterial = (course: FragmentFactory, use: FragmentFactory) =>
+    sourceMaterialsActive(sql, scope.workspaceId, () => sql`SELECT sid.id::text AS source_id,
+      NULL::text AS version, false AS version_required, false AS memory_only FROM unnest(a.source_ids) sid(id)`,
+    { memoryCourse: course, originUse: use, directMaterialPolicy: true });
   const rows = await sql`
     WITH prior AS MATERIALIZED (
       SELECT u.id, a.id AS assistant_id, u.created_at,
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch,
         refs.user_refs AS user_source_refs, refs.assistant_refs AS assistant_source_refs, a.citations AS assistant_citations,
         ${priorCourse()} AS prior_course_id, ${currentCourse()} AS current_course_id,
-        CASE WHEN current.attempt_id IS NOT NULL OR current.context_anchor->>'itemVersionId' IS NOT NULL
-          THEN 'practice' ELSE 'citation' END AS material_use,
-        CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
-          THEN 'practice' ELSE 'citation' END AS prior_material_use,
+        ${currentUse()} AS material_use, ${priorUse()} AS prior_material_use,
+        ${recordReferents ? sql`true` : sql`cardinality(a.source_ids) = 0 OR (
+          jsonb_typeof(refs.assistant_refs) = 'array' AND jsonb_typeof(a.citations) = 'array'
+          AND ${turnDirectSourcesVersioned(sql, () => sql`a.source_ids`, () => sql`refs.assistant_refs`, () => sql`a.citations`)}
+        )`} AS assistant_direct_versioned,
+        ${recordReferents ? sql`true` : sql`${assistantDirectMaterial(assistantCourse, assistantUse)}
+          AND ${assistantDirectMaterial(currentCourse, currentUse)}`} AS assistant_direct_allowed,
         CASE WHEN a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-          THEN ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, priorCourse, scope)} ELSE '[]'::jsonb END AS memory_backing_ids,
+          THEN ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, priorCourse, standaloneSessions, scope)}
+          ELSE '[]'::jsonb END AS memory_backing_ids,
         COALESCE(a.context_source_refs @? '$[*].memoryDependencyIds[*]' OR
           a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb, false) AS memory_bearing,
         EXISTS (
@@ -66,12 +85,14 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         AND (${recordReferents} OR (NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL))
     ), ranked AS (
       SELECT prior.*, count(*) FILTER (WHERE NOT memory_bearing) OVER exchange_order AS ordinary_rank
-      FROM prior WINDOW exchange_order AS (ORDER BY created_at DESC, id DESC)
+      FROM prior WHERE assistant_direct_versioned AND assistant_direct_allowed
+      WINDOW exchange_order AS (ORDER BY created_at DESC, id DESC)
     )
     SELECT id, assistant_id,
       user_source_refs, assistant_source_refs, assistant_citations, prior_course_id, current_course_id, memory_backing_ids,
       query_system, system_query, current_privacy_epoch, material_use, prior_material_use
-    FROM ranked WHERE (memory_bearing OR ordinary_rank <= 20) AND NOT EXISTS (SELECT 1 FROM prior WHERE invalid)
+    FROM ranked WHERE (memory_bearing OR ordinary_rank <= 20)
+      AND NOT EXISTS (SELECT 1 FROM prior WHERE assistant_direct_versioned AND invalid)
     ORDER BY created_at DESC, id DESC
   `;
   const lineage = rows.map(row => {
@@ -148,6 +169,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     // Record follow-ups inherit the user's referent, never prior assistant claims.
     if (recordReferents) history.unshift({ role: "user", text: question });
     else history.unshift({ role: "user", text: question }, { role: "assistant", text: answer });
+    // For model history, every assistant source ID is already covered by a direct pin, ref or citation.
     sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []), ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
     if (!recordReferents) {
       // The SQL admission above requires each citation to name an available source and version.

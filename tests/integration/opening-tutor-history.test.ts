@@ -99,6 +99,84 @@ it("bounds history by whole exchanges and excludes oversized recent turns", asyn
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
 });
 
+it.each(["empty", "memory-only", "conflicting", "malformed"] as const)("omits only the exchange with %s direct assistant version evidence", async evidence => {
+  const { sql, scope } = f;
+  const { c, current, jobs, prior, repo } = await seed();
+  const older = await repo.appendSavedTurn({ scope, conversationId: c.id, text: "Independent question", mode: "hint",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
+  await sql`UPDATE opening_turns SET created_at=now()-interval '2 hours' WHERE id=${older.turnId}`;
+  await sql`UPDATE opening_turns SET status='complete',text='Independent answer',context_source_refs='[]'::jsonb WHERE id=${older.assistantTurnId}`;
+  const sourceId = await insertSource(sql, scope);
+  const ref = { sourceId, sourceVersion: 0 };
+  const refs = evidence === "memory-only" ? [{ ...ref, memoryOnly: true }]
+    : evidence === "conflicting" ? [{ ...ref, sourceVersion: 1 }]
+      : evidence === "malformed" ? [{ ...ref, sourceVersion: "0" }] : [];
+  const pins = evidence === "conflicting" ? { [sourceId]: 0 } : {};
+  if (evidence === "memory-only") {
+    const memories = createOpeningMemoryRepository(sql);
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [sourceId] });
+    const proposed = await memories.proposeMemory(scope, { text: "Independent memory", sourceTurnIds: [origin], expiresAt: null });
+    await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+  }
+  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],
+    source_versions=${sql.json(pins)},context_source_refs=${sql.json(refs)} WHERE id=${prior.assistantTurnId}`;
+  await expect(jobs.loadHistoryContext(scope, current.turnId)).resolves.toEqual({
+    history: [{ role: "user", text: "Independent question" }, { role: "assistant", text: "Independent answer" }], sourceRefs: [],
+  });
+});
+
+it.each(["mock_exam", "reference"] as const)("uses pins for assistant direct sources and enforces %s on model history and send", async purpose => {
+  const { sql, scope } = f;
+  const { c, current, jobs, prior } = await seed();
+  const courses = createCourseMembershipRepository(sql);
+  const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Assistant direct material", slug: randomUUID() });
+  const sourceVersion = 2;
+  const sourceId = await insertSource(sql, scope, "uploaded", sourceVersion);
+  await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id, assetType: "source",
+    assetId: sourceId, role: "core", visibility: "course", purpose: "teaching" });
+  await sql`UPDATE opening_conversations SET course_id=${course.id} WHERE id=${c.id}`;
+  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],source_versions=${sql.json({ [sourceId]: sourceVersion })}
+    WHERE id=${prior.assistantTurnId}`;
+  if (purpose === "reference") {
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ itemVersionId: randomUUID() })} WHERE id=${current.turnId}`;
+  }
+  const history = () => jobs.loadHistoryContext(scope, current.turnId);
+  const { sourceRefs } = await history();
+  expect(sourceRefs).toEqual([{ sourceId, sourceVersion }]);
+  const claim = (await jobs.claim(current.jobId))!;
+  const send = () => jobs.assertSendAuthorized(scope, current.jobId, { claimToken: claim.claimToken, executionId: claim.executionId, contextSourceRefs: sourceRefs });
+  await expect(send()).resolves.toBeUndefined();
+  await sql`UPDATE course_asset_memberships SET purpose=${purpose} WHERE course_id=${course.id} AND asset_id=${sourceId}`;
+  await expect(history()).resolves.toEqual({ history: [], sourceRefs: [] });
+  await expect(send()).rejects.toMatchObject({ code: "CONFLICT" });
+});
+
+it.each(["anchor", "citation", "direct ref", "pin plus memory ref"] as const)("resolves a direct assistant source from %s", async evidence => {
+  const { sql, scope } = f;
+  const { current, jobs, prior } = await seed();
+  const sourceVersion = 3;
+  const sourceId = await insertSource(sql, scope, "uploaded", sourceVersion);
+  const ref = { sourceId, sourceVersion };
+  let refs: Array<typeof ref & { memoryOnly?: boolean }> = [];
+  if (evidence === "pin plus memory ref") {
+    const memories = createOpeningMemoryRepository(sql);
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [sourceId] });
+    const proposed = await memories.proposeMemory(scope, { text: "Backed memory", sourceTurnIds: [origin], expiresAt: null });
+    await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    refs = [{ ...ref, memoryOnly: true }];
+  } else if (evidence === "direct ref") {
+    refs = [ref];
+  }
+  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],
+    context_anchor=${evidence === "anchor" ? sql.json(ref) : null},
+    citations=${sql.json(evidence === "citation" ? [ref] : [])}, context_source_refs=${sql.json(refs)},
+    source_versions=${sql.json(evidence === "pin plus memory ref" ? { [sourceId]: sourceVersion } : {})}
+    WHERE id=${prior.assistantTurnId}`;
+  await expect(jobs.loadHistoryContext(scope, current.turnId)).resolves.toMatchObject({
+    history: [{ role: "user", text: "previous question" }, { role: "assistant", text: "step two" }], sourceRefs: [ref],
+  });
+});
+
 it.each(["mock_exam", "reference"] as const)("fences citation-only history after classification as %s", async purpose => {
   const { sql, scope } = f;
   const { c, current, jobs, prior } = await seed();

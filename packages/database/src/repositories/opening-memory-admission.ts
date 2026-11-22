@@ -211,7 +211,8 @@ async function readOriginBindings(
   const rows = await db<(Omit<OriginBinding, "ids"> & { refs: unknown; source_ids?: string[] })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
       CASE WHEN t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-        THEN ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`, scope)} ELSE '[]'::jsonb END AS backings,
+        THEN ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`,
+          () => turnHasStandaloneSessions(db, () => db`c.owner_user_id`), scope)} ELSE '[]'::jsonb END AS backings,
       ${originUse ? originUse() : db`NULL::text`} AS material_use
       ${rules?.collectSourceIds ? db`, ARRAY(
         SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
