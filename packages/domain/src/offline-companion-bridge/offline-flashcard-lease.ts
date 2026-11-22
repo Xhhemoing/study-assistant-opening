@@ -1600,8 +1600,9 @@ const ARTICLE_DIMENSION_TOKEN =
 const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
 const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps))$/;
 const ARTICLE_IRREGULAR_PLURAL_RE = /^(?:children|people|men|women|teeth|feet|mice|geese|criteria|phenomena)$/;
+// Option normalization spells Greek unit symbols as "mu" and "omega".
 const ARTICLE_MEASUREMENT_UNIT =
-  /(?:kg|cm|mm|km|mg|ms|ns|us|hz|khz|mhz|ghz|pa|kpa|mpa|mol|ev|kev|mev|gev|db|rad|deg|px|pt|kb|mb|gb|tb|ohm|°[cf]?|[msgvwjncfhlktb%])(?:\^?[+-]?\d+)?/.source;
+  /(?:(?:da|mu|[dcmunpfkgtμµ])?(?:pa|hz|ev|mol|ohm|bar|wh|ah|va|lm|lx|bq|gy|sv|wb|omega|[gmsavwjncfhlbktΩω])|atm|psi|cal|kcal|rpm|mph|kph|[kmg]?bps|db|rad|deg|sr|px|pt|em|rem|ft|yd|mi|oz|lb|gal|°[cf]?|[%ÅåÅ])(?:\^?[+-]?\d+)?/u.source;
 const ARTICLE_MEASUREMENT_TOKEN =
   `${UNGROUPED_DECIMAL}[ \\t]*${ARTICLE_MEASUREMENT_UNIT}(?:[ \\t]*/[ \\t]*${ARTICLE_MEASUREMENT_UNIT})*(?![\\w/%°^])`;
 
@@ -1614,13 +1615,19 @@ const ARTICLE_PRENOMINAL_ADJECTIVE_RE = /^(?:new|old|small|large|simple|complex|
 
 const ARTICLE_CLAUSE_END_RE = /[.!?。！？;；:：\r\n\u2028\u2029]/u;
 const ARTICLE_SUBORDINATE_RE = /^(?:that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$/;
+const ARTICLE_ARITHMETIC_RE = /[+\-*/^|]/u;
 const ARTICLE_CLAUSE_TOKEN_RE = new RegExp(
   `${RELATION_OP_RE.source}|${UNGROUPED_DECIMAL}|[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*(?:-[\\p{L}\\p{M}\\p{N}_]+)*|` +
-  `${/[()[\]{},，]/u.source}|${ARTICLE_CLAUSE_END_RE.source}`,
+  `${/[()[\]{},，]/u.source}|${ARTICLE_CLAUSE_END_RE.source}|${ARTICLE_ARITHMETIC_RE.source}`,
   "gu",
 );
 const ARTICLE_RELATION_COMPLEMENT_RE = /^(?:in|on|at|with|for|from|over|under|within|between|among|through|near|around|across|along|into|onto)$/;
-const ARTICLE_SYMBOLIC_LHS_RE = /^\p{L}(?:\d+|_[\p{L}\p{N}]+)?$/u;
+const ARTICLE_SYMBOLIC_TERM = /(?:\d+)?\p{L}(?:\d+|_[\p{L}\p{N}]+)?/u.source;
+const ARTICLE_SYMBOLIC_LHS_RE = new RegExp(
+  `^${ARTICLE_SYMBOLIC_TERM}(?:-(?:${ARTICLE_SYMBOLIC_TERM}|${UNGROUPED_DECIMAL}))*$`,
+  "u",
+);
+const ARTICLE_MATH_FUNCTION_RE = /^(?:sin|cos|tan|exp|ln|log|lim|min|max|sup|inf|det|tr|rank|dim|ker|deg|gcd|lcm|abs)$/;
 const ARTICLE_DETERMINER_RE = /^(?:the|a|an|this|these|those|each|every|all|both|any|some|no|its|their|our|your|my|his|her)$/;
 const ARTICLE_PARTICIPLE_COMPLEMENT_RE = /^(?:in|on|by|from|with|to|for|at|as|under|over|into|through)$/;
 const ARTICLE_FINITE_AUXILIARY_RE = /^(?:is|are|was|were|am|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must)$/;
@@ -1659,20 +1666,50 @@ function articleClauseTokens(remainder: string): string[] {
   return tokens;
 }
 
+function articleRelationComplementEnd(tokens: readonly string[], start: number): number {
+  let expectsOperand = true;
+  let sawRelation = false;
+  let insideAbsoluteValue = false;
+  let end = start;
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (RELATION_OP_RE.test(token)) {
+      if (expectsOperand || insideAbsoluteValue) break;
+      sawRelation = true;
+      expectsOperand = true;
+      continue;
+    }
+    if (token === "|") {
+      if (expectsOperand === insideAbsoluteValue) break;
+      insideAbsoluteValue = !insideAbsoluteValue;
+    } else if (token.length === 1 && ARTICLE_ARITHMETIC_RE.test(token)) {
+      if (expectsOperand && token !== "+" && token !== "-") break;
+      expectsOperand = true;
+    } else if (ARTICLE_MATH_FUNCTION_RE.test(token)) {
+      const argument = tokens[index + 1] ?? "";
+      if (argument !== "(" && !ARTICLE_SYMBOLIC_LHS_RE.test(argument)) break;
+      expectsOperand = true;
+    } else if ("([{".includes(token) || ARTICLE_SYMBOLIC_LHS_RE.test(token) || DECIMAL_LITERAL_RE.test(token)) {
+      expectsOperand = false;
+    } else {
+      break;
+    }
+    // Keep the last complete comparison, including any chained relation.
+    if (sawRelation && !expectsOperand && !insideAbsoluteValue) end = index + 1;
+  }
+  return end;
+}
+
 function hasConditionalClausePredicate(remainder: string): boolean {
   const tokens = articleClauseTokens(remainder);
   let previous = "";
   let expectsDeterminedNoun = false;
   let afterQuantifier = false;
   let inInfinitive = false;
-  let complementOperator = -1;
   let hasConjoinedSubject = false;
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]!;
     if (token === ",") {
-      const start = tokens[index + 1] ?? "";
-      if (!(start === "as" || ARTICLE_SUBORDINATE_RE.test(start) || ARTICLE_DETERMINER_RE.test(start) ||
-        ARTICLE_RELATION_COMPLEMENT_RE.test(start))) break;
       const closingComma = tokens.indexOf(",", index + 2);
       if (closingComma < 0) break;
       // Resume the main clause after the aside rather than scanning its verbs.
@@ -1682,12 +1719,20 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     if (ARTICLE_SUBORDINATE_RE.test(token)) break;
     const afterConjunction = previous === "and" || previous === "or";
     if (afterConjunction && ARTICLE_IMPERATIVE_RE.test(token)) break;
+    hasConjoinedSubject ||= afterConjunction;
 
-    // Exempt the operator of an immediately following symbolic complement only.
-    if (ARTICLE_RELATION_COMPLEMENT_RE.test(token) && ARTICLE_SYMBOLIC_LHS_RE.test(tokens[index + 1] ?? "")) {
-      complementOperator = index + (tokens[index + 2] === "(" ? 3 : 2);
+    if (ARTICLE_RELATION_COMPLEMENT_RE.test(token)) {
+      const end = articleRelationComplementEnd(tokens, index + 1);
+      if (end > index + 1) {
+        index = end - 1;
+        previous = "";
+        expectsDeterminedNoun = false;
+        afterQuantifier = false;
+        inInfinitive = false;
+        continue;
+      }
     }
-    if (index !== complementOperator && RELATION_OP_RE.test(token)) return true;
+    if (RELATION_OP_RE.test(token)) return true;
 
     const participle = ARTICLE_PARTICIPLE_FORM_RE.test(token);
     const infinitiveAuxiliary = ARTICLE_INFINITIVE_CHAIN_RE.test(token);
@@ -1714,7 +1759,6 @@ function hasConditionalClausePredicate(remainder: string): boolean {
         ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) ||
         (ARTICLE_MODIFIER_WORD_RE.test(token) && !ARTICLE_LY_NOUN_RE.test(token))));
     inInfinitive = token === "to" || (inInfinitive && infinitiveAuxiliary);
-    hasConjoinedSubject ||= afterConjunction;
     previous = token;
   }
   return false;
