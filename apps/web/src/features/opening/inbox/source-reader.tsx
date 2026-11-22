@@ -195,13 +195,15 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             ) : null}
             {mediaAnchor ? (
               <p role="status" className="text-xs text-text-3">
-                {mediaPlayback.phase === "paused_at_end"
-                  ? "已播放到引用片段末尾；点击继续播放可查看后续内容。"
-                  : mediaPlayback.phase === "continued_past_end"
-                    ? "已继续播放后续内容。"
-                    : mediaAnchor.bounded
-                      ? "已定位到引用片段，播放至末尾会自动暂停。"
-                      : "已定位到引用时间点。"}
+                {mediaPlayback.phase === "pending_metadata"
+                  ? "正在加载媒体信息，加载后将自动跳到引用位置。"
+                  : mediaPlayback.phase === "paused_at_end"
+                    ? "已播放到引用片段末尾；点击继续播放可查看后续内容。"
+                    : mediaPlayback.phase === "continued_past_end"
+                      ? "已继续播放后续内容。"
+                      : mediaAnchor.bounded
+                        ? "已定位到引用片段，播放至末尾会自动暂停。"
+                        : "已定位到引用时间点。"}
               </p>
             ) : hasInvalidMediaRange ? (
               <p role="status" className="text-xs text-warn">引用时间范围无效，请从头查看原件。</p>

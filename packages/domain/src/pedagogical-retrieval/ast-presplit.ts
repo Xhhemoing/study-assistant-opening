@@ -158,6 +158,24 @@ function findUnescapedToken(text: string, token: string, fromIndex: number): num
   return -1;
 }
 
+// Include "%" in the token pattern to consume a LaTeX comment as one unit.
+function* scanLatexTokens(text: string, pattern: RegExp, from: number, limit = text.length) {
+  pattern.lastIndex = from;
+  for (let match = pattern.exec(text); match && pattern.lastIndex <= limit; match = pattern.exec(text)) {
+    if (match[0] !== "%") {
+      yield match;
+    } else if (!isEscaped(text, match.index)) {
+      pattern.lastIndex = nextLineBreak(text, pattern.lastIndex)?.index ?? text.length;
+      if (pattern.lastIndex >= limit) break;
+    }
+  }
+}
+
+function stripLatexComment(line: string): string {
+  const comment = findUnescapedToken(line, "%", 0);
+  return comment === -1 ? line : line.slice(0, comment);
+}
+
 const VISIBILITY_RANK: Readonly<Record<PedagogicalVisibility, number>> = {
   public: 0,
   hint_gated: 1,
@@ -268,12 +286,9 @@ function findMatchingLatexEnvBounds(
   searchFrom: number,
   limit = text.length,
 ): { readonly closeStart: number; readonly closeEnd: number } {
-  const tokenRe = /\\(begin|end)\{([a-zA-Z][\w-]*\*?)\}/g;
-  tokenRe.lastIndex = searchFrom;
   const stack: string[] = [envName];
-  let match: RegExpExecArray | null;
-  while ((match = tokenRe.exec(text)) !== null) {
-    if (tokenRe.lastIndex > limit) break;
+  const pattern = /%|\\(begin|end)\{([a-zA-Z][\w-]*\*?)\}/g;
+  for (const match of scanLatexTokens(text, pattern, searchFrom, limit)) {
     if (isEscaped(text, match.index)) continue;
     const directive = match[1]!;
     const name = match[2]!;
@@ -295,16 +310,93 @@ function lineIndexContaining(lines: readonly SourceLine[], offset: number, start
   return idx;
 }
 
+function endOfHtmlComment(text: string, afterOpener: number): number {
+  const end = text.indexOf("-->", afterOpener);
+  return end === -1 ? text.length : end + 3;
+}
+
+function endOfBacktickSpan(text: string, start: number, limit = text.length): number {
+  const runs = /\x60+|(?:\r\n|\r(?!\n)|(?<!\r)\n)[ \t]*(?:\r\n|\r(?!\n)|(?<!\r)\n)/g;
+  runs.lastIndex = start;
+  const length = runs.exec(text)![0].length;
+  for (let next = runs.exec(text); next && runs.lastIndex <= limit; next = runs.exec(text)) {
+    if (!next[0].startsWith("\x60")) break;
+    if (next[0].length === length) return runs.lastIndex;
+  }
+  return -1;
+}
+
+function endOfDetailsCodeFence(
+  text: string,
+  afterOpener: number,
+  opener: string,
+  containers: readonly MarkdownContainer[],
+): number {
+  let newline = nextLineBreak(text, afterOpener);
+  while (newline) {
+    const start = newline.index + newline[0].length;
+    newline = nextLineBreak(text, start);
+    const line = text.slice(start, newline?.index ?? text.length);
+    const { depth, body } = continueMarkdownContainers(line, containers);
+    if (depth !== containers.length) return start;
+    if (closesFence(body, opener)) return newline ? newline.index + newline[0].length : text.length;
+  }
+  return text.length;
+}
+
 function findMatchingDetailsBounds(
   text: string,
   searchFrom: number,
 ): { readonly closeStart: number; readonly closeEnd: number } {
-  const tokenRe = /<(\/?)details(?:\s[^>]*)?>/gi;
+  const tokenRe =
+    /<!--|(?<fence>^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)*(?:\x60{3,}[^\x60\r\n]*|~{3,}[^\r\n]*)(?=\r|\n|$))|(?<ticks>\x60+)|<(?<closing>\/?)details(?:\s[^>]*)?>/gim;
   tokenRe.lastIndex = searchFrom;
+  let containers: MarkdownContainer[] = [];
+  let nextLineStart = containingLineStart(text, searchFrom);
+  const advanceContainers = (until: number) => {
+    while (nextLineStart < until) {
+      const newline = nextLineBreak(text, nextLineStart);
+      const line = text.slice(nextLineStart, newline?.index ?? text.length);
+      containers = readMarkdownContainerLine(line, containers).containers;
+      nextLineStart = newline ? newline.index + newline[0].length : text.length;
+    }
+  };
+
   let depth = 1;
   let match: RegExpExecArray | null;
   while ((match = tokenRe.exec(text)) !== null) {
-    if (match[1] === "/") {
+    if (match[0] === "<!--") {
+      tokenRe.lastIndex = endOfHtmlComment(text, tokenRe.lastIndex);
+      const lineStart = containingLineStart(text, match.index);
+      if (lineStart < containingLineStart(text, tokenRe.lastIndex)) {
+        advanceContainers(lineStart);
+        containers = readMarkdownContainerLine(text.slice(lineStart, match.index), containers).containers;
+        const newline = nextLineBreak(text, tokenRe.lastIndex);
+        nextLineStart = newline ? newline.index + newline[0].length : text.length;
+      }
+      continue;
+    }
+    if (match.groups?.ticks) {
+      if (!isEscaped(text, match.index)) {
+        const end = endOfBacktickSpan(text, match.index);
+        if (end !== -1) tokenRe.lastIndex = end;
+      }
+      continue;
+    }
+    if (match.groups?.fence) {
+      advanceContainers(match.index);
+      const fenceLine = readMarkdownContainerLine(match[0], containers);
+      const fence = matchFenceOpening(fenceLine.body)?.[1];
+      if (fence) {
+        containers = fenceLine.containers;
+        nextLineStart = endOfDetailsCodeFence(text, tokenRe.lastIndex, fence, containers);
+        tokenRe.lastIndex = nextLineStart;
+      } else {
+        tokenRe.lastIndex = match.index + 1;
+      }
+      continue;
+    }
+    if (match.groups?.closing === "/") {
       depth--;
       if (depth === 0) {
         return { closeStart: match.index, closeEnd: match.index + match[0].length };
@@ -314,6 +406,25 @@ function findMatchingDetailsBounds(
     }
   }
   return { closeStart: text.length, closeEnd: text.length };
+}
+
+function maskSummaryLiterals(text: string): string {
+  const parts: string[] = [];
+  const tokens = /<!--|\x60+/g;
+  let copied = 0;
+  for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
+    if (match[0] === "<!--") {
+      tokens.lastIndex = endOfHtmlComment(text, tokens.lastIndex);
+      parts.push(text.slice(copied, match.index), " ".repeat(tokens.lastIndex - match.index));
+    } else {
+      const end = isEscaped(text, match.index) ? -1 : endOfBacktickSpan(text, match.index);
+      if (end === -1) continue;
+      tokens.lastIndex = end;
+      parts.push(text.slice(copied, match.index), text.slice(match.index, end).replace(/[<>]/g, " "));
+    }
+    copied = tokens.lastIndex;
+  }
+  return parts.length > 0 ? parts.join("") + text.slice(copied) : text;
 }
 
 function classifyDetailsElement(
@@ -327,7 +438,8 @@ function classifyDetailsElement(
   readonly label: string;
   readonly summaryEndOffset: number | null;
 } {
-  const inner = text.slice(openEnd, closeStart);
+  // Mask literal markup while keeping summary offsets in the original text.
+  const inner = maskSummaryLiterals(text.slice(openEnd, closeStart));
   const summaryMatch = /^\s*<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary\s*>/i.exec(inner);
   if (summaryMatch) {
     const summaryText = summaryMatch[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -811,7 +923,7 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
       paragraphStart = undefined;
     }
     containers = current.containers;
-    const body = current.body.trimStart();
+    const body = stripLatexComment(current.body).trimStart();
     const latex = /^\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(body);
     const beforeLine = newline.index;
     if (
@@ -838,10 +950,9 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     }
     newline = nextNewline;
   }
-  const inline = /<details(?=[\s>])|\\begin\{([a-zA-Z][\w-]*\*?)\}/gi;
-  const inlineText = text.slice(afterOpen, Math.min(boundary, through));
-  for (const match of inlineText.matchAll(inline)) {
-    const start = afterOpen + match.index;
+  const inline = /%|<details(?=[\s>])|\\begin\{([a-zA-Z][\w-]*\*?)\}/gi;
+  for (const match of scanLatexTokens(text, inline, afterOpen, Math.min(boundary, through))) {
+    const start = match.index;
     if (!match[1]) return start;
     const classified = classifyLabel(match[1], "public");
     if (classified && classified.visibility !== "public" && !isEscaped(text, start)) return start;
@@ -851,7 +962,15 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
 
 function findMathDelimiter(text: string, start: number, token: "$$" | "\\]") {
   const afterOpen = start + 2;
-  const close = findUnescapedToken(text, token, afterOpen);
+  let close = -1;
+  const delimiters = token === "$$" ? /%|\$\$/g : /%|\\\]/g;
+  for (const match of scanLatexTokens(text, delimiters, afterOpen)) {
+    if (!isEscaped(text, match.index)) {
+      close = match.index;
+      break;
+    }
+    delimiters.lastIndex = match.index + 1;
+  }
   const boundary = findMathBoundary(text, afterOpen, close < 0 ? text.length : close);
   if (close === -1 || close >= boundary) return { end: boundary, closed: false };
 
@@ -862,9 +981,9 @@ function findMathDelimiter(text: string, start: number, token: "$$" | "\\]") {
     const openerLineEnd = nextLineBreak(text, afterOpen)?.index ?? text.length;
     const flowOpener = closerLineStart > openerLineStart
       && !text.slice(openerLineStart, start).trim()
-      && !text.slice(afterOpen, openerLineEnd).trim();
+      && !stripLatexComment(text.slice(afterOpen, openerLineEnd)).trim();
     const standaloneCloser = !text.slice(closerLineStart, close).trim()
-      && !text.slice(close + 2, closerLineEnd).trim();
+      && !stripLatexComment(text.slice(close + 2, closerLineEnd)).trim();
     const startsLaterFormula = closerLineStart > openerLineStart
       && !text.slice(closerLineStart, close).trim()
       && !standaloneCloser;
@@ -936,11 +1055,19 @@ function findBlockquoteEnd(
   interruptsQuote: (line: string, index: number) => boolean,
 ): number {
   const state: QuoteParagraph = { open: false };
+  let inHtmlComment = false;
   for (let index = start; index < lines.length; index++) {
     const raw = lines[index]!.raw;
     if (BLOCKQUOTE_PREFIX_RE.test(raw)) {
+      const body = innermostQuoteBody(raw)!;
+      const trimmed = body.trimStart();
+      if (!state.fence && (inHtmlComment || trimmed.startsWith("<!--"))) {
+        inHtmlComment = trimmed.indexOf("-->", inHtmlComment ? 0 : 4) === -1;
+        state.open = false;
+        continue;
+      }
       if (!state.fence && index > start && interruptsQuote(raw, index)) return index;
-      updateQuotedParagraph(state, innermostQuoteBody(raw)!);
+      updateQuotedParagraph(state, body);
     } else if (!continuesLazyQuote(state, raw, lines[index + 1]?.raw)) {
       return index;
     }
@@ -980,15 +1107,7 @@ function findTableLiteralEnd(text: string, start: number, end: number): number {
   const marker = text[start]!;
   if (isEscaped(text, start) || (text[start - 1] === marker && !isEscaped(text, start - 1))) return -1;
   const lineEnd = Math.min(end, nextLineBreak(text, start)?.index ?? end);
-  if (marker === "\x60") {
-    const runs = /\x60+/g;
-    runs.lastIndex = start;
-    const length = runs.exec(text)![0].length;
-    for (let next = runs.exec(text); next && runs.lastIndex <= lineEnd; next = runs.exec(text)) {
-      if (next[0].length === length) return runs.lastIndex;
-    }
-    return -1;
-  }
+  if (marker === "\x60") return endOfBacktickSpan(text, start, lineEnd);
 
   const first = text[start + 1];
   if (!first || first === "$" || /\s/.test(first)) return -1;
@@ -2298,26 +2417,37 @@ function parsePedagogicalAstInternal(
     const calloutMatch = CALLOUT_RE.exec(raw);
     if (calloutMatch) {
       const quotedHeading = quotedHeadings.at(-1);
-      const activeVis = maxVisibility(blockVisibility, quotedHeading?.visibility ?? "public");
-      const classified = classifyLabel(calloutMatch[1], activeVis, sealProofs);
-      if (classified) {
-        if (quotedHeading && quotedHeading.visibility !== "public" && !quotedHeadingLevels) {
+      const intrinsic = classifyLabel(calloutMatch[1], blockVisibility, sealProofs);
+      if (intrinsic) {
+        const activeVis = maxVisibility(blockVisibility, quotedHeading?.visibility ?? "public");
+        const classified = { ...intrinsic, visibility: maxVisibility(intrinsic.visibility, activeVis) };
+        const inheritedSection = quotedHeading &&
+          VISIBILITY_RANK[classified.visibility] > VISIBILITY_RANK[intrinsic.visibility] ? quotedHeading : undefined;
+        if (inheritedSection && !quotedHeadingLevels) {
           // Only a heading at this quote depth can end the inherited section.
           const levels = new Map<number, number>();
           const quoteEnd = findBlockquoteEnd(lines, i, () => false);
           parsePrefixedInnerBlocks(
             lines, i, quoteEnd - 1, null, activeVis, false, sealProofs, captionRowStarts, boundaryFloors,
-            undefined, { onHeading: (offset, level) => levels.set(offset, level) },
+            quoted => ({
+              length: CALLOUT_RE.test(quoted.raw) ? quoted.raw.length : BLOCKQUOTE_PREFIX_RE.exec(quoted.raw)?.[0].length ?? 0,
+              padding: 0,
+            }),
+            { onHeading: (offset, level) => levels.set(offset, level) },
           );
           quotedHeadingLevels = levels;
         }
+        let resetAt: number | undefined;
         const j = findBlockquoteEnd(lines, i, (candidate, index) => {
+          const next = classifyLabel(CALLOUT_RE.exec(candidate)?.[1], blockVisibility, sealProofs);
+          // A stronger explicit callout starts a new block even under an inherited floor.
+          if (next && VISIBILITY_RANK[next.visibility] > VISIBILITY_RANK[intrinsic.visibility]) return true;
           const level = quotedHeadingLevels?.get(lines[index]!.start);
-          if (quotedHeading && quotedHeading.visibility !== "public" && level !== undefined && level <= quotedHeading.level) {
-            return true;
+          if (inheritedSection && level !== undefined && level <= inheritedSection.level) {
+            if (intrinsic.visibility === "public") return true;
+            resetAt ??= index;
           }
-          const next = classifyLabel(CALLOUT_RE.exec(candidate)?.[1], activeVis, sealProofs);
-          return next !== null && VISIBILITY_RANK[next.visibility] > VISIBILITY_RANK[classified.visibility];
+          return false;
         });
         quoteContinuesAt = j;
         let endLineIdx = j - 1;
@@ -2328,7 +2458,19 @@ function parsePedagogicalAstInternal(
         const outerStart = line.start;
         const outerEnd = lines[endLineIdx]!.contentEnd;
 
-        if (classified.visibility !== "sealed") {
+        if (resetAt !== undefined) {
+          // The heading ends the inherited section while the explicit hint continues.
+          const resetStart = lines[resetAt]!.start;
+          pushBlock(classified.kind, classified.visibility, true, outerStart, lines[resetAt - 1]!.contentEnd);
+          const innerBlocks = parsePrefixedInnerBlocks(
+            lines, resetAt, endLineIdx, null, intrinsic.visibility, propagateSectionVisibility, sealProofs,
+            captionRowStarts, boundaryFloors, undefined,
+            { stack: quotedHeadings, baseVisibility: getActiveSectionVisibility() },
+          );
+          emitContainerWithExtraction(
+            intrinsic.kind, intrinsic.visibility, true, resetStart, outerEnd, outerEnd, undefined, true, innerBlocks,
+          );
+        } else if (classified.visibility !== "sealed") {
           const headerRestStart = line.start + calloutMatch[0].length - calloutMatch[2]!.length;
           const innerBlocks = parsePrefixedInnerBlocks(
             lines,

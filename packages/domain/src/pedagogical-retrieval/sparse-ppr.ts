@@ -13,7 +13,7 @@ const DEFAULT_RRF_K = 60;
 
 /**
  * Build a row-stochastic sparse transition graph from raw directed edges.
- * Outgoing weights per node sum strictly to 1.0; nodes with no positive
+ * Outgoing weights per node sum to 1.0 (up to rounding); nodes with no positive
  * outgoing edges remain dangling (`[]`) so `sparsePpr` redistributes their
  * probability mass back to the personalization seed vector.
  */
@@ -24,7 +24,7 @@ export function normalizeSparseAdjacency(
   if (!Number.isSafeInteger(nodeCount) || nodeCount < 0) {
     throw new RangeError("nodeCount must be a non-negative safe integer");
   }
-  const sumsByNode = Array.from({ length: nodeCount }, () => new Map<number, number>());
+  const maxWeights = new Float64Array(nodeCount);
   for (const edge of edges) {
     if (
       !Number.isSafeInteger(edge.from) ||
@@ -39,9 +39,16 @@ export function normalizeSparseAdjacency(
     if (!Number.isFinite(edge.weight) || edge.weight < 0) {
       throw new RangeError(`Edge weight must be finite and non-negative, got ${edge.weight}`);
     }
+    maxWeights[edge.from] = Math.max(maxWeights[edge.from]!, edge.weight);
+  }
+
+  // Scale before aggregating parallel edges so finite weights cannot overflow.
+  const sumsByNode = Array.from({ length: nodeCount }, () => new Map<number, number>());
+  for (const edge of edges) {
     if (edge.weight === 0) continue;
     const row = sumsByNode[edge.from]!;
-    row.set(edge.to, (row.get(edge.to) ?? 0) + edge.weight);
+    const scaledWeight = edge.weight / maxWeights[edge.from]!;
+    row.set(edge.to, (row.get(edge.to) ?? 0) + scaledWeight);
   }
 
   return sumsByNode.map(row => {
@@ -58,17 +65,23 @@ export function normalizeSparseAdjacency(
 }
 
 function normalizeSeedVector(seed: Float64Array): Float64Array | null {
-  let sum = 0;
+  let maxWeight = 0;
   for (let i = 0; i < seed.length; i++) {
     const value = seed[i]!;
     if (!Number.isFinite(value) || value < 0) {
       throw new RangeError(`Seed weight at index ${i} must be finite and non-negative`);
     }
-    sum += value;
+    maxWeight = Math.max(maxWeight, value);
   }
-  if (sum <= 0) return null;
+  if (maxWeight === 0) return null;
   const normalized = new Float64Array(seed.length);
-  for (let i = 0; i < seed.length; i++) normalized[i] = seed[i]! / sum;
+  let sum = 0;
+  for (let i = 0; i < seed.length; i++) {
+    const weight = seed[i]! / maxWeight;
+    normalized[i] = weight;
+    sum += weight;
+  }
+  for (let i = 0; i < seed.length; i++) normalized[i] = normalized[i]! / sum;
   return normalized;
 }
 

@@ -999,7 +999,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
         "> [!hint]", "> second-value", "> ## New topic", "> public-after"],
       plainDocument: true,
       secrets: ["first-value", "second-value"],
-      publicText: "public-after",
+      hintText: "public-after",
     },
     {
       name: "heading formatted as a callout title",
@@ -1029,7 +1029,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       plainDocument: true,
       secrets: ["forty-two"],
     },
-  ])("keeps sealed evidence out of retrieval ($name)", ({ bodies, inline, plainDocument, secrets, publicText }) => {
+  ])("keeps sealed evidence out of retrieval ($name)", ({ bodies, inline, plainDocument, secrets, publicText, hintText }) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     const document = bodies.join("\n");
     const cues = bodies.map((text, index) => ({
@@ -1043,6 +1043,13 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       ...(plainDocument ? [{ chunks: chunkPedagogicalDocument({ ...source, text: document }), text: document }] : []),
     ]) {
       expectSealedEvidence(chunks, text, secrets, publicText);
+      if (hintText) {
+        expect(chunks.find(chunk => chunk.text.includes(hintText))?.visibility).toBe("hint_gated");
+        for (const allowHintGated of [false, true]) {
+          const { indexableChunks } = partitionPedagogicalChunks(chunks, { allowHintGated });
+          expect(indexableChunks.some(chunk => chunk.text.includes(hintText))).toBe(allowHintGated);
+        }
+      }
     }
   });
 
@@ -1060,6 +1067,83 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
       startMs: 1000, endMs: 2000, keyframeChunkId: "key",
     });
+  });
+
+  it.each([
+    ["explicit solution callout", "> ## Hints\n> [!solution]\n> ## Worked steps\n> forty-two"],
+    ["explicit solution after an inherited callout", "> ## Answer Key\n> [!example]\n> sealed-before\n> [!solution]\n> ## Worked steps\n> forty-two"],
+    ["explicit solution with a Setext title after an inherited callout", "> ## Answer Key\n> [!example]\n> [!solution]\n> Worked steps\n> ---\n> forty-two"],
+    ["commented solution closer", "\\begin{solution}\n% \\end{solution}\nforty-two\n\\end{solution}"],
+    ["commented solution opener", "\\begin{solution}\n% \\begin{solution}\nforty-two\n\\end{solution}"],
+    ["commented proof closer", ":::exercise\n\\begin{proof}\n% \\end{proof}\nforty-two\n\\end{proof}\n:::"],
+    ["commented proof opener", ":::exercise\n\\begin{proof}\n% \\begin{proof}\nforty-two\n\\end{proof}\n:::"],
+    ["commented details closer", "<details>\n<summary>Answer</summary>\n<!-- </details> -->\nforty-two\n</details>"],
+    ["commented details opener", "<details>\n<summary>Answer</summary>\n<!--\n<details>\n-->\nforty-two\n</details>"],
+    ["commented summary closer", "<details>\n<summary>Hint <!-- </summary> --> Answer</summary>\nforty-two\n</details>"],
+    ["fenced details closer", "<details>\n<summary>Answer</summary>\n~~~html\n</details>\n~~~\nforty-two\n</details>"],
+    ["nested fenced details closer", "<details>\n<summary>Answer</summary>\n- \x60\x60\x60html\n  </details>\n  \x60\x60\x60\nforty-two\n</details>"],
+    ["list-continuation fence in details", "<details>\n<summary>Answer</summary>\n123. Item\n     ~~~html\n     </details>\n     ~~~\nforty-two\n</details>"],
+    ["inline comment opener in details", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>"],
+    ["inline details closer", "<details>\n<summary>Answer</summary>\nExample: \x60</details>\x60\nforty-two\n</details>"],
+    ["multiline inline details closer", "<details>\r\n<summary>Answer</summary>\r\nExample: \x60\x60start\r\n</details> end\x60\x60\r\nforty-two\r\n</details>"],
+    ["inline summary closer", "<details>\n<summary>Hint \x60</summary>\x60 Answer</summary>\nforty-two\n</details>"],
+  ])("preserves explicit protection across %s", (_name, body) => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = body + "\n\npublic-after";
+    const chunks = chunkPedagogicalDocument({ ...source, text });
+    const cueChunks = chunkTranscriptCues({ ...source, cues: [
+      { text: body, startMs: 0, endMs: 1000, keyframeChunkId: "key" },
+      { text: "\npublic-after", startMs: 1000, endMs: 2000 },
+    ] });
+    expectSealedEvidence(chunks, text, ["forty-two"], "public-after");
+    expectSealedEvidence(cueChunks, text, ["forty-two"], "public-after");
+    expect(cueChunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      startMs: 0, endMs: 1000, keyframeChunkId: "key",
+    });
+  });
+
+  it("resets inherited quote visibility at a Setext heading after a callout marker", () => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = "> ## Answer Key\n> [!example]\n> New topic\n> ---\n> public-after";
+    const chunks = chunkPedagogicalDocument({ ...source, text });
+    const cueChunks = chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] });
+    for (const candidate of [chunks, cueChunks]) expectSealedEvidence(candidate, text, [], "public-after");
+  });
+
+  it("ignores stronger callout markers inside quoted HTML comments", () => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = "> ## Answer Key\n> [!example]\n> confidential\n> <!--\n> [!solution]\n> -->\n> ## Reset\n> public-after";
+    const chunks = chunkPedagogicalDocument({ ...source, text });
+    const cueChunks = chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] });
+    for (const candidate of [chunks, cueChunks]) expectSealedEvidence(candidate, text, ["confidential"], "public-after");
+  });
+
+  it("keeps a hint after an inherited callout protected at its own level", () => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const text = "> ## Answer Key\n> [!example]\n> [!hint]\n> confidential\n>\n> Worked steps\n> ---\n> hint-only";
+    const chunks = chunkPedagogicalDocument({ ...source, text });
+    const cueChunks = chunkTranscriptCues({ ...source, cues: [{ text, startMs: 0, endMs: 1000 }] });
+    for (const candidate of [chunks, cueChunks]) {
+      expectSealedEvidence(candidate, text, ["confidential"]);
+      expect(candidate.find(chunk => chunk.text.includes("hint-only"))?.visibility).toBe("hint_gated");
+    }
+  });
+
+  it.each([["$$", "$$"], ["\\[", "\\]"], ["\\begin{equation}", "\\end{equation}"]])(
+    "ignores commented display-math tokens inside %s",
+    (open, close) => {
+      const text = [open, "% " + close + " " + open, "x = 4", close, "public-after"].join("\r");
+      const blocks = parsePedagogicalAst(text);
+      expect(blocks.find(block => block.kind === "display_math")).toMatchObject({
+        text: text.slice(0, text.lastIndexOf("\r")), visibility: "public",
+      });
+    },
+  );
+
+  it("preserves real LaTeX closing tokens after an escaped percent", () => {
+    const text = "\\begin{solution}\rforty-two \\% \\end{solution}\r\rpublic-after";
+    expectSealedEvidence(chunkPedagogicalDocument({ sourceId: "captions", sourceVersion: 1, text }),
+      text, ["forty-two"], "public-after");
   });
 
   it.each(["\n", "\r\n", "\r"])("recognizes fence and math boundaries with %j line endings", newline => {
@@ -1945,6 +2029,21 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
 });
 
 describe("sparsePpr exactness, dangling-node mass conservation, and validation", () => {
+  it("conserves seed mass with finite weights whose sum would overflow", () => {
+    const scores = sparsePpr([[], []], Float64Array.of(1e308, 1e308));
+    expect(scores[0]).toBeCloseTo(0.5);
+    expect(scores[1]).toBeCloseTo(0.5);
+  });
+
+  it("normalizes large outgoing weights before combining parallel edges", () => {
+    const distinct = normalizeSparseAdjacency(2, [{ from: 0, to: 0, weight: 1e308 }, { from: 0, to: 1, weight: 1e308 }]);
+    expect(distinct[0]).toEqual([[0, 0.5], [1, 0.5]]);
+    const parallel = normalizeSparseAdjacency(2, [
+      { from: 0, to: 1, weight: 1e308 }, { from: 0, to: 1, weight: 1e308 }, { from: 0, to: 0, weight: 1e308 },
+    ]);
+    expect(parallel[0]).toEqual([[0, 1 / 3], [1, 2 / 3]]);
+    expect(parallel[1]).toEqual([]);
+  });
   it("matches exact analytical Personalized PageRank and conserves probability mass at 1.0 with dangling nodes", () => {
     // Graph: 0 -> 1 (weight 1), 1 is dangling!
     // Seed s = [1, 0].

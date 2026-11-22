@@ -121,6 +121,11 @@ describe("dedicated material reader", () => {
     expect(reader.textContent).not.toContain("尚不能同步确认该位置");
     expect(player.getAttribute("data-media-anchor-keyframe-id")).toBe("kf-65");
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+    const status = player.querySelector('[role="status"]')!;
+    expect(video.readyState).toBe(0);
+    expect(video.currentTime).toBe(0);
+    expect(status.textContent).toContain("正在加载媒体信息，加载后将自动跳到引用位置。");
+    expect(status.textContent).not.toContain("已定位");
 
     let paused = true;
     vi.spyOn(video, "paused", "get").mockImplementation(() => paused);
@@ -136,6 +141,7 @@ describe("dedicated material reader", () => {
     await act(async () => { video.dispatchEvent(new Event("seeked")); });
     expect(video.currentTime).toBe(65);
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
+    expect(status.textContent).toContain("已定位到引用片段，播放至末尾会自动暂停。");
 
     // Mid-segment timeupdate does not pause.
     paused = false;
@@ -178,6 +184,24 @@ describe("dedicated material reader", () => {
     video.currentTime = 15;
     await act(async () => { video.dispatchEvent(new Event("seeked")); });
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+  });
+  it("announces an audio citation point once metadata allows seeking", async () => {
+    const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg" };
+    const reader = await render({ record: audioRecord, startMs: 30_000 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const audio = player.querySelector("audio")!;
+    const status = player.querySelector('[role="status"]')!;
+
+    expect(audio.readyState).toBe(0);
+    expect(audio.currentTime).toBe(0);
+    expect(status.textContent).toContain("正在加载媒体信息，加载后将自动跳到引用位置。");
+    expect(status.textContent).not.toContain("已定位");
+
+    Object.defineProperty(audio, "readyState", { configurable: true, value: 1 });
+    await act(async () => { audio.dispatchEvent(new Event("loadedmetadata")); });
+    await act(async () => { audio.dispatchEvent(new Event("seeked")); });
+    expect(audio.currentTime).toBe(30);
+    expect(status.textContent).toContain("已定位到引用时间点。");
   });
   it("renders an audio player and rejects inverted [startMs, endMs] media ranges without seeking", async () => {
     const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg", version: 1 };
