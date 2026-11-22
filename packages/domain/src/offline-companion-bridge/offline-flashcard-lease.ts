@@ -1611,7 +1611,13 @@ const ARTICLE_MEASURE_WORD_RE = new RegExp(
   "unit|term|factor|second|minute|hour|day|week|month|year|inch|foot|yard|mile|met(?:er|re)|" +
   "(?:centi|milli|kilo)met(?:er|re)|gram|kilogram|milligram|pound|ounce|tonne?|lit(?:er|re)|gallon|degree)$",
 );
-const ARTICLE_PRENOMINAL_ADJECTIVE_RE = /^(?:new|old|small|large|simple|complex|steep|[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$/;
+// Keep -al explicit: signal, material, and integral can complete the noun phrase.
+const ARTICLE_PRENOMINAL_ADJECTIVE_RE = new RegExp("^(?:" +
+  "new|old|small|large|simple|complex|straight|flat|steep|smooth|acute|obtuse|convex|concave|" +
+  "horizontal|orthogonal|linear|nonlinear|collinear|coplanar|planar|angular|circular|rectangular|triangular|" +
+  "lateral|radial|axial|spatial|temporal|directional|translational|rotational|thermal|optimal|minimal|maximal|internal|external|" +
+  "nonzero|finite|infinite|discrete|uniform|random|strict|weak|strong|upper|lower|inner|outer|red|blue|green|" +
+  "[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$");
 
 const ARTICLE_CLAUSE_END_RE = /[.!?。！？;；:：\r\n\u2028\u2029]/u;
 const ARTICLE_SUBORDINATE_RE = /^(?:that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$/;
@@ -1664,7 +1670,7 @@ const ARTICLE_PLURAL_VERB_RE = new RegExp("^(?:" +
   "approach|tend|touch|pass|meet|move|shift|scale|rotate|map|project|transform|increase|decrease|double|halve|peak|drop|jump|" +
   "fluctuate|oscillate|tremble|seem|stabilize|maximize|minimize|solve|obey|govern|describe|represent|denote|assume|hit)$");
 const ARTICLE_IMPERATIVE_RE = /^(?:compute|find|show|prove|check|explain|determine|evaluate|verify|state|give|write|list|sketch|plot)$/;
-const ARTICLE_ED_NOUN_RE = /^(?:speed|seed|feed|need|weed|reed|bed|red|sled|shed|shred|thread|bread|head|lead|spread|tread|stead|med|ped|biped|quadruped|hundred)$/;
+const ARTICLE_ED_NOUN_RE = /^(?:speed|seed|feed|need|weed|reed|bed|sled|shed|shred|thread|bread|head|lead|spread|tread|stead|med|ped|biped|quadruped|hundred)$/;
 const ARTICLE_APPOSITIVE_NOUN_HOMOGRAPH_RE = /^(?:approach|touch|pass|meet|move|shift|scale|map|project|transform|increase|decrease|peak|drop|jump|hit)$/;
 const ARTICLE_NOUN_COMPOUND_RE = /^(?:mountain passes|coordinate transforms)$/;
 
@@ -1853,7 +1859,7 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     }
     if (RELATION_OP_RE.test(token)) return true;
 
-    const participle = ARTICLE_PARTICIPLE_FORM_RE.test(token);
+    const participle = ARTICLE_PARTICIPLE_FORM_RE.test(token) && !ARTICLE_ED_NOUN_RE.test(token);
     const infinitiveAuxiliary = ARTICLE_INFINITIVE_CHAIN_RE.test(token);
     const nounSlot: boolean = afterConjunction || expectsNoun || afterQuantifier ||
       previous === "of" || previous === "by" || ARTICLE_RELATION_COMPLEMENT_RE.test(previous);
