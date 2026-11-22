@@ -1598,7 +1598,8 @@ const ARTICLE_DIMENSION_SEPARATOR = /(?:[ \t]+(?:by|[x×*])[ \t]+|-by-)/.source;
 const ARTICLE_DIMENSION_TOKEN =
   `${ARTICLE_DIMENSION}(?:${ARTICLE_DIMENSION_SEPARATOR}${ARTICLE_DIMENSION})+(?![\\w-])`;
 const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
-const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps))$/;
+const ARTICLE_SINGULAR_S_RE =
+  /(?:[sui]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps|chaos|cosmos|pathos|ethos|thermos|asbestos))$/;
 const ARTICLE_IRREGULAR_PLURAL_RE = /^(?:children|people|men|women|teeth|feet|mice|geese|criteria|phenomena)$/;
 // Option normalization spells Greek unit symbols as "mu" and "omega".
 const ARTICLE_MEASUREMENT_UNIT =
@@ -1612,8 +1613,11 @@ const ARTICLE_MEASURE_WORD_RE = new RegExp(
   "(?:centi|milli|kilo)met(?:er|re)|gram|kilogram|milligram|pound|ounce|tonne?|lit(?:er|re)|gallon|degree)$",
 );
 // A word like "flat" can complete a noun phrase before a finite verb.
-const ARTICLE_PRENOMINAL_ADJECTIVE_RE =
-  /^(?:new|old|small|large|simple|complex|steep|horizontal|orthogonal|collinear|coplanar|nonzero|[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$/;
+const ARTICLE_PRENOMINAL_ADJECTIVE_RE = new RegExp("^(?:" +
+  "new|old|small|large|simple|complex|steep|horizontal|orthogonal|collinear|coplanar|nonzero|" +
+  "linear|nonlinear|planar|angular|rectangular|triangular|diagonal|spatial|temporal|directional|translational|rotational|" +
+  "straight|smooth|acute|obtuse|convex|concave|finite|infinite|discrete|strict|weak|strong|" +
+  "[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$");
 const ARTICLE_COLOR_RE = /^(?:red|blue|green)$/;
 
 const ARTICLE_CLAUSE_END_RE = /[.!?。！？;；:：\r\n\u2028\u2029]/u;
@@ -1876,9 +1880,9 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     if (ARTICLE_FINITE_AUXILIARY_RE.test(token) &&
       !(inInfinitive && (infinitiveAuxiliary || token === "do"))) return true;
     if (ARTICLE_FINITE_VERB_RE.test(token)) return true;
-    if (ARTICLE_HOMOGRAPH_VERB_RE.test(token) && (!nounSlot || isArticleMannerAdverb(next))) return true;
     if (!nounSlot) {
-      if ((hasConjoinedSubject || afterQuantifiedPluralHead) && ARTICLE_PLURAL_VERB_RE.test(token)) {
+      if (ARTICLE_HOMOGRAPH_VERB_RE.test(token) ||
+        ((hasConjoinedSubject || afterQuantifiedPluralHead) && ARTICLE_PLURAL_VERB_RE.test(token))) {
         return true;
       }
       if (!inInfinitive) {
@@ -1899,10 +1903,14 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     afterQuantifiedPluralHead = pluralHead || (afterQuantifiedPluralHead && isArticleMannerAdverb(token));
     expectsPluralHead = (expectsPluralHead && !pluralHead) ||
       (nounSlot && quantity && token !== "one" && token !== "1" && next !== "of");
-    const colorModifier = previous !== "the" && ARTICLE_COLOR_RE.test(token);
+    const colorModifier = ARTICLE_COLOR_RE.test(token) &&
+      (previous !== "the" || (token === "red" && tokens[index - 2]?.toLowerCase() !== "in"));
+    // "The diagonal" and "a straight" can be complete countable noun phrases.
+    const prenominalAdjective = ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) &&
+      !((token === "diagonal" || token === "straight") && ARTICLE_DETERMINER_RE.test(previous));
     expectsNoun = determiner ||
       (nounSlot && (quantity || participle ||
-        ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) || colorModifier ||
+        prenominalAdjective || colorModifier ||
         ARTICLE_NOUN_COMPOUND_RE.test(token + " " + next) ||
         (ARTICLE_MODIFIER_WORD_RE.test(token) && !ARTICLE_LY_NOUN_RE.test(token))));
     inInfinitive = token === "to" || (inInfinitive && infinitiveAuxiliary);
