@@ -21,7 +21,7 @@ function expectSealedEvidence(
   chunks: readonly PedagogicalChunk[],
   text: string,
   secrets: readonly string[],
-  publicText?: string,
+  publicText?: string | readonly string[],
   hintText?: string,
 ) {
   for (const chunk of chunks) expect(text.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
@@ -40,8 +40,10 @@ function expectSealedEvidence(
       expect(ranked.ranked.some(result => result.chunk.text.includes(secret))).toBe(false);
     }
     if (publicText) {
-      expect(indexableChunks.find(chunk => chunk.text.includes(publicText))?.visibility).toBe("public");
-      expect(ranked.ranked.some(result => result.chunk.text.includes(publicText))).toBe(true);
+      for (const marker of typeof publicText === "string" ? [publicText] : publicText) {
+        expect(indexableChunks.find(chunk => chunk.text.includes(marker))?.visibility).toBe("public");
+        expect(ranked.ranked.some(result => result.chunk.text.includes(marker))).toBe(true);
+      }
     }
     if (hintText) {
       expect(chunks.find(chunk => chunk.text.includes(hintText))?.visibility).toBe("hint_gated");
@@ -1627,6 +1629,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       "习题答案", "课后答案", "官方答案", "查看答案", "展开答案", "显示答案", "答案与解析",
       "答案及解析", "标准解答", "评分标准",
       "答案（仅供参考）", "答案(第1题)", "【第1题】答案", "第一题答案", "答案一", "答案汇总",
+      "第一单元答案", "第一部分答案", "第二小节解答", "第一百零一题答案", "课后题答案", "期末试卷答案", "A卷答案",
     ].map(label => `## ${label}\n\nforty-two`),
     "答案\n---\n\nforty-two",
     "<h2>答案</h2>\n\nforty-two",
@@ -1636,13 +1639,18 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public follow-up.");
   });
 
-  it.each(["答案", "解答（第1题）"])("seals the %s column of a pipe table and keeps the 题目 column public", label => {
-    const text = `| 题目 | ${label} |\n| --- | --- |\n| 求值 | forty-two |`;
-    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "求值");
+  it.each([
+    "答案", "解答（第1题）", "第一单元答案", "第一部分答案",
+  ])("seals the %s column of a pipe table and keeps the 题目 column public", label => {
+    const text = `| 题目 | ${label} |\n| --- | --- |\n| 求值 | forty-two |\n\n## 下一节\n\nPublic follow-up.`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expectSealedEvidence(chunks, text, ["forty-two"], ["求值", "Public follow-up."]);
+    }
   });
 
   it.each([
     ["## 提示\n\ntry factoring\n\n## 下一节\n\nPublic follow-up.", "Public follow-up."],
+    ["## 第一单元提示\n\ntry factoring\n\n## 下一节\n\nPublic follow-up.", "Public follow-up."],
     ["| 题目 | 提示（第一步） |\n| --- | --- |\n| 求值 | try factoring |", "求值"],
   ])("gates Chinese hint text and keeps public evidence rankable (%j)", (text, publicText) => {
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], publicText, "try factoring");
