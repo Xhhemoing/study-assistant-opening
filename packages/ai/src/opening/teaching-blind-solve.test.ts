@@ -1,3 +1,4 @@
+import { createContext, runInNewContext, runInContext } from "node:vm";
 import type { ProviderInput } from "@aistudy/contracts";
 import type { BudgetedRepository } from "./budgeted-call";
 import { describe, expect, it, vi } from "vitest";
@@ -61,6 +62,22 @@ describe("teaching blind solve protocol", () => {
       { ...identity, generatorModelIdentity: { ...config.generator, modelName: "new" } }]) {
       expect(teachingBlindSolveMatchesCurrent(result, changed)).toBe(false);
     }
+  });
+
+  it("preserves strict identity equality for records in another realm and instances of the same class", async () => {
+    const result = await solveTeachingBlind(fixture().input);
+    const expression = `(${JSON.stringify(identity)})`;
+    const realm = createContext({});
+    const first = runInContext(expression, realm) as TeachingBlindSolveIdentity;
+    const second = runInContext(expression, realm) as TeachingBlindSolveIdentity;
+    expect(teachingBlindSolveMatchesCurrent({ ...result, identity: first }, second)).toBe(true);
+    expect(teachingBlindSolveMatchesCurrent({ ...result, identity: first }, runInNewContext(expression))).toBe(false);
+
+    class StoredIdentity {}
+    const stored = Object.assign(new StoredIdentity(), identity);
+    expect(teachingBlindSolveMatchesCurrent({ ...result, identity: stored }, Object.assign(new StoredIdentity(), identity))).toBe(true);
+    expect(teachingBlindSolveMatchesCurrent({ ...result, identity: stored }, identity)).toBe(false);
+    expect(teachingBlindSolveMatchesCurrent(result, { ...identity, itemVersionId: undefined })).toBe(false);
   });
   it.each([["5", "disagree"], [null, "unknown"], ["I abstain", "unknown"]] as const)("keeps %s as %s without repairing key", async (answer, decision) => {
     const f = fixture(answer);

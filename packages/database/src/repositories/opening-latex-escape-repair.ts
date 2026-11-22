@@ -1,4 +1,4 @@
-import { repairDecodedLatexInJson } from "@aistudy/ai";
+import { repairDecodedLatexInJson } from "@aistudy/domain/opening/ai-policy";
 import type { Sql } from "postgres";
 
 /**

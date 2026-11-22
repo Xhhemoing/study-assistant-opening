@@ -1,0 +1,55 @@
+{
+  "name": "aistudy",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "version": "0.0.0",
+  "description": "AIstudy lifelong learning platform",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "spikes/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @aistudy/web",
+    "worker:dev": "npm run dev -w @aistudy/worker",
+    "preview:build": "node scripts/run-heavy.mjs node scripts/web-preview.mjs build",
+    "preview:start": "node scripts/web-preview.mjs start",
+    "preview": "npm run preview:build && npm run preview:start",
+    "lint": "node scripts/check-new-fixed-colors.mjs && node scripts/check-server-boundary.mjs && node scripts/check-learner-copy.mjs --strict && node scripts/check-api-contracts.mjs --strict && node scripts/run-heavy.mjs eslint .",
+    "lint:copy": "node scripts/check-learner-copy.mjs --strict",
+    "lint:boundary": "node scripts/check-server-boundary.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
+    "test": "node scripts/run-heavy.mjs vitest run",
+    "test:integration": "node scripts/run-heavy.mjs vitest run --project integration",
+    "test:handler": "node scripts/run-heavy.mjs vitest run --project handler",
+    "test:browser": "node scripts/run-heavy.mjs playwright test",
+    "test:browser:smoke": "node scripts/run-heavy.mjs playwright test --config playwright.opening-smoke.config.mts",
+    "build": "node scripts/run-heavy.mjs npm run build -w @aistudy/worker && node scripts/run-heavy.mjs npm run build -w @aistudy/web",
+    "compose:up": "docker compose -f infra/docker/compose.yml up -d",
+    "compose:down": "docker compose -f infra/docker/compose.yml down",
+    "compose:ps": "docker compose -f infra/docker/compose.yml ps",
+    "db:migrate": "tsx ./scripts/db-migrate.ts",
+    "verify:ci": "node ./scripts/verify-ci.mjs",
+    "env:examples": "tsx ./scripts/env-examples.ts --write",
+    "env:check": "tsx ./scripts/env-examples.ts --check"
+  },
+  "aistudy": {
+    "typecheck": {
+      "extraProjects": ["tsconfig.e2e.json"]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.11.1",
+    "@eslint/js": "9.30.1",
+    "@playwright/test": "1.53.2",
+    "@types/node": "22.15.32",
+    "eslint": "9.30.1",
+    "globals": "16.3.0",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.35.1",
+    "vitest": "4.1.10"
+  }
+}

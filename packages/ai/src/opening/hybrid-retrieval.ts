@@ -1,8 +1,8 @@
-import type { CourseSourceUse, OpeningMaterialPurposePin, SourceChunk } from "@aistudy/contracts";
+import type { CourseSourceUse, MaterialSegment, OpeningMaterialPurposePin, SourceChunk } from "@aistudy/contracts";
 import { keywordOverlapScore, renderContext } from "./context";
 import type { ParentInteractionBudget } from "./parent-interaction-budget";
 
-export type MaterialSegment = { chunk: SourceChunk; segmentIndex: number };
+export type { MaterialSegment } from "@aistudy/contracts";
 export type MaterialRetrievalInput = {
   chunks: SourceChunk[];
   sourceIds: string[];

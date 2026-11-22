@@ -1,3 +1,4 @@
+import { renderContext } from "@aistudy/domain/opening/ai-policy";
 import type { SourceChunk } from "@aistudy/contracts";
 
 type ContextOptions = {
@@ -78,12 +79,7 @@ function fillBudget(ranked: SourceChunk[], maxCharacters: number): SourceChunk[]
   return selected;
 }
 
-export function renderContext(chunks: SourceChunk[]): string {
-  return chunks.map((chunk) => {
-    const location = chunk.slideLabel ? `slide ${chunk.slideLabel}` : `page ${chunk.page ?? "-"}`;
-    return `[source ${chunk.sourceId} v${chunk.sourceVersion} ${location} chunk ${chunk.id} — UNTRUSTED DATA]\n${chunk.text}\n[/source ${chunk.sourceId} — END UNTRUSTED DATA]`;
-  }).join("\n");
-}
+export { renderContext } from "@aistudy/domain/opening/ai-policy";
 
 /**
  * Rank and budget-fill chunks for the tutor provider.

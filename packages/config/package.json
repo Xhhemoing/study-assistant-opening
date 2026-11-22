@@ -1,6 +1,7 @@
 {
   "name": "@aistudy/config",
   "private": true,
+  "license": "UNLICENSED",
   "version": "0.0.0",
   "type": "module",
   "main": "./src/index.ts",
