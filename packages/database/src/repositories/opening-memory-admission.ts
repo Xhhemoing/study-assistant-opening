@@ -80,7 +80,10 @@ export function sourceMaterialsActive(
   const purposeAllowed = () => options?.directMaterialPolicy
     ? db`cam.purpose = 'practice' OR (cam.purpose = 'reference' AND ${materialUse()} = 'citation')`
     : db`cam.purpose = CASE WHEN ${materialUse()} = 'practice' THEN 'practice' ELSE 'reference' END`;
-  return db`NOT EXISTS (
+  return db`${memoryCourse ? db`(${memoryCourse()} IS NULL OR EXISTS (
+    SELECT 1 FROM courses material_course WHERE material_course.id = ${memoryCourse()}
+      AND material_course.workspace_id = ${workspaceId} AND material_course.archived_at IS NULL
+  )) AND` : db``} NOT EXISTS (
     SELECT 1 FROM (${materials()}) ref
     LEFT JOIN opening_sources s ON s.id = ${lineageUuid(db, () => db`ref.source_id`)}
       AND s.workspace_id = ${workspaceId} AND s.upload_state = 'uploaded'

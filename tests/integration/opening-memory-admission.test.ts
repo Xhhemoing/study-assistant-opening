@@ -489,7 +489,7 @@ it("never lets an active global memory exempt a detached course source shared wi
     purpose: "teaching",
   });
 
-  // Turn 1 inside the course conversation uses sharedSourceId and completes.
+  // Use a legacy assistant row to exercise the send fence after history loading.
   const courseConversation = await conversations.create(fixture.scope, { title: "Course history", courseId: course.id });
   const priorTurn = await conversations.appendSavedTurn({
     scope: fixture.scope,
@@ -503,7 +503,7 @@ it("never lets an active global memory exempt a detached course source shared wi
     chunkId: null,
   });
   await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${priorTurn.turnId}, ${priorTurn.assistantTurnId})`;
-  await fixture.sql`UPDATE opening_turns SET status = 'complete', text = 'Prior answer using shared material',
+  await fixture.sql`UPDATE opening_turns SET status = 'complete', text = 'Prior answer using shared material', source_ids = '{}',
     context_source_refs = ${fixture.sql.json([{ sourceId: sharedSourceId, sourceVersion: 0 }])} WHERE id = ${priorTurn.assistantTurnId}`;
   await fixture.sql`UPDATE opening_tutor_jobs SET status = 'succeeded' WHERE id = ${priorTurn.jobId}`;
 

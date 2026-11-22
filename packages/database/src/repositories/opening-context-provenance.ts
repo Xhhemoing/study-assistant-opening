@@ -251,10 +251,11 @@ export function memoryDependencyRows(db: Db, refs: FragmentFactory): Fragment {
     FROM jsonb_array_elements(
       CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END
     ) AS dep_elem
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-      CASE WHEN jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-        THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-    ) AS dep(id)
+    -- Avoid the JSON function's default row estimate multiplying through recursive joins.
+    CROSS JOIN LATERAL unnest(ARRAY(
+      SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+        THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END)
+    )) AS dep(id)
     WHERE dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
       AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
   )`;

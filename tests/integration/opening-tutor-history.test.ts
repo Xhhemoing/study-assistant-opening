@@ -125,6 +125,44 @@ it.each(["empty", "memory-only", "conflicting", "malformed"] as const)("omits on
   });
 });
 
+it("keeps earlier independent history and fences later answers after an unpinned source is revoked", async () => {
+  const { sql, scope } = f;
+  const { c, current, jobs, prior, repo } = await seed();
+  const sourceId = await insertSource(sql, scope);
+  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[] WHERE id=${prior.assistantTurnId}`;
+  for (const [text, answer, minutes] of [["Independent question", "Independent answer", 120], ["Continue that answer", "Derived from the revoked material", 30]] as const) {
+    const turn = await repo.appendSavedTurn({ scope, conversationId: c.id, text, mode: "hint", clientKey: randomUUID(),
+      sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null });
+    await sql`UPDATE opening_turns SET created_at=now()-make_interval(mins=>${minutes}) WHERE id=${turn.turnId}`;
+    await sql`UPDATE opening_turns SET status='complete',text=${answer},context_source_refs='[]'::jsonb WHERE id=${turn.assistantTurnId}`;
+  }
+  await sql`UPDATE opening_sources SET upload_state='rejected' WHERE id=${sourceId}`;
+  await expect(jobs.loadHistoryContext(scope, current.turnId)).resolves.toEqual({
+    history: [{ role: "user", text: "Independent question" }, { role: "assistant", text: "Independent answer" }], sourceRefs: [],
+  });
+});
+
+it("excludes direct assistant history from an archived origin course even with an active destination membership", async () => {
+  const { sql, scope } = f;
+  const { current, jobs, prior } = await seed();
+  const sourceId = await insertSource(sql, scope);
+  const courses = createCourseMembershipRepository(sql);
+  const origin = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Origin", slug: randomUUID() });
+  const destination = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Destination", slug: randomUUID() });
+  for (const course of [origin, destination]) {
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id, assetType: "source", assetId: sourceId,
+      role: "core", visibility: "course", purpose: "teaching" });
+  }
+  await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: origin.id })} WHERE id=${prior.turnId}`;
+  await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: destination.id })} WHERE id=${current.turnId}`;
+  await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],source_versions=${sql.json({ [sourceId]: 0 })}
+    WHERE id=${prior.assistantTurnId}`;
+  const history = () => jobs.loadHistoryContext(scope, current.turnId);
+  await expect(history()).resolves.toMatchObject({ sourceRefs: [{ sourceId, sourceVersion: 0 }] });
+  await courses.setArchived({ ...scope, courseId: origin.id, archived: true });
+  await expect(history()).resolves.toEqual({ history: [], sourceRefs: [] });
+});
+
 it.each(["mock_exam", "reference"] as const)("uses pins for assistant direct sources and enforces %s on model history and send", async purpose => {
   const { sql, scope } = f;
   const { c, current, jobs, prior } = await seed();

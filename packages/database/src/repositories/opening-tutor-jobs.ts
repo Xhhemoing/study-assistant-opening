@@ -16,7 +16,7 @@ import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryRecei
 import {
   contextSourceRefsIncluded, hasMemoryBearingRef, lineageUuid, memoryBacksSource, memoryCourseAllows,
   memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
-  resolveMemoryDependencyStatus, turnContextSourceRefs, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
+  resolveMemoryDependencyStatus, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
   turnPinnedSourceRefs, type ContextSourceRef,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
@@ -504,10 +504,11 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
     WITH candidate_evidence AS MATERIALIZED (
       SELECT * FROM jsonb_to_record(${db.json(evidence as never)}::jsonb) AS evidence(
         assistant_refs jsonb, user_refs jsonb, source_ids uuid[], citations jsonb, course_id uuid, material_use text,
-        standalone_sessions boolean
+        standalone_sessions boolean, assistant_source_ids uuid[], assistant_version_refs jsonb
       )
       WHERE jsonb_typeof(assistant_refs)='array'
         AND (user_refs IS NULL OR jsonb_typeof(user_refs)='array')
+        AND ${turnDirectSourcesVersioned(db, () => db`assistant_source_ids`, () => db`assistant_refs`, () => db`assistant_version_refs`)}
         AND ${contextSourceRefsIncluded(db, workspaceId, () => db`assistant_refs || COALESCE(user_refs, '[]'::jsonb)`,
           false, true, () => db`source_ids`, () => db`citations`)}
     ), lineage AS (
@@ -569,22 +570,23 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   const standaloneSessions = () => db`${turnHasStandaloneSession(db, () => db`t`, () => db`w.owner_user_id`)}
     AND ${turnHasStandaloneSession(db, () => db`u`, () => db`w.owner_user_id`)}
     AND ${lineageUuid(db, () => db`t.context_anchor->>'courseId'`)} IS NULL`;
+  const savedPins = (role: "assistant" | "user") => {
+    const turn = () => role === "assistant" ? db`t` : db`u`;
+    return db`(
+      SELECT COALESCE(array_agg(${lineageUuid(db, () => db`pin.source_id`)}), '{}'::uuid[]) AS source_ids,
+        COALESCE(jsonb_agg(jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version))
+          FILTER (WHERE pin.version_required OR pin.source_version IS NOT NULL), '[]'::jsonb) AS version_refs
+      FROM (${turnPinnedSourceRefs(db, () => db`${turn()}.source_versions`, () => db`${turn()}.context_anchor`)}) pin
+    )`;
+  };
   const [target] = await db`
     WITH candidate_target AS MATERIALIZED (
       SELECT j.conversation_id, j.user_turn_id, j.mode, t.text AS answer, u.text AS question,
         t.context_source_refs, u.context_source_refs AS user_context_source_refs, w.privacy_epoch,
-        u.source_ids || t.source_ids AS direct_source_ids, u.citations || t.citations AS citations,
-        ARRAY(
-          SELECT ${lineageUuid(db, () => db`pin.source_id`)}
-          FROM (${turnPinnedSourceRefs(db, () => db`t.source_versions`, () => db`t.context_anchor`)}
-            UNION ALL ${turnPinnedSourceRefs(db, () => db`u.source_versions`, () => db`u.context_anchor`)}) pin
-        ) AS pinned_source_ids,
-        (
-          SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version)), '[]'::jsonb)
-          FROM (${turnPinnedSourceRefs(db, () => db`t.source_versions`, () => db`t.context_anchor`)}
-            UNION ALL ${turnPinnedSourceRefs(db, () => db`u.source_versions`, () => db`u.context_anchor`)}) pin
-          WHERE pin.version_required OR pin.source_version IS NOT NULL
-        ) AS versioned_pins,
+        u.source_ids || t.source_ids || assistant_pins.source_ids || user_pins.source_ids AS source_ids,
+        t.source_ids AS assistant_source_ids,
+        t.citations || assistant_pins.version_refs AS assistant_version_refs,
+        u.citations || user_pins.version_refs AS user_version_refs,
         ${turnLineageCourse(db, "u", () => db`c.course_id`, () => db`c.owner_user_id`)} AS course_id,
         ${standaloneSessions()} AS standalone_sessions,
         CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
@@ -597,6 +599,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         AND t.conversation_id=j.conversation_id AND t.role='assistant' AND t.status='complete'
       JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=j.workspace_id
         AND u.conversation_id=j.conversation_id AND u.role='user' AND u.status='complete'
+      CROSS JOIN LATERAL ${savedPins("assistant")} assistant_pins
+      CROSS JOIN LATERAL ${savedPins("user")} user_pins
       WHERE j.id=${input.jobId} AND j.workspace_id=${workspaceId}
         AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
         AND jsonb_typeof(u.citations)='array' AND jsonb_typeof(t.citations)='array'
@@ -620,9 +624,10 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       CASE WHEN jsonb_typeof(t.context_source_refs) IS DISTINCT FROM 'array'
         OR t.user_context_source_refs IS NOT NULL AND jsonb_typeof(t.user_context_source_refs) IS DISTINCT FROM 'array'
         OR t.context_source_refs <> '[]'::jsonb OR COALESCE(t.user_context_source_refs, '[]'::jsonb) <> '[]'::jsonb
-        OR cardinality(t.direct_source_ids || t.pinned_source_ids) > 0 OR t.citations <> '[]'::jsonb
+        OR cardinality(t.source_ids) > 0 OR t.assistant_version_refs <> '[]'::jsonb OR t.user_version_refs <> '[]'::jsonb
         THEN jsonb_build_object('assistant_refs', t.context_source_refs, 'user_refs', t.user_context_source_refs,
-          'source_ids', t.direct_source_ids || t.pinned_source_ids, 'citations', t.citations || t.versioned_pins,
+          'source_ids', t.source_ids, 'citations', t.assistant_version_refs || t.user_version_refs,
+          'assistant_source_ids', t.assistant_source_ids, 'assistant_version_refs', t.assistant_version_refs,
           'course_id', t.course_id, 'material_use', t.material_use, 'standalone_sessions', t.standalone_sessions) END AS evidence
     FROM candidate_target t
     WHERE (t.course_id IS NULL OR EXISTS (

@@ -381,6 +381,33 @@ describe("saved tutor material provenance", () => {
     await expect(appendCandidates()).resolves.toBe(true);
   }, 15_000);
 
+  it.each(["unpinned", "pinned"] as const)("refuses metadata for a %s direct assistant source after replacement", async versionEvidence => {
+    const { sql, scope } = f;
+    const material = await source();
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Old metadata", courseId: null });
+    const saved = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const claim = (await jobs.claim(saved.jobId))!;
+    const target = { scope, jobId: saved.jobId, assistantTurnId: saved.assistantTurnId, claimToken: claim.claimToken };
+    await jobs.completeTurn({ ...target, text: "Answer using the original source", citations: [], candidates: [], contextSourceRefs: [] });
+    await sql`UPDATE opening_turns SET source_ids=ARRAY[${material}]::uuid[],
+      source_versions=${sql.json(versionEvidence === "pinned" ? { [material]: 0 } : {})} WHERE id=${saved.assistantTurnId}`;
+    if (versionEvidence === "pinned") {
+      await expect(jobs.loadCompletedTurnForMetadata(target)).resolves.toMatchObject({ answer: "Answer using the original source" });
+    }
+    await sql`UPDATE opening_sources SET version=1 WHERE id=${material}`;
+    await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+      VALUES (${material},0,${scope.workspaceId},'unavailable'),(${material},1,${scope.workspaceId},'available')
+      ON CONFLICT (source_id,version) DO UPDATE SET availability=EXCLUDED.availability`;
+    const send = vi.fn(async () => true);
+    await expect(jobs.loadCompletedTurnForMetadata(target)).resolves.toBeNull();
+    await expect(jobs.authorizeMetadataSend(target, send)).rejects.toThrow("tutor metadata authorization changed");
+    expect(send).not.toHaveBeenCalled();
+    await expect(jobs.appendCompletedTurnCandidates({ ...target, candidates: [{ kind: "memory", text: "Stale", temporary: false }] }))
+      .resolves.toBe(false);
+    expect(await sql`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${saved.assistantTurnId}`).toHaveLength(0);
+  });
+
   it.each(["user", "assistant", "paired user"] as const)("checks ownership of the %s session before admitting classified global memory", async binding => {
     const { sql, scope, otherScope } = f;
     const courses = createCourseMembershipRepository(sql);

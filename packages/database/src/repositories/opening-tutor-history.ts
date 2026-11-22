@@ -86,6 +86,9 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     ), ranked AS (
       SELECT prior.*, count(*) FILTER (WHERE NOT memory_bearing) OVER exchange_order AS ordinary_rank
       FROM prior WHERE assistant_direct_versioned AND assistant_direct_allowed
+        -- Older answers could have used an unpinned exchange without recording its material.
+        AND created_at < (SELECT COALESCE(min(p.created_at), 'infinity'::timestamptz)
+          FROM prior p WHERE p.assistant_direct_versioned IS NOT TRUE)
       WINDOW exchange_order AS (ORDER BY created_at DESC, id DESC)
     )
     SELECT id, assistant_id,
