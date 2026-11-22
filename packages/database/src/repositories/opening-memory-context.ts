@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import { isMemoryEligible } from "@aistudy/domain";
 import {
-  memoryCourseAllows, memoryDependencySummary, memoryTransitiveDepsCte,
+  lineageUuid, memoryCourseAllows, memoryDependencyRows,
   mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs,
   type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
@@ -20,9 +20,7 @@ export type LoadedMemoryContext = {
 };
 
 /**
- * Read eligible rows before validating their backing turns. Exclude missing, foreign,
- * unowned, references a missing, revoked, excluded, or version-drifted source,
- * or transitively depends on a memory that is no longer usable in its course.
+ * Read eligible memories as a batch before resolving their full backing lineage.
  */
 async function readMemoryContext(
   db: Db,
@@ -44,27 +42,46 @@ async function readMemoryContext(
   // Avoid reaching the dependency planner at all when there is no sourced memory.
   const [hasEvidence] = await db`SELECT m.id FROM opening_memories m WHERE ${eligibleForScope()} LIMIT 1`;
   if (!hasEvidence) return [];
+  // Bound the explicit ancestry query to all selected roots in one walk.
+  // The origin check also resolves unattributed backing and validates stored material.
   const rows = await db`
-    WITH eligible AS MATERIALIZED (
+    WITH RECURSIVE mem_deps(dep_id) AS (
+      SELECT lower(dep.id), m.id AS root_id
+      FROM eligible m CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`m.source_evidence->'refs'`)} dep
+      UNION
+      SELECT lower(dep.id), prev.root_id
+      FROM mem_deps prev
+      JOIN opening_memories parent ON parent.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND parent.workspace_id = ${scope.workspaceId}
+      CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(parent.source_turn_ids) = 'array' THEN parent.source_turn_ids ELSE '[]'::jsonb END
+      ) origin(turn_id)
+      JOIN opening_turns t ON t.id = ${lineageUuid(db, () => db`origin.turn_id`)} AND t.workspace_id = parent.workspace_id AND t.status = 'complete'
+      CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
+    ), eligible AS MATERIALIZED (
       SELECT m.*, (
         SELECT jsonb_build_object(
           'turn_ids', COALESCE(jsonb_agg(t.id), '[]'::jsonb),
           'refs', jsonb_path_query_array(COALESCE(jsonb_agg(${turnContextSourceRefs(db, "t")}), '[]'::jsonb), '$[*][*]')
         )
         FROM jsonb_array_elements_text(m.source_turn_ids) ref(turn_id)
-        JOIN opening_turns t ON t.id::text = lower(ref.turn_id) AND t.workspace_id = m.workspace_id
-      ) AS source_evidence, (
-        SELECT to_jsonb(chain) FROM (
-          ${memoryDependencySummary(db, memoryTransitiveDepsCte(db), workspace, course, () => db`m.id`)}
-        ) chain
-      ) AS ancestry
+        JOIN opening_turns t ON t.id::text = lower(ref.turn_id) AND t.workspace_id = m.workspace_id AND t.status = 'complete'
+      ) AS source_evidence
       FROM opening_memories m
       WHERE ${eligibleForScope()}
+    ), ancestry AS (
+      SELECT d.root_id, jsonb_agg(DISTINCT d.dep_id) AS memory_ids,
+        min(dep_m.expires_at) FILTER (WHERE dep_m.kind = 'temporary') AS temporary_expires_at,
+        bool_and(COALESCE(dep_m.id <> d.root_id AND dep_m.status = 'active'
+          AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp())), false)) AS all_active
+      FROM mem_deps d
+      LEFT JOIN opening_memories dep_m ON dep_m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND dep_m.workspace_id = ${scope.workspaceId}
+      GROUP BY d.root_id
     )
     SELECT eligible.*, source_evidence->'refs' AS material_source_refs,
       source_evidence->'turn_ids' AS evidence_turn_ids,
-      ancestry->>'temporary_expires_at' AS ancestor_temporary_expires_at, ancestry->'memory_ids' AS ancestor_memory_ids
-    FROM eligible WHERE (ancestry->>'all_active')::boolean
+      ancestry.temporary_expires_at AS ancestor_temporary_expires_at, ancestry.memory_ids AS ancestor_memory_ids
+    FROM eligible LEFT JOIN ancestry ON ancestry.root_id = eligible.id
+    WHERE COALESCE(ancestry.all_active, true)
       AND jsonb_array_length(source_evidence->'turn_ids') = jsonb_array_length(source_turn_ids)
     ORDER BY created_at ASC`;
   const origins = await readMemoryOrigins(db, scope, rows.flatMap(row => Array.isArray(row.evidence_turn_ids) ? [{

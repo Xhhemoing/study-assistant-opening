@@ -92,7 +92,9 @@ function fixture(options: Options = {}) {
       return options.membershipRemoved ? [] : [{ id: membershipId, asset_id: sourceId, purpose: "teaching", purpose_revision: purposeRevision }];
     }
     if (sql.startsWith("SELECT source_id FROM opening_privacy_exclusions")) return [];
-    if (sql.startsWith("SELECT 1 WHERE")) return options.unavailableSource ? [] : [{ "?column?": 1 }];
+    if (sql.startsWith("SELECT 1 WHERE")) {
+      return options.unavailableSource || (options.archivedCourse && sql.includes("FROM courses")) ? [] : [{ "?column?": 1 }];
+    }
     if (sql.startsWith("SELECT id FROM opening_help_exposures")) return options.missingExposure ? [] : [{ id: receipt }];
     if (sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")) return [{ id: jobId }];
     if (sql.startsWith("UPDATE opening_turns SET text =")) return [{ id: assistant }];
@@ -670,11 +672,10 @@ describe("stream receipt release waits for current job authorization and assista
     expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(true);
   });
 
-  it("rejects receipt completion when the bound course was archived", async () => {
+  it("rejects an empty receipt on an archived course when context and options are omitted", async () => {
     const f = fixture({ courseId, archivedCourse: true });
     await expect(f.repo.completeTurn({
       scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
-      contextSourceRefs: [],
       systemQuery: {
         authorization: { purpose: "system_record_lookup", workspaceId: workspace,
           principalId: owner, role: "workspace_owner", permissionRevision: "1" },
@@ -683,6 +684,12 @@ describe("stream receipt release waits for current job authorization and assista
       },
     })).rejects.toMatchObject({ code: "CONFLICT" });
     expect(f.calls.some(call => call.sql.startsWith("SELECT id FROM courses"))).toBe(true);
+  });
+
+  it("blocks source-free receipt release when the bound course was archived", async () => {
+    const f = fixture({ courseId, archivedCourse: true });
+    await expect(f.repo.readStream(scope, jobId, context)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(hooks.release).not.toHaveBeenCalled();
   });
 
   it("checks stored memory source availability without a caller source reference", async () => {

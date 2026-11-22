@@ -134,6 +134,19 @@ describe("opening memory owner and source admission", () => {
       .rejects.toMatchObject({ code: "VALIDATION" });
   });
 
+  it("rejects a failed assistant as a new or existing memory origin", async () => {
+    const { sql, scope } = fixture;
+    const origin = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+    const input = { text: "Assistant evidence", sourceTurnIds: [origin], expiresAt: null };
+    const candidate = await memories.proposeMemory(scope, input);
+    const confirmed = await memories.proposeMemory(scope, { ...input, text: "Previously confirmed evidence" });
+    await memories.confirm(scope, confirmed.id, confirmed.version, randomUUID());
+    await sql`UPDATE opening_turns SET status='failed' WHERE id=${origin}`;
+    await expect(memories.proposeMemory(scope, { ...input, text: "New failed evidence" })).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.confirm(scope, candidate.id, candidate.version, randomUUID())).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.listContext(scope, new Date().toISOString())).resolves.toEqual({ memories: [], sourceRefs: [] });
+  });
+
   it("rejects a same-workspace impostor on list, get, propose, and reject", async () => {
     const turnId = await insertTurn(fixture.scope.workspaceId, fixture.scope.ownerUserId);
     const owned = await memories.proposeMemory(fixture.scope, {
