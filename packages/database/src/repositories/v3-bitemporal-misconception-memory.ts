@@ -253,6 +253,8 @@ function deriveTryHandoffUuid(kind: "edge" | "initial-revision", identity: strin
 }
 
 export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScope, claim: TryMisconceptionClaim) {
+  const edgeId = deriveTryHandoffUuid("edge", claim.receiptId);
+  const initialRevisionId = deriveTryHandoffUuid("initial-revision", `${claim.receiptId}:${claim.payloadSha256}`);
   return sql.begin(async tx => {
     const privacyEpoch = await lockMisconceptionWorkspaceForWrite(tx, scope);
     // A receipt can race across independently locked workspaces.
@@ -266,8 +268,12 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
     }[]>`
       SELECT r.workspace_id AS "workspaceId", r.edge_id AS "edgeId", r.initial_revision_id AS "revisionId",
         (r.original_workspace_id = ${scope.workspaceId} AND r.original_owner_user_id = ${scope.ownerUserId}
+          AND r.original_edge_id = ${edgeId} AND r.original_initial_revision_id = ${initialRevisionId}
           AND r.redeemed_privacy_epoch = ${privacyEpoch} AND r.payload_sha256 = ${claim.payloadSha256}) AS "claimMatches",
-        (e.privacy_epoch = ${privacyEpoch}) AS matches
+        (e.privacy_epoch = ${privacyEpoch} AND e.prior_revision_id IS NULL AND e.course_id IS NULL
+          AND cardinality(e.evidence_attempt_ids) = 0 AND e.origin = 'public_try_handoff' AND e.status = 'candidate'
+          AND e.concept_key = ${claim.conceptKey} AND e.misconception_code = ${claim.misconceptionCode}
+          AND e.summary = ${claim.summary}) AS matches
       FROM v3_try_misconception_handoff_receipts r
       LEFT JOIN v3_bitemporal_misconception_edges e ON e.workspace_id = r.workspace_id AND e.owner_user_id = r.owner_user_id
         AND e.edge_id = r.edge_id AND e.revision_id = r.initial_revision_id
@@ -275,13 +281,13 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
     if (prior) {
       if (!prior.claimMatches) throw learningError("CONFLICT", "体验记录已被使用。");
       if (prior.workspaceId !== null) {
-        if (!prior.matches || !prior.edgeId || !prior.revisionId) throw learningError("CONFLICT", "体验记录已被使用。");
-        return { edgeId: prior.edgeId, revisionId: prior.revisionId, replayed: true };
+        if (!prior.matches || prior.edgeId !== edgeId || prior.revisionId !== initialRevisionId) {
+          throw learningError("CONFLICT", "体验记录已被使用。");
+        }
+        return { edgeId, revisionId: initialRevisionId, replayed: true };
       }
     }
 
-    const edgeId = deriveTryHandoffUuid("edge", claim.receiptId);
-    const initialRevisionId = deriveTryHandoffUuid("initial-revision", `${claim.receiptId}:${claim.payloadSha256}`);
     // Look up both identities globally to detect restored revision or edge collisions.
     const [root] = await tx<{ revisionId: string; matches: boolean }[]>`
       SELECT revision_id AS "revisionId",
@@ -308,6 +314,7 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
           edge_id = ${edgeId}, initial_revision_id = ${initialRevisionId}, redeemed_at = ${at}::text::timestamptz
         WHERE receipt_id = ${claim.receiptId} AND workspace_id IS NULL
           AND original_workspace_id = ${scope.workspaceId} AND original_owner_user_id = ${scope.ownerUserId}
+          AND original_edge_id = ${edgeId} AND original_initial_revision_id = ${initialRevisionId}
           AND redeemed_privacy_epoch = ${privacyEpoch} AND payload_sha256 = ${claim.payloadSha256}
         RETURNING receipt_id`;
       if (!reattached) throw learningError("CONFLICT", "体验记录已被使用。");
@@ -333,9 +340,9 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
     if (!inserted) throw learningError("CONFLICT", "体验记录已被使用。");
     const [claimed] = await tx`
       INSERT INTO v3_try_misconception_handoff_receipts
-        (receipt_id, original_workspace_id, original_owner_user_id, redeemed_privacy_epoch,
+        (receipt_id, original_workspace_id, original_owner_user_id, original_edge_id, original_initial_revision_id, redeemed_privacy_epoch,
          workspace_id, owner_user_id, payload_sha256, edge_id, initial_revision_id, redeemed_at)
-      VALUES (${claim.receiptId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${privacyEpoch},
+      VALUES (${claim.receiptId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${edgeId}, ${initialRevisionId}, ${privacyEpoch},
         ${scope.workspaceId}, ${scope.ownerUserId}, ${claim.payloadSha256}, ${edgeId}, ${initialRevisionId}, ${at}::text::timestamptz)
       ON CONFLICT (receipt_id) DO NOTHING
       RETURNING receipt_id`;

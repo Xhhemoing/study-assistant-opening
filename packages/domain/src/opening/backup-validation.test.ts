@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
-import { orderBackupMisconceptionRevisions, sourceReferences } from "./backup-validation";
+import { orderBackupMisconceptionRevisions, sourceReferences, validateBackupMisconceptionRevisions } from "./backup-validation";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const referenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -19,7 +19,7 @@ it.each(["self", "two revisions"])("rejects a %s predecessor cycle during restor
       ? [root] : [{ ...root, prior_revision_id: b }, { ...root, revision_id: b }] },
   };
   expect(validateOpeningRestore(backup, [])).toMatchObject({
-    allowed: false, errors: ["invalid misconception revision lineage"],
+    allowed: false, errors: expect.arrayContaining(["invalid misconception revision lineage"]),
   });
 });
 
@@ -38,8 +38,10 @@ it.each([
   const correction = {
     ...root, revision_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", prior_revision_id: root.revision_id,
     status: "learner_reported", origin: "learner_correction", learner_disposition: "clarified",
+    tx_range: '[2026-11-21T12:00:00.000002Z,)',
   };
   const revisions = [root, correction].slice(0, epochs.length);
+  if (revisions.length === 2) root.tx_range = '[2026-11-21T12:00:00.000001Z,2026-11-21T12:00:00.000002Z)';
   const backup: OpeningBackup = {
     format: "opening-backup", version: 1, workspaceId, privacyEpoch: 1, deletionJournal: [], objects: [],
     tables: { v3_bitemporal_misconception_edges: revisions },
@@ -58,8 +60,10 @@ it.each([
   ["(2026-11-21T12:00:00Z,)", false],
   ["[2026-11-21T12:00:00Z,2026-11-22T12:00:00Z]", false],
   ["[,2026-11-21T12:00:00Z)", false],
-  ["[-infinity,)", false],
-  ["[2026-11-21T12:00:00Z,infinity)", false],
+  ["[-infinity,)", true],
+  ["[-infinity,2026-11-21T12:00:00Z)", true],
+  ["[infinity,)", false],
+  ["[-infinity,-infinity)", false],
   ['["2026-02-30 12:00:00+00",)', false],
   ['["2026-11-21 12:00:00",)', false],
   ['["2026-11-21 12:00:00.000002+00","2026-11-21 12:00:00.000001+00")', false],
@@ -84,6 +88,42 @@ it.each([
     const result = validateOpeningRestore(backup, []);
     expect(result.allowed).toBe(allowed);
     expect(result.errors).toEqual(allowed ? [] : [`misconception revision has invalid ${column}`]);
+  }
+});
+
+it("allows an explicit positive infinity endpoint only for valid time", () => {
+  const root = {
+    workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
+    status: "verified", origin: "system_diagnosis", privacy_epoch: 0, evidence_attempt_ids: [],
+    valid_range: "[-infinity,infinity)", tx_range: "[-infinity,)",
+  };
+  const tables = { v3_bitemporal_misconception_edges: [root] };
+  expect(validateBackupMisconceptionRevisions(tables, 0)).toEqual([]);
+  root.tx_range = root.valid_range;
+  expect(validateBackupMisconceptionRevisions(tables, 0)).toEqual(["misconception revision has invalid tx_range"]);
+});
+
+it("checks overlapping rectangles and orders predecessors across all valid slices", () => {
+  const first = "2026-11-21T12:00:00.000001Z", second = "2026-11-21T12:00:00.000002Z";
+  const root = {
+    workspace_id: workspaceId, owner_user_id: referenceId, edge_id: referenceId, revision_id: referenceId,
+    status: "verified", origin: "system_diagnosis", privacy_epoch: 0, evidence_attempt_ids: [],
+    valid_range: `[-infinity,${second})`, tx_range: `[${first},)`,
+  };
+  const later = { ...root, revision_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", tx_range: `[${second},)` };
+  const errors = (one = root, two = later) =>
+    validateBackupMisconceptionRevisions({ v3_bitemporal_misconception_edges: [two, one] }, 0);
+  expect(errors()).toContain("misconception revisions overlap in valid and transaction time");
+  const otherSlice = { ...later, valid_range: `[${second},infinity)`, edge_id: referenceId.toUpperCase() };
+  expect(errors(root, otherSlice)).toEqual([]);
+  const successor = { ...otherSlice, prior_revision_id: root.revision_id };
+  expect(errors(root, successor)).toContain("misconception revision precedes the closure of its predecessor");
+  expect(errors({ ...root, tx_range: `[${first},${second})` }, successor)).toEqual([]);
+  expect(errors({ ...root, tx_range: later.tx_range }, { ...successor, tx_range: `[${first},${second})` }))
+    .toContain("misconception revision precedes the closure of its predecessor");
+
+  for (const identity of ["workspace_id", "owner_user_id"]) {
+    expect(orderBackupMisconceptionRevisions([root, { ...otherSlice, [identity]: later.revision_id }])).toBeNull();
   }
 });
 

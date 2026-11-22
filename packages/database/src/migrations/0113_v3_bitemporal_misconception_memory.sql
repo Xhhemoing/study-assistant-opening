@@ -16,8 +16,10 @@ CREATE TABLE v3_bitemporal_misconception_edges (
   learner_disposition text CHECK (learner_disposition IN ('disputed', 'clarified', 'resolved_self_report')),
   evidence_attempt_ids uuid[] NOT NULL DEFAULT '{}',
   privacy_epoch integer NOT NULL DEFAULT 0 CHECK (privacy_epoch >= 0),
-  valid_range tstzrange NOT NULL CHECK (NOT isempty(valid_range) AND lower_inc(valid_range) AND NOT upper_inc(valid_range)),
-  tx_range tstzrange NOT NULL CHECK (NOT isempty(tx_range) AND lower_inc(tx_range) AND NOT upper_inc(tx_range)),
+  valid_range tstzrange NOT NULL CHECK (NOT isempty(valid_range) AND lower_inc(valid_range) AND NOT upper_inc(valid_range)
+    AND lower(valid_range) < 'infinity'::timestamptz),
+  tx_range tstzrange NOT NULL CHECK (NOT isempty(tx_range) AND lower_inc(tx_range) AND NOT upper_inc(tx_range)
+    AND lower(tx_range) < 'infinity'::timestamptz AND (upper_inf(tx_range) OR isfinite(upper(tx_range)))),
   prior_revision_id uuid,
   CONSTRAINT v3_misconception_no_self_predecessor CHECK (prior_revision_id IS DISTINCT FROM revision_id),
   CONSTRAINT v3_misconception_learner_revision CHECK (
@@ -60,6 +62,16 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'Misconception revision predecessors must be acyclic'
       USING ERRCODE = '23514', CONSTRAINT = 'v3_misconception_acyclic_predecessors';
+  END IF;
+  -- A closed transaction range cannot change, so accepted predecessors stay closed.
+  IF EXISTS (
+    SELECT 1 FROM inserted child
+    JOIN v3_bitemporal_misconception_edges parent ON parent.revision_id = child.prior_revision_id
+    WHERE upper_inf(parent.tx_range) OR NOT isfinite(upper(parent.tx_range))
+      OR lower(child.tx_range) < upper(parent.tx_range)
+  ) THEN
+    RAISE EXCEPTION 'Misconception revision precedes the closure of its predecessor'
+      USING ERRCODE = '23514', CONSTRAINT = 'v3_misconception_predecessor_chronology';
   END IF;
   RETURN NULL;
 END;
@@ -143,6 +155,8 @@ CREATE TABLE v3_try_misconception_handoff_receipts (
   receipt_id uuid PRIMARY KEY,
   original_workspace_id uuid NOT NULL,
   original_owner_user_id uuid NOT NULL,
+  original_edge_id uuid NOT NULL,
+  original_initial_revision_id uuid NOT NULL,
   redeemed_privacy_epoch integer NOT NULL CHECK (redeemed_privacy_epoch >= 0),
   workspace_id uuid,
   owner_user_id uuid,
@@ -154,7 +168,8 @@ CREATE TABLE v3_try_misconception_handoff_receipts (
     (workspace_id IS NULL AND owner_user_id IS NULL AND edge_id IS NULL AND initial_revision_id IS NULL)
     OR (workspace_id IS NOT NULL AND workspace_id = original_workspace_id
       AND owner_user_id IS NOT NULL AND owner_user_id = original_owner_user_id
-      AND edge_id IS NOT NULL AND initial_revision_id IS NOT NULL)
+      AND edge_id IS NOT NULL AND edge_id = original_edge_id
+      AND initial_revision_id IS NOT NULL AND initial_revision_id = original_initial_revision_id)
   ),
   -- The edge cascade clears the whole attachment. Check workspace ownership after that action.
   CONSTRAINT v3_try_receipt_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
@@ -169,6 +184,8 @@ BEGIN
   IF NEW.receipt_id IS DISTINCT FROM OLD.receipt_id
     OR NEW.original_workspace_id IS DISTINCT FROM OLD.original_workspace_id
     OR NEW.original_owner_user_id IS DISTINCT FROM OLD.original_owner_user_id
+    OR NEW.original_edge_id IS DISTINCT FROM OLD.original_edge_id
+    OR NEW.original_initial_revision_id IS DISTINCT FROM OLD.original_initial_revision_id
     OR NEW.redeemed_privacy_epoch IS DISTINCT FROM OLD.redeemed_privacy_epoch
     OR NEW.payload_sha256 IS DISTINCT FROM OLD.payload_sha256
   THEN

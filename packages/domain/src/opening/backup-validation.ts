@@ -12,17 +12,17 @@ export function isUuid(value: unknown): value is string {
 /** Order an archive's revisions independently of storage order and timestamp precision. */
 export function orderBackupMisconceptionRevisions(rows: readonly Record<string, unknown>[]) {
   const byId = new Map<string, Record<string, unknown>>();
-  const courseByEdgeId = new Map<string, string | null>();
+  const scopeByEdgeId = new Map<string, string>();
   for (const row of rows) {
     if (!isUuid(row.revision_id) || !isUuid(row.edge_id) || !isUuid(row.workspace_id) || !isUuid(row.owner_user_id)) return null;
     if (row.course_id != null && !isUuid(row.course_id)) return null;
     const id = row.revision_id.toLowerCase();
     if (byId.has(id)) return null;
     const edgeId = row.edge_id.toLowerCase();
-    const course = row.course_id?.toLowerCase() ?? null;
-    const previousCourse = courseByEdgeId.get(edgeId);
-    if (previousCourse !== undefined && previousCourse !== course) return null;
-    courseByEdgeId.set(edgeId, course);
+    const scope = `${row.workspace_id.toLowerCase()}/${row.owner_user_id.toLowerCase()}/${row.course_id?.toLowerCase() ?? ""}`;
+    const previousScope = scopeByEdgeId.get(edgeId);
+    if (previousScope !== undefined && previousScope !== scope) return null;
+    scopeByEdgeId.set(edgeId, scope);
     byId.set(id, row);
   }
 
@@ -51,8 +51,10 @@ export function orderBackupMisconceptionRevisions(rows: readonly Record<string, 
 
 // PostgreSQL ISO output uses a space and a numeric offset. Retain microseconds
 // so an adjacent pair of bounds within one millisecond remains distinguishable.
-function archiveTimestampMicros(bound: string): bigint | null {
-  const value = bound.startsWith('"') ? bound.slice(1, -1) : bound;
+const firstFiniteTimestamp = -211813488000000000n;
+const pastLastFiniteTimestamp = 9223371331200000000n;
+
+function archiveTimestampMicros(value: string): bigint | null {
   const parts = /^(\d{4,6})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2})(?::(\d{2})(?::(\d{2}))?)?)( BC)?$/.exec(value);
   if (!parts) return null;
   const [, year, month, day, hour, minute, second, fraction = "", , sign,
@@ -70,18 +72,59 @@ function archiveTimestampMicros(bound: string): bigint | null {
   const micros = (BigInt(date.getTime() - Date.UTC(2000, 0, 1)) + BigInt(cycles) * 146097n * 86400000n
     - BigInt(offsetSeconds) * 1000n) * 1000n + BigInt(fraction.padEnd(6, "0"));
   // Finite PostgreSQL timestamps are measured from 2000-01-01 UTC.
-  return micros >= -211813488000000000n && micros < 9223371331200000000n ? micros : null;
+  return micros >= firstFiniteTimestamp && micros < pastLastFiniteTimestamp ? micros : null;
 }
 
-function validMisconceptionRange(value: unknown): boolean {
-  if (typeof value !== "string") return false;
+type MisconceptionRange = { lower: bigint; upper: bigint };
+type MisconceptionSlice = { valid: MisconceptionRange; tx: MisconceptionRange };
+
+function parseMisconceptionRange(value: unknown, allowExplicitInfinity: boolean): MisconceptionRange | null {
+  if (typeof value !== "string") return null;
   const bounds = /^\[("[^"]+"|[^",]+),("[^"]+"|[^",]+)?\)$/.exec(value);
-  if (!bounds) return false;
-  const lower = archiveTimestampMicros(bounds[1]!);
-  if (lower === null) return false;
-  if (bounds[2] === undefined) return true;
-  const upper = archiveTimestampMicros(bounds[2]);
-  return upper !== null && upper > lower;
+  if (!bounds) return null;
+  const lowerText = bounds[1]!.replace(/^"|"$/g, "");
+  const upperText = bounds[2]?.replace(/^"|"$/g, "");
+  const lower = lowerText === "-infinity" ? firstFiniteTimestamp - 1n : archiveTimestampMicros(lowerText);
+  // For supported lower bounds, an exclusive +infinity and an unbounded upper overlap the same ranges.
+  const upper = upperText === undefined || (allowExplicitInfinity && upperText === "infinity")
+    ? pastLastFiniteTimestamp : archiveTimestampMicros(upperText);
+  return lower !== null && upper !== null && lower < upper ? { lower, upper } : null;
+}
+
+function compareMicros(left: bigint, right: bigint): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** Sweep transaction time and count active valid-time endpoints with prefix sums. */
+function hasOverlappingMisconceptionSlices(slices: MisconceptionSlice[]): boolean {
+  if (slices.length < 2) return false;
+  const bounds = [...new Set(slices.flatMap(({ valid }) => [valid.lower, valid.upper]))].sort(compareMicros);
+  const ranks = new Map(bounds.map((bound, index) => [bound, index + 1]));
+  const lowerCounts = new Int32Array(bounds.length + 1);
+  const upperCounts = new Int32Array(bounds.length + 1);
+  const add = (counts: Int32Array, rank: number, delta: number) => {
+    for (let i = rank; i < counts.length; i += i & -i) counts[i] = counts[i]! + delta;
+  };
+  const countThrough = (counts: Int32Array, rank: number) => {
+    let count = 0;
+    for (let i = rank; i > 0; i -= i & -i) count += counts[i]!;
+    return count;
+  };
+  const ending = [...slices].sort((a, b) => compareMicros(a.tx.upper, b.tx.upper));
+  let ended = 0;
+  for (const slice of slices.sort((a, b) => compareMicros(a.tx.lower, b.tx.lower))) {
+    // End events precede start events at the same instant for half-open ranges.
+    while (ended < ending.length && ending[ended]!.tx.upper <= slice.tx.lower) {
+      const expired = ending[ended++]!.valid;
+      add(lowerCounts, ranks.get(expired.lower)!, -1);
+      add(upperCounts, ranks.get(expired.upper)!, -1);
+    }
+    const lowerRank = ranks.get(slice.valid.lower)!, upperRank = ranks.get(slice.valid.upper)!;
+    if (countThrough(lowerCounts, upperRank - 1) > countThrough(upperCounts, lowerRank)) return true;
+    add(lowerCounts, lowerRank, 1);
+    add(upperCounts, upperRank, 1);
+  }
+  return false;
 }
 
 export function validateBackupMisconceptionRevisions(
@@ -93,9 +136,20 @@ export function validateBackupMisconceptionRevisions(
   const attemptIds = new Set((tables.opening_learning_attempts ?? []).map(row => row.id).filter(isUuid).map(id => id.toLowerCase()));
   const courseIds = new Set((tables.courses ?? []).map(row => row.id).filter(isUuid).map(id => id.toLowerCase()));
   const errors = new Set<string>();
+  const txByRevision = new Map<string, MisconceptionRange>();
+  const slicesByEdge = new Map<string, MisconceptionSlice[]>();
   for (const row of rows) {
-    if (!validMisconceptionRange(row.valid_range)) errors.add("misconception revision has invalid valid_range");
-    if (!validMisconceptionRange(row.tx_range)) errors.add("misconception revision has invalid tx_range");
+    const valid = parseMisconceptionRange(row.valid_range, true);
+    const tx = parseMisconceptionRange(row.tx_range, false);
+    if (!valid) errors.add("misconception revision has invalid valid_range");
+    if (!tx) errors.add("misconception revision has invalid tx_range");
+    if (tx && isUuid(row.revision_id)) txByRevision.set(row.revision_id.toLowerCase(), tx);
+    if (valid && tx && isUuid(row.edge_id)) {
+      const edgeId = row.edge_id.toLowerCase();
+      const slices = slicesByEdge.get(edgeId);
+      if (slices) slices.push({ valid, tx });
+      else slicesByEdge.set(edgeId, [{ valid, tx }]);
+    }
     if (row.privacy_epoch !== archivePrivacyEpoch) {
       errors.add("misconception revision privacy epoch does not match the archive epoch");
     }
@@ -124,6 +178,21 @@ export function validateBackupMisconceptionRevisions(
         break;
       default:
         errors.add("invalid misconception revision origin");
+    }
+  }
+  for (const row of rows) {
+    if (!isUuid(row.revision_id) || !isUuid(row.prior_revision_id)) continue;
+    const child = txByRevision.get(row.revision_id.toLowerCase());
+    const parent = txByRevision.get(row.prior_revision_id.toLowerCase());
+    if (child && parent && (parent.upper === pastLastFiniteTimestamp || child.lower < parent.upper)) {
+      errors.add("misconception revision precedes the closure of its predecessor");
+      break;
+    }
+  }
+  for (const slices of slicesByEdge.values()) {
+    if (hasOverlappingMisconceptionSlices(slices)) {
+      errors.add("misconception revisions overlap in valid and transaction time");
+      break;
     }
   }
   return [...errors];

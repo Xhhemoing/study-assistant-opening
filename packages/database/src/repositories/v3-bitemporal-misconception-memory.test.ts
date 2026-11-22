@@ -114,6 +114,17 @@ it("rejects an exact restored root without a trusted receipt claim before taking
   expect(query.mock.lastCall?.slice(1)).toContain(revisionId);
 });
 
+it("rejects a live receipt whose attached revision differs from the signed root identity", async () => {
+  const prior = { workspaceId: scope.workspaceId, claimMatches: true, matches: true,
+    edgeId: "77216238-c966-44b8-ab40-d9150e131e51", revisionId: scope.workspaceId };
+  const { sql, query } = mockTransaction(
+    [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],
+    [{ at, expired: false }], [prior],
+  );
+  await expect(redeemTryMisconceptionHandoff(sql, scope, claim)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query).toHaveBeenCalledTimes(7);
+});
+
 it("rejects a competing revision insert without recording a receipt claim", async () => {
   const { sql, query } = mockTransaction(
     [{ id: scope.workspaceId }], [], [{ revision: 0 }], [{ privacy_epoch: 0 }], [],

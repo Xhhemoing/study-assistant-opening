@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OpeningBackup } from "@aistudy/domain";
-import { OPENING_RESTORE_APPLY_ORDER } from "@aistudy/domain";
+import { OPENING_RESTORE_APPLY_ORDER, planOpeningRestoreApply } from "@aistudy/domain";
 import { validateOpeningRestore } from "../../../domain/src/opening/backup-policy";
 import { OPENING_BACKUP_TABLES } from "./opening-backup-records";
 import {
@@ -98,11 +98,37 @@ describe("executeOpeningRestoreApply fail-closed gates", () => {
     const correction = {
       ...root, revision_id: "c3000000-0000-4000-8000-000000000011", prior_revision_id: root.revision_id,
       status: "learner_reported", origin: "learner_correction", learner_disposition: "clarified", privacy_epoch: 1,
+      tx_range: "[2026-11-22T00:00:00Z,)",
     };
+    if (withCorrection) root.tx_range = "[2026-11-21T00:00:00Z,2026-11-22T00:00:00Z)";
     backup.tables.v3_bitemporal_misconception_edges = withCorrection ? [root, correction] : [root];
     const sql = { begin: vi.fn() };
     await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
       .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+    expect(sql.begin).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "overlapping bitemporal slices", predecessor: null, childRange: "[2026-11-22T00:00:00Z,)",
+      error: "misconception revisions overlap in valid and transaction time" },
+    { name: "reversed transaction history", predecessor: sourceId, childRange: "[2026-11-20T00:00:00Z,2026-11-21T00:00:00Z)",
+      error: "misconception revision precedes the closure of its predecessor" },
+  ])("rejects $name in preview and plan before opening a transaction", async ({ predecessor, childRange, error }) => {
+    const backup = draft();
+    const root = {
+      workspace_id: workspaceId, owner_user_id: sourceId, edge_id: sourceId, revision_id: sourceId,
+      status: "verified", origin: "system_diagnosis", privacy_epoch: 4, evidence_attempt_ids: [],
+      valid_range: "[-infinity,)", tx_range: "[2026-11-21T00:00:00Z,)",
+    };
+    backup.tables.v3_bitemporal_misconception_edges = [root, {
+      ...root, revision_id: "c3000000-0000-4000-8000-000000000011", prior_revision_id: predecessor, tx_range: childRange,
+    }];
+    expect(validateOpeningRestore(backup, [])).toMatchObject({ allowed: false, errors: [error] });
+    expect(planOpeningRestoreApply(backup, [], { confirmLocalRestore: true }))
+      .toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", errors: [error] });
+    const sql = { begin: vi.fn() };
+    await expect(executeOpeningRestoreApply(sql as never, { confirmLocalRestore: true, backup }))
+      .resolves.toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false, errors: [error] });
     expect(sql.begin).not.toHaveBeenCalled();
   });
 

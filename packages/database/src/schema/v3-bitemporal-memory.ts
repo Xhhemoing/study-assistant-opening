@@ -62,6 +62,8 @@ export const v3TryMisconceptionHandoffReceipts = pgTable("v3_try_misconception_h
   receiptId: uuid("receipt_id").primaryKey(),
   originalWorkspaceId: uuid("original_workspace_id").notNull(),
   originalOwnerUserId: uuid("original_owner_user_id").notNull(),
+  originalEdgeId: uuid("original_edge_id").notNull(),
+  originalInitialRevisionId: uuid("original_initial_revision_id").notNull(),
   redeemedPrivacyEpoch: integer("redeemed_privacy_epoch").notNull(),
   workspaceId: uuid("workspace_id"),
   ownerUserId: uuid("owner_user_id"),
@@ -75,7 +77,8 @@ export const v3TryMisconceptionHandoffReceipts = pgTable("v3_try_misconception_h
     sql`(${t.workspaceId} IS NULL AND ${t.ownerUserId} IS NULL AND ${t.edgeId} IS NULL AND ${t.initialRevisionId} IS NULL)
       OR (${t.workspaceId} IS NOT NULL AND ${t.workspaceId} = ${t.originalWorkspaceId}
         AND ${t.ownerUserId} IS NOT NULL AND ${t.ownerUserId} = ${t.originalOwnerUserId}
-        AND ${t.edgeId} IS NOT NULL AND ${t.initialRevisionId} IS NOT NULL)`),
+        AND ${t.edgeId} IS NOT NULL AND ${t.edgeId} = ${t.originalEdgeId}
+        AND ${t.initialRevisionId} IS NOT NULL AND ${t.initialRevisionId} = ${t.originalInitialRevisionId})`),
   // Migration 0113 defines deferral and the SET NULL column list, which Drizzle cannot express.
   foreignKey({ name: "v3_try_receipt_workspace_owner", columns: [t.workspaceId, t.ownerUserId],
     foreignColumns: [workspaces.id, workspaces.ownerUserId] }),
