@@ -1630,28 +1630,33 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       "答案及解析", "标准解答", "评分标准",
       "答案（仅供参考）", "答案(第1题)", "【第1题】答案", "第一题答案", "答案一", "答案汇总",
       "第一单元答案", "第一部分答案", "第二小节解答", "第一百零一题答案", "课后题答案", "期末试卷答案", "A卷答案",
+      "正确答案", "最终答案", "选择题答案", "作业答案", "第一模块答案",
     ].map(label => `## ${label}\n\nforty-two`),
     "答案\n---\n\nforty-two",
     "<h2>答案</h2>\n\nforty-two",
     "<details><summary>答案</summary>forty-two</details>",
   ])("seals Chinese answer sections and reopens the next section (%j)", section => {
-    const text = `${section}\n\n## 下一节\n\nPublic follow-up.`;
-    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public follow-up.");
+    const text = `## 题目\n\n求值。\n\n${section}\n\n## 下一节\n\nPublic follow-up.`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expectSealedEvidence(chunks, text, ["forty-two"], ["题目", "求值。", "Public follow-up."]);
+    }
   });
 
   it.each([
-    "答案", "解答（第1题）", "第一单元答案", "第一部分答案",
+    "答案", "解答（第1题）", "第一单元答案", "第一部分答案", "正确答案",
   ])("seals the %s column of a pipe table and keeps the 题目 column public", label => {
     const text = `| 题目 | ${label} |\n| --- | --- |\n| 求值 | forty-two |\n\n## 下一节\n\nPublic follow-up.`;
     for (const chunks of chunkDocumentAndCues(text)) {
-      expectSealedEvidence(chunks, text, ["forty-two"], ["求值", "Public follow-up."]);
+      expectSealedEvidence(chunks, text, ["forty-two"], ["题目", "求值", "Public follow-up."]);
     }
   });
 
   it.each([
     ["## 提示\n\ntry factoring\n\n## 下一节\n\nPublic follow-up.", "Public follow-up."],
     ["## 第一单元提示\n\ntry factoring\n\n## 下一节\n\nPublic follow-up.", "Public follow-up."],
+    ["## 第一模块提示\n\ntry factoring\n\n## 下一节\n\nPublic follow-up.", "Public follow-up."],
     ["| 题目 | 提示（第一步） |\n| --- | --- |\n| 求值 | try factoring |", "求值"],
+    ["| 题目 | 第一模块提示 |\n| --- | --- |\n| 求值 | try factoring |", "求值"],
   ])("gates Chinese hint text and keeps public evidence rankable (%j)", (text, publicText) => {
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], publicText, "try factoring");
   });
@@ -1659,9 +1664,12 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   it.each([
     "寻找科学的答案", "为什么这个问题没有答案", "解答学生的疑惑", "答案是怎样炼成的",
     "提示词工程入门", "温馨提示", "重要提示",
-  ])("keeps Chinese prose headings public (%s)", title => {
-    const text = `## ${title}\n\nPublic theorem.`;
-    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  ])("keeps Chinese prose labels public (%s)", title => {
+    const heading = `## ${title}\n\nPublic theorem.`;
+    const table = `| 题目 | ${title} |\n| --- | --- |\n| 求值 | Public theorem. |`;
+    for (const text of [heading, table]) {
+      for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+    }
   });
 
   it.each([
