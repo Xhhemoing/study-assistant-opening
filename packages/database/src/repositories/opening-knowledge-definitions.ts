@@ -20,7 +20,8 @@ function containsPdfAnswerLabel(text: string): boolean {
 
 async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string) {
   // Read one text at a time. A single existing chunk can itself exceed 256 KiB in UTF-8.
-  const [chunk] = await tx<SourceChunk[]>`SELECT c.id,c.source_id AS "sourceId",c.source_version AS "sourceVersion",
+  const [row] = await tx<Array<SourceChunk & { mime: string }>>`SELECT c.id,c.source_id AS "sourceId",c.source_version AS "sourceVersion",
+    s.mime AS mime,
     c.page,c.slide_label AS "slideLabel",c.start_ms AS "startMs",c.end_ms AS "endMs",c.text,c.image_object_key AS "imageObjectKey"
     FROM opening_source_chunks c
     JOIN opening_sources s ON s.id=c.source_id AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
@@ -32,13 +33,14 @@ async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string
       AND graph.owner_user_id=${scope.ownerUserId}
     WHERE c.id=${id} AND c.source_version::text=graph.source_versions->>s.id::text
       AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-      AND (c.page IS NULL OR NOT EXISTS (
+      AND (s.mime<>'application/pdf' OR c.page IS NULL OR NOT EXISTS (
         SELECT 1 FROM opening_pdf_parse_segments seal
         WHERE seal.workspace_id=s.workspace_id AND seal.source_id=c.source_id AND seal.source_version=c.source_version
           AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'
           AND seal.page_end=seal.page_start AND seal.page_start<=c.page
           AND (
-            ((seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'publicationSealUnknown'='true')
+            ((seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
+              OR seal.pages->0->>'publicationSealUnknown'='true')
               AND (s.parse_state<>'ready' OR seal.updated_at>s.updated_at))
             OR (seal.page_start=c.page
               AND (seal.pages->0->>'hadSealedContent'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
@@ -47,7 +49,9 @@ async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string
           )
       ))
     FOR SHARE OF c,s,v,m`;
-  return chunk?.id === id && (chunk.page === null || !containsPdfAnswerLabel(chunk.text)) ? chunk : undefined;
+  if (row?.id !== id) return undefined;
+  const { mime, ...chunk } = row;
+  return mime === "application/pdf" && containsPdfAnswerLabel(chunk.text) ? undefined : chunk;
 }
 
 /** Upgrade pre-definition graphs before the parser replaces their evidence UUIDs.

@@ -54,19 +54,23 @@ function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
   const first = text[dollarIndex + 1];
   if (!first || first < "0" || first > "9") return false;
   let closeIdx = -1;
-  let bodyStart = dollarIndex + 1;
-  const mathBody: string[] = [];
-  for (let j = bodyStart; j < text.length; ) {
+  let percentStartsComment: boolean | undefined;
+  for (let j = dollarIndex + 1; j < text.length; ) {
     const ch = text[j]!;
     if (ch === "\\") {
       j += 2;
       continue;
     }
     if (ch === "%") {
-      mathBody.push(text.slice(bodyStart, j));
-      j = endOfLatexComment(text, j, text.length);
-      bodyStart = j;
-      continue;
+      // A numeric dollar opener is ambiguous until the body supplies math evidence.
+      if (percentStartsComment === undefined) {
+        const beforePercent = text.slice(dollarIndex + 1, j);
+        percentStartsComment = MATH_COMMAND_OR_OP_RE.test(beforePercent) || /\\%|^\d[\d,.]*\s*[a-z]\b/iu.test(beforePercent);
+      }
+      if (percentStartsComment) {
+        j = endOfLatexComment(text, j, text.length);
+        continue;
+      }
     }
     if (ch === "\n" && isBlankLineBreakAt(text, j)) break;
     if (ch === "$") {
@@ -80,8 +84,8 @@ function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
   const prev = text[closeIdx - 1] ?? "";
   const next = text[closeIdx + 1] ?? "";
   if (/\s/.test(prev) || (next >= "0" && next <= "9")) return true;
-  mathBody.push(text.slice(bodyStart, closeIdx));
-  const inner = mathBody.join("");
+  if (percentStartsComment) return false;
+  const inner = text.slice(dollarIndex + 1, closeIdx);
   if (MATH_COMMAND_OR_OP_RE.test(inner)) return false;
   if (CURRENCY_PROSE_OR_NON_MATH_RE.test(inner)) return true;
   return false;
@@ -165,7 +169,8 @@ function scanMathSpans(text: string): MathSpan[] {
         continue;
       }
 
-      if (ch === "%") {
+      if (ch === "%" && (displayDollarStart !== null || inlineDollarStart !== null
+        || bracketStack.length > 0 || parenStack.length > 0 || envStack.length > 0)) {
         i = endOfLatexComment(text, i, to);
         continue;
       }

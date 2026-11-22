@@ -160,6 +160,16 @@ describe("material hybrid retrieval", () => {
     expect(segmentMaterialChunks([chunk("escaped-percent", escaped)]).map(segment => segment.chunk.text)).toEqual([escaped]);
   });
 
+  it.each([["$$", "$$"], ["\\[", "\\]"], ["\\(", "\\)"], ["\\begin{align}", "\\end{align}"]])(
+    "protects a long %s formula after a percentage in prose on the same line", (open, close) => {
+      const formula = open + "x".repeat(6400 - open.length - close.length) + close;
+      for (const prefix of ["At 95% confidence, ", "Prices: $95% off and $5. "]) {
+        const segments = segmentMaterialChunks([chunk("percentage-in-prose", prefix + formula + "\nTail.")]);
+        expect(segments.map(segment => segment.chunk.text)).toEqual([prefix, formula, "\nTail."]);
+      }
+    },
+  );
+
   it.each(["$2 xy$", "$2 x$", "$10 n^2$", "$3 ab + 1$"])("keeps %s whole across the 6,000-byte boundary", (formula) => {
     const prefix = "a".repeat(5997);
     const segments = segmentMaterialChunks([chunk("short-formula", prefix + formula)], 6000);

@@ -85,16 +85,19 @@ describe("cross-source legacy definition backfill", () => {
   it.each([
     { reason: "same-page seal", marker: "hadSealedContent", available: false, text: "x = 3." },
     { reason: "unresolved earlier section", marker: "sectionSealedAtEnd", available: false, text: "5 units." },
+    { reason: "unresolved earlier inline answer", marker: "inlineSealedAtEnd", available: false, text: "5 units." },
     { reason: "unknown earlier scan", marker: "publicationSealUnknown", available: false, text: "5 units." },
     { reason: "unstripped answer", available: true, text: "Answer Key\nx = 3." },
     { reason: "completed public publication", available: true, text: "Public introduction.", preservesDefinition: true },
-  ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition }) => {
+    { reason: "Markdown answer label", available: true, text: "Answer: an HTTP response to a request.", mime: "text/markdown", preservesDefinition: true },
+  ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition, mime = "application/pdf" }) => {
     const courseId = "00000000-0000-4000-8000-000000000001";
     const nodeId = "00000000-0000-4000-8000-000000000002";
     const [chunkB, chunkA] = ["00000000-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000004"];
     const snapshot = { courseId, version: 1, nodes: [{ id: nodeId, courseId, label: "Concept", kind: "concept",
       evidenceChunkIds: [chunkB, chunkA], status: "supported" }], edges: [] };
     const writes: string[] = [];
+    const evidence: unknown[] = [];
     const citedIds: unknown[] = [];
     const tx = async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?").replace(/\s+/gu, " ").trim();
@@ -107,18 +110,25 @@ describe("cross-source legacy definition backfill", () => {
       if (query.startsWith("SELECT c.id,")) {
         const id = values.at(-1);
         citedIds.push(id);
+        if (id === chunkA && mime === "text/markdown") {
+          expect(query).toContain("s.mime AS mime");
+          expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR NOT EXISTS");
+        }
         if (id === chunkA && marker) {
           expect(query).toContain("seal.workspace_id=s.workspace_id AND seal.source_id=c.source_id AND seal.source_version=c.source_version");
           expect(query).toContain("seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'");
           expect(query).toContain("seal.page_start<=c.page");
           expect(query).toContain("s.parse_state<>'ready' OR seal.updated_at>s.updated_at");
           expect(query).toContain("c.image_object_key IS NOT NULL");
-          expect(query).toContain("seal.pages->0->>'" + marker + "'='true'");
+          const predecessor = query.split("OR (seal.page_start=c.page")[0];
+          expect(marker === "hadSealedContent" ? query : predecessor).toContain("seal.pages->0->>'" + marker + "'='true'");
         }
         if (id === chunkA && !available) return [];
         return [{ ...base, id, sourceId: id === chunkA ? "source-A" : "source-B", sourceVersion: 4,
+          mime: id === chunkA ? mime : "application/pdf",
           text: id === chunkA ? text : "Study notes.", imageObjectKey: null }];
       }
+      if (query.startsWith("INSERT INTO pg_temp.opening_legacy_knowledge_evidence")) evidence.push(values[0]);
       if (query.startsWith("UPDATE opening_course_knowledge")) writes.push(query);
       return [];
     };
@@ -126,6 +136,7 @@ describe("cross-source legacy definition backfill", () => {
       { workspaceId: "workspace", ownerUserId: "owner" }, "source-B", 4);
     expect(citedIds).toEqual([chunkB, chunkA]);
     expect(writes).toHaveLength(preservesDefinition ? 1 : 0);
+    if (preservesDefinition) expect(evidence).toContainEqual(expect.stringContaining(text));
   });
 });
 
