@@ -12,7 +12,7 @@ import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 
 // Run only against the task's disposable PG cluster via the existing integration
-// globalSetup (real migrations 0001–0112). No HTTP, fake SQL or projection injection.
+// globalSetup (real migrations 0001–0113). No HTTP, fake SQL or projection injection.
 // These are current MVCC reads with evidence-time cutoffs, NOT historical replay.
 let fixture: OpeningFixture;
 const cutoff = "2026-11-10T12:00:00.000Z";
@@ -80,11 +80,11 @@ async function assertPositive(f: Seed) {
 }
 
 describe("card 1 — real migration/schema and metadata SQL", () => {
-  it("has every real migration through 0112 with verified checksums", async () => {
+  it("has every real migration through 0113 with verified checksums", async () => {
     const rows = await fixture.sql`SELECT id,checksum,verification_state FROM schema_migrations ORDER BY id`;
-    expect(rows).toHaveLength(112);
+    expect(rows).toHaveLength(113);
     expect(rows[0]!.id).toBe("0001_library.sql");
-    expect(rows.at(-1)!.id).toBe("0112_opening_text_capture_intent.sql");
+    expect(rows.at(-1)!.id).toBe("0113_v3_bitemporal_misconception_memory.sql");
     expect(rows.every(r => r.verification_state === "verified" && /^[a-f0-9]{64}$/.test(String(r.checksum)))).toBe(true);
   });
   it("executes both exported SQL queries on real PG in readonly repeatable read, then admits nonzero evidence", async () => {
