@@ -193,9 +193,11 @@ describe("saved tutor material provenance", () => {
     const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Inherited task material", slug: randomUUID() });
     const material = await source();
     const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
-    const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
-      text: "Global task material", sourceTurnIds: [origin], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    const memories = createOpeningMemoryRepository(sql);
+    const proposed = await memories.proposeMemory(scope, {
+      text: "Global task material", sourceTurnIds: [origin], expiresAt: null,
     });
+    const memory = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
     const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Inherited task candidate", courseId: course.id });
     const saved = await append(conversation.id);
     const id = randomUUID();
@@ -208,12 +210,37 @@ describe("saved tutor material provenance", () => {
         ${sql.json({ kind: "task", title: "Review", minutes: 15, dueText: null })})`;
     const admit = () => sql.begin(tx => admitTaskCandidate(tx, scope, id));
     await expect(admit()).resolves.toBe(saved.assistantTurnId);
+    await sql`UPDATE opening_turns SET created_at=now()-interval '1 hour' WHERE id=${saved.turnId}`;
+    const next = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const claim = (await jobs.claim(next.jobId))!;
+    const send = () => jobs.assertSendAuthorized(scope, next.jobId, {
+      claimToken: claim.claimToken, executionId: claim.executionId, contextSourceRefs: [memoryOnlyRef], globalMemoryIds: [memory.id],
+    });
+    const history = () => jobs.loadHistoryContext(scope, next.turnId);
+    const context = () => memories.listForContext(scope, course.id);
+    const other = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Classified elsewhere", slug: randomUUID() });
+    const membership = { workspaceId: scope.workspaceId, courseId: other.id, assetType: "source" as const, assetId: material };
+    await courses.addAssetMembership({ ...membership, role: "core", visibility: "course", purpose: "teaching" });
+    for (const purpose of ["teaching", "reference", "practice"] as const) {
+      await sql`UPDATE course_asset_memberships SET purpose=${purpose} WHERE course_id=${other.id} AND asset_id=${material}`;
+      await expect(admit()).resolves.toBe(saved.assistantTurnId);
+      await expect(send()).resolves.toBeUndefined();
+      await expect(history()).resolves.toMatchObject({ memoryIds: [memory.id] });
+      await expect(context()).resolves.toEqual([expect.objectContaining({ id: memory.id })]);
+    }
+    await sql`UPDATE course_asset_memberships SET purpose='mock_exam' WHERE course_id=${other.id} AND asset_id=${material}`;
+    await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(send()).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(history()).resolves.toEqual({ history: [], sourceRefs: [] });
+    await expect(context()).resolves.toEqual([]);
+    await sql`UPDATE course_asset_memberships SET purpose='teaching' WHERE course_id=${other.id} AND asset_id=${material}`;
     await sql`UPDATE opening_turns SET source_ids=ARRAY[${material}]::uuid[] WHERE id=${saved.assistantTurnId}`;
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
     await sql`UPDATE opening_turns SET source_ids='{}' WHERE id=${saved.assistantTurnId}`;
     await setRefs([{ ...memoryOnlyRef, sourceId: await source() }]);
     await expect(admit()).rejects.toMatchObject({ code: "VALIDATION" });
-  });
+  }, 15_000);
 
   it("carries matching course memories through Worker completion and fences their exact IDs against the saved job", async () => {
     const { sql, scope } = f;

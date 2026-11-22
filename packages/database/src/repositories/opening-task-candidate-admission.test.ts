@@ -154,3 +154,22 @@ it.each([false, true])("keeps the preferred temporary legacy backing with revers
   expect(graph.get(parent)?.find(node => node.dep_id === lower)?.expires_at).toBe(expiresAt);
   expect(graph.has(cycle)).toBe(false);
 });
+
+it("looks up valid origin UUIDs and rejects a memory with a malformed origin", async () => {
+  const memoryId = "88888888-8888-4888-8888-888888888888";
+  const uppercaseTurn = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+  const { tx, queries } = simulatedSql(query => {
+    if (query.startsWith("SELECT dep_m.id")) return [{
+      id: memoryId, course_id: null, source_turn_ids: [uppercaseTurn, "not-a-uuid"], expires_at: null,
+    }];
+    if (query.startsWith("SELECT m.id, course.id")) return [{
+      id: memoryId, turn_course_id: null, refs: [], backings: [],
+    }];
+    throw new Error(query);
+  });
+  const graph = await readMemoryDependencyStatus(tx, scope, [memoryId]);
+  expect(graph.has(memoryId)).toBe(false);
+  const origins = queries.find(query => query.startsWith("SELECT m.id, course.id"));
+  expect(origins).toContain(`${uppercaseTurn}::uuid[]`);
+  expect(origins).not.toContain("not-a-uuid");
+});

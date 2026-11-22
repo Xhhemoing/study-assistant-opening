@@ -1,7 +1,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import {
-  lineageUuid, memoryCourseAllows, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
+  isLineageUuid, lineageUuid, memoryCourseAllows, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
   turnDependencyWalk, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs, type FragmentFactory,
   type MemoryDependencyStatus,
 } from "./opening-context-provenance";
@@ -83,7 +83,7 @@ export function sourceMaterialsActive(
       ${memoryCourse ? db`OR (
         SELECT COALESCE(bool_or(cam.purpose = 'mock_exam'), false)
           OR CASE ${options?.authorizeMemoryOnlySeparately ? db`WHEN ref.memory_only THEN false` : db``}
-            WHEN ${memoryCourse()} IS NULL THEN count(cam.purpose) > 0
+            WHEN ${memoryCourse()} IS NULL THEN ${options?.allowClassifiedGlobal ? db`false` : db`count(cam.purpose) > 0`}
             ELSE NOT COALESCE(bool_or(cam.course_id = ${memoryCourse()}
               AND (cam.purpose IS NULL OR cam.purpose = 'teaching'
                 OR cam.purpose = ${options?.originUse
@@ -168,6 +168,7 @@ type MemoryMaterialRules = {
   materialUse?: MaterialUse | "origin";
   collectSourceIds?: Set<string>;
   lockedSourceIds?: readonly string[];
+  allowClassifiedGlobal?: boolean;
 };
 type OriginBinding = {
   id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][]; material_use: MaterialUse | null;
@@ -177,7 +178,20 @@ async function readOriginBindings(
   db: Db, scope: OpeningScope, origins: MemoryOrigin[], rules?: MemoryMaterialRules,
 ): Promise<Map<string, OriginBinding[]>> {
   const byMemory = new Map<string, OriginBinding[]>();
-  if (!origins.some(origin => origin.turn_ids.length)) return byMemory;
+  const originIds: string[] = [];
+  const courseIds: (string | null)[] = [];
+  const turnIds: string[] = [];
+  const ordinalities: number[] = [];
+  for (const origin of origins) {
+    origin.turn_ids.forEach((turnId, index) => {
+      if (!isLineageUuid(turnId)) return;
+      originIds.push(origin.id);
+      courseIds.push(origin.course_id);
+      turnIds.push(turnId);
+      ordinalities.push(index);
+    });
+  }
+  if (!turnIds.length) return byMemory;
   const originUse: FragmentFactory | undefined = rules?.materialUse === "origin" ? () => db`policy.material_use` : undefined;
   const rows = await db<(Omit<OriginBinding, "ids"> & { refs: unknown; source_ids?: string[] })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
@@ -188,15 +202,18 @@ async function readOriginBindings(
         SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
         FROM (${turnMaterialRows(db)}) material
       ) AS source_ids` : db``}
-    FROM jsonb_to_recordset(${db.json(origins)}::jsonb) m(id uuid, course_id uuid, turn_ids uuid[])
-    CROSS JOIN LATERAL unnest(m.turn_ids) WITH ORDINALITY ref(turn_id, ordinality)
-    JOIN opening_turns t ON t.id = ref.turn_id AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
+    FROM unnest(${originIds}::uuid[], ${courseIds}::uuid[], ${turnIds}::uuid[], ${ordinalities}::int[]) m(id, course_id, turn_id, ordinality)
+    JOIN LATERAL (
+      SELECT saved.* FROM opening_turns saved
+      WHERE saved.id = m.turn_id AND saved.workspace_id = ${scope.workspaceId} AND saved.status = 'complete'
+      OFFSET 0
+    ) t ON true
     JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id AND c.owner_user_id = ${scope.ownerUserId}
     CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`)} AS id) course
     ${originUse ? db`CROSS JOIN LATERAL (SELECT ${turnMaterialUse(db, "t")} AS material_use) policy` : db``}
     WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && { memoryCourse: () => db`m.course_id`, ...rules, originUse })}
       ${rules ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}
-    ORDER BY m.id, ref.ordinality`;
+    ORDER BY m.id, m.ordinality`;
   for (const row of rows) {
     for (const id of row.source_ids ?? []) if (id) rules?.collectSourceIds?.add(id);
     const binding = { ...row, ids: row.refs == null ? [] : parseContextMemoryDependencyIds(row.refs) };
@@ -243,7 +260,7 @@ export async function readMemoryDependencyStatus(
         AND (dep_m.course_id IS NULL OR c.id IS NOT NULL)
         AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp()))`;
     const origins = memories.map(row => ({ ...row, turn_ids: row.source_turn_ids, excludedId: row.id }));
-    const bindings = await readOriginBindings(db, scope, origins, rules);
+    const bindings = await readOriginBindings(db, scope, origins, rules && { ...rules, allowClassifiedGlobal: true });
     for (const memory of origins) {
       pending.set(memory.id, { ...memory, bindings: bindings.get(memory.id) ?? [] });
     }

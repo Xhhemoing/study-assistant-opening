@@ -94,22 +94,26 @@ export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
 /** SQL admission shared by live context and backup, with the latter retaining historical versions. */
 export function contextSourceRefsIncluded(
   db: Db, workspaceId: string, refs: FragmentFactory, allowHistoricalVersions = false, requireAvailability = !allowHistoricalVersions,
-  bareSourceIds?: FragmentFactory,
+  bareSourceIds?: FragmentFactory, citations?: FragmentFactory,
 ): Fragment {
-  const versionless: FragmentFactory = () => bareSourceIds ? db`input.unversioned` : db`false`;
-  const safeRefs: FragmentFactory = () => db`CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END`;
+  const separateInputs = bareSourceIds !== undefined || citations !== undefined;
+  const versionless: FragmentFactory = () => separateInputs ? db`input.unversioned` : db`false`;
+  const safeArray = (value: FragmentFactory): Fragment => db`CASE WHEN jsonb_typeof(${value()}) = 'array' THEN ${value()} ELSE '[]'::jsonb END`;
   return db`
     COALESCE(jsonb_typeof(${refs()}) = 'array', false)
+    ${citations ? db`AND COALESCE(jsonb_typeof(${citations()}) = 'array', false)` : db``}
     AND NOT EXISTS (
-      SELECT 1 FROM ${bareSourceIds ? db`(
-        SELECT elem, false AS unversioned FROM jsonb_array_elements(${safeRefs()}) elem
-        UNION ALL
-        SELECT jsonb_build_object('sourceId', sid.id), true FROM unnest(${bareSourceIds()}) sid(id)
-      ) AS input(provenance_ref, unversioned)` : db`jsonb_array_elements(${safeRefs()}) provenance_ref`}
+      SELECT 1 FROM ${separateInputs ? db`(
+        SELECT elem, false, true FROM jsonb_array_elements(${safeArray(refs)}) elem
+        ${bareSourceIds ? db`UNION ALL
+          SELECT jsonb_build_object('sourceId', sid.id), true, false FROM unnest(${bareSourceIds()}) sid(id)` : db``}
+        ${citations ? db`UNION ALL SELECT elem, false, false FROM jsonb_array_elements(${safeArray(citations)}) elem` : db``}
+      ) AS input(provenance_ref, unversioned, allow_dependency_metadata)` : db`jsonb_array_elements(${safeArray(refs)}) provenance_ref`}
       WHERE NOT (
+          ${separateInputs ? db`input.allow_dependency_metadata AND` : db``}
           provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
           AND jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
-          AND jsonb_array_length(provenance_ref->'memoryDependencyIds') > 0
+          AND provenance_ref->'memoryDependencyIds' <> '[]'::jsonb
           AND NOT EXISTS (
             SELECT 1 FROM jsonb_array_elements_text(
               CASE WHEN jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
@@ -282,6 +286,10 @@ export function memoryTransitiveDependenciesActive(db: Db, alias: MemoryAlias = 
 
 export function lineageUuid(db: Db, value: FragmentFactory): Fragment {
   return db`CASE WHEN (${value()}) ~* ${UUID.source} THEN (${value()})::uuid END`;
+}
+
+export function isLineageUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID.test(value);
 }
 
 function pairedUserTurnId(db: Db, turn: FragmentFactory): Fragment {

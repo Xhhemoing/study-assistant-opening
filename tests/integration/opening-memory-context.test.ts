@@ -75,13 +75,13 @@ describe("opening memory context admission", () => {
       (await memories.listContext(scope, new Date().toISOString(), course.id, use)).memories.map(memory => memory.id);
     expect(await ids()).toEqual([global]);
     await courses.addAssetMembership({ ...membership, role: "core", visibility: "course", purpose: "teaching" });
-    expect(await ids()).toEqual([scoped]);
+    expect(await ids()).toEqual([scoped, global]);
     await sql`UPDATE course_asset_memberships SET purpose='reference' WHERE workspace_id=${scope.workspaceId} AND asset_id=${sourceId}`;
-    expect(await ids()).toEqual([scoped]);
-    expect(await ids("practice")).toEqual([]);
+    expect(await ids()).toEqual([scoped, global]);
+    expect(await ids("practice")).toEqual([global]);
     await sql`UPDATE course_asset_memberships SET purpose='practice' WHERE workspace_id=${scope.workspaceId} AND asset_id=${sourceId}`;
-    expect(await ids()).toEqual([]);
-    expect(await ids("practice")).toEqual([scoped]);
+    expect(await ids()).toEqual([global]);
+    expect(await ids("practice")).toEqual([scoped, global]);
     await sql`UPDATE course_asset_memberships SET purpose='mock_exam' WHERE workspace_id=${scope.workspaceId} AND asset_id=${sourceId}`;
     expect(await ids()).toEqual([]);
     await courses.removeAssetMembership(membership);
@@ -104,7 +104,9 @@ describe("opening memory context admission", () => {
       return turnId;
     };
     const original = await makeMemory("Course A evidence", await insertOwnedTurn(sql, scope));
-    const crossed = await makeMemory("Derived from a course B turn", await citeMemory(courseB.id, original));
+    const courseBTurn = await citeMemory(courseB.id, original);
+    const crossed = await makeMemory("Derived from a course B turn", courseBTurn);
+    await insertMemory(sql, scope, "Global memory derived from a scoped dependency", [courseBTurn]);
     await makeMemory("Derived from the crossed memory", await citeMemory(courseA.id, crossed));
     expect((await memories.listContext(scope, new Date().toISOString(), courseA.id)).memories.map(memory => memory.id))
       .toEqual([original]);

@@ -39,6 +39,27 @@ it("clears derived history when an earlier source was revoked or its cited versi
   await f.sql`UPDATE opening_turns SET citations=${f.sql.json([{ sourceId: id, sourceVersion: 0 }])} WHERE id=${prior.assistantTurnId}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
 });
+it("accepts dependency metadata only in context refs and clears history on malformed citations in either turn", async () => {
+  const { current, jobs, prior } = await seed();
+  const memories = createOpeningMemoryRepository(f.sql);
+  const active = await memories.proposeMemory(f.scope, {
+    text: "Valid history dependency", sourceTurnIds: [await insertOwnedTurn(f.sql, f.scope)],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const rejected = await memories.proposeMemory(f.scope, { text: "Rejected history dependency", sourceTurnIds: [prior.turnId], expiresAt: null });
+  await memories.reject(f.scope, rejected.id, rejected.version, randomUUID());
+  const refs = [{ memoryDependencyIds: [active.id] }];
+  await f.sql`UPDATE opening_turns SET context_source_refs=${f.sql.json(refs)} WHERE id=${prior.assistantTurnId}`;
+  expect(await jobs.loadHistoryContext(f.scope, current.turnId)).toMatchObject({ memoryIds: [active.id] });
+
+  for (const turnId of [prior.assistantTurnId, prior.turnId]) {
+    await f.sql`UPDATE opening_turns SET citations=${f.sql.json([{ memoryDependencyIds: [rejected.id] }])} WHERE id=${turnId}`;
+    expect(await jobs.loadHistoryContext(f.scope, current.turnId)).toEqual({ history: [], sourceRefs: [] });
+    expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
+    await f.sql`UPDATE opening_turns SET citations='[]'::jsonb WHERE id=${turnId}`;
+  }
+  expect(await jobs.loadHistory(f.scope, current.turnId)).toHaveLength(2);
+});
 it("clears derived history when a referenced source is privacy-excluded", async () => {
   const { current, jobs, prior } = await seed();
   const id = randomUUID();

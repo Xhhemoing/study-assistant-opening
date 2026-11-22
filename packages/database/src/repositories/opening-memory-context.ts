@@ -45,6 +45,17 @@ async function readMemoryContextInTx(
   // Avoid reaching the dependency planner at all when there is no sourced memory.
   const [hasEvidence] = await db`SELECT m.id FROM opening_memories m WHERE ${eligibleForScope()} LIMIT 1`;
   if (!hasEvidence) return [];
+  // Keep the UUID probe correlated when the number of saved origins is unknown to the planner.
+  const savedOrigins = (ids: FragmentFactory, workspaceId: FragmentFactory): ReturnType<Db> => db`
+    unnest(ARRAY(
+      SELECT ${lineageUuid(db, () => db`lower(ref.turn_id)`)}
+      FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${ids()}) = 'array' THEN ${ids()} ELSE '[]'::jsonb END) ref(turn_id)
+    )) origin(turn_id)
+    JOIN LATERAL (
+      SELECT saved.* FROM opening_turns saved
+      WHERE saved.id = origin.turn_id AND saved.workspace_id = ${workspaceId()} AND saved.status = 'complete'
+      OFFSET 0
+    ) t ON true`;
   // Bound the explicit ancestry query to all selected roots in one walk.
   // The origin check also resolves unattributed backing and validates stored material.
   const rows = await db`
@@ -55,8 +66,7 @@ async function readMemoryContextInTx(
           'turn_ids', COALESCE(jsonb_agg(t.id), '[]'::jsonb),
           'refs', jsonb_path_query_array(COALESCE(jsonb_agg(${turnContextSourceRefs(db, "t")}), '[]'::jsonb), '$[*][*]')
         )
-        FROM jsonb_array_elements_text(m.source_turn_ids) ref(turn_id)
-        JOIN opening_turns t ON t.id = ${lineageUuid(db, () => db`lower(ref.turn_id)`)} AND t.workspace_id = m.workspace_id AND t.status = 'complete'
+        FROM ${savedOrigins(() => db`m.source_turn_ids`, workspace)}
       ) AS source_evidence
       FROM opening_memories m
       WHERE ${eligibleForScope()}
@@ -68,10 +78,7 @@ async function readMemoryContextInTx(
         THEN lower(dep.id) END, prev.root_id
       FROM mem_deps prev
       JOIN opening_memories parent ON parent.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND parent.workspace_id = ${scope.workspaceId}
-      CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN jsonb_typeof(parent.source_turn_ids) = 'array' THEN parent.source_turn_ids ELSE '[]'::jsonb END
-      ) origin(turn_id)
-      JOIN opening_turns t ON t.id = ${lineageUuid(db, () => db`origin.turn_id`)} AND t.workspace_id = parent.workspace_id AND t.status = 'complete'
+      CROSS JOIN LATERAL ${savedOrigins(() => db`parent.source_turn_ids`, () => db`parent.workspace_id`)}
       CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
       CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t")} AS id) course
       LEFT JOIN opening_memories child ON child.id = ${lineageUuid(db, () => db`dep.id`)} AND child.workspace_id = parent.workspace_id
@@ -97,11 +104,14 @@ async function readMemoryContextInTx(
   const originRows = rows.flatMap(row => Array.isArray(row.evidence_turn_ids) ? [{
     id: String(row.id), excludedId: String(row.id), course_id: row.course_id as string | null, turn_ids: row.evidence_turn_ids as string[],
   }] : []);
+  // Suggestions validate the proposed origin under its own material policy.
+  // Previously saved global context remains usable across non-exam classifications.
+  const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin" };
   const collectSourceIds = new Set<string>();
-  let origins = await readMemoryOrigins(db, scope, originRows, { excluded: excludedSourceIds, materialUse, collectSourceIds });
+  let origins = await readMemoryOrigins(db, scope, originRows, { ...materialRules, collectSourceIds });
   if (collectSourceIds.size) {
     const lockedSourceIds = await lockMemoryMaterialSources(db, scope, collectSourceIds);
-    origins = await readMemoryOrigins(db, scope, originRows, { excluded: excludedSourceIds, materialUse, lockedSourceIds });
+    origins = await readMemoryOrigins(db, scope, originRows, { ...materialRules, lockedSourceIds });
   }
   return rows.flatMap(row => {
     const origin = origins.get(String(row.id));

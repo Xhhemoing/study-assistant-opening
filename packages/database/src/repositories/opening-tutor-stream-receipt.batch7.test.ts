@@ -85,8 +85,8 @@ function fixture(options: Options = {}) {
         .map(id => ({ id, course_id: null, expires_at: null, source_turn_ids: options.storedMemoryOrigins?.[id] ? [user] : [] }));
     }
     if (sql.startsWith("SELECT m.id, course.id AS turn_course_id")) {
-      const origins = values.find(Array.isArray) as Array<{ id: string }>;
-      return origins.flatMap(({ id }) => {
+      const origins = values.find(Array.isArray) as string[];
+      return origins.flatMap(id => {
         const origin = options.storedMemoryOrigins?.[id];
         return origin ? [{ id, turn_course_id: null, refs: origin.refs,
           backings: origin.backings ?? [], source_ids: origin.sourceIds ?? [] }] : [];

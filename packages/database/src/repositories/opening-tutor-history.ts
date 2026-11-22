@@ -25,6 +25,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   const excludedSourceIds = await createOpeningPrivacyRepository(sql).listExcludedSourceIds(scope);
   const priorCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`u.context_anchor->>'courseId'`)})`;
   const currentCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`current.context_anchor->>'courseId'`)})`;
+  const citations: FragmentFactory = () => sql`CASE WHEN jsonb_typeof(u.citations) = 'array' AND jsonb_typeof(a.citations) = 'array'
+    THEN u.citations || a.citations END`;
   const rows = await sql`
     WITH prior AS MATERIALIZED (
       SELECT u.id, a.id AS assistant_id, u.created_at,
@@ -43,10 +45,10 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
           SELECT 1 FROM unnest(u.source_ids || a.source_ids || current.source_ids) AS ref(id)
           WHERE ref.id = ANY(${excludedSourceIds}::uuid[])
         ) OR EXISTS (
-          SELECT 1 FROM jsonb_array_elements(a.citations) AS citation
+          SELECT 1 FROM jsonb_array_elements(${citations()}) AS citation
           WHERE citation->>'sourceId' = ANY(${excludedSourceIds}::text[])
-        ) OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`refs.user_refs || refs.assistant_refs || a.citations`,
-          false, true, () => sql`u.source_ids || a.source_ids`)}) AS invalid
+        ) OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`refs.user_refs || refs.assistant_refs`,
+          false, true, () => sql`u.source_ids || a.source_ids`, citations)}) AS invalid
       FROM opening_turns current
       JOIN opening_conversations c ON c.id=current.conversation_id
       JOIN workspaces w ON w.id=c.workspace_id
