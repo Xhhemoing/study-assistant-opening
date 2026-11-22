@@ -98,7 +98,7 @@ const SEALED_HEADING_RE =
   /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
-const HTML_HEADING_OPEN_RE = new RegExp(/^ {0,3}<h([1-6])(?=[\t />])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
+const RAW_HTML_HEADING_RE = /<h[1-6](?=[\t\n\f\r />])/i;
 const HTML_ATTRIBUTE_TOKEN_RE = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r >]+)))?/g;
 const HTML_TAG_TOKEN = /<(?<prefix>[!/?]?)(?<tag>[a-z][^\t\n\f\r />]*)(?=[\t\n\f\r />])/.source + HTML_TAG_ATTRIBUTES + ">";
 const DETAILS_OPEN_RE = new RegExp(/^<details(?=[\t\n\f\r />])/.source + HTML_TAG_ATTRIBUTES + ">", "i");
@@ -847,6 +847,9 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_
     }
   };
   return {
+    rawHeadings(definedLinkLabels: ReadonlySet<string>) {
+      return RAW_HTML_HEADING_RE.test(text) ? getScopeLookup(definedLinkLabels).rawHeadings : [];
+    },
     htmlBlockAt(lineStart: number) {
       scanThrough(lineStart - 1);
       return activeAtLine.get(lineStart);
@@ -877,20 +880,30 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_
   };
 }
 
-function readRawHtmlHeading(
-  text: string, lines: readonly SourceLine[], index: number, htmlContext: ReturnType<typeof createMarkdownHtmlBlockLookup>,
-) {
-  const line = lines[index]!;
-  const opening = HTML_HEADING_OPEN_RE.exec(line.raw);
-  if (!opening || htmlContext.htmlBlockAt(line.start) || !htmlContext.isRawHtmlAt(line.start)) return undefined;
-  let end = index + 1;
-  while (end < lines.length && htmlContext.isRawHtmlAt(lines[end]!.start)) end++;
-  const html = text.slice(line.start, lines[end - 1]!.contentEnd);
-  const close = htmlElementEnd(html, `h${opening[1]}`, opening[0].length);
-  if (close === undefined) return undefined;
-  const lastIndex = lineIndexContaining(lines, line.start + close - 1, index);
-  if (!isMarkdownBlankLine(text.slice(line.start + close, lines[lastIndex]!.contentEnd))) return undefined;
-  return { level: Number(opening[1]), lastIndex };
+type RawHtmlHeading = {
+  start: number;
+  end: number;
+  blockStart: number;
+  level: number;
+  depth: number;
+  context: LabelContext;
+  visibilityHidden: boolean;
+};
+
+function splitLinesAtRawHeadings(text: string, lines: readonly SourceLine[], headings: readonly RawHtmlHeading[]) {
+  const offsets = headings.flatMap(({ start, end }) => [start, end]).sort((a, b) => a - b);
+  const result: SourceLine[] = [];
+  let index = 0;
+  for (const line of lines) {
+    let { start } = line;
+    for (let cut = offsets[index]; cut !== undefined && cut < line.contentEnd; cut = offsets[++index]) {
+      if (cut <= start) continue;
+      result.push({ start, contentEnd: cut, end: cut, raw: text.slice(start, cut) });
+      start = cut;
+    }
+    result.push(start === line.start ? line : { ...line, start, raw: text.slice(start, line.contentEnd) });
+  }
+  return result;
 }
 
 type MarkdownInlineScope = "#markdown-p" | "#markdown-heading";
@@ -1265,7 +1278,8 @@ function findMatchingDetailsBounds(
     }
     if (match.groups?.ticks) {
       const insideSummary = summaryOpening !== undefined && elements.isOnStack(summaryOpening.element);
-      if ((allowsMarkdown || insideSummary) && !isEscaped(text, match.index)) {
+      const allowsCodeSpan = insideSummary ? !inheritsHtmlBlock.isRawHtmlAt(match.index) : allowsMarkdown;
+      if (allowsCodeSpan && !isEscaped(text, match.index)) {
         const end = endOfBacktickSpan(text, match.index);
         if (end !== -1 && !crossesDetailsHtmlBoundary(text, match.index, end, containers)) {
           // Keep the legacy inline example consisting solely of an unmatched comment opener.
@@ -1340,37 +1354,62 @@ function codeSpanLabelText(span: string): string {
 function readSummaryMarkup(
   text: string, summary: NonNullable<DetailsBounds["summary"]>,
   htmlContext: ReturnType<typeof createMarkdownHtmlBlockLookup>,
+  definedLinkLabels: ReadonlySet<string>,
 ): string {
   const parts: string[] = [];
-  const appendMarkup = (start: number, end: number) => {
+  let markdown: string[] = [];
+  const flushMarkdown = () => {
+    if (!markdown.length) return;
+    parts.push(renderMarkdownLabelMarkup(markdown.join(""), false, definedLinkLabels));
+    markdown = [];
+  };
+  const appendMarkdown = (start: number, end: number) => {
     const markup = text.slice(start, end);
     if (!markup.includes("&")) {
-      parts.push(markup);
+      markdown.push(markup);
       return;
     }
-    // A summary can straddle a raw HTML block and Markdown text. Project
-    // Markdown text references into HTML without rewriting markup or attributes.
+    // Project Markdown text references into HTML without rewriting attributes.
     const tokens = new RegExp(HTML_MARKUP_TOKEN + /|(?<reference>&(?:(?:#[xX][0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);?)?)/.source, "gi");
     let after = 0;
     for (const match of markup.matchAll(tokens)) {
       const reference = match.groups?.reference;
-      if (!reference || isEscaped(text, start + match.index) || htmlContext.isRawHtmlAt(start + match.index)) continue;
+      if (!reference || isEscaped(text, start + match.index)) continue;
       const decoded = decodeMarkdownCharacterReferences(reference);
       const escaped = decoded === reference ? `&#38;${reference.slice(1)}` :
         Array.from(decoded, character => `&#${character.codePointAt(0)};`).join("");
-      parts.push(markup.slice(after, match.index), escaped);
+      markdown.push(markup.slice(after, match.index), escaped);
       after = match.index + reference.length;
     }
-    parts.push(markup.slice(after));
+    markdown.push(markup.slice(after));
+  };
+  const appendMarkup = (start: number, end: number) => {
+    // A summary can cross a CommonMark HTML block boundary.
+    for (let cursor = start; cursor < end;) {
+      const raw = htmlContext.isRawHtmlAt(cursor);
+      let limit = cursor;
+      do {
+        const newline = nextLineBreak(text, limit);
+        limit = newline ? Math.min(end, newline.index + newline[0].length) : end;
+      } while (limit < end && htmlContext.isRawHtmlAt(limit) === raw);
+      if (raw) {
+        flushMarkdown();
+        parts.push(text.slice(cursor, limit));
+      } else {
+        appendMarkdown(cursor, limit);
+      }
+      cursor = limit;
+    }
   };
   let cursor = summary.openEnd;
   // Only shield spans the disclosure scanner actually treated as Markdown.
   for (const { start, end } of summary.codeSpans) {
     appendMarkup(cursor, start);
-    parts.push(codeSpanLabelText(text.slice(start, end)));
+    markdown.push(codeSpanLabelText(text.slice(start, end)));
     cursor = end;
   }
   appendMarkup(cursor, summary.closeStart);
+  flushMarkdown();
   return parts.join("");
 }
 
@@ -1831,13 +1870,18 @@ function cssVariableCall(group: Extract<CssToken, { kind: "group" }>) {
 
 const CSS_ZERO_LENGTH_ENVIRONMENT = new Set([
   "safe-area-inset-top", "safe-area-inset-right", "safe-area-inset-bottom", "safe-area-inset-left",
+  "safe-area-max-inset-top", "safe-area-max-inset-right", "safe-area-max-inset-bottom", "safe-area-max-inset-left",
   "titlebar-area-x", "titlebar-area-y", "titlebar-area-width", "titlebar-area-height",
   "keyboard-inset-top", "keyboard-inset-right", "keyboard-inset-bottom", "keyboard-inset-left",
   "keyboard-inset-width", "keyboard-inset-height",
 ]);
-// The chunker has no viewport or keyboard measurements. These scalar UA
-// lengths use the zero-inset value, which cannot match a label style keyword.
+const CSS_VIEWPORT_SEGMENT_ENVIRONMENT = new Set([
+  "viewport-segment-width", "viewport-segment-height", "viewport-segment-top", "viewport-segment-right",
+  "viewport-segment-bottom", "viewport-segment-left",
+]);
+// The document-only model supplies neutral UA values and a synthetic segment at (0, 0).
 const CSS_ZERO_LENGTH: readonly CssToken[] = [{ kind: "literal", value: "0px" }];
+const CSS_DEFAULT_TEXT_SCALE: readonly CssToken[] = [{ kind: "integer", value: "1" }];
 
 function cssEnvironmentCall(group: Extract<CssToken, { kind: "group" }>) {
   const [name] = group.tokens;
@@ -1846,11 +1890,19 @@ function cssEnvironmentCall(group: Extract<CssToken, { kind: "group" }>) {
   }
   let end = 1;
   while (group.tokens[end]?.kind === "integer") end++;
-  if (end === group.tokens.length) return { name: name.value, indexed: end > 1 };
-  if (!isCssPunct(group.tokens[end], ",")) return undefined;
-  const fallback = group.tokens.slice(end + 1);
-  if (fallback.some(token => token.kind === "punct" && /[!;\])}]/.test(token.value))) return undefined;
-  return { name: name.value, indexed: end > 1, fallback };
+  if (end < group.tokens.length && !isCssPunct(group.tokens[end], ",")) return undefined;
+  const fallback = end < group.tokens.length ? group.tokens.slice(end + 1) : undefined;
+  if (fallback?.some(token => token.kind === "punct" && /[!;\])}]/.test(token.value))) return undefined;
+  const indices = group.tokens.slice(1, end);
+  let value: readonly CssToken[] | undefined;
+  if (indices.length === 0) {
+    if (name.value === "preferred-text-scale") value = CSS_DEFAULT_TEXT_SCALE;
+    if (CSS_ZERO_LENGTH_ENVIRONMENT.has(name.value)) value = CSS_ZERO_LENGTH;
+  } else if (indices.length === 2 && CSS_VIEWPORT_SEGMENT_ENVIRONMENT.has(name.value) &&
+    indices.every(index => index.kind === "integer" && /^[+-]?0+$/.test(index.value))) {
+    value = CSS_ZERO_LENGTH;
+  }
+  return { value, fallback };
 }
 
 function cssSubstitutions(tokens: readonly CssToken[]) {
@@ -1929,8 +1981,7 @@ function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, 
       } else if (functionName === "env") {
         const call = cssEnvironmentCall(token);
         if (!call) return undefined;
-        replacement = !call.indexed && CSS_ZERO_LENGTH_ENVIRONMENT.has(call.name)
-          ? CSS_ZERO_LENGTH : call.fallback && substitute(call.fallback);
+        replacement = call.value ?? (call.fallback && substitute(call.fallback));
       } else {
         const children = substitute(token.tokens);
         if (children === undefined) return undefined;
@@ -2598,6 +2649,17 @@ function createHtmlScopeLookup(
   let generatedRow: OpenStyledTag | undefined;
   let cursor = 0;
   let rawHtml = false;
+  let rawBlockStart = 0;
+  const rawHeadings: RawHtmlHeading[] = [];
+  const openHeadings: { entry: OpenStyledTag; heading: RawHtmlHeading }[] = [];
+  const finishHeadings = (offset: number, closing?: OpenStyledTag, closeEnd = offset, endOfBlock = false) => {
+    while (openHeadings.length) {
+      const { entry, heading } = openHeadings.at(-1)!;
+      if (!endOfBlock && isOnStack(entry)) break;
+      heading.end = entry === closing ? closeEnd : offset;
+      openHeadings.pop();
+    }
+  };
   const recordScope = (offset: number, style = getStyle()) => {
     const namespace = htmlChildNamespace(stack.at(-1));
     let pipeCell: "th" | "td" | undefined;
@@ -2627,6 +2689,11 @@ function createHtmlScopeLookup(
   const advanceLines = (offset: number) => {
     for (let line = blockLines[lineIndex]; line && line.offset <= offset; line = blockLines[++lineIndex]) {
       readText(line.offset);
+      if (rawHtml && !line.rawHtml) {
+        finishHeadings(precedingLineBreakStart(html, line.offset), undefined, undefined, true);
+      } else if (!rawHtml && line.rawHtml) {
+        rawBlockStart = line.offset;
+      }
       rawHtml = line.rawHtml ?? false;
       const select = elements.selectIndex();
       if (select >= 0) {
@@ -2684,6 +2751,7 @@ function createHtmlScopeLookup(
         reconstructFormatting();
       }
       recordScope(line.offset);
+      finishHeadings(line.offset);
     }
   };
   for (let match = tokens.exec(html); match; match = tokens.exec(html)) {
@@ -2696,6 +2764,7 @@ function createHtmlScopeLookup(
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
     const start = !ignored && tag && prefix === "" ? elements.prepareStart(tag, namespace) : null;
+    finishHeadings(match.index);
     if (start) recordScope(match.index, namespace || start.tableStructure ? getStyle() : insertionStyle());
     const raw = namespace || ignored ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
     if (ignored) {
@@ -2709,17 +2778,36 @@ function createHtmlScopeLookup(
           tag, namespace: current, markup: match[0], htmlAnnotation: htmlEncodedAnnotation(current, tag, match[0]),
           outerSvg: current === "svg" && tag === "svg" && namespace !== "svg",
         };
-        const labelStyle = styleForOpenTag(element, namespace || start.tableStructure ? getStyle() : insertionStyle());
-        elements.insertTag({ ...element, labelStyle }, start.tableForm);
+        const parent = namespace || start.tableStructure ? stack.at(-1) : elements.insertionParent();
+        const labelStyle = styleForOpenTag(element, parent?.labelStyle ?? inheritedStyle);
+        const entry = elements.insertTag({ ...element, labelStyle }, start.tableForm);
         if (!current && tag === "details") {
-          const { name } = readDetailsOpening(match[0]);
-          if (name && !openDetailsOrder.has(name) && !inheritedContext.hasOpenDetails?.(name)) {
+          const { open, name } = readDetailsOpening(match[0]);
+          const alreadyOpen = name && (openDetailsOrder.has(name) || inheritedContext.hasOpenDetails?.(name));
+          entry.disclosure = { open: open && !alreadyOpen };
+          if (name && entry.disclosure.open) {
             openDetailsOrder.set(name, openDetailsOrder.size + 1);
           }
         }
+        if (!current && tag === "summary" && parent?.disclosure && !parent.disclosure.summary) {
+          parent.disclosure.summary = entry;
+        }
+        if (rawHtml && !current && /^h[1-6]$/.test(tag) &&
+          !labelStyle.suppressedSubtree && !skipsLabelContents(labelStyle) &&
+          !stack.some((ancestor, index) => ancestor.disclosure?.open === false &&
+            ancestor.disclosure.summary !== stack[index + 1])) {
+          const heading = {
+            start: match.index, end: tokens.lastIndex, blockStart: rawBlockStart,
+            level: Number(tag[1]), depth: entry.containerDepth,
+            context: scopes.at(-1)!.context, visibilityHidden: labelStyle.visibilityHidden,
+          };
+          rawHeadings.push(heading);
+          openHeadings.push({ entry, heading });
+        }
       }
     } else if (tag && prefix === "/") {
-      elements.closeTag(tag);
+      const closed = elements.closeTag(tag);
+      finishHeadings(match.index, closed, /^h[1-6]$/.test(tag) ? tokens.lastIndex : match.index);
     }
     // Multi-line HTML tokens and raw text consume the intervening source lines.
     while (blockLines[lineIndex] && blockLines[lineIndex]!.offset < tokens.lastIndex) lineIndex++;
@@ -2727,6 +2815,7 @@ function createHtmlScopeLookup(
     recordScope(tokens.lastIndex);
   }
   advanceLines(html.length);
+  finishHeadings(html.length, undefined, undefined, true);
   const scopeAt = (offset: number) => {
     let low = 0;
     let high = positions.length;
@@ -2737,7 +2826,7 @@ function createHtmlScopeLookup(
     }
     return scopes[low]!;
   };
-  return { scopeAt, ignoredDetailsStarts };
+  return { scopeAt, ignoredDetailsStarts, rawHeadings };
 }
 
 function seedPipeTableCell(elements: ReturnType<typeof createHtmlElementStack>, cell: "th" | "td") {
@@ -2984,7 +3073,7 @@ function classifyDetailsElement(
     );
     const summaryStyle = resolveElementStyle("summary", detailsStyle, text.slice(summary.openStart, summary.openEnd));
     const rawHtml = htmlContext.isRawHtmlAt(summary.openStart);
-    const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary, htmlContext), false, definedLinkLabels);
+    const summaryContents = readSummaryMarkup(text, summary, htmlContext, definedLinkLabels);
     const summaryContext = htmlContext.labelContextAt(summary.openEnd, definedLinkLabels);
     const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, { ...summaryContext, style: summaryStyle },
       htmlContext.pipeCellAt(openStart, definedLinkLabels), rawHtml, decodeHtmlCharacterReferences);
@@ -3390,14 +3479,23 @@ function createTranscriptCueSeparator(
     }
     return start;
   });
-  const headingText = lines.some(line => HTML_HEADING_OPEN_RE.test(line)) ? lines.join("\n") : undefined;
-  const headingLines = headingText === undefined ? undefined : splitLinesWithOffsets(headingText);
-  const headingContext = headingText === undefined ? undefined : createMarkdownHtmlBlockLookup(headingText, inheritedContext);
+  const htmlHeadingContinuations = new Set<number>();
+  if (lines.some(line => /<h[1-6](?:$|[\t\f />])/i.test(line))) {
+    const headingText = lines.join("\n");
+    const headingLines = splitLinesWithOffsets(headingText);
+    const htmlContext = createMarkdownHtmlBlockLookup(headingText, inheritedContext);
+    let index = 0;
+    for (const heading of htmlContext.rawHeadings(definedLinkLabels)) {
+      while (headingLines[index] && headingLines[index]!.start <= heading.blockStart) index++;
+      while (headingLines[index] && headingLines[index]!.start < heading.end) {
+        htmlHeadingContinuations.add(index++);
+      }
+    }
+  }
   let containers: MarkdownContainer[] = [];
   let previousBody = "";
   let tableColumns: PedagogicalVisibility[] | undefined;
   let setextThrough = -1;
-  let htmlHeadingThrough = -1;
   let latexArgumentThrough = -1;
   let literalEnvironment: string | undefined;
   const mathEnvironments: string[] = [];
@@ -3419,15 +3517,11 @@ function createTranscriptCueSeparator(
       literalEnvironment = undefined;
       mathEnvironments.length = 0;
       latexArgumentThrough = -1;
-      htmlHeadingThrough = -1;
       const underline = protectedUnderline(start, readMarkdownContainerLine(lines[start]!, containers));
       if (underline !== undefined) setextThrough = underline;
     }
     for (let index = start; index < end; index++) {
       const line = lines[index]!;
-      if (headingText !== undefined && headingLines && headingContext && index > htmlHeadingThrough && HTML_HEADING_OPEN_RE.test(line)) {
-        htmlHeadingThrough = readRawHtmlHeading(headingText, headingLines, index, headingContext)?.lastIndex ?? -1;
-      }
       const continuation = continueMarkdownContainers(line, containers);
       const current = readMarkdownContainerLine(line, containers);
       const readNext = (distance: number) => nextBodyInContainer(lines[index + distance], current.containers);
@@ -3501,7 +3595,7 @@ function createTranscriptCueSeparator(
     const continuesLatexEnvironment = continued.depth === containers.length &&
       (mathEnvironments.length > 0 || literalEnvironment !== undefined);
     if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph || continuesLatexEnvironment ||
-      end <= htmlHeadingThrough) return newline;
+      htmlHeadingContinuations.has(end)) return newline;
 
     // The synthetic paragraph break also ends any table.
     previousBody = "";
@@ -4338,7 +4432,7 @@ function parsePedagogicalAstInternal(
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
-  const lines = splitLinesWithOffsets(text);
+  let lines = splitLinesWithOffsets(text);
   const initialTimings = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, inheritedLinkLabels, inheritedContext);
   const hasCueTimings = initialTimings.timings.some(Boolean);
   const boundaryBefore = (index: number) => initialTimings.tableBreakVisibilities.has(index) ||
@@ -4360,6 +4454,17 @@ function parsePedagogicalAstInternal(
       options, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors, headingContext, inheritedContext);
   }
   const inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text, inheritedContext);
+  const rawHeadings = inheritsHtmlBlock.rawHeadings(definedLinkLabels).filter(heading => {
+    if (heading.depth !== 0) return false;
+    if (!heading.visibilityHidden) return true;
+    const { inline } = htmlLabelTextVariants(text.slice(heading.start, heading.end), heading.context, undefined, true);
+    return inline.length > 0;
+  });
+  const rawHeadingAt = new Map(rawHeadings.map((heading, index) => {
+    const end = Math.min(heading.end, rawHeadings[index + 1]?.start ?? text.length);
+    return [heading.start, { ...heading, end }] as const;
+  }));
+  if (rawHeadingAt.size) lines = splitLinesAtRawHeadings(text, lines, [...rawHeadingAt.values()]);
   const labelContextAt = (offset: number) => inheritsHtmlBlock.labelContextAt(offset, definedLinkLabels);
   const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(
     index => lines[index]?.raw, definedLinkLabels, index => labelContextAt(lines[index]?.start ?? 0),
@@ -4719,14 +4824,17 @@ function parsePedagogicalAstInternal(
     }
 
     // 1. Heading (and monotonic heading-stack section visibility propagation)
-    const headingMatch = ATX_HEADING_RE.exec(raw);
-    const rawHeading = headingMatch ? undefined : readRawHtmlHeading(text, lines, i, inheritsHtmlBlock);
-    const setext = headingMatch || rawHeading ? null : readSetextParagraph(index => lines[index]?.raw, i);
+    const inRawHtml = rawHeadingAt.size > 0 && inheritsHtmlBlock.isRawHtmlAt(line.start);
+    const headingMatch = inRawHtml ? null : ATX_HEADING_RE.exec(raw);
+    const rawHeading = rawHeadingAt.get(line.start);
+    const setext = headingMatch || inRawHtml ? null : readSetextParagraph(index => lines[index]?.raw, i);
     const level = headingMatch?.[1]?.length ?? rawHeading?.level ?? setext?.level;
     const boundaryFloor = boundaryFloors?.get(line.start) ??
       (tableHeadingFloor?.offset === line.start ? tableHeadingFloor.visibility : "public");
     if (level !== undefined) {
-      const headingLastIndex = setext?.index ?? rawHeading?.lastIndex ?? i;
+      const headingLastIndex = rawHeading
+        ? lineIndexContaining(lines, rawHeading.end - 1, i)
+        : setext?.index ?? i;
       const headingEnd = lines[headingLastIndex]!.contentEnd;
       const headingTextStart = headingMatch
         ? line.start + raw.indexOf(headingMatch[2]!, raw.indexOf(headingMatch[1]!) + level)
@@ -4764,7 +4872,8 @@ function parsePedagogicalAstInternal(
       if (isSectionHeading) headingContext?.onHeading?.(line.start, level);
       if (propagateSectionVisibility) {
         const titleVisibility = tableColumnVisibility(
-          cleanHeadingTitle, definedLinkLabels, labelContextAt(headingTextStart), undefined, rawHeading !== undefined,
+          cleanHeadingTitle, definedLinkLabels, rawHeading?.context ?? labelContextAt(headingTextStart),
+          undefined, rawHeading !== undefined,
         );
         const ownVisibility = titleVisibility === "public" ? sectionBaseVisibility : titleVisibility;
         const visibility = maxVisibility(ownVisibility, boundaryFloor);
@@ -5534,7 +5643,8 @@ function parsePedagogicalAstInternal(
 
     // 10. Prose paragraph (with embedded inline display-math & pedagogical-env protection)
     const endsParagraph = (index: number) =>
-      boundaryFloors?.has(lines[index]!.start) || startsMarkdownBlock(lines[index]!.raw, lines[index + 1]?.raw);
+      rawHeadingAt.has(lines[index]!.start) || boundaryFloors?.has(lines[index]!.start) ||
+      startsMarkdownBlock(lines[index]!.raw, lines[index + 1]?.raw);
     let inlineSpans: readonly InlineConstructSpan[] | undefined;
     let spanIndex = 0;
     let j = i + 1;

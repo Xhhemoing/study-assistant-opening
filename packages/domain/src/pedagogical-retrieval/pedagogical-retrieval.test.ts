@@ -1086,7 +1086,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["inline comment opener in details", "<details>\n<summary>Answer</summary>\nExample: \x60<!--\x60\nforty-two\n</details>"],
     ["inline details closer", "<details>\n<summary>Answer</summary>\nExample: \x60</details>\x60\nforty-two\n</details>"],
     ["multiline inline details closer", "<details>\r\n<summary>Answer</summary>\r\nExample: \x60\x60start\r\n</details> end\x60\x60\r\nforty-two\r\n</details>"],
-    ["inline summary closer", "<details>\n<summary>Hint \x60</summary>\x60 Answer</summary>\nforty-two\n</details>"],
+    ["inline summary closer", "Topic <details><summary>Hint \x60</summary>\x60 Answer</summary>\nforty-two\n</details>"],
   ])("preserves explicit protection across %s", (_name, body) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     const text = body + "\n\npublic-after";
@@ -1153,7 +1153,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["unclosed plaintext", "<details><summary>Answer</summary><plaintext></details>forty-two"],
     ["non-ASCII space in a false closer", "<details><summary>Answer</summary><textarea></textarea\u00a0></details>forty-two</textarea></details>"],
     ["indented opener in contiguous HTML", "<details>\n<summary>Answer</summary>\n    <textarea>\n</details>\nforty-two\n</textarea>\n</details>"],
-    ["inline code comment in a summary", "<details>\n<summary>Hint \x60<!--\x60 Answer</summary>\nforty-two\n</details>"],
+    ["inline code comment in a summary", "Topic <details><summary>Hint \x60<!--\x60 Answer</summary>\nforty-two\n</details>"],
     ["summary closer in raw text", "<details><summary>Hint <style></summary></style> Answer</summary>forty-two</details>"],
     ["slash on non-void raw text", "<details><summary>Answer</summary><textarea/></details>forty-two</textarea></details>"],
     ["double-escaped script", "<details><summary>Answer</summary><script><!--<script></script></details>--></script>forty-two</details>"],
@@ -1227,12 +1227,19 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       "<svg><text><![CDATA[Answer]]></text></svg>",
       "An<svg><title>x</title><symbol>x</symbol><clipPath>x</clipPath><mask>x</mask><pattern>x</pattern><marker>x</marker><linearGradient>x</linearGradient><radialGradient>x</radialGradient><filter>x</filter><view>x</view></svg>swer",
       "An<?ignored <div?>swer", "<?ignored>Answer?>", "<!Answer", "<?ignored Answer",
-      "An**sw**er", "An*sw*er", "An***sw***er", "An***sw*er**", "An~~sw~~er", "An\x60sw\x60er", "[An](url)swer", "![An](url(a) 'title')swer",
     ].flatMap(label => [
       [`${label} in a summary`, `<details><summary>Hint / ${label}</summary>forty-two</details>`],
       [`${label} in an ATX heading`, `## ${label.replace("\n", " ")}\nforty-two\n\n## Next topic`],
       [`${label} in a Setext heading`, `${label}\n---\nforty-two\n\n# Next topic`],
       [`${label} in a table header`, `Note | ${label.replace("\n", " ")}\n--- | ---\ny | forty-two`],
+    ]),
+    ...[
+      "An**sw**er", "An*sw*er", "An***sw***er", "An***sw*er**", "An~~sw~~er", "An\x60sw\x60er", "[An](url)swer", "![An](url(a) 'title')swer",
+    ].flatMap(label => [
+      [`${label} in a Markdown inline summary`, `Topic <details><summary>Hint / ${label}</summary>forty-two</details>`],
+      [`${label} in an ATX heading`, `## ${label}\nforty-two\n\n## Next topic`],
+      [`${label} in a Setext heading`, `${label}\n---\nforty-two\n\n# Next topic`],
+      [`${label} in a table header`, `Note | ${label}\n--- | ---\ny | forty-two`],
     ]),
     ["spoiler in summary", "<details><summary>Hint / Spo<wbr>iler</summary>forty-two</details>"],
     ["zero-width joiner in spoiler", "<details><summary>Hint / Spo&zwj;iler</summary>forty-two</details>"],
@@ -1386,7 +1393,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       [`${name} in an ATX heading`, `## ${label}\nforty-two`, definition],
       [`${name} in a Setext heading`, `${label}\n---\nforty-two`, definition],
       [`${name} in a table header`, `Topic | ${label}\n--- | ---\nrow | forty-two`, definition],
-      [`${name} in a summary`, `<details><summary>Hint / ${label}</summary>forty-two</details>`, definition],
+      [`${name} in a Markdown inline summary`, `Topic <details><summary>Hint / ${label}</summary>forty-two</details>`, definition],
     ] as const),
     ["a heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\n## An<span style="display:var(--mode)">x</span>swer\n\nforty-two\n</div>', ""],
     ["a Setext heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\nAn<span style="display:var(--mode)">x</span>swer\n---\n\nforty-two\n</div>', ""],
@@ -1775,6 +1782,86 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }
   });
 
+  it.each([
+    ["<h2>Overview</h2>\n<h2>Answer</h2>", "sealed"],
+    ["<h2>Answer</h2>\n<h2>Introduction</h2>", "public"],
+    ["<h2>Answer</h2>\n\n<h2>Introduction</h2><!-- section -->", "public"],
+    ['<h2>Answer</h2>\n\n<h2\n id="intro">Introduction</h2>', "public"],
+    ['<h2>Overview</h2>\n<h2\n id="answer">Answer</h2>', "sealed"],
+    ["<h2>Overview</h2><h2>Answer</h2>", "sealed"],
+    ["<div><h2>Overview</h2><h2>Answer</h2></div>", "sealed"],
+    ["<div>\nBackground <h2>Answer</h2>\n</div>", "sealed"],
+    ["<h2>\nAnswer\n</h2>", "sealed"],
+    ["<h2>Answer<h2>Introduction</h2>", "public"],
+    ["<h2>Overview<h2>Answer</h2>", "sealed"],
+    ["<h2>Answer</h2><h3>Introduction</h3>", "sealed"],
+    ["<h2>An**sw**er</h2>", "public"],
+    ["## An**sw**er", "sealed"],
+    ["<h2>Answer</h2><template><h2>Introduction</h2></template>", "sealed"],
+    ["<h2>Answer</h2><datalist><h2>Introduction</h2></datalist>", "sealed"],
+    ["<h2>Answer</h2><details><summary>Hint</summary><h2>Introduction</h2></details>", "sealed"],
+    ["<h2>Answer</h2><dialog><h2>Introduction</h2></dialog>", "sealed"],
+    ["<h2>Answer</h2><div hidden><h2>Introduction</h2></div>", "sealed"],
+    ['<h2>Answer</h2><h2 style="display:none">Introduction</h2>', "sealed"],
+    ['<h2>Answer</h2><div style="content-visibility:hidden"><h2>Introduction</h2></div>', "sealed"],
+    ['<h2>Answer</h2><h2 style="visibility:hidden">Introduction</h2>', "sealed"],
+    ['<h2>Answer</h2><h2 style="visibility:hidden"><span style="visibility:visible">Introduction</span></h2>', "public"],
+    ["<h2>Answer</h2><!-- <h2>Introduction</h2> -->", "sealed"],
+    ["<h2>Answer</h2>\n\n\x60<h2>Introduction</h2>\x60", "sealed"],
+  ] as const)("updates sections at each rendered raw HTML heading in %s", (headings, visibility) => {
+    const text = headings + "\n\nPublic theorem.";
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "sealed") expectSealedEvidence(chunks, text, ["Public theorem."]);
+      else expectSealedEvidence(chunks, text, [], "Public theorem.");
+    }
+  });
+
+  it.each([
+    ["<details><summary>Hint An**sw**er</summary>Example hint.</details>", "hint_gated"],
+    ["<details><summary>Hint [An](url)swer</summary>Example hint.</details>", "hint_gated"],
+    ["<details><summary>Hint An\x60sw\x60er</summary>Example hint.</details>", "hint_gated"],
+    ["<details><summary>Hint An~~sw~~er</summary>Example hint.</details>", "hint_gated"],
+    ["<details><summary>Hint \x60</summary>\x60 Answer</summary>Example hint.</details>", "hint_gated"],
+    ["<details><summary>Hint **Answer**</summary>Example hint.</details>", "sealed"],
+    ["Topic <details><summary>Hint An**sw**er</summary>Example hint.</details>", "sealed"],
+  ] as const)("preserves raw HTML summary punctuation in %s", (text, visibility) => {
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expect(chunks.find(chunk => chunk.text.includes("Example hint."))?.visibility).toBe(visibility);
+      for (const allowHintGated of [false, true]) {
+        const ranked = rankPedagogicalEvidence({
+          chunks,
+          authorization: { admissibleSourceIds: ["captions"], allowHintGated },
+          lexicalRanking: chunks.map(chunk => ({ id: chunk.id, score: 1 })),
+        });
+        expect(ranked.ranked.some(result => result.chunk.text.includes("Example hint.")))
+          .toBe(allowHintGated && visibility === "hint_gated");
+      }
+    }
+  });
+
+  it.each([
+    ...["top", "right", "bottom", "left"].flatMap(side => [
+      ["safe-area-max-inset-" + side, "public"],
+      ["safe-area-max-inset-" + side + " 0", "sealed"],
+    ]),
+    ["preferred-text-scale", "public"],
+    ["preferred-text-scale 0", "sealed"],
+    ...["width", "height", "top", "right", "bottom", "left"].flatMap(dimension => [
+      ["viewport-segment-" + dimension + " 0 0", "public"],
+      ["viewport-segment-" + dimension + " 1 0", "sealed"],
+    ]),
+    ["viewport-segment-width", "sealed"],
+    ["viewport-segment-width 0", "sealed"],
+    ["viewport-segment-width 0 0 0", "sealed"],
+    ["viewport-segment-width 0 1", "sealed"],
+  ])("applies env() index arity and default values for %s", (variable, visibility) => {
+    const text = '## An<span style="display:env(' + variable + ',none)">n</span>swer\n\nPublic theorem.';
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "sealed") expectSealedEvidence(chunks, text, ["Public theorem."]);
+      else expectSealedEvidence(chunks, text, [], "Public theorem.");
+    }
+  });
+
   it("keeps semicolon-less references literal in pipe-table headers", () => {
     const text = "Topic | <span>&copyAnswer</span> | Notes\n--- | --- | ---\nAlgebra | Public theorem. | Example";
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
@@ -1804,7 +1891,6 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ...[
       "display:env(missing-display, none)", "display:env(a, var(--b, none))",
       "display:ENV(a, env(b, var(--c, none)))", "display:\\65 nv(missing-display, none)",
-      "display:env(viewport-segment-width 0 0, none)", "display:env(viewport-segment-width +0 0, none)",
       "display:none;display:env(123, block)", "display:none;display:env(default, block)",
       "display:none;display:env(, block)", "display:none;display:env(initial, block)",
       "display:none;display:env(-1name, block)", "display:none;display:env(x -1, block)",
@@ -1818,6 +1904,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       "display:none;display:env(safe-area-inset-top, none)",
       "display:none;display:env(titlebar-area-width, none)",
       "display:none;display:env(keyboard-inset-bottom, none)",
+      "display:env(viewport-segment-width 0 0, none)", "display:env(viewport-segment-width +0 0, none)",
     ].map(style => [`Topic <span style="${style}">Answer</span>`, "sealed"] as const),
   ] as const)("uses ASCII keyword matching and CSS substitution in %s", (label, visibility) => {
     const text = `## ${label}\n\nPublic theorem.`;
