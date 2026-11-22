@@ -77,6 +77,129 @@ describe("ArtifactView", () => {
     expect(html).toContain('data-jingwei-skipped="unknown_capability"');
     expect(html).toContain('data-jingwei-block="y"');
   });
+
+  it("downgrades caller producer='rules' when artifact provenance is not rules", () => {
+    const ruleCap = defineCapability<{ values: number[]; origin?: string }>({
+      id: "rule-bars@1",
+      title: "规则条形",
+      tasks: ["compare"],
+      modes: ["text", "static", "interactive"],
+      params: z.object({ values: z.array(z.number()).min(2), origin: z.string().optional() }).strict(),
+      limits: [],
+      toText: ({ values }) => `规则：${values.join("、")}`,
+    });
+    const ruleRegistry = createCapabilityRegistry([ruleCap]);
+    const ruleRenderers: RendererMap = {
+      "rule-bars@1": defineRenderer<{ values: number[] }>(({ params, mode }) =>
+        createElement("svg", { "data-mode": mode, "aria-label": `${params.values.length} 根规则条形` }),
+      ),
+    };
+    const modelForgedArtifact: Artifact = {
+      schemaVersion: "1",
+      artifactId: "a-forged",
+      revision: 1,
+      provenance: { origin: "model" },
+      blocks: [block({ id: "r1", capability: "rule-bars@1", params: { values: [1, 2], origin: "rules" } })],
+    };
+    const downgradedHtml = renderToStaticMarkup(
+      createElement(ArtifactView, {
+        artifact: modelForgedArtifact,
+        registry: ruleRegistry,
+        renderers: ruleRenderers,
+        producer: "rules",
+      }),
+    );
+    expect(downgradedHtml).toContain('data-jingwei-skipped="untrusted_provenance"');
+
+    const rulesArtifact: Artifact = {
+      ...modelForgedArtifact,
+      artifactId: "a-rules",
+      provenance: { origin: "rules" },
+    };
+    const rulesHtml = renderToStaticMarkup(
+      createElement(ArtifactView, {
+        artifact: rulesArtifact,
+        registry: ruleRegistry,
+        renderers: ruleRenderers,
+        producer: "rules",
+      }),
+    );
+    expect(rulesHtml).toContain('data-jingwei-mode="interactive"');
+  });
+
+  it("enforces trusted AI candidate provenance for aiCandidateOnly capabilities in ArtifactView", () => {
+    const proposalCap = defineCapability<{ aiCandidateOnly: true; summary: string }>({
+      id: "proposal-diff@1",
+      title: "候选修订",
+      tasks: ["compare"],
+      modes: ["text", "static"],
+      params: z.object({ aiCandidateOnly: z.literal(true), summary: z.string() }).strict(),
+      limits: [],
+      hostOnly: true,
+      aiCandidateOnly: true,
+      toText: ({ summary }) => summary,
+    });
+    const proposalRegistry = createCapabilityRegistry([proposalCap]);
+    const proposalRenderers: RendererMap = {
+      "proposal-diff@1": defineRenderer<{ aiCandidateOnly: true; summary: string }>(({ params }) =>
+        createElement("div", { "data-proposal": "ok" }, params.summary),
+      ),
+    };
+    const proposalBlock = block({
+      id: "p1",
+      capability: "proposal-diff@1",
+      params: { aiCandidateOnly: true, summary: "改写第2步" },
+    });
+
+    for (const origin of ["user", "import", "model", "rules"] as const) {
+      const untrustedArtifact: Artifact = {
+        schemaVersion: "1",
+        artifactId: `view-${origin}`,
+        revision: 1,
+        provenance: { origin },
+        blocks: [proposalBlock],
+      };
+      const html = renderToStaticMarkup(
+        createElement(ArtifactView, {
+          artifact: untrustedArtifact,
+          registry: proposalRegistry,
+          renderers: proposalRenderers,
+          producer: "host",
+          aiCandidateProvenance: true,
+        }),
+      );
+      expect(html).toContain('data-jingwei-skipped="untrusted_provenance"');
+      expect(html).not.toContain('data-proposal="ok"');
+    }
+
+    const aiArtifact: Artifact = {
+      schemaVersion: "1",
+      artifactId: "view-ai",
+      revision: 1,
+      provenance: { origin: "ai_candidate" },
+      blocks: [proposalBlock],
+    };
+    const withoutHostAttestation = renderToStaticMarkup(
+      createElement(ArtifactView, {
+        artifact: aiArtifact,
+        registry: proposalRegistry,
+        renderers: proposalRenderers,
+        producer: "host",
+      }),
+    );
+    expect(withoutHostAttestation).toContain('data-jingwei-skipped="untrusted_provenance"');
+
+    const trustedHtml = renderToStaticMarkup(
+      createElement(ArtifactView, {
+        artifact: aiArtifact,
+        registry: proposalRegistry,
+        renderers: proposalRenderers,
+        producer: "host",
+        aiCandidateProvenance: true,
+      }),
+    );
+    expect(trustedHtml).toContain('data-proposal="ok"');
+  });
 });
 
 describe("RenderBoundary", () => {

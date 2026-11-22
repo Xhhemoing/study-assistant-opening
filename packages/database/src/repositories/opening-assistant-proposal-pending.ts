@@ -27,7 +27,7 @@ function eligible(sql: Sql, scope: Scope, conversationId?: string) {
     WHERE p.workspace_id=${scope.workspaceId} AND p.owner_user_id=${scope.ownerUserId}
       AND p.status='draft' AND p.privacy_epoch=w.privacy_epoch
       AND (${conversationId ?? null}::uuid IS NULL OR c.id=${conversationId ?? null}::uuid)
-      AND ${contextSourceRefsIncluded(sql, scope.workspaceId, sql`p.context_source_refs`)}`;
+      AND ${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`p.context_source_refs`)}`;
 }
 
 export async function countPendingAssistantProposals(sql: Sql, scope: Scope): Promise<number> {

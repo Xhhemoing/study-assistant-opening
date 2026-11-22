@@ -112,12 +112,17 @@ describe("course sprint training entry", () => {
     createElement("h2", { id: "plan" }, "今天的任务"))));
   const action = (label: string) => [...host.querySelectorAll<HTMLElement>("button, summary")].find(item => item.textContent === label);
   const visible = (item: HTMLElement | undefined) => !!item && !item.closest("[hidden], details:not([open])");
-  async function click(label: string) {
+  async function click(label: string, expectedWrites?: number) {
     const target = action(label);
     expect(target).toBeDefined();
     await act(async () => {
       target!.click();
-      if (target!.tagName === "SUMMARY") await new Promise(resolve => setTimeout(resolve, 0));
+      if (expectedWrites !== undefined) {
+        await vi.waitFor(() => expect(writes).toHaveLength(expectedWrites));
+        await new Promise(resolve => setTimeout(resolve, 0));
+      } else if (target!.tagName === "SUMMARY") {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
     });
   }
 
@@ -128,7 +133,7 @@ describe("course sprint training entry", () => {
     expect(start!.compareDocumentPosition(host.querySelector("#plan")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("当前训练");
     expect(writes).toEqual([]);
-    await click("开始摸底诊断");
+    await click("开始摸底诊断", 1);
     expect(writes).toEqual([{ path: overviewPath, command: { action: "start", mode: "diagnostic", clientKey: expect.any(String) } }]);
     expect(visible(action("提交本题"))).toBe(true);
   });
@@ -150,7 +155,7 @@ describe("course sprint training entry", () => {
     expect(plan).not.toBeNull();
     await click("导入示例题包");
     expect(action("开始摸底诊断")).toBeUndefined();
-    await click("导入预置考点和串讲到课程");
+    await click("导入预置考点和串讲到课程", 1);
     expect(host.querySelector("#plan")).toBe(plan);
     const trainingReads = fetchMock.mock.calls.filter(([path, init]) =>
       init?.method === "GET" && (path === overviewPath || path === integrationPath));

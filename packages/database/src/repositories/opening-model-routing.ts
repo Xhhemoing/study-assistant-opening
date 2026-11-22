@@ -1,4 +1,4 @@
-import { mergeOpeningCatalog, resolveEffectiveDailyCap, OpeningModelRoutingError } from "@aistudy/ai";
+import { mergeOpeningCatalog, resolveEffectiveDailyCap, OpeningModelRoutingError } from "@aistudy/domain/opening/ai-policy";
 import type { Scope } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { createOpeningAiSettingsRepository } from "./opening-ai-settings";

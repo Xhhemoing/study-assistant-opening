@@ -1,6 +1,17 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createCourseMembershipRepository, createOpeningConversationRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository, OpeningS3, type OpeningStorage } from "@aistudy/database";
+import {
+  connectorReservationId,
+  createCourseMembershipRepository,
+  createOpeningConversationRepository,
+  createOpeningImportsRepository,
+  createOpeningMemoryRepository,
+  createOpeningPrivacyRepository,
+  createOpeningSourceActionsRepository,
+  createOpeningSourceChunksRepository,
+  OpeningS3,
+  type OpeningStorage,
+} from "@aistudy/database";
 import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 import { readOpeningBackupSources } from "../../packages/database/src/repositories/opening-backup-sources";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
@@ -161,5 +172,153 @@ describe("source actions", () => {
         .toMatchObject({ deleted: true, cleanupPending: 0 });
       for (const key of keys) expect(await storage.objectExists(key)).toBe(false);
     } finally { for (const key of keys) await storage.deleteObject(key); }
+  });
+  it("cleans up orphaned connector reservations through actOnSource retry_cleanup and delete without 404", async () => {
+    const s = setup();
+    const seedOrphan = async () => {
+      const id = randomUUID();
+      const key = s.storage.finalKey(id, 0);
+      s.objects.add(key);
+      await f.sql`INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, availability)
+        VALUES (${id}, 0, ${f.scope.workspaceId}, 128, 'unavailable')`;
+      await f.sql`INSERT INTO opening_privacy_exclusions (id, workspace_id, source_id, asset_deleted_at, pending_object_keys)
+        VALUES (${connectorReservationId(id)}, ${f.scope.workspaceId}, ${id}, now(), ARRAY[${key}]::text[])`;
+      return { id, key };
+    };
+
+    const first = await seedOrphan();
+    expect(await s.service.listSourceDeletions(s.principal)).toContainEqual({
+      sourceId: first.id, cleanupPending: 1, retryAfter: null,
+    });
+    expect(await s.service.actOnSource(s.principal, first.id, { action: "retry_cleanup" })).toEqual({
+      sourceId: first.id, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null,
+    });
+    expect(s.objects.has(first.key)).toBe(false);
+    expect(await s.service.listSourceDeletions(s.principal)).not.toContainEqual(expect.objectContaining({ sourceId: first.id }));
+    expect(await f.sql`SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${first.id}`).toEqual([]);
+    expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${first.id}`).toEqual([]);
+    await expect(s.service.actOnSource(s.principal, first.id, { action: "retry_cleanup" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(s.service.actOnSource(s.principal, randomUUID(), { action: "retry_cleanup" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const second = await seedOrphan();
+    expect(await s.service.actOnSource(s.principal, second.id.toUpperCase(), {
+      action: "delete", expectedVersion: 0, expectedMembershipIds: [],
+    })).toEqual({
+      sourceId: second.id, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null,
+    });
+    expect(s.objects.has(second.key)).toBe(false);
+    expect(await s.service.listSourceDeletions(s.principal)).not.toContainEqual(expect.objectContaining({ sourceId: second.id }));
+    expect(await f.sql`SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${second.id}`).toEqual([]);
+    expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${second.id}`).toEqual([]);
+  });
+  it("blocks uppercase UUID cleanup and delete while an in-flight connector publish holds the session lock", async () => {
+    const s = setup();
+    const actions = createOpeningSourceActionsRepository(f.sql);
+    const imports = createOpeningImportsRepository(f.sql);
+    const connectionId = randomUUID();
+    const sourceId = randomUUID();
+    const key = s.storage.finalKey(sourceId, 0);
+    const payload = Buffer.from("Subject: Locked\r\n\r\nin-flight body");
+    await f.sql`INSERT INTO opening_connections (id, workspace_id, owner_user_id, version, kind, label, create_client_key)
+      VALUES (${connectionId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 1, 'imap', 'Lock fence', ${`ck-${connectionId}`})`;
+
+    try {
+      let checkedWhileLocked = false;
+      await imports.publish(f.scope, {
+        connectionVersion: 1,
+        identity: { connectionId, container: "INBOX", generation: "1", remoteId: "77" },
+        sourceId,
+        key,
+        quota: { maxBytes: 1024 * 1024, maxObjects: 50 },
+        source: {
+          name: "locked.eml",
+          mime: "message/rfc822",
+          bytes: payload.byteLength,
+          sha256: createHash("sha256").update(payload).digest("hex"),
+        },
+      }, async () => {
+        s.objects.add(key);
+        const upperId = sourceId.toUpperCase();
+        await expect(actions.cleanup(f.scope, upperId)).rejects.toMatchObject({ code: "CONFLICT" });
+        await expect(actions.apply(f.scope, upperId, {
+          action: "delete", expectedVersion: 0, expectedMembershipIds: [],
+        }, s.storage, new Date())).rejects.toMatchObject({ code: "CONFLICT" });
+        await expect(s.service.actOnSource(s.principal, upperId, { action: "retry_cleanup" }))
+          .rejects.toMatchObject({ code: "CONFLICT" });
+        await expect(s.service.actOnSource(s.principal, upperId, {
+          action: "delete", expectedVersion: 0, expectedMembershipIds: [],
+        })).rejects.toMatchObject({ code: "CONFLICT" });
+        expect(s.objects.has(key)).toBe(true);
+        expect(await f.sql`SELECT id FROM opening_privacy_exclusions WHERE source_id=${sourceId}`).toHaveLength(1);
+        checkedWhileLocked = true;
+      });
+      expect(checkedWhileLocked).toBe(true);
+      expect(await f.sql`SELECT id FROM opening_sources WHERE id=${sourceId}`).toHaveLength(1);
+    } finally {
+      await f.sql`DELETE FROM opening_import_receipts WHERE connection_id=${connectionId}`;
+      await f.sql`DELETE FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND payload->>'sourceId'=${sourceId}`;
+      await f.sql`DELETE FROM opening_outbox WHERE payload->>'sourceId'=${sourceId}`;
+      await f.sql`DELETE FROM opening_source_versions WHERE source_id=${sourceId}`;
+      await f.sql`DELETE FROM opening_sources WHERE id=${sourceId}`;
+      await f.sql`DELETE FROM opening_connections WHERE id=${connectionId}`;
+    }
+  });
+  it("cleans up legacy mixed-case staging, final, and job-recorded keys on source deletion", async () => {
+    const storage = new OpeningS3({
+      endpoint: process.env.S3_ENDPOINT!,
+      region: process.env.S3_REGION!,
+      bucket: process.env.S3_BUCKET!,
+      accessKeyId: process.env.S3_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
+      forcePathStyle: true,
+    });
+    const service = createOpeningSourceService(f.sql, storage);
+    const putBytes = async (key: string) => {
+      const url = await storage.presignPut(key, { mime: "application/pdf", bytes: 4, expiresInSeconds: 60 });
+      const response = await fetch(url, { method: "PUT", headers: { "content-type": "application/pdf" }, body: Buffer.from("%PDF") });
+      expect(response.ok).toBe(true);
+      expect(await storage.objectExists(key)).toBe(true);
+    };
+
+    const a = await asset(), s = setup();
+    const upperId = a.sourceId.toUpperCase();
+    const mixedKeys = [
+      storage.stagingKey(a.sourceId),
+      storage.stagingKey(upperId),
+      storage.finalKey(a.sourceId, 2),
+      storage.finalKey(upperId, 2),
+    ];
+    try {
+      for (const key of mixedKeys) await putBytes(key);
+      expect(await service.actOnSource(s.principal, upperId, {
+        action: "delete",
+        expectedVersion: 2,
+        expectedMembershipIds: a.memberships.map(row => row.id),
+      })).toMatchObject({ sourceId: a.sourceId, deleted: true, cleanupPending: 0 });
+      for (const key of mixedKeys) expect(await storage.objectExists(key)).toBe(false);
+    } finally {
+      for (const key of mixedKeys) await storage.deleteObject(key);
+    }
+
+    const b = await asset();
+    const bUpper = b.sourceId.toUpperCase();
+    const legacyJobKey = storage.finalKey(bUpper, 0);
+    const bKeys = [storage.finalKey(b.sourceId, 2), legacyJobKey];
+    const legacyJobId = randomUUID();
+    try {
+      for (const key of bKeys) await putBytes(key);
+      await f.sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+        VALUES (${legacyJobId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${legacyJobKey}, 'parse',
+          ${f.sql.json({ sourceId: bUpper, sourceVersion: 0 } as never)}, 0)`;
+      expect(await service.actOnSource(s.principal, b.sourceId, {
+        action: "delete",
+        expectedVersion: 2,
+        expectedMembershipIds: b.memberships.map(row => row.id),
+      })).toMatchObject({ sourceId: b.sourceId, deleted: true, cleanupPending: 0 });
+      for (const key of bKeys) expect(await storage.objectExists(key)).toBe(false);
+    } finally {
+      await f.sql`DELETE FROM opening_jobs WHERE id=${legacyJobId}`;
+      for (const key of bKeys) await storage.deleteObject(key);
+    }
   });
 });

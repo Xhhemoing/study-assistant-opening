@@ -10,6 +10,7 @@ import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, Op
 import type { ParserRunner } from "../parsers/types";
 import { createSourceVisualRecognition } from "../runtime/source-visual-recognition";
 import { createParseSourceHandler, type ParseSourceVisualPageInput } from "./parse-source";
+import { fetchPresignedSourceObject } from "./source-object-download";
 
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -30,8 +31,8 @@ const defaultBytes = Buffer.from("pdf");
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return { id: sourceId, workspaceId: scope.workspaceId, name: "source.pdf", mime: "application/pdf", bytes: 3, sha256: digest(defaultBytes), version: 7, uploadState: "uploaded", parseState: "not_started", error: null, createdAt: new Date().toISOString(), ...overrides };
 }
-type VisualDeps = Pick<Parameters<typeof createParseSourceHandler>[0], "recognizePage" | "recognizePages">;
-async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; runner?: ParserRunner; segments?: OpeningPdfSegmentsRepository; segmentPages?: number; published?: SourceChunk[]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
+type HandlerOverrides = Partial<Pick<Parameters<typeof createParseSourceHandler>[0], "storage" | "recognizePage" | "recognizePages">>;
+async function deps(input: HandlerOverrides & { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; runner?: ParserRunner; segments?: OpeningPdfSegmentsRepository; segmentPages?: number; published?: SourceChunk[]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
   const content = input.bytes ?? defaultBytes;
   const current = input.source ?? source({ bytes: content.byteLength, sha256: digest(content) });
   const states: State[] = [];
@@ -63,7 +64,7 @@ async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: numb
         listChunksAtVersion: async (_scope, _sourceId, _version, pages) =>
           (input.published ?? []).filter(chunk => pages && chunk.page != null && pages.includes(chunk.page)),
       },
-      storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(content).toString("base64")}` },
+      storage: input.storage ?? { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(content).toString("base64")}` },
       runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return input.runner ? input.runner(...args) : { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? JSON.stringify({ pageCount: input.pageCount ?? 2 }) : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
       tempDir, segments: input.segments, segmentPages: input.segmentPages,
       recognizePage: input.recognizePage, recognizePages: input.recognizePages, assertCurrent: input.assertCurrent,
@@ -629,5 +630,197 @@ describe("parse source handler", () => {
     await expect(d.handler({ ...job, claimToken: "claim" }, { sourceId })).rejects.toThrow("repository is required");
     expect(d.runs()).toBe(0);
     expect(d.replaceInput()).toBeUndefined();
+  });
+
+  it("parses the canonical PDF without an object existence check", async () => {
+    const canonicalKey = `opening/sources/${sourceId}/v7`;
+    const objectExists = vi.fn(async () => { throw new Error("unexpected storage call"); });
+    const presignGet = vi.fn(async () => `data:application/pdf;base64,${defaultBytes.toString("base64")}`);
+    const d = await deps({ storage: { finalKey: () => canonicalKey, presignGet, objectExists } });
+
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    expect(presignGet).toHaveBeenCalledExactlyOnceWith(canonicalKey, expect.any(Object));
+    expect(objectExists).not.toHaveBeenCalled();
+  });
+
+  it.each(["HTTP 404", "transport error"])("preserves the canonical %s when both verified keys fail", async failure => {
+    const id = "00000000-0000-4000-8000-0000000000ab";
+    const canonical = `opening/sources/${id}/v7`;
+    const fromPayload = canonical.replace("ab/", "Ab/");
+    const fromJob = canonical.replace("ab/", "AB/");
+    const missing = new Response("missing", { status: 404 });
+    const canonicalError = new Error("canonical download failed");
+    const failedFallback = new Response("unavailable", { status: 503 });
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    try {
+      if (failure === "HTTP 404") fetchMock.mockResolvedValueOnce(missing);
+      else fetchMock.mockRejectedValueOnce(canonicalError);
+      fetchMock.mockRejectedValueOnce(new Error("legacy download failed")).mockResolvedValueOnce(failedFallback);
+      const result = fetchPresignedSourceObject({
+        scope, source: { id, version: 7 }, job: { key: fromJob }, payload: { objectKey: fromPayload },
+        storage: { finalKey: () => canonical, presignGet: async key => key }, sources: {},
+      });
+      if (failure === "HTTP 404") {
+        await expect(result).resolves.toBe(missing);
+        expect(missing.bodyUsed).toBe(true);
+      } else {
+        await expect(result).rejects.toBe(canonicalError);
+      }
+      expect(fetchMock.mock.calls).toEqual([[canonical], [fromPayload], [fromJob]]);
+      expect(failedFallback.bodyUsed).toBe(true);
+    } finally { fetchMock.mockRestore(); }
+  });
+
+  it("falls back to verified historical mixed-case object keys on parse and retry when canonical finalKey is absent", async () => {
+    const hexSourceId = "00000000-0000-4000-8000-0000000000ab";
+    const mixedId = hexSourceId.toUpperCase();
+    const canonicalKey = `opening/sources/${hexSourceId}/v7`;
+    const legacyKey = `opening/sources/${mixedId}/v7`;
+    const textBytes = Buffer.from("Hello legacy markdown");
+    const presignedKeys: string[] = [];
+    const hexSource = source({ id: hexSourceId, mime: "text/plain", bytes: textBytes.byteLength, sha256: digest(textBytes) });
+    const d = await deps({ source: hexSource });
+
+    const resolveLegacyFinalKey = vi.fn(async () => legacyKey);
+    const handler = createParseSourceHandler({
+      sources: {
+        get: async () => hexSource,
+        markParseState: async () => hexSource,
+        resolveLegacyFinalKey,
+      },
+      chunks: {
+        replaceChunks: async () => {},
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === legacyKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === legacyKey) return `data:text/plain;base64,${textBytes.toString("base64")}`;
+          throw new Error("canonical object missing in storage");
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(handler({ ...job, key: `parse:${hexSourceId}:v7:retry:abc` }, { sourceId: hexSourceId })).resolves.toEqual({ pages: 1 });
+    expect(resolveLegacyFinalKey).toHaveBeenCalledWith(scope, hexSourceId, canonicalKey);
+    expect(presignedKeys).toEqual([canonicalKey, legacyKey]);
+
+    presignedKeys.length = 0;
+    const rejectingHandler = createParseSourceHandler({
+      sources: {
+        get: async () => hexSource,
+        markParseState: async () => hexSource,
+        resolveLegacyFinalKey: vi.fn(async () => null),
+      },
+      chunks: {
+        replaceChunks: async () => {},
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async () => false,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          throw new Error("missing object in storage");
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+    await expect(rejectingHandler({ ...job, key: `parse:${hexSourceId}:v7:retry:def` }, {
+      sourceId: hexSourceId,
+      objectKey: `opening/sources/other-source/../${mixedId}/v7`,
+    })).rejects.toThrow("missing object in storage");
+    expect(presignedKeys).toEqual([canonicalKey]);
+  });
+
+  it("never substitutes a v1 mixed-case object when parsing or retrying v2", async () => {
+    const hexSourceId = "00000000-0000-4000-8000-0000000000cd";
+    const mixedId = hexSourceId.toUpperCase();
+    const v1Bytes = Buffer.from("stale-v1");
+    const v2Bytes = Buffer.from("fresh-v2");
+    const v1MixedKey = `opening/sources/${mixedId}/v1`;
+    const v2CanonicalKey = `opening/sources/${hexSourceId}/v2`;
+    const v2MixedKey = `opening/sources/${mixedId}/v2`;
+    const presignedKeys: string[] = [];
+    const chunksPublished: unknown[] = [];
+    const v2Source = source({
+      id: hexSourceId,
+      version: 2,
+      mime: "text/plain",
+      bytes: v2Bytes.byteLength,
+      sha256: digest(v2Bytes),
+    });
+    const d = await deps({ source: v2Source });
+
+    const handler = createParseSourceHandler({
+      sources: {
+        get: async () => v2Source,
+        markParseState: async () => v2Source,
+        resolveLegacyFinalKey: vi.fn(async (_s, _id, canonical) => (canonical === v2CanonicalKey ? v1MixedKey : null)),
+      },
+      chunks: {
+        replaceChunks: async (_scope, input) => { chunksPublished.push(input); },
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === v1MixedKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === v1MixedKey) return `data:text/plain;base64,${v1Bytes.toString("base64")}`;
+          throw new Error("v2 object missing in storage");
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(handler({ ...job, key: v1MixedKey }, {
+      sourceId: hexSourceId,
+      sourceVersion: 2,
+      objectKey: v1MixedKey,
+    })).rejects.toThrow("v2 object missing in storage");
+    expect(presignedKeys).toEqual([v2CanonicalKey]);
+    expect(chunksPublished).toEqual([]);
+
+    presignedKeys.length = 0;
+    const mixedV2Handler = createParseSourceHandler({
+      sources: {
+        get: async () => v2Source,
+        markParseState: async () => v2Source,
+        resolveLegacyFinalKey: vi.fn(async () => v2MixedKey),
+      },
+      chunks: {
+        replaceChunks: async (_scope, input) => { chunksPublished.push(input); },
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === v1MixedKey || key === v2MixedKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === v2MixedKey) return `data:text/plain;base64,${v2Bytes.toString("base64")}`;
+          throw new Error(`unexpected key: ${key}`);
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(mixedV2Handler({ ...job, key: v1MixedKey }, {
+      sourceId: hexSourceId,
+      sourceVersion: 2,
+      objectKey: v1MixedKey,
+    })).resolves.toEqual({ pages: 1 });
+    expect(presignedKeys).toEqual([v2CanonicalKey, v2MixedKey]);
   });
 });

@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { reviewResultSchema, type ReviewResult, type TaskCreateInput, type TaskCreateResult, type TaskItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
-import { admitTaskCandidate } from "./opening-task-candidate-admission";
+import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "./opening-task-candidate-admission";
 
 type Candidate = { status: string; task_result_ref: unknown };
 
@@ -62,7 +62,7 @@ export async function acceptAssistantTask(
 ): Promise<TaskCreateResult> {
   try {
     return await sql.begin(async (tx) => {
-      await admitTaskCandidate(tx, scope, input.candidateId!);
+      const dependencyTurnId = await admitTaskCandidate(tx, scope, input.candidateId!);
       const replay = await findReplay(tx, scope, input);
       if (replay) return replay;
       const rows = await tx<Candidate[]>`
@@ -79,12 +79,15 @@ export async function acceptAssistantTask(
       if (candidate.status !== "pending" || (input.expectedVersion ?? 0) !== 0) {
         throw new OpeningPlanError("CONFLICT", "task candidate is not pending or version is stale");
       }
+      await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependencyTurnId);
       const task = await createTask(tx);
       await tx`
         UPDATE opening_assistant_candidates SET status = 'accepted', updated_at = now(),
           task_accept_client_key = ${input.clientKey ?? null}, task_accept_intent = ${tx.json(intent(input))},
           task_result_ref = ${tx.json({ kind: "task", id: task.id })}
         WHERE id = ${input.candidateId} AND workspace_id = ${scope.workspaceId}`;
+      // The insert can wait on a course foreign key and the update can wait on the receipt index.
+      await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependencyTurnId);
       return result(task, input, "applied");
     });
   } catch (error) {

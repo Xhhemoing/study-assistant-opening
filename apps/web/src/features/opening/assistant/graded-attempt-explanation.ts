@@ -105,11 +105,25 @@ export function useGradedAttemptExplanation(attempt?: LearningAttempt) {
     if (!navigator.locks) { setRecoveryMessage("浏览器无法安全协调多标签请求，已停止新建讲解。"); return; }
     await navigator.locks.request(operationScope, { ifAvailable: true }, async lock => {
       if (!lock) return;
-      await authorize();
-      const saved = readReceipt();
-      if (saved) { setReceipt(saved); setRecoveryMessage("已保留之前的讲解，请重新读取；不会再次调用 AI。"); return; }
       await action();
     });
+  }
+  async function prepareConversation(clientKey: string, create: () => Promise<string>, stopped: () => boolean) {
+    await authorize();
+    if (stopped()) return null;
+    const saved = readReceipt();
+    if (saved) {
+      setReceipt(saved);
+      if (saved.phase === "ready" && saved.conversationId === receipt?.conversationId && saved.clientKey === clientKey
+        && JSON.stringify(saved.snapshot) === JSON.stringify(baseline.current)) return saved.conversationId;
+      throw new Error("已保留之前的讲解，请重新读取。");
+    }
+    if (receipt) throw new Error(changedMessage);
+    begin(clientKey);
+    const id = await create();
+    await authorize();
+    bindConversation(id);
+    return id;
   }
   function begin(clientKey: string) {
     if (!baseline.current) throw new Error(changedMessage);
@@ -122,10 +136,10 @@ export function useGradedAttemptExplanation(attempt?: LearningAttempt) {
     writeReceipt({ ...saved, conversationId, phase: "ready" });
     setRecoveryMessage("");
   }
-  function markStarted() {
+  function markStarted(conversationId: string, clientKey: string) {
     const saved = readReceipt();
-    if (!saved?.conversationId) throw new Error(changedMessage);
+    if (saved?.phase !== "ready" || saved.conversationId !== conversationId || saved.clientKey !== clientKey) throw new Error(changedMessage);
     writeReceipt({ ...saved, phase: "submitted" });
   }
-  return { available: ready && validOwner(), receipt, recoveryMessage, authorize, begin, bindConversation, markStarted, withOperationLock };
+  return { available: ready && validOwner(), receipt, recoveryMessage, authorize, prepareConversation, markStarted, withOperationLock };
 }

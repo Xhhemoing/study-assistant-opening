@@ -18,6 +18,7 @@ const alias = Object.entries({
     "packages/database/src/migrate.ts",
   ),
   "@aistudy/ai/model-routing": path.resolve(root, "packages/ai/src/model-routing.ts"),
+  "@aistudy/ai/provider-network": path.resolve(root, "packages/ai/src/opening/provider-network.ts"),
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
   "@aistudy/config/public": path.resolve(root, "packages/config/src/public/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),
@@ -28,7 +29,7 @@ const alias = Object.entries({
   "@aistudy/jingwei/react": path.resolve(root, "packages/jingwei/src/react/index.ts"),
   "@aistudy/jingwei": path.resolve(root, "packages/jingwei/src/index.ts"),
 }).map(([find, replacement]) => ({
-  find: find === "@aistudy/domain" ? /^@aistudy\/domain$/ : find,
+  find: find === "@aistudy/domain" || find === "@aistudy/contracts" ? new RegExp(`^${find}$`) : find,
   replacement,
 }));
 

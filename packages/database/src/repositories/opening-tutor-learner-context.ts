@@ -32,7 +32,7 @@ async function admittedLineageRefs(tx: TransactionSql, scope: Scope, records: Le
     .map(([rootId, refs]) => ({ rootId, refs }));
   const admitted = candidates.length ? await tx`SELECT candidate->>'rootId' root_id
     FROM jsonb_array_elements(${tx.json(candidates)}) candidate
-    WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`candidate->'refs'`)}` : [];
+    WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`candidate->'refs'`)}` : [];
   return new Map(admitted.map(row => [String(row.root_id), byRoot.get(String(row.root_id))!]));
 }
 
@@ -112,7 +112,7 @@ export function createOpeningTutorLearnerContextRepository(sql: Sql) {
       const [current] = await sql`SELECT c.id FROM courses c JOIN workspaces w ON w.id=c.workspace_id
         WHERE c.id=${context.courseId} AND c.workspace_id=${scope.workspaceId} AND c.archived_at IS NULL
           AND w.owner_user_id=${scope.ownerUserId} AND w.privacy_epoch=${context.privacyEpoch}
-          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, sql`${sql.json(context.sourceRefs)}`)}
+          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`${sql.json(context.sourceRefs)}`)}
           AND NOT EXISTS (SELECT 1 FROM unnest(${context.observationIds}::uuid[]) expected(id)
             WHERE NOT EXISTS (SELECT 1 FROM opening_learning_observations o
               JOIN opening_learning_observations root ON root.id=COALESCE(o.root_observation_id,o.id)

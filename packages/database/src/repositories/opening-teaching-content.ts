@@ -31,7 +31,7 @@ import type {
   TeachingVerificationStatus,
 } from "@aistudy/contracts";
 import { mergeCheckpointResumePatch } from "@aistudy/domain";
-import { repairDecodedLatexInJson } from "@aistudy/ai";
+import { repairDecodedLatexInJson } from "@aistudy/domain/opening/ai-policy";
 import { readOpeningTeachingAnswerKey } from "./opening-teaching-hints";
 import { mapLearningAttempt } from "./opening-learning-attempts";
 import { qualifyObservationRevision } from "./opening-observation-revision-history";

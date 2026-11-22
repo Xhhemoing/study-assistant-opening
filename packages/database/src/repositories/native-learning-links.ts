@@ -21,7 +21,7 @@ function parseLink(row: Row, documentId: string) {
 export async function attachNativeLearningLinks(sql: Sql, workspaceId: string, documents: NativeBackupRecord[]): Promise<NativeBackupRecord[]> {
   const rows = await sql`SELECT l.* FROM opening_learning_asset_links l JOIN workspaces w ON w.id=l.workspace_id AND w.owner_user_id=l.owner_user_id
     WHERE l.workspace_id=${workspaceId} AND l.asset_type='document'
-      AND ${contextSourceRefsIncluded(sql, workspaceId, sql`l.source_refs`, true)} ORDER BY l.id`;
+      AND ${contextSourceRefsIncluded(sql, workspaceId, () => sql`l.source_refs`, true)} ORDER BY l.id`;
   return documents.map(document => ({ ...document, learningAssetLinks: rows.filter(row => row.asset_id === document.id) }));
 }
 /** Insert only after documents/goals have been restored. Missing Opening references remain detached history. */
@@ -36,7 +36,7 @@ export async function restoreNativeLearningLinks(sql: Sql, documents: NativeBack
     for (const raw of links) {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new BackupRestoreError("VALIDATION", "Note learning link is invalid");
       const row = raw as Row, link = parseLink(row, document.id);
-      const [privacy] = await sql`SELECT ${contextSourceRefsIncluded(sql, workspaceId, sql`${sql.json(link.sourceRefs)}::jsonb`, true)} AS included`;
+      const [privacy] = await sql`SELECT ${contextSourceRefsIncluded(sql, workspaceId, () => sql`${sql.json(link.sourceRefs)}::jsonb`, true)} AS included`;
       if (!privacy?.included) throw new BackupRestoreError("VALIDATION", "Note learning link sources are unavailable in this workspace");
       const [course] = link.courseId ? await sql`SELECT id FROM courses WHERE workspace_id=${workspaceId} AND id=${link.courseId}` : [];
       const [goal] = course && link.goalId ? await sql`SELECT g.id FROM course_goals g WHERE g.workspace_id=${workspaceId} AND g.id=${link.goalId}

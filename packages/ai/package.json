@@ -1,6 +1,7 @@
 {
   "name": "@aistudy/ai",
   "private": true,
+  "license": "UNLICENSED",
   "version": "0.0.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -9,6 +10,10 @@
     "./model-routing": {
       "types": "./src/model-routing.ts",
       "default": "./src/model-routing.ts"
+    },
+    "./provider-network": {
+      "types": "./src/opening/provider-network.ts",
+      "default": "./src/opening/provider-network.ts"
     },
     ".": {
       "types": "./src/index.ts",

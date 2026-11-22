@@ -96,12 +96,12 @@ it("rejects unsafe integer context versions consistently at SQL export and archi
   const { rows, sql, scope } = fixture;
   const source = await rows.source();
   const refs = [{ sourceId: source, sourceVersion: Number.MAX_SAFE_INTEGER + 1 }];
-  const [result] = await sql`SELECT (${contextSourceRefsIncluded(sql, scope.workspaceId, sql`${sql.json(refs)}::jsonb`, true)}) AS allowed`;
+  const [result] = await sql`SELECT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`${sql.json(refs)}::jsonb`, true)}) AS allowed`;
   expect(result?.allowed).toBe(false);
 });
 it.each([{}, "scalar", null].map(value => ({ value })))("rejects non-array context JSON safely before persistence: $value", async ({ value }) => {
   const { sql, scope } = fixture;
-  const [result] = await sql`SELECT (${contextSourceRefsIncluded(sql, scope.workspaceId, sql`${JSON.stringify(value)}::text::jsonb`, true)}) AS allowed`;
+  const [result] = await sql`SELECT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`${JSON.stringify(value)}::text::jsonb`, true)}) AS allowed`;
   expect(result?.allowed).toBe(false);
 });
 

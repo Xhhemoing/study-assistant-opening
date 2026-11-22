@@ -1,4 +1,4 @@
-import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
+import type { OpeningReservationModel, ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import {
   isBudgetReplayError,
   isPostProviderFailure,
@@ -8,25 +8,16 @@ import {
   type BudgetedRepository,
   type BudgetedCallOptions,
 } from "./budgeted-call";
-import { hasMediaInput, mediaInputCostBound, type MediaInputCostBound, type ParentInteractionBudget } from "./parent-interaction-budget";
+import type { ParentInteractionBudget } from "./parent-interaction-budget";
 import { OpeningModelRoutingError } from "./model-routing";
 import { modelTaskSpec, type ModelTaskKey } from "./model-tasks";
-import { OpeningProviderError, openingProviderRequestBody } from "./provider";
-import { actualCentsForOutput, reservationCentsForInput } from "./usage";
+import { OpeningProviderError } from "./provider";
+import { reservationTerms } from "@aistudy/domain/opening/ai-policy";
 
 export type GatewayScope = { workspaceId: string; ownerUserId: string };
 
 /** One selection supplies the provider, the ledger snapshot and the prices. */
-export type ResolvedTaskModel = Partial<MediaInputCostBound> & {
-  provider: BudgetedProvider;
-  modelSnapshot: OpeningModelSnapshot;
-  inputCentsPerMillion: number;
-  outputCentsPerMillion: number;
-  supportsVision?: boolean;
-  supportsAudio?: boolean;
-  billing?: "metered" | "free_tier";
-  dailyRequestCap?: number | null;
-};
+export type ResolvedTaskModel = OpeningReservationModel & { provider: BudgetedProvider };
 
 export type ModelGatewayCallOptions = {
   parentBudget?: ParentInteractionBudget;
@@ -47,37 +38,7 @@ export type ModelGatewayCallOptions = {
   onModel?: (model: ResolvedTaskModel, info: { fallback: boolean }) => void;
 };
 
-export type ReservationTerms = {
-  reservedCents: number;
-  actualCents: (output: ProviderOutput) => number;
-  requestCapPerDay?: number;
-};
-
-/**
- * How one call is reserved and settled. Paid models reserve the estimated token
- * cost (at least the floor); free-tier models reserve zero under their request cap.
- */
-export function reservationTerms(model: Omit<ResolvedTaskModel, "provider">, input: ProviderInput, floorCents = 1): ReservationTerms {
-  if (model.billing === "free_tier") {
-    if (!model.dailyRequestCap) {
-      throw new OpeningModelRoutingError("免费额度模型缺少每日请求上限，请到设置补全。");
-    }
-    return { reservedCents: 0, actualCents: () => 0, requestCapPerDay: model.dailyRequestCap };
-  }
-  const media = hasMediaInput(input);
-  const bound = media ? mediaInputCostBound(model) ?? mediaInputCostBound(model.modelSnapshot) : null;
-  const rates = { inputCentsPerMillion: bound ? Math.max(bound.mediaInputCentsPerMillion, model.inputCentsPerMillion) : model.inputCentsPerMillion, outputCentsPerMillion: model.outputCentsPerMillion };
-  // Encoded media bytes are transport, not text tokens. A verified provider
-  // context limit supplies the media bound; all textual frames remain priced.
-  const pricedInput = media ? { ...input, imageParts: input.imageParts.map(part => ({ ...part, data: "" })),
-    ...(input.audioParts ? { audioParts: input.audioParts.map(part => ({ ...part, data: "" })) } : {}) } : input;
-  const textReservation = reservationCentsForInput(JSON.stringify(openingProviderRequestBody(pricedInput, { model: model.modelSnapshot.modelName, answerStyle: true })), input.maxOutputTokens, rates);
-  const mediaReservation = bound ? Math.ceil(bound.mediaInputTokenUpperBound * rates.inputCentsPerMillion / 1_000_000) : 0;
-  return {
-    reservedCents: Math.max(floorCents, textReservation + mediaReservation),
-    actualCents: (output) => actualCentsForOutput(output, rates),
-  };
-}
+export { reservationTerms, type ReservationTerms } from "@aistudy/domain/opening/ai-policy";
 
 /**
  * True only when the provider certainly did not receive the request, so trying the

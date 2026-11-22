@@ -1,0 +1,187 @@
+import { expect, it, vi } from "vitest";
+import { publishConnectorSource } from "./publish-source";
+
+type Imports = Parameters<typeof publishConnectorSource>[0];
+
+it("reconciles the same unreferenced object on redelivery after bounded delete retries", async () => {
+  const objects = new Set<string>();
+  let storageHealthy = false;
+  const uploadSignals: (AbortSignal | undefined)[] = [];
+  const events: string[] = [];
+  const storage = {
+    upload: vi.fn(async ({ key, signal }: { key: string; signal?: AbortSignal }) => {
+      events.push("upload");
+      uploadSignals.push(signal);
+      objects.add(key);
+    }),
+    remove: vi.fn(async (key: string) => {
+      if (!storageHealthy) throw new Error("delete temporarily unavailable");
+      objects.delete(key);
+    }),
+  };
+  const duplicate = { id: "receipt", sourceIds: ["legacy-source"], duplicate: true, connectionVersion: 1 };
+  const imports: Imports = {
+    publish: vi.fn<Imports["publish"]>(async (_scope, _input, stage) => {
+      await stage();
+      return duplicate;
+    }),
+    refreshConnectorReservationCutoff: vi.fn<Imports["refreshConnectorReservationCutoff"]>(async () => {
+      events.push("refresh");
+    }),
+    removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(async (_scope, _identity, _sourceId, _key, _byteSize, remove) => {
+      await remove();
+    }),
+  };
+  const scope = { workspaceId: "workspace", ownerUserId: "owner" };
+  const delivery = {
+    connectionVersion: 1,
+    identity: { connectionId: "connection", container: "INBOX", generation: "42", remoteId: "11" },
+    name: "message.eml", mime: "message/rfc822" as const, bytes: Buffer.from("Subject: Message\r\n\r\nTest"),
+  };
+
+  await expect(publishConnectorSource(imports, storage, scope, delivery)).rejects.toThrow("delete temporarily unavailable");
+  const [firstKey] = objects;
+  expect(objects.size).toBe(1);
+  expect(storage.remove.mock.calls).toEqual([[firstKey], [firstKey], [firstKey]]);
+
+  storageHealthy = true;
+  await expect(publishConnectorSource(imports, storage, scope, delivery)).resolves.toEqual(duplicate);
+  expect(storage.remove).toHaveBeenCalledTimes(4);
+  expect(objects.size).toBe(1);
+  expect(objects.has(firstKey)).toBe(true);
+  expect(uploadSignals).toHaveLength(2);
+  expect(uploadSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
+  expect(events).toEqual(["refresh", "upload", "refresh", "upload"]);
+});
+
+it("forwards putUncertain accurately across pre-PUT, upload failure, and post-upload DB failure", async () => {
+  const scope = { workspaceId: "workspace", ownerUserId: "owner" };
+  const delivery = {
+    connectionVersion: 1,
+    identity: { connectionId: "connection", container: "INBOX", generation: "42", remoteId: "11" },
+    name: "message.eml", mime: "message/rfc822" as const, bytes: Buffer.from("Subject: Msg\r\n\r\nBody"),
+  };
+  const removeSpy = vi.fn(async () => undefined);
+  const removeUnpublishedSource = vi.fn(async () => undefined);
+  const refreshConnectorReservationCutoff = vi.fn(async () => undefined);
+
+  // Pre-PUT failure: publish rejects before entering stage().
+  const prePutImports: Imports = {
+    publish: vi.fn(async () => { throw new Error("connection locked"); }),
+    refreshConnectorReservationCutoff,
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(prePutImports, { upload: vi.fn(), remove: removeSpy }, scope, delivery))
+    .rejects.toThrow("connection locked");
+  expect(removeUnpublishedSource).not.toHaveBeenCalled();
+
+  // Pre-PUT failure when reservation refresh hits CONFLICT (reservation already gone): no cleanup call.
+  const uploadMock = vi.fn();
+  const conflictRefreshImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
+    refreshConnectorReservationCutoff: vi.fn(async () => {
+      throw Object.assign(new Error("connector staging reservation changed"), { code: "CONFLICT" });
+    }),
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(conflictRefreshImports, { upload: uploadMock, remove: removeSpy }, scope, delivery))
+    .rejects.toMatchObject({ code: "CONFLICT" });
+  expect(uploadMock).not.toHaveBeenCalled();
+  expect(removeUnpublishedSource).not.toHaveBeenCalled();
+
+  // Pre-PUT transient non-CONFLICT failure on reservation refresh: releases reservation (putUncertain: false) without touching S3.
+  const transientRefreshImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
+    refreshConnectorReservationCutoff: vi.fn(async () => { throw new Error("pool reset"); }),
+    removeUnpublishedSource: vi.fn(async (_s, _i, _sid, _k, _b, remove) => { await remove(); }),
+  };
+  await expect(publishConnectorSource(transientRefreshImports, { upload: uploadMock, remove: removeSpy }, scope, delivery))
+    .rejects.toThrow("pool reset");
+  expect(uploadMock).not.toHaveBeenCalled();
+  expect(removeSpy).not.toHaveBeenCalled();
+  expect(transientRefreshImports.removeUnpublishedSource).toHaveBeenCalledWith(
+    scope,
+    delivery.identity,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    delivery.bytes.byteLength,
+    expect.any(Function),
+    { putUncertain: false },
+  );
+
+  // Uncertain PUT failure: storage.upload starts then aborts/throws -> putUncertain: true.
+  const putErrorImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
+    refreshConnectorReservationCutoff,
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(putErrorImports, {
+    upload: vi.fn(async () => { throw new Error("PUT timed out"); }),
+    remove: removeSpy,
+  }, scope, delivery)).rejects.toThrow("PUT timed out");
+  expect(removeUnpublishedSource).toHaveBeenLastCalledWith(
+    scope,
+    delivery.identity,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    delivery.bytes.byteLength,
+    expect.any(Function),
+    { putUncertain: true },
+  );
+
+  // Post-upload DB failure: storage.upload succeeded cleanly -> putUncertain: false so reservation releases immediately.
+  const dbErrorImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => {
+      await stage();
+      throw new Error("receipt check constraint failed");
+    }),
+    refreshConnectorReservationCutoff,
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(dbErrorImports, {
+    upload: vi.fn(async () => undefined),
+    remove: removeSpy,
+  }, scope, delivery)).rejects.toThrow("receipt check constraint failed");
+  expect(removeUnpublishedSource).toHaveBeenLastCalledWith(
+    scope,
+    delivery.identity,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    delivery.bytes.byteLength,
+    expect.any(Function),
+    { putUncertain: false },
+  );
+});
+
+it("forwards the lock-holding publish session to refreshConnectorReservationCutoff without waiting on shared pool", async () => {
+  const scope = { workspaceId: "workspace", ownerUserId: "owner" };
+  const delivery = {
+    connectionVersion: 1,
+    identity: { connectionId: "connection", container: "INBOX", generation: "42", remoteId: "11" },
+    name: "message.eml",
+    mime: "message/rfc822" as const,
+    bytes: Buffer.from("Subject: Session\r\n\r\nBody"),
+  };
+  const lockSession = { fakeSession: true } as unknown as NonNullable<Parameters<Imports["refreshConnectorReservationCutoff"]>[3]>["session"];
+  const refreshConnectorReservationCutoff = vi.fn<Imports["refreshConnectorReservationCutoff"]>(async () => undefined);
+  const imports: Imports = {
+    publish: vi.fn<Imports["publish"]>(async (_scope, _input, stage) => {
+      await stage({ session: lockSession });
+      return { id: "receipt", sourceIds: ["source-1"], duplicate: false, connectionVersion: 1 };
+    }),
+    refreshConnectorReservationCutoff,
+    removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(),
+  };
+
+  await expect(publishConnectorSource(imports, {
+    upload: vi.fn(async () => undefined),
+    remove: vi.fn(async () => undefined),
+  }, scope, delivery)).resolves.toMatchObject({ id: "receipt", duplicate: false });
+
+  expect(refreshConnectorReservationCutoff).toHaveBeenCalledWith(
+    scope,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    { session: lockSession },
+  );
+});

@@ -109,4 +109,20 @@ describe("readOpeningBackupSources", () => {
     expect(snapshot).not.toHaveProperty("objects");
     expect(sql.begins).toBe(1);
   });
+
+  it("filters temporary UUIDv8 connector reservations unconditionally without version placeholder preconditions", async () => {
+    const sql = fakeSql((call) => {
+      if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 1 }];
+      return [];
+    });
+
+    await readOpeningBackupSources(sql, scope);
+
+    const journal = sql.calls.find((call) => call.query.includes("opening_privacy_exclusions"));
+    expect(journal?.values).toEqual([workspaceId]);
+    expect(journal?.query).toContain("e.memory_id IS NULL");
+    expect(journal?.query).toContain("overlay(e.source_id::text placing '8' from 15 for 1)");
+    expect(journal?.query).not.toContain("opening_source_versions");
+    expect(journal?.query).not.toContain("cardinality(e.pending_object_keys)");
+  });
 });

@@ -3,9 +3,24 @@ import { createServer } from "node:net";
 
 export type OpeningImapMail = {
   uid: number;
+  modseq?: number;
   internalDate?: Date;
   source: string;
+  advertisedSize?: number;
+  omitSize?: boolean;
 };
+
+const IMAP_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+function formatImapInternalDate(date: Date): string {
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const month = IMAP_MONTHS[date.getUTCMonth()] ?? "Jan";
+  const year = date.getUTCFullYear();
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  return `${day}-${month}-${year} ${hh}:${mm}:${ss} +0000`;
+}
 
 export type OpeningImapServer = {
   port: number;
@@ -16,13 +31,23 @@ export type OpeningImapServer = {
   waitForConnectionsClosed(): Promise<void>;
 };
 
+export type OpeningImapServerOptions = {
+  beforeFetch?: (ctx: { isUidFetch: boolean; fields: string; send: (line: string) => void }) => void;
+  afterFetch?: (ctx: { isUidFetch: boolean; fields: string; send: (line: string) => void }) => void;
+};
+
 /**
  * Minimal standard IMAP4rev1 server used only by the isolated Opening sync
  * gate. It exercises the real ImapFlow protocol stack and real MailParser
  * through wire-compatible LIST/EXAMINE/FETCH/LOGOUT exchanges.
  */
-export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Promise<OpeningImapServer> {
-  const mails = [...inputMails].sort((a, b) => a.uid - b.uid);
+export async function startOpeningImapServer(
+  inputMails: OpeningImapMail[],
+  options?: OpeningImapServerOptions,
+): Promise<OpeningImapServer> {
+  // Reply in fixture order while keeping sequence numbers in mailbox order.
+  const mails = [...inputMails];
+  const highestModseq = Math.max(0, ...mails.map(mail => mail.modseq ?? 0));
   let logoutCount = 0;
 
   const sockets = new Map<Socket, Promise<void>>();
@@ -54,8 +79,11 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
         const verb = (verbMatch?.[1] ?? "").toUpperCase();
         const args = verbMatch?.[2] ?? "";
         if (verb === "CAPABILITY") {
-          send("* CAPABILITY IMAP4rev1 UIDPLUS");
+          send(`* CAPABILITY IMAP4rev1 UIDPLUS${highestModseq ? " ENABLE CONDSTORE" : ""}`);
           tagged(tag, "OK CAPABILITY completed");
+        } else if (verb === "ENABLE" && highestModseq && args.toUpperCase() === "CONDSTORE") {
+          send("* ENABLED CONDSTORE");
+          tagged(tag, "OK ENABLE completed");
         } else if (verb === "LOGIN") {
           tagged(tag, "OK LOGIN completed");
         } else if (verb === "NAMESPACE") {
@@ -71,30 +99,73 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
           send(`* ${mails.length} EXISTS`);
           send(`* 0 RECENT`);
           send(`* OK [UIDVALIDITY 42] UIDs valid`);
+          if (highestModseq) send(`* OK [HIGHESTMODSEQ ${highestModseq}] Highest mod-sequence`);
           send(`* OK [UIDNEXT ${Math.max(...mails.map(mail => mail.uid), 0) + 1}] next uid`);
           send(`* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)`);
           send(`* OK [PERMANENTFLAGS ()] read-only`);
           tagged(tag, "OK [READ-ONLY] EXAMINE completed");
         } else if (verb === "FETCH" || (verb === "UID" && /^FETCH\b/i.test(args))) {
-          const fetchArgs = verb === "UID" ? args.replace(/^FETCH\s+/i, "") : args;
-          // ImapFlow uses UID FETCH with ranges like 1:* and quoted atoms.
-          const match = /^(\d+)(?::(\d+|\*))?\s+\((.*)\)\s*$/i.exec(fetchArgs);
+          const isUidFetch = verb === "UID";
+          const fetchArgs = isUidFetch ? args.replace(/^FETCH\s+/i, "") : args;
+          // ImapFlow uses FETCH / UID FETCH with ranges like 1:* and quoted or parenthesized items.
+          const match = /^(\d+)(?::(\d+|\*))?\s+(?:\((.*)\)|(\S+))\s*$/i.exec(fetchArgs);
           if (!match) {
             tagged(tag, "BAD FETCH syntax");
             return;
           }
           const start = Number(match[1]);
           const end = match[2] === "*" ? Number.MAX_SAFE_INTEGER : match[2] ? Number(match[2]) : start;
+          const fields = match[3] ?? match[4] ?? "";
+          const sequenceByUid = new Map([...mails].sort((a, b) => a.uid - b.uid)
+            .map((mail, index) => [mail.uid, index + 1]));
+          options?.beforeFetch?.({ isUidFetch, fields, send });
           for (const mail of mails) {
-            if (mail.uid < start || mail.uid > end) continue;
-            const sequence = mails.indexOf(mail) + 1;
-            const date = (mail.internalDate ?? new Date("2026-01-02T03:04:05.000Z")).toUTCString().replace("GMT", "+0000");
-            send(
-              `* ${sequence} FETCH (UID ${mail.uid} INTERNALDATE "${date}" BODY[] {${Buffer.byteLength(mail.source)}}\r\n` +
-              mail.source +
-              `)`,
-            );
+            const sequence = sequenceByUid.get(mail.uid)!;
+            const selector = isUidFetch ? mail.uid : sequence;
+            if (selector < start || selector > end) continue;
+            const date = formatImapInternalDate(mail.internalDate ?? new Date("2026-01-02T03:04:05.000Z"));
+            const rawSource = Buffer.from(mail.source, "utf8");
+            const advertisedSize = mail.advertisedSize ?? rawSource.byteLength;
+            const metadataParts: string[] = [];
+            if (isUidFetch || /\bUID\b/i.test(fields)) {
+              metadataParts.push(`UID ${mail.uid}`);
+            }
+            if (mail.modseq !== undefined && /\bMODSEQ\b/i.test(fields)) {
+              metadataParts.push(`MODSEQ (${mail.modseq})`);
+            }
+            if (/\bINTERNALDATE\b/i.test(fields)) {
+              metadataParts.push(`INTERNALDATE "${date}"`);
+            }
+            if (/\bRFC822\.SIZE\b/i.test(fields) && !mail.omitSize) {
+              metadataParts.push(`RFC822.SIZE ${advertisedSize}`);
+            }
+            const partialMatch = /BODY(?:\.PEEK)?\[\]<(\d+)(?:\.(\d+))?>/i.exec(fields);
+            if (partialMatch) {
+              const startByte = Number(partialMatch[1]);
+              const maxLength = partialMatch[2] !== undefined ? Number(partialMatch[2]) : undefined;
+              const sliceStart = Math.min(startByte, rawSource.byteLength);
+              const sliceEnd = maxLength !== undefined
+                ? Math.min(sliceStart + maxLength, rawSource.byteLength)
+                : rawSource.byteLength;
+              const slice = rawSource.subarray(sliceStart, sliceEnd);
+              const prefix = [...metadataParts, `BODY[]<${startByte}> {${slice.byteLength}}`].join(" ");
+              socket.write(Buffer.concat([
+                Buffer.from(`* ${sequence} FETCH (${prefix}\r\n`, "utf8"),
+                slice,
+                Buffer.from(")\r\n", "utf8"),
+              ]));
+            } else if (/BODY(?:\.PEEK)?\[\](?!<)/i.test(fields)) {
+              const prefix = [...metadataParts, `BODY[] {${rawSource.byteLength}}`].join(" ");
+              socket.write(Buffer.concat([
+                Buffer.from(`* ${sequence} FETCH (${prefix}\r\n`, "utf8"),
+                rawSource,
+                Buffer.from(")\r\n", "utf8"),
+              ]));
+            } else {
+              send(`* ${sequence} FETCH (${metadataParts.join(" ")})`);
+            }
           }
+          options?.afterFetch?.({ isUidFetch, fields, send });
           tagged(tag, "OK FETCH completed");
         } else if (verb === "LOGOUT") {
           send(`* BYE Opening IMAP fixture closing`);

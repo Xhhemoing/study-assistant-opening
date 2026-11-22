@@ -12,6 +12,7 @@ import {
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { importIdentityKey } from "../../apps/worker/src/connectors/import-identity";
+import { publishConnectorSource } from "../../apps/worker/src/connectors/publish-source";
 
 let f: OpeningFixture;
 
@@ -29,11 +30,11 @@ beforeEach(async () => {
   await f.sql`DELETE FROM opening_connections WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
 });
 
-async function seedConnection(scope = f.scope, version = 1) {
+async function seedConnection(scope = f.scope, version = 1, kind: "imap" | "dingtalk" = "imap") {
   const id = randomUUID();
   await f.sql`INSERT INTO opening_connections
     (id,workspace_id,owner_user_id,version,kind,label,create_client_key)
-    VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${version},'imap','Test',${'ck-' + id})`;
+    VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${version},${kind},'Test',${'ck-' + id})`;
   return { id, version };
 }
 
@@ -60,7 +61,7 @@ describe("opening import receipts", () => {
       connectionVersion: c.version,
       identity,
       sourceId,
-      cursor: { generation: "1", cursor: { folder: "INBOX", uidValidity: "1", lastUid: 9 } },
+      cursor: { expected: null, next: { folder: "INBOX", uidValidity: "1", lastUid: 9 } },
     });
     expect(first.duplicate).toBe(false);
     expect(first.sourceIds).toEqual([sourceId]);
@@ -82,6 +83,28 @@ describe("opening import receipts", () => {
       WHERE connection_id=${c.id} AND container='INBOX'`;
     expect(cursors[0]?.generation).toBe("1");
     expect(cursors[0]?.cursor).toEqual({ folder: "INBOX", uidValidity: "1", lastUid: 9 });
+  });
+
+  it("changes UIDVALIDITY only from the exact persisted generation and UID", async () => {
+    const connection = await seedConnection();
+    const sourceId = await seedSource();
+    const repo = createOpeningImportsRepository(f.sql);
+    const folder = "INBOX";
+    const original = { folder, uidValidity: "42", lastUid: 99 };
+    const next = { folder, uidValidity: "43", lastUid: 1 };
+    function commit(expected: typeof original | null, target: typeof original) {
+      return repo.commit(f.scope, {
+        connectionVersion: connection.version, sourceId,
+        identity: { connectionId: connection.id, container: folder, generation: target.uidValidity, remoteId: String(target.lastUid) },
+        cursor: { expected, next: target },
+      });
+    }
+    await commit(null, original);
+    await expect(commit({ ...original, lastUid: 98 }, next)).rejects.toMatchObject({ code: "CONFLICT" });
+    await commit(original, next);
+    await expect(commit(original, { ...original, lastUid: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.readImapCursor(f.scope, connection.id, folder)).resolves.toEqual(next);
+    expect(await f.sql`SELECT id FROM opening_import_receipts WHERE connection_id=${connection.id}`).toHaveLength(2);
   });
 });
 
@@ -147,27 +170,46 @@ describe("opening import isolation and protection", () => {
 });
 
 describe("revocation closes queued import work", () => {
-  it("cancels queued jobs for only the revoked connection", async () => {
-    const connectionA = await seedConnection();
-    const connectionB = await seedConnection();
-    const sourceId = await seedSource();
+  it.each(["dingtalk", "imap"] as const)("cancels current and legacy queued %s parse jobs", async kind => {
+    const connection = await seedConnection(f.scope, 1, kind);
+    const other = await seedConnection(f.scope, 1, kind);
     const revokeRepo = createOpeningConnectionsRepository(f.sql);
-    const queuedA = randomUUID();
-    const queuedB = randomUUID();
+    const imports = createOpeningImportsRepository(f.sql);
+    const storage = { upload: async () => {}, remove: async () => {} };
+    async function publish(target: typeof connection, uid: number) {
+      const receipt = await publishConnectorSource(imports, storage, f.scope, {
+        connectionVersion: target.version,
+        identity: {
+          connectionId: target.id,
+          container: kind === "imap" ? "INBOX" : "dingtalk-callback",
+          generation: kind === "imap" ? "42" : "callback",
+          remoteId: String(uid),
+        },
+        name: kind === "imap" ? "fixture.eml" : "fixture.md",
+        mime: kind === "imap" ? "message/rfc822" : "text/markdown",
+        bytes: Buffer.from("Subject: Fixture\r\n\r\nTest message"),
+      });
+      return receipt.sourceIds[0]!;
+    }
+    const sourceId = await publish(connection, 11);
+    const legacyId = await publish(connection, 12);
+    const otherId = await publish(other, 11);
+    const [queued] = await f.sql`SELECT kind, state, payload FROM opening_jobs
+      WHERE workspace_id=${f.scope.workspaceId} AND payload->>'sourceId'=${sourceId}`;
+    await f.sql`UPDATE opening_jobs SET payload=payload - 'connectionId'
+      WHERE workspace_id=${f.scope.workspaceId} AND payload->>'sourceId'=${legacyId}`;
 
-    await f.sql`INSERT INTO opening_jobs (workspace_id,owner_user_id,key,kind,payload)
-      VALUES (${f.scope.workspaceId},${f.scope.ownerUserId},${queuedA},'parse',
-        ${f.sql.json({ connectionId: connectionA.id, sourceId })}),
-        (${f.scope.workspaceId},${f.scope.ownerUserId},${queuedB},'parse',
-        ${f.sql.json({ connectionId: connectionB.id, sourceId })})`;
-
-    const revoked = await revokeRepo.revoke(f.scope, connectionA.id, connectionA.version, "revoke-client");
+    const revoked = await revokeRepo.revoke(f.scope, connection.id, connection.version, "revoke-client");
     expect(revoked.state).toBe("revoked");
 
-    const jobs = await f.sql`SELECT key, state FROM opening_jobs WHERE key IN (${queuedA},${queuedB}) ORDER BY key`;
-    const stateByKey = new Map(jobs.map(job => [String(job.key), String(job.state)]));
-    expect(stateByKey.get(queuedA)).toBe("cancelled");
-    expect(stateByKey.get(queuedB)).toBe("queued");
+    const jobs = await f.sql`SELECT state, payload FROM opening_jobs
+      WHERE workspace_id=${f.scope.workspaceId} AND payload->>'sourceId' IN (${sourceId},${legacyId},${otherId})`;
+    expect(new Map(jobs.map(job => [String(job.payload.sourceId), String(job.state)]))).toEqual(new Map([
+      [sourceId, "cancelled"], [legacyId, "cancelled"], [otherId, "queued"],
+    ]));
+    expect(queued).toMatchObject({ kind: "parse", state: "queued", payload: {
+      sourceId, sourceVersion: 0, connectionId: connection.id,
+    } });
   });
 });
 
