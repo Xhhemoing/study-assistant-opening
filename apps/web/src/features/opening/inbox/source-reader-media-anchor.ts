@@ -18,6 +18,7 @@ export interface SeekableMediaElement {
   readonly readyState: number;
   readonly paused: boolean;
   readonly seeking?: boolean;
+  readonly seekable?: { readonly length: number; start(index: number): number; end(index: number): number };
   pause(): void;
   play(): Promise<void> | void;
 }
@@ -124,6 +125,27 @@ function mediaEndsBeforeAnchor(media: SeekableMediaElement, anchor: MediaAnchorR
   return duration !== undefined && Number.isFinite(duration) && duration < anchor.startMs / 1000;
 }
 
+function nearestSeekablePosition(
+  seekable: NonNullable<SeekableMediaElement["seekable"]>, target: number, positionBeforeSeek: number,
+): number | undefined {
+  let nearest: number | undefined;
+  let distance = Infinity;
+  for (let index = 0; index < seekable.length; index++) {
+    const start = seekable.start(index);
+    const end = seekable.end(index);
+    if (start <= target && target <= end) return target;
+    const boundary = target < start ? start : end;
+    const candidateDistance = Math.abs(boundary - target);
+    if (candidateDistance < distance ||
+      (candidateDistance === distance && nearest !== undefined &&
+        Math.abs(boundary - positionBeforeSeek) < Math.abs(nearest - positionBeforeSeek))) {
+      distance = candidateDistance;
+      nearest = boundary;
+    }
+  }
+  return nearest;
+}
+
 /**
  * Stateful playback controller for a validated `[startMs, endMs]` anchor:
  * - Seeks to `startMs / 1000` immediately when `readyState >= 1`, or upon
@@ -140,6 +162,7 @@ export function createMediaAnchorPlaybackController(
   let pendingSeek = anchor !== null;
   let seekOrigin: "programmatic_requested" | "programmatic_started" | "manual" | null = null;
   let requestedPosition = 0;
+  let positionBeforeSeek = 0;
   let boundActive = anchor?.bounded ?? false;
   let autoPausedAtEnd = false;
   let userReleasedBound = false;
@@ -175,8 +198,17 @@ export function createMediaAnchorPlaybackController(
       return;
     }
     pendingSeek = false;
+    if (media.seekable?.length === 0) {
+      seekOrigin = null;
+      boundActive = false;
+      autoPausedAtEnd = false;
+      phase = "seek_unreached";
+      emit();
+      return;
+    }
     seekOrigin = "programmatic_requested";
     phase = "seeking_segment";
+    positionBeforeSeek = media.currentTime;
     requestedPosition = anchor.startMs / 1000;
     media.currentTime = requestedPosition;
     requestedPosition = media.currentTime;
@@ -226,11 +258,15 @@ export function createMediaAnchorPlaybackController(
     },
     handleSeeking(media) {
       if (!anchor || pendingSeek) return;
-      // The first event acknowledges the assignment, even if the browser clamped it.
       const atRequestedPosition = Math.abs(media.currentTime - requestedPosition) * 1000 <= SEEK_TOLERANCE_MS;
       const clampedToEnd = media.currentTime === media.duration && mediaEndsBeforeAnchor(media, anchor);
-      if (seekOrigin === "programmatic_requested" ||
-        (seekOrigin === "programmatic_started" && (atRequestedPosition || clampedToEnd))) {
+      const seekable = media.seekable;
+      const target = anchor.startMs / 1000;
+      const clampedTarget = seekable && nearestSeekablePosition(seekable, target, positionBeforeSeek);
+      const clampedToSeekable = clampedTarget !== undefined && clampedTarget !== target &&
+        Math.abs(media.currentTime - clampedTarget) * 1000 <= SEEK_TOLERANCE_MS;
+      if (isProgrammaticSeek() && (atRequestedPosition || clampedToEnd || clampedToSeekable ||
+        (seekOrigin === "programmatic_requested" && media.seeking === false))) {
         seekOrigin = "programmatic_started";
       } else {
         seekOrigin = "manual";

@@ -45,6 +45,10 @@ async function render(props: Partial<Parameters<typeof SourceReader>[0]> = {}) {
 async function click(element: HTMLElement) { await act(async () => element.click()); }
 async function settle() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); }); }
 
+function mockSeekableRange(media: HTMLMediaElement, end: number) {
+  vi.spyOn(media, "seekable", "get").mockReturnValue({ length: 1, start: () => 0, end: () => end });
+}
+
 describe("dedicated material reader", () => {
   it("opens the requested original as the only default reading view and keeps extracted text on demand", async () => {
     const dialog = await render({ requestedVersion: 0, page: 3 });
@@ -136,6 +140,7 @@ describe("dedicated material reader", () => {
     });
 
     // Simulate metadata load -> auto-seeks to startMs / 1000 = 65s and keeps highlight active while paused.
+    mockSeekableRange(video, 120);
     Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
     await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
     expect(video.currentTime).toBe(65);
@@ -200,6 +205,7 @@ describe("dedicated material reader", () => {
     const video = player.querySelector("video")!;
     const status = player.querySelector('[role="status"]')!;
     let currentTime = 0;
+    mockSeekableRange(video, 30);
     Object.defineProperty(video, "currentTime", {
       get: () => currentTime,
       set: (time: number) => { currentTime = Math.min(time, 30); },
@@ -217,6 +223,22 @@ describe("dedicated material reader", () => {
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
     expect(status.textContent).toBe("未能跳到引用位置。");
   });
+  it("clears the citation highlight when metadata arrives without a seekable range", async () => {
+    const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
+    const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 20_000 });
+    const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    const video = player.querySelector("video")!;
+
+    expect(video.seekable.length).toBe(0);
+    Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
+    await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+
+    expect(video.currentTime).toBe(0);
+    expect(player.getAttribute("data-media-anchor-phase")).toBe("seek_unreached");
+    expect(player.getAttribute("data-media-anchor-highlight")).toBe("inactive");
+    expect(player.querySelector('[role="status"]')?.textContent).toBe("未能跳到引用位置。");
+  });
+
   it("announces an audio citation point once programmatic seeking finishes", async () => {
     const audioRecord: SourceRecord = { ...record, name: "听力录音.mp3", mime: "audio/mpeg" };
     const reader = await render({ record: audioRecord, startMs: 30_000 });
@@ -229,6 +251,7 @@ describe("dedicated material reader", () => {
     expect(status.textContent).toContain("正在加载媒体信息，加载后将自动跳到引用位置。");
     expect(status.textContent).not.toContain("已定位");
 
+    mockSeekableRange(audio, 90);
     Object.defineProperty(audio, "readyState", { configurable: true, value: 1 });
     await act(async () => { audio.dispatchEvent(new Event("loadedmetadata")); });
     expect(audio.currentTime).toBe(30);

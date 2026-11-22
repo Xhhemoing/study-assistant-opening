@@ -1229,26 +1229,29 @@ function readSummaryMarkup(text: string, summary: NonNullable<DetailsBounds["sum
 function markdownLabelLinkEnd(label: string, start: number): number {
   if (label[start] !== "(") return -1;
   let cursor = start + 1;
-  while (/\s/.test(label[cursor] ?? "")) cursor++;
+  while (/[ \t\r\n]/.test(label[cursor] ?? "")) cursor++;
+  if (label[cursor] === ")") return cursor + 1;
   if (label[cursor] === "<") {
     const destination = /<(?:\\[<>]|[^<>\r\n])*>/y;
     destination.lastIndex = cursor;
     if (!destination.exec(label)) return -1;
     cursor = destination.lastIndex;
   } else {
+    const destinationStart = cursor;
     let depth = 0;
     for (; cursor < label.length; cursor++) {
+      const code = label.charCodeAt(cursor);
+      if (code <= 32 || code === 127) break;
       const character = label[cursor]!;
       if (character === "\\" && ASCII_PUNCTUATION.test(label[cursor + 1] ?? "")) cursor++;
       else if (character === "(") depth++;
       else if (character === ")" && depth === 0) return cursor + 1;
       else if (character === ")") depth--;
-      else if (/\s/.test(character)) break;
     }
-    if (depth !== 0) return -1;
+    if (cursor === destinationStart || depth !== 0) return -1;
   }
   const whitespaceStart = cursor;
-  while (/\s/.test(label[cursor] ?? "")) cursor++;
+  while (/[ \t\r\n]/.test(label[cursor] ?? "")) cursor++;
   if (label[cursor] === ")") return cursor + 1;
   if (cursor === whitespaceStart) return -1;
   const title = /(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\))[ \t\r\n]*\)/y;
@@ -1481,7 +1484,11 @@ function renderMarkdownLabelMarkup(
   return parts.length ? parts.join("") + label.slice(cursor) : label;
 }
 
-type OpenLabelTag = OpenHtmlTag & { suppressedSubtree: boolean; svgText: boolean };
+type OpenLabelTag = OpenHtmlTag & {
+  suppressedSubtree: boolean;
+  svgText: boolean;
+  readonly customProps: CssCustomProperties;
+};
 
 function lastOpenHtmlTagIndex(openTags: readonly OpenHtmlTag[], tag: string): number {
   for (let index = openTags.length - 1; index >= 0; index--) {
@@ -1502,14 +1509,16 @@ const CSS_DISPLAY_SINGLE = new Set([
 
 type CssToken =
   | { kind: "ident" | "punct" | "literal"; value: string }
-  | { kind: "group"; name: string; tokens: CssToken[]; closed: boolean };
+  | { kind: "group"; name: string; tokens: CssToken[] };
 type CssDeclaration = { name: string; value: readonly CssToken[]; important: boolean };
+type CssCustomProperties = ReadonlyMap<string, readonly CssToken[]>;
+const EMPTY_CUSTOM_PROPS: CssCustomProperties = new Map();
 
 const CSS_ESCAPE = /\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f])/.source;
 const CSS_IDENT = "(?:[-_a-zA-Z0-9\\u0080-\\uFFFF]|" + CSS_ESCAPE + ")+";
 const CSS_COMPONENT = [
   /(?<trivia>[ \t\r\n\f]+|\/\*[\s\S]*?(?:\*\/|$))/.source,
-  /(?<string>"(?:\\[\s\S]|[^"\\\r\n\f])*"|'(?:\\[\s\S]|[^'\\\r\n\f])*')/.source,
+  /(?<string>"(?:\\[\s\S]|[^"\\\r\n\f])*(?:"|(?=[\r\n\f])|\\?(?![\s\S]))|'(?:\\[\s\S]|[^'\\\r\n\f])*(?:'|(?=[\r\n\f])|\\?(?![\s\S])))/.source,
   "(?<ident>" + CSS_IDENT + ")(?<call>\\()?",
   /(?<punct>[()[\]{},;:!])|[\s\S]/.source,
 ].join("|");
@@ -1526,16 +1535,16 @@ function cssValueTokens(text: string): CssToken[] {
     const value = ident === undefined ? match[0] : unescapeCssDisplay(ident);
     const closer = call || punct === "(" ? ")" : punct === "[" ? "]" : punct === "{" ? "}" : undefined;
     if (closer) {
-      const group = { kind: "group" as const, name: value, tokens: [], closed: false };
+      const group = { kind: "group" as const, name: value, tokens: [] };
       tokens.push(group);
       stack.push({ group, closer });
     } else if (current && punct === current.closer) {
-      current.group.closed = true;
       stack.pop();
     } else {
       tokens.push({ kind: ident !== undefined ? "ident" : punct ? "punct" : "literal", value });
     }
   }
+  // CSS closes open component values at EOF. Their contents are already in the group.
   return root;
 }
 
@@ -1590,7 +1599,7 @@ function cssStyleDeclarations(text: string): CssDeclaration[] {
 
 function cssVariableCall(group: Extract<CssToken, { kind: "group" }>) {
   const [name, comma] = group.tokens;
-  if (!group.closed || name?.kind !== "ident" || !name.value.startsWith("--") || name.value.length <= 2 ||
+  if (name?.kind !== "ident" || !name.value.startsWith("--") || name.value.length <= 2 ||
     (comma && !isCssPunct(comma, ","))) return undefined;
   return { name: name.value, fallback: comma ? group.tokens.slice(2) : undefined };
 }
@@ -1600,7 +1609,6 @@ function cssVariableDependencies(tokens: readonly CssToken[]): Set<string> | und
   const groups = tokens.filter(token => token.kind === "group");
   for (let index = 0; index < groups.length; index++) {
     const group = groups[index]!;
-    if (!group.closed) return undefined;
     if (group.name.toLowerCase() === "var") {
       const call = cssVariableCall(group);
       if (!call) return undefined;
@@ -1611,7 +1619,7 @@ function cssVariableDependencies(tokens: readonly CssToken[]): Set<string> | und
   return dependencies;
 }
 
-function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>) {
+function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, inherited: CssCustomProperties) {
   const dependencies = new Map(
     Array.from(custom, ([name, declaration]) => [name, cssVariableDependencies(declaration.value)]),
   );
@@ -1673,19 +1681,27 @@ function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>) 
     return result;
   };
   const resolve = (name: string) => {
+    const declaration = custom.get(name);
+    if (!declaration) return inherited.get(name);
     if (computed.has(name)) return computed.get(name);
-    const value = custom.get(name)?.value;
-    const first = value?.[0];
-    const wide = value?.length === 1 && first?.kind === "ident" && CSS_WIDE_KEYWORDS.has(first.value.toLowerCase());
-    const resolved = value && !wide && !cyclic.has(name) && dependencies.get(name) ? substitute(value) : undefined;
+    const { value } = declaration;
+    const first = value[0];
+    const keyword = value.length === 1 && first?.kind === "ident" ? first.value.toLowerCase() : "";
+    const resolved = CSS_WIDE_KEYWORDS.has(keyword)
+      ? keyword === "initial" ? undefined : inherited.get(name)
+      : !cyclic.has(name) && dependencies.get(name) ? substitute(value) : undefined;
     computed.set(name, resolved);
     return resolved;
   };
-  return substitute;
+  return { substitute, resolve };
 }
 
-function effectiveDisplayIsNone(styleAttr: string | undefined, presentationAttr?: string): boolean {
-  if (!styleAttr && !presentationAttr) return false;
+function resolveElementStyle(
+  styleAttr: string | undefined,
+  presentationAttr: string | undefined,
+  inheritedProps: CssCustomProperties,
+): { readonly displayIsNone: boolean; readonly customProps: CssCustomProperties } {
+  if (!styleAttr && !presentationAttr) return { displayIsNone: false, customProps: inheritedProps };
   const custom = new Map<string, CssDeclaration>();
   let winner: CssDeclaration | undefined;
   for (const declaration of cssStyleDeclarations(decodeHtmlLabelText(styleAttr ?? ""))) {
@@ -1701,10 +1717,24 @@ function effectiveDisplayIsNone(styleAttr: string | undefined, presentationAttr?
   }
   const value = winner?.value ?? cssValueTokens(decodeHtmlLabelText(presentationAttr ?? ""));
   const deps = cssVariableDependencies(value);
-  if (!deps) return false;
-  const effective = deps.size ? createCssVariableResolver(custom)(value) : value;
+  const resolver = custom.size || deps?.size ? createCssVariableResolver(custom, inheritedProps) : undefined;
+  let customProps = inheritedProps;
+  if (custom.size) {
+    const computed = new Map(inheritedProps);
+    for (const name of custom.keys()) {
+      const tokens = resolver!.resolve(name);
+      if (tokens === undefined) computed.delete(name);
+      else computed.set(name, tokens);
+    }
+    customProps = computed;
+  }
+  // The all shorthand participates in the display cascade and excludes custom properties.
   // A winning but unresolved variable computes to unset, including when display was set earlier.
-  return effective !== undefined && cssDisplayKeyword(effective, winner?.name.toLowerCase() === "all") === "none";
+  const effective = !deps ? undefined : deps.size ? resolver!.substitute(value) : value;
+  return {
+    displayIsNone: effective !== undefined && cssDisplayKeyword(effective, winner?.name.toLowerCase() === "all") === "none",
+    customProps,
+  };
 }
 
 function htmlLabelTextVariants(label: string) {
@@ -1759,14 +1789,16 @@ function htmlLabelTextVariants(label: string) {
       const foreignHidden = (namespace === "svg" && SVG_NON_RENDERED_LABEL_TAGS.has(tag)) ||
         (namespace === "math" && MATH_NON_RENDERED_LABEL_TAGS.has(tag) && !htmlAnnotation);
       const selfClosingForeignTag = namespace !== undefined && hasSelfClosingFlag(match[0], tag);
-      // Browsers can close these elements implicitly before the next visible sibling.
-      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) && (
-        htmlAttributeValue(match[0], tag, "hidden") !== undefined ||
-        effectiveDisplayIsNone(
-          htmlAttributeValue(match[0], tag, "style"),
-          namespace ? htmlAttributeValue(match[0], tag, "display") : undefined,
-        )
+      const styleParent = rubyIndex >= 0 && annotationIndex !== undefined && annotationIndex > rubyIndex
+        ? openTags[annotationIndex - 1] : parent;
+      const { displayIsNone, customProps } = resolveElementStyle(
+        htmlAttributeValue(match[0], tag, "style"),
+        namespace ? htmlAttributeValue(match[0], tag, "display") : undefined,
+        styleParent?.customProps ?? EMPTY_CUSTOM_PROPS,
       );
+      // Browsers can close these elements implicitly before the next visible sibling.
+      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) &&
+        (htmlAttributeValue(match[0], tag, "hidden") !== undefined || displayIsNone);
       const raw = namespace === undefined ? htmlRawTextBounds(label, match, cursor) : null;
       const inertTag = HTML_NON_RENDERED_LABEL_TAGS.has(tag);
       if (!foreignHidden && (hidden || inertTag)) {
@@ -1795,6 +1827,7 @@ function htmlLabelTextVariants(label: string) {
           tag,
           childrenNamespace: htmlChildNamespace(namespace, tag, htmlAnnotation),
           suppressedSubtree: !visibleTag,
+          customProps,
           svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
         });
       }

@@ -95,7 +95,7 @@ describe("media anchor bounded playback controller", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "seeked_outside_range", boundActive: false });
   });
 
-  it("treats an unexpected first seeking event as completion of the programmatic request", () => {
+  it("reports a scrub that changes the target before the first seeking event", () => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
     const media = createFakeMedia();
     const controller = createMediaAnchorPlaybackController(anchor);
@@ -104,7 +104,7 @@ describe("media anchor bounded playback controller", () => {
     controller.handleSeeking(media);
     controller.handleSeeked(media);
     expect(controller.snapshot()).toMatchObject({
-      phase: "seek_unreached", userReleasedBound: false, rangeHighlightActive: false,
+      phase: "seeked_outside_range", userReleasedBound: true, rangeHighlightActive: false,
     });
   });
 
@@ -232,6 +232,44 @@ describe("media anchor bounded playback controller", () => {
     expect(controller.snapshot().phase).toBe(phase);
   });
 
+  it("recognizes a scrub before the first seeking event when the citation is seekable", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
+    const media = Object.assign(createFakeMedia(), {
+      duration: 90, seeking: true, seekable: { length: 1, start: () => 0, end: () => 90 },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+
+    media.currentTime = 5;
+    controller.handleSeeking(media);
+    media.seeking = false;
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seeked_outside_range", boundActive: false, userReleasedBound: true,
+    });
+  });
+
+  it.each(["seekToStart", "replay"] as const)("reports an empty seekable range and retries with %s", retry => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
+    const media = Object.assign(createFakeMedia(), {
+      duration: 90, seeking: false, seekable: { length: 0, start: () => 0, end: () => 90 },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    expect(media.currentTime).toBe(0);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seek_unreached", boundActive: false, userReleasedBound: false, rangeHighlightActive: false,
+    });
+
+    media.seekable.length = 1;
+    controller[retry](media);
+    expect(media.currentTime).toBe(10);
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "ready_segment", boundActive: true, userReleasedBound: false, rangeHighlightActive: true,
+    });
+  });
+
   it("recognizes the first seeking event clamped to the start of a seekable range", () => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
     const media = Object.assign(createFakeMedia(), {
@@ -253,6 +291,25 @@ describe("media anchor bounded playback controller", () => {
       phase: "seek_unreached", boundActive: false, userReleasedBound: false,
     });
   });
+
+  it.each([{ from: 10, landed: 20 }, { from: 80, landed: 60 }])(
+    "recognizes a seekable gap clamp to $landed seconds when seeking from $from seconds",
+    ({ from, landed }) => {
+      const anchor = validateMediaAnchorRange({ startMs: 40_000, endMs: 45_000 })!;
+      const media = Object.assign(createFakeMedia(), {
+        currentTime: from, duration: 90, seeking: true,
+        seekable: { length: 2, start: (index: number) => [0, 60][index]!, end: (index: number) => [20, 90][index]! },
+      });
+      const controller = createMediaAnchorPlaybackController(anchor);
+      controller.activate(media);
+      media.currentTime = landed;
+      controller.handleSeeking(media);
+      media.seeking = false;
+      controller.handleSeeked(media);
+
+      expect(controller.snapshot()).toMatchObject({ phase: "seek_unreached", userReleasedBound: false });
+    },
+  );
 
   it.each([30, 64.7])("recognizes a deferred clamp at the known duration %ss", duration => {
     const anchor = validateMediaAnchorRange({ startMs: 65_000, endMs: 70_000 })!;
