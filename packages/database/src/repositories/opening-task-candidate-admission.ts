@@ -78,6 +78,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
         lockedSourceIds,
         memoryCourse: () => tx`${candidate.course_id ?? null}::uuid`,
         materialUse: candidate.material_use,
+        directMaterialPolicy: true,
         authorizeMemoryOnlySeparately: true,
       })}`;
   const refs = candidate.context_source_refs ?? (candidate.role === "assistant" ? null : []);

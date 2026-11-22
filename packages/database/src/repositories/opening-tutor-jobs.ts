@@ -500,8 +500,8 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
       )
       WHERE jsonb_typeof(assistant_refs)='array'
         AND (user_refs IS NULL OR jsonb_typeof(user_refs)='array')
-        AND ${contextSourceRefsIncluded(db, workspaceId, () => db`assistant_refs || COALESCE(user_refs, '[]'::jsonb) || citations`,
-          false, true, () => db`source_ids`)}
+        AND ${contextSourceRefsIncluded(db, workspaceId, () => db`assistant_refs || COALESCE(user_refs, '[]'::jsonb)`,
+          false, true, () => db`source_ids`, () => db`citations`)}
     ), lineage AS (
       SELECT 1 AS origin, assistant_refs AS refs FROM candidate_evidence
       UNION ALL
@@ -587,6 +587,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         AND u.conversation_id=j.conversation_id AND u.role='user' AND u.status='complete'
       WHERE j.id=${input.jobId} AND j.workspace_id=${workspaceId}
         AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
+        AND jsonb_typeof(u.citations)='array' AND jsonb_typeof(t.citations)='array'
+        AND jsonb_typeof(u.source_versions)='object' AND jsonb_typeof(t.source_versions)='object'
         AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
         AND (${input.expectedPrivacyEpoch ?? null}::integer IS NULL OR w.privacy_epoch=${input.expectedPrivacyEpoch ?? null})
         AND (${input.metadataLease === undefined} OR EXISTS (

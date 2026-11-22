@@ -65,9 +65,20 @@ export function turnMaterialRows(db: Db, includeUserContext = false): ReturnType
 
 export function sourceMaterialsActive(
   db: Db, workspaceId: string, materials: FragmentFactory,
-  options?: MemoryMaterialRules & { memoryCourse?: FragmentFactory; originUse?: FragmentFactory; authorizeMemoryOnlySeparately?: boolean },
+  options?: MemoryMaterialRules & {
+    memoryCourse?: FragmentFactory;
+    originUse?: FragmentFactory;
+    standaloneOrigin?: FragmentFactory;
+    directMaterialPolicy?: boolean;
+    authorizeMemoryOnlySeparately?: boolean;
+  },
 ): ReturnType<Db> {
   const memoryCourse = options?.memoryCourse;
+  const standaloneOrigin = options?.allowClassifiedGlobal ? options.standaloneOrigin : undefined;
+  const materialUse = options?.originUse ?? (() => db`${options?.materialUse === "practice" ? "practice" : "citation"}::text`);
+  const purposeAllowed = options?.directMaterialPolicy
+    ? db`cam.purpose = 'practice' OR (cam.purpose = 'reference' AND ${materialUse()} = 'citation')`
+    : db`cam.purpose = CASE WHEN ${materialUse()} = 'practice' THEN 'practice' ELSE 'reference' END`;
   return db`NOT EXISTS (
     SELECT 1 FROM (${materials()}) ref
     LEFT JOIN opening_sources s ON s.id = ${lineageUuid(db, () => db`ref.source_id`)}
@@ -83,12 +94,10 @@ export function sourceMaterialsActive(
       ${memoryCourse ? db`OR (
         SELECT COALESCE(bool_or(cam.purpose = 'mock_exam'), false)
           OR CASE ${options?.authorizeMemoryOnlySeparately ? db`WHEN ref.memory_only THEN false` : db``}
-            WHEN ${memoryCourse()} IS NULL THEN ${options?.allowClassifiedGlobal ? db`false` : db`count(cam.purpose) > 0`}
+            WHEN ${memoryCourse()} IS NULL THEN count(cam.purpose) > 0
+              ${standaloneOrigin ? db`AND NOT (${standaloneOrigin()})` : db``}
             ELSE NOT COALESCE(bool_or(cam.course_id = ${memoryCourse()}
-              AND (cam.purpose IS NULL OR cam.purpose = 'teaching'
-                OR cam.purpose = ${options?.originUse
-                  ? db`CASE WHEN ${options.originUse()} = 'practice' THEN 'practice' ELSE 'reference' END`
-                  : db`${options?.materialUse === "practice" ? "practice" : "reference"}::text`})), false) END
+              AND (cam.purpose IS NULL OR cam.purpose = 'teaching' OR ${purposeAllowed})), false) END
         FROM course_asset_memberships cam
         WHERE cam.asset_id = s.id AND cam.workspace_id = s.workspace_id AND cam.asset_type = 'source'
       )` : db``}
@@ -96,7 +105,11 @@ export function sourceMaterialsActive(
 }
 
 export function turnSourceMaterialsActive(
-  db: Db, workspaceId: string, options?: MemoryMaterialRules & { memoryCourse: FragmentFactory; originUse?: FragmentFactory },
+  db: Db, workspaceId: string, options?: MemoryMaterialRules & {
+    memoryCourse: FragmentFactory;
+    originUse?: FragmentFactory;
+    standaloneOrigin?: FragmentFactory;
+  },
 ): ReturnType<Db> {
   return db`${sourceMaterialsActive(db, workspaceId, () => turnMaterialRows(db), options)}
     AND jsonb_typeof(t.source_versions) = 'object'
@@ -211,7 +224,9 @@ async function readOriginBindings(
     JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id AND c.owner_user_id = ${scope.ownerUserId}
     CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`)} AS id) course
     ${originUse ? db`CROSS JOIN LATERAL (SELECT ${turnMaterialUse(db, "t")} AS material_use) policy` : db``}
-    WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && { memoryCourse: () => db`m.course_id`, ...rules, originUse })}
+    WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && {
+      ...rules, memoryCourse: () => db`m.course_id`, originUse, standaloneOrigin: () => db`course.id IS NULL`,
+    })}
       ${rules ? db`AND (t.role <> 'assistant' OR t.context_source_refs IS NOT NULL)` : db``}
     ORDER BY m.id, m.ordinality`;
   for (const row of rows) {

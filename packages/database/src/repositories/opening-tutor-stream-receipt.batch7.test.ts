@@ -650,6 +650,20 @@ describe("stream receipt release waits for current job authorization and assista
     expect(startSend).toHaveBeenCalledOnce();
   });
 
+  it("rejects metadata dispatch and append when the saved target fails admission", async () => {
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    const f = fixture();
+    const startSend = vi.fn(async () => "provider response");
+
+    await expect(f.repo.canAppendCompletedTurnCandidates(target)).resolves.toBe(false);
+    await expect(f.repo.authorizeMetadataSend(target, startSend)).rejects.toThrow("metadata authorization changed");
+    await expect(f.repo.appendCompletedTurnCandidates({ ...target,
+      candidates: [{ kind: "memory", text: "Candidate", temporary: false }],
+    })).resolves.toBe(false);
+    expect(startSend).not.toHaveBeenCalled();
+    expect(f.calls.some(call => call.sql.startsWith("INSERT INTO opening_assistant_candidates"))).toBe(false);
+  });
+
   it("checks the legacy backing's expiry in the final gate before starting the provider", async () => {
     const parent = "12000000-0000-4000-8000-0000000000ac";
     const backing = "12000000-0000-4000-8000-0000000000ad";

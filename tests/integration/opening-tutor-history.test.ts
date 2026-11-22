@@ -48,14 +48,17 @@ it("accepts dependency metadata only in context refs and clears history on malfo
   });
   const rejected = await memories.proposeMemory(f.scope, { text: "Rejected history dependency", sourceTurnIds: [prior.turnId], expiresAt: null });
   await memories.reject(f.scope, rejected.id, rejected.version, randomUUID());
+  const sourceId = await insertSource(f.sql, f.scope);
   const refs = [{ memoryDependencyIds: [active.id] }];
   await f.sql`UPDATE opening_turns SET context_source_refs=${f.sql.json(refs)} WHERE id=${prior.assistantTurnId}`;
   expect(await jobs.loadHistoryContext(f.scope, current.turnId)).toMatchObject({ memoryIds: [active.id] });
 
   for (const turnId of [prior.assistantTurnId, prior.turnId]) {
-    await f.sql`UPDATE opening_turns SET citations=${f.sql.json([{ memoryDependencyIds: [rejected.id] }])} WHERE id=${turnId}`;
-    expect(await jobs.loadHistoryContext(f.scope, current.turnId)).toEqual({ history: [], sourceRefs: [] });
-    expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
+    for (const citations of [[{ memoryDependencyIds: [rejected.id] }], { sourceId, sourceVersion: 0 }]) {
+      await f.sql`UPDATE opening_turns SET citations=${f.sql.json(citations)} WHERE id=${turnId}`;
+      expect(await jobs.loadHistoryContext(f.scope, current.turnId)).toEqual({ history: [], sourceRefs: [] });
+      expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
+    }
     await f.sql`UPDATE opening_turns SET citations='[]'::jsonb WHERE id=${turnId}`;
   }
   expect(await jobs.loadHistory(f.scope, current.turnId)).toHaveLength(2);
