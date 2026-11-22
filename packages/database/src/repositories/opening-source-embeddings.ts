@@ -4,7 +4,7 @@ import type { OpeningScope } from "./opening-sources";
 import { parentBudgetFamilyPredicate } from "./opening-budget";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { mapChunk } from "./opening-source-chunks";
-import { isPublicSourceChunk, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
+import { containsPdfAnswerLabel, isPublicSourceChunk, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 export { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 
@@ -58,7 +58,7 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
       const sourceIds = [...new Set(chunks.map(chunk => chunk.sourceId))];
       const rows = await sql`
         ${publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds })}
-        SELECT c.id,c.source_version,c.text,s.mime FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
+        SELECT c.id,c.source_version,c.page,c.text,s.mime FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
         JOIN workspaces w ON w.id=s.workspace_id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(sourceIds)} AND s.upload_state='uploaded'
           AND c.source_version<=s.version AND (c.source_version<s.version OR s.parse_state='ready')
@@ -68,7 +68,8 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
       const allowed = new Map(rows.filter(isPublicSourceChunk).map(row => [String(row.id), row]));
       return { chunks: chunks.filter(chunk => {
         const row = allowed.get(chunk.id);
-        return row && Number(row.source_version) === chunk.sourceVersion && isPublicSourceChunk({ mime: row.mime, text: chunk.text });
+        return row && Number(row.source_version) === chunk.sourceVersion
+          && (row.mime !== "application/pdf" || String(row.text).includes(chunk.text) || !containsPdfAnswerLabel(chunk.text));
       }), privacyEpoch: Number(owner.privacy_epoch) };
     },
     snapshot: (scope: OpeningScope, sourceId: string, version?: number) => readSnapshot(sql, scope, sourceId, version),
@@ -154,7 +155,7 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
       if (!input.sourceIds.length || input.chunkIds?.length === 0) return false;
       const query = sql`
         ${publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds: input.sourceIds })}
-        SELECT CASE WHEN s.mime='application/pdf' THEN c.text END AS text,s.mime FROM opening_source_chunks c
+        SELECT CASE WHEN s.mime='application/pdf' THEN c.text END AS text,c.page,s.mime FROM opening_source_chunks c
         JOIN opening_sources s ON s.id=c.source_id JOIN workspaces w ON w.id=s.workspace_id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(input.sourceIds)} AND s.version=c.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'

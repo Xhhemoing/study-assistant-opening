@@ -75,11 +75,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v24-discourse/text",
     "docling-2.126.0/pdf-segments-v25-discourse/text",
     "docling-2.126.0/pdf-segments-v26-discourse/text",
+    "docling-2.126.0/pdf-segments-v27-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v27-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v28-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2633,6 +2634,41 @@ describe("bounded resumable PDF parser", () => {
     ] });
     expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Find x.", "Public explanation."]);
   });
+
+  it.each(["(iv).", "第十二页（共三百页）", "共三百页 第十二页"])(
+    "carries an inline answer past the running footer %j", async footer => {
+      const result = await runPdfScenario({ pages: [
+        { page: 1, text: "Exercise 1: Find x.\n【解析】\n" + footer },
+        { page: 2, text: "x = 3." },
+        { page: 3, text: "Public explanation." },
+      ] });
+      expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Find x.", "Public explanation."]);
+    },
+  );
+
+  it.each(["Figure:", "# Table:", "Table 1 gives the factorization.", "Theorem 2.1 states this fact.",
+    "Lemma 1.2 implies x = 3.", "Definition 3.1 requires a field.", "Figure 2 illustrates the construction."])(
+    "keeps %j and its following answer inside the exercise seal", async reference => {
+      const result = await runPdfScenario({ pages: [
+        { page: 1, text: "Exercise 1: Find x.\n【解答】" },
+        { page: 2, text: reference + "\nx = 3." },
+        { page: 3, text: "Public explanation." },
+      ] });
+      expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Find x.", "Public explanation."]);
+    },
+  );
+
+  it.each(["Theorem 2.1.", "Theorem 2.1 (Lagrange)", "**Theorem 2.1 finite rings**", "# Theorem 2.1 finite rings",
+    "Table A.2 Summary", "Fig. IV: Ring diagram", "Listing 1: Program"])(
+    "reopens a pending inline answer at %j", async heading => {
+      const result = await runPdfScenario({ pages: [
+        { page: 1, text: "Exercise 1: Find x.\n【解答】" },
+        { page: 2, text: "x =" },
+        { page: 3, text: heading + "\nPublic explanation." },
+      ] });
+      expect(result.publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Find x.", heading + "\nPublic explanation."]);
+    },
+  );
 
   it.each([true, false])("withholds a continuation after conversion failure and replays safely after recovery (answer: %s)", async answer => {
     const segmentData = new Map<string, PdfSegment>();

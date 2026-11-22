@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
-import { containsPdfAnswerLabel, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
+import { isPublicSourceChunk, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
 
 type PageStats = { page: number | null; characters: number; readable: boolean };
 
@@ -46,7 +46,7 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
       const byPage = new Map<number | null, PageStats>();
       for await (const rows of query.cursor(16)) {
         for (const row of rows) {
-          if (containsPdfAnswerLabel(String(row.text))) continue;
+          if (!isPublicSourceChunk({ ...row, mime: "application/pdf" })) continue;
           const page = row.page == null ? null : Number(row.page);
           const current = byPage.get(page);
           byPage.set(page, { page, characters: (current?.characters ?? 0) + Number(row.characters), readable: Boolean(current?.readable || row.readable) });

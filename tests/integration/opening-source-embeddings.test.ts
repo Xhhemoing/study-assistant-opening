@@ -103,6 +103,7 @@ async function expectArchivedPdfPages(texts: string[], pages: number[], blockedP
   expect((await pdf.repository.authorizeChunks(f.scope, pdf.snapshot.chunks)).chunks).toEqual(publicChunks);
   expect(await pdf.repository.hasIndex(f.scope, { ...query, chunkIds: [blockedChunk.id] })).toBe(false);
   expect(await pdf.repository.hasIndex(f.scope, query)).toBe(pages.length > 0);
+  return pdf;
 }
 
 describe("pgvector material repository", () => {
@@ -373,15 +374,18 @@ describe("pgvector material repository", () => {
     await expectArchivedPdfPages([stem, "x =", "Chapter 2: Rings", "Public prose continues here."], [3, 4], 2);
   });
 
-  it.each(["IV.", "pp. 12.", "12 / 300.", "- 12 -.", "第 十二页。", "第十二 / 三百頁。"])(
+  it.each(["IV.", "(iv).", "[iv].", "（iv）。", "- iv -.", "pp. 12.", "Page 12 of 300.",
+    "12 / 300.", "- 12 -.", "第 十二页。", "第十二 / 三百頁。", "第十二页（共三百页）",
+    "第 12 页 / 共 300 页", "第 12 页，共 300 页", "共三百页 第十二页"])(
     "ignores the running footer %j after a pending archived exercise answer", async footer => {
       const stem = "Exercise 1. Solve x - 3 = 0.\n【答案】";
       await expectArchivedPdfPages([stem + "\n" + footer, "x = 3.", "Public prose continues here."], [3], 2);
     },
   );
 
-  it.each(["Figure out the roots by factoring.", "Claim I can factor the polynomial.", "Note how the factors cancel.",
-    "Definition of the notation is given below.", "Theorem 2.1 states this fact."])(
+  it.each(["Figure out the roots by factoring.", "Figure:", "# Figure:", "Table 1 gives the factorization.",
+    "Claim I can factor the polynomial.", "Note how the factors cancel.", "Definition of the notation is given below.",
+    "Theorem 2.1 states this fact.", "Lemma 1.2 implies x = 3.", "Definition 3.1 requires a field.", "Figure 2 illustrates the construction."])(
     "keeps ordinary %j inside an archived inline answer", async line => {
       const stem = "Exercise 1. Solve x - 3 = 0.\n【解答】";
       await expectArchivedPdfPages([stem, line + "\nx = 3.", "Public prose continues here."], [3], 2);
@@ -389,7 +393,8 @@ describe("pgvector material repository", () => {
   );
 
   it.each(["Figure 1 The rings", "Table A.2: Ring operations", "Fig. IV: Ring diagram", "Tab. 2.1 Data",
-    "# Section 2.2 Ring operations", "Theorem 2.1"])(
+    "Table 1 Summary", "Diagram I", "# Section 2.2 Ring operations", "Theorem 2.1", "Theorem 2.1.",
+    "Theorem 2.1 (Lagrange)", "# Theorem 2.1 finite rings", "**Theorem 2.1 finite rings**"])(
     "reopens an archived inline answer at the structural heading %j", async heading => {
       const stem = "Exercise 1. Solve x - 3 = 0.\n【解答】";
       await expectArchivedPdfPages([stem, "x =", heading, "Public prose continues here."], [3, 4], 2);
@@ -402,6 +407,29 @@ describe("pgvector material repository", () => {
       await expectArchivedPdfPages([stem + "\n" + label, "x = 3.", "Public prose continues here."], [3], 2);
     },
   );
+
+  it.each(["【解析】", "【详解（续）】", "解析：", "详解：", "解："])(
+    "keeps worked-example explanations with %s public on the same and following pages", async label => {
+      const example = "例题 1：解方程。";
+      const explanation = label + "\nx = 3.";
+      await expectArchivedPdfPages([example + "\n" + explanation, explanation, "Chapter 2: Rings", explanation],
+        [1, 2, 3], 4);
+    },
+  );
+
+  it("authorizes a worked-example excerpt found in its vetted chunk", async () => {
+    const example = "例题 1：解方程。\n【解析】\nx = 3.";
+    const pdf = await expectArchivedPdfPages([example, "Definition 2.1: A ring.", "【解析】\ny = 4."], [1, 2], 3);
+    const chunk = pdf.snapshot.chunks[0]!;
+    const excerpt = { ...chunk, text: "【解析】\nx = 3." };
+    const modified = { ...chunk, text: "【解析】\ny = 4." };
+    expect((await pdf.repository.authorizeChunks(f.scope, [excerpt, modified])).chunks).toEqual([excerpt]);
+  });
+
+  it("counts a sentence beginning with Page as inline answer body", async () => {
+    await expectArchivedPdfPages(["Exercise 1. Solve x - 3 = 0.\n【答案】\nPage 2 gives the result.",
+      "Public prose continues here."], [2], 1);
+  });
 
   it("treats a label-only Chinese answer as a section after a structural heading ends the exercise", async () => {
     await expectArchivedPdfPages([
@@ -654,10 +682,13 @@ describe("pgvector material repository", () => {
     await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
-  it.each(["x = 3.", "Chapter 2: Rings\nx = 3."])(
-    "filters native %j when live Vision reopens an archived seal with no saved marker", async nativeText => {
-      const pdf = await seed(["Unavailable.", "[视觉转写与描述]\nAnswer Key\nx = 3.", "Rings have two operations."]);
-      await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page=1`;
+  it.each([
+    ["x = 3.", false], ["x = 3.", true], ["Chapter 2: Rings\nx = 3.", true],
+  ] as const)(
+    "filters native %j when live Vision reopens an archived seal after predecessor failure=%s", async (nativeText, failed) => {
+      const predecessor = failed ? "Unavailable." : "This introduction explains sets and operations.";
+      const pdf = await seed([predecessor, "[视觉转写与描述]\nAnswer Key\nx = 3.", "Rings have two operations."]);
+      if (failed) await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page=1`;
       await f.sql`UPDATE opening_source_chunks SET image_object_key='vision/key' WHERE source_id=${pdf.sourceId} AND page=2`;
       expect(await f.sql`SELECT 1 FROM opening_pdf_parse_segments
         WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`).toHaveLength(0);
@@ -666,18 +697,23 @@ describe("pgvector material repository", () => {
         imageObjectKey: "vision/page-two",
       }));
       const retry = await startPdfRetry(pdf.sourceId, [
-        { page: 1, text: "Unavailable.", imagePath: null, visualKinds: [] },
+        { page: 1, text: predecessor, imagePath: null, visualKinds: [] },
         { page: 2, text: nativeText, imagePath: null, visualKinds: ["picture"] },
         { page: 3, text: "Rings have two operations.", imagePath: null, visualKinds: [] },
-      ], { recognizePage }, [1]);
-      await expect(retry.run()).resolves.toEqual({ pages: 2 });
-      await retry.finish(2);
+      ], { recognizePage }, failed ? [1] : []);
+      await expect(retry.run()).resolves.toEqual({ pages: failed ? 2 : 3 });
+      await retry.finish(failed ? 2 : 3);
       expect(recognizePage).toHaveBeenCalledOnce();
-      expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ error: { code: "PARSE_PARTIAL" } });
+      if (failed) expect(await retry.sources.get(f.scope, pdf.sourceId)).toMatchObject({ error: { code: "PARSE_PARTIAL" } });
       const published = await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, undefined, { unpublishedPdfForRecovery: true });
-      expect(published.map(({ page }) => page)).toEqual([2, 3]);
-      expect(published[0]?.text).toContain("This chapter studies polynomial rings.");
-      expect(published[0]?.text).not.toContain("x = 3.");
+      expect(published.map(({ page }) => page)).toEqual(failed ? [2, 3] : [1, 2, 3]);
+      const recovered = published.find(({ page }) => page === 2);
+      expect(recovered?.text).toContain("This chapter studies polynomial rings.");
+      expect(recovered?.text).not.toContain("x = 3.");
+      expect(recovered?.imageObjectKey).toBeNull();
+      expect(await f.sql`SELECT pages->0 AS marker FROM opening_pdf_parse_segments
+        WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1' AND page_start=2`)
+        .toMatchObject([{ marker: { hadSealedContent: true, reopenedSection: true, publicationSealCommitted: true } }]);
       const content = await readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 });
       expect(content.text).not.toContain("x = 3.");
     },

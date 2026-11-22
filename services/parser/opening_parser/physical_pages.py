@@ -39,13 +39,22 @@ _MD_HASH_PREFIX_RE = re.compile(r"^(?:#{1,6}\s+)+")
 _MD_WRAPPED_EMPHASIS_RE = re.compile(r"^(\*\*|__)(.+?)\1(.*)$")
 _MD_EDGE_EMPHASIS_RE = re.compile(r"^(?:\*\*|__)+|(?:\*\*|__)+$")
 _MD_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
+_CAPTION_NAME = r"(?:Figure|Fig\.?|Table|Tab\.?|Chart|Diagram|Scheme|Algorithm|Listing)"
+_CAPTION_NAME_RE = re.compile(rf"^{_CAPTION_NAME}(?=\s|[:：]|$)", re.IGNORECASE)
+_BLOCK_ID = r"(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*|[ivxlcdm]+)\b(?=[\s:：.．—–(-]|$)"
 _CAPTION_PREFIX_RE = re.compile(
-    r"^(?P<ref>(?:Figure|Fig\.?|Table|Chart|Diagram|Scheme|Algorithm|Listing)\s+\d+(?:[.\-]\d+)*)"
-    r"(?:\s*[:.\-—]|$|\s+(?!(?:shows|illustrates|demonstrates|depicts|presents|indicates|is|was|are|can|will)\b))"
+    rf"^(?P<ref>{_CAPTION_NAME}\s+{_BLOCK_ID})"
     r"|^(?P<zh_ref>(?:图|表|插图|附表|算法)\s*\d+(?:[.\-]\d+)*)(?:\s*[:：.．、\-—]|\s+|$)",
     re.IGNORECASE,
 )
-_TABLE_CAPTION_REF_RE = re.compile(r"^(?:Table|表|附表)\b", re.IGNORECASE)
+_BLOCK_DELIMITER_RE = re.compile(r"^\s*(?:[:：．—–(]|\.(?!\d)|-(?!\d)|$)")
+_ENGLISH_BLOCK_PREFIX_RE = re.compile(
+    r"^(?:Definition|Notation|Terminology|Convention|Axiom|Theorem|Lemma|Proposition|Corollary|Conjecture|Claim"
+    r"|Proof(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary))?)\b",
+    re.IGNORECASE,
+)
+_BLOCK_IDENTIFIER_RE = re.compile(rf"^\s+{_BLOCK_ID}", re.IGNORECASE)
+_TABLE_CAPTION_REF_RE = re.compile(r"^(?:Table|Tab\.?|表|附表)(?=\s|\d|$)", re.IGNORECASE)
 _VISUAL_CAPTION_REF_RE = re.compile(r"^(?:Figure|Fig\.?|Chart|Diagram|Scheme|图|插图)\b", re.IGNORECASE)
 
 # Standalone assessment headings can open a seal across physical pages.
@@ -142,7 +151,7 @@ _PROOF_RE = re.compile(
 _THEOREM_RE = re.compile(
     r"^(?:"
     r"(?:Theorem|Lemma|Proposition|Corollary|Axiom|Conjecture|Claim)"
-    r"(?:\s+\d+(?:[.\-]\d+)*(?:\s*\([^)]+\))?(?:\s*\(\s*continued\s*\))?(?:\s*[:：.\-—]|\s+|$)|(?:\s*\([^)]+\))?(?:\s*\(\s*continued\s*\))?\s*(?:[:：.\-—]|$))"
+    rf"(?:\s+{_BLOCK_ID}|\s*(?:\([^)]+\))?\s*(?:[:：.．—–-]|$))"
     r"|(?:定理|引理|推论|命题|公理|猜想)"
     r"(?:\s*\d+(?:[.\-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*(?:（续）|\(续\)))?(?:\s*[:：.．\-—]|\s+|$)|(?:\s*[（(][^）)]+[）)])?(?:\s*(?:（续）|\(续\)))?\s*(?:[:：.．\-—]|$))"
     r")",
@@ -151,7 +160,7 @@ _THEOREM_RE = re.compile(
 _DEFINITION_RE = re.compile(
     r"^(?:"
     r"(?:Definition|Notation|Terminology|Convention)"
-    r"(?:\s+\d+(?:[.\-]\d+)*(?:\s*\([^)]+\))?(?:\s*\(\s*continued\s*\))?(?:\s*[:：.\-—]|\s+|$)|(?:\s*\([^)]+\))?(?:\s*\(\s*continued\s*\))?\s*(?:[:：.\-—]|$))"
+    rf"(?:\s+{_BLOCK_ID}|\s*(?:\([^)]+\))?\s*(?:[:：.．—–-]|$))"
     r"|(?:定义|记号|约定)"
     r"(?:\s*\d+(?:[.\-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*(?:（续）|\(续\)))?(?:\s*[:：.．\-—]|\s+|$)|(?:\s*[（(][^）)]+[）)])?(?:\s*(?:（续）|\(续\)))?\s*(?:[:：.．\-—]|$))"
     r")",
@@ -194,14 +203,16 @@ _NUMBERED_CONTAINER_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _PAGE_METADATA_HEADING_RE = re.compile(
-    r"^(?:[\[【(]\s*)?(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\b|(?:p|pp)\.\s*\d"
+    r"^(?:[\[【(]\s*)?(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+\d+"
+    r"(?:\s*(?:of\s+|[/／–—-]\s*)\d+)?\s*[)）\]】]?\s*[.。]?$|(?:p|pp)\.\s*\d"
     r"|(?:(?:cached|raw|readable|verified|automatic)\s+)*(?:transcription|ocr)\b"
-    r"|(?:第\s*)?[\d一二三四五六七八九十百千]+(?:\s*(?:[/／\-–—]|共)\s*(?:第\s*)?[\d一二三四五六七八九十百千]+)?\s*[页頁张張]"
+    r"|(?:第\s*)?[\d一二三四五六七八九十百千零〇]+(?:\s*(?:[/／\-–—]|共)\s*(?:第\s*)?[\d一二三四五六七八九十百千零〇]+)?\s*[页頁张張]"
+    r"|共\s*[\d一二三四五六七八九十百千零〇]+\s*[页頁]\s*第\s*[\d一二三四五六七八九十百千零〇]+\s*[页頁]"
     r"|\d+\s*(?:of|[/／\-–—])\s*\d+\s*[.)。]?$|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)",
     re.IGNORECASE,
 )
 _RUNNING_COUNTER_RE = re.compile(
-    r"(?:^[(（\[]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8})\s*[)）\].．、]?$"
+    r"(?:^(?:[(（\[【]?\s*(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8})\s*[)）\]】]?|[-–—]\s*(?:\d+|[ivxlcdm]{1,8})\s*[-–—])\s*[.。．、]?$"
     r"|[(（\[]\s*(?:(?:pages?|slides?)\s+\d+|pp?\.\s*\d+|第\s*\d+\s*[页頁])(?:\s*(?:of|[/／–-])\s*\d+)?\s*[)）\]]"
     r"|(?:\s|[:：—–-]\s*)(?:(?:pages?|slides?)\s+\d+|pp?\.\s*\d+|第\s*\d+\s*[页頁])(?:\s*(?:of|[/／–-])\s*\d+)?\s*[.。]?$)",
     re.IGNORECASE,
@@ -527,18 +538,43 @@ def _is_running_page_heading(stripped: str) -> bool:
     return bool(container and not stripped[container.end():].strip(" \t:：.．—–-"))
 
 
-def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
+def _is_english_block_heading(stripped: str, explicit_heading: bool) -> bool:
+    prefix = _ENGLISH_BLOCK_PREFIX_RE.match(stripped)
+    if not prefix:
+        return True
+    suffix = stripped[prefix.end():]
+    identifier = _BLOCK_IDENTIFIER_RE.match(suffix)
+    if not identifier:
+        return bool(_BLOCK_DELIMITER_RE.match(suffix))
+    rest = suffix[identifier.end():]
+    return explicit_heading or bool(_BLOCK_DELIMITER_RE.match(rest) or re.match(r"^\s+[^a-z\s]", rest))
+
+
+def _caption_heading(stripped: str, explicit_heading: bool):
+    match = _CAPTION_PREFIX_RE.match(stripped)
+    if not match or match.group("zh_ref"):
+        return match
+    rest = stripped[match.end():]
+    if explicit_heading or _BLOCK_DELIMITER_RE.match(rest) or re.match(r"^\s+[^a-z\s]", rest):
+        return match
+    return None
+
+
+def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool,
+                            explicit_heading: bool = False) -> bool:
     if not stripped or _is_section_sealed_opener(stripped) or _is_running_page_heading(stripped):
         return False
     if re.fullmatch(r"(?:\d+(?:\.\d+)*[.)]?\s+)?(?:true|false|yes|no|none|[a-f](?:\s*,\s*[a-f])*)[.。]?", stripped, re.IGNORECASE):
         return False
     if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
-    if _TEXTBOOK_NON_ANSWER_HEADING_RE.match(stripped):
+    if _TEXTBOOK_NON_ANSWER_HEADING_RE.match(stripped) and _is_english_block_heading(stripped, explicit_heading):
         return True
     if _is_titled_non_answer_chapter(stripped):
         return True
     if _STANDALONE_SOLUTION_HEADING_RE.match(stripped):
+        return False
+    if _CAPTION_NAME_RE.match(stripped) and not _caption_heading(stripped, explicit_heading):
         return False
     if re.match(
         r"^(?:(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])",
@@ -590,6 +626,8 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     """Return (kind, seal_kind, is_explicit_opener, is_section_break, is_major_non_answer, caption_ref, associated_visual_kind)."""
     raw_trimmed = line_text.strip()
     is_markdown_heading = bool(_MD_HEADING_LINE_RE.match(raw_trimmed))
+    explicit_heading = (is_markdown_heading or frag_label in _HEADING_LABELS
+                        or bool(_MD_WRAPPED_EMPHASIS_RE.match(raw_trimmed)))
     stripped = _strip_heading_markup(line_text)
     if frag_label in _FURNITURE_LABELS:
         if _is_section_sealed_opener(stripped):
@@ -598,17 +636,17 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
 
     exited_section_seal = False
     if seal_mode == "section_sealed":
-        if _is_section_sealed_exit(stripped, frag_label, is_markdown_heading):
+        if _is_section_sealed_exit(stripped, frag_label, is_markdown_heading, explicit_heading):
             # Re-classify the exiting line cleanly as its true public block kind.
             seal_mode = None
             exited_section_seal = True
         else:
             return "solution_sealed", "section_sealed", False, False, False, None, None
 
-    if frag_label == "caption":
-        cap_match = _CAPTION_PREFIX_RE.match(stripped)
-        cap_ref = (cap_match.group("ref") or cap_match.group("zh_ref")) if cap_match else None
-        return "figure_caption", None, True, False, exited_section_seal, cap_ref.strip() if cap_ref else None, _caption_visual_kind(stripped, page_visuals)
+    cap_match = _caption_heading(stripped, explicit_heading)
+    has_caption_name = bool(_CAPTION_NAME_RE.match(stripped))
+    if frag_label == "caption" and not has_caption_name and not cap_match:
+        return "figure_caption", None, True, False, exited_section_seal, None, _caption_visual_kind(stripped, page_visuals)
     if frag_label in ("table", "formula"):
         return "narrative", None, False, False, exited_section_seal, None, None
 
@@ -625,18 +663,18 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     if not in_worked_example and (_INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) or _STANDALONE_SOLUTION_HEADING_RE.match(stripped)):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 
-    if _PROOF_RE.match(stripped):
+    english_block_heading = _is_english_block_heading(stripped, explicit_heading)
+    if _PROOF_RE.match(stripped) and english_block_heading:
         return "proof", None, True, False, exited_section_seal, None, None
-    if _THEOREM_RE.match(stripped):
+    if _THEOREM_RE.match(stripped) and english_block_heading:
         return "theorem", None, True, False, True, None, None
-    if _DEFINITION_RE.match(stripped):
+    if _DEFINITION_RE.match(stripped) and english_block_heading:
         return "definition", None, True, False, True, None, None
     if _WORKED_EXAMPLE_RE.match(stripped):
         return "worked_example", None, True, False, True, None, None
     if _EXERCISE_RE.match(stripped):
         return "exercise", None, True, False, exited_section_seal, None, None
 
-    cap_match = _CAPTION_PREFIX_RE.match(stripped)
     if cap_match:
         cap_ref = (cap_match.group("ref") or cap_match.group("zh_ref")).strip()
         return "figure_caption", None, True, False, exited_section_seal, cap_ref, _caption_visual_kind(stripped, page_visuals)
@@ -646,8 +684,8 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
         or _is_titled_non_answer_chapter(stripped)
         or _SECTION_BREAK_RE.match(stripped)
     )
-    if is_markdown_heading or frag_label in _HEADING_LABELS or section_exit_candidate or exited_section_seal:
-        return "narrative", None, True, True, _is_section_sealed_exit(stripped, frag_label, is_markdown_heading) or exited_section_seal, None, None
+    if ((is_markdown_heading or frag_label in _HEADING_LABELS) and not has_caption_name) or section_exit_candidate or exited_section_seal:
+        return "narrative", None, True, True, _is_section_sealed_exit(stripped, frag_label, is_markdown_heading, explicit_heading) or exited_section_seal, None, None
 
     return "narrative", None, False, False, False, None, None
 

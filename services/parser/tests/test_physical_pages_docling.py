@@ -1063,6 +1063,50 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertNotIn("sectionSealedAtEnd", payload["pages"][4])
         self.assertNotIn("hadSealedContent", payload["pages"][4])
 
+    def test_pending_exercise_answer_ignores_caption_labels_and_prose_references(self):
+        for line in (
+            "Figure:", "# Table:", "Table 1 gives the factorization.", "Theorem 2.1 states this fact.",
+            "Lemma 1.2 implies x = 3.", "Definition 3.1 requires a field.", "Figure 2 illustrates the construction.",
+        ):
+            with self.subTest(line=line):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, "Exercise 1: Find x.\n【解答】", 1)],
+                    [text_element(12, line + "\nx = 3.", 1)],
+                    [text_element(13, "Public explanation.", 1)],
+                ))
+                self.assertEqual(ext.texts_by_page[12], [])
+                self.assertEqual(ext.texts_by_page[13], ["Public explanation."])
+
+    def test_pending_exercise_answer_reopens_at_verified_headings(self):
+        for line, label in (
+            ("Theorem 2.1.", DocItemLabel.TEXT),
+            ("Theorem 2.1 (Lagrange)", DocItemLabel.TEXT),
+            ("# Theorem 2.1 finite rings", DocItemLabel.TEXT),
+            ("**Theorem 2.1 finite rings**", DocItemLabel.TEXT),
+            ("Theorem 2.1 finite rings", DocItemLabel.SECTION_HEADER),
+            ("Table A.2 Summary", DocItemLabel.TEXT),
+            ("Fig. IV: Ring diagram", DocItemLabel.TEXT),
+        ):
+            with self.subTest(line=line, label=label):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, "Exercise 1: Find x.\n【解答】", 1)],
+                    [text_element(12, "x =", 1)],
+                    [text_element(13, line, 1, label)],
+                ))
+                self.assertEqual(ext.texts_by_page[12], [])
+                self.assertEqual(ext.texts_by_page[13], [line])
+
+    def test_inline_exercise_answer_ignores_parenthesized_footer_punctuation(self):
+        for footer in ("(iv).", "第十二页（共三百页）", "共三百页 第十二页"):
+            with self.subTest(footer=footer):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, "Exercise 1: Find x.\n【解析】\n" + footer, 1)],
+                    [text_element(12, "x = 3.", 1)],
+                    [text_element(13, "Public explanation.", 1)],
+                ))
+                self.assertEqual(ext.texts_by_page[12], [])
+                self.assertEqual(ext.texts_by_page[13], ["Public explanation."])
+
     def test_round8_reading_order_tables_and_lecture_solutions(self):
         table_label = DocItemLabel.TABLE
         answer_table = Table(
