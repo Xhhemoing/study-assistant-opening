@@ -347,11 +347,11 @@ function readLatexCueCommand(line: string, readNext: (distance: number) => strin
 }
 
 function tableDelimiterColumnCount(line: string): number {
-  const trimmed = line.trim();
+  const trimmed = line.replace(/^[ \t]+|[ \t]+$/g, "");
   if (!trimmed.includes("|") || !trimmed.includes("-")) return 0;
   const stripped = trimmed.replace(/^\|/, "").replace(/\|$/, "");
   const cells = stripped.split("|");
-  return cells.every(cell => /^\s*:?-{3,}:?\s*$/.test(cell)) ? cells.length : 0;
+  return cells.every(cell => /^[ \t]*:?-{3,}:?[ \t]*$/.test(cell)) ? cells.length : 0;
 }
 
 function parseTimestampToMs(raw: string): number | null {
@@ -564,10 +564,16 @@ function markupNamespace(openTags: OpenHtmlTag[], match: RegExpExecArray): HtmlN
   return namespace;
 }
 
-function htmlElementEnd(text: string, tag: string, from: number): number | undefined {
+function htmlElementEnd(
+  text: string,
+  tag: string,
+  from: number,
+  namespace: HtmlNamespace = tag === "svg" || tag === "math" ? tag : undefined,
+  htmlAnnotation = false,
+): number | undefined {
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   tokens.lastIndex = from;
-  const openTags: OpenHtmlTag[] = tag === "svg" || tag === "math" ? [{ tag, childrenNamespace: tag }] : [];
+  const openTags: OpenHtmlTag[] = namespace ? [{ tag, childrenNamespace: htmlChildNamespace(namespace, tag, htmlAnnotation) }] : [];
   let depth = 1;
   let templateDepth = 0;
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
@@ -643,6 +649,7 @@ function htmlContainerCrossingCodeEnd(
     }
     tokens.lastIndex = closeEnd;
   }
+  liveTags.splice(0, liveTags.length, ...openTags);
   return undefined;
 }
 
@@ -675,13 +682,17 @@ function endOfDetailsCodeFence(
   return text.length;
 }
 
+function isMarkdownBlankLine(line: string): boolean {
+  return /^[ \t]*$/.test(line);
+}
+
 const INDENTED_CODE_RE = /^(?: {4}| {0,3}\t)/;
 
 function endOfDetailsIndentedCode(text: string, start: number, containers: readonly MarkdownContainer[]): number {
   while (start < text.length) {
     const newline = nextLineBreak(text, start);
     const { depth, body } = continueMarkdownContainers(text.slice(start, newline?.index ?? text.length), containers);
-    if (depth !== containers.length || (body.trim() && !INDENTED_CODE_RE.test(body))) break;
+    if (depth !== containers.length || (!isMarkdownBlankLine(body) && !INDENTED_CODE_RE.test(body))) break;
     start = newline ? newline.index + newline[0].length : text.length;
   }
   return start;
@@ -709,7 +720,7 @@ function crossesDetailsHtmlBoundary(
   for (const { raw } of splitLinesWithOffsets(text.slice(start, end)).slice(1)) {
     const next = readMarkdownContainerLine(raw, containers);
     containers = next.containers;
-    if (!HTML_TYPE_6_BLOCK_START_RE.test(next.body)) continue;
+    if (!startsMarkdownHtmlBlock(next.body, false)) continue;
     // Keep an unmatched backtick from absorbing a standalone disclosure
     // closer and pairing with code in a following public paragraph.
     if (!next.body.trimStart().startsWith("</") ||
@@ -745,7 +756,7 @@ function endsMarkdownHtmlBlockLine(kind: MarkdownHtmlBlockKind, body: string): b
 
 function markdownHtmlContinuation(raw: string, block: MarkdownHtmlBlock): string | undefined {
   const { body, depth } = continueMarkdownContainers(raw, block.containers);
-  return depth === block.containers.length && (block.kind <= 5 || body.trim()) ? body : undefined;
+  return depth === block.containers.length && (block.kind <= 5 || !isMarkdownBlankLine(body)) ? body : undefined;
 }
 
 function createMarkdownBlockScanner(initialContainers: readonly MarkdownContainer[] = []) {
@@ -757,7 +768,7 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
   return {
     get htmlBlock() { return htmlBlock; },
     breakParagraph() { afterBlockBoundary = true; },
-    scan(raw: string) {
+    scan(raw: string, continuesInlineLiteral = false) {
       if (htmlBlock) {
         const body = markdownHtmlContinuation(raw, htmlBlock);
         if (body !== undefined) {
@@ -779,6 +790,7 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
       const atBoundary = afterBlockBoundary || next.containers.length > next.continuedDepth;
       containers = next.containers;
       const { body } = next;
+      if (continuesInlineLiteral) return { body, containers, mode: "text" as const, atBoundary: false };
       const htmlKind = startsMarkdownHtmlBlock(body, atBoundary);
       if (htmlKind) {
         if (!endsMarkdownHtmlBlockLine(htmlKind, body)) htmlBlock = { kind: htmlKind, containers };
@@ -789,7 +801,7 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
       const opener = matchFenceOpening(body)?.[1];
       if (opener) fence = { opener, containers };
       indented = INDENTED_CODE_RE.test(body) && (atBoundary || indented);
-      afterBlockBoundary = Boolean(opener) || indented || !body.trim() || THEMATIC_BREAK_RE.test(body) ||
+      afterBlockBoundary = Boolean(opener) || indented || isMarkdownBlankLine(body) || THEMATIC_BREAK_RE.test(body) ||
         /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) || (!atBoundary && SETEXT_UNDERLINE_RE.test(body)) ||
         /^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(body) ||
         (containers.includes("quote") && CALLOUT_HEADER_RE.test(body));
@@ -822,28 +834,62 @@ function hasDisclosureCommentEnd(
   if (/--!?>/.test(text.slice(start, htmlEnd))) return true;
   const scanner = createMarkdownBlockScanner(containers);
   const markdown = text.slice(Math.max(start, htmlEnd));
-  let independentOpener = false;
-  let codeSpanEnd = -1;
-  for (const line of splitLinesWithOffsets(markdown)) {
-    const state = scanner.scan(line.raw);
-    if (state.mode === "code") continue;
-    const tokens = /<!--|--!?>|\x60+/g;
-    tokens.lastIndex = Math.max(0, codeSpanEnd - line.start);
-    for (let match = tokens.exec(line.raw); match; match = tokens.exec(line.raw)) {
-      if (match[0] === "<!--") independentOpener = true;
-      else if (match[0].startsWith("--")) {
-        if (!independentOpener) return true;
-        // A subsequent disclosure opener owns its own closer.
-        const nextDetails = /<(\/?)details(?=[\s/>])/i.exec(markdown.slice(line.start + tokens.lastIndex));
-        return nextDetails?.[1] === "/";
-      } else if (state.mode === "text" && !isEscaped(line.raw, match.index)) {
-        const end = endOfBacktickSpan(markdown, line.start + match.index);
-        if (end !== -1 && !crossesDetailsHtmlBoundary(markdown, line.start + match.index, end, state.containers)) {
-          codeSpanEnd = end;
-          tokens.lastIndex = end - line.start;
+  const lines = splitLinesWithOffsets(markdown);
+  const tokens = new RegExp(/<!--|--!?>|(?<ticks>\x60+)/.source + "|" + HTML_OTHER_LITERAL + "|" + HTML_TAG_TOKEN, "gi");
+  const openTags: OpenHtmlTag[] = [];
+  let sawIndependentComment = false;
+  let detailsDepth = 0;
+  let literalEnd = -1;
+  let lineIndex = 0;
+  const firstLine = lines[lineIndex];
+  if (!firstLine) return false;
+  let state = scanner.scan(firstLine.raw);
+  for (let match = tokens.exec(markdown); match; match = tokens.exec(markdown)) {
+    while (match.index >= lines[lineIndex]!.end) {
+      const line = lines[++lineIndex]!;
+      state = scanner.scan(line.raw, line.start < literalEnd);
+    }
+    if (state.mode === "code") {
+      tokens.lastIndex = lines[lineIndex]!.end;
+      continue;
+    }
+    if (match.groups?.ticks) {
+      if (state.mode === "text" && !isEscaped(markdown, match.index)) {
+        const end = endOfBacktickSpan(markdown, match.index);
+        if (end !== -1 && !crossesDetailsHtmlBoundary(markdown, match.index, end, state.containers)) {
+          literalEnd = tokens.lastIndex = end;
         }
       }
+      continue;
     }
+    if (match[0].startsWith("--")) {
+      if (!sawIndependentComment) return true;
+      continue;
+    }
+    if (match[0] === "<!--") {
+      sawIndependentComment = true;
+      literalEnd = tokens.lastIndex = endOfHtmlComment(markdown, tokens.lastIndex);
+      continue;
+    }
+    const oldCount = openTags.length;
+    const namespace = markupNamespace(openTags, match);
+    const tag = match.groups?.tag?.toLowerCase();
+    const prefix = match.groups?.prefix;
+    if (match.groups?.cdata && (!namespace || !match[0].startsWith("<![CDATA["))) {
+      tokens.lastIndex = endOfBogusHtmlComment(markdown, match.index + 2);
+    }
+    const raw = namespace ? null : htmlRawTextBounds(markdown, match, tokens.lastIndex);
+    if (raw || (!namespace && tag === "template" && prefix === "")) {
+      openTags.length = Math.min(openTags.length, oldCount);
+      tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(markdown, "template", tokens.lastIndex) ?? markdown.length;
+    } else if (!namespace && tag === "details" && sawIndependentComment) {
+      if (prefix === "") detailsDepth++;
+      else if (prefix === "/") {
+        if (detailsDepth === 0) return true;
+        detailsDepth--;
+      }
+    }
+    literalEnd = tokens.lastIndex;
   }
   return false;
 }
@@ -881,7 +927,7 @@ function findMatchingDetailsBounds(
       htmlBlockEndsHere = htmlBlock !== undefined && endsMarkdownHtmlBlockLine(htmlBlock.kind, htmlContinuation!);
       if (contiguousHtml && htmlBlock && (lineStart < markdownBodyStart || htmlStartedInBody)) {
         const continued = continueMarkdownContainers(line, containers);
-        if (continued.depth === containers.length && continued.body.trim()) {
+        if (continued.depth === containers.length && !isMarkdownBlankLine(continued.body)) {
           body = continued.body;
           inIndentedCode = false;
           afterBlockBoundary = false;
@@ -905,7 +951,7 @@ function findMatchingDetailsBounds(
       const endsSetext = sameContainer && !afterBlockBoundary && !inIndentedCode && SETEXT_UNDERLINE_RE.test(body);
       inIndentedCode = INDENTED_CODE_RE.test(body) &&
         (afterBlockBoundary || !sameContainer || inIndentedCode);
-      afterBlockBoundary = !body.trim() || endsSetext || /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) ||
+      afterBlockBoundary = isMarkdownBlankLine(body) || endsSetext || /^[ ]{0,3}#{1,6}(?:[ \t]|$)/.test(body) ||
         THEMATIC_BREAK_RE.test(body);
     }
   };
@@ -978,7 +1024,7 @@ function findMatchingDetailsBounds(
       skipLiteralLines(tokenRe.lastIndex);
       if (body.trimStart().startsWith("<!--")) {
         const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
-        if (!text.slice(tokenRe.lastIndex, end).trim()) afterBlockBoundary = true;
+        if (isMarkdownBlankLine(text.slice(tokenRe.lastIndex, end))) afterBlockBoundary = true;
       }
       continue;
     }
@@ -988,7 +1034,7 @@ function findMatchingDetailsBounds(
         const end = endOfBacktickSpan(text, match.index);
         if (end !== -1 && !crossesDetailsHtmlBoundary(text, match.index, end, containers)) {
           // Keep the legacy inline example consisting solely of an unmatched comment opener.
-          const literalComment = /^\x60+[ \t]*<!--[ \t]*\x60+$/.test(text.slice(match.index, end)) &&
+          const literalComment = htmlBlock && /^\x60+[ \t]*<!--[ \t]*\x60+$/.test(text.slice(match.index, end)) &&
             !hasDisclosureCommentEnd(text, end, htmlBlockEnd(text.length), containers);
           const htmlEnd = htmlBlock && !literalComment ?
             htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end), openTags) : undefined;
@@ -1021,7 +1067,7 @@ function findMatchingDetailsBounds(
     if (tag === "summary") {
       if (prefix === "/") {
         const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
-        if (!text.slice(tokenRe.lastIndex, end).trim()) afterBlockBoundary = true;
+        if (isMarkdownBlankLine(text.slice(tokenRe.lastIndex, end))) afterBlockBoundary = true;
         if (depth === 1 && summaryOpening && !summary) {
           summary = { ...summaryOpening, closeStart: match.index, closeEnd: tokenRe.lastIndex, codeSpans: summaryCodeSpans };
           const newline = nextLineBreak(text, summary.closeEnd);
@@ -1128,6 +1174,17 @@ function linkReferenceDestinationEnd(line: string): number {
   return index && depth === 0 ? index : -1;
 }
 
+function linkReferenceTitleDelimiter(title: string, from: number): number {
+  const opensWithParenthesis = title[0] === "(";
+  const closer = opensWithParenthesis ? ")" : title[0];
+  for (let index = from; index < title.length; index++) {
+    const character = title[index];
+    if (character === "\\") index++;
+    else if (character === closer || (opensWithParenthesis && character === "(")) return index;
+  }
+  return -1;
+}
+
 function collectLinkReferenceLabels(lines: readonly string[]): ReadonlySet<string> {
   const scanner = createMarkdownBlockScanner();
   const labels = new Set<string>();
@@ -1137,10 +1194,10 @@ function collectLinkReferenceLabels(lines: readonly string[]): ReadonlySet<strin
     const continuation = (lineIndex: number) => {
       if (lineIndex >= lines.length) return undefined;
       const next = continueMarkdownContainers(lines[lineIndex]!, containers);
-      return next.depth === containers.length && next.body.trim() ? next.body : undefined;
+      return next.depth === containers.length && !isMarkdownBlankLine(next.body) ? next.body : undefined;
     };
     if (body.includes("|") && isPipeTableStart(body, continuation(index + 1))) continue;
-    let header = body.trimStart();
+    let header = body.replace(/^[ \t]+/, "");
     let lastLine = index;
     let reference = readLinkReferenceLabel(header, 0);
     while (!reference && header.length <= 999 && !/[[\]]/.test(header.slice(1).replace(/\\[^\r\n]/g, ""))) {
@@ -1153,20 +1210,21 @@ function collectLinkReferenceLabels(lines: readonly string[]): ReadonlySet<strin
     if (!reference || header[reference.end] !== ":") continue;
     const name = normalizeLinkReferenceLabel(reference.raw);
     if (!name) continue;
-    let destination = header.slice(reference.end + 1).trimStart();
-    if (!destination) destination = continuation(++lastLine)?.trimStart() ?? "";
+    let destination = header.slice(reference.end + 1).replace(/^[ \t]+/, "");
+    if (!destination) destination = continuation(++lastLine)?.replace(/^[ \t]+/, "") ?? "";
     const destinationEnd = linkReferenceDestinationEnd(destination);
     if (destinationEnd < 0) continue;
     const remainder = destination.slice(destinationEnd);
     if (remainder && !/^[ \t]/.test(remainder)) continue;
-    const inlineTitle = remainder.trim();
+    const inlineTitle = remainder.replace(/^[ \t]+/, "");
     let titleLine = inlineTitle ? lastLine : lastLine + 1;
-    let title = inlineTitle || continuation(titleLine)?.trimStart() || "";
+    let title = inlineTitle || continuation(titleLine)?.replace(/^[ \t]+/, "") || "";
     if (/^["'(]/.test(title)) {
-      const quote = title[0] === "(" ? ")" : title[0]!;
-      while (!LINK_REFERENCE_TITLE_RE.test(title) && !title.slice(1).includes(quote)) {
+      let scannedThrough = 1;
+      while (linkReferenceTitleDelimiter(title, scannedThrough) === -1) {
         const next = continuation(titleLine + 1);
         if (next === undefined) break;
+        scannedThrough = title.length;
         title += "\n" + next;
         titleLine++;
       }
@@ -1355,14 +1413,22 @@ function htmlLabelTextVariants(label: string) {
         (namespace === "math" && MATH_NON_RENDERED_LABEL_TAGS.has(tag) && !htmlAnnotation);
       const selfClosingForeignTag = namespace !== undefined && hasSelfClosingFlag(match[0], tag);
       // Browsers can close these elements implicitly before the next visible sibling.
-      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) && htmlAttributeValue(match[0], tag, "hidden") !== undefined;
+      const display = namespace ? decodeHtmlLabelText(htmlAttributeValue(match[0], tag, "display") ?? "") : "";
+      const style = decodeHtmlLabelText(htmlAttributeValue(match[0], tag, "style") ?? "");
+      const hidden = !HTML_OPTIONAL_END_TAGS.has(tag) && (
+        htmlAttributeValue(match[0], tag, "hidden") !== undefined ||
+        display.trim().toLowerCase() === "none" ||
+        /(?:^|;)\s*display\s*:\s*none(?:\s*!important)?\s*(?:;|$)/i.test(style)
+      );
       const raw = namespace === undefined ? htmlRawTextBounds(label, match, cursor) : null;
-      if (!foreignHidden && (hidden || HTML_NON_RENDERED_LABEL_TAGS.has(tag))) {
+      const inertTag = HTML_NON_RENDERED_LABEL_TAGS.has(tag);
+      if (!foreignHidden && (hidden || inertTag)) {
         // When an end tag is omitted, keep potentially visible text available for protection.
-        const end = HTML_VOID_TAGS.has(tag) || selfClosingForeignTag ? cursor :
-          raw?.closeEnd ?? htmlElementEnd(label, tag, cursor);
-        if (end !== undefined || tag === "template") {
-          tokens.lastIndex = cursor = end ?? label.length;
+        const hiddenEnd = HTML_VOID_TAGS.has(tag) || selfClosingForeignTag ? cursor :
+          raw ? (raw.closeStart < label.length || inertTag ? raw.closeEnd : undefined) :
+          htmlElementEnd(label, tag, cursor, namespace, htmlAnnotation);
+        if (hiddenEnd !== undefined || tag === "template") {
+          tokens.lastIndex = cursor = hiddenEnd ?? label.length;
           continue;
         }
       }
@@ -1560,7 +1626,7 @@ function continueMarkdownContainers(line: string, containers: readonly MarkdownC
       body = body.slice(quote[0].length);
     } else {
       const { length, padding } = listContinuationPrefix(body, container);
-      if (!length && body.trim()) break;
+      if (!length && !isMarkdownBlankLine(body)) break;
       body = " ".repeat(padding) + body.slice(length);
     }
     depth++;
@@ -1605,7 +1671,7 @@ function interruptsPipeTable(line: string): boolean {
 }
 
 function isPipeTableBodyRow(line: string): boolean {
-  return Boolean(line.trim()) && !interruptsPipeTable(line);
+  return !isMarkdownBlankLine(line) && !interruptsPipeTable(line);
 }
 
 function isPipeParagraphLine(line: string): boolean {
@@ -1657,7 +1723,7 @@ function timedTableRowVisibility(
   if (!hasSeparator) return columns[0] ?? "public";
   let visibility: PedagogicalVisibility = "public";
   for (const [index, cell] of cells.entries()) {
-    if (!raw.slice(cell.start, cell.end).trim()) continue;
+    if (isMarkdownBlankLine(raw.slice(cell.start, cell.end))) continue;
     const column = columns[index] ?? "public";
     const alternate = leadingEmptyCell ? columns[index - 1] ?? "public" : "public";
     visibility = maxVisibility(visibility, maxVisibility(column, alternate));
@@ -1954,7 +2020,7 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
       paragraphStart = undefined;
     }
     containers = current.containers;
-    const body = stripLatexComment(current.body).trimStart();
+    const body = stripLatexComment(current.body).replace(/^[ \t]+/, "");
     const latex = matchLatexBlockOpening(current.body, () => text.slice(lineStart));
     if (/^[ \t]*\\end(?=[ \t{%]|$)/.test(current.body)) {
       const closing = LATEX_BLOCK_END_RE.exec(text.slice(lineStart));
@@ -1972,7 +2038,7 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     }
     const beforeLine = newline.index;
     if (
-      !line.trim() ||
+      isMarkdownBlankLine(current.body) ||
       /^(?:#{1,6}(?:[ \t]|$)|:{3,}|\x60{3,}|~{3,})/.test(body) ||
       CALLOUT_HEADER_RE.test(body) ||
       DETAILS_OPEN_RE.test(body) ||
@@ -1983,7 +2049,7 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
       boundary = beforeLine;
       break;
     }
-    if (body && !/^(?:\$\$|\\\[|\\\])/.test(body) && !/^(?: {4}| {0,3}\t)/.test(current.body)) {
+    if (!isMarkdownBlankLine(body) && !/^(?:\$\$|\\\[|\\\])/.test(body) && !/^(?: {4}| {0,3}\t)/.test(current.body)) {
       paragraphStart ??= beforeLine;
       const underline = continueMarkdownContainers(nextLine, containers);
       if (underline.depth === containers.length && SETEXT_UNDERLINE_RE.test(underline.body)) {
@@ -2027,12 +2093,12 @@ function findMathDelimiter(text: string, start: number, token: "$$" | "\\]") {
     const closerLineEnd = nextLineBreak(text, close + 2)?.index ?? text.length;
     const openerLineEnd = nextLineBreak(text, afterOpen)?.index ?? text.length;
     const flowOpener = closerLineStart > openerLineStart
-      && !text.slice(openerLineStart, start).trim()
-      && !stripLatexComment(text.slice(afterOpen, openerLineEnd)).trim();
-    const standaloneCloser = !text.slice(closerLineStart, close).trim()
-      && !stripLatexComment(text.slice(close + 2, closerLineEnd)).trim();
+      && isMarkdownBlankLine(text.slice(openerLineStart, start))
+      && isMarkdownBlankLine(stripLatexComment(text.slice(afterOpen, openerLineEnd)));
+    const standaloneCloser = isMarkdownBlankLine(text.slice(closerLineStart, close))
+      && isMarkdownBlankLine(stripLatexComment(text.slice(close + 2, closerLineEnd)));
     const startsLaterFormula = closerLineStart > openerLineStart
-      && !text.slice(closerLineStart, close).trim()
+      && isMarkdownBlankLine(text.slice(closerLineStart, close))
       && !standaloneCloser;
     if ((flowOpener && !standaloneCloser) || startsLaterFormula) {
       return { end: precedingLineBreakStart(text, closerLineStart), closed: false };
@@ -2055,7 +2121,7 @@ function startsLatexBlock(raw: string, readContinuation?: () => string): boolean
 }
 
 function startsMarkdownBlock(raw: string, next?: string, interruptsParagraph = false): boolean {
-  if (/^\s*$/.test(raw)) return true;
+  if (isMarkdownBlankLine(raw)) return true;
   if (/^[ \t]{0,3}(\x60{3,}|~{3,})/.test(raw)) return true;
   if (/^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(raw)) return true;
   if (DETAILS_OPEN_RE.test(raw.trimStart())) return true;
@@ -2064,7 +2130,7 @@ function startsMarkdownBlock(raw: string, next?: string, interruptsParagraph = f
   if (THEMATIC_BREAK_RE.test(raw)) return true;
   const list = LIST_ITEM_RE.exec(raw);
   if (list && (!interruptsParagraph ||
-    (raw.slice(list[1]!.length).trim() && /^(?:[-+*]|1[.)])/.test(list[1]!.trimStart())))) return true;
+    (!isMarkdownBlankLine(raw.slice(list[1]!.length)) && /^(?:[-+*]|1[.)])/.test(list[1]!.trimStart())))) return true;
   if (isPipeTableStart(raw, next)) return true;
   if (parseInlineTranscriptCue(raw) !== null) return true;
   return false;
@@ -2081,10 +2147,10 @@ interface QuoteParagraph {
 }
 
 function updateQuotedParagraph(state: QuoteParagraph, rawBody: string) {
-  const body = rawBody.trimStart();
+  const body = rawBody.replace(/^[ \t]+/, "");
   const fence = /^(\x60{3,}|~{3,}|\$\$(?=[ \t]*$))(.*)$/.exec(body);
   if (state.fence) {
-    if (fence && fence[1]![0] === state.fence[0] && fence[1]!.length >= state.fence.length && !fence[2]!.trim()) {
+    if (fence && fence[1]![0] === state.fence[0] && fence[1]!.length >= state.fence.length && isMarkdownBlankLine(fence[2]!)) {
       state.fence = undefined;
     }
     return;
@@ -3088,7 +3154,7 @@ function parsePedagogicalAstInternal(
     const line = lines[i]!;
     const raw = line.raw;
 
-    if (/^\s*$/.test(raw)) {
+    if (isMarkdownBlankLine(raw)) {
       i++;
       continue;
     }
@@ -3666,7 +3732,7 @@ function parsePedagogicalAstInternal(
       let endLineIdx = i;
       for (let j = i + 1; j < lines.length; j++) {
         const candidate = lines[j]!.raw;
-        if (!candidate.trim()) {
+        if (isMarkdownBlankLine(candidate)) {
           quote.open = false;
           quote.fence = undefined;
           continue;
