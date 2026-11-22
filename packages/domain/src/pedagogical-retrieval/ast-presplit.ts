@@ -95,7 +95,7 @@ const STANDALONE_PEDAGOGICAL_KINDS = new Set<PedagogicalBlockKind>([
 ]);
 
 const SEALED_HEADING_RE =
-  /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
+  /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|(?:^|[\s:：·.、—\-–_/|([{（【《「『])(?:答案|解答)(?:$|[\s:：·.、—\-–_/|)\]}）】》」』\d])|参考答案|标准答案|习题答案|课后答案|官方答案|查看答案|展开答案|显示答案|答案与解析|答案及解析|答案解析|习题解答|标准解答|解答与评分|评分标准/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
 const HTML_HEADING_START_RE = /<h[1-6](?=[\t\n\f\r />])/i;

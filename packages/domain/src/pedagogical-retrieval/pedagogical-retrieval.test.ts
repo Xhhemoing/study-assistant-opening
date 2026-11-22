@@ -1616,6 +1616,30 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   }
 
   it.each([
+    ...[
+      "答案", "1. 答案", "一、答案", "【答案】", "（答案）", "答案：", "习题 1 答案", "解答",
+      "习题答案", "课后答案", "官方答案", "查看答案", "展开答案", "显示答案", "答案与解析",
+      "答案及解析", "标准解答", "评分标准",
+    ].map(label => `## ${label}\n\nforty-two`),
+    "答案\n---\n\nforty-two",
+    "<h2>答案</h2>\n\nforty-two",
+    "<details><summary>答案</summary>forty-two</details>",
+  ])("seals Chinese answer sections and reopens the next section (%j)", section => {
+    const text = `${section}\n\n## 下一节\n\nPublic follow-up.`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public follow-up.");
+  });
+
+  it("seals the 答案 column of a pipe table and keeps the 题目 column public", () => {
+    const text = "| 题目 | 答案 |\n| --- | --- |\n| 求值 | forty-two |";
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "求值");
+  });
+
+  it.each(["寻找科学的答案", "为什么这个问题没有答案"])("keeps Chinese prose headings public (%s)", title => {
+    const text = `## ${title}\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it.each([
     ...["-webkit-inline-flex", "-webkit-inline-box", "inline flow-root", "flow-root inline", "inline flex", "inline grid"].map(
       display => `An<span style="display:${display};content-visibility:hidden">noise</span>swer`,
     ),
