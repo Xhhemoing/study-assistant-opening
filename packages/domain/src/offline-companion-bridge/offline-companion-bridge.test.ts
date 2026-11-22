@@ -2925,6 +2925,25 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       ...["ratios", "zeros", "videos", "radios", "scenarios", "photos"].map(noun => ({
         answerKey: "A", text: `Select a given count of two ${noun} rises.`, ok: false,
       })),
+      ...["Choose a given program with elderly patients.",
+        "Choose a rhinoceros.",
+        "Choose a given chart with the diagonal scales labeled in meters.",
+        "Choose a given chart with the diagonal scales.",
+        "Choose a given grid with the diagonal shifts."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
+      ...["blue", "green", "black", "white", "yellow", "orange", "purple", "gray", "grey", "pink", "brown"].map(color => ({
+        answerKey: "A", text: `Choose a given box with the ${color} drops.`, ok: true,
+      })),
+      ...["Select a given aid for the elderly rises sharply.",
+        "Select a given aid for the elderly rises.",
+        "Select a elderly.",
+        "Select a studios.",
+        "Select a given balance in the black falls.",
+        "Select a given rate out of the blue rises.",
+        "Select a given car on a straight approaches."].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
         answerKey: "A", text, ok: false,
       })),

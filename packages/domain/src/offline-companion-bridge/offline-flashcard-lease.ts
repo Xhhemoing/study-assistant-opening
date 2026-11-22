@@ -1586,7 +1586,7 @@ const ARTICLE_MODIFIER_WORD_RE = new RegExp("^(?:" +
   "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|more|less|most|least|" +
   "still|given|provided)$");
 const ARTICLE_LY_NOUN_RE =
-  /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly)$/;
+  /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly|elderly)$/;
 const ARTICLE_QUANTITY_TOKEN = /\d(?:[^\s.,;:!?()[\]{}<>]|\.(?=\d))*/u.source;
 const ARTICLE_CARDINAL_WORD = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|" +
   "thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|" +
@@ -1598,8 +1598,9 @@ const ARTICLE_DIMENSION_SEPARATOR = /(?:[ \t]+(?:by|[x×*])[ \t]+|-by-)/.source;
 const ARTICLE_DIMENSION_TOKEN =
   `${ARTICLE_DIMENSION}(?:${ARTICLE_DIMENSION_SEPARATOR}${ARTICLE_DIMENSION})+(?![\\w-])`;
 const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
-const ARTICLE_SINGULAR_S_RE =
-  /(?:[sui]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps|chaos|cosmos|pathos|ethos|thermos|asbestos))$/;
+const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps))$/;
+const ARTICLE_PLURAL_OS_RE =
+  /(?:[eiu]os|^(?:zeros|photos|memos|demos|solos|halos|silos|kilos|combos|echoes|heroes|potatoes|tomatoes|volcanoes|vetoes|torpedoes))$/;
 const ARTICLE_IRREGULAR_PLURAL_RE = /^(?:children|people|men|women|teeth|feet|mice|geese|criteria|phenomena)$/;
 // Option normalization spells Greek unit symbols as "mu" and "omega".
 const ARTICLE_MEASUREMENT_UNIT =
@@ -1618,7 +1619,7 @@ const ARTICLE_PRENOMINAL_ADJECTIVE_RE = new RegExp("^(?:" +
   "linear|nonlinear|planar|angular|rectangular|triangular|diagonal|spatial|temporal|directional|translational|rotational|" +
   "straight|smooth|acute|obtuse|convex|concave|finite|infinite|discrete|strict|weak|strong|" +
   "[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$");
-const ARTICLE_COLOR_RE = /^(?:red|blue|green)$/;
+const ARTICLE_COLOR_RE = /^(?:red|blue|green|black|white|yellow|orange|purple|gray|grey|pink|brown)$/;
 
 const ARTICLE_CLAUSE_END_RE = /[.!?。！？;；:：\r\n\u2028\u2029]/u;
 const ARTICLE_SUBORDINATE_RE = /^(?:that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$/;
@@ -1654,6 +1655,9 @@ const ARTICLE_HOMOGRAPH_VERB_RE = new RegExp("^(?:" +
   "includes|excludes|requires|matches|applies|follows|depends|lies|falls|rises|grows|decays|reduces|simplifies|" +
   "cancels|persists|forces|determines|reaches|attains|intersects|crosses|starts|begins|ends|stops|continues|produces|returns|" +
   "approaches|touches|passes|meets|moves|shifts|scales|maps|projects|transforms|increases|decreases|doubles|halves|peaks|drops|jumps|hits)$");
+const ARTICLE_NON_GEOMETRIC_VERB_RE = new RegExp("^(?:" +
+  "increases|decreases|rises|falls|grows|decays|remains|stays|holds|equals|means|states|shows|gives|yields|makes|" +
+  "takes|uses|needs|lacks|contains|includes|excludes|requires|matches|applies|follows|depends|lies|persists|continues|produces|returns|approaches)$");
 const ARTICLE_INTRANSITIVE_PAST_RE = new RegExp("^(?:" +
   "failed|converged|diverged|vanished|occurred|appeared|existed|remained|stayed|persisted|worked|held|fell|rose|" +
   "grew|decayed|began|ended|stopped|became|differed|succeeded|commuted|terminated|depended|lay|continued|" +
@@ -1800,6 +1804,10 @@ function articleRelationComplementEnd(tokens: readonly string[], start: number):
   return end;
 }
 
+function isArticleRegularPlural(word: string): boolean {
+  return word.endsWith("s") && (!ARTICLE_SINGULAR_S_RE.test(word) || ARTICLE_PLURAL_OS_RE.test(word));
+}
+
 function articlePrepositionalRelationEnd(tokens: readonly string[], start: number): number {
   const directEnd = articleRelationComplementEnd(tokens, start);
   if (directEnd > start) return directEnd;
@@ -1817,7 +1825,7 @@ function articlePrepositionalRelationEnd(tokens: readonly string[], start: numbe
     const end = articleRelationComplementEnd(tokens, appositiveStart);
     if (end > appositiveStart) {
       // A later head must be singular and cannot be a predicate after the noun.
-      const plural = word.endsWith("s") && !ARTICLE_SINGULAR_S_RE.test(word);
+      const plural = isArticleRegularPlural(word);
       const pastVerb = /[aeiouy][a-z]*ed$/.test(word) && !ARTICLE_ED_NOUN_RE.test(word);
       return headIndex > headStart && (plural || pastVerb) ? start : end;
     }
@@ -1899,20 +1907,25 @@ function hasConditionalClausePredicate(remainder: string): boolean {
     const quantity = ARTICLE_CARDINAL_RE.test(token) || DECIMAL_LITERAL_RE.test(token);
     // A plural quantity can span a noun used as a modifier, as in "two speed increases".
     const pluralHead: boolean = expectsPluralHead &&
-      ((token.endsWith("s") && !ARTICLE_SINGULAR_S_RE.test(token)) || ARTICLE_IRREGULAR_PLURAL_RE.test(token));
+      (isArticleRegularPlural(token) || ARTICLE_IRREGULAR_PLURAL_RE.test(token));
     afterQuantifiedPluralHead = pluralHead || (afterQuantifiedPluralHead && isArticleMannerAdverb(token));
     expectsPluralHead = (expectsPluralHead && !pluralHead) ||
       (nounSlot && quantity && token !== "one" && token !== "1" && next !== "of");
-    const colorModifier = ARTICLE_COLOR_RE.test(token) &&
-      (previous !== "the" || (token === "red" && tokens[index - 2]?.toLowerCase() !== "in"));
+    const beforeArticle = tokens[index - 2]?.toLowerCase();
+    const colorNoun = previous === "the" &&
+      ((beforeArticle === "in" && (token === "red" || token === "black")) ||
+        (beforeArticle === "on" && token === "green") ||
+        (beforeArticle === "of" && token === "blue" && tokens[index - 3]?.toLowerCase() === "out"));
+    const colorModifier = ARTICLE_COLOR_RE.test(token) && !colorNoun;
     // "The diagonal" and "a straight" can be complete countable noun phrases.
     const prenominalAdjective = ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) &&
-      !((token === "diagonal" || token === "straight") && ARTICLE_DETERMINER_RE.test(previous));
+      !((token === "diagonal" || token === "straight") &&
+        ARTICLE_DETERMINER_RE.test(previous) && ARTICLE_NON_GEOMETRIC_VERB_RE.test(next));
+    const wordModifier = ARTICLE_MODIFIER_WORD_RE.test(token) &&
+      (!ARTICLE_LY_NOUN_RE.test(token) || (token === "elderly" && previous !== "the"));
     expectsNoun = determiner ||
-      (nounSlot && (quantity || participle ||
-        prenominalAdjective || colorModifier ||
-        ARTICLE_NOUN_COMPOUND_RE.test(token + " " + next) ||
-        (ARTICLE_MODIFIER_WORD_RE.test(token) && !ARTICLE_LY_NOUN_RE.test(token))));
+      (nounSlot && (quantity || participle || prenominalAdjective || colorModifier || wordModifier ||
+        ARTICLE_NOUN_COMPOUND_RE.test(token + " " + next)));
     inInfinitive = token === "to" || (inInfinitive && infinitiveAuxiliary);
     previous = token;
   }
@@ -1947,12 +1960,13 @@ function startsArticleNounPhrase(text: string): boolean {
       if (token.length < 2 || ARTICLE_STOP_WORD_RE.test(word)) return false;
       const head = token.slice(token.lastIndexOf("-") + 1);
       if (ARTICLE_IRREGULAR_PLURAL_RE.test(head)) return false;
-      const singular = !head.endsWith("s") || ARTICLE_SINGULAR_S_RE.test(head);
+      const singular = !isArticleRegularPlural(head);
+      const singularLyNoun = word !== "elderly" && ARTICLE_LY_NOUN_RE.test(word);
       if (needsMeasureWord) {
         // A bare plural cardinal needs both a measure word and a head.
         if (!singular || !ARTICLE_MEASURE_WORD_RE.test(token)) return false;
         needsMeasureWord = false;
-      } else if (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word)) {
+      } else if (!ARTICLE_MODIFIER_WORD_RE.test(word) || singularLyNoun) {
         if (singular) return !afterParticipialConditional || !hasConditionalClausePredicate(remainder);
         afterPluralModifier = true;
       }
