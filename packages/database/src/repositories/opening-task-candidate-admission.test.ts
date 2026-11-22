@@ -106,6 +106,31 @@ it("locks the course, direct and inherited materials, and memberships before val
   expect(queries.findLast(query => query.startsWith("SELECT m.id, course.id"))).toContain(`s.id = ANY(${direct},${backing}::uuid[])`);
 });
 
+it.each([false, true])("denies a memory-only task source without a backing match (result row: %s)", async hasBackingRow => {
+  const sourceId = "66666666-6666-4666-8666-666666666666";
+  const memoryId = "88888888-8888-4888-8888-888888888888";
+  const refs = [{ sourceId, sourceVersion: 0, memoryOnly: true }, { memoryDependencyIds: [memoryId] }];
+  const { tx } = simulatedSql(query => {
+    if (query.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (query.startsWith("SELECT c.payload")) return [{
+      payload: { kind: "task", title: "Review", minutes: 15, dueText: null }, source_turn_id: turnId,
+      has_memory_dependencies: true, course_id: null, source_ids: [sourceId], role: "assistant", context_source_refs: refs,
+    }];
+    if (query.startsWith("SELECT t.id FROM opening_turns")) return [{ id: {
+      turnId, ownerUserId: scope.ownerUserId, courseId: null, materialUse: "citation", refs, checkedAt: new Date().toISOString(),
+    } }];
+    if (query.startsWith("SELECT saved.id")) return hasBackingRow ? [{ id: turnId, backings: [[]] }] : [];
+    if (query.startsWith("SELECT dep_m.id")) return [{ id: memoryId, course_id: null, source_turn_ids: [], expires_at: null }];
+    if (query.startsWith("SELECT id FROM opening_sources")) return [{ id: sourceId }];
+    if (query.startsWith("SELECT id FROM course_asset_memberships")) return [];
+    if (query.startsWith("SELECT c.id")) return [{ id: candidateId }];
+    throw new Error(query);
+  });
+  await expect(admitTaskCandidate(tx, scope, candidateId)).rejects.toMatchObject({
+    code: "VALIDATION", message: "task candidate memory dependency is no longer active",
+  });
+});
+
 it.each([false, true])("keeps the preferred temporary legacy backing with reversed rows = %s", async reverse => {
   const lower = "60000000-0000-4000-8000-000000000001";
   const higher = "60000000-0000-4000-8000-000000000002";

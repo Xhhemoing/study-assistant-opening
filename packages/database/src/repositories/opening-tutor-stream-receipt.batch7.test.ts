@@ -30,10 +30,9 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string;
   expiredOnFinalCheck?: string;
   missingCompletionAssistant?: boolean;
-  legacyBackingId?: string;
   metadataTarget?: boolean;
-  storedMemoryMaterials?: Array<{ source_id: string | null; version: string | null; course_id: string | null; usable: boolean;
-    memory_id?: string; legacy_turn_id?: string }> };
+  storedMemoryOrigins?: Record<string, { refs: unknown[]; backings?: string[][]; sourceIds?: string[] }>;
+};
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
@@ -47,10 +46,6 @@ function fixture(options: Options = {}) {
     }
     if (sql.startsWith("WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
     if (sql.startsWith("CASE WHEN (?) ~*")) return { fragmentSql: sql };
-    if (sql.startsWith("WITH RECURSIVE ? SELECT mat.source_id")) {
-      calls.push({ sql, values });
-      return options.storedMemoryMaterials ?? [];
-    }
     if (sql.startsWith("NOT EXISTS ( ? SELECT 1 FROM mem_deps")) return values[0];
     if (sql.startsWith("WITH candidate_target AS MATERIALIZED")) {
       calls.push({ sql, values });
@@ -87,12 +82,15 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT dep_m.id, dep_m.course_id")) {
       const requested = values.find(Array.isArray) as string[];
       return (options.activeGlobalMemoryIds ?? []).filter(id => requested.includes(id))
-        .map(id => ({ id, course_id: null, expires_at: null, source_turn_ids: [] }));
+        .map(id => ({ id, course_id: null, expires_at: null, source_turn_ids: options.storedMemoryOrigins?.[id] ? [user] : [] }));
     }
     if (sql.startsWith("SELECT m.id, course.id AS turn_course_id")) {
       const origins = values.find(Array.isArray) as Array<{ id: string }>;
-      return origins.map(origin => ({ id: origin.id, turn_course_id: null, refs: [],
-        backings: [[options.legacyBackingId]] }));
+      return origins.flatMap(({ id }) => {
+        const origin = options.storedMemoryOrigins?.[id];
+        return origin ? [{ id, turn_course_id: null, refs: origin.refs,
+          backings: origin.backings ?? [], source_ids: origin.sourceIds ?? [] }] : [];
+      });
     }
     if (sql.startsWith("SELECT lower(sid.id::text) AS source_id")) {
       return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id, backed_by_global: true }))
@@ -655,9 +653,8 @@ describe("stream receipt release waits for current job authorization and assista
   it("checks the legacy backing's expiry in the final gate before starting the provider", async () => {
     const parent = "12000000-0000-4000-8000-0000000000ac";
     const backing = "12000000-0000-4000-8000-0000000000ad";
-    const f = fixture({ activeGlobalMemoryIds: [parent, backing], legacyBackingId: backing, expiredOnFinalCheck: backing,
-      storedMemoryMaterials: [{ source_id: null, version: null, course_id: null, usable: true,
-        memory_id: parent, legacy_turn_id: user }] });
+    const f = fixture({ activeGlobalMemoryIds: [parent, backing], expiredOnFinalCheck: backing,
+      storedMemoryOrigins: { [parent]: { refs: [{ sourceId, sourceVersion: 0, memoryOnly: true }], backings: [[backing]] } } });
     const startProvider = vi.fn(async () => "provider reply");
     await expect(f.repo.authorizeSend(scope, jobId, { ...context, globalMemoryIds: [parent] }, startProvider))
       .rejects.toMatchObject({ code: "CONFLICT" });
@@ -773,10 +770,7 @@ describe("stream receipt release waits for current job authorization and assista
     const parent = "12000000-0000-4000-8000-0000000000ac";
     const ancestor = "12000000-0000-4000-8000-0000000000ad";
     const f = fixture({ activeGlobalMemoryIds: [parent, ancestor], expiredOnFinalCheck: ancestor,
-      storedMemoryMaterials: [parent, ancestor].map(memory_id => ({
-        source_id: null, version: null, course_id: null, usable: true, memory_id,
-      })),
-    });
+      storedMemoryOrigins: { [parent]: { refs: [{ memoryDependencyIds: [ancestor] }] } } });
     const start = vi.fn(async () => "sent");
     await expect(f.repo.authorizeSend(scope, jobId, { ...context, expectedPrivacyEpoch: 2,
       globalMemoryIds: [parent] }, start)).rejects.toMatchObject({ code: "CONFLICT" });
@@ -793,7 +787,7 @@ describe("stream receipt release waits for current job authorization and assista
   it("checks stored memory source availability without a caller source reference", async () => {
     const memoryId = "12000000-0000-4000-8000-0000000000ad";
     const f = fixture({ activeGlobalMemoryIds: [memoryId], unavailableSource: true,
-      storedMemoryMaterials: [{ source_id: sourceId, version: "0", course_id: null, usable: true }] });
+      storedMemoryOrigins: { [memoryId]: { refs: [], sourceIds: [sourceId] } } });
     await expect(f.repo.completeTurn({
       scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [],
       claimToken: token, contextSourceRefs: [],

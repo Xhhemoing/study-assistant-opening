@@ -35,7 +35,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
           THEN 'practice' ELSE 'citation' END AS material_use,
         CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
           THEN 'practice' ELSE 'citation' END AS prior_material_use,
-        ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, priorCourse, scope)} AS memory_backing_ids,
+        CASE WHEN a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+          THEN ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, priorCourse, scope)} ELSE '[]'::jsonb END AS memory_backing_ids,
         COALESCE(a.context_source_refs @? '$[*].memoryDependencyIds[*]' OR
           a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb, false) AS memory_bearing,
         EXISTS (

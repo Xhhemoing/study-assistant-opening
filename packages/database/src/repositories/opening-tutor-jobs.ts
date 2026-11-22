@@ -15,11 +15,11 @@ import { courseSourcePurposeAllows, helpInputSnapshotSchema, openingMaterialPurp
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
 import {
   contextSourceRefsIncluded, hasMemoryBearingRef, lineageUuid, memoryBacksSource, memoryCourseAllows,
-  memoryDependencyGraphCtes, memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
+  memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
   resolveMemoryDependencyStatus, turnContextSourceRefs, turnPinnedSourceRefs, type ContextSourceRef,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockActiveMemoryCourse, lockMemoryMaterialSources, readMemoryDependencyStatus, readMemoryOrigins, turnMaterialRows } from "./opening-memory-admission";
+import { lockActiveMemoryCourse, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
 import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
 import {
   fenceCancelledOpeningTutorStream, isUnconfirmedStreamSealError, markFallbackStreamSealAttempted,
@@ -144,83 +144,6 @@ async function assertGlobalMemoriesUnexpiredInTx(
   }
 }
 
-type MemoryMaterial = {
-  source_id: string | null; version: string | null; course_id: string | null; usable: boolean;
-  memory_id: string; legacy_turn_id: string | null;
-};
-
-async function readStreamMemoryMaterialBatch(
-  tx: TransactionSql, scope: OpeningScope, memoryIds: string[], courseId: string | null,
-): Promise<MemoryMaterial[]> {
-  return tx<MemoryMaterial[]>`
-    WITH RECURSIVE ${memoryDependencyGraphCtes(tx, scope.workspaceId,
-      () => tx`SELECT id FROM unnest(${memoryIds}::uuid[]) roots(id)`)}
-    SELECT mat.source_id, mat.version, d.course_id,
-      d.dep_id AS memory_id,
-      CASE WHEN t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-        AND NOT (t.context_source_refs @? '$[*].memoryDependencyIds[*]') THEN t.id END AS legacy_turn_id,
-      COALESCE(d.usable AND (d.course_id IS NULL OR d.course_id = ${courseId}::uuid)
-        AND jsonb_typeof(d.source_turn_ids) = 'array'
-        AND (ref.ordinality IS NULL OR (c.id IS NOT NULL
-          AND jsonb_typeof(t.source_versions) = 'object'
-          AND jsonb_typeof(t.citations) = 'array'
-          AND (t.role <> 'assistant' OR t.context_source_refs IS NULL OR jsonb_typeof(t.context_source_refs) = 'array')
-          AND (mat.source_id IS NULL AND mat.version_required IS NULL OR (
-            ${lineageUuid(tx, () => tx`mat.source_id`)} IS NOT NULL
-            AND (NOT mat.version_required OR mat.version IS NOT NULL)
-            AND (mat.version IS NULL OR mat.version ~ '^[0-9]+$')
-          )))), false) AS usable
-    FROM dependency_status d
-    LEFT JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(d.source_turn_ids) = 'array'
-      THEN d.source_turn_ids ELSE '[]'::jsonb END) WITH ORDINALITY ref(turn_id, ordinality) ON true
-    LEFT JOIN opening_turns t ON t.id = ${lineageUuid(tx, () => tx`ref.turn_id`)}
-      AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
-    LEFT JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id
-      AND c.owner_user_id = ${scope.ownerUserId}
-    LEFT JOIN LATERAL (${turnMaterialRows(tx)}) mat ON true`;
-}
-
-async function readStreamMemoryMaterials(
-  tx: TransactionSql, scope: OpeningScope, ids: string[], courseId: string | null, materialUse: "practice" | "citation",
-) {
-  const known = new Set(ids);
-  const checkedLegacy = new Set<string>();
-  const materials: MemoryMaterial[] = [];
-  let pending = ids;
-  while (pending.length) {
-    const rows = await readStreamMemoryMaterialBatch(tx, scope, pending, courseId);
-    if (rows.some(row => !row.usable)) {
-      throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
-    }
-    materials.push(...rows);
-    for (const row of rows) if (row.memory_id) known.add(row.memory_id);
-    const legacy = new Map<string, { id: string; excludedId: string; course_id: string | null; turn_ids: string[] }>();
-    for (const row of rows) {
-      if (!row.legacy_turn_id) continue;
-      const key = `${row.memory_id}:${row.legacy_turn_id}`;
-      if (checkedLegacy.has(key)) continue;
-      checkedLegacy.add(key);
-      const group = legacy.get(row.memory_id);
-      if (group) group.turn_ids.push(row.legacy_turn_id);
-      else legacy.set(row.memory_id, { id: row.memory_id, excludedId: row.memory_id,
-        course_id: row.course_id, turn_ids: [row.legacy_turn_id] });
-    }
-    pending = [];
-    if (!legacy.size) continue;
-    const origins = await readMemoryOrigins(tx, scope, [...legacy.values()], { materialUse });
-    for (const id of legacy.keys()) {
-      const origin = origins.get(id);
-      if (!origin) throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
-      for (const dependency of origin.ids) {
-        if (known.has(dependency)) continue;
-        known.add(dependency);
-        pending.push(dependency);
-      }
-    }
-  }
-  return { materials, memoryIds: [...known].sort() };
-}
-
 async function assertStreamMaterialAdmission(
   sql: Sql,
   tx: TransactionSql,
@@ -332,47 +255,33 @@ async function assertStreamMaterialAdmission(
   if (courseId !== null && deferredCourseId === null) {
     await lockStreamCourse(tx, scope, courseId);
   }
-  let memoryMaterials: MemoryMaterial[] = [];
-  if (globalMemoryIdList.length) {
-    const validated = await readStreamMemoryMaterials(tx, scope, globalMemoryIdList, courseId, materialUse);
-    memoryMaterials = validated.materials;
-    globalMemoryIdList = validated.memoryIds;
-  }
-  const materialIds = [...new Set(memoryMaterials.flatMap(row => row.source_id ? [row.source_id.toLowerCase()] : []))].sort();
-  if (derivedSourceIds.length || materialIds.length) {
+  const collectSourceIds = new Set<string>();
+  let graph = globalMemoryIdList.length
+    ? await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, { materialUse, collectSourceIds }) : undefined;
+  if (derivedSourceIds.length || collectSourceIds.size) {
     // Lock courses -> all opening_sources (pinned + derived + memory lineage) in deterministic ID order
     // BEFORE any course_asset_memberships lock so addAssetMembership(FOR UPDATE on opening_sources)
     // can never deadlock or race standalone/mock_exam classification.
-    const allSourceIds = [...new Set([...pinnedSourceIds, ...derivedSourceIds, ...materialIds])].sort();
+    const allSourceIds = [...new Set([...pinnedSourceIds, ...derivedSourceIds, ...collectSourceIds])].sort();
     const lockedSources = await tx`SELECT s.id,s.version FROM opening_sources s
       WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${allSourceIds}::uuid[])
       ORDER BY s.id FOR SHARE OF s`;
     if (lockedSources.length !== allSourceIds.length) {
       throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
     }
-    if (materialIds.length) {
-      const versions = new Map(lockedSources.map(row => [String(row.id), Number(row.version)]));
-      const refs = memoryMaterials.flatMap(row => row.source_id ? [{
-        sourceId: row.source_id.toLowerCase(), sourceVersion: row.version === null
-          ? versions.get(row.source_id.toLowerCase())! : Number(row.version),
-      }] : []);
-      if (refs.some(ref => !Number.isSafeInteger(ref.sourceVersion) || ref.sourceVersion < 0)) {
-        throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
-      }
-      await assertStreamSources(tx, scope, refs);
-      const memberships = await tx<{ asset_id: string; course_id: string; purpose: CourseSourcePurpose | null }[]>`
-        SELECT asset_id,course_id,purpose FROM course_asset_memberships
-        WHERE workspace_id=${scope.workspaceId} AND asset_type='source' AND asset_id=ANY(${materialIds}::uuid[])
+    if (collectSourceIds.size) {
+      await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
+        AND asset_type='source' AND asset_id=ANY(${[...collectSourceIds].sort()}::uuid[])
         ORDER BY asset_id,course_id FOR SHARE`;
-      for (const row of memoryMaterials) {
-        if (!row.source_id) continue;
-        const forSource = memberships.filter(membership => membership.asset_id === row.source_id!.toLowerCase());
-        if (forSource.some(membership => membership.purpose === "mock_exam")
-          || !sourceMembershipAllows(forSource, row.course_id, materialUse, true)) {
-          throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
-        }
-      }
+      graph = await readMemoryDependencyStatus(tx, scope, globalMemoryIdList, {
+        materialUse, lockedSourceIds: lockedSources.map(row => String(row.id)),
+      });
     }
+  }
+  if (graph) {
+    const resolved = resolveMemoryDependencyStatus(graph, globalMemoryIdList, [], courseId);
+    if (!resolved) throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
+    globalMemoryIdList = [...new Set(resolved.map(memory => memory.dep_id))].sort();
   }
   if (pin && (pin.courseId !== null || pin.sources.length > 0)) {
     await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);

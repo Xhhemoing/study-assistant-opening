@@ -439,35 +439,6 @@ export function turnMemoryOnlyBackingIds(
   )`;
 }
 
-/** Set-based explicit lineage closure for the stream material gate. */
-export function memoryDependencyGraphCtes(db: Db, workspaceId: string, seeds: FragmentFactory): Fragment {
-  return db`
-    mem_deps(root_id, parent_id, dep_id, origin_course_id) AS (
-      SELECT id, NULL::uuid, id::text, NULL::uuid FROM (${seeds()}) roots
-      UNION
-      SELECT prev.root_id, parent.id, lower(dep.id), ${turnLineageCourse(db, "t")}
-      FROM mem_deps prev
-      JOIN opening_memories parent ON parent.id = ${lineageUuid(db, () => db`prev.dep_id`)}
-        AND parent.workspace_id = ${workspaceId}
-      CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN jsonb_typeof(parent.source_turn_ids) = 'array' THEN parent.source_turn_ids ELSE '[]'::jsonb END
-      ) origin(turn_id)
-      JOIN opening_turns t ON t.id = ${lineageUuid(db, () => db`origin.turn_id`)} AND t.workspace_id = parent.workspace_id
-      CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
-    ), dependency_status AS MATERIALIZED (
-    SELECT d.root_id, d.dep_id, m.course_id, m.source_turn_ids,
-      m.status = 'active'
-        AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at > clock_timestamp()))
-        AND (m.course_id IS NULL OR c.id IS NOT NULL)
-        AND (d.parent_id IS NULL OR ${dependencyOriginCourseAllows(db, () => db`parent.course_id`, () => db`m.course_id`, () => db`d.origin_course_id`)}) AS usable,
-      CASE WHEN m.kind = 'temporary' THEN m.expires_at END AS expires_at
-    FROM mem_deps d
-    LEFT JOIN opening_memories m ON m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND m.workspace_id = ${workspaceId}
-    LEFT JOIN opening_memories parent ON parent.id = d.parent_id AND parent.workspace_id = m.workspace_id
-    LEFT JOIN courses c ON c.id = m.course_id AND c.workspace_id = m.workspace_id AND c.archived_at IS NULL
-    )`;
-}
-
 export type MemoryDependencyStatus = {
   dep_id: string; course_id: string | null; expires_at: Date | null; usable: boolean;
 };
@@ -527,7 +498,7 @@ export async function readTurnsWithActiveMemoryDependencies(
       ELSE to_jsonb(a.id) END AS id) t
     WHERE a.workspace_id = ${workspaceId} AND a.id = ANY(${turnIds}::uuid[]) AND a.status='complete'`;
   const active = new Set<string>();
-  const groups = new Map<string, Array<TurnMemoryEvidence & { ids: string[] }>>();
+  const groups = new Map<string, Array<TurnMemoryEvidence & { ids: string[]; memoryOnlyCount: number }>>();
   for (const { id } of rows) {
     if (typeof id === "string") {
       active.add(id);
@@ -535,27 +506,31 @@ export async function readTurnsWithActiveMemoryDependencies(
     }
     const ids = parseContextMemoryDependencyIds(id.refs);
     if (!ids) continue;
+    const memoryOnlyCount = Array.isArray(id.refs) ? id.refs.filter(ref => ref.memoryOnly === true).length : 0;
+    const turn = { ...id, ids, memoryOnlyCount };
     const key = `${id.ownerUserId}:${id.materialUse}`;
     const group = groups.get(key);
-    if (group) group.push({ ...id, ids });
-    else groups.set(key, [{ ...id, ids }]);
+    if (group) group.push(turn);
+    else groups.set(key, [turn]);
   }
   const readGroups = async (rules?: { collectSourceIds?: Set<string>; lockedSourceIds?: readonly string[] }) => {
     const admitted = new Set(active);
     for (const turns of groups.values()) {
       const { ownerUserId, materialUse } = turns[0]!;
       const scope = { workspaceId, ownerUserId };
-      const legacy = turns.filter(turn => Array.isArray(turn.refs) && turn.refs.some(ref => ref?.memoryOnly === true));
-      const backingRows = legacy.length ? await db<{ id: string; backings: string[][] }[]>`
+      const memoryOnlyTurns = turns.filter(turn => turn.memoryOnlyCount > 0);
+      const backingRows = memoryOnlyTurns.length ? await db<{ id: string; backings: string[][] }[]>`
         SELECT saved.id, ${turnMemoryOnlyBackingIds(db, () => db`saved.refs`, () => db`saved.course_id`, scope)} AS backings
-        FROM jsonb_to_recordset(${db.json(legacy.map(turn => ({ id: turn.turnId, refs: turn.refs as never,
+        FROM jsonb_to_recordset(${db.json(memoryOnlyTurns.map(turn => ({ id: turn.turnId, refs: turn.refs as never,
           course_id: turn.courseId })))}::jsonb) saved(id uuid, refs jsonb, course_id uuid)` : [];
       const backings = new Map(backingRows.map(row => [row.id, row.backings]));
       const graph = await readMemoryDependencyStatus(db, scope,
         [...turns.flatMap(turn => turn.ids), ...backingRows.flatMap(row => row.backings.flat())], { ...rules, materialUse });
       const now = Date.now();
       for (const turn of turns) {
-        const resolved = resolveMemoryDependencyStatus(graph, turn.ids, backings.get(turn.turnId) ?? [], turn.courseId);
+        const turnBackings = backings.get(turn.turnId) ?? [];
+        if (turnBackings.length !== turn.memoryOnlyCount) continue;
+        const resolved = resolveMemoryDependencyStatus(graph, turn.ids, turnBackings, turn.courseId);
         const checkedAt = Math.max(now, Date.parse(turn.checkedAt));
         if (resolved?.every(memory => memory.expires_at === null || new Date(memory.expires_at).getTime() > checkedAt)) admitted.add(turn.turnId);
       }

@@ -40,30 +40,32 @@ export async function lockMemoryMaterialSources(db: Db, scope: OpeningScope, sou
 /** Turn material rows retain version pins and document identity independent of context provenance. */
 export function turnMaterialRows(db: Db, includeUserContext = false): ReturnType<Db> {
   return db`
-    SELECT sid.id::text AS source_id, NULL::text AS version, false AS version_required
+    SELECT sid.id::text AS source_id, NULL::text AS version, false AS version_required, false AS memory_only
     FROM unnest(t.source_ids) sid(id)
     UNION ALL
-    SELECT ref->>'sourceId', CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number' THEN ref->>'sourceVersion' END, true
-    FROM jsonb_array_elements(
-      CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END
-      || CASE WHEN (${includeUserContext} OR t.role = 'assistant') AND jsonb_typeof(t.context_source_refs) = 'array'
-        THEN t.context_source_refs ELSE '[]'::jsonb END) ref
+    SELECT citation->>'sourceId', CASE WHEN jsonb_typeof(citation->'sourceVersion') = 'number' THEN citation->>'sourceVersion' END, true, false
+    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END) citation
+    UNION ALL
+    SELECT ref->>'sourceId', CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number' THEN ref->>'sourceVersion' END,
+      true, COALESCE(ref->'memoryOnly' = 'true'::jsonb, false)
+    FROM jsonb_array_elements(CASE WHEN (${includeUserContext} OR t.role = 'assistant')
+      AND jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END) ref
     WHERE NOT (ref = jsonb_build_object('memoryDependencyIds', ref->'memoryDependencyIds')
       AND jsonb_typeof(ref->'memoryDependencyIds') = 'array'
       AND ref->'memoryDependencyIds' <> '[]'::jsonb)
     UNION ALL
     SELECT pin.source_id, CASE WHEN pin.source_version IS NULL THEN NULL
-      WHEN jsonb_typeof(pin.source_version) = 'number' THEN pin.source_version #>> '{}' ELSE '' END, pin.version_required
+      WHEN jsonb_typeof(pin.source_version) = 'number' THEN pin.source_version #>> '{}' ELSE '' END, pin.version_required, false
     FROM (${turnPinnedSourceRefs(db, () => db`t.source_versions`, () => db`t.context_anchor`)}) pin
     UNION ALL
-    SELECT k.source_id::text, k.source_version::text, true
+    SELECT k.source_id::text, k.source_version::text, true, false
     FROM (SELECT t.chunk_id AS id WHERE t.chunk_id IS NOT NULL) saved
     LEFT JOIN opening_source_chunks k ON k.id = saved.id`;
 }
 
 export function sourceMaterialsActive(
   db: Db, workspaceId: string, materials: FragmentFactory,
-  options?: MemoryMaterialRules & { memoryCourse?: FragmentFactory; originUse?: FragmentFactory },
+  options?: MemoryMaterialRules & { memoryCourse?: FragmentFactory; originUse?: FragmentFactory; authorizeMemoryOnlySeparately?: boolean },
 ): ReturnType<Db> {
   const memoryCourse = options?.memoryCourse;
   return db`NOT EXISTS (
@@ -80,7 +82,8 @@ export function sourceMaterialsActive(
       ${options?.excluded ? db`OR s.id = ANY(${options.excluded}::uuid[])` : db``}
       ${memoryCourse ? db`OR (
         SELECT COALESCE(bool_or(cam.purpose = 'mock_exam'), false)
-          OR CASE WHEN ${memoryCourse()} IS NULL THEN count(cam.purpose) > 0
+          OR CASE ${options?.authorizeMemoryOnlySeparately ? db`WHEN ref.memory_only THEN false` : db``}
+            WHEN ${memoryCourse()} IS NULL THEN count(cam.purpose) > 0
             ELSE NOT COALESCE(bool_or(cam.course_id = ${memoryCourse()}
               AND (cam.purpose IS NULL OR cam.purpose = 'teaching'
                 OR cam.purpose = ${options?.originUse
@@ -178,7 +181,8 @@ async function readOriginBindings(
   const originUse: FragmentFactory | undefined = rules?.materialUse === "origin" ? () => db`policy.material_use` : undefined;
   const rows = await db<(Omit<OriginBinding, "ids"> & { refs: unknown; source_ids?: string[] })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
-      ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`, scope)} AS backings,
+      CASE WHEN t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+        THEN ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`, scope)} ELSE '[]'::jsonb END AS backings,
       ${originUse ? originUse() : db`NULL::text`} AS material_use
       ${rules?.collectSourceIds ? db`, ARRAY(
         SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
