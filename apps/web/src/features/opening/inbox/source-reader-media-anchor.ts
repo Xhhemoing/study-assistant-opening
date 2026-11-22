@@ -226,11 +226,11 @@ export function createMediaAnchorPlaybackController(
     },
     handleSeeking(media) {
       if (!anchor || pendingSeek) return;
-      // A late seeking event may arrive after the programmatic seek has already rounded.
+      // The first event acknowledges the assignment, even if the browser clamped it.
       const atRequestedPosition = Math.abs(media.currentTime - requestedPosition) * 1000 <= SEEK_TOLERANCE_MS;
       const clampedToEnd = media.currentTime === media.duration && mediaEndsBeforeAnchor(media, anchor);
-      if (isProgrammaticSeek() && (atRequestedPosition || clampedToEnd ||
-        (seekOrigin === "programmatic_requested" && media.seeking === false))) {
+      if (seekOrigin === "programmatic_requested" ||
+        (seekOrigin === "programmatic_started" && (atRequestedPosition || clampedToEnd))) {
         seekOrigin = "programmatic_started";
       } else {
         seekOrigin = "manual";

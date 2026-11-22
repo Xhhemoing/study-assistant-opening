@@ -95,7 +95,7 @@ describe("media anchor bounded playback controller", () => {
     expect(controller.snapshot()).toMatchObject({ phase: "seeked_outside_range", boundActive: false });
   });
 
-  it("reports a scrub that changes the target before the first seeking event", () => {
+  it("treats an unexpected first seeking event as completion of the programmatic request", () => {
     const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000 })!;
     const media = createFakeMedia();
     const controller = createMediaAnchorPlaybackController(anchor);
@@ -103,7 +103,9 @@ describe("media anchor bounded playback controller", () => {
     media.currentTime = 5;
     controller.handleSeeking(media);
     controller.handleSeeked(media);
-    expect(controller.snapshot()).toMatchObject({ phase: "seeked_outside_range", rangeHighlightActive: false });
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seek_unreached", userReleasedBound: false, rangeHighlightActive: false,
+    });
   });
 
   it("becomes ready if a scrub supersedes the initial seek and stays within the citation", () => {
@@ -228,6 +230,28 @@ describe("media anchor bounded playback controller", () => {
 
     expect(media.pauseMock).not.toHaveBeenCalled();
     expect(controller.snapshot().phase).toBe(phase);
+  });
+
+  it("recognizes the first seeking event clamped to the start of a seekable range", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 20_000 })!;
+    const media = Object.assign(createFakeMedia(), {
+      duration: 90,
+      seeking: false,
+      seekable: { length: 1, start: () => 30, end: () => 90 },
+    });
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.activate(media);
+    expect(media.currentTime).toBe(10);
+
+    media.currentTime = media.seekable.start();
+    media.seeking = true;
+    controller.handleSeeking(media);
+    media.seeking = false;
+    controller.handleSeeked(media);
+
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seek_unreached", boundActive: false, userReleasedBound: false,
+    });
   });
 
   it.each([30, 64.7])("recognizes a deferred clamp at the known duration %ss", duration => {

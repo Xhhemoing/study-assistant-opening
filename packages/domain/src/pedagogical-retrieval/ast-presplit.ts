@@ -620,11 +620,12 @@ function htmlContainerCrossingCodeEnd(
   end: number,
   openerLimit: number,
   liveTags: OpenHtmlTag[],
-): { closeEnd?: number; detailsDelta: number } {
-  if (!text.slice(start, openerLimit).includes("<")) return { detailsDelta: 0 };
+  currentDepth: number,
+): { closeEnd?: number; nextDepth: number } {
+  if (!text.slice(start, openerLimit).includes("<")) return { nextDepth: currentDepth };
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const openTags = [...liveTags];
-  let detailsDelta = 0;
+  let nextDepth = currentDepth;
   tokens.lastIndex = start;
   for (let match = tokens.exec(text); match && match.index < openerLimit; match = tokens.exec(text)) {
     const oldCount = openTags.length;
@@ -644,18 +645,18 @@ function htmlContainerCrossingCodeEnd(
     } else {
       closeEnd = tokens.lastIndex;
       if (!namespace && tag === "details") {
-        if (match.groups?.prefix === "") detailsDelta++;
-        else if (match.groups?.prefix === "/" && detailsDelta > 0) detailsDelta--;
+        if (match.groups?.prefix === "") nextDepth++;
+        else if (match.groups?.prefix === "/" && nextDepth > 1) nextDepth--;
       }
     }
     if (closeEnd > end) {
       liveTags.splice(0, liveTags.length, ...openTags);
-      return { closeEnd, detailsDelta };
+      return { closeEnd, nextDepth };
     }
     tokens.lastIndex = closeEnd;
   }
   liveTags.splice(0, liveTags.length, ...openTags);
-  return { detailsDelta };
+  return { nextDepth };
 }
 
 function endOfBacktickSpan(text: string, start: number, limit = text.length): number {
@@ -819,33 +820,50 @@ function createMarkdownHtmlBlockLookup(text: string) {
   const scanner = createMarkdownBlockScanner();
   const activeAtLine = new Map<number, MarkdownHtmlBlock>();
   let cursor = 0;
-  return (lineStart: number) => {
-    while (cursor < lineStart) {
-      const newline = nextLineBreak(text, cursor);
-      scanner.scan(text.slice(cursor, newline?.index ?? text.length));
-      cursor = newline ? newline.index + newline[0].length : text.length;
-      if (scanner.htmlBlock) activeAtLine.set(cursor, scanner.htmlBlock);
-    }
-    return activeAtLine.get(lineStart);
+  let projected: string | undefined;
+  return {
+    htmlBlockAt(lineStart: number) {
+      while (cursor < lineStart) {
+        const newline = nextLineBreak(text, cursor);
+        scanner.scan(text.slice(cursor, newline?.index ?? text.length));
+        cursor = newline ? newline.index + newline[0].length : text.length;
+        if (scanner.htmlBlock) activeAtLine.set(cursor, scanner.htmlBlock);
+      }
+      return activeAtLine.get(lineStart);
+    },
+    maskedLiterals(definedLinkLabels: ReadonlySet<string>) {
+      return projected ??= projectDisclosureCommentMarkdown(text, [], definedLinkLabels, false);
+    },
   };
 }
 
-function projectDisclosureCommentMarkdown(markdown: string, containers: readonly MarkdownContainer[]): string {
+function projectDisclosureCommentMarkdown(
+  markdown: string,
+  containers: readonly MarkdownContainer[],
+  definedLinkLabels: ReadonlySet<string>,
+  maskCode = true,
+): string {
   const lines = splitLinesWithOffsets(markdown);
   const rawLines = lines.map(line => line.raw);
   const scanner = createMarkdownBlockScanner(containers);
   const escapes = "\\\\(?<escape>" + ASCII_PUNCTUATION.source + ")";
   const inline = /(?<ticks>\x60+)|(?<bracket>!?\[|\])|--!?>/.source;
   const tokens = new RegExp([escapes, MARKDOWN_AUTOLINK, inline, HTML_MARKUP_TOKEN].join("|"), "gi");
-  const brackets: { image: boolean; active: boolean }[] = [];
-  const parts: string[] = [];
-  let cursor = 0;
+  const brackets: { start: number; contentStart: number; image: boolean; active: boolean }[] = [];
+  const masks: { start: number; end: number }[] = [];
   let literalEnd = -1;
   let match = tokens.exec(markdown);
   const mask = (start: number, end: number) => {
-    // Keep original coordinates so the disclosure scanner can skip to the rendered terminator.
-    parts.push(markdown.slice(cursor, start), markdown.slice(start, end).replace(/[^\r\n]/g, " "));
-    cursor = end;
+    // A resolved image can cover masks already recorded inside its alt text.
+    while (masks.length && masks.at(-1)!.end >= start) {
+      const prior = masks.pop()!;
+      start = Math.min(start, prior.start);
+      end = Math.max(end, prior.end);
+    }
+    masks.push({ start, end });
+    skipTo(end);
+  };
+  const skipTo = (end: number) => {
     if (match && match.index < end) {
       tokens.lastIndex = end;
       match = tokens.exec(markdown);
@@ -858,7 +876,8 @@ function projectDisclosureCommentMarkdown(markdown: string, containers: readonly
     const state = scanner.scan(line.raw, continuedLiteral);
     if (state.mode !== "text" || state.atBoundary) brackets.length = 0;
     if (state.mode === "code") {
-      mask(line.start, line.end);
+      if (maskCode) mask(line.start, line.end);
+      else skipTo(line.end);
       continue;
     }
     if (state.mode === "text" && state.atBoundary) {
@@ -872,34 +891,52 @@ function projectDisclosureCommentMarkdown(markdown: string, containers: readonly
     }
     while (match && match.index < line.contentEnd) {
       const groups = match.groups!;
+      let maskedStart = match.index;
       let maskedEnd = -1;
       if (state.mode === "text") {
         if (groups.escape || groups.autolink) {
           maskedEnd = tokens.lastIndex;
         } else if (groups.ticks) {
           const end = endOfBacktickSpan(markdown, match.index);
-          if (end !== -1 && !crossesDetailsHtmlBoundary(markdown, match.index, end, state.containers)) maskedEnd = end;
+          if (end !== -1 && !crossesDetailsHtmlBoundary(markdown, match.index, end, state.containers)) {
+            if (maskCode) maskedEnd = end;
+            else {
+              literalEnd = end;
+              skipTo(end);
+              continue;
+            }
+          }
         } else if (groups.bracket === "]") {
           const opener = brackets.pop();
           if (opener?.active) {
-            maskedEnd = markdownLabelLinkEnd(markdown, tokens.lastIndex);
-            if (maskedEnd !== -1 && !opener.image) {
-              for (const previous of brackets) if (!previous.image) previous.active = false;
+            maskedEnd = renderedMarkdownLinkEnd(markdown, match.index, opener.contentStart, definedLinkLabels);
+            if (maskedEnd !== -1) {
+              if (opener.image) maskedStart = opener.start;
+              else for (const previous of brackets) if (!previous.image) previous.active = false;
             }
           }
         } else if (groups.bracket) {
-          brackets.push({ image: groups.bracket.startsWith("!"), active: true });
+          brackets.push({
+            start: match.index, contentStart: tokens.lastIndex, image: groups.bracket.startsWith("!"), active: true,
+          });
         }
       }
       if (maskedEnd !== -1) {
         literalEnd = maskedEnd;
-        mask(match.index, maskedEnd);
+        mask(maskedStart, maskedEnd);
       } else {
         if (groups.escape && state.mode === "html") tokens.lastIndex = match.index + 1;
         literalEnd = tokens.lastIndex;
         match = tokens.exec(markdown);
       }
     }
+  }
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const { start, end } of masks) {
+    // The disclosure scanner still uses the original UTF-16 offsets.
+    parts.push(markdown.slice(cursor, start), markdown.slice(start, end).replace(/[^\r\n]/g, " "));
+    cursor = end;
   }
   return parts.join("") + markdown.slice(cursor);
 }
@@ -909,12 +946,13 @@ function findDisclosureCommentEnd(
   start: number,
   htmlEnd: number,
   containers: readonly MarkdownContainer[],
+  definedLinkLabels: ReadonlySet<string>,
 ): number | undefined {
   const terminator = /--!?>/;
   const direct = terminator.exec(text.slice(start, htmlEnd));
   if (direct) return start + direct.index + direct[0].length;
   const markdownStart = Math.max(start, htmlEnd);
-  const html = projectDisclosureCommentMarkdown(text.slice(markdownStart), containers);
+  const html = projectDisclosureCommentMarkdown(text.slice(markdownStart), containers, definedLinkLabels);
   const firstClose = terminator.exec(html);
   if (!firstClose) return undefined;
 
@@ -960,6 +998,7 @@ function findMatchingDetailsBounds(
   openStart: number,
   searchFrom: number,
   inheritsHtmlBlock: ReturnType<typeof createMarkdownHtmlBlockLookup>,
+  definedLinkLabels: ReadonlySet<string>,
 ): DetailsBounds {
   const literals =
     /<!--|(?<fence>^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)*(?:\x60{3,}[^\x60\r\n]*|~{3,}[^\r\n]*)(?=\r|\n|$))|(?<ticks>\x60+)/.source;
@@ -968,7 +1007,7 @@ function findMatchingDetailsBounds(
   let containers: MarkdownContainer[] = [];
   let nextLineStart = containingLineStart(text, searchFrom);
   let contiguousHtml = /^ {0,3}$/.test(text.slice(containingLineStart(text, openStart), openStart));
-  let htmlBlock = inheritsHtmlBlock(nextLineStart);
+  let htmlBlock = inheritsHtmlBlock.htmlBlockAt(nextLineStart);
   let htmlBlockEndsHere = false;
   const openTags: OpenHtmlTag[] = [];
   let htmlStartedInBody = false;
@@ -1040,9 +1079,9 @@ function findMatchingDetailsBounds(
   let depth = 1;
   const skipCodeBlock = (start: number, end: number) => {
     const openerLimit = htmlBlock ? htmlBlockEnd(end) : start;
-    const crossing = openerLimit > start ? htmlContainerCrossingCodeEnd(text, start, end, openerLimit, openTags) : undefined;
+    const crossing = openerLimit > start ? htmlContainerCrossingCodeEnd(text, start, end, openerLimit, openTags, depth) : undefined;
     const htmlEnd = crossing?.closeEnd;
-    depth += crossing?.detailsDelta ?? 0;
+    depth = crossing?.nextDepth ?? depth;
     tokenRe.lastIndex = htmlEnd ?? end;
     if (htmlEnd !== undefined) skipLiteralLines(htmlEnd);
     else {
@@ -1068,6 +1107,10 @@ function findMatchingDetailsBounds(
     if (allowsMarkdown && inIndentedCode) {
       const end = endOfDetailsIndentedCode(text, nextLineStart, containers);
       skipCodeBlock(containingLineStart(text, match.index), end);
+      continue;
+    }
+    if (allowsMarkdown && !htmlBlock && inheritsHtmlBlock.maskedLiterals(definedLinkLabels)[match.index] !== text[match.index]) {
+      tokenRe.lastIndex = match.index + 1;
       continue;
     }
     const previousTagCount = openTags.length;
@@ -1100,11 +1143,11 @@ function findMatchingDetailsBounds(
           let htmlEnd: number | undefined;
           if (htmlBlock) {
             if (/^\x60+[ \t]*<!--[ \t]*\x60+$/.test(text.slice(match.index, end))) {
-              htmlEnd = findDisclosureCommentEnd(text, end, htmlBlockEnd(text.length), containers);
+              htmlEnd = findDisclosureCommentEnd(text, end, htmlBlockEnd(text.length), containers, definedLinkLabels);
             } else {
-              const crossing = htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end), openTags);
+              const crossing = htmlContainerCrossingCodeEnd(text, match.index, end, htmlBlockEnd(end), openTags, depth);
               htmlEnd = crossing.closeEnd;
-              depth += crossing.detailsDelta;
+              depth = crossing.nextDepth;
             }
           }
           if (insideSummary && htmlEnd === undefined) summaryCodeSpans.push({ start: match.index, end });
@@ -1133,7 +1176,7 @@ function findMatchingDetailsBounds(
       skipLiteralLines(tokenRe.lastIndex);
       continue;
     }
-    if (tag === "summary") {
+    if (!namespace && tag === "summary") {
       if (prefix === "/") {
         const end = nextLineBreak(text, tokenRe.lastIndex)?.index ?? text.length;
         if (isMarkdownBlankLine(text.slice(tokenRe.lastIndex, end))) afterBlockBoundary = true;
@@ -1146,7 +1189,7 @@ function findMatchingDetailsBounds(
         summaryOpening = { openStart: match.index, openEnd: tokenRe.lastIndex };
       }
     }
-    if (tag !== "details") continue;
+    if (namespace || tag !== "details") continue;
     if (prefix === "/") {
       depth--;
       if (depth === 0) {
@@ -1321,6 +1364,20 @@ function collectLinkReferenceLabels(lines: readonly string[]): ReadonlySet<strin
 }
 
 
+function renderedMarkdownLinkEnd(
+  label: string, closeIndex: number, contentStart: number, definedLinkLabels: ReadonlySet<string>,
+): number {
+  const suffixStart = closeIndex + 1;
+  const inlineEnd = markdownLabelLinkEnd(label, suffixStart);
+  if (inlineEnd !== -1 || !definedLinkLabels.size) return inlineEnd;
+  const suffix = readLinkReferenceLabel(label, suffixStart);
+  const raw = suffix?.raw || label.slice(contentStart, closeIndex);
+  const candidate = readLinkReferenceLabel("[" + raw + "]", 0);
+  return candidate?.raw === raw && definedLinkLabels.has(normalizeLinkReferenceLabel(raw))
+    ? suffix?.end ?? suffixStart
+    : -1;
+}
+
 function renderMarkdownLabelMarkup(
   label: string,
   readCodeSpans = true,
@@ -1358,15 +1415,7 @@ function renderMarkdownLabelMarkup(
     } else if (groups.bracket === "]") {
       const opener = brackets.pop();
       if (!opener?.active) continue;
-      let end = markdownLabelLinkEnd(label, tokens.lastIndex);
-      if (end === -1 && definedLinkLabels.size) {
-        const suffix = readLinkReferenceLabel(label, tokens.lastIndex);
-        const raw = suffix?.raw || label.slice(opener.contentStart, match.index);
-        const candidate = readLinkReferenceLabel("[" + raw + "]", 0);
-        if (candidate?.raw === raw && definedLinkLabels.has(normalizeLinkReferenceLabel(raw))) {
-          end = suffix?.end ?? tokens.lastIndex;
-        }
-      }
+      const end = renderedMarkdownLinkEnd(label, match.index, opener.contentStart, definedLinkLabels);
       if (end !== -1) {
         parts[opener.part] = "";
         replace(match.index, end, "");
@@ -1443,23 +1492,51 @@ function lastOpenHtmlTagIndex(openTags: readonly OpenHtmlTag[], tag: string): nu
 
 const CSS_DISPLAY_OUTSIDE = new Set(["block", "inline", "run-in"]);
 const CSS_DISPLAY_INSIDE = new Set(["flow", "flow-root", "table", "flex", "grid", "ruby", "math"]);
+const CSS_WIDE_KEYWORDS = new Set(["inherit", "initial", "unset", "revert", "revert-layer"]);
 const CSS_DISPLAY_SINGLE = new Set([
   "none", "contents", "inline-block", "inline-table", "inline-flex", "inline-grid", "-webkit-box", "-webkit-inline-box",
   "table-row-group", "table-header-group", "table-footer-group", "table-row", "table-cell", "table-column-group",
   "table-column", "table-caption", "ruby-base", "ruby-text", "ruby-base-container", "ruby-text-container",
-  "inherit", "initial", "unset", "revert", "revert-layer",
+  ...CSS_WIDE_KEYWORDS,
 ]);
 
-function validCssDisplay(value: string): boolean {
-  if (CSS_DISPLAY_SINGLE.has(value)) return true;
-  const words = value.split(/[ \t\r\n\f]+/);
-  if (new Set(words).size !== words.length) return false;
-  const outside = words.filter(word => CSS_DISPLAY_OUTSIDE.has(word));
-  const inside = words.filter(word => CSS_DISPLAY_INSIDE.has(word));
-  const listItem = words.includes("list-item");
-  return outside.length <= 1 && inside.length <= 1 &&
-    outside.length + inside.length + Number(listItem) === words.length &&
-    (!listItem || !inside.length || inside[0] === "flow" || inside[0] === "flow-root");
+type CssToken =
+  | { kind: "ident" | "punct" | "literal"; value: string }
+  | { kind: "group"; name: string; tokens: CssToken[]; closed: boolean };
+type CssDeclaration = { name: string; value: readonly CssToken[]; important: boolean };
+
+const CSS_ESCAPE = /\\(?:[0-9a-fA-F]{1,6}(?:\r\n|[ \t\r\n\f])?|[^\r\n\f])/.source;
+const CSS_IDENT = "(?:[-_a-zA-Z0-9\\u0080-\\uFFFF]|" + CSS_ESCAPE + ")+";
+const CSS_COMPONENT = [
+  /(?<trivia>[ \t\r\n\f]+|\/\*[\s\S]*?(?:\*\/|$))/.source,
+  /(?<string>"(?:\\[\s\S]|[^"\\\r\n\f])*"|'(?:\\[\s\S]|[^'\\\r\n\f])*')/.source,
+  "(?<ident>" + CSS_IDENT + ")(?<call>\\()?",
+  /(?<punct>[()[\]{},;:!])|[\s\S]/.source,
+].join("|");
+
+function cssValueTokens(text: string): CssToken[] {
+  const root: CssToken[] = [];
+  const stack: { group: Extract<CssToken, { kind: "group" }>; closer: string }[] = [];
+  for (const match of text.matchAll(new RegExp(CSS_COMPONENT, "g"))) {
+    const { trivia, ident, call, punct } = match.groups!;
+    // Comments separate adjacent tokens, including identifiers such as no/**/ne.
+    if (trivia) continue;
+    const current = stack.at(-1);
+    const tokens = current?.group.tokens ?? root;
+    const value = ident === undefined ? match[0] : unescapeCssDisplay(ident);
+    const closer = call || punct === "(" ? ")" : punct === "[" ? "]" : punct === "{" ? "}" : undefined;
+    if (closer) {
+      const group = { kind: "group" as const, name: value, tokens: [], closed: false };
+      tokens.push(group);
+      stack.push({ group, closer });
+    } else if (current && punct === current.closer) {
+      current.group.closed = true;
+      stack.pop();
+    } else {
+      tokens.push({ kind: ident !== undefined ? "ident" : punct ? "punct" : "literal", value });
+    }
+  }
+  return root;
 }
 
 function unescapeCssDisplay(text: string): string {
@@ -1470,35 +1547,164 @@ function unescapeCssDisplay(text: string): string {
   });
 }
 
-function effectiveDisplayIsNone(styleAttr: string | undefined, presentationAttr?: string): boolean {
-  const presentationIsNone = decodeHtmlLabelText(presentationAttr ?? "").trim().toLowerCase() === "none";
-  if (!styleAttr) return presentationIsNone;
-  const style = decodeHtmlLabelText(styleAttr).replace(/\/\*[\s\S]*?\*\//g, "");
-  const trimCssWhitespace = (value: string) => value.replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/g, "");
-  const declarations: string[] = [];
+function cssDisplayKeyword(tokens: readonly CssToken[], all: boolean): string | undefined {
+  if (!tokens.length || tokens.length > 3) return undefined;
+  const words: string[] = [];
+  for (const token of tokens) {
+    if (token.kind !== "ident") return undefined;
+    words.push(token.value.toLowerCase());
+  }
+  const first = words[0]!;
+  if (all) return words.length === 1 && CSS_WIDE_KEYWORDS.has(first) ? first : undefined;
+  if (words.length === 1 && CSS_DISPLAY_SINGLE.has(first)) return first;
+  if (new Set(words).size !== words.length) return undefined;
+  const outside = words.filter(word => CSS_DISPLAY_OUTSIDE.has(word));
+  const inside = words.filter(word => CSS_DISPLAY_INSIDE.has(word));
+  const listItem = words.includes("list-item");
+  return outside.length <= 1 && inside.length <= 1 &&
+    outside.length + inside.length + Number(listItem) === words.length &&
+    (!listItem || !inside.length || inside[0] === "flow" || inside[0] === "flow-root") ? words.join(" ") : undefined;
+}
+
+function isCssPunct(token: CssToken | undefined, value: string): boolean {
+  return token?.kind === "punct" && token.value === value;
+}
+
+function cssStyleDeclarations(text: string): CssDeclaration[] {
+  const tokens = cssValueTokens(text);
+  const declarations: CssDeclaration[] = [];
   let start = 0;
-  let depth = 0;
-  for (const token of style.matchAll(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\\[\s\S]|[()[\]{};]/g)) {
-    if (token[0] === ";" && depth === 0) {
-      declarations.push(style.slice(start, token.index));
-      start = token.index + 1;
-    } else if (token[0].length === 1 && "([{".includes(token[0])) depth++;
-    else if (token[0].length === 1 && ")]}".includes(token[0])) depth = Math.max(0, depth - 1);
+  for (let end = 0; end <= tokens.length; end++) {
+    if (end < tokens.length && !isCssPunct(tokens[end], ";")) continue;
+    const name = tokens[start];
+    if (name?.kind === "ident" && isCssPunct(tokens[start + 1], ":")) {
+      const last = tokens[end - 1];
+      const important = end >= start + 4 && last?.kind === "ident" && last.value.toLowerCase() === "important" &&
+        isCssPunct(tokens[end - 2], "!");
+      declarations.push({ name: name.value, value: tokens.slice(start + 2, important ? end - 2 : end), important });
+    }
+    start = end + 1;
   }
-  declarations.push(style.slice(start));
-  let winningValue: string | undefined;
-  let winningImportant = false;
-  for (const declaration of declarations) {
-    const colon = declaration.indexOf(":");
-    if (colon < 0 || trimCssWhitespace(unescapeCssDisplay(declaration.slice(0, colon))).toLowerCase() !== "display") continue;
-    const rawValue = trimCssWhitespace(unescapeCssDisplay(declaration.slice(colon + 1))).toLowerCase();
-    const importantEnd = /![ \t\r\n\f]*important$/.exec(rawValue);
-    const value = trimCssWhitespace(rawValue.slice(0, importantEnd?.index));
-    if (!validCssDisplay(value) || (winningImportant && !importantEnd)) continue;
-    winningValue = value;
-    winningImportant = importantEnd !== null;
+  return declarations;
+}
+
+function cssVariableCall(group: Extract<CssToken, { kind: "group" }>) {
+  const [name, comma] = group.tokens;
+  if (!group.closed || name?.kind !== "ident" || !name.value.startsWith("--") || name.value.length <= 2 ||
+    (comma && !isCssPunct(comma, ","))) return undefined;
+  return { name: name.value, fallback: comma ? group.tokens.slice(2) : undefined };
+}
+
+function cssVariableDependencies(tokens: readonly CssToken[]): Set<string> | undefined {
+  const dependencies = new Set<string>();
+  const groups = tokens.filter(token => token.kind === "group");
+  for (let index = 0; index < groups.length; index++) {
+    const group = groups[index]!;
+    if (!group.closed) return undefined;
+    if (group.name.toLowerCase() === "var") {
+      const call = cssVariableCall(group);
+      if (!call) return undefined;
+      dependencies.add(call.name);
+    }
+    for (const token of group.tokens) if (token.kind === "group") groups.push(token);
   }
-  return winningValue === undefined ? presentationIsNone : winningValue === "none";
+  return dependencies;
+}
+
+function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>) {
+  const dependencies = new Map(
+    Array.from(custom, ([name, declaration]) => [name, cssVariableDependencies(declaration.value)]),
+  );
+  const indices = new Map<string, number>();
+  const active = new Set<string>();
+  const stack: string[] = [];
+  const cyclic = new Set<string>();
+  // Each strongly connected component is a cycle, except a lone property without a self-reference.
+  const visit = (name: string): number => {
+    const index = indices.size;
+    let low = index;
+    indices.set(name, index);
+    active.add(name);
+    stack.push(name);
+    const edges = dependencies.get(name);
+    for (const dependency of edges ?? []) {
+      if (!dependencies.has(dependency)) continue;
+      const existing = indices.get(dependency);
+      if (existing === undefined) low = Math.min(low, visit(dependency));
+      else if (active.has(dependency)) low = Math.min(low, existing);
+    }
+    if (low === index) {
+      const members: string[] = [];
+      let member: string;
+      do {
+        member = stack.pop()!;
+        active.delete(member);
+        members.push(member);
+      } while (member !== name);
+      if (members.length > 1 || edges?.has(name)) {
+        for (const member of members) cyclic.add(member);
+      }
+    }
+    return low;
+  };
+  for (const name of custom.keys()) if (!indices.has(name)) visit(name);
+
+  const computed = new Map<string, readonly CssToken[] | undefined>();
+  const substitute = (tokens: readonly CssToken[]): readonly CssToken[] | undefined => {
+    const result: CssToken[] = [];
+    for (const token of tokens) {
+      if (token.kind !== "group") {
+        if (result.length < 4) result.push(token);
+        continue;
+      }
+      if (token.name.toLowerCase() !== "var") {
+        const children = substitute(token.tokens);
+        if (children === undefined) return undefined;
+        if (result.length < 4) result.push({ ...token, tokens: [...children] });
+        continue;
+      }
+      const call = cssVariableCall(token);
+      if (!call) return undefined;
+      const replacement = resolve(call.name) ?? (call.fallback && substitute(call.fallback));
+      if (replacement === undefined) return undefined;
+      // Display has at most three tokens. Keep one extra to distinguish an invalid value.
+      result.push(...replacement.slice(0, 4 - result.length));
+    }
+    return result;
+  };
+  const resolve = (name: string) => {
+    if (computed.has(name)) return computed.get(name);
+    const value = custom.get(name)?.value;
+    const first = value?.[0];
+    const wide = value?.length === 1 && first?.kind === "ident" && CSS_WIDE_KEYWORDS.has(first.value.toLowerCase());
+    const resolved = value && !wide && !cyclic.has(name) && dependencies.get(name) ? substitute(value) : undefined;
+    computed.set(name, resolved);
+    return resolved;
+  };
+  return substitute;
+}
+
+function effectiveDisplayIsNone(styleAttr: string | undefined, presentationAttr?: string): boolean {
+  if (!styleAttr && !presentationAttr) return false;
+  const custom = new Map<string, CssDeclaration>();
+  let winner: CssDeclaration | undefined;
+  for (const declaration of cssStyleDeclarations(decodeHtmlLabelText(styleAttr ?? ""))) {
+    const { name, value, important } = declaration;
+    if (name.startsWith("--")) {
+      if ((!custom.get(name)?.important || important) && cssVariableDependencies(value)) custom.set(name, declaration);
+      continue;
+    }
+    const property = name.toLowerCase();
+    if ((property !== "display" && property !== "all") || (winner?.important && !important)) continue;
+    const variables = cssVariableDependencies(value);
+    if (variables && (variables.size || cssDisplayKeyword(value, property === "all"))) winner = declaration;
+  }
+  const value = winner?.value ?? cssValueTokens(decodeHtmlLabelText(presentationAttr ?? ""));
+  const deps = cssVariableDependencies(value);
+  if (!deps) return false;
+  const effective = deps.size ? createCssVariableResolver(custom)(value) : value;
+  // A winning but unresolved variable computes to unset, including when display was set earlier.
+  return effective !== undefined && cssDisplayKeyword(effective, winner?.name.toLowerCase() === "all") === "none";
 }
 
 function htmlLabelTextVariants(label: string) {
@@ -2444,7 +2650,7 @@ function findInlineConstructSpans(
       const m = DETAILS_OPEN_RE.exec(text.slice(i));
       if (m) {
         const openEnd = i + m[0].length;
-        const bounds = findMatchingDetailsBounds(text, i, openEnd, inheritsHtmlBlock);
+        const bounds = findMatchingDetailsBounds(text, i, openEnd, inheritsHtmlBlock, definedLinkLabels);
         const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility, definedLinkLabels);
         spans.push({
           start: i,
@@ -3631,7 +3837,7 @@ function parsePedagogicalAstInternal(
       const leadingWs = raw.length - raw.trimStart().length;
       const detailsStart = line.start + leadingWs;
       const openEndOffset = detailsStart + detailsOpenMatch[0].length;
-      const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset, inheritsHtmlBlock);
+      const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset, inheritsHtmlBlock, definedLinkLabels);
       const { closeStart, closeEnd } = bounds;
       const classified = classifyDetailsElement(text, openEndOffset, bounds, activeVis, definedLinkLabels);
       const endLineIdx = lineIndexContaining(lines, Math.max(detailsStart, closeEnd - 1), i);
