@@ -337,6 +337,24 @@ describe("pgvector material repository", () => {
     await expectArchivedPdfPages(["Works Cited", `## 附录：${title} ##`, "5 units."], [1], 3);
   });
 
+  it.each([
+    "参考答案与解析", "参考答案", "标准答案", "正确答案", "课后习题答案",
+    "课后练习答案", "课后练习解答", "课后答案", "课后解答", "章节答案",
+    "习题答案", "习题解答", "练习题答案", "练习题解答", "练习答案",
+    "练习解答", "复习题答案", "复习题解答", "自测题答案", "自测题解答",
+    "思考题答案", "部分习题答案", "答案与解析", "参考解答", "详细解答",
+  ])("seals archived continuations after same-line content on %s", async title => {
+    await expectArchivedPdfPages([`${title}：x = 3.`, "5 units.", "Chapter 2: Rings"], [3], 2);
+  });
+
+  it("seals the continuation after a bracketed qualified heading with same-line content", async () => {
+    await expectArchivedPdfPages(["【参考答案】x = 3.", "5 units.", "Chapter 2: Rings"], [3], 2);
+  });
+
+  it.each(["答案：x = 3.", "解答：x = 3."])("keeps the following page public after the inline label %s", async label => {
+    await expectArchivedPdfPages([label, "Public continuation."], [2], 1);
+  });
+
   it("keeps historical legacy seals settled while the current PDF version is retried", async () => {
     const pdf = await seed(["Public exercise prompt.", "Chapter 2: Vectors"]);
     const marker = { page: 1, text: "", imagePath: null, sectionSealedAtEnd: true, hadSealedContent: true };
@@ -481,12 +499,21 @@ describe("pgvector material repository", () => {
     expect((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.page).sort()).toEqual(expectedPages);
   });
 
-  it("keeps archived Vision provenance when a native-only retry has no archive left to inspect", async () => {
+  it.each([
+    { archive: "[视觉转写与描述]\nChapter 1: Intro\nAnswer Key", fullySealed: false },
+    { archive: "[视觉转写与描述]\nAnswer Key", fullySealed: true },
+    { archive: "Answer Key", fullySealed: false },
+    { archive: "Answer Key", fullySealed: true },
+  ])("keeps archived Vision provenance on retry (archive: $archive, fully sealed: $fullySealed)", async ({ archive, fullySealed }) => {
     const texts = ["Chapter 1: Intro", "5 units.", "Chapter 2: Rings"];
-    const pdf = await seed(["[视觉转写与描述]\nChapter 1: Intro\nAnswer Key", ...texts.slice(1)]);
+    const pdf = await seed([archive, ...texts.slice(1)]);
+    await f.sql`UPDATE opening_source_chunks SET image_object_key='vision/p1' WHERE source_id=${pdf.sourceId} AND page=1`;
     const pages: PdfSegmentPage[] = texts.map((text, index) => ({ page: index + 1, text, imagePath: null, visualKinds: [] }));
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const retry = await startPdfRetry(pdf.sourceId, pages);
+    const initialPages = fullySealed
+      ? [{ ...pages[0]!, text: "", hadSealedContent: true, sectionSealedAtEnd: true }, ...pages.slice(1)]
+      : pages;
+    for (const extracted of [initialPages, pages]) {
+      const retry = await startPdfRetry(pdf.sourceId, extracted);
       await expect(retry.run()).resolves.toEqual({ pages: 3 });
       await retry.finish(3);
       const published = await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1);

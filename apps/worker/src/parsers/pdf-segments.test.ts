@@ -1161,15 +1161,22 @@ describe("bounded resumable PDF parser", () => {
     expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[3, heading], [4, "Public continuation."]]);
   });
 
-  it("keeps a Vision-only archived seal across fresh native retries without current visual inputs", async () => {
+  it.each([
+    { archive: "[视觉转写与描述]\nChapter 1: Intro\nAnswer Key", fullySealed: false },
+    { archive: "[视觉转写与描述]\nAnswer Key", fullySealed: true },
+    { archive: "Answer Key", fullySealed: false },
+    { archive: "Answer Key", fullySealed: true },
+  ])("keeps an archived Vision seal across native retries (archive: $archive, fully sealed: $fullySealed)", async ({ archive, fullySealed }) => {
     const pages = [
       { page: 1, text: "Chapter 1: Intro", visualKinds: [] },
       { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Rings" },
     ];
     const segmentData = new Map<string, PdfSegment>();
-    const first = await runPdfScenario({ pages, segmentData, savedChunks: [{
-      page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey: "old/full-page",
-      text: "[视觉转写与描述]\nChapter 1: Intro\nAnswer Key",
+    const initialPages = fullySealed
+      ? [{ ...pages[0]!, text: "", hadSealedContent: true, sectionSealedAtEnd: true }, ...pages.slice(1)]
+      : pages;
+    const first = await runPdfScenario({ pages: initialPages, segmentData, savedChunks: [{
+      page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey: "old/full-page", text: archive,
     }] });
     expect(first.publishedChunks.map(({ page }) => page)).toEqual([3]);
     expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({ state: "ready", pages: [{
@@ -1178,6 +1185,15 @@ describe("bounded resumable PDF parser", () => {
     const retry = await runPdfScenario({ pages, segmentData, savedChunks: first.publishedChunks });
     expect(retry.requests[0]).toEqual({ start: 1 });
     expect(retry.publishedChunks.map(({ page }) => page)).toEqual([3]);
+  });
+
+  it("reuses a clean legacy Vision transcription on a scan with no native text", async () => {
+    const saved = { page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey: "old/scan", text: "A public definition." };
+    const recognizePage = vi.fn(async () => null);
+    const parsed = await runPdfScenario({ pages: [{ page: 1, text: "", visualKinds: ["scan"] }],
+      savedChunks: [saved], recognizePage });
+    expect(parsed.publishedChunks).toEqual([saved]);
+    expect(recognizePage).not.toHaveBeenCalled();
   });
 
   it("normalizes ATX closing hashes and withholds numbered and unnumbered answer choices", async () => {

@@ -791,12 +791,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         hasPublicTranscription?: boolean; visionWasSealed: boolean; visionDetectedOnPage?: boolean } => {
         const anyNativeOrIncomingSeal = nativeContaminatedOnPage || incomingSeal.mode !== "none";
         const savedSeal: SealState = { ...nativeOutSeal };
-        const { nativeBody, nativeHeader, vision: visionBody, marker } = splitPdfChunk(saved.text);
-        if (!marker) {
+        const { nativeBody: archivedNative, nativeHeader, vision, marker } = splitPdfChunk(saved.text);
+        const legacyVision = !marker && !nativeHeader && Boolean(saved.imageObjectKey?.trim());
+        if (!marker && !legacyVision) {
           if (!anyNativeOrIncomingSeal && (!saved.text.trim() || sealTextWithState(saved.text, { ...incomingSeal }) === saved.text)) {
-            // Older Vision-only rows did not carry the transcription wrapper.
-            const hasPublicTranscription = !page.text.trim() && Boolean(saved.imageObjectKey?.trim() && hasVerifiedPageText(saved.text));
-            return { sanitized: saved, savedSeal, hasVisionMarker: false, hasPublicTranscription, visionWasSealed: false };
+            return { sanitized: saved, savedSeal, hasVisionMarker: false, visionWasSealed: false };
           }
           return {
             sanitized: page.text.trim() ? { ...saved, text: page.text, imageObjectKey: null } : undefined,
@@ -806,6 +805,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           };
         }
 
+        const nativeBody = legacyVision ? "" : archivedNative;
+        const visionBody = legacyVision ? saved.text : vision;
         const cachedNativeOutSeal: SealState = { ...incomingSeal };
         const sealedNativeBody = nativeBody.trim() ? sealTextWithState(nativeBody, cachedNativeOutSeal) : "";
         const savedNativeChanged = sealedNativeBody !== nativeBody;
@@ -840,9 +841,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           };
         }
         const currentNativeHeader = page.visualKinds?.includes("scan") ? "[本地提取（可能含OCR）]\n" : "[原生提取]\n";
-        const rebuilt = publicNative.trim()
-          ? `${pageHadAnySeal ? currentNativeHeader : (nativeHeader || "[原生提取]\n")}${publicNative}\n\n[视觉转写与描述]\n${sealedVisionBody}`
-          : `[视觉转写与描述]\n${sealedVisionBody}`;
+        const rebuilt = legacyVision && !pageHadSealed && sealedVisionBody === saved.text.trimEnd()
+          ? saved.text
+          : publicNative.trim()
+            ? `${pageHadAnySeal ? currentNativeHeader : (nativeHeader || "[原生提取]\n")}${publicNative}\n\n[视觉转写与描述]\n${sealedVisionBody}`
+            : `[视觉转写与描述]\n${sealedVisionBody}`;
         const nextImageKey = pageHadSealed ? null : saved.imageObjectKey;
         return {
           sanitized: rebuilt === saved.text && nextImageKey === saved.imageObjectKey ? saved : { ...saved, text: rebuilt, imageObjectKey: nextImageKey },
@@ -911,12 +914,12 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let savedVisionWasSealed = false;
         let savedVisionDetectedOnPage = false;
         const hadNativeSeal = pageHadNativeSeal || nativeDetectedSeal || (hadRawText && !incomingSeal.unknownAfterFailure && publicText !== rawPage.text);
-        if (!sealedAllText && saved && !incomingSeal.unknownAfterFailure) {
+        if (saved && !incomingSeal.unknownAfterFailure) {
           if (!isImage) {
             const cleaned = sanitizeSavedChunk(saved, page, {
               incomingSeal, nativeOutSeal, doclingEndSeal, nativeContaminatedOnPage, hadNativeSeal, hasVisualInput: Boolean(visual),
             });
-            sanitizedSaved = cleaned.sanitized;
+            sanitizedSaved = sealedAllText ? undefined : cleaned.sanitized;
             savedSeal = cleaned.savedSeal;
             savedHasVision = cleaned.hasVisionMarker;
             savedHasTranscription = Boolean(cleaned.hasPublicTranscription);
@@ -936,6 +939,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           Object.assign(sealState, savedSeal);
         } else {
           reconcileEndSealState(sealState, { hasNativeText: hadRawText, doclingEndSeal, incomingSeal, nativeOutSeal });
+          // Fully sealed pages skip consumption, so carry forward any stronger archived Vision seal here.
+          if (sealedAllText && savedVisionDetectedOnPage && savedSeal && savedSeal.mode !== "none"
+            && (sealState.mode === "none" || (sealState.mode === "inline_sealed" && savedSeal.mode === "section_sealed"))) {
+            Object.assign(sealState, savedSeal);
+          }
         }
         return {
           page,
@@ -1131,7 +1139,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         };
         const inspectSavedPdfChunk = (chunk: NewSourceChunk, incomingSeal: SealState) => {
           const { nativeBody, nativeHeader, vision, marker } = splitPdfChunk(chunk.text);
-          const legacyVision = !marker && !nativeHeader && chunk.imageObjectKey ? nativeBody : "";
+          const legacyVision = !marker && !nativeHeader && chunk.imageObjectKey?.trim() ? nativeBody : "";
           const native = legacyVision ? "" : nativeBody;
           const nativeOutSeal = { ...incomingSeal };
           const nativeChanged = sealTextWithState(native, nativeOutSeal) !== native;
