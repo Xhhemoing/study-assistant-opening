@@ -104,11 +104,20 @@ export function formatMediaTimestampMs(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  const wholeSeconds = String(totalSeconds % 60).padStart(2, "0");
+  const [mantissa, exponent] = String(ms).split("e");
+  const fractionalMs = mantissa?.split(".")[1] ?? "";
+  // Validated anchors are integer milliseconds. Keep extra precision for direct
+  // formatter callers so two sub-millisecond endpoints stay distinguishable.
+  const fractionalSeconds = exponent?.startsWith("-")
+    ? "0".repeat(2 - Number(exponent)) + mantissa!.replace(".", "")
+    : String(Math.trunc(ms % 1000)).padStart(3, "0") + (exponent === undefined ? fractionalMs : "");
+  const digits = fractionalSeconds.replace(/0+$/, "");
+  const seconds = digits ? `${wholeSeconds}.${digits}` : wholeSeconds;
   if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    return `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`;
   }
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  return `${minutes}:${seconds}`;
 }
 
 export function formatMediaAnchorRange(anchor: MediaAnchorRange): string {

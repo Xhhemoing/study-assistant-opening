@@ -130,7 +130,7 @@ const HTML_COMMENT_TAIL = /(?:-?>|[\s\S]*?(?:--!?>|$))/.source;
 const HTML_COMMENT_RE = new RegExp("<!--" + HTML_COMMENT_TAIL, "g");
 const HTML_OTHER_LITERAL = /(?<cdata><!\[CDATA\[[\s\S]*?(?:\]\]>|(?![\s\S])))|<!(?!--)[^>]*>?|<\?[^>]*>?/.source;
 const HTML_MARKUP_TOKEN = [HTML_COMMENT_RE.source, HTML_OTHER_LITERAL, HTML_TAG_TOKEN].join("|");
-const INVISIBLE_LABEL_TEXT = /\u00AD|\u200B|\u200C|\u200D|\u200E|\u200F|\u2060|\uFEFF/g;
+const INVISIBLE_LABEL_TEXT = /[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu;
 const HTML_LABEL_REFERENCES = new Map(Object.entries({
   amp: "&", AMP: "&", lt: "<", LT: "<", gt: ">", GT: ">", quot: '"', QUOT: '"', apos: "'",
   nbsp: "\u00A0", NonBreakingSpace: "\u00A0", shy: "\u00AD", Tab: "\t", NewLine: "\n",
@@ -463,13 +463,14 @@ function endOfHtmlComment(text: string, afterOpener: number): number {
   return tail.lastIndex;
 }
 
-function decodeHtmlLabelText(text: string): string {
+function decodeHtmlLabelText(text: string, inAttribute = false): string {
   return text.replace(/&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?|&([A-Za-z][A-Za-z0-9]*);?/g,
-    (reference, hex?: string, decimal?: string, name?: string) => {
+    (reference, hex: string | undefined, decimal: string | undefined, name: string | undefined, offset: number) => {
       if (name !== undefined) {
         const named = reference.endsWith(";") ? HTML_LABEL_REFERENCES.get(name) : undefined;
         if (named !== undefined) return named;
         const legacy = HTML_LEGACY_LABEL_REFERENCE.exec(name)?.[0];
+        if (legacy && inAttribute && /[=A-Za-z0-9]/.test(text[offset + legacy.length + 1] ?? "")) return reference;
         return legacy ? HTML_LABEL_REFERENCES.get(legacy)! + reference.slice(legacy.length + 1) : reference;
       }
       const codePoint = hex === undefined ? Number.parseInt(decimal!, 10) : Number.parseInt(hex, 16);
@@ -613,6 +614,13 @@ function htmlAttributeValue(opener: string, tag: string, attribute: string): str
     if (match[1]!.toLowerCase() === attribute) return match[2] ?? match[3] ?? match[4] ?? "";
   }
   return undefined;
+}
+
+function readDetailsOpening(markup: string) {
+  const open = htmlAttributeValue(markup, "details", "open") !== undefined;
+  const rawName = open ? htmlAttributeValue(markup, "details", "name") : undefined;
+  const name = rawName && decodeHtmlLabelText(rawName.replace(/\r\n?/g, "\n").replaceAll("\0", "\uFFFD"), true);
+  return { open, name };
 }
 
 function htmlContainerCrossingCodeEnd(
@@ -806,7 +814,7 @@ function createMarkdownBlockScanner(initialContainers: readonly MarkdownContaine
   };
 }
 
-function createMarkdownHtmlBlockLookup(text: string, inheritedStyle = DEFAULT_LABEL_STYLE) {
+function createMarkdownHtmlBlockLookup(text: string, inheritedContext = DEFAULT_LABEL_CONTEXT) {
   const scanner = createMarkdownBlockScanner();
   const activeAtLine = new Map<number, MarkdownHtmlBlock>();
   let cursor = 0;
@@ -815,11 +823,12 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedStyle = DEFAULT_LA
   let hasForeignMarkup: boolean | undefined;
   let hasSelect: boolean | undefined;
   let hasStyles: boolean | undefined;
+  let hasNamedDetails: boolean | undefined;
   const getScopeLookup = (definedLinkLabels: ReadonlySet<string>) => {
     if (!scopeLookup) {
       const blockLines: HtmlScopeLine[] = [];
       const html = projectDisclosureCommentMarkdown(text, [], definedLinkLabels, true, line => blockLines.push(line));
-      scopeLookup = createHtmlScopeLookup(html, inheritedStyle, blockLines);
+      scopeLookup = createHtmlScopeLookup(html, inheritedContext, blockLines);
     }
     return scopeLookup;
   };
@@ -836,9 +845,10 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedStyle = DEFAULT_LA
     maskedLiterals(definedLinkLabels: ReadonlySet<string>) {
       return projected ??= projectDisclosureCommentMarkdown(text, [], definedLinkLabels, false);
     },
-    labelStyleAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
+    labelContextAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
       hasStyles ??= /(?:\bstyle[ \t\r\n\f]*=|\bhidden(?=[ \t\r\n\f=/>])|<(?:datalist|dialog|svg|math)\b)/i.test(text);
-      return hasStyles ? getScopeLookup(definedLinkLabels).scopeAt(offset).style : inheritedStyle;
+      hasNamedDetails ??= /<details(?=[\t\n\f\r />])/i.test(text) && /\bname[\t\n\f\r ]*=/i.test(text);
+      return hasStyles || hasNamedDetails ? getScopeLookup(definedLinkLabels).scopeAt(offset).context : inheritedContext;
     },
     pipeCellAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
       return text.includes("|") ? getScopeLookup(definedLinkLabels).scopeAt(offset).pipeCell : undefined;
@@ -1093,7 +1103,7 @@ function findMatchingDetailsBounds(
   let contiguousHtml = /^ {0,3}$/.test(text.slice(containingLineStart(text, openStart), openStart));
   let htmlBlock = inheritsHtmlBlock.htmlBlockAt(nextLineStart);
   let htmlBlockEndsHere = false;
-  const inheritedStyle = inheritsHtmlBlock.labelStyleAt(openStart, definedLinkLabels);
+  const { style: inheritedStyle } = inheritsHtmlBlock.labelContextAt(openStart, definedLinkLabels);
   const elements = createHtmlElementStack(inheritedStyle);
   const cell = inheritsHtmlBlock.pipeCellAt(openStart, definedLinkLabels);
   if (cell) seedPipeTableCell(elements, cell);
@@ -1590,10 +1600,16 @@ const CSS_DISPLAY_OUTSIDE = new Set(["block", "inline", "run-in"]);
 const CSS_DISPLAY_INSIDE = new Set(["flow", "flow-root", "table", "flex", "grid", "ruby", "math"]);
 const CSS_WIDE_KEYWORDS = new Set(["inherit", "initial", "unset", "revert", "revert-layer"]);
 const CSS_DISPLAY_SINGLE = new Set([
-  "none", "contents", "inline-block", "inline-table", "inline-flex", "inline-grid", "-webkit-box", "-webkit-inline-box",
+  "none", "contents", "inline-block", "inline-table", "inline-flex", "inline-grid",
   "table-row-group", "table-header-group", "table-footer-group", "table-row", "table-cell", "table-column-group",
   "table-column", "table-caption", "ruby-base", "ruby-text", "ruby-base-container", "ruby-text-container",
   ...CSS_WIDE_KEYWORDS,
+]);
+const CSS_DISPLAY_ALIASES = new Map([
+  ["-webkit-flex", "flex"], ["-webkit-inline-flex", "inline-flex"],
+  ["-webkit-box", "flex"], ["-webkit-inline-box", "inline-flex"],
+  ["-ms-flexbox", "flex"], ["-ms-inline-flexbox", "inline-flex"],
+  ["-ms-grid", "grid"], ["-ms-inline-grid", "inline-grid"],
 ]);
 
 type CssToken =
@@ -1620,6 +1636,11 @@ const DEFAULT_LABEL_STYLE: LabelStyle = {
   position: "static", float: "none", outOfFlow: false, flexOrGridItems: false,
   visibilityHidden: false, contentVisibility: "visible", ownContentHidden: false, contentVisibilityHidden: false,
 };
+type LabelContext = {
+  style: LabelStyle;
+  hasOpenDetails?: (name: string) => boolean;
+};
+const DEFAULT_LABEL_CONTEXT: LabelContext = { style: DEFAULT_LABEL_STYLE };
 
 function skipsLabelContents(style: LabelStyle) {
   return style.contentVisibilityHidden || style.ownContentHidden;
@@ -1688,14 +1709,31 @@ function cssDisplayKeyword(tokens: readonly CssToken[], all: boolean): string | 
   }
   const first = words[0]!;
   if (all) return words.length === 1 && CSS_WIDE_KEYWORDS.has(first) ? first : undefined;
-  if (words.length === 1 && CSS_DISPLAY_SINGLE.has(first)) return first;
+  if (words.length === 1) {
+    if (CSS_DISPLAY_SINGLE.has(first)) return first;
+    const alias = CSS_DISPLAY_ALIASES.get(first);
+    if (alias) return alias;
+  }
   if (new Set(words).size !== words.length) return undefined;
   const outside = words.filter(word => CSS_DISPLAY_OUTSIDE.has(word));
   const inside = words.filter(word => CSS_DISPLAY_INSIDE.has(word));
   const listItem = words.includes("list-item");
-  return outside.length <= 1 && inside.length <= 1 &&
-    outside.length + inside.length + Number(listItem) === words.length &&
-    (!listItem || !inside.length || inside[0] === "flow" || inside[0] === "flow-root") ? words.join(" ") : undefined;
+  if (outside.length > 1 || inside.length > 1 || outside.length + inside.length + Number(listItem) !== words.length) return;
+  const inner = inside[0] ?? "flow";
+  const outer = outside[0] ?? (inner === "ruby" ? "inline" : "block");
+  if (listItem) {
+    if (inner !== "flow" && inner !== "flow-root") return;
+    if (outer === "block") return "list-item";
+    return inner === "flow" ? `${outer} list-item` : `${outer} flow-root list-item`;
+  }
+  if (inner === "flow") return outer;
+  if (outer === "block") return inner === "ruby" ? "block ruby" : inner;
+  if (outer === "inline") {
+    if (inner === "flow-root") return "inline-block";
+    if (inner === "table" || inner === "flex" || inner === "grid") return `inline-${inner}`;
+    if (inner === "ruby") return inner;
+  }
+  return `${outer} ${inner}`;
 }
 
 function isCssPunct(token: CssToken | undefined, value: string): boolean {
@@ -1861,7 +1899,7 @@ function blockifyLabelDisplay(display: string): string {
     const inner = types.find(type => type === "flex" || type === "grid" || type === "table");
     return inner ?? (types.includes("list-item") ? "list-item" : "block");
   }
-  return display === "inline-block" || display === "-webkit-inline-box" ? "block" : display;
+  return display === "inline-block" ? "block" : display;
 }
 
 function resolveElementStyle(
@@ -2436,17 +2474,20 @@ function createHtmlElementStack(
 
 function createHtmlScopeLookup(
   html: string,
-  inheritedStyle: LabelStyle,
+  inheritedContext: LabelContext,
   blockLines: readonly HtmlScopeLine[],
 ) {
+  const { style: inheritedStyle } = inheritedContext;
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const elements = createHtmlElementStack(inheritedStyle);
   const { stack, getStyle, insertionStyle, pushTag, popTo, leaveForeignContent, findInScope,
     closeRawParagraph, closeCurrentHeading, closeTableForNewTable, reconstructFormatting, pushImplicitTableTag, isOnStack } = elements;
   const ignoredDetailsStarts = new Set<number>();
+  // Keep an insertion count per scope so lookups only see groups already open there.
+  const openDetailsOrder = new Map<string, number>();
   const positions = [0];
-  const scopes: { style: LabelStyle; namespace: HtmlNamespace; pipeCell?: "th" | "td" }[] = [
-    { style: inheritedStyle, namespace: undefined },
+  const scopes: { context: LabelContext; openDetailsCount: number; namespace: HtmlNamespace; pipeCell?: "th" | "td" }[] = [
+    { context: inheritedContext, openDetailsCount: 0, namespace: undefined },
   ];
   let lineIndex = 0;
   let generatedHeading = false;
@@ -2462,9 +2503,15 @@ function createHtmlScopeLookup(
       if (index > generatedTable.stackIndex) pipeCell = stack[index]!.tag === "th" ? "th" : "td";
     }
     const previous = scopes.at(-1)!;
-    if (style !== previous.style || namespace !== previous.namespace || pipeCell !== previous.pipeCell) {
+    const openDetailsCount = openDetailsOrder.size;
+    if (style !== previous.context.style || namespace !== previous.namespace || pipeCell !== previous.pipeCell ||
+      openDetailsCount !== previous.openDetailsCount) {
+      const hasOpenDetails = openDetailsCount === previous.openDetailsCount ? previous.context.hasOpenDetails :
+        (name: string) => (openDetailsOrder.get(name) ?? Infinity) <= openDetailsCount || inheritedContext.hasOpenDetails?.(name) === true;
+      const context = style === previous.context.style && hasOpenDetails === previous.context.hasOpenDetails
+        ? previous.context : { style, hasOpenDetails };
       positions.push(offset);
-      scopes.push({ style, namespace, pipeCell });
+      scopes.push({ context, openDetailsCount, namespace, pipeCell });
     }
   };
   const readText = (end: number) => {
@@ -2559,6 +2606,12 @@ function createHtmlScopeLookup(
         };
         const labelStyle = styleForOpenTag(element, namespace || start.tableStructure ? getStyle() : insertionStyle());
         elements.insertTag({ ...element, labelStyle }, start.tableForm);
+        if (!current && tag === "details") {
+          const { name } = readDetailsOpening(match[0]);
+          if (name && !openDetailsOrder.has(name) && !inheritedContext.hasOpenDetails?.(name)) {
+            openDetailsOrder.set(name, openDetailsOrder.size + 1);
+          }
+        }
       }
     } else if (tag && prefix === "/") {
       elements.closeTag(tag);
@@ -2590,9 +2643,11 @@ type LabelOutput = { parts: (string | boolean | LabelBoxOutput | LabelDetailsLeg
 type LabelBoxOutput = { parent: LabelOutput; before?: LabelOutput; inside: LabelOutput; block: boolean };
 type LabelDetailsLegend = { disclosure: LabelDisclosure; parent: LabelOutput; visibilityHidden: boolean };
 
-function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STYLE, pipeCell?: "th" | "td") {
+function htmlLabelTextVariants(label: string, context: LabelContext, pipeCell?: "th" | "td") {
+  const { style: inheritedStyle } = context;
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const root: LabelOutput = { parts: [], hasText: false };
+  const openDetails = new Set<string>();
   const boxBuffers: LabelBoxOutput[] = [];
   const detailsLegends: LabelDetailsLegend[] = [];
   const tableOutputs = new WeakMap<OpenStyledTag, LabelBoxOutput>();
@@ -2627,7 +2682,7 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
     output.hasText ||= /\S/.test(text.replace(INVISIBLE_LABEL_TEXT, ""));
   };
   const breaksLine = (display: string) => /(?:^| )block(?: |$)/.test(display) ||
-    !/(?:^| )(?:inline(?:-\S+)?|run-in|ruby(?:-\S+)?|-webkit-inline-box)(?: |$)/.test(display);
+    !/(?:^| )(?:inline(?:-\S+)?|run-in|ruby(?:-\S+)?)(?: |$)/.test(display);
   const rendersText = (current: OpenStyledTag | undefined) => {
     const style = current?.labelStyle ?? inheritedStyle;
     return current?.disclosure?.open !== false && !style.suppressedSubtree && !skipsLabelContents(style) && !style.visibilityHidden &&
@@ -2681,7 +2736,8 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
       const hiddenEnd = mayNeedClose && (raw
         ? (raw.closeStart < label.length || inertTag ? raw.closeEnd : undefined)
         : htmlElementEnd(label, tag, cursor, namespace, htmlAnnotation));
-      if (inertTag && (hiddenEnd || tag === "template")) {
+      // Datalist descendants still participate in document-scoped details groups.
+      if (inertTag && tag !== "datalist" && (hiddenEnd || tag === "template")) {
         tokens.lastIndex = cursor = hiddenEnd || label.length;
         continue;
       }
@@ -2707,9 +2763,16 @@ function htmlLabelTextVariants(label: string, inheritedStyle = DEFAULT_LABEL_STY
         }
       }
       if (canOpen) {
+        let ownDisclosure: LabelDisclosure | undefined;
+        if (!namespace && tag === "details") {
+          const { open, name } = readDetailsOpening(markup);
+          const alreadyOpen = name && (openDetails.has(name) || context.hasOpenDetails?.(name));
+          ownDisclosure = { open: open && !alreadyOpen };
+          if (name && ownDisclosure.open) openDetails.add(name);
+        }
         const opened = elements.insertTag({
           ...element, labelStyle: style, preserveUnclosedLabel,
-          disclosure: !namespace && tag === "details" ? { open: htmlAttributeValue(markup, tag, "open") !== undefined } : undefined,
+          disclosure: ownDisclosure,
           svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
         }, start.tableForm);
         if (firstSummary) disclosure.summary = opened;
@@ -2805,11 +2868,12 @@ function classifyDetailsElement(
 } {
   if (summary && !text.slice(openEnd, summary.openStart).replace(HTML_COMMENT_RE, "").trim()) {
     const detailsStyle = resolveElementStyle(
-      "details", htmlContext.labelStyleAt(openStart, definedLinkLabels), text.slice(openStart, openEnd),
+      "details", htmlContext.labelContextAt(openStart, definedLinkLabels).style, text.slice(openStart, openEnd),
     );
     const summaryStyle = resolveElementStyle("summary", detailsStyle, text.slice(summary.openStart, summary.openEnd));
     const summaryContents = renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false, definedLinkLabels);
-    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, summaryStyle,
+    const summaryContext = htmlContext.labelContextAt(summary.openEnd, definedLinkLabels);
+    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, { ...summaryContext, style: summaryStyle },
       htmlContext.pipeCellAt(openStart, definedLinkLabels));
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
@@ -3018,13 +3082,14 @@ function isPipeTableStart(header: string, delimiter?: string): boolean {
 }
 
 function tableColumnVisibility(
-  label: string, definedLinkLabels = EMPTY_LINK_LABELS, inheritedStyle = DEFAULT_LABEL_STYLE,
+  label: string, definedLinkLabels = EMPTY_LINK_LABELS, context = DEFAULT_LABEL_CONTEXT,
   pipeCell?: "th" | "td",
 ): PedagogicalVisibility {
+  const { style: inheritedStyle } = context;
   if (inheritedStyle.suppressedSubtree || skipsLabelContents(inheritedStyle)) return "public";
   if (/[<\\*_[~\x60]/.test(label)) label = renderMarkdownLabelMarkup(label, true, definedLinkLabels);
-  const { inline, spaced } = /[<&]|\p{Cf}/u.test(label) ? htmlLabelTextVariants(label, inheritedStyle, pipeCell)
-    : { inline: inheritedStyle.visibilityHidden ? "" : label, spaced: inheritedStyle.visibilityHidden ? "" : label };
+  const { inline, spaced } = /[<&]/.test(label) ? htmlLabelTextVariants(label, context, pipeCell)
+    : { inline: inheritedStyle.visibilityHidden ? "" : label.replace(INVISIBLE_LABEL_TEXT, ""), spaced: "" };
   if (SEALED_HEADING_RE.test(inline) || SEALED_HEADING_RE.test(spaced)) return "sealed";
   if (HINT_HEADING_RE.test(inline) || HINT_HEADING_RE.test(spaced)) return "hint_gated";
   return "public";
@@ -3078,17 +3143,17 @@ function tableBoundaryVisibility(
 
 function getTableColumnVisibilities(
   header: string, cells: readonly { start: number; end: number }[], definedLinkLabels: ReadonlySet<string>,
-  start = 0, labelStyleAt = (_offset: number) => DEFAULT_LABEL_STYLE,
+  start = 0, labelContextAt = (_offset: number) => DEFAULT_LABEL_CONTEXT,
 ) {
   return cells.map(cell => tableColumnVisibility(
-    header.slice(cell.start - start, cell.end - start), definedLinkLabels, labelStyleAt(cell.start), "th",
+    header.slice(cell.start - start, cell.end - start), definedLinkLabels, labelContextAt(cell.start), "th",
   ));
 }
 
 type ReadMarkdownLine = (index: number) => string | undefined;
 
-function createCueLabelStyleLookup(
-  lines: readonly string[], definedLinkLabels: ReadonlySet<string>, inheritedStyle: LabelStyle,
+function createCueLabelContextLookup(
+  lines: readonly string[], definedLinkLabels: ReadonlySet<string>, inheritedContext: LabelContext,
 ) {
   let offset = 0;
   const offsets = lines.map(line => {
@@ -3096,18 +3161,18 @@ function createCueLabelStyleLookup(
     offset += line.length + 1;
     return start;
   });
-  const html = createMarkdownHtmlBlockLookup(lines.join("\n"), inheritedStyle);
-  return (index: number, column = 0) => html.labelStyleAt((offsets[index] ?? 0) + column, definedLinkLabels);
+  const html = createMarkdownHtmlBlockLookup(lines.join("\n"), inheritedContext);
+  return (index: number, column = 0) => html.labelContextAt((offsets[index] ?? 0) + column, definedLinkLabels);
 }
 
 function createProtectedSetextLookup(
-  readRaw: ReadMarkdownLine, definedLinkLabels: ReadonlySet<string>, labelStyleAt = (_index: number) => DEFAULT_LABEL_STYLE,
+  readRaw: ReadMarkdownLine, definedLinkLabels: ReadonlySet<string>, labelContextAt = (_index: number) => DEFAULT_LABEL_CONTEXT,
 ) {
   let checkedBefore = -1;
   let checkedContainers: readonly MarkdownContainer[] = [];
   let checkedColumns: readonly PedagogicalVisibility[] | undefined;
   let checkedCaptionRow = false;
-  let checkedStyle: LabelStyle | undefined;
+  let checkedContext: LabelContext | undefined;
   return (
     start: number,
     { body, containers }: ReturnType<typeof readMarkdownContainerLine>,
@@ -3115,8 +3180,8 @@ function createProtectedSetextLookup(
     captionRow = false,
   ): number | undefined => {
     // A suffix of a checked, unprotected paragraph cannot introduce a protected title.
-    const activeStyle = labelStyleAt(start);
-    if (start < checkedBefore && columns === checkedColumns && captionRow === checkedCaptionRow && activeStyle === checkedStyle &&
+    const activeContext = labelContextAt(start);
+    if (start < checkedBefore && columns === checkedColumns && captionRow === checkedCaptionRow && activeContext === checkedContext &&
       containers.length === checkedContainers.length &&
       containers.every((container, index) => container === checkedContainers[index])) return undefined;
 
@@ -3127,7 +3192,7 @@ function createProtectedSetextLookup(
       const line = continueMarkdownContainers(raw, containers);
       if (index !== start && line.depth !== containers.length) return undefined;
       const titleLine = index === start ? body : line.body;
-      if (columns && tableColumnVisibility(titleLine, definedLinkLabels, labelStyleAt(index)) !== "public") {
+      if (columns && tableColumnVisibility(titleLine, definedLinkLabels, labelContextAt(index)) !== "public") {
         firstProtectedTitleLine = Math.min(firstProtectedTitleLine, index);
       }
       // Data rows cannot become an earlier part of a later hint heading and lose column protection.
@@ -3141,13 +3206,13 @@ function createProtectedSetextLookup(
     if (paragraph.level !== undefined) {
       const title: string[] = [];
       for (let index = start; index < paragraph.index; index++) title.push(readLine(index)!);
-      if (tableColumnVisibility(title.join("\n"), definedLinkLabels, activeStyle) !== "public") return paragraph.index;
+      if (tableColumnVisibility(title.join("\n"), definedLinkLabels, activeContext) !== "public") return paragraph.index;
     }
     checkedBefore = paragraph.index;
     checkedContainers = containers;
     checkedColumns = columns;
     checkedCaptionRow = captionRow;
-    checkedStyle = activeStyle;
+    checkedContext = activeContext;
     return undefined;
   };
 }
@@ -3195,7 +3260,7 @@ function createTranscriptCueSeparator(
   cueTexts: readonly string[],
   definedLinkLabels: ReadonlySet<string>,
   preserveBoundaryVisibility?: (cueIndex: number, offset: number, visibility: PedagogicalVisibility) => void,
-  inheritedStyle = DEFAULT_LABEL_STYLE,
+  inheritedContext = DEFAULT_LABEL_CONTEXT,
 ) {
   const lines: string[] = [];
   const offsets: number[] = [];
@@ -3219,8 +3284,8 @@ function createTranscriptCueSeparator(
   let latexArgumentThrough = -1;
   let literalEnvironment: string | undefined;
   const mathEnvironments: string[] = [];
-  const labelStyleAt = createCueLabelStyleLookup(lines, definedLinkLabels, inheritedStyle);
-  const protectedUnderline = createProtectedSetextLookup(index => lines[index], definedLinkLabels, labelStyleAt);
+  const labelContextAt = createCueLabelContextLookup(lines, definedLinkLabels, inheritedContext);
+  const protectedUnderline = createProtectedSetextLookup(index => lines[index], definedLinkLabels, labelContextAt);
   const readCaptionRow = (index: number) => ({
     ...continueMarkdownContainers(lines[index]!, containers),
     captionRow: true,
@@ -3280,7 +3345,7 @@ function createTranscriptCueSeparator(
       const headerCells = sameContainer ? pipeTableHeaderCells({ raw: previousBody, start: 0 }, current.body) : null;
       tableColumns = headerCells ? getTableColumnVisibilities(
         previousBody, headerCells, definedLinkLabels, 0,
-        offset => labelStyleAt(index - 1, lines[index - 1]!.length - previousBody.length + offset),
+        offset => labelContextAt(index - 1, lines[index - 1]!.length - previousBody.length + offset),
       ) : undefined;
       containers = current.containers;
       previousBody = current.body;
@@ -3745,7 +3810,7 @@ function parsePrefixedInnerBlocks(
     length: BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0, padding: 0,
   }),
   headingContext?: HeadingContext,
-  inheritedStyle = DEFAULT_LABEL_STYLE,
+  inheritedContext = DEFAULT_LABEL_CONTEXT,
 ): MappedInnerBlock[] {
   const bodyParts: string[] = [];
   const charOrigStart: number[] = [];
@@ -3809,7 +3874,7 @@ function parsePrefixedInnerBlocks(
       },
     } : headingContext,
     definedLinkLabels,
-    inheritedStyle,
+    inheritedContext,
   );
 
   return innerAst.map(b => {
@@ -3910,7 +3975,7 @@ function scanInlineCueTimings(
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   definedLinkLabels: ReadonlySet<string> = EMPTY_LINK_LABELS,
-  inheritedStyle = DEFAULT_LABEL_STYLE,
+  inheritedContext = DEFAULT_LABEL_CONTEXT,
 ) {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
@@ -3922,9 +3987,9 @@ function scanInlineCueTimings(
     const raw = lines[index]?.raw;
     return raw?.slice(cueTimings[index]?.prefixLength ?? 0);
   };
-  const labelStyleAt = createCueLabelStyleLookup(lines.map((_, index) => readCueBody(index)!),
-    definedLinkLabels, inheritedStyle);
-  const protectedUnderline = createProtectedSetextLookup(readCueBody, definedLinkLabels, labelStyleAt);
+  const labelContextAt = createCueLabelContextLookup(lines.map((_, index) => readCueBody(index)!),
+    definedLinkLabels, inheritedContext);
+  const protectedUnderline = createProtectedSetextLookup(readCueBody, definedLinkLabels, labelContextAt);
   const tableBreakVisibilities = new Map<number, PedagogicalVisibility>();
   const timings = lines.map(({ raw, start }, index) => {
     const timing = cueTimings[index]!;
@@ -4003,7 +4068,7 @@ function scanInlineCueTimings(
       containers = header.containers;
       table = {
         columns: getTableColumnVisibilities(header.body, cells, definedLinkLabels, 0,
-          offset => labelStyleAt(index, readCueBody(index)!.length - header.body.length + offset)),
+          offset => labelContextAt(index, readCueBody(index)!.length - header.body.length + offset)),
         timed: timedHeader !== null,
         delimiterIndex: index + 1,
       };
@@ -4030,7 +4095,7 @@ function parseInlineCuedDocument(
   captionRowStarts?: ReadonlySet<number>,
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   headingContext?: HeadingContext,
-  inheritedStyle = DEFAULT_LABEL_STYLE,
+  inheritedContext = DEFAULT_LABEL_CONTEXT,
 ): PedagogicalAstBlock[] {
   const parts: string[] = [];
   const regions: TranscriptRegion[] = [];
@@ -4039,7 +4104,7 @@ function parseInlineCuedDocument(
   const observeHeading = headingContext?.onHeading;
   const projectedLineOrigins = observeHeading && new Map<number, number>();
   const bodies = lines.map((line, index) => line.raw.slice(timings[index]?.prefixLength ?? 0));
-  const cueSeparator = createTranscriptCueSeparator(bodies, definedLinkLabels, undefined, inheritedStyle);
+  const cueSeparator = createTranscriptCueSeparator(bodies, definedLinkLabels, undefined, inheritedContext);
   let offset = 0;
   for (const [index, line] of lines.entries()) {
     const timing = timings[index];
@@ -4084,7 +4149,7 @@ function parseInlineCuedDocument(
       const original = projectedLineOrigins?.get(projectedOffset);
       if (original !== undefined) observeHeading(original, level);
     },
-  } : headingContext, definedLinkLabels, inheritedStyle));
+  } : headingContext, definedLinkLabels, inheritedContext));
   const blocks: PedagogicalAstBlock[] = [];
   for (const region of regions) {
     const { start, end, sourceStart, cue } = region;
@@ -4146,13 +4211,13 @@ function parsePedagogicalAstInternal(
   boundaryFloors?: ReadonlyMap<number, PedagogicalVisibility>,
   headingContext?: HeadingContext,
   inheritedLinkLabels?: ReadonlySet<string>,
-  inheritedStyle = DEFAULT_LABEL_STYLE,
+  inheritedContext = DEFAULT_LABEL_CONTEXT,
 ): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
-  const initialTimings = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, inheritedLinkLabels, inheritedStyle);
+  const initialTimings = scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, inheritedLinkLabels, inheritedContext);
   const hasCueTimings = initialTimings.timings.some(Boolean);
   const boundaryBefore = (index: number) => initialTimings.tableBreakVisibilities.has(index) ||
     boundaryFloors?.has(lines[index]?.start ?? -1) === true;
@@ -4166,16 +4231,16 @@ function parsePedagogicalAstInternal(
       : collectLinkReferenceLabels(lines.map(line => line.raw))
     : EMPTY_LINK_LABELS);
   const { timings, tableBreakVisibilities } = hasCueTimings && !inheritedLinkLabels && definedLinkLabels.size
-    ? scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, definedLinkLabels, inheritedStyle)
+    ? scanInlineCueTimings(lines, captionRowStarts, boundaryFloors, definedLinkLabels, inheritedContext)
     : initialTimings;
   if (timings.some(Boolean)) {
     return parseInlineCuedDocument(text, lines, timings, tableBreakVisibilities,
-      options, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors, headingContext, inheritedStyle);
+      options, sealProofs, definedLinkLabels, captionRowStarts, boundaryFloors, headingContext, inheritedContext);
   }
-  const inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text, inheritedStyle);
-  const labelStyleAt = (offset: number) => inheritsHtmlBlock.labelStyleAt(offset, definedLinkLabels);
+  const inheritsHtmlBlock = createMarkdownHtmlBlockLookup(text, inheritedContext);
+  const labelContextAt = (offset: number) => inheritsHtmlBlock.labelContextAt(offset, definedLinkLabels);
   const protectedCaptionUnderline = captionRowStarts && createProtectedSetextLookup(
-    index => lines[index]?.raw, definedLinkLabels, index => labelStyleAt(lines[index]?.start ?? 0),
+    index => lines[index]?.raw, definedLinkLabels, index => labelContextAt(lines[index]?.start ?? 0),
   );
   const blocks: PedagogicalAstBlock[] = [];
   const headingStack = headingContext?.stack ?? [];
@@ -4210,7 +4275,7 @@ function parsePedagogicalAstInternal(
       rebasedFloors,
       undefined,
       definedLinkLabels,
-      labelStyleAt(start),
+      labelContextAt(start),
     ).map(block => ({
       ...block,
       startOffset: start + block.startOffset,
@@ -4575,7 +4640,7 @@ function parsePedagogicalAstInternal(
       const isSectionHeading = line.start > 0 || !headingContext?.firstHeadingIsLocal;
       if (isSectionHeading) headingContext?.onHeading?.(line.start, level);
       if (propagateSectionVisibility) {
-        const titleVisibility = tableColumnVisibility(cleanHeadingTitle, definedLinkLabels, labelStyleAt(headingTextStart));
+        const titleVisibility = tableColumnVisibility(cleanHeadingTitle, definedLinkLabels, labelContextAt(headingTextStart));
         const ownVisibility = titleVisibility === "public" ? sectionBaseVisibility : titleVisibility;
         const visibility = maxVisibility(ownVisibility, boundaryFloor);
         if (isSectionHeading) {
@@ -4965,7 +5030,7 @@ function parsePedagogicalAstInternal(
               padding: 0,
             }),
             { onHeading: (offset, level) => levels.set(offset, level) },
-            labelStyleAt(line.start),
+            labelContextAt(line.start),
           );
           quotedHeadingLevels = levels;
         }
@@ -4998,7 +5063,7 @@ function parsePedagogicalAstInternal(
             lines, resetAt, endLineIdx, null, intrinsic.visibility, propagateSectionVisibility, sealProofs,
             definedLinkLabels, captionRowStarts, boundaryFloors, undefined,
             { stack: quotedHeadings, baseVisibility: getActiveSectionVisibility() },
-            labelStyleAt(resetStart),
+            labelContextAt(resetStart),
           );
           emitContainerWithExtraction(
             intrinsic.kind, intrinsic.visibility, true, resetStart, outerEnd, outerEnd, undefined, true, innerBlocks,
@@ -5018,7 +5083,7 @@ function parsePedagogicalAstInternal(
             boundaryFloors,
             undefined,
             { stack: quotedHeadings, baseVisibility: getActiveSectionVisibility(), firstHeadingIsLocal: true },
-            labelStyleAt(headerRestStart),
+            labelContextAt(headerRestStart),
           );
           const higherBlocks = innerBlocks.filter(
             b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
@@ -5077,7 +5142,7 @@ function parsePedagogicalAstInternal(
           boundaryFloors,
           undefined,
           { stack: quotedHeadings, baseVisibility: activeVis },
-          labelStyleAt(line.start),
+          labelContextAt(line.start),
         );
         if (innerBlocks.some(b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis])) {
           emitContainerWithExtraction(
@@ -5146,7 +5211,7 @@ function parsePedagogicalAstInternal(
           ? { length: listMatch[0].length, padding: 0 }
           : listContinuationPrefix(bodyLine.raw, contentIndent),
         undefined,
-        labelStyleAt(line.start),
+        labelContextAt(line.start),
       );
       const end = lines[endLineIdx]!.contentEnd;
       emitContainerWithExtraction("prose", activeVis, false, line.start, end, end, undefined, false, innerBlocks);
@@ -5157,7 +5222,7 @@ function parsePedagogicalAstInternal(
     // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
     if (tableHeaderCells) {
       let j = i + 2;
-      const columns = getTableColumnVisibilities(raw, tableHeaderCells, definedLinkLabels, line.start, labelStyleAt);
+      const columns = getTableColumnVisibilities(raw, tableHeaderCells, definedLinkLabels, line.start, labelContextAt);
       while (j < lines.length) {
         const row = lines[j]!;
         if (boundaryFloors?.has(row.start)) break;
@@ -5195,7 +5260,7 @@ function parsePedagogicalAstInternal(
         const cellText = sanitizeHeaderLabel(text, cell.start, cell.end, extracted, "");
         const renderedLabelSource = maskedLabelBlocks === extracted ? cellText :
           sanitizeHeaderLabel(text, cell.start, cell.end, maskedLabelBlocks, "");
-        const visibility = tableColumnVisibility(renderedLabelSource, definedLinkLabels, labelStyleAt(cell.start), "th");
+        const visibility = tableColumnVisibility(renderedLabelSource, definedLinkLabels, labelContextAt(cell.start), "th");
         if (visibility === "sealed") {
           return { kind: "solution" as const, visibility: maxVisibility("sealed", activeVis), label: cellText };
         }

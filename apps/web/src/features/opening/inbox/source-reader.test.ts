@@ -225,6 +225,7 @@ describe("dedicated material reader", () => {
     const videoRecord: SourceRecord = { ...record, name: "短视频.mp4", mime: "video/mp4" };
     const reader = await render({ record: videoRecord, startMs: 10_000, endMs: 10_500 });
     const player = reader.querySelector('[data-media-anchor-player="true"]')!;
+    expect(player.textContent).toContain("引用片段：0:10–0:10.5");
     const video = player.querySelector("video")!;
     const replay = Array.from(player.querySelectorAll("button")).find(button => button.textContent === "重播片段")!;
     let seeking = true;

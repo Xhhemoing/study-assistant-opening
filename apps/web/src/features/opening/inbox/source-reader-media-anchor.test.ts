@@ -80,6 +80,18 @@ describe("source-reader media anchor validation and formatting", () => {
     expect(formatMediaAnchorRange({ startMs: 65_000, endMs: 90_000, bounded: true })).toBe("1:05–1:30");
     expect(formatMediaAnchorRange({ startMs: 65_000, endMs: 65_000, bounded: false })).toBe("1:05");
   });
+
+  it.each([
+    [10_000, 10_500, "0:10–0:10.5"],
+    [10_200, 10_500, "0:10.2–0:10.5"],
+    [10_050, 10_125, "0:10.05–0:10.125"],
+    [3_000, 6_000, "0:03–0:06"],
+    [3_599_999, 3_600_001, "59:59.999–1:00:00.001"],
+    [10_000.05, 10_000.051, "0:10.00005–0:10.000051"],
+    [0, 1e-7, "0:00–0:00.0000000001"],
+  ])("formats distinct endpoints for %s–%s ms", (startMs, endMs, label) => {
+    expect(formatMediaAnchorRange({ startMs, endMs, bounded: true })).toBe(label);
+  });
 });
 
 describe("media anchor bounded playback controller", () => {

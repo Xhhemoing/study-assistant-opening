@@ -1609,6 +1609,14 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   }
 
   it.each([
+    ...["-webkit-inline-flex", "-webkit-inline-box", "-ms-inline-flexbox", "-ms-inline-grid", "inline flow-root", "flow-root inline", "inline flex", "inline grid"].map(
+      display => `An<span style="display:${display};content-visibility:hidden">noise</span>swer`,
+    ),
+    'An<span style="--layout:-webkit-inline-flex;display:var(--layout)!important;display:block;content-visibility:hidden">noise</span>swer',
+    ...["\u2066", "\u2067", "\u2068", "\u2069", "\u202E", "\u061C", "\u2060", "\u2062", "\u034F", "\uFE0F", "\u{E0100}", "\u{E0020}", "\u00AD", "\u200B", "\u200C", "\u200D", "\uFEFF", "\u0600"].map(
+      control => `An${control}sw${control}er`,
+    ),
+    'An<span>&#x2066;sw&#x2069;</span>er',
     'An<span style="position:absolute;content-visibility:hidden">noise</span>swer',
     'An<span hidden="until-found" style="position:fixed">noise</span>swer',
     'An<span style="position:absolute"></span>swer',
@@ -1656,6 +1664,14 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
+    ...["-webkit-flex", "-webkit-box", "-ms-flexbox", "-ms-grid", "block flex", "block grid", "block flow-root", "block list-item", "flow-root list-item"].map(
+      display => `An<span style="display:${display};content-visibility:hidden">noise</span>swer`,
+    ),
+    ...["-webkit-flex", "-webkit-inline-box", "block flex", "grid block"].map(
+      display => `Topic <span style="display:${display}"><span hidden="until-found">Answer</span></span>`,
+    ),
+    'An<span style="display:inline list-item;content-visibility:hidden">noise</span>swer',
+    'An<span style="display:inline table;content-visibility:hidden">noise</span>swer',
     'An<span style="position:absolute">noise</span>swer',
     'An<span style="float:right">noise</span>swer',
     'An<span style="position:relative;content-visibility:hidden">noise</span>swer',
@@ -1705,6 +1721,39 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   it("includes the open summaryless disclosure body in a Markdown heading label", () => {
     const text = "## <details open>Answer</details>\n\nforty-two";
     for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
+  });
+
+  it("keeps the original directional-isolate code points in the sealed heading", () => {
+    const heading = "## An\u2066sw\u2069er";
+    const text = `${heading}\n\nforty-two`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [heading, "forty-two"]);
+  });
+
+  it.each([
+    ['## <details name="g" open hidden></details>An', 'g', true],
+    ['<details name="g" open><summary>Intro</summary>body</details>\n\n## An', 'g', true],
+    ['<details name="g" open></details>\n\n> ## An', 'g', true, '\n>\n> forty-two'],
+    ['<details name="g" open></details>\n\n- ## An', 'g', true, '\n\n  forty-two'],
+    ['## <details name="&#103;" open hidden></details>An', 'g', true],
+    ['## <details name=" " open hidden></details>An', ' ', true],
+    ['## <details name="g" hidden></details>An', 'g', false],
+    ['## <details name="G" open hidden></details>An', 'g', false],
+    ['## <details name="g&#x2066;" open hidden></details>An', 'g', false],
+    ['## <details open hidden></details>An', '', false],
+    ['## <details name="" open hidden></details>An', '', false],
+    ['## <template><details name="g" open></details></template>An', 'g', false],
+    ['## <datalist><details name="g" open></details></datalist>An', 'g', true],
+    ['## <select hidden><details name="g" open></details></select>An', 'g', false],
+    ['<template><details name="g" open></details></template>\n\n## An', 'g', false],
+    ['## `<details name="g" open>` An', 'g', false],
+    ['## <details name="g" open hidden></details><template><details name="g" open></details></template>An', 'g', true],
+  ] as const)("uses earlier open disclosures with the same nonempty name for %s", (prefix, name, sealed, body?: string) => {
+    const label = `${prefix}<details name="${name}" open style="display:inline"><summary hidden></summary>noise</details>swer`;
+    const text = label + (body ?? "\n\nforty-two");
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (sealed) expectSealedEvidence(chunks, text, ["forty-two"]);
+      else expectSealedEvidence(chunks, text, [], "forty-two");
+    }
   });
 
   it.each([
