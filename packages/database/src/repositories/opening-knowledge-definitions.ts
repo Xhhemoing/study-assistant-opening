@@ -2,14 +2,17 @@ import type { Scope, SourceChunk } from "@aistudy/contracts";
 import { knowledgeDefinitionHeader, knowledgeNodeDefinition, serializeKnowledgeEvidence } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
+import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 
 const definitionPatchByteLimit = 256 * 1024;
 const pdfHeadingContainer = /^(?:(?:chapter|section|lecture|part|unit|appendix)[ \t]+[\w.]+|第[ \t]*[一二三四五六七八九十百千\d]+[ \t]*(?:章|节|讲|部分|单元)|附录[ \t]*[A-Z0-9一二三四五六七八九十]+)(?:[ \t]*[:：.\-—–][ \t]*|[ \t]+)/iu;
 const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
 const englishContinuation = String.raw`(?:[ \t]*\([ \t]*(?:continued|cont\.?|cont['’]?d)[ \t]*\))?`;
-const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后答案|课后解答|章节答案|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答)";
+const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答)";
 const chineseContinuation = String.raw`(?:[ \t]*[（(](?:续|接上页)[）)])?[ \t]*`;
-const explicitPdfAnswerLabel = new RegExp(String.raw`^(?:(?:answers?[ \t]+(?:key|section)|${englishAnswerQualifier}[ \t]+answers?|(?:official|reference)[ \t]+solutions?|solutions?[ \t]+manual|answers?[ \t]+and[ \t]+solutions?|answers?)${englishContinuation}[ \t]*(?:[:：]|$)|(?:answers?|solutions?|key)[ \t]+to[ \t]+(?:(?:the|selected|odd-numbered|even-numbered|all)[ \t]+)*(?:exercises?|problems?|questions?|chapter[ \t]+\d+|section[ \t]+\d+(?:\.\d+)*)\b|(?:【[ \t]*)?${chineseAnswerHeading}${chineseContinuation}(?:】|[:：]|$))`, "iu");
+const assessmentTopic = String.raw`(?:review[ \t]+questions?|practice[ \t]+problems?|self[- ]check[ \t]+exercises?|exercises?|problems?|questions?|chapter[ \t]+\d+|section[ \t]+\d+(?:\.\d+)*)`;
+const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter[ \t]+\d+|section[ \t]+\d+(?:\.\d+)*)[ \t]+)*`;
+const explicitPdfAnswerLabel = new RegExp(String.raw`^(?:(?:answers?[ \t]+(?:key|section)|${englishAnswerQualifier}[ \t]+answers?|(?:official|reference)[ \t]+solutions?|solutions?[ \t]+manual|answers?[ \t]+and[ \t]+solutions?|answers?)${englishContinuation}[ \t]*(?:[:：]|$)|(?:answers?|solutions?|key)[ \t]+to[ \t]+${assessmentQualifier}${assessmentTopic}${englishContinuation}[ \t]*(?:[:：]|$)|(?:【[ \t]*)?${chineseAnswerHeading}${chineseContinuation}(?:】|[:：]|$))`, "iu");
 const numberedPdfAnswerLabel = new RegExp(String.raw`^(?:(?:(?:${englishAnswerQualifier}|worked|full)[ \t]+)?(?:answers?(?:[ \t]+key)?|solutions?)|key)(?:[ \t]+to[ \t]+(?:exercise|problem|question))?[ \t]*\d+(?:\.\d+)*${englishContinuation}[ \t]*(?:[:：]|[.。](?:[ \t]|$)|$)|^(?:${chineseAnswerHeading}|详解|解析|解)[ \t]*\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?:[ \t]|$)|$)`, "iu");
 
 export function containsPdfAnswerLabel(text: string): boolean {
@@ -38,14 +41,16 @@ export function publicPdfSealBoundaries(sql: Sql, workspaceId: string, scope: { 
   // Every newer tightening invalidates stale downstream chunks until replacement.
   // A verified reopening and all settled markers commit with that replacement.
   return sql`WITH pdf_pending_seals AS MATERIALIZED (
-    SELECT seal.source_id,seal.source_version,min(seal.page_start) AS first_page
+    SELECT seal.source_id,seal.source_version,min(CASE WHEN seal.parser_profile='pdf-publication-page-seal-v1'
+      THEN seal.page_start ELSE substring(seal.parser_profile FROM ${pendingPdfFailureBoundaryPattern})::int END) AS first_page
     FROM opening_pdf_parse_segments seal
     JOIN opening_sources ps ON ps.id=seal.source_id AND ps.workspace_id=seal.workspace_id AND ps.mime='application/pdf'
     WHERE seal.workspace_id=${workspaceId} AND ${requested}
-      AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready' AND seal.page_end=seal.page_start
-      AND (seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
-        OR seal.pages->0->>'publicationSealUnknown'='true')
-      AND (${pendingPdfSeal(sql, "ps")})
+      AND ((seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready' AND seal.page_end=seal.page_start
+        AND (seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
+          OR seal.pages->0->>'publicationSealUnknown'='true')
+        AND (${pendingPdfSeal(sql, "ps")}))
+        OR seal.parser_profile ~ ${pendingPdfFailureBoundaryPattern})
     GROUP BY seal.source_id,seal.source_version
   )`;
 }

@@ -1,5 +1,8 @@
 import type { Sql } from "postgres";
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
+import { containsPdfAnswerLabel, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
+
+type PageStats = { page: number | null; characters: number; readable: boolean };
 
 /** Owner-only, version-pinned plain text; object keys and rendered HTML never leave this reader. */
 export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id: string, input: { version?: number; page?: number }) {
@@ -28,15 +31,49 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
     if (source.upload_state !== "uploaded" || (version === Number(source.version) && source.parse_state !== "ready" && !publishedPdf)) {
       throw new OpeningSourceError("CONFLICT", "材料尚未完成正文解析");
     }
-    const stats = await tx`SELECT page,sum(length(text))::int AS characters,bool_or(text ~ '[^[:space:]]') AS readable
-      FROM opening_source_chunks WHERE source_id=${id} AND source_version=${version} GROUP BY page ORDER BY page NULLS LAST`;
+    const pdf = source.mime === "application/pdf";
+    const permittedIds = new Map<number | null, string[]>();
+    const pdfBoundary = pdf ? publicPdfSealBoundaries(tx, scope.workspaceId, { sourceIds: [id] }) : tx``;
+    const fromPdf = pdf ? tx`FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
+      WHERE c.source_id=${id} AND c.source_version=${version} AND s.workspace_id=${scope.workspaceId}
+        AND ${publicPdfChunkPredicate(tx)}` : tx``;
+    let stats: PageStats[];
+    if (pdf) {
+      // Send full text for potential labels only. The broad SQL words cover every
+      // label family, while the shared checker decides from the complete lines.
+      const query = tx`${pdfBoundary}
+        SELECT c.id,c.page,length(c.text)::int AS characters,c.text ~ '[^[:space:]]' AS readable,
+          CASE WHEN c.text ~* '(answer|solution|key|答案|解|解析)' THEN c.text ELSE '' END AS answer_candidate
+        ${fromPdf} ORDER BY c.page NULLS LAST`;
+      const byPage = new Map<number | null, PageStats>();
+      for await (const rows of query.cursor(16)) {
+        for (const row of rows) {
+          if (containsPdfAnswerLabel(row.answer_candidate)) continue;
+          const page = row.page == null ? null : Number(row.page);
+          const current = byPage.get(page);
+          byPage.set(page, { page, characters: (current?.characters ?? 0) + Number(row.characters), readable: Boolean(current?.readable || row.readable) });
+          const ids = permittedIds.get(page) ?? [];
+          ids.push(String(row.id));
+          permittedIds.set(page, ids);
+        }
+      }
+      stats = [...byPage.values()];
+    } else {
+      stats = await tx<PageStats[]>`SELECT page,sum(length(text))::int AS characters,bool_or(text ~ '[^[:space:]]') AS readable
+        FROM opening_source_chunks WHERE source_id=${id} AND source_version=${version} GROUP BY page ORDER BY page NULLS LAST`;
+    }
     if (!stats.length) throw new OpeningSourceError("NOT_FOUND", "该版本没有解析正文");
     const pages = stats.map(row => row.page == null ? null : Number(row.page));
     const page = input.page ?? pages[0]!;
     if (!pages.includes(page)) throw new OpeningSourceError("NOT_FOUND", "该页没有解析记录");
     // Limit each database value before sending; a physical page may contain multiple chunks.
-    const bodies = await tx`SELECT left(text,20001) AS text FROM opening_source_chunks
-      WHERE source_id=${id} AND source_version=${version} AND page IS NOT DISTINCT FROM ${page} ORDER BY created_at,id`;
+    // Repeatable read pins the chunk IDs checked for full-text labels in the inventory.
+    const bodies = pdf ? await tx`${pdfBoundary}
+      SELECT left(c.text,20001) AS text ${fromPdf}
+      AND c.page IS NOT DISTINCT FROM ${page} AND c.id=ANY(${permittedIds.get(page) ?? []}::uuid[])
+      ORDER BY c.created_at,c.id`
+      : await tx`SELECT left(text,20001) AS text FROM opening_source_chunks
+        WHERE source_id=${id} AND source_version=${version} AND page IS NOT DISTINCT FROM ${page} ORDER BY created_at,id`;
     const text = bodies.map(row => String(row.text)).join("\n\n");
     return { sourceId: id, version, currentVersion: Number(source.version), page, pages,
       pageKind: source.mime === "text/markdown" || source.mime === "text/plain" || source.mime === "text/html" ? "section" as const : "physical" as const,

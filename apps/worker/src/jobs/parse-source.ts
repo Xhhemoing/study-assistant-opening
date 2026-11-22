@@ -137,6 +137,10 @@ function isRunningPageHeading(stripped: string): boolean {
   return Boolean(container && /^[\s:：.．—–-]*$/u.test(stripped.slice(container.length)));
 }
 
+function needsVerifiedImage(kinds: readonly VisualPageKind[]): boolean {
+  return kinds.includes("scan") || kinds.includes("picture");
+}
+
 function hasVerifiedPageText(text: string): boolean {
   const content = text.split(/\r?\n/u).map(line => stripHeadingMarkup(line).stripped)
     .filter(line => !isRunningPageHeading(line)).join("\n");
@@ -895,7 +899,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         // Recheck raw Vision for pages published without an image key to restore trailing seals.
         const reusable = sanitizedSaved
           && (!visual || (Boolean(sanitizedSaved.imageObjectKey)
-            && (!visual.visualKinds.includes("scan") || savedHasTranscription || hasVerifiedPageText(page.text))))
+            && (!needsVerifiedImage(visual.visualKinds) || savedHasTranscription || hasVerifiedPageText(page.text))))
           ? sanitizedSaved
           : undefined;
         if (reusable && !isImage && savedSeal && savedHasVision) {
@@ -997,7 +1001,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             if (visionSealed.detectedOnPage) {
               text = stripSealedSolutionLines(text, { ...incomingSeal, mode: "none" }, undefined, hadNativeSeal ? true : "heading-only");
             }
-            const verifiedImageKey = pageHadSealed || (isPdf && visual.visualKinds.includes("scan")
+            const verifiedImageKey = pageHadSealed || (isPdf && needsVerifiedImage(visual.visualKinds)
               && !visionSealed.hasPublicTranscription && !hasVerifiedPageText(text)) ? null : result.imageObjectKey;
             if (!isImage && !sealedVisionText.trim()) {
               if (!text.trim()) {
@@ -1061,7 +1065,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           return pageSeals;
         };
         const publicationSeals = new Map<number, PdfSegmentPage>();
-        const recordPageSeal = async (marker: PdfSegmentPage | undefined, next: PdfSegmentPage) => {
+        const stagePageSeal = (marker: PdfSegmentPage | undefined, next: PdfSegmentPage) => {
           if (!deps.segments) return;
           publicationSeals.set(next.page, next);
           const previousMode = pdfPageEndSeal(marker);
@@ -1073,7 +1077,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           const mode = previousMode === "section_sealed" ? previousMode : nextMode ?? previousMode;
           // Concurrent readers see every tightening immediately. A pending write cannot erase
           // older blocking evidence or publish a section reopening before the chunks commit.
-          await deps.segments.save(scope, pageSealIdentity(next.page), { state: "ready", pages: [{
+          return {
             ...next,
             hadSealedContent: Boolean(marker?.hadSealedContent || next.hadSealedContent),
             publicationSealHadPublicPrefix: marker?.hadSealedContent
@@ -1084,7 +1088,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             inlineSealedAtEnd: mode === "inline_sealed",
             publicationSealCommitted: false,
             reopenedSection: false,
-          }] }, signal);
+          };
         };
 
         const beginsWithRecoveredPdfSection = (text: string) => {
@@ -1148,6 +1152,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               : [];
             const saved = new Map(existing.map(chunk => [chunk.page, chunk]));
             const pageSeals = await readPageSeals(pageStart, pageEnd);
+            const blockingSeals: PdfSegmentPage[] = [];
             if (initialSealMode === "section_sealed" || pdfSealState.mode === "none" && initialSealMode) {
               pdfSealState.mode = initialSealMode;
             }
@@ -1178,16 +1183,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 unknownAfterFailure: !sectionSealed && (incomingUnresolved || !savedIsClean),
               });
               if (!preserve) {
-                const endMode = pdfPageEndSeal(marker);
-                await recordPageSeal(marker, {
-                  ...marker, page, text: "", imagePath: null,
-                  sectionSealedAtEnd: endMode === "section_sealed",
-                  inlineSealedAtEnd: endMode === "inline_sealed",
-                  publicationSealUnknown: Boolean(marker?.publicationSealUnknown || !endMode),
-                  reopenedSection: false,
-                });
+                blockingSeals.push({ page, text: "", imagePath: null, publicationSealUnknown: true });
+                if (marker && !marker.failedRangeBoundary) publicationSeals.set(page, marker);
               }
             }
+            return blockingSeals;
           },
           onPages: async (pages, initialDoclingSeal, _afterFailedSegment, initialDoclingWorkedExample, cached) => {
             const pageSeals = await readPageSeals(pages[0]!.page, pages.at(-1)!.page);
@@ -1254,11 +1254,14 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 let chunk = await consumePage(effectivePrepared, pdfSealState, pageRecognize, evidence);
                 const visualSeal = evidence.visionHandled ? evidence.visionDetectedOnPage : preparedPage.savedVisionDetectedOnPage;
                 const confirmedSeal = preparedPage.nativeSealConfirmedOnPage || visualSeal;
-                const freshNative = !cached && preparedPage.hadRawText && !preparedPage.visual && !preparedPage.savedHasVision
+                // A validated segment can survive an interrupted publication. Its native output
+                // can resolve its own failed-range uncertainty, with the relaxation still staged.
+                const onlyUncertainty = previouslyUnverified && !previouslySealed;
+                const verifiedNativeRecovery = preparedPage.hadRawText && !preparedPage.visual && !preparedPage.savedHasVision
                   && marker?.visualKinds === undefined && marker?.publicationSealHadPublicPrefix !== true
-                  && (isStandaloneRecoverySection(rawPage.text) || (!previouslySealed && previouslyUnverified
-                    && !preparedPage.incomingSeal.unknownAfterFailure && preparedPage.incomingSeal.mode === "none"
-                    && isStandaloneRecoveryProse(rawPage.text)));
+                  && ((!cached || onlyUncertainty) && isStandaloneRecoverySection(rawPage.text)
+                    || onlyUncertainty && !preparedPage.incomingSeal.unknownAfterFailure
+                      && preparedPage.incomingSeal.mode === "none" && isStandaloneRecoveryProse(rawPage.text));
                 const recoveredVision = previouslyBlocked && evidence.visionTranscribed && !evidence.visionDetectedOnPage
                   && (!previouslySealed || !evidence.visionHadSeal) && chunk
                   ? splitPdfChunk(chunk.text) : undefined;
@@ -1270,10 +1273,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                     !evidence.visionHadSeal && preparedPage.incomingSeal.mode === "none"
                     && !preparedPage.incomingSeal.unknownAfterFailure && isStandaloneRecoveryProse(recoveryTranscription)
                   );
-                const verifiedRecovery = (freshNative || cleanVision) && !confirmedSeal
+                const verifiedRecovery = (verifiedNativeRecovery || cleanVision) && !confirmedSeal
                   && pdfSealState.mode === "none" && !pdfSealState.unknownAfterFailure;
                 const replayMarker = previouslyBlocked && !verifiedRecovery;
                 if (replayMarker) {
+                  if (onlyUncertainty && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
                   hasSealedContent ||= previouslySealed;
                   if (recordedMode === "section_sealed" || recordedMode === "inline_sealed" && pdfSealState.mode === "none" && !pdfSealState.unknownAfterFailure) {
                     Object.assign(pdfSealState, cleanSeal, { mode: recordedMode });
@@ -1300,21 +1304,21 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                   const vision = "[视觉转写与描述]\n" + recoveredVision.vision;
                   chunk = { ...chunk, text: native ? recoveredVision.nativeHeader + native + "\n\n" + vision : vision };
                 }
-                const effectiveScan = preparedPage.visual?.visualKinds.includes("scan");
-                const unverifiedScan = !confirmedSeal && !previouslySealed && pdfSealState.mode === "none"
+                const unverifiedImage = preparedPage.visual && needsVerifiedImage(preparedPage.visual.visualKinds);
+                const unverifiedPage = !confirmedSeal && !previouslySealed && pdfSealState.mode === "none"
                   && !(evidence.visionTranscribed || preparedPage.savedHasTranscription && chunk?.imageObjectKey)
                   && !preparedPage.sealedAllText
-                  && ((effectiveScan && !hasVerifiedPageText(preparedPage.page.text))
+                  && ((unverifiedImage && !hasVerifiedPageText(rawPage.text))
                     || (Boolean(rawPage.text.trim()) && checkPdfPageQuality(rawPage.text).quality === "low_quality"));
-                if (unverifiedScan) {
+                if (unverifiedPage) {
                   // Keep Docling's raw extractions usable for recovery. The worker carries the unknown boundary across ranges.
                   Object.assign(pdfSealState, cleanSeal, { unknownAfterFailure: true });
-                  if (effectiveScan && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
+                  if (unverifiedImage && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
                 }
                 if (chunk?.imageObjectKey && (confirmedSeal || pdfSealState.mode !== "none" || pdfSealState.unknownAfterFailure)) {
                   chunk = { ...chunk, imageObjectKey: null };
                 }
-                if (preparedPage.originalSaved && (previouslyBlocked || preparedPage.hadNativeSeal || confirmedSeal || unverifiedScan
+                if (preparedPage.originalSaved && (previouslyBlocked || preparedPage.hadNativeSeal || confirmedSeal || unverifiedPage
                   || preparedPage.incomingSeal.unknownAfterFailure || preparedPage.saved !== preparedPage.originalSaved)) {
                   unsafeLegacyPages.add(rawPage.page);
                 }
@@ -1327,20 +1331,23 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 const reopenedSection = !replayMarker && Boolean(chunk?.text.trim()) && pdfSealState.mode === "none"
                   && !pdfSealState.unknownAfterFailure && (recoveredSection || preparedPage.incomingSeal.mode !== "none"
                     || preparedPage.incomingSeal.unknownAfterFailure);
-                if ((!replayMarker && (confirmedSeal || unverifiedScan || previouslyBlocked || reopenedSection)) || strongerSeal) {
-                  await recordPageSeal(marker, {
+                if ((!replayMarker && (confirmedSeal || unverifiedPage || previouslyBlocked || reopenedSection)) || strongerSeal) {
+                  const pending = stagePageSeal(marker, {
                     page: rawPage.page, text: "", imagePath: null, hadSealedContent: confirmedSeal,
                     ...(confirmedSeal && publicPrefix !== undefined ? { publicationSealHadPublicPrefix: publicPrefix } : {}),
-                    ...(unverifiedScan || replayMarker && previouslyUnverified && pdfSealState.unknownAfterFailure
+                    ...(unverifiedPage || replayMarker && previouslyUnverified && pdfSealState.unknownAfterFailure
                       ? { publicationSealUnknown: true } : {}),
                     // Retain visual provenance when the current evidence only strengthens the existing seal.
-                    ...(visualSeal || unverifiedScan && effectiveScan || replayMarker && marker?.visualKinds !== undefined
+                    ...(visualSeal || unverifiedPage && unverifiedImage || replayMarker && marker?.visualKinds !== undefined
                       ? { visualKinds: preparedPage.visual?.visualKinds ?? marker?.visualKinds ?? [] } : {}),
                     ...(pdfSealState.mode === "section_sealed" ? { sectionSealedAtEnd: true }
                       : pdfSealState.mode === "inline_sealed" ? { inlineSealedAtEnd: true } : {}),
                     ...(reopenedSection ? { reopenedSection: true } : {}),
                   });
-                } else if (replayMarker && marker) {
+                  if (pending) {
+                    await deps.segments?.save(scope, pageSealIdentity(rawPage.page), { state: "ready", pages: [pending] }, signal);
+                  }
+                } else if (replayMarker && marker && !marker.failedRangeBoundary) {
                   publicationSeals.set(rawPage.page, marker);
                 }
                 if (!chunk) {

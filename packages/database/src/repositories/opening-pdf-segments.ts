@@ -2,18 +2,32 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[] } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
 const conflict = () => new OpeningSourceError("CONFLICT", "PDF parse execution or source version is no longer current");
+
+const publicationProfile = "pdf-publication-page-seal-v1";
+const failureProfileSuffix = "/publication-failure-";
+const boundaryPagePattern = "([1-9][0-9]{0,8})$";
+export const pendingPdfFailureBoundaryPattern = failureProfileSuffix + "pending-" + boundaryPagePattern;
+const failureBoundaryPattern = failureProfileSuffix + "(?:pending|settled)-" + boundaryPagePattern;
+const failureBoundary = new RegExp(failureBoundaryPattern, "u");
+const pendingFailureBoundary = new RegExp(pendingPdfFailureBoundaryPattern, "u");
+
+function storedSegmentKey(tx: Sql, input: PdfSegmentIdentity) {
+  // A conversion has one row even when its failed-row constraint prevents JSON metadata.
+  return tx`(parser_profile=${input.parserProfile} OR starts_with(parser_profile,${input.parserProfile + failureProfileSuffix}))`;
+}
 
 function validateIdentity(input: PdfSegmentIdentity) {
   // Normal uploads start at version 0; cache identity follows source/chunk identity.
   if (!Number.isSafeInteger(input.sourceVersion) || input.sourceVersion < 0
     || !Number.isSafeInteger(input.pageStart) || !Number.isSafeInteger(input.pageEnd)
     || input.pageStart < 1 || input.pageEnd < input.pageStart || input.pageEnd - input.pageStart >= 100
-    || input.parserProfile.length < 1 || input.parserProfile.length > 200) throw new TypeError("invalid PDF segment identity");
+    || input.parserProfile.length < 1 || input.parserProfile.length > 200
+    || input.parserProfile.includes(failureProfileSuffix)) throw new TypeError("invalid PDF segment identity");
 }
 export function validatePdfSegmentPages(value: unknown, start: number, end: number): PdfSegmentPage[] {
   if (!Array.isArray(value) || value.length !== end - start + 1) throw new TypeError("incomplete PDF segment");
@@ -46,13 +60,12 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
   });
 }
 
-/** Called after chunk reconciliation, under the publication transaction's execution and source locks. */
-export async function commitPdfPageSeals(tx: TransactionSql, workspaceId: string, sourceId: string, sourceVersion: number,
-  markers: readonly PdfSegmentPage[]) {
+async function writePdfPageSeals(tx: TransactionSql, workspaceId: string, sourceId: string, sourceVersion: number,
+  markers: readonly PdfSegmentPage[], committed: boolean) {
   if (!markers.length) return;
   const pages = markers.map(marker => {
     const [page] = validatePdfSegmentPages([marker], marker.page, marker.page);
-    return { ...page, publicationSealCommitted: true };
+    return { ...page, publicationSealCommitted: committed };
   });
   await tx`INSERT INTO opening_pdf_parse_segments(workspace_id,source_id,source_version,parser_profile,page_start,page_end,state,pages,error_code)
     SELECT ${workspaceId}::uuid,${sourceId}::uuid,${sourceVersion}::int,'pdf-publication-page-seal-v1',entry.page,entry.page,'ready',jsonb_build_array(entry.marker),NULL
@@ -62,7 +75,33 @@ export async function commitPdfPageSeals(tx: TransactionSql, workspaceId: string
       SET state=EXCLUDED.state,pages=EXCLUDED.pages,error_code=NULL,updated_at=now()`;
 }
 
-async function assertSource(tx: Sql | TransactionSql, scope: OpeningJobScope, input: { sourceId: string; sourceVersion: number }) {
+/** Called after chunk reconciliation, under the publication transaction's execution and source locks. */
+export async function commitPdfPageSeals(tx: TransactionSql, workspaceId: string, sourceId: string, sourceVersion: number,
+  markers: readonly PdfSegmentPage[]) {
+  const retained: PdfSegmentPage[] = [];
+  const cleared: number[] = [];
+  for (const marker of markers) {
+    if (marker.hadSealedContent || marker.sectionSealedAtEnd || marker.inlineSealedAtEnd || marker.publicationSealUnknown) retained.push(marker);
+    else cleared.push(marker.page);
+  }
+  await writePdfPageSeals(tx, workspaceId, sourceId, sourceVersion, retained, true);
+  if (cleared.length) await tx`DELETE FROM opening_pdf_parse_segments
+    WHERE workspace_id=${workspaceId} AND source_id=${sourceId} AND source_version=${sourceVersion}
+      AND parser_profile=${publicationProfile} AND page_start=ANY(${cleared}::int[]) AND page_end=page_start`;
+  // Ready conversion output can survive an interrupted publication. Keep the
+  // pending boundary on that same row until the staged replacement commits.
+  await tx`UPDATE opening_pdf_parse_segments
+    SET parser_profile=CASE
+      WHEN substring(parser_profile FROM ${failureBoundaryPattern})::int=ANY(${cleared}::int[])
+        THEN regexp_replace(parser_profile,${failureBoundaryPattern},'')
+      ELSE replace(parser_profile,${failureProfileSuffix + "pending-"},${failureProfileSuffix + "settled-"})
+    END,updated_at=now()
+    WHERE workspace_id=${workspaceId} AND source_id=${sourceId} AND source_version=${sourceVersion}
+      AND (parser_profile ~ ${pendingPdfFailureBoundaryPattern}
+        OR substring(parser_profile FROM ${failureBoundaryPattern})::int=ANY(${cleared}::int[]))`;
+}
+
+async function assertSource(tx: Sql | TransactionSql, scope: OpeningJobScope, input: { sourceId: string; sourceVersion: number }, write = false) {
   // Cache is execution-private, not an alternate read API. Reuse the same
   // workspace -> job -> source locking order as chunks/cancel/privacy changes.
   if (!scope.jobExecution) throw conflict();
@@ -73,7 +112,7 @@ async function assertSource(tx: Sql | TransactionSql, scope: OpeningJobScope, in
   const [source] = job ? await tx`SELECT id FROM opening_sources s WHERE id=${input.sourceId}
     AND workspace_id=${scope.workspaceId} AND version=${input.sourceVersion} AND upload_state='uploaded' AND mime='application/pdf'
     AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-    FOR SHARE` : [];
+    ${write ? tx`FOR NO KEY UPDATE` : tx`FOR SHARE`}` : [];
   if (!source) throw conflict();
 }
 
@@ -89,7 +128,8 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
         await assertSource(tx, scope, input);
         const [row] = await tx`SELECT state,pages,error_code FROM opening_pdf_parse_segments
           WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND source_version=${input.sourceVersion}
-          AND parser_profile=${input.parserProfile} AND page_start=${input.pageStart} AND page_end=${input.pageEnd}`;
+          AND page_start=${input.pageStart} AND page_end=${input.pageEnd} AND ${storedSegmentKey(tx, input)}
+          LIMIT 1`;
         if (!row) return null;
         return row.state === "ready" ? { state: "ready", pages: validatePdfSegmentPages(row.pages, input.pageStart, input.pageEnd) }
           : { state: "failed", errorCode: row.error_code as "conversion_failed" | "timeout" | "invalid_output" };
@@ -99,29 +139,71 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
       validateIdentity(input);
       return sql.begin(async tx => {
         await assertSource(tx, scope, input);
-        const rows = await tx<{ page_start: number; pages: unknown }[]>`SELECT page_start, pages
+        const rows = await tx<{ page_start: number; parser_profile: string; pages: unknown }[]>`SELECT page_start,parser_profile,pages
           FROM opening_pdf_parse_segments
           WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND source_version=${input.sourceVersion}
-          AND parser_profile=${input.parserProfile} AND page_start BETWEEN ${input.pageStart} AND ${input.pageEnd}
-          AND page_end=page_start AND state='ready'`;
-        return rows.flatMap(row => validatePdfSegmentPages(row.pages, row.page_start, row.page_start));
+            AND page_start<=${input.pageEnd} AND page_end>=${input.pageStart}
+            AND ((parser_profile=${input.parserProfile} AND page_end=page_start AND state='ready')
+              OR parser_profile ~ ${failureBoundaryPattern})`;
+        const markers = new Map<number, PdfSegmentPage>();
+        for (const row of rows) {
+          if (row.parser_profile === input.parserProfile) {
+            const [marker] = validatePdfSegmentPages(row.pages, row.page_start, row.page_start);
+            if (marker && (!markers.has(marker.page) || marker.hadSealedContent
+              || marker.publicationSealUnknown || marker.sectionSealedAtEnd || marker.inlineSealedAtEnd)) markers.set(marker.page, marker);
+            continue;
+          }
+          const page = Number(failureBoundary.exec(row.parser_profile)?.[1]);
+          if (!Number.isSafeInteger(page) || page < input.pageStart || page > input.pageEnd) continue;
+          const existing = markers.get(page);
+          if (!existing || !(existing.hadSealedContent || existing.publicationSealUnknown || existing.sectionSealedAtEnd || existing.inlineSealedAtEnd)) {
+            markers.set(page, { page, text: "", imagePath: null, publicationSealUnknown: true, failedRangeBoundary: true });
+          }
+        }
+        return [...markers.values()];
       });
     },
-    async save(scope: OpeningJobScope, input: PdfSegmentIdentity, segment: PdfSegment, signal?: AbortSignal): Promise<void> {
+    async save(scope: OpeningJobScope, input: PdfSegmentIdentity, segment: PdfSegment, signal?: AbortSignal,
+      blockingSeals: readonly PdfSegmentPage[] = []): Promise<void> {
       validateIdentity(input);
+      if (blockingSeals.length && (segment.state !== "failed" || blockingSeals.some(marker =>
+        marker.page < input.pageStart || marker.page > input.pageEnd || !marker.publicationSealUnknown || marker.reopenedSection))) {
+        throw new TypeError("invalid failed PDF segment publication markers");
+      }
       const pages = segment.state === "ready" ? validatePdfSegmentPages(segment.pages, input.pageStart, input.pageEnd) : null;
       signal?.throwIfAborted();
       await sql.begin(async tx => {
-        await assertSource(tx, scope, input);
+        // Serialize logical keys that can change stored profiles across retry and publication.
+        await assertSource(tx, scope, input, true);
         signal?.throwIfAborted();
+        let profile = input.parserProfile;
+        if (profile !== publicationProfile) {
+          const [existing] = await tx<{ parser_profile: string; state: string }[]>`SELECT parser_profile,state FROM opening_pdf_parse_segments
+            WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND source_version=${input.sourceVersion}
+              AND page_start=${input.pageStart} AND page_end=${input.pageEnd} AND ${storedSegmentKey(tx, input)}
+            LIMIT 1 FOR UPDATE`;
+          if (existing?.state === "ready") return;
+          if (existing) profile = existing.parser_profile;
+          if (blockingSeals.length) {
+            const previousPending = Number(pendingFailureBoundary.exec(profile)?.[1] ?? Infinity);
+            const boundary = Math.min(previousPending, ...blockingSeals.map(marker => marker.page));
+            profile = input.parserProfile + failureProfileSuffix + "pending-" + boundary;
+            if (!pendingFailureBoundary.test(profile) || profile.length > 200) throw new TypeError("invalid PDF failure boundary");
+          }
+          if (existing && profile !== existing.parser_profile) {
+            await tx`UPDATE opening_pdf_parse_segments SET parser_profile=${profile}
+              WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND source_version=${input.sourceVersion}
+                AND page_start=${input.pageStart} AND page_end=${input.pageEnd} AND parser_profile=${existing.parser_profile}`;
+          }
+        }
         await tx`INSERT INTO opening_pdf_parse_segments(workspace_id,source_id,source_version,parser_profile,page_start,page_end,state,pages,error_code)
-          VALUES(${scope.workspaceId},${input.sourceId},${input.sourceVersion},${input.parserProfile},${input.pageStart},${input.pageEnd},
+          VALUES(${scope.workspaceId},${input.sourceId},${input.sourceVersion},${profile},${input.pageStart},${input.pageEnd},
             ${segment.state},${pages ? tx.json(pages) : null},${segment.state === "failed" ? segment.errorCode : null})
           ON CONFLICT(source_id,source_version,parser_profile,page_start,page_end) DO UPDATE
             SET state=EXCLUDED.state,pages=EXCLUDED.pages,error_code=EXCLUDED.error_code,updated_at=now()
             WHERE opening_pdf_parse_segments.state <> 'ready'
                OR EXCLUDED.parser_profile = 'pdf-publication-page-seal-v1'`;
-        // An abort while the SQL command was in flight rolls back the segment.
+        // A failure or abort rolls back both the conversion state and its publication boundary.
         signal?.throwIfAborted();
       });
     },

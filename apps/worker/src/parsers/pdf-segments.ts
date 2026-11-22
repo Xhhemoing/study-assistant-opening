@@ -98,7 +98,7 @@ export async function parsePdfSegments(input: {
   onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean, initialInWorkedExample?: boolean, cached?: boolean) =>
     PdfSegmentContinuation | Promise<PdfSegmentContinuation>;
   onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
-  onFailedSegment?: (segment: FailedPdfSegment) => void | Promise<void>;
+  onFailedSegment?: (segment: FailedPdfSegment) => readonly PdfSegmentPage[] | void | Promise<readonly PdfSegmentPage[] | void>;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
   maxPages?: number; maxSegmentBytes?: number; maxPageTextBytes?: number; maxBookBytes?: number;
 }): Promise<PdfSegmentParseResult> {
@@ -232,10 +232,14 @@ export async function parsePdfSegments(input: {
       input.signal.throwIfAborted();
       const errorCode = error instanceof Error && error.name === "TimeoutError" ? "timeout"
         : error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError ? "invalid_output" : "conversion_failed";
-      await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal);
       const failure = { pageStart: start, pageEnd: end, initialSealMode };
+      // Inspect archived coverage first, then publish the failure and its blocker together.
+      const blockingSeals = await input.onFailedSegment?.(failure) ?? [
+        { page: start, text: "", imagePath: null, publicationSealUnknown: true },
+      ];
+      input.signal.throwIfAborted();
+      await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal, blockingSeals);
       failedSegments.push(failure);
-      await input.onFailedSegment?.(failure);
       // Seeing an incomplete range cannot end a confirmed answer seal or extend an example.
       initialInWorkedExample = false;
       afterFailedSegment = true;

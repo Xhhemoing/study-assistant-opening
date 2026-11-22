@@ -817,6 +817,14 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertFalse(ext.inline_sealed_by_page[10])
                 self.assertEqual(ext.texts_by_page[11], ["Public explanation."])
 
+    def test_footer_only_bitmap_needs_scan_verification(self):
+        for footer in ("123", "Chapter 1 (page 2 of 3)", "[illegible]"):
+            with self.subTest(footer=footer):
+                conversion = worker_pdf_conversion({11: footer, 12: "Public geometry notes."}, (11, 12))
+                kinds = physical_pages.extract_physical_pages(conversion).visual_kinds_by_page
+                self.assertEqual(kinds[11], ["scan", "picture"])
+                self.assertEqual(kinds[12], ["picture"])
+
     def test_scan_without_native_text_keeps_visuals_and_inherited_section_seal(self):
         result = result_for(
             [],

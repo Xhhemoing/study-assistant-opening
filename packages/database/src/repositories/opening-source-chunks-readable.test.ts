@@ -58,8 +58,8 @@ describe("empty PDF chunk publication", () => {
     const source = position("SELECT id,version,upload_state FROM opening_sources");
     const backfill = position("UPDATE opening_course_knowledge graph");
     const deletion = position("DELETE FROM opening_source_chunks c");
-    const seals = position("INSERT INTO opening_pdf_parse_segments");
-    expect(statements[seals]?.values).toContainEqual([{ ...reopened, publicationSealCommitted: true }]);
+    const seals = position("DELETE FROM opening_pdf_parse_segments");
+    expect(statements[seals]?.values).toEqual([scope.workspaceId, sourceId, 4, "pdf-publication-page-seal-v1", [1]]);
     const ready = position("UPDATE opening_sources SET parse_state='ready'");
     const index = position("INSERT INTO opening_jobs");
     const steps = [history, execution, workspace, source, backfill, deletion, seals, ready, index];
@@ -107,6 +107,13 @@ describe("cross-source legacy definition backfill", () => {
     { reason: "numbered Chinese exercise answer", available: true, text: "课后习题答案 1：x = 3。" },
     { reason: "numbered Chinese chapter answer", available: true, text: "章节答案 1、x = 3。" },
     { reason: "worked example continuation", available: true, text: "Solution:\nTake the square root.", preservesDefinition: true },
+    { reason: "answers to review questions", available: true, text: "# Answers to Review Questions\nx = 3." },
+    { reason: "solutions to practice problems", available: true, text: "Solutions to Practice Problems (continued)\nx = 3." },
+    { reason: "selected exercise answers", available: true, text: "Answers to Selected Odd-Numbered Exercises\nx = 3." },
+    { reason: "Chinese review assessment heading", available: true, text: "复习题答案\nx = 3." },
+    { reason: "ordinary solutions prose", available: true, text: "Solutions to problems of this type need more constraints.", preservesDefinition: true },
+    { reason: "ordinary linear algebra prose", available: true, text: "Solutions to linear systems form a subspace.", preservesDefinition: true },
+    { reason: "ordinary questions prose", available: true, text: "Answers to these scientific questions are uncertain.", preservesDefinition: true },
     { reason: "completed public publication", available: true, text: "Public introduction.", preservesDefinition: true },
     { reason: "Markdown answer label", available: true, text: "Answer: an HTTP response to a request.", mime: "text/markdown", preservesDefinition: true },
   ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition, mime = "application/pdf" }) => {

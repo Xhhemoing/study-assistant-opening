@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createOpeningBudgetRepository, createOpeningSourceChunksRepository, createOpeningSourceEmbeddingsRepository } from "@aistudy/database";
+import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningPdfSegmentsRepository,
+  createOpeningSourceChunksRepository, createOpeningSourceEmbeddingsRepository, openingJobScope, readOpeningSourceContent } from "@aistudy/database";
 import { segmentMaterialChunks } from "@aistudy/ai";
 import * as network from "../../packages/ai/src/opening/provider-network";
 import { createOpeningMaterialRetriever, retrievalBudgetId } from "../../apps/worker/src/runtime/material-retrieval";
@@ -25,8 +26,63 @@ async function seed(text: string | string[], scope = f.scope) {
 }
 
 describe("pgvector material repository", () => {
+  it("stores a failed boundary on the conversion row and hides the archived continuation from direct reads", async () => {
+    const pdf = await seed(["", "Public introduction.", "5 units.", "Answers to Review Questions\nx = 3."]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf',parse_state='running' WHERE id=${pdf.sourceId}`;
+    const jobs = createOpeningJobRepository(f.sql);
+    const job = await jobs.createOnce(f.scope, { kind: "parse", key: randomUUID(),
+      payload: { sourceId: pdf.sourceId, sourceVersion: 1 }, privacyEpoch: await jobs.workspacePrivacyEpoch(f.scope.workspaceId) });
+    const claimed = await jobs.claim(job.id);
+    expect(claimed?.claimToken).toBeTruthy();
+    const scope = openingJobScope(claimed!);
+    const segments = createOpeningPdfSegmentsRepository(f.sql);
+    const range = { sourceId: pdf.sourceId, sourceVersion: 1, parserProfile: "pdf-test-native", pageStart: 3, pageEnd: 3 };
+    const failure = { state: "failed", errorCode: "conversion_failed" } as const;
+    const boundary = { page: 3, text: "", imagePath: null, publicationSealUnknown: true };
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 1 })).resolves.toMatchObject({
+      pages: [1, 2, 3], text: "",
+    });
+    await expect(segments.save(scope, range, failure, undefined, [{ ...boundary, page: 4 }]))
+      .rejects.toThrow("invalid failed PDF segment publication markers");
+    expect(await segments.read(scope, range)).toBeNull();
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 })).resolves.toMatchObject({ text: "5 units." });
+
+    await segments.save(scope, range, failure, undefined, [boundary]);
+    expect(await segments.read(scope, range)).toEqual(failure);
+    expect(await f.sql`SELECT parser_profile,state FROM opening_pdf_parse_segments WHERE source_id=${pdf.sourceId}`).toEqual([
+      { parser_profile: "pdf-test-native/publication-failure-pending-3", state: "failed" },
+    ]);
+    for (const state of ["running", "failed"]) {
+      await f.sql`UPDATE opening_sources SET parse_state=${state},updated_at=now() WHERE id=${pdf.sourceId}`;
+      expect(await readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 1 })).toMatchObject({
+        pages: [1, 2], readablePages: 1, text: "",
+      });
+      expect(await readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 })).toMatchObject({ text: "Public introduction." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+
+    const recovered = { page: 3, text: "Recovered third page", imagePath: null };
+    await segments.save(scope, range, { state: "ready", pages: [recovered] });
+    expect(await segments.read(scope, range)).toEqual({ state: "ready", pages: [recovered] });
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    await chunks.replacePdfChunks(scope, { sourceId: pdf.sourceId, sourceVersion: 1, preservePages: [1, 2],
+      chunks: (async function* () {
+        yield { page: 3, text: recovered.text, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null };
+      })(),
+      publicationSeals: [recovered],
+    });
+    expect(await f.sql`SELECT parser_profile,state FROM opening_pdf_parse_segments WHERE source_id=${pdf.sourceId}`).toEqual([
+      { parser_profile: range.parserProfile, state: "ready" },
+    ]);
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 })).resolves.toMatchObject({
+      pages: [1, 2, 3], text: recovered.text,
+    });
+  });
+
   it("filters PDF answer labels and unsettled seals from all embedding entry points", async () => {
-    const texts = ["Public notes.", "Official Answer 1\nx = 3.", "5 units."];
+    const texts = ["Public notes.", "Answers to Review Questions\nx = 3.", "5 units."];
     const pdf = await seed(texts);
     const markdown = await seed(texts[1]!);
     await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
@@ -64,7 +120,7 @@ describe("pgvector material repository", () => {
     expect((await repo.snapshot(f.scope, pdf.sourceId))?.chunks.map(chunk => chunk.text)).toEqual([notes!.text, recovered]);
     const [marker] = await f.sql`SELECT pages FROM opening_pdf_parse_segments
       WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`;
-    expect(marker?.pages).toMatchObject([{ reopenedSection: true, publicationSealCommitted: true }]);
+    expect(marker).toBeUndefined();
   });
 
   it("ranks the three admitted pages even with 55 closer pages in the same book", async () => {

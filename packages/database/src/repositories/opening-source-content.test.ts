@@ -6,15 +6,26 @@ const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const source = { version: 1, mime: "application/pdf", parse_state: "ready", upload_state: "uploaded",
   published: false, ai_excluded: true, error: null };
 
-// Exercise the real reader's decision branch; SQL authorization/filtering is
-// covered by the persistence/unchanged ephemeral handler tests, not this stub.
-function database(row: Record<string, unknown> | undefined): Sql {
-  const sql = ((parts: TemplateStringsArray) => {
-    const query = parts.join("?");
-    if (query.includes("FROM opening_sources s")) return Promise.resolve(row ? [row] : []);
-    if (query.includes("GROUP BY page")) return Promise.resolve([{ page: 1, characters: 7, readable: true }]);
-    if (query.includes("left(text,20001)")) return Promise.resolve([{ text: "private" }]);
-    throw new Error(`Unexpected SQL: ${query}`);
+const defaultChunks = [{ id: "public", page: 1, text: "private", answer_candidate: "", characters: 7, readable: true }];
+
+function database(row: Record<string, unknown> | undefined, chunks = defaultChunks, reads: string[] = []): Sql {
+  const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
+    const query = parts.map((part, index) => {
+      const value = values[index];
+      return part + (typeof value === "object" && value && "fragment" in value ? value.fragment
+        : index < values.length ? "?" : "");
+    }).join("").replace(/\s+/gu, " ").trim();
+    if (query.includes("AS ai_excluded")) return Promise.resolve(row ? [row] : []);
+    if (query.includes("AS answer_candidate")) {
+      reads.push(query);
+      return { async *cursor() { yield chunks; } };
+    }
+    if (query.includes("left(c.text,20001)")) {
+      reads.push(query);
+      const permitted = values.find(Array.isArray) ?? [];
+      return Promise.resolve(chunks.filter(chunk => permitted.includes(chunk.id)));
+    }
+    return { fragment: query };
   }) as unknown as Sql;
   sql.begin = (async (_options: string, callback: (tx: Sql) => Promise<unknown>) => callback(sql)) as Sql["begin"];
   return sql;
@@ -38,6 +49,29 @@ describe("source content self-read versus additional PDF retry access", () => {
       await expect(readOpeningSourceContent(database(denied), scope, "source", {}))
         .rejects.toMatchObject({ code: "CONFLICT" });
     }
+  });
+
+  it("uses the same publication scope for inventory and bodies and excludes whole answer chunks", async () => {
+    const reads: string[] = [];
+    const answer = "Answers to Review Questions\n5 units.";
+    const chunks = [...defaultChunks,
+      { id: "blank", page: 2, text: "", answer_candidate: "", characters: 0, readable: false },
+      { id: "mixed-page-answer", page: 2, text: answer, answer_candidate: answer, characters: answer.length, readable: true },
+      { id: "answer-only", page: 3, text: answer, answer_candidate: answer, characters: answer.length, readable: true },
+    ];
+    const sql = database(source, chunks, reads);
+    expect(await readOpeningSourceContent(sql, scope, "source", { page: 2 })).toMatchObject({
+      pages: [1, 2], readablePages: 1, characters: 7, text: "",
+    });
+    expect(reads).toHaveLength(2);
+    for (const query of reads) {
+      expect(query).toContain("pdf_pending_seals AS MATERIALIZED");
+      expect(query).toContain("boundary.first_page<=c.page");
+      expect(query).toContain("seal.page_start=c.page AND seal.page_end=c.page");
+      expect(query.match(/\b(?:FROM|JOIN) opening_\w+/gu)).toHaveLength(5);
+    }
+    expect(reads[1]).toContain("c.id=ANY(?::uuid[])");
+    await expect(readOpeningSourceContent(sql, scope, "source", { page: 3 })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
   it("does not convert owner/source lookup failures or future versions into readable content", async () => {

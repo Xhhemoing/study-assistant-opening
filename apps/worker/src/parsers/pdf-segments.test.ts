@@ -66,11 +66,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v13-discourse/text",
     "docling-2.126.0/pdf-segments-v17-discourse/text",
     "docling-2.126.0/pdf-segments-v18-discourse/text",
+    "docling-2.126.0/pdf-segments-v19-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v19-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v20-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -103,6 +104,19 @@ describe("bounded resumable PDF parser", () => {
     const pages = await collectPdfSegments({ ...d.input, scope: { ...scope, jobExecution: { ...scope.jobExecution, id: "retry" } } });
     expect(d.ranges).toEqual([[11, 20]]);
     expect(pages.map(p => p.page)).toEqual(Array.from({ length: 23 }, (_, i) => i + 1));
+  });
+
+  it("leaves the failure cache untouched if archived coverage inspection is interrupted", async () => {
+    const d = setup(2);
+    d.failures.add(2);
+    await expect(parsePdfSegments({ ...d.input, segmentPages: 1, onPages: () => {},
+      onFailedSegment: ({ pageStart }) => {
+        expect(pageStart).toBe(2);
+        expect(d.data.has("source/0/text-v1/2-2")).toBe(false);
+        throw new Error("interrupted before archive inspection finished");
+      },
+    })).rejects.toThrow("interrupted before archive inspection finished");
+    expect(d.segments.save).toHaveBeenCalledOnce();
   });
 
   it("rejects a mandatory over-quota page before saving or consuming its window", async () => {
@@ -749,12 +763,43 @@ describe("bounded resumable PDF parser", () => {
       const savedMap = new Map((options.savedChunks ?? []).map(chunk => [chunk.page, chunk]));
       const segmentData = options.segmentData ?? new Map<string, PdfSegment>();
       const cacheKey = (identity: PdfSegmentIdentity) => `${identity.parserProfile}/${identity.pageStart}-${identity.pageEnd}`;
-      const segments: Pick<OpeningPdfSegmentsRepository, "read" | "save"> = {
+      const failureBoundary = /\/publication-failure-(pending|settled)-(\d+)(?=\/\d+-\d+$)/u;
+      const storedKey = (identity: PdfSegmentIdentity) => {
+        const key = cacheKey(identity);
+        return [...segmentData.keys()].find(stored => stored.replace(failureBoundary, "") === key) ?? key;
+      };
+      const segments: Pick<OpeningPdfSegmentsRepository, "read" | "readPageSeals" | "save"> = {
         read: async (_scope, identity) => {
           segmentReads.push(identity);
-          return segmentData.get(cacheKey(identity)) ?? null;
+          return segmentData.get(storedKey(identity)) ?? null;
         },
-        save: async (_scope, identity, value) => { segmentData.set(cacheKey(identity), value); },
+        readPageSeals: async (_scope, identity) => {
+          const markers = new Map<number, PdfSegmentPage>();
+          for (const key of segmentData.keys()) {
+            const page = Number(failureBoundary.exec(key)?.[2]);
+            if (page >= identity.pageStart && page <= identity.pageEnd) {
+              markers.set(page, { page, text: "", imagePath: null, publicationSealUnknown: true, failedRangeBoundary: true });
+            }
+          }
+          for (let page = identity.pageStart; page <= identity.pageEnd; page++) {
+            const value = segmentData.get(cacheKey({ ...identity, pageStart: page, pageEnd: page }));
+            const marker = value?.state === "ready" ? value.pages[0] : undefined;
+            if (marker) markers.set(page, marker);
+          }
+          return [...markers.values()];
+        },
+        save: async (_scope, identity, value, _signal, blockingSeals = []) => {
+          const key = storedKey(identity);
+          if (!blockingSeals.length) {
+            segmentData.set(key, value);
+            return;
+          }
+          const existing = failureBoundary.exec(key);
+          const boundary = Math.min(existing?.[1] === "pending" ? Number(existing[2]) : Infinity,
+            ...blockingSeals.map(marker => marker.page));
+          segmentData.delete(key);
+          segmentData.set(cacheKey({ ...identity, parserProfile: identity.parserProfile + "/publication-failure-pending-" + boundary }), value);
+        },
       };
 
       const handler = createParseSourceHandler({
@@ -767,10 +812,25 @@ describe("bounded resumable PDF parser", () => {
             pdfWarning = publication.warning;
             allowSealedEmpty = publication.allowSealedEmpty;
             options.beforePublish?.();
+            const cleared = new Set<number>();
             for (const marker of publication.publicationSeals ?? []) {
-              segmentData.set(`pdf-publication-page-seal-v1/${marker.page}-${marker.page}`, {
-                state: "ready", pages: [{ ...marker, publicationSealCommitted: true }],
-              });
+              const key = `pdf-publication-page-seal-v1/${marker.page}-${marker.page}`;
+              if (marker.hadSealedContent || marker.sectionSealedAtEnd || marker.inlineSealedAtEnd || marker.publicationSealUnknown) {
+                segmentData.set(key, { state: "ready", pages: [{ ...marker, publicationSealCommitted: true }] });
+              } else {
+                segmentData.delete(key);
+                cleared.add(marker.page);
+              }
+            }
+            for (const [key, value] of [...segmentData]) {
+              const match = failureBoundary.exec(key);
+              if (!match) continue;
+              const next = cleared.has(Number(match[2])) ? key.replace(failureBoundary, "")
+                : key.replace("/publication-failure-pending-", "/publication-failure-settled-");
+              if (next !== key) {
+                segmentData.delete(key);
+                segmentData.set(next, value);
+              }
             }
           },
           listChunksAtVersion: async (_scope, _sourceId, _sourceVersion, pageNumbers) =>
@@ -1072,9 +1132,7 @@ describe("bounded resumable PDF parser", () => {
       recognizePage: async () => ({ text: "Chapter 1: Geometry", imageObjectKey: "vision/recovered" }),
     });
     expect(recovered.publishedChunks.map(chunk => chunk.page)).toEqual([1, 2, 3, 4]);
-    expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
-      state: "ready", pages: [{ hadSealedContent: false }],
-    });
+    expect(segmentData.has("pdf-publication-page-seal-v1/2-2")).toBe(false);
     const failedAgain = await runPdfScenario({ pages, segmentData, savedChunks: recovered.publishedChunks,
       segmentPages: 2, failedStarts: [1],
     });
@@ -1179,9 +1237,33 @@ describe("bounded resumable PDF parser", () => {
     await expect(runPdfScenario({ ...options, beforePublish: () => { throw new Error("interrupted"); } })).rejects.toThrow("interrupted");
     expect(segmentData.get(key)).toEqual({ state: "ready", pages: [section] });
     await expect(runPdfScenario(options)).resolves.toMatchObject({ publishedChunks: [{ page: 1 }, { page: 2 }] });
-    expect(segmentData.get(key)).toMatchObject({ state: "ready", pages: [
-      { hadSealedContent: false, reopenedSection: true, publicationSealCommitted: true },
-    ] });
+    expect(segmentData.has(key)).toBe(false);
+  });
+
+  it("recovers a failed native page from the segment cached by an interrupted retry", async () => {
+    const settled = pdfParserProfile() + "/publication-failure-settled-2/2-2";
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [{ page: 1, text: "Public first page." }, { page: 2, text: "Recovered second page" },
+      { page: 3, text: "Public continuation." }];
+    const options = { pages, segmentData, segmentPages: 1 };
+    const first = await runPdfScenario({ ...options, failedStarts: [2] });
+    expect(first.publishedChunks.map(page => page.page)).toEqual([1]);
+    await expect(runPdfScenario({ ...options, savedChunks: first.publishedChunks, beforePublish: () => {
+      throw new Error("interrupted before chunks commit");
+    } })).rejects.toThrow("interrupted before chunks commit");
+    expect(segmentData.get(settled)).toMatchObject({ state: "ready" });
+    expect(segmentData.has("pdf-publication-page-seal-v1/2-2")).toBe(false);
+
+    const retry = await runPdfScenario({ ...options, savedChunks: first.publishedChunks });
+    expect(retry.requests).toEqual([]);
+    expect(retry.publishedChunks.map(({ text }) => text)).toEqual(pages.map(({ text }) => text));
+    expect(retry.pdfWarning).toBeUndefined();
+    expect(segmentData.has(settled)).toBe(false);
+    expect(segmentData.get(pdfParserProfile() + "/2-2")).toMatchObject({ state: "ready" });
+    const again = await runPdfScenario({ ...options, savedChunks: retry.publishedChunks });
+    expect(again.requests).toEqual([]);
+    expect(again.publishedChunks).toEqual(retry.publishedChunks);
+    expect(again.pdfWarning).toBeUndefined();
   });
 
   it.each([false, true])("recovers only a scan's own uncertainty with fresh prose (blocked predecessor: %s)", async blocked => {
@@ -1223,6 +1305,22 @@ describe("bounded resumable PDF parser", () => {
       ], recognizePage: async () => ({ text, imageObjectKey: "full-page" }) });
       expect(result.publishedChunks.map(({ page }) => page)).toEqual([1, 4]);
       expect(result.requests.find(({ start }) => start === 3)?.seed).toBe("inline_sealed");
+    },
+  );
+
+  it.each(["123", "# Page 1 of 3", "[unreadable]"])(
+    "withholds an unverified picture and its continuation when native text is %j", async text => {
+      const segmentData = new Map<string, PdfSegment>();
+      const result = await runPdfScenario({ segmentData, segmentPages: 1, pages: [
+        { page: 1, text, visualKinds: ["picture"] },
+        { page: 2, text: "5 units." },
+        { page: 3, text: "Chapter 2: Vectors" },
+      ], recognizePage: async () => ({ text: "[illegible]", imageObjectKey: "archived/full-page" }) });
+      expect(result.publishedChunks.some(chunk => chunk.imageObjectKey || chunk.page === 2)).toBe(false);
+      expect(result.pdfWarning).toMatchObject({ code: "PARSE_PARTIAL" });
+      expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({
+        state: "ready", pages: [{ visualKinds: ["picture"], publicationSealUnknown: true }],
+      });
     },
   );
 
@@ -1357,9 +1455,7 @@ describe("bounded resumable PDF parser", () => {
       },
     });
     expect(recovered.publishedChunks.map(chunk => chunk.page)).toEqual([2, 3, 4]);
-    expect(segmentData.get("pdf-publication-page-seal-v1/2-2")).toMatchObject({
-      state: "ready", pages: [{ hadSealedContent: false }],
-    });
+    expect(segmentData.has("pdf-publication-page-seal-v1/2-2")).toBe(false);
   });
 
   it("carries uncertainty past an unverified low-quality native page", async () => {
@@ -1406,9 +1502,7 @@ describe("bounded resumable PDF parser", () => {
       page: 1, slideLabel: null, startMs: null, endMs: null, text: "5 units.", imageObjectKey: null,
     }] });
     expect(result.publishedChunks.map(({ text }) => text)).toEqual(["Chapter 1: Public recovered section"]);
-    expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({
-      state: "ready", pages: [{ page: 1, text: "", imagePath: null, hadSealedContent: false, publicationSealCommitted: true }],
-    });
+    expect(segmentData.has("pdf-publication-page-seal-v1/1-1")).toBe(false);
   });
 
   it("keeps a legacy seal marker when fresh native extraction only supplies unheaded text", async () => {
@@ -1441,9 +1535,11 @@ describe("bounded resumable PDF parser", () => {
         text, imageObjectKey: "old/image" }] : [];
       const result = await runPdfScenario({ segmentData, failedStarts: [1], segmentPages: 1, savedChunks: published,
         pages: [{ page: 1, text: "" }, { page: 2, text: "5 units." }, { page: 3, text: "Chapter 2: Vectors" }],
-        beforePublish: () => expect(segmentData.get("pdf-publication-page-seal-v1/1-1")).toMatchObject({
-          state: "ready", pages: [{ publicationSealUnknown: true, publicationSealCommitted: false }],
-        }) });
+        beforePublish: () => {
+          expect(segmentData.has("pdf-publication-page-seal-v1/1-1")).toBe(false);
+          expect(segmentData.get(pdfParserProfile() + "/publication-failure-pending-1/1-1"))
+            .toEqual({ state: "failed", errorCode: "conversion_failed" });
+        } });
       expect(result.preservePages).toEqual([]);
       expect(result.publishedChunks.map(page => page.page)).toEqual([3]);
     },

@@ -907,6 +907,11 @@ def _filter_fragments_by_visibility(fragments: list[tuple[str, str | None]], blo
     return kept
 
 
+def _has_substantive_text(text: str) -> bool:
+    return any(line.strip() and not _is_running_page_heading(_strip_heading_markup(line))
+               for line in text.splitlines())
+
+
 def _compute_visual_kinds(conversion, by_page, page_order, visual_sets, raw_fragments):
     kinds = {number: set(visual_sets.get(number, ())) for number in by_page}
     physical = getattr(conversion, "pages", []) if hasattr(conversion, "document") else []
@@ -918,12 +923,13 @@ def _compute_visual_kinds(conversion, by_page, page_order, visual_sets, raw_frag
         found = kinds[number]
         cells = getattr(page, "cells", None)
         raw_texts = [text for text, _ in raw_fragments.get(number, ())]
-        has_any_text = bool("\n".join(by_page[number]).strip()) or bool("\n".join(raw_texts).strip())
-        all_sealed_only = not "\n".join(by_page[number]).strip() and bool("\n".join(raw_texts).strip())
+        public_text = "\n".join(by_page[number])
+        all_sealed_only = not public_text.strip() and any(_has_substantive_text(text) for text in raw_texts)
         if all_sealed_only:
             found.clear()
             continue
-        native = any((getattr(cell, "text", None) or "").strip() and not getattr(cell, "from_ocr", False) for cell in cells) if cells is not None else has_any_text
+        native = (any(not getattr(cell, "from_ocr", False) and _has_substantive_text(getattr(cell, "text", None) or "")
+                      for cell in cells) if cells is not None else _has_substantive_text(public_text))
         has_ocr = any((getattr(cell, "text", None) or "").strip() and getattr(cell, "from_ocr", False) for cell in cells) if cells is not None else False
         if not native or has_ocr:
             found.add("scan")
