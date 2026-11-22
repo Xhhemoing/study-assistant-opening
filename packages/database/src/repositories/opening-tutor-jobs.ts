@@ -182,7 +182,7 @@ async function readStreamMemoryMaterialBatch(
 }
 
 async function readStreamMemoryMaterials(
-  tx: TransactionSql, scope: OpeningScope, ids: string[], courseId: string | null,
+  tx: TransactionSql, scope: OpeningScope, ids: string[], courseId: string | null, materialUse: "practice" | "citation",
 ) {
   const known = new Set(ids);
   const checkedLegacy = new Set<string>();
@@ -207,7 +207,7 @@ async function readStreamMemoryMaterials(
     }
     pending = [];
     if (!legacy.size) continue;
-    const origins = await readMemoryOrigins(tx, scope, [...legacy.values()]);
+    const origins = await readMemoryOrigins(tx, scope, [...legacy.values()], { materialUse });
     for (const id of legacy.keys()) {
       const origin = origins.get(id);
       if (!origin) throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
@@ -334,7 +334,7 @@ async function assertStreamMaterialAdmission(
   }
   let memoryMaterials: MemoryMaterial[] = [];
   if (globalMemoryIdList.length) {
-    const validated = await readStreamMemoryMaterials(tx, scope, globalMemoryIdList, courseId);
+    const validated = await readStreamMemoryMaterials(tx, scope, globalMemoryIdList, courseId, materialUse);
     memoryMaterials = validated.materials;
     globalMemoryIdList = validated.memoryIds;
   }
@@ -390,7 +390,6 @@ async function assertStreamMaterialAdmission(
           AND m.status = 'active'
           AND ${memoryCourseAllows(tx, () => tx`m.course_id`, () => tx`${courseId}::uuid`, () => tx`m.workspace_id`)}
           AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-          AND ${memoryTransitiveDependenciesActive(tx)}
           AND EXISTS (
             SELECT 1
             FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
@@ -784,12 +783,10 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
 }
 
 /** Dispatch admission uses the same course and material locks as candidate append. */
-function readCompletedCandidateTarget(sql: Sql, input: CompletedCandidateTarget) {
-  return sql.begin(async tx => {
-    const [workspace] = await tx`SELECT id FROM workspaces WHERE id=${input.scope.workspaceId}
-      AND owner_user_id=${input.scope.ownerUserId} FOR SHARE`;
-    return workspace ? findCompletedCandidateTarget(tx, input) : undefined;
-  });
+async function readCompletedCandidateTarget(tx: TransactionSql, input: CompletedCandidateTarget) {
+  const [workspace] = await tx`SELECT id FROM workspaces WHERE id=${input.scope.workspaceId}
+    AND owner_user_id=${input.scope.ownerUserId} FOR SHARE`;
+  return workspace ? findCompletedCandidateTarget(tx, input) : undefined;
 }
 
 /**
@@ -1708,13 +1705,23 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     async loadCompletedTurnForMetadata(input: CompletedCandidateTarget): Promise<{
       question: string; answer: string; mode: string; userTurnId: string;
     } | null> {
-      const target = await readCompletedCandidateTarget(sql, input);
+      const target = await sql.begin(tx => readCompletedCandidateTarget(tx, input));
       return target ? { question: String(target.question), answer: String(target.answer),
         mode: String(target.mode), userTurnId: String(target.user_turn_id) } : null;
     },
 
     async canAppendCompletedTurnCandidates(input: CompletedCandidateTarget): Promise<boolean> {
-      return Boolean(await readCompletedCandidateTarget(sql, input));
+      return Boolean(await sql.begin(tx => readCompletedCandidateTarget(tx, input)));
+    },
+
+    async authorizeMetadataSend<T>(input: CompletedCandidateTarget, startSend: () => Promise<T>): Promise<T> {
+      let inFlight: Promise<T> | undefined;
+      await sql.begin(async tx => {
+        if (!await readCompletedCandidateTarget(tx, input)) throw new Error("tutor metadata authorization changed");
+        inFlight = startSend();
+        void inFlight.catch(() => undefined);
+      });
+      return await inFlight!;
     },
 
     /** Late suggestions never reopen a completed answer or change its text, usage, or exposure. */

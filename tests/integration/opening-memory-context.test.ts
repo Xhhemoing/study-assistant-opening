@@ -71,15 +71,45 @@ describe("opening memory context admission", () => {
     const global = await insertMemory(sql, scope, "Workspace evidence", [turnId]);
     await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${scoped}`;
     const membership = { workspaceId: scope.workspaceId, courseId: course.id, assetType: "source" as const, assetId: sourceId };
-    const ids = async () => (await memories.listContext(scope, new Date().toISOString(), course.id)).memories.map(memory => memory.id);
+    const ids = async (use: "citation" | "practice" = "citation") =>
+      (await memories.listContext(scope, new Date().toISOString(), course.id, use)).memories.map(memory => memory.id);
     expect(await ids()).toEqual([global]);
     await courses.addAssetMembership({ ...membership, role: "core", visibility: "course", purpose: "teaching" });
     expect(await ids()).toEqual([scoped]);
+    await sql`UPDATE course_asset_memberships SET purpose='reference' WHERE workspace_id=${scope.workspaceId} AND asset_id=${sourceId}`;
+    expect(await ids()).toEqual([scoped]);
+    expect(await ids("practice")).toEqual([]);
+    await sql`UPDATE course_asset_memberships SET purpose='practice' WHERE workspace_id=${scope.workspaceId} AND asset_id=${sourceId}`;
+    expect(await ids()).toEqual([]);
+    expect(await ids("practice")).toEqual([scoped]);
     await sql`UPDATE course_asset_memberships SET purpose='mock_exam' WHERE workspace_id=${scope.workspaceId} AND asset_id=${sourceId}`;
     expect(await ids()).toEqual([]);
     await courses.removeAssetMembership(membership);
     expect(await ids()).toEqual([global]);
   });
+  it("rejects explicit ancestry that crosses an intermediate turn outside the memory's course", async () => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const courseA = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory course A", slug: randomUUID() });
+    const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory course B", slug: randomUUID() });
+    const makeMemory = async (text: string, turnId: string) => {
+      const id = await insertMemory(sql, scope, text, [turnId]);
+      await sql`UPDATE opening_memories SET course_id=${courseA.id} WHERE id=${id}`;
+      return id;
+    };
+    const citeMemory = async (courseId: string, memoryId: string) => {
+      const turnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [memoryId] }] });
+      await sql`UPDATE opening_conversations SET course_id=${courseId} WHERE id=(
+        SELECT conversation_id FROM opening_turns WHERE id=${turnId})`;
+      return turnId;
+    };
+    const original = await makeMemory("Course A evidence", await insertOwnedTurn(sql, scope));
+    const crossed = await makeMemory("Derived from a course B turn", await citeMemory(courseB.id, original));
+    await makeMemory("Derived from the crossed memory", await citeMemory(courseA.id, crossed));
+    expect((await memories.listContext(scope, new Date().toISOString(), courseA.id)).memories.map(memory => memory.id))
+      .toEqual([original]);
+  });
+
   it("hides memories with a missing or foreign turn and a foreign conversation owner", async () => {
     const missing = await insertMemory(fixture.sql, fixture.scope, "missing turn", [randomUUID()]);
     const foreignTurn = await insertOwnedTurn(fixture.sql, fixture.otherScope);

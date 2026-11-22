@@ -55,12 +55,13 @@ export function createOpeningMemoryRepository(
     async listForContext(
       scope: OpeningScope,
       activeCourseId: string | null = null,
+      materialUse: "citation" | "practice" = "citation",
     ): Promise<MemoryItem[]> {
-      return listMemoriesForContext(sql, scope, activeCourseId);
+      return listMemoriesForContext(sql, scope, activeCourseId, undefined, undefined, materialUse);
     },
 
-    async listContext(scope: OpeningScope, now: string, activeCourseId: string | null = null) {
-      return loadMemoryContext(sql, scope, activeCourseId, now);
+    async listContext(scope: OpeningScope, now: string, activeCourseId: string | null = null, materialUse: "citation" | "practice" = "citation") {
+      return loadMemoryContext(sql, scope, activeCourseId, now, materialUse);
     },
 
     async get(scope: OpeningScope, id: string): Promise<MemoryItem | null> {

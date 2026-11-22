@@ -11,6 +11,7 @@ import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/ma
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { insertOwnedTurn } from "./opening-memory-context-fixture";
 import { closeRace, deferred, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
+import { readTurnsWithActiveMemoryDependencies } from "../../packages/database/src/repositories/opening-context-provenance";
 
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
@@ -52,7 +53,8 @@ function handler(text: string, memoryText?: string) {
     budget,
     retrieveContext: createOpeningMaterialRetriever(f.sql, budget, null),
     privacy: createOpeningPrivacyRepository(f.sql), provider,
-    memories: { listContext: (scope, now, activeCourseId) => createOpeningMemoryRepository(f.sql).listContext(scope, now, activeCourseId ?? null) },
+    memories: { listContext: (scope, now, activeCourseId, materialUse) =>
+      createOpeningMemoryRepository(f.sql).listContext(scope, now, activeCourseId ?? null, materialUse) },
     config: { maxContextCharacters: 12_000, reservedCents: 100, maxOutputTokens: 256,
       inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   });
@@ -121,12 +123,15 @@ describe("saved tutor material provenance", () => {
     const idOnlyTarget = { ...metadataTarget, jobId: idOnly.jobId, assistantTurnId: idOnly.assistantTurnId,
       claimToken: idOnlyClaim.claimToken };
     await expect(jobs.canAppendCompletedTurnCandidates(idOnlyTarget)).resolves.toBe(true);
+    const checkCandidateTurn = () => readTurnsWithActiveMemoryDependencies(sql, scope.workspaceId, [idOnly.assistantTurnId]);
+    await expect(checkCandidateTurn()).resolves.toEqual(new Set([idOnly.assistantTurnId]));
 
     const publication = { ...send, privacyEpoch: await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope) };
     const publish = vi.fn(async () => {});
     const deliver = vi.fn();
     await courses.removeAssetMembership(courseAMaterial);
     await expect(jobs.canAppendCompletedTurnCandidates(directTarget)).resolves.toBe(false);
+    await expect(checkCandidateTurn()).resolves.toEqual(new Set());
     await expect(jobs.canAppendCompletedTurnCandidates(idOnlyTarget)).resolves.toBe(false);
     await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
     await expect(jobs.withStreamPublication(scope, pending.jobId, publication, publish)).rejects.toMatchObject({ code: "CONFLICT" });
@@ -232,15 +237,21 @@ describe("saved tutor material provenance", () => {
       pending.push(mutation);
       await Promise.race([changed.promise, mutation]);
       const reader = createOpeningTutorJobsRepository(metadata.sql);
+      const startSend = vi.fn(async () => true);
       const check = track(change === "archive"
-        ? reader.canAppendCompletedTurnCandidates(target)
+        ? reader.authorizeMetadataSend(target, startSend)
         : reader.appendCompletedTurnCandidates({ ...target, candidates: [{ kind: "memory", text: "Candidate", temporary: false }] }));
       pending.push(check);
       await waitUntilBlocked(sql, metadata.pid, writer.pid, change,
         change === "archive" ? /FROM courses/ : /FROM course_asset_memberships/);
       release.resolve();
       await mutation;
-      await expect(check).resolves.toBe(false);
+      if (change === "archive") {
+        await expect(check).rejects.toThrow("tutor metadata authorization changed");
+        expect(startSend).not.toHaveBeenCalled();
+      } else {
+        await expect(check).resolves.toBe(false);
+      }
       const savedCandidates = await sql`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${saved.assistantTurnId}`;
       expect(savedCandidates).toEqual([]);
     } finally {
@@ -264,6 +275,15 @@ describe("saved tutor material provenance", () => {
     });
     const proposed = await memories.proposeMemory(scope, { text: "Named memory", sourceTurnIds: [legacyTurn], expiresAt: null });
     const named = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    const mockExam = await source();
+    const courses = createCourseMembershipRepository(sql);
+    const examCourse = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Exam material", slug: randomUUID() });
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: examCourse.id,
+      assetType: "source", assetId: mockExam, role: "core", visibility: "course", purpose: "mock_exam" });
+    const disallowedOrigin = await insertOwnedTurn(sql, scope, { sourceIds: [material, mockExam] });
+    await sql`INSERT INTO opening_memories (id, workspace_id, kind, text, source_turn_ids)
+      VALUES ('00000000-0000-4000-8000-000000000001', ${scope.workspaceId}, 'confirmed', 'Disallowed backing',
+        ${sql.json([disallowedOrigin])})`;
     const conversation = await conversations.create(scope, { title: "Indirect legacy lineage", courseId: null });
     const prior = await append(conversation.id);
     const claim = (await jobs.claim(prior.jobId))!;

@@ -119,6 +119,8 @@ export async function assertSourceTurnsOwned(
             AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp()))
             AND ${memoryCourseAllows(db, dependencyCourse, () => db`${targetCourseId}::uuid`, workspace)}
             AND (dep_m.course_id IS NULL OR dep_m.course_id = ${ownCourseId()})
+            AND (${targetCourseId}::uuid IS NULL OR ${targetCourseId}::uuid = ${ownCourseId()})
+            AND dep_m.source_turn_ids = '[]'::jsonb
         )
       )`;
   if (rows.length === unique.length) return;
@@ -186,9 +188,11 @@ function resolveOrigins(
   graph: ReadonlyMap<string, MemoryDependencyStatus[]>, origin: MemoryOrigin, group: OriginBinding[],
 ): MemoryDependencyStatus[] | null {
   if (group.length !== origin.turn_ids.length) return null;
-  const nodes = group.map(row => row.ids === null ? null : resolveMemoryDependencyStatus(
-    graph, row.ids, row.backings, row.turn_course_id === origin.course_id ? origin.course_id : null, origin.excludedId,
-  ));
+  const nodes = group.map(row => {
+    if (row.ids === null || (origin.course_id !== null && origin.course_id !== row.turn_course_id
+      && (row.ids.length || row.backings.length))) return null;
+    return resolveMemoryDependencyStatus(graph, row.ids, row.backings, origin.course_id, origin.excludedId);
+  });
   return nodes.some(node => node === null) ? null : nodes.flatMap(node => node ?? []);
 }
 

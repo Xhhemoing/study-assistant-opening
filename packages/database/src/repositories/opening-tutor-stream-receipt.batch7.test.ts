@@ -30,6 +30,7 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string;
   expiredOnFinalCheck?: string;
   legacyBackingId?: string;
+  metadataTarget?: boolean;
   storedMemoryMaterials?: Array<{ source_id: string | null; version: string | null; course_id: string | null; usable: boolean;
     memory_id?: string; legacy_turn_id?: string }> };
 function fixture(options: Options = {}) {
@@ -49,6 +50,10 @@ function fixture(options: Options = {}) {
       return options.storedMemoryMaterials ?? [];
     }
     if (sql.startsWith("NOT EXISTS ( ? SELECT 1 FROM mem_deps")) return values[0];
+    if (sql.startsWith("WITH candidate_target AS MATERIALIZED")) {
+      calls.push({ sql, values });
+      return options.metadataTarget ? [{ course_id: options.courseId }] : [];
+    }
     if (!sql.startsWith("SELECT")) return "fragment";
     calls.push({ sql, values });
     if (options.failAt && sql.startsWith(options.failAt)) throw failure;
@@ -619,6 +624,29 @@ describe("stream receipt release waits for current job authorization and assista
     })).resolves.toBeUndefined();
     const backedCall = f.calls.find(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id"));
     expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id::text = lower(ref.turn_id)");
+  });
+
+  it("starts eligible metadata under the course lock and commits before the provider responds", async () => {
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    const f = fixture({ courseId, metadataTarget: true });
+    let finish!: (response: string) => void;
+    const inFlight = new Promise<string>(resolve => { finish = resolve; });
+    const startSend = vi.fn(() => {
+      expect(f.txEvents).toEqual(["begin:1"]);
+      expect(f.calls.at(-1)?.sql).toMatch(/FROM courses .*FOR SHARE/);
+      return inFlight;
+    });
+    const send = f.repo.authorizeMetadataSend(target, startSend);
+    try {
+      await vi.waitFor(() => expect(f.txEvents).toEqual(["begin:1", "commit:1"]));
+      expect(startSend).toHaveBeenCalledOnce();
+    } finally {
+      finish("provider response");
+    }
+    await expect(send).resolves.toBe("provider response");
+    const archived = fixture({ courseId, metadataTarget: true, archivedCourse: true });
+    await expect(archived.repo.authorizeMetadataSend(target, startSend)).rejects.toThrow("metadata authorization changed");
+    expect(startSend).toHaveBeenCalledOnce();
   });
 
   it("checks the legacy backing's expiry in the final gate before starting the provider", async () => {

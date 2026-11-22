@@ -108,7 +108,7 @@ export type TutorTurnDeps = {
   };
   /** M01: confirmed/unexpired temporary memories only. Optional. */
   memories?: {
-    listContext(scope: Scope, now: string, activeCourseId?: string | null): Promise<{
+    listContext(scope: Scope, now: string, activeCourseId?: string | null, materialUse?: "citation" | "practice"): Promise<{
       memories: MemoryItem[];
       sourceRefs: ContextSourceRef[];
       temporaryMemoryExpiresAt?: string;
@@ -325,9 +325,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       // Photo sources default to page 1 so empty-text image chunks stay preferred.
       const preferPage = turn.currentPage ?? (imageOnlySources ? 1 : undefined);
       const resolvedCourseId = turn.courseId ?? turn.contextAnchor?.courseId ?? null;
+      const materialUse: "citation" | "practice" = turn.attemptId || turn.contextAnchor?.itemVersionId ? "practice" : "citation";
       const retrievalInput = {
-        courseContext: { courseId: resolvedCourseId,
-          materialUse: turn.attemptId || turn.contextAnchor?.itemVersionId ? "practice" as const : "citation" as const },
+        courseContext: { courseId: resolvedCourseId, materialUse },
         chunks,
         sourceIds: allowedSourceIds,
         query: turn.text,
@@ -348,7 +348,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const historyTempExpiresAt = loadedHistory.temporaryMemoryExpiresAt;
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
-        ? await deps.memories.listContext(scope, contextNow, resolvedCourseId)
+        ? await deps.memories.listContext(scope, contextNow, resolvedCourseId, materialUse)
         : { memories: [], sourceRefs: [] };
       const ineligibleCourseMemoryIds = new Set(memoryContext.memories.filter(memory => memory.courseId != null
         && memory.courseId.toLowerCase() !== resolvedCourseId?.toLowerCase()).map(memory => memory.id.toLowerCase()));

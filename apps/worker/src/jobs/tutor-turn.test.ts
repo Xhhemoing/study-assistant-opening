@@ -1779,11 +1779,14 @@ describe("tutor turn handler", () => {
     );
   });
 
-  it.each(["conversation", "anchor", "unbound"] as const)("fences only admitted memories for a %s course binding", async binding => {
+  it.each(["conversation", "anchor", "practice", "unbound"] as const)("fences only admitted memories for a %s course binding", async binding => {
     const { deps, tutorJobs, provider } = setup();
     const courseA = "00000000-0000-4000-8000-0000000000ca";
     const courseB = "00000000-0000-4000-8000-0000000000cb";
-    const anchor = binding === "anchor" ? { purpose: "learning_help" as const, courseId: courseA } : null;
+    const anchor = binding === "anchor" || binding === "practice" ? {
+      purpose: "learning_help" as const, courseId: courseA,
+      ...(binding === "practice" ? { itemVersionId: "00000000-0000-4000-8000-0000000000cc" } : {}),
+    } : null;
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceVersions: { [chunkA.sourceId]: 0 },
       ...(binding === "conversation" ? { courseId: courseA } : {}), ...(anchor ? { contextAnchor: anchor } : {}) });
     const memory = (id: string, courseId: string | null, text: string) => ({
@@ -1805,7 +1808,8 @@ describe("tutor turn handler", () => {
       tutorJobs: { ...tutorJobs, assertGlobalMemoriesCurrent } })(claimedJob.id);
     const scope = { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId };
     const expectedIds = binding === "unbound" ? [global.id] : [global.id, matching.id];
-    expect(listContext).toHaveBeenCalledWith(scope, expect.any(String), binding === "unbound" ? null : courseA);
+    expect(listContext).toHaveBeenCalledWith(scope, expect.any(String), binding === "unbound" ? null : courseA,
+      binding === "practice" ? "practice" : "citation");
     const instruction = provider.complete.mock.calls[0]?.[0].instruction;
     expect(instruction).toContain(global.text);
     expect(instruction).not.toContain(foreign.text);

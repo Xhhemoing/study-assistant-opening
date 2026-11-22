@@ -31,6 +31,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch,
         refs.user_refs AS user_source_refs, refs.assistant_refs AS assistant_source_refs,
         ${priorCourse()} AS prior_course_id, ${currentCourse()} AS current_course_id,
+        CASE WHEN current.attempt_id IS NOT NULL OR current.context_anchor->>'itemVersionId' IS NOT NULL
+          THEN 'practice' ELSE 'citation' END AS material_use,
         ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, priorCourse, scope)} AS memory_backing_ids,
         COALESCE(a.context_source_refs @? '$[*].memoryDependencyIds[*]' OR
           a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb, false) AS memory_bearing,
@@ -63,7 +65,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     )
     SELECT id, assistant_id,
       user_source_refs, assistant_source_refs, prior_course_id, current_course_id, memory_backing_ids,
-      query_system, system_query, current_privacy_epoch
+      query_system, system_query, current_privacy_epoch, material_use
     FROM ranked WHERE (memory_bearing OR ordinary_rank <= 20) AND NOT EXISTS (SELECT 1 FROM prior WHERE invalid)
     ORDER BY created_at DESC, id DESC
   `;
@@ -73,7 +75,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     return { ids, backings };
   });
   const roots = [...new Set(lineage.flatMap(row => row.backings ? [...(row.ids ?? []), ...row.backings.flat()] : []))];
-  const graph = await readMemoryDependencyStatus(sql, scope, roots, { excluded: excludedSourceIds });
+  const materialUse = rows[0]?.material_use === "practice" ? "practice" : "citation";
+  const graph = await readMemoryDependencyStatus(sql, scope, roots, { excluded: excludedSourceIds, materialUse });
   const resolved = lineage.map(({ ids, backings }, index) => {
     if (!ids) return null;
     const row = rows[index]!;
