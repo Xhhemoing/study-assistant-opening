@@ -114,10 +114,7 @@ const HTML_NON_RENDERED_LABEL_TAGS = new Set([
   "title", "script", "style", "iframe", "noembed", "noframes", "noscript", "template", "datalist",
 ]);
 const HTML_VOID_TAGS = new Set([
-  "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
-]);
-const HTML_OPTIONAL_END_TAGS = new Set([
-  "html", "head", "body", "li", "dt", "dd", "p", "option", "optgroup", "colgroup", "thead", "tbody", "tfoot", "tr", "td", "th",
+  "area", "base", "br", "col", "embed", "hr", "img", "input", "keygen", "link", "meta", "param", "source", "track", "wbr",
 ]);
 const MARKDOWN_AUTOLINK = /(?<autolink><(?:[a-z][a-z0-9+.-]{1,31}:[^\s<>]*|[a-z0-9.!#$%&'*+/=?^_\x60{|}~-]+@[a-z0-9.-]+)>)/.source;
 const HTML_LABEL_BREAK_TAGS = new Set([
@@ -570,7 +567,8 @@ function htmlElementEnd(
   const elements = createHtmlElementStack();
   const root = elements.insertTag({ tag, namespace, htmlAnnotation, customProps: EMPTY_CUSTOM_PROPS }, false);
   for (let match = tokens.exec(text); match; match = tokens.exec(text)) {
-    const namespace = elements.namespaceForToken(match);
+    const { namespace, ignored } = elements.readTokenContext(match);
+    if (ignored) continue;
     if (match.groups?.cdata && !isForeignCdata(elements.stack.at(-1), match)) {
       tokens.lastIndex = endOfBogusHtmlComment(text, match.index + 2);
     }
@@ -625,8 +623,8 @@ function htmlContainerCrossingCodeEnd(
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   tokens.lastIndex = start;
   for (let match = tokens.exec(text); match && match.index < openerLimit; match = tokens.exec(text)) {
-    const namespace = elements.namespaceForToken(match);
-    const raw = namespace ? null : htmlRawTextBounds(text, match, tokens.lastIndex);
+    const { namespace, ignored } = elements.readTokenContext(match);
+    const raw = namespace || ignored ? null : htmlRawTextBounds(text, match, tokens.lastIndex);
     const tag = match.groups?.tag?.toLowerCase();
     let closeEnd: number;
     if (match[0].startsWith("<!--")) {
@@ -639,7 +637,7 @@ function htmlContainerCrossingCodeEnd(
       closeEnd = raw?.closeEnd ?? htmlElementEnd(text, "template", tokens.lastIndex) ?? text.length;
     } else {
       closeEnd = tokens.lastIndex;
-      elements.applyToken(match, namespace, details);
+      if (!ignored) elements.applyToken(match, namespace, details);
     }
     if (closeEnd > end) return closeEnd;
     tokens.lastIndex = closeEnd;
@@ -811,14 +809,15 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedCustomProps = EMPT
   let projected: string | undefined;
   let scopeLookup: ReturnType<typeof createHtmlScopeLookup> | undefined;
   let hasForeignMarkup: boolean | undefined;
+  let hasSelect: boolean | undefined;
   let hasStyles: boolean | undefined;
-  const getScope = (offset: number, definedLinkLabels: ReadonlySet<string>) => {
+  const getScopeLookup = (definedLinkLabels: ReadonlySet<string>) => {
     if (!scopeLookup) {
       const blockLines: HtmlScopeLine[] = [];
       const html = projectDisclosureCommentMarkdown(text, [], definedLinkLabels, true, line => blockLines.push(line));
       scopeLookup = createHtmlScopeLookup(html, inheritedCustomProps, blockLines);
     }
-    return scopeLookup(offset);
+    return scopeLookup;
   };
   return {
     htmlBlockAt(lineStart: number) {
@@ -835,11 +834,14 @@ function createMarkdownHtmlBlockLookup(text: string, inheritedCustomProps = EMPT
     },
     customPropertiesAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
       hasStyles ??= /style[ \t\r\n\f]*=/i.test(text);
-      return hasStyles ? getScope(offset, definedLinkLabels).customProps : inheritedCustomProps;
+      return hasStyles ? getScopeLookup(definedLinkLabels).scopeAt(offset).customProps : inheritedCustomProps;
     },
-    namespaceAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
+    opensHtmlDetailsAt(offset: number, definedLinkLabels: ReadonlySet<string>) {
       hasForeignMarkup ??= /<(?:svg|math)(?=[\t\n\f\r />])/i.test(text);
-      return hasForeignMarkup ? getScope(offset, definedLinkLabels).namespace : undefined;
+      hasSelect ??= /<select(?=[\t\n\f\r />])/i.test(text);
+      if (!hasForeignMarkup && !hasSelect) return true;
+      const scope = getScopeLookup(definedLinkLabels);
+      return scope.scopeAt(offset).namespace === undefined && !scope.ignoredDetailsStarts.has(offset);
     },
   };
 }
@@ -1049,7 +1051,8 @@ function findDisclosureCommentEnd(
       continue;
     }
     if (match[0].startsWith("--")) return markdownStart + closeEnd;
-    const namespace = elements.namespaceForToken(match);
+    const { namespace, ignored } = elements.readTokenContext(match);
+    if (ignored) continue;
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
     if (match.groups?.cdata && !isForeignCdata(elements.stack.at(-1), match)) {
@@ -1183,7 +1186,11 @@ function findMatchingDetailsBounds(
       tokenRe.lastIndex = match.index + 1;
       continue;
     }
-    const namespace = elements.namespaceForToken(match);
+    const { namespace, ignored } = elements.readTokenContext(match);
+    if (ignored) {
+      skipLiteralLines(tokenRe.lastIndex);
+      continue;
+    }
     if (match.groups?.cdata && !isForeignCdata(elements.stack.at(-1), match)) {
       tokenRe.lastIndex = endOfBogusHtmlComment(text, match.index + 2);
     }
@@ -1766,14 +1773,23 @@ function createCssVariableResolver(custom: ReadonlyMap<string, CssDeclaration>, 
   return { substitute, resolve };
 }
 
+function cssVisibilityKeyword(tokens: readonly CssToken[]): string | undefined {
+  const [token] = tokens;
+  if (tokens.length !== 1 || token?.kind !== "ident") return undefined;
+  const word = token.value.toLowerCase();
+  return word === "visible" || word === "hidden" || word === "collapse" || CSS_WIDE_KEYWORDS.has(word)
+    ? word : undefined;
+}
+
 function resolveElementStyle(
   styleAttr: string | undefined,
   presentationAttr: string | undefined,
   inheritedProps: CssCustomProperties,
-): { readonly displayIsNone: boolean; readonly customProps: CssCustomProperties } {
+): { readonly displayIsNone: boolean; readonly visibilityHidden?: boolean; readonly customProps: CssCustomProperties } {
   if (!styleAttr && !presentationAttr) return { displayIsNone: false, customProps: inheritedProps };
   const custom = new Map<string, CssDeclaration>();
-  let winner: CssDeclaration | undefined;
+  let display: CssDeclaration | undefined;
+  let visibility: CssDeclaration | undefined;
   for (const declaration of cssStyleDeclarations(decodeHtmlLabelText(styleAttr ?? ""))) {
     const { name, value, important } = declaration;
     if (name.startsWith("--")) {
@@ -1781,13 +1797,20 @@ function resolveElementStyle(
       continue;
     }
     const property = name.toLowerCase();
-    if ((property !== "display" && property !== "all") || (winner?.important && !important)) continue;
+    const all = property === "all";
+    if (property !== "display" && property !== "visibility" && !all) continue;
     const variables = cssVariableDependencies(value);
-    if (variables && (variables.size || cssDisplayKeyword(value, property === "all"))) winner = declaration;
+    if (!variables) continue;
+    if ((property === "display" || all) && (!display?.important || important) &&
+      (variables.size || cssDisplayKeyword(value, all))) display = declaration;
+    if ((property === "visibility" || all) && (!visibility?.important || important) &&
+      (variables.size || (all ? cssDisplayKeyword(value, true) : cssVisibilityKeyword(value)))) visibility = declaration;
   }
-  const value = winner?.value ?? cssValueTokens(decodeHtmlLabelText(presentationAttr ?? ""));
-  const deps = cssVariableDependencies(value);
-  const resolver = custom.size || deps?.size ? createCssVariableResolver(custom, inheritedProps) : undefined;
+  const displayValue = display?.value ?? cssValueTokens(decodeHtmlLabelText(presentationAttr ?? ""));
+  const displayDeps = cssVariableDependencies(displayValue);
+  const visibilityDeps = visibility && cssVariableDependencies(visibility.value);
+  const resolver = custom.size || displayDeps?.size || visibilityDeps?.size
+    ? createCssVariableResolver(custom, inheritedProps) : undefined;
   let customProps = inheritedProps;
   if (custom.size) {
     const computed = new Map(inheritedProps);
@@ -1798,11 +1821,15 @@ function resolveElementStyle(
     }
     customProps = computed;
   }
-  // The all shorthand participates in the display cascade and excludes custom properties.
   // A winning but unresolved variable computes to unset, including when display was set earlier.
-  const effective = !deps ? undefined : deps.size ? resolver!.substitute(value) : value;
+  const effectiveDisplay = !displayDeps ? undefined : displayDeps.size ? resolver!.substitute(displayValue) : displayValue;
+  const effectiveVisibility = visibility && (visibilityDeps?.size ? resolver!.substitute(visibility.value) : visibility.value);
+  const visibilityKeyword = effectiveVisibility && (visibility?.name.toLowerCase() === "all"
+    ? cssDisplayKeyword(effectiveVisibility, true) : cssVisibilityKeyword(effectiveVisibility));
   return {
-    displayIsNone: effective !== undefined && cssDisplayKeyword(effective, winner?.name.toLowerCase() === "all") === "none",
+    displayIsNone: effectiveDisplay !== undefined && cssDisplayKeyword(effectiveDisplay, display?.name.toLowerCase() === "all") === "none",
+    visibilityHidden: visibilityKeyword === "hidden" || visibilityKeyword === "collapse" ? true :
+      visibilityKeyword === "visible" || visibilityKeyword === "initial" ? false : undefined,
     customProps,
   };
 }
@@ -1819,6 +1846,9 @@ const HTML_TABLE_SCOPE_RE = /^(?:html|template)$/;
 const HTML_TABLE_ELEMENT_BOUNDARY_RE = /^(?:html|table|template)$/;
 const HTML_TABLE_INSERTION_RE = /^(?:table|thead|tbody|tfoot|tr)$/;
 const HTML_TABLE_STRUCTURE_RE = /^(?:caption|colgroup|col|thead|tbody|tfoot|tr|td|th)$/;
+const HTML_SELECT_TABLE_RE = /^(?:caption|table|tbody|tfoot|thead|tr|td|th)$/;
+const HTML_FRAGMENT_START_IGNORED_RE = /^(?:html|body|head|frame|frameset)$/;
+const HTML_FRAGMENT_END_IGNORED_RE = /^(?:html|body|head)$/;
 const HTML_TABLE_SECTION_RE = /^(?:thead|tbody|tfoot)$/;
 const HTML_HEADING_SCOPE_RE = /^(?:h[1-6]|#markdown-heading)$/;
 const HTML_FORMATTING_TAG_RE = /^(?:a|b|big|code|em|font|i|nobr|s|small|strike|strong|tt|u)$/;
@@ -1854,6 +1884,7 @@ type OpenStyledTag = OpenHtmlTag & {
   formattingMarker?: number;
   stackIndex: number;
   suppressedSubtree?: boolean;
+  visibilityHidden?: boolean;
   svgText?: boolean;
 };
 
@@ -1983,7 +2014,11 @@ function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
   };
   const closeRawParagraph = () => {
     const index = findInScope(/^p$/, HTML_BUTTON_SCOPE_RE);
-    if (index >= 0) popTo(index);
+    if (index >= 0) {
+      const paragraph = stack[index]!;
+      popTo(index);
+      return paragraph;
+    }
   };
   const closeCurrentHeading = () => {
     if (HTML_HEADING_SCOPE_RE.test(stack.at(-1)?.tag ?? "")) popTo(stack.length - 1);
@@ -2002,10 +2037,13 @@ function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
     }
     for (; index < activeFormatting.length; index++) {
       const entry = activeFormatting[index]!;
-      const { customProps, displayIsNone } = resolveElementStyle(entry.style, undefined, insertionProps());
+      const parent = insertionParent();
+      const { customProps, displayIsNone, visibilityHidden } = resolveElementStyle(entry.style, undefined,
+        parent?.customProps ?? inheritedProps);
       activeFormatting[index] = pushTag({
         tag: entry.tag, customProps, style: entry.style, hidesLabel: entry.hidesLabel, honorDisplay: entry.honorDisplay,
-        suppressedSubtree: entry.hidesLabel || (entry.honorDisplay && displayIsNone) || insertionParent()?.suppressedSubtree,
+        suppressedSubtree: entry.hidesLabel || (entry.honorDisplay && displayIsNone) || parent?.suppressedSubtree,
+        visibilityHidden: visibilityHidden ?? parent?.visibilityHidden,
       });
     }
   };
@@ -2019,22 +2057,24 @@ function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
   };
   const closeFormatting = (tag: string) => {
     // Adoption agency steps affecting the open stack and inherited styles.
+    let closed: OpenStyledTag | undefined;
     for (let attempt = 0; attempt < 8; attempt++) {
       const activeIndex = activeFormattingIndex(tag);
-      if (activeIndex < 0) return closeOtherEndTag(tag);
+      if (activeIndex < 0) return closeOtherEndTag(tag) ?? closed;
       const entry = activeFormatting[activeIndex]!;
       const index = entry.stackIndex;
       if (!isOnStack(entry)) {
         activeFormatting.splice(activeIndex, 1);
-        return;
+        return closed;
       }
-      if (!isInScope(index, HTML_ELEMENT_SCOPE_RE)) return;
+      if (!isInScope(index, HTML_ELEMENT_SCOPE_RE)) return closed;
+      closed ??= entry;
       let block = index + 1;
       while (block < stack.length && !isSpecialHtmlElement(stack[block]!)) block++;
       if (block === stack.length) {
         activeFormatting.splice(activeIndex, 1);
         popTo(index);
-        return;
+        return closed;
       }
 
       // Reparent the first special element. The three nearest active formatting
@@ -2061,11 +2101,21 @@ function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
         const candidate = stack[changed]!;
         candidate.stackIndex = changed;
         const parent = insertionParent(changed - 1);
-        const { customProps, displayIsNone } = resolveElementStyle(candidate.style, undefined, parent?.customProps ?? inheritedProps);
+        const { customProps, displayIsNone, visibilityHidden } = resolveElementStyle(
+          candidate.style, undefined, parent?.customProps ?? inheritedProps,
+        );
         candidate.customProps = customProps;
         candidate.suppressedSubtree = candidate.hidesLabel || (candidate.honorDisplay && displayIsNone) || parent?.suppressedSubtree;
+        candidate.visibilityHidden = visibilityHidden ?? parent?.visibilityHidden;
       }
     }
+    return closed;
+  };
+  const pushImplicitTableTag = (tag: string) => {
+    const parent = stack.at(-1);
+    pushTag({
+      tag, customProps: getProps(), suppressedSubtree: parent?.suppressedSubtree, visibilityHidden: parent?.visibilityHidden,
+    });
   };
   const prepareTableStructure = (tag: string) => {
     const table = findInScope(/^table$/, HTML_TABLE_SCOPE_RE);
@@ -2074,38 +2124,73 @@ function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
     if (tag === "col") {
       const group = findInScope(/^colgroup$/, HTML_TABLE_ELEMENT_BOUNDARY_RE);
       popTo((group < 0 ? table : group) + 1);
-      if (group < 0) pushTag({ tag: "colgroup", customProps: getProps() });
+      if (group < 0) pushImplicitTableTag("colgroup");
     } else if (tag === "tr" || tag === "td" || tag === "th") {
       const row = tag === "tr" ? -1 : findInScope(/^tr$/, HTML_TABLE_ELEMENT_BOUNDARY_RE);
       if (row >= 0) popTo(row + 1);
       else {
         const section = findInScope(HTML_TABLE_SECTION_RE, HTML_TABLE_ELEMENT_BOUNDARY_RE);
         popTo((section < 0 ? table : section) + 1);
-        if (section < 0) pushTag({ tag: "tbody", customProps: getProps() });
-        if (tag !== "tr") pushTag({ tag: "tr", customProps: getProps() });
+        if (section < 0) pushImplicitTableTag("tbody");
+        if (tag !== "tr") pushImplicitTableTag("tr");
       }
     } else popTo(table + 1);
     return true;
   };
-  const namespaceForToken = (match: RegExpExecArray) => {
+  const selectIndex = () => findInScope(/^select$/, /^template$/);
+  const prepareText = (text: string) => {
+    const nonWhitespace = /[^\t\n\f\r ]/.test(text);
+    if (stack.at(-1)?.tag === "colgroup" && nonWhitespace) popTo(stack.length - 1);
+    const inTable = inTableInsertionContext();
+    const foster = inTable && nonWhitespace;
+    if ((!inTable || foster) && !htmlChildNamespace(stack.at(-1)) && activeFormatting.length && selectIndex() < 0) {
+      reconstructFormatting();
+    }
+    return foster ? insertionParent() : stack.at(-1);
+  };
+  const ignoreSelectToken = (tag: string, prefix: string, index: number) => {
+    if (HTML_SELECT_TABLE_RE.test(tag) && findInScope(/^table$/, HTML_TABLE_SCOPE_RE) >= 0) {
+      if (prefix === "/" && findInScope(new RegExp("^" + tag + "$"), HTML_TABLE_SCOPE_RE) < 0) return true;
+      popTo(index);
+      return false;
+    }
+    if (prefix === "") {
+      if (tag === "select" || /^(?:input|keygen|textarea)$/.test(tag)) {
+        popTo(index);
+        return tag === "select";
+      }
+      if (tag === "hr") {
+        while (/^(?:option|optgroup)$/.test(stack.at(-1)?.tag ?? "")) popTo(stack.length - 1);
+        return false;
+      }
+      return !/^(?:option|optgroup|script|template)$/.test(tag);
+    }
+    return !/^(?:option|optgroup|select|template)$/.test(tag);
+  };
+  const readTokenContext = (match: RegExpExecArray) => {
     const prefix = match.groups?.prefix;
     const tag = match.groups?.tag?.toLowerCase();
     const startTag = prefix === "" ? tag : undefined;
     if (tag && htmlChildNamespace(stack.at(-1), startTag) && exitsHtmlForeignContent(tag, prefix, match[0])) {
       leaveForeignContent();
     }
-    return htmlChildNamespace(stack.at(-1), startTag);
+    const namespace = htmlChildNamespace(stack.at(-1), startTag);
+    if (namespace || !tag || (prefix !== "" && prefix !== "/")) return { namespace, ignored: false };
+    const rootTag = (prefix === "" ? HTML_FRAGMENT_START_IGNORED_RE : HTML_FRAGMENT_END_IGNORED_RE).test(tag);
+    if (rootTag) return { namespace, ignored: true };
+    const select = selectIndex();
+    // Match the select insertion modes used by the HTML fragment parser.
+    return { namespace, ignored: select >= 0 && ignoreSelectToken(tag, prefix, select) };
   };
   const prepareStart = (tag: string, namespace: HtmlNamespace) => {
     if (namespace) return { tableStructure: false, tableForm: false };
-    if (tag === "head") return null;
     const tableStructure = HTML_TABLE_STRUCTURE_RE.test(tag);
     const htmlForm = tag === "form";
     const hasTemplate = htmlForm && findInScope(/^template$/) >= 0;
     if ((tableStructure && !prepareTableStructure(tag)) || (htmlForm && !hasTemplate && formElement)) return null;
     const tableForm = htmlForm && !hasTemplate &&
       findInScope(HTML_TABLE_INSERTION_RE, /^(?:caption|td|th|template|#markdown-td)$/) >= 0;
-    if (!tableStructure && tag !== "template" && tag !== "html" && stack.at(-1)?.tag === "colgroup") {
+    if (!tableStructure && tag !== "template" && stack.at(-1)?.tag === "colgroup") {
       popTo(stack.length - 1);
     }
     if (tag === "table") closeTableForNewTable();
@@ -2147,11 +2232,19 @@ function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
     }
     if (tag === "p") {
       const index = findInScope(/^#markdown-p$/, HTML_BUTTON_SCOPE_RE);
-      if (index >= 0) popTo(index);
-      closeRawParagraph();
+      if (index >= 0) {
+        const paragraph = stack[index]!;
+        popTo(index);
+        return paragraph;
+      }
+      return closeRawParagraph();
     } else if (HTML_HEADING_SCOPE_RE.test(tag)) {
       const index = findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE);
-      if (index >= 0) popTo(index);
+      if (index >= 0) {
+        const heading = stack[index]!;
+        popTo(index);
+        return heading;
+      }
     } else if (HTML_FORMATTING_TAG_RE.test(tag)) {
       return closeFormatting(tag);
     } else {
@@ -2175,9 +2268,8 @@ function createHtmlElementStack(inheritedProps = EMPTY_CUSTOM_PROPS) {
   };
   return {
     stack, getProps, insertionParent, insertionProps, pushTag, popTo, leaveForeignContent, findInScope,
-    closeRawParagraph, closeCurrentHeading, closeTableForNewTable, reconstructFormatting, inTableInsertionContext,
-    namespaceForToken, prepareStart, insertTag, closeTag, applyToken, isOnStack,
-    hasActiveFormatting: () => activeFormatting.length > 0,
+    closeRawParagraph, closeCurrentHeading, closeTableForNewTable, reconstructFormatting,
+    selectIndex, readTokenContext, prepareText, prepareStart, insertTag, closeTag, applyToken, isOnStack,
     setContainerDepth(depth: number) { containerDepth = depth; },
   };
 }
@@ -2190,7 +2282,8 @@ function createHtmlScopeLookup(
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const elements = createHtmlElementStack(inheritedProps);
   const { stack, getProps, insertionProps, pushTag, popTo, leaveForeignContent, findInScope,
-    closeRawParagraph, closeCurrentHeading, closeTableForNewTable, reconstructFormatting, inTableInsertionContext } = elements;
+    closeRawParagraph, closeCurrentHeading, closeTableForNewTable, reconstructFormatting } = elements;
+  const ignoredDetailsStarts = new Set<number>();
   const positions = [0];
   const scopes: { customProps: CssCustomProperties; namespace: HtmlNamespace }[] = [
     { customProps: inheritedProps, namespace: undefined },
@@ -2208,17 +2301,20 @@ function createHtmlScopeLookup(
   };
   const readText = (end: number) => {
     if (end <= cursor) return;
-    if (stack.at(-1)?.tag === "colgroup" && /[^\t\n\f\r ]/.test(html.slice(cursor, end))) popTo(stack.length - 1);
-    if (!htmlChildNamespace(stack.at(-1)) && elements.hasActiveFormatting() &&
-      (!inTableInsertionContext() || /[^\t\n\f\r ]/.test(html.slice(cursor, end)))) {
-      reconstructFormatting();
-      recordScope(cursor, insertionProps());
-    }
+    const parent = elements.prepareText(html.slice(cursor, end));
+    recordScope(cursor, parent?.customProps ?? inheritedProps);
     cursor = end;
   };
   const advanceLines = (offset: number) => {
     for (let line = blockLines[lineIndex]; line && line.offset <= offset; line = blockLines[++lineIndex]) {
       readText(line.offset);
+      const select = elements.selectIndex();
+      if (select >= 0) {
+        const endsCell = line.endsInline && findInScope(/^#markdown-td$/, HTML_TABLE_ELEMENT_BOUNDARY_RE) >= 0;
+        const startsTableInTable = line.startsTable && findInScope(/^table$/, HTML_TABLE_SCOPE_RE) >= 0;
+        if (!endsCell && !startsTableInTable) continue;
+        popTo(select);
+      }
       if (line.endsInline) {
         // An inline HTML heading can replace the generated heading on the open-element stack.
         const index = generatedHeading ? findInScope(HTML_HEADING_SCOPE_RE, HTML_ELEMENT_SCOPE_RE) :
@@ -2252,14 +2348,16 @@ function createHtmlScopeLookup(
     readText(match.index);
     const prefix = match.groups?.prefix;
     const tag = match.groups?.tag?.toLowerCase();
-    const namespace = elements.namespaceForToken(match);
+    const { namespace, ignored } = elements.readTokenContext(match);
     if (match.groups?.cdata && !isForeignCdata(stack.at(-1), match)) {
       tokens.lastIndex = endOfBogusHtmlComment(html, match.index + 2);
     }
-    const start = tag && prefix === "" ? elements.prepareStart(tag, namespace) : null;
+    const start = !ignored && tag && prefix === "" ? elements.prepareStart(tag, namespace) : null;
     if (start && !namespace) recordScope(match.index, start.tableStructure ? getProps() : insertionProps());
-    const raw = namespace ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
-    if (raw || (!namespace && tag === "template" && prefix === "")) {
+    const raw = namespace || ignored ? null : htmlRawTextBounds(html, match, tokens.lastIndex);
+    if (ignored) {
+      if (tag === "details" && prefix === "") ignoredDetailsStarts.add(match.index);
+    } else if (raw || (!namespace && tag === "template" && prefix === "")) {
       tokens.lastIndex = raw?.closeEnd ?? htmlElementEnd(html, "template", tokens.lastIndex) ?? html.length;
     } else if (tag && start) {
       const current = htmlStartTagNamespace(namespace, tag);
@@ -2277,7 +2375,7 @@ function createHtmlScopeLookup(
     recordScope(tokens.lastIndex);
   }
   advanceLines(html.length);
-  return (offset: number) => {
+  const scopeAt = (offset: number) => {
     let low = 0;
     let high = positions.length;
     while (low + 1 < high) {
@@ -2287,30 +2385,28 @@ function createHtmlScopeLookup(
     }
     return scopes[low]!;
   };
+  return { scopeAt, ignoredDetailsStarts };
 }
 
-function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTOM_PROPS) {
+function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTOM_PROPS, inheritedVisibilityHidden = false) {
   const tokens = new RegExp(HTML_MARKUP_TOKEN, "gi");
   const inline: string[] = [];
   const spaced: string[] = [];
-  const appendText = (start: number, end?: number, decodeReferences = true) => {
-    // References cannot continue into the next HTML text node.
-    const raw = label.slice(start, end);
-    const text = decodeReferences ? decodeHtmlLabelText(raw) : raw;
+  const appendText = (text: string) => {
     inline.push(text);
     spaced.push(text);
   };
   const elements = createHtmlElementStack(inheritedCustomProps);
   const { stack } = elements;
-  const rendersText = () => {
-    const current = stack.at(-1);
-    return !current?.suppressedSubtree &&
+  const rendersText = (current: OpenStyledTag | undefined) => {
+    return !current?.suppressedSubtree && !(current?.visibilityHidden ?? inheritedVisibilityHidden) &&
       (htmlChildNamespace(current) !== "svg" || current?.svgText === true);
   };
   const appendData = (start: number, end: number) => {
     if (start >= end) return;
-    if (!htmlChildNamespace(stack.at(-1))) elements.reconstructFormatting();
-    if (rendersText()) appendText(start, end);
+    // References cannot continue into the next HTML text node.
+    const text = decodeHtmlLabelText(label.slice(start, end));
+    if (rendersText(elements.prepareText(text))) appendText(text);
   };
   let cursor = 0;
   let hasDetails = false;
@@ -2319,7 +2415,7 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
     cursor = tokens.lastIndex;
     if (match.groups?.cdata) {
       if (isForeignCdata(stack.at(-1), match)) {
-        if (rendersText()) appendText(match.index + 9, match[0].endsWith("]]>") ? cursor - 3 : cursor, false);
+        if (rendersText(stack.at(-1))) appendText(label.slice(match.index + 9, match[0].endsWith("]]>") ? cursor - 3 : cursor));
       } else {
         tokens.lastIndex = cursor = endOfBogusHtmlComment(label, match.index + 2);
       }
@@ -2328,8 +2424,9 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
     const tag = match.groups?.tag?.toLowerCase();
     const prefix = match.groups?.prefix;
     if (!tag || (prefix !== "" && prefix !== "/")) continue;
-    const parentNamespace = elements.namespaceForToken(match);
-    let visibleTag = !stack.at(-1)?.suppressedSubtree;
+    const { namespace: parentNamespace, ignored } = elements.readTokenContext(match);
+    if (ignored) continue;
+    let rendersBox: boolean;
     if (prefix === "") {
       const start = elements.prepareStart(tag, parentNamespace);
       if (!start) continue;
@@ -2341,7 +2438,7 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
         (namespace === "math" && MATH_NON_RENDERED_LABEL_TAGS.has(tag) && !htmlAnnotation);
       const canOpen = isOpenableHtmlTag(namespace, tag, match[0]);
       const style = htmlAttributeValue(match[0], tag, "style");
-      const { displayIsNone, customProps } = resolveElementStyle(
+      const { displayIsNone, visibilityHidden, customProps } = resolveElementStyle(
         style, namespace ? htmlAttributeValue(match[0], tag, "display") : undefined,
         parent?.customProps ?? inheritedCustomProps,
       );
@@ -2349,8 +2446,7 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
       const raw = namespace ? null : htmlRawTextBounds(label, match, cursor);
       const inertTag = !namespace && HTML_NON_RENDERED_LABEL_TAGS.has(tag);
       // Keep potentially visible text available for protection when a close tag is absent.
-      const shouldCheckHidden = !HTML_OPTIONAL_END_TAGS.has(tag) && (hiddenAttribute || displayIsNone);
-      const hiddenEnd = !foreignHidden && (shouldCheckHidden || inertTag)
+      const hiddenEnd = !foreignHidden && (inertTag || (!start.tableStructure && (hiddenAttribute || displayIsNone)))
         ? !canOpen ? cursor : raw ? (raw.closeStart < label.length || inertTag ? raw.closeEnd : undefined) :
           htmlElementEnd(label, tag, cursor, namespace, htmlAnnotation)
         : undefined;
@@ -2358,24 +2454,32 @@ function htmlLabelTextVariants(label: string, inheritedCustomProps = EMPTY_CUSTO
         tokens.lastIndex = cursor = hiddenEnd ?? label.length;
         continue;
       }
-      const hidesLabel = foreignHidden || rubyAnnotation || (hiddenAttribute && hiddenEnd !== undefined);
-      const honorDisplay = displayIsNone && hiddenEnd !== undefined;
-      visibleTag = !parent?.suppressedSubtree && !hidesLabel && !honorDisplay;
+      const canSuppress = start.tableStructure || hiddenEnd !== undefined;
+      const hidesLabel = foreignHidden || rubyAnnotation || (hiddenAttribute && canSuppress);
+      const honorDisplay = displayIsNone && canSuppress;
+      const hiddenText = visibilityHidden ?? parent?.visibilityHidden;
+      rendersBox = !parent?.suppressedSubtree && !hidesLabel && !honorDisplay;
       if (raw) {
-        if (visibleTag) appendText(cursor, raw.closeStart, tag === "textarea");
+        if (rendersBox && !(hiddenText ?? inheritedVisibilityHidden)) {
+          const text = label.slice(cursor, raw.closeStart);
+          appendText(tag === "textarea" ? decodeHtmlLabelText(text) : text);
+        }
         tokens.lastIndex = cursor = raw.closeEnd;
         continue;
       }
       if (canOpen) {
         elements.insertTag({
-          tag, namespace, htmlAnnotation, style, customProps, hidesLabel, honorDisplay, suppressedSubtree: !visibleTag,
+          tag, namespace, htmlAnnotation, style, customProps, hidesLabel, honorDisplay,
+          suppressedSubtree: !rendersBox, visibilityHidden: hiddenText,
           svgText: namespace === "svg" && (SVG_TEXT_TAGS.has(tag) || (tag !== "svg" && parent?.svgText === true)),
         }, start.tableForm);
       }
-    } else if (elements.closeTag(tag)) {
-      visibleTag ||= !stack.at(-1)?.suppressedSubtree;
+    } else {
+      const closed = elements.closeTag(tag);
+      rendersBox = closed ? !closed.suppressedSubtree :
+        !parentNamespace && (tag === "br" || tag === "p") && !elements.insertionParent()?.suppressedSubtree;
     }
-    if (visibleTag && tag !== "svg" && tag !== "ruby" && parentNamespace !== "svg") {
+    if (rendersBox && tag !== "svg" && tag !== "ruby" && parentNamespace !== "svg") {
       if (!parentNamespace && tag === "details" && prefix === "") hasDetails = true;
       if (HTML_LABEL_BREAK_TAGS.has(tag)) inline.push(" ");
       spaced.push(" ");
@@ -2401,14 +2505,14 @@ function classifyDetailsElement(
 } {
   if (summary && !text.slice(openEnd, summary.openStart).replace(HTML_COMMENT_RE, "").trim()) {
     const markup = text.slice(summary.openStart, summary.openEnd);
-    const { customProps, displayIsNone } = resolveElementStyle(
+    const { customProps, displayIsNone, visibilityHidden } = resolveElementStyle(
       htmlAttributeValue(markup, "summary", "style"),
       undefined,
       htmlContext.customPropertiesAt(summary.openStart, definedLinkLabels),
     );
     const summaryContents = displayIsNone || htmlAttributeValue(markup, "summary", "hidden") !== undefined
       ? "" : renderMarkdownLabelMarkup(readSummaryMarkup(text, summary), false, definedLinkLabels);
-    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, customProps);
+    const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, customProps, visibilityHidden);
     if (
       ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
       !hasDetails &&
@@ -3248,7 +3352,7 @@ function findInlineConstructSpans(
     }
     if (text.charCodeAt(i) === 60 && text.slice(i, i + 8).toLowerCase() === "<details") {
       const m = DETAILS_OPEN_RE.exec(text.slice(i));
-      if (m && inheritsHtmlBlock.namespaceAt(i, definedLinkLabels) === undefined) {
+      if (m && inheritsHtmlBlock.opensHtmlDetailsAt(i, definedLinkLabels)) {
         const openEnd = i + m[0].length;
         const bounds = findMatchingDetailsBounds(text, i, openEnd, inheritsHtmlBlock, definedLinkLabels);
         const classified = classifyDetailsElement(text, openEnd, bounds, activeVisibility, definedLinkLabels, inheritsHtmlBlock);
@@ -4445,7 +4549,7 @@ function parsePedagogicalAstInternal(
     const trimmedRaw = raw.trimStart();
     const detailsOpenMatch = DETAILS_OPEN_RE.exec(trimmedRaw);
     const detailsStart = line.start + raw.length - trimmedRaw.length;
-    if (detailsOpenMatch && inheritsHtmlBlock.namespaceAt(detailsStart, definedLinkLabels) === undefined) {
+    if (detailsOpenMatch && inheritsHtmlBlock.opensHtmlDetailsAt(detailsStart, definedLinkLabels)) {
       const activeVis = blockVisibility;
       const openEndOffset = detailsStart + detailsOpenMatch[0].length;
       const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset, inheritsHtmlBlock, definedLinkLabels);

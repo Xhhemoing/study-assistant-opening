@@ -1353,7 +1353,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["SVG CDATA inside a fence after its SVG ancestor", "<details><summary>Answer</summary><svg><defs>\n~~~\n<![CDATA[\n~~~\n</details>]]></defs></svg>forty-two</details>"],
     ["a bogus HTML comment inside a fence in an HTML block", "<details><summary>Answer</summary>\n~~~\n<!bogus\n~~~\n</details>>forty-two</details>"],
     ["an HTML comment finishing in the next HTML block", "<details><summary>Answer</summary>\nExample: \x60<!--\x60\n</details>\n\n<div>-->forty-two</div></details>"],
-  ])("seals details across %s", (_name, body) => {
+  ] as const)("seals details across %s", (_name, body) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     const tail = "\nPublic theorem.\n\n~~~\n-->\n~~~\n\n<!-- independent comment -->";
     const text = body + "\n" + tail;
@@ -1375,19 +1375,19 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
-    ...[
+    ...([
       ["full reference link", "An[sw][lesson]er", "[lesson]: /lesson"],
       ["collapsed reference link", "An[sw][]er", "[sw]: /lesson"],
       ["shortcut reference link", "An[sw]er", "[sw]: /lesson"],
       ["full reference image", "An![sw][lesson]er", "[lesson]: /lesson"],
       ["collapsed reference image", "An![sw][]er", "[sw]: /lesson"],
       ["shortcut reference image", "An![sw]er", "[sw]: /lesson"],
-    ].flatMap(([name, label, definition]) => [
+    ] as const).flatMap(([name, label, definition]) => [
       [`${name} in an ATX heading`, `## ${label}\nforty-two`, definition],
       [`${name} in a Setext heading`, `${label}\n---\nforty-two`, definition],
       [`${name} in a table header`, `Topic | ${label}\n--- | ---\nrow | forty-two`, definition],
       [`${name} in a summary`, `<details><summary>Hint / ${label}</summary>forty-two</details>`, definition],
-    ]),
+    ] as const),
     ["a heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\n## An<span style="display:var(--mode)">x</span>swer\n\nforty-two\n</div>', ""],
     ["a Setext heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\nAn<span style="display:var(--mode)">x</span>swer\n---\n\nforty-two\n</div>', ""],
     ["a quoted heading inheriting CSS from an HTML block", '<div style="--mode:none">\n\n> ## An<span style="display:var(--mode)">x</span>swer\n> forty-two\n\n</div>', ""],
@@ -1397,7 +1397,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["a heading following an implicitly closed list item", '<ul><li style="--mode:none">one<li>\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two\n\n</li></ul>', ""],
     ["a heading following an implicitly closed definition term", '<dl><dt style="--mode:none">one<dd>\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two\n\n</dd></dl>', ""],
     ["a heading following a table cell with an omitted end tag", '<table><tr><td style="--mode:none">one<td>\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two\n\n</td></tr></table>', ""],
-    ...[
+    ...([
       ["a row closing a colgroup", '<table><colgroup style="--mode:none"><col><tr><td>'],
       ["a cell closing a colgroup", '<table><colgroup style="--mode:none"><col><td>'],
       ["a row closing a caption", '<table><caption style="--mode:none"><span>cap<tr><td>'],
@@ -1407,7 +1407,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       ["a nested button replacing the previous button", '<div><button style="--mode:none">one<button>'],
       ["a nested anchor replacing the previous anchor", '<div><a style="--mode:none">one<a>'],
       ["a nested nobr replacing the previous nobr", '<div><nobr style="--mode:none">one<nobr>'],
-    ].map(([name, opener]) => [
+    ] as const).map(([name, opener]) => [
       name,
       opener + '\n\n## An<span style="display:var(--mode)">sw</span>er\n\nforty-two',
       "",
@@ -1456,7 +1456,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["an escaped double quote in a multiline reference title", "## An[sw][lesson]er\nforty-two", "[lesson]: /lesson \"one \\\"two\nthree\""],
     ["an escaped single quote in a multiline reference title", "## An[sw][lesson]er\nforty-two", "[lesson]: /lesson 'one \\'two\nthree'"],
     ["escaped parentheses in a multiline reference title", "## An[sw][lesson]er\nforty-two", "[lesson]: /lesson (one \\(two\\)\nthree)"],
-    ...[
+    ...([
       ["hidden SVG text", '<svg><text display="none">x</text></svg>'],
       ["a hidden SVG group", '<svg><g display=" &#78;ONE "><g/><text>x</text></g></svg>'],
       ["hidden HTML inside SVG foreignObject", '<svg><foreignObject style="display: none !important"><span>x</span></foreignObject></svg>'],
@@ -1477,11 +1477,11 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       ["an invalid variable reference that leaves the winning display declaration", '<span style="display:none;display:var(foo)">x</span>'],
       ["an escaped SVG display value", '<svg><text display="n\\6f ne">x</text></svg>'],
       ["an escaped display value and CSS comment", '<span style="display:/**/\\6e one">x</span>'],
-    ].flatMap(([name, markup]) => [
+    ] as const).flatMap(([name, markup]) => [
       [name, "## An" + markup + "swer\nforty-two", ""],
       [name + " in a summary", "<details><summary>Hint / An" + markup + "swer</summary>forty-two</details>", ""],
-    ]),
-    ...[
+    ] as const),
+    ...([
       ["a CSS comment separating invalid display tokens", '<span style="display:no/**/ne">sw</span>'],
       ["the all shorthand resetting a display declaration", '<span style="display:none;all:initial">sw</span>'],
       ["a custom property overriding a display declaration", '<span style="--mode:inline;display:none;display:var(--mode)">sw</span>'],
@@ -1495,7 +1495,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       ["a cycle of custom properties", '<span style="--mode:var(--other);--other:var(--mode);display:none;display:var(--mode)">sw</span>'],
       ["a non-ASCII space in an SVG display value", '<svg><text display="&#160;none">sw</text></svg>'],
       ["a CSS space escape inside an SVG display identifier", '<svg><text display="no\\20 ne">sw</text></svg>'],
-    ].map(([name, markup]) => [name, "## An" + markup + "er\nforty-two", ""]),
+    ] as const).map(([name, markup]) => [name, "## An" + markup + "er\nforty-two", ""] as const),
     ["a later inline declaration making answer text visible", '## An<span style="display:none;display:inline">sw</span>er\nforty-two', ""],
     ["a nonbreaking space inside an invalid CSS display value", '## An<span style="display:&nbsp;none">sw</span>er\nforty-two', ""],
     ["quoted CSS content containing an apparent display declaration", '## An<span style="content: \x27;display:none;\x27">sw</span>er\nforty-two', ""],
@@ -1505,7 +1505,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["an unclosed styled raw-text element with answer text", '## <textarea style="display:none">Answer\nforty-two', ""],
     ["SVG text in defs", "## An<svg><defs><text>x</text></defs></svg>swer\nforty-two", ""],
     ["HTML in SVG desc", "## An<svg><desc><span>x</span></desc></svg>swer\nforty-two", ""],
-  ])("seals evidence for the rendered label with %s", (_name, body, definition) => {
+  ] as const)("seals evidence for the rendered label with %s", (_name, body, definition) => {
     const source = { sourceId: "captions", sourceVersion: 1 };
     const tail = `\n## Next topic\n\nPublic theorem.${definition ? "\n\n" + definition : ""}`;
     const text = body + "\n" + tail;
@@ -1607,6 +1607,74 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }));
     return [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })];
   }
+
+  it.each([
+    "An<div hidden></div>swer",
+    'An<div style="display:none">extra</div>swer',
+    "An<template><div>extra</div></template>swer",
+    "An<datalist><div>extra</div></datalist>swer",
+    "An<title>extra</title>swer",
+    "An<table hidden> </table>swer",
+    "<table hidden>Answer</table>",
+    "<table hidden><span>Answer</span></table>",
+    "<table><tbody hidden>Answer</tbody></table>",
+    '<table style="visibility:hidden">Answer</table>',
+    '<div style="visibility:hidden"><table><span style="visibility:visible">Answer</span></table></div>',
+    '<div style="--mode:inline"><table hidden style="--mode:none"><span style="display:var(--mode)">Answer</span></table></div>',
+  ])("reads the visible label around hidden boxes and tables in %s", label => {
+    const text = `## ${label}\n\nforty-two\n\n## Next topic\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+  });
+
+  it.each([
+    "<div hidden><table>Answer</table></div>",
+    "<div hidden><table><span>Answer</span></table></div>",
+    "<table hidden><tr><td>Answer</td></tr></table>",
+    "<table><tbody hidden><tr><td>Answer</td></tr></tbody></table>",
+    "<table><tbody><tr hidden><td>Answer</td></tr></tbody></table>",
+    'An<div style="visibility:hidden">extra</div>swer',
+    '<div style="visibility:hidden"><table>Answer</table></div>',
+    '<table style="visibility:hidden"><tr><td>Answer</td></tr></table>',
+    '<div style="--visibility:hidden;visibility:var(--visibility)"><table>Answer</table></div>',
+  ])("keeps the answer keyword hidden or split by a rendered box in %s", label => {
+    const text = `## ${label}\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, [], "Public theorem.");
+  });
+
+  it("keeps a disclosure sealed when its hint label inherits hidden visibility", () => {
+    const text = '<details><summary style="visibility:hidden"><table>Hint</table></summary>forty-two</details>';
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"]);
+  });
+
+  it.each([
+    ...["html", "body", "head", "frame", "frameset", "caption", "colgroup", "col", "tbody", "thead", "tfoot", "tr", "td", "th"]
+      .map(tag => `<${tag}>forty-two`),
+    ...["html", "body", "head", "td", "caption"].map(tag => `</${tag}>forty-two`),
+    "<select><option>Example<input>forty-two",
+    "<select><keygen>forty-two",
+    "<select><textarea>literal </details></textarea>forty-two",
+    "<select><select>forty-two",
+    "<select><title>ignored</select>forty-two",
+    "<table><select><tr><td>Example</td></tr></table>forty-two",
+    "<table><tbody><tr><td><select></td></tr></tbody></table>forty-two",
+    "<template><html><body></details></template>forty-two",
+  ])("closes the real disclosure after stray markup %s", inner => {
+    const text = `<details><summary>Answer</summary>${inner}</details>\n\nPublic theorem.`;
+    for (const chunks of chunkDocumentAndCues(text)) expectSealedEvidence(chunks, text, ["forty-two"], "Public theorem.");
+  });
+
+  it.each([
+    "<select><details><summary>Answer</summary>option text</details></select>",
+    "<select>\n<details><summary>Answer</summary>option text</details>\n</select>",
+    "<select><optgroup><option>\n<details><summary>Answer</summary>option text</details>\n</option></optgroup></select>",
+    "<table><tr><td><select><details>option text</details></select></td></tr></table>",
+  ])("ignores a disclosure start in select content %s", markup => {
+    const text = markup + "\n\nPublic theorem.";
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expectSealedEvidence(chunks, text, [], "Public theorem.");
+      expect(chunks.every(chunk => chunk.visibility === "public")).toBe(true);
+    }
+  });
 
   it.each([
     ...["mi", "mo", "mn", "ms", "mtext", "annotation-xml"].map(tag => `<math><${tag}></details></${tag}></math>`),
