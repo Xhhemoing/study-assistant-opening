@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, customType, foreignKey, integer, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, customType, foreignKey, integer, pgTable, primaryKey, text, timestamp, unique, uuid } from "drizzle-orm/pg-core";
 import { courses } from "./courses";
 import { users } from "./identity";
 import { workspaces } from "./library";
@@ -45,6 +45,7 @@ export const v3LearnerContextBlocks = pgTable("v3_learner_context_blocks", {
   renderedMarkdown: text("rendered_markdown").notNull(),
   byteLength: integer("byte_length").notNull(),
   revision: integer("revision").notNull(),
+  invalidated: boolean("invalidated").notNull().default(false),
   privacyEpoch: integer("privacy_epoch").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }, t => [

@@ -43,7 +43,7 @@ import type { OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 import { readOpeningRestoreCurrentFacts } from "./opening-restore-current-facts";
 import { prepareOpeningRestoreObjects } from "./opening-restore-object-integrity";
 import { orderBackupMisconceptionRevisions, validateBackupMisconceptionRevisions } from "../../../domain/src/opening/backup-validation";
-import { refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
+import { lockMisconceptionContext, refreshLearnerMisconceptionContextBlock } from "./v3-bitemporal-misconception-memory";
 
 export type OpeningRestoreObjectSideEffects = {
   status: "clean" | "remaining" | "unknown";
@@ -592,6 +592,7 @@ export async function executeOpeningRestoreApply(
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
       const [lockedWorkspace] = await tx`SELECT id, privacy_epoch FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
       if (!lockedWorkspace) throw new Error("restore workspace owner changed");
+      if (misconceptionRevisions.length) await lockMisconceptionContext(tx, workspaceId);
       // Drift can commit while we wait for either lock, so only this read authorizes apply.
       await assertOpeningRestoreTarget(tx, backup, owner, seeded.length > 0);
       const privacyEpoch = Number(lockedWorkspace.privacy_epoch);

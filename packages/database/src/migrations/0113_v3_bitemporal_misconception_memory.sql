@@ -81,6 +81,7 @@ CREATE TABLE v3_learner_context_blocks (
   rendered_markdown text NOT NULL CHECK (octet_length(rendered_markdown) <= 2048),
   byte_length integer NOT NULL CHECK (byte_length BETWEEN 0 AND 2048 AND byte_length = octet_length(rendered_markdown)),
   revision integer NOT NULL CHECK (revision > 0),
+  invalidated boolean NOT NULL DEFAULT false,
   privacy_epoch integer NOT NULL CHECK (privacy_epoch >= 0),
   updated_at timestamptz NOT NULL,
   CONSTRAINT v3_learner_context_workspace_owner FOREIGN KEY (workspace_id, owner_user_id)
@@ -93,10 +94,12 @@ DECLARE
   affected_workspace_id uuid := COALESCE(NEW.workspace_id, OLD.workspace_id);
 BEGIN
   IF EXISTS (SELECT 1 FROM workspaces WHERE id = affected_workspace_id) THEN
-    -- The revision lock is already held. Use only the cache lock here so a cascade
-    -- or direct SQL mutation cannot wait for a workspace lock held by a revision writer.
+    -- Multi-statement SQL revision writers must lock the workspace row and then take
+    -- this advisory lock before the first revision mutation (including inserts).
+    -- The trigger reuses that lock and also fences standalone cache invalidations.
     PERFORM pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || affected_workspace_id::text, 0));
-    DELETE FROM v3_learner_context_blocks WHERE workspace_id = affected_workspace_id;
+    UPDATE v3_learner_context_blocks SET invalidated = true, rendered_markdown = '', byte_length = 0
+      WHERE workspace_id = affected_workspace_id AND NOT invalidated;
   END IF;
   RETURN NULL;
 END;

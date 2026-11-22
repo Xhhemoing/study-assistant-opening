@@ -59,22 +59,26 @@ export function renderLearnerContextBlock(items: readonly ContextItem[]) {
   return { renderedMarkdown, byteLength };
 }
 
-async function lockWorkspace(tx: TransactionSql, scope: OpeningScope): Promise<number> {
+/** Acquire workspace and context locks before reading or mutating revision rows for a write. */
+export async function lockMisconceptionWorkspaceForWrite(tx: TransactionSql, scope: OpeningScope): Promise<number> {
   await lockWorkspaceLearningHistory(tx, scope);
   // Serialize writers and context rebuilds while allowing foreign-key key shares.
   const [workspace] = await tx<{ privacy_epoch: number }[]>`
     SELECT privacy_epoch FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
     FOR NO KEY UPDATE`;
   if (!workspace) throw learningError("NOT_FOUND", "学习空间不存在。");
+  await lockMisconceptionContext(tx, scope.workspaceId);
   return workspace.privacy_epoch;
 }
 
-async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
+/** With the workspace row already locked, fence revision writes and cache refreshes. */
+export async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
   // The migration's revision trigger holds this same lock when invalidating the cache.
   await tx`SELECT pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || ${workspaceId}::uuid::text, 0))`;
 }
 
-async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
+/** The caller already holds the workspace row and context advisory locks. */
+export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
   const items = await tx<ContextItem[]>`
     SELECT status, learner_disposition AS "learnerDisposition", left(summary, ${LEARNER_CONTEXT_MAX_BYTES}) AS summary
     FROM v3_bitemporal_misconception_edges e
@@ -91,16 +95,10 @@ async function writeLearnerMisconceptionContextBlock(tx: TransactionSql, scope: 
       (workspace_id, owner_user_id, rendered_markdown, byte_length, revision, privacy_epoch, updated_at)
     VALUES (${scope.workspaceId}, ${scope.ownerUserId}, ${renderedMarkdown}, ${byteLength}, 1, ${privacyEpoch}, ${at}::text::timestamptz)
     ON CONFLICT (workspace_id, owner_user_id) DO UPDATE
-    SET rendered_markdown = EXCLUDED.rendered_markdown, byte_length = EXCLUDED.byte_length,
+    SET rendered_markdown = EXCLUDED.rendered_markdown, byte_length = EXCLUDED.byte_length, invalidated = false,
       revision = v3_learner_context_blocks.revision + 1, privacy_epoch = EXCLUDED.privacy_epoch, updated_at = EXCLUDED.updated_at
     RETURNING rendered_markdown AS "renderedMarkdown", byte_length AS "byteLength", revision`;
   return block!;
-}
-
-/** The caller holds the workspace lock before mutating revisions and refreshing the cache. */
-export async function refreshLearnerMisconceptionContextBlock(tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string): Promise<ContextBlock> {
-  await lockMisconceptionContext(tx, scope.workspaceId);
-  return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at);
 }
 
 export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: OpeningScope): Promise<ContextBlock | null> {
@@ -117,6 +115,7 @@ export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: Open
       FROM v3_learner_context_blocks b
       WHERE b.workspace_id = ${scope.workspaceId} AND b.owner_user_id = ${scope.ownerUserId}
         AND b.privacy_epoch = ${workspace.privacy_epoch}
+        AND NOT b.invalidated
         AND b.updated_at <= ${at}::text::timestamptz
         AND NOT EXISTS (
           SELECT 1 FROM v3_bitemporal_misconception_edges e
@@ -125,7 +124,7 @@ export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: Open
                 (e.valid_range @> ${at}::text::timestamptz AND e.tx_range @> ${at}::text::timestamptz)
         )`;
     if (cached) return cached;
-    return writeLearnerMisconceptionContextBlock(tx, scope, workspace.privacy_epoch, at);
+    return refreshLearnerMisconceptionContextBlock(tx, scope, workspace.privacy_epoch, at);
   });
 }
 
@@ -159,7 +158,7 @@ export async function queryMisconceptionEdgesAsOf(
 
 export async function applyLearnerMisconceptionCorrection(sql: Sql, scope: OpeningScope, input: LearnerCorrection) {
   return sql.begin(async tx => {
-    const privacyEpoch = await lockWorkspace(tx, scope);
+    const privacyEpoch = await lockMisconceptionWorkspaceForWrite(tx, scope);
     // Lock all open transaction slices for this edge before sampling the mutation time.
     await tx`
       SELECT revision_id FROM v3_bitemporal_misconception_edges
@@ -191,8 +190,8 @@ export async function applyLearnerMisconceptionCorrection(sql: Sql, scope: Openi
   });
 }
 
-function deriveTryHandoffUuid(kind: "edge" | "initial-revision", receiptId: string): string {
-  const bytes = createHash("sha256").update(`opening:try-misconception:v1:${kind}:${receiptId.toLowerCase()}`).digest();
+function deriveTryHandoffUuid(kind: "edge" | "initial-revision", identity: string): string {
+  const bytes = createHash("sha256").update(`opening:try-misconception:v1:${kind}:${identity.toLowerCase()}`).digest();
   bytes[6] = (bytes[6]! & 0x0f) | 0x40;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
@@ -201,7 +200,7 @@ function deriveTryHandoffUuid(kind: "edge" | "initial-revision", receiptId: stri
 
 export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScope, claim: TryMisconceptionClaim) {
   return sql.begin(async tx => {
-    const privacyEpoch = await lockWorkspace(tx, scope);
+    const privacyEpoch = await lockMisconceptionWorkspaceForWrite(tx, scope);
     // A receipt can race across independently locked workspaces.
     await tx`SELECT pg_advisory_xact_lock(hashtextextended('v3:try-misconception:' || ${claim.receiptId}::uuid::text, 0))`;
     const [clock] = await tx<{ at: string; expired: boolean }[]>`
@@ -219,7 +218,7 @@ export async function redeemTryMisconceptionHandoff(sql: Sql, scope: OpeningScop
     }
 
     const edgeId = deriveTryHandoffUuid("edge", claim.receiptId);
-    const initialRevisionId = deriveTryHandoffUuid("initial-revision", claim.receiptId);
+    const initialRevisionId = deriveTryHandoffUuid("initial-revision", `${claim.receiptId}:${claim.payloadSha256}`);
     // Backups retain revisions and omit the receipt ledger. Look up both identities
     // globally so a restored revision attached to another edge is still a conflict.
     const [root] = await tx<{ revisionId: string; matches: boolean }[]>`

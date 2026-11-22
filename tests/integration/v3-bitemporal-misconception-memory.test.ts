@@ -55,8 +55,12 @@ function tryRequest(method: "PUT" | "POST", body: unknown, owner = "primary") {
 }
 
 function withDifferentSignedSummary(receipt: string): string {
+  return rewriteSignedReceipt(receipt, () => ({ summary: "Different signed payload" }));
+}
+
+function rewriteSignedReceipt(receipt: string, changes: (payload: { issuedAt: number; expiresAt: number }) => Record<string, unknown>): string {
   const payload = JSON.parse(Buffer.from(receipt.split(".")[0]!, "base64url").toString("utf8"));
-  const changed = Buffer.from(JSON.stringify({ ...payload, summary: "Different signed payload" })).toString("base64url");
+  const changed = Buffer.from(JSON.stringify({ ...payload, ...changes(payload) })).toString("base64url");
   const signature = createHmac("sha256", secret).update("opening:try-misconception:v1." + changed).digest("base64url");
   return changed + "." + signature;
 }
@@ -196,13 +200,6 @@ it("uses fresh post-lock transaction time and advances rapid revisions by at lea
       context = track(readLearnerMisconceptionContextBlock(reader.sql, scope));
       await waitUntilBlocked(sql, reader.pid, writer.pid, "context waits for workspace before reading revisions",
         /FROM workspaces[\s\S]+FOR SHARE/);
-      // The earlier transaction can still complete an insert's workspace FK check.
-      await tx`INSERT INTO v3_bitemporal_misconception_edges
-        (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
-         summary, status, origin, valid_range, tx_range)
-        SELECT ${randomUUID()}, workspace_id, owner_user_id, ${randomUUID()}, concept_key, misconception_code,
-          'Concurrent diagnosis', status, origin, valid_range, tx_range
-        FROM v3_bitemporal_misconception_edges WHERE revision_id=${released.revisionId}`;
       const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
       return clock!.at;
     });
@@ -231,6 +228,41 @@ it("uses fresh post-lock transaction time and advances rapid revisions by at lea
   expect(revisions.every(row => row.nonempty)).toBe(true);
   expect(revisions.map(row => row.open)).toEqual([false, false, false, true]);
   expect(revisions.slice(1).map(row => row.prior_revision_id)).toEqual(revisions.slice(0, -1).map(row => row.revision_id));
+});
+
+it("waits for the context lock before locking an edge a concurrent writer may close", async () => {
+  const { sql, scope } = f;
+  const existing = await seedEdge();
+  const writer = await openRaceSession().ready;
+  let correction: ReturnType<typeof applyLearnerMisconceptionCorrection> | undefined;
+  let blockedQuery: string | undefined;
+  try {
+    await sql.begin(async tx => {
+      const [holder] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      await tx`INSERT INTO v3_bitemporal_misconception_edges
+        (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
+         summary, status, origin, valid_range, tx_range)
+        SELECT ${randomUUID()}, workspace_id, owner_user_id, ${randomUUID()}, concept_key, misconception_code,
+          'Concurrent diagnosis', status, origin, valid_range, tx_range
+        FROM v3_bitemporal_misconception_edges WHERE revision_id=${existing.revisionId}`;
+      correction = track(applyLearnerMisconceptionCorrection(writer.sql, scope,
+        { edgeId: existing.edgeId, disposition: "clarified", summary: "Concurrent correction" }));
+      await waitUntilBlocked(sql, writer.pid, holder!.pid, "correction waits for the concurrent diagnosis transaction");
+      const [blocked] = await sql<{ query: string }[]>`SELECT query FROM pg_stat_activity WHERE pid=${writer.pid}`;
+      blockedQuery = blocked?.query;
+      const [closed] = await tx`UPDATE v3_bitemporal_misconception_edges SET tx_range =
+        tstzrange(lower(tx_range), GREATEST(clock_timestamp(), lower(tx_range) + interval '1 microsecond'), '[)')
+        WHERE revision_id=${existing.revisionId} RETURNING revision_id`;
+      expect(closed?.revision_id).toBe(existing.revisionId);
+    });
+    await expect(correction).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(blockedQuery).toMatch(/pg_advisory_xact_lock[\s\S]+v3:learner-context/);
+    await expect(readLearnerMisconceptionContextBlock(sql, scope))
+      .resolves.toMatchObject({ renderedMarkdown: "- 已确认：Concurrent diagnosis" });
+  } finally {
+    await correction?.catch(() => undefined);
+    await writer.sql.end({ timeout: 5 });
+  }
 });
 
 it("issues and redeems one signed candidate under concurrent retries and rejects conflicting claims and expiry", async () => {
@@ -282,6 +314,7 @@ it("enforces owner binding on all three tables and preserves course and workspac
     VALUES (${courseId}, ${scope.workspaceId}, 'Cascade fixture', ${courseId})`;
   const independent = await seedEdge({ summary: "Independent diagnosis" });
   const first = await seedEdge({ courseId });
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({ revision: 1 });
   const correction = await applyLearnerMisconceptionCorrection(sql, scope,
     { edgeId: first.edgeId, disposition: "clarified", summary: "Course correction" });
   expect(correction.contextBlock.renderedMarkdown).toContain("Course correction");
@@ -297,12 +330,17 @@ it("enforces owner binding on all three tables and preserves course and workspac
     .rejects.toMatchObject({ code: "23514" });
   expect(await sql`SELECT revision_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${first.edgeId}`).toHaveLength(2);
   await sql`DELETE FROM courses WHERE id=${courseId}`;
-  expect(await sql`SELECT rendered_markdown FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
+  const invalidated = await sql`SELECT *, octet_length(rendered_markdown) AS rendered_bytes
+    FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
   expect(await sql`SELECT edge_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${first.edgeId}`).toEqual([]);
   expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE receipt_id=${receiptId}`).toEqual([]);
   await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({
-    renderedMarkdown: "- 已确认：Independent diagnosis",
+    renderedMarkdown: "- 已确认：Independent diagnosis", revision: 3,
   });
+  expect(correction.contextBlock.revision).toBe(2);
+  expect(invalidated).toMatchObject([{ invalidated: true, revision: 2, rendered_bytes: 0 }]);
+  expect(await sql`SELECT invalidated, revision FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`)
+    .toEqual([{ invalidated: false, revision: 3 }]);
 
   await sql`DELETE FROM workspaces WHERE id=${scope.workspaceId}`;
   expect(await sql`SELECT edge_id FROM v3_bitemporal_misconception_edges WHERE edge_id=${independent.edgeId}`).toEqual([]);
@@ -408,8 +446,8 @@ it("invalidates cached context after a retroactive transaction closure or insert
   const initial = await seedEdge();
   const first = await readLearnerMisconceptionContextBlock(sql, scope);
   expect(first?.renderedMarkdown).toBe("- 已确认：Initial diagnosis");
-  const readCache = () => sql<{ updated_at: string; rendered_markdown: string }[]>`
-    SELECT updated_at::text, rendered_markdown FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
+  const readCache = () => sql<{ updated_at: string; rendered_markdown: string; invalidated: boolean; revision: number }[]>`
+    SELECT updated_at::text, rendered_markdown, invalidated, revision FROM v3_learner_context_blocks WHERE workspace_id=${scope.workspaceId}`;
   const [snapshot] = await readCache();
 
   const [closed] = await sql`UPDATE v3_bitemporal_misconception_edges
@@ -418,8 +456,8 @@ it("invalidates cached context after a retroactive transaction closure or insert
     RETURNING upper(tx_range) < ${snapshot!.updated_at}::text::timestamptz AS closed_before_snapshot`;
   expect(closed?.closed_before_snapshot).toBe(true);
   const cacheAfterClosure = await readCache();
-  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({ renderedMarkdown: "", byteLength: 0 });
-  expect(cacheAfterClosure).toEqual([]);
+  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({ renderedMarkdown: "", byteLength: 0, revision: 2 });
+  expect(cacheAfterClosure).toMatchObject([{ invalidated: true, revision: 1 }]);
 
   await sql`INSERT INTO v3_bitemporal_misconception_edges
     (revision_id, workspace_id, owner_user_id, edge_id, concept_key, misconception_code,
@@ -428,8 +466,9 @@ it("invalidates cached context after a retroactive transaction closure or insert
       'Backdated diagnosis', status, origin, valid_range, tstzrange(lower(tx_range), NULL, '[)')
     FROM v3_bitemporal_misconception_edges WHERE revision_id=${initial.revisionId}`;
   const cacheAfterInsert = await readCache();
-  await expect(readLearnerMisconceptionContextBlock(sql, scope)).resolves.toMatchObject({ renderedMarkdown: "- 已确认：Backdated diagnosis" });
-  expect(cacheAfterInsert).toEqual([]);
+  await expect(readLearnerMisconceptionContextBlock(sql, scope))
+    .resolves.toMatchObject({ renderedMarkdown: "- 已确认：Backdated diagnosis", revision: 3 });
+  expect(cacheAfterInsert).toMatchObject([{ invalidated: true, revision: 2 }]);
 });
 
 it("rejects a course change on the same edge at the database and restore boundaries", async () => {
@@ -533,6 +572,13 @@ it("round-trips misconception corrections through a v1 workspace backup and rebu
 
   expect((await redeem(tryRequest("POST", { receipt }, "other"))).status).toBe(409);
   expect((await redeem(tryRequest("POST", { receipt: withDifferentSignedSummary(receipt) }))).status).toBe(409);
+  const shifted = rewriteSignedReceipt(receipt, ({ issuedAt, expiresAt }) => ({
+    issuedAt: issuedAt + 1, expiresAt: expiresAt + 1,
+  }));
+  const conflict = await redeem(tryRequest("POST", { receipt: shifted }));
+  expect(conflict.status).toBe(409);
+  expect(await conflict.json()).toMatchObject({ error: { code: "CONFLICT" } });
+  expect(await sql`SELECT receipt_id FROM v3_try_misconception_handoff_receipts WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
   const replays = await Promise.all([redeem(tryRequest("POST", { receipt })), redeem(tryRequest("POST", { receipt }))]);
   for (const replay of replays) {
     expect(replay.status).toBe(200);
