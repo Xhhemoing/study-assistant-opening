@@ -1,11 +1,42 @@
 import type { TransactionSql } from "postgres";
 import { describe, expect, it } from "vitest";
+import type { FragmentFactory } from "./opening-context-provenance";
 import { admitTaskCandidate } from "./opening-task-candidate-admission";
-import { readMemoryDependencyStatus } from "./opening-memory-admission";
+import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
 
 const scope = { workspaceId: "11111111-1111-4111-8111-111111111111", ownerUserId: "22222222-2222-4222-8222-222222222222" };
 const turnId = "33333333-3333-4333-8333-333333333333";
 const candidateId = "44444444-4444-4444-8444-444444444444";
+
+it("consumes each material admission SQL fragment with or without a course policy", async () => {
+  const unconsumed = new Set<object>();
+  const sql = (_parts: TemplateStringsArray, ...values: unknown[]) => {
+    for (const value of values) {
+      if (typeof value === "object" && value !== null) {
+        expect(unconsumed.delete(value)).toBe(true);
+      }
+    }
+    const fragment = { then(resolve: (rows: unknown[]) => void) {
+      expect(unconsumed.delete(fragment)).toBe(true);
+      resolve([]);
+    } };
+    unconsumed.add(fragment);
+    return fragment;
+  };
+  const tx = sql as unknown as TransactionSql;
+  const materials: FragmentFactory = () => tx`SELECT source_id, version, version_required, memory_only FROM material`;
+  const options = {
+    memoryCourse: () => tx`material.course_id`,
+    originUse: () => tx`material.material_use`,
+    standaloneOrigin: () => tx`material.origin_course_id IS NULL`,
+  } satisfies NonNullable<Parameters<typeof sourceMaterialsActive>[3]>;
+
+  for (const resolved of [undefined, { directMaterialPolicy: true }, options,
+    { ...options, allowClassifiedGlobal: true }, { ...options, directMaterialPolicy: true }]) {
+    await tx`SELECT 1 WHERE ${sourceMaterialsActive(tx, scope.workspaceId, materials, resolved)}`;
+    expect(unconsumed.size).toBe(0);
+  }
+});
 
 function stub(ancestor: "none" | "active" | "expired" | "revoked" | "superseded") {
   const queries: string[] = [];
@@ -97,7 +128,9 @@ it("locks the course, direct and inherited materials, and memberships before val
 
   await expect(admitTaskCandidate(tx, scope, candidateId)).rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("memory dependency") });
   const locks = queries.filter(query => query.endsWith("FOR SHARE") || query.endsWith("FOR SHARE OF conv, t"));
-  expect(locks.map(query => query.split(" FROM ")[1]?.split(" ")[0])).toEqual([
+  expect(locks.map(query => query.endsWith("FOR SHARE OF conv, t")
+    ? query.match(/ JOIN (\w+) t ON /)?.[1]
+    : query.match(/^SELECT id FROM (\w+)/)?.[1])).toEqual([
     "workspaces", "opening_turns", "courses", "opening_sources", "course_asset_memberships",
   ]);
   expect(locks[3]).toContain(`${direct},${backing}`);

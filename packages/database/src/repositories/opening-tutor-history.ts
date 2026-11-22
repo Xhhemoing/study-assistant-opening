@@ -4,8 +4,8 @@ import type { OpeningScope } from "./opening-sources";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 import {
-  contextSourceRefsIncluded, lineageUuid, mergeContextSourceRefs, resolveMemoryDependencyStatus,
-  parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnMemoryOnlyBackingIds,
+  contextSourceRefsIncluded, mergeContextSourceRefs, resolveMemoryDependencyStatus,
+  parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnLineageCourse, turnMemoryOnlyBackingIds,
   type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus } from "./opening-memory-admission";
@@ -23,8 +23,8 @@ export type TutorHistoryContext = {
 export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, currentTurnId: string, purpose: TutorHistoryPurpose = "model"): Promise<TutorHistoryContext> {
   const recordReferents = purpose === "record_referents";
   const excludedSourceIds = await createOpeningPrivacyRepository(sql).listExcludedSourceIds(scope);
-  const priorCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`u.context_anchor->>'courseId'`)})`;
-  const currentCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`current.context_anchor->>'courseId'`)})`;
+  const priorCourse: FragmentFactory = () => turnLineageCourse(sql, "u", () => sql`c.course_id`, () => sql`c.owner_user_id`);
+  const currentCourse: FragmentFactory = () => turnLineageCourse(sql, "current", () => sql`c.course_id`, () => sql`c.owner_user_id`);
   const citations: FragmentFactory = () => sql`CASE WHEN jsonb_typeof(u.citations) = 'array' AND jsonb_typeof(a.citations) = 'array'
     THEN u.citations || a.citations END`;
   const rows = await sql`

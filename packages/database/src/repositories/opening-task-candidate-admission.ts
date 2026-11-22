@@ -39,7 +39,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   const [candidate] = await tx<{ payload: unknown; source_turn_id: string; has_memory_dependencies: boolean | null;
     course_id: string | null; material_use: "citation" | "practice"; source_ids: string[]; role: string; context_source_refs: unknown }[]>`
     SELECT c.payload, t.id AS source_turn_id, ${turnHasMemoryDependencies(tx)} AS has_memory_dependencies,
-      ${turnLineageCourse(tx, "t", () => tx`conv.course_id`)} AS course_id,
+      ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} AS course_id,
       ${turnMaterialUse(tx, "t")} AS material_use, t.role, t.context_source_refs,
       array_remove(ARRAY(SELECT DISTINCT ${lineageUuid(tx, () => tx`ref.source_id`)}
         FROM (${candidateMaterialRows(tx, scope)}) ref), NULL::uuid) AS source_ids

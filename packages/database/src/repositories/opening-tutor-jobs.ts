@@ -16,7 +16,7 @@ import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryRecei
 import {
   contextSourceRefsIncluded, hasMemoryBearingRef, lineageUuid, memoryBacksSource, memoryCourseAllows,
   memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
-  resolveMemoryDependencyStatus, turnContextSourceRefs, turnPinnedSourceRefs, type ContextSourceRef,
+  resolveMemoryDependencyStatus, turnContextSourceRefs, turnLearningSessionCourse, turnLineageCourse, turnPinnedSourceRefs, type ContextSourceRef,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import { lockActiveMemoryCourse, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
@@ -76,6 +76,7 @@ type StreamTurnBinding = {
   source_ids?: unknown;
   source_versions?: unknown;
   course_id?: unknown;
+  session_course_id?: unknown;
 };
 
 const PUBLICATION_CLEANUP_DEADLINE_MS = 1_500;
@@ -93,12 +94,17 @@ function sourceMembershipAllows(
 }
 
 function boundTurnCourseId(turn: StreamTurnBinding): string | null {
-  const courseId = turn.course_id ?? (turn.context_anchor as StudyContextAnchor | null | undefined)?.courseId;
+  const courseId = turn.course_id ?? (turn.context_anchor as StudyContextAnchor | null | undefined)?.courseId ?? turn.session_course_id;
   if (courseId == null) return null;
   if (typeof courseId !== "string" || !UUID_PATTERN.test(courseId)) {
     throw Object.assign(new Error("stream course binding invalid"), { code: "CONFLICT" });
   }
   return courseId.toLowerCase();
+}
+
+function jobUserSessionCourse(db: Sql | TransactionSql) {
+  return db`CASE WHEN c.course_id IS NULL AND t.context_anchor->>'courseId' IS NULL
+    THEN ${turnLearningSessionCourse(db, () => db`t`, () => db`c.owner_user_id`)} END`;
 }
 
 async function lockStreamCourse(tx: TransactionSql, scope: OpeningScope, courseId: string) {
@@ -574,7 +580,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
             UNION ALL ${turnPinnedSourceRefs(db, () => db`u.source_versions`, () => db`u.context_anchor`)}) pin
           WHERE pin.version_required OR pin.source_version IS NOT NULL
         ) AS versioned_pins,
-        COALESCE(c.course_id, ${lineageUuid(db, () => db`u.context_anchor->>'courseId'`)}) AS course_id,
+        ${turnLineageCourse(db, "u", () => db`c.course_id`, () => db`c.owner_user_id`)} AS course_id,
         CASE WHEN u.attempt_id IS NOT NULL OR u.context_anchor->>'itemVersionId' IS NOT NULL
           THEN 'practice' ELSE 'citation' END AS material_use
       FROM opening_tutor_jobs j
@@ -628,7 +634,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   if (typeof target.course_id === "string" && !await lockActiveMemoryCourse(db, input.scope, target.course_id)) return;
   if (!target.evidence) return target;
   let admitted = await readCompletedCandidateEvidence(db, input, target.evidence);
-  if (!admitted || admitted.memberships.some(row => row.purpose === "mock_exam")) return;
+  if (!admitted) return;
   const { assistant_refs, user_refs } = target.evidence as { assistant_refs: unknown; user_refs: unknown };
   const assistantIds = parseContextMemoryDependencyIds(assistant_refs);
   const userIds = user_refs === null ? [] : parseContextMemoryDependencyIds(user_refs);
@@ -642,8 +648,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
     const lockedSourceIds = await lockMemoryMaterialSources(db, input.scope, collectSourceIds);
     const locked = new Set(lockedSourceIds);
     admitted = await readCompletedCandidateEvidence(db, input, target.evidence);
-    if (!admitted || admitted.memberships.some(row => row.purpose === "mock_exam")
-      || admitted.sources.some(row => !locked.has(row.id))) return;
+    if (!admitted || admitted.sources.some(row => !locked.has(row.id))) return;
     graph = await readMemoryDependencyStatus(db, input.scope, [
       ...exactIds, ...admitted.backings.map(row => row.id),
     ], { materialUse: admitted.material_use, lockedSourceIds });
@@ -668,7 +673,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
         AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
         AND w.privacy_epoch=${target.privacy_epoch}
-        AND COALESCE(convo.course_id, ${lineageUuid(db, () => db`u.context_anchor->>'courseId'`)})
+        AND ${turnLineageCourse(db, "u", () => db`convo.course_id`, () => db`convo.owner_user_id`)}
           IS NOT DISTINCT FROM ${admitted.course_id}::uuid
         AND (${admitted.course_id}::uuid IS NULL OR c.id IS NOT NULL)
         AND (${input.metadataLease === undefined} OR EXISTS (
@@ -682,7 +687,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         ))`;
   if (!currentTarget || !exactIds.every(current)) return;
   const activeBacking = admitted.backings.filter(row => current(row.id));
-  if (admitted.scoped.some(ref => !activeBacking.some(row => row.origin === ref.origin && row.source_id === ref.id))) return;
+  if (admitted.scoped.some(ref => admitted.memberships.some(row => row.asset_id === ref.id && row.purpose === "mock_exam")
+    || !activeBacking.some(row => row.origin === ref.origin && row.source_id === ref.id))) return;
   for (const ref of admitted.sources) {
     if (ref.memory_only && activeBacking.some(row => row.source_id === ref.id && row.global_backed)) continue;
     const memberships = admitted.memberships.filter(row => row.asset_id === ref.id);
@@ -985,7 +991,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       if (context.expectedPrivacyEpoch !== undefined && Number(workspace.privacy_epoch) !== context.expectedPrivacyEpoch) {
         throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
       }
-      const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id
+      const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
+        ${jobUserSessionCourse(tx)} AS session_course_id
         FROM opening_tutor_jobs j
         JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
         JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
@@ -1204,7 +1211,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
             throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
           }
-          const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
+          const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
+            ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
             JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
             WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
@@ -1304,11 +1312,13 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!workspace) return null;
         const [row] = lockMode === "FOR UPDATE"
-          ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
+          ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
+              ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR UPDATE OF j`
-          : await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
+          : await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,
+              ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR SHARE OF j`;
@@ -1412,7 +1422,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         let courseId: string | null = null;
         let materialUse: "practice" | "citation" = "citation";
         if (jobId !== undefined) {
-          const [turn] = await tx`SELECT t.attempt_id,t.context_anchor,c.course_id FROM opening_tutor_jobs j
+          const [turn] = await tx`SELECT t.attempt_id,t.context_anchor,c.course_id,
+            ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
             JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id
               AND t.conversation_id=j.conversation_id AND t.role='user' AND t.status='complete'
@@ -1533,7 +1544,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         }
         if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
           || options?.memoryLineageSourceIds !== undefined || input.contextSourceRefs !== undefined || receipt !== null) {
-          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,j.assistant_turn_id FROM opening_tutor_jobs j
+          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,j.assistant_turn_id,
+            ${jobUserSessionCourse(tx)} AS session_course_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
             JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
             WHERE j.id=${input.jobId} AND j.workspace_id=${input.scope.workspaceId} AND c.owner_user_id=${input.scope.ownerUserId}
@@ -1694,7 +1706,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       studyIntent?: StudyIntentEvent | null;
     } | null> {
       const rows = await sql`
-        SELECT t.text,t.mode,t.source_ids,t.source_versions,t.current_page,t.chunk_id,t.learning_session_id,t.attempt_id,t.strategy_template_id,t.query_system,t.context_anchor,t.composer_purpose,c.course_id,c.owner_user_id,v.evaluation_spec,
+        SELECT t.text,t.mode,t.source_ids,t.source_versions,t.current_page,t.chunk_id,t.learning_session_id,t.attempt_id,t.strategy_template_id,t.query_system,t.context_anchor,t.composer_purpose,
+          COALESCE(c.course_id, ${jobUserSessionCourse(sql)}) AS course_id,c.owner_user_id,v.evaluation_spec,
           COALESCE(t.learning_session_id,(SELECT a.session_id FROM opening_learning_attempts a WHERE a.workspace_id=t.workspace_id AND a.owner_user_id=c.owner_user_id
             AND (a.id=t.attempt_id OR a.id::text=t.context_anchor->>'attemptId') LIMIT 1)) AS intent_session_id
         FROM opening_turns t JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id

@@ -76,7 +76,7 @@ export function sourceMaterialsActive(
   const memoryCourse = options?.memoryCourse;
   const standaloneOrigin = options?.allowClassifiedGlobal ? options.standaloneOrigin : undefined;
   const materialUse = options?.originUse ?? (() => db`${options?.materialUse === "practice" ? "practice" : "citation"}::text`);
-  const purposeAllowed = options?.directMaterialPolicy
+  const purposeAllowed = () => options?.directMaterialPolicy
     ? db`cam.purpose = 'practice' OR (cam.purpose = 'reference' AND ${materialUse()} = 'citation')`
     : db`cam.purpose = CASE WHEN ${materialUse()} = 'practice' THEN 'practice' ELSE 'reference' END`;
   return db`NOT EXISTS (
@@ -97,9 +97,10 @@ export function sourceMaterialsActive(
             WHEN ${memoryCourse()} IS NULL THEN count(cam.purpose) > 0
               ${standaloneOrigin ? db`AND NOT (${standaloneOrigin()})` : db``}
             ELSE NOT COALESCE(bool_or(cam.course_id = ${memoryCourse()}
-              AND (cam.purpose IS NULL OR cam.purpose = 'teaching' OR ${purposeAllowed})), false) END
+              AND (cam.purpose IS NULL OR cam.purpose = 'teaching' OR ${purposeAllowed()})), false) END
         FROM course_asset_memberships cam
         WHERE cam.asset_id = s.id AND cam.workspace_id = s.workspace_id AND cam.asset_type = 'source'
+          ${options?.directMaterialPolicy ? db`AND (ref.memory_only OR ${memoryCourse()} IS NULL OR cam.course_id = ${memoryCourse()})` : db``}
       )` : db``}
   )`;
 }
@@ -136,7 +137,7 @@ export async function assertSourceTurnsOwned(
   const rows = await db<{ id: string }[]>`
     SELECT t.id FROM opening_turns t
     JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id
-    CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`)} AS id) course
+    CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`, () => db`c.owner_user_id`)} AS id) course
     WHERE t.workspace_id = ${scope.workspaceId} AND c.owner_user_id = ${scope.ownerUserId} AND t.status = 'complete'
       AND t.id = ANY(${unique}::uuid[])
       AND NOT COALESCE(t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb, false)
@@ -222,7 +223,7 @@ async function readOriginBindings(
       OFFSET 0
     ) t ON true
     JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id AND c.owner_user_id = ${scope.ownerUserId}
-    CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`)} AS id) course
+    CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`, () => db`c.owner_user_id`)} AS id) course
     ${originUse ? db`CROSS JOIN LATERAL (SELECT ${turnMaterialUse(db, "t")} AS material_use) policy` : db``}
     WHERE ${turnSourceMaterialsActive(db, scope.workspaceId, rules && {
       ...rules, memoryCourse: () => db`m.course_id`, originUse, standaloneOrigin: () => db`course.id IS NULL`,

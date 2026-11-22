@@ -80,7 +80,7 @@ async function readMemoryContextInTx(
       JOIN opening_memories parent ON parent.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND parent.workspace_id = ${scope.workspaceId}
       CROSS JOIN LATERAL ${savedOrigins(() => db`parent.source_turn_ids`, () => db`parent.workspace_id`)}
       CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
-      CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t")} AS id) course
+      CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", undefined, () => db`${scope.ownerUserId}::uuid`)} AS id) course
       LEFT JOIN opening_memories child ON child.id = ${lineageUuid(db, () => db`dep.id`)} AND child.workspace_id = parent.workspace_id
     ), ancestry AS MATERIALIZED (
       SELECT d.root_id, jsonb_agg(DISTINCT d.dep_id) AS memory_ids,

@@ -15,6 +15,7 @@ const token = "12000000-0000-4000-8000-000000000007", execution = "12000000-0000
 const attempt = "12000000-0000-4000-8000-000000000009", item = "12000000-0000-4000-8000-000000000010";
 const courseId = "12000000-0000-4000-8000-000000000011", sourceId = "12000000-0000-4000-8000-000000000012";
 const membershipId = "12000000-0000-4000-8000-000000000013", purposeRevision = "2026-11-20T00:00:00.000000Z";
+const examCourse = "12000000-0000-4000-8000-000000000014";
 const fence = { attemptId: attempt, itemVersionId: item, rootObservationId: null, headObservationId: null, answerRevision: null };
 const pin = { courseId, materialUse: "citation" as const, sources: [{ sourceId, sourceVersion: 0, membershipId, purposeRevision, purpose: "teaching" as const }] };
 const scope = { workspaceId: workspace, ownerUserId: owner }, time = "2026-11-10T00:00:00.000Z";
@@ -31,6 +32,9 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   expiredOnFinalCheck?: string;
   missingCompletionAssistant?: boolean;
   metadataTarget?: boolean;
+  sessionCourseId?: string;
+  metadataVersionMaps?: Partial<Record<"u" | "t", unknown>>;
+  metadataDirectSource?: boolean;
   storedMemoryOrigins?: Record<string, { refs: unknown[]; backings?: string[][]; sourceIds?: string[] }>;
 };
 function fixture(options: Options = {}) {
@@ -49,7 +53,20 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("NOT EXISTS ( ? SELECT 1 FROM mem_deps")) return values[0];
     if (sql.startsWith("WITH candidate_target AS MATERIALIZED")) {
       calls.push({ sql, values });
-      return options.metadataTarget ? [{ course_id: options.courseId }] : [];
+      for (const [alias, value] of Object.entries(options.metadataVersionMaps ?? {})) {
+        const kind = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+        if (kind !== "object" && sql.includes(`jsonb_typeof(${alias}.source_versions)='object'`)) return [];
+      }
+      return options.metadataTarget ? [{ course_id: options.courseId, context_source_refs: [],
+        ...(options.metadataDirectSource ? { evidence: { assistant_refs: [], user_refs: [] } } : {}),
+      }] : [];
+    }
+    if (sql.startsWith("WITH candidate_evidence AS MATERIALIZED")) {
+      return [{ sources: [{ id: sourceId, memory_only: false }], scoped: [], backings: [],
+        course_id: options.courseId, material_use: "citation", memberships: [
+          { asset_id: sourceId, course_id: courseId, purpose: "practice" },
+          { asset_id: sourceId, course_id: examCourse, purpose: "mock_exam" },
+        ] }];
     }
     if (!sql.startsWith("SELECT") && !sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")
       && !sql.startsWith("UPDATE opening_turns SET text =")) return "fragment";
@@ -64,11 +81,14 @@ function fixture(options: Options = {}) {
         : null;
       return options.missingJob ? [] : [{ ...job, status, claim_token: options.token ?? token, timing_execution_id: execValue,
         attempt_id: options.boundAttempt ?? null, context_anchor: anchor,
-        source_ids: options.sourceIds ?? [], source_versions: options.sourceVersions ?? null, course_id: options.courseId ?? null }];
+        source_ids: options.sourceIds ?? [], source_versions: options.sourceVersions ?? null, course_id: options.courseId ?? null,
+        session_course_id: sql.includes("AS session_course_id") ? options.sessionCourseId : undefined }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
     if (sql === "SELECT ? AS included") return [{ included: true }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
+    if (sql.startsWith("SELECT id FROM opening_sources")) return [{ id: sourceId }];
+    if (sql.startsWith("SELECT j.id FROM opening_tutor_jobs j")) return [{ id: jobId }];
     if (sql.startsWith("SELECT s.id,s.version FROM opening_sources")) {
       if (options.unavailableSource) return [];
       const requested = Array.isArray(values[1]) ? values[1] as string[] : [sourceId];
@@ -166,7 +186,9 @@ describe("stream receipt release waits for current job authorization and assista
     // appended OR clauses. Equivalent SQL rewrites may require updating this test.
     expect(exposure.sql).toBe("SELECT id FROM opening_help_exposures WHERE id=? AND workspace_id=? AND owner_user_id=? AND turn_id=? AND exposure_origin='assistant'");
     expect(exposure.values).toEqual([receipt, workspace, owner, assistant]);
-    expect(f.calls.map(c => c.sql.split(" ").slice(0, 2).join(" "))).toEqual(["SELECT privacy_epoch", "SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id", "SELECT 1", "SELECT id"]);
+    expect(f.calls.map(c => c.sql.split(" ").slice(0, 2).join(" "))).toEqual([
+      "SELECT privacy_epoch", expect.stringMatching(/^SELECT j\.\*,/), "SELECT 1", "SELECT id",
+    ]);
   });
   it("waits for receipt release before resolving a running stream authorization", async () => {
     const f = fixture();
@@ -662,6 +684,35 @@ describe("stream receipt release waits for current job authorization and assista
     })).resolves.toBe(false);
     expect(startSend).not.toHaveBeenCalled();
     expect(f.calls.some(call => call.sql.startsWith("INSERT INTO opening_assistant_candidates"))).toBe(false);
+  });
+
+  it.each<{ alias: "u" | "t"; value: [] | null }>([
+    { alias: "u", value: [] }, { alias: "u", value: null },
+    { alias: "t", value: [] }, { alias: "t", value: null },
+  ])("rejects legacy version map $value on saved turn $alias", async ({ alias, value }) => {
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    const f = fixture({ metadataTarget: true, metadataVersionMaps: { [alias]: value } });
+    const startSend = vi.fn(async () => "provider response");
+
+    await expect(f.repo.canAppendCompletedTurnCandidates(target)).resolves.toBe(false);
+    await expect(f.repo.authorizeMetadataSend(target, startSend)).rejects.toThrow("metadata authorization changed");
+    await expect(f.repo.appendCompletedTurnCandidates({ ...target, candidates: [] })).resolves.toBe(false);
+    expect(startSend).not.toHaveBeenCalled();
+  });
+
+  it.each([courseId, examCourse, null])("checks direct metadata purpose in the saved course %s", async savedCourse => {
+    const f = fixture({ courseId: savedCourse, metadataTarget: true, metadataDirectSource: true });
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    await expect(f.repo.canAppendCompletedTurnCandidates(target)).resolves.toBe(savedCourse === courseId);
+  });
+
+  it("locks the owned session course before sending from an unscoped conversation", async () => {
+    const f = fixture({ sessionCourseId: courseId, archivedCourse: true });
+    const send = vi.fn(async () => "provider response");
+
+    await expect(f.repo.authorizeSend(scope, jobId, context, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.find(call => call.sql.startsWith("SELECT id FROM courses"))?.values).toContain(courseId);
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("checks the legacy backing's expiry in the final gate before starting the provider", async () => {

@@ -310,17 +310,37 @@ export function turnMaterialUse(db: Db, alias: "t" | "u"): Fragment {
     THEN 'practice' ELSE 'citation' END`;
 }
 
-export function turnLineageCourse(db: Db, alias: "a" | "t" | "dt", conversationCourse?: FragmentFactory): Fragment {
-  const turn: FragmentFactory = () => alias === "a" ? db`a` : alias === "dt" ? db`dt` : db`t`;
+export function turnLearningSessionCourse(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
+  return db`(SELECT ls.course_id FROM opening_learning_sessions ls
+    WHERE ls.id = ${turn()}.learning_session_id AND ls.workspace_id = ${turn()}.workspace_id
+      AND ls.owner_user_id = ${owner()})`;
+}
+
+export function turnLineageCourse(
+  db: Db, alias: "a" | "t" | "dt" | "u" | "current", conversationCourse?: FragmentFactory, ownerUserId?: FragmentFactory,
+): Fragment {
+  const turn: FragmentFactory = () => {
+    switch (alias) {
+      case "a": return db`a`;
+      case "t": return db`t`;
+      case "dt": return db`dt`;
+      case "u": return db`u`;
+      case "current": return db`current`;
+    }
+  };
   const course = conversationCourse ?? (() => db`(SELECT tc.course_id FROM opening_conversations tc
+    WHERE tc.id = ${turn()}.conversation_id AND tc.workspace_id = ${turn()}.workspace_id)`);
+  const owner = ownerUserId ?? (() => db`(SELECT tc.owner_user_id FROM opening_conversations tc
     WHERE tc.id = ${turn()}.conversation_id AND tc.workspace_id = ${turn()}.workspace_id)`);
   return db`(
     COALESCE(${course()}, ${lineageUuid(db, () => db`${turn()}.context_anchor->>'courseId'`)},
-      CASE WHEN ${turn()}.role = 'assistant' THEN (
-        SELECT ${lineageUuid(db, () => db`tu.context_anchor->>'courseId'`)} FROM opening_turns tu
+      ${alias === "u" || alias === "current" ? db`` : db`CASE WHEN ${turn()}.role = 'assistant' THEN (
+        SELECT COALESCE(${lineageUuid(db, () => db`tu.context_anchor->>'courseId'`)},
+          ${turnLearningSessionCourse(db, () => db`tu`, owner)}) FROM opening_turns tu
         WHERE tu.workspace_id = ${turn()}.workspace_id AND tu.conversation_id = ${turn()}.conversation_id AND tu.role = 'user'
           AND tu.id = (${pairedUserTurnId(db, turn)})
-      ) END)
+      ) END,`}
+      ${turnLearningSessionCourse(db, turn, owner)})
   )`;
 }
 
@@ -495,7 +515,9 @@ export async function readTurnsWithActiveMemoryDependencies(
     LEFT JOIN opening_turns u ON a.role='assistant' AND u.id=(${pairedUserTurnId(db, () => db`a`)})
       AND u.workspace_id=a.workspace_id AND u.conversation_id=c.id AND u.role='user' AND u.status='complete'
     CROSS JOIN LATERAL (SELECT COALESCE(c.course_id, ${lineageUuid(db, () => db`a.context_anchor->>'courseId'`)},
-      ${lineageUuid(db, () => db`u.context_anchor->>'courseId'`)}) AS id) course
+      ${lineageUuid(db, () => db`u.context_anchor->>'courseId'`)},
+      ${turnLearningSessionCourse(db, () => db`u`, () => db`c.owner_user_id`)},
+      ${turnLearningSessionCourse(db, () => db`a`, () => db`c.owner_user_id`)}) AS id) course
     CROSS JOIN LATERAL (SELECT CASE
       WHEN ${refs()} @? '$[*].memoryDependencyIds[*]' OR ${refs()} @> '[{"memoryOnly":true}]'::jsonb
       THEN jsonb_build_object('turnId', a.id, 'ownerUserId', c.owner_user_id, 'courseId', ${course()},

@@ -42,7 +42,7 @@ function sameInstant(left: string | null, right: string | null): boolean {
 async function lockCandidate(tx: Db, scope: OpeningScope, id: string): Promise<LockedCandidate> {
   const rows = await tx`
     SELECT c.conversation_id, c.source_turn_id, c.source_ids, c.payload, c.status,
-      ${turnLineageCourse(tx, "t", () => tx`conv.course_id`)} AS course_id
+      ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} AS course_id
     FROM opening_assistant_candidates c
     INNER JOIN opening_conversations conv
       ON conv.id = c.conversation_id
