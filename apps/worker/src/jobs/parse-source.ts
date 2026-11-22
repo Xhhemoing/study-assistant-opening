@@ -19,14 +19,15 @@ import { parsePdfSegments, pdfPageEndSeal, watchPdfExecution, type PdfDiscourseB
 import { pdfParserProfile } from "../parsers/ocr-health";
 import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
 import { createPdfPartialError } from "./pdf-partial-error";
+import { fetchPresignedSourceObject, type LegacyFinalKeyResolver, type SourceDownloadStorage } from "./source-object-download";
 
 export class UnsupportedSourceError extends Error { readonly code = "UNSUPPORTED_SOURCE"; }
 const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 // The database checks code points. Bounding UTF-16 units also bounds code points.
 const PDF_CHUNK_TEXT_LIMIT = 100_000;
 const PAGE_SEAL_PROFILE = "pdf-publication-page-seal-v1";
-type Storage = { presignGet(key: string, input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string }): Promise<string>; finalKey(id: string, version: number): string };
-type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
+type Storage = SourceDownloadStorage;
+type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState"> & LegacyFinalKeyResolver;
 
 type AnnotatedParsedPage = ParsedPage & {
   discourseBlocks?: ReadonlyArray<Partial<PdfDiscourseBlock>>;
@@ -453,8 +454,14 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
     // wiring; legacy direct/test callers without a claim can remain ephemeral.
     if (source.mime === "application/pdf" && job.claimToken && !deps.segments) throw new Error("PDF segment repository is required for claimed parse jobs");
     if (source.mime === "text/markdown" || source.mime === "text/plain" || source.mime === "text/html") {
-      const url = await deps.storage.presignGet(deps.storage.finalKey(source.id, source.version), { expiresInSeconds: 900, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
-      const response = await fetch(url);
+      const response = await fetchPresignedSourceObject({
+        scope,
+        source,
+        job,
+        payload,
+        storage: deps.storage,
+        sources: deps.sources,
+      });
       if (!response.ok) throw new Error("source download failed");
       const parts: Uint8Array[] = [];
       const download = trackSourceDownload(source);
@@ -492,7 +499,6 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       await deps.sources.markParseState(scope, source.id, "unsupported");
       return { unsupported: true };
     }
-    const url = await deps.storage.presignGet(deps.storage.finalKey(source.id, source.version), { expiresInSeconds: 900, responseContentDisposition: "attachment", responseCacheControl: "private, no-store" });
     await mkdir(tempDir, { recursive: true });
     const workDir = await mkdtemp(path.join(tempDir, `${source.id}-${source.version}-`));
     const temp = path.join(workDir, "source");
@@ -505,7 +511,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       if (assertCurrent) execution = await watchPdfExecution(assertCurrent, deps.executionPollMs);
       const signal = execution?.signal ?? new AbortController().signal;
       signal.throwIfAborted();
-      const response = await fetch(url, { signal });
+      const response = await fetchPresignedSourceObject({
+        scope,
+        source,
+        job,
+        payload,
+        storage: deps.storage,
+        sources: deps.sources,
+        signal,
+      });
       if (!response.ok || !response.body) throw new Error("source download failed");
       const download = trackSourceDownload(source);
       const limited = new Transform({

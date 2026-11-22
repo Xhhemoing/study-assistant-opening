@@ -229,7 +229,7 @@ async function facts(tx: TransactionSql, scope: Scope, courseId: string, sourceI
   }
   const sourceRefs = mergeContextSourceRefs(origins).sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.sourceVersion - b.sourceVersion);
   if (sourceRefs.length > 960) throw conflict("关联学习记录过多，请缩小课程材料范围。");
-  const [admitted] = await db`SELECT 1 AS ok WHERE ${contextSourceRefsIncluded(db, scope.workspaceId, db`${db.json(sourceRefs)}`)}`;
+  const [admitted] = await db`SELECT 1 AS ok WHERE ${contextSourceRefsIncluded(db, scope.workspaceId, () => db`${db.json(sourceRefs)}`)}`;
   if (!admitted) throw conflict("学习记录关联材料已变化，请重新读取后继续。");
   // An explicit continuation answers this activity's result. A newer session
   // can inform later course planning, but cannot replace the selected origin.

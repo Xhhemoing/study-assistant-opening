@@ -32,7 +32,7 @@ export async function readSystemStateQuery(tx: TransactionSql, scope: Scope,
     if (!explained) { out.status = "unknown"; out.reason = "no_data"; return; }
     const { decision, current, invalidationReasons } = explained;
     const refs = Object.entries(decision.sourceVersions).flatMap(([sourceId, versions]) => versions.map(sourceVersion => ({ sourceId, sourceVersion })));
-    const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`, false)} AS included`;
+    const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`, false)} AS included`;
     if (!admitted?.included) { out.status = "unknown"; out.reason = "stale"; return; }
     out.sourceRefs.push(...refs);
     out.asOf = explained.dataAsOf;

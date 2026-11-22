@@ -1,6 +1,7 @@
 import type { CourseLearningPreferencesUpdate } from "@aistudy/contracts";
 
 export interface CourseSummary {
+  workspaceId?: string;
   archivedAt?: string | null;
   learningPreferenceOverrides?: CourseLearningPreferencesUpdate;
   id: string;

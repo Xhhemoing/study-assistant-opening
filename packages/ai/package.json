@@ -10,6 +10,10 @@
       "types": "./src/model-routing.ts",
       "default": "./src/model-routing.ts"
     },
+    "./provider-network": {
+      "types": "./src/opening/provider-network.ts",
+      "default": "./src/opening/provider-network.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

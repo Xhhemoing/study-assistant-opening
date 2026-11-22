@@ -6,6 +6,7 @@ import { parseSuggestionKey } from "@aistudy/domain";
 import { assertCoachAcceptance } from "./opening-coach-plans";
 import { assertOpeningSuggestedSelectionAllowed } from "./opening-suggestion-feedback";
 import { OpeningPlanError } from "./opening-plan-error";
+import { assertPlanningDay } from "./opening-plan-day";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-read";
 import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
@@ -24,6 +25,7 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
       WHERE id=${input.draftId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     if (!located) throw new OpeningPlanError("NOT_FOUND", "draft not found");
     const day = new Date(located.day as string | Date).toISOString().slice(0, 10);
+    assertPlanningDay(day);
     // Same day lock as auto-draft recomputation, before any workspace/row lock.
     const digest = createHash("sha256").update(`opening-daily-draft:${scope.workspaceId}:${day}`).digest();
     await tx`SELECT pg_advisory_xact_lock(${digest.readInt32BE(0)}, ${digest.readInt32BE(4)})`;
@@ -124,10 +126,12 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
       }
     }
     const createdTaskVersions: Record<string, number> = {};
+    const dependencyTurnIds: string[] = [];
     for (const item of selected) {
       if (draft.origin === "agent") {
         const created = await consumeOpeningConversationPlanCandidate(tx, scope, conversationPlan, item);
         createdTaskVersions[created.taskId] = created.version;
+        if (created.dependencyTurnId !== null) dependencyTurnIds.push(created.dependencyTurnId);
         continue;
       }
       if (parseSuggestionKey(item.key)?.date !== day) throw new OpeningPlanError("VALIDATION", "invalid suggestion identity");
@@ -165,6 +169,12 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
     await tx`INSERT INTO opening_plan_acceptances (workspace_id, client_key, draft_id, day, accepted_version, payload_hash, source, before_blocks, created_task_versions)
       VALUES (${scope.workspaceId}, ${input.clientKey}, ${input.draftId}, ${day}::date, ${nextVersion}, ${payloadHash},
         ${options.source ?? "learner"}, ${tx.json(state!.accepted_blocks ?? [])}, ${tx.json(createdTaskVersions)})`;
+    if (dependencyTurnIds.length) {
+      const { assertTaskCandidateMemoryDependencies } = await import("./opening-task-candidate-admission");
+      for (const dependencyTurnId of dependencyTurnIds) {
+        await assertTaskCandidateMemoryDependencies(tx, scope.workspaceId, dependencyTurnId);
+      }
+    }
     return updated!;
   });
 }

@@ -133,17 +133,29 @@ describe("workspace upload quota with real SQL", () => {
   it.each([false, true])("releases deleted quota only after cleanup acknowledgements (uploaded=%s)", async uploaded => {
     const repo = createOpeningSourceRepository(f.sql, { quota: { maxBytes: 4, maxObjects: 1 } });
     const source = await repo.create(f.scope, upload(4));
-    if (uploaded) await repo.complete(f.scope, source.id, upload(4));
+    const manifest = { role: "exercise", pages: [] };
+    if (uploaded) {
+      await repo.complete(f.scope, source.id, upload(4));
+      await f.sql`UPDATE opening_source_versions SET material_manifest=${f.sql.json(manifest)},
+        material_manifest_revision=1, material_reviewed_by=${f.scope.ownerUserId}, material_reviewed_at=now()
+        WHERE source_id=${source.id} AND version=0`;
+    }
     const actions = createOpeningSourceActionsRepository(f.sql);
     const removed = await actions.apply(f.scope, source.id, { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }, {
       stagingKey: id => `opening/staging/${id}`, finalKey: (id, version) => `opening/sources/${id}/v${version}`,
     }, new Date());
     await expect(repo.create(f.scope, upload(4))).rejects.toMatchObject({ code: "CONFLICT" });
     // The object store acknowledges removal before these journal entries clear.
-    for (const key of removed.cleanup.keys) await actions.cleaned(f.scope, source.id, key);
+    const finalKey = `opening/sources/${source.id}/v0`;
+    for (const key of removed.cleanup.keys.filter(key => key !== finalKey)) await actions.cleaned(f.scope, source.id, key);
+    expect((await actions.cleanup(f.scope, source.id)).keys).toEqual([finalKey]);
+    await actions.cleaned(f.scope, source.id, finalKey);
     expect((await repo.create(f.scope, upload(4))).bytes).toBe(4);
-    const versions = await f.sql`SELECT availability FROM opening_source_versions WHERE source_id=${source.id}`;
-    expect(versions).toEqual(uploaded ? [{ availability: "unavailable" }] : []);
+    expect((await actions.cleanup(f.scope, source.id)).keys).toEqual([]);
+    const versions = await f.sql`SELECT availability, sha256, material_manifest, material_reviewed_by
+      FROM opening_source_versions WHERE source_id=${source.id}`;
+    expect(versions).toEqual(uploaded ? [{ availability: "unavailable", sha256: upload(4).sha256,
+      material_manifest: manifest, material_reviewed_by: f.scope.ownerUserId }] : []);
   });
 
   it("rejects an expired pending lease even before the sweeper marks it rejected", async () => {

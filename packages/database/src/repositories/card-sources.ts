@@ -11,11 +11,10 @@ export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)))`;
 }
 export function cardReadable(db: Db, workspaceId: string) {
-  const document = db`c.source_document_id`;
   return db`${cardSourcesIncluded(db, workspaceId, db`c.source_ids`)}
-    AND (${document} IS NULL OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=${document} AND d.workspace_id=${workspaceId}))
-    AND NOT EXISTS (SELECT 1 FROM opening_note_provenance np WHERE np.document_id=${document}
-      AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, noteContextSourceRefs(db, db`np.context_source_refs`), true)})))
+    AND (c.source_document_id IS NULL OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=c.source_document_id AND d.workspace_id=${workspaceId}))
+    AND NOT EXISTS (SELECT 1 FROM opening_note_provenance np WHERE np.document_id=c.source_document_id
+      AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)})))
     AND NOT EXISTS (
       SELECT 1 FROM opening_note_provenance np
       LEFT JOIN library_documents d ON d.id=np.document_id AND d.workspace_id=np.workspace_id
@@ -26,7 +25,7 @@ export function cardReadable(db: Db, workspaceId: string) {
           THEN metadata.ref->'publicationCardIds' ELSE '[]'::jsonb END) AS linked(id)
         WHERE lower(linked.id)=c.id::text
       ) AND (np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
-        OR NOT (${contextSourceRefsIncluded(db, workspaceId, noteContextSourceRefs(db, db`np.context_source_refs`), true)}))
+        OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)}))
     )`;
 }
 

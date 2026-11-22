@@ -36,9 +36,10 @@ import {
   createOpeningEphemeralProvenanceRepository,
   createOpeningPrivacyRepository,
   createOpeningSourceRepository,
+  createOpeningSourceEmbeddingsRepository,
 } from "@aistudy/database";
 import { loadFeatureSwitches, loadOpeningEmbeddingConfig, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota } from "@aistudy/config";
-import { createOpeningMaterialRetriever } from "../../../../worker/src/runtime/material-retrieval";
+import { createOpeningMaterialRetriever, retrievalBudgetId } from "../../../../worker/src/runtime/material-retrieval";
 import { resolveTutorFallbackModel, resolveTutorModel } from "../../../../worker/src/runtime/model-gateway";
 import { createSourcePageImages, openingPageStorage } from "../../../../worker/src/runtime/source-page-images";
 import { createDbSystemQueryService } from "../../../../worker/src/runtime/system-query";
@@ -157,6 +158,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
     pricingConfigured: Boolean(embeddingConfig && embeddingConfig.inputCentsPerMillion > 0 || catalog?.models.some(m => m.inputCentsPerMillion > 0 && m.outputCentsPerMillion > 0)),
   });
   const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
+  const embeddings = createOpeningSourceEmbeddingsRepository(sql);
   const chunks = createOpeningSourceChunksRepository(sql);
   const privacySnapshot = (scope: EphemeralScope) => sql.begin("isolation level repeatable read read only", async tx => {
     const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -198,7 +200,7 @@ function getModelEphemeralTutorService(sql: Sql): EphemeralTutorService {
         },
         budget: {
           reserve: (entry) => budgetRepo.reserve(scope, entry),
-          isParentNotSent: parentId => budgetRepo.isParentNotSent(scope, parentId),
+          isParentNotSent: parentId => embeddings.isTurnWithRetrievalNotSent(scope, parentId, retrievalBudgetId(parentId)),
           release: (requestId, reason) => budgetRepo.release(scope, requestId, reason),
           claimExecution: (reservationId) => budgetRepo.claimExecution(scope, reservationId),
           settle: (...args) => budgetRepo.settle(scope, ...args),

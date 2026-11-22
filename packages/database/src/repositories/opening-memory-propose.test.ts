@@ -3,29 +3,47 @@ import type { TransactionSql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
 import { createOpeningMemoryRepository, OpeningMemoryError } from "./opening-memory";
 
-function sqlStub(options: { deniedOwnerRead?: number; failure?: { query: string; error: Error } } = {}) {
+function sqlStub(options: {
+  deniedOwnerRead?: number;
+  failure?: { query: string; error: Error };
+  expireDuringInsert?: boolean;
+  unavailablePin?: "versions" | "anchor";
+} = {}) {
   const calls: string[] = [];
   let ownerReads = 0;
+  let inserted = false;
   const tx = Object.assign(
-    async (strings: TemplateStringsArray) => {
-      const text = strings.join(" ").replace(/\s+/g, " ").trim();
-      calls.push(text);
-      if (options.failure && text.includes(options.failure.query)) throw options.failure.error;
-      if (text.includes("FROM workspaces")) {
-        ownerReads += 1;
-        return ownerReads === options.deniedOwnerRead ? [] : [{ id: "workspace" }];
-      }
-      if (text.includes("INSERT INTO opening_memories")) {
-        return [{
-          id: randomUUID(), workspace_id: randomUUID(), course_id: null, kind: "candidate",
-          text: "note", source_turn_ids: [], version: 0, expires_at: null, status: "active",
-          created_at: new Date(), updated_at: new Date(),
-        }];
-      }
-      return [];
+    (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.reduce((query, part, i) => query + part + (i < values.length ? String(values[i]) : ""), "")
+        .replace(/\s+/g, " ").trim();
+      return { toString: () => text, then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) =>
+        Promise.resolve().then(() => execute(text)).then(resolve, reject) };
     },
     { json: (value: unknown) => value },
   );
+  function execute(text: string) {
+    calls.push(text);
+    if (options.failure && text.includes(options.failure.query)) throw options.failure.error;
+    if (text.includes("FROM workspaces")) {
+      ownerReads += 1;
+      return ownerReads === options.deniedOwnerRead ? [] : [{ id: "workspace" }];
+    }
+    if (text.includes("INSERT INTO opening_memories")) {
+      inserted = true;
+      return [{
+        id: randomUUID(), workspace_id: randomUUID(), course_id: null, kind: "candidate",
+        text: "note", source_turn_ids: [], version: 0, expires_at: null, status: "active",
+        created_at: new Date(), updated_at: new Date(),
+      }];
+    }
+    if (text.startsWith("SELECT t.id FROM opening_turns")) {
+      const checksPin = options.unavailablePin === "versions" ? text.includes("jsonb_each(CASE WHEN jsonb_typeof(t.source_versions)")
+        : options.unavailablePin === "anchor" && text.includes("t.context_anchor->>'sourceId'");
+      if (checksPin) return [];
+      return options.expireDuringInsert && inserted ? [] : [{ id: "source-turn" }];
+    }
+    return [];
+  }
   const begin = vi.fn(async (run: (inner: TransactionSql) => Promise<unknown>) => run(tx as never));
   return { sql: Object.assign(tx, { begin, json: tx.json }), calls, begin };
 }
@@ -48,6 +66,25 @@ describe("proposeMemory transaction boundary", () => {
     expect(calls.some(query => query.includes("revision=revision+1"))).toBe(false);
     expect(calls.some((sqlText) => sqlText.includes("status = 'rejected'"))).toBe(true);
     expect(calls.at(-1)).toContain("INSERT INTO opening_memories");
+  });
+
+  it("rechecks source ancestry after inserting the proposal", async () => {
+    const { sql, calls } = sqlStub({ expireDuringInsert: true });
+    const repo = createOpeningMemoryRepository(sql as never);
+    const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() };
+    await expect(repo.proposeMemory(scope, { text: "note", sourceTurnIds: [randomUUID()], expiresAt: null }))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    expect(calls.some(query => query.startsWith("INSERT INTO opening_memories"))).toBe(true);
+    expect(calls.at(-1)).toMatch(/^SELECT t.id FROM opening_turns/);
+  });
+
+  it.each(["versions", "anchor"] as const)("rejects inaccessible material pinned only by the turn's %s", async unavailablePin => {
+    const { sql, calls } = sqlStub({ unavailablePin });
+    const repo = createOpeningMemoryRepository(sql as never);
+    const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() };
+    await expect(repo.proposeMemory(scope, { text: "note", sourceTurnIds: [randomUUID()], expiresAt: null }))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    expect(calls.some(query => query.startsWith("INSERT INTO opening_memories"))).toBe(false);
   });
 
   it.each([1, 2, 3])("keeps typed workspace not-found at ownership read %s", async deniedOwnerRead => {

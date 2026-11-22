@@ -34,6 +34,10 @@ export const interventionPrefsSchema = z
     quietMode: z.boolean(),
   })
   .strict();
+/** The non-null workspace JSONB also carries server-owned timetable metadata through backups. */
+export const storedWorkspaceInterventionPrefsSchema = interventionPrefsSchema.extend({
+  timetableRevision: uuidSchema.optional(),
+});
 export type InterventionPrefs = z.infer<typeof interventionPrefsSchema>;
 
 /** PM-locked defaults (Plan ACCEPT / §9). */

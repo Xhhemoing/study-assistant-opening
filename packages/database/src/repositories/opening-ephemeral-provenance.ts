@@ -33,7 +33,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         WHERE p.id=ANY(${ids}::uuid[]) AND p.workspace_id=${scope.workspaceId}
           AND p.owner_user_id=${scope.ownerUserId} AND w.owner_user_id=${scope.ownerUserId}
           AND p.privacy_epoch=${epoch}
-          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, sql`p.context_source_refs`)}`;
+          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, () => sql`p.context_source_refs`)}`;
       if (rows.length !== ids.length) return null;
       const groups = rows.map(row => parseContextSourceRefs(row.context_source_refs));
       return groups.some(refs => refs === null) ? null : mergeContextSourceRefs(...groups as ContextSourceRef[][]);
@@ -45,7 +45,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         const [owner] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner) throw new EphemeralProvenanceError("NOT_FOUND", "workspace not found");
         if (Number(owner.privacy_epoch) !== input.privacyEpoch) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query privacy changed");
-        const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`, true, true)} AS included`;
+        const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`, true, true)} AS included`;
         if (!admitted?.included) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query material unavailable");
         const [created] = await tx`INSERT INTO opening_query_ephemeral_provenance(id,workspace_id,owner_user_id,request_id,privacy_epoch,context_source_refs)
           VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${input.requestId},${input.privacyEpoch},${tx.json(refs)})
@@ -65,7 +65,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         if (Number(owners[0]!.privacy_epoch) !== input.privacyEpoch) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "privacy changed before reply delivery");
         const refs = input.contextSourceRefs === null ? null : parseContextSourceRefs(input.contextSourceRefs);
         if (refs !== null) {
-          const admitted = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`)} AS included`;
+          const admitted = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`)} AS included`;
           if (!admitted[0]!.included) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "material is no longer available");
         }
         const rows = await tx`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)
