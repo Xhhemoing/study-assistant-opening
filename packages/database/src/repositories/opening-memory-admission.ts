@@ -1,7 +1,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import {
-  assistantDirectSourcesVersioned, historicalUserTurnId, isLineageUuid, lineageUuid, memoryCourseAllows, pairedUserTurnId,
+  assistantDirectSourcesVersioned, historicalUserTurnId, isLineageUuid, isMemoryDependencyMetadata, lineageUuid, memoryCourseAllows, pairedUserTurnId,
   memoryOnlyRefSourceIds, parseContextMemoryDependencyIds, parseContextSourceRefs, resolveMemoryDependencyStatus,
   turnDependencyWalk, turnHasOwnedSession, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialRows, turnMaterialUse, turnMemoryOnlyBackingIds,
   type ContextSourceRef,
@@ -556,12 +556,78 @@ async function readOriginLineages(db: Db, scope: OpeningScope, origins: MemoryOr
   return new Map(origins.map(origin => [origin.id, resolveOrigins(graphFor, origin, bindings.get(origin.id) ?? [], rules?.materialUse)]));
 }
 
-/** Read backing IDs without acquiring locks or applying the deleted memory's own expiry. */
-export async function readMemoryDeletionSourceIds(db: Db, scope: OpeningScope, origin: MemoryOrigin): Promise<string[]> {
-  const lineages = await readOriginLineages(db, scope, [{ ...origin, excludedId: origin.id }], {
-    materialUse: "origin", allowClassifiedGlobal: true, includeSourceRefs: true,
-  });
-  return lineages.get(origin.id)?.sourceIds ?? [];
+function readMemoryDeletionTurns(db: Db, scope: OpeningScope, turnIds: string[]) {
+  const owner: FragmentFactory = () => db`c.owner_user_id`;
+  return db<{ refs: unknown; source_ids: (string | null)[]; backings: string[][] }[]>`
+    WITH origins AS (
+      SELECT t.id, t.conversation_id, paired.id AS user_id, paired.created_at AS user_created_at,
+        NOT t.query_system AND t.system_query IS NULL AND NOT paired.query_system AS include_history
+      FROM opening_turns t
+      JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+        AND c.owner_user_id=${scope.ownerUserId}
+      LEFT JOIN opening_turns paired ON t.role='assistant' AND paired.id=(${pairedUserTurnId(db, () => db`t`)})
+        AND paired.workspace_id=t.workspace_id AND paired.conversation_id=t.conversation_id
+        AND paired.role='user' AND paired.status='complete'
+      WHERE t.workspace_id=${scope.workspaceId} AND t.id=ANY(${turnIds}::uuid[])
+    ), lineage_turns AS (
+      SELECT id FROM origins
+      UNION SELECT user_id FROM origins WHERE user_id IS NOT NULL
+      UNION
+      SELECT side.id FROM origins o
+      JOIN opening_tutor_jobs j ON j.conversation_id=o.conversation_id AND j.workspace_id=${scope.workspaceId}
+      JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=j.workspace_id AND u.conversation_id=j.conversation_id
+        AND u.role='user' AND u.status='complete' AND NOT u.query_system
+      JOIN opening_turns a ON a.id=j.assistant_turn_id AND a.workspace_id=j.workspace_id AND a.conversation_id=j.conversation_id
+        AND a.role='assistant' AND a.status='complete' AND NOT a.query_system AND a.system_query IS NULL
+      CROSS JOIN LATERAL (VALUES (u.id), (a.id)) side(id)
+      WHERE o.include_history AND (u.created_at, u.id) < (o.user_created_at, o.user_id)
+    )
+    SELECT t.context_source_refs AS refs,
+      ARRAY(SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
+        FROM (${turnMaterialRows(db, owner)}) material) AS source_ids,
+      CASE WHEN t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+        AND NOT (t.context_source_refs @? '$[*].memoryDependencyIds[*]')
+        THEN ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`,
+          () => turnLineageCourse(db, "t", () => db`c.course_id`, owner),
+          () => turnHasStandaloneSessions(db, owner), scope, "deletion")}
+        ELSE '[]'::jsonb END AS backings
+    FROM lineage_turns lineage JOIN opening_turns t ON t.id=lineage.id
+    JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id`;
+}
+
+/** Privacy deletion follows saved lineage even after a dependency stops being usable. */
+export async function readMemoryDeletionSourceIds(db: Db, scope: OpeningScope, originTurnIds: string[]): Promise<string[]> {
+  const sourceIds = new Set<string>();
+  const visitedTurns = new Set<string>();
+  const visitedMemories = new Set<string>();
+  let frontier = originTurnIds;
+  while (frontier.length) {
+    const turnIds: string[] = [];
+    for (const id of frontier.filter(isLineageUuid).map(id => id.toLowerCase())) {
+      if (visitedTurns.has(id)) continue;
+      visitedTurns.add(id);
+      turnIds.push(id);
+    }
+    if (!turnIds.length) break;
+    const memoryIds: string[] = [];
+    for (const turn of await readMemoryDeletionTurns(db, scope, turnIds)) {
+      for (const id of turn.source_ids) if (id) sourceIds.add(id);
+      const exactIds = Array.isArray(turn.refs) ? turn.refs.filter(isMemoryDependencyMetadata).flatMap(ref => ref.memoryDependencyIds) : [];
+      for (const rawId of [...exactIds, ...turn.backings.flat()]) {
+        const id = rawId.toLowerCase();
+        if (visitedMemories.has(id)) continue;
+        visitedMemories.add(id);
+        memoryIds.push(id);
+      }
+    }
+    if (!memoryIds.length) break;
+    const memories = await db<{ source_turn_ids: string[] }[]>`
+      SELECT source_turn_ids FROM opening_memories
+      WHERE workspace_id=${scope.workspaceId} AND id=ANY(${memoryIds}::uuid[])
+        AND jsonb_typeof(source_turn_ids)='array'`;
+    frontier = memories.flatMap(memory => memory.source_turn_ids);
+  }
+  return [...sourceIds].sort();
 }
 
 async function readMemoryOrigins(db: Db, scope: OpeningScope, origins: MemoryOrigin[], rules?: MemoryMaterialRules,

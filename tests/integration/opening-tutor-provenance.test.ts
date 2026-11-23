@@ -417,7 +417,7 @@ describe("saved tutor material provenance", () => {
     await expect(exported()).resolves.toBe(false);
   });
 
-  it.each(["confirmed", "expired temporary"] as const)("excludes the backing source when deleting a memory derived from an ID-only turn (%s)", async kind => {
+  it.each(["confirmed", "expired temporary", "expired sibling", "superseded revision"] as const)("excludes the backing source when deleting a memory derived from an ID-only turn (%s)", async kind => {
     const { sql, scope } = f;
     const material = await source();
     const memories = createOpeningMemoryRepository(sql);
@@ -427,13 +427,16 @@ describe("saved tutor material provenance", () => {
     };
     const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
     const memory = await confirmFrom("Source-backed preference", origin);
+    const sibling = kind === "expired sibling" ? await memories.proposeMemory(scope, {
+      text: "Temporary preference", sourceTurnIds: [await insertOwnedTurn(sql, scope)],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }) : undefined;
     const historical = await insertOwnedTurn(sql, scope, {
-      role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [memory.id] }],
+      role: "assistant", contextSourceRefs: [{ memoryDependencyIds: sibling ? [memory.id, sibling.id] : [memory.id] }],
     });
-    const derived = kind === "confirmed" ? await confirmFrom("Derived preference", historical)
-      : await memories.proposeMemory(scope, {
+    const derived = kind === "expired temporary" ? await memories.proposeMemory(scope, {
         text: "Derived preference", sourceTurnIds: [historical], expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      });
+      }) : await confirmFrom("Derived preference", historical);
     const context = () => memories.listContext(scope, new Date().toISOString());
     await expect(context()).resolves.toMatchObject({ memories: expect.arrayContaining([
       expect.objectContaining({ id: memory.id }), expect.objectContaining({ id: derived.id }),
@@ -441,14 +444,31 @@ describe("saved tutor material provenance", () => {
     if (kind === "expired temporary") {
       await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${derived.id}`;
     }
+    if (sibling) {
+      await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${sibling.id}`;
+    }
+    let deleteVersion = derived.version;
+    let replacementId: string | undefined;
+    if (kind === "superseded revision") {
+      const replacement = await memories.replaceMemory(scope, {
+        id: derived.id, expectedVersion: derived.version, text: "Corrected preference",
+        sourceTurnIds: [await insertOwnedTurn(sql, scope)], clientKey: randomUUID(),
+      });
+      replacementId = replacement.id;
+      deleteVersion += 1;
+      await expect(memories.get(scope, derived.id)).resolves.toMatchObject({ status: "superseded", version: deleteVersion });
+    }
+    await expect(context()).resolves.toMatchObject({ memories: expect.arrayContaining([expect.objectContaining({ id: memory.id })]) });
 
     await expect(memories.deleteMemory(scope, {
-      id: derived.id, expectedVersion: derived.version, deleteSourceText: false, clientKey: randomUUID(),
+      id: derived.id, expectedVersion: deleteVersion, deleteSourceText: false, clientKey: randomUUID(),
     })).resolves.toMatchObject({ excludedSourceIds: [material] });
     await expect(sql`SELECT source_id, memory_id FROM opening_privacy_exclusions WHERE workspace_id=${scope.workspaceId}`)
       .resolves.toEqual([{ source_id: material, memory_id: derived.id }]);
     await expect(memories.get(scope, memory.id)).resolves.toMatchObject({ status: "active" });
-    await expect(context()).resolves.toEqual({ memories: [], sourceRefs: [] });
+    const remaining = await context();
+    expect(remaining.memories.map(item => item.id)).toEqual(replacementId ? [replacementId] : []);
+    expect(remaining.sourceRefs).toEqual([]);
   });
 
   it("preserves source-free snippets and rejects unavailable historical memory dependencies", async () => {

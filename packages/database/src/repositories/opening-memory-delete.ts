@@ -79,11 +79,9 @@ export function deleteOwnedMemory(
         sourceIds.push(...(parseContextSourceRefs(turn.context_source_refs) ?? []).map((ref) => ref.sourceId));
       }
     }
-    if (row.status === "active" && storedTurnIds.length) {
+    if (storedTurnIds.length) {
       // The history and workspace locks serialize lineage mutations during this read.
-      sourceIds.push(...await readMemoryDeletionSourceIds(tx, scope, {
-        id: String(row.id), course_id: row.course_id as string | null, turn_ids: storedTurnIds,
-      }));
+      sourceIds.push(...await readMemoryDeletionSourceIds(tx, scope, storedTurnIds));
     }
     await tx`
       UPDATE opening_memories
