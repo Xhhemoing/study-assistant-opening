@@ -347,6 +347,164 @@ it("follows source lineage from source-free turns through derived activities, ob
   expect(result.dataset.answerSequences.map(row => row.identity)).toEqual(["attempt:attempt-direct", "attempt:attempt-good"]);
 });
 
+describe("persisted dataset provenance", () => {
+  const memoryId = "abcdef12-3456-4789-abcd-ef1234567890";
+  const memoryRefs = [{ memoryDependencyIds: [memoryId.toUpperCase()] }];
+  const turn = (id: string, links: Record<string, unknown> = {}) => ({
+    ...owner, id, conversation_id: "conversation", source_ids: [], role: "assistant", ...links,
+  });
+  const activity = (id: string) => ({ ...owner, id, source_ids: [] });
+  const project = (
+    lineage: dataset.OpeningDatasetProjectionInput["tables"],
+    privacy: Pick<dataset.PrivacyGuardedOpeningDatasetInput, "deletedTurnIds" | "tombstoneReceipts"> = {},
+  ) => dataset.projectPrivacyGuardedOpeningDataset({
+    scope, privacyEpoch: 3, mode: "solo", role: "learner", ...privacy,
+    tables: { opening_conversations: tables.opening_conversations, ...lineage },
+  }, pseudonym).dataset;
+
+  const boundBlock = { content: { citationBinding: { sourceId: " SHRED " } } };
+  it.each([
+    { origin: "republished note provenance", lineage: {
+      opening_note_provenance: [{ ...owner, document_id: " DOCUMENT ", context_source_refs: [{ sourceId: "shred", sourceVersion: 1 }] }],
+    } },
+    { origin: "library document deletion", lineage: {
+      library_documents: [{ ...owner, id: "document", deleted_at: time }],
+    } },
+    { origin: "live library block citation", lineage: {
+      library_blocks: [{ ...owner, document_id: "document", ...boundBlock }],
+    } },
+    { origin: "saved library block citation", lineage: {
+      library_revisions: [{ ...owner, id: "revision", document_id: "document", blocks: [
+        { content: { citationBinding: { refs: [{ sourceId: "shred", sourceVersion: 1 }] } } },
+      ] }],
+    } },
+    { origin: "legacy revision snapshot citation", lineage: {
+      library_revisions: [{ id: "revision", document_id: "document", blocks_snapshot: [boundBlock] }],
+    } },
+  ] satisfies { origin: string; lineage: dataset.OpeningDatasetProjectionInput["tables"] }[])(
+    "excludes teaching projections via $origin", ({ origin, lineage }) => {
+      const result = project({
+        ...lineage,
+        opening_teaching_units: [
+          { ...owner, id: "unit", document_id: "document" },
+          { ...owner, id: "other-unit", document_id: "other-document" },
+        ],
+        opening_teaching_activity_specs: [
+          { ...owner, activity_id: "through-unit", teaching_unit_id: "unit", document_id: "other-document" },
+          { ...owner, activity_id: "through-spec", teaching_unit_id: "other-unit", document_id: "document" },
+          { ...owner, activity_id: "keep", teaching_unit_id: "other-unit", document_id: "other-document" },
+        ],
+        opening_teaching_activities: ["through-unit", "through-spec", "keep"].map(activity),
+        opening_learning_sessions: ["through-unit", "through-spec"].map(id => ({ ...owner, id, activity_id: id })),
+        opening_turns: [turn("through-unit", { learning_session_id: "through-unit" }),
+          turn("through-spec", { learning_session_id: "through-spec" }), turn("keep")],
+      }, origin === "library document deletion" ? {} : { tombstoneReceipts: [tombstone] });
+      expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
+      expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+    },
+  );
+
+  it("follows a deleted source turn through a documentless memory and a republished note's memory dependencies", () => {
+    const result = project({
+      opening_memories: [{ ...owner, id: memoryId, source_turn_ids: [" SOURCE-TURN "] }],
+      opening_note_provenance: [{ document_id: "document", context_source_refs: memoryRefs }],
+      opening_teaching_activity_specs: [{ ...owner, activity_id: "published", document_id: "document" }],
+      opening_teaching_activities: [activity("published")],
+      opening_turns: [turn("source-turn", { role: "user" }), turn("memory-dependent", { context_source_refs: memoryRefs }), turn("keep")],
+    }, { deletedTurnIds: ["source-turn"] });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+    expect(result.coursePackageQuality).toEqual([]);
+  });
+
+  const memory = { ...owner, id: memoryId, status: "active", source_turn_ids: ["upstream"] };
+  it.each([
+    { origin: "a deleted memory", lineage: { opening_memories: [{ ...memory, status: "deleted" }] } },
+    { origin: "an explicit memory exclusion", lineage: { opening_privacy_exclusions: [{ ...owner, memory_id: memoryId }] } },
+    { origin: "a memory with no source turns", lineage: { opening_memories: [{ ...memory, source_turn_ids: [] }] } },
+    { origin: "a missing memory in a supplied inventory", lineage: { opening_memories: [] } },
+    { origin: "a memory only present in another workspace", lineage: {
+      opening_memories: [{ ...memory, workspace_id: "foreign" }],
+    } },
+    { origin: "a memory backed by a deleted document", lineage: {
+      opening_memories: [{ ...memory, document_id: "document" }],
+      library_documents: [{ ...owner, id: "document", deleted_at: time }],
+    } },
+  ] satisfies { origin: string; lineage: dataset.OpeningDatasetProjectionInput["tables"] }[])(
+    "excludes consumers of $origin without excluding the upstream turn", ({ lineage }) => {
+      const result = project({
+        ...lineage,
+        opening_turns: [turn("upstream", { role: "user" }), turn("memory-dependent", { context_source_refs: memoryRefs })],
+      });
+      expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:upstream"]);
+    },
+  );
+
+  it("keeps valid legacy dependencies when the memory inventory is omitted and rejects malformed metadata", () => {
+    const result = project({
+      opening_privacy_exclusions: [{ ...owner, workspace_id: "foreign", memory_id: memoryId }],
+      opening_turns: [
+        turn("legacy", { context_source_refs: memoryRefs }),
+        turn("malformed", { context_source_refs: [{ memoryDependencyIds: memoryId }] }),
+      ],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:legacy"]);
+  });
+
+  it.each([
+    { origin: "the user snapshot", user: { userTurnId: "user", assistantTurnId: " PAIRED ", tutorMode: "hint", studyIntent: null } },
+    { origin: "a legacy user snapshot", user: { assistant_turn_id: "paired" } },
+    { origin: "the assistant snapshot", assistant: { userTurnId: " USER " } },
+    { origin: "a persisted tutor job", jobs: [{ user_turn_id: "user", assistant_turn_id: "paired" }] },
+  ])("excludes only the paired reply via $origin", ({ user, assistant, jobs = [] }) => {
+    const result = project({
+      opening_turns: [turn("user", { role: "user", help_input_snapshot: user }),
+        turn("paired", { help_input_snapshot: assistant }), turn("unrelated")],
+      opening_tutor_jobs: [...jobs, { workspace_id: "foreign", user_turn_id: "user", assistant_turn_id: "unrelated" }],
+    }, { deletedTurnIds: ["user"] });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:unrelated"]);
+  });
+
+  it("follows problem and library revision links and closes the observation revision chain", () => {
+    const observation = (id: string, lineage: Record<string, unknown>) => ({
+      ...owner, id, source_turn_ids: [], outcome: "correct", ...lineage,
+    });
+    const result = project({
+      opening_teaching_activities: [activity("keep")],
+      opening_learning_sessions: [{ ...owner, id: "session", source_ids: ["shred"] }],
+      opening_source_chunks: [{ id: "chunk", source_id: "shred" }],
+      library_documents: [{ id: "document", deleted_at: time }],
+      library_revisions: [{ ...owner, id: "revision", document_id: "document" }],
+      opening_problem_refs: [
+        { ...owner, problem_id: "chunk-problem", chunk_id: "chunk" },
+        { ...owner, problem_id: "revision-problem", teaching_revision_id: "revision" },
+        { ...owner, problem_id: "session-problem", session_id: "session" },
+      ],
+      opening_learning_item_versions: [
+        { ...owner, id: "problem-item", problem_id: "chunk-problem" },
+        { ...owner, id: "revision-item", teaching_revision_id: "revision" },
+      ],
+      opening_learning_observations: [
+        observation("root", { reference_check: { referenceId: " SHRED " } }),
+        observation("middle", { revises_observation_id: "root" }),
+        observation("head", { root_observation_id: "root" }),
+        observation("points-at-head", { effective_head_id: "head" }),
+        observation("problem", { problem_id: "chunk-problem" }),
+        observation("revision", { teaching_revision_id: "revision" }),
+      ],
+      opening_learning_attempts: [
+        { id: "keep" }, { id: "chunk-problem", problem_id: "chunk-problem" },
+        { id: "revision-problem", problem_id: "revision-problem" }, { id: "revision", teaching_revision_id: "revision" },
+        { id: "session-problem", problem_id: "session-problem" },
+        ...["problem-item", "revision-item"].map(id => ({ id, item_version_id: id })),
+        ...["middle", "head", "points-at-head", "problem", "revision"].map(id => ({ id: `observation-${id}`, observation_id: id })),
+      ].map(attempt => ({ ...owner, activity_id: "keep", source_ids: [], ...attempt })),
+      opening_turns: [turn("downstream", { attempt_id: "observation-points-at-head" }), turn("keep")],
+    }, { tombstoneReceipts: [tombstone] });
+    expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:keep"]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+});
+
 it("admits a verified speech receipt only in a configured rubric section and strips transcript material", () => {
   const receipt = issueSpeechTimingReceipt({
     receiptId: "speaking-receipt", issuedAtMs, totalOriginalDurationMs: 2000,
