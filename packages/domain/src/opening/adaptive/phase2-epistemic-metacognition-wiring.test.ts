@@ -565,6 +565,35 @@ it.each([
 });
 
 it.each([
+  { projection: "untimestamped original", originalTimestamped: false },
+  { projection: "timestamped original", originalTimestamped: true },
+])("pairs duplicate future legacy revisions by slot with an $projection", ({ originalTimestamped }) => {
+  const legacy = head("evidence", 2);
+  const original = originalTimestamped ? { ...legacy, recordedAt: at(2) } : legacy;
+  const revision = { ...legacy, isMultiDraft: true };
+  const input = { scope, cutoff: at(3), observations: [original], features: [feature(original)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...input, observations: [original, revision, { ...revision }],
+    features: [...input.features, feature(revision, { recordedAt: at(4) }), feature(revision, { recordedAt: at(5) })] };
+
+  const before = buildSkillBeliefTrajectory(input);
+  const holdout = compareLearnerShadowV2(input).rows;
+  expect(before.steps).toMatchObject([{ observationId: original.id, omega: 1 }]);
+  expect(before.belief.lastDirectRecallAtMs).toBe(Date.parse(at(2)));
+  expect(holdout.map(row => row.observationId)).toEqual([original.id]);
+  expect(buildSkillBeliefTrajectory(appended)).toEqual(before);
+  expect(compareLearnerShadowV2(appended).rows).toEqual(holdout);
+
+  for (const cutoff of ["2026-10-04T22:00:00.000Z", at(6)]) {
+    const afterRevision = { ...appended, cutoff };
+    const after = buildSkillBeliefTrajectory(afterRevision);
+    expect(after.steps).toMatchObject([{ observationId: original.id, omega: 0 }]);
+    expect(after.belief.lastDirectRecallAtMs).toBeNull();
+    expect(compareLearnerShadowV2(afterRevision).rows).toEqual([]);
+  }
+});
+
+it.each([
   ["independence", { independentAttempt: "no" }],
   ["hint exposure", { assistance: "hinted" }],
   ["solution exposure", { assistance: "revealed" }],

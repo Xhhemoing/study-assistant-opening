@@ -207,6 +207,14 @@ function visibleObservationRevisions(
     const unclaimedSlots = matchingSlots.filter(slot => !claimedSlots.has(slot));
     const slots = unclaimedSlots.length ? unclaimedSlots : matchingSlots;
     const isVisible = (slot: number) => features[slot]!.recorded < cutoff;
+    if (bucket.length === unclaimedSlots.length) {
+      // Match each legacy projection to its recording slot before grouping identical copies.
+      bucket.forEach((row, index) => {
+        if (isVisible(unclaimedSlots[index]!)) visible.push(row);
+      });
+      continue;
+    }
+
     const distinctGroups: Array<typeof bucket> = [];
     for (const row of bucket) {
       const group = distinctGroups.find(group => sameHead(group[0]!.observation, row.observation));
