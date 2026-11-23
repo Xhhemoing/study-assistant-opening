@@ -596,12 +596,12 @@ export function turnMemoryOnlyBackingIds(
         AND (${attributed()} AND m.id::text IN (SELECT lower(d.id) FROM ${memoryDependencyRows(db, refs)} d)
           OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND (${standaloneSessions()}) AND m.course_id IS NULL)
         AND (${attributed()} OR ${memoryBacksSource(db, () => db`m.source_turn_ids`,
-          () => lineageUuid(db, () => db`mem_ref.backing_ref->>'sourceId'`), scope.workspaceId, scope.ownerUserId)})
+          () => lineageUuid(db, () => db`mem_ref->>'sourceId'`), scope.workspaceId, scope.ownerUserId)})
       ORDER BY m.id
-    )) ORDER BY mem_ref.ordinality), '[]'::jsonb)
+    )) ORDER BY memory_refs.ordinality), '[]'::jsonb)
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END)
-      WITH ORDINALITY AS mem_ref(backing_ref, ordinality)
-    WHERE (mem_ref.backing_ref->>'memoryOnly') = 'true'
+      WITH ORDINALITY AS memory_refs(mem_ref, ordinality)
+    WHERE (mem_ref->>'memoryOnly') = 'true'
   )`;
 }
 

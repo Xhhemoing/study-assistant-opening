@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  createCourseMembershipRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
+  createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
   createOpeningMemoryRepository, createOpeningNoteRepository, createOpeningPrivacyRepository,
   createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
 } from "@aistudy/database";
@@ -371,6 +371,67 @@ describe("saved tutor material provenance", () => {
       await expect(readable()).resolves.toBe(false);
       await expect(exported()).resolves.toBe(false);
     }, 30_000);
+
+  it("carries historical ID-only memory sources into snippet reads and backup export", async () => {
+    const { sql, scope } = f;
+    const material = await source(1);
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const memories = createOpeningMemoryRepository(sql);
+    const proposed = await memories.proposeMemory(scope, {
+      text: "Versioned memory backing", sourceTurnIds: [origin], expiresAt: null,
+    });
+    const memory = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    const savedTurnId = await insertOwnedTurn(sql, scope, {
+      role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [memory.id] }],
+    });
+    const notes = createOpeningNoteRepository(sql);
+    const save = () => notes.saveSnippet(scope, { title: "Historical snippet", text: "Saved answer", savedTurnId });
+    const { documentId } = await save();
+    await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+      .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1, memoryOnly: true }] }]);
+    const library = createLibraryRepository(sql);
+    const readNote = () => library.getDocument({ workspaceId: scope.workspaceId, documentId });
+    const exported = async () => (await dumpWorkspaceSnapshot(sql, scope.workspaceId, scope.ownerUserId))
+      .documents.some(document => document.id === documentId);
+    await expect(readNote()).resolves.toMatchObject({ id: documentId, title: "Historical snippet" });
+    await expect(exported()).resolves.toBe(true);
+
+    await expect(createOpeningSourceActionsRepository(sql).apply(scope, material,
+      { action: "delete", expectedVersion: 1, expectedMembershipIds: [] },
+      { stagingKey: id => `opening/staging/${id}`, finalKey: (id, version) => `opening/sources/${id}/v${version}` },
+      new Date())).resolves.toMatchObject({ deleted: true });
+    await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+    await expect(readNote()).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(exported()).resolves.toBe(false);
+  });
+
+  it("preserves source-free snippets and rejects unavailable historical memory dependencies", async () => {
+    const { sql, scope } = f;
+    const origin = await insertOwnedTurn(sql, scope);
+    const memories = createOpeningMemoryRepository(sql);
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const memory = await memories.proposeMemory(scope, {
+      text: "Source-free memory", sourceTurnIds: [origin], expiresAt,
+    });
+    const savedTurnId = await insertOwnedTurn(sql, scope, {
+      role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [memory.id] }],
+    });
+    const notes = createOpeningNoteRepository(sql);
+    const save = () => notes.saveSnippet(scope, { title: "Source-free snippet", text: "Saved answer", savedTurnId });
+    const { documentId } = await save();
+    await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+      .resolves.toEqual([{ context_source_refs: [] }]);
+
+    const course = await createCourseMembershipRepository(sql).createCourse({
+      workspaceId: scope.workspaceId, title: "Other memory course", slug: randomUUID(),
+    });
+    await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${memory.id}`;
+    await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+    await sql`UPDATE opening_memories SET course_id=NULL, expires_at=clock_timestamp()-interval '1 second' WHERE id=${memory.id}`;
+    await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+    await sql`DELETE FROM opening_memories WHERE id=${memory.id}`;
+    await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+  });
 
   it.each(["user", "assistant"] as const)("revalidates a chunk-only %s turn for history and metadata", async role => {
     const { sql, scope } = f;
