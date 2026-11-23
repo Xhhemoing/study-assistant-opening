@@ -131,15 +131,15 @@ function sameHead(left: SnapshotObservation, right: SnapshotObservation): boolea
     && leftErrors.every((error, index) => sameFields(error, rightErrors[index]!));
 }
 
-function groupById<T>(rows: readonly T[], idOf: (row: T) => string) {
-  const byId = new Map<string, T[]>();
+function groupByKey<T, K>(rows: readonly T[], keyOf: (row: T) => K) {
+  const groups = new Map<K, T[]>();
   for (const row of rows) {
-    const id = idOf(row);
-    const existing = byId.get(id);
+    const key = keyOf(row);
+    const existing = groups.get(key);
     if (existing) existing.push(row);
-    else byId.set(id, [row]);
+    else groups.set(key, [row]);
   }
-  return byId;
+  return groups;
 }
 
 const nonIndependentAssistanceReasons = new Set<EvidenceEligibility["reasonCodes"][number]>([
@@ -178,7 +178,7 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
     const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
     return attempted <= recorded && recorded < cutoff ? [{ feature, attempted }] : [];
   });
-  const features = groupById(visibleFeatures, row => row.feature.observationId);
+  const features = groupByKey(visibleFeatures, row => row.feature.observationId);
   const visibleObservations = input.observations.flatMap(observation => {
     const rows = features.get(observation.id);
     if (!rows) return [];
@@ -191,7 +191,7 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
     const recorded = adaptiveShadowTime(observation.recordedAt);
     return attempted <= recorded && recorded < cutoff ? [{ observation, attempted }] : [];
   });
-  const heads = groupById(visibleObservations, row => row.observation.id);
+  const heads = groupByKey(visibleObservations, row => row.observation.id);
   return [...features.values()].flatMap((rows): JoinedHead[] => {
     const { feature, attempted } = rows[0]!;
     const { observationId, requirementKey } = feature;
@@ -243,13 +243,44 @@ function firstEpistemicSubmissions(rows: readonly JoinedHead[]) {
   }
   const first = new Set<JoinedHead>();
   for (const earliest of earliestByProblem.values()) {
-    // A single submission can produce multiple observations for different requirements.
-    const { attemptId } = earliest[0]!.feature;
-    if (earliest.length === 1 || (attemptId !== null && earliest.every(row => row.feature.attemptId === attemptId))) {
-      for (const row of earliest) first.add(row);
+    const initial = earliest[0]!;
+    if (earliest.length === 1) {
+      first.add(initial);
+      continue;
+    }
+    const { attemptId } = initial.feature;
+    if (attemptId === null || earliest.some(row => row.feature.attemptId !== attemptId)) continue;
+    // A shared submission qualifies each requirement only when its observation is unambiguous.
+    for (const [requirementKey, heads] of groupByKey(earliest, row => row.feature.requirementKey)) {
+      if (requirementKey !== null && heads.length === 1) first.add(heads[0]!);
     }
   }
   return first;
+}
+
+function freshFamilyHeads(known: readonly JoinedHead[], eligible: (row: JoinedHead) => boolean) {
+  const seenFamilies = new Set<string>();
+  const fresh = new Set<JoinedHead>();
+  for (const simultaneous of groupByKey(known, row => row.attempted).values()) {
+    const exposures: JoinedHead[][] = [];
+    const submissions: JoinedHead[][] = [];
+    for (const batch of groupByKey(simultaneous, row => row.feature.attemptId ?? row).values()) {
+      (batch.some(eligible) ? submissions : exposures).push(batch);
+    }
+    // At a tie, standalone exposure counts first. Siblings share the history before their submission.
+    for (const batch of [...exposures, ...submissions]) {
+      const newFamilies = new Set<string>();
+      for (const row of batch) {
+        const { familyKey } = row.observation;
+        if (familyKey?.trim() && !seenFamilies.has(familyKey)) {
+          fresh.add(row);
+          newFamilies.add(familyKey);
+        }
+      }
+      for (const familyKey of newFamilies) seenFamilies.add(familyKey);
+    }
+  }
+  return fresh;
 }
 
 function shadowItem(input: SkillBeliefTrajectoryInput, id: string): SkillItemModel {
@@ -277,16 +308,14 @@ function replay(input: SkillBeliefTrajectoryInput, cutoff: number, excludedFamil
     && (!excludedFamilies || Boolean(row.observation.familyKey?.trim()) && !excludedFamilies.has(row.observation.familyKey!));
   const evidenceFeatures: LearnerStateFeature[] = [];
   const steps: { observationId: string; omega: 0 | 1; belief: SkillBeliefV1 }[] = [];
-  const seenFamilies = new Set<string>();
+  const freshHeads = freshFamilyHeads(known, eligible);
   const propagatedAttempts = new Set<string>();
   const directlyObservedAttempts = new Set(known.filter(eligible).filter(row => row.feature.requirementKey === scope.requirementKey
     && row.feature.attemptId).map(row => row.feature.attemptId));
   for (const row of known) {
     const { observation } = row;
-    const familyKey = observation.familyKey?.trim() ? observation.familyKey : null;
-    const isFreshFamily = Boolean(familyKey && !seenFamilies.has(familyKey));
-    if (familyKey) seenFamilies.add(familyKey);
     if (!observation.problemId) continue;
+    const isFreshFamily = freshHeads.has(row);
     const comparable = eligible(row);
     if (row.feature.requirementKey === scope.requirementKey) {
       if (comparable) {

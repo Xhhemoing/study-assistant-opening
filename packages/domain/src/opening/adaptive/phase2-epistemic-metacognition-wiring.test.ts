@@ -240,21 +240,66 @@ it.each([
 });
 
 it.each([
-  { scenario: "share one attempt", attemptIds: ["shared", "shared"], omega: 1 },
-  { scenario: "have distinct attempts", attemptIds: ["one", "two"], omega: 0 },
-  { scenario: "have no attempt IDs", attemptIds: [null, null], omega: 0 },
-] as const)("credits simultaneous requirement heads only when they $scenario", ({ attemptIds, omega }) => {
-  const first = head("first", 1, { requirementKey: "A" });
-  const second = head("second", 1, { requirementKey: "B", problemId: first.problemId, familyKey: first.familyKey });
-  const retry = head("retry", 2, { requirementKey: "B", problemId: first.problemId, familyKey: first.familyKey });
-  const input = { scope: { ...scope, requirementKey: "B" }, cutoff: at(3), observations: [retry, second, first],
-    features: [feature(first, { attemptId: attemptIds[0] }), feature(second, { attemptId: attemptIds[1] }), feature(retry)],
+  { scenario: "share one attempt with A sorting first", ids: ["a", "z"], attemptIds: ["shared", "shared"], omega: 1 },
+  { scenario: "share one attempt with B sorting first", ids: ["z", "a"], attemptIds: ["shared", "shared"], omega: 1 },
+  { scenario: "have distinct attempts", ids: ["a", "z"], attemptIds: ["one", "two"], omega: 0 },
+  { scenario: "have no attempt IDs", ids: ["a", "z"], attemptIds: [null, null], omega: 0 },
+] as const)("credits simultaneous requirement heads only when they $scenario", ({ ids, attemptIds, omega }) => {
+  const shared = { problemId: "shared-problem", familyKey: "shared-family" };
+  const skillA = head(ids[0], 1, { ...shared, requirementKey: "A" });
+  const skillB = head(ids[1], 1, { ...shared, requirementKey: "B" });
+  const retry = head("retry", 2, { ...shared, requirementKey: "B" });
+  const input = { scope, cutoff: at(3), observations: [retry, skillB, skillA],
+    features: [feature(skillA, { attemptId: attemptIds[0] }), feature(skillB, { attemptId: attemptIds[1] }), feature(retry)],
     targetFamilyKeys: [], propagatedFamilyKeys: [] };
 
-  expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([{ observationId: second.id, omega }, { observationId: retry.id, omega: 0 }]);
-  expect(compareLearnerShadowV2(input).rows.map(row => row.observationId)).toEqual(omega === 1 ? [second.id] : []);
-  const firstSkill = { ...input, scope: { ...scope, requirementKey: "A" } };
-  expect(buildSkillBeliefTrajectory(firstSkill).steps).toMatchObject([{ observationId: first.id, omega }]);
+  for (const observation of [skillA, skillB]) {
+    const perSkill = { ...input, scope: { ...scope, requirementKey: observation.requirementKey! } };
+    const result = buildSkillBeliefTrajectory(perSkill);
+    const expectedSteps = [{ observationId: observation.id, omega }];
+    if (observation === skillB) expectedSteps.push({ observationId: retry.id, omega: 0 });
+    expect(result.steps).toMatchObject(expectedSteps);
+    expect(result.belief.lastDirectRecallAtMs, observation.requirementKey!).toBe(omega === 1 ? Date.parse(at(1)) : null);
+    expect(compareLearnerShadowV2(perSkill).rows.map(row => row.observationId)).toEqual(omega === 1 ? [observation.id] : []);
+  }
+});
+
+it("excludes duplicate requirement heads from replay and holdout in a shared submission", () => {
+  const shared = { problemId: "shared-problem", familyKey: "shared-family" };
+  const firstA = head("first-a", 1, { ...shared, requirementKey: "A" });
+  const secondA = head("second-a", 1, { ...shared, requirementKey: "A" });
+  const skillB = head("skill-b", 1, { ...shared, requirementKey: "B" });
+  const observations = [firstA, skillB, secondA];
+  const input = { scope: { ...scope, requirementKey: "A" }, cutoff: at(2), observations,
+    features: observations.map(row => feature(row, { attemptId: "shared" })), targetFamilyKeys: [], propagatedFamilyKeys: [] };
+
+  expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([
+    { observationId: firstA.id, omega: 0 }, { observationId: secondA.id, omega: 0 },
+  ]);
+  expect(compareLearnerShadowV2(input).rows).toEqual([]);
+  const otherSkill = { ...input, scope: { ...scope, requirementKey: "B" } };
+  const result = buildSkillBeliefTrajectory(otherSkill);
+  expect(result.steps).toMatchObject([{ observationId: skillB.id, omega: 1 }]);
+  expect(result.belief.lastDirectRecallAtMs).toBe(Date.parse(at(1)));
+  expect(compareLearnerShadowV2(otherSkill).rows.map(row => row.observationId)).toEqual([skillB.id]);
+});
+
+it.each([
+  { kind: "conflicting", exposureId: "a", answerId: "z" },
+  { kind: "conflicting", exposureId: "z", answerId: "a" },
+  { kind: "hinted", exposureId: "a", answerId: "z" },
+  { kind: "hinted", exposureId: "z", answerId: "a" },
+] as const)("counts a tied $kind exposure ($exposureId) before a separate submission ($answerId)", ({
+  kind, exposureId, answerId,
+}) => {
+  const exposure = head(exposureId, 1, { requirementKey: "A", familyKey: "shared-family",
+    ...(kind === "hinted" ? { assistance: "hinted", independentAttempt: "no" } : {}) });
+  const answer = head(answerId, 1, { familyKey: "shared-family" });
+  const observations = kind === "conflicting" ? [answer, exposure, { ...exposure, problemId: "conflicting-problem" }] : [answer, exposure];
+  const result = buildSkillBeliefTrajectory({ scope, cutoff: at(2), observations, features: [feature(answer), feature(exposure)] });
+
+  expect(result.steps).toMatchObject([{ observationId: answer.id, omega: 1 }]);
+  expect(result.belief.lastDirectRecallAtMs).toBeNull();
 });
 
 const priorAnswerHelp = { complete: true, exposures: [{ attemptId: "earlier-attempt", problemId: "shared-problem",
