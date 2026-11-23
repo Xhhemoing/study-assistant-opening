@@ -1713,6 +1713,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["## Answer", "", "sealed", "Explanation"],
     [":::hint", "\n:::", "hint_gated", "Explanation"],
     [":::exercise", "\n:::", "sealed", "证明"],
+    [":::exercise", "\n:::", "sealed", "Proof / Hint"],
   ] as const)("inherits protection inside %s for ordinary details", (opener, closer, visibility, summary) => {
     const text = `${opener}\n<details><summary>${summary}</summary>private-detail</details>${closer}`;
     for (const chunks of chunkDocumentAndCues(text)) {
@@ -1735,11 +1736,18 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
+    "Sealed", "Sealed notes", "Hint / Sealed", "<span>Sealed</span><span>Hint</span>",
+    "solution", "answer", "answer-key", "answer_key", "proof-key", "proof_key",
+    "rubric", "spoiler", "hidden-solution", "hidden_solution",
     "剧透", "防剧透", "剧透警告", "点击查看答案", "展开答案", "展开解析",
     "查看解答", "显示正确答案", "点击查看参考答案", "点击 查看 题解", "展开<span>解析</span>",
+    "查看完整解析", "展开详细解答", "展开详细解析", "点击查看本题答案", "点击查看完整答案",
+    "显示标准答案", "查看本题解答", "点此查看参考解析", "揭晓最终结果", "查看本题的完整证明",
     "Spoilers", "Spoiler alert", "Reveal answer", "Show solution", "Tap to reveal the key",
+    "Show complete solution", "Click to reveal full solution", "Show complete answer",
+    "View detailed solution", "Reveal full key", "Tap here to view the detailed proof",
     "<span>Show</span><span>keys</span>", "Hint / Spoilers", "提示 / 剧透",
-  ])("keeps spoiler and reveal summaries sealed in documents and transcripts (%s)", summary => {
+  ])("keeps protected summaries sealed in documents and transcripts (%s)", summary => {
     const disclosure = `<details><summary>${summary}</summary>42</details>`;
     const block = `${disclosure}\n\nPublic wrap-up`;
     const inline = `Lecture: ${disclosure} Public wrap-up`;
@@ -1757,8 +1765,11 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expectSealedEvidence(timedChunks, timed, ["42"], "Public wrap-up");
   });
 
-  it("recognizes hint labels that require spacing between HTML elements", () => {
-    const text = "<details><summary>Try<span>Hint</span>First</summary>private-hint</details>";
+  it.each([
+    "hint", "hint-gated", "hint_gated", "scaffold",
+    "Courseware / hint_gated", "Try<span>Hint</span>First",
+  ])("keeps hint summaries gated in documents and transcripts (%s)", summary => {
+    const text = `<details><summary>${summary}</summary>private-hint</details>`;
     for (const chunks of chunkDocumentAndCues(text)) {
       expectSealedEvidence(chunks, text, [], undefined, "private-hint");
     }

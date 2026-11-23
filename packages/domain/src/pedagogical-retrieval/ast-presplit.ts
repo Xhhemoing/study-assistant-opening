@@ -82,6 +82,10 @@ const PEDAGOGICAL_LABELS: Readonly<
   hidden_solution: { kind: "solution", visibility: "sealed" },
 };
 
+const PROTECTED_DETAILS_LABELS = Object.entries(PEDAGOGICAL_LABELS)
+  .filter(([, classification]) => classification.visibility !== "public")
+  .map(([name, classification]) => ({ words: ` ${name.replace(/[-_]/g, " ")} `, classification }));
+
 const STANDALONE_PEDAGOGICAL_KINDS = new Set<PedagogicalBlockKind>([
   "definition",
   "theorem",
@@ -120,8 +124,14 @@ const HINT_HEADING_RE = new RegExp(
   String.raw`(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|(?:^|[\s\p{P}\p{S}\d]|[题步问章节课讲卷册]|(?:第\s*[\d一二三四五六七八九十百千万零两]+\s*${ZH_HEADING_UNIT}|解题|分步|思路|方法|关键|答题|审题|证明|推导|计算|编程|实验|作业|练习|习题|测试|自测|课后|随堂|课堂|单元|模块|部分|专题|阶段|查看|展开|显示|点击查看|点拨|附))提示(?:$|[\s\p{P}\p{S}\d一二三四五六七八九十百千万零两甲乙丙丁]|(?:部分|单元|模块|专题|章节|汇总|一览|汇编|要点|说明|(?:与|及|和)(?:点拨|思路|引导|说明)))|分步提示|解题提示|思路提示|查看提示|展开提示|显示提示`,
   "iu",
 );
-const SEALED_DETAILS_SUMMARY_RE =
-  /\bspoilers?\b|^(?:(?:click|tap)\s+to\s+)?(?:reveal|show)\s+(?:the\s+)?keys?\b|剧\s*透|(?:点击|展开|显示|查看)\s*(?:(?:(?:正确|参考)\s*)?答案|解析|解答|题解)/iu;
+const SEALED_DETAILS_SUMMARY_RE = new RegExp(
+  [
+    String.raw`\bspoilers?\b|剧\s*透`,
+    String.raw`^(?:(?:click|tap)(?:\s+here)?\s+to\s+)?(?:reveal|show|view|display|expand|uncover)\s+(?:(?:the|full|complete|detailed|correct|reference|official|final|worked|step-by-step)\s+)*(?:answers?|solutions?|keys?|proofs?|explanations?|results?)\b`,
+    String.raw`(?:点击|点此|展开|显示|查看|揭晓)\s*(?:(?:完整|详细|本题|本小题|该题|此题|这道题|本例|正确|参考|标准|官方|最终|全部|简明|的)\s*)*(?:答案|解析|解答|题解|证明|结果)`,
+  ].join("|"),
+  "iu",
+);
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
 const HTML_HEADING_START_RE = /<h[1-6](?=[\t\n\f\r />])/i;
 const HTML_ATTRIBUTE_TOKEN_RE = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r >]+)))?/g;
@@ -3099,7 +3109,7 @@ function classifyDetailsElement(
     const summaryContext = htmlContext.labelContextAt(summary.openEnd, definedLinkLabels);
     const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, { ...summaryContext, style: summaryStyle },
       htmlContext.pipeCellAt(openStart, definedLinkLabels), rawHtml, decodeHtmlCharacterReferences);
-    const labels = [summaryText, spaced];
+    const labels = summaryText === spaced ? [summaryText] : [summaryText, spaced];
     const summaryEndOffset = summary.closeEnd;
     if (!summaryText || hasDetails || labels.some(label => SEALED_HEADING_RE.test(label) || SEALED_DETAILS_SUMMARY_RE.test(label))) {
       return {
@@ -3109,24 +3119,34 @@ function classifyDetailsElement(
         summaryEndOffset,
       };
     }
-    if (labels.some(label => HINT_HEADING_RE.test(label))) {
-      return {
-        kind: "hint",
-        visibility: maxVisibility("hint_gated", activeVisibility),
-        label: summaryText,
-        summaryEndOffset,
-      };
-    }
+    let classified: NonNullable<ReturnType<typeof classifyLabel>> = { kind: "prose", visibility: "public" };
     for (const label of labels) {
       const englishLabel = /^(?:worked[-_ ]example|[a-z]+)(?![a-z0-9])/i.exec(label)?.[0]?.replace(" ", "-");
       const name = englishLabel ??
         Object.entries(DETAILS_COURSEWARE_LABEL_ALIASES).find(([prefix]) => label.startsWith(prefix))?.[1];
-      const classified = classifyLabel(name, activeVisibility, sealProofs);
-      if (classified && classified.kind !== "solution" && classified.kind !== "hint") {
-        return { ...classified, label: summaryText, summaryEndOffset };
+      const named = classifyLabel(label, "public", sealProofs) ?? classifyLabel(name, "public", sealProofs);
+      if (named && (classified.kind === "prose" || VISIBILITY_RANK[named.visibility] > VISIBILITY_RANK[classified.visibility])) {
+        classified = named;
+      }
+
+      // Recognize protected names anywhere in a summary, including compound
+      // names separated by markup, punctuation, or spaces.
+      const words = ` ${label.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+      for (const { words: protectedWords, classification } of PROTECTED_DETAILS_LABELS) {
+        if (VISIBILITY_RANK[classification.visibility] > VISIBILITY_RANK[classified.visibility] && words.includes(protectedWords)) {
+          classified = classification;
+        }
+      }
+      if (classified.visibility === "public" && HINT_HEADING_RE.test(label)) {
+        classified = { kind: "hint", visibility: "hint_gated" };
       }
     }
-    return { kind: "prose", visibility: activeVisibility, label: summaryText, summaryEndOffset };
+    return {
+      kind: classified.kind,
+      visibility: maxVisibility(classified.visibility, activeVisibility),
+      label: summaryText,
+      summaryEndOffset,
+    };
   }
   // A disclosure without a leading direct summary has no trustworthy label.
   return {
