@@ -303,6 +303,38 @@ it.each([
 });
 
 it.each([
+  { revisionKey: "B", changesFamily: true, siblingWeight: 0 },
+  { revisionKey: "B", changesFamily: false, siblingWeight: 0 },
+  { revisionKey: "C", changesFamily: true, siblingWeight: 1 },
+])("checks the sibling's claim when A moves problems and claims $revisionKey (changes family: $changesFamily)", ({
+  revisionKey, changesFamily, siblingWeight,
+}) => {
+  const prior = head("prior-b", 1, { requirementKey: "B" });
+  const shared = { problemId: "shared-problem", familyKey: "shared-family", recordedAt: at(2) };
+  const skillA = head("skill-a", 2, { ...shared, requirementKey: "A" });
+  const skillB = head("skill-b", 2, { ...shared, requirementKey: "B" });
+  const revision = { ...skillA, requirementKey: revisionKey, problemId: "other-problem", recordedAt: at(4),
+    familyKey: changesFamily ? "other-family" : skillA.familyKey };
+  const input = { scope: { ...scope, requirementKey: "B" }, cutoff: at(4),
+    observations: [prior, skillA, skillB, revision],
+    features: [feature(prior), feature(skillA, { attemptId: "shared" }), feature(skillB, { attemptId: "shared" }),
+      feature(revision, { attemptId: "shared", recordedAt: at(4) })],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+
+  const before = buildSkillBeliefTrajectory(input);
+  expect(before.steps.at(-1)).toMatchObject({ observationId: skillB.id, omega: 1 });
+  expect(before.belief.lastDirectRecallAtMs).toBe(Date.parse(at(2)));
+  expect(compareLearnerShadowV2(input).rows.map(row => row.observationId)).toEqual([prior.id, skillB.id]);
+
+  const afterRevision = { ...input, cutoff: at(5) };
+  const after = buildSkillBeliefTrajectory(afterRevision);
+  expect(after.steps.map(step => [step.observationId, step.omega])).toEqual([[prior.id, 1], [skillB.id, siblingWeight]]);
+  expect(after.belief.lastDirectRecallAtMs).toBe(Date.parse(at(siblingWeight ? 2 : 1)));
+  expect(compareLearnerShadowV2(afterRevision).rows.map(row => row.observationId))
+    .toEqual(siblingWeight ? [prior.id, skillB.id] : [prior.id]);
+});
+
+it.each([
   { scenario: "feature moves earlier", source: "feature", day: 1 },
   { scenario: "feature moves later", source: "feature", day: 3 },
   { scenario: "observation moves earlier", source: "observation", day: 1 },
@@ -499,6 +531,37 @@ it.each([
   expect(after.steps).toMatchObject([{ observationId: original.id, omega: 0 }]);
   expect(after.belief.lastDirectRecallAtMs).toBeNull();
   expect(compareLearnerShadowV2(afterRevision).rows).toEqual([]);
+});
+
+it.each([
+  { projection: "duplicate copies of the first revision", ambiguous: false },
+  { projection: "three distinct revisions for two slots", ambiguous: true },
+])("keeps future legacy revisions out of a claimed past slot with $projection", ({ ambiguous }) => {
+  const legacy = head("evidence", 2);
+  const original = { ...legacy, recordedAt: at(2) };
+  const firstRevision = { ...legacy, isMultiDraft: true };
+  const secondRevision = { ...legacy, problemId: "other-problem", familyKey: "other-family" };
+  const extra = ambiguous ? { ...legacy, isFirstSubmission: false } : { ...firstRevision };
+  const input = { scope, cutoff: at(3), observations: [original], features: [feature(original)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...input, observations: [original, firstRevision, extra, secondRevision],
+    features: [...input.features, feature(firstRevision, { recordedAt: at(4) }), feature(secondRevision, { recordedAt: at(5) })] };
+
+  const before = buildSkillBeliefTrajectory(input);
+  expect(before.steps).toMatchObject([{ observationId: original.id, omega: 1 }]);
+  expect(before.belief.lastDirectRecallAtMs).toBe(Date.parse(at(2)));
+  expect(buildSkillBeliefTrajectory(appended)).toEqual(before);
+  expect(compareLearnerShadowV2(appended).rows.map(row => row.observationId)).toEqual([original.id]);
+
+  const betweenRevisions = { ...appended, cutoff: "2026-10-04T22:00:00.000Z" };
+  const between = buildSkillBeliefTrajectory(betweenRevisions);
+  expect(between.steps).toMatchObject(ambiguous ? [] : [{ observationId: original.id, omega: 0 }]);
+  expect(between.belief.lastDirectRecallAtMs).toBeNull();
+  expect(compareLearnerShadowV2(betweenRevisions).rows).toEqual([]);
+
+  const afterBothRevisions = { ...appended, cutoff: at(6) };
+  expect(buildSkillBeliefTrajectory(afterBothRevisions).steps).toEqual([]);
+  expect(compareLearnerShadowV2(afterBothRevisions).rows).toEqual([]);
 });
 
 it.each([
