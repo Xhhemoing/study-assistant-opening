@@ -136,16 +136,21 @@ function uniqueById<T extends object>(rows: readonly T[], idOf: (row: T) => stri
   return byId;
 }
 
-const preSubmissionHelpReasons = new Set<EvidenceEligibility["reasonCodes"][number]>([
-  "declared_help", "help_before_submission", "prior_evaluation_feedback", "exam_lesson_assistance", "exam_partial_example_exposure",
+const nonIndependentAssistanceReasons = new Set<EvidenceEligibility["reasonCodes"][number]>([
+  "declared_help", "prior_evaluation_feedback", "exam_lesson_assistance", "exam_partial_example_exposure",
+  "assistance_unknown", "exam_exposure_history_unknown", "exam_legacy_untracked_source",
 ]);
 
 function matchesAssistance(assistance: SnapshotObservation["assistance"], eligibility: EvidenceEligibility): boolean {
   const { independentAttempt, reasonCodes } = eligibility;
+  // Eligibility exits before evaluating assistance when the observation identity is incomplete.
+  if (reasonCodes.includes("observation_identity_incomplete")) return true;
   if ((assistance === "hinted" || assistance === "revealed") && independentAttempt !== "no") return false;
   if (assistance === "unknown" && independentAttempt === "yes") return false;
-  if (assistance === "independent" && reasonCodes.some(reason => preSubmissionHelpReasons.has(reason))) return false;
-  return assistance === "revealed" || independentAttempt !== "no" || !reasonCodes.includes("prior_answer_exposure");
+  if (reasonCodes.includes("self_reported_copied_answer")) return assistance === "revealed";
+  if (assistance !== "independent") return true;
+  return !reasonCodes.some(reason => nonIndependentAssistanceReasons.has(reason))
+    && (!reasonCodes.includes("help_before_submission") || reasonCodes.includes("attempt_timing_unknown"));
 }
 
 function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): JoinedHead[] {

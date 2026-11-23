@@ -5,7 +5,7 @@ import {
   nextLearningStepWithExperimentalBkt, planAdaptiveBellmanShadow, predictLearnerShadowV2,
   type LearnerStateFeature, type NextLearningStepInput, type SnapshotObservation,
 } from "../../index";
-import type { CourseEvidence } from "../learning-summary";
+import type { CourseEvidence, ObservationEligibilityInput } from "../learning-summary";
 import { learningObservation, qualifiedInput } from "../learning-summary-fixtures";
 import { toSnapshotEvidence } from "./snapshot-evidence";
 
@@ -101,21 +101,27 @@ function feature(row: SnapshotObservation, fields: Partial<LearnerStateFeature> 
 }
 const scope = { workspaceId: "workspace", learnerId: "learner", courseId: "math", requirementKey: "integrate", confirmedSkillVersion: 1 };
 
-function projectProducedAttempts(rows: readonly SnapshotObservation[], cutoff: string) {
+type ProducedAttempt = SnapshotObservation & {
+  startedAt?: number | null;
+  context?: Partial<ObservationEligibilityInput["context"]>;
+};
+
+function projectProducedAttempts(rows: readonly ProducedAttempt[], cutoff: string) {
   const evidence: CourseEvidence = { observations: [], evidenceContexts: {} };
   const { context } = qualifiedInput;
   for (const row of rows) {
     const { id, skillLabel, attemptedAt, assistance } = row;
-    const attemptId = `attempt-${id}`, problemId = row.problemId!, itemVersionId = row.itemVersionId!;
+    const attemptId = `attempt-${id}`, problemId = row.problemId!, itemVersionId = row.itemVersionId ?? null;
     const submittedAt = Date.parse(attemptedAt);
+    const { startedAt = submittedAt - 60_000 } = row;
     evidence.observations.push({ ...learningObservation, id, courseId: scope.courseId, skillLabel, attemptId, problemId,
       itemVersionId, assistance, occurredAt: attemptedAt, recordedAt: attemptedAt });
     evidence.evidenceContexts[id] = {
       observation: { ...qualifiedInput.observation, observationId: id, courseId: scope.courseId, requirementKey: scope.requirementKey,
-        attemptId, problemId, itemVersionId, assistance, submittedAt, startedAt: submittedAt - 60_000 },
+        attemptId, problemId, itemVersionId, assistance, submittedAt, startedAt },
       context: { helpHistory: { complete: true, exposures: [] }, referenceCheckAuthority: context.referenceCheckAuthority,
         referenceCheck: { ...context.referenceCheck!, attemptId, problemId, itemVersionId },
-        version: { applicability: "exact", currentItemVersionId: itemVersionId } },
+        version: { applicability: "exact", currentItemVersionId: itemVersionId }, ...row.context },
     };
   }
   const familyKeys = new Map(rows.map(row => [row.id, row.familyKey]));
@@ -145,6 +151,33 @@ it.each([
   expect(input.features[0]).toMatchObject({ views: [], eligibility: { reasonCodes: expect.arrayContaining(["declared_help"]) } });
   const result = buildSkillBeliefTrajectory(input);
   expect(result.steps.map(step => [step.observationId, step.omega])).toEqual([["hint", 0], ["independent", expectedWeight]]);
+  expect(result.belief.lastDirectRecallAtMs).toBeNull();
+});
+
+const priorAnswerHelp = { complete: true, exposures: [{ attemptId: "earlier-attempt", problemId: "shared-problem",
+  level: "revealed", delivered: true, deliveredAt: Date.parse(at(1)) - 120_000 }] } as const;
+
+it.each([
+  { scenario: "a prior answer exposure with a seen exam family", attempt: { context: {
+    helpHistory: priorAnswerHelp, examAttempt: { firstFamilyExposure: false, lessonAssistance: false, partialExample: false, answerUnchanged: true },
+  } }, independence: "no", reasons: ["prior_answer_exposure", "exam_family_already_seen"] },
+  { scenario: "a prior answer exposure with a current hint", attempt: { assistance: "hinted", context: { helpHistory: priorAnswerHelp } },
+    independence: "no", reasons: ["prior_answer_exposure", "declared_help"] },
+  { scenario: "server-ordered help with missing start time", attempt: { startedAt: null, context: {
+    helpHistory: { complete: true, exposures: [{ attemptId: "attempt-first", problemId: "shared-problem",
+      level: "hinted", delivered: true, serverOrder: "before_answer" }] },
+  } }, independence: "no", reasons: ["help_before_submission", "attempt_timing_unknown"] },
+  { scenario: "a hint with an incomplete observation identity", attempt: { itemVersionId: null, assistance: "hinted" },
+    independence: "unknown", reasons: ["observation_identity_incomplete"] },
+] as const)("retains first-submission history for $scenario", ({ attempt, independence, reasons }) => {
+  const first = { ...head("first", 1, { problemId: "shared-problem", familyKey: "shared-family" }), ...attempt };
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const input = projectProducedAttempts([first, retry], at(3));
+
+  expect(input.observations[0]).toMatchObject({ assistance: first.assistance, itemVersionId: first.itemVersionId, independentAttempt: independence });
+  expect(input.features[0]?.eligibility.reasonCodes).toEqual(expect.arrayContaining(reasons));
+  const result = buildSkillBeliefTrajectory(input);
+  expect(result.steps.map(step => [step.observationId, step.omega])).toEqual([["first", 0], ["retry", 0]]);
   expect(result.belief.lastDirectRecallAtMs).toBeNull();
 });
 
@@ -249,7 +282,7 @@ it.each([
   ["prior_evaluation_feedback", "hinted", "independent"],
   ["exam_lesson_assistance", "hinted", "independent"],
   ["exam_partial_example_exposure", "hinted", "independent"],
-  ["prior_answer_exposure", "revealed", "hinted"],
+  ["self_reported_copied_answer", "revealed", "hinted"],
 ] as const)("uses %s to keep an incompatible untimestamped head from erasing exposure history", (reason, assistance, incompatible) => {
   const exposure = head("exposure", 1, { assistance, independentAttempt: "no" });
   const otherHead = { ...exposure, assistance: incompatible };
