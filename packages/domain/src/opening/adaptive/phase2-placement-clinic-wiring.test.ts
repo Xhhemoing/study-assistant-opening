@@ -283,21 +283,26 @@ describe("adaptive clinic suggestions", () => {
 
   it.each(["revoked", "re-versioned"])("drops a four-attempt clinic when one source is %s at the same epoch", change => {
     const clinic = clinicFixture(true);
+    const clinicOnlySnapshot = { ...snapshot, courses: [{ ...snapshot.courses[0]!, skills: [] }] };
     const live = clinicValidation();
     const plan = { ...options, remedyClinics: [clinic] };
     expect(clinic.clinic.coverage.rootAttemptCount).toBe(4);
-    expect(proposeAdaptiveTasks(snapshot, { ...plan, remedyClinicValidation: live }).suggestions[0]?.minutes).toBe(14);
+    expect(proposeAdaptiveTasks(clinicOnlySnapshot, { ...plan, remedyClinicValidation: live }).suggestions[0]?.minutes).toBe(14);
 
     const activeSources = new Map(live.activeSources);
     if (change === "revoked") activeSources.delete("chapter-c");
     else activeSources.set("chapter-c", 2);
-    expect(revalidateRemedyClinic(clinic.clinic, activeSources, live.currentPrivacyEpoch)).toMatchObject({
+    const partiallyRevoked = revalidateRemedyClinic(clinic.clinic, activeSources, live.currentPrivacyEpoch);
+    expect(partiallyRevoked).toMatchObject({
       status: "active",
       coverage: { rootAttemptCount: 3, chapterCount: 2, localDateCount: 2 },
       revocationSummary: { reason: "partial_source_revoked_still_active", strippedCaseCount: 1 },
     });
-    const remedyClinicValidation = { ...live, activeSources };
-    expect(proposeAdaptiveTasks(snapshot, { ...plan, remedyClinicValidation })).toEqual(proposeAdaptiveTasks(snapshot, options));
+    const validation = { ...plan, remedyClinicValidation: { ...live, activeSources } };
+    expect(proposeAdaptiveTasks(clinicOnlySnapshot, validation).suggestions).toEqual([]);
+    expect(proposeAdaptiveTasks(clinicOnlySnapshot, {
+      ...validation, remedyClinics: [{ ...clinic, clinic: partiallyRevoked }],
+    }).suggestions).toEqual([]);
   });
 
   it("respects proposal controls and skips clinics that would be shortened", () => {

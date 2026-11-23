@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { uuidSchema } from "@aistudy/contracts";
 import type { CourseGoal, TaskItem } from "@aistudy/contracts";
-import { generateAdaptiveRemedyClinic, type ClinicCandidateProbe } from "@aistudy/domain";
+import { generateAdaptiveRemedyClinic, revalidateRemedyClinic, type ClinicCandidateProbe } from "@aistudy/domain";
 import { buildAdaptiveDraft, freeMinutes, suggestionTaskId, type BuildAdaptiveDraftInput } from "./adaptive-draft";
 
 describe("adaptive draft helpers", () => {
@@ -104,7 +104,8 @@ describe("remedy clinic daily draft", () => {
 
   it.each(["revoked", "re-versioned"])("removes the four-attempt clinic and block when one source is %s at the same epoch", change => {
     const input = clinicDraftInput(true);
-    expect(input.remedyClinics[0]?.clinic.coverage.rootAttemptCount).toBe(4);
+    const candidate = input.remedyClinics[0]!;
+    expect(candidate.clinic.coverage.rootAttemptCount).toBe(4);
     const before = buildAdaptiveDraft(input);
     expect(before.adaptive.suggestedTasks).toMatchObject([{ minutes: 14 }]);
     expect(before.blocks).toHaveLength(1);
@@ -116,6 +117,16 @@ describe("remedy clinic daily draft", () => {
     const draft = buildAdaptiveDraft({ ...input, remedyClinicValidation });
     expect(draft.adaptive.suggestedTasks).toEqual([]);
     expect(draft.blocks).toEqual([]);
+
+    const partiallyRevoked = revalidateRemedyClinic(candidate.clinic, activeSources, remedyClinicValidation.currentPrivacyEpoch);
+    expect(partiallyRevoked).toMatchObject({
+      status: "active", revocationSummary: { reason: "partial_source_revoked_still_active", strippedCaseCount: 1 },
+    });
+    const rebuilt = buildAdaptiveDraft({
+      ...input, remedyClinicValidation, remedyClinics: [{ ...candidate, clinic: partiallyRevoked }],
+    });
+    expect(rebuilt.adaptive.suggestedTasks).toEqual([]);
+    expect(rebuilt.blocks).toEqual([]);
   });
 
   it("leaves a tight exam slot free when the suggestion budget cannot fit all 14 minutes", () => {
