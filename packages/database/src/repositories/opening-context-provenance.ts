@@ -402,6 +402,32 @@ export function turnSessionMaterialIds(db: Db, turn: FragmentFactory, owner: Fra
   ) END`;
 }
 
+/** Material evidence shared by turn admission, memory projection, and backing checks. */
+export function turnMaterialRows(db: Db, owner: FragmentFactory, turn: FragmentFactory = () => db`t`): Fragment {
+  return db`
+    SELECT sid.id::text AS source_id, NULL::text AS version, false AS version_required, false AS memory_only
+    FROM unnest(${turn()}.source_ids || ${turnSessionMaterialIds(db, turn, owner)}) sid(id)
+    UNION ALL
+    SELECT citation->>'sourceId', CASE WHEN jsonb_typeof(citation->'sourceVersion') = 'number' THEN citation->>'sourceVersion' END, true, false
+    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.citations) = 'array' THEN ${turn()}.citations ELSE '[]'::jsonb END) citation
+    UNION ALL
+    SELECT ref->>'sourceId', CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number' THEN ref->>'sourceVersion' END,
+      true, COALESCE(ref->'memoryOnly' = 'true'::jsonb, false)
+    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.context_source_refs) = 'array'
+      THEN ${turn()}.context_source_refs ELSE '[]'::jsonb END) ref
+    WHERE NOT (ref = jsonb_build_object('memoryDependencyIds', ref->'memoryDependencyIds')
+      AND jsonb_typeof(ref->'memoryDependencyIds') = 'array'
+      AND ref->'memoryDependencyIds' <> '[]'::jsonb)
+    UNION ALL
+    SELECT pin.source_id, CASE WHEN pin.source_version IS NULL THEN NULL
+      WHEN jsonb_typeof(pin.source_version) = 'number' THEN pin.source_version #>> '{}' ELSE '' END, pin.version_required, false
+    FROM (${turnPinnedSourceRefs(db, () => db`${turn()}.source_versions`, () => db`${turn()}.context_anchor`)}) pin
+    UNION ALL
+    SELECT k.source_id::text, k.source_version::text, true, false
+    FROM (SELECT ${turn()}.chunk_id AS id WHERE ${turn()}.chunk_id IS NOT NULL) saved
+    LEFT JOIN opening_source_chunks k ON k.id = saved.id`;
+}
+
 /** A missing or foreign session cannot establish that a saved turn was standalone. */
 export function turnHasStandaloneSession(db: Db, turn: FragmentFactory, owner: FragmentFactory): Fragment {
   return db`(${turn()}.learning_session_id IS NULL OR EXISTS (
@@ -520,8 +546,14 @@ export function turnTransitiveDependenciesActive(
 /** The source must be present in an owned source turn of the exact backing memory. */
 export function memoryBacksSource(
   db: Db, sourceTurnIds: FragmentFactory, sourceId: FragmentFactory, workspaceId: string, ownerUserId: string | FragmentFactory,
-  allowInheritedRefs: FragmentFactory,
+  allowInheritedRefs: (turn: FragmentFactory) => Fragment,
 ): Fragment {
+  const turn: FragmentFactory = () => db`mt`;
+  const hasMaterial = (origin: FragmentFactory) => db`EXISTS (
+    SELECT 1 FROM (${turnMaterialRows(db, () => db`mc.owner_user_id`, origin)}) material
+    WHERE lower(material.source_id) = ${sourceId()}::text
+      AND (NOT material.memory_only OR ${allowInheritedRefs(origin)})
+  )`;
   return db`EXISTS (
     SELECT 1 FROM jsonb_array_elements_text(
       CASE WHEN jsonb_typeof(${sourceTurnIds()}) = 'array' THEN ${sourceTurnIds()} ELSE '[]'::jsonb END
@@ -531,17 +563,12 @@ export function memoryBacksSource(
       AND mt.workspace_id = ${workspaceId} AND mt.status = 'complete'
     JOIN opening_conversations mc ON mc.id = mt.conversation_id
       AND mc.workspace_id = ${workspaceId} AND mc.owner_user_id = ${typeof ownerUserId === "string" ? ownerUserId : ownerUserId()}
-    CROSS JOIN LATERAL (SELECT CASE WHEN mt.role = 'assistant' THEN mt.context_source_refs ELSE mt.citations END AS refs) origin
-    WHERE ${sourceId()} = ANY(mt.source_ids) OR EXISTS (
-      SELECT 1 FROM jsonb_array_elements(
-        CASE WHEN jsonb_typeof(origin.refs) = 'array' THEN origin.refs ELSE '[]'::jsonb END
-      ) AS turn_ref
-      WHERE lower(turn_ref->>'sourceId') = ${sourceId()}::text
-        AND ((turn_ref->>'memoryOnly') IS DISTINCT FROM 'true' OR ${allowInheritedRefs()})
-    ) OR EXISTS (
-      SELECT 1 FROM (${turnPinnedSourceRefs(db, () => db`mt.source_versions`, () => db`mt.context_anchor`)}) pin
-      WHERE lower(pin.source_id) = ${sourceId()}::text
-    )
+    WHERE ${hasMaterial(turn)} OR (mt.role='assistant' AND EXISTS (
+      SELECT 1 FROM opening_turns mu
+      WHERE mu.id=(${pairedUserTurnId(db, turn)}) AND mu.workspace_id=mt.workspace_id
+        AND mu.conversation_id=mt.conversation_id AND mu.role='user' AND mu.status='complete'
+        AND ${hasMaterial(() => db`mu`)}
+    ))
   )`;
 }
 
@@ -575,6 +602,7 @@ export function turnMemoryOnlyBackingIds(
 
 export type MemoryDependencyStatus = {
   dep_id: string; course_id: string | null; expires_at: Date | null; usable: boolean;
+  sourceIds?: string[];
 };
 
 /** Resolve exact consumed IDs and choose an active authority for each unattributed reference. */

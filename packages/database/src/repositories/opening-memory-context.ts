@@ -123,12 +123,15 @@ async function readMemoryContextInTx(
   }] : []);
   // Suggestions validate the proposed origin under its own material policy.
   // Previously saved global context remains usable across non-exam classifications.
-  const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin" };
+  const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin",
+    includeSourceRefs: true };
   const origins = await lockAndReadMemoryOrigins(db, scope, originRows, materialRules, eligibleCourseId);
   return rows.flatMap(row => {
     const origin = origins.get(String(row.id));
-    const sourceRefs = parseContextSourceRefs(row.material_source_refs);
-    if (origin === null || sourceRefs === null) return [];
+    const savedRefs = parseContextSourceRefs(row.material_source_refs);
+    if (origin === null || savedRefs === null) return [];
+    const savedSourceIds = new Set(savedRefs.map(ref => ref.sourceId));
+    const sourceRefs = mergeContextSourceRefs(savedRefs, (origin?.sourceRefs ?? []).filter(ref => !savedSourceIds.has(ref.sourceId)));
     const expiry = Math.min(row.ancestor_temporary_expires_at == null
       ? Infinity : new Date(row.ancestor_temporary_expires_at as string | Date).getTime(), origin?.expiresAt ?? Infinity);
     if (Number.isNaN(expiry)) return [];

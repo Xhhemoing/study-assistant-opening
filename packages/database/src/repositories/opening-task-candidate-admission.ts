@@ -5,9 +5,9 @@ import { OpeningPlanError } from "./opening-plan-error";
 import {
   assistantDirectSourcesVersioned, contextSourceRefsIncluded, historicalUserTurnId, lineageUuid, pairedUserTurnId, parseContextMemoryDependencyIds,
   readTurnMemoryDependencyDeadlines, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasMemoryDependencies,
-  turnHasOwnedSession, turnLineageCourse, turnMaterialUse, turnPinnedSourceRefs, type FragmentFactory,
+  turnHasOwnedSession, turnLineageCourse, turnMaterialRows, turnMaterialUse, turnPinnedSourceRefs, type FragmentFactory,
 } from "./opening-context-provenance";
-import { lockActiveMemoryCourses, lockMemoryMaterialSources, sourceMaterialsActive, turnMaterialRows } from "./opening-memory-admission";
+import { lockActiveMemoryCourses, lockMemoryMaterialSources, sourceMaterialsActive } from "./opening-memory-admission";
 import { readTutorHistoryAncestors, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
 
 function candidateListedMaterials(tx: TransactionSql): ReturnType<FragmentFactory> {
@@ -76,7 +76,7 @@ function taskTurnOriginActive(tx: TransactionSql, workspaceId: string, alias: "a
   return tx`${turnHasOwnedSession(tx, turn, owner)}
     AND jsonb_typeof(${turn()}.source_versions)='object' AND jsonb_typeof(${turn()}.citations)='array'
     ${alias === "u" ? tx`AND ${contextSourceRefsIncluded(tx, workspaceId, userRefs)}` : tx``}
-    AND ${sourceMaterialsActive(tx, workspaceId, () => turnMaterialRows(tx, owner, alias), {
+    AND ${sourceMaterialsActive(tx, workspaceId, () => turnMaterialRows(tx, owner, turn), {
       lockedSourceIds, memoryCourse: () => turnLineageCourse(tx, alias, conversationCourse, owner),
       originUse: () => turnMaterialUse(tx, alias), directMaterialPolicy: true, authorizeMemoryOnlySeparately: true,
     })}`;
@@ -102,7 +102,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
       u.id AS paired_user_turn_id,
       CASE WHEN u.id IS NOT NULL THEN ${turnLineageCourse(tx, "u", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} END AS user_course_id,
       CASE WHEN u.id IS NOT NULL THEN array_remove(ARRAY(SELECT DISTINCT ${lineageUuid(tx, () => tx`ref.source_id`)}
-        FROM (${turnMaterialRows(tx, () => tx`conv.owner_user_id`, "u")}) ref), NULL::uuid) END AS user_source_ids
+        FROM (${turnMaterialRows(tx, () => tx`conv.owner_user_id`, () => tx`u`)}) ref), NULL::uuid) END AS user_source_ids
     FROM opening_assistant_candidates c
     JOIN opening_conversations conv ON conv.id = c.conversation_id AND conv.workspace_id = c.workspace_id
       AND conv.owner_user_id = ${scope.ownerUserId}
@@ -125,7 +125,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   let lockedSourceIds: string[] = [];
   const acquire = async () => {
     if (!await lockActiveMemoryCourses(tx, scope, [...courseIds])) throw invalidSource();
-    lockedSourceIds = await lockMemoryMaterialSources(tx, scope, sourceIds);
+    lockedSourceIds = [...(await lockMemoryMaterialSources(tx, scope, sourceIds)).keys()];
     return lockedSourceIds;
   };
   if (!candidate.has_memory_dependencies) await acquire();

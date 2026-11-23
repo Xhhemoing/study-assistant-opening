@@ -17,7 +17,7 @@ import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryRecei
 import {
   contextSourceRefsIncluded, hasMemoryBearingRef, isLineageUuid, lineageUuid, memoryBacksSource, memoryCourseAllows,
   memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
-  resolveMemoryDependencyStatus, turnContextSourceRefs, turnDirectSourcesVersioned, turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
+  resolveMemoryDependencyStatus, turnDirectSourcesVersioned, turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
   turnMaterialUse, turnPinnedSourceRefs, turnSessionMaterialIds, type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
@@ -405,27 +405,8 @@ async function assertStreamMaterialAdmission(
           AND m.status = 'active'
           AND ${memoryCourseAllows(tx, () => tx`m.course_id`, () => tx`${courseId}::uuid`, () => tx`m.workspace_id`)}
           AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-          AND EXISTS (
-            SELECT 1
-            FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
-            JOIN opening_turns t ON t.id = ${lineageUuid(tx, () => tx`ref.turn_id`)} AND t.workspace_id = ${scope.workspaceId} AND t.status = 'complete'
-            JOIN opening_conversations c ON c.id = t.conversation_id
-              AND c.workspace_id = ${scope.workspaceId}
-              AND c.owner_user_id = ${scope.ownerUserId}
-            WHERE sid.id = ANY(t.source_ids)
-              OR EXISTS (
-                SELECT 1
-                FROM jsonb_array_elements(
-                  CASE WHEN jsonb_typeof(${turnContextSourceRefs(tx, "t")}) = 'array'
-                    THEN ${turnContextSourceRefs(tx, "t")}
-                    ELSE '[]'::jsonb
-                  END
-                ) AS turn_ref
-                WHERE lower(turn_ref->>'sourceId') = lower(sid.id::text)
-                  AND ((turn_ref->>'memoryOnly') IS DISTINCT FROM 'true'
-                    OR t.context_source_refs @? '$[*].memoryDependencyIds[*]')
-              )
-          )
+          AND ${memoryBacksSource(tx, () => tx`m.source_turn_ids`, () => tx`sid.id`, scope.workspaceId,
+            scope.ownerUserId, turn => tx`${turn()}.context_source_refs @? '$[*].memoryDependencyIds[*]'`)}
       GROUP BY sid.id`;
     if (backed.length !== memoryOnlySourceIds.length) {
       throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
@@ -904,8 +885,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   if (collectCourseIds.size === 1) {
     if (!await lockActiveMemoryCourse(db, input.scope, [...collectCourseIds][0]!)) return;
   } else if (!await lockActiveMemoryCourses(db, input.scope, [...collectCourseIds])) return;
-  const lockedSourceIds = await lockMemoryMaterialSources(db, input.scope, collectSourceIds);
-  const locked = new Set(lockedSourceIds);
+  const locked = await lockMemoryMaterialSources(db, input.scope, collectSourceIds);
+  const lockedSourceIds = [...locked.keys()];
   if (locked.size !== collectSourceIds.size) return;
   if (checkAncestors) {
     const currentSources = new Set<string>(), currentCourses = new Set<string>();
@@ -1716,7 +1697,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         const collectSourceIds = new Set<string>();
         let graph = await readMemoryDependencyStatus(tx, scope, ids, { materialUse, collectSourceIds });
         if (collectSourceIds.size) {
-          const lockedSourceIds = await lockMemoryMaterialSources(tx, scope, collectSourceIds);
+          const lockedSourceIds = [...(await lockMemoryMaterialSources(tx, scope, collectSourceIds)).keys()];
           graph = await readMemoryDependencyStatus(tx, scope, ids, { materialUse, lockedSourceIds });
         }
         const resolved = resolveMemoryDependencyStatus(graph, ids, [], courseId);

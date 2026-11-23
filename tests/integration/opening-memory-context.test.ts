@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createCourseMembershipRepository, createOpeningMemoryRepository } from "@aistudy/database";
-import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import { insertMemory, insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
+import { lockAndReadMemoryOrigins, lockOwnedWorkspace } from "../../packages/database/src/repositories/opening-memory-admission";
 
 let fixture: OpeningFixture;
 let memories: ReturnType<typeof createOpeningMemoryRepository>;
@@ -27,6 +28,32 @@ describe("opening memory context admission", () => {
     const id = await insertMemory(fixture.sql, fixture.scope, "source-less fact", [turnId]);
     const loaded = await memories.listForContext(fixture.scope, null);
     expect(loaded.map((item) => item.id)).toEqual([id]);
+  });
+
+  it("projects locked material from a named memory ancestor of a legacy source-free turn", async () => {
+    const { sql, scope } = fixture;
+    const sourceId = await insertSource(sql, scope, "uploaded", 3);
+    const original = await insertOwnedTurn(sql, scope);
+    const activity = await insertTestTeachingActivity(sql, scope);
+    const session = randomUUID();
+    await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, activity_id, skill_label, source_ids)
+      VALUES (${session}, ${scope.workspaceId}, ${scope.ownerUserId}, ${activity}, 'Memory origin', ${[sourceId]}::uuid[])`;
+    await sql`UPDATE opening_turns SET learning_session_id=${session} WHERE id=${original}`;
+    const ancestorId = await insertMemory(sql, scope, "Session memory", [original]);
+    const legacy = await insertOwnedTurn(sql, scope, {
+      role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [ancestorId] }],
+    });
+    const derivedId = await insertMemory(sql, scope, "Derived memory", [legacy]);
+
+    await sql.begin(async tx => {
+      await lockOwnedWorkspace(tx, scope);
+      const origins = await lockAndReadMemoryOrigins(tx, scope,
+        [{ id: derivedId, excludedId: derivedId, course_id: null, turn_ids: [legacy] }],
+        { materialUse: "citation", includeSourceRefs: true });
+      expect(origins.get(derivedId)).toMatchObject({
+        ids: new Set([ancestorId]), sourceRefs: [{ sourceId, sourceVersion: 3 }],
+      });
+    });
   });
 
   it("selects memory text and provenance at the same eligibility instant", async () => {

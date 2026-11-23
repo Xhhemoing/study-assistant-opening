@@ -54,6 +54,10 @@ function fixture(options: Options = {}) {
     }
     if (sql.startsWith("WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
     if (sql.startsWith("CASE WHEN (?) ~*")) return { fragmentSql: sql };
+    if (sql.startsWith("SELECT tj.user_turn_id FROM opening_tutor_jobs")) return { fragmentSql: sql };
+    if (sql.startsWith("EXISTS ( SELECT 1 FROM jsonb_array_elements_text(") && sql.includes("JOIN opening_turns mt")) {
+      return { fragmentSql: sql, values };
+    }
     if (sql.startsWith("NOT EXISTS ( ? SELECT 1 FROM mem_deps")) return values[0];
     if (sql.startsWith("WITH candidate_target AS MATERIALIZED")) {
       calls.push({ sql, values });
@@ -97,7 +101,7 @@ function fixture(options: Options = {}) {
     }
     if (sql === "SELECT ? AS included") return [{ included: true }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
-    if (sql.startsWith("SELECT id FROM opening_sources")) return [{ id: sourceId }];
+    if (sql.startsWith("SELECT id, version FROM opening_sources")) return [{ id: sourceId, version: 0 }];
     if (sql.startsWith("SELECT j.id FROM opening_tutor_jobs j")) return [{ id: jobId }];
     if (sql.startsWith("SELECT s.id,s.version FROM opening_sources")) {
       if (options.unavailableSource) return [];
@@ -697,8 +701,10 @@ describe("stream receipt release waits for current job authorization and assista
       globalMemoryIds: [memoryId],
     })).resolves.toBeUndefined();
     const backedCall = f.calls.find(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id"));
-    expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id = ?");
-    expect(await Promise.all(backedCall!.values)).toContainEqual({ fragmentSql: "CASE WHEN (?) ~* ? THEN (?)::uuid END" });
+    const backing = (await Promise.all(backedCall!.values)).find(value =>
+      value?.fragmentSql?.includes("JOIN opening_turns mt ON mt.id::text = lower(mref.turn_id)"));
+    expect(backing?.fragmentSql).toContain("AND mt.id = ?");
+    expect(await Promise.all(backing!.values)).toContainEqual({ fragmentSql: "CASE WHEN (?) ~* ? THEN (?)::uuid END" });
   });
 
   it("starts eligible metadata under the course lock and commits before the provider responds", async () => {

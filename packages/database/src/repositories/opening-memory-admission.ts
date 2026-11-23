@@ -3,7 +3,8 @@ import type { OpeningScope } from "./opening-sources";
 import {
   assistantDirectSourcesVersioned, historicalUserTurnId, isLineageUuid, lineageUuid, memoryCourseAllows, pairedUserTurnId,
   parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
-  turnDependencyWalk, turnHasOwnedSession, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds, turnPinnedSourceRefs, turnSessionMaterialIds,
+  turnDependencyWalk, turnHasOwnedSession, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialRows, turnMaterialUse, turnMemoryOnlyBackingIds,
+  type ContextSourceRef,
   type FragmentFactory,
   type MemoryDependencyStatus,
 } from "./opening-context-provenance";
@@ -37,43 +38,16 @@ export async function lockActiveMemoryCourses(db: Db, scope: OpeningScope, cours
 }
 
 /** Lock sources before memberships to serialize both first classification and removal. */
-export async function lockMemoryMaterialSources(db: Db, scope: OpeningScope, sourceIds: Set<string>): Promise<string[]> {
-  if (!sourceIds.size) return [];
-  const sources = await db<{ id: string }[]>`SELECT id FROM opening_sources WHERE workspace_id=${scope.workspaceId}
+export async function lockMemoryMaterialSources(db: Db, scope: OpeningScope, sourceIds: Set<string>): Promise<Map<string, number>> {
+  if (!sourceIds.size) return new Map();
+  const sources = await db<{ id: string; version: number }[]>`SELECT id, version FROM opening_sources WHERE workspace_id=${scope.workspaceId}
     AND id=ANY(${[...sourceIds].sort()}::uuid[]) ORDER BY id FOR SHARE`;
-  const lockedIds = sources.map(source => source.id);
-  if (lockedIds.length) {
+  const versions = new Map(sources.map(({ id, version }) => [id, version]));
+  if (versions.size) {
     await db`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
-      AND asset_type='source' AND asset_id=ANY(${lockedIds}::uuid[]) ORDER BY asset_id, course_id FOR SHARE`;
+      AND asset_type='source' AND asset_id=ANY(${[...versions.keys()]}::uuid[]) ORDER BY asset_id, course_id FOR SHARE`;
   }
-  return lockedIds;
-}
-
-/** Turn material rows retain version pins and document identity independent of context provenance. */
-export function turnMaterialRows(db: Db, owner: FragmentFactory, alias: "t" | "u" | "a" = "t"): ReturnType<Db> {
-  const turn: FragmentFactory = () => alias === "u" ? db`u` : alias === "a" ? db`a` : db`t`;
-  return db`
-    SELECT sid.id::text AS source_id, NULL::text AS version, false AS version_required, false AS memory_only
-    FROM unnest(${turn()}.source_ids || ${turnSessionMaterialIds(db, turn, owner)}) sid(id)
-    UNION ALL
-    SELECT citation->>'sourceId', CASE WHEN jsonb_typeof(citation->'sourceVersion') = 'number' THEN citation->>'sourceVersion' END, true, false
-    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.citations) = 'array' THEN ${turn()}.citations ELSE '[]'::jsonb END) citation
-    UNION ALL
-    SELECT ref->>'sourceId', CASE WHEN jsonb_typeof(ref->'sourceVersion') = 'number' THEN ref->>'sourceVersion' END,
-      true, COALESCE(ref->'memoryOnly' = 'true'::jsonb, false)
-    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${turn()}.context_source_refs) = 'array'
-      THEN ${turn()}.context_source_refs ELSE '[]'::jsonb END) ref
-    WHERE NOT (ref = jsonb_build_object('memoryDependencyIds', ref->'memoryDependencyIds')
-      AND jsonb_typeof(ref->'memoryDependencyIds') = 'array'
-      AND ref->'memoryDependencyIds' <> '[]'::jsonb)
-    UNION ALL
-    SELECT pin.source_id, CASE WHEN pin.source_version IS NULL THEN NULL
-      WHEN jsonb_typeof(pin.source_version) = 'number' THEN pin.source_version #>> '{}' ELSE '' END, pin.version_required, false
-    FROM (${turnPinnedSourceRefs(db, () => db`${turn()}.source_versions`, () => db`${turn()}.context_anchor`)}) pin
-    UNION ALL
-    SELECT k.source_id::text, k.source_version::text, true, false
-    FROM (SELECT ${turn()}.chunk_id AS id WHERE ${turn()}.chunk_id IS NOT NULL) saved
-    LEFT JOIN opening_source_chunks k ON k.id = saved.id`;
+  return versions;
 }
 
 export function sourceMaterialsActive(
@@ -151,11 +125,11 @@ function turnOriginPolicies(db: Db, scope: OpeningScope, rules?: MemoryMaterialR
       WHERE u.id=(${pairedUserTurnId(db, () => db`t`)}) AND u.workspace_id=t.workspace_id
         AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
         AND NOT (${turnHasOwnedSession(db, () => db`u`, () => db`c.owner_user_id`)}
-          AND ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`, "u"),
+          AND ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`, () => db`u`),
             directPolicy(userCourse, () => turnMaterialUse(db, "u"),
               () => db`${userCourse()} IS NULL AND ${turnHasStandaloneSession(db, () => db`u`, () => db`c.owner_user_id`)}`))}
           ${destination ? db`AND (${userCourse()} IS NULL OR ${userCourse()} IS NOT DISTINCT FROM ${destination()} OR
-            ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`, "u"), {
+            ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`, () => db`u`), {
               ...rules, memoryCourse: destination, originUse: !rules?.materialUse || rules.materialUse === "origin"
                 ? () => turnMaterialUse(db, "u") : undefined,
             })})` : db``}
@@ -264,12 +238,13 @@ type MemoryMaterialRules = {
   collectSourceIds?: Set<string>;
   collectCourseIds?: Set<string>;
   lockedSourceIds?: readonly string[];
+  includeSourceRefs?: boolean;
   allowClassifiedGlobal?: boolean;
   writeAdmission?: boolean;
 };
 type OriginBinding = {
   id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][]; material_use: MaterialUse | null;
-  ancestors: HistoryAncestorAuthority[];
+  ancestors: HistoryAncestorAuthority[]; source_ids?: string[];
 };
 
 async function readOriginBindings(
@@ -301,7 +276,7 @@ async function readOriginBindings(
   if (!turnIds.length) return byMemory;
   const originUse: FragmentFactory | undefined = rules?.materialUse === "origin" ? () => db`policy.material_use` : undefined;
   const rows = await db<(Omit<OriginBinding, "ids" | "ancestors"> & {
-    refs: unknown; source_ids?: string[]; historical_user_turn_id?: string | null; user_course_id?: string | null;
+    refs: unknown; historical_user_turn_id?: string | null; user_course_id?: string | null;
   })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
       ${historicalUserTurnId(db)} AS historical_user_turn_id,
@@ -310,10 +285,10 @@ async function readOriginBindings(
         THEN ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`,
           () => turnHasStandaloneSessions(db, () => db`c.owner_user_id`), scope)} ELSE '[]'::jsonb END AS backings,
       ${originUse ? originUse() : db`NULL::text`} AS material_use
-      ${rules?.collectSourceIds ? db`, ARRAY(
+      ${rules?.collectSourceIds || rules?.includeSourceRefs ? db`, ARRAY(
         SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
         FROM (${turnMaterialRows(db, () => db`c.owner_user_id`)} UNION ALL
-          SELECT paired.* FROM (${turnMaterialRows(db, () => db`c.owner_user_id`, "u")}) paired WHERE u.id IS NOT NULL
+          SELECT paired.* FROM (${turnMaterialRows(db, () => db`c.owner_user_id`, () => db`u`)}) paired WHERE u.id IS NOT NULL
         ) material
       ) AS source_ids` : db``}
     FROM unnest(${originIds}::uuid[], ${courseIds}::uuid[], ${turnIds}::uuid[], ${ordinalities}::int[]) m(id, course_id, turn_id, ordinality)
@@ -463,8 +438,9 @@ async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: Me
     // imposing that old course's visibility on the already-authorized derivative.
     const ownExpiry = node.expires_at === null ? Infinity : new Date(node.expires_at).getTime();
     const expiresAt = ancestry.expiresAt < ownExpiry ? new Date(ancestry.expiresAt) : node.expires_at;
-    dependencies.set(node.id, { dep_id: node.id, course_id: node.course_id,
-      expires_at: expiresAt, usable: true });
+    dependencies.set(node.id, { dep_id: node.id, course_id: node.course_id, expires_at: expiresAt, usable: true,
+      ...(rules?.includeSourceRefs ? { sourceIds: node.bindings.flatMap(binding => binding.source_ids ?? []) } : {}),
+    });
     return [...dependencies.values()];
   }
   const ready = new Set(orderedIds);
@@ -504,15 +480,28 @@ async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: Me
 }
 
 /** Validate source turns and resolve their named and legacy ancestry against the destination course. */
-export async function readMemoryOrigins(db: Db, scope: OpeningScope, origins: MemoryOrigin[], rules?: MemoryMaterialRules) {
-  const result = new Map<string, { ids: Set<string>; expiresAt: number } | null>();
+type AdmittedMemoryOrigin = { ids: Set<string>; expiresAt: number; sourceRefs?: ContextSourceRef[] };
+
+async function readMemoryOrigins(db: Db, scope: OpeningScope, origins: MemoryOrigin[], rules?: MemoryMaterialRules,
+  lockedSourceVersions?: ReadonlyMap<string, number>,
+) {
+  const result = new Map<string, AdmittedMemoryOrigin | null>();
   const bindings = await readOriginBindings(db, scope, origins, rules);
   const roots = bindingRoots([...bindings.values()].flat(), rules?.materialUse);
   const emptyGraph: MemoryGraph = new Map();
   const graphFor = roots.length ? await readMemoryDependencyGraphs(db, scope, roots, rules) : () => emptyGraph;
   for (const origin of origins) {
-    const lineage = resolveOrigins(graphFor, origin, bindings.get(origin.id) ?? [], rules?.materialUse);
+    const originBindings = bindings.get(origin.id) ?? [];
+    const lineage = resolveOrigins(graphFor, origin, originBindings, rules?.materialUse);
     if (!lineage) {
+      result.set(origin.id, null);
+      continue;
+    }
+    const sourceRefs = lockedSourceVersions && rules?.includeSourceRefs ? lockedMemorySourceRefs(lockedSourceVersions, [
+      ...originBindings.flatMap(binding => binding.source_ids ?? []),
+      ...lineage.dependencies.flatMap(dependency => dependency.sourceIds ?? []),
+    ]) : undefined;
+    if (sourceRefs === null) {
       result.set(origin.id, null);
       continue;
     }
@@ -520,15 +509,26 @@ export async function readMemoryOrigins(db: Db, scope: OpeningScope, origins: Me
       ids: new Set(lineage.dependencies.map(node => node.dep_id)),
       expiresAt: lineage.dependencies.reduce((expiresAt, node) => node.expires_at === null ? expiresAt
         : Math.min(expiresAt, new Date(node.expires_at).getTime()), lineage.expiresAt),
+      sourceRefs,
     });
   }
   return result;
 }
 
+function lockedMemorySourceRefs(versions: ReadonlyMap<string, number>, sourceIds: string[]): ContextSourceRef[] | null {
+  const refs: ContextSourceRef[] = [];
+  for (const sourceId of [...new Set(sourceIds)].sort()) {
+    const sourceVersion = versions.get(sourceId);
+    if (sourceVersion === undefined || !Number.isSafeInteger(sourceVersion) || sourceVersion < 0) return null;
+    refs.push({ sourceId, sourceVersion });
+  }
+  return refs;
+}
+
 /** Discover material first, then repeat admission under sorted course and source locks. */
 export async function lockAndReadMemoryOrigins(db: Db, scope: OpeningScope, origins: MemoryOrigin[], rules?: MemoryMaterialRules,
   activeCourseId?: string | null,
-) {
+): Promise<Map<string, AdmittedMemoryOrigin | null>> {
   const collectCourseIds = new Set(origins.flatMap(origin => origin.course_id === null ? [] : [origin.course_id]));
   if (activeCourseId) collectCourseIds.add(activeCourseId.toLowerCase());
   if (origins.every(origin => origin.turn_ids.length === 0)) {
@@ -539,9 +539,10 @@ export async function lockAndReadMemoryOrigins(db: Db, scope: OpeningScope, orig
   const initial = await readMemoryOrigins(db, scope, origins, { ...rules, collectCourseIds, collectSourceIds });
   if (!collectCourseIds.size && !collectSourceIds.size) return initial;
   if (!await lockActiveMemoryCourses(db, scope, [...collectCourseIds])) return new Map(origins.map(origin => [origin.id, null]));
-  const lockedSourceIds = await lockMemoryMaterialSources(db, scope, collectSourceIds);
+  const versions = await lockMemoryMaterialSources(db, scope, collectSourceIds);
   const currentCourses = new Set<string>();
-  const results = await readMemoryOrigins(db, scope, origins, { ...rules, collectCourseIds: currentCourses, lockedSourceIds });
+  const results = await readMemoryOrigins(db, scope, origins,
+    { ...rules, collectCourseIds: currentCourses, lockedSourceIds: [...versions.keys()] }, versions);
   return [...currentCourses].every(id => collectCourseIds.has(id))
     ? results : new Map(origins.map(origin => [origin.id, null]));
 }

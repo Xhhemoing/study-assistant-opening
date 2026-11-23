@@ -156,7 +156,7 @@ it("locks the course, direct and inherited materials, and memberships before val
     if (query.startsWith("SELECT m.id, course.id")) return membershipRemoved ? [] : [
       { id: memoryId, turn_course_id: courseId, refs: [], backings: [], source_ids: [backing] },
     ];
-    if (query.startsWith("SELECT id FROM opening_sources")) return [{ id: direct }, { id: backing }];
+    if (query.startsWith("SELECT id, version FROM opening_sources")) return [{ id: direct, version: 0 }, { id: backing, version: 0 }];
     if (query.startsWith("SELECT id FROM course_asset_memberships")) {
       membershipRemoved = true;
       return [];
@@ -169,7 +169,7 @@ it("locks the course, direct and inherited materials, and memberships before val
   const locks = queries.filter(query => query.endsWith("FOR SHARE") || query.endsWith("FOR SHARE OF conv, t"));
   expect(locks.map(query => query.endsWith("FOR SHARE OF conv, t")
     ? query.match(/ JOIN (\w+) t ON /)?.[1]
-    : query.match(/^SELECT id FROM (\w+)/)?.[1])).toEqual([
+    : query.match(/^SELECT id(?:, version)? FROM (\w+)/)?.[1])).toEqual([
     "workspaces", "opening_turns", "courses", "opening_sources", "course_asset_memberships",
   ]);
   expect(locks[3]).toContain(`${direct},${backing}`);
@@ -193,7 +193,7 @@ it.each([false, true])("denies a memory-only task source without a backing match
     } }];
     if (query.startsWith("SELECT saved.id")) return hasBackingRow ? [{ id: turnId, backings: [[]] }] : [];
     if (query.startsWith("SELECT dep_m.id")) return [{ id: memoryId, course_id: null, source_turn_ids: [], expires_at: null }];
-    if (query.startsWith("SELECT id FROM opening_sources")) return [{ id: sourceId }];
+    if (query.startsWith("SELECT id, version FROM opening_sources")) return [{ id: sourceId, version: 0 }];
     if (query.startsWith("SELECT id FROM course_asset_memberships")) return [];
     if (query.startsWith("SELECT c.id")) return [{ id: candidateId }];
     throw new Error(query);

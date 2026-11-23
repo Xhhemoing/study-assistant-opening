@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCourseMembershipRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
-  createOpeningMemoryRepository, createOpeningPrivacyRepository,
-  createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
+  createOpeningMemoryRepository, createOpeningNoteRepository, createOpeningPrivacyRepository,
+  createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
 } from "@aistudy/database";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
@@ -14,6 +14,8 @@ import { closeRace, deferred, openRaceSession, track, waitUntilBlocked } from ".
 import { readTurnsWithActiveMemoryDependencies } from "../../packages/database/src/repositories/opening-context-provenance";
 import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "../../packages/database/src/repositories/opening-task-candidate-admission";
 import { insertOpeningTaskWithOutcome } from "../../packages/database/src/repositories/opening-retest-task";
+import { openingNoteReadable } from "../../packages/database/src/repositories/opening-note-provenance";
+import { dumpWorkspaceSnapshot } from "../../packages/database/src/repositories/backup-dump";
 
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
@@ -254,6 +256,106 @@ describe("saved tutor material provenance", () => {
     await expect(sql`SELECT context_source_refs,source_ids FROM opening_turns WHERE id=${current.assistantTurnId}`)
       .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1 }], source_ids: [] }]);
   }, 15_000);
+
+  it.each(["assistant session", "paired activity", "paired chunk"] as const)(
+    "revokes a note after deleting the sole %s source of its injected memory", async origin => {
+      const { sql, scope } = f;
+      const courses = createCourseMembershipRepository(sql);
+      const conversations = createOpeningConversationRepository(sql);
+      const jobs = createOpeningTutorJobsRepository(sql);
+      const memories = createOpeningMemoryRepository(sql);
+      const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage", slug: randomUUID() });
+      const material = await source(1);
+      await courses.addAssetMembership({
+        workspaceId: scope.workspaceId, courseId: course.id, assetType: "source", assetId: material,
+        role: "core", purpose: "teaching", visibility: "course",
+      });
+      const [membership] = await sql`SELECT id FROM course_asset_memberships
+        WHERE workspace_id=${scope.workspaceId} AND course_id=${course.id} AND asset_type='source' AND asset_id=${material}`;
+      const original = await conversations.create(scope, { title: "Memory origin", courseId: course.id });
+      const prior = await append(original.id);
+      const priorClaim = (await jobs.claim(prior.jobId))!;
+      await jobs.completeTurn({ scope, jobId: prior.jobId, assistantTurnId: prior.assistantTurnId, claimToken: priorClaim.claimToken,
+        text: "Worked example", citations: [], candidates: [], contextSourceRefs: [] });
+      if (origin === "paired chunk") {
+        await sql`UPDATE opening_turns SET chunk_id=(SELECT id FROM opening_source_chunks WHERE source_id=${material} AND source_version=1)
+          WHERE id=${prior.turnId}`;
+      } else {
+        const activity = await insertTestTeachingActivity(sql, scope, course.id);
+        const session = randomUUID();
+        const sourceIds = origin === "assistant session" ? [material] : [];
+        await sql`INSERT INTO opening_learning_sessions (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
+          VALUES (${session}, ${scope.workspaceId}, ${scope.ownerUserId}, ${course.id}, ${activity}, 'Memory evidence', ${sourceIds}::uuid[])`;
+        if (origin === "paired activity") {
+          await sql`UPDATE opening_teaching_activities SET source_ids=${[material]}::uuid[] WHERE id=${activity}`;
+        }
+        await sql`UPDATE opening_turns SET learning_session_id=${session}
+          WHERE id=${origin === "assistant session" ? prior.assistantTurnId : prior.turnId}`;
+      }
+      const proposal = await memories.proposeMemory(scope, {
+        courseId: course.id, text: "Evidence-backed preference", sourceTurnIds: [prior.assistantTurnId], expiresAt: null,
+      });
+      const memory = await memories.confirm(scope, proposal.id, proposal.version, randomUUID());
+      const fresh = await conversations.create(scope, { title: "Memory injection", courseId: course.id });
+      const turn = await append(fresh.id);
+      const claim = (await jobs.claim(turn.jobId))!;
+      const ref = { sourceId: material, sourceVersion: 1 };
+      const loaded = await memories.listContext(scope, new Date().toISOString(), course.id);
+      expect(loaded).toMatchObject({ memories: [{ id: memory.id }], sourceRefs: [ref] });
+      const privacyEpoch = await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope);
+      const admission = { claimToken: claim.claimToken, executionId: claim.executionId,
+        contextSourceRefs: [{ ...ref, memoryOnly: true }], memoryLineageSourceIds: [material], globalMemoryIds: [memory.id],
+        historyCourseBindings: [], privacyEpoch, expectedPrivacyEpoch: privacyEpoch,
+      };
+      const send = vi.fn(async () => true);
+      await expect(jobs.authorizeSend(scope, turn.jobId, admission, send)).resolves.toBe(true);
+      await expect(jobs.withStreamPublication(scope, turn.jobId, admission, send)).resolves.toBeUndefined();
+      const deliver = vi.fn();
+      await expect(jobs.readStream(scope, turn.jobId, { ...admission, exposureReceiptId: null }, deliver))
+        .resolves.toMatchObject({ status: "running" });
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(deliver).toHaveBeenCalledOnce();
+      const target = { scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId, claimToken: claim.claimToken };
+      const answer = "Answer relying only on memory";
+      await jobs.completeTurn({ ...target, text: answer, citations: [], candidates: [], contextSourceRefs: admission.contextSourceRefs }, admission);
+      const followup = await append(fresh.id);
+      await expect(jobs.loadHistoryContext(scope, followup.turnId)).resolves.toMatchObject({
+        history: [{ role: "user", text: "continue" }, { role: "assistant", text: answer }], sourceRefs: admission.contextSourceRefs,
+      });
+      await expect(jobs.loadCompletedTurnForMetadata(target)).resolves.toMatchObject({ answer });
+      const derivedProposal = await memories.proposeMemory(scope, {
+        courseId: course.id, text: "Derived preference", sourceTurnIds: [turn.assistantTurnId], expiresAt: null,
+      });
+      await expect(memories.confirm(scope, derivedProposal.id, derivedProposal.version, randomUUID()))
+        .resolves.toMatchObject({ kind: "confirmed" });
+      const task = { kind: "task", title: "Review the example", minutes: 15, dueText: null };
+      await expect(jobs.appendCompletedTurnCandidates({ ...target, candidates: [task] })).resolves.toBe(true);
+      const [candidate] = await sql`SELECT id FROM opening_assistant_candidates WHERE source_turn_id=${turn.assistantTurnId}`;
+      await expect(insertOpeningTaskWithOutcome(sql, scope,
+        { candidateId: String(candidate?.id), courseId: course.id, title: task.title, minutes: task.minutes, dueAt: null, priority: 0 }))
+        .resolves.toMatchObject({ task: { title: task.title } });
+
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Memory snippet", text: answer, savedTurnId: turn.assistantTurnId,
+      });
+      await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+        .resolves.toEqual([{ context_source_refs: [{ ...ref, memoryOnly: true }] }]);
+      const readable = async () => (await sql`SELECT
+        ${openingNoteReadable(sql, scope.workspaceId, sql`${documentId}::uuid`)} AS readable`)[0]?.readable;
+      const exported = async () => (await dumpWorkspaceSnapshot(sql, scope.workspaceId, scope.ownerUserId))
+        .documents.some(document => document.id === documentId);
+      await expect(readable()).resolves.toBe(true);
+      await expect(exported()).resolves.toBe(true);
+
+      await expect(createOpeningSourceActionsRepository(sql).apply(scope, material,
+        { action: "delete", expectedVersion: 1, expectedMembershipIds: [String(membership?.id)] },
+        { stagingKey: id => `opening/staging/${id}`, finalKey: (id, version) => `opening/sources/${id}/v${version}` },
+        new Date())).resolves.toMatchObject({ deleted: true });
+      await expect(sql`SELECT 1 FROM opening_privacy_exclusions WHERE workspace_id=${scope.workspaceId}
+        AND source_id=${material} AND asset_deleted_at IS NOT NULL`).resolves.toHaveLength(1);
+      await expect(readable()).resolves.toBe(false);
+      await expect(exported()).resolves.toBe(false);
+    }, 30_000);
 
   it("checks a task's paired user memory and its backing course under the user's scope", async () => {
     const { sql, scope } = f;
