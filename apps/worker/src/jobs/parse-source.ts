@@ -267,6 +267,10 @@ function isInlineSeal(mode: SealState["mode"] | undefined): mode is "inline_seal
   return mode === "inline_sealed" || mode === "inline_proof_sealed";
 }
 
+function hasConfirmedPdfPageSeal(page: PdfSegmentPage | undefined): boolean {
+  return Boolean(page?.hadSealedContent || page?.inlineProofBoundaryPendingAtEnd || pdfPageEndSeal(page));
+}
+
 function findAssessmentSolutionsContext(lines: readonly string[], index: number): number {
   for (let next = index + 1; next < lines.length; next++) {
     const { stripped } = stripHeadingMarkup(lines[next]!);
@@ -1445,7 +1449,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           segments: deps.segments, signal, parserProfile, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds,
           shouldRevalidateSegment: async (start, end) =>
             [...(await readPageSeals(start, end)).values()].some(marker =>
-              marker.hadSealedContent || marker.publicationSealUnknown || pdfPageEndSeal(marker)),
+              marker.publicationSealUnknown || hasConfirmedPdfPageSeal(marker)),
           onFailedSegment: async ({ pageStart, pageEnd, initialSealMode }) => {
             const pages = Array.from({ length: pageEnd - pageStart + 1 }, (_, index) => pageStart + index);
             const existing = deps.segments
@@ -1466,12 +1470,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               const incomingUnresolved = pdfSealState.unknownAfterFailure || pdfSealState.mode !== "none"
                 || pdfSealState.inlineProofBoundaryPending;
               const check = chunk && inspectSavedPdfChunk(chunk, { ...pdfSealState });
-              const confirmedMarker = marker && !marker.failedRangeBoundary
-                && (marker.hadSealedContent || pdfPageEndSeal(marker));
+              const confirmedMarker = marker && !marker.failedRangeBoundary && hasConfirmedPdfPageSeal(marker);
               const sectionSealed = pdfSealState.mode === "section_sealed"
                 || confirmedMarker && marker.sectionSealedAtEnd === true
                 || !archive.nativeWithheld && check?.endSeal.mode === "section_sealed";
-              const markedSealed = Boolean(marker?.hadSealedContent || marker?.publicationSealUnknown || pdfPageEndSeal(marker));
+              const markedSealed = marker?.publicationSealUnknown || hasConfirmedPdfPageSeal(marker);
               const savedIsClean = Boolean(chunk?.text.trim() && check && !check.unsafe && !markedSealed && !archive.nativeWithheld);
               const preserve = savedIsClean && (!incomingUnresolved || (
                 chunk && !chunk.imageObjectKey && beginsWithRecoveredPdfSection(chunk.text)
@@ -1538,7 +1541,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               doclingIncomingProofBoundary = Boolean(rawPage.inlineProofBoundaryPendingAtEnd);
               doclingIncomingWorkedExample = Boolean(rawPage.inWorkedExampleAtEnd);
               doclingIncomingExercise = rawPage.inExerciseAtEnd;
-              const blocked = marker?.hadSealedContent || marker?.publicationSealUnknown || pdfPageEndSeal(marker);
+              const blocked = marker?.publicationSealUnknown || hasConfirmedPdfPageSeal(marker);
               return { rawPage, seed, proofBoundary, effectiveSeed, workedExample, exercise, prepared: prep, archive,
                 visualInput: prep.visual && (!prep.reusable || blocked) ? prep.visual : undefined };
             });
@@ -1569,7 +1572,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 if (archive.nativeWithheld) unsafeLegacyPages.add(rawPage.page);
                 const marker = pageSeals.get(rawPage.page);
                 const recordedMode = pdfPageEndSeal(marker);
-                const previouslySealed = Boolean(marker?.hadSealedContent || recordedMode);
+                const previouslySealed = hasConfirmedPdfPageSeal(marker);
                 const previouslyUnverified = Boolean(marker?.publicationSealUnknown);
                 const previouslyBlocked = previouslySealed || previouslyUnverified;
                 const committedReopening = marker?.reopenedSection === true && marker.publicationSealCommitted === true

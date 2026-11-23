@@ -92,13 +92,18 @@ async function writePdfPageSeals(tx: TransactionSql, workspaceId: string, source
       SET state=EXCLUDED.state,pages=EXCLUDED.pages,error_code=NULL,updated_at=now()`;
 }
 
+function hasPublicationSeal(page: PdfSegmentPage): boolean {
+  return Boolean(page.hadSealedContent || page.sectionSealedAtEnd || page.inlineSealedAtEnd
+    || page.inlineProofBoundaryPendingAtEnd || page.publicationSealUnknown);
+}
+
 /** Called after chunk reconciliation, under the publication transaction's execution and source locks. */
 export async function commitPdfPageSeals(tx: TransactionSql, workspaceId: string, sourceId: string, sourceVersion: number,
   markers: readonly PdfSegmentPage[]) {
   const retained: PdfSegmentPage[] = [];
   const cleared: number[] = [];
   for (const marker of markers) {
-    if (marker.hadSealedContent || marker.sectionSealedAtEnd || marker.inlineSealedAtEnd || marker.publicationSealUnknown) retained.push(marker);
+    if (hasPublicationSeal(marker)) retained.push(marker);
     else cleared.push(marker.page);
   }
   await writePdfPageSeals(tx, workspaceId, sourceId, sourceVersion, retained, true);
@@ -167,14 +172,13 @@ export function createOpeningPdfSegmentsRepository(sql: Sql) {
         for (const row of rows) {
           if (row.parser_profile === input.parserProfile) {
             const [marker] = validatePdfSegmentPages(row.pages, row.page_start, row.page_start);
-            if (marker && (!markers.has(marker.page) || marker.hadSealedContent
-              || marker.publicationSealUnknown || marker.sectionSealedAtEnd || marker.inlineSealedAtEnd)) markers.set(marker.page, marker);
+            if (marker && (!markers.has(marker.page) || hasPublicationSeal(marker))) markers.set(marker.page, marker);
             continue;
           }
           const page = Number(failureBoundary.exec(row.parser_profile)?.[1]);
           if (!Number.isSafeInteger(page) || page < input.pageStart || page > input.pageEnd) continue;
           const existing = markers.get(page);
-          if (!existing || !(existing.hadSealedContent || existing.publicationSealUnknown || existing.sectionSealedAtEnd || existing.inlineSealedAtEnd)) {
+          if (!existing || !hasPublicationSeal(existing)) {
             markers.set(page, { page, text: "", imagePath: null, publicationSealUnknown: true, failedRangeBoundary: true });
           }
         }

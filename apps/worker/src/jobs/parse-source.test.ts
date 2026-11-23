@@ -107,7 +107,7 @@ describe("parse source handler", () => {
     },
   );
 
-  it("replays a published proof boundary when a cached Vision answer is unavailable", async () => {
+  it("replays a published proof boundary recorded without an active seal when cached Vision is unavailable", async () => {
     const publicText = "Chapter 2: Rings\nThe rest of this chapter is public.";
     const pages = [
       { page: 1, text: "Problem 1. Prove the identity.", imagePath: null, visualKinds: ["picture"] },
@@ -118,7 +118,7 @@ describe("parse source handler", () => {
     const d = await deps({
       segments: { assertCurrent: async () => {}, read: async () => null, save: async () => {},
         readPageSeals: async (_scope, range) => range.pageStart !== 1 ? [] : [{
-          page: 1, text: "", imagePath: null, visualKinds: ["picture"], hadSealedContent: true,
+          page: 1, text: "", imagePath: null, visualKinds: ["picture"],
           inlineProofBoundaryPendingAtEnd: true, publicationSealCommitted: true,
         }] },
       runner: async argv => {

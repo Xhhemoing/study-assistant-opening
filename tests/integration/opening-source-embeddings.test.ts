@@ -32,7 +32,7 @@ async function seed(text: string | string[], scope = f.scope) {
 
 async function startPdfRetry(sourceId: string, pages: PdfSegmentPage[],
   recognition: Pick<Parameters<typeof createParseSourceHandler>[0], "recognizePage" | "recognizePages"> = {},
-  failedStarts: number[] = []) {
+  failedStarts: number[] = [], afterPageSeal?: (page: PdfSegmentPage) => Promise<void>) {
   const bytes = Buffer.from("%PDF synthetic retry");
   await f.sql`UPDATE opening_sources SET mime='application/pdf',parse_state='running',bytes=${bytes.length},
     sha256=${createHash("sha256").update(bytes).digest("hex")} WHERE id=${sourceId}`;
@@ -44,9 +44,16 @@ async function startPdfRetry(sourceId: string, pages: PdfSegmentPage[],
   expect(claimed?.claimToken).toBeTruthy();
   const chunks = createOpeningSourceChunksRepository(f.sql);
   const sources = createOpeningSourceRepository(f.sql);
+  const segments = createOpeningPdfSegmentsRepository(f.sql);
   const handler = createParseSourceHandler({
     ...recognition, sources, chunks, tempDir: os.tmpdir(),
-    segments: createOpeningPdfSegmentsRepository(f.sql),
+    segments: afterPageSeal ? { ...segments, async save(...args) {
+      await segments.save(...args);
+      const [, identity, segment] = args;
+      if (identity.parserProfile === "pdf-publication-page-seal-v1" && segment.state === "ready") {
+        await afterPageSeal(segment.pages[0]!);
+      }
+    } } : segments,
     ...(failedStarts.length ? { segmentPages: 1 } : {}),
     storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${bytes.toString("base64")}` },
     runner: async argv => {
@@ -345,6 +352,26 @@ describe("pgvector material repository", () => {
     ], [2, 3], 1);
   });
 
+  it.each(["Chapter 1 (continued)", "第 1 章（续）", "Chapter 1: Rings (cont’d)"])(
+    "finds an adjacent archived proof below the running heading %j", async heading => {
+      await expectArchivedPdfPages([
+        "Answer: Yes.",
+        heading + "\nProof. Private continuation.",
+        "The conclusion is private. ∎",
+        "The next argument is public.",
+      ], [4], 2);
+    },
+  );
+
+  it("carries a standalone Answer label on a numbered question into an adjacent archived proof", async () => {
+    await expectArchivedPdfPages([
+      "1. Decide whether the claim holds.\nAnswer:\nYes.",
+      "Proof. Private continuation.",
+      "The conclusion is private. ∎",
+      "This separate paragraph is public.",
+    ], [4], 2);
+  });
+
   it("keeps a proof public across a missing archived page", async () => {
     const publicText = "This separate paragraph is public.";
     const publicProof = "Proof. A separate public proof.";
@@ -385,6 +412,7 @@ describe("pgvector material repository", () => {
     "[原生提取]\nChapter 2: Geometry\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nAnswer 1: x = 3.",
     "[视觉转写与描述]\n【图表观察描述，非原文或解答】\nChapter 2: Geometry",
     "[视觉转写与描述]\n【识别不确定，不能据此判定正确】\nChapter 2: Geometry",
+    "[视觉转写与描述]\n# Cached transcription for page 3\n# 图表观察描述\nChapter 2: Geometry",
     "[原生提取]\n5 units.\nChapter 2: Geometry",
   ])("keeps a wrapped page sealed when it lacks a clean first heading (%j)", async page => {
     await expectArchivedPdfPages(["Answer Key", "5 units.", page, "5 more units."], [], 4);
@@ -598,6 +626,38 @@ describe("pgvector material repository", () => {
       WHERE source_id=${pdf.sourceId} AND source_version=1`;
     await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { version: 1, page: 2 }))
       .rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("withholds an archived proof after the Vision proof boundary is staged and before chunks are replaced", async () => {
+    const question = "Problem 1. Decide whether the claim holds.";
+    const texts = ["Public notes before the question.", question, "Proof. The archived private argument.",
+      "The rest of the private argument. ∎", "Chapter 2: Geometry\nThe next topic is public."];
+    const pdf = await seed(texts);
+    let checkedPendingSeal = false;
+    const retry = await startPdfRetry(pdf.sourceId, texts.map((text, index) => ({
+      page: index + 1, text, imagePath: null, visualKinds: index === 1 ? ["picture"] : [],
+    })), {
+      recognizePage: async page => {
+        expect(page.physicalPage).toBe(2);
+        return { text: question + "\nAnswer:\nYes.", imageObjectKey: "vision/question" };
+      },
+    }, [], async marker => {
+      if (marker.page !== 2) return;
+      expect(marker).toMatchObject({ inlineProofBoundaryPendingAtEnd: true, publicationSealCommitted: false });
+      expect(marker.inlineSealedAtEnd).toBe(false);
+      const [archived] = await f.sql`SELECT text FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page=3`;
+      expect(archived?.text).toBe(texts[2]);
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      const chunks = createOpeningSourceChunksRepository(f.sql);
+      expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.page)).toEqual([1]);
+      checkedPendingSeal = true;
+    });
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
+      .resolves.toMatchObject({ text: texts[2] });
+    await retry.run();
+    expect(checkedPendingSeal).toBe(true);
+    expect((await retry.chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.page)).toEqual([1, 2, 5]);
   });
 
   it.each(["empty response", "confirmed native seal", "native seal with unverified picture", "batch setup failure"])(

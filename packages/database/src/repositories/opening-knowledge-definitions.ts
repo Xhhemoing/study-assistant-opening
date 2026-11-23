@@ -7,7 +7,8 @@ import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 const definitionPatchByteLimit = 256 * 1024;
 const pdfHeadingContainer = String.raw`(?:(?:appendix(?: +[\w.]+)?|(?:chapter|section|lecture|lesson|module|part|unit) +[\w.]+|第 *[一二三四五六七八九十百千\d]+ *(?:章节|讲义|部分|单元|章|节|讲)|附录(?: *[A-Z0-9一二三四五六七八九十]+)?)(?: *[:：.\-—–] *| +)|附录)`;
 const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
-const englishContinuation = String.raw`(?: *\( *(?:continued|cont(?:['’]?d)?\.?) *\))?`;
+const englishContinuationWord = String.raw`(?:continued|cont(?:['’]?d)?\.?)`;
+const englishContinuation = String.raw`(?: *\( *${englishContinuationWord} *\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
 const chineseContinuation = String.raw`(?: *[（(](?:续|接上页)[）)])? *`;
 const chineseExplanation = "(?:解答|解析|详解)";
@@ -28,8 +29,8 @@ const inlineSolutionPeriod = String.raw`(?:(?:Worked|Full|Sample|Official|Refere
 const answerPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineAnswerPeriod}`;
 const solutionPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineSolutionPeriod}`;
 const exerciseInlineAnswerPeriod = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${inlineAnswerPeriod}|${inlineSolutionPeriod})`;
-// Standalone answer keys and bare "Answers" open a section. Numbered inline labels
-// and a singular "Answer:" affect the current chunk alone.
+// Standalone answer keys and bare "Answers" open a section. Singular "Answer:"
+// and numbered labels can open an inline answer.
 const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|答案${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
 const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案)${chineseContinuation}(?:】|[:：]|$))`;
 const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?(?:answers?(?: +key)?|solutions?)|key)(?: +to +(?:exercise|problem|question))? *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)|(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
@@ -60,6 +61,7 @@ const blockedReopeningHeading = [
   String.raw`\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|drills?|self[- ]check|homework|assignments?|problem +sets?|worksheets?|tutorials?|recitations?|labs?|continued|cont(?:['’]?d)?)\M`,
   String.raw`(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千]+(?: *(?:[/／–-]|共) *(?:第 *)?[\d一二三四五六七八九十百千]+)? *[页頁]`,
   String.raw`答案|解答|习题|练习|复习题|自测题|思考题|作业|课后题|单元测试|第 *[一二三四五六七八九十百千\d]+ *[题小题]|续上页|接上页|[（(] *续 *[）)]`,
+  String.raw`${lineStart}(?:[\[【(] *)?(?:图表观察描述|识别不确定)`,
 ].join("|");
 
 // Only extraction and transcription headers may precede a reopening heading.
@@ -70,6 +72,7 @@ const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确�
 const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
 const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|答案 *[:：] *$|解答${chineseContinuation}[:：]? *$|${qualifiedExerciseAnswer})`;
 const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
+const standaloneInlineAnswer = String.raw`${lineStart}(?:(?:${englishAnswerQualifier} +)?answer(?: +\d+(?:\.\d+)*)?${englishContinuation} *[:：]|【 *答案${chineseContinuation}】 *[:：]?) *$`;
 
 const workedExampleHeading = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:(?:worked +example|example)(?= +\d| *[(:：.．—–-]| *$)|例题(?= *\d| *[（(:：.．—–-]| *$)|例 *(?=\d|[:：]))`;
 const englishBlock = String.raw`(?:definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof(?: +of +(?:theorem|lemma|proposition|corollary))?)`;
@@ -210,8 +213,9 @@ const furnitureTitleProse = String.raw`\m(?:on|see|at|pages?) +(?:page +)?\d+\M|
 const pageCounter = String.raw`(?:[(（\[【]? *(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]?|${chineseCounter}) *[.。．、]?`;
 const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix}).*${furnitureSeparator}|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
 const titledPageCounter = String.raw`${lineStart}([^|｜—–]{1,96}?)(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
-const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)`;
-const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|[ivxlcdm]+ *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${pageMetadataHeading}`;
+const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M`;
+const continuedContainer = String.raw`(?:${englishContainerPrefix}|${chineseContainerPrefix}).*(?:[(（\[【] *(?:(?:to +be +)?${englishContinuationWord}|续|续上页|接上页) *[)）\]】]|\m${englishContinuationWord}(?: +(?:from|on) +.+)?|续上页|接上页| +续)[ .:：]*$`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|[ivxlcdm]+ *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}`;
 const jsInlineRunningHeading = new RegExp(asJsPattern(inlineRunningHeading), "iu");
 const jsTitledPageCounter = new RegExp(titledPageCounter, "iu");
 const jsFurnitureTitleProse = new RegExp(asJsPattern(furnitureTitleProse), "iu");
@@ -254,6 +258,7 @@ export function publicPdfSealBoundaries(sql: Sql, workspaceId: string,
     WHERE seal.workspace_id=${workspaceId}
       AND ((seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready' AND seal.page_end=seal.page_start
         AND (seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
+           OR seal.pages->0->>'inlineProofBoundaryPendingAtEnd'='true'
           OR seal.pages->0->>'publicationSealUnknown'='true')
         AND (${pendingPdfSeal(sql, "ps")}))
         OR seal.parser_profile ~ ${pendingPdfFailureBoundaryPattern})
@@ -356,7 +361,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       AND NOT (in_worked_example AND explanation_label) AS section_answer,
       explanation_label AND NOT in_worked_example AS sealed_explanation,
       (period_inline OR line ~* ${exerciseInlineAnswer}
-        AND (in_exercise OR (unconditional_answer OR NOT in_worked_example) AND line ~* ${exerciseInlineAnswer + "[^ ]"}))
+        AND (in_exercise OR unconditional_answer AND line ~* ${standaloneInlineAnswer}
+          OR (unconditional_answer OR NOT in_worked_example) AND line ~* ${exerciseInlineAnswer + "[^ ]"}))
         AND (NOT opens_section OR exercise_exception) AND NOT (in_worked_example AND explanation_label) AS inline_opener
     FROM pdf_archive_exercise_context
   ), pdf_archive_page_events AS (
@@ -443,6 +449,7 @@ export function publicPdfChunkPredicate(sql: Sql, { checkArchive = true } = {}) 
         AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'
         AND seal.page_start=c.page AND seal.page_end=c.page
         AND (seal.pages->0->>'hadSealedContent'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
+          OR seal.pages->0->>'inlineProofBoundaryPendingAtEnd'='true'
           OR seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'publicationSealUnknown'='true')
         AND (c.image_object_key IS NOT NULL OR (${pendingPdfSeal(sql, "s")}))
     )
