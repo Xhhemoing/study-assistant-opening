@@ -26,6 +26,30 @@
       "types": "./src/cartridge-sdk-lite/index.ts",
       "default": "./src/cartridge-sdk-lite/index.ts"
     },
+    "./multimodal-evidence": {
+      "types": "./src/multimodal-evidence/index.ts",
+      "default": "./src/multimodal-evidence/index.ts"
+    },
+    "./offline-companion-bridge": {
+      "types": "./src/offline-companion-bridge/index.ts",
+      "default": "./src/offline-companion-bridge/index.ts"
+    },
+    "./commercial-resilience": {
+      "types": "./src/commercial-resilience/index.ts",
+      "default": "./src/commercial-resilience/index.ts"
+    },
+    "./resilience-canary-shredding": {
+      "types": "./src/resilience-canary-shredding/index.ts",
+      "default": "./src/resilience-canary-shredding/index.ts"
+    },
+    "./symbolic-equivalence": {
+      "types": "./src/symbolic-equivalence/index.ts",
+      "default": "./src/symbolic-equivalence/index.ts"
+    },
+    "./pedagogical-retrieval": {
+      "types": "./src/pedagogical-retrieval/index.ts",
+      "default": "./src/pedagogical-retrieval/index.ts"
+    },
     "./opening/ai-policy": {
       "types": "./src/opening/ai-policy/index.ts",
       "default": "./src/opening/ai-policy/index.ts"

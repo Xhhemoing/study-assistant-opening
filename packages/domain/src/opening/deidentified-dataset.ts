@@ -1,4 +1,6 @@
 import type { OpeningDeidentifiedDataset } from "@aistudy/contracts";
+import { resolveCohortSurfacePolicy, type CohortSurfacePolicy, type CohortSurfacePolicyInput } from "../commercial-resilience";
+import type { CryptoShredTombstoneReceipt } from "../resilience-canary-shredding";
 
 type Row = Record<string, unknown>;
 export type OpeningDatasetProjectionInput = {
@@ -45,5 +47,72 @@ export function projectOpeningDataset(input: OpeningDatasetProjectionInput, pseu
     }),
     coursePackageQuality: activities.map(row => ({ identity: pseudonym("activity", String(row.id)), generated: row.generate_status === "ready",
       sourceCount: sourceIds(row)!.length, sources: sourceTokens(sourceIds(row)!) })),
+  };
+}
+
+export type PrivacyGuardedOpeningDatasetInput = OpeningDatasetProjectionInput & CohortSurfacePolicyInput & {
+  readonly shreddedSourceIds?: readonly string[];
+  /** The persistence layer supplies the workspace epoch at which the receipt was applied. */
+  readonly tombstoneReceipts?: readonly (CryptoShredTombstoneReceipt & { readonly privacyEpoch: number })[];
+};
+
+const field = (value: unknown, key: string) => value !== null && typeof value === "object" ? (value as Row)[key] : undefined;
+const containsId = (ids: ReadonlySet<string>, id: unknown) => typeof id === "string" && ids.has(id.toLowerCase());
+const containsAnyId = (ids: ReadonlySet<string>, values: unknown) =>
+  Array.isArray(values) && values.some(value => containsId(ids, value));
+const containsSourceRef = (ids: ReadonlySet<string>, refs: unknown) =>
+  Array.isArray(refs) && refs.some(ref => containsId(ids, field(ref, "sourceId")));
+
+export function projectPrivacyGuardedOpeningDataset(
+  input: PrivacyGuardedOpeningDatasetInput,
+  pseudonym: (kind: string, id: string) => string,
+): { dataset: OpeningDeidentifiedDataset; cohortPolicy: CohortSurfacePolicy } {
+  const { scope, tables } = input;
+  const shredded = new Set((input.shreddedSourceIds ?? []).map(id => id.toLowerCase()));
+  let privacyEpoch = input.privacyEpoch;
+  for (const receipt of input.tombstoneReceipts ?? []) {
+    if (receipt.workspaceId !== scope.workspaceId) continue;
+    if (!Number.isSafeInteger(receipt.privacyEpoch) || receipt.privacyEpoch < 0) throw new RangeError("Invalid tombstone privacy epoch");
+    privacyEpoch = Math.max(privacyEpoch, receipt.privacyEpoch);
+    for (const id of receipt.shreddedSourceIds) shredded.add(id.toLowerCase());
+    if (receipt.target.kind === "source") shredded.add(receipt.target.sourceId.toLowerCase());
+  }
+
+  const cohortPolicy = resolveCohortSurfacePolicy(input);
+  if (!shredded.size) return { dataset: projectOpeningDataset({ ...input, privacyEpoch }, pseudonym), cohortPolicy };
+
+  const rows = (name: string) => tables[name] ?? [];
+  const referencesShreddedSource = (row: Row) => containsAnyId(shredded, row.source_ids)
+    || containsId(shredded, row.source_id)
+    || containsId(shredded, row.reference_source_id)
+    || containsId(shredded, field(row.grading_work_source, "id"))
+    || containsId(shredded, field(row.context_anchor, "sourceId"))
+    || containsSourceRef(shredded, row.context_source_refs)
+    || containsSourceRef(shredded, row.citations)
+    || (row.source_versions !== null && typeof row.source_versions === "object"
+      && Object.keys(row.source_versions).some(id => containsId(shredded, id)));
+  const idsFor = (name: string, matches: (row: Row) => boolean) => rows(name)
+    .filter(row => row.workspace_id === scope.workspaceId && matches(row))
+    .flatMap(row => typeof row.id === "string" ? [row.id] : []);
+  const deletedTurnIds = [...(input.deletedTurnIds ?? []), ...idsFor("opening_turns", referencesShreddedSource)];
+  const excludedTurns = new Set(deletedTurnIds.map(id => id.toLowerCase()));
+  const excludedSessions = new Set(idsFor("opening_learning_sessions", referencesShreddedSource).map(id => id.toLowerCase()));
+  const excludedItemVersions = new Set(idsFor("opening_learning_item_versions", referencesShreddedSource).map(id => id.toLowerCase()));
+  const referencesExcludedItem = (row: Row) => containsId(excludedSessions, row.session_id) || containsId(excludedItemVersions, row.item_version_id);
+
+  return {
+    cohortPolicy,
+    dataset: projectOpeningDataset({
+      scope, privacyEpoch, deletedTurnIds,
+      tables: {
+        ...tables,
+        opening_sources: rows("opening_sources").filter(row => !containsId(shredded, row.id)),
+        opening_teaching_activities: rows("opening_teaching_activities").filter(row => !referencesShreddedSource(row)
+          && !containsId(excludedTurns, field(row.create_intent, "sourceTurnId"))),
+        opening_learning_observations: rows("opening_learning_observations").filter(row => !referencesShreddedSource(row)
+          && !referencesExcludedItem(row) && !containsAnyId(excludedTurns, row.source_turn_ids)),
+        opening_learning_attempts: rows("opening_learning_attempts").filter(row => !referencesShreddedSource(row) && !referencesExcludedItem(row)),
+      },
+    }, pseudonym),
   };
 }

@@ -7,6 +7,7 @@ import {
   type CandidateStudyAction, type EvaluateCrnActionRoiInput, type ExamBlueprintV1,
   type ExamEvidenceRecord, type WholePaperCalibrationRecord,
 } from "../../exam-forecast";
+import type { SpeechTimingReceipt } from "../../multimodal-evidence";
 import type { ExamSelectionContext } from "./engine";
 import { examAttemptExposureQualification } from "./exposure-qualification";
 
@@ -132,6 +133,37 @@ export type ExamSprintSimulationInput = ExamSprintForecastEvidenceInput & {
   readonly numDraws?: number;
   readonly seed?: number;
 };
+
+export type ExamSprintSpeechTimingEvidenceInput = {
+  readonly blueprint: ExamBlueprintV1;
+  readonly learnerId: string;
+  readonly sectionId: string;
+  readonly partId?: string;
+  readonly receipt: SpeechTimingReceipt;
+  /** Timing provenance and calibration are verified by the supplying service. */
+  readonly verified: boolean;
+  readonly assisted: boolean;
+};
+
+export function toExamSprintSpeechTimingEvidence(input: ExamSprintSpeechTimingEvidenceInput): ExamEvidenceRecord | null {
+  const { blueprint, learnerId, sectionId, partId, receipt, verified, assisted } = input;
+  const section = blueprint.sections.find(section => section.sectionId === sectionId);
+  if (!verified || section?.scoringKind !== "rubric_band"
+    || (partId !== undefined && !section.parts.some(part => part.partId === partId))) return null;
+
+  const { receiptId, issuedAtMs, totalDurationMs, speechRateWordsPerMin, silenceDurationMs } = receipt;
+  if (!Number.isFinite(totalDurationMs) || totalDurationMs <= 0
+    || !Number.isFinite(speechRateWordsPerMin) || speechRateWordsPerMin <= 0
+    || !Number.isFinite(silenceDurationMs) || silenceDurationMs < 0 || silenceDurationMs > totalDurationMs) return null;
+  return {
+    evidenceId: receiptId, learnerId, sectionId, partId, evidenceKind: "speech_timing", observedAtMs: issuedAtMs,
+    countsTowardMastery: !assisted, assisted,
+    speechTimingReceipt: {
+      receiptId, partId, calibrated: true, durationSeconds: totalDurationMs / 1000,
+      speechRateWpm: speechRateWordsPerMin, pauseRatio: silenceDurationMs / totalDurationMs,
+    },
+  };
+}
 
 function defaultExamSprintDraws(blueprint: ExamBlueprintV1): number {
   let itemCount = 0;

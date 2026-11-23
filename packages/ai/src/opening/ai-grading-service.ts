@@ -5,6 +5,7 @@ import type { ModelGateway } from "./model-gateway";
 import { aiGradingInputSchema, aiGradingProposalSchema, type AnswerInterpretationMetadata,type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import { parseModelJson } from "./latex-json";
 import { copyGradingDiagnostic, logGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic } from "./provider";
+import { canGradeOpeningHandwriting, type OpeningMultimodalEvidenceHook } from "./multimodal-grading-bridge";
 import {
   evaluateCalibratedSubjectiveGrading, type OpeningRubricCalibrationEvidence, type OpeningRubricCalibrationHook,
   type VerifiedRubricSubmissionText,
@@ -36,6 +37,8 @@ export type OpeningAiGradingServiceDeps = {
   images(scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }): Promise<ProviderInput["imageParts"]>;
   /** Resolve precomputed rubric evidence for this answer revision. Return null for objective grading. */
   rubricCalibration?: OpeningRubricCalibrationHook;
+  /** Resolve server-owned handwriting evidence before any model spend. */
+  multimodalEvidence?: OpeningMultimodalEvidenceHook;
 };
 
 const conflict = (message: string, code = "CONFLICT") => Object.assign(new Error(message), { code });
@@ -128,6 +131,16 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
           throw error;
         }
       }
+      let handwritingVerified = true;
+      if (deps.multimodalEvidence) {
+        try {
+          handwritingVerified = canGradeOpeningHandwriting(rubricContext, await deps.multimodalEvidence(rubricContext));
+        } catch (cause) {
+          const error = conflict("暂时无法读取作答照片的核对资料。原答案已保存，请稍后重试。");
+          copyGradingDiagnostic(cause, error);
+          throw error;
+        }
+      }
       const rubricSubmission = calibration ? {
         ...calibration.submission, submissionId: context.observation.id,
         text: verifiedRubricText(rubricContext, calibration.verifiedSubmissionText),
@@ -165,7 +178,7 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
           input: buildAnswerGradingInput({ question: context.stem, answer: context.observation.answer,
             referenceText: context.referenceText, misconceptions: context.misconceptions, imageParts, imageRoles,interpretation:context.interpretation }),
           persistResult: async output => {
-            let proposal;
+            let proposal: AiGradingProposal;
             try {
               proposal = aiGradingProposalSchema.parse(parseModelJson(output.text));
             } catch {
@@ -181,6 +194,7 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
                 calibration: calibration.calibration,
               }).proposal;
             }
+            if (!handwritingVerified) proposal = { ...proposal, outcome: "unverified" };
             result = await deps.repository.apply(scope, input, unverifyUnpersistableProposal(proposal), modelLabel);
           },
         });

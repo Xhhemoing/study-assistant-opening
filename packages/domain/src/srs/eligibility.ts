@@ -1,6 +1,8 @@
 import type { ReviewCard, ReviewQueueMode, ReviewState } from "@aistudy/contracts";
 import { computeCardRetrievability } from "./scheduler";
 
+export { issueReviewQueueOfflineLease, reconcileReviewQueueOfflineOutbox, type IssueReviewQueueOfflineLeaseInput } from "./offline-lease-bridge";
+
 export const DEFAULT_RECOVERY_SESSION_CARD_CAP = 200;
 export const RECOVERY_BACKLOG_CARD_THRESHOLD = 200;
 export const SALVAGEABLE_RETRIEVABILITY_MIN = 0.35;
