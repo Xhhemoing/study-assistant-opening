@@ -14,7 +14,9 @@ import {
 import { adaptiveSkillIdentity, normalizeSkillLabelKey, normalizedSuggestionIdentity } from "./skill-identity";
 import { suggestionFeedbackIdentity } from "./suggestion-feedback";
 import { goalPlanningPriority, resolveGoalLearningContext } from "./goal-policy";
-import { revalidateAdaptiveRemedyClinics, type AdaptiveRemedyClinicCandidate } from "./remedy-clinic-bridge";
+import {
+  revalidateAdaptiveRemedyClinics, type AdaptiveRemedyClinicCandidate, type AdaptiveRemedyClinicValidation,
+} from "./remedy-clinic-bridge";
 
 export const MAX_DAILY_SUGGESTIONS = 3;
 /** Suggestions may fill at most this share of the day's free time, after committed tasks. */
@@ -51,6 +53,7 @@ export type ProposeAdaptiveTasksOptions = {
   /** Explicit same-day planning feedback. Does not imply a skill verdict or a skip. */
   suppressedSuggestionIdentities?: readonly string[];
   remedyClinics?: readonly AdaptiveRemedyClinicCandidate[];
+  remedyClinicValidation?: AdaptiveRemedyClinicValidation;
 };
 
 type Candidate = {
@@ -276,7 +279,7 @@ export function proposeAdaptiveTasks(
   let suggestedMinutes = 0;
   const suggestions: SuggestedTask[] = [];
 
-  const clinics = revalidateAdaptiveRemedyClinics(options.remedyClinics ?? []);
+  const clinics = revalidateAdaptiveRemedyClinics(options.remedyClinics ?? [], options.remedyClinicValidation);
   const suppressed = new Set(options.suppressedSuggestionIdentities ?? []);
   const proposedIdentities = new Set<string>();
   for (const candidate of collectCandidates(snapshot, options.pendingTasks, clinics).sort(compareCandidates)) {

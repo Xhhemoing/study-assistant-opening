@@ -56,7 +56,10 @@ export { nextLearningStep, captureNextLearningStep, learningPhaseForInput, withL
 export { resolveGoalLearningContext, goalPlanningPriority, goalPlanningReason } from "./goal-policy";
 export { toSupportedKnowledgeNodes, selectPrerequisiteRepair, resolvePrerequisiteDrilldown, type PrerequisiteDrilldownContext } from "./prerequisite-repair";
 export { buildAdaptivePlacement, type AdaptivePlacement, type AdaptivePlacementInput } from "./placement-bridge";
-export { generateAdaptiveRemedyClinic, revalidateAdaptiveRemedyClinics, type AdaptiveRemedyClinicCandidate } from "./remedy-clinic-bridge";
+export {
+  generateAdaptiveRemedyClinic, revalidateAdaptiveRemedyClinics,
+  type AdaptiveRemedyClinicCandidate, type AdaptiveRemedyClinicValidation,
+} from "./remedy-clinic-bridge";
 export { adaptiveSkillIdentity, normalizeSkillLabelKey } from "./skill-identity";
 export { toSnapshotEvidence } from "./snapshot-evidence";
 

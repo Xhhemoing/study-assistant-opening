@@ -202,10 +202,12 @@ it("applies the confirmed prerequisite repair and restores the original error wh
   }));
   const context = (correct: boolean): PrerequisiteDrilldownContext => ({
     probePool, observations: probePool.map(({ itemId }) => ({ itemId, observationId: `obs-${itemId}`, correct })),
-    originalContext: { originalAttemptId: "attempt", originalItemId: "problem", frozenDraftText: "x=", frozenCursorOffset: 2, startedAtMs: 0 },
+    originalContext: { originalAttemptId: original.id, originalItemId: "problem", frozenDraftText: "x=", frozenCursorOffset: 2, startedAtMs: 0 },
   });
   expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, now, { drilldown: context(false) }))
     .toMatchObject({ focusObservationId: original.id, prerequisiteRepair: { nodeId: "arithmetic", targetNodeId: "algebra" } });
+  source.observations = [...source.observations, { ...original, id: courseId, problemId: "another-problem",
+    verifiedCorrect: "yes", attemptedAt: "2026-10-16T09:00:00Z" }];
   const restored = teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, now, { drilldown: context(true) });
   expect(restored).toMatchObject({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: original.id });
   expect(restored?.prerequisiteRepair).toBeUndefined();

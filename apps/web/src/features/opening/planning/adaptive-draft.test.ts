@@ -62,7 +62,8 @@ function clinicDraftInput(): BuildAdaptiveDraftInput {
     })),
   }, { skillLabel: "不等式", requirementKey: "inequality" });
   expect(clinic).not.toBeNull();
-  return { ...draft, remedyClinics: [clinic!] };
+  return { ...draft, remedyClinics: [Object.freeze(clinic!)],
+    remedyClinicValidation: { currentPrivacyEpoch: 4, activeSources: new Map(activeSourcesMap) } };
 }
 
 describe("remedy clinic daily draft", () => {
@@ -84,15 +85,17 @@ describe("remedy clinic daily draft", () => {
     expect(JSON.stringify(buildAdaptiveDraft({ ...legacy, remedyClinics: [] }))).toBe(JSON.stringify(buildAdaptiveDraft(legacy)));
   });
 
-  it("drops a clinic immediately after revocation, version change, or privacy epoch change", () => {
+  it("removes a cached clinic from the draft when live source or privacy authority changes", () => {
     const input = clinicDraftInput();
-    const candidate = input.remedyClinics![0]!;
-    for (const clinic of [
-      { ...candidate, activeSources: new Map([["A", 1], ["probes", 1]]) },
-      { ...candidate, activeSources: new Map([["A", 1], ["B", 2], ["probes", 1]]) },
-      { ...candidate, currentPrivacyEpoch: 5 },
+    const live = input.remedyClinicValidation!;
+    expect(buildAdaptiveDraft(input).adaptive.suggestedTasks).toMatchObject([{ minutes: 14 }]);
+    for (const remedyClinicValidation of [
+      undefined,
+      { ...live, currentPrivacyEpoch: 5 },
+      { ...live, activeSources: new Map([["A", 1], ["probes", 1]]) },
+      { ...live, activeSources: new Map([["A", 1], ["B", 2], ["probes", 1]]) },
     ]) {
-      const draft = buildAdaptiveDraft({ ...input, remedyClinics: [clinic] });
+      const draft = buildAdaptiveDraft({ ...input, remedyClinicValidation });
       expect(draft.adaptive.suggestedTasks).toEqual([]);
       expect(draft.blocks).toEqual([]);
     }

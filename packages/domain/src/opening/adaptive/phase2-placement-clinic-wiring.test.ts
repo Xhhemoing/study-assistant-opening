@@ -121,7 +121,9 @@ describe("bounded prerequisite drilldown", () => {
     itemId, familyId: itemId, chapterId: "opening", requiredSkillIds: ["base"], slip: noise, guess: noise, estimatedSeconds: 30,
   });
   const probePool = [probe("less-informative", 0.4), probe("best", 0.05), probe("second", 0.1)];
-  const originalContext = { originalAttemptId: "attempt", originalItemId: "original", frozenDraftText: "x=", frozenCursorOffset: 2, startedAtMs: 0 };
+  const originalContext = { originalAttemptId: "obs-a", originalItemId: "prob-a", frozenDraftText: "x=", frozenCursorOffset: 2, startedAtMs: 0 };
+  const originalError = observation("obs-a", "不等式", { problemId: "prob-a", verifiedCorrect: "no" });
+  const otherSuccess = observation("obs-b", "不等式", { problemId: "prob-b", attemptedAt: "2026-11-21T12:00:00Z" });
   const response = (itemId: string, correct: boolean) => ({ observationId: `response-${itemId}`, itemId, correct, channel: "unassisted" as const });
   const input = {
     targetSkillLabel: "不等式", knowledgeNodes: nodes, goalContext: resolveGoalLearningContext(null, date),
@@ -153,21 +155,57 @@ describe("bounded prerequisite drilldown", () => {
     expect(nextProbe).toBeNull();
     expect(selectPrerequisiteRepair(input)?.nodeId).toBe("bridge");
     expect(selectPrerequisiteRepair({ ...input, drilldown: { probePool, observations, originalContext } })).toBeNull();
-    const decision = captureNextLearningStep({ ...noEvidence, observations: [observation("original-error", "不等式", { verifiedCorrect: "no" })], drilldownSnapshot: snapshot });
-    expect(decision.decision).toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "original-error" });
+    const decision = captureNextLearningStep({ ...noEvidence, observations: [originalError], drilldownSnapshot: snapshot });
+    expect(decision.decision).toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "obs-a" });
     expect(decision.candidates.at(-1)?.reasonCodes).toEqual(["drilldown_integration_step_restore"]);
     expect(nextLearningStep({ ...noEvidence, drilldownSnapshot: snapshot, learningPhase: "new_learning" }).activityKind).toBe("full_explain");
     const insufficient = { probePool: [], observations: [], originalContext };
     expect(resolvePrerequisiteDrilldown({ ...input, drilldown: insufficient })?.snapshot.rootCause).toBe("insufficient_diagnostic_evidence");
     expect(selectPrerequisiteRepair({ ...input, drilldown: insufficient })).toBeNull();
   });
+
+  it("binds the explanation and its receipt to the frozen incorrect attempt after another problem is solved", () => {
+    const { snapshot } = resolve([response("best", true), response("second", true)]);
+    const run = (rows: readonly SnapshotObservation[]) => captureNextLearningStep({
+      ...noEvidence, status: "observed_independent", observations: rows, drilldownSnapshot: snapshot,
+    });
+    const restored = run([otherSuccess, originalError]);
+    expect(restored.decision).toEqual({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: "obs-a" });
+    expect(restored.candidates.at(-1)).toMatchObject({
+      reasonCodes: ["drilldown_integration_step_restore"], evidenceRefs: ["observation:obs-a"],
+    });
+    const solved = { ...otherSuccess, id: "obs-a-solved", problemId: "prob-a" };
+    for (const rows of [[solved, originalError], [otherSuccess, { ...originalError, verifiedCorrect: "unknown" as const }],
+      [otherSuccess, { ...originalError, verifiedCorrect: "yes" as const }],
+      [otherSuccess, { ...originalError, usableForCurrentVersion: "no" as const }]]) {
+      const decision = run(rows);
+      expect(decision.decision).toEqual({ activityKind: "transfer_check", reasonCode: "independent", focusObservationId: null });
+      expect(decision.candidates.flatMap(candidate => candidate.reasonCodes)).not.toContain("drilldown_integration_step_restore");
+    }
+  });
+
+  it("falls back to the original item for an external attempt id and respects a later success on that item", () => {
+    const { snapshot } = resolve([response("best", true), response("second", true)]);
+    const drilldownSnapshot = { ...snapshot, restoreContext: { ...originalContext, originalAttemptId: "external-attempt-key" } };
+    const unmatchedError = { ...otherSuccess, verifiedCorrect: "no" as const };
+    const run = (rows: readonly SnapshotObservation[]) => captureNextLearningStep({
+      ...noEvidence, observations: rows, drilldownSnapshot,
+    });
+    expect(run([unmatchedError, originalError]).decision.focusObservationId).toBe("obs-a");
+    expect(run([{ ...otherSuccess, problemId: "prob-a" }, originalError]).decision.focusObservationId).toBeNull();
+    expect(run([unmatchedError]).candidates.at(-1)?.reasonCodes).toEqual(["verified_incorrect"]);
+  });
 });
 
 const skillLabel = "移项";
 const requirementKey = "move-term";
 const ruleId = "negative_sign_flip";
+const clinicValidation = () => ({
+  currentPrivacyEpoch: 4,
+  activeSources: new Map([["chapter-a", 1], ["chapter-b", 1], ["probes", 1]]),
+});
 const clinicFixture = () => {
-  const activeSourcesMap = new Map([["chapter-a", 1], ["chapter-b", 1], ["probes", 1]]);
+  const { currentPrivacyEpoch, activeSources: activeSourcesMap } = clinicValidation();
   const candidateProbes: ClinicCandidateProbe<number, string>[] = [3, 5].map(n => ({
     probeId: `p${n}`, requirementKey, prompt: `给定 -x ≤ ${n}，求 x 的范围。`, targetMisconceptionId: ruleId,
     input: n, correctModel: { id: "correct", label: "正确", role: "correct", predict: input => `x ≥ ${-input}` },
@@ -177,17 +215,17 @@ const clinicFixture = () => {
     sourceRefs: [{ sourceId: "probes", sourceVersion: 1 }],
   }));
   const candidate = generateAdaptiveRemedyClinic({
-    learnerId: "learner", courseId, ruleId, currentPrivacyEpoch: 1, activeSourcesMap, candidateProbes,
+    learnerId: "learner", courseId, ruleId, currentPrivacyEpoch, activeSourcesMap, candidateProbes,
     verifyRuleViolation: attempt => attempt.excerpt.includes("反向错误"),
     attempts: ["chapter-a", "chapter-a", "chapter-b"].map((chapterId, i) => ({
       attemptId: `attempt-${i}`, rootAttemptId: `root-${i}`, learnerId: "learner", courseId, ruleId, chapterId,
-      localDate: i === 2 ? date : "2026-11-20", assisted: false, privacyEpoch: 1,
+      localDate: i === 2 ? date : "2026-11-20", assisted: false, privacyEpoch: currentPrivacyEpoch,
       excerpt: `反向错误 ${i}`, invariantSummary: "两边同乘负数时不等号反向。",
       sourceRefs: [{ sourceId: chapterId, sourceVersion: 1 }],
     })),
   }, { skillLabel, requirementKey });
   expect(candidate?.clinic.steps.map(step => step.durationMinutes)).toEqual([4, 3, 7]);
-  return candidate!;
+  return Object.freeze(candidate!);
 };
 const weakSkill = (label: string, key?: string) => ({
   skillLabel: label, requirementKey: key, status: "needs_review" as const, lastObservedAt: null, recentAssistance: [],
@@ -202,7 +240,8 @@ const options = { autonomy: "copilot" as const, capacityMinutes: 100, committedM
 describe("adaptive clinic suggestions", () => {
   it("schedules one intact clinic before ordinary weaknesses with the existing suggestion identity", () => {
     const clinic = clinicFixture();
-    const suggestions = proposeAdaptiveTasks(snapshot, { ...options, remedyClinics: [clinic, clinic] }).suggestions;
+    const plan = { ...options, remedyClinics: [clinic, clinic], remedyClinicValidation: clinicValidation() };
+    const suggestions = proposeAdaptiveTasks(snapshot, plan).suggestions;
     expect(suggestions).toHaveLength(2);
     expect(suggestions[0]).toMatchObject({
       key: `planner:${date}:${suggestionIdentity("weak_skill", courseId, skillLabel, requirementKey)}`,
@@ -215,29 +254,37 @@ describe("adaptive clinic suggestions", () => {
   it("keeps clinics ahead of ordinary weak skills at equal goal priority even when the ordinary course is behind", () => {
     const behind = { ...snapshot.courses[0]!, courseId: "behind", skills: [weakSkill("向量")],
       goal: { targetDate: null, weeklyMinutes: 100 } };
-    const plan = { ...options, remedyClinics: [clinicFixture()] };
+    const plan = { ...options, remedyClinics: [clinicFixture()], remedyClinicValidation: clinicValidation() };
     const samePriority = { ...snapshot, courses: [...snapshot.courses, behind] };
     expect(proposeAdaptiveTasks(samePriority, plan).suggestions[0]).toMatchObject({ courseId, minutes: 14 });
     const higherPriority = { ...snapshot, courses: [...snapshot.courses, { ...behind, goal: { ...behind.goal, priority: 1 } }] };
     expect(proposeAdaptiveTasks(higherPriority, plan).suggestions[0]).toMatchObject({ courseId: "behind", minutes: 25 });
   });
 
-  it("revalidates source revocation, versions, probes, and privacy epochs at planning time", () => {
+  it("drops the same cached clinic when live authority is missing or changes", () => {
     const clinic = clinicFixture();
     const baseline = proposeAdaptiveTasks(snapshot, options);
-    for (const candidate of [
-      { ...clinic, activeSources: new Map([["chapter-a", 1], ["probes", 1]]) },
-      { ...clinic, activeSources: new Map([["chapter-a", 1], ["chapter-b", 2], ["probes", 1]]) },
-      { ...clinic, activeSources: new Map([["chapter-a", 1], ["chapter-b", 1]]) },
-      { ...clinic, currentPrivacyEpoch: clinic.currentPrivacyEpoch + 1 },
-    ]) expect(proposeAdaptiveTasks(snapshot, { ...options, remedyClinics: [candidate] })).toEqual(baseline);
+    const plan = { ...options, remedyClinics: [clinic] };
+    const live = clinicValidation();
+    expect(proposeAdaptiveTasks(snapshot, { ...plan, remedyClinicValidation: live }).suggestions[0]?.minutes).toBe(14);
+    for (const remedyClinicValidation of [
+      undefined,
+      { ...live, currentPrivacyEpoch: 5 },
+      { ...live, activeSources: new Map([["chapter-a", 1], ["probes", 1]]) },
+      { ...live, activeSources: new Map([["chapter-a", 1], ["chapter-b", 2], ["probes", 1]]) },
+      { ...live, activeSources: new Map([["chapter-a", 1], ["chapter-b", 1]]) },
+    ]) {
+      const input = { ...plan, remedyClinicValidation };
+      expect(proposeAdaptiveTasks(snapshot, input)).toEqual(baseline);
+    }
+    expect(clinic).toEqual({ clinic: expect.any(Object), skillLabel, requirementKey });
   });
 
   it("respects proposal controls and skips clinics that would be shortened", () => {
     const clinic = clinicFixture();
     const course = snapshot.courses[0]!;
     const exam = { ...snapshot, courses: [{ ...course, goal: { kind: "final-exam" as const, targetDate: "2026-11-23", weeklyMinutes: 0 }, skills: [] }] };
-    const plan = { ...options, remedyClinics: [clinic] };
+    const plan = { ...options, remedyClinics: [clinic], remedyClinicValidation: clinicValidation() };
     const identity = suggestionIdentity("weak_skill", courseId, skillLabel, requirementKey);
     const suppression = suggestionFeedbackIdentity({ kind: "weak_skill", courseId, skillLabel, requirementKey });
     expect(proposeAdaptiveTasks(exam, { ...plan, capacityMinutes: 17 }).suggestions).toEqual([]);

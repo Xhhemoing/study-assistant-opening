@@ -8,10 +8,14 @@ import {
 
 export type AdaptiveRemedyClinicCandidate = {
   clinic: RemedyClinicSessionV1;
-  currentPrivacyEpoch: number;
-  activeSources: ActiveSourcesMap;
   skillLabel: string;
   requirementKey?: string | null;
+};
+
+/** Current workspace authority supplied for this planning read. */
+export type AdaptiveRemedyClinicValidation = {
+  readonly currentPrivacyEpoch: number;
+  readonly activeSources: ActiveSourcesMap;
 };
 
 export function generateAdaptiveRemedyClinic<TInput, TObservable>(
@@ -19,20 +23,20 @@ export function generateAdaptiveRemedyClinic<TInput, TObservable>(
   target: Pick<AdaptiveRemedyClinicCandidate, "skillLabel" | "requirementKey">,
 ): AdaptiveRemedyClinicCandidate | null {
   const { clinic } = generateRemedyClinic(input);
-  return clinic && {
-    ...target, clinic,
-    currentPrivacyEpoch: input.currentPrivacyEpoch,
-    activeSources: input.activeSourcesMap,
-  };
+  const { skillLabel, requirementKey } = target;
+  return clinic && { clinic, skillLabel, ...(requirementKey !== undefined ? { requirementKey } : {}) };
 }
 
 export function revalidateAdaptiveRemedyClinics(
   candidates: readonly AdaptiveRemedyClinicCandidate[],
+  validation?: AdaptiveRemedyClinicValidation,
 ): AdaptiveRemedyClinicCandidate[] {
-  return candidates.flatMap(candidate => {
-    const clinic = revalidateRemedyClinic(candidate.clinic, candidate.activeSources, candidate.currentPrivacyEpoch);
+  if (!validation) return [];
+  const { activeSources, currentPrivacyEpoch } = validation;
+  return candidates.flatMap(({ clinic: cachedClinic, skillLabel, requirementKey }) => {
+    const clinic = revalidateRemedyClinic(cachedClinic, activeSources, currentPrivacyEpoch);
     // A new privacy epoch requires a fresh clinic for adaptive planning.
-    return clinic.status === "active" && clinic.createdPrivacyEpoch === candidate.currentPrivacyEpoch
-      ? [{ ...candidate, clinic }] : [];
+    return clinic.status === "active" && clinic.createdPrivacyEpoch === currentPrivacyEpoch
+      ? [{ clinic, skillLabel, ...(requirementKey !== undefined ? { requirementKey } : {}) }] : [];
   });
 }

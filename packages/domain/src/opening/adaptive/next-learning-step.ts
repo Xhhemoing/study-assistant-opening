@@ -1,6 +1,7 @@
+import type { FrozenOriginalContext } from "../../diagnostic-placement";
 import type { LearningDecisionCandidate } from "../learning-decision";
 import { remediationLimitEvidence } from "../remediation-cycle";
-import type { LearningPhase, NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
+import type { LearningPhase, NextLearningStep, NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 
 // Restored D5 assisted-success policy plus evidenced D4 remediation cycles.
 export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-6";
@@ -22,6 +23,19 @@ export function withLearningPhase(decision: NextLearningStep, input: NextLearnin
   if (input.learningPhase === undefined && input.dueRetest === undefined && input.phaseSource === undefined) return decision;
   const phase = learningPhaseForInput(input);
   return { ...decision, phase: phase.phase, phaseSource: phase.source };
+}
+
+function unresolvedOriginalError(observations: readonly SnapshotObservation[], context: FrozenOriginalContext): SnapshotObservation | undefined {
+  const attemptIndex = observations.findIndex(row => row.id === context.originalAttemptId);
+  // An external attempt key can still be resolved by its original problem identity.
+  const index = attemptIndex >= 0 ? attemptIndex : observations.findIndex(row =>
+    row.problemId === context.originalItemId && row.verifiedCorrect === "no");
+  const original = observations[index];
+  if (original?.verifiedCorrect !== "no") return undefined;
+
+  const solved = observations.slice(0, index).some(row => row.verifiedCorrect === "yes"
+    && (row.problemId === context.originalItemId || (original.problemId !== null && row.problemId === original.problemId)));
+  return solved ? undefined : original;
 }
 
 /** Capture only branches actually evaluated, in priority order; later rules did not compete. */
@@ -64,9 +78,12 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
   const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
   const latest = observations[0], refs = observations.map(row => `observation:${row.id}`);
   if (input.drilldownSnapshot?.status === "restore_original_attempt"
-    && input.drilldownSnapshot.rootCause === "integration_step_coordination") {
-    check("targeted_explain", true, "drilldown_integration_step_restore", "drilldown_integration_step_restore", latest ? [`observation:${latest.id}`] : []);
-    return result("targeted_explain", "verified_incorrect", latest?.id ?? null);
+    && input.drilldownSnapshot.rootCause === "integration_step_coordination" && input.drilldownSnapshot.restoreContext) {
+    const original = unresolvedOriginalError(observations, input.drilldownSnapshot.restoreContext);
+    if (original) {
+      check("targeted_explain", true, "drilldown_integration_step_restore", "drilldown_integration_step_restore", [`observation:${original.id}`]);
+      return result("targeted_explain", "verified_incorrect", original.id);
+    }
   }
   if (!latest && placement?.route === "inferred_skip_candidate") {
     check("transfer_check", true, "placement_inferred_skip_holdout_check", "placement_inferred_skip_holdout_check");
