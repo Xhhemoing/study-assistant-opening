@@ -4,6 +4,7 @@ import * as dataset from "@aistudy/domain/opening/deidentified-dataset";
 import * as forecast from "@aistudy/domain/opening/exam-sprint/score-forecast-bridge";
 import { issueReviewQueueOfflineLease, reconcileReviewQueueOfflineOutbox } from "@aistudy/domain/srs/offline-lease-bridge";
 import { describe, expect, it } from "vitest";
+import { isIndependentExamEvidence } from "../exam-forecast/simulator";
 import { issueSpeechTimingReceipt } from "../multimodal-evidence";
 import { createInitialOfflineFsrsSnapshot } from "../offline-companion-bridge";
 import type { CryptoShredTombstoneReceipt } from "../resilience-canary-shredding";
@@ -349,9 +350,14 @@ it("follows source lineage from source-free turns through derived activities, ob
 
 describe("persisted dataset provenance", () => {
   const memoryId = "abcdef12-3456-4789-abcd-ef1234567890";
+  const upstreamId = "abcdef12-3456-4789-abcd-ef1234567891";
+  const missingTurnId = "abcdef12-3456-4789-abcd-ef1234567892";
+  const knownSourceId = "abcdef12-3456-4789-abcd-ef1234567893";
+  const missingSourceId = "abcdef12-3456-4789-abcd-ef1234567894";
+  const shreddedSourceId = "abcdef12-3456-4789-abcd-ef1234567895";
   const memoryRefs = [{ memoryDependencyIds: [memoryId.toUpperCase()] }];
   const turn = (id: string, links: Record<string, unknown> = {}) => ({
-    ...owner, id, conversation_id: "conversation", source_ids: [], role: "assistant", ...links,
+    ...owner, id, conversation_id: "conversation", source_ids: [], role: "assistant", context_source_refs: [], ...links,
   });
   const activity = (id: string) => ({ ...owner, id, source_ids: [] });
   const project = (
@@ -365,7 +371,7 @@ describe("persisted dataset provenance", () => {
   const boundBlock = { content: { citationBinding: { sourceId: " SHRED " } } };
   it.each([
     { origin: "republished note provenance", lineage: {
-      opening_note_provenance: [{ ...owner, document_id: " DOCUMENT ", context_source_refs: [{ sourceId: "shred", sourceVersion: 1 }] }],
+      opening_note_provenance: [{ ...owner, document_id: " DOCUMENT ", context_source_refs: [{ sourceId: shreddedSourceId, sourceVersion: 1 }] }],
     } },
     { origin: "library document deletion", lineage: {
       library_documents: [{ ...owner, id: "document", deleted_at: time }],
@@ -398,25 +404,155 @@ describe("persisted dataset provenance", () => {
         opening_learning_sessions: ["through-unit", "through-spec"].map(id => ({ ...owner, id, activity_id: id })),
         opening_turns: [turn("through-unit", { learning_session_id: "through-unit" }),
           turn("through-spec", { learning_session_id: "through-spec" }), turn("keep")],
-      }, origin === "library document deletion" ? {} : { tombstoneReceipts: [tombstone] });
+      }, origin === "library document deletion" ? {} : {
+        tombstoneReceipts: [{ ...tombstone, shreddedSourceIds: ["shred", shreddedSourceId] }],
+      });
       expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
       expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
     },
   );
 
+  const published = {
+    opening_teaching_units: [{ ...owner, id: "published-unit", document_id: "document" }],
+    opening_teaching_activity_specs: [{ ...owner, activity_id: "published", teaching_unit_id: "published-unit" }],
+    opening_teaching_activities: [activity("published")],
+    opening_learning_sessions: [{ ...owner, id: "published-session", activity_id: "published" }],
+    opening_learning_attempts: [{ ...owner, id: "published", activity_id: "published", source_ids: [] }],
+  };
+  const publishedTurn = turn("published", { learning_session_id: "published-session" });
+
+  it.each(["live", "blocks", "blocks_snapshot"] as const)("follows chunk-only citations from %s", storage => {
+    const block = { content: { citedChunkIds: ["keep-chunk", " SHRED-CHUNK "] } };
+    const storageRows = storage === "live"
+      ? { library_blocks: [{ ...owner, document_id: "document", ...block }] }
+      : { library_revisions: [{ ...owner, id: "revision", document_id: "document", [storage]: [block] }] };
+    const result = project({
+      ...published, ...storageRows,
+      opening_source_chunks: [{ id: "keep-chunk", source_id: "keep" }, { id: "shred-chunk", source_id: "shred" }],
+      opening_turns: [publishedTurn, turn("keep")],
+    }, { tombstoneReceipts: [tombstone] });
+    expect(result.coursePackageQuality).toEqual([]);
+    expect(result.answerSequences).toEqual([]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
+  it.each([
+    { reason: "not an array", citedChunkIds: "keep-chunk", visible: false },
+    { reason: "a null entry", citedChunkIds: [null], visible: false },
+    { reason: "an empty entry", citedChunkIds: [" "], visible: false },
+    { reason: "a purged chunk", citedChunkIds: ["missing"], visible: false },
+    { reason: "a chunk in another workspace", citedChunkIds: ["foreign"], visible: false },
+    { reason: "a workspace chunk", citedChunkIds: [" KEEP-CHUNK "], visible: true },
+    { reason: "an explicitly empty list", citedChunkIds: [], visible: true },
+  ])("checks saved block chunk lineage for $reason", ({ citedChunkIds, visible }) => {
+    const result = project({
+      ...published,
+      opening_sources: [{ ...owner, id: "keep" }, { ...owner, workspace_id: "foreign", id: "foreign-source" }],
+      opening_source_chunks: [{ id: "keep-chunk", source_id: "keep" }, { id: "foreign", source_id: "foreign-source" }],
+      library_revisions: [{ id: "revision", document_id: "document", blocks: [{ content: { citedChunkIds } }] }],
+      opening_learning_attempts: [...published.opening_learning_attempts,
+        { ...owner, id: "revision", activity_id: "keep", teaching_revision_id: "revision", source_ids: [] }],
+      opening_teaching_activities: [...published.opening_teaching_activities, activity("keep")],
+      opening_turns: [publishedTurn, turn("keep")],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(visible ? ["activity:published", "activity:keep"] : ["activity:keep"]);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(visible ? ["attempt:published", "attempt:revision"] : []);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(visible ? ["turn:keep", "turn:published"] : ["turn:keep"]);
+  });
+
+  it("excludes problem and item dependents when their chunks are the only missing lineage", () => {
+    const result = project({
+      opening_source_chunks: [],
+      opening_problem_refs: [{ ...owner, problem_id: "problem", chunk_id: "missing" }],
+      opening_learning_item_versions: [{ ...owner, id: "item", chunk_id: "missing" }],
+      opening_teaching_activities: [activity("keep")],
+      opening_learning_attempts: [
+        { id: "keep" }, { id: "problem", problem_id: "problem" }, { id: "item", item_version_id: "item" },
+      ].map(attempt => ({ ...owner, activity_id: "keep", source_ids: [], ...attempt })),
+    });
+    expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:keep"]);
+  });
+
+  it("excludes turns with purged direct or citation chunk references in a supplied inventory", () => {
+    const result = project({
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_source_chunks: [{ id: "present", source_id: knownSourceId }],
+      opening_turns: [turn("direct", { chunk_id: "missing" }), turn("present", { chunk_id: "PRESENT" }),
+        turn("citation", { citations: [{ sourceId: knownSourceId, sourceVersion: 1, chunkId: "missing" }] }),
+        turn("media-citation", { citations: [{ sourceId: knownSourceId, sourceVersion: 1, chunkId: "present", keyframeChunkId: "missing" }] })],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:present"]);
+  });
+
+  it.each([
+    { reason: "unknown context", refs: null, visible: false },
+    { reason: "a non-array context", refs: "[]", visible: false },
+    { reason: "a malformed source ref", refs: [{ sourceId: knownSourceId }], visible: false },
+    { reason: "a malformed memory list", refs: [{ memoryDependencyIds: memoryId }], visible: false },
+    { reason: "a malformed memory ID", refs: [{ memoryDependencyIds: [null] }], visible: false },
+    { reason: "a missing memory", refs: memoryRefs, visible: false },
+    { reason: "a versioned workspace source", refs: [{ sourceId: knownSourceId, sourceVersion: 0 }], visible: true },
+    { reason: "an empty context", refs: [], visible: true },
+    { reason: "valid publication metadata", refs: [{ publicationCardIds: [knownSourceId] }], visible: true },
+  ])("checks republished note lineage for $reason", ({ refs, visible }) => {
+    const result = project({
+      ...published,
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_note_provenance: [{ ...owner, document_id: "document", context_source_refs: refs }],
+      opening_memories: [{ ...owner, workspace_id: "foreign", id: memoryId, source_turn_ids: [upstreamId] }],
+      opening_turns: [publishedTurn, turn("keep")],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(visible ? ["activity:published"] : []);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(visible ? ["attempt:published"] : []);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(visible ? ["turn:keep", "turn:published"] : ["turn:keep"]);
+  });
+
   it("follows a deleted source turn through a documentless memory and a republished note's memory dependencies", () => {
     const result = project({
-      opening_memories: [{ ...owner, id: memoryId, source_turn_ids: [" SOURCE-TURN "] }],
+      opening_memories: [{ ...owner, id: memoryId, source_turn_ids: [upstreamId.toUpperCase()] }],
       opening_note_provenance: [{ document_id: "document", context_source_refs: memoryRefs }],
       opening_teaching_activity_specs: [{ ...owner, activity_id: "published", document_id: "document" }],
       opening_teaching_activities: [activity("published")],
-      opening_turns: [turn("source-turn", { role: "user" }), turn("memory-dependent", { context_source_refs: memoryRefs }), turn("keep")],
-    }, { deletedTurnIds: ["source-turn"] });
+      opening_turns: [turn(upstreamId, { role: "user" }), turn("memory-dependent", { context_source_refs: memoryRefs }), turn("keep")],
+    }, { deletedTurnIds: [upstreamId] });
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
     expect(result.coursePackageQuality).toEqual([]);
   });
 
-  const memory = { ...owner, id: memoryId, status: "active", source_turn_ids: ["upstream"] };
+  it("excludes memory consumers when a user source turn loses its referenced source", () => {
+    const result = project({
+      opening_sources: [],
+      opening_memories: [{ ...owner, id: memoryId, source_turn_ids: [upstreamId] }],
+      opening_turns: [turn(upstreamId, { role: "user", source_ids: [missingSourceId], context_source_refs: null }),
+        turn("consumer", { context_source_refs: memoryRefs }), turn("keep")],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
+  const memory = { ...owner, id: memoryId, status: "active", source_turn_ids: [upstreamId] };
+
+  it.each([
+    { reason: "a hard-deleted turn", ids: [upstreamId, missingTurnId], visible: false },
+    { reason: "a null turn ID", ids: [upstreamId, null], visible: false },
+    { reason: "a numeric turn ID", ids: [1], visible: false },
+    { reason: "a non-UUID turn ID", ids: ["keep"], visible: false },
+    { reason: "a non-array turn list", ids: upstreamId, visible: false },
+    { reason: "no source turns", ids: [], visible: false },
+    { reason: "a surviving source turn", ids: [upstreamId.toUpperCase()], visible: true },
+  ])("checks memory lineage for $reason", ({ ids, visible }) => {
+    const result = project({
+      ...published,
+      opening_memories: [{ ...memory, source_turn_ids: ids }],
+      opening_note_provenance: [{ ...owner, document_id: "document", context_source_refs: memoryRefs }],
+      opening_turns: [turn(upstreamId, { role: "user" }), turn("keep"),
+        turn("consumer", { context_source_refs: memoryRefs }), publishedTurn,
+        turn(missingTurnId, { workspace_id: "foreign", role: "user" })],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(visible ? ["activity:published"] : []);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(visible ? ["attempt:published"] : []);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(visible
+      ? [`turn:${upstreamId}`, "turn:consumer", "turn:keep", "turn:published"] : [`turn:${upstreamId}`, "turn:keep"]);
+  });
   it.each([
     { origin: "a deleted memory", lineage: { opening_memories: [{ ...memory, status: "deleted" }] } },
     { origin: "an explicit memory exclusion", lineage: { opening_privacy_exclusions: [{ ...owner, memory_id: memoryId }] } },
@@ -433,9 +569,9 @@ describe("persisted dataset provenance", () => {
     "excludes consumers of $origin without excluding the upstream turn", ({ lineage }) => {
       const result = project({
         ...lineage,
-        opening_turns: [turn("upstream", { role: "user" }), turn("memory-dependent", { context_source_refs: memoryRefs })],
+        opening_turns: [turn(upstreamId, { role: "user" }), turn("memory-dependent", { context_source_refs: memoryRefs })],
       });
-      expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:upstream"]);
+      expect(result.dialogueEvaluation.map(row => row.identity)).toEqual([`turn:${upstreamId}`]);
     },
   );
 
@@ -448,6 +584,28 @@ describe("persisted dataset provenance", () => {
       ],
     });
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:legacy"]);
+  });
+
+  it.each([
+    { reason: "unknown assistant context", data: { context_source_refs: null } },
+    { reason: "omitted assistant context", data: { context_source_refs: undefined } },
+    { reason: "a non-array assistant context", data: { context_source_refs: {} } },
+    { reason: "non-array citations", data: { citations: {} } },
+    { reason: "a citation missing a version", data: { citations: [{ sourceId: knownSourceId }] } },
+    { reason: "a citation with an invalid version", data: { citations: [{ sourceId: knownSourceId, sourceVersion: -1 }] } },
+    { reason: "a citation with an invalid source ID", data: { citations: [{ sourceId: " ", sourceVersion: 1 }] } },
+    { reason: "a citation with an unavailable source", data: { citations: [{ sourceId: missingSourceId, sourceVersion: 1 }] } },
+  ])("drops a turn and its dependent records for $reason", ({ data }) => {
+    const result = project({
+      opening_sources: [{ ...owner, id: knownSourceId }, { ...owner, id: missingSourceId, workspace_id: "foreign" }],
+      opening_turns: [turn("affected", data), turn("keep-assistant"), turn("keep-user", { role: "user", context_source_refs: null }),
+        turn("keep-citation", { citations: [{ sourceId: knownSourceId.toUpperCase(), sourceVersion: 0 }] })],
+      opening_teaching_activities: [{ ...activity("derived"), create_intent: { sourceTurnId: "affected" } }],
+      opening_learning_attempts: [{ ...owner, id: "derived", activity_id: "derived", source_ids: [] }],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep-assistant", "turn:keep-citation", "turn:keep-user"]);
+    expect(result.coursePackageQuality).toEqual([]);
+    expect(result.answerSequences).toEqual([]);
   });
 
   it.each([
@@ -505,7 +663,7 @@ describe("persisted dataset provenance", () => {
   });
 });
 
-it("admits a verified speech receipt only in a configured rubric section and strips transcript material", () => {
+it("admits a verified speech-only receipt for speaking and strips transcript material", () => {
   const receipt = issueSpeechTimingReceipt({
     receiptId: "speaking-receipt", issuedAtMs, totalOriginalDurationMs: 2000,
     voicedSegments: [{ originalStartMs: 200, originalEndMs: 1500, strippedStartMs: 0, strippedEndMs: 1300 }],
@@ -515,7 +673,9 @@ it("admits a verified speech receipt only in a configured rubric section and str
   const speaking = forecast.toExamSprintSpeechTimingEvidence({ ...input, sectionId: "speaking" });
   expect(speaking).toMatchObject({ evidenceKind: "speech_timing", sectionId: "speaking", countsTowardMastery: true,
     speechTimingReceipt: { receiptId: "speaking-receipt", durationSeconds: 2, speechRateWpm: 30, calibrated: true } });
+  if (speaking) expect(isIndependentExamEvidence(speaking)).toBe(true);
   expect(JSON.stringify(speaking)).not.toContain("private-word");
+  expect(forecast.toExamSprintSpeechTimingEvidence({ ...input, sectionId: "writing" })).toBeNull();
   expect(forecast.toExamSprintSpeechTimingEvidence({ ...input, sectionId: "reading" })).toBeNull();
   expect(forecast.toExamSprintSpeechTimingEvidence({ ...input, sectionId: "speaking", verified: false })).toBeNull();
 });

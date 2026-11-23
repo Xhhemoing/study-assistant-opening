@@ -148,7 +148,7 @@ export type ExamSprintSpeechTimingEvidenceInput = {
 export function toExamSprintSpeechTimingEvidence(input: ExamSprintSpeechTimingEvidenceInput): ExamEvidenceRecord | null {
   const { blueprint, learnerId, sectionId, partId, receipt, verified, assisted } = input;
   const section = blueprint.sections.find(section => section.sectionId === sectionId);
-  if (!verified || section?.scoringKind !== "rubric_band"
+  if (!verified || sectionId !== "speaking" || section?.scoringKind !== "rubric_band"
     || (partId !== undefined && !section.parts.some(part => part.partId === partId))) return null;
 
   const { receiptId, issuedAtMs, totalDurationMs, speechRateWordsPerMin, silenceDurationMs } = receipt;
