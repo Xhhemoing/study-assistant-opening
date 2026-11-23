@@ -63,6 +63,8 @@ export { MODEL_TASKS, modelTaskSpec, tutorModelTask, type ModelInputKind, type M
 export { buildAnswerGradingInput } from "./opening/answer-grading";
 export { buildWorkedExampleProviderInput, parseWorkedExampleOutput, type WorkedExampleProducerInput } from "./opening/worked-example-producer";
 export { createOpeningAiGradingService, type OpeningAiGradingServiceDeps } from "./opening/ai-grading-service";
+export * from "./opening/rubric-grading-bridge";
+export * from "./rubric-calibration";
 export { runSystemQuery, renderSystemQuery, SYSTEM_QUERY_TOOLS, SYSTEM_QUERY_LIMITS, type SystemQueryReader, type SystemQueryService, type SystemQueryFocus, type SystemQueryClock, type SystemQueryPlanner } from "./opening/system-query-agent";
 export {
   createModelGateway,

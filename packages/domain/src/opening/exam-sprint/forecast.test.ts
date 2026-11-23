@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ExamPaper } from "@aistudy/contracts";
 import { forecastExamTopics } from "./forecast";
+import { createExamSprintState } from "./engine";
+import { EXAM_SPRINT_PACK } from "./catalog";
 
 function paper(id: string, overrides: Partial<ExamPaper> = {}): ExamPaper {
   return { id, courseId: "course", sourceId: `source-${id}`, sourceVersion: 1, teacher: "Teacher A", year: 2025,
@@ -8,6 +10,19 @@ function paper(id: string, overrides: Partial<ExamPaper> = {}): ExamPaper {
 }
 
 describe("historical exam topic forecast", () => {
+  it("adds an independent score forecast only when explicitly requested", () => {
+    const papers = [paper("history")];
+    const skillIds = ["limits"];
+    const topicForecast = forecastExamTopics(papers, skillIds, "Teacher A");
+    expect(topicForecast).not.toHaveProperty("scoreForecast");
+    const { scoreForecast, ...topicsWithOptions } = forecastExamTopics(papers, skillIds, "Teacher A", {
+      state: createExamSprintState("2026-10-17T08:00:00Z"), pack: EXAM_SPRINT_PACK,
+      workspaceId: "workspace", learnerId: "learner", examAtMs: Date.parse("2026-10-18T08:00:00Z"),
+    });
+    expect(topicsWithOptions).toEqual(topicForecast);
+    expect(scoreForecast).toMatchObject({ status: "insufficient_independent_evidence", calibrationCount: 0 });
+  });
+
   it("does not invent a probability from exercises, samples or an unspecified teacher", () => {
     const materials = [paper("sample", { kind: "sample" }), paper("practice", { kind: "exercise" })];
     const result = forecastExamTopics(materials, ["limits"], "Teacher A");

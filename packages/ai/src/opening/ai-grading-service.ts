@@ -5,15 +5,20 @@ import type { ModelGateway } from "./model-gateway";
 import { aiGradingInputSchema, aiGradingProposalSchema, type AnswerInterpretationMetadata,type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import { parseModelJson } from "./latex-json";
 import { copyGradingDiagnostic, logGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic } from "./provider";
+import {
+  evaluateCalibratedSubjectiveGrading, type OpeningRubricCalibrationEvidence, type OpeningRubricCalibrationHook,
+  type VerifiedRubricSubmissionText,
+} from "./rubric-grading-bridge";
 
 type GatewayOptions = Parameters<ModelGateway["call"]>[2];
+type RubricContext = Parameters<OpeningRubricCalibrationHook>[0];
 /** Structural boundary: AI must not import database (database already uses AI). */
 export type OpeningAiGradingServiceDeps = {
   repository: {
     context(scope: Scope, input: AiGradingInput): Promise<{
-      observation: LearningObservation; existing: LearningObservation | null;
+      observation: RubricContext["observation"]; existing: LearningObservation | null;
       stem: string; referenceText: string; misconceptions: TeachingMisconception[];
-      workSource: { id: string; version: number; physicalPage: number } | null;
+      workSource: RubricContext["workSource"];
       /** Current owned visual evidence from the immutable question/reference binding. */
       referenceSources?: { sourceId: string; sourceVersion: number; physicalPage: number }[];
       answerRevision: number; operationId: string;
@@ -29,6 +34,8 @@ export type OpeningAiGradingServiceDeps = {
   gateway: Pick<ModelGateway, "call">;
   budget(scope: Scope): GatewayOptions["budget"];
   images(scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }): Promise<ProviderInput["imageParts"]>;
+  /** Resolve precomputed rubric evidence for this answer revision. Return null for objective grading. */
+  rubricCalibration?: OpeningRubricCalibrationHook;
 };
 
 const conflict = (message: string, code = "CONFLICT") => Object.assign(new Error(message), { code });
@@ -54,6 +61,20 @@ function unverifyUnpersistableProposal(proposal: AiGradingProposal): AiGradingPr
     criteria: [{ label: "批改输出", verdict: "unverified", feedback: unverifiedNullOutputFeedback }],
     misconceptionId: null,
   };
+}
+
+function verifiedRubricText(
+  { observation, answerRevision, workSource, input }: RubricContext, transcript: VerifiedRubricSubmissionText | undefined,
+): string {
+  const storageKey = observation.photoStorageKey;
+  if (!workSource && !input.workSourceId && !storageKey) return observation.answer.trim();
+  if (!transcript || transcript.observationId !== observation.id || transcript.answerRevision !== answerRevision) return "";
+  if (input.workSourceId && (!workSource || input.workSourceId !== workSource.id
+    || input.workSourceVersion !== workSource.version || input.physicalPage !== workSource.physicalPage)) return "";
+  if (workSource && (transcript.workSource?.id !== workSource.id || transcript.workSource.version !== workSource.version
+    || transcript.workSource.physicalPage !== workSource.physicalPage)) return "";
+  if (storageKey && transcript.photoStorageKey !== storageKey) return "";
+  return typeof transcript.text === "string" ? transcript.text.trim() : "";
 }
 
 /** Follow only ledger-confirmed unsent attempts; never bypass a prior fallback. */
@@ -96,6 +117,21 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
       const context = await deps.repository.context(scope, input);
       if (context.existing) return context.existing;
       if (!context.observation.answer.trim() && !context.workSource) throw conflict("请先填写答案或选择作答照片。");
+      const rubricContext = { scope, input, observation: context.observation, answerRevision: context.answerRevision, workSource: context.workSource };
+      let calibration: OpeningRubricCalibrationEvidence | null = null;
+      if (deps.rubricCalibration) {
+        try {
+          calibration = await deps.rubricCalibration(rubricContext);
+        } catch (cause) {
+          const error = conflict("暂时无法读取评分标定资料。原答案已保存，请稍后重试。");
+          copyGradingDiagnostic(cause, error);
+          throw error;
+        }
+      }
+      const rubricSubmission = calibration ? {
+        ...calibration.submission, submissionId: context.observation.id,
+        text: verifiedRubricText(rubricContext, calibration.verifiedSubmissionText),
+      } : null;
       const pages = new Map<string, { sourceId: string; sourceVersion: number; physicalPage: number; role: "student_work" | "reference_material" }>();
       if (context.workSource) {
         const work = context.workSource;
@@ -138,6 +174,12 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
               recordGradingDiagnostic(error, "parse", receipt?.attemptedFetch === true
                 ? { attemptedFetch: true, httpStatus: receipt.httpStatus } : undefined, "GRADING_PARSE");
               throw error;
+            }
+            if (calibration && rubricSubmission) {
+              proposal = evaluateCalibratedSubjectiveGrading({
+                proposal, submission: rubricSubmission,
+                calibration: calibration.calibration,
+              }).proposal;
             }
             result = await deps.repository.apply(scope, input, unverifyUnpersistableProposal(proposal), modelLabel);
           },
