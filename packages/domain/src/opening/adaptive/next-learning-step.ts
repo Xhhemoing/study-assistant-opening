@@ -33,8 +33,11 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
     candidates.push({ action, eligible, reasonCodes: [eligible ? reason : rejected], evidenceRefs });
     return eligible;
   };
+  const placement = input.placementRoute;
   const result = (activityKind: NextLearningStep["activityKind"], reasonCode: NextLearningStep["reasonCode"], focusObservationId: string | null = null) =>
-    ({ decision: withLearningPhase({ activityKind, focusObservationId, reasonCode }, input), candidates });
+    ({ decision: withLearningPhase({ activityKind, focusObservationId, reasonCode, ...(placement !== undefined
+      ? { placementRoute: placement.route, holdoutVerificationRequired: placement.holdoutVerificationRequired }
+      : {}) }, input), candidates });
   const phase = learningPhaseForInput(input);
   if (input.learningPhase === "new_learning") {
     check("full_explain", true, "explicit_new_learning", "explicit_new_learning");
@@ -60,6 +63,15 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
   if (check("full_explain", !!input.wantsFullExplanation, "requested_full", "not_requested_full")) return result("full_explain", "requested_full");
   const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
   const latest = observations[0], refs = observations.map(row => `observation:${row.id}`);
+  if (input.drilldownSnapshot?.status === "restore_original_attempt"
+    && input.drilldownSnapshot.rootCause === "integration_step_coordination") {
+    check("targeted_explain", true, "drilldown_integration_step_restore", "drilldown_integration_step_restore", latest ? [`observation:${latest.id}`] : []);
+    return result("targeted_explain", "verified_incorrect", latest?.id ?? null);
+  }
+  if (!latest && placement?.route === "inferred_skip_candidate") {
+    check("transfer_check", true, "placement_inferred_skip_holdout_check", "placement_inferred_skip_holdout_check");
+    return result("transfer_check", "correct_needs_independent_check");
+  }
   if (check("diagnose", !latest, "no_evidence", "has_current_evidence", refs)) return result("diagnose", "no_evidence");
   const lastCorrectIndex = observations.findIndex(row => row.verifiedCorrect === "yes");
   // A verified success resolves earlier errors; only inspect the latest unresolved segment.

@@ -1,4 +1,13 @@
 import type { GoalLearningContext, KnowledgeSnapshot, TeachingLearnerFocus } from "@aistudy/contracts";
+import {
+  DiagnosticPlacementError,
+  PrerequisiteDrilldownStateMachine,
+  type DiagnosticProbeItem,
+  type DiagnosticProbeObservation,
+  type DrilldownStateSnapshot,
+  type PrerequisiteDrilldownInput,
+} from "../../diagnostic-placement";
+import { toDiagnosticKnowledgeSkills } from "./placement-bridge";
 import type { SnapshotKnowledgeNode, SnapshotObservation } from "./snapshot-sources";
 import { normalizeSkillLabelKey } from "./skill-identity";
 
@@ -17,18 +26,69 @@ type PrerequisiteRepair = NonNullable<TeachingLearnerFocus["prerequisiteRepair"]
 // Conservative scheduling policy, not an estimate of how quickly a skill decays.
 const RECENT_PREREQUISITE_EVIDENCE_MS = 30 * 86_400_000;
 
+export type PrerequisiteDrilldownContext = Pick<PrerequisiteDrilldownInput, "probePool" | "originalContext" | "kstSnapshot"> & {
+  /** Responses in the order the diagnostic probes were administered. */
+  observations: readonly DiagnosticProbeObservation[];
+};
+
+type PrerequisiteTarget = {
+  targetSkillLabel: string;
+  knowledgeNodes: readonly SnapshotKnowledgeNode[];
+  goalContext: GoalLearningContext;
+};
+
+export function resolvePrerequisiteDrilldown(input: PrerequisiteTarget & { drilldown: PrerequisiteDrilldownContext }): {
+  snapshot: DrilldownStateSnapshot;
+  nextProbe: DiagnosticProbeItem | null;
+  prerequisiteRepair: PrerequisiteRepair | null;
+} | null {
+  const key = normalizeSkillLabelKey(input.targetSkillLabel);
+  const targets = input.knowledgeNodes.filter(node => normalizeSkillLabelKey(node.title) === key);
+  if (targets.length !== 1) return null;
+  const target = targets[0]!;
+  const { observations, ...context } = input.drilldown;
+  try {
+    const machine = new PrerequisiteDrilldownStateMachine({
+      ...context,
+      skills: toDiagnosticKnowledgeSkills(input.knowledgeNodes),
+      targetSkillId: target.id,
+    });
+    let snapshot = machine.getState();
+    for (const observation of observations) {
+      if (snapshot.status !== "probing") break;
+      snapshot = machine.recordProbeResponse(observation);
+    }
+    const { probe: nextProbe } = machine.selectNextProbe();
+    snapshot = machine.getState();
+    const deficit = snapshot.status === "repair_plan_ready" && input.knowledgeNodes.find(node =>
+      node.id === snapshot.confirmedDeficitSkillIds[0] && node.id !== target.id && node.title.length <= 200);
+    const prerequisiteRepair = deficit ? {
+      nodeId: deficit.id,
+      targetNodeId: target.id,
+      skillLabel: deficit.title,
+      returnToSkillLabel: input.targetSkillLabel,
+      maxMinutes: input.goalContext.prerequisiteBudgetMinutes,
+      reason: `独立探测确认「${deficit.title}」存在缺口，先补原题所需的这一步。`,
+      stopCondition: `能独立完成「${deficit.title}」的关键一步或达到时间预算后，立即回到「${input.targetSkillLabel}」的原题。`,
+    } : null;
+    return { snapshot, nextProbe, prerequisiteRepair };
+  } catch (error) {
+    if (error instanceof DiagnosticPlacementError) return null;
+    throw error;
+  }
+}
+
 /**
  * One bounded prelude for a known direct prerequisite, never a mastery propagation.
  * Current evidence still uses labels: ambiguity in nodes or requirements means no
  * automatic detour. Missing evidence is unknown, not a reason to reteach ancestors.
  */
-export function selectPrerequisiteRepair(input: {
-  targetSkillLabel: string;
-  knowledgeNodes: readonly SnapshotKnowledgeNode[];
+export function selectPrerequisiteRepair(input: PrerequisiteTarget & {
   observations: readonly SnapshotObservation[];
-  goalContext: GoalLearningContext;
   now: Date;
+  drilldown?: PrerequisiteDrilldownContext;
 }): PrerequisiteRepair | null {
+  if (input.drilldown !== undefined) return resolvePrerequisiteDrilldown({ ...input, drilldown: input.drilldown })?.prerequisiteRepair ?? null;
   const key = normalizeSkillLabelKey(input.targetSkillLabel);
   const targets = input.knowledgeNodes.filter(node => normalizeSkillLabelKey(node.title) === key);
   if (targets.length !== 1) return null;

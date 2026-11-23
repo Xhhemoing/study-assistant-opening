@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { uuidSchema } from "@aistudy/contracts";
 import type { CourseGoal, TaskItem } from "@aistudy/contracts";
+import { generateAdaptiveRemedyClinic, type ClinicCandidateProbe } from "@aistudy/domain";
 import { buildAdaptiveDraft, freeMinutes, suggestionTaskId, type BuildAdaptiveDraftInput } from "./adaptive-draft";
 
 describe("adaptive draft helpers", () => {
@@ -34,6 +35,76 @@ const draftInput = (goal: CourseGoal | null, tasks: TaskItem[] = []): BuildAdapt
     courses: [{ courseId: examCourse, title: "Math I", goal, minutesThisWeek: 0, skills: [], nextSkills: ["积分"], hasUsableMaterials: true }],
   } },
   planDayOptions: preferredOrder => ({ preferredOrder, localDate: "2026-10-17", timeZone: "America/Los_Angeles", planningNow: "2026-10-17T14:00:00Z" }),
+});
+
+function clinicDraftInput(): BuildAdaptiveDraftInput {
+  const draft = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 });
+  const course = draft.adaptive.snapshot.courses[0]!;
+  course.nextSkills = [];
+  const ruleId = "negative_sign_flip";
+  const activeSourcesMap = new Map([["A", 1], ["B", 1], ["probes", 1]]);
+  const candidateProbes: ClinicCandidateProbe<number, string>[] = [3, 5].map(n => ({
+    probeId: `p${n}`, requirementKey: "inequality", prompt: `Solve -x ≤ ${n}.`, input: n,
+    correctModel: { id: "correct", label: "Correct", role: "correct", predict: input => `x ≥ ${-input}` },
+    hypotheses: [{ id: ruleId, label: "Incorrect direction", role: "misconception",
+      description: "Preserves the inequality direction after dividing by a negative.", predict: input => `x ≤ ${-input}` }],
+    targetMisconceptionId: ruleId,
+    observableKey: value => value, parseResponse: raw => typeof raw === "string" ? raw : null,
+    sourceRefs: [{ sourceId: "probes", sourceVersion: 1 }],
+  }));
+  const clinic = generateAdaptiveRemedyClinic({
+    learnerId: draft.workspaceId, courseId: course.courseId, ruleId, currentPrivacyEpoch: 4, activeSourcesMap, candidateProbes,
+    verifyRuleViolation: attempt => attempt.excerpt === "x ≤ -3",
+    attempts: ["A", "A", "B"].map((chapterId, i) => ({
+      attemptId: id(i + 10), rootAttemptId: id(i + 10), learnerId: draft.workspaceId, courseId: course.courseId, ruleId, chapterId,
+      localDate: i === 2 ? "2026-10-17" : "2026-10-16", excerpt: "x ≤ -3", invariantSummary: "除以负数时不等号反向。",
+      privacyEpoch: 4, assisted: false, sourceRefs: [{ sourceId: chapterId, sourceVersion: 1 }],
+    })),
+  }, { skillLabel: "不等式", requirementKey: "inequality" });
+  expect(clinic).not.toBeNull();
+  return { ...draft, remedyClinics: [clinic!] };
+}
+
+describe("remedy clinic daily draft", () => {
+  it("schedules the full clinic before an ordinary weak skill and keeps legacy draft bytes", () => {
+    const input = clinicDraftInput();
+    input.freeBlocks = [{ start: "2026-10-17T17:00:00Z", end: "2026-10-17T18:00:00Z", kind: "free" }];
+    input.adaptive.snapshot.courses[0]!.skills = [{
+      skillLabel: "积分", status: "needs_review", lastObservedAt: null, recentAssistance: [],
+    }];
+    const draft = buildAdaptiveDraft(input);
+    expect(draft.adaptive.suggestedTasks).toMatchObject([
+      { kind: "weak_skill", minutes: 14, title: "Math I · 不等式 跨章错因诊所" },
+      { kind: "weak_skill", minutes: 25, title: "Math I · 积分 巩固练习" },
+    ]);
+    expect(draft.blocks[0]).toMatchObject({
+      taskId: draft.adaptive.suggestedTasks![0]!.id, start: "2026-10-17T17:00:00.000Z", end: "2026-10-17T17:14:00.000Z",
+    });
+    const legacy = draftInput(null);
+    expect(JSON.stringify(buildAdaptiveDraft({ ...legacy, remedyClinics: [] }))).toBe(JSON.stringify(buildAdaptiveDraft(legacy)));
+  });
+
+  it("drops a clinic immediately after revocation, version change, or privacy epoch change", () => {
+    const input = clinicDraftInput();
+    const candidate = input.remedyClinics![0]!;
+    for (const clinic of [
+      { ...candidate, activeSources: new Map([["A", 1], ["probes", 1]]) },
+      { ...candidate, activeSources: new Map([["A", 1], ["B", 2], ["probes", 1]]) },
+      { ...candidate, currentPrivacyEpoch: 5 },
+    ]) {
+      const draft = buildAdaptiveDraft({ ...input, remedyClinics: [clinic] });
+      expect(draft.adaptive.suggestedTasks).toEqual([]);
+      expect(draft.blocks).toEqual([]);
+    }
+  });
+
+  it("leaves a tight exam slot free when the suggestion budget cannot fit all 14 minutes", () => {
+    const input = clinicDraftInput();
+    input.freeBlocks = [{ start: "2026-10-17T17:00:00Z", end: "2026-10-17T17:17:00Z", kind: "free" }];
+    const draft = buildAdaptiveDraft(input);
+    expect(draft.adaptive.suggestedTasks).toEqual([]);
+    expect(draft.blocks).toEqual([]);
+  });
 });
 
 describe("goal-aware adaptive draft integration", () => {

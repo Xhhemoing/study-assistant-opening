@@ -1,5 +1,9 @@
 import { expect, it } from "vitest";
-import { ADAPTIVE_STRATEGY_VERSION, assembleLearnerSnapshot, type LearnerSnapshotSources, type SnapshotObservation } from "@aistudy/domain";
+import { teachingLearnerFocusSchema } from "@aistudy/contracts";
+import {
+  ADAPTIVE_STRATEGY_VERSION, assembleLearnerSnapshot, buildAdaptivePlacement,
+  type LearnerSnapshotSources, type PrerequisiteDrilldownContext, type SnapshotObservation,
+} from "@aistudy/domain";
 import type { LearnerSnapshotRead } from "../planning/learner-snapshot-service";
 import { teachingLearnerFocus } from "./learner-focus";
 
@@ -165,4 +169,44 @@ it("passes only current, same-requirement historical errors to teaching", () => 
     { ...base, id: courseId, requirementKey: "another", errors: [{ ...error, feedback: "其他要求" }] },
     { ...base, id: courseId, usableForCurrentVersion: "no", errors: [{ ...error, feedback: "旧材料" }] }];
   expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false)?.recentErrors).toEqual([error]);
+});
+
+it("uses placement for an unobserved node and preserves the teaching focus contract", () => {
+  const value = read("yes"), source = value.sources.courses[0]!;
+  source.knowledgeNodes = [
+    { id: "arithmetic", title: "Arithmetic", prerequisiteIds: [] },
+    { id: "algebra", title: "Linear Algebra", prerequisiteIds: ["arithmetic"] },
+  ];
+  const { placementRoutesByNodeId } = buildAdaptivePlacement(source)!;
+  const legacy = teachingLearnerFocus(value, courseId, "Arithmetic", false);
+  expect(JSON.stringify(teachingLearnerFocus(value, courseId, "Arithmetic", false, undefined, undefined, {})))
+    .toBe(JSON.stringify(legacy));
+  expect(legacy?.activityKind).toBe("diagnose");
+  const focus = teachingLearnerFocus(value, courseId, "Arithmetic", false, undefined, undefined, { placementRoutesByNodeId });
+  expect(focus).toMatchObject({ activityKind: "transfer_check", reasonCode: "correct_needs_independent_check" });
+  expect(focus?.prerequisiteRepair).toBeUndefined();
+  expect(teachingLearnerFocusSchema.safeParse(focus).success).toBe(true);
+});
+
+it("applies the confirmed prerequisite repair and restores the original error when probes pass", () => {
+  const value = read("no"), source = value.sources.courses[0]!, original = source.observations[0]!;
+  source.knowledgeNodes = [
+    { id: "arithmetic", title: "Arithmetic", prerequisiteIds: [] },
+    { id: "algebra", title: "Linear Algebra", prerequisiteIds: ["arithmetic"] },
+  ];
+  source.observations = [original, { ...original, id: "pre", skillLabel: "Arithmetic" }];
+  const now = new Date("2026-10-16T12:00:00Z");
+  const probePool = ["p1", "p2"].map(itemId => ({
+    itemId, familyId: itemId, chapterId: "opening", requiredSkillIds: ["arithmetic"],
+    guess: 0.1, slip: 0.1, estimatedSeconds: 30,
+  }));
+  const context = (correct: boolean): PrerequisiteDrilldownContext => ({
+    probePool, observations: probePool.map(({ itemId }) => ({ itemId, observationId: `obs-${itemId}`, correct })),
+    originalContext: { originalAttemptId: "attempt", originalItemId: "problem", frozenDraftText: "x=", frozenCursorOffset: 2, startedAtMs: 0 },
+  });
+  expect(teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, now, { drilldown: context(false) }))
+    .toMatchObject({ focusObservationId: original.id, prerequisiteRepair: { nodeId: "arithmetic", targetNodeId: "algebra" } });
+  const restored = teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, now, { drilldown: context(true) });
+  expect(restored).toMatchObject({ activityKind: "targeted_explain", reasonCode: "verified_incorrect", focusObservationId: original.id });
+  expect(restored?.prerequisiteRepair).toBeUndefined();
 });
