@@ -16,11 +16,13 @@ type SkillScope = Pick<SkillBeliefV1, "workspaceId" | "learnerId" | "courseId" |
   requirementKey: string;
 };
 
+type ShadowObservation = SnapshotObservation & { recordedAt?: string | null };
+
 export type SkillBeliefTrajectoryInput = {
   scope: SkillScope;
   cutoff: string;
   /** Trusted, identity-scoped effective heads and their independently qualified features. */
-  observations: readonly SnapshotObservation[];
+  observations: readonly ShadowObservation[];
   features: readonly LearnerStateFeature[];
   /** Immutable publisher item models and predeclared prior, available at the prediction cutoff. */
   itemModelsByVersion?: ReadonlyMap<string, SkillItemModel>;
@@ -33,10 +35,10 @@ export type SkillBeliefTrajectoryInput = {
 export type AdaptiveEpistemicShadowInput = SkillBeliefTrajectoryInput & Pick<ShadowV2Input,
   "targetFamilyKeys" | "propagatedFamilyKeys" | "advanceThreshold">;
 
-export type AdaptiveWheelSpinningInput = Omit<WheelSpinningGuardInput, "nowMs" | "scheduleBlocks" | "thresholds">;
+export type AdaptiveWheelSpinningInput = Omit<WheelSpinningGuardInput, "nowMs" | "thresholds">;
 
-export function evaluateWheelSpinningGuard(input: AdaptiveWheelSpinningInput, now: Date) {
-  return wheelSpinningGuard({ ...input, nowMs: now.getTime() });
+export function evaluateWheelSpinningGuard({ taskId, skillId, events, additionalActiveDwellMs, scheduleBlocks }: AdaptiveWheelSpinningInput, now: Date) {
+  return wheelSpinningGuard({ taskId, skillId, nowMs: now.getTime(), events, additionalActiveDwellMs, scheduleBlocks });
 }
 
 function firstSubmissions<T>(rows: readonly T[], problem: (row: T) => string | null, time: (row: T) => number) {
@@ -53,17 +55,18 @@ function firstSubmissions<T>(rows: readonly T[], problem: (row: T) => string | n
 
 export function metacognitiveStepMetadata({ observations, metacognitiveConfidence }: NextLearningStepInput) {
   if (!metacognitiveConfidence && !observations.some(row => row.preAnswerConfidence !== undefined)) return undefined;
-  const current = observations.filter(row => row.usableForCurrentVersion === "yes").map(row => ({
+  const all = observations.map(row => ({
     ...metacognitiveConfidence?.byObservationId.get(row.id), ...row,
   }));
-  const submissions = firstSubmissions(current, row => row.problemId, row => Date.parse(row.attemptedAt));
+  const submissions = firstSubmissions(all, row => row.problemId, row => Date.parse(row.attemptedAt));
+  const current = all.filter(row => row.usableForCurrentVersion === "yes");
   const isAssisted = (row: SnapshotObservation) => row.assistance !== "independent"
     || row.independentAttempt !== "yes" || row.isMultiDraft === true;
   const calibration = current.flatMap(row => isPreAnswerConfidence(row.preAnswerConfidence) ? [{
     itemId: row.problemId ?? undefined,
     preAnswerConfidence: row.preAnswerConfidence,
     isCorrect: row.verifiedCorrect === "unknown" ? null : row.verifiedCorrect === "yes",
-    isFirstSubmission: submissions.has(row) && row.isFirstSubmission !== false,
+    isFirstSubmission: row.isFirstSubmission ?? submissions.has(row),
     assisted: isAssisted(row),
   }] : []);
   if (calibration.length === 0) return undefined;
@@ -97,7 +100,6 @@ type JoinedHead = {
   feature: LearnerStateFeature;
   observation: SnapshotObservation;
   attempted: number;
-  recorded: number;
 };
 
 function uniqueById<T>(rows: readonly T[], idOf: (row: T) => string) {
@@ -109,16 +111,26 @@ function uniqueById<T>(rows: readonly T[], idOf: (row: T) => string) {
   return byId;
 }
 
-function prepareHeads(input: SkillBeliefTrajectoryInput): JoinedHead[] {
-  const heads = uniqueById(input.observations, row => row.id);
-  const features = uniqueById(input.features.filter(row => row.courseId === input.scope.courseId), row => row.observationId);
-  return [...features.values()].flatMap(feature => {
-    if (!feature) return [];
+function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): JoinedHead[] {
+  const visibleFeatures = input.features.flatMap(feature => {
+    if (feature.courseId !== input.scope.courseId) return [];
+    const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
+    return attempted <= recorded && recorded < cutoff ? [{ feature, attempted }] : [];
+  });
+  const features = uniqueById(visibleFeatures, row => row.feature.observationId);
+  const heads = uniqueById(input.observations.filter(observation => {
+    const attempted = adaptiveShadowTime(observation.attemptedAt);
+    // Untimestamped heads inherit visibility from the feature for that attempt.
+    if (observation.recordedAt === undefined) return features.get(observation.id)?.attempted === attempted;
+    const recorded = adaptiveShadowTime(observation.recordedAt);
+    return attempted <= recorded && recorded < cutoff;
+  }), row => row.id);
+  return [...features.values()].flatMap(row => {
+    if (!row) return [];
+    const { feature, attempted } = row;
     const observation = heads.get(feature.observationId);
     if (!observation?.problemId || !feature.requirementKey || observation.requirementKey !== feature.requirementKey) return [];
-    const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
-    return attempted <= recorded && adaptiveShadowTime(observation.attemptedAt) === attempted
-      ? [{ feature, observation, attempted, recorded }] : [];
+    return adaptiveShadowTime(observation.attemptedAt) === attempted ? [{ ...row, observation }] : [];
   }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));
 }
 
@@ -150,11 +162,11 @@ function withDirectEvidence(belief: SkillBeliefV1, row: JoinedHead, item: SkillI
     channel: misconceptionId ? "step-failure" : "unassisted", misconceptionId } });
 }
 
-function replay(input: SkillBeliefTrajectoryInput, heads: readonly JoinedHead[], cutoff: number, excludedFamilies?: ReadonlySet<string>) {
-  const { scope } = input;
-  let belief = createSkillBelief({ ...scope, ...input.misconceptionPrior });
-  let noDcmBelief = input.misconceptionPrior ? createSkillBelief(scope) : belief;
-  const known = heads.filter(row => row.recorded < cutoff);
+function replay(input: SkillBeliefTrajectoryInput, cutoff: number, excludedFamilies?: ReadonlySet<string>) {
+  const { scope, misconceptionPrior: prior } = input;
+  let belief = createSkillBelief({ ...scope, misconceptionMass: prior?.misconceptionMass, otherMass: prior?.otherMass });
+  let noDcmBelief = prior ? createSkillBelief(scope) : belief;
+  const known = prepareHeads(input, cutoff);
   const first = firstEpistemicSubmissions(known), excludedIds = new Set(input.excludedProblemIds);
   const eligible = (row: JoinedHead) => first.has(row) && isComparable(row)
     && !excludedIds.has(row.observation.id) && !excludedIds.has(row.observation.problemId!)
@@ -167,17 +179,17 @@ function replay(input: SkillBeliefTrajectoryInput, heads: readonly JoinedHead[],
     && row.feature.attemptId && eligible(row)).map(row => row.feature.attemptId));
   for (const row of known) {
     const { observation, feature } = row;
+    const familyKey = observation.familyKey?.trim() ? observation.familyKey : null;
+    const isFreshFamily = Boolean(familyKey && !seenFamilies.has(familyKey));
+    if (familyKey) seenFamilies.add(familyKey);
     const comparable = eligible(row);
     if (feature.requirementKey === scope.requirementKey) {
       if (comparable) {
-        const familyKey = observation.familyKey?.trim() ? observation.familyKey : null;
-        const isFreshFamily = !familyKey || !seenFamilies.has(familyKey);
         const item = shadowItem(input, feature.itemVersionId!);
         const next = withDirectEvidence(belief, row, item, isFreshFamily).belief;
         noDcmBelief = noDcmBelief === belief && !item.misconceptions?.length
           ? next : withDirectEvidence(noDcmBelief, row, { ...item, misconceptions: undefined }, isFreshFamily).belief;
         belief = next;
-        if (familyKey) seenFamilies.add(familyKey);
         evidenceFeatures.push(feature);
       }
       steps.push({ observationId: observation.id, omega: comparable ? 1 : 0, belief });
@@ -188,7 +200,7 @@ function replay(input: SkillBeliefTrajectoryInput, heads: readonly JoinedHead[],
     if (!edge || !comparable || observation.verifiedCorrect !== "yes" || !attemptId
       || directlyObservedAttempts.has(attemptId) || propagatedAttempts.has(attemptId)) continue;
     const source = createSkillBelief({ ...scope, confirmedSkillVersion: edge.sourceSkillVersion });
-    const sourceUpdate = withDirectEvidence(source, row, shadowItem(input, feature.itemVersionId!), true);
+    const sourceUpdate = withDirectEvidence(source, row, shadowItem(input, feature.itemVersionId!), isFreshFamily);
     const propagate = (target: SkillBeliefV1) => propagateFireCredit({ sourceSkillId: feature.requirementKey!, attemptId,
       atMs: row.attempted, source: sourceUpdate.belief, rhoPlus: sourceUpdate.retrievedProbability,
       targets: { target: { ...edge, belief: target } } });
@@ -209,13 +221,13 @@ function cutoffMs(cutoff: string) {
 
 export function buildSkillBeliefTrajectory(input: SkillBeliefTrajectoryInput) {
   const cutoff = cutoffMs(input.cutoff);
-  const { belief, steps, directRetrievability, effectiveRetrievability } = replay(input, prepareHeads(input), cutoff);
+  const { belief, steps, directRetrievability, effectiveRetrievability } = replay(input, cutoff);
   return { belief, steps, directRetrievability, effectiveRetrievability };
 }
 
-function predictAt(input: AdaptiveEpistemicShadowInput, heads: readonly JoinedHead[], cutoff: number,
+function predictAt(input: AdaptiveEpistemicShadowInput, cutoff: number,
   excludedFamilies: ReadonlySet<string>, itemVersionId?: string) {
-  const { belief, noDcmBelief, directRetrievability, effectiveRetrievability, evidenceFeatures } = replay(input, heads, cutoff, excludedFamilies);
+  const { belief, noDcmBelief, directRetrievability, effectiveRetrievability, evidenceFeatures } = replay(input, cutoff, excludedFamilies);
   const predictions = scoreLearnerShadowV2({ ...input.scope, features: evidenceFeatures,
     cutoff: new Date(cutoff).toISOString(), belief, noDcmBelief, item: shadowItem(input, itemVersionId ?? input.scope.requirementKey) });
   return { belief, predictions, directRetrievability, effectiveRetrievability,
@@ -224,7 +236,7 @@ function predictAt(input: AdaptiveEpistemicShadowInput, heads: readonly JoinedHe
 
 export function predictLearnerShadowV2(input: AdaptiveEpistemicShadowInput & { targetItemVersionId?: string }) {
   const cutoff = cutoffMs(input.cutoff);
-  return predictAt(input, prepareHeads(input), cutoff, new Set([...input.targetFamilyKeys, ...input.propagatedFamilyKeys]), input.targetItemVersionId);
+  return predictAt(input, cutoff, new Set([...input.targetFamilyKeys, ...input.propagatedFamilyKeys]), input.targetItemVersionId);
 }
 
 /** Each answered row gets a forecast from its own pre-attempt prefix, leaving its entire family out. */
@@ -232,14 +244,14 @@ export function compareLearnerShadowV2(input: AdaptiveEpistemicShadowInput) {
   const cutoff = cutoffMs(input.cutoff);
   const excluded = new Set([...input.targetFamilyKeys, ...input.propagatedFamilyKeys]);
   const excludedIds = new Set(input.excludedProblemIds);
-  const heads = prepareHeads(input).filter(row => row.recorded < cutoff);
+  const heads = prepareHeads(input, cutoff);
   const first = firstEpistemicSubmissions(heads);
   const rows = heads.flatMap((row): ShadowV2Row[] => {
     const { observation, feature } = row;
     const familyKey = observation.familyKey;
     if (feature.requirementKey !== input.scope.requirementKey || !first.has(row) || !isComparable(row)
       || !familyKey?.trim() || excluded.has(familyKey) || excludedIds.has(observation.id) || excludedIds.has(observation.problemId!)) return [];
-    const { predictions } = predictAt(input, heads, row.attempted, new Set([...excluded, familyKey]), feature.itemVersionId!);
+    const { predictions } = predictAt(input, row.attempted, new Set([...excluded, familyKey]), feature.itemVersionId!);
     return [{ observationId: observation.id, familyKey, attemptedAt: observation.attemptedAt,
       correct: observation.verifiedCorrect === "yes", predictions }];
   });

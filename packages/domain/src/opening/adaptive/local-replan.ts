@@ -117,24 +117,28 @@ export function buildLocalReplan(input: {
   acceptedBlocks: readonly PlannedBlock[]; tasks: readonly TaskItem[];
   constraints: readonly TimeBlock[]; now: Date; options: PlanDayOptions; preserveAll?: boolean;
   excludedTaskIds?: ReadonlySet<string>; inactiveRetestTaskIds?: ReadonlySet<string>; candidateTaskIds?: ReadonlySet<string>;
-  wheelSpinningGuard?: AdaptiveWheelSpinningInput;
+  wheelSpinningGuard?: AdaptiveWheelSpinningInput & { activeSession?: boolean };
 }) {
   const guard = input.wheelSpinningGuard;
-  const spinningTask = guard && input.tasks.find(task => task.id === guard.taskId && task.status === "pending");
-  const wheelSpinningGuard = spinningTask && guard ? evaluateWheelSpinningGuard(guard, input.now) : undefined;
-  const carryOver = wheelSpinningGuard?.triggered ? spinningTask : undefined;
   const nowMs = input.now.getTime();
+  const spinningTask = guard && input.tasks.find(task => task.id === guard.taskId && task.status === "pending");
+  const wheelSpinningGuard = spinningTask && guard && (guard.activeSession === true || input.acceptedBlocks.some(block =>
+    block.taskId === spinningTask.id && Date.parse(block.start) <= nowMs && Date.parse(block.end) > nowMs))
+    ? evaluateWheelSpinningGuard(guard, input.now) : undefined;
+  const carryOver = wheelSpinningGuard?.triggered ? spinningTask : undefined;
   const { fixedBlocks: accepted, releasedTaskVersions } = localReplanFixedBlocks({
     ...input,
     localDate: input.options.localDate,
     timeZone: input.options.timeZone,
   });
   const fixedBlocks = carryOver ? accepted.flatMap(block => {
-    if (block.taskId !== carryOver.id) return [block];
-    const start = Date.parse(block.start);
-    if (start > nowMs) return [];
-    // Keep the delivered part of the active block under the original task and reason.
-    return [start < nowMs && Date.parse(block.end) > nowMs ? { ...block, end: input.now.toISOString() } : block];
+    if (block.taskId === carryOver.id && Date.parse(block.end) > nowMs) {
+      const startMs = Date.parse(block.start);
+      if (startMs >= nowMs) return [];
+      // Keep the delivered part of the active block under the original task and reason.
+      if (startMs < nowMs) return [{ ...block, end: input.now.toISOString() }];
+    }
+    return [block];
   }) : accepted;
   if (carryOver?.version && !samePlannedBlocks(fixedBlocks, accepted)
     && !releasedTaskVersions.some(row => row.id === carryOver.id)) {

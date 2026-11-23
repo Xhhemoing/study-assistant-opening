@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import type { PlannedBlock, TaskItem } from "@aistudy/contracts";
 import {
-  buildLocalReplan, buildSkillBeliefTrajectory, compareLearnerShadowV2, nextLearningStep,
+  buildLocalReplan, buildSkillBeliefTrajectory, compareLearnerShadowV2, createSkillBelief, evaluateWheelSpinningGuard, nextLearningStep,
   nextLearningStepWithExperimentalBkt, planAdaptiveBellmanShadow, predictLearnerShadowV2,
   type LearnerStateFeature, type NextLearningStepInput, type SnapshotObservation,
 } from "../../index";
@@ -51,6 +51,24 @@ it("keeps repeated assisted error priority and excludes assisted and later confi
   });
 });
 
+it("counts prior-version attempts when inferring first-submission provenance for calibration", () => {
+  const old = head("old", 1, { problemId: "revised", usableForCurrentVersion: "no" });
+  const retry = head("retry", 2, { problemId: "revised", preAnswerConfidence: "sure" });
+  expect(nextLearningStep(decision([retry, old])).murphyBrier).toMatchObject({
+    totalInputCount: 1, sampleCount: 0, excludedAssistedOrRepeatCount: 1,
+  });
+});
+
+it("excludes conflicting explicit first-submission claims from calibration in either order", () => {
+  const first = head("first", 1, { problemId: "shared", preAnswerConfidence: "sure", isFirstSubmission: true });
+  const conflict = head("conflict", 2, { problemId: "shared", preAnswerConfidence: "guessing", isFirstSubmission: true });
+  for (const observations of [[first, conflict], [conflict, first]]) {
+    expect(nextLearningStep(decision(observations)).murphyBrier).toMatchObject({
+      totalInputCount: 2, sampleCount: 0, excludedAssistedOrRepeatCount: 2,
+    });
+  }
+});
+
 function feature(row: SnapshotObservation, fields: Partial<LearnerStateFeature> = {}): LearnerStateFeature {
   return { observationId: row.id, attemptId: row.id, courseId: "math", requirementKey: row.requirementKey!,
     itemVersionId: row.itemVersionId!, skillLabel: row.skillLabel, attemptedAt: row.attemptedAt, recordedAt: row.attemptedAt,
@@ -60,6 +78,63 @@ function feature(row: SnapshotObservation, fields: Partial<LearnerStateFeature> 
     retention: { protocolId: null, earliestAt: null, recordedIntervalSupportCount: null, intervalExposureComplete: null }, ...fields };
 }
 const scope = { workspaceId: "workspace", learnerId: "learner", courseId: "math", requirementKey: "integrate", confirmedSkillVersion: 1 };
+
+it("copies only misconception mass from a structurally compatible prior belief", () => {
+  const misconceptionPrior = createSkillBelief({ workspaceId: "other-workspace", learnerId: "other-learner",
+    courseId: "other-course", confirmedSkillVersion: 7, abilityMean: 2, logStability: 4, lastDirectRecallAtMs: Date.parse(at(1)),
+    misconceptionMass: [["substitution", 0.25]], otherMass: 0.75 });
+  const { belief } = buildSkillBeliefTrajectory({ scope, cutoff: at(2), observations: [], features: [], misconceptionPrior });
+  expect(belief).toMatchObject({ workspaceId: scope.workspaceId, learnerId: scope.learnerId, courseId: scope.courseId,
+    confirmedSkillVersion: 1, abilityMean: 0, logStability: Math.log(10), lastDirectRecallAtMs: null,
+    misconceptionMass: [["substitution", 0.25]], otherMass: 0.75 });
+});
+
+it("deduplicates records only once they are visible at a forecast cutoff", () => {
+  const original = head("original", 2), featureOnly = head("feature-only", 2), problem = head("problem", 2);
+  const replacement = { ...head("original", 3), recordedAt: at(3) };
+  const backdated = head("backdated", 1, { problemId: problem.problemId });
+  const observations = [original, featureOnly, problem];
+  const input = { scope, cutoff: at(3), observations, features: observations.map(row => feature(row)),
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...input, observations: [...observations, replacement, backdated], features: [...input.features,
+    feature(replacement), feature(featureOnly, { recordedAt: at(4) }), feature(backdated, { recordedAt: at(4) })] };
+
+  expect(predictLearnerShadowV2(input).evidenceObservationIds).toEqual(["feature-only", "original", "problem"]);
+  expect(predictLearnerShadowV2(appended)).toEqual(predictLearnerShadowV2(input));
+  expect(predictLearnerShadowV2({ ...appended, cutoff: at(5) }).evidenceObservationIds).toEqual(["backdated"]);
+});
+
+it("preserves walk-forward prefixes when a duplicate head becomes visible at the held-out attempt", () => {
+  const evidence = head("evidence", 1), holdout = head("holdout", 3);
+  const replacement = { ...evidence, recordedAt: at(3), verifiedCorrect: "no" as const };
+  const observations = [evidence, holdout];
+  const input = { scope, cutoff: at(4), observations, features: observations.map(row => feature(row)),
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const { rows } = compareLearnerShadowV2(input);
+  expect(rows.find(row => row.observationId === holdout.id)?.predictions["smoothed-frequency"]).toBeCloseTo(2 / 3);
+  const appended = compareLearnerShadowV2({ ...input, observations: [...observations, replacement],
+    features: [...input.features, feature(replacement, { recordedAt: at(3) })] });
+  expect(appended.rows).toEqual(rows.filter(row => row.observationId === holdout.id));
+});
+
+it.each([undefined, null, "", "   "])("does not refresh direct recall for a missing or blank family (%s)", familyKey => {
+  const row = head("attempt", 1, { familyKey });
+  const result = buildSkillBeliefTrajectory({ scope, cutoff: at(2), observations: [row], features: [feature(row)] });
+  expect(result.steps[0]?.omega).toBe(1);
+  expect(result.belief.lastDirectRecallAtMs).toBeNull();
+  expect(result.belief.logStability).toBe(Math.log(10));
+});
+
+it.each([
+  { assistance: "hinted" }, { assistance: "revealed" }, { usableForCurrentVersion: "no" },
+] as const)("tracks an earlier family exposure even when it cannot update the belief (%j)", fields => {
+  const exposure = head("exposure", 1, { ...fields, familyKey: "shared" });
+  const independent = head("independent", 2, { familyKey: "shared" });
+  const result = buildSkillBeliefTrajectory({ scope, cutoff: at(3), observations: [independent, exposure],
+    features: [feature(independent), feature(exposure)] });
+  expect(result.steps.map(step => step.omega)).toEqual([0, 1]);
+  expect(result.belief.lastDirectRecallAtMs).toBeNull();
+});
 
 it("replays only comparable evidence known before the cutoff and leaves non-independent attempts at zero weight", () => {
   const first = head("first", 1), hinted = head("hinted", 2, { assistance: "hinted" });
@@ -149,13 +224,45 @@ const taskId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, 
 const time = (clock: string) => `2026-10-16T${clock}:00.000Z`;
 const block = (n: number, start: string, end: string): PlannedBlock => ({ taskId: taskId(n), start: time(start), end: time(end), reason: "accepted" });
 const task = (n: number): TaskItem => ({ id: taskId(n), version: 1, title: `Task ${n}`, minutes: 20, status: "pending", priority: 0, dueAt: null });
+const stalledEvents = (clocks: readonly string[]) => clocks.map(clock => ({ timestampMs: Date.parse(time(clock)),
+  isCorrect: false, assisted: true, hasValidIntermediateSteps: false, dwellMs: 5 * 60_000, hintEscalations: 1 }));
 
-it("wraps a spinning task, preserves history and exact-start blocks, and reuses only freed future time", () => {
+it("keeps the 20-minute wheel-spinning window when the input carries extra runtime properties", () => {
+  const now = new Date(time("10:00"));
+  const input = { taskId: taskId(1), events: stalledEvents(["09:30", "09:35", "09:39"]), thresholds: { windowMs: 60 * 60_000 } };
+  expect(evaluateWheelSpinningGuard(input, now)).toMatchObject({ triggered: false,
+    metrics: { windowStartMs: Date.parse(time("09:40")), inWindowEventCount: 0, expiredEventCount: 3 } });
+});
+
+it("keeps a future-only reservation until the task has an active block or a confirmed session", () => {
+  const now = new Date(time("10:00"));
+  const past = block(1, "09:40", "10:00"), future = block(1, "11:00", "11:20");
+  const input = { acceptedBlocks: [past, future], tasks: [task(1)], now, constraints: [],
+    options: { localDate: "2026-10-16", timeZone: "UTC" } };
+  const guard = { taskId: taskId(1), events: stalledEvents(["09:50", "09:55", "10:00"]) };
+  expect(buildLocalReplan({ ...input, wheelSpinningGuard: guard })).toEqual(buildLocalReplan(input));
+
+  const activeGuard = { ...guard, activeSession: true };
+  expect(buildLocalReplan({ ...input, wheelSpinningGuard: activeGuard })).toMatchObject({ fixedBlocks: [past],
+    releasedTaskVersions: [{ id: taskId(1), version: 1, status: "pending" }], wheelSpinningCarryOverTaskIds: [taskId(1)] });
+});
+
+it("releases an active reservation that starts exactly now and preserves other tasks' reservations", () => {
+  const now = new Date(time("10:00"));
+  const past = block(1, "09:40", "10:00"), exactStart = block(1, "10:00", "10:20");
+  const other = block(2, "10:20", "10:40");
+  const result = buildLocalReplan({ acceptedBlocks: [past, exactStart, other], tasks: [task(1), task(2)], now, constraints: [],
+    options: { localDate: "2026-10-16", timeZone: "UTC" },
+    wheelSpinningGuard: { taskId: taskId(1), events: stalledEvents(["09:50", "09:55", "10:00"]) } });
+  expect(result).toMatchObject({ fixedBlocks: [past, other],
+    releasedTaskVersions: [{ id: taskId(1), version: 1, status: "pending" }], wheelSpinningCarryOverTaskIds: [taskId(1)] });
+});
+
+it("wraps a spinning task, preserves history and other tasks' blocks, and reuses freed future time", () => {
   const now = new Date(time("10:00"));
   const past = block(1, "09:00", "09:20"), active = block(1, "09:45", "10:35");
   const exactStart = block(3, "10:00", "10:15"), future = block(1, "10:35", "11:00");
-  const events = ["09:50", "09:55", "10:00"].map(clock => ({ timestampMs: Date.parse(time(clock)),
-    isCorrect: false, assisted: true, hasValidIntermediateSteps: false, dwellMs: 5 * 60_000, hintEscalations: 1 }));
+  const events = stalledEvents(["09:50", "09:55", "10:00"]);
   const input = { acceptedBlocks: [past, active, exactStart, future], tasks: [task(1), task(2), task(3)], now,
     constraints: [{ kind: "free" as const, start: time("08:00"), end: time("11:00") }], options: { localDate: "2026-10-16", timeZone: "UTC" } };
   const result = buildLocalReplan({ ...input, wheelSpinningGuard: { taskId: taskId(1), events } });
