@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
-  createOpeningMemoryRepository, createOpeningNoteRepository, createOpeningPrivacyRepository,
+  createBackupRestoreRepository, createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository,
+  createOpeningConversationRepository, createOpeningMemoryRepository, createOpeningNoteRepository, createOpeningPrivacyRepository,
   createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
 } from "@aistudy/database";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
@@ -372,7 +372,7 @@ describe("saved tutor material provenance", () => {
       await expect(exported()).resolves.toBe(false);
     }, 30_000);
 
-  it("carries historical ID-only memory sources into snippet reads and backup export", async () => {
+  it.each(["assistant", "paired user", "paired user legacy backing"] as const)("carries %s memory sources into snippet reads and backup export", async side => {
     const { sql, scope } = f;
     const material = await source(1);
     const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
@@ -381,9 +381,21 @@ describe("saved tutor material provenance", () => {
       text: "Versioned memory backing", sourceTurnIds: [origin], expiresAt: null,
     });
     const memory = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
-    const savedTurnId = await insertOwnedTurn(sql, scope, {
-      role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [memory.id] }],
-    });
+    const memoryIds = [{ memoryDependencyIds: [memory.id] }];
+    let savedTurnId: string;
+    if (side === "assistant") {
+      savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: memoryIds });
+    } else {
+      const conversations = createOpeningConversationRepository(sql);
+      const conversation = await conversations.create(scope, { title: "Paired snippet", courseId: null });
+      const selected = await source(1);
+      const exchange = await append(conversation.id, [selected]);
+      savedTurnId = exchange.assistantTurnId;
+      const refs = side === "paired user" ? memoryIds : [{ sourceId: material, sourceVersion: 1, memoryOnly: true }];
+      await sql`UPDATE opening_turns SET context_source_refs=${sql.json(refs)} WHERE id=${exchange.turnId}`;
+      await sql`UPDATE opening_turns SET status='complete', context_source_refs='[]'::jsonb, citations='[]'::jsonb
+        WHERE id=${savedTurnId}`;
+    }
     const notes = createOpeningNoteRepository(sql);
     const save = () => notes.saveSnippet(scope, { title: "Historical snippet", text: "Saved answer", savedTurnId });
     const { documentId } = await save();
@@ -391,8 +403,8 @@ describe("saved tutor material provenance", () => {
       .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1, memoryOnly: true }] }]);
     const library = createLibraryRepository(sql);
     const readNote = () => library.getDocument({ workspaceId: scope.workspaceId, documentId });
-    const exported = async () => (await dumpWorkspaceSnapshot(sql, scope.workspaceId, scope.ownerUserId))
-      .documents.some(document => document.id === documentId);
+    const backups = createBackupRestoreRepository(sql);
+    const exported = async () => (await backups.exportWorkspace(scope)).records.documents.some(document => document.id === documentId);
     await expect(readNote()).resolves.toMatchObject({ id: documentId, title: "Historical snippet" });
     await expect(exported()).resolves.toBe(true);
 
@@ -403,6 +415,40 @@ describe("saved tutor material provenance", () => {
     await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
     await expect(readNote()).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(exported()).resolves.toBe(false);
+  });
+
+  it.each(["confirmed", "expired temporary"] as const)("excludes the backing source when deleting a memory derived from an ID-only turn (%s)", async kind => {
+    const { sql, scope } = f;
+    const material = await source();
+    const memories = createOpeningMemoryRepository(sql);
+    const confirmFrom = async (text: string, turnId: string) => {
+      const proposal = await memories.proposeMemory(scope, { text, sourceTurnIds: [turnId], expiresAt: null });
+      return memories.confirm(scope, proposal.id, proposal.version, randomUUID());
+    };
+    const origin = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const memory = await confirmFrom("Source-backed preference", origin);
+    const historical = await insertOwnedTurn(sql, scope, {
+      role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [memory.id] }],
+    });
+    const derived = kind === "confirmed" ? await confirmFrom("Derived preference", historical)
+      : await memories.proposeMemory(scope, {
+        text: "Derived preference", sourceTurnIds: [historical], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+    const context = () => memories.listContext(scope, new Date().toISOString());
+    await expect(context()).resolves.toMatchObject({ memories: expect.arrayContaining([
+      expect.objectContaining({ id: memory.id }), expect.objectContaining({ id: derived.id }),
+    ]) });
+    if (kind === "expired temporary") {
+      await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${derived.id}`;
+    }
+
+    await expect(memories.deleteMemory(scope, {
+      id: derived.id, expectedVersion: derived.version, deleteSourceText: false, clientKey: randomUUID(),
+    })).resolves.toMatchObject({ excludedSourceIds: [material] });
+    await expect(sql`SELECT source_id, memory_id FROM opening_privacy_exclusions WHERE workspace_id=${scope.workspaceId}`)
+      .resolves.toEqual([{ source_id: material, memory_id: derived.id }]);
+    await expect(memories.get(scope, memory.id)).resolves.toMatchObject({ status: "active" });
+    await expect(context()).resolves.toEqual({ memories: [], sourceRefs: [] });
   });
 
   it("preserves source-free snippets and rejects unavailable historical memory dependencies", async () => {
