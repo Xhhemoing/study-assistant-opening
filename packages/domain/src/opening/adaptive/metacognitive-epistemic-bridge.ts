@@ -59,6 +59,12 @@ export function metacognitiveStepMetadata({ observations, metacognitiveConfidenc
     ...metacognitiveConfidence?.byObservationId.get(row.id), ...row,
   }));
   const submissions = firstSubmissions(all, row => row.problemId, row => Date.parse(row.attemptedAt));
+  const firstClaimCounts = new Map<string, number>();
+  for (const { problemId, isFirstSubmission } of all) {
+    if (problemId !== null && isFirstSubmission === true) {
+      firstClaimCounts.set(problemId, (firstClaimCounts.get(problemId) ?? 0) + 1);
+    }
+  }
   const current = all.filter(row => row.usableForCurrentVersion === "yes");
   const isAssisted = (row: SnapshotObservation) => row.assistance !== "independent"
     || row.independentAttempt !== "yes" || row.isMultiDraft === true;
@@ -66,7 +72,8 @@ export function metacognitiveStepMetadata({ observations, metacognitiveConfidenc
     itemId: row.problemId ?? undefined,
     preAnswerConfidence: row.preAnswerConfidence,
     isCorrect: row.verifiedCorrect === "unknown" ? null : row.verifiedCorrect === "yes",
-    isFirstSubmission: row.isFirstSubmission ?? submissions.has(row),
+    isFirstSubmission: row.problemId !== null && (firstClaimCounts.get(row.problemId) ?? 0) <= 1
+      && row.isFirstSubmission !== false && submissions.has(row),
     assisted: isAssisted(row),
   }] : []);
   if (calibration.length === 0) return undefined;
@@ -102,11 +109,27 @@ type JoinedHead = {
   attempted: number;
 };
 
-function uniqueById<T>(rows: readonly T[], idOf: (row: T) => string) {
+function sameFields<T extends object>(left: T, right: T): boolean {
+  const keys = Object.keys(left) as (keyof T)[];
+  return keys.length === Object.keys(right).length
+    && keys.every(key => Object.hasOwn(right, key) && left[key] === right[key]);
+}
+
+function sameHead(left: ShadowObservation, right: ShadowObservation): boolean {
+  if (left === right) return true;
+  const { errors: leftErrors = [], ...leftFields } = left;
+  const { errors: rightErrors = [], ...rightFields } = right;
+  return sameFields(leftFields, rightFields) && leftErrors.length === rightErrors.length
+    && leftErrors.every((error, index) => sameFields(error, rightErrors[index]!));
+}
+
+function uniqueById<T extends object>(rows: readonly T[], idOf: (row: T) => string, same?: (left: T, right: T) => boolean) {
   const byId = new Map<string, T | null>();
   for (const row of rows) {
     const id = idOf(row);
-    byId.set(id, byId.has(id) ? null : row);
+    const existing = byId.get(id);
+    if (existing === undefined) byId.set(id, row);
+    else if (existing !== null && !same?.(existing, row)) byId.set(id, null);
   }
   return byId;
 }
@@ -119,18 +142,23 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
   });
   const features = uniqueById(visibleFeatures, row => row.feature.observationId);
   const heads = uniqueById(input.observations.filter(observation => {
+    const row = features.get(observation.id);
     const attempted = adaptiveShadowTime(observation.attemptedAt);
-    // Untimestamped heads inherit visibility from the feature for that attempt.
-    if (observation.recordedAt === undefined) return features.get(observation.id)?.attempted === attempted;
+    if (!row || row.attempted !== attempted) return false;
+    if (observation.recordedAt === undefined) {
+      // Conflicting revisions with the same version and outcome need recording times to resolve visibility.
+      return observation.itemVersionId === row.feature.itemVersionId
+        && observation.verifiedCorrect === row.feature.eligibility.verifiedCorrect;
+    }
     const recorded = adaptiveShadowTime(observation.recordedAt);
     return attempted <= recorded && recorded < cutoff;
-  }), row => row.id);
+  }), row => row.id, sameHead);
   return [...features.values()].flatMap(row => {
     if (!row) return [];
-    const { feature, attempted } = row;
+    const { feature } = row;
     const observation = heads.get(feature.observationId);
-    if (!observation?.problemId || !feature.requirementKey || observation.requirementKey !== feature.requirementKey) return [];
-    return adaptiveShadowTime(observation.attemptedAt) === attempted ? [{ ...row, observation }] : [];
+    if (!observation || !feature.requirementKey || observation.requirementKey !== feature.requirementKey) return [];
+    return [{ ...row, observation }];
   }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));
 }
 
@@ -147,7 +175,8 @@ function isComparable({ feature, observation }: JoinedHead) {
 }
 
 function firstEpistemicSubmissions(rows: readonly JoinedHead[]) {
-  return firstSubmissions(rows, row => JSON.stringify([row.feature.requirementKey, row.observation.problemId]), row => row.attempted);
+  return firstSubmissions(rows, row => row.observation.problemId
+    ? JSON.stringify([row.feature.requirementKey, row.observation.problemId]) : null, row => row.attempted);
 }
 
 function shadowItem(input: SkillBeliefTrajectoryInput, id: string): SkillItemModel {
@@ -164,8 +193,10 @@ function withDirectEvidence(belief: SkillBeliefV1, row: JoinedHead, item: SkillI
 
 function replay(input: SkillBeliefTrajectoryInput, cutoff: number, excludedFamilies?: ReadonlySet<string>) {
   const { scope, misconceptionPrior: prior } = input;
-  let belief = createSkillBelief({ ...scope, misconceptionMass: prior?.misconceptionMass, otherMass: prior?.otherMass });
-  let noDcmBelief = prior ? createSkillBelief(scope) : belief;
+  const identity = { workspaceId: scope.workspaceId, learnerId: scope.learnerId, courseId: scope.courseId,
+    confirmedSkillVersion: scope.confirmedSkillVersion };
+  let belief = createSkillBelief({ ...identity, misconceptionMass: prior?.misconceptionMass, otherMass: prior?.otherMass });
+  let noDcmBelief = prior ? createSkillBelief(identity) : belief;
   const known = prepareHeads(input, cutoff);
   const first = firstEpistemicSubmissions(known), excludedIds = new Set(input.excludedProblemIds);
   const eligible = (row: JoinedHead) => first.has(row) && isComparable(row)
@@ -182,6 +213,7 @@ function replay(input: SkillBeliefTrajectoryInput, cutoff: number, excludedFamil
     const familyKey = observation.familyKey?.trim() ? observation.familyKey : null;
     const isFreshFamily = Boolean(familyKey && !seenFamilies.has(familyKey));
     if (familyKey) seenFamilies.add(familyKey);
+    if (!observation.problemId) continue;
     const comparable = eligible(row);
     if (feature.requirementKey === scope.requirementKey) {
       if (comparable) {
@@ -199,7 +231,7 @@ function replay(input: SkillBeliefTrajectoryInput, cutoff: number, excludedFamil
     const attemptId = feature.attemptId;
     if (!edge || !comparable || observation.verifiedCorrect !== "yes" || !attemptId
       || directlyObservedAttempts.has(attemptId) || propagatedAttempts.has(attemptId)) continue;
-    const source = createSkillBelief({ ...scope, confirmedSkillVersion: edge.sourceSkillVersion });
+    const source = createSkillBelief({ ...identity, confirmedSkillVersion: edge.sourceSkillVersion });
     const sourceUpdate = withDirectEvidence(source, row, shadowItem(input, feature.itemVersionId!), isFreshFamily);
     const propagate = (target: SkillBeliefV1) => propagateFireCredit({ sourceSkillId: feature.requirementKey!, attemptId,
       atMs: row.attempted, source: sourceUpdate.belief, rhoPlus: sourceUpdate.retrievedProbability,

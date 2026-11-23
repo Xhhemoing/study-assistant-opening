@@ -69,6 +69,22 @@ it("excludes conflicting explicit first-submission claims from calibration in ei
   }
 });
 
+it("requires an unambiguous earliest calibration attempt across version states", () => {
+  const current = head("current", 2, { problemId: "revised", preAnswerConfidence: "sure", isFirstSubmission: true });
+  const old = head("old", 1, { problemId: "revised", usableForCurrentVersion: "no", isFirstSubmission: true });
+  expect(nextLearningStep(decision([current])).murphyBrier).toMatchObject({ sampleCount: 1 });
+  for (const [scenario, historical] of [
+    ["earlier explicit claim", old],
+    ["later explicit claim", { ...old, attemptedAt: at(3) }],
+    ["earlier unmarked attempt", { ...old, isFirstSubmission: undefined }],
+    ["tied unmarked attempt", { ...old, attemptedAt: current.attemptedAt, isFirstSubmission: undefined }],
+  ] as const) {
+    expect(nextLearningStep(decision([current, historical])).murphyBrier, scenario).toMatchObject({
+      totalInputCount: 1, sampleCount: 0, excludedAssistedOrRepeatCount: 1,
+    });
+  }
+});
+
 function feature(row: SnapshotObservation, fields: Partial<LearnerStateFeature> = {}): LearnerStateFeature {
   return { observationId: row.id, attemptId: row.id, courseId: "math", requirementKey: row.requirementKey!,
     itemVersionId: row.itemVersionId!, skillLabel: row.skillLabel, attemptedAt: row.attemptedAt, recordedAt: row.attemptedAt,
@@ -89,6 +105,23 @@ it("copies only misconception mass from a structurally compatible prior belief",
     misconceptionMass: [["substitution", 0.25]], otherMass: 0.75 });
 });
 
+it("projects scope identity without carrying saved belief state into forecasts or FIRE replay", () => {
+  const savedBelief = createSkillBelief({ ...scope, abilityMean: 2, abilityVariance: 3, logStability: 4,
+    lastDirectRecallAtMs: Date.parse(at(9)), implicitLogCredit: 0.1, misconceptionMass: [["substitution", 0.8]], otherMass: 0.2 });
+  const savedScope = { ...savedBelief, requirementKey: scope.requirementKey };
+  const own = head("own", 1), source = head("source", 4, { requirementKey: "apply-integrals" });
+  const input = { scope, cutoff: at(5), observations: [own, source], features: [feature(own), feature(source)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [], misconceptionPrior: { misconceptionMass: [], otherMass: 1 },
+    fireEdgesByObservationId: new Map([[source.id, { sourceSkillVersion: 2, edgeWeight: 1, covered: true, stepPassed: true }]]) };
+  const empty = { ...input, observations: [], features: [] };
+  const fresh = predictLearnerShadowV2(empty);
+  expect(fresh.belief.lastDirectRecallAtMs).toBeNull();
+  expect(predictLearnerShadowV2({ ...empty, scope: savedScope })).toEqual(fresh);
+  const credited = predictLearnerShadowV2(input);
+  expect(credited.belief.implicitLogCredit).toBeGreaterThan(0);
+  expect(predictLearnerShadowV2({ ...input, scope: savedScope })).toEqual(credited);
+});
+
 it("deduplicates records only once they are visible at a forecast cutoff", () => {
   const original = head("original", 2), featureOnly = head("feature-only", 2), problem = head("problem", 2);
   const replacement = { ...head("original", 3), recordedAt: at(3) };
@@ -104,6 +137,29 @@ it("deduplicates records only once they are visible at a forecast cutoff", () =>
   expect(predictLearnerShadowV2({ ...appended, cutoff: at(5) }).evidenceObservationIds).toEqual(["backdated"]);
 });
 
+it("binds untimestamped heads to matching visible versions and outcomes before resolving duplicates", () => {
+  const evidence = head("evidence", 1, { errors: [{ observationId: "evidence", label: "variable", feedback: "Use the original variable",
+    source: "verified_steps" }] });
+  const holdout = head("holdout", 3);
+  const { familyKey, ...fields } = evidence;
+  const copy = { familyKey, ...fields, errors: evidence.errors?.map(error => ({ ...error })) };
+  const input = { scope, cutoff: at(3), observations: [evidence, holdout], features: [feature(evidence), feature(holdout)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const forecast = predictLearnerShadowV2(input);
+  expect(forecast.evidenceObservationIds).toEqual([evidence.id]);
+  expect(predictLearnerShadowV2({ ...input, observations: [...input.observations, copy] })).toEqual(forecast);
+  const conflict = { ...evidence, familyKey: "other-family" };
+  expect(predictLearnerShadowV2({ ...input, observations: [...input.observations, conflict] }).evidenceObservationIds).toEqual([]);
+  const holdoutForecast = compareLearnerShadowV2({ ...input, cutoff: at(4) }).rows.find(row => row.observationId === holdout.id);
+  expect(holdoutForecast?.predictions["smoothed-frequency"]).toBeCloseTo(2 / 3);
+  for (const revision of [{ ...evidence, itemVersionId: "revised-version" }, { ...evidence, verifiedCorrect: "no" as const }]) {
+    const appended = { ...input, observations: [...input.observations, revision],
+      features: [...input.features, feature(revision, { recordedAt: at(3) })] };
+    expect(predictLearnerShadowV2(appended)).toEqual(forecast);
+    expect(compareLearnerShadowV2({ ...appended, cutoff: at(4) }).rows).toEqual([holdoutForecast]);
+  }
+});
+
 it("preserves walk-forward prefixes when a duplicate head becomes visible at the held-out attempt", () => {
   const evidence = head("evidence", 1), holdout = head("holdout", 3);
   const replacement = { ...evidence, recordedAt: at(3), verifiedCorrect: "no" as const };
@@ -115,6 +171,17 @@ it("preserves walk-forward prefixes when a duplicate head becomes visible at the
   const appended = compareLearnerShadowV2({ ...input, observations: [...observations, replacement],
     features: [...input.features, feature(replacement, { recordedAt: at(3) })] });
   expect(appended.rows).toEqual(rows.filter(row => row.observationId === holdout.id));
+});
+
+it("records visible family exposures without problem IDs before evaluating direct recall", () => {
+  const exposure = head("hint", 1, { familyKey: "shared", problemId: null, assistance: "hinted" });
+  const independent = head("independent", 2, { familyKey: "shared" });
+  const input = { scope, cutoff: at(3), observations: [independent, exposure], features: [feature(independent), feature(exposure)] };
+  const visible = buildSkillBeliefTrajectory(input);
+  expect(visible.steps.map(step => [step.observationId, step.omega])).toEqual([[independent.id, 1]]);
+  expect(visible.belief.lastDirectRecallAtMs).toBeNull();
+  const late = buildSkillBeliefTrajectory({ ...input, features: [feature(independent), feature(exposure, { recordedAt: at(3) })] });
+  expect(late.belief.lastDirectRecallAtMs).toBe(Date.parse(at(2)));
 });
 
 it.each([undefined, null, "", "   "])("does not refresh direct recall for a missing or blank family (%s)", familyKey => {
