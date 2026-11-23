@@ -20,6 +20,8 @@ export type SnapshotObservation = {
   itemVersionId?: string | null;
   /** Original attempt time (ISO); a revision keeps the attempt's time. */
   attemptedAt: string;
+  /** Time this head was recorded, when available. */
+  recordedAt?: string | null;
   assistance: Assistance;
   verifiedCorrect: EvidenceEligibilityValue;
   independentAttempt: EvidenceEligibilityValue;

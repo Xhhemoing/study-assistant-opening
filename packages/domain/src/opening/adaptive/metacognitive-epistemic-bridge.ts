@@ -18,13 +18,11 @@ type SkillScope = Pick<SkillBeliefV1, "workspaceId" | "learnerId" | "courseId" |
   requirementKey: string;
 };
 
-type ShadowObservation = SnapshotObservation & { recordedAt?: string | null };
-
 export type SkillBeliefTrajectoryInput = {
   scope: SkillScope;
   cutoff: string;
   /** Trusted, identity-scoped effective heads and their independently qualified features. */
-  observations: readonly ShadowObservation[];
+  observations: readonly SnapshotObservation[];
   features: readonly LearnerStateFeature[];
   /** Immutable publisher item models and predeclared prior, available at the prediction cutoff. */
   itemModelsByVersion?: ReadonlyMap<string, SkillItemModel>;
@@ -105,10 +103,18 @@ export function adaptiveShadowTime(value: string | null): number {
     && Number(value.slice(11, 13)) < 24 ? time : NaN;
 }
 
-type JoinedHead = {
+type EvidenceHead = {
   feature: LearnerStateFeature;
   observation: SnapshotObservation;
   attempted: number;
+  exposureOnly?: false;
+};
+
+type JoinedHead = EvidenceHead | {
+  feature: Pick<LearnerStateFeature, "observationId" | "requirementKey">;
+  observation: Pick<SnapshotObservation, "id" | "problemId" | "familyKey">;
+  attempted: number;
+  exposureOnly: true;
 };
 
 function sameFields<T extends object>(left: T, right: T): boolean {
@@ -117,7 +123,7 @@ function sameFields<T extends object>(left: T, right: T): boolean {
     && keys.every(key => Object.hasOwn(right, key) && left[key] === right[key]);
 }
 
-function sameHead(left: ShadowObservation, right: ShadowObservation): boolean {
+function sameHead(left: SnapshotObservation, right: SnapshotObservation): boolean {
   if (left === right) return true;
   const { errors: leftErrors = [], ...leftFields } = left;
   const { errors: rightErrors = [], ...rightFields } = right;
@@ -125,13 +131,13 @@ function sameHead(left: ShadowObservation, right: ShadowObservation): boolean {
     && leftErrors.every((error, index) => sameFields(error, rightErrors[index]!));
 }
 
-function uniqueById<T extends object>(rows: readonly T[], idOf: (row: T) => string, same?: (left: T, right: T) => boolean) {
-  const byId = new Map<string, T | null>();
+function groupById<T>(rows: readonly T[], idOf: (row: T) => string) {
+  const byId = new Map<string, T[]>();
   for (const row of rows) {
     const id = idOf(row);
     const existing = byId.get(id);
-    if (existing === undefined) byId.set(id, row);
-    else if (existing !== null && !same?.(existing, row)) byId.set(id, null);
+    if (existing) existing.push(row);
+    else byId.set(id, [row]);
   }
   return byId;
 }
@@ -146,11 +152,24 @@ function matchesAssistance(assistance: SnapshotObservation["assistance"], eligib
   // Eligibility exits before evaluating assistance when the observation identity is incomplete.
   if (reasonCodes.includes("observation_identity_incomplete")) return true;
   if ((assistance === "hinted" || assistance === "revealed") && independentAttempt !== "no") return false;
-  if (assistance === "unknown" && independentAttempt === "yes") return false;
   if (reasonCodes.includes("self_reported_copied_answer")) return assistance === "revealed";
+  if (assistance === "unknown") return independentAttempt !== "yes" && reasonCodes.some(reason =>
+    reason === "assistance_unknown" || reason === "exam_exposure_history_unknown" || reason === "exam_legacy_untracked_source");
   if (assistance !== "independent") return true;
   return !reasonCodes.some(reason => nonIndependentAssistanceReasons.has(reason))
     && (!reasonCodes.includes("help_before_submission") || reasonCodes.includes("attempt_timing_unknown"));
+}
+
+function matchesUntimestampedObservation(observation: SnapshotObservation, feature: LearnerStateFeature): boolean {
+  const { eligibility } = feature;
+  return (observation.requirementKey ?? null) === feature.requirementKey
+    && normalizeSkillLabelKey(observation.skillLabel) === normalizeSkillLabelKey(feature.skillLabel)
+    && (observation.itemVersionId ?? null) === feature.itemVersionId
+    && (observation.verifiedCorrect === eligibility.verifiedCorrect
+      || (eligibility.verifiedCorrect === "unknown" && feature.gaps.includes("cartridge_evidence_not_qualified")))
+    && observation.independentAttempt === eligibility.independentAttempt
+    && (observation.usableForCurrentVersion ?? "unknown") === eligibility.usableForCurrentVersion
+    && matchesAssistance(observation.assistance, eligibility);
 }
 
 function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): JoinedHead[] {
@@ -159,36 +178,40 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
     const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
     return attempted <= recorded && recorded < cutoff ? [{ feature, attempted }] : [];
   });
-  const features = uniqueById(visibleFeatures, row => row.feature.observationId);
-  const heads = uniqueById(input.observations.filter(observation => {
-    const row = features.get(observation.id);
+  const features = groupById(visibleFeatures, row => row.feature.observationId);
+  const heads = groupById(input.observations.filter(observation => {
+    const rows = features.get(observation.id);
+    if (!rows) return false;
     const attempted = adaptiveShadowTime(observation.attemptedAt);
-    if (!row || row.attempted !== attempted) return false;
     if (observation.recordedAt === undefined) {
       // Bind untimestamped heads to the visible feature before resolving duplicates.
-      const { feature } = row;
-      const { eligibility } = feature;
-      return (observation.requirementKey ?? null) === feature.requirementKey
-        && normalizeSkillLabelKey(observation.skillLabel) === normalizeSkillLabelKey(feature.skillLabel)
-        && (observation.itemVersionId ?? null) === feature.itemVersionId
-        && observation.verifiedCorrect === eligibility.verifiedCorrect
-        && observation.independentAttempt === eligibility.independentAttempt
-        && (observation.usableForCurrentVersion ?? "unknown") === eligibility.usableForCurrentVersion
-        && matchesAssistance(observation.assistance, eligibility);
+      return rows.some(row => row.attempted === attempted && matchesUntimestampedObservation(observation, row.feature));
     }
     const recorded = adaptiveShadowTime(observation.recordedAt);
-    return attempted <= recorded && recorded < cutoff;
-  }), row => row.id, sameHead);
-  return [...features.values()].flatMap(row => {
-    if (!row) return [];
-    const { feature } = row;
-    const observation = heads.get(feature.observationId);
-    if (!observation || !feature.requirementKey || observation.requirementKey !== feature.requirementKey) return [];
-    return [{ ...row, observation }];
+    return attempted <= recorded && recorded < cutoff && rows.some(row => row.attempted === attempted);
+  }), row => row.id);
+  return [...features.values()].flatMap((rows): JoinedHead[] => {
+    const { feature, attempted } = rows[0]!;
+    const { observationId, requirementKey } = feature;
+    const candidates = heads.get(observationId);
+    if (!candidates || !requirementKey || candidates.some(head => head.requirementKey !== requirementKey)) return [];
+    const observation = candidates[0]!;
+    if (rows.length === 1 && candidates.every(head => sameHead(head, observation))) return [{ feature, attempted, observation }];
+    if (rows.some(row => row.feature.requirementKey !== requirementKey || row.attempted !== attempted)) return [];
+
+    // A collision can establish prior exposure only for identities shared by every candidate.
+    const problemId = candidates.every(head => head.problemId === observation.problemId) ? observation.problemId : null;
+    const familyKey = candidates.every(head => head.familyKey === observation.familyKey) ? observation.familyKey : undefined;
+    return problemId !== null || familyKey?.trim() ? [{
+      exposureOnly: true, attempted, feature: { observationId, requirementKey },
+      observation: { id: observationId, problemId, familyKey },
+    }] : [];
   }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));
 }
 
-function isComparable({ feature, observation }: JoinedHead) {
+function isComparable(row: JoinedHead): row is EvidenceHead {
+  if (row.exposureOnly === true) return false;
+  const { feature, observation } = row;
   const { eligibility } = feature;
   return Boolean(observation.itemVersionId) && observation.itemVersionId === feature.itemVersionId
     && observation.usableForCurrentVersion === "yes" && eligibility.usableForCurrentVersion === "yes"
@@ -209,7 +232,7 @@ function shadowItem(input: SkillBeliefTrajectoryInput, id: string): SkillItemMod
   return input.itemModelsByVersion?.get(id) ?? { itemId: id, a: 1, b: 0, g: 0.25, l: 0.05 };
 }
 
-function withDirectEvidence(belief: SkillBeliefV1, row: JoinedHead, item: SkillItemModel, freshFamily: boolean) {
+function withDirectEvidence(belief: SkillBeliefV1, row: EvidenceHead, item: SkillItemModel, freshFamily: boolean) {
   const outcome = row.observation.verifiedCorrect === "yes";
   const misconceptionId = !outcome ? row.observation.errors?.find(error => error.source === "verified_steps"
     && item.misconceptions?.some(misconception => misconception.id === error.misconceptionId))?.misconceptionId : undefined;
@@ -225,37 +248,39 @@ function replay(input: SkillBeliefTrajectoryInput, cutoff: number, excludedFamil
   let noDcmBelief = prior ? createSkillBelief(identity) : belief;
   const known = prepareHeads(input, cutoff);
   const first = firstEpistemicSubmissions(known), excludedIds = new Set(input.excludedProblemIds);
-  const eligible = (row: JoinedHead) => first.has(row) && isComparable(row)
+  const eligible = (row: JoinedHead): row is EvidenceHead => first.has(row) && isComparable(row)
     && !excludedIds.has(row.observation.id) && !excludedIds.has(row.observation.problemId!)
     && (!excludedFamilies || Boolean(row.observation.familyKey?.trim()) && !excludedFamilies.has(row.observation.familyKey!));
   const evidenceFeatures: LearnerStateFeature[] = [];
   const steps: { observationId: string; omega: 0 | 1; belief: SkillBeliefV1 }[] = [];
   const seenFamilies = new Set<string>();
   const propagatedAttempts = new Set<string>();
-  const directlyObservedAttempts = new Set(known.filter(row => row.feature.requirementKey === scope.requirementKey
-    && row.feature.attemptId && eligible(row)).map(row => row.feature.attemptId));
+  const directlyObservedAttempts = new Set(known.filter(eligible).filter(row => row.feature.requirementKey === scope.requirementKey
+    && row.feature.attemptId).map(row => row.feature.attemptId));
   for (const row of known) {
-    const { observation, feature } = row;
+    const { observation } = row;
     const familyKey = observation.familyKey?.trim() ? observation.familyKey : null;
     const isFreshFamily = Boolean(familyKey && !seenFamilies.has(familyKey));
     if (familyKey) seenFamilies.add(familyKey);
     if (!observation.problemId) continue;
     const comparable = eligible(row);
-    if (feature.requirementKey === scope.requirementKey) {
+    if (row.feature.requirementKey === scope.requirementKey) {
       if (comparable) {
-        const item = shadowItem(input, feature.itemVersionId!);
+        const item = shadowItem(input, row.feature.itemVersionId!);
         const next = withDirectEvidence(belief, row, item, isFreshFamily).belief;
         noDcmBelief = noDcmBelief === belief && !item.misconceptions?.length
           ? next : withDirectEvidence(noDcmBelief, row, { ...item, misconceptions: undefined }, isFreshFamily).belief;
         belief = next;
-        evidenceFeatures.push(feature);
+        evidenceFeatures.push(row.feature);
       }
       steps.push({ observationId: observation.id, omega: comparable ? 1 : 0, belief });
       continue;
     }
+    if (!comparable) continue;
+    const { feature } = row;
     const edge = input.fireEdgesByObservationId?.get(observation.id);
     const attemptId = feature.attemptId;
-    if (!edge || !comparable || observation.verifiedCorrect !== "yes" || !attemptId
+    if (!edge || row.observation.verifiedCorrect !== "yes" || !attemptId
       || directlyObservedAttempts.has(attemptId) || propagatedAttempts.has(attemptId)) continue;
     const source = createSkillBelief({ ...identity, confirmedSkillVersion: edge.sourceSkillVersion });
     const sourceUpdate = withDirectEvidence(source, row, shadowItem(input, feature.itemVersionId!), isFreshFamily);
@@ -305,9 +330,10 @@ export function compareLearnerShadowV2(input: AdaptiveEpistemicShadowInput) {
   const heads = prepareHeads(input, cutoff);
   const first = firstEpistemicSubmissions(heads);
   const rows = heads.flatMap((row): ShadowV2Row[] => {
+    if (!isComparable(row)) return [];
     const { observation, feature } = row;
     const familyKey = observation.familyKey;
-    if (feature.requirementKey !== input.scope.requirementKey || !first.has(row) || !isComparable(row)
+    if (feature.requirementKey !== input.scope.requirementKey || !first.has(row)
       || !familyKey?.trim() || excluded.has(familyKey) || excludedIds.has(observation.id) || excludedIds.has(observation.problemId!)) return [];
     const { predictions } = predictAt(input, row.attempted, new Set([...excluded, familyKey]), feature.itemVersionId!);
     return [{ observationId: observation.id, familyKey, attemptedAt: observation.attemptedAt,
