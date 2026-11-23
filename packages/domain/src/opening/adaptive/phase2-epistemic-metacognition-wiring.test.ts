@@ -121,7 +121,7 @@ function projectProducedAttempts(rows: readonly ProducedAttempt[], cutoff: strin
     evidence.observations.push({ ...learningObservation, id, courseId: scope.courseId, skillLabel, attemptId, problemId,
       itemVersionId, assistance, occurredAt: attemptedAt, recordedAt: row.recordedAt ?? attemptedAt });
     evidence.evidenceContexts[id] = {
-      observation: { ...qualifiedInput.observation, observationId: id, courseId: scope.courseId, requirementKey: scope.requirementKey,
+      observation: { ...qualifiedInput.observation, observationId: id, courseId: scope.courseId, requirementKey: row.requirementKey ?? null,
         attemptId, problemId, itemVersionId, assistance, submittedAt, startedAt },
       context: { helpHistory: { complete: true, exposures: [] }, referenceCheckAuthority: context.referenceCheckAuthority,
         referenceCheck: { ...context.referenceCheck!, attemptId, problemId, itemVersionId },
@@ -206,6 +206,55 @@ it("keeps a cartridge-withheld grade and the later retry out of the holdout", ()
     ["first", 0], ["retry", 0],
   ]);
   expect(compareLearnerShadowV2(input).rows).toEqual([]);
+});
+
+it.each(["independent", "hinted"] as const)("blocks a cross-requirement retry after a cartridge-withheld %s attempt", assistance => {
+  const first = head("first", 1, { requirementKey: "A", assistance });
+  const retry = head("retry", 2, { requirementKey: "B", problemId: first.problemId, familyKey: first.familyKey });
+  const input = { ...projectProducedAttempts([first, retry], at(3), {
+    cartridgeEvidence: { registry: createCartridgeRegistry(), emissions: {
+      first: { cartridgeId: "unregistered", cartridgeVersion: "1", probeId: "probe", response: "correct" },
+    } },
+  }), scope: { ...scope, requirementKey: "B" }, targetFamilyKeys: [], propagatedFamilyKeys: [] };
+
+  expect(input.observations[0]).toMatchObject({ requirementKey: "A", assistance, verifiedCorrect: "yes" });
+  expect(input.features[0]).toMatchObject({ requirementKey: "A", eligibility: { verifiedCorrect: "unknown" },
+    gaps: expect.arrayContaining(["cartridge_evidence_not_qualified"]) });
+  expect(input.features[1]).toMatchObject({ requirementKey: "B", eligibility: { verifiedCorrect: "yes", independentAttempt: "yes" } });
+  expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([{ observationId: retry.id, omega: 0 }]);
+  expect(compareLearnerShadowV2(input).rows).toEqual([]);
+});
+
+it.each([
+  { scenario: "a missing requirement", requirementKey: null, revisionRequirementKey: null },
+  { scenario: "conflicting requirements", requirementKey: "A", revisionRequirementKey: "B" },
+])("retains prior problem exposure with $scenario", ({ requirementKey, revisionRequirementKey }) => {
+  const first = head("first", 1, { recordedAt: at(1), requirementKey });
+  const revision = { ...first, requirementKey: revisionRequirementKey };
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const input = { scope, cutoff: at(3), observations: [first, revision, retry], features: [feature(first), feature(retry)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+
+  expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([{ observationId: retry.id, omega: 0 }]);
+  expect(compareLearnerShadowV2(input).rows).toEqual([]);
+});
+
+it.each([
+  { scenario: "share one attempt", attemptIds: ["shared", "shared"], omega: 1 },
+  { scenario: "have distinct attempts", attemptIds: ["one", "two"], omega: 0 },
+  { scenario: "have no attempt IDs", attemptIds: [null, null], omega: 0 },
+] as const)("credits simultaneous requirement heads only when they $scenario", ({ attemptIds, omega }) => {
+  const first = head("first", 1, { requirementKey: "A" });
+  const second = head("second", 1, { requirementKey: "B", problemId: first.problemId, familyKey: first.familyKey });
+  const retry = head("retry", 2, { requirementKey: "B", problemId: first.problemId, familyKey: first.familyKey });
+  const input = { scope: { ...scope, requirementKey: "B" }, cutoff: at(3), observations: [retry, second, first],
+    features: [feature(first, { attemptId: attemptIds[0] }), feature(second, { attemptId: attemptIds[1] }), feature(retry)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+
+  expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([{ observationId: second.id, omega }, { observationId: retry.id, omega: 0 }]);
+  expect(compareLearnerShadowV2(input).rows.map(row => row.observationId)).toEqual(omega === 1 ? [second.id] : []);
+  const firstSkill = { ...input, scope: { ...scope, requirementKey: "A" } };
+  expect(buildSkillBeliefTrajectory(firstSkill).steps).toMatchObject([{ observationId: first.id, omega }]);
 });
 
 const priorAnswerHelp = { complete: true, exposures: [{ attemptId: "earlier-attempt", problemId: "shared-problem",
@@ -395,6 +444,40 @@ it.each([
     weight === 0 ? [["first", 0], ["retry", 0]] : [["retry", 1]],
   );
   expect(result.belief.lastDirectRecallAtMs).toBe(lastRecallAtMs);
+});
+
+it.each([
+  { scenario: "both records of the revision are visible", revisionFeature: true, revisionObservation: true },
+  { scenario: "only the revision observation is visible", revisionFeature: false, revisionObservation: true },
+  { scenario: "only the revision feature is visible", revisionFeature: true, revisionObservation: false },
+])("retains problem and family exposure at the later conflicting attempt time when $scenario", ({ revisionFeature, revisionObservation }) => {
+  const first = head("first", 1, { recordedAt: at(1) });
+  const revision = { ...first, attemptedAt: at(2), recordedAt: at(2) };
+  const retry = head("retry", 3, { problemId: first.problemId, familyKey: first.familyKey });
+  const priorFeatures = revisionFeature ? [feature(first), feature(revision)] : [feature(first)];
+  const priorObservations = revisionObservation ? [first, revision] : [first];
+  const input = { scope, cutoff: at(4), observations: [...priorObservations, retry], features: [...priorFeatures, feature(retry)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const result = buildSkillBeliefTrajectory(input);
+  expect(result.steps).toMatchObject([{ observationId: first.id, omega: 0 }, { observationId: retry.id, omega: 0 }]);
+  expect(result.belief.lastDirectRecallAtMs).toBeNull();
+  expect(compareLearnerShadowV2(input).rows).toEqual([]);
+
+  const tiedRetry = { ...retry, attemptedAt: at(2) };
+  const tie = { ...input, observations: [...priorObservations, tiedRetry], features: [...priorFeatures, feature(tiedRetry)] };
+  expect(buildSkillBeliefTrajectory(tie).steps).toMatchObject([{ observationId: first.id, omega: 0 }, { observationId: retry.id, omega: 0 }]);
+  expect(compareLearnerShadowV2(tie).rows).toEqual([]);
+
+  const between = { ...retry, attemptedAt: "2026-10-01T11:00:00.000Z" };
+  const betweenResult = buildSkillBeliefTrajectory({ ...input, observations: [...priorObservations, between],
+    features: [...priorFeatures, feature(between)] });
+  expect(betweenResult.steps).toMatchObject([{ observationId: retry.id, omega: 1 }, { observationId: first.id, omega: 0 }]);
+
+  const sameFamily = head("same-family", 3, { familyKey: first.familyKey });
+  const familyResult = buildSkillBeliefTrajectory({ ...input, observations: [...input.observations, sameFamily],
+    features: [...input.features, feature(sameFamily)] });
+  expect(familyResult.steps.at(-1)).toMatchObject({ observationId: sameFamily.id, omega: 1 });
+  expect(familyResult.belief.lastDirectRecallAtMs).toBeNull();
 });
 
 it.each([undefined, null, "", "   "])("does not refresh direct recall for a missing or blank family (%s)", familyKey => {
