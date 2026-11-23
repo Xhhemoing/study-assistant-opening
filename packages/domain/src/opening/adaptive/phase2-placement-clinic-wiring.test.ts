@@ -1,7 +1,7 @@
 import type { CourseRequirement } from "@aistudy/contracts";
 import { describe, expect, it } from "vitest";
 import { MAX_TOTAL_DRILLDOWN_PROBES, type DiagnosticProbeItem } from "../../diagnostic-placement";
-import { REMEDY_CLINIC_TOTAL_MINUTES, type ClinicCandidateProbe } from "../../remedy-clinic";
+import { REMEDY_CLINIC_TOTAL_MINUTES, revalidateRemedyClinic, type ClinicCandidateProbe } from "../../remedy-clinic";
 import { courseRequirementProgress, courseRouteLearningDecision, selectCourseRouteStep } from "../course-route";
 import { resolveGoalLearningContext } from "./goal-policy";
 import { captureNextLearningStep, nextLearningStep } from "./next-learning-step";
@@ -202,10 +202,11 @@ const requirementKey = "move-term";
 const ruleId = "negative_sign_flip";
 const clinicValidation = () => ({
   currentPrivacyEpoch: 4,
-  activeSources: new Map([["chapter-a", 1], ["chapter-b", 1], ["probes", 1]]),
+  activeSources: new Map([["chapter-a", 1], ["chapter-b", 1], ["chapter-c", 1], ["probes", 1]]),
 });
-const clinicFixture = () => {
+const clinicFixture = (includeExtraAttempt = false) => {
   const { currentPrivacyEpoch, activeSources: activeSourcesMap } = clinicValidation();
+  const chapters = ["chapter-a", "chapter-a", "chapter-b", ...(includeExtraAttempt ? ["chapter-c"] : [])];
   const candidateProbes: ClinicCandidateProbe<number, string>[] = [3, 5].map(n => ({
     probeId: `p${n}`, requirementKey, prompt: `给定 -x ≤ ${n}，求 x 的范围。`, targetMisconceptionId: ruleId,
     input: n, correctModel: { id: "correct", label: "正确", role: "correct", predict: input => `x ≥ ${-input}` },
@@ -217,7 +218,7 @@ const clinicFixture = () => {
   const candidate = generateAdaptiveRemedyClinic({
     learnerId: "learner", courseId, ruleId, currentPrivacyEpoch, activeSourcesMap, candidateProbes,
     verifyRuleViolation: attempt => attempt.excerpt.includes("反向错误"),
-    attempts: ["chapter-a", "chapter-a", "chapter-b"].map((chapterId, i) => ({
+    attempts: chapters.map((chapterId, i) => ({
       attemptId: `attempt-${i}`, rootAttemptId: `root-${i}`, learnerId: "learner", courseId, ruleId, chapterId,
       localDate: i === 2 ? date : "2026-11-20", assisted: false, privacyEpoch: currentPrivacyEpoch,
       excerpt: `反向错误 ${i}`, invariantSummary: "两边同乘负数时不等号反向。",
@@ -278,6 +279,25 @@ describe("adaptive clinic suggestions", () => {
       expect(proposeAdaptiveTasks(snapshot, input)).toEqual(baseline);
     }
     expect(clinic).toEqual({ clinic: expect.any(Object), skillLabel, requirementKey });
+  });
+
+  it.each(["revoked", "re-versioned"])("drops a four-attempt clinic when one source is %s at the same epoch", change => {
+    const clinic = clinicFixture(true);
+    const live = clinicValidation();
+    const plan = { ...options, remedyClinics: [clinic] };
+    expect(clinic.clinic.coverage.rootAttemptCount).toBe(4);
+    expect(proposeAdaptiveTasks(snapshot, { ...plan, remedyClinicValidation: live }).suggestions[0]?.minutes).toBe(14);
+
+    const activeSources = new Map(live.activeSources);
+    if (change === "revoked") activeSources.delete("chapter-c");
+    else activeSources.set("chapter-c", 2);
+    expect(revalidateRemedyClinic(clinic.clinic, activeSources, live.currentPrivacyEpoch)).toMatchObject({
+      status: "active",
+      coverage: { rootAttemptCount: 3, chapterCount: 2, localDateCount: 2 },
+      revocationSummary: { reason: "partial_source_revoked_still_active", strippedCaseCount: 1 },
+    });
+    const remedyClinicValidation = { ...live, activeSources };
+    expect(proposeAdaptiveTasks(snapshot, { ...plan, remedyClinicValidation })).toEqual(proposeAdaptiveTasks(snapshot, options));
   });
 
   it("respects proposal controls and skips clinics that would be shortened", () => {

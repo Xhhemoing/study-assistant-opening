@@ -37,12 +37,13 @@ const draftInput = (goal: CourseGoal | null, tasks: TaskItem[] = []): BuildAdapt
   planDayOptions: preferredOrder => ({ preferredOrder, localDate: "2026-10-17", timeZone: "America/Los_Angeles", planningNow: "2026-10-17T14:00:00Z" }),
 });
 
-function clinicDraftInput(): BuildAdaptiveDraftInput {
+function clinicDraftInput(includeExtraAttempt = false) {
   const draft = draftInput({ kind: "final-exam", targetDate: "2026-10-20", weeklyMinutes: 0 });
   const course = draft.adaptive.snapshot.courses[0]!;
   course.nextSkills = [];
   const ruleId = "negative_sign_flip";
-  const activeSourcesMap = new Map([["A", 1], ["B", 1], ["probes", 1]]);
+  const activeSourcesMap = new Map([["A", 1], ["B", 1], ["C", 1], ["probes", 1]]);
+  const chapters = ["A", "A", "B", ...(includeExtraAttempt ? ["C"] : [])];
   const candidateProbes: ClinicCandidateProbe<number, string>[] = [3, 5].map(n => ({
     probeId: `p${n}`, requirementKey: "inequality", prompt: `Solve -x ≤ ${n}.`, input: n,
     correctModel: { id: "correct", label: "Correct", role: "correct", predict: input => `x ≥ ${-input}` },
@@ -55,7 +56,7 @@ function clinicDraftInput(): BuildAdaptiveDraftInput {
   const clinic = generateAdaptiveRemedyClinic({
     learnerId: draft.workspaceId, courseId: course.courseId, ruleId, currentPrivacyEpoch: 4, activeSourcesMap, candidateProbes,
     verifyRuleViolation: attempt => attempt.excerpt === "x ≤ -3",
-    attempts: ["A", "A", "B"].map((chapterId, i) => ({
+    attempts: chapters.map((chapterId, i) => ({
       attemptId: id(i + 10), rootAttemptId: id(i + 10), learnerId: draft.workspaceId, courseId: course.courseId, ruleId, chapterId,
       localDate: i === 2 ? "2026-10-17" : "2026-10-16", excerpt: "x ≤ -3", invariantSummary: "除以负数时不等号反向。",
       privacyEpoch: 4, assisted: false, sourceRefs: [{ sourceId: chapterId, sourceVersion: 1 }],
@@ -63,7 +64,7 @@ function clinicDraftInput(): BuildAdaptiveDraftInput {
   }, { skillLabel: "不等式", requirementKey: "inequality" });
   expect(clinic).not.toBeNull();
   return { ...draft, remedyClinics: [Object.freeze(clinic!)],
-    remedyClinicValidation: { currentPrivacyEpoch: 4, activeSources: new Map(activeSourcesMap) } };
+    remedyClinicValidation: { currentPrivacyEpoch: 4, activeSources: new Map(activeSourcesMap) } } satisfies BuildAdaptiveDraftInput;
 }
 
 describe("remedy clinic daily draft", () => {
@@ -99,6 +100,22 @@ describe("remedy clinic daily draft", () => {
       expect(draft.adaptive.suggestedTasks).toEqual([]);
       expect(draft.blocks).toEqual([]);
     }
+  });
+
+  it.each(["revoked", "re-versioned"])("removes the four-attempt clinic and block when one source is %s at the same epoch", change => {
+    const input = clinicDraftInput(true);
+    expect(input.remedyClinics[0]?.clinic.coverage.rootAttemptCount).toBe(4);
+    const before = buildAdaptiveDraft(input);
+    expect(before.adaptive.suggestedTasks).toMatchObject([{ minutes: 14 }]);
+    expect(before.blocks).toHaveLength(1);
+
+    const activeSources = new Map(input.remedyClinicValidation.activeSources);
+    if (change === "revoked") activeSources.delete("C");
+    else activeSources.set("C", 2);
+    const remedyClinicValidation = { ...input.remedyClinicValidation, activeSources };
+    const draft = buildAdaptiveDraft({ ...input, remedyClinicValidation });
+    expect(draft.adaptive.suggestedTasks).toEqual([]);
+    expect(draft.blocks).toEqual([]);
   });
 
   it("leaves a tight exam slot free when the suggestion budget cannot fit all 14 minutes", () => {

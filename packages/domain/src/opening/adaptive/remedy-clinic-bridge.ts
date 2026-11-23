@@ -35,8 +35,10 @@ export function revalidateAdaptiveRemedyClinics(
   const { activeSources, currentPrivacyEpoch } = validation;
   return candidates.flatMap(({ clinic: cachedClinic, skillLabel, requirementKey }) => {
     const clinic = revalidateRemedyClinic(cachedClinic, activeSources, currentPrivacyEpoch);
-    // A new privacy epoch requires a fresh clinic for adaptive planning.
+    const { reason, strippedCaseCount, strippedProbeCount } = clinic.revocationSummary;
+    // Partial source revocation also requires a fresh clinic for adaptive planning.
     return clinic.status === "active" && clinic.createdPrivacyEpoch === currentPrivacyEpoch
+      && reason === "none" && strippedCaseCount === 0 && (strippedProbeCount ?? 0) === 0
       ? [{ clinic, skillLabel, ...(requirementKey !== undefined ? { requirementKey } : {}) }] : [];
   });
 }
