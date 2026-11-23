@@ -174,34 +174,79 @@ function matchesUntimestampedObservation(observation: SnapshotObservation, featu
     && matchesAssistance(observation.assistance, eligibility);
 }
 
-function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): JoinedHead[] {
-  const visibleFeatures = input.features.flatMap(feature => {
-    if (feature.courseId !== input.scope.courseId) return [];
-    const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
-    return attempted <= recorded && recorded < cutoff ? [{ feature, attempted }] : [];
-  });
-  const features = groupByKey(visibleFeatures, row => row.feature.observationId);
-  const visibleObservations = input.observations.flatMap(observation => {
-    const rows = features.get(observation.id);
-    if (!rows) return [];
+type FeatureRevision = { feature: LearnerStateFeature; attempted: number; recorded: number };
+type ObservationRevision = { observation: SnapshotObservation; attempted: number };
+
+function visibleObservationRevisions(
+  observations: readonly SnapshotObservation[], features: readonly FeatureRevision[], cutoff: number,
+): ObservationRevision[] {
+  const visible: ObservationRevision[] = [];
+  const claimedSlots = new Set<number>();
+  const untimestamped: (ObservationRevision & { matchingSlots: number[] })[] = [];
+  for (const observation of observations) {
     const attempted = adaptiveShadowTime(observation.attemptedAt);
     if (observation.recordedAt === undefined) {
-      // Bind untimestamped heads to the visible feature before resolving duplicates.
-      return rows.some(row => row.attempted === attempted && matchesUntimestampedObservation(observation, row.feature))
-        ? [{ observation, attempted }] : [];
+      const matchingSlots = features.flatMap((row, slot) =>
+        row.attempted === attempted && matchesUntimestampedObservation(observation, row.feature) ? [slot] : []);
+      if (matchingSlots.length) untimestamped.push({ observation, attempted, matchingSlots });
+      continue;
     }
+
     const recorded = adaptiveShadowTime(observation.recordedAt);
-    return attempted <= recorded && recorded < cutoff ? [{ observation, attempted }] : [];
+    if (!(attempted <= recorded)) continue;
+    if (recorded < cutoff) visible.push({ observation, attempted });
+    features.forEach((row, slot) => {
+      if (row.recorded === recorded && row.attempted === attempted
+        && matchesUntimestampedObservation(observation, row.feature)) claimedSlots.add(slot);
+    });
+  }
+
+  // Each bucket shares the same matching feature slots, including the attempted time.
+  for (const bucket of groupByKey(untimestamped, row => row.matchingSlots.join(",")).values()) {
+    const { observation, matchingSlots } = bucket[0]!;
+    const unclaimedSlots = matchingSlots.filter(slot => !claimedSlots.has(slot));
+    const isVisible = (slot: number) => features[slot]!.recorded < cutoff;
+    if (bucket.every(row => sameHead(row.observation, observation))) {
+      const slots = unclaimedSlots.length ? unclaimedSlots : matchingSlots;
+      if (slots.some(isVisible)) visible.push(...bucket);
+    } else if (bucket.length === unclaimedSlots.length) {
+      // Pair distinct legacy revisions with their feature slots in input order.
+      visible.push(...bucket.filter((_row, index) => isVisible(unclaimedSlots[index]!)));
+    } else if (matchingSlots.some(isVisible)) {
+      // Ambiguous pairings still collide as soon as a matching feature is visible.
+      visible.push(...bucket);
+    }
+  }
+  return visible;
+}
+
+function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
+  const courseFeatures = input.features.flatMap(feature => {
+    if (feature.courseId !== input.scope.courseId) return [];
+    const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
+    return attempted <= recorded ? [{ feature, attempted, recorded }] : [];
   });
-  const heads = groupByKey(visibleObservations, row => row.observation.id);
-  return [...features.values()].flatMap((rows): JoinedHead[] => {
+  const featuresById = groupByKey(courseFeatures, row => row.feature.observationId);
+  const observationsById = groupByKey(input.observations, row => row.id);
+  const disputedAttemptIds = new Set<string>();
+  const heads = [...featuresById.entries()].flatMap(([observationId, allRows]): JoinedHead[] => {
+    const rows = allRows.filter(row => row.recorded < cutoff);
+    if (!rows.length) return [];
     const { feature, attempted } = rows[0]!;
-    const { observationId, requirementKey, attemptId } = feature;
-    const candidates = heads.get(observationId);
-    if (!candidates) return [];
+    const { requirementKey, attemptId } = feature;
+    const candidates = visibleObservationRevisions(observationsById.get(observationId) ?? [], allRows, cutoff);
+    const sameSubmission = rows.every(row => row.feature.attemptId === attemptId && row.attempted === attempted)
+      && candidates.every(row => row.attempted === attempted);
+    if (!sameSubmission) {
+      // Retain membership even when the collision loses its problem, family, or attempt identity.
+      for (const row of rows) {
+        if (row.feature.attemptId !== null) disputedAttemptIds.add(row.feature.attemptId);
+      }
+    }
+    if (!candidates.length) return [];
     const { observation } = candidates[0]!;
-    if (rows.length === 1 && requirementKey && candidates.every(({ observation: head, attempted: headAttempted }) =>
-      sameHead(head, observation) && headAttempted === attempted && (head.requirementKey ?? null) === requirementKey)) {
+    if (rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head }) =>
+      sameHead(head, observation) && (head.requirementKey ?? null) === requirementKey)) {
       return [{ feature, attempted, observation, claimedRequirementKeys: new Set([requirementKey]) }];
     }
 
@@ -211,8 +256,6 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
     const problemId = candidates.every(({ observation: head }) => head.problemId === observation.problemId) ? observation.problemId : null;
     const familyKey = candidates.every(({ observation: head }) => head.familyKey === observation.familyKey) ? observation.familyKey : undefined;
     if (problemId === null && !familyKey?.trim()) return [];
-    const unanimousAttemptId = rows.every(row => row.feature.attemptId === attemptId && row.attempted === attempted)
-      && candidates.every(row => row.attempted === attempted) ? attemptId : null;
     const claimedRequirementKeys = new Set([
       ...rows.map(row => row.feature.requirementKey), ...candidates.map(row => row.observation.requirementKey),
     ].filter(key => key != null));
@@ -220,10 +263,11 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
     const maxAttempted = candidates.reduce((latest, row) => Math.max(latest, row.attempted), latestFeatureAttempted);
     return [{
       exposureOnly: true, attempted: maxAttempted, claimedRequirementKeys,
-      feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: unanimousAttemptId },
+      feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: sameSubmission ? attemptId : null },
       observation: { id: observationId, problemId, familyKey },
     }];
   }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));
+  return { heads, disputedAttemptIds };
 }
 
 function isComparable(row: JoinedHead): row is EvidenceHead {
@@ -240,7 +284,7 @@ function isComparable(row: JoinedHead): row is EvidenceHead {
     && feature.availability === "available" && !feature.views.includes("help");
 }
 
-function firstEpistemicSubmissions(rows: readonly JoinedHead[]) {
+function firstEpistemicSubmissions(rows: readonly JoinedHead[], disputedAttemptIds: ReadonlySet<string>) {
   const earliestByProblem = new Map<string, JoinedHead[]>();
   for (const row of rows) {
     const { problemId } = row.observation;
@@ -252,11 +296,12 @@ function firstEpistemicSubmissions(rows: readonly JoinedHead[]) {
   const first = new Set<JoinedHead>();
   for (const earliest of earliestByProblem.values()) {
     const initial = earliest[0]!;
+    const { attemptId } = initial.feature;
+    if (attemptId !== null && disputedAttemptIds.has(attemptId)) continue;
     if (earliest.length === 1) {
       first.add(initial);
       continue;
     }
-    const { attemptId } = initial.feature;
     if (attemptId === null || earliest.some(row => row.feature.attemptId !== attemptId)) continue;
     // A colliding head can claim multiple requirements without qualifying as evidence itself.
     const claimCounts = new Map<string, number>();
@@ -314,8 +359,8 @@ function replay(input: SkillBeliefTrajectoryInput, cutoff: number, excludedFamil
     confirmedSkillVersion: scope.confirmedSkillVersion };
   let belief = createSkillBelief({ ...identity, misconceptionMass: prior?.misconceptionMass, otherMass: prior?.otherMass });
   let noDcmBelief = prior ? createSkillBelief(identity) : belief;
-  const known = prepareHeads(input, cutoff);
-  const first = firstEpistemicSubmissions(known), excludedIds = new Set(input.excludedProblemIds);
+  const { heads: known, disputedAttemptIds } = prepareHeads(input, cutoff);
+  const first = firstEpistemicSubmissions(known, disputedAttemptIds), excludedIds = new Set(input.excludedProblemIds);
   const eligible = (row: JoinedHead): row is EvidenceHead => first.has(row) && isComparable(row)
     && !excludedIds.has(row.observation.id) && !excludedIds.has(row.observation.problemId!)
     && (!excludedFamilies || Boolean(row.observation.familyKey?.trim()) && !excludedFamilies.has(row.observation.familyKey!));
@@ -393,8 +438,8 @@ export function compareLearnerShadowV2(input: AdaptiveEpistemicShadowInput) {
   const cutoff = cutoffMs(input.cutoff);
   const excluded = new Set([...input.targetFamilyKeys, ...input.propagatedFamilyKeys]);
   const excludedIds = new Set(input.excludedProblemIds);
-  const heads = prepareHeads(input, cutoff);
-  const first = firstEpistemicSubmissions(heads);
+  const { heads, disputedAttemptIds } = prepareHeads(input, cutoff);
+  const first = firstEpistemicSubmissions(heads, disputedAttemptIds);
   const rows = heads.flatMap((row): ShadowV2Row[] => {
     if (!isComparable(row)) return [];
     const { observation, feature } = row;

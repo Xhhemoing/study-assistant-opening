@@ -303,21 +303,36 @@ it.each([
 });
 
 it.each([
-  { disagreement: "feature attempt ID", featureFields: { attemptId: "different" }, observationFields: {} },
-  { disagreement: "feature attempt time", featureFields: { attemptedAt: at(1) }, observationFields: {} },
-  { disagreement: "observation attempt time", featureFields: {}, observationFields: { attemptedAt: at(1) } },
-])("excludes a tied sibling after a revision conflicts on $disagreement", ({ featureFields, observationFields }) => {
+  { scenario: "feature moves earlier", source: "feature", day: 1 },
+  { scenario: "feature moves later", source: "feature", day: 3 },
+  { scenario: "observation moves earlier", source: "observation", day: 1 },
+  { scenario: "observation moves later", source: "observation", day: 3 },
+  { scenario: "both move earlier", source: "both", day: 1 },
+  { scenario: "both move later", source: "both", day: 3 },
+  { scenario: "feature changes attempt ID", source: "feature", day: 2, attemptId: "different" },
+  { scenario: "revision also changes problem and family", source: "both", day: 3, changesIdentities: true },
+])("excludes a sibling from a disputed submission when $scenario", ({ source, day, attemptId = "shared", changesIdentities }) => {
   const shared = { problemId: "shared-problem", familyKey: "shared-family", recordedAt: at(2) };
   const skillA = head("skill-a", 2, { ...shared, requirementKey: "A" });
   const skillB = head("skill-b", 2, { ...shared, requirementKey: "B" });
-  const input = { scope: { ...scope, requirementKey: "B" }, cutoff: at(3),
-    observations: [skillA, skillB, { ...skillA, ...observationFields, recordedAt: at(3) }],
-    features: [feature(skillA, { attemptId: "shared" }), feature(skillB, { attemptId: "shared" }),
-      feature(skillA, { attemptId: "shared", ...featureFields, recordedAt: at(3) })],
+  const revision = { ...skillA, attemptedAt: at(day), recordedAt: at(4),
+    ...(changesIdentities ? { problemId: "other-problem", familyKey: "other-family" } : {}) };
+  const observations = [skillA, skillB];
+  const features = observations.map(row => feature(row, { attemptId: "shared" }));
+  if (source !== "feature") observations.push(revision);
+  if (source !== "observation") features.push(feature(revision, { attemptId, recordedAt: at(4) }));
+  const input = { scope: { ...scope, requirementKey: "B" }, cutoff: at(4), observations, features,
     targetFamilyKeys: [], propagatedFamilyKeys: [] };
-  expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([{ observationId: skillB.id, omega: 1 }]);
-  const afterRevision = { ...input, cutoff: at(4) };
-  expect(buildSkillBeliefTrajectory(afterRevision).steps).toMatchObject([{ observationId: skillB.id, omega: 0 }]);
+
+  const before = buildSkillBeliefTrajectory(input);
+  expect(before.steps).toMatchObject([{ observationId: skillB.id, omega: 1 }]);
+  expect(before.belief.lastDirectRecallAtMs).toBe(Date.parse(at(2)));
+  expect(compareLearnerShadowV2(input).rows.map(row => row.observationId)).toEqual([skillB.id]);
+
+  const afterRevision = { ...input, cutoff: at(5) };
+  const after = buildSkillBeliefTrajectory(afterRevision);
+  expect(after.steps).toMatchObject([{ observationId: skillB.id, omega: 0 }]);
+  expect(after.belief.lastDirectRecallAtMs).toBeNull();
   expect(compareLearnerShadowV2(afterRevision).rows).toEqual([]);
 });
 
@@ -456,6 +471,34 @@ it("binds untimestamped heads to matching visible versions and outcomes before r
     expect(predictLearnerShadowV2(appended)).toEqual(forecast);
     expect(compareLearnerShadowV2({ ...appended, cutoff: at(4) }).rows).toEqual([holdoutForecast]);
   }
+});
+
+it.each([
+  { projection: "untimestamped original", originalTimestamped: false, revisionFirst: false },
+  { projection: "timestamped original before the revision", originalTimestamped: true, revisionFirst: false },
+  { projection: "timestamped original after the revision", originalTimestamped: true, revisionFirst: true },
+])("binds a future untimestamped revision before replay with $projection", ({ originalTimestamped, revisionFirst }) => {
+  const evidence = head("evidence", 2);
+  const original = originalTimestamped ? { ...evidence, recordedAt: at(2) } : evidence;
+  const revision = { ...evidence, isMultiDraft: true, isFirstSubmission: false, familyKey: "other-family" };
+  const input = { scope, cutoff: at(3), observations: [original], features: [feature(original)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...input, observations: revisionFirst ? [revision, original] : [original, revision],
+    features: [...input.features, feature(revision, { recordedAt: at(4) })] };
+
+  const before = buildSkillBeliefTrajectory(input);
+  const holdout = compareLearnerShadowV2(input).rows;
+  expect(before.steps).toMatchObject([{ observationId: original.id, omega: 1 }]);
+  expect(before.belief.lastDirectRecallAtMs).toBe(Date.parse(at(2)));
+  expect(holdout.map(row => row.observationId)).toEqual([original.id]);
+  expect(buildSkillBeliefTrajectory(appended)).toEqual(before);
+  expect(compareLearnerShadowV2(appended).rows).toEqual(holdout);
+
+  const afterRevision = { ...appended, cutoff: at(5) };
+  const after = buildSkillBeliefTrajectory(afterRevision);
+  expect(after.steps).toMatchObject([{ observationId: original.id, omega: 0 }]);
+  expect(after.belief.lastDirectRecallAtMs).toBeNull();
+  expect(compareLearnerShadowV2(afterRevision).rows).toEqual([]);
 });
 
 it.each([
