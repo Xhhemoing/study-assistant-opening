@@ -1,10 +1,49 @@
 import { providerOutputSchema, tutorMetadataJobPayloadSchema, tutorModeSchema, type ProviderOutput, type Scope, type TutorMode } from "@aistudy/contracts";
-import { buildTutorMetadataInput, canProposeTask, type ModelGatewayCallOptions } from "@aistudy/ai";
+import {
+  buildTutorMetadataInput, canProposeTask, modelTaskSpec, OpeningModelRoutingError, reservationTerms,
+  runBudgetedCall, tutorModelTask, withModelFallback, type BudgetedCallOptions, type BudgetedRepository,
+  type ModelGateway, type ModelGatewayCallOptions,
+} from "@aistudy/ai";
 import type { OpeningJobRecord, OpeningTutorJobsRepository } from "@aistudy/database";
 
+type TutorMetadataCallOptions = Pick<ModelGatewayCallOptions,
+  "input" | "operationId" | "parentBudget" | "resultRef" | "persistResult">
+  & Pick<BudgetedCallOptions, "authorizeAndStartSend">;
+
+/** Metadata needs the budgeted call's atomic provider start after model selection. */
+export function callTutorMetadataModel(
+  gateway: Pick<ModelGateway, "resolve" | "resolveFallback">, scope: Scope, mode: TutorMode,
+  options: TutorMetadataCallOptions, budget: BudgetedRepository,
+): Promise<ProviderOutput> {
+  const task = tutorModelTask(mode);
+  return withModelFallback({
+    primary: () => gateway.resolve(scope, task),
+    fallback: () => gateway.resolveFallback(scope, task),
+    operationId: options.operationId,
+    run: (model, operationId) => {
+      const terms = reservationTerms(model, options.input);
+      if (!Number.isSafeInteger(terms.reservedCents) || terms.reservedCents < 0) {
+        throw new OpeningModelRoutingError("模型费用无法安全估算，请检查价格或选择备用模型。");
+      }
+      return runBudgetedCall({
+        ...options,
+        ...terms,
+        provider: model.provider,
+        modelSnapshot: model.modelSnapshot,
+        budget,
+        requestId: operationId,
+        operationId,
+        requestFamily: options.operationId,
+        purpose: modelTaskSpec(task).purpose,
+        parentBudget: options.parentBudget ?? { id: options.operationId },
+      });
+    },
+  });
+}
+
 export type TutorMetadataDeps = {
-  tutorJobs: Pick<OpeningTutorJobsRepository, "loadCompletedTurnForMetadata" | "canAppendCompletedTurnCandidates" | "appendCompletedTurnCandidates">;
-  callModel(scope: Scope, mode: TutorMode, options: Omit<ModelGatewayCallOptions, "budget">): Promise<ProviderOutput>;
+  tutorJobs: Pick<OpeningTutorJobsRepository, "loadCompletedTurnForMetadata" | "authorizeMetadataSend" | "appendCompletedTurnCandidates">;
+  callModel(scope: Scope, mode: TutorMode, options: TutorMetadataCallOptions): Promise<ProviderOutput>;
 };
 
 /** Optional suggestions own a separate job, worker slot, and budget operation. */
@@ -25,9 +64,7 @@ export function createTutorMetadataHandler(deps: TutorMetadataDeps) {
       input, operationId: `tutor:${body.tutorJobId}:metadata`,
       parentBudget: { id: `study-turn:${completed.userTurnId}` },
       resultRef: `opening_turn_candidates:${body.assistantTurnId}`,
-      beforeSend: async () => {
-        if (!await deps.tutorJobs.canAppendCompletedTurnCandidates(target)) throw new Error("tutor metadata authorization changed");
-      },
+      authorizeAndStartSend: startSend => deps.tutorJobs.authorizeMetadataSend(target, startSend),
       persistResult: async output => {
         const { candidates } = providerOutputSchema.parse(output);
         appended = await deps.tutorJobs.appendCompletedTurnCandidates({ ...target,

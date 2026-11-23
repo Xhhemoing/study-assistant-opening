@@ -1,14 +1,23 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { snippetCreateInputSchema, type SnippetCreateInput } from "@aistudy/contracts";
-import { contextSourceRefsIncluded, noteContextSourceRefs, parseContextSourceRefs } from "./opening-context-provenance";
+import {
+  contextSourceRefsIncluded, mergeContextSourceRefs, noteContextSourceRefs, parseContextSourceRefs,
+} from "./opening-context-provenance";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { lockAndReadSnippetMemoryRefs } from "./opening-memory-admission";
 import type { OpeningScope } from "./opening-sources";
 
 type Db = Sql | TransactionSql;
 export class OpeningNoteError extends Error {
   constructor(readonly code: "NOT_FOUND" | "SOURCE_UNAVAILABLE" | "PROVENANCE_UNKNOWN", message: string) { super(message); }
 }
+
+type SavedSnippetOrigin = {
+  context_source_refs: unknown;
+  citations: unknown;
+  turn_id: string;
+};
 
 /** AI exclusion still permits personal reading; permanent source deletion does not. */
 export function openingNoteReadable(db: Db, workspaceId: string, documentId: ReturnType<Db>) {
@@ -46,8 +55,9 @@ export function createOpeningNoteRepository(sql: Sql) {
         await lockWorkspaceLearningHistory(tx, scope);
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw new OpeningNoteError("NOT_FOUND", "workspace not found");
-        const origins = input.savedTurnId !== undefined
-          ? await tx`SELECT t.context_source_refs,t.citations FROM opening_turns t
+        const [origin] = input.savedTurnId !== undefined
+          ? await tx<SavedSnippetOrigin[]>`SELECT t.context_source_refs,t.citations,t.id AS turn_id
+              FROM opening_turns t
               JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
               WHERE t.id=${input.savedTurnId} AND t.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
                 AND t.role='assistant' AND t.status='complete' AND NOT t.query_system AND t.system_query IS NULL
@@ -57,19 +67,25 @@ export function createOpeningNoteRepository(sql: Sql) {
                   WHERE j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id
                     AND (u.query_system OR u.system_query IS NOT NULL OR u.composer_purpose IN ('query','explain_state')))
               FOR SHARE OF t,c`
-          : await tx`SELECT context_source_refs FROM opening_ephemeral_provenance
+          : await tx<{ context_source_refs: unknown }[]>`SELECT context_source_refs FROM opening_ephemeral_provenance
               WHERE id=${input.provenanceId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-        if (!origins.length) throw new OpeningNoteError("NOT_FOUND", input.savedTurnId
+        if (!origin) throw new OpeningNoteError("NOT_FOUND", input.savedTurnId
           ? "已保存回答不可用，请重新打开已完成的普通对话回答后保存。"
           : "临时片段来源凭据不可用，请重新提问后保存。");
-        const refs = parseContextSourceRefs(origins[0]!.context_source_refs);
-        if (refs === null) throw new OpeningNoteError("PROVENANCE_UNKNOWN", "回答来源不完整，无法保存为关联笔记。请重新提问后保存。");
-        if (input.savedTurnId) {
+        const recordedRefs = parseContextSourceRefs(origin.context_source_refs);
+        if (recordedRefs === null) throw new OpeningNoteError("PROVENANCE_UNKNOWN", "回答来源不完整，无法保存为关联笔记。请重新提问后保存。");
+        let refs = recordedRefs;
+        if ("citations" in origin) {
           // Selected sources need not have been retrieved. Citations, unlike selection,
           // claim consumed content and must be covered by the recorded lineage.
-          const citations = parseContextSourceRefs(origins[0]!.citations);
-          if (citations === null || citations.some(ref => !refs.some(parent => parent.sourceId === ref.sourceId && parent.sourceVersion === ref.sourceVersion))) {
+          const citations = parseContextSourceRefs(origin.citations);
+          if (citations === null || citations.some(ref => !recordedRefs.some(parent => parent.sourceId === ref.sourceId && parent.sourceVersion === ref.sourceVersion))) {
             throw new OpeningNoteError("PROVENANCE_UNKNOWN", "回答的关联材料来源不完整，请重新提问后保存。");
+          }
+          if (origin.turn_id !== undefined) {
+            const memoryRefs = await lockAndReadSnippetMemoryRefs(tx, scope, origin.turn_id);
+            if (!memoryRefs) throw new OpeningNoteError("SOURCE_UNAVAILABLE", "关联学习记忆或材料已不可用，无法保存此片段。");
+            refs = mergeContextSourceRefs(refs, memoryRefs);
           }
         }
         const admission = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`)} AS included`;

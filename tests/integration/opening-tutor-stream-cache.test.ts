@@ -98,7 +98,8 @@ it("pushes real increments, restores the complete reconnect snapshot and isolate
     if (received.length === 2) notify?.();
   });
   try {
-    const context = { privacyEpoch: 2, contextSourceRefs: [], exposureReceiptId: null, claimToken: randomUUID() };
+    const context = { privacyEpoch: 2, contextSourceRefs: [], exposureReceiptId: null,
+      claimToken: randomUUID(), historyCourseBindings: [] };
     await writer.begin(workspaceId, jobId, context);
     expect(await reader.read(workspaceId, jobId)).toEqual({ ...context, text: "", sequence: 0 });
     await writer.append(workspaceId, jobId, "先看矩阵", undefined, 2);
@@ -110,6 +111,19 @@ it("pushes real increments, restores the complete reconnect snapshot and isolate
     expect(await redis.ttl(key)).toBeGreaterThan(0);
     expect(await redis.ttl(key)).toBeLessThanOrEqual(900);
   } finally { await unsubscribe(); }
+});
+
+it("rejects reconnect snapshots with missing or legacy history bindings", async () => {
+  const workspaceId = randomUUID(), jobId = randomUUID();
+  const key = tutorStreamKey(workspaceId, jobId);
+  keys.push(key);
+  const reader = createTutorStreamReader(redis);
+  const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null };
+  await redis.hset(key, "text", "buffered", "sequence", "1", "context", JSON.stringify(context));
+  await expect(reader.read(workspaceId, jobId)).rejects.toThrow("invalid tutor stream cache");
+  const legacy = { courseId: randomUUID(), materialUse: "citation", sourceIds: [], sourceRefs: [] };
+  await redis.hset(key, "context", JSON.stringify({ ...context, historyCourseBindings: [legacy] }));
+  await expect(reader.read(workspaceId, jobId)).rejects.toThrow("invalid tutor stream cache");
 });
 
 async function streamFixture(historySourceId?: string) {

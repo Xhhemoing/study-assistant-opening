@@ -3,6 +3,7 @@ import {
   isUnconfirmedStreamSealError, markUnconfirmedStreamSeal, parseContextSourceRefs, sealOpeningTutorStream,
   TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema, tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey,
   tutorStreamPreAnswerHeadKey, UnconfirmedStreamSealError, type ContextSourceRef, type TutorAttemptFence,
+  type OpeningTutorJobsRepository,
 } from "@aistudy/database";
 import { openingMaterialPurposePinSchema, uuidSchema, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 export { isUnconfirmedStreamSealError, UnconfirmedStreamSealError };
@@ -14,9 +15,11 @@ export type TutorStreamContext = {
   claimToken?: string;
   executionId?: string;
   attemptFence?: TutorAttemptFence;
+  attemptSourceRefs?: ContextSourceRef[];
   materialPurposePin?: OpeningMaterialPurposePin;
   memoryLineageSourceIds?: string[];
   globalMemoryIds?: string[];
+  historyCourseBindings?: Parameters<OpeningTutorJobsRepository["readStream"]>[2]["historyCourseBindings"];
   temporaryMemoryExpiresAt?: string;
 };
 export type TutorStreamDelta = { text: string; sequence: number };
@@ -251,7 +254,14 @@ export function createTutorStreamWriter(redis: IORedis) {
         redis.call('EXPIRE', KEYS[1], ARGV[3])
         return 1
       `, 4, key, tutorStreamEpochKey(workspaceId), head?.key ?? key, head?.revKey ?? key,
-      context.executionId ?? "", JSON.stringify(context), TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch,
+      context.executionId ?? "", JSON.stringify({ ...context,
+        historyCourseBindings: (context.historyCourseBindings ?? []).map(binding => ({
+          courseId: binding.courseId, materialUse: binding.materialUse, sourceIds: binding.sourceIds,
+          selectedDestinationSourceIds: binding.selectedDestinationSourceIds,
+          sourceRefs: binding.sourceRefs, memoryIds: binding.memoryIds ?? [], memoryBackings: binding.memoryBackings ?? [],
+        })),
+      }),
+      TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch,
       head?.id ?? "", head?.revision ?? "", tempExpiresAtMs !== null ? String(tempExpiresAtMs) : "", nowMs);
       if (result === "EXPIRED") {
         throw new TutorStreamExpiredError();
@@ -551,6 +561,38 @@ export function createWorkerTutorStreamWriter(
   };
 }
 
+function parseHistoryCourseBindings(value: unknown): NonNullable<TutorStreamContext["historyCourseBindings"]> {
+  if (!Array.isArray(value)) throw new Error("invalid tutor stream cache");
+  const isUuidList = (ids: unknown): ids is string[] =>
+    Array.isArray(ids) && ids.every(id => uuidSchema.safeParse(id).success);
+  const normalizeIds = (ids: string[]) => [...new Set(ids.map(id => id.toLowerCase()))];
+  return value.map(binding => {
+    if (!binding || typeof binding !== "object") throw new Error("invalid tutor stream cache");
+    const hasSelectedDestinationSourceIds = Object.hasOwn(binding, "selectedDestinationSourceIds");
+    if (Object.keys(binding).length !== (hasSelectedDestinationSourceIds ? 7 : 6)
+      || !(binding.courseId === null || uuidSchema.safeParse(binding.courseId).success)
+      || (binding.materialUse !== "citation" && binding.materialUse !== "practice")
+      || !isUuidList(binding.sourceIds)
+      || (hasSelectedDestinationSourceIds && !isUuidList(binding.selectedDestinationSourceIds))
+      || !Array.isArray(binding.sourceRefs) || binding.sourceRefs.some((ref: ContextSourceRef) =>
+        !ref || typeof ref !== "object" || !uuidSchema.safeParse(ref.sourceId).success || ref.memoryOnly === true)
+      || !isUuidList(binding.memoryIds)
+      || !Array.isArray(binding.memoryBackings)
+      || binding.memoryBackings.some((ids: unknown) => !isUuidList(ids) || !ids.length)) {
+      throw new Error("invalid tutor stream cache");
+    }
+    const sourceRefs = parseContextSourceRefs(binding.sourceRefs);
+    const sourceIds = normalizeIds(binding.sourceIds).sort();
+    if (!sourceRefs || sourceRefs.some(ref => !sourceIds.includes(ref.sourceId))) throw new Error("invalid tutor stream cache");
+    const selectedDestinationSourceIds = hasSelectedDestinationSourceIds
+      ? normalizeIds(binding.selectedDestinationSourceIds).sort() : undefined;
+    return { courseId: binding.courseId?.toLowerCase() ?? null, materialUse: binding.materialUse, sourceIds,
+      ...(selectedDestinationSourceIds ? { selectedDestinationSourceIds } : {}), sourceRefs,
+      memoryIds: normalizeIds(binding.memoryIds).sort(), memoryBackings: binding.memoryBackings.map(normalizeIds),
+    };
+  });
+}
+
 function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null {
   if (!row.context) return null;
   const context = JSON.parse(row.context) as TutorStreamContext;
@@ -562,6 +604,9 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     || (context.claimToken !== undefined && typeof context.claimToken !== "string")
     || (context.executionId !== undefined && !uuidSchema.safeParse(context.executionId).success)) throw new Error("invalid tutor stream cache");
   const fence = context.attemptFence === undefined ? undefined : tutorAttemptFenceSchema.parse(context.attemptFence);
+  const attemptSourceRefs = context.attemptSourceRefs === undefined ? undefined : parseContextSourceRefs(context.attemptSourceRefs);
+  if (attemptSourceRefs === null || (attemptSourceRefs && !fence)) throw new Error("invalid tutor stream cache");
+  const historyCourseBindings = parseHistoryCourseBindings(context.historyCourseBindings);
   const materialPurposePin = context.materialPurposePin === undefined ? undefined
     : openingMaterialPurposePinSchema.parse(context.materialPurposePin);
   let memoryLineageSourceIds: string[] | undefined;
@@ -588,6 +633,8 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     temporaryMemoryExpiresAt = context.temporaryMemoryExpiresAt;
   }
   return { ...context, ...(fence ? { attemptFence: fence } : {}),
+    ...(attemptSourceRefs ? { attemptSourceRefs } : {}),
+    historyCourseBindings,
     ...(materialPurposePin ? { materialPurposePin } : {}),
     ...(memoryLineageSourceIds ? { memoryLineageSourceIds } : {}),
     ...(globalMemoryIds ? { globalMemoryIds } : {}),

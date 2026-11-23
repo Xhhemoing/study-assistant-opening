@@ -458,6 +458,8 @@ export async function collectTutorDialogue(options: {
         if (item.withSession) {
           const courseId = randomUUID(), activityId = randomUUID(); sessionId = randomUUID();
           await sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${scope.workspaceId},'Synthetic dialogue',${courseId})`;
+          await sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+            VALUES(${scope.workspaceId},${courseId},'source',${sourceId},'core','course','teaching')`;
           await sql`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,client_key,create_intent)
             VALUES(${activityId},${scope.workspaceId},${scope.ownerUserId},${courseId},'active','course_continue','Synthetic dialogue',${activityId},'{}'::jsonb)`;
           await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label,source_ids)

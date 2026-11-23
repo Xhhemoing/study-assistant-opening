@@ -108,7 +108,7 @@ export type TutorTurnDeps = {
   };
   /** M01: confirmed/unexpired temporary memories only. Optional. */
   memories?: {
-    listContext(scope: Scope, now: string): Promise<{
+    listContext(scope: Scope, now: string, activeCourseId?: string | null, materialUse?: "citation" | "practice"): Promise<{
       memories: MemoryItem[];
       sourceRefs: ContextSourceRef[];
       temporaryMemoryExpiresAt?: string;
@@ -324,9 +324,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const imageOnlySources = isImageOnlySourceChunks(chunks);
       // Photo sources default to page 1 so empty-text image chunks stay preferred.
       const preferPage = turn.currentPage ?? (imageOnlySources ? 1 : undefined);
+      const resolvedCourseId = turn.courseId ?? turn.contextAnchor?.courseId ?? null;
+      const materialUse: "citation" | "practice" = turn.attemptId || turn.contextAnchor?.itemVersionId ? "practice" : "citation";
       const retrievalInput = {
-        courseContext: { courseId: turn.courseId ?? turn.contextAnchor?.courseId ?? null,
-          materialUse: turn.attemptId || turn.contextAnchor?.itemVersionId ? "practice" as const : "citation" as const },
+        courseContext: { courseId: resolvedCourseId, materialUse },
         chunks,
         sourceIds: allowedSourceIds,
         query: turn.text,
@@ -342,14 +343,21 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const assertMaterialsCurrent = async () => { await retrieved?.assertCurrent?.(); };
       const context = (retrieved?.chunks ?? selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
       const loadedHistory = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
-      const { history, sourceRefs: historySourceRefs } = loadedHistory;
+      const { history, sourceRefs: historySourceRefs, historyCourseBindings } = loadedHistory;
       const historyMemoryIds = loadedHistory.memoryIds ?? [];
       const historyTempExpiresAt = loadedHistory.temporaryMemoryExpiresAt;
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
-        ? await deps.memories.listContext(scope, contextNow)
+        ? await deps.memories.listContext(scope, contextNow, resolvedCourseId, materialUse)
         : { memories: [], sourceRefs: [] };
-      const learnerContext = await deps.learnerContext?.read(scope, { courseId: turn.courseId ?? turn.contextAnchor?.courseId,
+      const ineligibleCourseMemoryIds = new Set(memoryContext.memories.filter(memory => memory.courseId != null
+        && memory.courseId.toLowerCase() !== resolvedCourseId?.toLowerCase()).map(memory => memory.id.toLowerCase()));
+      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow)
+        && !ineligibleCourseMemoryIds.has(memory.id.toLowerCase()));
+      const memorySourceRefs = eligibleMemories.length ? memoryContext.sourceRefs : [];
+      const memoryDependencyIds = eligibleMemories.length ? (memoryContext.dependencyMemoryIds ?? [])
+        .map(id => id.toLowerCase()).filter(id => !ineligibleCourseMemoryIds.has(id)) : [];
+      const learnerContext = await deps.learnerContext?.read(scope, { courseId: resolvedCourseId,
         sourceIds: allowedSourceIds }) ?? null;
       const nonMemorySourceIds = new Set(
         [
@@ -363,17 +371,20 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       );
       const memoryLineageSourceIds = [...new Set(
         [
-          ...memoryContext.sourceRefs,
+          ...memorySourceRefs,
           ...historySourceRefs.filter(ref => ref.memoryOnly === true),
         ]
           .map(({ sourceId }) => sourceId.toLowerCase())
           .filter(sourceId => !nonMemorySourceIds.has(sourceId)),
       )].sort();
-      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow));
+      // Removing revoked history cannot promote its direct material to standalone memory.
+      if (memoryLineageSourceIds.some(id => loadedHistory.revokedDirectSourceIds?.includes(id))) {
+        throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+      }
       const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
       const temporaryExpiryCandidates = [
         ...injectedTemporaryMemories.map(memory => memory.expiresAt!),
-        ...(memoryContext.temporaryMemoryExpiresAt ? [memoryContext.temporaryMemoryExpiresAt] : []),
+        ...(eligibleMemories.length && memoryContext.temporaryMemoryExpiresAt ? [memoryContext.temporaryMemoryExpiresAt] : []),
         ...(historyTempExpiresAt ? [historyTempExpiresAt] : []),
       ];
       const earliestTemporaryMemoryExpiresAt = temporaryExpiryCandidates.length
@@ -389,13 +400,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         }
       };
       const globalMemoryIds = [...new Set([
-        ...eligibleMemories
-          .filter(memory => memory.courseId == null)
-          .map(memory => memory.id.toLowerCase()),
-        ...(memoryContext.dependencyMemoryIds ?? []).map(id => id.toLowerCase()),
+        ...eligibleMemories.map(memory => memory.id.toLowerCase()),
+        ...memoryDependencyIds,
         ...historyMemoryIds.map(id => id.toLowerCase()),
       ])].sort();
-      const memoryTaggedSourceRefs = memoryContext.sourceRefs.map(ref =>
+      const memoryTaggedSourceRefs = memorySourceRefs.map(ref =>
         nonMemorySourceIds.has(ref.sourceId.toLowerCase()) ? ref : { ...ref, memoryOnly: true },
       );
       const contextSourceRefs = mergeContextSourceRefs(
@@ -405,7 +414,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const mode = helpInputSnapshot.tutorMode;
       const baseInstruction = instructionWithMemories(
         makeTutorInstruction(mode, { text: turn.text }),
-        memoryContext.memories,
+        eligibleMemories,
         contextNow,
       );
       const strategyTemplate = resolveStrategyTemplate(turn.strategyTemplateId);
@@ -467,6 +476,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+        historyCourseBindings: (historyCourseBindings ?? []).map(binding => ({
+          ...binding, memoryIds: binding.memoryIds ?? [], memoryBackings: binding.memoryBackings ?? [],
+        })),
         ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}) };
       const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
@@ -474,7 +486,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       if (deps.stream) {
         const stream = deps.stream;
         const cacheContext = { ...streamContext, exposureReceiptId: exposureReceipt?.id ?? null,
-          ...(attemptFence ? { attemptFence } : {}) };
+          ...(attemptFence && attemptContext ? { attemptFence, attemptSourceRefs: attemptContext.sourceRefs } : {}) };
         await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
           assertTempMemoriesUnexpiredSync();
           try { await stream.begin(scope.workspaceId, claimed.id, cacheContext); }
@@ -599,6 +611,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
               ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
               ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+              ...(historyCourseBindings?.length ? { historyCourseBindings } : {}),
               ...(attemptContext ? { attemptContext } : {}),
             };
             // Hold FOR SHARE locks across synchronous provider.complete / fetch initiation,
@@ -610,7 +623,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               await deps.tutorJobs.assertSendAuthorized(scope, claimed.id, sendContext);
             } else {
               if (globalMemoryIds.length) {
-                await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds);
+                await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds, claimed.id);
               }
               if (deps.privacy && jobEpoch !== null) {
                 assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
@@ -741,6 +754,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       }, { materialPurposePin: retrieved?.purposePin,
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+        ...(historyCourseBindings?.length ? { historyCourseBindings } : {}),
         ...(attemptContext ? { attemptContext: { target: attemptTarget, snapshot: attemptContext } } : {}) });
       // The answer and optional metadata outbox entry are durable. Release this
       // tutor worker slot; suggestions run in their own bounded queue.

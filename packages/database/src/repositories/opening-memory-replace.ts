@@ -1,7 +1,7 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { assertSourceTurnsOwned, lockOwnedWorkspace } from "./opening-memory-admission";
+import { assertCourseInWorkspace, assertSourceTurnsOwned, lockOwnedWorkspace } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
@@ -73,7 +73,8 @@ export function replaceOwnedMemory(
     if (currentMemory.status !== "active" || currentMemory.kind !== "confirmed") {
       throw new OpeningMemoryError("CONFLICT", "only an active confirmed memory can be replaced");
     }
-    await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id);
+    await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id, currentMemory.courseId);
+    await assertCourseInWorkspace(tx, scope, currentMemory.courseId, true);
     const superseded = await tx`
       UPDATE opening_memories
       SET status = 'superseded', version = ${currentMemory.version + 1},
@@ -93,7 +94,7 @@ export function replaceOwnedMemory(
     // Superseding a confirmed memory invalidates in-flight Tutor streams that injected it.
     await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
     // The Tutor job row lock can outlast a temporary ancestor's eligibility.
-    await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id);
+    await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id, currentMemory.courseId);
     return mapMemoryRow(inserted[0] as Record<string, unknown>);
   });
 }

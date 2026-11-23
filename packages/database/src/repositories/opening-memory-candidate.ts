@@ -2,6 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { assistantCandidateSchema, type MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { assertCourseInWorkspace, lockOwnedWorkspace } from "./opening-memory-admission";
+import { turnLineageCourse } from "./opening-context-provenance";
 import { listMemoriesForContext } from "./opening-memory-context";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
@@ -40,7 +41,8 @@ function sameInstant(left: string | null, right: string | null): boolean {
 
 async function lockCandidate(tx: Db, scope: OpeningScope, id: string): Promise<LockedCandidate> {
   const rows = await tx`
-    SELECT c.conversation_id, c.source_turn_id, c.source_ids, c.payload, c.status, conv.course_id
+    SELECT c.conversation_id, c.source_turn_id, c.source_ids, c.payload, c.status,
+      ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} AS course_id
     FROM opening_assistant_candidates c
     INNER JOIN opening_conversations conv
       ON conv.id = c.conversation_id
@@ -158,7 +160,7 @@ export async function decideOwnedMemoryCandidate(
     if (candidate.sourceIds.some((sourceId) => excludedIds.includes(sourceId))) {
       throw new OpeningMemoryError("VALIDATION", "candidate source is excluded");
     }
-    await assertCourseInWorkspace(tx, scope, candidate.courseId);
+    await assertCourseInWorkspace(tx, scope, candidate.courseId, input.action === "confirm");
     const kind = input.action === "reject" ? "candidate" : candidate.temporary ? "temporary" : "confirmed";
     const status = input.action === "reject" ? "rejected" : "active";
     const storedExpiry = input.action === "reject" ? null : candidate.temporary ? input.expiresAt : null;

@@ -31,10 +31,9 @@ import { createParserHealthLease } from "./runtime/parser-health-lease";
 import { createParseSourceHandler } from "./jobs/parse-source";
 import { createTutorTurnHandler } from "./jobs/tutor-turn";
 import { createSpanTutorNextAction } from "./runtime/span-tutor-next-action";
-import { createTutorMetadataHandler } from "./jobs/tutor-metadata";
+import { callTutorMetadataModel, createTutorMetadataHandler } from "./jobs/tutor-metadata";
 import { createRecognizePhotoQuestionHandler } from "./jobs/recognize-photo-question";
 import { createOpeningPhotoRecognitionRepository } from "@aistudy/database";
-import { tutorModelTask } from "@aistudy/ai";
 import { createRetestCandidateHandler } from "./jobs/retest-candidate";
 import { createRemindHandler } from "./jobs/remind";
 import { createBuildCourseKnowledgeHandler } from "./jobs/build-course-knowledge";
@@ -186,7 +185,7 @@ function createTeachingHandlers(sql: WorkerSql, env: WorkerEnv, producer: Return
     readStemPromptsBySkill: (scope, courseId) => readLatestStemPromptsBySkill(sql, scope, courseId),
   });
   const tutorMetadata = createTutorMetadataHandler({ tutorJobs,
-    callModel: (scope, mode, options) => models.call(scope, tutorModelTask(mode), { ...options, budget: scopeBudget(budget, scope) }),
+    callModel: (scope, mode, options) => callTutorMetadataModel(models, scope, mode, options, scopeBudget(budget, scope)),
   });
   // Production compile-teaching-unit dependency construction (shared with tests).
   const compileTeachingUnit = createCompileTeachingUnitHandler(
@@ -234,7 +233,7 @@ function createTeachingHandlers(sql: WorkerSql, env: WorkerEnv, producer: Return
       listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),
     },
     memories: {
-      listContext: (scope, now) => memory.listContext(scope, now),
+      listContext: (scope, now, activeCourseId, materialUse) => memory.listContext(scope, now, activeCourseId ?? null, materialUse),
     },
     ...(loadFeatureSwitches().adaptivePlanning ? {
       planningContext: { read: (scope: { workspaceId: string; ownerUserId: string }, now: Date) => readOpeningConversationPlanningContext(sql, scope, now) },
