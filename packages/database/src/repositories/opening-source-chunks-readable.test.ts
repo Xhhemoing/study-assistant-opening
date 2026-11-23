@@ -101,12 +101,13 @@ describe("cross-source legacy definition backfill", () => {
     { reason: "unknown earlier scan", marker: "publicationSealUnknown", available: false, text: "5 units." },
     { reason: "unstripped answer", available: true, text: "Answer Key\nx = 3." },
     { reason: "numbered answer", available: true, text: "**Answer 1:** x = 3." },
-    { reason: "numbered decimal solution", available: true, text: "Solution 2.1: x = 3." },
+    { reason: "numbered decimal solution outside an example", available: true, text: "Solution 2.1: x = 3.", archiveSealed: true },
     { reason: "numbered answer key", available: true, text: "Answer Key 3: x = 3." },
     { reason: "numbered qualified heading", available: true, text: "Official Answer 1\nx = 3." },
     { reason: "numbered Chinese exercise answer", available: true, text: "课后习题答案 1：x = 3。" },
     { reason: "numbered Chinese chapter answer", available: true, text: "章节答案 1、x = 3。" },
     { reason: "worked example continuation", available: true, text: "Solution:\nTake the square root.", preservesDefinition: true },
+    { reason: "numbered worked example continuation", available: true, text: "Solution 2.1: Take the square root.", preservesDefinition: true },
     { reason: "answers to review questions", available: true, text: "# Answers to Review Questions\nx = 3." },
     { reason: "solutions to practice problems", available: true, text: "Solutions to Practice Problems (continued)\nx = 3." },
     { reason: "selected exercise answers", available: true, text: "Answers to Selected Odd-Numbered Exercises\nx = 3." },
@@ -124,7 +125,7 @@ describe("cross-source legacy definition backfill", () => {
     { reason: "ordinary questions prose", available: true, text: "Answers to these scientific questions are uncertain.", preservesDefinition: true },
     { reason: "completed public publication", available: true, text: "Public introduction.", preservesDefinition: true },
     { reason: "Markdown answer label", available: true, text: "Answer: an HTTP response to a request.", mime: "text/markdown", preservesDefinition: true },
-  ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition, mime = "application/pdf" }) => {
+  ])("handles $reason on a second cited source", async ({ marker, available, text, preservesDefinition, archiveSealed, mime = "application/pdf" }) => {
     const courseId = "00000000-0000-4000-8000-000000000001";
     const nodeId = "00000000-0000-4000-8000-000000000002";
     const [chunkB, chunkA] = ["00000000-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000004"];
@@ -135,7 +136,11 @@ describe("cross-source legacy definition backfill", () => {
     const citedIds: unknown[] = [];
     const tx = (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = mockQueryText(strings, values);
-      if (strings[0]?.trimStart().startsWith("WITH pdf_read_sources") || !query.startsWith("WITH") && query.includes("seal.pages->0")
+      if (query.startsWith("c.source_id=? AND c.source_version=?")) {
+        return { sqlFragment: `c.source_id=${values[0]} AND c.source_version=?` };
+      }
+      if (query.startsWith("pdf_archive_text AS") || strings[0]?.trimStart().startsWith("WITH pdf_read_sources")
+        || !query.startsWith("WITH") && query.includes("seal.pages->0")
         || query.startsWith("s.id=") || query.startsWith("s.parse_state") || query.startsWith("ps.parse_state") || query.startsWith("seal.source_version<")) {
         return { sqlFragment: query };
       }
@@ -166,6 +171,10 @@ describe("cross-source legacy definition backfill", () => {
         return [{ ...base, id, sourceId: id === chunkA ? "source-A" : "source-B", sourceVersion: 4,
           mime: id === chunkA ? mime : "application/pdf",
           text: id === chunkA ? text : "Study notes.", imageObjectKey: null }];
+      }
+      if (archiveSealed && query.includes("c.source_id=source-A ")
+        && query.endsWith("SELECT first_page,reopen_page,chunk_id FROM pdf_archive_sealed_spans")) {
+        return [{ first_page: base.page, reopen_page: base.page + 1, chunk_id: chunkA }];
       }
       if (query.startsWith("INSERT INTO pg_temp.opening_legacy_knowledge_evidence")) evidence.push(values[0]);
       if (query.startsWith("UPDATE opening_course_knowledge")) writes.push(query);

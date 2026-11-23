@@ -36,6 +36,21 @@ it("keeps PDF worked-example context until a genuine structural heading", () => 
   }
 });
 
+it.each(["Solution:", "解答：", "Solution 1:"])(
+  "recognizes %s as an answer label outside worked examples",
+  label => {
+    expect(containsPdfAnswerLabel(`1. Decide whether every cyclic group is abelian.\n${label}\nYes.`)).toBe(true);
+  },
+);
+
+it("keeps numbered worked-example solutions public while recognizing explicit answer keys", () => {
+  const example = "Example 1: Quadratic Equations\nSolution 1: Factor the polynomial.\nSolution 2: Complete the square.";
+  expect(containsPdfAnswerLabel(example)).toBe(false);
+  expect(containsPdfAnswerLabel(example + "\nExercises\nSolution 1: A private derivation.")).toBe(true);
+  expect(containsPdfAnswerLabel(example + "\nOfficial Solution 1: A private derivation.")).toBe(true);
+  expect(containsPdfAnswerLabel(example + "\nSolution to Exercise 1: A private derivation.")).toBe(true);
+});
+
 function database(row: Record<string, unknown> | undefined, chunks = defaultChunks, reads: string[] = []): Sql {
   const sql = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.map((part, index) => {

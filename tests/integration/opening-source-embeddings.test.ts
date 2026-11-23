@@ -363,13 +363,36 @@ describe("pgvector material repository", () => {
     },
   );
 
-  it("carries a standalone Answer label on a numbered question into an adjacent archived proof", async () => {
+  it.each(["Answer:", "Solution:"])(
+    "carries a standalone %s label on a numbered question into an adjacent archived proof",
+    async label => {
+      await expectArchivedPdfPages([
+        `1. Decide whether every cyclic group is abelian.\n${label}\nYes.`,
+        "Proof. Private continuation.",
+        "The conclusion is private. ∎",
+        "This separate paragraph is public.",
+      ], [4], 2);
+    },
+  );
+
+  it("carries a standalone 解答 label in a numbered exercise into an adjacent archived proof", async () => {
     await expectArchivedPdfPages([
-      "1. Decide whether the claim holds.\nAnswer:\nYes.",
+      "Exercises\n1. Decide whether every cyclic group is abelian.\n解答：\nYes.",
       "Proof. Private continuation.",
       "The conclusion is private. ∎",
       "This separate paragraph is public.",
     ], [4], 2);
+  });
+
+  it("keeps numbered worked-example solutions public and withholds numbered exercise solutions", async () => {
+    await expectArchivedPdfPages([
+      "Example 1: Quadratic Equations\nSolution 1: Factor the polynomial.\nSolution 2: Complete the square.",
+      "Solution 3: Use the quadratic formula.",
+      "Exercises\n1. Find x.\nSolution 1: A private derivation.",
+      "Proof. Private continuation. ∎",
+      "## Solutions\nA homogeneous mixture.",
+      "Solutions\nSolutes dissolve in solvents.",
+    ], [1, 2, 5, 6], 3);
   });
 
   it("keeps a proof public across a missing archived page", async () => {
@@ -757,7 +780,9 @@ describe("pgvector material repository", () => {
       recognizePage: async () => { throw new Error("Vision unavailable"); },
     });
     const { chunks } = retry;
-    expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual(archived);
+    // The archived inline answer and its first continuation are already hidden on read.
+    expect((await chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text))
+      .toEqual(inline ? archived.slice(2) : archived);
     await expect(retry.run()).rejects.toThrow("Vision unavailable");
     expect(await f.sql`SELECT pages FROM opening_pdf_parse_segments
       WHERE source_id=${pdf.sourceId} AND parser_profile='pdf-publication-page-seal-v1'`).toEqual([

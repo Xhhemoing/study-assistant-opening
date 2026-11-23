@@ -33,10 +33,16 @@ const exerciseInlineAnswerPeriod = String.raw`${lineStart}(?:${pdfHeadingContain
 // and numbered labels can open an inline answer.
 const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|答案${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
 const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案)${chineseContinuation}(?:】|[:：]|$))`;
-const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?(?:answers?(?: +key)?|solutions?)|key)(?: +to +(?:exercise|problem|question))? *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)|(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
+const numberedAnswerTarget = String.raw`(?: +to +(?:exercise|problem|question))`;
+const numberedAnswerSuffix = String.raw` *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)`;
+const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${englishAnswerQualifier} +solutions?)${numberedAnswerTarget}?${numberedAnswerSuffix}|(?:(?:worked|full) +)?solutions?${numberedAnswerTarget}${numberedAnswerSuffix}|(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
+// These labels can also explain a worked example. Qualified keys and explicit
+// assessment targets remain unconditional answers.
+const numberedSolution = String.raw`(?:(?:worked|full) +)?solutions?${numberedAnswerSuffix}`;
+const standaloneEnglishSolution = String.raw`solution${englishContinuation} *[:：] *$`;
 const sectionAnswerLine = String.raw`${lineStart}(?:${sectionAnswer}|解答${chineseContinuation}[:：]? *$)`;
 const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
-const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|[.。](?: |$)|$))`;
+const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${standaloneEnglishSolution}|${numberedSolution}|【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|[.。](?: |$)|$))`;
 const answerLabel = new RegExp(answerLabelLine, "imu");
 const explanationLabel = new RegExp(explanationLabelLine, "iu");
 const jsAnswerPeriod = new RegExp(answerPeriodLine, "mu");
@@ -71,8 +77,8 @@ const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +proble
 const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
 const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
 const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|答案 *[:：] *$|解答${chineseContinuation}[:：]? *$|${qualifiedExerciseAnswer})`;
-const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
-const standaloneInlineAnswer = String.raw`${lineStart}(?:(?:${englishAnswerQualifier} +)?answer(?: +\d+(?:\.\d+)*)?${englishContinuation} *[:：]|【 *答案${chineseContinuation}】 *[:：]?) *$`;
+const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|${numberedSolution} *|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
+const standaloneInlineAnswer = String.raw`${lineStart}(?:(?:${englishAnswerQualifier} +)?answer(?: +\d+(?:\.\d+)*)?${englishContinuation} *[:：]|【 *答案${chineseContinuation}】 *[:：]?|${standaloneEnglishSolution}|解答${chineseContinuation}[:：]|${numberedSolution}) *$`;
 
 const workedExampleHeading = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:(?:worked +example|example)(?= +\d| *[(:：.．—–-]| *$)|例题(?= *\d| *[（(:：.．—–-]| *$)|例 *(?=\d|[:：]))`;
 const englishBlock = String.raw`(?:definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof(?: +of +(?:theorem|lemma|proposition|corollary))?)`;
@@ -361,7 +367,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       AND NOT (in_worked_example AND explanation_label) AS section_answer,
       explanation_label AND NOT in_worked_example AS sealed_explanation,
       (period_inline OR line ~* ${exerciseInlineAnswer}
-        AND (in_exercise OR unconditional_answer AND line ~* ${standaloneInlineAnswer}
+        AND (in_exercise OR (unconditional_answer OR explanation_label) AND line ~* ${standaloneInlineAnswer}
           OR (unconditional_answer OR NOT in_worked_example) AND line ~* ${exerciseInlineAnswer + "[^ ]"}))
         AND (NOT opens_section OR exercise_exception) AND NOT (in_worked_example AND explanation_label) AS inline_opener
     FROM pdf_archive_exercise_context
