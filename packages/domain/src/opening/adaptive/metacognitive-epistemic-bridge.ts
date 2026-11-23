@@ -107,13 +107,15 @@ type EvidenceHead = {
   feature: LearnerStateFeature;
   observation: SnapshotObservation;
   attempted: number;
+  claimedRequirementKeys: ReadonlySet<string>;
   exposureOnly?: false;
 };
 
 type JoinedHead = EvidenceHead | {
-  feature: Pick<LearnerStateFeature, "observationId" | "requirementKey"> & { attemptId: null };
+  feature: Pick<LearnerStateFeature, "observationId" | "requirementKey" | "attemptId">;
   observation: Pick<SnapshotObservation, "id" | "problemId" | "familyKey">;
   attempted: number;
+  claimedRequirementKeys: ReadonlySet<string>;
   exposureOnly: true;
 };
 
@@ -194,13 +196,13 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
   const heads = groupByKey(visibleObservations, row => row.observation.id);
   return [...features.values()].flatMap((rows): JoinedHead[] => {
     const { feature, attempted } = rows[0]!;
-    const { observationId, requirementKey } = feature;
+    const { observationId, requirementKey, attemptId } = feature;
     const candidates = heads.get(observationId);
     if (!candidates) return [];
     const { observation } = candidates[0]!;
     if (rows.length === 1 && requirementKey && candidates.every(({ observation: head, attempted: headAttempted }) =>
       sameHead(head, observation) && headAttempted === attempted && (head.requirementKey ?? null) === requirementKey)) {
-      return [{ feature, attempted, observation }];
+      return [{ feature, attempted, observation, claimedRequirementKeys: new Set([requirementKey]) }];
     }
 
     // A collision can establish prior exposure only for identities shared by every candidate.
@@ -209,10 +211,16 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
     const problemId = candidates.every(({ observation: head }) => head.problemId === observation.problemId) ? observation.problemId : null;
     const familyKey = candidates.every(({ observation: head }) => head.familyKey === observation.familyKey) ? observation.familyKey : undefined;
     if (problemId === null && !familyKey?.trim()) return [];
+    const unanimousAttemptId = rows.every(row => row.feature.attemptId === attemptId && row.attempted === attempted)
+      && candidates.every(row => row.attempted === attempted) ? attemptId : null;
+    const claimedRequirementKeys = new Set([
+      ...rows.map(row => row.feature.requirementKey), ...candidates.map(row => row.observation.requirementKey),
+    ].filter(key => key != null));
     const latestFeatureAttempted = rows.reduce((latest, row) => Math.max(latest, row.attempted), attempted);
     const maxAttempted = candidates.reduce((latest, row) => Math.max(latest, row.attempted), latestFeatureAttempted);
     return [{
-      exposureOnly: true, attempted: maxAttempted, feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: null },
+      exposureOnly: true, attempted: maxAttempted, claimedRequirementKeys,
+      feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: unanimousAttemptId },
       observation: { id: observationId, problemId, familyKey },
     }];
   }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));
@@ -250,9 +258,14 @@ function firstEpistemicSubmissions(rows: readonly JoinedHead[]) {
     }
     const { attemptId } = initial.feature;
     if (attemptId === null || earliest.some(row => row.feature.attemptId !== attemptId)) continue;
-    // A shared submission qualifies each requirement only when its observation is unambiguous.
-    for (const [requirementKey, heads] of groupByKey(earliest, row => row.feature.requirementKey)) {
-      if (requirementKey !== null && heads.length === 1) first.add(heads[0]!);
+    // A colliding head can claim multiple requirements without qualifying as evidence itself.
+    const claimCounts = new Map<string, number>();
+    for (const head of earliest) {
+      for (const key of head.claimedRequirementKeys) claimCounts.set(key, (claimCounts.get(key) ?? 0) + 1);
+    }
+    for (const head of earliest) {
+      const { requirementKey } = head.feature;
+      if (requirementKey !== null && claimCounts.get(requirementKey) === 1) first.add(head);
     }
   }
   return first;

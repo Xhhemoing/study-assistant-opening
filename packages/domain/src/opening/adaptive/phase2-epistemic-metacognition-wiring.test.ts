@@ -264,24 +264,88 @@ it.each([
   }
 });
 
-it("excludes duplicate requirement heads from replay and holdout in a shared submission", () => {
+it.each([
+  { revisionKey: "A", source: "feature", siblingWeight: 1 },
+  { revisionKey: "C", source: "both", siblingWeight: 1 },
+  { revisionKey: "B", source: "feature", siblingWeight: 0 },
+  { revisionKey: "B", source: "observation", siblingWeight: 0 },
+])("replays a shared submission when a $source revision of A claims $revisionKey", ({ revisionKey, source, siblingWeight }) => {
+  const shared = { problemId: "shared-problem", familyKey: "shared-family", recordedAt: at(1) };
+  const skillA = head("skill-a", 1, { ...shared, requirementKey: "A" });
+  const skillB = head("skill-b", 1, { ...shared, requirementKey: "B" });
+  const revision = { ...skillA, requirementKey: revisionKey, recordedAt: at(2) };
+  const observations = [skillA, skillB];
+  const features = observations.map(row => feature(row, { attemptId: "shared" }));
+  if (source !== "feature") observations.push(revision);
+  if (source !== "observation") features.push(feature(revision, { attemptId: "shared", recordedAt: at(2) }));
+  const input = { observations, features, targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const beforeA = { ...input, scope: { ...scope, requirementKey: "A" }, cutoff: at(2) };
+  const afterA = { ...beforeA, cutoff: at(3) };
+  const beforeB = { ...beforeA, scope: { ...scope, requirementKey: "B" } };
+  const afterB = { ...beforeB, cutoff: at(3) };
+
+  expect(buildSkillBeliefTrajectory(beforeA).steps).toMatchObject([{ observationId: skillA.id, omega: 1 }]);
+  expect(compareLearnerShadowV2(beforeA).rows.map(row => row.observationId)).toEqual([skillA.id]);
+  const revised = buildSkillBeliefTrajectory(afterA);
+  expect(revised.steps).toMatchObject(revisionKey === "A" ? [{ observationId: skillA.id, omega: 0 }] : []);
+  expect(revised.belief.lastDirectRecallAtMs).toBeNull();
+  expect(compareLearnerShadowV2(afterA).rows).toEqual([]);
+
+  const originalSibling = buildSkillBeliefTrajectory(beforeB);
+  const originalHoldout = compareLearnerShadowV2(beforeB).rows;
+  expect(originalSibling.steps).toMatchObject([{ observationId: skillB.id, omega: 1 }]);
+  expect(originalSibling.belief.lastDirectRecallAtMs).toBe(Date.parse(at(1)));
+  expect(originalHoldout.map(row => row.observationId)).toEqual([skillB.id]);
+  const sibling = buildSkillBeliefTrajectory(afterB);
+  expect(sibling.steps).toMatchObject([{ observationId: skillB.id, omega: siblingWeight }]);
+  expect(sibling.belief.lastDirectRecallAtMs).toBe(siblingWeight === 1 ? Date.parse(at(1)) : null);
+  expect(compareLearnerShadowV2(afterB).rows).toEqual(siblingWeight === 1 ? originalHoldout : []);
+});
+
+it.each([
+  { disagreement: "feature attempt ID", featureFields: { attemptId: "different" }, observationFields: {} },
+  { disagreement: "feature attempt time", featureFields: { attemptedAt: at(1) }, observationFields: {} },
+  { disagreement: "observation attempt time", featureFields: {}, observationFields: { attemptedAt: at(1) } },
+])("excludes a tied sibling after a revision conflicts on $disagreement", ({ featureFields, observationFields }) => {
+  const shared = { problemId: "shared-problem", familyKey: "shared-family", recordedAt: at(2) };
+  const skillA = head("skill-a", 2, { ...shared, requirementKey: "A" });
+  const skillB = head("skill-b", 2, { ...shared, requirementKey: "B" });
+  const input = { scope: { ...scope, requirementKey: "B" }, cutoff: at(3),
+    observations: [skillA, skillB, { ...skillA, ...observationFields, recordedAt: at(3) }],
+    features: [feature(skillA, { attemptId: "shared" }), feature(skillB, { attemptId: "shared" }),
+      feature(skillA, { attemptId: "shared", ...featureFields, recordedAt: at(3) })],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([{ observationId: skillB.id, omega: 1 }]);
+  const afterRevision = { ...input, cutoff: at(4) };
+  expect(buildSkillBeliefTrajectory(afterRevision).steps).toMatchObject([{ observationId: skillB.id, omega: 0 }]);
+  expect(compareLearnerShadowV2(afterRevision).rows).toEqual([]);
+});
+
+it("excludes duplicate requirements even after one head is revised to a missing requirement in a shared submission", () => {
   const shared = { problemId: "shared-problem", familyKey: "shared-family" };
   const firstA = head("first-a", 1, { ...shared, requirementKey: "A" });
   const secondA = head("second-a", 1, { ...shared, requirementKey: "A" });
   const skillB = head("skill-b", 1, { ...shared, requirementKey: "B" });
   const observations = [firstA, skillB, secondA];
-  const input = { scope: { ...scope, requirementKey: "A" }, cutoff: at(2), observations,
-    features: observations.map(row => feature(row, { attemptId: "shared" })), targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const features = [...observations.map(row => feature(row, { attemptId: "shared" })),
+    feature(firstA, { attemptId: "shared", requirementKey: null, recordedAt: at(2) })];
+  const input = { scope: { ...scope, requirementKey: "A" }, cutoff: at(2), observations, features,
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
 
   expect(buildSkillBeliefTrajectory(input).steps).toMatchObject([
     { observationId: firstA.id, omega: 0 }, { observationId: secondA.id, omega: 0 },
   ]);
   expect(compareLearnerShadowV2(input).rows).toEqual([]);
-  const otherSkill = { ...input, scope: { ...scope, requirementKey: "B" } };
-  const result = buildSkillBeliefTrajectory(otherSkill);
-  expect(result.steps).toMatchObject([{ observationId: skillB.id, omega: 1 }]);
-  expect(result.belief.lastDirectRecallAtMs).toBe(Date.parse(at(1)));
-  expect(compareLearnerShadowV2(otherSkill).rows.map(row => row.observationId)).toEqual([skillB.id]);
+  const afterRevision = { ...input, cutoff: at(3) };
+  expect(buildSkillBeliefTrajectory(afterRevision).steps).toMatchObject([{ observationId: secondA.id, omega: 0 }]);
+  expect(compareLearnerShadowV2(afterRevision).rows).toEqual([]);
+  for (const replay of [input, afterRevision]) {
+    const otherSkill = { ...replay, scope: { ...scope, requirementKey: "B" } };
+    const result = buildSkillBeliefTrajectory(otherSkill);
+    expect(result.steps).toMatchObject([{ observationId: skillB.id, omega: 1 }]);
+    expect(result.belief.lastDirectRecallAtMs).toBe(Date.parse(at(1)));
+    expect(compareLearnerShadowV2(otherSkill).rows.map(row => row.observationId)).toEqual([skillB.id]);
+  }
 });
 
 it.each([
