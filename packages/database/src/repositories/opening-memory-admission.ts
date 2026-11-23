@@ -558,7 +558,7 @@ async function readOriginLineages(db: Db, scope: OpeningScope, origins: MemoryOr
 
 function readMemoryDeletionTurns(db: Db, scope: OpeningScope, turnIds: string[]) {
   const owner: FragmentFactory = () => db`c.owner_user_id`;
-  return db<{ refs: unknown; source_ids: (string | null)[]; backings: string[][] }[]>`
+  return db<{ refs: unknown; source_ids: (string | null)[] }[]>`
     WITH origins AS (
       SELECT t.id, t.conversation_id, paired.id AS user_id, paired.created_at AS user_created_at,
         NOT t.query_system AND t.system_query IS NULL AND NOT paired.query_system AS include_history
@@ -584,13 +584,7 @@ function readMemoryDeletionTurns(db: Db, scope: OpeningScope, turnIds: string[])
     )
     SELECT t.context_source_refs AS refs,
       ARRAY(SELECT DISTINCT ${lineageUuid(db, () => db`material.source_id`)}
-        FROM (${turnMaterialRows(db, owner)}) material) AS source_ids,
-      CASE WHEN t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-        AND NOT (t.context_source_refs @? '$[*].memoryDependencyIds[*]')
-        THEN ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`,
-          () => turnLineageCourse(db, "t", () => db`c.course_id`, owner),
-          () => turnHasStandaloneSessions(db, owner), scope, "deletion")}
-        ELSE '[]'::jsonb END AS backings
+        FROM (${turnMaterialRows(db, owner)}) material) AS source_ids
     FROM lineage_turns lineage JOIN opening_turns t ON t.id=lineage.id
     JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id`;
 }
@@ -613,7 +607,7 @@ export async function readMemoryDeletionSourceIds(db: Db, scope: OpeningScope, o
     for (const turn of await readMemoryDeletionTurns(db, scope, turnIds)) {
       for (const id of turn.source_ids) if (id) sourceIds.add(id);
       const exactIds = Array.isArray(turn.refs) ? turn.refs.filter(isMemoryDependencyMetadata).flatMap(ref => ref.memoryDependencyIds) : [];
-      for (const rawId of [...exactIds, ...turn.backings.flat()]) {
+      for (const rawId of exactIds) {
         const id = rawId.toLowerCase();
         if (visitedMemories.has(id)) continue;
         visitedMemories.add(id);

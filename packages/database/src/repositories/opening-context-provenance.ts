@@ -585,15 +585,14 @@ export function hasMemoryBearingRef(refs: unknown): boolean {
 export function turnMemoryOnlyBackingIds(
   db: Db, refs: FragmentFactory, ownCourse: FragmentFactory, standaloneSessions: FragmentFactory,
   scope: { workspaceId: string; ownerUserId: string | FragmentFactory },
-  mode?: "deletion",
 ): Fragment {
   const attributed: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
   return db`(
     SELECT COALESCE(jsonb_agg(to_jsonb(ARRAY(
       SELECT m.id FROM opening_memories m
       WHERE m.workspace_id = ${scope.workspaceId}
-        ${mode === "deletion" ? db`AND m.kind IN ('confirmed', 'temporary')` : db`AND m.status = 'active'
-          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at > clock_timestamp()))`}
+        AND m.status = 'active'
+        AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at > clock_timestamp()))
         AND (m.course_id IS NULL OR m.course_id = ${ownCourse()})
         AND (${attributed()} AND m.id::text IN (SELECT lower(d.id) FROM ${memoryDependencyRows(db, refs)} d)
           OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND (${standaloneSessions()}) AND m.course_id IS NULL)

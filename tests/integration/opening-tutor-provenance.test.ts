@@ -471,6 +471,33 @@ describe("saved tutor material provenance", () => {
     expect(remaining.sourceRefs).toEqual([]);
   });
 
+  it("excludes only the recorded source when deleting a memory from an unattributed legacy turn", async () => {
+    const { sql, scope } = f;
+    const recorded = await source();
+    const unrelated = await source();
+    const memories = createOpeningMemoryRepository(sql);
+    const confirmFrom = async (text: string, turnId: string) => {
+      const proposal = await memories.proposeMemory(scope, { text, sourceTurnIds: [turnId], expiresAt: null });
+      return memories.confirm(scope, proposal.id, proposal.version, randomUUID());
+    };
+    await confirmFrom("Original backing", await insertOwnedTurn(sql, scope, { sourceIds: [recorded] }));
+    const legacy = await insertOwnedTurn(sql, scope, {
+      role: "assistant", contextSourceRefs: [{ sourceId: recorded, sourceVersion: 0, memoryOnly: true }],
+    });
+    const derived = await confirmFrom("Derived memory", legacy);
+    const mixed = await insertOwnedTurn(sql, scope, { sourceIds: [recorded, unrelated] });
+    await sql`INSERT INTO opening_memories (workspace_id, kind, status, text, source_turn_ids)
+      VALUES (${scope.workspaceId}, 'confirmed', 'rejected', 'Later rejected backing', ${sql.json([mixed])})`;
+    const kept = await confirmFrom("Unrelated memory", await insertOwnedTurn(sql, scope, { sourceIds: [unrelated] }));
+
+    await expect(memories.deleteMemory(scope, {
+      id: derived.id, expectedVersion: derived.version, deleteSourceText: false, clientKey: randomUUID(),
+    })).resolves.toMatchObject({ excludedSourceIds: [recorded] });
+    const remaining = await memories.listContext(scope, new Date().toISOString());
+    expect(remaining.memories.map(item => item.id)).toEqual([kept.id]);
+    expect(remaining.sourceRefs.map(ref => ref.sourceId)).toEqual([unrelated]);
+  });
+
   it("preserves source-free snippets and rejects unavailable historical memory dependencies", async () => {
     const { sql, scope } = f;
     const origin = await insertOwnedTurn(sql, scope);
