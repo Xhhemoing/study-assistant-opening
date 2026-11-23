@@ -2,6 +2,7 @@ import type { CourseGoal, LearningActivityKind, TaskItem, TeachingLearnerFocus }
 import type { EvidenceEligibilityValue } from "../evidence-eligibility";
 import type { Assistance, SkillStatus } from "./types";
 import type { RemediationCycleSummary } from "../remediation-cycle";
+import type { DrilldownStateSnapshot, SkillPlacementRoute } from "../../diagnostic-placement";
 
 /** Outcome of reading one data source. "unavailable" is a failure and never means "empty". */
 export type SnapshotDataStatus = "available" | "not_configured" | "unavailable";
@@ -116,6 +117,8 @@ export type NextLearningStepInput = {
   dueRetest?: boolean;
   /** Trusted repository projection, never client/model supplied. */
   remediationCycles?: RemediationCycleSummary;
+  placementRoute?: SkillPlacementRoute;
+  drilldownSnapshot?: DrilldownStateSnapshot;
 };
 
 export type NextLearningStep = {
@@ -125,4 +128,6 @@ export type NextLearningStep = {
   reasonCode: NextStepReasonCode;
   phase?: LearningPhase;
   phaseSource?: LearningPhaseSource;
+  placementRoute?: SkillPlacementRoute["route"];
+  holdoutVerificationRequired?: boolean;
 };

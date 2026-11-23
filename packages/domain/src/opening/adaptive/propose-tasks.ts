@@ -1,4 +1,5 @@
 import type { PlanningAutonomy, PlanReasonCode, SuggestedTask, SuggestionKind, TaskItem } from "@aistudy/contracts";
+import { REMEDY_CLINIC_TOTAL_MINUTES, STEP1_SELF_DIFF_MINUTES, STEP2_INVARIANT_RESTATEMENT_MINUTES, STEP3_TRANSFER_PROBES_MINUTES } from "../../remedy-clinic";
 import { addLocalDays } from "../daily-draft";
 import {
   suggestionIdentity,
@@ -13,6 +14,9 @@ import {
 import { adaptiveSkillIdentity, normalizeSkillLabelKey, normalizedSuggestionIdentity } from "./skill-identity";
 import { suggestionFeedbackIdentity } from "./suggestion-feedback";
 import { goalPlanningPriority, resolveGoalLearningContext } from "./goal-policy";
+import {
+  revalidateAdaptiveRemedyClinics, type AdaptiveRemedyClinicCandidate, type AdaptiveRemedyClinicValidation,
+} from "./remedy-clinic-bridge";
 
 export const MAX_DAILY_SUGGESTIONS = 3;
 /** Suggestions may fill at most this share of the day's free time, after committed tasks. */
@@ -48,6 +52,8 @@ export type ProposeAdaptiveTasksOptions = {
   maxSuggestions?: number;
   /** Explicit same-day planning feedback. Does not imply a skill verdict or a skip. */
   suppressedSuggestionIdentities?: readonly string[];
+  remedyClinics?: readonly AdaptiveRemedyClinicCandidate[];
+  remedyClinicValidation?: AdaptiveRemedyClinicValidation;
 };
 
 type Candidate = {
@@ -55,7 +61,7 @@ type Candidate = {
   courseId: string | null;
   skillLabel: string | null;
   requirementKey?: string | null;
-  comparisonIdentities: readonly string[];
+  comparisonIdentities: readonly [string, string, ...string[]];
   title: string;
   minutes: number;
   reasonCode: PlanReasonCode;
@@ -64,6 +70,7 @@ type Candidate = {
   urgency: number;
   goalPriority: number;
   examMode: boolean;
+  remedyClinic?: true;
 };
 
 /** Hinted/revealed on most of the latest three observations (at least two observed). */
@@ -115,7 +122,8 @@ function consecutiveSkippedDays(snapshot: LearnerSnapshot, identities: readonly 
   return days;
 }
 
-function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly TaskItem[]): Candidate[] {
+function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly TaskItem[],
+  remedyClinics: readonly AdaptiveRemedyClinicCandidate[]): Candidate[] {
   const urgency = courseUrgency(snapshot);
   const covered = new Set(
     pendingTasks
@@ -131,6 +139,7 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
   );
   const out: Candidate[] = [];
   const seen = new Set<string>();
+  const seenClinics = new Set<string>();
   const push = (candidate: Omit<Candidate, "rank" | "urgency" | "comparisonIdentities" | "goalPriority" | "examMode">, behind: boolean) => {
     const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
     const comparable = normalizedSuggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
@@ -141,28 +150,47 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
       : [];
     const legacyIdentity = matchingSkills.length === 1
       ? suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel) : undefined;
-    const comparisonIdentities = [identity, comparable, ...(legacyIdentity ? [legacyIdentity,
+    const comparisonIdentities: Candidate["comparisonIdentities"] = [identity, comparable, ...(legacyIdentity ? [legacyIdentity,
       normalizedSuggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel)] : [])];
-    if (comparisonIdentities.some(key => unavailableIdentities.has(key)) || seen.has(comparable)) return;
+    const seenForKind = candidate.remedyClinic ? seenClinics : seen;
+    if (comparisonIdentities.some(key => unavailableIdentities.has(key)) || seenForKind.has(comparable)) return;
     if (candidate.courseId && candidate.skillLabel && covered.has(JSON.stringify([
       candidate.courseId, adaptiveSkillIdentity(normalizeSkillLabelKey(candidate.skillLabel), candidate.requirementKey),
     ]))) return;
     if (legacyIdentity && candidate.courseId && candidate.skillLabel && covered.has(JSON.stringify([
       candidate.courseId, adaptiveSkillIdentity(normalizeSkillLabelKey(candidate.skillLabel), null),
     ]))) return;
-    seen.add(comparable);
+    seenForKind.add(comparable);
     const context = resolveGoalLearningContext(
       snapshot.courses.find(course => course.courseId === candidate.courseId)?.goal ?? null, snapshot.date,
     );
     out.push({
       ...candidate,
       comparisonIdentities,
-      rank: KIND_PRIORITY[candidate.kind] - (behind ? BEHIND_BOOST : 0),
+      rank: KIND_PRIORITY[candidate.kind] - (candidate.remedyClinic ? 0.25 : 0) - (behind ? BEHIND_BOOST : 0),
       urgency: candidate.courseId ? urgency.get(candidate.courseId) ?? Number.MAX_SAFE_INTEGER : -1,
       goalPriority: goalPlanningPriority(context),
       examMode: context.mode === "exam",
     });
   };
+
+  const availableCourses = new Map(snapshot.courses.filter(course => course.hasUsableMaterials).map(course => [course.courseId, course]));
+  for (const { clinic, skillLabel, requirementKey } of remedyClinics) {
+    const course = availableCourses.get(clinic.courseId);
+    if (!course) continue;
+    const { rootAttemptCount, chapterCount, localDateCount } = clinic.coverage;
+    push({
+      kind: "weak_skill",
+      courseId: course.courseId,
+      skillLabel,
+      ...(requirementKey !== undefined ? { requirementKey } : {}),
+      title: `${course.title} · ${skillLabel} 跨章错因诊所`,
+      minutes: REMEDY_CLINIC_TOTAL_MINUTES,
+      reasonCode: "weak_skill",
+      reason: `在 ${chapterCount} 章、${localDateCount} 天的 ${rootAttemptCount} 次独立作答中出现同一错因；对比原作答 ${STEP1_SELF_DIFF_MINUTES} 分钟，复述规则 ${STEP2_INVARIANT_RESTATEMENT_MINUTES} 分钟，完成迁移探测 ${STEP3_TRANSFER_PROBES_MINUTES} 分钟。`,
+      remedyClinic: true,
+    }, isCourseBehind(course, snapshot.date));
+  }
 
   for (const course of snapshot.courses) {
     const behind = isCourseBehind(course, snapshot.date);
@@ -225,6 +253,8 @@ function collectCandidates(snapshot: LearnerSnapshot, pendingTasks: readonly Tas
 
 function compareCandidates(a: Candidate, b: Candidate): number {
   if (a.goalPriority !== b.goalPriority) return b.goalPriority - a.goalPriority;
+  if (a.kind === "weak_skill" && b.kind === "weak_skill" && a.remedyClinic !== b.remedyClinic)
+    return Number(Boolean(b.remedyClinic)) - Number(Boolean(a.remedyClinic));
   if (a.rank !== b.rank) return a.rank - b.rank;
   if (a.urgency !== b.urgency) return a.urgency - b.urgency;
   const courseA = a.courseId ?? "", courseB = b.courseId ?? "";
@@ -249,16 +279,20 @@ export function proposeAdaptiveTasks(
   let suggestedMinutes = 0;
   const suggestions: SuggestedTask[] = [];
 
+  const clinics = revalidateAdaptiveRemedyClinics(options.remedyClinics ?? [], options.remedyClinicValidation);
   const suppressed = new Set(options.suppressedSuggestionIdentities ?? []);
-  for (const candidate of collectCandidates(snapshot, options.pendingTasks).sort(compareCandidates)) {
+  const proposedIdentities = new Set<string>();
+  for (const candidate of collectCandidates(snapshot, options.pendingTasks, clinics).sort(compareCandidates)) {
     if (suppressed.has(suggestionFeedbackIdentity(candidate))) continue;
     if (suggestions.length >= max) break;
-    const identity = suggestionIdentity(candidate.kind, candidate.courseId, candidate.skillLabel, candidate.requirementKey);
+    const [identity, comparable] = candidate.comparisonIdentities;
+    if (proposedIdentities.has(comparable)) continue;
     const skippedDays = consecutiveSkippedDays(snapshot, candidate.comparisonIdentities);
-    if (skippedDays >= 3) continue;
+    if (skippedDays >= 3 || (candidate.remedyClinic && skippedDays >= 2)) continue;
     const committed = options.committedMinutesForCourse?.(candidate.courseId) ?? options.committedMinutes;
     const continuous = options.maxContinuousMinutesForCourse?.(candidate.courseId, suggestions) ?? Number.POSITIVE_INFINITY;
     const budget = Math.max(0, Math.min(capacity - committed - suggestedMinutes, continuous));
+    if (candidate.remedyClinic && budget < REMEDY_CLINIC_TOTAL_MINUTES) continue;
     let { minutes, reasonCode, reason } = candidate;
     if (skippedDays === 2) {
       // Card reviews can start below the study-block minimum. Applying the
@@ -273,6 +307,7 @@ export function proposeAdaptiveTasks(
       reason = `${reason}；根据剩余时间缩短为 ${minutes} 分钟应试练习`;
     }
     if (minutes > budget) continue;
+    proposedIdentities.add(comparable);
     suggestedMinutes += minutes;
     const key = suggestionKey(snapshot.date, identity);
     suggestions.push({

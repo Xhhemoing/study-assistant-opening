@@ -1,5 +1,6 @@
 import type { CourseRequirement, CourseRequirementProgress, LearningActivityKind } from "@aistudy/contracts";
-import type { SnapshotObservation } from "./adaptive/snapshot-sources";
+import type { SkillPlacementRoute } from "../diagnostic-placement";
+import type { NextLearningStepInput, SnapshotObservation } from "./adaptive/snapshot-sources";
 import { nextLearningStep } from "./adaptive/next-learning-step";
 import { buildDecisionInput } from "./adaptive/decision-input";
 
@@ -36,7 +37,10 @@ export function courseRequirementProgress(requirements:readonly CourseRequiremen
   });
 }
 export type CourseRouteStep={requirementId:string;action:LearningActivityKind|"prerequisite"|"return"|"comprehensive";returnTo?:string;focusObservationId:string|null};
-export function selectCourseRouteStep(rows:readonly CourseRequirementProgress[],requestedId?:string):CourseRouteStep|null{
+export function selectCourseRouteStep(rows:readonly CourseRequirementProgress[],requestedId?:string,options?:{
+  /** Keyed by course requirement id. */
+  placementRoutes?:ReadonlyMap<string,SkillPlacementRoute>;
+}):CourseRouteStep|null{
   const target=requestedId?rows.find(row=>row.requirement.id===requestedId):rows.find(row=>row.requirement.mandatory&&row.status!=="verified")??rows.find(row=>row.status!=="verified");
   if(!target)return null;
   // Only explicit course identities create a prerequisite detour; no label inference.
@@ -49,13 +53,16 @@ export function selectCourseRouteStep(rows:readonly CourseRequirementProgress[],
   };
   const prerequisite=weakPrerequisite(target);
   if(prerequisite)return {requirementId:prerequisite.requirement.id,action:"prerequisite",returnTo:target.requirement.id,focusObservationId:prerequisite.observationId};
+  const placementCheck=target.status==="unobserved"&&target.sourcesAvailable
+    &&options?.placementRoutes?.get(target.requirement.id)?.route==="inferred_skip_candidate";
   const action:LearningActivityKind=target.status==="needs_correction"?"targeted_explain":target.status==="assisted"?"reduced_help_practice"
-    :target.status==="needs_verification"||target.status==="verified"?"transfer_check":"diagnose";
+    :target.status==="needs_verification"||target.status==="verified"||placementCheck?"transfer_check":"diagnose";
   return {requirementId:target.requirement.id,action,focusObservationId:target.observationId};
 }
 /** The full observation context remains the existing adaptive policy's responsibility. */
-export function courseRouteLearningDecision(observations:readonly SnapshotObservation[]){
-  return nextLearningStep(buildDecisionInput({ observations, wantsFullExplanation: false }));
+export function courseRouteLearningDecision(observations:readonly SnapshotObservation[],
+  options?:Pick<NextLearningStepInput,"placementRoute"|"drilldownSnapshot">){
+  return nextLearningStep(buildDecisionInput({ observations, wantsFullExplanation: false, ...options }));
 }
 export function remainingCourseComprehensiveRequirements(rows:readonly CourseRequirementProgress[],observations:readonly CourseRouteObservation[],runKey:string):string[]{
   return rows.filter(row=>row.requirement.mandatory).filter(row=>{

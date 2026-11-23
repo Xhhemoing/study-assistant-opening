@@ -1,6 +1,7 @@
+import type { FrozenOriginalContext } from "../../diagnostic-placement";
 import type { LearningDecisionCandidate } from "../learning-decision";
 import { remediationLimitEvidence } from "../remediation-cycle";
-import type { LearningPhase, NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
+import type { LearningPhase, NextLearningStep, NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 
 // Restored D5 assisted-success policy plus evidenced D4 remediation cycles.
 export const NEXT_LEARNING_STEP_VERSION = "next-learning-step-6";
@@ -24,6 +25,19 @@ export function withLearningPhase(decision: NextLearningStep, input: NextLearnin
   return { ...decision, phase: phase.phase, phaseSource: phase.source };
 }
 
+function unresolvedOriginalError(observations: readonly SnapshotObservation[], context: FrozenOriginalContext): SnapshotObservation | undefined {
+  const attemptIndex = observations.findIndex(row => row.id === context.originalAttemptId);
+  // An external attempt key can still be resolved by its original problem identity.
+  const index = attemptIndex >= 0 ? attemptIndex : observations.findIndex(row =>
+    row.problemId === context.originalItemId && row.verifiedCorrect === "no");
+  const original = observations[index];
+  if (original?.verifiedCorrect !== "no") return undefined;
+
+  const solved = observations.slice(0, index).some(row => row.verifiedCorrect === "yes"
+    && (row.problemId === context.originalItemId || (original.problemId !== null && row.problemId === original.problemId)));
+  return solved ? undefined : original;
+}
+
 /** Capture only branches actually evaluated, in priority order; later rules did not compete. */
 export function captureNextLearningStep(input: NextLearningStepInput): {
   decision: NextLearningStep; candidates: LearningDecisionCandidate[];
@@ -33,8 +47,11 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
     candidates.push({ action, eligible, reasonCodes: [eligible ? reason : rejected], evidenceRefs });
     return eligible;
   };
+  const placement = input.placementRoute;
   const result = (activityKind: NextLearningStep["activityKind"], reasonCode: NextLearningStep["reasonCode"], focusObservationId: string | null = null) =>
-    ({ decision: withLearningPhase({ activityKind, focusObservationId, reasonCode }, input), candidates });
+    ({ decision: withLearningPhase({ activityKind, focusObservationId, reasonCode, ...(placement !== undefined
+      ? { placementRoute: placement.route, holdoutVerificationRequired: placement.holdoutVerificationRequired }
+      : {}) }, input), candidates });
   const phase = learningPhaseForInput(input);
   if (input.learningPhase === "new_learning") {
     check("full_explain", true, "explicit_new_learning", "explicit_new_learning");
@@ -60,6 +77,18 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
   if (check("full_explain", !!input.wantsFullExplanation, "requested_full", "not_requested_full")) return result("full_explain", "requested_full");
   const observations = input.observations.filter(row => row.usableForCurrentVersion === "yes");
   const latest = observations[0], refs = observations.map(row => `observation:${row.id}`);
+  if (input.drilldownSnapshot?.status === "restore_original_attempt"
+    && input.drilldownSnapshot.rootCause === "integration_step_coordination" && input.drilldownSnapshot.restoreContext) {
+    const original = unresolvedOriginalError(observations, input.drilldownSnapshot.restoreContext);
+    if (original) {
+      check("targeted_explain", true, "drilldown_integration_step_restore", "drilldown_integration_step_restore", [`observation:${original.id}`]);
+      return result("targeted_explain", "verified_incorrect", original.id);
+    }
+  }
+  if (!latest && placement?.route === "inferred_skip_candidate") {
+    check("transfer_check", true, "placement_inferred_skip_holdout_check", "placement_inferred_skip_holdout_check");
+    return result("transfer_check", "correct_needs_independent_check");
+  }
   if (check("diagnose", !latest, "no_evidence", "has_current_evidence", refs)) return result("diagnose", "no_evidence");
   const lastCorrectIndex = observations.findIndex(row => row.verifiedCorrect === "yes");
   // A verified success resolves earlier errors; only inspect the latest unresolved segment.

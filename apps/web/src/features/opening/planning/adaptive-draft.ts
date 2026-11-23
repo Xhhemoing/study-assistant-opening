@@ -8,6 +8,8 @@ import {
   proposeAdaptiveTasks,
   rankForPlan,
   suggestionsAsTasks,
+  type AdaptiveRemedyClinicCandidate,
+  type AdaptiveRemedyClinicValidation,
   type LearnerSnapshot,
   type PlanDayOptions,
   type PreferredTaskOrder,
@@ -32,6 +34,8 @@ export type BuildAdaptiveDraftInput = {
   now: Date;
   planDayOptions(preferredOrder: PreferredTaskOrder, carryOverTaskIds?: ReadonlySet<string>): PlanDayOptions;
   suppressedSuggestionIdentities?: readonly string[];
+  remedyClinics?: readonly AdaptiveRemedyClinicCandidate[];
+  remedyClinicValidation?: AdaptiveRemedyClinicValidation;
 };
 
 /**
@@ -136,6 +140,8 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
     pendingTasks: tasks.filter((task) => task.status === "pending"),
     idFor: (key) => suggestionTaskId(input.workspaceId, key),
     suppressedSuggestionIdentities: input.suppressedSuggestionIdentities,
+    remedyClinics: input.remedyClinics,
+    remedyClinicValidation: input.remedyClinicValidation,
   });
   const ranked = rankForPlan({ ...rankInput, suggestions });
   const byId = new Map([...tasks, ...suggestionsAsTasks(suggestions)].map((task) => [task.id, task]));

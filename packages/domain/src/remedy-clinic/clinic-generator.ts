@@ -1175,6 +1175,7 @@ interface ClinicSnapshotHeader {
   readonly createdPrivacyEpoch: number;
   readonly validatedPrivacyEpoch: number;
   readonly priorStrippedCaseCount: number;
+  readonly priorStrippedProbeCount: number;
   readonly priorReason: ClinicRevocationReason;
 }
 
@@ -1193,12 +1194,24 @@ function parsePriorRevocationReason(value: unknown): ClinicRevocationReason {
   return "already_revoked";
 }
 
+function readPriorStrippedCount(summary: Record<string, unknown> | null, key: "strippedCaseCount" | "strippedProbeCount"): number {
+  const count = summary && readOwnDataProp(summary, key);
+  return typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : 0;
+}
+
+function cumulativeStrippedCounts(header: ClinicSnapshotHeader, newlyStrippedCases: number, newlyStrippedProbes: number) {
+  const strippedCaseCount = Math.min(Number.MAX_SAFE_INTEGER, header.priorStrippedCaseCount + newlyStrippedCases);
+  const strippedProbeCount = Math.min(Number.MAX_SAFE_INTEGER, header.priorStrippedProbeCount + newlyStrippedProbes);
+  return { strippedCaseCount, ...(strippedProbeCount > 0 ? { strippedProbeCount } : {}) };
+}
+
 function buildRevokedClinicFromHeader(
   header: ClinicSnapshotHeader,
   validatedPrivacyEpoch: number,
   coverage: EvidenceCoverage,
-  strippedCaseCount: number,
+  newlyStrippedCaseCount: number,
   reason: ClinicRevocationReason,
+  newlyStrippedProbeCount = 0,
 ): RemedyClinicSessionV1 {
   return Object.freeze({
     schemaVersion: 1 as const,
@@ -1239,7 +1252,7 @@ function buildRevokedClinicFromHeader(
     ] as const),
     delayedRecheck: buildDelayedRecheck(header.ruleId),
     revocationSummary: Object.freeze({
-      strippedCaseCount,
+      ...cumulativeStrippedCounts(header, newlyStrippedCaseCount, newlyStrippedProbeCount),
       reason,
     }),
   });
@@ -1463,6 +1476,7 @@ export function revalidateRemedyClinic(
       createdPrivacyEpoch: -1,
       validatedPrivacyEpoch: -1,
       priorStrippedCaseCount: 0,
+      priorStrippedProbeCount: 0,
       priorReason: "invalid_privacy_epoch",
     };
     return buildRevokedClinicFromHeader(emptyHeader, safeEpoch, zeroCoverage, 0, "invalid_privacy_epoch");
@@ -1487,11 +1501,7 @@ export function revalidateRemedyClinic(
     rawRevSummary !== null && typeof rawRevSummary === "object" && !Array.isArray(rawRevSummary)
       ? (rawRevSummary as Record<string, unknown>)
       : null;
-  const priorStrippedCaseCount =
-    revSummaryObj && typeof readOwnDataProp(revSummaryObj, "strippedCaseCount") === "number"
-      ? (readOwnDataProp(revSummaryObj, "strippedCaseCount") as number)
-      : 0;
-  const priorReason = revSummaryObj ? parsePriorRevocationReason(readOwnDataProp(revSummaryObj, "reason")) : "already_revoked";
+  const priorReason = revSummaryObj && readOwnDataProp(revSummaryObj, "reason");
 
   const header: ClinicSnapshotHeader = {
     clinicId: typeof rawClinicId === "string" ? rawClinicId : "",
@@ -1503,8 +1513,9 @@ export function revalidateRemedyClinic(
     ruleSourceRefs: hasRuleSourceRefs ? freezeSourceRefs(rawRuleSourceRefs) : null,
     createdPrivacyEpoch: typeof rawCreatedEpoch === "number" ? rawCreatedEpoch : -1,
     validatedPrivacyEpoch: typeof rawValidatedEpoch === "number" ? rawValidatedEpoch : -1,
-    priorStrippedCaseCount,
-    priorReason,
+    priorStrippedCaseCount: readPriorStrippedCount(revSummaryObj, "strippedCaseCount"),
+    priorStrippedProbeCount: readPriorStrippedCount(revSummaryObj, "strippedProbeCount"),
+    priorReason: parsePriorRevocationReason(priorReason),
   };
 
   const evidenceCasesSnap = Array.isArray(rawEvidenceCases) ? rawEvidenceCases : null;
@@ -1538,7 +1549,7 @@ export function revalidateRemedyClinic(
       header,
       currentPrivacyEpoch,
       zeroCoverage,
-      header.priorStrippedCaseCount,
+      0,
       header.priorReason,
     );
   }
@@ -1630,7 +1641,7 @@ export function revalidateRemedyClinic(
     }
   }
   const frozenSurvivingCases = Object.freeze(survivingCases);
-  const strippedCaseCount = totalEvidenceCases - frozenSurvivingCases.length;
+  const newlyStrippedCaseCount = totalEvidenceCases - frozenSurvivingCases.length;
   const coverage = Object.freeze(computeEvidenceCoverage(frozenSurvivingCases));
 
   if (!meetsClinicThreshold(coverage)) {
@@ -1638,7 +1649,7 @@ export function revalidateRemedyClinic(
       header,
       currentPrivacyEpoch,
       coverage,
-      strippedCaseCount,
+      newlyStrippedCaseCount,
       "insufficient_surviving_evidence",
     );
   }
@@ -1664,18 +1675,23 @@ export function revalidateRemedyClinic(
       survivingProbes.push(snapProbe);
     }
   }
-  const strippedProbeCount = totalProbes - survivingProbes.length;
+  const newlyStrippedProbeCount = totalProbes - survivingProbes.length;
   if (survivingProbes.length < REQUIRED_TRANSFER_PROBE_COUNT) {
     return buildRevokedClinicFromHeader(
       header,
       currentPrivacyEpoch,
       coverage,
-      strippedCaseCount,
+      newlyStrippedCaseCount,
       "insufficient_surviving_probes",
+      newlyStrippedProbeCount,
     );
   }
 
   const selectedCases = Object.freeze(selectSpreadRepresentativeCases(frozenSurvivingCases));
+  const counts = cumulativeStrippedCounts(header, newlyStrippedCaseCount, newlyStrippedProbeCount);
+  // A later read sees only the remaining evidence, so it must retain earlier revocations.
+  const partiallyRevoked = priorReason === "partial_source_revoked_still_active"
+    || counts.strippedCaseCount > 0 || (counts.strippedProbeCount ?? 0) > 0;
   return Object.freeze({
     schemaVersion: 1 as const,
     clinicId: header.clinicId,
@@ -1707,12 +1723,8 @@ export function revalidateRemedyClinic(
     ] as const),
     delayedRecheck: buildDelayedRecheck(header.ruleId),
     revocationSummary: Object.freeze({
-      strippedCaseCount,
-      ...(strippedProbeCount > 0 ? { strippedProbeCount } : {}),
-      reason:
-        strippedCaseCount > 0 || strippedProbeCount > 0
-          ? ("partial_source_revoked_still_active" as const)
-          : ("none" as const),
+      ...counts,
+      reason: partiallyRevoked ? ("partial_source_revoked_still_active" as const) : ("none" as const),
     }),
   });
 }

@@ -490,6 +490,8 @@ export {
 } from "./opening/teaching-math-model";
 
 export * from "./opening/adaptive";
+export * from "./diagnostic-placement";
+export * from "./remedy-clinic";
 export { buildDecisionInput } from "./opening/adaptive/decision-input";
 export { summarizeRemediationCycles, remediationLimitEvidence, type RemediationCycleSummary, type RemediationCycleActivity } from "./opening/remediation-cycle";
 
