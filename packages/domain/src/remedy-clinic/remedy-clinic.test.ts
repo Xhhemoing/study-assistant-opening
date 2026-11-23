@@ -820,6 +820,29 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(JSON.stringify(revalidated)).not.toContain("r-revoked");
   });
 
+  it("preserves prior case revocation on revalidation at the same epoch and accumulates a later removal", () => {
+    const clinic = createFourCaseClinic();
+    const survivingSources = { "src-ch-1": "v1", "src-ch-2": "v1", "src-ch-3": "v1" };
+    const partiallyRevoked = revalidateRemedyClinic(clinic, survivingSources, 5);
+    expect(partiallyRevoked).toMatchObject({
+      status: "active",
+      revocationSummary: { reason: "partial_source_revoked_still_active", strippedCaseCount: 1 },
+    });
+    const revalidatedAgain = revalidateRemedyClinic(partiallyRevoked, survivingSources, 5);
+    expect(revalidatedAgain).toEqual(partiallyRevoked);
+    const markerOnly = { ...partiallyRevoked, revocationSummary: { ...partiallyRevoked.revocationSummary, strippedCaseCount: 0 } };
+    expect(revalidateRemedyClinic(markerOnly, survivingSources, 5).revocationSummary).toEqual(markerOnly.revocationSummary);
+
+    const next = revalidateRemedyClinic(revalidatedAgain, { ...survivingSources, "src-ch-1": "v2" }, 5);
+    expect(next).toMatchObject({
+      status: "stale_source_revoked",
+      coverage: { rootAttemptCount: 2 },
+      evidenceCases: [],
+      revocationSummary: { reason: "insufficient_surviving_evidence", strippedCaseCount: 2 },
+    });
+    expect(revalidateRemedyClinic(next, allCaseSources, 5).revocationSummary).toEqual(next.revocationSummary);
+  });
+
   it("degrades to stale_source_revoked with empty excerpts when source version mismatch or deletion breaks the threshold", () => {
     const clinic = createFourCaseClinic();
 
@@ -1165,6 +1188,14 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(partialProbeReval.revocationSummary.strippedCaseCount).toBe(0);
     expect(partialProbeReval.revocationSummary.strippedProbeCount).toBe(1);
     expect(partialProbeReval.revocationSummary.reason).toBe("partial_source_revoked_still_active");
+    const repeatedProbeReval = revalidateRemedyClinic(partialProbeReval, allSources, 6);
+    expect(repeatedProbeReval).toEqual(partialProbeReval);
+    const probesRevoked = revalidateRemedyClinic(repeatedProbeReval, { ...allSources, "src-probe-1": "v2" }, 6);
+    expect(probesRevoked).toMatchObject({
+      status: "stale_source_revoked",
+      revocationSummary: { reason: "insufficient_surviving_probes", strippedCaseCount: 0, strippedProbeCount: 2 },
+    });
+    expect(revalidateRemedyClinic(probesRevoked, allSources, 6).revocationSummary).toEqual(probesRevoked.revocationSummary);
 
     // Step 2 learner-facing prompt must not leak internal snake_case ruleId.
     expect(clinic.steps[1].ruleId).toBe(RULE_ID);

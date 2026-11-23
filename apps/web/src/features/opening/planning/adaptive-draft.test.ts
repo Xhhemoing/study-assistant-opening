@@ -122,11 +122,14 @@ describe("remedy clinic daily draft", () => {
     expect(partiallyRevoked).toMatchObject({
       status: "active", revocationSummary: { reason: "partial_source_revoked_still_active", strippedCaseCount: 1 },
     });
-    const rebuilt = buildAdaptiveDraft({
-      ...input, remedyClinicValidation, remedyClinics: [{ ...candidate, clinic: partiallyRevoked }],
-    });
-    expect(rebuilt.adaptive.suggestedTasks).toEqual([]);
-    expect(rebuilt.blocks).toEqual([]);
+    const revalidatedAgain = revalidateRemedyClinic(partiallyRevoked, activeSources, remedyClinicValidation.currentPrivacyEpoch);
+    for (const revoked of [partiallyRevoked, revalidatedAgain]) {
+      const rebuilt = buildAdaptiveDraft({
+        ...input, remedyClinicValidation, remedyClinics: [{ ...candidate, clinic: revoked }],
+      });
+      expect(rebuilt.adaptive.suggestedTasks).toEqual([]);
+      expect(rebuilt.blocks).toEqual([]);
+    }
   });
 
   it("leaves a tight exam slot free when the suggestion budget cannot fit all 14 minutes", () => {

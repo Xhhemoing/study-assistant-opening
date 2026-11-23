@@ -300,9 +300,12 @@ describe("adaptive clinic suggestions", () => {
     });
     const validation = { ...plan, remedyClinicValidation: { ...live, activeSources } };
     expect(proposeAdaptiveTasks(clinicOnlySnapshot, validation).suggestions).toEqual([]);
-    expect(proposeAdaptiveTasks(clinicOnlySnapshot, {
-      ...validation, remedyClinics: [{ ...clinic, clinic: partiallyRevoked }],
-    }).suggestions).toEqual([]);
+    const revalidatedAgain = revalidateRemedyClinic(partiallyRevoked, activeSources, live.currentPrivacyEpoch);
+    for (const revoked of [partiallyRevoked, revalidatedAgain]) {
+      expect(proposeAdaptiveTasks(clinicOnlySnapshot, {
+        ...validation, remedyClinics: [{ ...clinic, clinic: revoked }],
+      }).suggestions).toEqual([]);
+    }
   });
 
   it("respects proposal controls and skips clinics that would be shortened", () => {
