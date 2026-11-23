@@ -1,10 +1,13 @@
 import { expect, it } from "vitest";
 import type { PlannedBlock, TaskItem } from "@aistudy/contracts";
 import {
-  buildLocalReplan, buildSkillBeliefTrajectory, compareLearnerShadowV2, createSkillBelief, evaluateWheelSpinningGuard, nextLearningStep,
+  assembleLearnerState, buildLocalReplan, buildSkillBeliefTrajectory, compareLearnerShadowV2, createSkillBelief, evaluateWheelSpinningGuard, nextLearningStep,
   nextLearningStepWithExperimentalBkt, planAdaptiveBellmanShadow, predictLearnerShadowV2,
   type LearnerStateFeature, type NextLearningStepInput, type SnapshotObservation,
 } from "../../index";
+import type { CourseEvidence } from "../learning-summary";
+import { learningObservation, qualifiedInput } from "../learning-summary-fixtures";
+import { toSnapshotEvidence } from "./snapshot-evidence";
 
 const at = (day: number) => `2026-10-${String(day).padStart(2, "0")}T10:00:00.000Z`;
 function head(id: string, day: number, fields: Partial<SnapshotObservation> = {}): SnapshotObservation {
@@ -98,6 +101,53 @@ function feature(row: SnapshotObservation, fields: Partial<LearnerStateFeature> 
 }
 const scope = { workspaceId: "workspace", learnerId: "learner", courseId: "math", requirementKey: "integrate", confirmedSkillVersion: 1 };
 
+function projectProducedAttempts(rows: readonly SnapshotObservation[], cutoff: string) {
+  const evidence: CourseEvidence = { observations: [], evidenceContexts: {} };
+  const { context } = qualifiedInput;
+  for (const row of rows) {
+    const { id, skillLabel, attemptedAt, assistance } = row;
+    const attemptId = `attempt-${id}`, problemId = row.problemId!, itemVersionId = row.itemVersionId!;
+    const submittedAt = Date.parse(attemptedAt);
+    evidence.observations.push({ ...learningObservation, id, courseId: scope.courseId, skillLabel, attemptId, problemId,
+      itemVersionId, assistance, occurredAt: attemptedAt, recordedAt: attemptedAt });
+    evidence.evidenceContexts[id] = {
+      observation: { ...qualifiedInput.observation, observationId: id, courseId: scope.courseId, requirementKey: scope.requirementKey,
+        attemptId, problemId, itemVersionId, assistance, submittedAt, startedAt: submittedAt - 60_000 },
+      context: { helpHistory: { complete: true, exposures: [] }, referenceCheckAuthority: context.referenceCheckAuthority,
+        referenceCheck: { ...context.referenceCheck!, attemptId, problemId, itemVersionId },
+        version: { applicability: "exact", currentItemVersionId: itemVersionId } },
+    };
+  }
+  const familyKeys = new Map(rows.map(row => [row.id, row.familyKey]));
+  const observations = toSnapshotEvidence(evidence, new Date(cutoff)).observations
+    .map(observation => ({ ...observation, familyKey: familyKeys.get(observation.id) }));
+  const { features } = assembleLearnerState({ evidence, dataAsOf: cutoff, stateVersion: "test" });
+  return { scope, cutoff, observations, features };
+}
+
+it("replays both producer attempts when the display label uses different casing and whitespace", () => {
+  const input = projectProducedAttempts([head("first", 1), head("second", 2, { skillLabel: " integration " })], at(3));
+  expect(input.observations.map(row => row.skillLabel)).toEqual(["Integration", "Integration"]);
+  expect(input.features.map(row => row.skillLabel)).toEqual(["Integration", " integration "]);
+  expect(buildSkillBeliefTrajectory(input).steps.map(step => [step.observationId, step.omega])).toEqual([
+    ["first", 1], ["second", 1],
+  ]);
+});
+
+it.each([
+  ["a retry of the same problem", "shared-problem", 0],
+  ["a different problem in the same family", "new-problem", 1],
+] as const)("retains a declared hint without delivered help before %s", (_scenario, problemId, expectedWeight) => {
+  const first = head("hint", 1, { problemId: "shared-problem", familyKey: "shared-family", assistance: "hinted" });
+  const second = head("independent", 2, { problemId, familyKey: "shared-family" });
+  const input = projectProducedAttempts([first, second], at(3));
+  expect(input.observations[0]).toMatchObject({ assistance: "hinted", independentAttempt: "no" });
+  expect(input.features[0]).toMatchObject({ views: [], eligibility: { reasonCodes: expect.arrayContaining(["declared_help"]) } });
+  const result = buildSkillBeliefTrajectory(input);
+  expect(result.steps.map(step => [step.observationId, step.omega])).toEqual([["hint", 0], ["independent", expectedWeight]]);
+  expect(result.belief.lastDirectRecallAtMs).toBeNull();
+});
+
 it("copies only misconception mass from a structurally compatible prior belief", () => {
   const misconceptionPrior = createSkillBelief({ workspaceId: "other-workspace", learnerId: "other-learner",
     courseId: "other-course", confirmedSkillVersion: 7, abilityMean: 2, logStability: 4, lastDirectRecallAtMs: Date.parse(at(1)),
@@ -167,6 +217,7 @@ it.each([
   ["independence", { independentAttempt: "no" }],
   ["hint exposure", { assistance: "hinted" }],
   ["solution exposure", { assistance: "revealed" }],
+  ["unknown assistance", { assistance: "unknown" }],
   ["version usability", { usableForCurrentVersion: "no" }],
   ["requirement", { requirementKey: "apply-integrals" }],
   ["skill label", { skillLabel: "Integral applications" }],
@@ -179,6 +230,43 @@ it.each([
   expect(forecast.evidenceObservationIds).toEqual([evidence.id]);
   expect(predictLearnerShadowV2({ ...input, observations: [evidence, revision],
     features: [...input.features, feature(revision, { recordedAt: at(3) })] })).toEqual(forecast);
+});
+
+it("preserves verified day-1 evidence when a day-3 untimestamped head omits version usability", () => {
+  const evidence = head("evidence", 1);
+  const { usableForCurrentVersion, ...revision } = evidence;
+  expect(usableForCurrentVersion).toBe("yes");
+  const input = { scope, cutoff: at(2), observations: [evidence, revision],
+    features: [feature(evidence), feature(revision, { recordedAt: at(3) })], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  expect(predictLearnerShadowV2(input).evidenceObservationIds).toEqual([evidence.id]);
+  expect(buildSkillBeliefTrajectory({ ...input, cutoff: at(4), features: [input.features[1]!] }).steps)
+    .toMatchObject([{ observationId: evidence.id, omega: 0 }]);
+});
+
+it.each([
+  ["declared_help", "hinted", "independent"],
+  ["help_before_submission", "hinted", "independent"],
+  ["prior_evaluation_feedback", "hinted", "independent"],
+  ["exam_lesson_assistance", "hinted", "independent"],
+  ["exam_partial_example_exposure", "hinted", "independent"],
+  ["prior_answer_exposure", "revealed", "hinted"],
+] as const)("uses %s to keep an incompatible untimestamped head from erasing exposure history", (reason, assistance, incompatible) => {
+  const exposure = head("exposure", 1, { assistance, independentAttempt: "no" });
+  const otherHead = { ...exposure, assistance: incompatible };
+  const visible = feature(exposure);
+  visible.eligibility.reasonCodes = [reason];
+  const retry = head("retry", 2, { problemId: exposure.problemId, familyKey: exposure.familyKey });
+  const result = buildSkillBeliefTrajectory({ scope, cutoff: at(3), observations: [exposure, otherHead, retry],
+    features: [visible, feature(retry)] });
+  expect(result.steps.map(step => [step.observationId, step.omega])).toEqual([["exposure", 0], ["retry", 0]]);
+});
+
+it("retains independent attempt history when the help view reflects post-answer feedback", () => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const result = buildSkillBeliefTrajectory({ scope, cutoff: at(3), observations: [first, retry],
+    features: [feature(first, { views: ["independent", "help"] }), feature(retry)] });
+  expect(result.steps.map(step => [step.observationId, step.omega])).toEqual([["first", 0], ["retry", 0]]);
 });
 
 it("preserves walk-forward prefixes when a duplicate head becomes visible at the held-out attempt", () => {
@@ -195,7 +283,7 @@ it("preserves walk-forward prefixes when a duplicate head becomes visible at the
 });
 
 it("records visible family exposures without problem IDs before evaluating direct recall", () => {
-  const exposure = head("hint", 1, { familyKey: "shared", problemId: null, assistance: "hinted" });
+  const exposure = head("hint", 1, { familyKey: "shared", problemId: null, assistance: "hinted", independentAttempt: "no" });
   const independent = head("independent", 2, { familyKey: "shared" });
   const input = { scope, cutoff: at(3), observations: [independent, exposure], features: [feature(independent), feature(exposure)] };
   const visible = buildSkillBeliefTrajectory(input);
@@ -214,7 +302,7 @@ it.each([undefined, null, "", "   "])("does not refresh direct recall for a miss
 });
 
 it.each([
-  { assistance: "hinted" }, { assistance: "revealed" }, { usableForCurrentVersion: "no" },
+  { assistance: "hinted", independentAttempt: "no" }, { assistance: "revealed", independentAttempt: "no" }, { usableForCurrentVersion: "no" },
 ] as const)("tracks an earlier family exposure even when it cannot update the belief (%j)", fields => {
   const exposure = head("exposure", 1, { ...fields, familyKey: "shared" });
   const independent = head("independent", 2, { familyKey: "shared" });
@@ -225,9 +313,9 @@ it.each([
 });
 
 it("replays only comparable evidence known before the cutoff and leaves non-independent attempts at zero weight", () => {
-  const first = head("first", 1), hinted = head("hinted", 2, { assistance: "hinted" });
+  const first = head("first", 1), hinted = head("hinted", 2, { assistance: "hinted", independentAttempt: "no" });
   const repeated = head("repeated", 3, { problemId: "first" });
-  const revealed = head("revealed", 4, { assistance: "revealed" });
+  const revealed = head("revealed", 4, { assistance: "revealed", independentAttempt: "no" });
   const ai = head("ai", 5), late = head("late", 6), impossible = head("reversed", 7), missing = head("missing", 8);
   const observations = [late, repeated, hinted, first, revealed, ai, impossible, missing];
   const features = [feature(first), feature(hinted), feature(repeated), feature(revealed),

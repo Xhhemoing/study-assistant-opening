@@ -8,8 +8,10 @@ import { computeMurphyBrierReceipt } from "../../metacognition/murphy-brier";
 import { isPreAnswerConfidence, type WheelSpinningGuardInput } from "../../metacognition/types";
 import { wheelSpinningGuard } from "../../metacognition/wheel-spinning-guard";
 import { isAiGradedEvidence } from "../ai-evaluation";
+import type { EvidenceEligibility } from "../evidence-eligibility";
 import { scoreLearnerShadowV2 } from "../learner-shadow-predictions";
 import type { LearnerStateFeature } from "../learner-state";
+import { normalizeSkillLabelKey } from "./skill-identity";
 import type { NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 
 type SkillScope = Pick<SkillBeliefV1, "workspaceId" | "learnerId" | "courseId" | "confirmedSkillVersion"> & {
@@ -134,6 +136,18 @@ function uniqueById<T extends object>(rows: readonly T[], idOf: (row: T) => stri
   return byId;
 }
 
+const preSubmissionHelpReasons = new Set<EvidenceEligibility["reasonCodes"][number]>([
+  "declared_help", "help_before_submission", "prior_evaluation_feedback", "exam_lesson_assistance", "exam_partial_example_exposure",
+]);
+
+function matchesAssistance(assistance: SnapshotObservation["assistance"], eligibility: EvidenceEligibility): boolean {
+  const { independentAttempt, reasonCodes } = eligibility;
+  if ((assistance === "hinted" || assistance === "revealed") && independentAttempt !== "no") return false;
+  if (assistance === "unknown" && independentAttempt === "yes") return false;
+  if (assistance === "independent" && reasonCodes.some(reason => preSubmissionHelpReasons.has(reason))) return false;
+  return assistance === "revealed" || independentAttempt !== "no" || !reasonCodes.includes("prior_answer_exposure");
+}
+
 function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): JoinedHead[] {
   const visibleFeatures = input.features.flatMap(feature => {
     if (feature.courseId !== input.scope.courseId) return [];
@@ -149,15 +163,13 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
       // Bind untimestamped heads to the visible feature before resolving duplicates.
       const { feature } = row;
       const { eligibility } = feature;
-      const hasHelp = observation.assistance === "hinted" || observation.assistance === "revealed";
       return (observation.requirementKey ?? null) === feature.requirementKey
-        && observation.skillLabel === feature.skillLabel
+        && normalizeSkillLabelKey(observation.skillLabel) === normalizeSkillLabelKey(feature.skillLabel)
         && (observation.itemVersionId ?? null) === feature.itemVersionId
         && observation.verifiedCorrect === eligibility.verifiedCorrect
         && observation.independentAttempt === eligibility.independentAttempt
-        && (observation.usableForCurrentVersion === undefined
-          || observation.usableForCurrentVersion === eligibility.usableForCurrentVersion)
-        && hasHelp === feature.views.includes("help");
+        && (observation.usableForCurrentVersion ?? "unknown") === eligibility.usableForCurrentVersion
+        && matchesAssistance(observation.assistance, eligibility);
     }
     const recorded = adaptiveShadowTime(observation.recordedAt);
     return attempted <= recorded && recorded < cutoff;
