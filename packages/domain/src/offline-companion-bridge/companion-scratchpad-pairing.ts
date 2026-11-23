@@ -718,7 +718,7 @@ export function redeemCompanionPairingOffer(
     };
   }
 
-  if (offer.status === "expired" || nowMs > offer.expiresAtMs) {
+  if (offer.status === "expired" || nowMs >= offer.expiresAtMs) {
     return {
       ok: false,
       code: "pairing_expired",
@@ -823,7 +823,7 @@ export function authorizeCompanionAction(
   if (
     !isValidTimestamp(nowMs) ||
     session.status === "expired" ||
-    nowMs > session.expiresAtMs ||
+    nowMs >= session.expiresAtMs ||
     nowMs < session.issuedAtMs
   ) {
     return {

@@ -94,6 +94,33 @@ const STANDALONE_PEDAGOGICAL_KINDS = new Set<PedagogicalBlockKind>([
   "transcript_cue",
 ]);
 
+const DETAILS_COURSEWARE_LABEL_ALIASES = {
+  定义: "definition",
+  定理: "theorem",
+  推论: "corollary",
+  命题: "proposition",
+  引理: "lemma",
+  证明: "proof",
+  例题: "example",
+  示例: "example",
+  例子: "example",
+  习题: "exercise",
+  练习: "exercise",
+  思考题: "question",
+  问题: "problem",
+};
+
+const DETAILS_COMPOUND_LABELS = [
+  ...Object.keys(PEDAGOGICAL_LABELS).map(name => ({
+    name,
+    token: ` ${name.replace(/[-_]/g, " ")} `,
+    matchWords: true,
+  })),
+  ...Object.entries(DETAILS_COURSEWARE_LABEL_ALIASES).map(([token, name]) => ({
+    name, token, matchWords: false,
+  })),
+];
+
 const ZH_HEADING_UNIT =
   /(?:部分|单元|模块|专题|课时|阶段|学期|小节|大题|小题|例题|习题|练习|思考题|测试|真题|[章节篇课讲题问步卷册期组套道项条])/.source;
 const SEALED_HEADING_RE = new RegExp(
@@ -102,6 +129,14 @@ const SEALED_HEADING_RE = new RegExp(
 );
 const HINT_HEADING_RE = new RegExp(
   String.raw`(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|(?:^|[\s\p{P}\p{S}\d]|[题步问章节课讲卷册]|(?:第\s*[\d一二三四五六七八九十百千万零两]+\s*${ZH_HEADING_UNIT}|解题|分步|思路|方法|关键|答题|审题|证明|推导|计算|编程|实验|作业|练习|习题|测试|自测|课后|随堂|课堂|单元|模块|部分|专题|阶段|查看|展开|显示|点击查看|点拨|附))提示(?:$|[\s\p{P}\p{S}\d一二三四五六七八九十百千万零两甲乙丙丁]|(?:部分|单元|模块|专题|章节|汇总|一览|汇编|要点|说明|(?:与|及|和)(?:点拨|思路|引导|说明)))|分步提示|解题提示|思路提示|查看提示|展开提示|显示提示`,
+  "iu",
+);
+const SEALED_DETAILS_SUMMARY_RE = new RegExp(
+  [
+    String.raw`\bspoilers?\b|剧\s*透`,
+    String.raw`\b(?:reveal|show|view|display|expand|uncover)\s+(?:(?:the|full|complete|detailed|correct|reference|official|final|worked|step-by-step)\s+)*(?:answers?|solutions?|keys?|proofs?|explanations?|results?)\b`,
+    String.raw`(?:点击|点此|展开|显示|查看|揭晓)\s*(?:(?:完整|详细|本题|本小题|该题|此题|这道题|本例|正确|参考|标准|官方|最终|全部|简明|的)\s*)*(?:答案|解析|解答|题解|证明|结果)`,
+  ].join("|"),
   "iu",
 );
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
@@ -3062,6 +3097,7 @@ function classifyDetailsElement(
   openEnd: number,
   { summary }: DetailsBounds,
   activeVisibility: PedagogicalVisibility,
+  sealProofs: boolean,
   definedLinkLabels: ReadonlySet<string>,
   htmlContext: ReturnType<typeof createMarkdownHtmlBlockLookup>,
 ): {
@@ -3080,26 +3116,49 @@ function classifyDetailsElement(
     const summaryContext = htmlContext.labelContextAt(summary.openEnd, definedLinkLabels);
     const { inline: summaryText, spaced, hasDetails } = htmlLabelTextVariants(summaryContents, { ...summaryContext, style: summaryStyle },
       htmlContext.pipeCellAt(openStart, definedLinkLabels), rawHtml, decodeHtmlCharacterReferences);
-    if (
-      ![summaryText, spaced].some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label)) &&
-      !hasDetails &&
-      HINT_HEADING_RE.test(summaryText)
-    ) {
+    const labels = summaryText === spaced ? [summaryText] : [summaryText, spaced];
+    const summaryEndOffset = summary.closeEnd;
+    if (!summaryText || hasDetails || labels.some(label => SEALED_HEADING_RE.test(label) || SEALED_DETAILS_SUMMARY_RE.test(label))) {
       return {
-        kind: "hint",
-        visibility: maxVisibility("hint_gated", activeVisibility),
-        label: summaryText || "hint",
-        summaryEndOffset: summary.closeEnd,
+        kind: "solution",
+        visibility: maxVisibility("sealed", activeVisibility),
+        label: summaryText || "solution",
+        summaryEndOffset,
       };
     }
+    let classified: NonNullable<ReturnType<typeof classifyLabel>> = { kind: "prose", visibility: "public" };
+    for (const label of labels) {
+      const englishLabel = /^(?:worked[-_ ]example|[a-z]+)(?![a-z0-9])/i.exec(label)?.[0]?.replace(" ", "-");
+      const name = englishLabel ??
+        Object.entries(DETAILS_COURSEWARE_LABEL_ALIASES).find(([prefix]) => label.startsWith(prefix))?.[1];
+      const named = classifyLabel(label, "public", sealProofs) ?? classifyLabel(name, "public", sealProofs);
+      if (named && (classified.kind === "prose" || VISIBILITY_RANK[named.visibility] > VISIBILITY_RANK[classified.visibility])) {
+        classified = named;
+      }
+
+      // Recognize protected names anywhere in a summary, including compound
+      // names separated by markup, punctuation, or spaces. Apply the exercise
+      // proof rule to each match before comparing its visibility.
+      const words = ` ${label.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
+      for (const { name: candidateName, token, matchWords } of DETAILS_COMPOUND_LABELS) {
+        if (!(matchWords ? words : label).includes(token)) continue;
+        const candidate = classifyLabel(candidateName, "public", sealProofs);
+        if (candidate && VISIBILITY_RANK[candidate.visibility] > VISIBILITY_RANK[classified.visibility]) {
+          classified = candidate;
+        }
+      }
+      if (classified.visibility === "public" && HINT_HEADING_RE.test(label)) {
+        classified = { kind: "hint", visibility: "hint_gated" };
+      }
+    }
     return {
-      kind: "solution",
-      visibility: maxVisibility("sealed", activeVisibility),
-      label: summaryText || "solution",
-      summaryEndOffset: summary.closeEnd,
+      kind: classified.kind,
+      visibility: maxVisibility(classified.visibility, activeVisibility),
+      label: summaryText,
+      summaryEndOffset,
     };
   }
-  // Fail closed: any <details> without an explicit hint-only <summary> is sealed.
+  // A disclosure without a leading direct summary has no trustworthy label.
   return {
     kind: "solution",
     visibility: maxVisibility("sealed", activeVisibility),
@@ -3969,7 +4028,7 @@ function findInlineConstructSpans(
       if (m && inheritsHtmlBlock.opensHtmlDetailsAt(i, definedLinkLabels)) {
         const openEnd = i + m[0].length;
         const bounds = findMatchingDetailsBounds(text, i, openEnd, inheritsHtmlBlock, definedLinkLabels);
-        const classified = classifyDetailsElement(text, i, openEnd, bounds, activeVisibility, definedLinkLabels, inheritsHtmlBlock);
+        const classified = classifyDetailsElement(text, i, openEnd, bounds, activeVisibility, sealProofs, definedLinkLabels, inheritsHtmlBlock);
         spans.push({
           start: i,
           end: bounds.closeEnd,
@@ -4828,10 +4887,10 @@ function parsePedagogicalAstInternal(
         extracted.push(...splitNonSealedSpan(span));
       } else if (
         span.end > rangeEnd &&
-        VISIBILITY_RANK[span.visibility] >= VISIBILITY_RANK["hint_gated"]
+        (span.summaryEndOffset !== undefined || span.visibility !== "public")
       ) {
-        // Multi-line or unclosed sealed/hint_gated span extending past this line/block
-        // must consume through `span.end` so a later same-level heading cannot reset visibility.
+        // Consume a disclosure through its end so its headings stay local to
+        // the body. Protected spans also retain their visibility across lines.
         extracted.push(...splitNonSealedSpan(span));
       } else if (
         span.kind !== "display_math" &&
@@ -4897,8 +4956,8 @@ function parsePedagogicalAstInternal(
         definedLinkLabels,
         inheritsHtmlBlock,
       );
-      // Render the visible part of a complete disclosure when classifying the
-      // heading. Its source text is still extracted as a protected construct.
+      // Use the rendered label of a complete disclosure to classify the heading.
+      // Extract any protected content separately below.
       const maskedLabelSpans = rawInlineSpans.filter(s => s.kind !== "display_math" && !isCompleteHtmlDisclosure(s, inlineEnd));
       const cleanHeadingTitle =
         maskedLabelSpans.length > 0
@@ -5198,7 +5257,7 @@ function parsePedagogicalAstInternal(
       }
     }
 
-    // 4b. HTML <details> block (spoiler / hint / solution disclosure; fails closed if unclosed)
+    // 4b. HTML <details> block (courseware or a protected disclosure)
     const trimmedRaw = raw.trimStart();
     const detailsOpenMatch = DETAILS_OPEN_RE.exec(trimmedRaw);
     const detailsStart = line.start + raw.length - trimmedRaw.length;
@@ -5207,7 +5266,7 @@ function parsePedagogicalAstInternal(
       const openEndOffset = detailsStart + detailsOpenMatch[0].length;
       const bounds = findMatchingDetailsBounds(text, detailsStart, openEndOffset, inheritsHtmlBlock, definedLinkLabels);
       const { closeStart, closeEnd } = bounds;
-      const classified = classifyDetailsElement(text, detailsStart, openEndOffset, bounds, activeVis, definedLinkLabels, inheritsHtmlBlock);
+      const classified = classifyDetailsElement(text, detailsStart, openEndOffset, bounds, activeVis, sealProofs, definedLinkLabels, inheritsHtmlBlock);
       const endLineIdx = lineIndexContaining(lines, Math.max(detailsStart, closeEnd - 1), i);
       const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
       const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
