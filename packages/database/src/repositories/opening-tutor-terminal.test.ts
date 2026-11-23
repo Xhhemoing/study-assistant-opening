@@ -347,21 +347,22 @@ describe("opening tutor jobs repository", () => {
     expect(exposureInsert).toBeGreaterThan(assistantUpdate);
   });
 
-  it("stores locked destination history versions accepted by context and backup readers", async () => {
+  it("stores destination history versions even for user-selected sources absent from assistant refs", async () => {
     const courseId = "10000000-0000-4000-8000-000000000001";
     const sessionSource = "20000000-0000-4000-8000-000000000001";
     const activitySource = "20000000-0000-4000-8000-000000000002";
-    const directSource = "20000000-0000-4000-8000-00000000000a";
+    const sharedSource = "20000000-0000-4000-8000-00000000000a";
     let savedRefs: unknown;
     const sql = fakeSql((query, values) => {
       if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
       if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
       if (query.includes("SELECT t.attempt_id,t.context_anchor")) {
-        return [{ assistant_turn_id: "assistant-turn-1", course_id: courseId, source_ids: [directSource.toUpperCase()] }];
+        return [{ assistant_turn_id: "assistant-turn-1", course_id: courseId, source_ids: [sharedSource.toUpperCase()] }];
       }
       if (query.includes("SELECT id FROM courses")) return [{ id: courseId }];
       if (query.includes("SELECT s.id,s.version FROM opening_sources")) {
-        return [{ id: sessionSource, version: 4 }, { id: activitySource, version: 2 }, { id: directSource, version: 3 }];
+        expect(values[1]).toEqual([sessionSource, activitySource, sharedSource]);
+        return [{ id: sessionSource, version: 4 }, { id: activitySource, version: 2 }, { id: sharedSource, version: 3 }];
       }
       if (query.includes("FROM jsonb_to_recordset")) return [{ admitted: true }];
       if (query.includes("UPDATE opening_tutor_jobs SET status = 'succeeded'")) return [{ id: "job-1" }];
@@ -375,8 +376,8 @@ describe("opening tutor jobs repository", () => {
       scope, jobId: "job-1", assistantTurnId: "assistant-turn-1", text: "answer",
       citations: [], candidates: [], contextSourceRefs: [],
     }, { historyCourseBindings: [{ courseId, materialUse: "citation",
-      sourceIds: [activitySource, directSource, sessionSource], sourceRefs: [],
-      selectedDestinationSourceIds: [activitySource, directSource, sessionSource],
+      sourceIds: [activitySource, sharedSource, sessionSource], sourceRefs: [],
+      selectedDestinationSourceIds: [activitySource, sharedSource, sessionSource],
     }] });
 
     const [contextRefs, backupRefs] = [
@@ -384,8 +385,12 @@ describe("opening tutor jobs repository", () => {
       turnSourceReferences({ context_source_refs: savedRefs, source_ids: [], citations: [] }),
     ];
     expect({ contextRefs, backupRefs }).toEqual({
-      contextRefs: [{ sourceId: sessionSource, sourceVersion: 4 }, { sourceId: activitySource, sourceVersion: 2 }],
-      backupRefs: [sessionSource, activitySource],
+      contextRefs: [
+        { sourceId: sessionSource, sourceVersion: 4 },
+        { sourceId: activitySource, sourceVersion: 2 },
+        { sourceId: sharedSource, sourceVersion: 3 },
+      ],
+      backupRefs: [sessionSource, activitySource, sharedSource],
     });
     const locks = [
       "FROM opening_workspace_history_revisions", "SELECT privacy_epoch FROM workspaces", "FROM courses",

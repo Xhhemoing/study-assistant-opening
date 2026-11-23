@@ -1877,10 +1877,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           : [];
         // History's session and activity sources carry destination membership even
         // when the provider received no explicit versioned source reference.
-        const directlyPinned = new Set([
-          ...((boundTurn.source_ids ?? []) as string[]).map(id => id.toLowerCase()),
-          ...refs.map(ref => ref.sourceId.toLowerCase()),
-        ]);
+        const directlyPinned = new Set(refs.map(ref => ref.sourceId.toLowerCase()));
         const selectedHistorySourceIds = new Set((options?.historyCourseBindings ?? [])
           .filter(binding => binding.courseId?.toLowerCase() === (boundCourseId ?? undefined)
             && binding.materialUse === boundTurnMaterialUse(boundTurn))
