@@ -1714,6 +1714,10 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     [":::hint", "\n:::", "hint_gated", "Explanation"],
     [":::exercise", "\n:::", "sealed", "证明"],
     [":::exercise", "\n:::", "sealed", "Proof / Hint"],
+    [":::exercise", "\n:::", "sealed", "Hint / Proof"],
+    [":::exercise", "\n:::", "sealed", "证明 / 提示"],
+    [":::exercise", "\n:::", "sealed", "提示 / 证明"],
+    [":::exercise", "\n:::", "sealed", "<span>Hint</span><span>Proof</span>"],
   ] as const)("inherits protection inside %s for ordinary details", (opener, closer, visibility, summary) => {
     const text = `${opener}\n<details><summary>${summary}</summary>private-detail</details>${closer}`;
     for (const chunks of chunkDocumentAndCues(text)) {
@@ -1746,6 +1750,9 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     "Spoilers", "Spoiler alert", "Reveal answer", "Show solution", "Tap to reveal the key",
     "Show complete solution", "Click to reveal full solution", "Show complete answer",
     "View detailed solution", "Reveal full key", "Tap here to view the detailed proof",
+    "Question 1 — Reveal full key", "Exercise 2: Show complete answer",
+    "Exercise 3: <span>Reveal</span><span>full</span><span>key</span>",
+    "第 1 题 — 查看完整解析", "练习 2：展开详细解答",
     "<span>Show</span><span>keys</span>", "Hint / Spoilers", "提示 / 剧透",
   ])("keeps protected summaries sealed in documents and transcripts (%s)", summary => {
     const disclosure = `<details><summary>${summary}</summary>42</details>`;
@@ -1768,6 +1775,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   it.each([
     "hint", "hint-gated", "hint_gated", "scaffold",
     "Courseware / hint_gated", "Try<span>Hint</span>First",
+    "Question 1 — Hint", "Proof / Hint", "Hint / Proof", "证明 / 提示", "提示 / 证明",
   ])("keeps hint summaries gated in documents and transcripts (%s)", summary => {
     const text = `<details><summary>${summary}</summary>private-hint</details>`;
     for (const chunks of chunkDocumentAndCues(text)) {

@@ -82,10 +82,6 @@ const PEDAGOGICAL_LABELS: Readonly<
   hidden_solution: { kind: "solution", visibility: "sealed" },
 };
 
-const PROTECTED_DETAILS_LABELS = Object.entries(PEDAGOGICAL_LABELS)
-  .filter(([, classification]) => classification.visibility !== "public")
-  .map(([name, classification]) => ({ words: ` ${name.replace(/[-_]/g, " ")} `, classification }));
-
 const STANDALONE_PEDAGOGICAL_KINDS = new Set<PedagogicalBlockKind>([
   "definition",
   "theorem",
@@ -114,6 +110,17 @@ const DETAILS_COURSEWARE_LABEL_ALIASES = {
   问题: "problem",
 };
 
+const DETAILS_COMPOUND_LABELS = [
+  ...Object.keys(PEDAGOGICAL_LABELS).map(name => ({
+    name,
+    token: ` ${name.replace(/[-_]/g, " ")} `,
+    matchWords: true,
+  })),
+  ...Object.entries(DETAILS_COURSEWARE_LABEL_ALIASES).map(([token, name]) => ({
+    name, token, matchWords: false,
+  })),
+];
+
 const ZH_HEADING_UNIT =
   /(?:部分|单元|模块|专题|课时|阶段|学期|小节|大题|小题|例题|习题|练习|思考题|测试|真题|[章节篇课讲题问步卷册期组套道项条])/.source;
 const SEALED_HEADING_RE = new RegExp(
@@ -127,7 +134,7 @@ const HINT_HEADING_RE = new RegExp(
 const SEALED_DETAILS_SUMMARY_RE = new RegExp(
   [
     String.raw`\bspoilers?\b|剧\s*透`,
-    String.raw`^(?:(?:click|tap)(?:\s+here)?\s+to\s+)?(?:reveal|show|view|display|expand|uncover)\s+(?:(?:the|full|complete|detailed|correct|reference|official|final|worked|step-by-step)\s+)*(?:answers?|solutions?|keys?|proofs?|explanations?|results?)\b`,
+    String.raw`\b(?:reveal|show|view|display|expand|uncover)\s+(?:(?:the|full|complete|detailed|correct|reference|official|final|worked|step-by-step)\s+)*(?:answers?|solutions?|keys?|proofs?|explanations?|results?)\b`,
     String.raw`(?:点击|点此|展开|显示|查看|揭晓)\s*(?:(?:完整|详细|本题|本小题|该题|此题|这道题|本例|正确|参考|标准|官方|最终|全部|简明|的)\s*)*(?:答案|解析|解答|题解|证明|结果)`,
   ].join("|"),
   "iu",
@@ -3130,11 +3137,14 @@ function classifyDetailsElement(
       }
 
       // Recognize protected names anywhere in a summary, including compound
-      // names separated by markup, punctuation, or spaces.
+      // names separated by markup, punctuation, or spaces. Apply the exercise
+      // proof rule to each match before comparing its visibility.
       const words = ` ${label.toLowerCase().replace(/[^a-z0-9]+/g, " ")} `;
-      for (const { words: protectedWords, classification } of PROTECTED_DETAILS_LABELS) {
-        if (VISIBILITY_RANK[classification.visibility] > VISIBILITY_RANK[classified.visibility] && words.includes(protectedWords)) {
-          classified = classification;
+      for (const { name: candidateName, token, matchWords } of DETAILS_COMPOUND_LABELS) {
+        if (!(matchWords ? words : label).includes(token)) continue;
+        const candidate = classifyLabel(candidateName, "public", sealProofs);
+        if (candidate && VISIBILITY_RANK[candidate.visibility] > VISIBILITY_RANK[classified.visibility]) {
+          classified = candidate;
         }
       }
       if (classified.visibility === "public" && HINT_HEADING_RE.test(label)) {
