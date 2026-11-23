@@ -5,6 +5,7 @@ import type { ModelGateway } from "./model-gateway";
 import { aiGradingInputSchema, aiGradingProposalSchema, type AnswerInterpretationMetadata,type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import { parseModelJson } from "./latex-json";
 import { copyGradingDiagnostic, logGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic } from "./provider";
+import { evaluateCalibratedSubjectiveGrading, type OpeningRubricCalibrationHook } from "./rubric-grading-bridge";
 
 type GatewayOptions = Parameters<ModelGateway["call"]>[2];
 /** Structural boundary: AI must not import database (database already uses AI). */
@@ -29,6 +30,8 @@ export type OpeningAiGradingServiceDeps = {
   gateway: Pick<ModelGateway, "call">;
   budget(scope: Scope): GatewayOptions["budget"];
   images(scope: Scope, input: { sourceIds: string[]; sourceVersions: Record<string, number>; physicalPage: number }): Promise<ProviderInput["imageParts"]>;
+  /** Resolve precomputed rubric evidence for this answer revision. Return null for objective grading. */
+  rubricCalibration?: OpeningRubricCalibrationHook;
 };
 
 const conflict = (message: string, code = "CONFLICT") => Object.assign(new Error(message), { code });
@@ -138,6 +141,16 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
               recordGradingDiagnostic(error, "parse", receipt?.attemptedFetch === true
                 ? { attemptedFetch: true, httpStatus: receipt.httpStatus } : undefined, "GRADING_PARSE");
               throw error;
+            }
+            const calibration = deps.rubricCalibration ? await deps.rubricCalibration({
+              scope, input, observation: context.observation, answerRevision: context.answerRevision,
+            }) : null;
+            if (calibration) {
+              proposal = evaluateCalibratedSubjectiveGrading({
+                proposal,
+                submission: { ...calibration.submission, submissionId: context.observation.id, text: context.observation.answer },
+                calibration: calibration.calibration,
+              }).proposal;
             }
             result = await deps.repository.apply(scope, input, unverifyUnpersistableProposal(proposal), modelLabel);
           },

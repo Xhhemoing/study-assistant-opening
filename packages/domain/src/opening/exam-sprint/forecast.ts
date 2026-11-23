@@ -1,4 +1,5 @@
 import type { ExamForecastOverview, ExamPaper } from "@aistudy/contracts";
+import { forecastExamSprintScore, type ExamScoreForecastV1, type ExamSprintScoreForecastInput } from "./score-forecast-bridge";
 
 /** Integer-parameter Beta CDF via a binomial tail; log terms avoid coefficient overflow. */
 function betaQuantile(probability: number, a: number, b: number): number {
@@ -22,7 +23,13 @@ function betaQuantile(probability: number, a: number, b: number): number {
   return (lower + upper) / 2;
 }
 
-export function forecastExamTopics(papers: ExamPaper[], skillIds: string[], teacher: string | null): ExamForecastOverview {
+export function forecastExamTopics(papers: ExamPaper[], skillIds: string[], teacher: string | null): ExamForecastOverview;
+export function forecastExamTopics(
+  papers: ExamPaper[], skillIds: string[], teacher: string | null, scoreOptions: ExamSprintScoreForecastInput,
+): ExamForecastOverview & { scoreForecast: ExamScoreForecastV1 };
+export function forecastExamTopics(
+  papers: ExamPaper[], skillIds: string[], teacher: string | null, ...[scoreOptions]: [ExamSprintScoreForecastInput?]
+): ExamForecastOverview & { scoreForecast?: ExamScoreForecastV1 } {
   const selectedTeacher = teacher?.trim() || null;
   const byId = new Map<string, ExamPaper>();
   for (const paper of papers) {
@@ -57,6 +64,7 @@ export function forecastExamTopics(papers: ExamPaper[], skillIds: string[], teac
   const limited = n < 10 || topics.some(topic => topic.totalPapers < 10);
   return {
     teacher: selectedTeacher, papers: structuredClone(listed),
+    ...(scoreOptions ? { scoreForecast: forecastExamSprintScore(scoreOptions) } : {}),
     topics,
     status: !n ? "no_history" : limited ? "limited_history" : "history_based",
     message: !n

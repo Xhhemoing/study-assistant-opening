@@ -25,6 +25,7 @@ import { snapshotExamPrediction } from "./analytics";
 import { captureExamAttemptExposures, examAttemptExposureQualification } from "./exposure-qualification";
 export { examAttemptExposureQualification } from "./exposure-qualification";
 export { validExamLessonExposure } from "./lesson-exposure-mapping";
+export * from "./score-forecast-bridge";
 
 export type ExamRuleEvidence = { usable: boolean; correct: boolean | null; independent: boolean; assisted: boolean };
 export type ExamSelectionContext = {
