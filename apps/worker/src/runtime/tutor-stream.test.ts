@@ -75,6 +75,7 @@ it("round-trips origin course authority through the cache and rejects malformed 
   const hgetall = vi.fn().mockResolvedValueOnce({ context: cached, text: "buffered", sequence: "1" });
   const invalidBindings = [undefined, null, {}, [null],
     [{ courseId: id, materialUse: "citation", sourceIds: [id], sourceRefs: [ref] }],
+    [{ ...binding, unknownKey: [id] }], [{ ...binding, selectedDestinationSourceIds: null }],
     [{ ...binding, courseId: "invalid" }],
     [{ ...binding, materialUse: "exam" }], [{ ...binding, sourceIds: ["invalid"] }],
     [{ ...binding, sourceRefs: [{ ...ref, memoryOnly: true }] }], [{ ...binding, sourceRefs: [{ ...ref, sourceVersion: "1" }] }],
@@ -88,6 +89,16 @@ it("round-trips origin course authority through the cache and rejects malformed 
       sourceRefs: [{ sourceId: id, sourceVersion: 1 }], memoryIds: [id], memoryBackings: [[id]] }],
   });
   for (const _binding of invalidBindings) await expect(reader.read(id, id)).rejects.toThrow("invalid tutor stream cache");
+});
+
+it("preserves an explicitly empty destination selection in cached history", async () => {
+  const id = "10000000-0000-4000-8000-000000000001";
+  const binding = { courseId: id, materialUse: "citation", sourceIds: [id], sourceRefs: [],
+    memoryIds: [], memoryBackings: [], selectedDestinationSourceIds: [] };
+  const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null, historyCourseBindings: [binding] };
+  const hgetall = vi.fn().mockResolvedValue({ context: JSON.stringify(context), text: "cached", sequence: "1" });
+  const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
+  await expect(reader.read(id, id)).resolves.toMatchObject({ historyCourseBindings: [binding] });
 });
 
 it("parses temporaryMemoryExpiresAt and memoryOnly provenance refs and rejects invalid timestamps", async () => {

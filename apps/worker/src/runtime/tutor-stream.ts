@@ -567,12 +567,13 @@ function parseHistoryCourseBindings(value: unknown): NonNullable<TutorStreamCont
     Array.isArray(ids) && ids.every(id => uuidSchema.safeParse(id).success);
   const normalizeIds = (ids: string[]) => [...new Set(ids.map(id => id.toLowerCase()))];
   return value.map(binding => {
-    if (!binding || typeof binding !== "object"
-      || (Object.keys(binding).length !== 6 && Object.keys(binding).length !== 7)
+    if (!binding || typeof binding !== "object") throw new Error("invalid tutor stream cache");
+    const hasSelectedDestinationSourceIds = Object.hasOwn(binding, "selectedDestinationSourceIds");
+    if (Object.keys(binding).length !== (hasSelectedDestinationSourceIds ? 7 : 6)
       || !(binding.courseId === null || uuidSchema.safeParse(binding.courseId).success)
       || (binding.materialUse !== "citation" && binding.materialUse !== "practice")
       || !isUuidList(binding.sourceIds)
-      || (binding.selectedDestinationSourceIds !== undefined && !isUuidList(binding.selectedDestinationSourceIds))
+      || (hasSelectedDestinationSourceIds && !isUuidList(binding.selectedDestinationSourceIds))
       || !Array.isArray(binding.sourceRefs) || binding.sourceRefs.some((ref: ContextSourceRef) =>
         !ref || typeof ref !== "object" || !uuidSchema.safeParse(ref.sourceId).success || ref.memoryOnly === true)
       || !isUuidList(binding.memoryIds)
@@ -583,8 +584,8 @@ function parseHistoryCourseBindings(value: unknown): NonNullable<TutorStreamCont
     const sourceRefs = parseContextSourceRefs(binding.sourceRefs);
     const sourceIds = normalizeIds(binding.sourceIds).sort();
     if (!sourceRefs || sourceRefs.some(ref => !sourceIds.includes(ref.sourceId))) throw new Error("invalid tutor stream cache");
-    const selectedDestinationSourceIds = binding.selectedDestinationSourceIds === undefined
-      ? undefined : normalizeIds(binding.selectedDestinationSourceIds).sort();
+    const selectedDestinationSourceIds = hasSelectedDestinationSourceIds
+      ? normalizeIds(binding.selectedDestinationSourceIds).sort() : undefined;
     return { courseId: binding.courseId?.toLowerCase() ?? null, materialUse: binding.materialUse, sourceIds,
       ...(selectedDestinationSourceIds ? { selectedDestinationSourceIds } : {}), sourceRefs,
       memoryIds: normalizeIds(binding.memoryIds).sort(), memoryBackings: binding.memoryBackings.map(normalizeIds),

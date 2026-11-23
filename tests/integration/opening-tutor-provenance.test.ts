@@ -23,13 +23,13 @@ beforeEach(async () => {
 });
 afterAll(async () => { await f?.close(); });
 
-async function source() {
+async function source(version = 0) {
   const id = randomUUID();
   await f.sql`INSERT INTO opening_sources
     (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
-    VALUES (${id},${f.scope.workspaceId},'secret.pdf','application/pdf',1,${"a".repeat(64)},0,'uploaded','ready')`;
+    VALUES (${id},${f.scope.workspaceId},'secret.pdf','application/pdf',1,${"a".repeat(64)},${version},'uploaded','ready')`;
   await createOpeningSourceChunksRepository(f.sql).replaceChunks(f.scope, {
-    sourceId: id, sourceVersion: 0,
+    sourceId: id, sourceVersion: version,
     chunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null,
       text: "ancestor-secret-material", imageObjectKey: null }],
   });
@@ -187,7 +187,7 @@ describe("saved tutor material provenance", () => {
     const courses = createCourseMembershipRepository(sql);
     const origin = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Origin", slug: randomUUID() });
     const destination = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Destination", slug: randomUUID() });
-    const material = await source();
+    const material = await source(1);
     const membership = { workspaceId: scope.workspaceId, courseId: destination.id, assetType: "source" as const, assetId: material };
     const addMembership = (courseId: string) => courses.addAssetMembership({
       ...membership, courseId, role: "core", visibility: "course", purpose: "teaching",
@@ -252,7 +252,7 @@ describe("saved tutor material provenance", () => {
     await addMembership(destination.id);
     await expect(accept()).resolves.toMatchObject({ task: { title: task.title } });
     await expect(sql`SELECT context_source_refs,source_ids FROM opening_turns WHERE id=${current.assistantTurnId}`)
-      .resolves.toEqual([{ context_source_refs: [{ sourceId: material }], source_ids: [] }]);
+      .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1 }], source_ids: [] }]);
   }, 15_000);
 
   it("checks a task's paired user memory and its backing course under the user's scope", async () => {

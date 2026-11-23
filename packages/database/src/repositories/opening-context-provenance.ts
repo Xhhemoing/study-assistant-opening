@@ -30,7 +30,6 @@ export function parseContextMemoryDependencyIds(value: unknown): string[] | null
       for (const id of ref.memoryDependencyIds) ids.add(id.toLowerCase());
       continue;
     }
-    if (isUnversionedTurnSourceRef(ref)) continue;
     if (!ref || typeof ref !== "object" || typeof ref.sourceId !== "string"
       || !UUID.test(ref.sourceId) || !Number.isSafeInteger(ref.sourceVersion) || ref.sourceVersion < 0
       || (ref.memoryOnly !== undefined && typeof ref.memoryOnly !== "boolean")) return null;
@@ -39,13 +38,11 @@ export function parseContextMemoryDependencyIds(value: unknown): string[] | null
 }
 
 /** Persisted JSON is a trust boundary. NULL is unknown, never an empty lineage. */
-export function parseContextSourceRefs(value: unknown, mode?: "saved-turn"): ContextSourceRef[] | null {
+export function parseContextSourceRefs(value: unknown): ContextSourceRef[] | null {
   if (!Array.isArray(value)) return null;
   const refs: ContextSourceRef[] = [];
   for (const ref of value) {
     if (isMemoryDependencyMetadata(ref)) continue;
-    // Saved membership dependencies are rechecked by turn admission. They are not version pins.
-    if (mode === "saved-turn" && isUnversionedTurnSourceRef(ref)) continue;
     if (!ref || typeof ref !== "object" || typeof ref.sourceId !== "string"
       || !UUID.test(ref.sourceId) || !Number.isSafeInteger(ref.sourceVersion) || ref.sourceVersion < 0
       || (ref.memoryOnly !== undefined && typeof ref.memoryOnly !== "boolean")) return null;
@@ -56,15 +53,6 @@ export function parseContextSourceRefs(value: unknown, mode?: "saved-turn"): Con
     });
   }
   return mergeContextSourceRefs(refs);
-}
-
-function isUnversionedTurnSourceRef(ref: unknown): boolean {
-  return !!ref && typeof ref === "object" && Object.keys(ref).length === 1
-    && "sourceId" in ref && typeof ref.sourceId === "string" && UUID.test(ref.sourceId);
-}
-
-export function unversionedTurnSourceRef(db: Db, ref: FragmentFactory): Fragment {
-  return db`${ref()} = jsonb_build_object('sourceId', ${ref()}->'sourceId')`;
 }
 
 export function mergeContextSourceRefs(...groups: readonly ContextSourceRef[][]): ContextSourceRef[] {
@@ -110,9 +98,6 @@ export function contextSourceRefsIncluded(
   bareSourceIds?: FragmentFactory, citations?: FragmentFactory,
 ): Fragment {
   const separateInputs = bareSourceIds !== undefined || citations !== undefined;
-  const versionless: FragmentFactory = () => separateInputs
-    ? db`(input.unversioned OR (input.allow_dependency_metadata AND ${unversionedTurnSourceRef(db, () => db`provenance_ref`)}))`
-    : unversionedTurnSourceRef(db, () => db`provenance_ref`);
   const safeArray = (value: FragmentFactory): Fragment => db`CASE WHEN jsonb_typeof(${value()}) = 'array' THEN ${value()} ELSE '[]'::jsonb END`;
   return db`
     COALESCE(jsonb_typeof(${refs()}) = 'array', false)
@@ -142,7 +127,7 @@ export function contextSourceRefsIncluded(
           OR jsonb_typeof(provenance_ref->'sourceId') IS DISTINCT FROM 'string'
           OR (provenance_ref->>'sourceId') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
           OR (provenance_ref ? 'memoryOnly' AND jsonb_typeof(provenance_ref->'memoryOnly') IS DISTINCT FROM 'boolean')
-          OR (NOT ${versionless()} AND (jsonb_typeof(provenance_ref->'sourceVersion') IS DISTINCT FROM 'number'
+          OR (${bareSourceIds ? db`NOT input.unversioned AND` : db``} (jsonb_typeof(provenance_ref->'sourceVersion') IS DISTINCT FROM 'number'
             OR (provenance_ref->>'sourceVersion') !~ '^[0-9]+$'))
           OR CASE WHEN jsonb_typeof(provenance_ref->'sourceVersion') = 'number'
             AND (provenance_ref->>'sourceVersion') ~ '^[0-9]+$'
@@ -156,7 +141,8 @@ export function contextSourceRefsIncluded(
                 WHERE provenance_version.workspace_id=${workspaceId} AND provenance_version.source_id=provenance_source.id
                   AND provenance_version.version::text=COALESCE(provenance_ref->>'sourceVersion', provenance_source.version::text)
                   AND provenance_version.availability='unavailable'))
-              AND (${allowHistoricalVersions} OR ${versionless()} OR provenance_source.version::text = provenance_ref->>'sourceVersion')
+              AND (${allowHistoricalVersions} OR ${bareSourceIds ? db`input.unversioned OR` : db``}
+                provenance_source.version::text = provenance_ref->>'sourceVersion')
               AND NOT EXISTS (
                 SELECT 1 FROM opening_privacy_exclusions provenance_exclusion
                 WHERE provenance_exclusion.workspace_id = ${workspaceId}
