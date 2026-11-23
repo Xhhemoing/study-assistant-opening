@@ -1627,6 +1627,8 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["Definition", "definition"], ["Explanation", "prose"], ["Example", "example"], ["Example 2", "example"],
     ["补充说明", "prose"], ["Proof of convergence", "proof"], ["Theorem", "theorem"],
     ["引理一", "lemma"], ["练习 3", "exercise"],
+    ["定义", "definition"], ["定理", "theorem"], ["例题", "example"],
+    ["概念补充", "prose"], ["案例解析", "prose"],
   ] as const)("indexes ordinary disclosures labeled %s", (summary, kind) => {
     for (const prefix of ["", "Lecture: "]) {
       const text = `${prefix}<details><summary>${summary}</summary>🧮 Courseware body</details>`;
@@ -1730,6 +1732,29 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     for (const chunks of chunkDocumentAndCues(text)) {
       expectSealedEvidence(chunks, text, ["private-detail"], "Public wrap-up");
     }
+  });
+
+  it.each([
+    "剧透", "防剧透", "剧透警告", "点击查看答案", "展开答案", "展开解析",
+    "查看解答", "显示正确答案", "点击查看参考答案", "点击 查看 题解", "展开<span>解析</span>",
+    "Spoilers", "Spoiler alert", "Reveal answer", "Show solution", "Tap to reveal the key",
+    "<span>Show</span><span>keys</span>", "Hint / Spoilers", "提示 / 剧透",
+  ])("keeps spoiler and reveal summaries sealed in documents and transcripts (%s)", summary => {
+    const disclosure = `<details><summary>${summary}</summary>42</details>`;
+    const block = `${disclosure}\n\nPublic wrap-up`;
+    const inline = `Lecture: ${disclosure} Public wrap-up`;
+    for (const text of [block, inline]) {
+      const [document, cues] = chunkDocumentAndCues(text);
+      expect(document.find(chunk => chunk.text.includes(">42</details>"))).toMatchObject({
+        kind: "solution", visibility: "sealed",
+      });
+      for (const chunks of [document, cues]) {
+        expectSealedEvidence(chunks, text, ["42"], "Public wrap-up");
+      }
+    }
+    const timed = `[startMs=1000,endMs=2000] ${inline}`;
+    const timedChunks = chunkPedagogicalDocument({ sourceId: "captions", sourceVersion: 1, text: timed });
+    expectSealedEvidence(timedChunks, timed, ["42"], "Public wrap-up");
   });
 
   it("recognizes hint labels that require spacing between HTML elements", () => {

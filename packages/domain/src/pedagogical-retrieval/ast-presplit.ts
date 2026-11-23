@@ -120,6 +120,8 @@ const HINT_HEADING_RE = new RegExp(
   String.raw`(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|(?:^|[\s\p{P}\p{S}\d]|[题步问章节课讲卷册]|(?:第\s*[\d一二三四五六七八九十百千万零两]+\s*${ZH_HEADING_UNIT}|解题|分步|思路|方法|关键|答题|审题|证明|推导|计算|编程|实验|作业|练习|习题|测试|自测|课后|随堂|课堂|单元|模块|部分|专题|阶段|查看|展开|显示|点击查看|点拨|附))提示(?:$|[\s\p{P}\p{S}\d一二三四五六七八九十百千万零两甲乙丙丁]|(?:部分|单元|模块|专题|章节|汇总|一览|汇编|要点|说明|(?:与|及|和)(?:点拨|思路|引导|说明)))|分步提示|解题提示|思路提示|查看提示|展开提示|显示提示`,
   "iu",
 );
+const SEALED_DETAILS_SUMMARY_RE =
+  /\bspoilers?\b|^(?:(?:click|tap)\s+to\s+)?(?:reveal|show)\s+(?:the\s+)?keys?\b|剧\s*透|(?:点击|展开|显示|查看)\s*(?:(?:(?:正确|参考)\s*)?答案|解析|解答|题解)/iu;
 const HTML_TAG_ATTRIBUTES = /(?:"[^"]*"|'[^']*'|[^'"<>])*/.source;
 const HTML_HEADING_START_RE = /<h[1-6](?=[\t\n\f\r />])/i;
 const HTML_ATTRIBUTE_TOKEN_RE = /([^\t\n\f\r "'<>/=]+)(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:"([^"]*)"|'([^']*)'|([^\t\n\f\r >]+)))?/g;
@@ -3099,7 +3101,7 @@ function classifyDetailsElement(
       htmlContext.pipeCellAt(openStart, definedLinkLabels), rawHtml, decodeHtmlCharacterReferences);
     const labels = [summaryText, spaced];
     const summaryEndOffset = summary.closeEnd;
-    if (!summaryText || hasDetails || labels.some(label => SEALED_HEADING_RE.test(label) || /\bspoiler\b/i.test(label))) {
+    if (!summaryText || hasDetails || labels.some(label => SEALED_HEADING_RE.test(label) || SEALED_DETAILS_SUMMARY_RE.test(label))) {
       return {
         kind: "solution",
         visibility: maxVisibility("sealed", activeVisibility),
