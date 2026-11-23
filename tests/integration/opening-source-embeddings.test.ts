@@ -315,6 +315,47 @@ describe("pgvector material repository", () => {
     },
   );
 
+  it.each(["Solution.", "Answer:", "Solution:", "【答案】"])(
+    "withholds an archived proof starting on the same line as %s", async label => {
+      await expectArchivedPdfPages([
+        label + " Proof. Private derivation.",
+        "A private intermediate step.\n\nThe equality now follows.",
+        "The proof concludes. ∎",
+        "Public prose after the proof.",
+      ], [4], 2);
+    },
+  );
+
+  it.each(["Solution. The answer is 3.", "Answer: Yes. □"])(
+    "extends an archived answer ending in %j into an adjacent proof behind furniture", async answer => {
+      await expectArchivedPdfPages([
+        answer,
+        "[原生提取]\n\n# Cached transcription for page 2\nChapter 1 | Page 2\nProof. Private continuation.",
+        "Another private paragraph.\n\nThe proof concludes. ∎",
+        "Public prose after the proof.",
+      ], [4], 2);
+    },
+  );
+
+  it("keeps archived prose public when a later proof does not open the next page", async () => {
+    await expectArchivedPdfPages([
+      "Problem 1. Find x.\nSolution. The answer is 3.",
+      "[原生提取]\nChapter 1 | Page 2\nThis page explains an unrelated lemma.\nProof. Public proof.",
+      "The public argument continues.",
+    ], [2, 3], 1);
+  });
+
+  it("keeps a proof public across a missing archived page", async () => {
+    const publicText = "This separate paragraph is public.";
+    const publicProof = "Proof. A separate public proof.";
+    const pdf = await seed(["Solution. The answer is 3.", "Omitted page.", publicProof, publicText]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page=2`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    expect(await chunks.listForSources(f.scope, [pdf.sourceId])).toMatchObject([{ page: 3, text: publicProof }, { page: 4, text: publicText }]);
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 })).resolves.toMatchObject({ pages: [3, 4], text: publicProof });
+  });
+
   it("keeps proof headings inside an archived answer section until a public theorem", async () => {
     await expectArchivedPdfPages(["Answer Key", "## Proof. Base Cases: private.",
       "Proof (by induction). Private.", "Proof of Lemma 1.1. Private.", "证明：私有推导。",

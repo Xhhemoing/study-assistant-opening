@@ -36,6 +36,7 @@ export function decodeParserOutput(text: string): ParsedPage[] {
       ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }),
       ...(page.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: page.inlineSealedAtEnd }),
       ...(page.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: page.inlineProofSealedAtEnd }),
+      ...(page.inlineProofBoundaryPendingAtEnd === undefined ? {} : { inlineProofBoundaryPendingAtEnd: page.inlineProofBoundaryPendingAtEnd }),
       ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }),
       ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }),
       ...(page.inExerciseAtEnd !== undefined || tracksExerciseContext ? { inExerciseAtEnd: page.inExerciseAtEnd ?? false } : {}) };

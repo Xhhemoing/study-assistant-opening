@@ -87,7 +87,8 @@ def worker_pdf_cli_fixtures():
             (1, 10, None), (11, 20, "section_sealed"), (12, 20, None), (21, 23, None),
         ]),
         "same_segment_answer_key": (23, {12: "Answer Key", 13: "", 14: "1. Find x.", 15: "5 units."}, (1, 14), [
-            (1, 10, None), (11, 20, None), (14, 20, None), (15, 20, "inline_sealed"), (21, 23, None),
+            (1, 10, None), (2, 10, None, False, False, True), (11, 20, None), (14, 20, None),
+            (15, 20, "inline_sealed"), (21, 23, None),
         ]),
         "vision_section_exit": (3, {1: "", 2: [("5 units.", "text"), ("Vector Spaces", "section_header"),
                                               ("A vector space has two operations.", "text")], 3: "Public continuation."}, (), [
@@ -95,7 +96,7 @@ def worker_pdf_cli_fixtures():
             (1, 2, None), (1, 3, None), (2, 3, "section_sealed"),
         ]),
         "completed_inline": (12, {10: "Model Answer: x = 3.", 11: "2. Calculate y.", 12: "Use the diagram for this exercise."}, (), [
-            (1, 10, None), (11, 12, None), (11, 12, "section_sealed"),
+            (1, 10, None), (11, 12, None, False, False, True), (11, 12, "section_sealed"),
         ]),
         "failed_sealed_retry": (11, {10: "", 11: "5 units."}, (), [
             (1, 10, None), (11, 11, None),
@@ -111,7 +112,7 @@ def worker_pdf_cli_fixtures():
         ]),
         "exercise_context": (3, {1: "Exercise 1. Solve x - 3 = 0.", 2: "【正确答案】\nx = 3.",
                                  3: "Public prose continues here."}, (), [
-            (1, 3, None), (1, 1, None), (2, 2, None, False, True), (3, 3, None, False, True),
+            (1, 3, None), (1, 1, None), (2, 2, None, False, True), (3, 3, None, False, True, True),
         ]),
         "vision_exercise": (3, {1: "", 2: "【正确答案】\nx = 3.",
                                 3: "Public prose continues here."}, (), [
@@ -131,6 +132,13 @@ def worker_pdf_cli_fixtures():
             3: "Problem 2. Find the root.",
         }, (), [(1, 3, None), (1, 1, None), (2, 2, "inline_proof_sealed", False, True),
                 (3, 3, None, False, True)]),
+        "adjacent_answer_proof": (4, {
+            1: "Problem 1. Prove the identity.\nSolution. The answer is 3.",
+            2: [("Course notes", "page_header"), ("Page 2 of 4\nProof. Private continuation.", "text")],
+            3: "The private equality follows. ∎",
+            4: "Problem 2. Find the root.",
+        }, (), [(1, 4, None), (1, 1, None), (2, 2, None, False, True, True),
+                 (3, 3, "inline_proof_sealed", False, True), (4, 4, None, False, True)]),
     }
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -141,6 +149,7 @@ def worker_pdf_cli_fixtures():
             for start, end, seal, *flags in ranges:
                 worked_example = bool(flags and flags[0])
                 exercise = len(flags) > 1 and flags[1]
+                proof_boundary = len(flags) > 2 and flags[2]
                 conversion = worker_pdf_conversion({page: texts.get(page, "Public page.")
                                                     for page in range(start, end + 1)}, picture_pages)
                 argv = ["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", str(page_count),
@@ -151,12 +160,14 @@ def worker_pdf_cli_fixtures():
                     argv += ["--initial-in-worked-example"]
                 if exercise:
                     argv += ["--initial-in-exercise"]
+                if proof_boundary:
+                    argv += ["--initial-inline-proof-boundary"]
                 stdout = io.StringIO()
                 with patch.object(cli, "pdf_page_count", return_value=page_count), \
                      patch.object(cli, "convert", return_value=conversion), redirect_stdout(stdout):
                     if cli.main(argv) != 0:
                         raise RuntimeError(f"could not generate {name} fixture for pages {start}-{end}")
-                suffix = ("/we" if worked_example else "") + ("/exercise" if exercise else "")
+                suffix = ("/we" if worked_example else "") + ("/exercise" if exercise else "") + ("/proof-boundary" if proof_boundary else "")
                 outputs[f"{start}-{end}/{seal or ''}{suffix}"] = json.loads(stdout.getvalue())
             fixtures[name] = {"pageCount": page_count, "ranges": outputs}
     return fixtures
@@ -1225,6 +1236,25 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(ext.texts_by_page[12], [])
         self.assertEqual(ext.texts_by_page[13], ["Problem 2. Public problem."])
         self.assertTrue(ext.inline_proof_sealed_by_page[11])
+
+    def test_next_page_proof_boundary_skips_furniture(self):
+        problem = "Problem 1. Prove the identity."
+        for answer in ("Solution. The answer is 3.", "Answer: Yes. □"):
+            for proof_at_start in (True, False):
+                with self.subTest(answer=answer, proof_at_start=proof_at_start):
+                    proof = "Proof. Private continuation."
+                    public = "This paragraph introduces another method."
+                    ext = physical_pages.extract_physical_pages(result_for(
+                        [text_element(11, f"{problem}\n{answer}\nPage 11 of 40", 1)],
+                        [text_element(12, "Course notes", 1, DocItemLabel.PAGE_HEADER),
+                         text_element(12, "[原生提取]\nChapter 1 | Page 12\n"
+                                      + (proof if proof_at_start else f"{public}\n{proof}"), 2)],
+                        [text_element(13, "The next argument. ∎", 1)],
+                    ))
+                    self.assertTrue(ext.inline_proof_boundary_by_page[11])
+                    self.assertEqual(ext.inline_proof_sealed_by_page[12], proof_at_start)
+                    self.assertEqual(proof in "\n".join(ext.texts_by_page[12]), not proof_at_start)
+                    self.assertEqual(bool(ext.texts_by_page[13]), not proof_at_start)
 
     def test_scans_public_proof_continuation_once_per_line(self):
         line = "Because the two terms agree, the inductive equality follows."

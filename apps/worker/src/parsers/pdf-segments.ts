@@ -263,6 +263,7 @@ export async function parsePdfSegments(input: {
       await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal, blockingSeals, revalidate);
       failedSegments.push(failure);
       // Seeing an incomplete range cannot end a confirmed answer seal or extend an example.
+      initialInlineProofBoundary = false;
       initialInWorkedExample = false;
       initialInExercise = false;
       afterFailedSegment = true;

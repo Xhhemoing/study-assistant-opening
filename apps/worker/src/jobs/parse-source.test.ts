@@ -75,6 +75,66 @@ async function deps(input: HandlerOverrides & { source?: SourceRecord; exitCode?
 }
 
 describe("parse source handler", () => {
+  it.each([1, 4].flatMap(segmentPages => ["Solution. The answer is 3.", "Answer: Yes. □"]
+    .map(answer => ({ segmentPages, answer }))))(
+    "carries a Vision answer's proof boundary with $segmentPages-page windows after $answer",
+    async ({ segmentPages, answer }) => {
+      const texts = [
+        "Problem 1. Prove the identity.\n" + answer,
+        "[原生提取]\nChapter 1 | Page 2\nProof. Private continuation.",
+        "A private intermediate step.\n\nThe proof concludes. ∎",
+        "Example 1: Factor the polynomial.\nSolution. The public derivation.\nProof. The worked proof is public.",
+      ];
+      const d = await deps({
+        segmentPages,
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":4}' };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const end = Number(argv[argv.indexOf("--page-end") + 1]);
+          return { exitCode: 0, stdout: JSON.stringify({ pages: texts.slice(start - 1, end).map((_, index) => ({
+            page: start + index, text: "", imagePath: null, visualKinds: ["scan"], inExerciseAtEnd: false,
+          })) }) };
+        },
+        recognizePage: async page => ({ text: texts[page.physicalPage - 1]!, imageObjectKey: "synthetic/page-" + page.physicalPage }),
+      });
+      await d.handler(job, { sourceId });
+      const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+      expect(chunks.map(chunk => chunk.page)).toEqual([1, 4]);
+      expect(chunks[0]).toMatchObject({ text: expect.stringContaining("Problem 1. Prove the identity."), imageObjectKey: null });
+      expect(chunks[1]?.text).toContain("Proof. The worked proof is public.");
+      expect(d.argvs().some(argv =>
+        argv[argv.indexOf("--page-start") + 1] === "2" && argv.includes("--initial-inline-proof-boundary"))).toBe(true);
+    },
+  );
+
+  it("replays a published proof boundary when a cached Vision answer is unavailable", async () => {
+    const publicText = "Chapter 2: Rings\nThe rest of this chapter is public.";
+    const pages = [
+      { page: 1, text: "Problem 1. Prove the identity.", imagePath: null, visualKinds: ["picture"] },
+      { page: 2, text: "Page 2 of 4\nProof. Private continuation.", imagePath: null, visualKinds: [] },
+      { page: 3, text: "The equality holds. □", imagePath: null, visualKinds: [] },
+      { page: 4, text: publicText, imagePath: null, visualKinds: [] },
+    ];
+    const d = await deps({
+      segments: { assertCurrent: async () => {}, read: async () => null, save: async () => {},
+        readPageSeals: async (_scope, range) => range.pageStart !== 1 ? [] : [{
+          page: 1, text: "", imagePath: null, visualKinds: ["picture"], hadSealedContent: true,
+          inlineProofBoundaryPendingAtEnd: true, publicationSealCommitted: true,
+        }] },
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":4}' };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const end = Number(argv[argv.indexOf("--page-end") + 1]);
+        return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, end) }) };
+      },
+    });
+    await d.handler(job, { sourceId });
+    const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+    expect(chunks.map(chunk => chunk.text)).toEqual(["Page 2 of 4", publicText]);
+    expect(d.argvs().some(argv =>
+      argv[argv.indexOf("--page-start") + 1] === "2" && argv.includes("--initial-inline-proof-boundary"))).toBe(true);
+  });
+
   it("persists a confirmed native section seal when Vision fails on its public prefix", async () => {
     const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
     const d = await deps({

@@ -922,7 +922,6 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         current = None
 
     units = list(_iter_page_units(fragments))
-    first_substantive_index = next((i for i, (_, _, text, _, _) in enumerate(units) if text.strip()), -1)
     assessment_context_line = -1
     for index, (unit_start, unit_end, unit_text, frag_label, is_frag_start) in enumerate(units):
         if not unit_text.strip():
@@ -937,14 +936,16 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                 flush()
             continue
 
-        active_seal = current[7] if current is not None else page_seal_mode
         is_furniture = frag_label in _FURNITURE_LABELS
         stripped = _strip_heading_markup(unit_text)
-        if index == first_substantive_index and initial_inline_proof_boundary:
-            page_seal_mode = "inline_proof_sealed" if _ANSWER_PROOF_HEADING_RE.match(stripped) else None
+        is_running_heading = _is_running_page_heading(stripped, bare_containers_are_counters=False)
+        if stripped and not is_furniture and not is_running_heading:
+            if initial_inline_proof_boundary and page_seal_mode is None and _ANSWER_PROOF_HEADING_RE.match(stripped):
+                flush()
+                page_seal_mode = "inline_proof_sealed"
             initial_inline_proof_boundary = False
-        elif page_seal_mode is None and not is_furniture:
             inline_proof_boundary_pending = False
+        active_seal = current[7] if current is not None else page_seal_mode
         assessment_context = (_find_assessment_solutions_context(units, index)
                               if _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped) else -1)
         if assessment_context >= 0:
@@ -952,7 +953,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         if active_seal in _INLINE_SEAL_MODES:
             numeric_exercise_answer = (in_exercise and not _MD_HEADING_LINE_RE.match(unit_text.strip())
                                        and re.fullmatch(r"\d+[.。]", stripped))
-            if (_is_running_page_heading(stripped, bare_containers_are_counters=False)
+            if (is_running_heading
                     and assessment_context < 0 and not _is_section_sealed_opener(stripped) and not numeric_exercise_answer):
                 # A running header is neither a new section nor part of the answer body.
                 if current is None:

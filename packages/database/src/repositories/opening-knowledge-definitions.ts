@@ -210,7 +210,8 @@ const furnitureTitleProse = String.raw`\m(?:on|see|at|pages?) +(?:page +)?\d+\M|
 const pageCounter = String.raw`(?:[(（\[【]? *(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]?|${chineseCounter}) *[.。．、]?`;
 const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix}).*${furnitureSeparator}|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
 const titledPageCounter = String.raw`${lineStart}([^|｜—–]{1,96}?)(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
-const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|[ivxlcdm]+ *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}`;
+const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|[ivxlcdm]+ *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${pageMetadataHeading}`;
 const jsInlineRunningHeading = new RegExp(asJsPattern(inlineRunningHeading), "iu");
 const jsTitledPageCounter = new RegExp(titledPageCounter, "iu");
 const jsFurnitureTitleProse = new RegExp(asJsPattern(furnitureTitleProse), "iu");
@@ -316,8 +317,6 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT id,source_id,source_version,page,line,running_heading,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
       line ~* ${exerciseHeading} AS opens_exercise,
-      (line ~* ${answerProofHeading}
-        OR (line ~ ${answerPeriodLine} AND btrim(regexp_replace(line,${answerPeriodLine},'')) ~* ${answerProofHeading})) AS proof_heading,
       public_example AND NOT running_heading AS opens_worked_example,
       (line ~* ${inlinePublicHeading} OR public_example
         OR public_numbered OR public_container OR public_dotted OR other_reopening)
@@ -356,7 +355,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT *, opens_section AND NOT (in_exercise AND exercise_exception)
       AND NOT (in_worked_example AND explanation_label) AS section_answer,
       explanation_label AND NOT in_worked_example AS sealed_explanation,
-      (period_inline OR in_exercise AND line ~* ${exerciseInlineAnswer})
+      (period_inline OR line ~* ${exerciseInlineAnswer}
+        AND (in_exercise OR (unconditional_answer OR NOT in_worked_example) AND line ~* ${exerciseInlineAnswer + "[^ ]"}))
         AND (NOT opens_section OR exercise_exception) AND NOT (in_worked_example AND explanation_label) AS inline_opener
     FROM pdf_archive_exercise_context
   ), pdf_archive_page_events AS (
@@ -376,7 +376,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   ), pdf_archive_inline_body AS (
     SELECT *, min(position) FILTER (WHERE body_line<>'')
       OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body,
-      min(position) FILTER (WHERE proof_heading AND body_line<>'')
+      min(position) FILTER (WHERE body_line ~* ${answerProofHeading})
       OVER (PARTITION BY source_id,source_version,inline_group) AS first_proof,
       min(position) FILTER (WHERE body_line<>'')
       OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
@@ -389,16 +389,25 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       bool_or(btrim(line)='' AND position>first_body AND next_body IS NOT NULL
         AND (first_proof IS NULL OR next_body<first_proof)) AS closed_after_blank,
       bool_or(first_proof<=position) AS in_sealed_proof,
-      bool_or(body_line ~* ${inlineTerminator}) AS ended_inline
+      bool_or(position=first_body AND position=first_proof) AS starts_proof,
+      min(position) FILTER (WHERE body_line ~* ${inlineTerminator}) AS terminator_position,
+      max(position) FILTER (WHERE body_line<>'') AS last_body_position
     FROM pdf_archive_inline_body
     GROUP BY source_id,source_version,inline_group,page
   ), pdf_archive_inline_spans AS (
     -- A finished answer affects later pages only up to its first closing page.
     SELECT source_id,source_version,min(page) FILTER (WHERE starts_inline) AS first_page,
       bool_or(hide_opening_page) AS hide_opening_page,
-      COALESCE(min(page) FILTER (WHERE closed_after_blank OR ended_inline
-        OR (in_sealed_proof IS NOT TRUE AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})),max(page)) AS last_page
-    FROM pdf_archive_inline_pages
+      COALESCE(min(page) FILTER (WHERE closed_after_blank
+        OR (terminator_position IS NOT NULL AND (in_sealed_proof IS TRUE
+          OR terminator_position<last_body_position OR continues_into_proof IS NOT TRUE))
+        OR (in_sealed_proof IS NOT TRUE AND continues_into_proof IS NOT TRUE
+          AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})),max(page)) AS last_page
+    FROM (
+      SELECT *, lead(page) OVER next_page=page+1 AND lead(starts_proof) OVER next_page AS continues_into_proof
+      FROM pdf_archive_inline_pages
+      WINDOW next_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page)
+    ) with_next_page
     GROUP BY source_id,source_version,inline_group
     HAVING bool_or(starts_inline)
   ), pdf_archive_sealed_spans AS MATERIALIZED (
