@@ -18,7 +18,7 @@ import {
   contextSourceRefsIncluded, hasMemoryBearingRef, isLineageUuid, lineageUuid, memoryBacksSource, memoryCourseAllows,
   memoryDependencyRows, mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs,
   resolveMemoryDependencyStatus, turnDirectSourcesVersioned, turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse,
-  turnMaterialUse, turnPinnedSourceRefs, turnSessionMaterialIds, type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
+  turnChunkSourceRef, turnMaterialUse, turnPinnedSourceRefs, turnSessionMaterialIds, type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import { lockActiveMemoryCourse, lockActiveMemoryCourses, lockMemoryMaterialSources, readMemoryDependencyStatus } from "./opening-memory-admission";
@@ -199,7 +199,7 @@ async function assertStreamMaterialAdmission(
     attemptLockScope?: { sourceIds: string[]; courseIds: string[] };
   } = {},
 ): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[];
-  historyExpiresAt: number; lockedSourceVersions: ReadonlyMap<string, number> }> {
+  historyExpiresAt: number; lockedSourceVersions: ReadonlyMap<string, number>; memorySourceRefs: ContextSourceRef[] }> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
   const courseId = boundTurnCourseId(turn);
   const materialUse = boundTurnMaterialUse(turn);
@@ -318,7 +318,7 @@ async function assertStreamMaterialAdmission(
     for (const use of ["citation", "practice"] as const) {
       if (roots[use].size) graphs.set(use, await readMemoryDependencyStatus(tx, scope, [...roots[use]], {
         materialUse: use, collectSourceIds: lockedSourceIds ? undefined : collectSourceIds,
-        collectCourseIds: currentCourses, lockedSourceIds,
+        collectCourseIds: currentCourses, lockedSourceIds, includeSourceRefs: true,
       }));
     }
     if (lockedSourceIds && [...currentCourses].some(id => !originCourseIds.has(id))) {
@@ -384,41 +384,38 @@ async function assertStreamMaterialAdmission(
     )`;
     if (!admitted) throw Object.assign(new Error("history material no longer permits this use"), { code: "CONFLICT" });
   }
+  const backingSources = new Map<string, boolean>();
   if (globalMemoryIdList.length) {
     const resolved = resolveMemoryDependencyStatus(graphs!.get(materialUse)!, globalMemoryIdList, [], courseId);
     if (!resolved) throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
     globalMemoryIdList = [...new Set(resolved.map(memory => memory.dep_id))].sort();
+    historyExpiresAt = Math.min(historyExpiresAt, memoryExpiry(resolved));
+    for (const memory of resolved) {
+      for (const sourceId of memory.sourceIds ?? []) {
+        backingSources.set(sourceId, backingSources.get(sourceId) === true || memory.course_id === null);
+      }
+    }
   }
   if (pin && (pin.courseId !== null || pin.sources.length > 0)) {
     await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
   }
-  if (memoryOnlySourceIds.length) {
-    if (!globalMemoryIdList.length) {
-      throw Object.assign(new Error("stream global memory binding missing"), { code: "CONFLICT" });
-    }
+  if (memoryOnlySourceIds.length && !globalMemoryIdList.length) {
+    throw Object.assign(new Error("stream global memory binding missing"), { code: "CONFLICT" });
+  }
+  if (memoryOnlySourceIds.some(id => !backingSources.has(id))) {
+    throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+  }
+  const backingSourceIds = [...backingSources.keys()].sort();
+  if (backingSourceIds.length) {
     // Global backing can cross courses. Course-only backing retains course and purpose limits.
-    const backed = await tx`
-      SELECT lower(sid.id::text) AS source_id, bool_or(m.course_id IS NULL) AS backed_by_global
-      FROM unnest(${memoryOnlySourceIds}::uuid[]) AS sid(id)
-      JOIN opening_memories m ON m.workspace_id = ${scope.workspaceId}
-          AND m.id = ANY(${globalMemoryIdList}::uuid[])
-          AND m.status = 'active'
-          AND ${memoryCourseAllows(tx, () => tx`m.course_id`, () => tx`${courseId}::uuid`, () => tx`m.workspace_id`)}
-          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-          AND ${memoryBacksSource(tx, () => tx`m.source_turn_ids`, () => tx`sid.id`, scope.workspaceId,
-            scope.ownerUserId, turn => tx`${turn()}.context_source_refs @? '$[*].memoryDependencyIds[*]'`)}
-      GROUP BY sid.id`;
-    if (backed.length !== memoryOnlySourceIds.length) {
-      throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
-    }
     const mockExam = await tx`SELECT id FROM course_asset_memberships
       WHERE workspace_id=${scope.workspaceId} AND asset_type='source'
-        AND asset_id=ANY(${memoryOnlySourceIds}::uuid[]) AND purpose='mock_exam'
+        AND asset_id=ANY(${backingSourceIds}::uuid[]) AND purpose='mock_exam'
       ORDER BY asset_id FOR SHARE`;
     if (mockExam.length) {
       throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
     }
-    const courseOnlySourceIds = backed.filter(row => !row.backed_by_global).map(row => String(row.source_id));
+    const courseOnlySourceIds = backingSourceIds.filter(id => !backingSources.get(id) && !explicitSourceIds.has(id));
     if (courseOnlySourceIds.length) {
       const memberships = await tx<{ asset_id: string; course_id: string; purpose: CourseSourcePurpose | null }[]>`
         SELECT asset_id,course_id,purpose FROM course_asset_memberships
@@ -463,7 +460,14 @@ async function assertStreamMaterialAdmission(
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
     }
   }
-  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList, historyExpiresAt, lockedSourceVersions };
+  const memorySourceRefs = backingSourceIds.map(sourceId => {
+    const sourceVersion = lockedSourceVersions.get(sourceId);
+    if (sourceVersion === undefined || !Number.isSafeInteger(sourceVersion) || sourceVersion < 0) {
+      throw Object.assign(new Error("stream memory source version unavailable"), { code: "CONFLICT" });
+    }
+    return { sourceId, sourceVersion, memoryOnly: true };
+  });
+  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList, historyExpiresAt, lockedSourceVersions, memorySourceRefs };
 }
 
 /** Collect the source set for both the attempt and its nested study-context reads. */
@@ -721,8 +725,8 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
           AND (r.attributed AND m.id IN (SELECT d.id FROM direct_deps d WHERE d.origin=r.origin)
             OR NOT r.attributed AND r.course_id IS NULL AND r.standalone_sessions AND m.course_id IS NULL)
           AND (m.course_id IS NULL OR m.course_id=r.course_id)
-          AND ${memoryBacksSource(db, () => db`m.source_turn_ids`, () => db`r.id`, workspaceId,
-            input.scope.ownerUserId, () => db`r.attributed`)}
+          AND (r.attributed OR ${memoryBacksSource(db, () => db`m.source_turn_ids`, () => db`r.id`, workspaceId,
+            input.scope.ownerUserId)})
       ) m
     ), memberships AS (
       SELECT s.origin, cam.asset_id, cam.course_id, cam.purpose
@@ -756,12 +760,13 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
     )`;
   };
   const savedPins = (role: "assistant" | "user") => {
-    const turn = () => role === "assistant" ? db`t` : db`u`;
+    const turn: FragmentFactory = () => role === "assistant" ? db`t` : db`u`;
     return db`(
       SELECT COALESCE(array_agg(${lineageUuid(db, () => db`pin.source_id`)}), '{}'::uuid[]) AS source_ids,
         COALESCE(jsonb_agg(jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version))
           FILTER (WHERE pin.version_required OR pin.source_version IS NOT NULL), '[]'::jsonb) AS version_refs
-      FROM (${turnPinnedSourceRefs(db, () => db`${turn()}.source_versions`, () => db`${turn()}.context_anchor`)}) pin
+      FROM (${turnPinnedSourceRefs(db, () => db`${turn()}.source_versions`, () => db`${turn()}.context_anchor`)}
+        UNION ALL ${turnChunkSourceRef(db, turn)}) pin
     )`;
   };
   const readTarget = () => db`
@@ -858,8 +863,10 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
         if (!(expiry > Date.now())) return false;
         earliestExpiresAtMs = Math.min(earliestExpiresAtMs, expiry);
       }
+      const attributedSources = new Set(row.scoped.filter(ref => ref.attributed).map(ref => ref.id));
       const backingExpiry = (id: string, globalOnly = false) => Math.max(-Infinity, ...row.backings
-        .filter(backing => backing.source_id === id && (!globalOnly || backing.global_backed))
+        .filter(backing => backing.source_id === id && (!globalOnly || backing.global_backed)
+          && (!attributedSources.has(id) || graph.get(backing.id)?.some(node => node.sourceIds?.includes(id))))
         .map(backing => expiryFor(backing.id)));
       for (const ref of row.scoped) {
         const expiry = backingExpiry(ref.id);
@@ -1811,6 +1818,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         const boundCourseId = boundTurnCourseId(boundTurn);
         const attemptLockScope = attempt ? await discoverBoundAttemptMaterials(tx, input.scope, boundTurn) : undefined;
         let lockedSourceVersions: ReadonlyMap<string, number> | undefined;
+        let memorySourceRefs: ContextSourceRef[] = [];
         if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
           || options?.memoryLineageSourceIds !== undefined || options?.historyCourseBindings !== undefined
           || options?.attemptContext !== undefined
@@ -1832,6 +1840,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           );
           const { courseId, resolvedMemoryIds, historyExpiresAt } = admission;
           lockedSourceVersions = admission.lockedSourceVersions;
+          memorySourceRefs = admission.memorySourceRefs;
           if (attempt) {
             await assertTutorAttemptContext(tx, input.scope, attempt.target, attempt.snapshot);
           }
@@ -1876,6 +1885,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             }
             return { sourceId, sourceVersion };
           }),
+          ...memorySourceRefs.filter(ref => !directlyPinned.has(ref.sourceId) && !selectedHistorySourceIds.has(ref.sourceId)),
           ...(memoryDependencyIds.length ? [{ memoryDependencyIds }] : []),
         ];
         const persistedContextSourceRefs = input.contextSourceRefs === undefined && !persistedRefs.length ? null : persistedRefs;

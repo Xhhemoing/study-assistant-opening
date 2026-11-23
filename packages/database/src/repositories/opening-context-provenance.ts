@@ -164,6 +164,13 @@ export function turnPinnedSourceRefs(db: Db, versions: FragmentFactory, anchor: 
     WHERE ${anchor()}->>'sourceId' IS NOT NULL`;
 }
 
+/** A missing saved chunk yields an invalid pin for the caller's source admission. */
+export function turnChunkSourceRef(db: Db, turn: FragmentFactory): Fragment {
+  return db`SELECT k.source_id::text AS source_id, to_jsonb(k.source_version) AS source_version, true AS version_required
+    FROM (SELECT ${turn()}.chunk_id AS id WHERE ${turn()}.chunk_id IS NOT NULL) saved
+    LEFT JOIN opening_source_chunks k ON k.id = saved.id`;
+}
+
 export function turnPinnedSourcesIncluded(
   db: Db, workspaceId: string, versions: FragmentFactory, anchor: FragmentFactory, historical = false,
 ): Fragment {
@@ -194,8 +201,8 @@ export function turnPinnedSourcesIncluded(
 }
 
 /** User turns are original leaves; assistant turns must carry their full consumed lineage. */
-export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fragment {
-  const turn = () => {
+export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt", includeChunk = false): Fragment {
+  const turn: FragmentFactory = () => {
     switch (alias) {
       case "t": return db`t`;
       case "u": return db`u`;
@@ -224,7 +231,7 @@ export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fr
       ) direct_refs
     ) END) || (
       SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version)), '[]'::jsonb)
-      FROM (${pins()}) pin
+      FROM (${pins()} ${includeChunk ? db`UNION ALL ${turnChunkSourceRef(db, turn)}` : db``}) pin
     )
   END`;
 }
@@ -423,9 +430,8 @@ export function turnMaterialRows(db: Db, owner: FragmentFactory, turn: FragmentF
       WHEN jsonb_typeof(pin.source_version) = 'number' THEN pin.source_version #>> '{}' ELSE '' END, pin.version_required, false
     FROM (${turnPinnedSourceRefs(db, () => db`${turn()}.source_versions`, () => db`${turn()}.context_anchor`)}) pin
     UNION ALL
-    SELECT k.source_id::text, k.source_version::text, true, false
-    FROM (SELECT ${turn()}.chunk_id AS id WHERE ${turn()}.chunk_id IS NOT NULL) saved
-    LEFT JOIN opening_source_chunks k ON k.id = saved.id`;
+    SELECT chunk.source_id, chunk.source_version #>> '{}', chunk.version_required, false
+    FROM (${turnChunkSourceRef(db, turn)}) chunk`;
 }
 
 /** A missing or foreign session cannot establish that a saved turn was standalone. */
@@ -543,16 +549,14 @@ export function turnTransitiveDependenciesActive(
   )`;
 }
 
-/** The source must be present in an owned source turn of the exact backing memory. */
+/** Before exact memory attribution existed, a backing needed its own owned material. */
 export function memoryBacksSource(
   db: Db, sourceTurnIds: FragmentFactory, sourceId: FragmentFactory, workspaceId: string, ownerUserId: string | FragmentFactory,
-  allowInheritedRefs: (turn: FragmentFactory) => Fragment,
 ): Fragment {
   const turn: FragmentFactory = () => db`mt`;
   const hasMaterial = (origin: FragmentFactory) => db`EXISTS (
     SELECT 1 FROM (${turnMaterialRows(db, () => db`mc.owner_user_id`, origin)}) material
-    WHERE lower(material.source_id) = ${sourceId()}::text
-      AND (NOT material.memory_only OR ${allowInheritedRefs(origin)})
+    WHERE lower(material.source_id) = ${sourceId()}::text AND NOT material.memory_only
   )`;
   return db`EXISTS (
     SELECT 1 FROM jsonb_array_elements_text(
@@ -591,12 +595,13 @@ export function turnMemoryOnlyBackingIds(
         AND (m.course_id IS NULL OR m.course_id = ${ownCourse()})
         AND (${attributed()} AND m.id::text IN (SELECT lower(d.id) FROM ${memoryDependencyRows(db, refs)} d)
           OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND (${standaloneSessions()}) AND m.course_id IS NULL)
-        AND ${memoryBacksSource(db, () => db`m.source_turn_ids`,
-          () => lineageUuid(db, () => db`mem_ref->>'sourceId'`), scope.workspaceId, scope.ownerUserId, attributed)}
+        AND (${attributed()} OR ${memoryBacksSource(db, () => db`m.source_turn_ids`,
+          () => lineageUuid(db, () => db`mem_ref.backing_ref->>'sourceId'`), scope.workspaceId, scope.ownerUserId)})
       ORDER BY m.id
-    ))), '[]'::jsonb)
-    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END) mem_ref
-    WHERE (mem_ref->>'memoryOnly') = 'true'
+    )) ORDER BY mem_ref.ordinality), '[]'::jsonb)
+    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END)
+      WITH ORDINALITY AS mem_ref(backing_ref, ordinality)
+    WHERE (mem_ref.backing_ref->>'memoryOnly') = 'true'
   )`;
 }
 
@@ -605,18 +610,29 @@ export type MemoryDependencyStatus = {
   sourceIds?: string[];
 };
 
+/** Match the order used by turnMemoryOnlyBackingIds after parsing the saved lineage. */
+export function memoryOnlyRefSourceIds(refs: unknown): string[] {
+  return Array.isArray(refs)
+    ? refs.filter(ref => ref?.memoryOnly === true).map(ref => String(ref.sourceId).toLowerCase())
+    : [];
+}
+
 /** Resolve exact consumed IDs and choose an active authority for each unattributed reference. */
 export function resolveMemoryDependencyStatus(
   graph: ReadonlyMap<string, MemoryDependencyStatus[]>, ids: string[], backings: string[][],
-  courseId: string | null, excludedId?: string,
+  courseId: string | null, excludedId?: string, backingSourceIds?: string[],
 ): MemoryDependencyStatus[] | null {
   const usable = (id: string) => {
     const nodes = graph.get(id);
     return nodes?.length && nodes.every(node => node.usable && node.dep_id !== excludedId
       && (node.course_id === null || node.course_id === courseId)) ? nodes : null;
   };
-  const groups = [...ids.map(usable),
-    ...backings.map(candidates => candidates.map(usable).find(nodes => nodes !== null) ?? null)];
+  if (backingSourceIds && backings.length !== backingSourceIds.length) return null;
+  const groups = [...ids.map(usable), ...backings.map((candidates, index) => {
+    const sourceId = backingSourceIds?.[index];
+    return candidates.map(usable).find(nodes => nodes !== null
+      && (!sourceId || nodes.some(node => node.sourceIds?.includes(sourceId)))) ?? null;
+  })];
   return groups.some(group => group === null) ? null : groups.flatMap(group => group ?? []);
 }
 
@@ -721,7 +737,8 @@ export async function readTurnMemoryDependencyDeadlines(
         if (turn.courseId !== null) rules?.collectCourseIds?.add(turn.courseId);
         const turnBackings = backings.get(turn.turnId) ?? [];
         const resolved = turnBackings.length === turn.memoryOnlyCount
-          ? resolveMemoryDependencyStatus(graph, turn.ids, turnBackings, turn.courseId) : null;
+          ? resolveMemoryDependencyStatus(graph, turn.ids, turnBackings, turn.courseId, undefined,
+            turn.ids.length ? memoryOnlyRefSourceIds(turn.refs) : undefined) : null;
         const expiry = resolved?.reduce((earliest, node) => node.expires_at === null ? earliest
           : Math.min(earliest, new Date(node.expires_at).getTime()), Infinity) ?? -Infinity;
         deadlines.set(turn.consumerId, Math.min(deadlines.get(turn.consumerId) ?? Infinity, expiry));

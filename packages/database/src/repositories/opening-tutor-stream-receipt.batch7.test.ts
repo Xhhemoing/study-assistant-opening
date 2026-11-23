@@ -39,7 +39,7 @@ type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: stri
   teachingSpecSourceIds?: string[];
   metadataVersionMaps?: Partial<Record<"u" | "t", unknown>>;
   metadataDirectSource?: boolean;
-  storedMemoryOrigins?: Record<string, { refs: unknown[]; backings?: string[][]; sourceIds?: string[] }>;
+  storedMemoryOrigins?: Record<string, { refs: unknown[]; backings?: string[][]; sourceIds?: string[]; turnId?: string }>;
 };
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
@@ -116,20 +116,23 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT dep_m.id, dep_m.course_id")) {
       const requested = values.find(Array.isArray) as string[];
       return (options.activeGlobalMemoryIds ?? []).filter(id => requested.includes(id))
-        .map(id => ({ id, course_id: null, expires_at: null, source_turn_ids: options.storedMemoryOrigins?.[id] ? [user] : [] }));
+        .map(id => {
+          const origin = options.storedMemoryOrigins?.[id];
+          const sources = options.backedMemorySourceIds ?? options.courseOnlyMemorySourceIds ?? [];
+          return { id, course_id: options.courseOnlyMemorySourceIds?.length ? options.courseId : null, expires_at: null,
+            source_turn_ids: origin || sources.length ? [origin?.turnId ?? user] : [] };
+        });
     }
     if (sql.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
     if (sql.startsWith("SELECT m.id, course.id AS turn_course_id")) {
       const origins = values.find(Array.isArray) as string[];
       return origins.flatMap(id => {
         const origin = options.storedMemoryOrigins?.[id];
-        return origin ? [{ id, turn_course_id: null, refs: origin.refs,
-          backings: origin.backings ?? [], source_ids: origin.sourceIds ?? [] }] : [];
+        const sources = origin?.sourceIds ?? options.backedMemorySourceIds ?? options.courseOnlyMemorySourceIds ?? [];
+        return origin || sources.length ? [{ id,
+          turn_course_id: options.courseOnlyMemorySourceIds?.length ? options.courseId : null, refs: origin?.refs ?? [],
+          backings: origin?.backings ?? [], source_ids: sources }] : [];
       });
-    }
-    if (sql.startsWith("SELECT lower(sid.id::text) AS source_id")) {
-      return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id, backed_by_global: true }))
-        .concat((options.courseOnlyMemorySourceIds ?? []).map(id => ({ source_id: id, backed_by_global: false })));
     }
     if (sql.startsWith("SELECT asset_id,course_id,purpose FROM course_asset_memberships")) {
       return options.classifiedMemoryCourseId ? [{ asset_id: sourceId, course_id: options.classifiedMemoryCourseId,
@@ -515,7 +518,8 @@ describe("stream receipt release waits for current job authorization and assista
       contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
     }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).resolves.toBeUndefined();
     expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"))).toBe(true);
-    expect(admitted.calls.some(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+    expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM course_asset_memberships")
+      && c.sql.includes("purpose='mock_exam'") && c.values.some(value => Array.isArray(value) && value.includes(memorySourceId)))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, [memoryId])).resolves.toBeUndefined();
     expect(admitted.calls.some(call => call.sql.startsWith("SELECT dep_m.id, dep_m.course_id")
       && call.sql.includes("dep_m.expires_at > clock_timestamp()"))).toBe(true);
@@ -686,11 +690,12 @@ describe("stream receipt release waits for current job authorization and assista
 
   it("matches restored uppercase opening_memories.source_turn_ids case-insensitively during memoryOnly admission", async () => {
     const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const originId = "12000000-0000-4000-8000-0000000000AB";
     const f = fixture({
       courseId,
       sourceIds: [],
       activeGlobalMemoryIds: [memoryId],
-      backedMemorySourceIds: [sourceId],
+      storedMemoryOrigins: { [memoryId]: { refs: [], sourceIds: [sourceId], turnId: originId } },
     });
     await expect(f.repo.assertSendAuthorized(scope, jobId, {
       expectedPrivacyEpoch: 2,
@@ -700,11 +705,7 @@ describe("stream receipt release waits for current job authorization and assista
       memoryLineageSourceIds: [sourceId],
       globalMemoryIds: [memoryId],
     })).resolves.toBeUndefined();
-    const backedCall = f.calls.find(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id"));
-    const backing = (await Promise.all(backedCall!.values)).find(value =>
-      value?.fragmentSql?.includes("JOIN opening_turns mt ON mt.id::text = lower(mref.turn_id)"));
-    expect(backing?.fragmentSql).toContain("AND mt.id = ?");
-    expect(await Promise.all(backing!.values)).toContainEqual({ fragmentSql: "CASE WHEN (?) ~* ? THEN (?)::uuid END" });
+    expect(f.calls.find(c => c.sql.startsWith("SELECT m.id, course.id"))?.values).toContainEqual([originId]);
   });
 
   it("starts eligible metadata under the course lock and commits before the provider responds", async () => {
@@ -819,6 +820,8 @@ describe("stream receipt release waits for current job authorization and assista
       contextSourceRefs: [{ sourceId, sourceVersion: 0, memoryOnly: true }],
       memoryLineageSourceIds: [sourceId], globalMemoryIds: [memoryId],
     })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(f.repo.assertSendAuthorized(scope, jobId, { ...context, contextSourceRefs: [], globalMemoryIds: [memoryId] }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "source purpose no longer permits this use" });
   });
 
   it.each(["send", "publication", "completion"] as const)("prelocks teaching-spec sources before attempt %s", async mode => {

@@ -103,7 +103,7 @@ describe("opening memory owner and source admission", () => {
       });
       const locks = statements.filter(query => query.endsWith("FOR SHARE"));
       const courseLock = locks.findIndex(query => query.startsWith("SELECT id FROM courses"));
-      const sourceLock = locks.findIndex(query => query.startsWith("SELECT id FROM opening_sources"));
+      const sourceLock = locks.findIndex(query => query.startsWith("SELECT id, version FROM opening_sources"));
       const membershipLock = locks.findIndex(query => query.startsWith("SELECT id FROM course_asset_memberships"));
       expect(courseLock).toBeGreaterThanOrEqual(0);
       expect(sourceLock).toBeGreaterThan(courseLock);
@@ -179,6 +179,58 @@ describe("opening memory owner and source admission", () => {
     await expect(memories.proposeMemory(scope, { ...input, text: "New failed evidence" })).rejects.toMatchObject({ code: "VALIDATION" });
     await expect(memories.confirm(scope, candidate.id, candidate.version, randomUUID())).rejects.toMatchObject({ code: "VALIDATION" });
     await expect(memories.listContext(scope, new Date().toISOString())).resolves.toEqual({ memories: [], sourceRefs: [] });
+  });
+
+  it.each([false, true])("checks paired-user memory across courses with explicit backing refs = %s", async includeBacking => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const createCourse = (title: string) => courses.createCourse({ workspaceId: scope.workspaceId, title, slug: randomUUID() });
+    const userCourse = await createCourse("Paired user memory");
+    const assistantCourse = await createCourse("Assistant memory destination");
+    const material = await insertSource(sql, scope);
+    const scoped = await memories.proposeMemory(scope, {
+      courseId: userCourse.id, text: "Course-only preference", sourceTurnIds: [], expiresAt: null,
+    });
+    await memories.confirm(scope, scoped.id, scoped.version, randomUUID());
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const global = await memories.proposeMemory(scope, {
+      text: "Temporary global material", expiresAt, sourceTurnIds: [await insertOwnedTurn(sql, scope, { sourceIds: [material] })],
+    });
+    const conversation = await conversations.create(scope, { title: "Split-course exchange", courseId: null });
+    const turn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id,
+      text: "Use the saved preference", mode: "explain", sourceIds: [], clientKey: randomUUID(),
+      learningSessionId: null, currentPage: null, chunkId: null });
+    const claim = (await jobs.claim(turn.jobId))!;
+    await jobs.completeTurn({ scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId, claimToken: claim.claimToken,
+      text: "Answer from the saved preference", citations: [], candidates: [], contextSourceRefs: [] });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: assistantCourse.id })} WHERE id=${turn.assistantTurnId}`;
+    const setUserRefs = async (refs: unknown[]) => sql`UPDATE opening_turns
+      SET context_anchor=${sql.json({ courseId: userCourse.id })}, context_source_refs=${sql.json(refs as never)}
+      WHERE id=${turn.turnId}`;
+    const propose = (courseId: string | null) => memories.proposeMemory(scope, {
+      courseId, text: `Derived from paired user ${courseId ?? "global"}`, sourceTurnIds: [turn.assistantTurnId], expiresAt: null,
+    });
+    await setUserRefs([{ memoryDependencyIds: [scoped.id] }]);
+    await expect(propose(assistantCourse.id)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(propose(null)).rejects.toMatchObject({ code: "VALIDATION" });
+    await setUserRefs([{ memoryDependencyIds: [global.id] },
+      ...(includeBacking ? [{ sourceId: material, sourceVersion: 0, memoryOnly: true }] : []),
+    ]);
+    for (const courseId of [assistantCourse.id, null]) {
+      const derived = await propose(courseId);
+      await memories.confirm(scope, derived.id, derived.version, randomUUID());
+      const context = () => memories.listContext(scope, new Date().toISOString(), courseId);
+      await expect(context()).resolves.toMatchObject({
+        memories: expect.arrayContaining([expect.objectContaining({ id: derived.id })]),
+        dependencyMemoryIds: [global.id], temporaryMemoryExpiresAt: expiresAt,
+        sourceRefs: [{ sourceId: material, sourceVersion: 0 }],
+      });
+    }
+    await sql`UPDATE opening_memories SET expires_at=now()-interval '1 second' WHERE id=${global.id}`;
+    await expect(memories.listContext(scope, new Date().toISOString(), assistantCourse.id))
+      .resolves.toEqual({ memories: [], sourceRefs: [] });
   });
 
   it("rejects a same-workspace impostor on list, get, propose, and reject", async () => {

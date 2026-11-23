@@ -4,7 +4,7 @@ import type { OpeningScope } from "./opening-sources";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 import {
-  contextSourceRefsIncluded, isLineageUuid, lineageUuid, mergeContextSourceRefs, resolveMemoryDependencyStatus,
+  contextSourceRefsIncluded, isLineageUuid, lineageUuid, memoryOnlyRefSourceIds, mergeContextSourceRefs, resolveMemoryDependencyStatus,
   parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnDirectSourcesVersioned,
   turnHasOwnedSession, turnHasStandaloneSession, turnLineageCourse, turnMemoryOnlyBackingIds, turnSessionMaterialIds,
   type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
@@ -108,8 +108,8 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
       JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=c.workspace_id AND u.conversation_id=c.id AND u.role='user'
       JOIN opening_turns a ON a.id=j.assistant_turn_id AND a.workspace_id=c.workspace_id AND a.conversation_id=c.id AND a.role='assistant'
       CROSS JOIN LATERAL (SELECT CASE WHEN u.context_source_refs IS NULL OR jsonb_typeof(u.context_source_refs)='array'
-        THEN ${turnContextSourceRefs(sql, "u")} || COALESCE(u.context_source_refs, '[]'::jsonb) END AS user_refs,
-        ${turnContextSourceRefs(sql, "a")} AS assistant_refs) refs
+        THEN ${turnContextSourceRefs(sql, "u", true)} || COALESCE(u.context_source_refs, '[]'::jsonb) END AS user_refs,
+        ${turnContextSourceRefs(sql, "a", true)} AS assistant_refs) refs
       WHERE current.id=ANY(${currentTurnIds}::uuid[]) AND current.role='user'
         AND current.workspace_id=${scope.workspaceId} AND c.workspace_id=${scope.workspaceId}
         AND c.owner_user_id=${scope.ownerUserId}
@@ -152,9 +152,15 @@ function exchangeMemoryAuthority(row: HistoryRows[number]): HistoryAncestorAutho
   if (!userIds || !assistantIds) return null;
   return [
     { courseId: row.prior_course_id ?? null, materialUse: row.prior_material_use ?? "citation",
-      memoryIds: row.user_memory_backing_ids === undefined ? [] : userIds, backings: row.user_memory_backing_ids ?? [], expiresAt: Infinity },
+      memoryIds: row.user_memory_backing_ids === undefined ? [] : userIds, backings: row.user_memory_backing_ids ?? [],
+      backingSourceIds: userIds.length && row.user_memory_backing_ids !== undefined
+        ? memoryOnlyRefSourceIds(row.user_source_refs) : undefined,
+      sourceIds: [], expiresAt: Infinity },
     { courseId: row.assistant_course_id ?? null, materialUse: row.assistant_material_use ?? "citation",
       memoryIds: row.memory_backing_ids === undefined ? [] : assistantIds, backings: row.memory_backing_ids ?? [],
+      backingSourceIds: assistantIds.length && row.memory_backing_ids !== undefined
+        ? memoryOnlyRefSourceIds(row.assistant_source_refs) : undefined,
+      sourceIds: [],
       expiresAt: row.memory_temporary_expires_at == null ? Infinity : new Date(row.memory_temporary_expires_at).getTime() },
   ];
 }
@@ -192,13 +198,15 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
     if (!entries) return null;
     const courseId = rows[index]!.current_course_id ?? null;
     const own = entries.map(entry =>
-      resolveMemoryDependencyStatus(graphFor(entry.materialUse), entry.memoryIds, entry.backings, entry.courseId));
+      resolveMemoryDependencyStatus(graphFor(entry.materialUse), entry.memoryIds, entry.backings, entry.courseId,
+        undefined, entry.backingSourceIds));
     if (own.some(nodes => nodes === null)) return null;
     const current = entries.map((entry, i) => {
       const nodes = own[i]!;
       if (!nodes.every(node => node.course_id === null || node.course_id === courseId)) return null;
       return entry.materialUse === materialUse ? nodes
-        : resolveMemoryDependencyStatus(graphFor(materialUse), entry.memoryIds, entry.backings, courseId);
+        : resolveMemoryDependencyStatus(graphFor(materialUse), entry.memoryIds, entry.backings, courseId,
+          undefined, entry.backingSourceIds);
     });
     const expires = (nodes: (MemoryDependencyStatus[] | null)[]) =>
       nodes.flatMap(group => group?.flatMap(node => node.expires_at === null ? [] : [node.expires_at]) ?? []);
@@ -210,6 +218,7 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
 
 export type HistoryAncestorAuthority = {
   courseId: string | null; materialUse: MaterialUse; memoryIds: string[]; backings: string[][]; expiresAt: number;
+  sourceIds: string[]; backingSourceIds?: string[];
 };
 
 type HistoryAncestorRules = {
@@ -235,15 +244,15 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
       authority.set(row.current_id, null);
       continue;
     }
-    const sources = new Set([...assistantRefs, ...userRefs].map(ref => ref.sourceId));
-    for (const binding of historyCourseBindings(row)) {
-      if (binding.courseId !== null) rules?.collectCourseIds?.add(binding.courseId);
-      for (const id of binding.sourceIds) sources.add(id);
-    }
-    if (locked && [...sources].some(id => !locked.has(id))) {
+    const [userAuthority, assistantAuthority] = memoryAuthority;
+    userAuthority!.sourceIds = [...(row.user_direct_ids ?? []), ...userRefs.map(ref => ref.sourceId)];
+    assistantAuthority!.sourceIds = [...(row.assistant_direct_ids ?? []), ...assistantRefs.map(ref => ref.sourceId)];
+    const sources = memoryAuthority.flatMap(entry => entry.sourceIds);
+    if (locked && sources.some(id => !locked.has(id))) {
       authority.set(row.current_id, null);
       continue;
     }
+    for (const entry of memoryAuthority) if (entry.courseId !== null) rules?.collectCourseIds?.add(entry.courseId);
     for (const id of sources) rules?.collectSourceIds?.add(id);
     entries.push(...memoryAuthority);
   }
@@ -254,18 +263,21 @@ export function historyAncestorMemoryIds(authority: HistoryAncestorAuthority) {
   return [...authority.memoryIds, ...authority.backings.flat()];
 }
 
-export function resolveHistoryAncestorExpiry(authority: HistoryAncestorAuthority[],
+export function resolveHistoryAncestors(authority: HistoryAncestorAuthority[],
   graphFor: (materialUse: MaterialUse) => ReadonlyMap<string, MemoryDependencyStatus[]>,
   excludedId?: string,
 ) {
   let expiry = Infinity;
+  const sourceIds = new Set<string>();
   for (const entry of authority) {
-    const dependencies = resolveMemoryDependencyStatus(graphFor(entry.materialUse), entry.memoryIds, entry.backings, entry.courseId, excludedId);
-    if (!dependencies) return -Infinity;
+    const dependencies = resolveMemoryDependencyStatus(graphFor(entry.materialUse), entry.memoryIds, entry.backings,
+      entry.courseId, excludedId, entry.backingSourceIds);
+    if (!dependencies) return null;
+    for (const sourceId of [...entry.sourceIds, ...dependencies.flatMap(node => node.sourceIds ?? [])]) sourceIds.add(sourceId);
     expiry = Math.min(expiry, entry.expiresAt, ...dependencies.map(node =>
       node.expires_at === null ? Infinity : new Date(node.expires_at).getTime()));
   }
-  return expiry;
+  return { expiresAt: expiry, sourceIds };
 }
 
 /** Revalidate the saved conversation prefix before reusing its derivative. */
@@ -277,7 +289,7 @@ export async function readTutorHistoryAncestorStatus(sql: Db, scope: OpeningScop
     const ids = authority.filter(entry => entry.materialUse === use).flatMap(historyAncestorMemoryIds);
     graph.set(use, await readMemoryDependencyStatus(sql, scope, ids, { ...rules, materialUse: use }));
   }
-  const earliestExpiresAtMs = resolveHistoryAncestorExpiry(authority, use => graph.get(use)!);
+  const earliestExpiresAtMs = resolveHistoryAncestors(authority, use => graph.get(use)!)?.expiresAt ?? -Infinity;
   return { valid: earliestExpiresAtMs > Date.now(), hasAncestors: authority.length > 0, earliestExpiresAtMs };
 }
 

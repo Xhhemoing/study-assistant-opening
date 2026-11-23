@@ -2,14 +2,14 @@ import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import {
   assistantDirectSourcesVersioned, historicalUserTurnId, isLineageUuid, lineageUuid, memoryCourseAllows, pairedUserTurnId,
-  parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
+  memoryOnlyRefSourceIds, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
   turnDependencyWalk, turnHasOwnedSession, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialRows, turnMaterialUse, turnMemoryOnlyBackingIds,
   type ContextSourceRef,
   type FragmentFactory,
   type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
-import { historyAncestorMemoryIds, readTutorHistoryAncestorAuthority, resolveHistoryAncestorExpiry,
+import { historyAncestorMemoryIds, readTutorHistoryAncestorAuthority, resolveHistoryAncestors,
   type HistoryAncestorAuthority } from "./opening-tutor-history";
 
 type Db = Sql | TransactionSql;
@@ -130,7 +130,8 @@ function turnOriginPolicies(db: Db, scope: OpeningScope, rules?: MemoryMaterialR
               () => db`${userCourse()} IS NULL AND ${turnHasStandaloneSession(db, () => db`u`, () => db`c.owner_user_id`)}`))}
           ${destination ? db`AND (${userCourse()} IS NULL OR ${userCourse()} IS NOT DISTINCT FROM ${destination()} OR
             ${sourceMaterialsActive(db, scope.workspaceId, () => turnMaterialRows(db, () => db`c.owner_user_id`, () => db`u`), {
-              ...rules, memoryCourse: destination, originUse: !rules?.materialUse || rules.materialUse === "origin"
+              ...rules, memoryCourse: destination, authorizeMemoryOnlySeparately: true,
+              originUse: !rules?.materialUse || rules.materialUse === "origin"
                 ? () => turnMaterialUse(db, "u") : undefined,
             })})` : db``}
           AND jsonb_typeof(u.source_versions)='object' AND jsonb_typeof(u.citations)='array')
@@ -244,7 +245,11 @@ type MemoryMaterialRules = {
 };
 type OriginBinding = {
   id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][]; material_use: MaterialUse | null;
-  ancestors: HistoryAncestorAuthority[]; source_ids?: string[];
+  ancestors: HistoryAncestorAuthority[]; source_ids?: string[]; backingSourceIds?: string[];
+  user?: {
+    courseId: string | null; materialUse: MaterialUse; destinationUse: MaterialUse;
+    ids: string[] | null; backings: string[][]; backingSourceIds?: string[];
+  };
 };
 
 async function readOriginBindings(
@@ -275,12 +280,19 @@ async function readOriginBindings(
   }
   if (!turnIds.length) return byMemory;
   const originUse: FragmentFactory | undefined = rules?.materialUse === "origin" ? () => db`policy.material_use` : undefined;
+  const userCourse = () => turnLineageCourse(db, "u", () => db`c.course_id`, () => db`c.owner_user_id`);
   const rows = await db<(Omit<OriginBinding, "ids" | "ancestors"> & {
     refs: unknown; historical_user_turn_id?: string | null; user_course_id?: string | null;
+    user_refs: unknown; user_backings?: string[][]; user_material_use?: MaterialUse | null; paired_destination_use?: MaterialUse;
   })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
       ${historicalUserTurnId(db)} AS historical_user_turn_id,
-      ${turnLineageCourse(db, "u", () => db`CASE WHEN u.id IS NOT NULL THEN c.course_id END`, () => db`c.owner_user_id`)} AS user_course_id,
+      u.context_source_refs AS user_refs, CASE WHEN u.id IS NOT NULL THEN ${userCourse()} END AS user_course_id,
+      CASE WHEN u.id IS NOT NULL THEN ${turnMaterialUse(db, "u")} END AS user_material_use,
+      CASE WHEN u.id IS NOT NULL THEN ${originUse ? originUse() : turnMaterialUse(db, "t")} END AS paired_destination_use,
+      CASE WHEN u.id IS NOT NULL AND u.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+        THEN ${turnMemoryOnlyBackingIds(db, () => db`u.context_source_refs`, userCourse,
+          () => turnHasStandaloneSession(db, () => db`u`, () => db`c.owner_user_id`), scope)} ELSE '[]'::jsonb END AS user_backings,
       CASE WHEN t.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
         THEN ${turnMemoryOnlyBackingIds(db, () => db`t.context_source_refs`, () => db`course.id`,
           () => turnHasStandaloneSessions(db, () => db`c.owner_user_id`), scope)} ELSE '[]'::jsonb END AS backings,
@@ -321,7 +333,16 @@ async function readOriginBindings(
     for (const id of row.source_ids ?? []) if (id) rules?.collectSourceIds?.add(id);
     if (typeof row.turn_course_id === "string") rules?.collectCourseIds?.add(row.turn_course_id);
     if (typeof row.user_course_id === "string") rules?.collectCourseIds?.add(row.user_course_id);
-    const binding = { ...row, ids: row.refs == null ? [] : parseContextMemoryDependencyIds(row.refs), ancestors };
+    const ids = row.refs == null ? [] : parseContextMemoryDependencyIds(row.refs);
+    const binding: OriginBinding = { ...row, ids, ancestors,
+      backingSourceIds: ids?.length ? memoryOnlyRefSourceIds(row.refs) : undefined };
+    if (row.user_material_use) {
+      const userIds = row.user_refs == null ? [] : parseContextMemoryDependencyIds(row.user_refs);
+      binding.user = { courseId: row.user_course_id ?? null, materialUse: row.user_material_use,
+        destinationUse: row.paired_destination_use ?? row.user_material_use,
+        ids: userIds, backings: row.user_backings ?? [],
+        backingSourceIds: userIds?.length ? memoryOnlyRefSourceIds(row.user_refs) : undefined };
+    }
     const group = byMemory.get(row.id);
     if (group) group.push(binding);
     else byMemory.set(row.id, [binding]);
@@ -334,10 +355,20 @@ type MemoryRoot = { id: string; use: MemoryUse };
 type MemoryGraph = Map<string, MemoryDependencyStatus[]>;
 
 function bindingRoots(bindings: OriginBinding[], use: MemoryUse): MemoryRoot[] {
-  return bindings.flatMap(row => [
-    ...[...(row.ids ?? []), ...row.backings.flat()].map(id => ({ id, use: row.material_use ?? use })),
-    ...row.ancestors.flatMap(entry => historyAncestorMemoryIds(entry).map(id => ({ id, use: entry.materialUse }))),
-  ]);
+  return bindings.flatMap(row => {
+    const { user } = row;
+    return [
+      ...[...(row.ids ?? []), ...row.backings.flat()].map(id => ({ id, use: row.material_use ?? use })),
+      ...(user ? [...(user.ids ?? []), ...user.backings.flat()].flatMap(id => [
+        { id, use: user.materialUse }, { id, use: pairedDestinationUse(user, use) },
+      ]) : []),
+      ...row.ancestors.flatMap(entry => historyAncestorMemoryIds(entry).map(id => ({ id, use: entry.materialUse }))),
+    ];
+  });
+}
+
+function pairedDestinationUse(user: { destinationUse: MaterialUse }, use: MemoryUse): MaterialUse {
+  return use && use !== "origin" ? use : user.destinationUse;
 }
 
 function resolveOrigins(
@@ -345,16 +376,46 @@ function resolveOrigins(
 ) {
   if (group.length !== origin.turn_ids.length) return null;
   const dependencies: MemoryDependencyStatus[] = [];
+  const sourceIds = new Set<string>();
   let expiresAt = Infinity;
   for (const row of group) {
     if (row.ids === null || (origin.course_id !== null && origin.course_id !== row.turn_course_id
       && (row.ids.length || row.backings.length))) return null;
-    const nodes = resolveMemoryDependencyStatus(graphFor(row.material_use ?? use), row.ids, row.backings, origin.course_id, origin.excludedId);
+    const nodes = resolveMemoryDependencyStatus(graphFor(row.material_use ?? use), row.ids, row.backings,
+      origin.course_id, origin.excludedId, row.backingSourceIds);
     if (!nodes) return null;
     dependencies.push(...nodes);
-    expiresAt = Math.min(expiresAt, resolveHistoryAncestorExpiry(row.ancestors, graphFor, origin.excludedId));
+    if (row.user) {
+      const user = row.user;
+      if (user.ids === null) return null;
+      if (user.ids.length || user.backings.length) {
+        const ownGraph = graphFor(user.materialUse);
+        const destinationGraph = graphFor(pairedDestinationUse(user, use));
+        const shared = new Map<string, MemoryDependencyStatus[]>();
+        for (const id of [...user.ids, ...user.backings.flat()]) {
+          const own = resolveMemoryDependencyStatus(ownGraph, [id], [], user.courseId, origin.excludedId);
+          const destination = destinationGraph === ownGraph ? own : destinationGraph.get(id);
+          if (own && destination) shared.set(id, destination === own ? own : [...own, ...destination]);
+        }
+        const backings = user.backingSourceIds ? user.backings.map((candidates, index) => candidates.filter(id =>
+          [ownGraph, destinationGraph].every(graph =>
+            graph.get(id)?.some(node => node.sourceIds?.includes(user.backingSourceIds![index]!))))) : user.backings;
+        const paired = resolveMemoryDependencyStatus(shared, user.ids, backings, origin.course_id,
+          origin.excludedId, user.backingSourceIds);
+        if (!paired) return null;
+        dependencies.push(...paired);
+      }
+    }
+    const history = resolveHistoryAncestors(row.ancestors, graphFor, origin.excludedId);
+    if (!history) return null;
+    expiresAt = Math.min(expiresAt, history.expiresAt);
+    for (const id of [...(row.source_ids ?? []), ...history.sourceIds]) sourceIds.add(id);
   }
-  return expiresAt > Date.now() ? { dependencies, expiresAt } : null;
+  for (const dep of dependencies) {
+    if (dep.expires_at !== null) expiresAt = Math.min(expiresAt, new Date(dep.expires_at).getTime());
+    for (const id of dep.sourceIds ?? []) sourceIds.add(id);
+  }
+  return expiresAt > Date.now() ? { dependencies, expiresAt, sourceIds: [...sourceIds].sort() } : null;
 }
 
 /** Read each visited memory and its origins once, including unattributed backing at every depth. */
@@ -407,7 +468,7 @@ async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: Me
         AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp()))`;
     const origins = memories.map(row => ({ ...row, turn_ids: row.source_turn_ids, excludedId: row.id }));
     const bindings = await readOriginBindings(db, scope, origins,
-      rules || use ? { ...rules, materialUse: use, allowClassifiedGlobal: true, writeAdmission: false } : undefined);
+      { ...rules, materialUse: use, allowClassifiedGlobal: true, writeAdmission: false, includeSourceRefs: true });
     for (const memory of origins) {
       if (memory.course_id !== null) rules?.collectCourseIds?.add(memory.course_id);
       const originBindings = bindings.get(memory.id) ?? [];
@@ -439,7 +500,7 @@ async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: Me
     const ownExpiry = node.expires_at === null ? Infinity : new Date(node.expires_at).getTime();
     const expiresAt = ancestry.expiresAt < ownExpiry ? new Date(ancestry.expiresAt) : node.expires_at;
     dependencies.set(node.id, { dep_id: node.id, course_id: node.course_id, expires_at: expiresAt, usable: true,
-      ...(rules?.includeSourceRefs ? { sourceIds: node.bindings.flatMap(binding => binding.source_ids ?? []) } : {}),
+      sourceIds: ancestry.sourceIds,
     });
     return [...dependencies.values()];
   }
@@ -470,7 +531,9 @@ async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: Me
       if (!resolved) continue;
       const previous = graph.get(node.id)!;
       if (previous.length === resolved.length && previous.every((dep, index) => dep.dep_id === resolved[index]?.dep_id
-        && Number(dep.expires_at) === Number(resolved[index]?.expires_at))) continue;
+        && Number(dep.expires_at) === Number(resolved[index]?.expires_at)
+        && dep.sourceIds?.length === resolved[index]?.sourceIds?.length
+        && dep.sourceIds?.every((id, sourceIndex) => id === resolved[index]?.sourceIds?.[sourceIndex]))) continue;
       graph.set(node.id, resolved);
       changed = true;
     }
@@ -497,18 +560,15 @@ async function readMemoryOrigins(db: Db, scope: OpeningScope, origins: MemoryOri
       result.set(origin.id, null);
       continue;
     }
-    const sourceRefs = lockedSourceVersions && rules?.includeSourceRefs ? lockedMemorySourceRefs(lockedSourceVersions, [
-      ...originBindings.flatMap(binding => binding.source_ids ?? []),
-      ...lineage.dependencies.flatMap(dependency => dependency.sourceIds ?? []),
-    ]) : undefined;
+    const sourceRefs = lockedSourceVersions && rules?.includeSourceRefs
+      ? lockedMemorySourceRefs(lockedSourceVersions, lineage.sourceIds) : undefined;
     if (sourceRefs === null) {
       result.set(origin.id, null);
       continue;
     }
     result.set(origin.id, {
       ids: new Set(lineage.dependencies.map(node => node.dep_id)),
-      expiresAt: lineage.dependencies.reduce((expiresAt, node) => node.expires_at === null ? expiresAt
-        : Math.min(expiresAt, new Date(node.expires_at).getTime()), lineage.expiresAt),
+      expiresAt: lineage.expiresAt,
       sourceRefs,
     });
   }
