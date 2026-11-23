@@ -1620,8 +1620,124 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     const cues = text.split("\n").map((line, index) => ({
       text: line, startMs: index * 1000, endMs: (index + 1) * 1000,
     }));
-    return [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })];
+    return [chunkPedagogicalDocument({ ...source, text }), chunkTranscriptCues({ ...source, cues })] as const;
   }
+
+  it.each([
+    ["Definition", "definition"], ["Explanation", "prose"], ["Example", "example"], ["Example 2", "example"],
+    ["补充说明", "prose"], ["Proof of convergence", "proof"], ["Theorem", "theorem"],
+    ["引理一", "lemma"], ["练习 3", "exercise"],
+  ] as const)("indexes ordinary disclosures labeled %s", (summary, kind) => {
+    for (const prefix of ["", "Lecture: "]) {
+      const text = `${prefix}<details><summary>${summary}</summary>🧮 Courseware body</details>`;
+      const [document, cues] = chunkDocumentAndCues(text);
+      expect(document.find(chunk => chunk.text.includes("Courseware body"))).toMatchObject({
+        kind, label: summary, visibility: "public",
+      });
+      for (const chunks of [document, cues]) {
+        expectSealedEvidence(chunks, text, [], "🧮 Courseware body");
+      }
+      expect(cues.find(chunk => chunk.text.includes("Courseware body"))).toMatchObject({
+        startMs: 0, endMs: 1000,
+      });
+    }
+  });
+
+  it.each([
+    ["heading", "## Answer\nprivate-detail\n## More examples", undefined],
+    ["LaTeX environment", "\\begin{solution}private-detail\\end{solution}", undefined],
+    ["nested disclosure", "<details><summary>Answer</summary>private-detail</details>", undefined],
+    ["fenced directive", ":::solution\nprivate-detail\n:::", undefined],
+    ["answer column", "| Q | Answer |\n| --- | --- |\n| Prompt | private-detail |", undefined],
+    ["hint and solution", ":::hint\nprivate-hint\n:::\n\\begin{solution}private-detail\\end{solution}", "private-hint"],
+  ] as const)("extracts %s protection from public disclosure prose", (_name, protectedBody, hint) => {
+    for (const prefix of ["", "Lecture: "]) {
+      const text = [
+        `${prefix}<details><summary>Example</summary>🧮 Example setup`, "",
+        protectedBody, "", "Example wrap-up</details> Outside disclosure",
+      ].join("\n");
+      const privateCue = text.slice(0, text.indexOf("private-detail")).split("\n").length - 1;
+      const [document, cues] = chunkDocumentAndCues(text);
+      for (const chunks of [document, cues]) {
+        expectSealedEvidence(chunks, text, ["private-detail"],
+          ["🧮 Example setup", "Example wrap-up", "Outside disclosure"], hint);
+      }
+      expect(cues.find(chunk => chunk.text.includes("private-detail"))).toMatchObject({
+        visibility: "sealed", startMs: privateCue * 1000, endMs: (privateCue + 1) * 1000,
+      });
+    }
+  });
+
+  it("keeps cross-line details nested in a heading and preserves timed cue offsets", () => {
+    const source = { sourceId: "captions", sourceVersion: 1 };
+    const lines = [
+      "## Lecture <details><summary>Example</summary>🧮 Public setup",
+      "", "## Answer", "private-detail", "", "## More examples",
+      "Public wrap-up</details> Outside disclosure",
+    ];
+    const text = lines.join("\n");
+    const [document, cues] = chunkDocumentAndCues(text);
+    const timed = lines.map((line, i) => line && `[startMs=${i * 1000},endMs=${(i + 1) * 1000}] ${line}`).join("\n");
+    const timedDocument = chunkPedagogicalDocument({ ...source, text: timed });
+    for (const [chunks, original] of [[document, text], [cues, text], [timedDocument, timed]] as const) {
+      expectSealedEvidence(chunks, original, ["private-detail"], ["🧮 Public setup", "Public wrap-up", "Outside disclosure"]);
+    }
+    expect(document.find(chunk => chunk.text.includes("Public wrap-up"))?.kind).toBe("example");
+    expect(document.find(chunk => chunk.text.includes("Outside disclosure"))).toMatchObject({
+      kind: "prose", startOffset: text.indexOf("Outside disclosure"), text: "Outside disclosure",
+    });
+    for (const chunks of [cues, timedDocument]) {
+      expect(chunks.find(chunk => chunk.text.includes("private-detail"))).toMatchObject({ startMs: 3000, endMs: 4000 });
+      expect(chunks.find(chunk => chunk.text.includes("Outside disclosure"))).toMatchObject({ startMs: 6000, endMs: 7000 });
+    }
+  });
+
+  it.each(["Lecture: ", "## Lecture "])("extracts an answer across cues in an unclosed ordinary disclosure after %s", prefix => {
+    const lines = [
+      `${prefix}<details><summary>Explanation</summary>🧮 Public setup`,
+      "", "## Answer", "private-detail",
+    ];
+    const text = lines.join("\n");
+    const [document, cues] = chunkDocumentAndCues(text);
+    for (const chunks of [document, cues]) {
+      expectSealedEvidence(chunks, text, ["private-detail"], "🧮 Public setup");
+    }
+    expect(cues.find(chunk => chunk.text.includes("private-detail"))).toMatchObject({
+      visibility: "sealed", startMs: 3000, endMs: 4000,
+    });
+  });
+
+  it.each([
+    ["## Answer", "", "sealed", "Explanation"],
+    [":::hint", "\n:::", "hint_gated", "Explanation"],
+    [":::exercise", "\n:::", "sealed", "证明"],
+  ] as const)("inherits protection inside %s for ordinary details", (opener, closer, visibility, summary) => {
+    const text = `${opener}\n<details><summary>${summary}</summary>private-detail</details>${closer}`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      if (visibility === "sealed") expectSealedEvidence(chunks, text, ["private-detail"]);
+      else expectSealedEvidence(chunks, text, [], undefined, "private-detail");
+    }
+  });
+
+  it.each([
+    "", "preface<summary>Info</summary>", "<summary></summary>",
+    "<summary><span hidden>Info</span></summary>",
+    "<summary>Info<details><summary>Nested</summary>notes</details></summary>",
+    "<summary>Answer</summary>", "<summary>Solution</summary>",
+    "<summary>Spoiler</summary>", "<summary>答案</summary>",
+  ])("seals disclosures with ambiguous or protected summaries (%s)", summary => {
+    const text = `Lecture: <details>${summary}private-detail</details> Public wrap-up`;
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expectSealedEvidence(chunks, text, ["private-detail"], "Public wrap-up");
+    }
+  });
+
+  it("recognizes hint labels that require spacing between HTML elements", () => {
+    const text = "<details><summary>Try<span>Hint</span>First</summary>private-hint</details>";
+    for (const chunks of chunkDocumentAndCues(text)) {
+      expectSealedEvidence(chunks, text, [], undefined, "private-hint");
+    }
+  });
 
   it.each([
     ...[

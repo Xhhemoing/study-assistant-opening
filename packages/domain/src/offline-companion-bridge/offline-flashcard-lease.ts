@@ -3557,7 +3557,7 @@ export function reconcileOfflineLeaseOutbox(
     };
   }
 
-  if (lease.status === "expired" || serverReceiptAtMs > lease.expiresAtMs) {
+  if (lease.status === "expired" || serverReceiptAtMs >= lease.expiresAtMs) {
     return {
       ok: false,
       leaseStatus: "lease_expired",

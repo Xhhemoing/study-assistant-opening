@@ -3574,11 +3574,10 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     });
     expect(spoofedRevisionAttempt.updatedServerCards).toEqual(sameMsDesktopReviewed);
 
-    // Backdated clientReviewedAtMs CANNOT bypass 12h expiry when serverReceiptAtMs > expiresAtMs.
-    const expiredResult = reconcileOfflineLeaseOutbox({
+    const settleAt = (serverReceiptAtMs: number) => reconcileOfflineLeaseOutbox({
       lease: minted.lease,
       serverCards: { "card-1": card1Base },
-      serverReceiptAtMs: T0 + OFFLINE_LEASE_TTL_MS + 1,
+      serverReceiptAtMs,
       entries: [
         {
           leaseId: "lease-race-1",
@@ -3590,8 +3589,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         },
       ],
     });
-    expect(expiredResult.ok).toBe(false);
-    if (!expiredResult.ok) expect(expiredResult.leaseStatus).toBe("lease_expired");
+    expect(settleAt(minted.lease.expiresAtMs - 1)).toMatchObject({ ok: true, settledCount: 1 });
+    // A backdated review cannot bypass expiry at the server receipt time.
+    expect(settleAt(minted.lease.expiresAtMs)).toMatchObject({ ok: false, leaseStatus: "lease_expired" });
 
     // Superseded lease rejected cleanly.
     const nextLease = issueOfflineFlashcardLease({
@@ -3923,7 +3923,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     expect(wrongOriginRedeem.ok).toBe(false);
     if (!wrongOriginRedeem.ok) expect(wrongOriginRedeem.code).toBe("origin_mismatch");
 
-    // Expired at +90_001ms fails closed.
+    // The expiry millisecond is outside the redemption window.
     const expiredRedeem = redeemCompanionPairingOffer({
       offer: created.offer,
       sessionId: "sess-expired",
@@ -3931,7 +3931,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       userCode: "ab23cd45",
       fragmentSecretProof: proof,
       requestOrigin: COMPANION_ORIGIN,
-      nowMs: T0 + 90_001,
+      nowMs: created.expiresAtMs,
     });
     expect(expiredRedeem.ok).toBe(false);
     if (!expiredRedeem.ok) {
@@ -3939,7 +3939,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       expect(expiredRedeem.offer.status).toBe("expired");
     }
 
-    // Valid redemption right at the 90s boundary succeeds with strict cookie policy.
+    // The final valid millisecond still succeeds with strict cookie policy.
     const redeemed = redeemCompanionPairingOffer({
       offer: created.offer,
       sessionId: "sess-1",
@@ -3947,7 +3947,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       userCode: "ab23cd45",
       fragmentSecretProof: proof,
       requestOrigin: COMPANION_ORIGIN,
-      nowMs: T0 + 90_000,
+      nowMs: created.expiresAtMs - 1,
     });
     expect(redeemed.ok).toBe(true);
     if (!redeemed.ok) throw new Error("expected redemption");
@@ -4137,16 +4137,17 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       }),
     ).toMatchObject({ allowed: false, httpStatus: 403, reason: "attempt_mismatch" });
 
-    // Expired & revoked sessions rejected cleanly.
-    expect(
-      authorizeCompanionAction({
-        session,
-        action: "heartbeat",
-        attemptId: "attempt-42",
-        requestOrigin: COMPANION_ORIGIN,
-        nowMs: session.expiresAtMs + 1,
-      }),
-    ).toMatchObject({ allowed: false, httpStatus: 403, reason: "session_expired" });
+    const heartbeatAt = (nowMs: number) => authorizeCompanionAction({
+      session,
+      action: "heartbeat",
+      attemptId: "attempt-42",
+      requestOrigin: COMPANION_ORIGIN,
+      nowMs,
+    });
+    expect(heartbeatAt(session.expiresAtMs - 1)).toMatchObject({ allowed: true });
+    expect(heartbeatAt(session.expiresAtMs)).toMatchObject({
+      allowed: false, httpStatus: 403, reason: "session_expired",
+    });
 
     const revokedSession = revokeCompanionSession(session, T0 + 15_000, "pairing_replay_detected");
     expect(
