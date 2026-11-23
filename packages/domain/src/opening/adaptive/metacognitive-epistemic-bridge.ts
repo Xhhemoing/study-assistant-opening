@@ -146,9 +146,18 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number): Joined
     const attempted = adaptiveShadowTime(observation.attemptedAt);
     if (!row || row.attempted !== attempted) return false;
     if (observation.recordedAt === undefined) {
-      // Conflicting revisions with the same version and outcome need recording times to resolve visibility.
-      return observation.itemVersionId === row.feature.itemVersionId
-        && observation.verifiedCorrect === row.feature.eligibility.verifiedCorrect;
+      // Bind untimestamped heads to the visible feature before resolving duplicates.
+      const { feature } = row;
+      const { eligibility } = feature;
+      const hasHelp = observation.assistance === "hinted" || observation.assistance === "revealed";
+      return (observation.requirementKey ?? null) === feature.requirementKey
+        && observation.skillLabel === feature.skillLabel
+        && (observation.itemVersionId ?? null) === feature.itemVersionId
+        && observation.verifiedCorrect === eligibility.verifiedCorrect
+        && observation.independentAttempt === eligibility.independentAttempt
+        && (observation.usableForCurrentVersion === undefined
+          || observation.usableForCurrentVersion === eligibility.usableForCurrentVersion)
+        && hasHelp === feature.views.includes("help");
     }
     const recorded = adaptiveShadowTime(observation.recordedAt);
     return attempted <= recorded && recorded < cutoff;

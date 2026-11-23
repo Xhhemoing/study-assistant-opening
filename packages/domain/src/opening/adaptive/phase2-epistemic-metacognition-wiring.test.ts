@@ -86,10 +86,13 @@ it("requires an unambiguous earliest calibration attempt across version states",
 });
 
 function feature(row: SnapshotObservation, fields: Partial<LearnerStateFeature> = {}): LearnerStateFeature {
+  const views: LearnerStateFeature["views"] = row.independentAttempt === "yes" ? ["independent"] : [];
+  if (row.assistance === "hinted" || row.assistance === "revealed") views.push("help");
   return { observationId: row.id, attemptId: row.id, courseId: "math", requirementKey: row.requirementKey!,
     itemVersionId: row.itemVersionId!, skillLabel: row.skillLabel, attemptedAt: row.attemptedAt, recordedAt: row.attemptedAt,
-    availability: "available", views: ["independent"], ordinal: 0, outcome: row.verifiedCorrect === "yes" ? "correct" : "incorrect",
-    eligibility: { verifiedCorrect: row.verifiedCorrect, independentAttempt: row.independentAttempt, usableForCurrentVersion: "yes", reasonCodes: [] } as LearnerStateFeature["eligibility"],
+    availability: "available", views, ordinal: 0, outcome: row.verifiedCorrect === "yes" ? "correct" : "incorrect",
+    eligibility: { verifiedCorrect: row.verifiedCorrect, independentAttempt: row.independentAttempt,
+      usableForCurrentVersion: row.usableForCurrentVersion ?? "unknown", reasonCodes: [] } as LearnerStateFeature["eligibility"],
     sourceIds: [], sourceVersions: {}, transfer: {} as LearnerStateFeature["transfer"], gaps: [],
     retention: { protocolId: null, earliestAt: null, recordedIntervalSupportCount: null, intervalExposureComplete: null }, ...fields };
 }
@@ -158,6 +161,24 @@ it("binds untimestamped heads to matching visible versions and outcomes before r
     expect(predictLearnerShadowV2(appended)).toEqual(forecast);
     expect(compareLearnerShadowV2({ ...appended, cutoff: at(4) }).rows).toEqual([holdoutForecast]);
   }
+});
+
+it.each([
+  ["independence", { independentAttempt: "no" }],
+  ["hint exposure", { assistance: "hinted" }],
+  ["solution exposure", { assistance: "revealed" }],
+  ["version usability", { usableForCurrentVersion: "no" }],
+  ["requirement", { requirementKey: "apply-integrals" }],
+  ["skill label", { skillLabel: "Integral applications" }],
+] as const)("preserves the day-2 forecast when an untimestamped %s correction is recorded on day 3", (_label, correction) => {
+  const evidence = head("evidence", 1);
+  const revision = { ...evidence, ...correction };
+  const input = { scope, cutoff: at(2), observations: [evidence], features: [feature(evidence)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const forecast = predictLearnerShadowV2(input);
+  expect(forecast.evidenceObservationIds).toEqual([evidence.id]);
+  expect(predictLearnerShadowV2({ ...input, observations: [evidence, revision],
+    features: [...input.features, feature(revision, { recordedAt: at(3) })] })).toEqual(forecast);
 });
 
 it("preserves walk-forward prefixes when a duplicate head becomes visible at the held-out attempt", () => {
