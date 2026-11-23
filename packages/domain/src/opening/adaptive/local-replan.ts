@@ -1,6 +1,7 @@
 import type { LocalReplanMetadata, PlannedBlock, TaskItem, TimeBlock } from "@aistudy/contracts";
 import { planDay, type PlanDayOptions } from "../day-planner";
 import { isInstantOnLocalDay, resolveLocalDayBounds } from "../local-day-bounds";
+import { evaluateWheelSpinningGuard, type AdaptiveWheelSpinningInput } from "./metacognitive-epistemic-bridge";
 
 export function samePlannedBlocks(left: readonly PlannedBlock[], right: readonly PlannedBlock[]): boolean {
   const key = (block: PlannedBlock) => JSON.stringify([block.taskId, block.start, block.end, block.reason]);
@@ -116,17 +117,35 @@ export function buildLocalReplan(input: {
   acceptedBlocks: readonly PlannedBlock[]; tasks: readonly TaskItem[];
   constraints: readonly TimeBlock[]; now: Date; options: PlanDayOptions; preserveAll?: boolean;
   excludedTaskIds?: ReadonlySet<string>; inactiveRetestTaskIds?: ReadonlySet<string>; candidateTaskIds?: ReadonlySet<string>;
+  wheelSpinningGuard?: AdaptiveWheelSpinningInput;
 }) {
-  const { fixedBlocks, releasedTaskVersions } = localReplanFixedBlocks({
+  const guard = input.wheelSpinningGuard;
+  const spinningTask = guard && input.tasks.find(task => task.id === guard.taskId && task.status === "pending");
+  const wheelSpinningGuard = spinningTask && guard ? evaluateWheelSpinningGuard(guard, input.now) : undefined;
+  const carryOver = wheelSpinningGuard?.triggered ? spinningTask : undefined;
+  const nowMs = input.now.getTime();
+  const { fixedBlocks: accepted, releasedTaskVersions } = localReplanFixedBlocks({
     ...input,
     localDate: input.options.localDate,
     timeZone: input.options.timeZone,
   });
+  const fixedBlocks = carryOver ? accepted.flatMap(block => {
+    if (block.taskId !== carryOver.id) return [block];
+    const start = Date.parse(block.start);
+    if (start > nowMs) return [];
+    // Keep the delivered part of the active block under the original task and reason.
+    return [start < nowMs && Date.parse(block.end) > nowMs ? { ...block, end: input.now.toISOString() } : block];
+  }) : accepted;
+  if (carryOver?.version && !samePlannedBlocks(fixedBlocks, accepted)
+    && !releasedTaskVersions.some(row => row.id === carryOver.id)) {
+    releasedTaskVersions.push({ id: carryOver.id, version: carryOver.version, status: carryOver.status });
+  }
   const fixedFutureIds = new Set(fixedBlocks.filter(block => Date.parse(block.end) > input.now.getTime()).map(block => block.taskId));
   const inactiveRetestIds = input.inactiveRetestTaskIds?.size
     ? new Set([...input.inactiveRetestTaskIds].map(id => id.toLowerCase()))
     : undefined;
   const candidates = input.tasks.filter(task => task.status === "pending"
+    && task.id !== carryOver?.id
     && (!input.candidateTaskIds || input.candidateTaskIds.has(task.id))
     && !fixedFutureIds.has(task.id)
     && !input.excludedTaskIds?.has(task.id)
@@ -134,8 +153,11 @@ export function buildLocalReplan(input: {
     && (!task.notBefore || Date.parse(task.notBefore) <= input.now.getTime())
     && matchesScheduledDay(task, input.options.localDate, input.options.timeZone));
   const locked: TimeBlock[] = fixedBlocks.map(block => ({ start: block.start, end: block.end, kind: "locked" }));
-  const planned = planDay(candidates, [...input.constraints, ...locked], input.options);
+  const planningNow = carryOver && !(Date.parse(input.options.planningNow ?? "") >= nowMs) ? input.now.toISOString() : input.options.planningNow;
+  const planned = planDay(candidates, [...input.constraints, ...locked], carryOver ? { ...input.options, planningNow } : input.options);
   const blocks = [...fixedBlocks, ...planned.blocks].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
   return { blocks, unscheduledTaskIds: planned.unscheduledTaskIds, fixedBlocks, releasedTaskVersions,
-    changed: !samePlannedBlocks(blocks, input.acceptedBlocks) };
+    changed: !samePlannedBlocks(blocks, input.acceptedBlocks), ...(carryOver && wheelSpinningGuard ? {
+      wheelSpinningCarryOverTaskIds: [carryOver.id], microConsolidationPlan: wheelSpinningGuard.microConsolidationPlan,
+    } : {}) };
 }

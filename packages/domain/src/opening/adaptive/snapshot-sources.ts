@@ -3,6 +3,7 @@ import type { EvidenceEligibilityValue } from "../evidence-eligibility";
 import type { Assistance, SkillStatus } from "./types";
 import type { RemediationCycleSummary } from "../remediation-cycle";
 import type { DrilldownStateSnapshot, SkillPlacementRoute } from "../../diagnostic-placement";
+import type { ConfidenceRouteDecision, MurphyBrierReceipt, PreAnswerConfidence } from "../../metacognition/types";
 
 /** Outcome of reading one data source. "unavailable" is a failure and never means "empty". */
 export type SnapshotDataStatus = "available" | "not_configured" | "unavailable";
@@ -26,6 +27,18 @@ export type SnapshotObservation = {
   usableForCurrentVersion?: EvidenceEligibilityValue;
   problemId: string | null;
   errors?: TeachingLearnerFocus["recentErrors"];
+  /** Trusted pre-answer and item lineage facts. Absence must not imply confirmation. */
+  familyKey?: string | null;
+  preAnswerConfidence?: PreAnswerConfidence;
+  hasValidIntermediateSteps?: boolean;
+  isFirstSubmission?: boolean;
+  isMultiDraft?: boolean;
+};
+
+export type MetacognitiveConfidenceContext = {
+  /** Pre-answer confidence attached to the selected skill's effective observation IDs. */
+  byObservationId: ReadonlyMap<string, Pick<SnapshotObservation,
+    "preAnswerConfidence" | "hasValidIntermediateSteps" | "isFirstSubmission" | "isMultiDraft">>;
 };
 
 /** One summarizeObservations row over the course's full evidence (not the HTTP projection). */
@@ -119,6 +132,7 @@ export type NextLearningStepInput = {
   remediationCycles?: RemediationCycleSummary;
   placementRoute?: SkillPlacementRoute;
   drilldownSnapshot?: DrilldownStateSnapshot;
+  metacognitiveConfidence?: MetacognitiveConfidenceContext;
 };
 
 export type NextLearningStep = {
@@ -130,4 +144,10 @@ export type NextLearningStep = {
   phaseSource?: LearningPhaseSource;
   placementRoute?: SkillPlacementRoute["route"];
   holdoutVerificationRequired?: boolean;
+  metacognitiveRoute?: ConfidenceRouteDecision["route"];
+  allowMasteryAdvance?: ConfidenceRouteDecision["allowMasteryAdvance"];
+  productiveFailureRecognized?: ConfidenceRouteDecision["productiveFailureRecognized"];
+  effectiveFrustrationStreak?: ConfidenceRouteDecision["effectiveFrustrationStreak"];
+  pedagogicalDirective?: ConfidenceRouteDecision["directive"];
+  murphyBrier?: MurphyBrierReceipt;
 };

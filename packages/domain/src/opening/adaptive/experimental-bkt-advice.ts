@@ -2,6 +2,10 @@ import type { LearnerStateFeature } from "../learner-state";
 import { predictLearnerShadow } from "../learner-shadow-predictions";
 import { nextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
 import type { NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
+import {
+  adaptiveShadowTime, compareLearnerShadowV2, planAdaptiveBellmanShadow, predictLearnerShadowV2,
+  type AdaptiveBellmanShadowInput, type AdaptiveEpistemicShadowInput,
+} from "./metacognitive-epistemic-bridge";
 
 /** Predeclared experiment choices, not fitted sample sufficiency or calibrated truth. */
 export const EXPERIMENTAL_BKT_ADVICE_POLICY = {
@@ -18,6 +22,9 @@ export type ExperimentalBktAdviceInput = {
   cutoff: string;
   /** Accept problem IDs or observation IDs; translate to the predictor's observation-ID exclusions. */
   excludedProblemIds: readonly string[];
+  epistemic?: Omit<AdaptiveEpistemicShadowInput, "scope" | "cutoff" | "observations" | "features" | "excludedProblemIds">
+    & Omit<AdaptiveEpistemicShadowInput["scope"], "courseId" | "requirementKey">
+    & { bellman?: AdaptiveBellmanShadowInput };
 };
 type FallbackReason = "disabled" | "incomplete_target" | "invalid_cutoff" | "priority_rule"
   | "no_qualified_samples" | "insufficient_samples";
@@ -44,16 +51,12 @@ export type ExperimentalBktAdviceResult = {
     differsFromRule: boolean;
   };
   calibrated: false;
+  epistemicShadowComparison?: {
+    prediction: ReturnType<typeof predictLearnerShadowV2>;
+    holdout: ReturnType<typeof compareLearnerShadowV2>["receipt"];
+    bellman?: ReturnType<typeof planAdaptiveBellmanShadow>;
+  };
 };
-
-/** Reject calendar rollovers and timezone-less timestamps at the experiment boundary. */
-function experimentTime(value: string | null): number {
-  if (value == null || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return NaN;
-  const time = Date.parse(value);
-  const date = new Date(`${value.slice(0, 10)}T00:00:00Z`);
-  return Number.isFinite(time) && Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value.slice(0, 10)
-    && Number(value.slice(11, 13)) < 24 ? time : NaN;
-}
 
 /**
  * Explicit opt-in consumption, separate from rules and decision receipts. No status,
@@ -66,9 +69,10 @@ export function nextLearningStepWithExperimentalBkt(
   const ruleDecision = nextLearningStep(input);
   const comparison = { policyVersion: EXPERIMENTAL_BKT_ADVICE_POLICY.version,
     ruleVersion: NEXT_LEARNING_STEP_VERSION, sampleCount: 0, differsFromRule: false } as const;
-  const fallback = (reason: FallbackReason, sampleCount = 0): ExperimentalBktAdviceResult => ({
+  const fallback = (reason: FallbackReason, sampleCount = 0,
+    shadow: Pick<ExperimentalBktAdviceResult, "epistemicShadowComparison"> = {}): ExperimentalBktAdviceResult => ({
     ruleDecision, experimentalAdvice: null, calibrated: false,
-    comparison: { ...comparison, status: "fallback", reason, sampleCount },
+    comparison: { ...comparison, status: "fallback", reason, sampleCount }, ...shadow,
   });
   if (experiment?.enabled !== true) return fallback("disabled");
   const { target, cutoff, features, excludedProblemIds } = experiment;
@@ -77,11 +81,21 @@ export function nextLearningStepWithExperimentalBkt(
     return fallback("incomplete_target");
   }
   // Require an explicit timezone, not server-local date interpretation.
-  const cutoffTime = experimentTime(cutoff);
+  const cutoffTime = adaptiveShadowTime(cutoff);
   if (!Number.isFinite(cutoffTime)) return fallback("invalid_cutoff");
   if (input.dueRetest || input.learningPhase !== undefined || input.phaseSource === "explicit"
-    || input.wantsFullExplanation || !["needs_check", "independent", "correct_needs_independent_check"].includes(ruleDecision.reasonCode)) {
+    || input.wantsFullExplanation || ruleDecision.metacognitiveRoute === "lucky_guess_verification_probe"
+    || !["needs_check", "independent", "correct_needs_independent_check"].includes(ruleDecision.reasonCode)) {
     return fallback("priority_rule");
+  }
+  const epistemic = experiment.epistemic;
+  const shadow: Pick<ExperimentalBktAdviceResult, "epistemicShadowComparison"> = {};
+  if (epistemic?.targetFamilyKeys.some(key => key.trim())) {
+    const { workspaceId, learnerId, confirmedSkillVersion, bellman, ...configuration } = epistemic;
+    const shadowInput = { ...configuration, scope: { courseId: courseId!, requirementKey: requirementKey!, workspaceId, learnerId, confirmedSkillVersion },
+      cutoff, observations: input.observations, features, excludedProblemIds: [...excludedProblemIds, problemId!] };
+    shadow.epistemicShadowComparison = { prediction: predictLearnerShadowV2({ ...shadowInput, targetItemVersionId: itemVersionId! }),
+      holdout: compareLearnerShadowV2(shadowInput).receipt, ...(bellman ? { bellman: planAdaptiveBellmanShadow(bellman) } : {}) };
   }
 
   // Features lack problemId. Join to trusted effective observation heads rather
@@ -102,9 +116,9 @@ export function nextLearningStepWithExperimentalBkt(
   const excluded = new Set(excludedProblemIds);
   const comparable = features.filter(row => {
     const head = heads.get(row.observationId);
-    const attempted = experimentTime(row.attemptedAt), recorded = experimentTime(row.recordedAt);
+    const attempted = adaptiveShadowTime(row.attemptedAt), recorded = adaptiveShadowTime(row.recordedAt);
     return head && head.problemId && head.itemVersionId && head.requirementKey === requirementKey
-      && head.itemVersionId === row.itemVersionId && experimentTime(head.attemptedAt) === attempted
+      && head.itemVersionId === row.itemVersionId && adaptiveShadowTime(head.attemptedAt) === attempted
       && head.assistance === "independent" && head.independentAttempt === "yes"
       && head.usableForCurrentVersion === "yes" && head.verifiedCorrect === row.eligibility.verifiedCorrect
       && row.availability === "available" && !row.views.includes("help")
@@ -114,8 +128,8 @@ export function nextLearningStepWithExperimentalBkt(
   });
   const prediction = predictLearnerShadow({ features: comparable, courseId: courseId!, requirementKey: requirementKey!, cutoff, excludedProblemIds: [] });
   const sampleCount = prediction.evidenceObservationIds.length;
-  if (!sampleCount) return fallback("no_qualified_samples");
-  if (sampleCount < EXPERIMENTAL_BKT_ADVICE_POLICY.minimumDistinctProblems) return fallback("insufficient_samples", sampleCount);
+  if (!sampleCount) return fallback("no_qualified_samples", 0, shadow);
+  if (sampleCount < EXPERIMENTAL_BKT_ADVICE_POLICY.minimumDistinctProblems) return fallback("insufficient_samples", sampleCount, shadow);
   const bkt = prediction.predictions.find(row => row.modelId === "classical-bkt")!;
   const additionalSupport = bkt.probability < EXPERIMENTAL_BKT_ADVICE_POLICY.supportBelowProbability;
   const activityKind = additionalSupport ? "reduced_help_practice" : ruleDecision.activityKind;
@@ -127,5 +141,6 @@ export function nextLearningStepWithExperimentalBkt(
       cutoff, target: { courseId, requirementKey, problemId, itemVersionId } },
     comparison: { ...comparison, status: "compared", reason: additionalSupport ? "additional_support" : "retain_rule",
       sampleCount, differsFromRule: activityKind !== ruleDecision.activityKind },
+    ...shadow,
   };
 }

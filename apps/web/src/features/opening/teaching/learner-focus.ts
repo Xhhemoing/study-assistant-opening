@@ -2,6 +2,7 @@ import type { TeachingLearnerFocus } from "@aistudy/contracts";
 import {
   ADAPTIVE_STRATEGY_VERSION, buildDecisionInput, nextLearningStep, resolveGoalLearningContext,
   resolvePrerequisiteDrilldown, selectPrerequisiteRepair, type PrerequisiteDrilldownContext, type SkillPlacementRoute,
+  type MetacognitiveConfidenceContext,
 } from "@aistudy/domain";
 import type { LearnerSnapshotRead } from "../planning/learner-snapshot-service";
 import { normalizeSkillLabelKey } from "../learning/skill-label-options";
@@ -11,6 +12,7 @@ export function teachingLearnerFocus(read: LearnerSnapshotRead, courseId: string
   wantsFullExplanation: boolean, requestedRequirementKey?: string | null, now = new Date(), options?: {
     placementRoutesByNodeId?: ReadonlyMap<string, SkillPlacementRoute>;
     drilldown?: PrerequisiteDrilldownContext;
+    metacognition?: MetacognitiveConfidenceContext;
   }): TeachingLearnerFocus | null {
   const course = read.snapshot.courses.find(row => row.courseId === courseId);
   const source = read.sources.courses.find(row => row.courseId === courseId);
@@ -42,6 +44,7 @@ export function teachingLearnerFocus(read: LearnerSnapshotRead, courseId: string
     wantsFullExplanation,
     placementRoute,
     drilldownSnapshot: drilldown?.snapshot,
+    metacognitiveConfidence: options?.metacognition,
   });
   const { observations } = decisionInput;
   const { activityKind, focusObservationId, reasonCode } = nextLearningStep(decisionInput);

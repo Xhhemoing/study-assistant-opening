@@ -1,0 +1,266 @@
+import { createSkillBelief, effectiveRetrievability, retrievability, type SkillBeliefV1 } from "../../epistemic/belief";
+import { explorationWeight, planFiniteHorizon, type SchedulerAction } from "../../epistemic/bellman-scheduler";
+import { propagateFireCredit, type FireTarget } from "../../epistemic/fire-credit";
+import { updateBeliefWithEvidence, type SkillItemModel } from "../../epistemic/gauss-hermite";
+import { evaluateShadowV2Holdout, type ShadowV2Input, type ShadowV2Row } from "../../epistemic/shadow-v2";
+import { routeMetacognitiveConfidence } from "../../metacognition/confidence-router";
+import { computeMurphyBrierReceipt } from "../../metacognition/murphy-brier";
+import { isPreAnswerConfidence, type WheelSpinningGuardInput } from "../../metacognition/types";
+import { wheelSpinningGuard } from "../../metacognition/wheel-spinning-guard";
+import { isAiGradedEvidence } from "../ai-evaluation";
+import { scoreLearnerShadowV2 } from "../learner-shadow-predictions";
+import type { LearnerStateFeature } from "../learner-state";
+import type { NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
+
+type SkillScope = Pick<SkillBeliefV1, "workspaceId" | "learnerId" | "courseId" | "confirmedSkillVersion"> & {
+  requirementKey: string;
+};
+
+export type SkillBeliefTrajectoryInput = {
+  scope: SkillScope;
+  cutoff: string;
+  /** Trusted, identity-scoped effective heads and their independently qualified features. */
+  observations: readonly SnapshotObservation[];
+  features: readonly LearnerStateFeature[];
+  /** Immutable publisher item models and predeclared prior, available at the prediction cutoff. */
+  itemModelsByVersion?: ReadonlyMap<string, SkillItemModel>;
+  misconceptionPrior?: Pick<SkillBeliefV1, "misconceptionMass" | "otherMass">;
+  /** Verified prerequisite edges from a distinct source skill to this skill, keyed by source observation. */
+  fireEdgesByObservationId?: ReadonlyMap<string, Omit<FireTarget, "belief"> & { sourceSkillVersion: SkillBeliefV1["confirmedSkillVersion"] }>;
+  excludedProblemIds?: readonly string[];
+};
+
+export type AdaptiveEpistemicShadowInput = SkillBeliefTrajectoryInput & Pick<ShadowV2Input,
+  "targetFamilyKeys" | "propagatedFamilyKeys" | "advanceThreshold">;
+
+export type AdaptiveWheelSpinningInput = Omit<WheelSpinningGuardInput, "nowMs" | "scheduleBlocks" | "thresholds">;
+
+export function evaluateWheelSpinningGuard(input: AdaptiveWheelSpinningInput, now: Date) {
+  return wheelSpinningGuard({ ...input, nowMs: now.getTime() });
+}
+
+function firstSubmissions<T>(rows: readonly T[], problem: (row: T) => string | null, time: (row: T) => number) {
+  const first = new Map<string, { at: number; row: T | null }>();
+  for (const row of rows) {
+    const key = problem(row), at = time(row);
+    if (!key || !Number.isFinite(at)) continue;
+    const existing = first.get(key);
+    if (!existing || at < existing.at) first.set(key, { at, row });
+    else if (at === existing.at) first.set(key, { at, row: null });
+  }
+  return new Set([...first.values()].map(entry => entry.row));
+}
+
+export function metacognitiveStepMetadata({ observations, metacognitiveConfidence }: NextLearningStepInput) {
+  if (!metacognitiveConfidence && !observations.some(row => row.preAnswerConfidence !== undefined)) return undefined;
+  const current = observations.filter(row => row.usableForCurrentVersion === "yes").map(row => ({
+    ...metacognitiveConfidence?.byObservationId.get(row.id), ...row,
+  }));
+  const submissions = firstSubmissions(current, row => row.problemId, row => Date.parse(row.attemptedAt));
+  const isAssisted = (row: SnapshotObservation) => row.assistance !== "independent"
+    || row.independentAttempt !== "yes" || row.isMultiDraft === true;
+  const calibration = current.flatMap(row => isPreAnswerConfidence(row.preAnswerConfidence) ? [{
+    itemId: row.problemId ?? undefined,
+    preAnswerConfidence: row.preAnswerConfidence,
+    isCorrect: row.verifiedCorrect === "unknown" ? null : row.verifiedCorrect === "yes",
+    isFirstSubmission: submissions.has(row) && row.isFirstSubmission !== false,
+    assisted: isAssisted(row),
+  }] : []);
+  if (calibration.length === 0) return undefined;
+  const murphyBrier = computeMurphyBrierReceipt(calibration);
+  const latest = current[0];
+  if (!latest || latest.verifiedCorrect === "unknown" || !isPreAnswerConfidence(latest.preAnswerConfidence)) return { murphyBrier };
+  let priorConsecutiveErrors = 0;
+  for (const row of current.slice(1)) {
+    if (row.verifiedCorrect !== "no" || row.hasValidIntermediateSteps === true) break;
+    priorConsecutiveErrors++;
+  }
+  const route = routeMetacognitiveConfidence({ preAnswerConfidence: latest.preAnswerConfidence,
+    isCorrect: latest.verifiedCorrect === "yes", hasValidIntermediateSteps: latest.hasValidIntermediateSteps === true,
+    priorConsecutiveErrors, assisted: isAssisted(latest) && !(latest.preAnswerConfidence === "guessing"
+      && latest.assistance === "independent" && latest.independentAttempt === "unknown" && latest.isMultiDraft !== true) });
+  return { murphyBrier, metacognitiveRoute: route.route, allowMasteryAdvance: route.allowMasteryAdvance,
+    productiveFailureRecognized: route.productiveFailureRecognized, effectiveFrustrationStreak: route.effectiveFrustrationStreak,
+    pedagogicalDirective: route.directive };
+}
+
+/** Reject time without a timezone and calendar rollovers before constructing a bitemporal prefix. */
+export function adaptiveShadowTime(value: string | null): number {
+  if (value == null || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return NaN;
+  const time = Date.parse(value);
+  const date = new Date(`${value.slice(0, 10)}T00:00:00Z`);
+  return Number.isFinite(time) && Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value.slice(0, 10)
+    && Number(value.slice(11, 13)) < 24 ? time : NaN;
+}
+
+type JoinedHead = {
+  feature: LearnerStateFeature;
+  observation: SnapshotObservation;
+  attempted: number;
+  recorded: number;
+};
+
+function uniqueById<T>(rows: readonly T[], idOf: (row: T) => string) {
+  const byId = new Map<string, T | null>();
+  for (const row of rows) {
+    const id = idOf(row);
+    byId.set(id, byId.has(id) ? null : row);
+  }
+  return byId;
+}
+
+function prepareHeads(input: SkillBeliefTrajectoryInput): JoinedHead[] {
+  const heads = uniqueById(input.observations, row => row.id);
+  const features = uniqueById(input.features.filter(row => row.courseId === input.scope.courseId), row => row.observationId);
+  return [...features.values()].flatMap(feature => {
+    if (!feature) return [];
+    const observation = heads.get(feature.observationId);
+    if (!observation?.problemId || !feature.requirementKey || observation.requirementKey !== feature.requirementKey) return [];
+    const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
+    return attempted <= recorded && adaptiveShadowTime(observation.attemptedAt) === attempted
+      ? [{ feature, observation, attempted, recorded }] : [];
+  }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));
+}
+
+function isComparable({ feature, observation }: JoinedHead) {
+  const { eligibility } = feature;
+  return Boolean(observation.itemVersionId) && observation.itemVersionId === feature.itemVersionId
+    && observation.usableForCurrentVersion === "yes" && eligibility.usableForCurrentVersion === "yes"
+    && observation.assistance === "independent" && observation.independentAttempt === "yes"
+    && observation.isFirstSubmission !== false && observation.isMultiDraft !== true
+    && eligibility.independentAttempt === "yes" && eligibility.verifiedCorrect !== "unknown"
+    && observation.verifiedCorrect === eligibility.verifiedCorrect && !isAiGradedEvidence(eligibility)
+    && feature.outcome === (eligibility.verifiedCorrect === "yes" ? "correct" : "incorrect")
+    && feature.availability === "available" && !feature.views.includes("help");
+}
+
+function firstEpistemicSubmissions(rows: readonly JoinedHead[]) {
+  return firstSubmissions(rows, row => JSON.stringify([row.feature.requirementKey, row.observation.problemId]), row => row.attempted);
+}
+
+function shadowItem(input: SkillBeliefTrajectoryInput, id: string): SkillItemModel {
+  return input.itemModelsByVersion?.get(id) ?? { itemId: id, a: 1, b: 0, g: 0.25, l: 0.05 };
+}
+
+function withDirectEvidence(belief: SkillBeliefV1, row: JoinedHead, item: SkillItemModel, freshFamily: boolean) {
+  const outcome = row.observation.verifiedCorrect === "yes";
+  const misconceptionId = !outcome ? row.observation.errors?.find(error => error.source === "verified_steps"
+    && item.misconceptions?.some(misconception => misconception.id === error.misconceptionId))?.misconceptionId : undefined;
+  return updateBeliefWithEvidence({ belief, item, atMs: row.attempted, observation: { outcome, isFreshFamily: freshFamily,
+    channel: misconceptionId ? "step-failure" : "unassisted", misconceptionId } });
+}
+
+function replay(input: SkillBeliefTrajectoryInput, heads: readonly JoinedHead[], cutoff: number, excludedFamilies?: ReadonlySet<string>) {
+  const { scope } = input;
+  let belief = createSkillBelief({ ...scope, ...input.misconceptionPrior });
+  let noDcmBelief = input.misconceptionPrior ? createSkillBelief(scope) : belief;
+  const known = heads.filter(row => row.recorded < cutoff);
+  const first = firstEpistemicSubmissions(known), excludedIds = new Set(input.excludedProblemIds);
+  const eligible = (row: JoinedHead) => first.has(row) && isComparable(row)
+    && !excludedIds.has(row.observation.id) && !excludedIds.has(row.observation.problemId!)
+    && (!excludedFamilies || Boolean(row.observation.familyKey?.trim()) && !excludedFamilies.has(row.observation.familyKey!));
+  const evidenceFeatures: LearnerStateFeature[] = [];
+  const steps: { observationId: string; omega: 0 | 1; belief: SkillBeliefV1 }[] = [];
+  const seenFamilies = new Set<string>();
+  const propagatedAttempts = new Set<string>();
+  const directlyObservedAttempts = new Set(known.filter(row => row.feature.requirementKey === scope.requirementKey
+    && row.feature.attemptId && eligible(row)).map(row => row.feature.attemptId));
+  for (const row of known) {
+    const { observation, feature } = row;
+    const comparable = eligible(row);
+    if (feature.requirementKey === scope.requirementKey) {
+      if (comparable) {
+        const familyKey = observation.familyKey?.trim() ? observation.familyKey : null;
+        const isFreshFamily = !familyKey || !seenFamilies.has(familyKey);
+        const item = shadowItem(input, feature.itemVersionId!);
+        const next = withDirectEvidence(belief, row, item, isFreshFamily).belief;
+        noDcmBelief = noDcmBelief === belief && !item.misconceptions?.length
+          ? next : withDirectEvidence(noDcmBelief, row, { ...item, misconceptions: undefined }, isFreshFamily).belief;
+        belief = next;
+        if (familyKey) seenFamilies.add(familyKey);
+        evidenceFeatures.push(feature);
+      }
+      steps.push({ observationId: observation.id, omega: comparable ? 1 : 0, belief });
+      continue;
+    }
+    const edge = input.fireEdgesByObservationId?.get(observation.id);
+    const attemptId = feature.attemptId;
+    if (!edge || !comparable || observation.verifiedCorrect !== "yes" || !attemptId
+      || directlyObservedAttempts.has(attemptId) || propagatedAttempts.has(attemptId)) continue;
+    const source = createSkillBelief({ ...scope, confirmedSkillVersion: edge.sourceSkillVersion });
+    const sourceUpdate = withDirectEvidence(source, row, shadowItem(input, feature.itemVersionId!), true);
+    const propagate = (target: SkillBeliefV1) => propagateFireCredit({ sourceSkillId: feature.requirementKey!, attemptId,
+      atMs: row.attempted, source: sourceUpdate.belief, rhoPlus: sourceUpdate.retrievedProbability,
+      targets: { target: { ...edge, belief: target } } });
+    const propagated = propagate(belief);
+    noDcmBelief = noDcmBelief === belief ? propagated.targets.target!.belief : propagate(noDcmBelief).targets.target!.belief;
+    belief = propagated.targets.target!.belief;
+    if (propagated.propagatedSkillIds.length) propagatedAttempts.add(attemptId);
+  }
+  return { belief, noDcmBelief, evidenceFeatures, steps, directRetrievability: retrievability(belief, cutoff),
+    effectiveRetrievability: effectiveRetrievability(belief, cutoff) };
+}
+
+function cutoffMs(cutoff: string) {
+  const time = adaptiveShadowTime(cutoff);
+  if (!Number.isFinite(time)) throw new RangeError("Invalid adaptive shadow cutoff");
+  return time;
+}
+
+export function buildSkillBeliefTrajectory(input: SkillBeliefTrajectoryInput) {
+  const cutoff = cutoffMs(input.cutoff);
+  const { belief, steps, directRetrievability, effectiveRetrievability } = replay(input, prepareHeads(input), cutoff);
+  return { belief, steps, directRetrievability, effectiveRetrievability };
+}
+
+function predictAt(input: AdaptiveEpistemicShadowInput, heads: readonly JoinedHead[], cutoff: number,
+  excludedFamilies: ReadonlySet<string>, itemVersionId?: string) {
+  const { belief, noDcmBelief, directRetrievability, effectiveRetrievability, evidenceFeatures } = replay(input, heads, cutoff, excludedFamilies);
+  const predictions = scoreLearnerShadowV2({ ...input.scope, features: evidenceFeatures,
+    cutoff: new Date(cutoff).toISOString(), belief, noDcmBelief, item: shadowItem(input, itemVersionId ?? input.scope.requirementKey) });
+  return { belief, predictions, directRetrievability, effectiveRetrievability,
+    evidenceObservationIds: evidenceFeatures.map(row => row.observationId) };
+}
+
+export function predictLearnerShadowV2(input: AdaptiveEpistemicShadowInput & { targetItemVersionId?: string }) {
+  const cutoff = cutoffMs(input.cutoff);
+  return predictAt(input, prepareHeads(input), cutoff, new Set([...input.targetFamilyKeys, ...input.propagatedFamilyKeys]), input.targetItemVersionId);
+}
+
+/** Each answered row gets a forecast from its own pre-attempt prefix, leaving its entire family out. */
+export function compareLearnerShadowV2(input: AdaptiveEpistemicShadowInput) {
+  const cutoff = cutoffMs(input.cutoff);
+  const excluded = new Set([...input.targetFamilyKeys, ...input.propagatedFamilyKeys]);
+  const excludedIds = new Set(input.excludedProblemIds);
+  const heads = prepareHeads(input).filter(row => row.recorded < cutoff);
+  const first = firstEpistemicSubmissions(heads);
+  const rows = heads.flatMap((row): ShadowV2Row[] => {
+    const { observation, feature } = row;
+    const familyKey = observation.familyKey;
+    if (feature.requirementKey !== input.scope.requirementKey || !first.has(row) || !isComparable(row)
+      || !familyKey?.trim() || excluded.has(familyKey) || excludedIds.has(observation.id) || excludedIds.has(observation.problemId!)) return [];
+    const { predictions } = predictAt(input, heads, row.attempted, new Set([...excluded, familyKey]), feature.itemVersionId!);
+    return [{ observationId: observation.id, familyKey, attemptedAt: observation.attemptedAt,
+      correct: observation.verifiedCorrect === "yes", predictions }];
+  });
+  return { rows, receipt: evaluateShadowV2Holdout({ ...input, rows }) };
+}
+
+export type AdaptiveBellmanShadowInput = {
+  candidates: readonly SchedulerAction[];
+  horizonMinutes?: number;
+  slotMinutes?: number;
+  deadlineHours?: number;
+};
+
+const ADAPTIVE_SHADOW_DEADLINE_HOURS = 72;
+
+export function planAdaptiveBellmanShadow({ candidates, horizonMinutes = ADAPTIVE_SHADOW_DEADLINE_HOURS * 60,
+  slotMinutes = 15, deadlineHours = ADAPTIVE_SHADOW_DEADLINE_HOURS }: AdaptiveBellmanShadowInput) {
+  if (!Number.isFinite(deadlineHours) || deadlineHours < 0 || !Number.isFinite(horizonMinutes) || horizonMinutes < 0
+    || !Number.isInteger(slotMinutes) || slotMinutes < 1) throw new RangeError("Invalid adaptive shadow planning bounds");
+  const boundedMinutes = Math.min(horizonMinutes, ADAPTIVE_SHADOW_DEADLINE_HOURS * 60, deadlineHours * 60);
+  const actions = [...candidates].sort((a, b) => a.id.localeCompare(b.id));
+  return { ...planFiniteHorizon({ actions, slotMinutes, horizonMinutes: boundedMinutes, deadlineHours }),
+    horizonMinutes: boundedMinutes, slotMinutes, deadlineHours, explorationWeight: explorationWeight(deadlineHours, { min: 0 }) };
+}
