@@ -85,13 +85,18 @@ const QUALIFIED_MULTI_SECTION_RE = new RegExp(
 );
 
 const QUALIFIED_ANSWER_LABEL = String.raw`(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)`;
-const ENGLISH_SOLUTION_LABEL = String.raw`(?:(?:Worked|Full|Sample|Official|Reference)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)`;
+const ENGLISH_SOLUTION_LABEL = String.raw`(?:(?:Worked|Full|Sample)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)`;
 const CONTINUED_LABEL = String.raw`(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?`;
 const CHINESE_SOLUTION_LABEL = "(?:参考解答|详细解答|解答|详解|解析)";
 const ENGLISH_INLINE_DELIMITER = String.raw`(?:[:：]|\.(?=\s|$))`;
 const ASSESSMENT_SOLUTIONS_HEADING_RE = new RegExp(String.raw`^Solutions${SEALED_HEADING_CONTINUATION}\s*[:：]?$`, "iu");
 const ASSESSMENT_SOLUTIONS_CONTEXT_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?=[\s:：.—–-]|$)|(?:Exercises?|Problems?|Questions?|Review(?:\s+Questions?)?|Practice(?:\s+Problems?)?|Quiz|Drills?|Self[- ]Check)\b(?=\s*(?:[:：.—–-]|$)|\s+(?:#?\d|(?:for|of|on|from)\s+(?:Chapter|Section|Part|Unit)\b))|(?:\d+|[a-z])[.)](?=\s|$)|[（(]\s*(?:\d+|[a-z])\s*[)）](?=\s|$))/iu;
 const STANDALONE_ASSESSMENT_ITEM_RE = /^\d+[.)]$/u;
+const NUMBERED_QUESTION_RE = /^\d+[.)]\s+\S/u;
+const STANDALONE_CHINESE_SOLUTION_RE = new RegExp(String.raw`^解答${CHINESE_ANSWER_CONTINUATION}\s*[:：]$`, "u");
+const QUALIFIED_SOLUTION_LABEL_RE = new RegExp(
+  String.raw`^(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)\s+Solutions?(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)`, "iu",
+);
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
@@ -115,7 +120,7 @@ const INLINE_SEALED_NON_EXAMPLE_RE = new RegExp(
 const STANDALONE_SOLUTION_HEADING_RE = new RegExp(String.raw`^(?!(?:Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|${CHINESE_SOLUTION_LABEL}${CHINESE_ANSWER_CONTINUATION})${CONTINUED_LABEL}\s*$`, "u");
 const WORKED_EXAMPLE_RE = new RegExp(String.raw`^(?:${SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+))?(?:(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+|$)|(?:\s*\([^)]+\))?\s*(?:[:：.—-]|$))|例题(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*(?:[:：.．—-]|$))|例(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*[:：]))`, "iu");
 const WORKED_EXAMPLE_INTERNAL_RE = new RegExp(
-  String.raw`^(?:(?!(?:(?:Official|Reference)\s+[Ss]olutions|(?:OFFICIAL|REFERENCE)\s+SOLUTIONS|Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|Proof|PROOF)${CONTINUED_LABEL}\s*(?:[:：]|\.(?:\s|$)|$)` +
+  String.raw`^(?:(?!(?:Solutions|SOLUTIONS)\b)(?:${ENGLISH_SOLUTION_LABEL}|Proof|PROOF)${CONTINUED_LABEL}\s*(?:[:：]|\.(?:\s|$)|$)` +
   String.raw`|(?:${CHINESE_SOLUTION_LABEL}|证明|证|解|分析)${CHINESE_ANSWER_CONTINUATION}\s*(?:[:：]|$)|【\s*(?:解答|证明|证|解|分析|详解|解析)${CHINESE_ANSWER_CONTINUATION}\s*】)`, "u",
 );
 const EXERCISE_OPENER_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problem\s+\d+|PROBLEM\s+\d+|Question\s+\d+|QUESTION\s+\d+)\b|(?:习题|练习题|练习|思考题|作业题))/u;
@@ -144,7 +149,7 @@ const REFERENCE_BODY_RE = /^[A-Za-z0-9\u4e00-\u9fff【「『〈《]/u;
 const ENGLISH_REFERENCE_CLAUSE_RE = /,\s*(?:which|where|applied|used|shown|given|as)\b/u;
 const ENGLISH_REFERENCE_SUBJECT_RE = /^(?:[a-z]+|This|That|It|They|We)\b/u;
 const CHINESE_REFERENCE_CLAUSE_RE = /[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)/u;
-const ANSWER_PROOF_HEADING_RE = /^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s\d:：.．—–(（-]|$)|证\s*[:：.．])/iu;
+const ANSWER_PROOF_HEADING_RE = /^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。])/iu;
 const ENGLISH_CONTAINER_PREFIX_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s|:：.．—–(（-]|$)/iu;
 const CHINESE_CONTAINER_PREFIX_RE = /^(?:第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)/u;
 const BLOCK_IDENTIFIER_RE = /^\s+(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)\b(?=[\s:：.．、—–(（-]|$)/iu;
@@ -292,7 +297,8 @@ function isSectionSealedExit(stripped: string, isMarkdownHeading: boolean): bool
   if (isTitledPublicContainer(stripped)) return true;
   if (isNumberedSectionHeading(stripped)) return true;
   if (!isMarkdownHeading) return false;
-  if (INLINE_SEALED_ALWAYS_RE.test(stripped) || INLINE_SEALED_NON_EXAMPLE_RE.test(stripped)) return false;
+  if (INLINE_SEALED_ALWAYS_RE.test(stripped) || QUALIFIED_SOLUTION_LABEL_RE.test(stripped)
+      || INLINE_SEALED_NON_EXAMPLE_RE.test(stripped)) return false;
   if (STANDALONE_SOLUTION_HEADING_RE.test(stripped) || SECTION_SEALED_SUBHEADER_RE.test(stripped)) return false;
   return !ANSWER_OR_REVIEW_TITLE_RE.test(stripped) && isGenericPublicMarkdownHeading(stripped);
 }
@@ -384,6 +390,7 @@ function stripSealedSolutionLines(
   let lastInlineBodyLine = "";
   let inlineBreakPending = false;
   let assessmentContextLine = -1;
+  let previousNumberedQuestion = false;
   const hasSectionSeal = requirePublicVisionHeading
     && lines.some((line, index) => {
       const { stripped } = stripHeadingMarkup(line);
@@ -427,7 +434,10 @@ function stripSealedSolutionLines(
     }
 
     const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
-    if ((incomingProofBoundary || state.inlineProofBoundaryPending) && stripped && !isRunningPageHeading(stripped, false)) {
+    const followsNumberedQuestion = previousNumberedQuestion;
+    const contentLine = stripped && !isRunningPageHeading(stripped, false);
+    if (contentLine) previousNumberedQuestion = NUMBERED_QUESTION_RE.test(stripped);
+    if ((incomingProofBoundary || state.inlineProofBoundaryPending) && contentLine) {
       if (incomingProofBoundary && state.mode === "none" && !state.unknownAfterFailure && ANSWER_PROOF_HEADING_RE.test(stripped)) {
         state.afterAllSealedPage = false;
         setMode("inline_proof_sealed");
@@ -435,11 +445,14 @@ function stripSealedSolutionLines(
       incomingProofBoundary = false;
       state.inlineProofBoundaryPending = false;
     }
-    const exerciseAnswer = state.inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped));
+    const exerciseAnswer = (state.inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped)))
+      || (followsNumberedQuestion && STANDALONE_CHINESE_SOLUTION_RE.test(stripped));
     const bareSolutionsHeading = ASSESSMENT_SOLUTIONS_HEADING_RE.test(stripped);
     const assessmentContext = bareSolutionsHeading ? findAssessmentSolutionsContext(lines, index) : -1;
     if (assessmentContext >= 0) assessmentContextLine = assessmentContext;
-    const sectionHeader = !exerciseAnswer && (isSectionSealedHeader(stripped) || assessmentContext >= 0);
+    const qualifiedSolution = QUALIFIED_SOLUTION_LABEL_RE.exec(stripped);
+    const sectionHeader = !exerciseAnswer && !(state.inWorkedExample && qualifiedSolution)
+      && (isSectionSealedHeader(stripped) || assessmentContext >= 0);
     if (!sectionHeader && (state.mode !== "none" || state.unknownAfterFailure || state.afterAllSealedPage)
       && isRunningPageHeading(stripped, !isInlineSeal(state.mode) || !allowBareInlineContainer)
       && !(state.inExercise && !isMarkdownHeading && /^\d+[.。]$/u.test(stripped))) {
@@ -523,7 +536,8 @@ function stripSealedSolutionLines(
       continue;
     }
 
-    const inlineOpener = INLINE_SEALED_ALWAYS_RE.exec(stripped) ?? (!state.inWorkedExample && !bareSolutionsHeading
+    const inlineOpener = INLINE_SEALED_ALWAYS_RE.exec(stripped) ?? qualifiedSolution
+      ?? (!state.inWorkedExample && !bareSolutionsHeading
       ? INLINE_SEALED_NON_EXAMPLE_RE.exec(stripped) ?? STANDALONE_SOLUTION_HEADING_RE.exec(stripped)
       : null);
     if (inlineOpener) {

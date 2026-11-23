@@ -48,7 +48,19 @@ it("keeps numbered worked-example solutions public while recognizing explicit an
   expect(containsPdfAnswerLabel(example)).toBe(false);
   expect(containsPdfAnswerLabel(example + "\nExercises\nSolution 1: A private derivation.")).toBe(true);
   expect(containsPdfAnswerLabel(example + "\nOfficial Solution 1: A private derivation.")).toBe(true);
+  expect(containsPdfAnswerLabel(example + "\nCorrect Solution. Yes.")).toBe(true);
   expect(containsPdfAnswerLabel(example + "\nSolution to Exercise 1: A private derivation.")).toBe(true);
+});
+
+it("establishes PDF worked-example context only from primary Vision transcription", () => {
+  const example = "Example 1: Quadratic Equations";
+  const answer = "Solution:\nThe derivation follows.";
+  for (const header of ["【图表观察描述，非原文或解答】", "【识别不确定，不能据此判定正确】",
+    "[图片描述]", "[图像描述]", "[图示与版面描述]", "[不确定处]"]) {
+    expect(containsPdfAnswerLabel(`${header}\n${example}\n[转写]\n${answer}`), header).toBe(true);
+    expect(containsPdfAnswerLabel(`${example}\n${header}\nChapter 2: Geometry\n[转写]\n${answer}`), header).toBe(false);
+    expect(containsPdfAnswerLabel(`${example}\n${header}\nOfficial Solution: A description.`), header).toBe(false);
+  }
 });
 
 function database(row: Record<string, unknown> | undefined, chunks = defaultChunks, reads: string[] = []): Sql {

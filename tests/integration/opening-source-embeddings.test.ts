@@ -395,6 +395,82 @@ describe("pgvector material repository", () => {
     ], [1, 2, 5, 6], 3);
   });
 
+  it.each(["Official Solution 1. Yes.", "Reference Solution 1:", "Model Solution: Yes.",
+    "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:", "EVEN-NUMBERED SOLUTION: Yes.",
+    "Official Solutions", "Reference Solutions:"])(
+    "withholds %s and its adjacent archived proof after a worked example", async label => {
+      await expectArchivedPdfPages([
+        "Example 1: Quadratic Equations\nSolution 1: Factor the polynomial.\n" + label,
+        "Proof. Private continuation. ∎",
+        "Public prose after the proof.",
+      ], [3], 2);
+    },
+  );
+
+  it("still withholds a numbered official solution with a chapter prefix", async () => {
+    await expectArchivedPdfPages(["Chapter 1: Official Solution 1: Yes.", "Public prose."], [2], 1);
+  });
+
+  it.each(["【图表观察描述，非原文或解答】", "【识别不确定，不能据此判定正确】",
+    "[图片描述]", "[图像描述]", "[图示与版面描述]", "[不确定处]"])(
+    "keeps an archived example heading inside %s from making a numbered answer public", async header => {
+      await expectArchivedPdfPages([
+        header + "\nExample 1: Quadratic Equations",
+        "1. Decide whether every cyclic group is abelian.\nSolution:\nYes.",
+        "Proof. Private continuation. ∎",
+        "Public prose after the proof.",
+      ], [1, 4], 3);
+    },
+  );
+
+  it("ignores archived auxiliary chapter headings and terminators until primary transcription resumes", async () => {
+    await expectArchivedPdfPages([
+      "Answer Key",
+      "【图表观察描述，非原文或解答】\nChapter 2: Geometry\nEnd of Answers.",
+      "More private text.",
+      "【识别不确定，不能据此判定正确】\nUncertain description.\n[转写]\nChapter 2: Geometry",
+      "Public prose after the chapter begins.",
+    ], [4, 5], 2);
+  });
+
+  it("ignores archived auxiliary body lines and blank lines at an inline proof boundary", async () => {
+    await expectArchivedPdfPages([
+      "Answer: Yes.\n【图表观察描述，非原文或解答】\nAuxiliary note.\n\nAnother auxiliary note.",
+      "[图像描述]\nAn auxiliary note.\n【原图忠实转写，尚需核对】\nProof. Private continuation. ∎",
+      "Public prose after the proof.",
+    ], [3], 2);
+  });
+
+  it("withholds the answer and proof of a heading-free numbered question with standalone 解答：", async () => {
+    await expectArchivedPdfPages([
+      "Introduction to cyclic groups.",
+      "1. Decide whether every cyclic group is abelian.\n解答：\nYes.",
+      "证明。\nThe proof concludes. ∎",
+      "Public prose after the proof.",
+      "## Solutions\nA homogeneous mixture.",
+      "Solutions\nSolutes dissolve in solvents.",
+    ], [1, 4, 5, 6], 3);
+  });
+
+  it.each(["End of Answers.", "End of Solutions.", "答案完", "解答完"])(
+    "reopens archived prose on the page after %s", async terminator => {
+      await expectArchivedPdfPages([
+        "Answer Key", terminator, "Public prose after the answers.", "Chapter 2: Geometry",
+      ], [3, 4], 2);
+    },
+  );
+
+  it("honors the order of answer-section reopeners and terminators on an archived page", async () => {
+    await expectArchivedPdfPages([
+      "Answer Key\nEnd of Answers.",
+      "First public passage.",
+      "Answer Key\nEnd of Answers.\nAnswer Key",
+      "Private text under the reopened key.",
+      "End of Solutions.",
+      "Second public passage.",
+    ], [2, 6], 4);
+  });
+
   it("keeps a proof public across a missing archived page", async () => {
     const publicText = "This separate paragraph is public.";
     const publicProof = "Proof. A separate public proof.";

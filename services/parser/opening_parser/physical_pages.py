@@ -67,7 +67,7 @@ _ENGLISH_REFERENCE_SUBJECT_RE = re.compile(r"^(?:[a-z]+|This|That|It|They|We)\b"
 _CHINESE_REFERENCE_CLAUSE_RE = re.compile(r"[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)")
 _ANSWER_PROOF_HEADING_RE = re.compile(
     r"^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】"
-    r"|(?:证明|略证|续证)(?=[\s\d:：.．—–(（-]|$)|证\s*[:：.．])", re.IGNORECASE,
+    r"|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。])", re.IGNORECASE,
 )
 _ENGLISH_BLOCK_PREFIX_RE = re.compile(
     r"^(?:Definition|Notation|Terminology|Convention|Axiom|Theorem|Lemma|Proposition|Corollary|Conjecture|Claim"
@@ -127,7 +127,7 @@ _QUALIFIED_MULTI_SECTION_RE = re.compile(
 )
 
 _QUALIFIED_ANSWER_LABEL = r"(?:(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER)"
-_ENGLISH_SOLUTION_LABEL = r"(?:(?:Worked|Full|Sample|Official|Reference)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)"
+_ENGLISH_SOLUTION_LABEL = r"(?:(?:Worked|Full|Sample)\s+[Ss]olutions?|(?:WORKED|FULL|SAMPLE)\s+SOLUTIONS?|Solutions?|SOLUTIONS?)"
 _CONTINUED_LABEL = r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?"
 _CHINESE_SOLUTION_LABEL = r"(?:参考解答|详细解答|解答|详解|解析)"
 _ENGLISH_INLINE_DELIMITER = r"(?:[:：]|\.(?=\s|$))"
@@ -140,6 +140,13 @@ _ASSESSMENT_SOLUTIONS_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _STANDALONE_ASSESSMENT_ITEM_RE = re.compile(r"^\d+[.)]$")
+_NUMBERED_QUESTION_RE = re.compile(r"^\d+[.)]\s+\S")
+_STANDALONE_CHINESE_SOLUTION_RE = re.compile(rf"^解答{_CHINESE_ANSWER_CONTINUATION}\s*[:：]$")
+_QUALIFIED_SOLUTION_LABEL_RE = re.compile(
+    r"^(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)\s+Solutions?"
+    rf"(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)",
+    re.IGNORECASE,
+)
 
 # Single-item answers use a colon or a standalone qualified heading.
 _INLINE_SEALED_ALWAYS_RE = re.compile(
@@ -165,7 +172,7 @@ _STANDALONE_SOLUTION_HEADING_RE = re.compile(
 
 _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE = re.compile(
     r"^(?:"
-    rf"(?!(?:(?:Official|Reference)\s+[Ss]olutions|(?:OFFICIAL|REFERENCE)\s+SOLUTIONS|Solutions|SOLUTIONS)\b)"
+    rf"(?!(?:Solutions|SOLUTIONS)\b)"
     rf"(?:{_ENGLISH_SOLUTION_LABEL}|Proof|PROOF){_CONTINUED_LABEL}\s*(?:[:：]|\.(?:\s|$)|$)"
     rf"|(?:{_CHINESE_SOLUTION_LABEL}|证明|证|解|分析){_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：]|$)"
     rf"|【\s*(?:解答|证明|证|解|详解|解析|分析){_CHINESE_ANSWER_CONTINUATION}\s*】"
@@ -760,7 +767,7 @@ def _is_section_sealed_opener(stripped: str) -> bool:
 
 
 def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[str], *, in_worked_example: bool, in_exercise: bool,
-                      seal_mode: str | None, assessment_solutions: bool, assessment_context_line: bool):
+                      follows_numbered_question: bool, seal_mode: str | None, assessment_solutions: bool, assessment_context_line: bool):
     """Return (kind, seal_kind, is_explicit_opener, is_section_break, is_major_non_answer, caption_ref, associated_visual_kind)."""
     raw_trimmed = line_text.strip()
     is_markdown_heading = bool(_MD_HEADING_LINE_RE.match(raw_trimmed))
@@ -796,11 +803,13 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     if in_worked_example and _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE.match(stripped):
         return "worked_example", None, False, False, False, None, None
 
-    exercise_answer = in_exercise and (_BARE_ANSWER_LABEL_RE.match(stripped) or _CHINESE_EXERCISE_ANSWER_RE.match(stripped))
-    if not exercise_answer and _is_section_sealed_opener(stripped):
+    exercise_answer = (in_exercise and (_BARE_ANSWER_LABEL_RE.match(stripped) or _CHINESE_EXERCISE_ANSWER_RE.match(stripped))
+                       or follows_numbered_question and _STANDALONE_CHINESE_SOLUTION_RE.match(stripped))
+    qualified_solution = _QUALIFIED_SOLUTION_LABEL_RE.match(stripped)
+    if not exercise_answer and not (in_worked_example and qualified_solution) and _is_section_sealed_opener(stripped):
         return "solution_sealed", "section_sealed", True, False, False, None, None
 
-    if _INLINE_SEALED_ALWAYS_RE.match(stripped):
+    if qualified_solution or _INLINE_SEALED_ALWAYS_RE.match(stripped):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 
     if (not in_worked_example and not _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped)
@@ -857,7 +866,8 @@ def _iter_page_units(fragments: list[tuple[str, str | None]]):
 
 def _inline_answer_body(line_text: str) -> str:
     stripped = _strip_heading_markup(line_text)
-    for label in (_INLINE_SEALED_ALWAYS_RE, _INLINE_SEALED_NON_EXAMPLE_RE, _STANDALONE_SOLUTION_HEADING_RE):
+    for label in (_INLINE_SEALED_ALWAYS_RE, _QUALIFIED_SOLUTION_LABEL_RE, _INLINE_SEALED_NON_EXAMPLE_RE,
+                  _STANDALONE_SOLUTION_HEADING_RE):
         match = label.match(stripped)
         if match:
             return re.sub(r"^\s*[:：]?\s*", "", stripped[match.end():])
@@ -923,6 +933,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
 
     units = list(_iter_page_units(fragments))
     assessment_context_line = -1
+    previous_numbered_question = False
     for index, (unit_start, unit_end, unit_text, frag_label, is_frag_start) in enumerate(units):
         if not unit_text.strip():
             active_seal = current[7] if current is not None else page_seal_mode
@@ -939,7 +950,9 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         is_furniture = frag_label in _FURNITURE_LABELS
         stripped = _strip_heading_markup(unit_text)
         is_running_heading = _is_running_page_heading(stripped, bare_containers_are_counters=False)
+        follows_numbered_question = previous_numbered_question
         if stripped and not is_furniture and not is_running_heading:
+            previous_numbered_question = bool(_NUMBERED_QUESTION_RE.match(stripped))
             if initial_inline_proof_boundary and page_seal_mode is None and _ANSWER_PROOF_HEADING_RE.match(stripped):
                 flush()
                 page_seal_mode = "inline_proof_sealed"
@@ -979,6 +992,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             page_visuals,
             in_worked_example=in_worked_example,
             in_exercise=in_exercise,
+            follows_numbered_question=follows_numbered_question,
             seal_mode=active_seal,
             assessment_solutions=assessment_context >= 0,
             assessment_context_line=index == assessment_context_line,

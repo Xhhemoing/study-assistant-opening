@@ -7,6 +7,7 @@ import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 const definitionPatchByteLimit = 256 * 1024;
 const pdfHeadingContainer = String.raw`(?:(?:appendix(?: +[\w.]+)?|(?:chapter|section|lecture|lesson|module|part|unit) +[\w.]+|第 *[一二三四五六七八九十百千\d]+ *(?:章节|讲义|部分|单元|章|节|讲)|附录(?: *[A-Z0-9一二三四五六七八九十]+)?)(?: *[:：.\-—–] *| +)|附录)`;
 const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
+const qualifiedSolution = String.raw`(?:official|reference|model|selected|correct|odd-numbered|even-numbered) +solutions?`;
 const englishContinuationWord = String.raw`(?:continued|cont(?:['’]?d)?\.?)`;
 const englishContinuation = String.raw`(?: *\( *${englishContinuationWord} *\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
@@ -35,15 +36,19 @@ const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmen
 const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案)${chineseContinuation}(?:】|[:：]|$))`;
 const numberedAnswerTarget = String.raw`(?: +to +(?:exercise|problem|question))`;
 const numberedAnswerSuffix = String.raw` *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)`;
-const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${englishAnswerQualifier} +solutions?)${numberedAnswerTarget}?${numberedAnswerSuffix}|(?:(?:worked|full) +)?solutions?${numberedAnswerTarget}${numberedAnswerSuffix}|(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
+const qualifiedSolutionLabel = String.raw`${lineStart}${qualifiedSolution}(?:${numberedAnswerTarget}(?: *\d+(?:\.\d+)*)?)?(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|\.(?= |$) *|$)`;
+const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution})${numberedAnswerTarget}?${numberedAnswerSuffix}|(?:(?:worked|full|sample) +)?solutions?${numberedAnswerTarget}${numberedAnswerSuffix}|(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
 // These labels can also explain a worked example. Qualified keys and explicit
 // assessment targets remain unconditional answers.
-const numberedSolution = String.raw`(?:(?:worked|full) +)?solutions?${numberedAnswerSuffix}`;
+const numberedSolution = String.raw`(?:(?:worked|full|sample) +)?solutions?${numberedAnswerSuffix}`;
 const standaloneEnglishSolution = String.raw`solution${englishContinuation} *[:：] *$`;
+const standaloneChineseSolution = String.raw`${lineStart}解答${chineseContinuation}[:：] *$`;
+const numberedQuestion = String.raw`${lineStart}\d+[.)] +[^ ]`;
 const sectionAnswerLine = String.raw`${lineStart}(?:${sectionAnswer}|解答${chineseContinuation}[:：]? *$)`;
 const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
 const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${standaloneEnglishSolution}|${numberedSolution}|【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|[.。](?: |$)|$))`;
 const answerLabel = new RegExp(answerLabelLine, "imu");
+const jsQualifiedSolution = new RegExp(qualifiedSolutionLabel, "iu");
 const explanationLabel = new RegExp(explanationLabelLine, "iu");
 const jsAnswerPeriod = new RegExp(answerPeriodLine, "mu");
 const jsSolutionPeriod = new RegExp(solutionPeriodLine, "u");
@@ -71,7 +76,11 @@ const blockedReopeningHeading = [
 ].join("|");
 
 // Only extraction and transcription headers may precede a reopening heading.
-const pdfLeadingTextWrappers = String.raw`^(?: *(?:\[(?:原生提取|本地提取（可能含OCR）|视觉转写与描述)\]|【原图忠实转写，尚需核对】) *(?:\n[ \n]*|$))+`;
+const visionTranscription = String.raw`^ *(?:【原图忠实转写[^】]*】|\[转写\]) *[:：]? *$`;
+const visionAuxiliary = String.raw`^ *(?:【(?:图表观察描述|识别不确定)[^】]*】|\[(?:图片描述|图像描述|图示与版面描述|不确定处)\])`;
+const pdfLeadingTextWrappers = String.raw`^ *\[(?:原生提取|本地提取（可能含OCR）|视觉转写与描述)\] *$|${visionTranscription}`;
+const jsVisionTranscription = new RegExp(visionTranscription, "u");
+const jsVisionAuxiliary = new RegExp(visionAuxiliary, "u");
 const jsPdfLeadingTextWrappers = new RegExp(pdfLeadingTextWrappers, "u");
 const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +problems?|(?:problem|question) +\d+)\M|习题|练习题?|思考题|作业题)`;
 const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
@@ -117,7 +126,7 @@ const sectionProse = String.raw`[=<>≈%％。！？；]|[.!?;] *$|${englishRefe
 const appendixHeading = String.raw`${lineStart}(?:appendix(?= |[:：]|$)|附录)`;
 const bareContainerSuffix = String.raw`^[ :：.．—–-]*$`;
 const inlinePublicHeading = String.raw`${lineStart}(?:${englishBlock} *(?:[:：．—–]|\.(?!\d)|-(?!\d)|$)|${chineseBlocks} *(?:[:：]|$))`;
-const answerProofHeading = String.raw`${lineStart}(?:(?:Proof|Sketch +of +Proof)\M|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ \d:：.．—–(（-]|$)|证 *[:：.．])`;
+const answerProofHeading = String.raw`${lineStart}(?:(?:Proof|Sketch +of +Proof)\M|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ \d:：.．。—–(（-]|$)|证 *[:：.．。])`;
 const explicitHeadingMarkup = String.raw`^ *#{1,6} +[^ ]`;
 
 const jsWorkedExample = new RegExp(workedExampleHeading, "iu");
@@ -159,18 +168,25 @@ function acceptsPdfHeading(line: string, prefix: RegExpExecArray, prose: RegExp)
 
 export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
   const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ").replace(pdfClosingAtxHashes, "$1");
-  const withoutEmphasis = normalized.replace(/\*\*|__/gu, "");
-  if (answerLabel.test(withoutEmphasis) || jsAnswerPeriod.test(withoutEmphasis)) return true;
-  if (jsAssessmentSolutionsHeading.test(withoutEmphasis)) {
-    const content = withoutEmphasis.split("\n").filter(line => line.trim() && !jsPdfLeadingTextWrappers.test(line)
+  const primary: { rawLine: string; line: string }[] = [];
+  let auxiliary = false;
+  for (const rawLine of normalized.split("\n")) {
+    const line = rawLine.replace(/\*\*|__/gu, "");
+    if (jsVisionAuxiliary.test(line)) auxiliary = true;
+    else if (jsVisionTranscription.test(line)) auxiliary = false;
+    if (auxiliary || jsPdfLeadingTextWrappers.test(line)) continue;
+    if (answerLabel.test(line) || jsQualifiedSolution.test(line) || jsAnswerPeriod.test(line)) return true;
+    primary.push({ rawLine, line });
+  }
+  if (primary.some(({ line }) => jsAssessmentSolutionsHeading.test(line))) {
+    const content = primary.map(({ line }) => line).filter(line => line.trim()
       && (!isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line)));
     if (content.some((line, index) => jsAssessmentSolutionsHeading.test(line)
       && jsAssessmentSolutionsContext.test(content[index + 1] ?? ""))) return true;
   }
   if (!checkContext) return false;
   let inWorkedExample = false;
-  for (const rawLine of normalized.split("\n")) {
-    const line = rawLine.replace(/\*\*|__/gu, "");
+  for (const { rawLine, line } of primary) {
     if (explanationLabel.test(line) || jsSolutionPeriod.test(line)) {
       if (!inWorkedExample) return true;
       continue;
@@ -234,7 +250,8 @@ function isArchiveRunningHeading(line: string): boolean {
 }
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
-const inlineTerminator = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|\mQ\.?E\.?D\.?|证毕|证完|end +of +answers?|答案完|解答完) *[.。]? *$`;
+const answerSectionEnd = String.raw`(?:end +of +(?:answers?|solutions?)|答案完|解答完) *[.。]? *$`;
+const inlineTerminator = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|\mQ\.?E\.?D\.?|证毕|证完|\mend +of +(?:answers?|solutions?)|答案完|解答完) *[.。]? *$`;
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -306,7 +323,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       (line ~* ${inlineRunningHeading} OR (furniture_title IS NOT NULL
         AND furniture_title !~ ${englishReferenceVerb} AND furniture_title !~* ${furnitureTitleProse})) AS running_heading
     FROM (
-      SELECT *, raw_line ~ ${explicitHeadingMarkup} AS atx,
+      SELECT *, coalesce(last_auxiliary>coalesce(last_transcription,0),false) AS auxiliary,
+        raw_line ~ ${explicitHeadingMarkup} AS atx,
         NULLIF(regexp_replace(line,${englishContainerPrefix},'','i'),line) AS english_container,
         NULLIF(regexp_replace(line,${chineseContainerPrefix},''),line) AS chinese_container,
         NULLIF(regexp_replace(line,${englishBlockReferencePrefix},'','i'),line) AS english_numbered,
@@ -316,41 +334,55 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         (regexp_match(line,${titledPageCounter},'i'))[1] AS furniture_title,
         NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
-        SELECT *,replace(replace(raw_line,'**',''),'__','') AS line
+        SELECT *,
+          max(line_number) FILTER (WHERE line ~ ${visionAuxiliary}) OVER vision_block AS last_auxiliary,
+          max(line_number) FILTER (WHERE line ~ ${visionTranscription}) OVER vision_block AS last_transcription
         FROM (
-          SELECT id,source_id,source_version,page,created_at,unnest(lines) AS raw_line,
-            generate_subscripts(lines,1) AS line_number
-          FROM pdf_archive_text
-        ) raw_lines
+          SELECT *,replace(replace(raw_line,'**',''),'__','') AS line
+          FROM (
+            SELECT id,source_id,source_version,page,created_at,unnest(lines) AS raw_line,
+              generate_subscripts(lines,1) AS line_number
+            FROM pdf_archive_text
+          ) raw_lines
+        ) vision_lines
+        WINDOW vision_block AS (PARTITION BY id ORDER BY line_number ROWS UNBOUNDED PRECEDING)
       ) normalized_lines
     ) heading_suffixes
   ), pdf_archive_lines AS (
-    SELECT id,source_id,source_version,page,line,running_heading,
+    SELECT id,source_id,source_version,page,line,running_heading,auxiliary,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
-      line ~* ${exerciseHeading} AS opens_exercise,
-      public_example AND NOT running_heading AS opens_worked_example,
+      NOT wrapper AND line ~* ${exerciseHeading} AS opens_exercise,
+      NOT wrapper AND public_example AND NOT running_heading AS opens_worked_example,
       (line ~* ${inlinePublicHeading} OR public_example
         OR public_numbered OR public_container OR public_dotted OR other_reopening)
-        AND NOT running_heading AND line !~* ${answerProofHeading}
+        AND NOT wrapper AND NOT running_heading AND line !~* ${answerProofHeading} AND NOT qualified_solution
         AND line !~* ${answerLabelLine} AND line !~* ${explanationLabelLine} AS opens_public,
       (other_reopening OR public_dotted OR public_example OR public_numbered OR line ~* ${inlinePublicHeading}
         OR public_container AND (line ~* ${appendixHeading} OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix}))
-        AND NOT running_heading AND line !~* ${answerProofHeading}
+        AND NOT wrapper AND NOT running_heading AND line !~* ${answerProofHeading}
         AND line !~* ${captionPrefix} AND line !~ ${chineseCaptionPrefix} AS reopens_section,
-      line ~* ${sectionAnswerLine} OR assessment_solutions AS opens_section,
-      line ~* ${answerLabelLine} OR period_answer OR assessment_solutions AS unconditional_answer,
-      line ~* ${explanationLabelLine} OR period_solution AS explanation_label,
+      NOT wrapper AND (line ~* ${sectionAnswerLine} OR assessment_solutions) AS opens_section,
+      NOT wrapper AND (line ~* ${answerLabelLine} OR qualified_solution OR period_answer OR assessment_solutions) AS unconditional_answer,
+      NOT wrapper AND (line ~* ${explanationLabelLine} OR period_solution) AS explanation_label,
       period_answer OR period_solution AS period_inline,
-      line ~* ${exerciseSectionException} AS exercise_exception,wrapper
+      NOT wrapper AND line ~* ${lineStart + answerSectionEnd} AS section_terminator,
+      line ~* ${exerciseSectionException} AS exercise_exception,
+      content_line AND line ~ ${standaloneChineseSolution} AND COALESCE(
+        lag(line) OVER (PARTITION BY source_id,source_version,page,content_line ORDER BY created_at,id,line_number) ~ ${numberedQuestion},false)
+        AS numbered_solution_exception,
+      qualified_solution,wrapper
     FROM (
       SELECT *, line ~ ${answerPeriodLine} AS period_answer, line ~ ${solutionPeriodLine} AS period_solution,
-        line ~* ${assessmentSolutionsHeading} AND COALESCE(
+        line ~* ${qualifiedSolutionLabel} AS qualified_solution,
+        content_line AND line ~* ${assessmentSolutionsHeading} AND COALESCE(
           lead(line) OVER (PARTITION BY id,content_line ORDER BY line_number) ~* ${assessmentSolutionsContext},false) AS assessment_solutions
       FROM (
-        SELECT *, line ~* ${pdfLeadingTextWrappers} AS wrapper,
-          (NOT running_heading OR line ~ ${standaloneAssessmentItem})
-            AND btrim(line)<>'' AND line !~* ${pdfLeadingTextWrappers} AS content_line
-        FROM pdf_archive_headings
+        SELECT *, NOT wrapper AND (NOT running_heading OR line ~ ${standaloneAssessmentItem})
+          AND btrim(line)<>'' AS content_line
+        FROM (
+          SELECT *, auxiliary OR line ~* ${pdfLeadingTextWrappers} AS wrapper
+          FROM pdf_archive_headings
+        ) wrappers
       ) lookahead
     ) contextual
   ), pdf_archive_exercise_context AS (
@@ -363,17 +395,19 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     FROM pdf_archive_lines
     WINDOW context AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
   ), pdf_archive_line_events AS (
-    SELECT *, opens_section AND NOT (in_exercise AND exercise_exception)
-      AND NOT (in_worked_example AND explanation_label) AS section_answer,
+    SELECT *, opens_section AND NOT (in_exercise AND exercise_exception OR numbered_solution_exception)
+      AND NOT (in_worked_example AND (explanation_label OR qualified_solution)) AS section_answer,
       explanation_label AND NOT in_worked_example AS sealed_explanation,
-      (period_inline OR line ~* ${exerciseInlineAnswer}
+      NOT wrapper AND (qualified_solution OR period_inline OR line ~* ${exerciseInlineAnswer}
         AND (in_exercise OR (unconditional_answer OR explanation_label) AND line ~* ${standaloneInlineAnswer}
           OR (unconditional_answer OR NOT in_worked_example) AND line ~* ${exerciseInlineAnswer + "[^ ]"}))
-        AND (NOT opens_section OR exercise_exception) AND NOT (in_worked_example AND explanation_label) AS inline_opener
+        AND (NOT opens_section OR exercise_exception OR in_worked_example AND qualified_solution)
+        AND (unconditional_answer OR NOT (in_worked_example AND explanation_label)) AS inline_opener
     FROM pdf_archive_exercise_context
   ), pdf_archive_page_events AS (
     SELECT source_id,source_version,page,bool_or(section_answer) AS section_answer,
       bool_or(inline_opener OR unconditional_answer OR sealed_explanation) AS answer_label,
+      max(position) FILTER (WHERE section_terminator) > COALESCE(max(position) FILTER (WHERE section_answer),0) AS section_ends_here,
       (array_agg(reopens_section ORDER BY position) FILTER (WHERE NOT wrapper AND btrim(line)<>'' AND NOT running_heading))[1] AS reopens_section
     FROM pdf_archive_line_events
     GROUP BY source_id,source_version,page
@@ -381,7 +415,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     -- An opener and its continuation lines share a group until the next explicit boundary.
     SELECT *, count(*) FILTER (WHERE inline_opener OR section_answer OR opens_exercise OR opens_public)
       OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group,
-      CASE WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
+      CASE WHEN inline_opener AND qualified_solution THEN btrim(regexp_replace(line,${qualifiedSolutionLabel},'','i'))
+        WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
         WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
         WHEN wrapper OR running_heading THEN '' ELSE btrim(line) END AS body_line
     FROM pdf_archive_line_events
@@ -398,7 +433,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT source_id,source_version,inline_group,page,bool_or(inline_opener) AS starts_inline,
       bool_or(inline_opener AND NOT (unconditional_answer OR sealed_explanation)) AS hide_opening_page,
       (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
-      bool_or(btrim(line)='' AND position>first_body AND next_body IS NOT NULL
+      bool_or(NOT auxiliary AND btrim(line)='' AND position>first_body AND next_body IS NOT NULL
         AND (first_proof IS NULL OR next_body<first_proof)) AS closed_after_blank,
       bool_or(first_proof<=position) AS in_sealed_proof,
       bool_or(position=first_body AND position=first_proof) AS starts_proof,
@@ -425,9 +460,11 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   ), pdf_archive_sealed_spans AS MATERIALIZED (
     SELECT source_id,source_version,first_page,reopen_page,NULL::uuid AS chunk_id FROM (
       SELECT source_id,source_version,page AS first_page,section_answer,
-        lead(page) OVER (PARTITION BY source_id,source_version ORDER BY page) AS reopen_page
+        CASE WHEN section_ends_here THEN page+1 ELSE
+          lead(CASE WHEN section_ends_here AND NOT section_answer THEN page+1 ELSE page END)
+            OVER (PARTITION BY source_id,source_version ORDER BY page) END AS reopen_page
       FROM pdf_archive_page_events
-      WHERE section_answer OR (NOT answer_label AND reopens_section)
+      WHERE section_answer OR section_ends_here OR (NOT answer_label AND reopens_section)
     ) events WHERE section_answer
     UNION ALL
     SELECT source_id,source_version,first_page,last_page+1,NULL::uuid

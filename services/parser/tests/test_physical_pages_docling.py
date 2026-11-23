@@ -947,6 +947,37 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertFalse(ext.inline_sealed_by_page[10])
                 self.assertEqual(ext.texts_by_page[11], [example])
 
+    def test_qualified_answer_keys_seal_after_worked_examples(self):
+        for label in ("Official Solution 1. Yes.", "Reference Solution 1:", "Model Solution: Yes.",
+                      "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:",
+                      "EVEN-NUMBERED SOLUTION: Yes.", "Official Solutions", "Reference Solutions:"):
+            with self.subTest(label=label):
+                example = "Example 1: Quadratic Equations\nSample solution: A derivation."
+                proof = "Proof. Private continuation. ∎"
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(1, f"{example}\n{label}")], [text_element(2, proof)],
+                    [text_element(3, "Public prose after the proof.")], start_page=1,
+                ))
+                self.assertEqual(ext.texts_by_page[1], [example])
+                self.assertEqual(ext.sealed_texts_by_page[1], [label])
+                self.assertFalse(ext.in_worked_example_by_page[1])
+                self.assertEqual(ext.texts_by_page[2], [])
+                self.assertEqual(ext.sealed_texts_by_page[2], [proof])
+                self.assertEqual(ext.texts_by_page[3], ["Public prose after the proof."])
+
+    def test_heading_free_numbered_question_with_chinese_solution_seals_only_answer_and_proof(self):
+        stem = "1. Decide whether every cyclic group is abelian."
+        public = ["Introduction to cyclic groups.", "Public prose after the proof.",
+                  "## Solutions\nA homogeneous mixture.", "Solutions\nSolutes dissolve in solvents."]
+        pages = [public[0], f"{stem}\n解答：\nYes.", "证明。\nThe proof concludes. ∎", *public[1:]]
+        ext = physical_pages.extract_physical_pages(result_for(*(
+            [text_element(page, content)] for page, content in enumerate(pages, 1)
+        ), start_page=1))
+        self.assertEqual(ext.texts_by_page, {1: [public[0]], 2: [stem], 3: [],
+                                             4: [public[1]], 5: [public[2]], 6: [public[3]]})
+        self.assertEqual(ext.sealed_texts_by_page[2], ["解答：\nYes."])
+        self.assertEqual(ext.sealed_texts_by_page[3], [pages[2]])
+
     def test_repeated_chinese_answer_labels_in_the_same_exercise_stay_inline(self):
         for label in ("答案：", "解答："):
             with self.subTest(label=label):

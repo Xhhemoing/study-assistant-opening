@@ -82,11 +82,12 @@ describe("bounded resumable PDF parser", () => {
     "docling-2.126.0/pdf-segments-v31-discourse/text",
     "docling-2.126.0/pdf-segments-v32-discourse/text",
     "docling-2.126.0/pdf-segments-v33-discourse/text",
+    "docling-2.126.0/pdf-segments-v37-discourse/text",
   ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v37-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v38-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2678,6 +2679,30 @@ describe("bounded resumable PDF parser", () => {
     expect(result.requests[1]).toEqual({ start: 11, seed: "inline_sealed", exercise: true });
     expect(result.publishedChunks.slice(-2).map(chunk => [chunk.page, chunk.text]))
       .toEqual([[10, "Exercise 1: Find x."], [12, "Public explanation."]]);
+  });
+
+  it.each(["Official Solution 1. Yes.", "Reference Solution 1:", "Model Solution: Yes.",
+    "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:", "EVEN-NUMBERED SOLUTION: Yes.",
+    "Official Solutions", "Reference Solutions:"])(
+    "seals %s and the adjacent proof after a worked example", async label => {
+      const example = "Example 1: Quadratic Equations\nSample solution: A derivation.";
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: example + "\n" + label },
+        { page: 2, text: "Proof. Private continuation. ∎" },
+        { page: 3, text: "Public prose after the proof." },
+      ] });
+      expect(result.publishedChunks.map(({ page, text }) => [page, text]))
+        .toEqual([[1, example], [3, "Public prose after the proof."]]);
+    },
+  );
+
+  it("seals a standalone 解答： and its proof in a heading-free numbered question", async () => {
+    const stem = "1. Decide whether every cyclic group is abelian.";
+    const pages = ["Introduction to cyclic groups.", stem + "\n解答：\nYes.", "证明。\nThe proof concludes. ∎",
+      "Public prose after the proof.", "## Solutions\nA homogeneous mixture.", "Solutions\nSolutes dissolve in solvents."];
+    const result = await runPdfScenario({ segmentPages: 1, pages: pages.map((text, index) => ({ page: index + 1, text })) });
+    expect(result.publishedChunks.map(({ page, text }) => [page, text]))
+      .toEqual([[1, pages[0]], [2, stem], [4, pages[3]], [5, pages[4]], [6, pages[5]]]);
   });
 
   it.each(["Model Answer:", "MODEL ANSWER 1.2 (CONTD.):"])("treats singular %s with a body as inline", async label => {
