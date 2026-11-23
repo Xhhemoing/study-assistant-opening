@@ -63,6 +63,13 @@ const containsAnyId = (ids: ReadonlySet<string>, values: unknown) =>
 const containsSourceRef = (ids: ReadonlySet<string>, refs: unknown) =>
   Array.isArray(refs) && refs.some(ref => containsId(ids, field(ref, "sourceId")));
 
+type LineageKind = "session" | "activity" | "item" | "observation" | "attempt" | "turn";
+type LineageLink = readonly [LineageKind, unknown];
+
+function lineageKey(kind: LineageKind, id: unknown): string | undefined {
+  return typeof id === "string" ? `${kind}:${id.toLowerCase()}` : undefined;
+}
+
 export function projectPrivacyGuardedOpeningDataset(
   input: PrivacyGuardedOpeningDatasetInput,
   pseudonym: (kind: string, id: string) => string,
@@ -70,16 +77,23 @@ export function projectPrivacyGuardedOpeningDataset(
   const { scope, tables } = input;
   const shredded = new Set((input.shreddedSourceIds ?? []).map(id => id.toLowerCase()));
   let privacyEpoch = input.privacyEpoch;
+  let workspaceShredded = false;
   for (const receipt of input.tombstoneReceipts ?? []) {
     if (receipt.workspaceId !== scope.workspaceId) continue;
     if (!Number.isSafeInteger(receipt.privacyEpoch) || receipt.privacyEpoch < 0) throw new RangeError("Invalid tombstone privacy epoch");
     privacyEpoch = Math.max(privacyEpoch, receipt.privacyEpoch);
     for (const id of receipt.shreddedSourceIds) shredded.add(id.toLowerCase());
-    if (receipt.target.kind === "source") shredded.add(receipt.target.sourceId.toLowerCase());
+    if (receipt.target.kind === "workspace") workspaceShredded = true;
+    else shredded.add(receipt.target.sourceId.toLowerCase());
   }
 
   const cohortPolicy = resolveCohortSurfacePolicy(input);
-  if (!shredded.size) return { dataset: projectOpeningDataset({ ...input, privacyEpoch }, pseudonym), cohortPolicy };
+  if (workspaceShredded) return {
+    cohortPolicy, dataset: { version: 1, privacyEpoch, dialogueEvaluation: [], answerSequences: [], coursePackageQuality: [] },
+  };
+  if (!shredded.size && !input.deletedTurnIds?.length) {
+    return { dataset: projectOpeningDataset({ ...input, privacyEpoch }, pseudonym), cohortPolicy };
+  }
 
   const rows = (name: string) => tables[name] ?? [];
   const referencesShreddedSource = (row: Row) => containsAnyId(shredded, row.source_ids)
@@ -91,14 +105,56 @@ export function projectPrivacyGuardedOpeningDataset(
     || containsSourceRef(shredded, row.citations)
     || (row.source_versions !== null && typeof row.source_versions === "object"
       && Object.keys(row.source_versions).some(id => containsId(shredded, id)));
-  const idsFor = (name: string, matches: (row: Row) => boolean) => rows(name)
-    .filter(row => row.workspace_id === scope.workspaceId && matches(row))
-    .flatMap(row => typeof row.id === "string" ? [row.id] : []);
-  const deletedTurnIds = [...(input.deletedTurnIds ?? []), ...idsFor("opening_turns", referencesShreddedSource)];
-  const excludedTurns = new Set(deletedTurnIds.map(id => id.toLowerCase()));
-  const excludedSessions = new Set(idsFor("opening_learning_sessions", referencesShreddedSource).map(id => id.toLowerCase()));
-  const excludedItemVersions = new Set(idsFor("opening_learning_item_versions", referencesShreddedSource).map(id => id.toLowerCase()));
-  const referencesExcludedItem = (row: Row) => containsId(excludedSessions, row.session_id) || containsId(excludedItemVersions, row.item_version_id);
+
+  // Index dependency edges once, then visit each excluded row once. Attempts and
+  // observations can refer to each other, and activities can originate from turns.
+  const dependents = new Map<string, string[]>();
+  const excluded = new Set<string>();
+  const exclude = (key: string | undefined) => { if (key !== undefined) excluded.add(key); };
+  const index = (kind: LineageKind, table: string, links: (row: Row) => readonly LineageLink[]) => {
+    for (const row of rows(table)) {
+      if (row.workspace_id !== scope.workspaceId) continue;
+      const key = lineageKey(kind, row.id);
+      if (!key) continue;
+      if (referencesShreddedSource(row)) exclude(key);
+      for (const [parentKind, parentId] of links(row)) {
+        const parent = lineageKey(parentKind, parentId);
+        if (!parent) continue;
+        const children = dependents.get(parent);
+        if (children) children.push(key);
+        else dependents.set(parent, [key]);
+      }
+    }
+  };
+  const anchorLinks = (anchor: unknown): LineageLink[] => [
+    ["session", field(anchor, "sessionId")], ["activity", field(anchor, "activityId")],
+    ["item", field(anchor, "itemVersionId")], ["attempt", field(anchor, "attemptId")],
+  ];
+  index("session", "opening_learning_sessions", row => [["activity", row.activity_id]]);
+  index("activity", "opening_teaching_activities", row => [["turn", field(row.create_intent, "sourceTurnId")]]);
+  index("item", "opening_learning_item_versions", row => [["activity", row.activity_id]]);
+  index("observation", "opening_learning_observations", row => [
+    ["session", row.session_id], ["activity", row.activity_id], ["item", row.item_version_id], ["attempt", row.attempt_id],
+    ...(Array.isArray(row.source_turn_ids) ? row.source_turn_ids.map((id): LineageLink => ["turn", id]) : []),
+  ]);
+  index("attempt", "opening_learning_attempts", row => [
+    ["session", row.session_id], ["activity", row.activity_id], ["item", row.item_version_id], ["observation", row.observation_id],
+    ...anchorLinks(row.context_anchor),
+  ]);
+  index("turn", "opening_turns", row => [
+    ["session", row.learning_session_id], ["activity", row.teaching_activity_id], ["attempt", row.attempt_id],
+    ...anchorLinks(row.context_anchor),
+  ]);
+  for (const id of input.deletedTurnIds ?? []) exclude(lineageKey("turn", id));
+  // Set iteration also visits newly excluded dependents.
+  for (const key of excluded) for (const dependent of dependents.get(key) ?? []) excluded.add(dependent);
+
+  const isExcluded = (kind: LineageKind, row: Row) => {
+    const key = lineageKey(kind, row.id);
+    return key !== undefined && excluded.has(key);
+  };
+  const deletedTurnIds = [...(input.deletedTurnIds ?? []), ...rows("opening_turns")
+    .flatMap(row => typeof row.id === "string" && isExcluded("turn", row) ? [row.id] : [])];
 
   return {
     cohortPolicy,
@@ -107,11 +163,9 @@ export function projectPrivacyGuardedOpeningDataset(
       tables: {
         ...tables,
         opening_sources: rows("opening_sources").filter(row => !containsId(shredded, row.id)),
-        opening_teaching_activities: rows("opening_teaching_activities").filter(row => !referencesShreddedSource(row)
-          && !containsId(excludedTurns, field(row.create_intent, "sourceTurnId"))),
-        opening_learning_observations: rows("opening_learning_observations").filter(row => !referencesShreddedSource(row)
-          && !referencesExcludedItem(row) && !containsAnyId(excludedTurns, row.source_turn_ids)),
-        opening_learning_attempts: rows("opening_learning_attempts").filter(row => !referencesShreddedSource(row) && !referencesExcludedItem(row)),
+        opening_teaching_activities: rows("opening_teaching_activities").filter(row => !isExcluded("activity", row)),
+        opening_learning_observations: rows("opening_learning_observations").filter(row => !isExcluded("observation", row)),
+        opening_learning_attempts: rows("opening_learning_attempts").filter(row => !isExcluded("attempt", row)),
       },
     }, pseudonym),
   };

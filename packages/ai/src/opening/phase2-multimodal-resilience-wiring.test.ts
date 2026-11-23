@@ -1,4 +1,4 @@
-import type { AiGradingProposal, LearningObservation, OpeningAiSettings, OpeningModelSummary } from "@aistudy/contracts";
+import type { AiGradingProposal, LearningObservation, OpeningAiSettings, OpeningModelSummary, ProviderInput } from "@aistudy/contracts";
 import { describe, expect, it, vi } from "vitest";
 import * as ai from "../index";
 
@@ -21,7 +21,7 @@ const handwriting = {
 };
 
 function gradingFixture(multimodalEvidence: ai.OpeningMultimodalEvidenceHook, assessed = proposal, rubricCalibration?: ai.OpeningRubricCalibrationHook) {
-  const complete = vi.fn(async () => ({
+  const complete = vi.fn(async (_request: ProviderInput) => ({
     text: JSON.stringify(assessed), inputTokens: 1, outputTokens: 1, citedChunkIds: [], candidates: [], requestId: null,
   }));
   const gateway = ai.createModelGateway({ resolve: async () => ({
@@ -70,21 +70,41 @@ describe("Opening handwriting admission", () => {
     await expect(service.grade(scope, input)).resolves.toMatchObject({ outcome: "unverified" });
   });
 
-  it("keeps normal grading on a current learner-confirmed glyph", async () => {
-    const { service } = gradingFixture(() => ({
-      ...handwriting, confirmations: [{ stepId: "step", tokenId: "sign", confirmedText: "+" }],
+  it("binds both learner-confirmed signs to distinct outgoing grading requests", async () => {
+    const requests: string[] = [];
+    for (const symbol of ["+", "−"]) {
+      const { service, complete } = gradingFixture(() => ({
+        ...handwriting, confirmations: [{ stepId: "step", tokenId: "sign", confirmedText: symbol }],
+      }));
+      await expect(service.grade(scope, input)).resolves.toMatchObject({ outcome: "incorrect" });
+      const request = complete.mock.calls[0]![0];
+      expect(JSON.parse(request.text)).toMatchObject({ studentAnswer: "", handwritingSymbolConfirmations: [{ step: 1, token: 1, symbol }] });
+      requests.push(request.text);
+    }
+    expect(requests[0]).not.toBe(requests[1]);
+  });
+
+  it("withholds grading when confirmations disagree about the same glyph", async () => {
+    const { service, complete } = gradingFixture(() => ({
+      ...handwriting,
+      confirmations: [
+        { stepId: "step", tokenId: "sign", confirmedText: "+" },
+        { stepId: "step", tokenId: "sign", confirmedText: "−" },
+      ],
     }));
-    await expect(service.grade(scope, input)).resolves.toMatchObject({ outcome: "incorrect" });
+    await expect(service.grade(scope, input)).resolves.toMatchObject({ outcome: "unverified" });
+    expect(JSON.parse(complete.mock.calls[0]![0].text)).not.toHaveProperty("handwritingSymbolConfirmations");
   });
 
   it("does not penalize a photo when the learner confirms only one critical glyph", async () => {
     const step = handwriting.steps[0]!;
-    const { service } = gradingFixture(() => ({
+    const { service, complete } = gradingFixture(() => ({
       ...handwriting,
       steps: [{ ...step, ast: { ...step.ast, tokens: [...step.ast.tokens, { tokenId: "digit", kind: "digit", rawText: "8", confidence: 0.5 }] } }],
       confirmations: [{ stepId: "step", tokenId: "sign", confirmedText: "+" }],
     }));
     await expect(service.grade(scope, input)).resolves.toMatchObject({ outcome: "unverified" });
+    expect(JSON.parse(complete.mock.calls[0]![0].text)).not.toHaveProperty("handwritingSymbolConfirmations");
   });
 
   it("keeps normal grading for high-confidence tokens without a confirmation", async () => {

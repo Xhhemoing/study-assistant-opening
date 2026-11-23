@@ -58,6 +58,22 @@
       "types": "./src/opening/ai-policy/teaching-blind-solve.ts",
       "default": "./src/opening/ai-policy/teaching-blind-solve.ts"
     },
+    "./srs/offline-lease-bridge": {
+      "types": "./src/srs/offline-lease-bridge.ts",
+      "default": "./src/srs/offline-lease-bridge.ts"
+    },
+    "./opening/exam-sprint/score-forecast-bridge": {
+      "types": "./src/opening/exam-sprint/score-forecast-bridge.ts",
+      "default": "./src/opening/exam-sprint/score-forecast-bridge.ts"
+    },
+    "./opening/course-shared-skill": {
+      "types": "./src/opening/course-shared-skill.ts",
+      "default": "./src/opening/course-shared-skill.ts"
+    },
+    "./opening/deidentified-dataset": {
+      "types": "./src/opening/deidentified-dataset.ts",
+      "default": "./src/opening/deidentified-dataset.ts"
+    },
     "./exam-sprint-catalog": {
       "types": "./src/opening/exam-sprint/catalog.ts",
       "default": "./src/opening/exam-sprint/catalog.ts"

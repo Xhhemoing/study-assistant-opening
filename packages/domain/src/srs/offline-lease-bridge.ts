@@ -29,21 +29,23 @@ export function issueReviewQueueOfflineLease({
     const snapshot = serverCards.get(card.id);
     if (card.ownerUserId !== lease.learnerId || snapshot?.cardId !== card.id) continue;
 
+    const kind = cardReviewKind(card);
     const binding = { cardId: card.id, cardRevision: snapshot.revision, lastServerReviewedAtMs: snapshot.lastServerReviewedAtMs };
-    if (cardReviewKind(card) === "question") {
+    if (kind === "question") {
       const variant = freshVariants?.get(card.id);
       if (!variant) continue;
       // Preserve hidden fields and accessors for the core's plain-data check.
       const fields = Object.getOwnPropertyDescriptors(variant);
-      const referenceAnswer = fields.referenceAnswer;
+      const sealedPayload = fields.sealedPayload;
+      // Put the original answer in the core's protected input alongside the fresh answer.
+      // Leave accessors and inherited fields for the core to reject without reading them.
+      const canAddOriginal = sealedPayload ? Object.hasOwn(sealedPayload, "value") : !("sealedPayload" in variant);
       candidates.push(Object.create(Object.getPrototypeOf(variant), {
         ...fields,
         ...Object.getOwnPropertyDescriptors({ ...binding, cardKind: "miss_variant" }),
-        referenceAnswer: !referenceAnswer || (Object.hasOwn(referenceAnswer, "value") && referenceAnswer.value == null)
-          ? { value: card.back }
-          : referenceAnswer,
+        ...(canAddOriginal ? { sealedPayload: { value: { originalCardBack: card.back, variantPayload: sealedPayload?.value } } } : {}),
       }) as OfflineMissVariantCandidate);
-    } else {
+    } else if (kind === "concept") {
       candidates.push({ ...binding, cardKind: "flashcard", prompt: card.front, backSummary: card.back });
     }
   }

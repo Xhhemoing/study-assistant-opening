@@ -1,13 +1,14 @@
 import type { CourseRequirement } from "@aistudy/contracts";
+import * as course from "@aistudy/domain/opening/course-shared-skill";
+import * as dataset from "@aistudy/domain/opening/deidentified-dataset";
+import * as forecast from "@aistudy/domain/opening/exam-sprint/score-forecast-bridge";
+import { issueReviewQueueOfflineLease, reconcileReviewQueueOfflineOutbox } from "@aistudy/domain/srs/offline-lease-bridge";
 import { describe, expect, it } from "vitest";
 import { issueSpeechTimingReceipt } from "../multimodal-evidence";
 import { createInitialOfflineFsrsSnapshot } from "../offline-companion-bridge";
 import type { CryptoShredTombstoneReceipt } from "../resilience-canary-shredding";
 import * as srs from "../srs/eligibility";
 import type { CourseRouteObservation } from "./course-route";
-import * as course from "./course-shared-skill";
-import * as dataset from "./deidentified-dataset";
-import * as forecast from "./exam-sprint/score-forecast-bridge";
 
 const issuedAtMs = 10_000;
 const time = new Date(issuedAtMs).toISOString();
@@ -15,7 +16,7 @@ const scope = { workspaceId: "workspace", ownerUserId: "learner" };
 const queueItem = (id: string, question = false): srs.ReviewQueueItem => ({
   card: {
     id, ownerUserId: scope.ownerUserId, front: "What is this concept?", back: question ? "old protected answer" : "A reusable explanation.",
-    sourceDocumentId: null, syllabusPointId: null, tags: question ? ["review:question"] : [], courseId: null, skillLabel: null,
+    sourceDocumentId: null, syllabusPointId: null, tags: question ? ["review:question"] : ["review:concept"], courseId: null, skillLabel: null,
     archived: false, contentVersion: 1, pausedUntil: null, maintainUntil: null, excludeFromAssessment: false, createdAt: time,
   },
   state: { cardId: id, ease: 2.5, intervalDays: 0, dueAt: time, reps: 0, lapses: 0, lastGrade: null, updatedAt: time },
@@ -34,7 +35,7 @@ describe("SRS offline lease integration", () => {
   it("leases the triaged prefix at the stricter core card cap and excludes another learner's card", () => {
     const items = Array.from({ length: 220 }, (_, index) => ({ ...queueItem(`card-${index}`), goalPriority: index + 1 }));
     items[219]!.card.ownerUserId = "foreign";
-    const result = srs.issueReviewQueueOfflineLease(leaseInput(items));
+    const result = issueReviewQueueOfflineLease(leaseInput(items));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.lease.cards).toHaveLength(30);
@@ -43,17 +44,33 @@ describe("SRS offline lease integration", () => {
 
   it("screens fresh variants against private answers before publishing a lease", () => {
     const offline = leaseInput([queueItem("question", true)]);
-    const variant = { freshVariantId: "fresh", freshVariantStem: "Solve this new exercise.", answerKey: "controlled answer" };
-    const result = srs.issueReviewQueueOfflineLease({ ...offline, freshVariants: new Map([["question", variant]]) });
+    const variant = { freshVariantId: "fresh", freshVariantStem: "Solve this new exercise.", answerKey: "controlled answer",
+      referenceAnswer: "fresh protected answer", sealedPayload: { solution: "sealed calculation" } };
+    const result = issueReviewQueueOfflineLease({ ...offline, freshVariants: new Map([["question", variant]]) });
     expect(result).toMatchObject({ ok: true, lease: { cards: [{
       cardId: "question", cardKind: "miss_variant", freshVariantId: "fresh", freshVariantStem: variant.freshVariantStem,
     }] } });
-    if (result.ok) expect(result.lease.cards[0]).not.toHaveProperty("answerKey");
-    for (const stem of ["The controlled answer is shown here.", "Try using the old protected answer here."]) {
-      expect(srs.issueReviewQueueOfflineLease({
-        ...offline, freshVariants: new Map([["question", { ...variant, freshVariantStem: stem }]]),
+    if (result.ok) expect(Object.keys(result.lease.cards[0]!)).toEqual([
+      "cardId", "cardKind", "cardRevision", "lastServerReviewedAtMs", "freshVariantId", "freshVariantStem",
+    ]);
+    for (const secret of ["controlled answer", "old protected answer", "fresh protected answer", "sealed calculation"]) {
+      expect(issueReviewQueueOfflineLease({
+        ...offline, freshVariants: new Map([["question", { ...variant, freshVariantStem: `Try using the ${secret} here.` }]]),
       })).toMatchObject({ ok: false, code: "miss_variant_answer_leak" });
     }
+  });
+
+  it("issues a standard flashcard only for a classified concept", () => {
+    const concept = queueItem("concept");
+    const legacy = queueItem("legacy");
+    legacy.card.tags = [];
+    legacy.card.back = "Legacy question answer";
+    const question = queueItem("question", true);
+    const result = issueReviewQueueOfflineLease(leaseInput([legacy, question, concept]));
+    expect(result).toMatchObject({ ok: true, lease: { cards: [{ cardId: "concept", cardKind: "flashcard",
+      prompt: concept.card.front, backSummary: concept.card.back }] } });
+    expect(issueReviewQueueOfflineLease(leaseInput([legacy, question])))
+      .toMatchObject({ ok: false, code: "empty_lease_cards" });
   });
 
   it("lets the core inspect hidden answers and refuse accessors without invoking them", () => {
@@ -63,7 +80,7 @@ describe("SRS offline lease integration", () => {
     let getterRead = false;
     const accessor = Object.defineProperty({ ...variant }, "answerKey", { get() { getterRead = true; return "privileged token"; } });
     for (const value of [hidden, accessor]) {
-      expect(srs.issueReviewQueueOfflineLease({ ...offline, freshVariants: new Map([["question", value]]) }))
+      expect(issueReviewQueueOfflineLease({ ...offline, freshVariants: new Map([["question", value]]) }))
         .toMatchObject({ ok: false, code: "miss_variant_answer_leak" });
     }
     expect(getterRead).toBe(false);
@@ -71,10 +88,10 @@ describe("SRS offline lease integration", () => {
 
   it("uses the half-open server clock and never promotes mastery on an offline easy rating", () => {
     const offline = leaseInput([queueItem("card")]);
-    const issued = srs.issueReviewQueueOfflineLease(offline);
+    const issued = issueReviewQueueOfflineLease(offline);
     if (!issued.ok) throw new Error(issued.message);
     const { lease } = issued;
-    const sync = (serverReceiptAtMs: number) => srs.reconcileReviewQueueOfflineOutbox({
+    const sync = (serverReceiptAtMs: number) => reconcileReviewQueueOfflineOutbox({
       lease, serverCards: offline.serverCards, serverReceiptAtMs,
       entries: [{ leaseId: lease.leaseId, cardId: "card", seq: 1, expectedCardRevision: 2, rating: "easy",
         clientReviewedAtMs: issuedAtMs, delayedCheck: true, transferVerified: true, promoteMastery: true }],
@@ -188,6 +205,57 @@ it("keeps an existing higher privacy epoch and applies the cohort viewer policy"
   expect(dataset.projectPrivacyGuardedOpeningDataset({ ...input, role: "learner" }, pseudonym))
     .toMatchObject({ dataset: { privacyEpoch: 9 }, cohortPolicy: { cohortSurfaceVisible: false } });
   expect(dataset.projectPrivacyGuardedOpeningDataset({ ...input, role: "instructor" }, pseudonym).cohortPolicy.cohortSurfaceVisible).toBe(true);
+});
+
+it.each([{ sourceIds: [] }, { sourceIds: ["keep", "shred", "explicit"] }])("empties all projections for a workspace shred with source IDs $sourceIds", ({ sourceIds }) => {
+  const result = dataset.projectPrivacyGuardedOpeningDataset({
+    scope, privacyEpoch: 3, role: "instructor", mode: "cohort",
+    tables: { ...tables, opening_turns: [...tables.opening_turns,
+      { ...owner, id: "turn-source-free", conversation_id: "conversation", source_ids: [], role: "assistant" }] },
+    tombstoneReceipts: [tombstone, { ...tombstone, target: { kind: "workspace" },
+      shreddedSourceIds: sourceIds, shreddedWorkspaceKeyId: "workspace-key", preservedWorkspaceKeyId: null, privacyEpoch: 8 }],
+  }, () => { throw new Error("Shredded records cannot reach pseudonymization"); });
+  expect(result.dataset).toEqual({ version: 1, privacyEpoch: 8, dialogueEvaluation: [], answerSequences: [], coursePackageQuality: [] });
+  expect(result.cohortPolicy.cohortSurfaceVisible).toBe(true);
+});
+
+it("follows source lineage from source-free turns through derived activities, observations, and attempts", () => {
+  const sourceFreeTurn = (id: string, refs: object = {}) => ({
+    ...owner, id, conversation_id: "conversation", source_ids: [], role: "user", ...refs,
+  });
+  const result = dataset.projectPrivacyGuardedOpeningDataset({
+    scope, privacyEpoch: 3, mode: "solo", role: "learner",
+    tombstoneReceipts: [tombstone, { ...tombstone, workspaceId: "foreign", target: { kind: "workspace" }, privacyEpoch: 99 }],
+    tables: {
+      ...tables,
+      opening_learning_sessions: [{ ...owner, id: "session-shred", source_ids: ["shred"] }],
+      opening_learning_item_versions: [{ ...owner, id: "item-shred", source_id: "shred" }],
+      opening_turns: [
+        ...tables.opening_turns, sourceFreeTurn("turn-source-free"),
+        sourceFreeTurn("turn-session", { learning_session_id: "SESSION-SHRED" }),
+        sourceFreeTurn("turn-session-anchor", { context_anchor: { sessionId: "session-shred" } }),
+        sourceFreeTurn("turn-activity", { teaching_activity_id: "activity-direct" }),
+        sourceFreeTurn("turn-activity-anchor", { context_anchor: { activityId: "activity-direct" } }),
+        sourceFreeTurn("turn-source-anchor", { context_anchor: { sourceId: "shred" } }),
+        sourceFreeTurn("turn-attempt", { attempt_id: "attempt-version" }),
+        sourceFreeTurn("turn-item-attempt", { context_anchor: { attemptId: "attempt-item" } }),
+        sourceFreeTurn("turn-observation-attempt", { attempt_id: "attempt-observation" }),
+        sourceFreeTurn("turn-derived-attempt", { attempt_id: "attempt-derived-observation" }),
+      ],
+      opening_teaching_activities: [...tables.opening_teaching_activities,
+        { ...owner, id: "activity-derived", source_ids: [], create_intent: { sourceTurnId: "turn-session" } }],
+      opening_learning_observations: [...tables.opening_learning_observations,
+        { ...owner, id: "observation-derived", source_turn_ids: ["turn-session-anchor"], outcome: "correct" }],
+      opening_learning_attempts: [...tables.opening_learning_attempts,
+        { ...owner, id: "attempt-item", activity_id: "activity-good", item_version_id: "item-shred", source_ids: [] },
+        { ...owner, id: "attempt-derived-activity", activity_id: "activity-derived", source_ids: [] },
+        { ...owner, id: "attempt-derived-observation", activity_id: "activity-good", observation_id: "observation-derived", source_ids: [] }],
+    },
+  }, pseudonym);
+  expect(result.dataset.privacyEpoch).toBe(7);
+  expect(result.dataset.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:turn-good", "turn:turn-source-free"]);
+  expect(result.dataset.coursePackageQuality.map(row => row.identity)).toEqual(["activity:activity-good"]);
+  expect(result.dataset.answerSequences.map(row => row.identity)).toEqual(["attempt:attempt-direct", "attempt:attempt-good"]);
 });
 
 it("admits a verified speech receipt only in a configured rubric section and strips transcript material", () => {
