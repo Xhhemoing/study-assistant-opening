@@ -89,7 +89,8 @@ _ASSESSMENT_ANSWER_HEADING = (
     r"(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*"
     rf"(?:(?:Exercises?|Problems?|Questions?|Review\s+Questions?|Practice\s+Problems?|Self[- ]Check\s+Exercises?){_ASSESSMENT_TARGET}|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)"
 )
-_QUALIFIED_ANSWER_SECTION = r"(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|(?:Official|Reference)\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)"
+_SOLUTION_QUALIFIER = r"(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)"
+_QUALIFIED_ANSWER_SECTION = rf"(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|{_SOLUTION_QUALIFIER}\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)"
 _CHINESE_ANSWER_HEADING = (
     "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|"
     "练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)"
@@ -141,9 +142,11 @@ _ASSESSMENT_SOLUTIONS_CONTEXT_RE = re.compile(
 )
 _STANDALONE_ASSESSMENT_ITEM_RE = re.compile(r"^\d+[.)]$")
 _NUMBERED_QUESTION_RE = re.compile(r"^\d+[.)]\s+\S")
-_STANDALONE_CHINESE_SOLUTION_RE = re.compile(rf"^解答{_CHINESE_ANSWER_CONTINUATION}\s*[:：]$")
+_NUMBERED_QUESTION_SOLUTION_RE = re.compile(
+    rf"^(?:解答{_CHINESE_ANSWER_CONTINUATION}|(?:Solution|SOLUTION){_CONTINUED_LABEL})\s*[:：]$"
+)
 _QUALIFIED_SOLUTION_LABEL_RE = re.compile(
-    r"^(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)\s+Solutions?"
+    rf"^{_SOLUTION_QUALIFIER}\s+Solutions?"
     rf"(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)",
     re.IGNORECASE,
 )
@@ -800,19 +803,20 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     if frag_label in ("table", "formula"):
         return "narrative", None, False, False, exited_section_seal, None, None
 
-    if in_worked_example and _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE.match(stripped):
+    numbered_question_answer = follows_numbered_question and _NUMBERED_QUESTION_SOLUTION_RE.match(stripped)
+    if in_worked_example and not numbered_question_answer and _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE.match(stripped):
         return "worked_example", None, False, False, False, None, None
 
-    exercise_answer = (in_exercise and (_BARE_ANSWER_LABEL_RE.match(stripped) or _CHINESE_EXERCISE_ANSWER_RE.match(stripped))
-                       or follows_numbered_question and _STANDALONE_CHINESE_SOLUTION_RE.match(stripped))
+    exercise_answer = (numbered_question_answer
+                       or in_exercise and (_BARE_ANSWER_LABEL_RE.match(stripped) or _CHINESE_EXERCISE_ANSWER_RE.match(stripped)))
     qualified_solution = _QUALIFIED_SOLUTION_LABEL_RE.match(stripped)
-    if not exercise_answer and not (in_worked_example and qualified_solution) and _is_section_sealed_opener(stripped):
+    if not exercise_answer and _is_section_sealed_opener(stripped):
         return "solution_sealed", "section_sealed", True, False, False, None, None
 
     if qualified_solution or _INLINE_SEALED_ALWAYS_RE.match(stripped):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 
-    if (not in_worked_example and not _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped)
+    if ((not in_worked_example or numbered_question_answer) and not _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped)
             and (_INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) or _STANDALONE_SOLUTION_HEADING_RE.match(stripped))):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 

@@ -61,7 +61,8 @@ const SEALED_HEADING_CONTINUATION = String.raw`(?:\s*\(\s*(?:continued|cont(?:['
 const ASSESSMENT_NUMBER = String.raw`#?\d+(?:\.\d+)*`;
 const ASSESSMENT_TARGET = String.raw`(?:\s+${ASSESSMENT_NUMBER}(?:(?:\s*[-–—]\s*|\s+(?:to|through)\s+)${ASSESSMENT_NUMBER})?)?`;
 const ASSESSMENT_ANSWER_HEADING = String.raw`(?:Answers?|Solutions?|Key)\s+to\s+(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*(?:(?:Exercises?|Problems?|Questions?|Review\s+Questions?|Practice\s+Problems?|Self[- ]Check\s+Exercises?)${ASSESSMENT_TARGET}|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)`;
-const QUALIFIED_ANSWER_SECTION = String.raw`(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|(?:Official|Reference)\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)`;
+const SOLUTION_QUALIFIER = "(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)";
+const QUALIFIED_ANSWER_SECTION = String.raw`(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|${SOLUTION_QUALIFIER}\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)`;
 const CHINESE_ANSWER_HEADING = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
 const CHINESE_ANSWER_CONTINUATION = String.raw`(?:\s*[（(](?:续|接上页)[）)])?`;
 const BRACKETED_CHINESE_ANSWER_HEADING = String.raw`【\s*${CHINESE_ANSWER_HEADING}${CHINESE_ANSWER_CONTINUATION}\s*】`;
@@ -93,9 +94,11 @@ const ASSESSMENT_SOLUTIONS_HEADING_RE = new RegExp(String.raw`^Solutions${SEALED
 const ASSESSMENT_SOLUTIONS_CONTEXT_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?=[\s:：.—–-]|$)|(?:Exercises?|Problems?|Questions?|Review(?:\s+Questions?)?|Practice(?:\s+Problems?)?|Quiz|Drills?|Self[- ]Check)\b(?=\s*(?:[:：.—–-]|$)|\s+(?:#?\d|(?:for|of|on|from)\s+(?:Chapter|Section|Part|Unit)\b))|(?:\d+|[a-z])[.)](?=\s|$)|[（(]\s*(?:\d+|[a-z])\s*[)）](?=\s|$))/iu;
 const STANDALONE_ASSESSMENT_ITEM_RE = /^\d+[.)]$/u;
 const NUMBERED_QUESTION_RE = /^\d+[.)]\s+\S/u;
-const STANDALONE_CHINESE_SOLUTION_RE = new RegExp(String.raw`^解答${CHINESE_ANSWER_CONTINUATION}\s*[:：]$`, "u");
+const NUMBERED_QUESTION_SOLUTION_RE = new RegExp(
+  String.raw`^(?:解答${CHINESE_ANSWER_CONTINUATION}|(?:Solution|SOLUTION)${CONTINUED_LABEL})\s*[:：]$`, "u",
+);
 const QUALIFIED_SOLUTION_LABEL_RE = new RegExp(
-  String.raw`^(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)\s+Solutions?(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)`, "iu",
+  String.raw`^${SOLUTION_QUALIFIER}\s+Solutions?(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)`, "iu",
 );
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
@@ -445,14 +448,14 @@ function stripSealedSolutionLines(
       incomingProofBoundary = false;
       state.inlineProofBoundaryPending = false;
     }
-    const exerciseAnswer = (state.inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped)))
-      || (followsNumberedQuestion && STANDALONE_CHINESE_SOLUTION_RE.test(stripped));
+    const numberedQuestionAnswer = followsNumberedQuestion && NUMBERED_QUESTION_SOLUTION_RE.test(stripped);
+    const exerciseAnswer = numberedQuestionAnswer
+      || (state.inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped)));
     const bareSolutionsHeading = ASSESSMENT_SOLUTIONS_HEADING_RE.test(stripped);
     const assessmentContext = bareSolutionsHeading ? findAssessmentSolutionsContext(lines, index) : -1;
     if (assessmentContext >= 0) assessmentContextLine = assessmentContext;
     const qualifiedSolution = QUALIFIED_SOLUTION_LABEL_RE.exec(stripped);
-    const sectionHeader = !exerciseAnswer && !(state.inWorkedExample && qualifiedSolution)
-      && (isSectionSealedHeader(stripped) || assessmentContext >= 0);
+    const sectionHeader = !exerciseAnswer && (isSectionSealedHeader(stripped) || assessmentContext >= 0);
     if (!sectionHeader && (state.mode !== "none" || state.unknownAfterFailure || state.afterAllSealedPage)
       && isRunningPageHeading(stripped, !isInlineSeal(state.mode) || !allowBareInlineContainer)
       && !(state.inExercise && !isMarkdownHeading && /^\d+[.。]$/u.test(stripped))) {
@@ -523,7 +526,7 @@ function stripSealedSolutionLines(
       }
     }
 
-    if (state.inWorkedExample && WORKED_EXAMPLE_INTERNAL_RE.test(stripped)) {
+    if (state.inWorkedExample && !numberedQuestionAnswer && WORKED_EXAMPLE_INTERNAL_RE.test(stripped)) {
       keep(line);
       continue;
     }
@@ -537,7 +540,7 @@ function stripSealedSolutionLines(
     }
 
     const inlineOpener = INLINE_SEALED_ALWAYS_RE.exec(stripped) ?? qualifiedSolution
-      ?? (!state.inWorkedExample && !bareSolutionsHeading
+      ?? ((!state.inWorkedExample || numberedQuestionAnswer) && !bareSolutionsHeading
       ? INLINE_SEALED_NON_EXAMPLE_RE.exec(stripped) ?? STANDALONE_SOLUTION_HEADING_RE.exec(stripped)
       : null);
     if (inlineOpener) {

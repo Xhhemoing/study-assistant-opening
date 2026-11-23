@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v38-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v39-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2113,6 +2113,15 @@ describe("bounded resumable PDF parser", () => {
     ]);
   });
 
+  it("allows later prose after an inline answer completes inside a Vision description", async () => {
+    const prose = "Public prose after the answer.";
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "", visualKinds: ["scan"] },
+      { page: 2, text: prose },
+    ], recognizePage: async () => ({ text: "[图片描述]\nSolution:\nYes.", imageObjectKey: "vision/answer" }) });
+    expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[2, prose]]);
+  });
+
   it.each(["live", "saved"] as const)("redacts unheaded native and transcription text when %s Vision detects an answer", async origin => {
     const answer = "x = 3.";
     const chapter = "Chapter 2: Vectors";
@@ -2682,8 +2691,7 @@ describe("bounded resumable PDF parser", () => {
   });
 
   it.each(["Official Solution 1. Yes.", "Reference Solution 1:", "Model Solution: Yes.",
-    "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:", "EVEN-NUMBERED SOLUTION: Yes.",
-    "Official Solutions", "Reference Solutions:"])(
+    "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:", "EVEN-NUMBERED SOLUTION: Yes."])(
     "seals %s and the adjacent proof after a worked example", async label => {
       const example = "Example 1: Quadratic Equations\nSample solution: A derivation.";
       const result = await runPdfScenario({ segmentPages: 1, pages: [
@@ -2695,6 +2703,43 @@ describe("bounded resumable PDF parser", () => {
         .toEqual([[1, example], [3, "Public prose after the proof."]]);
     },
   );
+
+  it.each(["Official Solutions", "Reference Solutions:", "Model Solutions"])(
+    "keeps %s section-sealed across numbered items after a worked example", async label => {
+      const example = "Example 1: Quadratic Equations\nSample solution: A derivation.";
+      const publicChapter = "Chapter 2: Geometry";
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: [example, label, "1. x = 3."].join("\n") },
+        { page: 2, text: "2. y = 4." },
+        { page: 3, text: "Proof. Private continuation. ∎" },
+        { page: 4, text: publicChapter },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 2, seed: "section_sealed" });
+      expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[1, example], [4, publicChapter]]);
+    },
+  );
+
+  it.each(["Official Solution 1.", "Reference Solution:"])(
+    "closes a single inline %s after its completed answer", async label => {
+      const example = "Example 1: Quadratic Equations";
+      const prose = "Public prose after the answer.";
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: [example, label, "x = 3."].join("\n") },
+        { page: 2, text: prose },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 2, proofBoundary: true });
+      expect(result.publishedChunks.map(({ text }) => text)).toEqual([example, prose]);
+    },
+  );
+
+  it.each(["解答：", "Solution:"])("seals %s after a numbered question on the page after a worked example", async label => {
+    const example = "Example 1: Cyclic groups\nSolution: This group is abelian.";
+    const stem = "1. Decide whether every cyclic group is abelian.";
+    const prose = "Public prose after the proof.";
+    const pages = [example, [stem, label, "Yes."].join("\n"), "Proof. Private continuation. ∎", prose];
+    const result = await runPdfScenario({ segmentPages: 1, pages: pages.map((text, index) => ({ page: index + 1, text })) });
+    expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[1, example], [2, stem], [4, prose]]);
+  });
 
   it("seals a standalone 解答： and its proof in a heading-free numbered question", async () => {
     const stem = "1. Decide whether every cyclic group is abelian.";

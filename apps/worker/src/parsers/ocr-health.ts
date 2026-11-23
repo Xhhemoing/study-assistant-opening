@@ -30,5 +30,5 @@ export async function probeParserOcr(
  * Bump when extraction semantics/models change. Never reuse non-OCR output for OCR. */
 export function pdfParserProfile(env: NodeJS.ProcessEnv = process.env): string {
   // v37 revalidates segments behind recorded proof boundaries.
-  return `docling-2.126.0/pdf-segments-v38-discourse/${env.PARSER_OCR_MODEL_DIR?.trim() ? "rapidocr-3.9.2-torch-ppocrv4" : "text"}`;
+  return `docling-2.126.0/pdf-segments-v39-discourse/${env.PARSER_OCR_MODEL_DIR?.trim() ? "rapidocr-3.9.2-torch-ppocrv4" : "text"}`;
 }

@@ -7,7 +7,8 @@ import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 const definitionPatchByteLimit = 256 * 1024;
 const pdfHeadingContainer = String.raw`(?:(?:appendix(?: +[\w.]+)?|(?:chapter|section|lecture|lesson|module|part|unit) +[\w.]+|第 *[一二三四五六七八九十百千\d]+ *(?:章节|讲义|部分|单元|章|节|讲)|附录(?: *[A-Z0-9一二三四五六七八九十]+)?)(?: *[:：.\-—–] *| +)|附录)`;
 const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
-const qualifiedSolution = String.raw`(?:official|reference|model|selected|correct|odd-numbered|even-numbered) +solutions?`;
+const solutionQualifier = "(?:official|reference|model|selected|correct|odd-numbered|even-numbered)";
+const qualifiedSolution = String.raw`${solutionQualifier} +solutions?`;
 const englishContinuationWord = String.raw`(?:continued|cont(?:['’]?d)?\.?)`;
 const englishContinuation = String.raw`(?: *\( *${englishContinuationWord} *\))?`;
 const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
@@ -18,7 +19,7 @@ const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *|
 const assessmentTopic = String.raw`(?:(?:review +questions?|practice +problems?|self[- ]check +exercises?|exercises?|problems?|questions?)${assessmentTarget}|chapter +\d+|section +\d+(?:\.\d+)*)`;
 const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter +\d+|section +\d+(?:\.\d+)*) +)*`;
 const assessmentAnswers = String.raw`(?:answers?|solutions?|key) +to +${assessmentQualifier}${assessmentTopic}`;
-const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numbered) +answers?|model +answers|(?:official|reference) +solutions|solutions? +manual|answers? +and +solutions?)`;
+const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numbered) +answers?|model +answers|${solutionQualifier} +solutions|solutions? +manual|answers? +and +solutions?)`;
 const lineStart = String.raw`^ *(?:#{1,6} +)*`;
 const assessmentSolutionsHeading = String.raw`${lineStart}Solutions${englishContinuation} *[:：]? *$`;
 const assessmentSolutionsContext = String.raw`${lineStart}(?:(?:Chapter|Section|Part|Unit|Lecture) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?=[ :：.—–-]|$)|(?:Exercises?|Problems?|Questions?|Review(?: +Questions?)?|Practice(?: +Problems?)?|Quiz|Drills?|Self[- ]Check)\M(?= *(?:[:：.—–-]|$)| +(?:#?\d|(?:for|of|on|from) +(?:Chapter|Section|Part|Unit)\M))|(?:\d+|[a-z])[.)](?= |$)|[（(] *(?:\d+|[a-z]) *[)）](?= |$))`;
@@ -41,9 +42,13 @@ const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full
 // These labels can also explain a worked example. Qualified keys and explicit
 // assessment targets remain unconditional answers.
 const numberedSolution = String.raw`(?:(?:worked|full|sample) +)?solutions?${numberedAnswerSuffix}`;
-const standaloneEnglishSolution = String.raw`solution${englishContinuation} *[:：] *$`;
-const standaloneChineseSolution = String.raw`${lineStart}解答${chineseContinuation}[:：] *$`;
+const englishSolutionLabel = String.raw`solution${englishContinuation} *[:：]`;
+const standaloneEnglishSolution = englishSolutionLabel + " *$";
+const standaloneNumberedSolution = String.raw`${lineStart}(?:${standaloneEnglishSolution}|解答${chineseContinuation}[:：] *$)`;
 const numberedQuestion = String.raw`${lineStart}\d+[.)] +[^ ]`;
+const jsStandaloneNumberedSolution = new RegExp(standaloneNumberedSolution, "iu");
+const jsNumberedQuestion = new RegExp(numberedQuestion, "u");
+const jsEnglishSolutionLabel = new RegExp(lineStart + englishSolutionLabel, "iu");
 const sectionAnswerLine = String.raw`${lineStart}(?:${sectionAnswer}|解答${chineseContinuation}[:：]? *$)`;
 const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
 const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${standaloneEnglishSolution}|${numberedSolution}|【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|[.。](?: |$)|$))`;
@@ -77,7 +82,7 @@ const blockedReopeningHeading = [
 
 // Only extraction and transcription headers may precede a reopening heading.
 const visionTranscription = String.raw`^ *(?:【原图忠实转写[^】]*】|\[转写\]) *[:：]? *$`;
-const visionAuxiliary = String.raw`^ *(?:【(?:图表观察描述|识别不确定)[^】]*】|\[(?:图片描述|图像描述|图示与版面描述|不确定处)\])`;
+const visionAuxiliary = String.raw`^ *(?:【(?:图表观察描述|识别不确定)[^】]*】|\[(?:图片描述|图像描述|图示与版面描述|不确定处)\]) *[:：]? *`;
 const pdfLeadingTextWrappers = String.raw`^ *\[(?:原生提取|本地提取（可能含OCR）|视觉转写与描述)\] *$|${visionTranscription}`;
 const jsVisionTranscription = new RegExp(visionTranscription, "u");
 const jsVisionAuxiliary = new RegExp(visionAuxiliary, "u");
@@ -169,54 +174,60 @@ function acceptsPdfHeading(line: string, prefix: RegExpExecArray, prose: RegExp)
 export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
   const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ").replace(pdfClosingAtxHashes, "$1");
   const primary: { rawLine: string; line: string }[] = [];
-  let auxiliary = false;
+  const blocks = [primary];
+  let block = primary;
   for (const rawLine of normalized.split("\n")) {
-    const line = rawLine.replace(/\*\*|__/gu, "");
-    if (jsVisionAuxiliary.test(line)) auxiliary = true;
-    else if (jsVisionTranscription.test(line)) auxiliary = false;
-    if (auxiliary || jsPdfLeadingTextWrappers.test(line)) continue;
+    let line = rawLine.replace(/\*\*|__/gu, "");
+    const auxiliaryHeader = jsVisionAuxiliary.exec(line);
+    if (auxiliaryHeader) {
+      block = [];
+      blocks.push(block);
+      line = line.slice(auxiliaryHeader[0].length);
+    } else if (jsVisionTranscription.test(line)) block = primary;
+    if (jsPdfLeadingTextWrappers.test(line) || !line.trim()) continue;
     if (answerLabel.test(line) || jsQualifiedSolution.test(line) || jsAnswerPeriod.test(line)) return true;
-    primary.push({ rawLine, line });
+    if (!isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line)) block.push({ rawLine, line });
   }
-  if (primary.some(({ line }) => jsAssessmentSolutionsHeading.test(line))) {
-    const content = primary.map(({ line }) => line).filter(line => line.trim()
-      && (!isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line)));
-    if (content.some((line, index) => jsAssessmentSolutionsHeading.test(line)
-      && jsAssessmentSolutionsContext.test(content[index + 1] ?? ""))) return true;
-  }
+  if (blocks.some(lines => lines.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
+    && jsAssessmentSolutionsContext.test(lines[index + 1]?.line ?? "")))) return true;
   if (!checkContext) return false;
   let inWorkedExample = false;
-  for (const { rawLine, line } of primary) {
-    if (explanationLabel.test(line) || jsSolutionPeriod.test(line)) {
-      if (!inWorkedExample) return true;
-      continue;
-    }
-    if (isArchiveRunningHeading(line) || jsProofHeading.test(line)) continue;
-    const atx = jsExplicitHeading.test(rawLine);
-    const englishExample = jsEnglishExample.exec(line);
-    const chineseExample = jsChineseExample.exec(line);
-    if (jsWorkedExample.test(line)
-      && (!englishExample || acceptsPdfHeading(line, englishExample, jsEnglishProse))
-      && (!chineseExample || acceptsPdfHeading(line, chineseExample, jsChineseProse))) {
-      inWorkedExample = true;
-    } else if (inWorkedExample) {
-      const numbered = jsBlockReference.exec(line);
-      const chinese = jsChineseNumberedBlock.exec(line) ?? jsChineseContainer.exec(line);
-      const container = jsEnglishContainer.exec(line);
-      const dotted = jsDottedSection.exec(line);
-      const title = dotted ? line.slice(dotted[0].length) : "";
-      const numberedSection = Boolean(dotted && (jsLatinTitle.test(title) && /[A-Za-z]{2}/u.test(title)
-        || jsCjkTitle.test(title) && !jsCjkSectionUnits.test(title)) && !jsSectionProse.test(title));
-      const genericHeading = atx && !dotted && !numbered && !chinese && !container && !englishExample && !chineseExample
-        && !jsEnglishBlock.test(line) && !jsCaptionPrefix.test(line) && !jsChineseCaptionPrefix.test(line)
-        && jsMarkdownTitle.test(line) && !jsMarkdownProse.test(line);
-      if (jsExerciseHeading.test(line) || jsPublicHeading.test(line)
-        || (numbered && acceptsPdfHeading(line, numbered, jsEnglishProse))
-        || (chinese && acceptsPdfHeading(line, chinese, jsChineseProse))
-        || ((container && acceptsPdfHeading(line, container, jsEnglishProse))
-          || numberedSection || jsBackMatter.test(line) || genericHeading)
-          && !jsBlockedReopening.test(line)) {
-        inWorkedExample = false;
+  for (const lines of blocks) {
+    let previousNumberedQuestion = false;
+    for (const { rawLine, line } of lines) {
+      const followsNumberedQuestion = previousNumberedQuestion;
+      previousNumberedQuestion = jsNumberedQuestion.test(line);
+      if (explanationLabel.test(line) || jsEnglishSolutionLabel.test(line) || jsSolutionPeriod.test(line)) {
+        if (!inWorkedExample || followsNumberedQuestion && jsStandaloneNumberedSolution.test(line)) return true;
+        continue;
+      }
+      if (lines !== primary || jsProofHeading.test(line)) continue;
+      const atx = jsExplicitHeading.test(rawLine);
+      const englishExample = jsEnglishExample.exec(line);
+      const chineseExample = jsChineseExample.exec(line);
+      if (jsWorkedExample.test(line)
+        && (!englishExample || acceptsPdfHeading(line, englishExample, jsEnglishProse))
+        && (!chineseExample || acceptsPdfHeading(line, chineseExample, jsChineseProse))) {
+        inWorkedExample = true;
+      } else if (inWorkedExample) {
+        const numbered = jsBlockReference.exec(line);
+        const chinese = jsChineseNumberedBlock.exec(line) ?? jsChineseContainer.exec(line);
+        const container = jsEnglishContainer.exec(line);
+        const dotted = jsDottedSection.exec(line);
+        const title = dotted ? line.slice(dotted[0].length) : "";
+        const numberedSection = Boolean(dotted && (jsLatinTitle.test(title) && /[A-Za-z]{2}/u.test(title)
+          || jsCjkTitle.test(title) && !jsCjkSectionUnits.test(title)) && !jsSectionProse.test(title));
+        const genericHeading = atx && !dotted && !numbered && !chinese && !container && !englishExample && !chineseExample
+          && !jsEnglishBlock.test(line) && !jsCaptionPrefix.test(line) && !jsChineseCaptionPrefix.test(line)
+          && jsMarkdownTitle.test(line) && !jsMarkdownProse.test(line);
+        if (jsExerciseHeading.test(line) || jsPublicHeading.test(line)
+          || (numbered && acceptsPdfHeading(line, numbered, jsEnglishProse))
+          || (chinese && acceptsPdfHeading(line, chinese, jsChineseProse))
+          || ((container && acceptsPdfHeading(line, container, jsEnglishProse))
+            || numberedSection || jsBackMatter.test(line) || genericHeading)
+            && !jsBlockedReopening.test(line)) {
+          inWorkedExample = false;
+        }
       }
     }
   }
@@ -334,7 +345,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         (regexp_match(line,${titledPageCounter},'i'))[1] AS furniture_title,
         NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
-        SELECT *,
+        SELECT id,source_id,source_version,page,created_at,raw_line,line_number,
+          regexp_replace(line,${visionAuxiliary},'') AS line,
           max(line_number) FILTER (WHERE line ~ ${visionAuxiliary}) OVER vision_block AS last_auxiliary,
           max(line_number) FILTER (WHERE line ~ ${visionTranscription}) OVER vision_block AS last_transcription
         FROM (
@@ -361,23 +373,27 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         OR public_container AND (line ~* ${appendixHeading} OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix}))
         AND NOT wrapper AND NOT running_heading AND line !~* ${answerProofHeading}
         AND line !~* ${captionPrefix} AND line !~ ${chineseCaptionPrefix} AS reopens_section,
-      NOT wrapper AND (line ~* ${sectionAnswerLine} OR assessment_solutions) AS opens_section,
-      NOT wrapper AND (line ~* ${answerLabelLine} OR qualified_solution OR period_answer OR assessment_solutions) AS unconditional_answer,
-      NOT wrapper AND (line ~* ${explanationLabelLine} OR period_solution) AS explanation_label,
+       (line ~* ${sectionAnswerLine} OR assessment_solutions) AS opens_section,
+       (line ~* ${answerLabelLine} OR qualified_solution OR period_answer OR assessment_solutions) AS unconditional_answer,
+       (line ~* ${explanationLabelLine} OR period_solution) AS explanation_label,
       period_answer OR period_solution AS period_inline,
       NOT wrapper AND line ~* ${lineStart + answerSectionEnd} AS section_terminator,
       line ~* ${exerciseSectionException} AS exercise_exception,
-      content_line AND line ~ ${standaloneChineseSolution} AND COALESCE(
-        lag(line) OVER (PARTITION BY source_id,source_version,page,content_line ORDER BY created_at,id,line_number) ~ ${numberedQuestion},false)
+       content_line AND line ~* ${standaloneNumberedSolution} AND COALESCE(
+         lag(line) OVER (PARTITION BY source_id,source_version,page,content_line,auxiliary_chunk,auxiliary_block
+           ORDER BY created_at,id,line_number) ~ ${numberedQuestion},false)
         AS numbered_solution_exception,
-      qualified_solution,wrapper
+       qualified_solution,wrapper,auxiliary_block
     FROM (
       SELECT *, line ~ ${answerPeriodLine} AS period_answer, line ~ ${solutionPeriodLine} AS period_solution,
         line ~* ${qualifiedSolutionLabel} AS qualified_solution,
         content_line AND line ~* ${assessmentSolutionsHeading} AND COALESCE(
-          lead(line) OVER (PARTITION BY id,content_line ORDER BY line_number) ~* ${assessmentSolutionsContext},false) AS assessment_solutions
+           lead(line) OVER (PARTITION BY id,content_line,auxiliary_block ORDER BY line_number)
+             ~* ${assessmentSolutionsContext},false) AS assessment_solutions
       FROM (
-        SELECT *, NOT wrapper AND (NOT running_heading OR line ~ ${standaloneAssessmentItem})
+         SELECT *, CASE WHEN auxiliary THEN id END AS auxiliary_chunk,
+           CASE WHEN auxiliary THEN last_auxiliary END AS auxiliary_block,
+           line !~* ${pdfLeadingTextWrappers} AND (NOT running_heading OR line ~ ${standaloneAssessmentItem})
           AND btrim(line)<>'' AS content_line
         FROM (
           SELECT *, auxiliary OR line ~* ${pdfLeadingTextWrappers} AS wrapper
@@ -390,19 +406,19 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       > COALESCE(max(position) FILTER (WHERE (opens_section AND NOT exercise_exception)
         OR (opens_public AND NOT opens_exercise)) OVER context,0) AS in_exercise,
       COALESCE(max(position) FILTER (WHERE opens_worked_example) OVER context,0)
-      > COALESCE(max(position) FILTER (WHERE unconditional_answer OR opens_exercise
+       > COALESCE(max(position) FILTER (WHERE unconditional_answer OR numbered_solution_exception OR opens_exercise
         OR (opens_public AND NOT opens_worked_example)) OVER context,0) AS in_worked_example
     FROM pdf_archive_lines
     WINDOW context AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
   ), pdf_archive_line_events AS (
     SELECT *, opens_section AND NOT (in_exercise AND exercise_exception OR numbered_solution_exception)
-      AND NOT (in_worked_example AND (explanation_label OR qualified_solution)) AS section_answer,
-      explanation_label AND NOT in_worked_example AS sealed_explanation,
-      NOT wrapper AND (qualified_solution OR period_inline OR line ~* ${exerciseInlineAnswer}
+       AND NOT (in_worked_example AND explanation_label) AS section_answer,
+       explanation_label AND (NOT in_worked_example OR numbered_solution_exception) AS sealed_explanation,
+       (qualified_solution OR period_inline OR line ~* ${exerciseInlineAnswer}
         AND (in_exercise OR (unconditional_answer OR explanation_label) AND line ~* ${standaloneInlineAnswer}
           OR (unconditional_answer OR NOT in_worked_example) AND line ~* ${exerciseInlineAnswer + "[^ ]"}))
-        AND (NOT opens_section OR exercise_exception OR in_worked_example AND qualified_solution)
-        AND (unconditional_answer OR NOT (in_worked_example AND explanation_label)) AS inline_opener
+         AND (NOT opens_section OR exercise_exception)
+         AND (unconditional_answer OR NOT in_worked_example OR NOT explanation_label OR numbered_solution_exception) AS inline_opener
     FROM pdf_archive_exercise_context
   ), pdf_archive_page_events AS (
     SELECT source_id,source_version,page,bool_or(section_answer) AS section_answer,
@@ -411,15 +427,36 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       (array_agg(reopens_section ORDER BY position) FILTER (WHERE NOT wrapper AND btrim(line)<>'' AND NOT running_heading))[1] AS reopens_section
     FROM pdf_archive_line_events
     GROUP BY source_id,source_version,page
-  ), pdf_archive_inline_groups AS (
-    -- An opener and its continuation lines share a group until the next explicit boundary.
-    SELECT *, count(*) FILTER (WHERE inline_opener OR section_answer OR opens_exercise OR opens_public)
-      OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group,
+  ), pdf_archive_inline_bodies AS (
+    SELECT *,
       CASE WHEN inline_opener AND qualified_solution THEN btrim(regexp_replace(line,${qualifiedSolutionLabel},'','i'))
         WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
         WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
-        WHEN wrapper OR running_heading THEN '' ELSE btrim(line) END AS body_line
+         WHEN running_heading OR line ~* ${pdfLeadingTextWrappers} THEN '' ELSE btrim(line) END AS candidate_body
     FROM pdf_archive_line_events
+  ), pdf_archive_inline_starts AS (
+    -- A complete auxiliary answer hides its own chunk and leaves any incoming seal in place.
+    SELECT *, inline_opener AND NOT (auxiliary AND (last_auxiliary_body ~* ${inlineTerminator}
+      OR (NOT has_auxiliary_proof AND last_auxiliary_body ~* ${inlineTerminal}
+        AND last_auxiliary_body !~* ${inlineContinues}))) AS starts_inline
+    FROM (
+      SELECT *, first_value(candidate_body) OVER auxiliary_body AS last_auxiliary_body,
+        bool_or(candidate_body ~* ${answerProofHeading}) OVER auxiliary_body AS has_auxiliary_proof
+      FROM pdf_archive_inline_bodies
+      WINDOW auxiliary_body AS (PARTITION BY id,auxiliary_block ORDER BY (candidate_body=''),position DESC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+    ) with_auxiliary_body
+  ), pdf_archive_inline_groups AS (
+    -- An opener and its continuation lines share a group until the next explicit boundary.
+    SELECT *, CASE WHEN auxiliary AND NOT (first_value(starts_inline) OVER inline_origin
+        AND id=first_value(id) OVER inline_origin AND auxiliary_block=first_value(auxiliary_block) OVER inline_origin)
+      THEN '' ELSE candidate_body END AS body_line
+    FROM (
+      SELECT *, count(*) FILTER (WHERE starts_inline OR section_answer OR opens_exercise OR opens_public)
+        OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group
+      FROM pdf_archive_inline_starts
+    ) grouped_lines
+    WINDOW inline_origin AS (PARTITION BY source_id,source_version,inline_group ORDER BY position)
   ), pdf_archive_inline_body AS (
     SELECT *, min(position) FILTER (WHERE body_line<>'')
       OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body,
@@ -430,8 +467,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_body
     FROM pdf_archive_inline_groups
   ), pdf_archive_inline_pages AS (
-    SELECT source_id,source_version,inline_group,page,bool_or(inline_opener) AS starts_inline,
-      bool_or(inline_opener AND NOT (unconditional_answer OR sealed_explanation)) AS hide_opening_page,
+    SELECT source_id,source_version,inline_group,page,bool_or(starts_inline) AS starts_inline,
+      bool_or(starts_inline AND NOT (unconditional_answer OR sealed_explanation)) AS hide_opening_page,
       (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
       bool_or(NOT auxiliary AND btrim(line)='' AND position>first_body AND next_body IS NOT NULL
         AND (first_proof IS NULL OR next_body<first_proof)) AS closed_after_blank,
@@ -471,7 +508,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     FROM pdf_archive_inline_spans WHERE first_page<last_page OR hide_opening_page
     UNION ALL
     SELECT DISTINCT source_id,source_version,page,page+1,id
-    FROM pdf_archive_line_events WHERE sealed_explanation
+    FROM pdf_archive_line_events WHERE sealed_explanation OR (auxiliary AND inline_opener)
   )`;
 }
 

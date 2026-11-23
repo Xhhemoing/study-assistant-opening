@@ -396,8 +396,7 @@ describe("pgvector material repository", () => {
   });
 
   it.each(["Official Solution 1. Yes.", "Reference Solution 1:", "Model Solution: Yes.",
-    "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:", "EVEN-NUMBERED SOLUTION: Yes.",
-    "Official Solutions", "Reference Solutions:"])(
+    "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:", "EVEN-NUMBERED SOLUTION: Yes."])(
     "withholds %s and its adjacent archived proof after a worked example", async label => {
       await expectArchivedPdfPages([
         "Example 1: Quadratic Equations\nSolution 1: Factor the polynomial.\n" + label,
@@ -407,8 +406,64 @@ describe("pgvector material repository", () => {
     },
   );
 
+  it.each(["Official Solutions", "Reference Solutions:", "Model Solutions"])(
+    "withholds numbered pages after the archived %s section that follows a worked example", async label => {
+      await expectArchivedPdfPages([
+        "Example 1: Quadratic Equations\nSolution: Factor the polynomial.\n" + label + "\n1. x = 3.",
+        "2. y = 4.",
+        "Proof. Private continuation. ∎",
+        "Chapter 2: Geometry",
+      ], [4], 2);
+    },
+  );
+
   it("still withholds a numbered official solution with a chapter prefix", async () => {
     await expectArchivedPdfPages(["Chapter 1: Official Solution 1: Yes.", "Public prose."], [2], 1);
+  });
+
+  it.each(["Official Solution 1.", "Reference Solution:"])(
+    "allows prose after an archived %s whose inline answer has ended", async label => {
+      await expectArchivedPdfPages([
+        "Example 1: Quadratic Equations\n" + label + "\nx = 3.", "Public prose after the answer.",
+      ], [2], 1);
+    },
+  );
+
+  it.each([
+    ["[图片描述]", "\n"], ["[图片描述]", "："],
+    ["【图表观察描述，非原文或解答】", "\n"], ["【识别不确定，不能据此判定正确】", "\n"],
+  ])(
+    "withholds an answer section introduced inside archived Vision block %s with separator %j", async (header, separator) => {
+      await expectArchivedPdfPages([
+        header + separator + "Answer Key\n1. x = 3.",
+        "2. y = 4.",
+        "Chapter 2: Geometry",
+      ], [3], 2);
+    },
+  );
+
+  it("withholds a continuing inline answer introduced inside archived auxiliary Vision", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nSolution: x =",
+      "3 units.",
+      "Public prose after the answer.",
+    ], [3], 2);
+  });
+
+  it("allows later prose after an inline answer completes inside the same archived Vision block", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nSolution:\nYes.",
+      "Public prose after the answer.",
+    ], [2], 1);
+  });
+
+  it("keeps an incoming inline seal when a different answer completes inside archived Vision", async () => {
+    await expectArchivedPdfPages([
+      "Answer: x =",
+      "[图片描述]\nSolution:\nYes.",
+      "3 units.",
+      "Public prose after the answer.",
+    ], [4], 3);
   });
 
   it.each(["【图表观察描述，非原文或解答】", "【识别不确定，不能据此判定正确】",
@@ -440,6 +495,17 @@ describe("pgvector material repository", () => {
       "Public prose after the proof.",
     ], [3], 2);
   });
+
+  it.each(["解答：", "Solution:"])(
+    "withholds %s and proof after a numbered question even with a preceding archived worked example", async label => {
+      await expectArchivedPdfPages([
+        "Example 1: Cyclic groups\nSolution: This group is abelian.",
+        "1. Decide whether every cyclic group is abelian.\n" + label + "\nYes.",
+        "Proof. Private continuation. ∎",
+        "Public prose after the proof.",
+      ], [1, 4], 2);
+    },
+  );
 
   it("withholds the answer and proof of a heading-free numbered question with standalone 解答：", async () => {
     await expectArchivedPdfPages([

@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
+import { isPublicSourceChunk, preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
 import { chunksHaveReadableContent, createOpeningSourceChunksRepository, type NewSourceChunk } from "./opening-source-chunks";
 
 const base = { page: 1, slideLabel: null, startMs: null, endMs: null };
@@ -227,6 +227,21 @@ it("withdraws unresolved PDF continuations and numbered labels from public reads
     expect(query.match(/\b(?:FROM|JOIN) (?:opening_\w+|workspaces)\b/gu)?.length).toBeLessThanOrEqual(10);
   }
   expect(queries.at(-1)).not.toContain("opening_pdf_parse_segments");
+});
+
+describe("page-less archived PDF chunks", () => {
+  const example = "Example 1: Cyclic groups\nSolution: This group is abelian.";
+  const stem = "1. Decide whether every cyclic group is abelian.";
+
+  it.each([
+    [example, true],
+    [`${example}\n${stem}\n解答：\nYes.`, false],
+    [`${example}\n${stem}\nSolution:\nYes.`, false],
+    ["[图片描述]：Answer Key\n1. x = 3.", false],
+    ["【图表观察描述，非原文或解答】\nExample 1: Cyclic groups\nSolution: Yes.", false],
+  ])("checks local answer context in %j", (text, isPublic) => {
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: null, text })).toBe(isPublic);
+  });
 });
 
 describe("chunksHaveReadableContent", () => {

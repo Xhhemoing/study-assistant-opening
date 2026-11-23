@@ -950,7 +950,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
     def test_qualified_answer_keys_seal_after_worked_examples(self):
         for label in ("Official Solution 1. Yes.", "Reference Solution 1:", "Model Solution: Yes.",
                       "Selected Solutions.", "Correct Solution. Yes.", "Odd-Numbered Solutions 1:",
-                      "EVEN-NUMBERED SOLUTION: Yes.", "Official Solutions", "Reference Solutions:"):
+                      "EVEN-NUMBERED SOLUTION: Yes."):
             with self.subTest(label=label):
                 example = "Example 1: Quadratic Equations\nSample solution: A derivation."
                 proof = "Proof. Private continuation. ∎"
@@ -964,6 +964,49 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertEqual(ext.texts_by_page[2], [])
                 self.assertEqual(ext.sealed_texts_by_page[2], [proof])
                 self.assertEqual(ext.texts_by_page[3], ["Public prose after the proof."])
+
+    def test_qualified_plural_solution_section_stays_sealed_after_worked_example(self):
+        example = "Example 1: Quadratic Equations\nSample solution: A derivation."
+        proof = "Proof. Private continuation. ∎"
+        public_chapter = "Chapter 2: Geometry"
+        for label in ("Official Solutions", "Reference Solutions:", "Model Solutions"):
+            with self.subTest(label=label):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(1, f"{example}\n{label}\n1. x = 3.")],
+                    [text_element(2, "2. y = 4.")], [text_element(3, proof)],
+                    [text_element(4, public_chapter)], start_page=1,
+                ))
+                self.assertTrue(ext.section_sealed_by_page[1])
+                self.assertEqual(ext.texts_by_page, {1: [example], 2: [], 3: [], 4: [public_chapter]})
+                self.assertEqual(ext.sealed_texts_by_page[2], ["2. y = 4."])
+                self.assertEqual(ext.sealed_texts_by_page[3], [proof])
+
+    def test_qualified_singular_solution_closes_after_completed_inline_answer(self):
+        example = "Example 1: Quadratic Equations"
+        prose = "Public prose after the answer."
+        for label in ("Official Solution 1.", "Reference Solution:"):
+            with self.subTest(label=label):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(1, f"{example}\n{label}\nx = 3.")], [text_element(2, prose)], start_page=1,
+                ))
+                self.assertFalse(ext.section_sealed_by_page[1])
+                self.assertEqual(ext.texts_by_page, {1: [example], 2: [prose]})
+                self.assertEqual(ext.sealed_texts_by_page[1], [f"{label}\nx = 3."])
+
+    def test_numbered_question_overrides_worked_example_from_previous_page(self):
+        example = "Example 1: Cyclic groups\nSolution: This group is abelian."
+        stem = "1. Decide whether every cyclic group is abelian."
+        proof = "Proof. Private continuation. ∎"
+        prose = "Public prose after the proof."
+        for label in ("解答：", "Solution:"):
+            with self.subTest(label=label):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(1, example)], [text_element(2, f"{stem}\n{label}\nYes.")],
+                    [text_element(3, proof)], [text_element(4, prose)], start_page=1,
+                ))
+                self.assertEqual(ext.texts_by_page, {1: [example], 2: [stem], 3: [], 4: [prose]})
+                self.assertEqual(ext.sealed_texts_by_page[2], [f"{label}\nYes."])
+                self.assertEqual(ext.sealed_texts_by_page[3], [proof])
 
     def test_heading_free_numbered_question_with_chinese_solution_seals_only_answer_and_proof(self):
         stem = "1. Decide whether every cyclic group is abelian."
