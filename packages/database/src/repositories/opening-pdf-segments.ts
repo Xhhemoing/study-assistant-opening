@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; inlineProofSealedAtEnd?: boolean; inlineProofBoundaryPendingAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true; withheldNativeDigest?: string; withheldNativeMode?: "section_sealed" | "inline_sealed" | "inline_proof_sealed" };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; inlineProofSealedAtEnd?: boolean; inlineProofBoundaryPendingAtEnd?: boolean; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; previousNumberedQuestionAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true; withheldNativeDigest?: string; withheldNativeMode?: "section_sealed" | "inline_sealed" | "inline_proof_sealed" };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[]; requiresRevalidation?: true } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -44,6 +44,7 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
     if (row.inlineProofSealedAtEnd !== undefined && typeof row.inlineProofSealedAtEnd !== "boolean") throw new TypeError("invalid PDF inlineProofSealedAtEnd metadata");
     if (row.sectionSealedAtEnd && row.inlineSealedAtEnd || row.inlineProofSealedAtEnd && !row.inlineSealedAtEnd) throw new TypeError("conflicting PDF page end seal metadata");
     if (row.hadSealedContent !== undefined && typeof row.hadSealedContent !== "boolean") throw new TypeError("invalid PDF hadSealedContent metadata");
+    if (row.previousNumberedQuestionAtEnd !== undefined && typeof row.previousNumberedQuestionAtEnd !== "boolean") throw new TypeError("invalid PDF previousNumberedQuestionAtEnd metadata");
     if (row.inWorkedExampleAtEnd !== undefined && typeof row.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid PDF inWorkedExampleAtEnd metadata");
     if (row.inExerciseAtEnd !== undefined && typeof row.inExerciseAtEnd !== "boolean") throw new TypeError("invalid PDF inExerciseAtEnd metadata");
     if (row.publicationSealUnknown !== undefined && typeof row.publicationSealUnknown !== "boolean") throw new TypeError("invalid PDF publicationSealUnknown metadata");
@@ -64,6 +65,7 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       ...(row.inlineProofBoundaryPendingAtEnd === undefined ? {} : { inlineProofBoundaryPendingAtEnd: row.inlineProofBoundaryPendingAtEnd }),
       ...(row.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: row.inlineProofSealedAtEnd }),
       ...(row.hadSealedContent === undefined ? {} : { hadSealedContent: row.hadSealedContent }),
+      ...(row.previousNumberedQuestionAtEnd === undefined ? {} : { previousNumberedQuestionAtEnd: row.previousNumberedQuestionAtEnd }),
       ...(row.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: row.inWorkedExampleAtEnd }),
       ...(row.inExerciseAtEnd === undefined ? {} : { inExerciseAtEnd: row.inExerciseAtEnd }),
       ...(row.publicationSealUnknown === undefined ? {} : { publicationSealUnknown: row.publicationSealUnknown }),

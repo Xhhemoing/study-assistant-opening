@@ -52,6 +52,7 @@ type PdfSegmentContinuation = PdfSealMode | null | void | {
   nextInlineProofBoundary?: boolean;
   nextInWorkedExample?: boolean;
   nextInExercise?: boolean;
+  nextPreviousNumberedQuestion?: boolean;
   resumeFromPage?: number;
 };
 type FailedPdfSegment = { pageStart: number; pageEnd: number; initialSealMode?: PdfSealMode };
@@ -170,6 +171,7 @@ export async function parsePdfSegments(input: {
   let initialInlineProofBoundary = false;
   let initialInWorkedExample = false;
   let initialInExercise = false;
+  let initialPreviousNumberedQuestion = false;
   let afterFailedSegment = false;
   let parsedPageCount = 0;
   const emitSegment = async (pageStart: number, parsed: ReturnType<typeof validateSegment>, cached: boolean, firstOverQuotaPage?: number) => {
@@ -193,15 +195,18 @@ export async function parsePdfSegments(input: {
     const doclingEndInlineProofBoundary = Boolean(lastPage.inlineProofBoundaryPendingAtEnd);
     const doclingEndWorkedExample = Boolean(lastPage.inWorkedExampleAtEnd);
     const doclingEndExercise = Boolean(lastPage.inExerciseAtEnd);
+    const doclingEndNumberedQuestion = Boolean(lastPage.previousNumberedQuestionAtEnd);
     initialSealMode = continuation ? continuation.nextSealMode ?? undefined
       : workerEnd === undefined ? doclingEndSeal : typeof workerEnd === "string" ? workerEnd : undefined;
     initialInWorkedExample = continuation?.nextInWorkedExample
       ?? (resumeFromPage === undefined && doclingEndWorkedExample);
     initialInExercise = continuation?.nextInExercise ?? (resumeFromPage === undefined && doclingEndExercise);
     initialInlineProofBoundary = continuation?.nextInlineProofBoundary ?? (resumeFromPage === undefined && doclingEndInlineProofBoundary);
+    initialPreviousNumberedQuestion = continuation?.nextPreviousNumberedQuestion
+      ?? (resumeFromPage === undefined && doclingEndNumberedQuestion);
     const changedSeed = workerEnd !== undefined
       && (initialSealMode !== doclingEndSeal || initialInlineProofBoundary !== doclingEndInlineProofBoundary || initialInWorkedExample !== doclingEndWorkedExample
-        || initialInExercise !== doclingEndExercise);
+        || initialInExercise !== doclingEndExercise || initialPreviousNumberedQuestion !== doclingEndNumberedQuestion);
     return resumeFromPage ?? (changedSeed ? firstOverQuotaPage : undefined);
   };
   const failedSegments: FailedPdfSegment[] = [];
@@ -214,7 +219,8 @@ export async function parsePdfSegments(input: {
       // previously cached range, even when the source version is unchanged.
       parserProfile: parserProfile + (initialSealMode ? "/from-" + initialSealMode : "")
         + (initialInWorkedExample ? "/we" : "") + (initialInExercise ? "/exercise" : "")
-        + (initialInlineProofBoundary ? "/proof-boundary" : ""),
+        + (initialInlineProofBoundary ? "/proof-boundary" : "")
+        + (initialPreviousNumberedQuestion ? "/numbered-question" : ""),
       pageStart: start,
       pageEnd: end,
     };
@@ -240,6 +246,7 @@ export async function parsePdfSegments(input: {
           initialInlineProofBoundary,
           initialInWorkedExample,
           initialInExercise,
+          initialPreviousNumberedQuestion,
         }, input.signal);
         parsed = validateSegment(rawPages, start, end);
       } catch (caught) {
@@ -266,6 +273,7 @@ export async function parsePdfSegments(input: {
       initialInlineProofBoundary = false;
       initialInWorkedExample = false;
       initialInExercise = false;
+      initialPreviousNumberedQuestion = false;
       afterFailedSegment = true;
     } else {
       const remainingBytes = maxBookBytes - cumulativeBookBytes;

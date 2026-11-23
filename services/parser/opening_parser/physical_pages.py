@@ -143,7 +143,8 @@ _ASSESSMENT_SOLUTIONS_CONTEXT_RE = re.compile(
 _STANDALONE_ASSESSMENT_ITEM_RE = re.compile(r"^\d+[.)]$")
 _NUMBERED_QUESTION_RE = re.compile(r"^\d+[.)]\s+\S")
 _NUMBERED_QUESTION_SOLUTION_RE = re.compile(
-    rf"^(?:解答{_CHINESE_ANSWER_CONTINUATION}|(?:Solution|SOLUTION){_CONTINUED_LABEL})\s*[:：]$"
+    rf"^(?:解答{_CHINESE_ANSWER_CONTINUATION}|Solution{_CONTINUED_LABEL})\s*[:：]$",
+    re.IGNORECASE,
 )
 _QUALIFIED_SOLUTION_LABEL_RE = re.compile(
     rf"^{_SOLUTION_QUALIFIER}\s+Solutions?"
@@ -385,6 +386,7 @@ class PhysicalPagesExtraction:
     inline_proof_boundary_by_page: dict[int, bool] = field(default_factory=dict)
     had_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     in_worked_example_by_page: dict[int, bool] = field(default_factory=dict)
+    previous_numbered_question_by_page: dict[int, bool] = field(default_factory=dict)
     in_exercise_by_page: dict[int, bool] = field(default_factory=dict)
 
 
@@ -813,10 +815,10 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     if not exercise_answer and _is_section_sealed_opener(stripped):
         return "solution_sealed", "section_sealed", True, False, False, None, None
 
-    if qualified_solution or _INLINE_SEALED_ALWAYS_RE.match(stripped):
+    if numbered_question_answer or qualified_solution or _INLINE_SEALED_ALWAYS_RE.match(stripped):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 
-    if ((not in_worked_example or numbered_question_answer) and not _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped)
+    if (not in_worked_example and not _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped)
             and (_INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) or _STANDALONE_SOLUTION_HEADING_RE.match(stripped))):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 
@@ -870,7 +872,7 @@ def _iter_page_units(fragments: list[tuple[str, str | None]]):
 
 def _inline_answer_body(line_text: str) -> str:
     stripped = _strip_heading_markup(line_text)
-    for label in (_INLINE_SEALED_ALWAYS_RE, _QUALIFIED_SOLUTION_LABEL_RE, _INLINE_SEALED_NON_EXAMPLE_RE,
+    for label in (_NUMBERED_QUESTION_SOLUTION_RE, _INLINE_SEALED_ALWAYS_RE, _QUALIFIED_SOLUTION_LABEL_RE, _INLINE_SEALED_NON_EXAMPLE_RE,
                   _STANDALONE_SOLUTION_HEADING_RE):
         match = label.match(stripped)
         if match:
@@ -894,7 +896,7 @@ def _find_assessment_solutions_context(units: list[tuple[int, int, str, str | No
 def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]], page_visuals: set[str], *,
                        initial_in_worked_example: bool = False, initial_in_exercise: bool = False,
                        initial_seal_mode: str | None = None,
-                       initial_inline_proof_boundary: bool = False):
+                       initial_inline_proof_boundary: bool = False, initial_previous_numbered_question: bool = False):
     page_text = "\n".join(text for text, _ in fragments)
     blocks = []
     # Track tuple entries: (block_index, is_furniture, explicit_opener, seal_mode, is_section_exit)
@@ -937,7 +939,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
 
     units = list(_iter_page_units(fragments))
     assessment_context_line = -1
-    previous_numbered_question = False
+    previous_numbered_question = initial_previous_numbered_question
     for index, (unit_start, unit_end, unit_text, frag_label, is_frag_start) in enumerate(units):
         if not unit_text.strip():
             active_seal = current[7] if current is not None else page_seal_mode
@@ -955,8 +957,8 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         stripped = _strip_heading_markup(unit_text)
         is_running_heading = _is_running_page_heading(stripped, bare_containers_are_counters=False)
         follows_numbered_question = previous_numbered_question
-        if stripped and not is_furniture and not is_running_heading:
-            previous_numbered_question = bool(_NUMBERED_QUESTION_RE.match(stripped))
+        is_content_line = bool(stripped and not is_furniture and not is_running_heading)
+        if is_content_line:
             if initial_inline_proof_boundary and page_seal_mode is None and _ANSWER_PROOF_HEADING_RE.match(stripped):
                 flush()
                 page_seal_mode = "inline_proof_sealed"
@@ -1007,6 +1009,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             current = [kind, unit_start, unit_end, None, None, True, explicit_opener, seal_kind, False]
             flush()
             if seal_kind == "section_sealed":
+                previous_numbered_question = False
                 page_seal_mode = "section_sealed"
                 in_worked_example = False
                 in_exercise = False
@@ -1033,6 +1036,8 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         if current[0] == "proof":
             current_proof_terminated = bool(_PROOF_TERMINATOR_RE.search(unit_text))
         active_seal = current[7]
+        if is_content_line:
+            previous_numbered_question = active_seal is None and bool(_NUMBERED_QUESTION_RE.match(stripped))
         if active_seal in _INLINE_SEAL_MODES:
             last_inline_body = _inline_answer_body(unit_text) if explicit_opener else unit_text.strip()
             if explicit_opener and _ANSWER_PROOF_HEADING_RE.match(last_inline_body):
@@ -1060,7 +1065,8 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                 and not _NEXT_CONTINUATION_RE.search(last_inline_body)):
             inline_proof_boundary_pending = True
             page_seal_mode = None
-    return blocks, entries, in_worked_example, in_exercise, page_seal_mode, inline_proof_boundary_pending
+    return (blocks, entries, in_worked_example, in_exercise, page_seal_mode,
+            inline_proof_boundary_pending, previous_numbered_question)
 
 def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals):
     for index, page_number in enumerate(page_order):
@@ -1259,7 +1265,8 @@ def _seal_furniture_on_all_sealed_page(blocks: list[DiscourseBlock], entries: li
 
 def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_seal_mode: str | None = None,
                            initial_in_worked_example: bool = False, initial_in_exercise: bool = False,
-                           initial_inline_proof_boundary: bool = False) -> PhysicalPagesExtraction:
+                           initial_inline_proof_boundary: bool = False,
+                           initial_previous_numbered_question: bool = False) -> PhysicalPagesExtraction:
     page_order, raw_fragments, visual_sets = _collect_page_fragments(conversion)
     blocks_by_page: dict[int, list[DiscourseBlock]] = {}
     entries_by_page = {}
@@ -1267,6 +1274,8 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
     proof_boundaries: dict[int, bool] = {}
     worked_examples: dict[int, bool] = {}
     exercises: dict[int, bool] = {}
+    numbered_questions: dict[int, bool] = {}
+    previous_numbered_question = initial_previous_numbered_question
     seal_mode = initial_seal_mode
     in_worked_example = initial_in_worked_example
     in_exercise = initial_in_exercise
@@ -1278,7 +1287,9 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
             in_exercise = False
             seal_mode = None
             inline_proof_boundary = False
-        blocks, entries, in_worked_example, in_exercise, seal_mode, next_inline_proof_boundary = _build_page_blocks(
+            previous_numbered_question = False
+        (blocks, entries, in_worked_example, in_exercise, seal_mode,
+         next_inline_proof_boundary, previous_numbered_question) = _build_page_blocks(
             page_number,
             raw_fragments[page_number],
             visual_sets.get(page_number, set()),
@@ -1286,6 +1297,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
             initial_in_exercise=in_exercise,
             initial_seal_mode=seal_mode,
             initial_inline_proof_boundary=inline_proof_boundary,
+            initial_previous_numbered_question=previous_numbered_question,
         )
         blocks_by_page[page_number] = blocks
         entries_by_page[page_number] = entries
@@ -1294,6 +1306,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         inline_proof_boundary = next_inline_proof_boundary
         worked_examples[page_number] = in_worked_example
         exercises[page_number] = in_exercise
+        numbered_questions[page_number] = previous_numbered_question
         prev_page_number = page_number
 
     _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals)
@@ -1331,6 +1344,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         inline_proof_boundary_by_page=proof_boundaries,
         had_sealed_by_page=had_sealed_by_page,
         in_worked_example_by_page=worked_examples,
+        previous_numbered_question_by_page=numbered_questions,
         in_exercise_by_page=exercises,
     )
 

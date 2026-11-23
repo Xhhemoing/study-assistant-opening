@@ -29,6 +29,7 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (page.inlineProofSealedAtEnd !== undefined && typeof page.inlineProofSealedAtEnd !== "boolean") throw new TypeError("invalid inlineProofSealedAtEnd metadata");
     if (page.sectionSealedAtEnd && page.inlineSealedAtEnd || page.inlineProofSealedAtEnd && !page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
     if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
+    if (page.previousNumberedQuestionAtEnd !== undefined && typeof page.previousNumberedQuestionAtEnd !== "boolean") throw new TypeError("invalid previousNumberedQuestionAtEnd metadata");
     if (page.inWorkedExampleAtEnd !== undefined && typeof page.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid inWorkedExampleAtEnd metadata");
     if (page.inExerciseAtEnd !== undefined && typeof page.inExerciseAtEnd !== "boolean") throw new TypeError("invalid inExerciseAtEnd metadata");
     return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null,
@@ -38,6 +39,7 @@ export function decodeParserOutput(text: string): ParsedPage[] {
       ...(page.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: page.inlineProofSealedAtEnd }),
       ...(page.inlineProofBoundaryPendingAtEnd === undefined ? {} : { inlineProofBoundaryPendingAtEnd: page.inlineProofBoundaryPendingAtEnd }),
       ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }),
+      ...(page.previousNumberedQuestionAtEnd === undefined ? {} : { previousNumberedQuestionAtEnd: page.previousNumberedQuestionAtEnd }),
       ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }),
       ...(page.inExerciseAtEnd !== undefined || tracksExerciseContext ? { inExerciseAtEnd: page.inExerciseAtEnd ?? false } : {}) };
   });
@@ -52,6 +54,7 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
     if (input.pageStart !== undefined && input.pageEnd !== undefined) argv.push("--page-start", String(input.pageStart), "--page-end", String(input.pageEnd));
     if (input.initialSealMode !== undefined) argv.push("--initial-seal-mode", input.initialSealMode);
     if (input.initialInlineProofBoundary) argv.push("--initial-inline-proof-boundary");
+    if (input.initialPreviousNumberedQuestion) argv.push("--initial-previous-numbered-question");
     if (input.initialInWorkedExample) argv.push("--initial-in-worked-example");
     if (input.initialInExercise) argv.push("--initial-in-exercise");
     // The outer deadline includes imports/model initialization, which the

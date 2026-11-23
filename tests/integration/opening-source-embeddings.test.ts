@@ -457,6 +457,40 @@ describe("pgvector material repository", () => {
     ], [2], 1);
   });
 
+  it("seals a proof immediately after a complete auxiliary Vision answer", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nSolution:\nYes.",
+      "[不确定处]\nAuxiliary note.\n[转写]\nProof. Private continuation. ∎",
+      "Public prose after the proof.",
+    ], [3], 2);
+  });
+
+  it("keeps a same-chunk auxiliary note from closing a primary inline answer", async () => {
+    await expectArchivedPdfPages([
+      "Answer: x =\n[图片描述]\nAuxiliary observation.",
+      "3 units.",
+      "Public prose after the answer.",
+    ], [3], 2);
+  });
+
+  it("tracks completion per auxiliary answer opener", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nOfficial Solution 1: Yes.\nOfficial Solution 2:",
+      "Another private answer.",
+      "Public prose after the answer.",
+    ], [3], 2);
+  });
+
+  it("keeps an archived proof sealed through a weaker auxiliary answer opener", async () => {
+    await expectArchivedPdfPages([
+      "Answer: Yes.\nProof. Begin the private derivation.",
+      "[图片描述]\nSolution: y =",
+      "The private proof continues.",
+      "The private proof ends. ∎",
+      "Public prose after the proof.",
+    ], [5], 4);
+  });
+
   it("keeps an incoming inline seal when a different answer completes inside archived Vision", async () => {
     await expectArchivedPdfPages([
       "Answer: x =",
@@ -501,6 +535,18 @@ describe("pgvector material repository", () => {
       await expectArchivedPdfPages([
         "Example 1: Cyclic groups\nSolution: This group is abelian.",
         "1. Decide whether every cyclic group is abelian.\n" + label + "\nYes.",
+        "Proof. Private continuation. ∎",
+        "Public prose after the proof.",
+      ], [1, 4], 2);
+    },
+  );
+
+  it.each(["解答：", "Solution:", "sOlUtIoN:"])(
+    "withholds %s on the page after a numbered question and the immediately following proof", async label => {
+      const example = "Example 1: Cyclic groups\nSolution: This group is abelian.";
+      await expectArchivedPdfPages([
+        example + "\n1. Decide whether every cyclic group is abelian.",
+        "Page 2 of 4\n" + label + "\nYes.",
         "Proof. Private continuation. ∎",
         "Public prose after the proof.",
       ], [1, 4], 2);
@@ -869,14 +915,15 @@ describe("pgvector material repository", () => {
       for (const state of ["running", "failed", "ready"]) {
         await f.sql`UPDATE opening_sources SET parse_state=${state} WHERE id=${pdf.sourceId}`;
         expect((await retry.chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.text)).toEqual(expected);
-        expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(chunk => chunk.text)).toEqual(expected);
-        await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: markerPage }))
-          .rejects.toMatchObject({ code: "NOT_FOUND" });
-        await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
-          .rejects.toMatchObject({ code: "NOT_FOUND" });
-        if (!confirmed) await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 1 }))
-          .resolves.toMatchObject({ text: publicText, pages: [1] });
       }
+      // Exercise the other readers after a status-only write claims the PDF is ready.
+      expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(chunk => chunk.text)).toEqual(expected);
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: markerPage }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      if (!confirmed) await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 1 }))
+        .resolves.toMatchObject({ text: publicText, pages: [1] });
       expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks.map(chunk => chunk.text)).toEqual(expected);
       const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
       expect((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.text)).toEqual(expected);

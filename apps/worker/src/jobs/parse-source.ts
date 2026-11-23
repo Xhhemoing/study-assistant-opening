@@ -37,6 +37,7 @@ type AnnotatedParsedPage = ParsedPage & {
 export type SealState = {
   mode: "none" | PdfSealMode;
   inWorkedExample: boolean;
+  previousNumberedQuestion?: boolean;
   inExercise?: boolean;
   inlineProofBoundaryPending?: boolean;
   afterAllSealedPage: boolean;
@@ -95,7 +96,7 @@ const ASSESSMENT_SOLUTIONS_CONTEXT_RE = /^(?:(?:Chapter|Section|Part|Unit|Lectur
 const STANDALONE_ASSESSMENT_ITEM_RE = /^\d+[.)]$/u;
 const NUMBERED_QUESTION_RE = /^\d+[.)]\s+\S/u;
 const NUMBERED_QUESTION_SOLUTION_RE = new RegExp(
-  String.raw`^(?:解答${CHINESE_ANSWER_CONTINUATION}|(?:Solution|SOLUTION)${CONTINUED_LABEL})\s*[:：]$`, "u",
+  String.raw`^(?:解答${CHINESE_ANSWER_CONTINUATION}|Solution${CONTINUED_LABEL})\s*[:：]$`, "iu",
 );
 const QUALIFIED_SOLUTION_LABEL_RE = new RegExp(
   String.raw`^${SOLUTION_QUALIFIER}\s+Solutions?(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)`, "iu",
@@ -382,6 +383,7 @@ function stripSealedSolutionLines(
   onModeTransition?: (prevMode: SealState["mode"], nextMode: SealState["mode"], explicitOpener: boolean) => void,
   requirePublicVisionHeading: boolean | "heading-only" = false,
   allowBareInlineContainer = true,
+  auxiliary = false,
 ): string {
   const lines = text.trimEnd().split(/\r?\n/u);
   const kept: string[] = [];
@@ -393,7 +395,6 @@ function stripSealedSolutionLines(
   let lastInlineBodyLine = "";
   let inlineBreakPending = false;
   let assessmentContextLine = -1;
-  let previousNumberedQuestion = false;
   const hasSectionSeal = requirePublicVisionHeading
     && lines.some((line, index) => {
       const { stripped } = stripHeadingMarkup(line);
@@ -410,6 +411,7 @@ function stripSealedSolutionLines(
     if (requirePublicVisionHeading && nextMode !== "none") publish = false;
     const prevMode = state.mode;
     state.mode = nextMode;
+    if (nextMode !== "none") state.previousNumberedQuestion = false;
     state.inlineProofBoundaryPending = false;
     if (nextMode === "section_sealed") state.inExercise = false;
     if (prevMode !== nextMode || explicitOpener) onModeTransition?.(prevMode, nextMode, explicitOpener);
@@ -437,9 +439,9 @@ function stripSealedSolutionLines(
     }
 
     const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
-    const followsNumberedQuestion = previousNumberedQuestion;
+    const followsNumberedQuestion = state.previousNumberedQuestion;
     const contentLine = stripped && !isRunningPageHeading(stripped, false);
-    if (contentLine) previousNumberedQuestion = NUMBERED_QUESTION_RE.test(stripped);
+    if (contentLine) state.previousNumberedQuestion = false;
     if ((incomingProofBoundary || state.inlineProofBoundaryPending) && contentLine) {
       if (incomingProofBoundary && state.mode === "none" && !state.unknownAfterFailure && ANSWER_PROOF_HEADING_RE.test(stripped)) {
         state.afterAllSealedPage = false;
@@ -448,7 +450,7 @@ function stripSealedSolutionLines(
       incomingProofBoundary = false;
       state.inlineProofBoundaryPending = false;
     }
-    const numberedQuestionAnswer = followsNumberedQuestion && NUMBERED_QUESTION_SOLUTION_RE.test(stripped);
+    const numberedQuestionAnswer = followsNumberedQuestion ? NUMBERED_QUESTION_SOLUTION_RE.exec(stripped) : null;
     const exerciseAnswer = numberedQuestionAnswer
       || (state.inExercise && (BARE_ANSWER_LABEL_RE.test(stripped) || CHINESE_EXERCISE_ANSWER_RE.test(stripped)));
     const bareSolutionsHeading = ASSESSMENT_SOLUTIONS_HEADING_RE.test(stripped);
@@ -469,12 +471,12 @@ function stripSealedSolutionLines(
       if (INLINE_SEALED_TERMINATOR_RE.test(stripped)) endInline();
       continue;
     }
-    if (inlineBreakPending) {
+    if (inlineBreakPending && !auxiliary) {
       setMode("none");
       inlineBreakPending = false;
     }
     if (state.unknownAfterFailure) {
-      if (!sectionHeader && !isRecoverySectionHeading(stripped)) {
+      if (!sectionHeader && (auxiliary || !isRecoverySectionHeading(stripped))) {
         changed = true;
         continue;
       }
@@ -497,13 +499,13 @@ function stripSealedSolutionLines(
     firstContentLine = false;
 
     if (state.mode === "section_sealed") {
-      if (index !== assessmentContextLine && isSectionSealedExit(stripped, isMarkdownHeading)) {
+      if (!auxiliary && index !== assessmentContextLine && isSectionSealedExit(stripped, isMarkdownHeading)) {
         setMode("none");
         state.inWorkedExample = isWorkedExampleHeading(stripped);
         keep(line);
       } else {
         changed = true;
-        if (SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
+        if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
       }
       continue;
     }
@@ -521,7 +523,7 @@ function stripSealedSolutionLines(
         setMode("section_sealed");
         state.inWorkedExample = false;
         changed = true;
-        if (SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
+        if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
         continue;
       }
     }
@@ -535,43 +537,39 @@ function stripSealedSolutionLines(
       setMode("section_sealed", true);
       state.inWorkedExample = false;
       changed = true;
-      if (SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
+      if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
       continue;
     }
 
-    const inlineOpener = INLINE_SEALED_ALWAYS_RE.exec(stripped) ?? qualifiedSolution
-      ?? ((!state.inWorkedExample || numberedQuestionAnswer) && !bareSolutionsHeading
+    const inlineOpener = numberedQuestionAnswer ?? INLINE_SEALED_ALWAYS_RE.exec(stripped) ?? qualifiedSolution
+      ?? (!state.inWorkedExample && !bareSolutionsHeading
       ? INLINE_SEALED_NON_EXAMPLE_RE.exec(stripped) ?? STANDALONE_SOLUTION_HEADING_RE.exec(stripped)
       : null);
     if (inlineOpener) {
+      changed = true;
+      if (auxiliary && state.mode === "inline_proof_sealed") continue;
       setMode("inline_sealed", true);
       state.inWorkedExample = false;
       lastInlineBodyLine = stripped.slice(inlineOpener[0].length).replace(/^\s*[:：]?\s*/u, "");
       if (ANSWER_PROOF_HEADING_RE.test(lastInlineBodyLine)) setMode("inline_proof_sealed");
-      changed = true;
       if (INLINE_SEALED_TERMINATOR_RE.test(lastInlineBodyLine)) endInline();
       continue;
     }
 
-    if (isWorkedExampleHeading(stripped)) {
-      setMode("none");
-      state.inWorkedExample = true;
-      state.inExercise = false;
-      keep(line);
-      continue;
-    }
-
+    const workedExample = isWorkedExampleHeading(stripped);
     const exerciseOpener = EXERCISE_OPENER_RE.test(stripped);
-    if (
-      exerciseOpener || structuralHeading || captionHeading || isNumberedSectionHeading(stripped)
-      || majorPublicHeading
-      || titledPublicContainer
-      || (isMarkdownHeading && isGenericPublicMarkdownHeading(stripped))
-    ) {
-      setMode("none");
-      state.inWorkedExample = false;
-      state.inExercise = exerciseOpener;
-      keep(line);
+    if (workedExample || exerciseOpener || structuralHeading || captionHeading || isNumberedSectionHeading(stripped)
+      || majorPublicHeading || titledPublicContainer
+      || (isMarkdownHeading && isGenericPublicMarkdownHeading(stripped))) {
+      if (!auxiliary) {
+        setMode("none");
+        state.inWorkedExample = workedExample;
+        state.inExercise = !workedExample && exerciseOpener;
+      }
+      if (state.mode === "none") {
+        if (contentLine) state.previousNumberedQuestion = NUMBERED_QUESTION_RE.test(stripped);
+        keep(line);
+      } else changed = true;
       continue;
     }
 
@@ -582,6 +580,7 @@ function stripSealedSolutionLines(
       continue;
     }
 
+    if (contentLine) state.previousNumberedQuestion = NUMBERED_QUESTION_RE.test(stripped);
     keep(line);
   }
 
@@ -804,7 +803,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       const VISION_TRANSCRIPTION_HEADER = "【原图忠实转写，尚需核对】";
       const VISION_DESCRIPTION_HEADER = "【图表观察描述，非原文或解答】";
       const VISION_UNCERTAINTIES_HEADER = "【识别不确定，不能据此判定正确】";
-      const sealVisionBodyWithTransitions = (rawBody: string, sealState: SealState, requirePublicHeading: boolean) => {
+      const sealVisionBodyWithTransitions = (rawBody: string, sealState: SealState, requirePublicHeading: boolean, auxiliary = false) => {
         let sawSectionExit = false;
         let reenteredSectionSealed = false;
         let openedInlineAtEnd = false;
@@ -826,6 +825,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           },
           requirePublicHeading,
           false,
+          auxiliary,
         );
         const confirmedSeal = incomingMode !== "none" || sealState.mode !== "none" || detectedOnPage;
         const visionDetectedSeal = Boolean(enteredUnknown || enteredSealed || confirmedSeal || sealed !== rawBody);
@@ -876,6 +876,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           if (target.mode === "section_sealed") target.unknownAfterFailure = false;
         }
         if (target.mode === "section_sealed") target.inExercise = false;
+        if (target.mode !== "none" || target.unknownAfterFailure) target.previousNumberedQuestion = false;
+        else if (!options.incomingSeal.previousNumberedQuestion && vision?.previousNumberedQuestion && !vision.unknownAfterFailure) {
+          target.previousNumberedQuestion = true;
+        }
         target.inlineProofBoundaryPending = target.mode === "none" && !target.unknownAfterFailure
           && Boolean(picked.inlineProofBoundaryPending || vision?.inlineProofBoundaryPending);
       };
@@ -904,7 +908,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           }
           return verified.join("\n").trimEnd();
         };
-        const headerRe = /^(【(?:原图忠实转写，尚需核对|图表观察描述，非原文或解答|识别不确定，不能据此判定正确)】|\[(?:转写|图片描述|图像描述|图示与版面描述|不确定处)\])[ \t]*[:：]?[ \t]*(?:\r?\n)?/gmu;
+        const headerRe = /^(【(?:原图忠实转写，尚需核对|(?:图表观察描述|识别不确定)[^】\r\n]*)】|\[(?:转写|图片描述|图像描述|图示与版面描述|不确定处)\])[ \t]*[:：]?[ \t]*(?:\r?\n)?/gmu;
         const matches = [...rawVisionText.matchAll(headerRe)];
         const transcriptionSeed = { ...sealState };
         const incomingMode = sealState.mode;
@@ -940,7 +944,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           const body = rawVisionText.slice(bodyStart, bodyEnd).replace(/(?:\r?\n)+$/u, "");
           if (!body.trim()) continue;
           if (header === VISION_TRANSCRIPTION_HEADER || header === "[转写]") transcriptions.push(body);
-          else if (header === VISION_UNCERTAINTIES_HEADER || header === "[不确定处]") uncertainties.push(body);
+          else if (header.startsWith("【识别不确定") || header === "[不确定处]") uncertainties.push(body);
           else descriptions.push(body);
         }
         const transcription = transcriptions.join("\n");
@@ -951,17 +955,27 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let detectedOnPage = Boolean(primary?.detectedOnPage);
         let reenteredSectionSealed = Boolean(primary?.reenteredSectionSealed);
         let openedInlineAtEnd = Boolean(primary?.openedInlineAtEnd);
+        const sealStrength = { none: 0, inline_sealed: 1, inline_proof_sealed: 2, section_sealed: 3 };
         for (const body of [...descriptions, ...uncertainties]) {
-          const auxiliarySeal = { ...sealState };
-          const check = sealVisionBodyWithTransitions(body, auxiliarySeal, false);
+          const auxiliarySeal = { ...sealState, previousNumberedQuestion: false };
+          const check = sealVisionBodyWithTransitions(body, auxiliarySeal, false, true);
           hadSealedContent ||= check.visionDetectedSeal;
           confirmedSeal ||= check.confirmedSeal;
           detectedOnPage ||= check.detectedOnPage;
-          // Auxiliary text can introduce a seal, but only a transcription can release one.
-          if (auxiliarySeal.mode !== "none" && (sealState.mode !== "section_sealed" || auxiliarySeal.mode === "section_sealed")) {
-            Object.assign(sealState, auxiliarySeal);
-            reenteredSectionSealed ||= check.reenteredSectionSealed;
+          if (auxiliarySeal.mode !== "none" && sealStrength[auxiliarySeal.mode] >= sealStrength[sealState.mode]) {
+            reenteredSectionSealed ||= incomingMode === "section_sealed" && sealState.mode !== "section_sealed"
+              && auxiliarySeal.mode === "section_sealed";
+            sealState.mode = auxiliarySeal.mode;
+            sealState.inWorkedExample = false;
+            sealState.afterAllSealedPage = false;
+            sealState.inlineProofBoundaryPending = false;
+            if (sealState.mode === "section_sealed") {
+              sealState.inExercise = false;
+              sealState.unknownAfterFailure = false;
+            }
             openedInlineAtEnd ||= check.openedInlineAtEnd;
+          } else if (sealState.mode === "none" && auxiliarySeal.inlineProofBoundaryPending) {
+            sealState.inlineProofBoundaryPending = true;
           }
         }
         // An auxiliary answer label cannot establish where a transcription's public text ends.
@@ -1100,6 +1114,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           ? pdfPageEndSeal(rawPage)
           : undefined;
         if (isPdf && rawPage.inlineProofBoundaryPendingAtEnd) nativeOutSeal.inlineProofBoundaryPending = true;
+        if (isPdf && rawPage.previousNumberedQuestionAtEnd !== undefined) {
+          nativeOutSeal.previousNumberedQuestion = rawPage.previousNumberedQuestionAtEnd;
+        }
         const pageHadNativeSeal = doclingHadSealedContent || doclingEndSeal !== undefined;
         const nativeContaminatedOnPage = !isImage && (
           doclingSealedBlank
@@ -1407,7 +1424,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const withheldAfterFailurePages: number[] = [];
         let usablePages = 0;
         const cleanSeal: SealState = { mode: "none", inWorkedExample: false, inExercise: false,
-          afterAllSealedPage: false, inlineProofBoundaryPending: false };
+          afterAllSealedPage: false, inlineProofBoundaryPending: false, previousNumberedQuestion: false };
         const pdfSealState = { ...cleanSeal };
         const nextSegmentState = () => ({
           nextSealMode: pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? null : pdfSealState.mode,
@@ -1415,6 +1432,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             && Boolean(pdfSealState.inlineProofBoundaryPending),
           nextInWorkedExample: !pdfSealState.unknownAfterFailure && pdfSealState.inWorkedExample,
           nextInExercise: Boolean(pdfSealState.inExercise && !pdfSealState.unknownAfterFailure),
+          nextPreviousNumberedQuestion: pdfSealState.mode === "none" && !pdfSealState.unknownAfterFailure
+            && Boolean(pdfSealState.previousNumberedQuestion),
         });
         let archivedSavedSeal = { ...cleanSeal };
         const inspectArchivedPage = (incoming: SealState, saved: NewSourceChunk | undefined, marker: PdfSegmentPage | undefined) => {
@@ -1485,7 +1504,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               const archive = inspectArchivedPage(archivedSavedSeal, chunk, marker);
               archivedSavedSeal = archive.endSeal;
               const incomingUnresolved = pdfSealState.unknownAfterFailure || pdfSealState.mode !== "none"
-                || pdfSealState.inlineProofBoundaryPending;
+                || pdfSealState.inlineProofBoundaryPending || pdfSealState.previousNumberedQuestion;
               const check = chunk && inspectSavedPdfChunk(chunk, { ...pdfSealState });
               const confirmedMarker = marker && !marker.failedRangeBoundary && hasConfirmedPdfPageSeal(marker);
               const sectionSealed = pdfSealState.mode === "section_sealed"

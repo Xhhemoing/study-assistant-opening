@@ -132,6 +132,13 @@ def worker_pdf_cli_fixtures():
             3: "Problem 2. Find the root.",
         }, (), [(1, 3, None), (1, 1, None), (2, 2, "inline_proof_sealed", False, True),
                 (3, 3, None, False, True)]),
+        "cross_page_numbered_question": (4, {
+            1: "Example 1: Cyclic groups\nSolution: An example.\n1. Is every cyclic group abelian?",
+            2: "Page 2 of 4\nsOlUtIoN:\nYes.",
+            3: "Proof. Private continuation. ∎",
+            4: "Public prose after the proof.",
+        }, (), [(1, 4, None), (1, 1, None), (2, 2, None, True, False, False, True),
+                (3, 3, None, False, False, True), (4, 4, None)]),
         "adjacent_answer_proof": (4, {
             1: "Problem 1. Prove the identity.\nSolution. The answer is 3.",
             2: [("Course notes", "page_header"), ("Page 2 of 4\nProof. Private continuation.", "text")],
@@ -150,6 +157,7 @@ def worker_pdf_cli_fixtures():
                 worked_example = bool(flags and flags[0])
                 exercise = len(flags) > 1 and flags[1]
                 proof_boundary = len(flags) > 2 and flags[2]
+                numbered_question = len(flags) > 3 and flags[3]
                 conversion = worker_pdf_conversion({page: texts.get(page, "Public page.")
                                                     for page in range(start, end + 1)}, picture_pages)
                 argv = ["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", str(page_count),
@@ -162,12 +170,16 @@ def worker_pdf_cli_fixtures():
                     argv += ["--initial-in-exercise"]
                 if proof_boundary:
                     argv += ["--initial-inline-proof-boundary"]
+                if numbered_question:
+                    argv += ["--initial-previous-numbered-question"]
                 stdout = io.StringIO()
                 with patch.object(cli, "pdf_page_count", return_value=page_count), \
                      patch.object(cli, "convert", return_value=conversion), redirect_stdout(stdout):
                     if cli.main(argv) != 0:
                         raise RuntimeError(f"could not generate {name} fixture for pages {start}-{end}")
                 suffix = ("/we" if worked_example else "") + ("/exercise" if exercise else "") + ("/proof-boundary" if proof_boundary else "")
+                if numbered_question:
+                    suffix += "/numbered-question"
                 outputs[f"{start}-{end}/{seal or ''}{suffix}"] = json.loads(stdout.getvalue())
             fixtures[name] = {"pageCount": page_count, "ranges": outputs}
     return fixtures
@@ -1007,6 +1019,22 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertEqual(ext.texts_by_page, {1: [example], 2: [stem], 3: [], 4: [prose]})
                 self.assertEqual(ext.sealed_texts_by_page[2], [f"{label}\nYes."])
                 self.assertEqual(ext.sealed_texts_by_page[3], [proof])
+
+    def test_numbered_question_at_page_end_seals_next_page_answer_and_proof(self):
+        question = "Example 1: Cyclic groups\nSolution: An example.\n1. Is every cyclic group abelian?"
+        proof = "Proof. Private continuation. ∎"
+        prose = "Public prose after the proof."
+        for label in ("解答：", "Solution:", "sOlUtIoN:"):
+            with self.subTest(label=label):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(1, question)], [text_element(2, f"Page 2 of 4\n{label}\nYes.")],
+                    [text_element(3, proof)], [text_element(4, prose)], start_page=1,
+                ))
+                self.assertTrue(ext.previous_numbered_question_by_page[1])
+                self.assertFalse(ext.previous_numbered_question_by_page[2])
+                self.assertIn(f"{label}\nYes.", "\n".join(ext.sealed_texts_by_page[2]))
+                self.assertEqual(ext.sealed_texts_by_page[3], [proof])
+                self.assertEqual(ext.texts_by_page[4], [prose])
 
     def test_heading_free_numbered_question_with_chinese_solution_seals_only_answer_and_proof(self):
         stem = "1. Decide whether every cyclic group is abelian."

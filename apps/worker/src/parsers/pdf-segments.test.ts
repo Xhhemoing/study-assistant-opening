@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v39-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v40-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -861,7 +861,7 @@ describe("bounded resumable PDF parser", () => {
     }>;
   } | {
     pageCount: number;
-     extractRange: (start: number, end: number, seed?: string, workedExample?: boolean, exercise?: boolean, proofBoundary?: boolean) => string;
+     extractRange: (start: number, end: number, seed?: string, workedExample?: boolean, exercise?: boolean, proofBoundary?: boolean, numberedQuestion?: boolean) => string;
   })) {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-r3-"));
     try {
@@ -898,7 +898,7 @@ describe("bounded resumable PDF parser", () => {
       let preservePages: number[] = [];
       let pdfWarning: unknown = undefined;
       let allowSealedEmpty: boolean | undefined;
-      const requests: Array<{ start: number; seed?: string; workedExample?: true; exercise?: true; proofBoundary?: true }> = [];
+      const requests: Array<{ start: number; seed?: string; workedExample?: true; exercise?: true; proofBoundary?: true; numberedQuestion?: true }> = [];
       const segmentReads: PdfSegmentIdentity[] = [];
       const savedMap = new Map((options.savedChunks ?? []).map(chunk => [chunk.page, chunk]));
       const segmentData = options.segmentData ?? new Map<string, PdfSegment>();
@@ -996,10 +996,12 @@ describe("bounded resumable PDF parser", () => {
           const workedExample = argv.includes("--initial-in-worked-example");
           const exercise = argv.includes("--initial-in-exercise");
           const proofBoundary = argv.includes("--initial-inline-proof-boundary");
+          const numberedQuestion = argv.includes("--initial-previous-numbered-question");
           requests.push({ start, ...(seed ? { seed } : {}), ...(workedExample ? { workedExample: true } : {}),
-            ...(exercise ? { exercise: true } : {}), ...(proofBoundary ? { proofBoundary: true } : {}) });
+            ...(exercise ? { exercise: true } : {}), ...(proofBoundary ? { proofBoundary: true } : {}),
+            ...(numberedQuestion ? { numberedQuestion: true } : {}) });
           if (options.failedStarts?.includes(start)) return { exitCode: 4, stdout: "" };
-          if ("extractRange" in options) return { exitCode: 0, stdout: options.extractRange(start, end, seed, workedExample, exercise, proofBoundary) };
+          if ("extractRange" in options) return { exitCode: 0, stdout: options.extractRange(start, end, seed, workedExample, exercise, proofBoundary, numberedQuestion) };
           return {
             exitCode: 0,
             stdout: JSON.stringify({
@@ -1036,8 +1038,8 @@ describe("bounded resumable PDF parser", () => {
     async function runCliScenario(name: string, options: Omit<Parameters<typeof runPdfScenario>[0], "pages"> = {}) {
       const fixture = fixtures[name]!;
       const missing: string[] = [];
-      const result = await runPdfScenario({ ...options, pageCount: fixture.pageCount, extractRange(start, end, seed, workedExample, exercise, proofBoundary) {
-        const key = `${start}-${end}/${seed ?? ""}${workedExample ? "/we" : ""}${exercise ? "/exercise" : ""}${proofBoundary ? "/proof-boundary" : ""}`;
+      const result = await runPdfScenario({ ...options, pageCount: fixture.pageCount, extractRange(start, end, seed, workedExample, exercise, proofBoundary, numberedQuestion) {
+        const key = `${start}-${end}/${seed ?? ""}${workedExample ? "/we" : ""}${exercise ? "/exercise" : ""}${proofBoundary ? "/proof-boundary" : ""}${numberedQuestion ? "/numbered-question" : ""}`;
         if (!fixture.ranges[key]) missing.push(key);
         return JSON.stringify(fixture.ranges[key]);
       } });
@@ -1082,6 +1084,23 @@ describe("bounded resumable PDF parser", () => {
         [1, "Problem 1. Prove the identity."], [2, "Course notes\nPage 2 of 4"], [4, "Problem 2. Find the root."],
       ]);
       if (segmentPages === 1) expect(result.requests[1]).toEqual({ start: 2, exercise: true, proofBoundary: true });
+    });
+
+    it.each([1, 4])("carries a numbered question through %i-page Python ranges and a cached retry", async segmentPages => {
+      const segmentData = new Map<string, PdfSegment>();
+      const first = await runCliScenario("cross_page_numbered_question", { segmentPages, segmentData });
+      const cached = await runCliScenario("cross_page_numbered_question", { segmentPages, segmentData });
+      if (segmentPages === 1) {
+        expect(first.requests[1]).toEqual({ start: 2, workedExample: true, numberedQuestion: true });
+        expect(cached.segmentReads).toContainEqual(expect.objectContaining({
+          pageStart: 2, parserProfile: expect.stringContaining("/numbered-question"),
+        }));
+      }
+      for (const result of [first, cached]) {
+        expect(result.publishedChunks.map(({ page }) => page)).toEqual([1, 2, 4]);
+        expect(result.publishedChunks[0]?.text).toContain("1. Is every cyclic group abelian?");
+        expect(result.publishedChunks[1]?.text).toBe("Page 2 of 4");
+      }
     });
 
     it("re-extracts the rest of a seeded window after its first scan reopens the section", async () => {
@@ -2739,6 +2758,66 @@ describe("bounded resumable PDF parser", () => {
     const pages = [example, [stem, label, "Yes."].join("\n"), "Proof. Private continuation. ∎", prose];
     const result = await runPdfScenario({ segmentPages: 1, pages: pages.map((text, index) => ({ page: index + 1, text })) });
     expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[1, example], [2, stem], [4, prose]]);
+  });
+
+  it.each(["live", "saved"] as const)("only lets primary %s Vision text open worked examples and release seals", async origin => {
+    const chapter = "Chapter 2: Geometry";
+    const visionByPage = new Map([
+      [1, "【图表观察描述】\nExample 1: A misidentified example"],
+      [4, "【识别不确定，仅供核对】\nAnswer Key\n" + chapter + "\nEnd of Answers."],
+    ]);
+    const pages = [
+      { page: 1, text: "", visualKinds: ["scan"] as VisualPageKind[] },
+      { page: 2, text: "Solution:\nYes." },
+      { page: 3, text: "Proof. Private continuation. ∎" },
+      { page: 4, text: "", visualKinds: ["scan"] as VisualPageKind[] },
+      { page: 5, text: "The private key continues." },
+      { page: 6, text: chapter },
+    ];
+    const result = await runPdfScenario({ segmentPages: 1, pages,
+      ...(origin === "live" ? { recognizePage: async ({ physicalPage }) => ({
+        text: visionByPage.get(physicalPage)!, imageObjectKey: "vision/aux",
+      }) } : {
+        savedChunks: [...visionByPage].map(([page, vision]) => ({
+          page, text: "[视觉转写与描述]\n" + vision, imageObjectKey: "vision/aux",
+          slideLabel: null, startMs: null, endMs: null,
+        })),
+      }),
+    });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual([1, 6]);
+    expect(result.requests[4]).toEqual({ start: 5, seed: "section_sealed" });
+  });
+
+  it.each(["live", "saved"] as const)("preserves %s Vision auxiliary proof boundaries and proof seal strength", async origin => {
+    const prose = "Public prose after the proof.";
+    const imageObjectKey = "vision/aux";
+    const visionByPage = new Map([[1, "[图片描述]\nSolution:\nYes."], [3, "[不确定处]\nSolution: y ="]]);
+    for (const continuation of ["Proof. Start of the private proof.", "Ordinary prose after the answer."]) {
+      const proof = continuation.startsWith("Proof.");
+      const pages = [
+        { page: 1, text: "", visualKinds: ["scan"] as VisualPageKind[] },
+        { page: 2, text: continuation },
+        ...(proof ? [
+          { page: 3, text: "", visualKinds: ["scan"] as VisualPageKind[] },
+          { page: 4, text: "The private derivation continues." },
+          { page: 5, text: "The proof ends. ∎" },
+        ] : []),
+        { page: proof ? 6 : 3, text: prose },
+      ];
+      const result = await runPdfScenario({ segmentPages: 1, pages,
+        ...(origin === "live" ? { recognizePage: async ({ physicalPage }) => ({
+          text: visionByPage.get(physicalPage)!, imageObjectKey,
+        }) } : {
+          savedChunks: [...visionByPage].filter(([page]) => page === 1 || proof).map(([page, vision]) => ({
+            page, text: "[视觉转写与描述]\n" + vision, imageObjectKey,
+            slideLabel: null, startMs: null, endMs: null,
+          })),
+        }),
+      });
+      expect(result.requests[1]).toEqual({ start: 2, proofBoundary: true });
+      if (proof) expect(result.requests[3]).toEqual({ start: 4, seed: "inline_proof_sealed" });
+      expect(result.publishedChunks.map(({ text }) => text)).toEqual(proof ? [prose] : [continuation, prose]);
+    }
   });
 
   it("seals a standalone 解答： and its proof in a heading-free numbered question", async () => {
