@@ -7,16 +7,30 @@ import {
 } from "../rubric-calibration";
 
 export type SubjectiveGradingCalibration = Parameters<typeof evaluateRubricCalibrationGate>[0];
+type RubricWorkSource = { readonly id: string; readonly version: number; readonly physicalPage: number };
+type RubricObservation = LearningObservation & { readonly photoStorageKey?: string | null };
+
+/** Trusted server transcript bound to the saved answer revision and its photo. */
+export type VerifiedRubricSubmissionText = {
+  readonly observationId: string;
+  readonly answerRevision: number;
+  readonly text: string;
+  readonly workSource?: RubricWorkSource;
+  readonly photoStorageKey?: string;
+};
+
 export type OpeningRubricCalibrationEvidence = {
   readonly submission: Omit<RubricSubmissionInput, "submissionId" | "text">;
   readonly calibration: SubjectiveGradingCalibration | null;
+  readonly verifiedSubmissionText?: VerifiedRubricSubmissionText;
 };
 
 export type OpeningRubricCalibrationHook = (context: {
   readonly scope: Scope;
   readonly input: AiGradingInput;
-  readonly observation: Readonly<LearningObservation>;
+  readonly observation: Readonly<RubricObservation>;
   readonly answerRevision: number;
+  readonly workSource: RubricWorkSource | null;
 }) => OpeningRubricCalibrationEvidence | null | Promise<OpeningRubricCalibrationEvidence | null>;
 
 export type SubjectiveGradingGateReport = Omit<RubricCalibrationGateReport, "metrics" | "failures"> & {
@@ -58,17 +72,22 @@ export function evaluateCalibratedSubjectiveGrading(input: {
   readonly calibration: SubjectiveGradingCalibration | null;
 }): {
   readonly proposal: AiGradingProposal;
-  readonly rubricResult: AnchorCalibratedRubricV1Result;
+  readonly rubricResult: AnchorCalibratedRubricV1Result | null;
   readonly gateReport: SubjectiveGradingGateReport;
+  readonly masteryEligible: boolean;
 } {
-  // Anchor evaluation runs the position swaps and detectTemplatePadding on the same submission.
-  const rubricResult = evaluateAnchorCalibratedRubric(input.submission);
+  const snapshot = snapshotPlainRubricData(input.submission);
+  const submission = snapshot.ok ? snapshot.value as RubricSubmissionInput | null : null;
+  // Without verified text there is no submission to compare to anchors or scan for padding.
+  const rubricResult = typeof submission?.text === "string" && submission.text.trim()
+    ? evaluateAnchorCalibratedRubric(submission) : null;
   const gateReport = evaluateSubjectiveGradingGate(input.calibration);
-  const eligible = gateReport.passed && rubricResult.status === "calibrated"
+  const masteryEligible = gateReport.passed && rubricResult?.status === "calibrated"
     && rubricResult.countsTowardMastery && !rubricResult.paddingReport.isTemplatePadded;
   return {
     rubricResult,
     gateReport,
-    proposal: eligible ? input.proposal : { ...input.proposal, outcome: "unverified" },
+    masteryEligible,
+    proposal: masteryEligible ? input.proposal : { ...input.proposal, outcome: "unverified" },
   };
 }

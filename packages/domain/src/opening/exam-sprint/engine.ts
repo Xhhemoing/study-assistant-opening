@@ -23,9 +23,16 @@ export function evaluateExamQuestionParts(question: ExamQuestion, pack: Pick<Exa
 }
 import { snapshotExamPrediction } from "./analytics";
 import { captureExamAttemptExposures, examAttemptExposureQualification } from "./exposure-qualification";
+import { buildForecastDecisionWithSkillSummaries, examSprintAttemptAnswerTime, type ExamSprintDecisionInput } from "./score-forecast-bridge";
 export { examAttemptExposureQualification } from "./exposure-qualification";
 export { validExamLessonExposure } from "./lesson-exposure-mapping";
-export * from "./score-forecast-bridge";
+export {
+  buildExamSprintForecastBlueprint, evaluateExamSprintActionRoi, forecastExamSprintScore, IELTS_ACADEMIC_V1_BLUEPRINT,
+  simulateExamSprintPaper, toExamSprintForecastEvidence,
+  type CandidateStudyAction, type ExamBlueprintV1, type ExamEvidenceRecord, type ExamScoreForecastV1,
+  type ExamSprintActionRoiInput, type ExamSprintDecisionInput, type ExamSprintForecastEvidenceInput,
+  type ExamSprintScoreForecastInput, type ExamSprintSimulationInput, type WholePaperCalibrationRecord,
+} from "./score-forecast-bridge";
 
 export type ExamRuleEvidence = { usable: boolean; correct: boolean | null; independent: boolean; assisted: boolean };
 export type ExamSelectionContext = {
@@ -96,8 +103,8 @@ function recheckSkills(state: ExamSprintState, pack: ExamPack, context?: ExamSel
   }).map(attempt => questionFor(pack, attempt.questionId).skillId));
 }
 
-function skillSummaries(state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext): ExamSkillSummary[] {
-  const evidence = visibleEvidence(state, context);
+function skillSummaries(state: ExamSprintState, pack: ExamPack, context?: ExamSelectionContext,
+  evidence: readonly ExamAttempt[] = visibleEvidence(state, context)): ExamSkillSummary[] {
   const recheck = recheckSkills(state, pack, context);
   const skills = [...new Map(pack.questions.map(question => [question.skillId, question])).values()];
   return skills.map(question => {
@@ -127,6 +134,14 @@ function skillSummaries(state: ExamSprintState, pack: ExamPack, context?: ExamSe
       lessonId: question.lessonId,
     };
   });
+}
+
+export function buildExamSprintDecisionSnapshot(input: ExamSprintDecisionInput) {
+  const { state, pack, context, examAtMs } = input;
+  const runs = new Map(state.runs.map(run => [run.id, run]));
+  const evidence = visibleEvidence(state, context).filter(attempt =>
+    examSprintAttemptAnswerTime(attempt, runs.get(attempt.runId), examAtMs) !== null);
+  return buildForecastDecisionWithSkillSummaries(input, skillSummaries(state, pack, context, evidence));
 }
 
 function currentSourceRecords(state: ExamSprintState, context?: ExamSelectionContext, purpose: "coverage" | "ranking" = "coverage"): ExamSourceRecord[] {

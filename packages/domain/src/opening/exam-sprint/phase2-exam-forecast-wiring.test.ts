@@ -68,7 +68,7 @@ describe("Opening common-clock exam forecast", () => {
     const records = toExamSprintForecastEvidence({ ...base, state, context });
     expect(records).toEqual([
       expect.objectContaining({ evidenceId: "practice", observedAtMs: Date.parse(answeredAt), evidenceKind: "diagnostic_item", countsTowardMastery: true }),
-      expect.objectContaining({ evidenceId: "mock-first", observedAtMs: Date.parse(submittedAt), evidenceKind: "independent_mock", correct: false }),
+      expect.objectContaining({ evidenceId: "mock-first", observedAtMs: Date.parse(answeredAt), evidenceKind: "independent_mock", correct: false }),
     ]);
   });
 
@@ -101,17 +101,83 @@ describe("Opening common-clock exam forecast", () => {
     expect(snapshot.rankedActions).toEqual([]);
   });
 
+  it("uses mock submission for visibility and the answer time for recall and spacing", () => {
+    const state = createExamSprintState(startedAt);
+    record(state, "practice");
+    record(state, "mock-first", {}, { mode: "mock-a", completedAt: "2026-11-22T10:00:00Z" });
+    const input = { ...base, state, decisionId: "late-mock", crnSeed: 21, horizonHours: 72 };
+    expect(toExamSprintForecastEvidence({ ...input, examAtMs: Date.parse(submittedAt) }).map(row => row.evidenceId))
+      .toEqual(["practice"]);
+    expect(toExamSprintForecastEvidence(input).map(row => row.observedAtMs))
+      .toEqual([Date.parse(answeredAt), Date.parse(answeredAt)]);
+    expect(buildExamSprintDecisionSnapshot(input).rankedActions).toMatchObject([{ actionId: "skill-repair:skill" }]);
+
+    const earlierSubmission = structuredClone(state);
+    earlierSubmission.runs[1]!.completedAt = submittedAt;
+    expect(simulateExamSprintPaper({ ...input, seed: 21 })).toEqual(
+      simulateExamSprintPaper({ ...input, seed: 21, state: earlierSubmission }),
+    );
+  });
+
+  it("restores a weak skill to the repair candidates after a visible aided failure", () => {
+    const state = createExamSprintState(startedAt);
+    record(state, "practice");
+    const later = "2026-11-22T10:00:00Z";
+    record(state, "revised", { presentedAt: later, answeredAt: later }, { startedAt: later, completedAt: later });
+    const input = { ...base, state, decisionId: "aided-failure", crnSeed: 21, horizonHours: 72 };
+    const previousSimulation = simulateExamSprintPaper({ ...input, seed: 21 });
+    const failureAt = "2026-11-23T09:00:00Z";
+    record(state, "assisted", {
+      presentedAt: failureAt, answeredAt: failureAt, answer: "B", correct: false,
+      help: [{ kind: "hint", at: failureAt }],
+    }, { startedAt: failureAt, completedAt: null });
+    expect(buildExamSprintDecisionSnapshot({ ...input, examAtMs: Date.parse(later) }).rankedActions).toEqual([]);
+    expect(buildExamSprintDecisionSnapshot(input).rankedActions).toMatchObject([{ actionId: "skill-repair:skill" }]);
+    expect(simulateExamSprintPaper({ ...input, seed: 21 })).toEqual(previousSimulation);
+  });
+
+  it("ignores supplemental rubric scores for objective section coverage", () => {
+    const blueprint = buildExamSprintForecastBlueprint(pack);
+    const state = createExamSprintState(startedAt);
+    const forecast = forecastExamSprintScore({ ...base, blueprint, state,
+      calibrationRecords: wholePaperRecords(blueprint.blueprintId, 2),
+      supplementalEvidence: [{
+        evidenceId: "not-an-objective-attempt", sectionId: "objective", learnerId: base.learnerId,
+        assisted: false, countsTowardMastery: true, observedAtMs: Date.parse(submittedAt),
+        evidenceKind: "rubric_assessment", rubricScore: { kind: "exact", score: 1 },
+      }],
+    });
+    expect(forecast).toMatchObject({
+      status: "insufficient_independent_evidence", missingSections: ["objective"], calibrationCount: 4,
+    });
+  });
+
+  it("uses the same workload-safe default for a 100-item forecast and paired ROI", () => {
+    const largePack = { ...pack, questions: [question("practice"),
+      ...Array.from({ length: 100 }, (_, index) => question(`mock-${index}`, { pool: "mock-a" }))] };
+    const state = createExamSprintState(startedAt);
+    record(state, "practice");
+    const blueprint = buildExamSprintForecastBlueprint(largePack);
+    expect(validateExamBlueprint(blueprint)).toEqual([]);
+    const options = { ...base, pack: largePack, state, blueprint, numDraws: undefined, seed: 21,
+      calibrationRecords: wholePaperRecords(blueprint.blueprintId, 100) };
+    expect(simulateExamSprintPaper(options).numDraws).toBe(495);
+    const forecast = forecastExamSprintScore(options);
+    expect(forecast.status).toBe("calibrated_forecast_ready");
+    const snapshot = buildExamSprintDecisionSnapshot({ ...options, decisionId: "large", crnSeed: 21, horizonHours: 72 });
+    expect(snapshot.forecast).toEqual(forecast);
+    const roi = evaluateExamSprintActionRoi({ ...options, crnSeed: 21, candidateAction: {
+      actionId: "skill-repair:skill", title: "skill", kind: "skill_repair",
+      durationHours: 0.5, skillEffects: { skill: { abilityDelta: 0.25 } },
+    } });
+    expect(snapshot.rankedActions).toEqual([roi]);
+  });
+
   it("calibrates with independent external whole-paper records and excludes assisted, exposed and same-learner observations", () => {
     const state = createExamSprintState(startedAt);
     record(state, "practice");
     const blueprint = buildExamSprintForecastBlueprint(pack);
-    const calibrationRecords = Array.from({ length: 4 }, (_, index): WholePaperCalibrationRecord => ({
-      recordId: `record-${index}`, learnerId: `peer-${index}`, paperFamilyId: `form-${index}`,
-      blueprintId: blueprint.blueprintId, targetKind: "same_blueprint_mock", evidenceKind: "independent_mock",
-      assisted: false, countsTowardMastery: true,
-      predictedQuantiles: { q10: 0, q50: 1, q90: 2 }, observedScore: { kind: "exact", score: 1 },
-      recordedAtMs: Date.parse(submittedAt),
-    }));
+    const calibrationRecords = wholePaperRecords(blueprint.blueprintId, 2);
     const extra = calibrationRecords[0]!;
     const options = { ...base, state, blueprint, seed: 21,
       calibrationRecords: [...calibrationRecords, { ...extra, recordId: "self", learnerId: base.learnerId },
@@ -151,3 +217,13 @@ describe("Opening common-clock exam forecast", () => {
     });
   });
 });
+
+function wholePaperRecords(blueprintId: string, maxScore: number): WholePaperCalibrationRecord[] {
+  return Array.from({ length: 4 }, (_, index) => ({
+    recordId: `record-${index}`, learnerId: `peer-${index}`, paperFamilyId: `form-${index}`,
+    blueprintId, targetKind: "same_blueprint_mock", evidenceKind: "independent_mock",
+    assisted: false, countsTowardMastery: true,
+    predictedQuantiles: { q10: 0, q50: maxScore / 2, q90: maxScore },
+    observedScore: { kind: "exact", score: maxScore / 2 }, recordedAtMs: Date.parse(submittedAt),
+  }));
+}

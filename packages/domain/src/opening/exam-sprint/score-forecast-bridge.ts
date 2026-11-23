@@ -1,9 +1,9 @@
-import type { ExamPack, ExamQuestion, ExamSprintState } from "@aistudy/contracts";
-import { createSkillBelief, DAY_MS, type SkillBeliefV1 } from "../../epistemic/belief";
+import type { ExamAttempt, ExamPack, ExamQuestion, ExamRun, ExamSkillSummary, ExamSprintState } from "@aistudy/contracts";
+import { createSkillBelief, type SkillBeliefV1 } from "../../epistemic/belief";
 import { updateBeliefWithEvidence } from "../../epistemic/gauss-hermite";
 import {
   buildUnifiedDecisionSnapshot, createSharedFullPaperBlueprint, evaluateCrnActionRoi,
-  evaluateExamForecast, simulateExamPaper,
+  DEFAULT_EXAM_SIMULATION_DRAWS, evaluateExamForecast, MAX_SIMULATION_DP_CELLS, MAX_SIMULATION_ITEM_EVALS, simulateExamPaper,
   type CandidateStudyAction, type EvaluateCrnActionRoiInput, type ExamBlueprintV1,
   type ExamEvidenceRecord, type WholePaperCalibrationRecord,
 } from "../../exam-forecast";
@@ -19,6 +19,23 @@ type MockPool = "mock-a" | "mock-b";
 const formId = (pack: ExamPack, pool: ExamQuestion["pool"]) => `${pack.id}:${pack.version}:${pool}`;
 const guessRate = (question: ExamQuestion) => question.options.length > 1 ? 1 / question.options.length : 0;
 const ITEM_LAPSE = 0.05;
+
+const mockPoolFor = (run: ExamRun): MockPool | null => run.mode === "mock-a" || run.mode === "mock-b" ? run.mode : null;
+
+/** A mock becomes visible at submission. Learning happened when the item was answered. */
+export function examSprintAttemptAnswerTime(attempt: ExamAttempt, run: ExamRun | undefined, cutoffMs: number): number | null {
+  if (!run?.questionIds.includes(attempt.questionId) || attempt.answeredAt === null) return null;
+  const answeredAtMs = Date.parse(attempt.answeredAt);
+  const presentedAtMs = Date.parse(attempt.presentedAt);
+  if (!Number.isFinite(answeredAtMs) || !Number.isFinite(presentedAtMs)
+    || answeredAtMs < presentedAtMs || answeredAtMs > cutoffMs) return null;
+  if (mockPoolFor(run)) {
+    if (run.restoredUngraded || run.completedAt === null) return null;
+    const completedAtMs = Date.parse(run.completedAt);
+    if (!Number.isFinite(completedAtMs) || completedAtMs < answeredAtMs || completedAtMs > cutoffMs) return null;
+  }
+  return answeredAtMs;
+}
 
 /** One point per objective item. The pack's short forms have their own scale and clock. */
 export function buildExamSprintForecastBlueprint(pack: ExamPack, mockPool?: MockPool): ExamBlueprintV1 {
@@ -84,19 +101,11 @@ export function toExamSprintForecastEvidence(input: ExamSprintForecastEvidenceIn
   for (const attempt of state.attempts) {
     const question = questions.get(attempt.questionId);
     const run = runs.get(attempt.runId);
-    if (!question || !run?.questionIds.includes(attempt.questionId) || attempt.answeredAt === null
-      || attempt.help.length > 0 || typeof attempt.correct !== "boolean"
+    if (!question || !run || attempt.help.length > 0 || typeof attempt.correct !== "boolean"
       || !question.options.some(option => option.id === attempt.answer)
       || attempt.correct !== (question.answer === attempt.answer)) continue;
-    const mode = run.mode;
-    const isMock = mode === "mock-a" || mode === "mock-b";
-    const answeredAtMs = Date.parse(attempt.answeredAt);
-    const presentedAtMs = Date.parse(attempt.presentedAt);
-    if (!Number.isFinite(presentedAtMs) || !Number.isFinite(answeredAtMs) || answeredAtMs < presentedAtMs) continue;
-    const publishedAt = isMock ? run.completedAt : attempt.answeredAt;
-    if (publishedAt === null || (isMock && run.restoredUngraded)) continue;
-    const observedAtMs = Date.parse(publishedAt);
-    if (!Number.isFinite(observedAtMs) || observedAtMs < answeredAtMs || observedAtMs > examAtMs) continue;
+    const observedAtMs = examSprintAttemptAnswerTime(attempt, run, examAtMs);
+    if (observedAtMs === null) continue;
 
     const current = context?.ruleEvidence?.[attempt.id];
     if (current && (!current.usable || !current.independent || current.assisted || current.correct !== attempt.correct)) continue;
@@ -104,11 +113,12 @@ export function toExamSprintForecastEvidence(input: ExamSprintForecastEvidenceIn
     if (qualification.exposureHistoryUncertain || qualification.lessonAssistance !== false || qualification.firstFamilyExposure !== true) continue;
     const location = objectiveLocation(blueprint, question);
     if (!location) continue;
+    const mockPool = mockPoolFor(run);
     evidence.push({
       ...location, evidenceId: attempt.id, learnerId, itemId: question.id, skillId: question.skillId,
-      paperFamilyId: isMock ? formId(pack, mode) : question.familyId,
+      paperFamilyId: mockPool ? formId(pack, mockPool) : question.familyId,
       countsTowardMastery: true, assisted: false, exposed: false,
-      evidenceKind: isMock ? "independent_mock" : "diagnostic_item", observedAtMs,
+      evidenceKind: mockPool ? "independent_mock" : "diagnostic_item", observedAtMs,
       correct: attempt.correct, elapsedSeconds: attempt.durationSeconds,
     });
   }
@@ -122,6 +132,22 @@ export type ExamSprintSimulationInput = ExamSprintForecastEvidenceInput & {
   readonly numDraws?: number;
   readonly seed?: number;
 };
+
+function defaultExamSprintDraws(blueprint: ExamBlueprintV1): number {
+  let itemCount = 0;
+  let dpCellsPerDraw = 0;
+  for (const section of blueprint.sections) {
+    if (!section.items) continue;
+    itemCount += section.items.length;
+    if (section.scoringKind === "item_raw_table") {
+      const points = section.items.reduce((sum, item) => sum + (item.points ?? 1), 0);
+      dpCellsPerDraw += section.items.length * (points + 1);
+    }
+  }
+  // CRN actions can turn fixed item probabilities into variable ones, so budget every draw.
+  return Math.max(1, Math.min(DEFAULT_EXAM_SIMULATION_DRAWS,
+    Math.floor(MAX_SIMULATION_DP_CELLS / dpCellsPerDraw), Math.floor(MAX_SIMULATION_ITEM_EVALS / itemCount)));
+}
 
 function prepareSprintSimulation(input: ExamSprintSimulationInput) {
   const blueprint = input.blueprint ?? buildExamSprintForecastBlueprint(input.pack);
@@ -142,19 +168,18 @@ function prepareSprintSimulation(input: ExamSprintSimulationInput) {
     });
     beliefs.set(record.skillId, updated.belief);
   }
+  const rubricSections = new Set(blueprint.sections.filter(section => section.scoringKind === "rubric_band").map(section => section.sectionId));
   const supplemental = input.blueprint ? input.supplementalEvidence?.filter(record =>
-    record.evidenceKind === "rubric_assessment" || record.evidenceKind === "speech_timing") ?? [] : [];
+    rubricSections.has(record.sectionId) && (record.evidenceKind === "rubric_assessment"
+      || record.evidenceKind === "speech_timing")) ?? [] : [];
   return {
-    objectiveEvidence,
-    simulation: {
-      blueprint, learnerId, beliefs: Object.fromEntries(beliefs), evidence: [...objectiveEvidence, ...supplemental],
-      examAtMs: input.examAtMs, numDraws: input.numDraws, seed: input.seed,
-    },
+    blueprint, learnerId, beliefs: Object.fromEntries(beliefs), evidence: [...objectiveEvidence, ...supplemental],
+    examAtMs: input.examAtMs, numDraws: input.numDraws ?? defaultExamSprintDraws(blueprint), seed: input.seed,
   };
 }
 
 export function simulateExamSprintPaper(input: ExamSprintSimulationInput) {
-  return simulateExamPaper(prepareSprintSimulation(input).simulation);
+  return simulateExamPaper(prepareSprintSimulation(input));
 }
 
 type CalibrationOptions = {
@@ -174,7 +199,7 @@ function heldOutCalibration(input: CalibrationOptions, blueprint: ExamBlueprintV
 }
 
 export function forecastExamSprintScore(input: ExamSprintScoreForecastInput) {
-  const { simulation } = prepareSprintSimulation(input);
+  const simulation = prepareSprintSimulation(input);
   return evaluateExamForecast({
     ...input, ...simulation, calibrationRecords: heldOutCalibration(input, simulation.blueprint),
   });
@@ -185,7 +210,7 @@ export type ExamSprintActionRoiInput = ExamSprintSimulationInput & Pick<
 > & { readonly baselineActions?: readonly CandidateStudyAction[] };
 
 export function evaluateExamSprintActionRoi(input: ExamSprintActionRoiInput) {
-  const { simulation } = prepareSprintSimulation(input);
+  const simulation = prepareSprintSimulation(input);
   const { crnSeed, candidateAction, baselineActions = [] } = input;
   return evaluateCrnActionRoi({ ...simulation, crnSeed, candidateAction, baselineActions });
 }
@@ -195,28 +220,17 @@ export type ExamSprintDecisionInput = ExamSprintSimulationInput & CalibrationOpt
   "decisionId" | "crnSeed" | "horizonHours" | "executableMinutes" | "baselineActions"
 >;
 
-function candidateStudyActions(pack: ExamPack, evidence: readonly SprintObjectiveEvidence[]): CandidateStudyAction[] {
-  const titles = new Map(pack.questions.map(question => [question.skillId,
-    pack.lessons.find(lesson => lesson.id === question.lessonId)?.title ?? question.skillId]));
-  const winsSinceFailure = new Map<string, { first: number; last: number } | null>();
-  for (const { skillId, correct, observedAtMs } of evidence) {
-    const prior = winsSinceFailure.get(skillId);
-    winsSinceFailure.set(skillId, correct ? { first: prior?.first ?? observedAtMs, last: observedAtMs } : null);
-  }
-  return [...winsSinceFailure.entries()].flatMap(([skillId, wins]): CandidateStudyAction[] => {
-    if (wins && wins.last - wins.first >= DAY_MS) return [];
-    // A fixed scenario to compare across skills. It makes no claim about measured treatment effects.
-    return [{
-      actionId: `skill-repair:${skillId}`, title: titles.get(skillId) ?? skillId, kind: "skill_repair",
+export function buildForecastDecisionWithSkillSummaries(input: ExamSprintDecisionInput, skills: readonly ExamSkillSummary[]) {
+  const simulation = prepareSprintSimulation(input);
+  const modeledSkillIds = new Set(simulation.blueprint.skillIds);
+  const candidateActions = skills.filter(skill => modeledSkillIds.has(skill.skillId) && (skill.status === "weak" || skill.status === "usable"))
+    .map(({ skillId, title }): CandidateStudyAction => ({
+      // A fixed scenario for comparing skills, with a hypothetical treatment effect.
+      actionId: `skill-repair:${skillId}`, title, kind: "skill_repair",
       durationHours: 0.5, skillEffects: { [skillId]: { abilityDelta: 0.25 } },
-    }];
-  });
-}
-
-export function buildExamSprintDecisionSnapshot(input: ExamSprintDecisionInput) {
-  const { simulation, objectiveEvidence } = prepareSprintSimulation(input);
+    }));
   return buildUnifiedDecisionSnapshot({
     ...input, ...simulation, calibrationRecords: heldOutCalibration(input, simulation.blueprint),
-    candidateActions: candidateStudyActions(input.pack, objectiveEvidence),
+    candidateActions,
   });
 }
