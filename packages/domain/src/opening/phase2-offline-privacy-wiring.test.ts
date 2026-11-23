@@ -219,6 +219,95 @@ it.each([{ sourceIds: [] }, { sourceIds: ["keep", "shred", "explicit"] }])("empt
   expect(result.cohortPolicy.cohortSurfaceVisible).toBe(true);
 });
 
+it("applies an uppercase workspace tombstone even without source IDs", () => {
+  const workspaceId = "abcdef12-3456-4789-abcd-ef1234567890";
+  const workspaceOwner = { ...owner, workspace_id: workspaceId };
+  const result = dataset.projectPrivacyGuardedOpeningDataset({
+    scope: { ...scope, workspaceId }, privacyEpoch: 3, mode: "solo", role: "learner",
+    shreddedSourceIds: [],
+    tombstoneReceipts: [{ ...tombstone, workspaceId: workspaceId.toUpperCase(), target: { kind: "workspace" },
+      shreddedSourceIds: [], shreddedSourceKeyIds: [], shreddedWorkspaceKeyId: "workspace-key", preservedWorkspaceKeyId: null }],
+    tables: {
+      opening_conversations: [{ ...workspaceOwner, id: "conversation" }],
+      opening_turns: [{ ...workspaceOwner, id: "turn-source-free", conversation_id: "conversation", source_ids: [], role: "user" }],
+      opening_teaching_activities: [{ ...workspaceOwner, id: "activity", source_ids: [] }],
+      opening_learning_attempts: [{ ...workspaceOwner, id: "attempt", activity_id: "activity", source_ids: [] }],
+    },
+  }, pseudonym);
+  expect(result.dataset).toEqual({ version: 1, privacyEpoch: 7, dialogueEvaluation: [], answerSequences: [], coursePackageQuality: [] });
+});
+
+it.each([
+  { lineage: "camelCase spec ref", specRefs: [{ sourceId: "shred" }], unitRefs: [] },
+  { lineage: "snake_case spec ref", specRefs: [{ source_id: " SHRED " }], unitRefs: [] },
+  { lineage: "string spec ref", specRefs: [" SHRED "], unitRefs: [] },
+  { lineage: "teaching unit ref", specRefs: [], unitRefs: [{ sourceId: " SHRED " }] },
+])("excludes a published activity and its source-free dialogue via a $lineage", ({ specRefs, unitRefs }) => {
+  const result = dataset.projectPrivacyGuardedOpeningDataset({
+    scope, privacyEpoch: 3, mode: "solo", role: "learner", tombstoneReceipts: [tombstone],
+    tables: {
+      ...tables,
+      opening_teaching_units: [{ ...owner, workspace_id: " WORKSPACE ", id: "unit", source_refs: unitRefs }],
+      opening_teaching_activity_specs: [
+        { ...owner, workspace_id: " WORKSPACE ", activity_id: " ACTIVITY-PUBLISHED ", teaching_unit_id: " UNIT ", source_refs: specRefs },
+        { ...owner, workspace_id: "foreign", activity_id: "activity-good", source_refs: ["shred"] },
+      ],
+      opening_teaching_activities: [...tables.opening_teaching_activities, { ...owner, id: "activity-published", source_ids: [] }],
+      opening_learning_sessions: [{ ...owner, id: "session-published", activity_id: "activity-published" }],
+      opening_turns: [...tables.opening_turns, {
+        ...owner, id: "turn-published", conversation_id: "conversation", learning_session_id: "session-published", source_ids: [], role: "user",
+      }],
+    },
+  }, pseudonym);
+  expect(result.dataset).toMatchObject({
+    coursePackageQuality: [{ identity: "activity:activity-good" }],
+    dialogueEvaluation: [{ identity: "turn:turn-good" }],
+  });
+});
+
+it("starts lineage from scoped exclusions and follows chunk links with canonical IDs", () => {
+  const result = dataset.projectPrivacyGuardedOpeningDataset({
+    scope, privacyEpoch: 3, mode: "solo", role: "learner",
+    tables: {
+      opening_privacy_exclusions: [{ workspace_id: " WORKSPACE ", source_id: " SHRED " }, { workspace_id: "foreign", source_id: "keep" }],
+      opening_sources: [{ ...owner, workspace_id: "WORKSPACE", id: "keep" }, { ...owner, id: "SHRED" }],
+      opening_source_chunks: [{ id: "chunk", source_id: "Shred" }],
+      opening_conversations: [{ workspace_id: " WORKSPACE ", owner_user_id: " LEARNER ", id: "conversation" }],
+      opening_turns: [
+        { ...owner, id: "turn-keep", conversation_id: "conversation", source_ids: [" KEEP "], role: "user" },
+        { ...owner, id: "turn-shred", conversation_id: "conversation", source_ids: ["SHRED"], role: "user" },
+        { ...owner, id: "turn-chunk", conversation_id: "conversation", chunk_id: " CHUNK ", source_ids: [], role: "user" },
+      ],
+      opening_learning_item_versions: [{ ...owner, workspace_id: " WORKSPACE ", id: "item", chunk_id: " CHUNK " }],
+      opening_teaching_activities: [{ ...owner, id: "activity", source_ids: [" KEEP "] }],
+      opening_learning_attempts: [
+        { ...owner, id: "attempt-keep", activity_id: "activity", source_ids: ["KEEP"] },
+        { ...owner, id: "attempt-item", activity_id: "activity", item_version_id: " ITEM ", source_ids: [] },
+      ],
+    },
+  }, pseudonym);
+  expect(result.dataset.privacyEpoch).toBe(3);
+  expect(result.dataset.dialogueEvaluation).toMatchObject([{ identity: "turn:turn-keep", sources: ["source:keep"] }]);
+  expect(result.dataset.coursePackageQuality).toMatchObject([{ identity: "activity:activity", sources: ["source:keep"] }]);
+  expect(result.dataset.answerSequences).toMatchObject([{ identity: "attempt:attempt-keep", sources: ["source:keep"] }]);
+});
+
+it("excludes a deleted turn and attempts created from it with case-insensitive IDs", () => {
+  const result = dataset.projectPrivacyGuardedOpeningDataset({
+    scope, privacyEpoch: 3, mode: "solo", role: "learner", deletedTurnIds: [" TURN-DELETED "],
+    tables: {
+      ...tables,
+      opening_turns: [...tables.opening_turns, { ...owner, id: "turn-deleted", conversation_id: "conversation", source_ids: [], role: "user" }],
+      opening_learning_attempts: [...tables.opening_learning_attempts, {
+        ...owner, id: "attempt-from-turn", activity_id: "activity-good", source_ids: [], create_intent: { sourceTurnId: "TURN-DELETED" },
+      }],
+    },
+  }, pseudonym);
+  expect(result.dataset.dialogueEvaluation.map(row => row.identity)).not.toContain("turn:turn-deleted");
+  expect(result.dataset.answerSequences.map(row => row.identity)).not.toContain("attempt:attempt-from-turn");
+  expect(result.dataset.answerSequences.map(row => row.identity)).toContain("attempt:attempt-good");
+});
+
 it("follows source lineage from source-free turns through derived activities, observations, and attempts", () => {
   const sourceFreeTurn = (id: string, refs: object = {}) => ({
     ...owner, id, conversation_id: "conversation", source_ids: [], role: "user", ...refs,
