@@ -435,6 +435,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         AND lead(numbered_solution_candidate AND section_without_numbered) OVER content_order
         THEN lead(position) OVER content_order END AS next_numbered_section,
       lead(page) OVER content_order AS next_content_page,
+      bool_or(sealed_explanation AND NOT numbered_solution_candidate OR auxiliary AND inline_opener) OVER (PARTITION BY id)
+        OR bool_or(auxiliary AND inline_opener) OVER (PARTITION BY source_id,source_version,page) AS withheld_numbered_context,
       COALESCE(max(position) FILTER (WHERE section_answer) OVER preceding_lines,0)
         > COALESCE(max(position) FILTER (WHERE section_terminator OR reopens_section) OVER preceding_lines,0)
         AND NOT reopens_section AS in_sealed_section
@@ -443,15 +445,13 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       preceding_lines AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
   ), pdf_archive_inline_starts AS (
     SELECT *, inline_opener AND NOT auxiliary_complete AS starts_inline,
-      content_line AND candidate_body ~* ${answerProofHeading}
-        AND (NOT auxiliary AND position=first_primary_position
-          OR auxiliary_proof_head AND first_primary_position IS NULL)
+      (NOT auxiliary AND position=first_primary_position AND candidate_body ~* ${answerProofHeading}
+        OR auxiliary_proof_head AND NOT primary_ends_adjacency)
         AND COALESCE(max(page) FILTER (WHERE inline_opener AND auxiliary_complete AND NOT has_auxiliary_proof)
           OVER (PARTITION BY source_id,source_version ORDER BY page GROUPS BETWEEN 1 PRECEDING AND 1 PRECEDING)=page-1,false)
         AS follows_auxiliary_answer
     FROM (
-      SELECT *, auxiliary AND content_line AND NOT inline_opener AND candidate_body ~* ${answerProofHeading}
-          AND position=first_auxiliary_position AS auxiliary_proof_head,
+      SELECT *, auxiliary_proof AND position=first_auxiliary_position AS auxiliary_proof_head,
         auxiliary AND (last_auxiliary_body ~* ${inlineTerminator}
         OR (NOT has_auxiliary_proof AND last_auxiliary_body ~* ${inlineTerminal}
           AND last_auxiliary_body !~* ${inlineContinues})) AS auxiliary_complete
@@ -459,10 +459,16 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         SELECT *, min(position) FILTER (WHERE NOT auxiliary AND content_line)
             OVER (PARTITION BY source_id,source_version,page) AS first_primary_position,
           min(position) FILTER (WHERE content_line) OVER (PARTITION BY id,auxiliary_block) AS first_auxiliary_position,
+          max(position) FILTER (WHERE NOT inline_opener AND candidate_body ~* ${inlineTerminator})
+            OVER (PARTITION BY id,auxiliary_block) AS auxiliary_terminator,
+          bool_or(NOT auxiliary AND (inline_opener OR section_answer OR opens_exercise OR opens_public
+            OR content_line AND line ~ ${numberedQuestion}))
+            OVER (PARTITION BY source_id,source_version,page) AS primary_ends_adjacency,
           first_value(candidate_body) OVER auxiliary_body AS last_auxiliary_body,
           bool_or(candidate_body ~* ${answerProofHeading}) OVER auxiliary_body AS has_auxiliary_proof
         FROM (
-          SELECT *, count(*) FILTER (WHERE inline_opener)
+          SELECT *, auxiliary AND content_line AND NOT inline_opener AND candidate_body ~* ${answerProofHeading} AS auxiliary_proof,
+            count(*) FILTER (WHERE inline_opener)
             OVER (PARTITION BY id,auxiliary_block ORDER BY position ROWS UNBOUNDED PRECEDING) AS auxiliary_opener
           FROM pdf_archive_inline_bodies
         ) with_openers
@@ -472,24 +478,23 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     ) with_completion
   ), pdf_archive_inline_groups AS (
     -- An opener and its continuation lines share a group until the next explicit boundary.
-    SELECT *, CASE WHEN auxiliary
-      AND NOT (first_value(starts_inline) OVER inline_origin AND id=first_value(id) OVER inline_origin
-        AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin)
-      AND NOT (proof_in_auxiliary_block AND (first_value(starts_inline) OVER inline_origin OR follows_auxiliary_answer_in_block))
-      THEN '' ELSE candidate_body END AS body_line
+    SELECT *, CASE WHEN NOT auxiliary OR first_value(starts_inline) OVER inline_origin
+        AND id=first_value(id) OVER inline_origin
+        AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
+      THEN candidate_body ELSE '' END AS body_line,
+      -- An auxiliary proof that closes in its own block leaves the outer answer active.
+      auxiliary_proof AND first_value(starts_inline) OVER inline_origin
+        AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position) AS upgrades_inline
     FROM (
       SELECT *, count(*) FILTER (WHERE starts_inline OR section_answer OR opens_exercise OR opens_public)
-        OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group,
-        bool_or(auxiliary_proof_head) OVER auxiliary_lines AS proof_in_auxiliary_block,
-        bool_or(follows_auxiliary_answer) OVER auxiliary_lines AS follows_auxiliary_answer_in_block
+        OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group
       FROM pdf_archive_inline_starts
-      WINDOW auxiliary_lines AS (PARTITION BY id,auxiliary_block)
     ) grouped_lines
     WINDOW inline_origin AS (PARTITION BY source_id,source_version,inline_group ORDER BY position)
   ), pdf_archive_inline_body AS (
     SELECT *, min(position) FILTER (WHERE body_line<>'')
       OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body,
-      min(position) FILTER (WHERE body_line ~* ${answerProofHeading})
+      min(position) FILTER (WHERE upgrades_inline OR body_line ~* ${answerProofHeading})
       OVER (PARTITION BY source_id,source_version,inline_group) AS first_proof,
       min(position) FILTER (WHERE body_line<>'')
       OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
@@ -510,18 +515,22 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       bool_or(NOT auxiliary AND (starts_inline OR section_answer OR opens_exercise OR opens_public)) AS primary_boundary,
       min(position) FILTER (WHERE position=first_proof) AS proof_position,
       min(position) FILTER (WHERE follows_auxiliary_answer) AS auxiliary_proof_position,
+      min(position) FILTER (WHERE auxiliary_proof_head AND NOT primary_ends_adjacency) AS adjacent_auxiliary_position,
+      (array_agg(auxiliary_terminator ORDER BY position)
+        FILTER (WHERE auxiliary_proof_head AND NOT primary_ends_adjacency))[1] AS adjacent_auxiliary_terminator,
       max(position) FILTER (WHERE NOT auxiliary AND body_line ~* ${inlineTerminator}) AS primary_terminator,
       bool_or(starts_inline AND NOT (unconditional_answer OR sealed_explanation)) AS hide_opening_page,
       (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
       bool_or(closes_after_blank) AS closed_after_blank,
       bool_or(first_proof<=position) AS in_sealed_proof,
-      bool_or(position=first_body AND position=first_proof AND (NOT auxiliary OR first_primary_position IS NULL)) AS starts_proof,
+      bool_or(NOT auxiliary AND position=first_body AND position=first_proof) AS starts_proof,
       min(position) FILTER (WHERE explicit_inline_close) AS terminator_position,
       max(position) FILTER (WHERE body_line<>'') AS last_body_position,
-      min(next_numbered_section) FILTER (WHERE in_sealed_section OR inside_inline_body) AS numbered_section_position,
-      min(next_content_page) FILTER (WHERE next_numbered_section IS NOT NULL
-        AND (in_sealed_section OR inside_inline_body)) AS numbered_section_page,
-      bool_or(next_numbered_section IS NOT NULL AND in_sealed_section) AS numbered_in_section
+      min(next_numbered_section) AS numbered_section_position,
+      min(next_content_page) FILTER (WHERE next_numbered_section IS NOT NULL) AS numbered_section_page,
+      min(position) FILTER (WHERE next_numbered_section IS NOT NULL) AS numbered_predecessor,
+      bool_or(next_numbered_section IS NOT NULL AND (in_sealed_section OR withheld_numbered_context)) AS numbered_withheld,
+      bool_or(next_numbered_section IS NOT NULL AND inside_inline_body) AS numbered_in_inline
     FROM (
       SELECT *, first_inline_close IS NULL OR position<=first_inline_close AS inside_inline_body
       FROM pdf_archive_inline_closes
@@ -543,20 +552,36 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     ) with_next_page
     WINDOW answer AS (PARTITION BY source_id,source_version,inline_group)
   ), pdf_archive_proof_ranges AS (
-    -- Auxiliary openers cannot reset a proof. A completed auxiliary answer can
-    -- also start a proof on the next page without opening another inline span.
-    SELECT source_id,source_version,page,proof_start,
-      COALESCE(min(page) FILTER (WHERE primary_terminator>=COALESCE(proof_start,first_position)
-        OR proof_start=proof_position AND terminator_position>=proof_position) OVER remaining,max(page) OVER remaining) AS proof_end
+    -- A completed answer can start a fresh proof on the adjacent page.
+    -- A terminator in that proof's opening block only closes that proof.
+    SELECT *,
+      CASE WHEN proof_start=adjacent_auxiliary_position AND adjacent_auxiliary_terminator>=proof_start
+          OR proof_start=proof_position AND terminator_position>=proof_start THEN page
+        ELSE COALESCE(min(page) FILTER (WHERE primary_terminator>=COALESCE(proof_start,first_position))
+          OVER remaining,max(page) OVER remaining) END AS proof_end
     FROM (
       SELECT *, LEAST(auxiliary_proof_position,
+        CASE WHEN follows_finished_inline THEN adjacent_auxiliary_position END,
         CASE WHEN first_page IS NOT NULL AND page<=last_page AND closed_after_blank IS NOT TRUE THEN proof_position END) AS proof_start,
         count(*) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position
           ROWS UNBOUNDED PRECEDING) AS primary_group
-      FROM pdf_archive_inline_ranges
+      FROM (
+        SELECT *, lag(page) OVER previous_page=page-1 AND lag(page=last_page AND first_page IS NOT NULL
+          AND in_sealed_proof IS NOT TRUE AND NOT closed_after_blank
+          AND (terminator_position=last_body_position OR last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues}))
+          OVER previous_page AS follows_finished_inline
+        FROM pdf_archive_inline_ranges
+        WINDOW previous_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page)
+      ) adjacent
     ) proof_groups
     WINDOW remaining AS (PARTITION BY source_id,source_version,primary_group ORDER BY first_position
       ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)
+  ), pdf_archive_numbered_predecessors AS (
+    SELECT *, max(proof_end) FILTER (WHERE proof_start IS NOT NULL) OVER prior_pages AS earlier_proof_end,
+      min(proof_start) OVER (PARTITION BY source_id,source_version,page) AS same_page_proof_start
+    FROM pdf_archive_proof_ranges
+    WINDOW prior_pages AS (PARTITION BY source_id,source_version ORDER BY page
+      GROUPS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
   ), pdf_archive_page_events AS (
     SELECT source_id,source_version,page,bool_or(section_answer) AS section_answer,
       bool_or(answer_label) AS answer_label,
@@ -569,9 +594,10 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       FROM pdf_archive_line_events
       UNION ALL
       SELECT source_id,source_version,numbered_section_page,numbered_section_position,true,true,false,NULL::boolean
-      FROM pdf_archive_inline_ranges
+      FROM pdf_archive_numbered_predecessors
       WHERE numbered_section_position IS NOT NULL
-        AND (numbered_in_section OR first_page IS NOT NULL AND page<=last_page)
+        AND (numbered_withheld OR numbered_in_inline AND first_page IS NOT NULL AND page<=last_page
+          OR page<=earlier_proof_end OR numbered_predecessor>=same_page_proof_start)
     ) sections
     GROUP BY source_id,source_version,page
   ), pdf_archive_sealed_spans AS MATERIALIZED (

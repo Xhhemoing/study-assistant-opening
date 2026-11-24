@@ -504,6 +504,98 @@ describe("pgvector material repository", () => {
     ], [3], 2);
   });
 
+  it.each(["Answer: Yes.", "[图片描述]\nAnswer: Yes."])(
+    "archives a mixed native and auxiliary proof after %j through its terminator", async (answer) => {
+      await expectArchivedPdfPages([
+        answer,
+        "[原生提取]\nThe private derivation begins.\n[视觉转写与描述]\n[图片描述]\nProof.",
+        "The private derivation continues.",
+        "The private proof ends. ∎",
+        "Chapter 2: Geometry",
+      ], [5], 3);
+    },
+  );
+
+  it("keeps a mixed page public when a chapter heading precedes an auxiliary proof", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nAnswer: Yes.",
+      "[原生提取]\nChapter 2: Geometry\n[视觉转写与描述]\n[图片描述]\nProof. The public derivation begins.",
+      "The public derivation continues.",
+    ], [2, 3], 1);
+  });
+
+  it("archives a proof below the first auxiliary line of an active inline answer", async () => {
+    await expectArchivedPdfPages([
+      "Answer: x =",
+      "[图片描述]\nAn ordinary observation.\nProof. The private derivation begins.",
+      "The equality follows.",
+      "The private proof ends. ∎",
+      "Public prose after the proof.",
+    ], [5], 4);
+  });
+
+  it.each(["∎", "Q.E.D."])("keeps the outer answer sealed after an auxiliary proof closes with %s", async (end) => {
+    await expectArchivedPdfPages([
+      "Answer: x =",
+      "[图片描述]\nProof. The private derivation ends. " + end,
+      "3 units.",
+      "Public prose after the answer.",
+    ], [4], 3);
+  });
+
+  it.each(["", "[图片描述]\n"])("seals 解答 after a completed primary or auxiliary answer on the numbered page (%j)", async (header) => {
+    await expectArchivedPdfPages([
+      "1. Find x.\n" + header + "Answer: Yes.",
+      "解答：\nYes.",
+      "The private answer section continues.",
+      "Chapter 2: Geometry",
+    ], [4], 3);
+  });
+
+  it("seals 解答 after a numbered line inside the preceding auxiliary proof", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nAnswer: Yes.",
+      "[图片描述]\nProof. The private derivation begins.",
+      "1. First result.",
+      "解答：\nYes.",
+      "The private proof ends. ∎",
+      "The private answer section continues.",
+      "Chapter 2: Geometry",
+    ], [7], 6);
+  });
+
+  it("closes subsequent auxiliary proofs independently after an earlier public proof", async () => {
+    await expectArchivedPdfPages([
+      "Theorem 2.1: The public identity.\nProof. A public justification.",
+      "[图片描述]\nAnswer: Yes.",
+      "[图片描述]\nProof. The first private proof ends. Q.E.D.",
+      "Public prose after the first proof.",
+      "[图片描述]\nAnswer: Yes.",
+      "[图片描述]\nProof. The second private proof ends. ∎",
+      "Public prose after the second proof.",
+    ], [1, 4, 7], 6);
+  });
+
+  it("keeps numbered answer and proof boundaries across a 128-page archive", async () => {
+    const leading = Array.from({ length: 120 }, () => "Public practice prose about rings and fields.");
+    const pdf = await seed([
+      ...leading,
+      "[图片描述]\nAnswer: Yes.",
+      "[图片描述]\nProof. The private derivation begins.",
+      "1. First result.",
+      "解答：\nYes.",
+      "The private proof ends. ∎",
+      "The private answer section continues.",
+      "Chapter 2: Geometry",
+      "Public chapter prose.",
+    ]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const pages = [...leading.map((_, index) => index + 1), 127, 128];
+    expect((await chunks.listChunks(f.scope, pdf.sourceId)).map(chunk => chunk.page)).toEqual(pages);
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 128 })).resolves.toMatchObject({ pages });
+  });
+
   it("tracks completion per auxiliary answer opener", async () => {
     await expectArchivedPdfPages([
       "[图片描述]\nOfficial Solution 1: Yes.\nOfficial Solution 2:",

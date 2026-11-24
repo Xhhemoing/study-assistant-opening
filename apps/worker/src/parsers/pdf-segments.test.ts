@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v41-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v42-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2858,6 +2858,135 @@ describe("bounded resumable PDF parser", () => {
       if (proof) expect(result.requests[3]).toEqual({ start: 4, seed: "inline_proof_sealed" });
       expect(result.publishedChunks.map(({ text }) => text)).toEqual(proof ? [prose] : [continuation, prose]);
     }
+  });
+
+  it.each(["", "[转写]\n", "【原图忠实转写，尚需核对】\n", "native"])(
+    "does not seed a numbered question after a complete visual answer (%j)",
+    async (format) => {
+      const auxiliary = format === "native";
+      const stem = "1. Find x.";
+      const chapter = "Chapter 2: Geometry";
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: auxiliary ? stem : "", visualKinds: ["picture"] },
+        { page: 2, text: "解答：\nYes." },
+        { page: 3, text: "More private answer text." },
+        { page: 4, text: chapter },
+      ], recognizePage: async () => ({
+        text: auxiliary ? "[图片描述]\nAnswer: Yes." : format + stem + "\nAnswer: Yes.",
+        imageObjectKey: "vision/answer",
+      }) });
+      expect(result.requests[1]).toEqual({ start: 2, proofBoundary: true });
+      expect(result.requests[2]).toEqual({ start: 3, seed: "section_sealed" });
+      expect(result.publishedChunks.some(({ page }) => page === 3)).toBe(false);
+      expect(result.publishedChunks.at(-1)?.text).toBe(chapter);
+    },
+  );
+
+  it.each(["∎", "Q.E.D."].flatMap(end => [false, true].map(stale => ({ end, stale }))))(
+    "consumes an adjacent auxiliary proof closed by $end (saved pending marker: $stale)",
+    async ({ end, stale }) => {
+      const publicProof = "Proof. The public derivation of the theorem.";
+      const segmentData = new Map<string, PdfSegment>();
+      if (stale) segmentData.set("pdf-publication-page-seal-v1/2-2", { state: "ready", pages: [{
+        page: 2, text: "", imagePath: null, visualKinds: ["scan"],
+        hadSealedContent: true, inlineProofBoundaryPendingAtEnd: true, publicationSealCommitted: true,
+      }] });
+      const result = await runPdfScenario({ segmentPages: 1, segmentData, pages: [
+        { page: 1, text: "", visualKinds: ["scan"] },
+        { page: 2, text: "", visualKinds: ["scan"] },
+        { page: 3, text: publicProof },
+        { page: 4, text: "More public justification." },
+      ], recognizePage: async ({ physicalPage }) => ({
+        text: physicalPage === 1 ? "[图片描述]\nAnswer: Yes." : "[图片描述]\nProof. Private derivation. " + end,
+        imageObjectKey: "vision/proof",
+      }) });
+      expect(result.requests[1]).toEqual({ start: 2, proofBoundary: true });
+      expect(result.requests[2]).toEqual({ start: 3 });
+      expect(result.publishedChunks.map(({ text }) => text)).toEqual([publicProof, "More public justification."]);
+      expect(segmentData.get("pdf-publication-page-seal-v1/2-2")?.pages[0]?.inlineProofBoundaryPendingAtEnd).toBeUndefined();
+    },
+  );
+
+  it.each(["", "∎", "Q.E.D."])("merges an auxiliary proof after an observation inside an active answer (%j)", async (end) => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Answer: x =" },
+      { page: 2, text: "", visualKinds: ["scan"] },
+      { page: 3, text: "3 units." },
+      { page: 4, text: end ? "Public prose." : "The private proof ends. ∎" },
+      { page: 5, text: "Public chapter prose." },
+    ], recognizePage: async () => ({
+      text: "[图片描述]\nAn ordinary observation.\nProof. A private derivation. " + end,
+      imageObjectKey: "vision/proof",
+    }) });
+    expect(result.requests[2]).toEqual({ start: 3, seed: end ? "inline_sealed" : "inline_proof_sealed" });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual(end ? [4, 5] : [5]);
+  });
+
+  it.each([false, true])("seals a mixed native and auxiliary proof after a completed answer (auxiliary: %s)", async (auxiliary) => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: auxiliary ? "" : "Answer: Yes.", visualKinds: auxiliary ? ["scan"] : [] },
+      { page: 2, text: "The private derivation begins.", visualKinds: ["picture"] },
+      { page: 3, text: "The private derivation continues." },
+      { page: 4, text: "The private proof ends. ∎" },
+      { page: 5, text: "Chapter 2: Geometry" },
+    ], recognizePage: async ({ physicalPage }) => ({
+      text: physicalPage === 1 ? "[图片描述]\nAnswer: Yes." : "[图片描述]\nProof.",
+      imageObjectKey: "vision/proof",
+    }) });
+    expect(result.requests[2]).toEqual({ start: 3, seed: "inline_proof_sealed" });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual([5]);
+  });
+
+  it("reopens at a native chapter heading before an adjacent auxiliary proof", async () => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "", visualKinds: ["scan"] },
+      { page: 2, text: "Chapter 2: Geometry", visualKinds: ["picture"] },
+      { page: 3, text: "The public derivation continues." },
+    ], recognizePage: async ({ physicalPage }) => ({
+      text: physicalPage === 1 ? "[图片描述]\nAnswer: Yes." : "[图片描述]\nProof. The public derivation begins.",
+      imageObjectKey: "vision/proof",
+    }) });
+    expect(result.requests[2]).toEqual({ start: 3 });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual([2, 3]);
+  });
+
+  it("keeps 解答 section-sealed after a numbered line inside an auxiliary proof", async () => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "", visualKinds: ["scan"] },
+      { page: 2, text: "", visualKinds: ["scan"] },
+      { page: 3, text: "1. First result." },
+      { page: 4, text: "解答：\nYes." },
+      { page: 5, text: "The private proof ends. ∎" },
+      { page: 6, text: "The private answer section continues." },
+      { page: 7, text: "Chapter 2: Geometry" },
+    ], recognizePage: async ({ physicalPage }) => ({
+      text: physicalPage === 1 ? "[图片描述]\nAnswer: Yes." : "[图片描述]\nProof. The private derivation begins.",
+      imageObjectKey: "vision/proof",
+    }) });
+    expect(result.requests[3]).toEqual({ start: 4, seed: "inline_proof_sealed" });
+    expect(result.requests[4]).toEqual({ start: 5, seed: "section_sealed" });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual([7]);
+  });
+
+  it("closes each auxiliary proof independently after an earlier public proof", async () => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Theorem 2.1: The public identity.\nProof. A public justification." },
+      { page: 2, text: "", visualKinds: ["scan"] },
+      { page: 3, text: "", visualKinds: ["scan"] },
+      { page: 4, text: "Public prose after the first proof." },
+      { page: 5, text: "", visualKinds: ["scan"] },
+      { page: 6, text: "", visualKinds: ["scan"] },
+      { page: 7, text: "Public prose after the second proof." },
+    ], recognizePage: async ({ physicalPage }) => ({
+      text: physicalPage === 2 || physicalPage === 5 ? "[图片描述]\nAnswer: Yes."
+        : "[图片描述]\nProof. The private derivation ends. " + (physicalPage === 3 ? "Q.E.D." : "∎"),
+      imageObjectKey: "vision/proof",
+    }) });
+    expect(result.requests[2]).toEqual({ start: 3, proofBoundary: true });
+    expect(result.requests[3]).toEqual({ start: 4 });
+    expect(result.requests[5]).toEqual({ start: 6, proofBoundary: true });
+    expect(result.requests[6]).toEqual({ start: 7 });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual([1, 4, 7]);
   });
 
   it("seals a standalone 解答： and its proof in a heading-free numbered question", async () => {
