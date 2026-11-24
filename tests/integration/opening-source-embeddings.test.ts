@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
+import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningPdfSegmentsRepository,
   createOpeningSourceChunksRepository, createOpeningSourceEmbeddingsRepository, createOpeningSourceRepository, openingJobScope,
@@ -534,6 +535,52 @@ describe("pgvector material repository", () => {
     ], [5], 4);
   });
 
+  it.each([
+    "1. Find x.\n[图片描述]\nAnswer: Yes.",
+    "[图片描述]\nAnswer: Yes.\n[不确定处]\nProof. The first derivation ends. ∎\n[图片描述]\nAnswer: No.",
+  ])("archives an open proof following a completed answer in an earlier block on the same page (%j)", async prefix => {
+    await expectArchivedPdfPages([
+      prefix + "\n[不确定处]\nProof. The private derivation begins.",
+      "The private derivation continues.",
+      "The private derivation ends. ∎",
+      "Public prose after the proof.",
+    ], [4], 3);
+  });
+
+  it.each([
+    "[不确定处]\nFigure 1.",
+    "[不确定处]\nFigure 1.\n[图片描述]\nProof. An independent public derivation.",
+    " ∎\nAn ordinary observation after the answer.",
+  ])("consumes a completed auxiliary answer boundary before any later block or page (%j)", async intervening => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nAnswer: Yes." + (intervening.startsWith("[") ? "\n" : "") + intervening,
+      "Proof. An independent public derivation.",
+      "The public derivation continues.",
+    ], [2, 3], 1);
+  });
+
+  it("keeps a nested auxiliary proof sealed across pages after its sibling closes in the same block", async () => {
+    const auxiliary = "[图片描述]\nProof. First calculation ends. ∎\nProof. Second calculation begins.";
+    const texts = ["Answer: x =", auxiliary, "3 units.", "The private derivation continues.",
+      "The private derivation ends. ∎", "The next topic is public."];
+    const pdf = await expectArchivedPdfPages(texts, [6], 4);
+    const retry = await startPdfRetry(pdf.sourceId, texts.map((text, index) => ({
+      page: index + 1, text: index === 1 ? "" : text, imagePath: null, visualKinds: index === 1 ? ["scan"] : [],
+    })), { recognizePage: async () => ({ text: auxiliary, imageObjectKey: "vision/two-proofs" }) });
+    const result = await retry.run();
+    await retry.finish(result.pages);
+    expect((await retry.chunks.listChunks(f.scope, pdf.sourceId)).map(chunk => chunk.page)).toEqual([6]);
+  });
+
+  it("keeps the auxiliary answer's open proof sealed after an earlier proof terminator in its own block", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nAnswer: x =\nProof. First calculation ends. ∎\nProof. Second calculation begins.",
+      "The private derivation continues.",
+      "The private derivation ends. ∎",
+      "Public prose after the proof.",
+    ], [4], 2);
+  });
+
   it.each(["∎", "Q.E.D."])("keeps the outer answer sealed after an auxiliary proof closes with %s", async (end) => {
     await expectArchivedPdfPages([
       "Answer: x =",
@@ -594,6 +641,58 @@ describe("pgvector material repository", () => {
     const pages = [...leading.map((_, index) => index + 1), 127, 128];
     expect((await chunks.listChunks(f.scope, pdf.sourceId)).map(chunk => chunk.page)).toEqual(pages);
     await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 128 })).resolves.toMatchObject({ pages });
+  });
+
+  it.each([false, true])("carries a public numbered question after a proof terminator (cross-page: %s)", async crossPage => {
+    await expectArchivedPdfPages([
+      "Answer: x =",
+      ...(crossPage ? ["Proof. The private proof begins.", "The private proof ends. ∎\n1. Find y."]
+        : ["Proof. The private proof ends. ∎\n1. Find y."]),
+      "解答：\nYes.",
+      "Public prose after the answer.",
+    ], [crossPage ? 5 : 4], crossPage ? 3 : 2);
+  });
+
+  it.each([128, 256, 512])("reads the sealed pages and chunks of a %i-page archive once", async pageCount => {
+    const pattern = ["[图片描述]\nAnswer: Yes.", "[不确定处]\nProof. Private derivation ends. ∎",
+      "Public discussion of rings.", "Public discussion of fields.", "[图片描述]\nAnswer: No.",
+      "Public examples of groups.", "Public examples of rings.", "Public examples of fields."];
+    const pdf = await seed(Array.from({ length: pageCount }, (_, index) => pattern[index % pattern.length]!));
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const expected = Array.from({ length: pageCount }, (_, index) => index + 1)
+      .filter(page => ![1, 2, 5].includes((page - 1) % pattern.length + 1));
+    let statement: { query: string; parameters: postgres.ParameterOrJSON<never>[] } | undefined;
+    const sql = postgres(process.env.OPENING_TEST_DATABASE_URL!, {
+      max: 1,
+      debug: (_, query, parameters) => {
+        if (query.trimStart().startsWith("WITH pdf_read_sources")) statement = { query, parameters: [...parameters] };
+      },
+    });
+    try {
+      const chunks = createOpeningSourceChunksRepository(sql);
+      expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(chunk => chunk.page)).toEqual(expected);
+      if (!statement) throw new Error("Missing archive read statement");
+      const { query, parameters } = statement;
+      expect(query.match(/\bJOIN\b/giu)).toHaveLength(2);
+
+      type Plan = { "CTE Name"?: string; "Actual Loops": number; "Actual Rows": number; Plans?: Plan[] };
+      const [row] = await sql.unsafe<{ "QUERY PLAN": { Plan: Plan }[] }[]>(
+        `EXPLAIN (ANALYZE, FORMAT JSON) ${query}`, parameters,
+      );
+      const scans: Plan[] = [];
+      const visit = (plan: Plan) => {
+        if (plan["CTE Name"]?.startsWith("pdf_archive_sealed_")) scans.push(plan);
+        plan.Plans?.forEach(visit);
+      };
+      visit(row!["QUERY PLAN"][0]!.Plan);
+      expect(scans.filter(plan => plan["CTE Name"] === "pdf_archive_sealed_spans").map(plan => plan["Actual Loops"]))
+        .toEqual(expect.arrayContaining([1]));
+      expect(scans.filter(plan => plan["CTE Name"] === "pdf_archive_sealed_pages")
+        .map(plan => [plan["Actual Loops"], plan["Actual Rows"]])).toEqual([[1, pageCount / pattern.length]]);
+      expect(scans.every(plan => plan["Actual Loops"] <= 1)).toBe(true);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
   });
 
   it("tracks completion per auxiliary answer opener", async () => {
@@ -1009,6 +1108,44 @@ describe("pgvector material repository", () => {
     await retry.run();
     expect(checkedPendingSeal).toBe(true);
     expect((await retry.chunks.listForSources(f.scope, [pdf.sourceId])).map(chunk => chunk.page)).toEqual([1, 2, 5]);
+  });
+
+  it("uses the native scan's trailing answer boundary when only Vision sees the same-page proof", async () => {
+    const pdf = await seed("Previously published source.");
+    const texts = ["1. Find x.", "The private derivation continues.", "The private derivation ends. ∎", "Public prose follows."];
+    const retry = await startPdfRetry(pdf.sourceId, texts.map((text, index) => ({
+      page: index + 1, text, imagePath: null, visualKinds: index === 0 ? ["picture"] : [],
+      ...(index === 0 ? { hadSealedContent: true, inlineSealedAtEnd: false,
+        inlineProofBoundaryPendingAtEnd: true, previousNumberedQuestionAtEnd: false } : {}),
+    })), { recognizePage: async () => ({ text: "[图片描述]\nProof. The private derivation begins.", imageObjectKey: "vision/proof" }) });
+    const result = await retry.run();
+    await retry.finish(result.pages);
+    const published = await retry.chunks.listChunks(f.scope, pdf.sourceId);
+    expect(published.filter(chunk => chunk.page !== 1).map(chunk => chunk.page)).toEqual([4]);
+  });
+
+  it("does not restore a stale committed proof boundary when saved Vision closes it and live Vision returns null", async () => {
+    const texts = ["Problem 1. Decide whether the identity holds.\nAnswer: Yes.",
+      "[视觉转写与描述]\n[图片描述]\nProof. The private argument ends. Q.E.D.",
+      "Proof. This separate proof is public.", "The public proof ends. ∎"];
+    const pdf = await seed(texts);
+    const marker = { page: 2, text: "", imagePath: null, hadSealedContent: true, visualKinds: ["scan"],
+      inlineProofBoundaryPendingAtEnd: true, publicationSealCommitted: true };
+    await f.sql`INSERT INTO opening_pdf_parse_segments(workspace_id,source_id,source_version,parser_profile,page_start,page_end,state,pages)
+      VALUES(${f.scope.workspaceId},${pdf.sourceId},1,'pdf-publication-page-seal-v1',2,2,'ready',${f.sql.json([marker])})`;
+    const recognizePage = vi.fn(async () => null);
+    const retry = await startPdfRetry(pdf.sourceId, texts.map((text, index) => ({
+      page: index + 1, text: index === 1 ? "" : text, imagePath: null, visualKinds: index === 1 ? ["scan"] : [],
+    })), { recognizePage });
+    const result = await retry.run();
+    await retry.finish(result.pages);
+    expect(recognizePage).toHaveBeenCalledOnce();
+    const published = await retry.chunks.listChunks(f.scope, pdf.sourceId);
+    expect(published.filter(chunk => chunk.page && chunk.page > 2).map(chunk => chunk.text)).toEqual(texts.slice(2));
+    const [row] = await f.sql`SELECT pages->0 AS marker FROM opening_pdf_parse_segments
+      WHERE source_id=${pdf.sourceId} AND page_start=2 AND parser_profile='pdf-publication-page-seal-v1'`;
+    expect(row?.marker?.publicationSealCommitted).toBe(true);
+    expect(row?.marker?.inlineProofBoundaryPendingAtEnd).toBeUndefined();
   });
 
   it.each(["empty response", "confirmed native seal", "native seal with unverified picture", "batch setup failure"])(

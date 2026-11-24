@@ -154,6 +154,7 @@ const ENGLISH_REFERENCE_CLAUSE_RE = /,\s*(?:which|where|applied|used|shown|given
 const ENGLISH_REFERENCE_SUBJECT_RE = /^(?:[a-z]+|This|That|It|They|We)\b/u;
 const CHINESE_REFERENCE_CLAUSE_RE = /[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)/u;
 const ANSWER_PROOF_HEADING_RE = /^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。])/iu;
+const BARE_ANSWER_PROOF_HEADING_RE = /^(?:Proof|Sketch\s+of\s+Proof|(?:【\s*)?(?:证明|证|略证|续证)(?:\s*】)?)\s*[:：.．。]?$/iu;
 const ENGLISH_CONTAINER_PREFIX_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s|:：.．—–(（-]|$)/iu;
 const CHINESE_CONTAINER_PREFIX_RE = /^(?:第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)/u;
 const BLOCK_IDENTIFIER_RE = /^\s+(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)\b(?=[\s:：.．、—–(（-]|$)/iu;
@@ -402,6 +403,7 @@ function stripSealedSolutionLines(
 ): string {
   const lines = text.trimEnd().split(/\r?\n/u);
   const kept: string[] = [];
+  const enclosingInlineSeal = auxiliary && state.mode === "inline_sealed";
   let changed = false;
   let publish = !requirePublicVisionHeading;
   let firstContentLine = true;
@@ -434,6 +436,11 @@ function stripSealedSolutionLines(
   };
 
   const endInline = () => {
+    if (enclosingInlineSeal) {
+      setMode("inline_sealed");
+      lastInlineBodyLine = "";
+      return;
+    }
     const canContinueWithProof = state.mode === "inline_sealed";
     setMode("none");
     state.inlineProofBoundaryPending = canContinueWithProof;
@@ -599,7 +606,7 @@ function stripSealedSolutionLines(
     keep(line);
   }
 
-  if (state.mode === "inline_sealed" && TERMINAL_PUNCTUATION_RE.test(lastInlineBodyLine)
+  if (!enclosingInlineSeal && state.mode === "inline_sealed" && TERMINAL_PUNCTUATION_RE.test(lastInlineBodyLine)
     && !NEXT_CONTINUATION_RE.test(lastInlineBodyLine)) endInline();
 
   if (!changed) return text;
@@ -907,14 +914,14 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         }
         target.inlineProofBoundaryPending = target.mode === "none" && !target.unknownAfterFailure
           && Boolean(vision?.inlineProofBoundaryPending || picked.inlineProofBoundaryPending
-            && (!options.visionConsumedAuxiliaryProofBoundary || options.nativeHasPrimaryContent && options.hadNativeSeal));
+            && !options.visionConsumedAuxiliaryProofBoundary);
       };
       const sealVisionText = (
         rawVisionText: string,
         sealState: SealState,
         nativeContaminated: boolean,
         nativePublicPrefix?: string,
-        nativeText = nativePublicPrefix ?? "",
+        nativeScan?: { endSeal: SealState; hasText: boolean; publicText: string },
         requireExplicitBoundary = true,
       ) => {
         const boundTranscription = (transcription: string, explicitBoundary: boolean) => {
@@ -967,6 +974,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const transcriptions: string[] = [];
         const descriptions: string[] = [];
         const uncertainties: string[] = [];
+        const auxiliaryBodies: string[] = [];
         for (let i = 0; i < matches.length; i++) {
           const match = matches[i]!;
           const header = match[1]!;
@@ -975,23 +983,42 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           const body = rawVisionText.slice(bodyStart, bodyEnd).replace(/(?:\r?\n)+$/u, "");
           if (!body.trim()) continue;
           if (header === VISION_TRANSCRIPTION_HEADER || header === "[转写]") transcriptions.push(body);
-          else if (header.startsWith("【识别不确定") || header === "[不确定处]") uncertainties.push(body);
-          else descriptions.push(body);
+          else {
+            auxiliaryBodies.push(body);
+            if (header.startsWith("【识别不确定") || header === "[不确定处]") uncertainties.push(body);
+            else descriptions.push(body);
+          }
         }
         const transcription = transcriptions.join("\n");
         const primary = transcription
           ? sealVisionBodyWithTransitions(transcription, sealState, requirePublicHeading) : undefined;
-        // In a mixed page, Vision can see the proof heading while native text
-        // supplies the preceding public boundary or the proof's opening prose.
-        const inheritedProofBoundary = transcriptionSeed.inlineProofBoundaryPending && !primary?.detectedOnPage
-          && sealState.mode === "none" && !sealState.unknownAfterFailure;
-        const primaryEndsAdjacency = inheritedProofBoundary && `${nativeText}\n${transcription}`.split(/\r?\n/u).some(line => {
-          const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
-          return !isRunningPageHeading(stripped, false) && (isRecoverySectionHeading(stripped)
-            || isTextbookStructuralHeading(stripped) || EXERCISE_OPENER_RE.test(stripped) || NUMBERED_QUESTION_RE.test(stripped)
-            || isMarkdownHeading && isGenericPublicMarkdownHeading(stripped));
-        });
-        if (primaryEndsAdjacency) sealState.inlineProofBoundaryPending = false;
+        // Transcription begins at the page boundary. Auxiliary blocks can also
+        // follow an answer seen by the native scan on this same page.
+        const nativeEndSeal = nativeScan?.endSeal;
+        const transcriptionHasContent = hasPrimaryContentLine(transcription);
+        const inheritedProofBoundary = transcriptionSeed.inlineProofBoundaryPending
+          && (!nativeScan?.hasText || nativeEndSeal?.inlineProofBoundaryPending)
+          && (!transcriptionHasContent || sealState.inlineProofBoundaryPending) && !primary?.detectedOnPage;
+        const nativeProofBoundary = nativeScan?.hasText && !transcriptionSeed.inlineProofBoundaryPending
+          && nativeEndSeal?.mode === "none" && !nativeEndSeal.unknownAfterFailure && nativeEndSeal.inlineProofBoundaryPending
+          && (!transcriptionHasContent || sealState.inlineProofBoundaryPending || nativeContaminated);
+        sealState.inlineProofBoundaryPending = sealState.mode === "none" && !sealState.unknownAfterFailure
+          && Boolean(inheritedProofBoundary || nativeProofBoundary || primary?.detectedOnPage && sealState.inlineProofBoundaryPending);
+        // Vision may supply only the heading for proof prose extracted natively.
+        // Only the first auxiliary content block can complete that split heading.
+        const firstAuxiliaryBody = auxiliaryBodies.find(hasPrimaryContentLine);
+        const firstAuxiliaryLine = firstAuxiliaryBody?.split(/\r?\n/u).map(line => stripHeadingMarkup(line).stripped)
+          .find(line => line && !isRunningPageHeading(line, false));
+        const splitProofHeading = transcriptionSeed.inlineProofBoundaryPending && !nativeContaminated
+          && !transcriptionHasContent && nativeScan?.hasText && nativeEndSeal?.mode === "none" && !nativeEndSeal.unknownAfterFailure
+          && firstAuxiliaryLine && BARE_ANSWER_PROOF_HEADING_RE.test(firstAuxiliaryLine)
+          && hasPrimaryContentLine(nativeScan.publicText) && !nativeScan.publicText.split(/\r?\n/u).some(line => {
+            const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
+            return !isRunningPageHeading(stripped, false) && (isRecoverySectionHeading(stripped)
+              || isTextbookStructuralHeading(stripped) || EXERCISE_OPENER_RE.test(stripped) || NUMBERED_QUESTION_RE.test(stripped)
+              || isMarkdownHeading && isGenericPublicMarkdownHeading(stripped));
+          });
+        if (splitProofHeading && sealState.mode === "none" && !sealState.unknownAfterFailure) sealState.inlineProofBoundaryPending = true;
         let hadSealedContent = anyNativeOrIncomingSeal || Boolean(primary?.visionDetectedSeal);
         let confirmedSeal = primary?.confirmedSeal ?? incomingMode !== "none";
         let detectedOnPage = Boolean(primary?.detectedOnPage);
@@ -999,15 +1026,19 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let openedInlineAtEnd = Boolean(primary?.openedInlineAtEnd);
         let consumedAuxiliaryProofBoundary = false;
         const sealStrength = { none: 0, inline_sealed: 1, inline_proof_sealed: 2, section_sealed: 3 };
-        for (const body of [...descriptions, ...uncertainties]) {
-          const proofBoundary = sealState.inlineProofBoundaryPending || inheritedProofBoundary && !primaryEndsAdjacency && !detectedOnPage;
-          const auxiliarySeal = { ...sealState, inlineProofBoundaryPending: proofBoundary, previousNumberedQuestion: false };
+        for (const body of auxiliaryBodies) {
+          const proofBoundary: boolean = Boolean(sealState.inlineProofBoundaryPending);
+          const followsNativeInline = nativeScan?.hasText && nativeEndSeal?.mode === "inline_sealed"
+            && !nativeEndSeal.unknownAfterFailure && sealState.mode === "none" && !sealState.unknownAfterFailure;
+          const auxiliarySeal: SealState = { ...sealState, mode: followsNativeInline ? "inline_sealed" : sealState.mode,
+            previousNumberedQuestion: false };
           const check = sealVisionBodyWithTransitions(body, auxiliarySeal, false, true);
           hadSealedContent ||= check.visionDetectedSeal;
           confirmedSeal ||= check.confirmedSeal;
           detectedOnPage ||= check.detectedOnPage;
           if (check.detectedOnPage) sealState.previousNumberedQuestion = false;
-          if (auxiliarySeal.mode !== "none" && sealStrength[auxiliarySeal.mode] >= sealStrength[sealState.mode]) {
+          if (auxiliarySeal.mode !== "none" && !(followsNativeInline && auxiliarySeal.mode === "inline_sealed")
+            && sealStrength[auxiliarySeal.mode] >= sealStrength[sealState.mode]) {
             reenteredSectionSealed ||= incomingMode === "section_sealed" && sealState.mode !== "section_sealed"
               && auxiliarySeal.mode === "section_sealed";
             sealState.mode = auxiliarySeal.mode;
@@ -1020,9 +1051,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               sealState.unknownAfterFailure = false;
             }
             openedInlineAtEnd ||= check.openedInlineAtEnd;
-          } else if (sealState.mode === "none" && (check.detectedOnPage || auxiliarySeal.inlineProofBoundaryPending)) {
-            consumedAuxiliaryProofBoundary ||= Boolean(proofBoundary && !auxiliarySeal.inlineProofBoundaryPending);
-            sealState.inlineProofBoundaryPending = auxiliarySeal.inlineProofBoundaryPending;
+          } else if (sealState.mode === "none") {
+            const consumedBoundary: boolean = proofBoundary && hasPrimaryContentLine(body);
+            consumedAuxiliaryProofBoundary ||= consumedBoundary && !auxiliarySeal.inlineProofBoundaryPending;
+            sealState.inlineProofBoundaryPending = Boolean(auxiliarySeal.inlineProofBoundaryPending || proofBoundary && !consumedBoundary);
           }
         }
         // An auxiliary answer label cannot establish where a transcription's public text ends.
@@ -1049,12 +1081,12 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       const sanitizeSavedChunk = (
         saved: NewSourceChunk,
         page: ParsedPage,
-        { incomingSeal, nativeOutSeal, doclingEndSeal, nativeContaminatedOnPage, nativeHasPrimaryContent, hadNativeSeal, hasVisualInput }: {
+        { incomingSeal, nativeOutSeal, doclingEndSeal, nativeContaminatedOnPage, nativeHasPrimaryContent, hadNativeSeal, hadRawText, hasVisualInput }: {
           incomingSeal: SealState; nativeOutSeal: SealState; doclingEndSeal?: PdfSealMode;
-          nativeContaminatedOnPage: boolean; nativeHasPrimaryContent: boolean; hadNativeSeal: boolean; hasVisualInput: boolean;
+          nativeContaminatedOnPage: boolean; nativeHasPrimaryContent: boolean; hadNativeSeal: boolean; hadRawText: boolean; hasVisualInput: boolean;
         },
       ): { sanitized: NewSourceChunk | undefined; savedSeal: SealState; hasVisionMarker: boolean;
-        hasPublicTranscription?: boolean; visionWasSealed: boolean; visionDetectedOnPage?: boolean } => {
+        hasPublicTranscription?: boolean; visionWasSealed: boolean; visionDetectedOnPage?: boolean; consumedAuxiliaryProofBoundary?: boolean } => {
         const anyNativeOrIncomingSeal = nativeContaminatedOnPage || incomingSeal.mode !== "none";
         const savedSeal: SealState = { ...nativeOutSeal };
         const { nativeBody: archivedNative, nativeHeader, vision, marker } = splitPdfChunk(saved.text);
@@ -1078,9 +1110,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const savedNativeChanged = sealedNativeBody !== nativeBody;
         const pageContaminated = nativeContaminatedOnPage || savedNativeChanged;
         const pageHadAnySeal = anyNativeOrIncomingSeal || savedNativeChanged;
+        const nativeEndSeal = pageHadAnySeal ? nativeOutSeal : cachedNativeOutSeal;
         const visionSeal: SealState = { ...incomingSeal };
         const visionSealed = visionBody.trim()
-          ? sealVisionText(visionBody, visionSeal, pageContaminated, hadNativeSeal || savedNativeChanged ? page.text : undefined, page.text || nativeBody)
+          ? sealVisionText(visionBody, visionSeal, pageContaminated, hadNativeSeal || savedNativeChanged ? page.text : undefined,
+            { endSeal: nativeEndSeal, hasText: Boolean(hadRawText || nativeBody.trim()), publicText: page.text || sealedNativeBody })
           : { text: "", hasPublicTranscription: false, hasPrimaryActivity: false, primaryNumberedQuestion: false,
             hadSealedContent: false, confirmedSeal: false, detectedOnPage: false, reenteredSectionSealed: false, openedInlineAtEnd: false,
             consumedAuxiliaryProofBoundary: false };
@@ -1096,7 +1130,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           hadNativeSeal: hadNativeSeal || savedNativeChanged,
           doclingEndSeal,
           incomingSeal,
-          nativeOutSeal: pageHadAnySeal ? nativeOutSeal : cachedNativeOutSeal,
+          nativeOutSeal: nativeEndSeal,
           visionOutSeal: visionBody.trim() ? visionSeal : undefined,
           visionReenteredSection: visionSealed.reenteredSectionSealed,
           visionOpenedInlineAtEnd: visionSealed.openedInlineAtEnd,
@@ -1112,6 +1146,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             savedSeal,
             hasVisionMarker: pageHadSealed, visionWasSealed: visionSealed.confirmedSeal,
             visionDetectedOnPage: visionSealed.detectedOnPage,
+            consumedAuxiliaryProofBoundary: visionSealed.consumedAuxiliaryProofBoundary,
           };
         }
         const currentNativeHeader = page.visualKinds?.includes("scan") ? "[本地提取（可能含OCR）]\n" : "[原生提取]\n";
@@ -1126,6 +1161,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           savedSeal,
           hasVisionMarker: true, hasPublicTranscription: visionSealed.hasPublicTranscription, visionWasSealed: visionSealed.confirmedSeal,
           visionDetectedOnPage: visionSealed.detectedOnPage,
+          consumedAuxiliaryProofBoundary: visionSealed.consumedAuxiliaryProofBoundary,
         };
       };
       const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState,
@@ -1175,6 +1211,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const doclingEndSeal = isPdf && (hadRawText || doclingHadSealedContent || doclingSealedBlank)
           ? pdfPageEndSeal(rawPage)
           : undefined;
+        if (doclingEndSeal === "inline_sealed" && nativeOutSeal.mode === "none") nativeOutSeal.mode = doclingEndSeal;
         if (isPdf && rawPage.inlineProofBoundaryPendingAtEnd) nativeOutSeal.inlineProofBoundaryPending = true;
         if (isPdf && rawPage.previousNumberedQuestionAtEnd !== undefined) {
           nativeOutSeal.previousNumberedQuestion = rawPage.previousNumberedQuestionAtEnd;
@@ -1207,11 +1244,12 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let savedHasTranscription = false;
         let savedVisionWasSealed = false;
         let savedVisionDetectedOnPage = false;
+        let savedVisionConsumedAuxiliaryProofBoundary = false;
         const hadNativeSeal = pageHadNativeSeal || nativeDetectedSeal || (hadRawText && !incomingSeal.unknownAfterFailure && publicText !== rawPage.text);
         if (saved && !isImage) {
           const cleaned = sanitizeSavedChunk(saved, page, {
             incomingSeal, nativeOutSeal, doclingEndSeal, nativeContaminatedOnPage, nativeHasPrimaryContent,
-            hadNativeSeal, hasVisualInput: Boolean(visual),
+            hadNativeSeal, hadRawText, hasVisualInput: Boolean(visual),
           });
           sanitizedSaved = sealedAllText || incomingSeal.unknownAfterFailure || archived?.nativeWithheld
             ? undefined : cleaned.sanitized;
@@ -1220,6 +1258,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           savedHasTranscription = Boolean(cleaned.hasPublicTranscription);
           savedVisionWasSealed = cleaned.visionWasSealed;
           savedVisionDetectedOnPage = Boolean(cleaned.visionDetectedOnPage);
+          savedVisionConsumedAuxiliaryProofBoundary = Boolean(cleaned.consumedAuxiliaryProofBoundary);
         } else if (!incomingSeal.unknownAfterFailure) {
           sanitizedSaved = saved;
         }
@@ -1233,7 +1272,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           Object.assign(sealState, savedSeal);
         } else {
           reconcileEndSealState(sealState, { hasNativeText: hadRawText, nativeHasPrimaryContent, hadNativeSeal,
-            doclingEndSeal, incomingSeal, nativeOutSeal });
+            doclingEndSeal, incomingSeal, nativeOutSeal, visionConsumedAuxiliaryProofBoundary: savedVisionConsumedAuxiliaryProofBoundary });
           // Archived text may be unusable even when it establishes a seal.
           if ((sealedAllText || incomingSeal.unknownAfterFailure) && savedVisionDetectedOnPage && savedSeal && savedSeal.mode !== "none"
             && (sealState.mode === "none" || isInlineSeal(sealState.mode) && savedSeal.mode === "section_sealed"
@@ -1254,6 +1293,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           savedHasTranscription,
           savedVisionWasSealed,
           savedVisionDetectedOnPage,
+          savedVisionConsumedAuxiliaryProofBoundary,
           nativeContaminatedOnPage,
           nativeHasPrimaryContent,
           hadNativeSeal,
@@ -1317,7 +1357,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             visionHandled = true;
             const visionSeal: SealState = { ...incomingSeal };
             const visionSealed = !isImage
-              ? sealVisionText(result.text, visionSeal, nativeContaminatedOnPage, hadNativeSeal ? page.text : undefined, page.text)
+              ? sealVisionText(result.text, visionSeal, nativeContaminatedOnPage, hadNativeSeal ? page.text : undefined,
+                { endSeal: nativeOutSeal, hasText: hadRawText, publicText: page.text })
               : { text: result.text, transcription: result.text, hasPublicTranscription: true,
                 hasPrimaryActivity: false, primaryNumberedQuestion: false, hadSealedContent: false, confirmedSeal: false,
                 detectedOnPage: false, reenteredSectionSealed: false, openedInlineAtEnd: false, consumedAuxiliaryProofBoundary: false };
@@ -1473,10 +1514,12 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           const legacyVision = !marker && !nativeHeader && chunk.imageObjectKey?.trim() ? nativeBody : "";
           const native = legacyVision ? "" : nativeBody;
           const nativeOutSeal = { ...incomingSeal };
-          const nativeChanged = sealTextWithState(native, nativeOutSeal) !== native;
+          const publicNative = sealTextWithState(native, nativeOutSeal);
+          const nativeChanged = publicNative !== native;
           const visionOutSeal = { ...incomingSeal };
           const visionText = vision || legacyVision;
-          const visionCheck = visionText.trim() ? sealVisionText(visionText, visionOutSeal, nativeChanged, undefined, native) : undefined;
+          const visionCheck = visionText.trim() ? sealVisionText(visionText, visionOutSeal, nativeChanged, undefined,
+            { endSeal: nativeOutSeal, hasText: Boolean(native.trim()), publicText: publicNative }) : undefined;
           const endSeal = { ...incomingSeal };
           reconcileEndSealState(endSeal, {
             hasNativeText: Boolean(native.trim()), incomingSeal, nativeOutSeal,
@@ -1536,7 +1579,14 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           if (marker?.reopenedSection && marker.publicationSealCommitted && !pdfPageEndSeal(marker) && !marker.publicationSealUnknown) {
             endSeal.mode = "none";
           }
-          if (endSeal.mode === "none" && marker?.inlineProofBoundaryPendingAtEnd) endSeal.inlineProofBoundaryPending = true;
+          if (endSeal.mode === "none" && marker?.inlineProofBoundaryPendingAtEnd) {
+            const visionSeal = { ...incoming };
+            const vision = lanes?.marker && incoming.inlineProofBoundaryPending
+              ? sealVisionText(lanes.vision, visionSeal, changed, undefined, { endSeal, hasText: Boolean(native.trim()), publicText: native })
+              : undefined;
+            endSeal.inlineProofBoundaryPending = !vision?.consumedAuxiliaryProofBoundary
+              || visionSeal.mode !== "none" || Boolean(visionSeal.inlineProofBoundaryPending);
+          }
           // Vision has its own verification and reopening rules. Carry the independent
           // archive's native seals so fresh headings cannot promote archived answers.
           const nativeWithheld = Boolean(saved && (nativeOnly && changed
@@ -1822,7 +1872,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 const replayMarker = previouslyBlocked && !verifiedRecovery;
                 const consumedStaleProofBoundary = marker?.inlineProofBoundaryPendingAtEnd && !recordedMode
                   && pdfSealState.mode === "none" && !pdfSealState.unknownAfterFailure && !pdfSealState.inlineProofBoundaryPending
-                  && evidence.visionConsumedAuxiliaryProofBoundary;
+                  && (evidence.visionHandled ? evidence.visionConsumedAuxiliaryProofBoundary
+                    : preparedPage.savedVisionConsumedAuxiliaryProofBoundary);
                 let withheldSealedRecovery = false;
                 if (replayMarker) {
                   if (onlyUncertainty && !preparedPage.archiveStillApplies && skippedVisionPages.at(-1) !== rawPage.page) skippedVisionPages.push(rawPage.page);
@@ -1845,7 +1896,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                     const native = previouslySealed && preparedPage.hadNativeSeal ? verifiedNative
                       : stripSealedSolutionLines(verifiedNative, { ...cleanSeal }, undefined, "heading-only");
                     const publicVision = previouslySealed && vision && native.trim()
-                      ? sealVisionText(vision, { ...cleanSeal }, true, native, native, false).text : "";
+                      ? sealVisionText(vision, { ...cleanSeal }, true, native, undefined, false).text : "";
                     const text = publicVision
                       ? [native && nativeHeader + native, "[视觉转写与描述]\n" + publicVision].filter(Boolean).join("\n\n")
                       : native;

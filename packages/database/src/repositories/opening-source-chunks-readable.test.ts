@@ -222,7 +222,8 @@ it("withdraws unresolved PDF continuations and numbered labels from public reads
   for (const query of queries.slice(0, 2)) {
     expect(query).toContain("s.mime<>'application/pdf' OR c.page IS NULL OR");
     expect(query).toContain("pdf_pending_seals AS MATERIALIZED");
-    expect(query).toContain("archived.first_page<=c.page AND (archived.reopen_page IS NULL OR c.page<archived.reopen_page)");
+    expect(query).toContain("archived_page.source_id=c.source_id AND archived_page.source_version=c.source_version AND archived_page.page=c.page");
+    expect(query).toContain("archived_chunk.chunk_id=c.id");
     expect(query).toContain("seal.source_id=c.source_id AND seal.source_version=c.source_version");
     expect(query.match(/\b(?:FROM|JOIN) (?:opening_\w+|workspaces)\b/gu)?.length).toBeLessThanOrEqual(10);
   }

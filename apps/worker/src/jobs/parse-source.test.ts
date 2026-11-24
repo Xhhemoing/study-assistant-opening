@@ -107,6 +107,51 @@ describe("parse source handler", () => {
     },
   );
 
+  it.each([1, 4])("uses the same-page native answer boundary for Vision with %i-page windows", async segmentPages => {
+    const pages = [
+      { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"], hadSealedContent: true,
+        inlineSealedAtEnd: false, inlineProofBoundaryPendingAtEnd: true, previousNumberedQuestionAtEnd: false },
+      { page: 2, text: "The private derivation continues.", imagePath: null, visualKinds: [] },
+      { page: 3, text: "The private derivation ends. ∎", imagePath: null, visualKinds: [] },
+      { page: 4, text: "The next topic is public.", imagePath: null, visualKinds: [] },
+    ];
+    const recognizePage = vi.fn(async () => ({
+      text: "[图片描述]\nProof. The derivation begins.", imageObjectKey: "vision/proof",
+    }));
+    const d = await deps({ segmentPages, recognizePage, runner: async argv => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":4}' };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      const end = Number(argv[argv.indexOf("--page-end") + 1]);
+      return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, end) }) };
+    } });
+    await d.handler(job, { sourceId });
+    const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+    expect(recognizePage).toHaveBeenCalledOnce();
+    expect(chunks.filter(chunk => chunk.page !== 1).map(chunk => chunk.page)).toEqual([4]);
+    expect(chunks.every(chunk => chunk.imageObjectKey === null)).toBe(true);
+  });
+
+  it("clears a native answer boundary when Vision closes its same-page proof", async () => {
+    const publicProof = "Proof. This separate proof is public.";
+    const publicEnd = "This is the conclusion of the public proof. ∎";
+    const pages = [
+      { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"], hadSealedContent: true,
+        inlineSealedAtEnd: false, inlineProofBoundaryPendingAtEnd: true, previousNumberedQuestionAtEnd: false },
+      { page: 2, text: publicProof, imagePath: null, visualKinds: [] },
+      { page: 3, text: publicEnd, imagePath: null, visualKinds: [] },
+    ];
+    const d = await deps({ segmentPages: 1, runner: async argv => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":3}' };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, start) }) };
+    }, recognizePage: async () => ({
+        text: "[图片描述]\nProof. The private proof ends. Q.E.D.", imageObjectKey: "vision/proof",
+      }) });
+    await d.handler(job, { sourceId });
+    const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+    expect(chunks.filter(chunk => chunk.page !== 1).map(chunk => chunk.text)).toEqual([publicProof, publicEnd]);
+  });
+
   it("replays a published proof boundary recorded without an active seal when cached Vision is unavailable", async () => {
     const publicText = "Chapter 2: Rings\nThe rest of this chapter is public.";
     const pages = [

@@ -125,8 +125,8 @@ describe("source content self-read versus additional PDF retry access", () => {
       expect(query).toContain("boundary.first_page<=c.page");
       expect(query).toContain("seal.page_start=c.page AND seal.page_end=c.page");
       expect(query).toContain("pdf_archive_sealed_spans AS MATERIALIZED");
-      expect(query).toContain("archived.first_page<=c.page");
-      expect(query).toContain("c.page<archived.reopen_page");
+      expect(query).toContain("archived_page.source_id=c.source_id AND archived_page.source_version=c.source_version AND archived_page.page=c.page");
+      expect(query).toContain("archived_chunk.chunk_id=c.id");
       expect(query.match(/\b(?:FROM|JOIN) opening_\w+/gu)).toHaveLength(6);
     }
     expect(reads[1]).toContain("c.id=ANY(?::uuid[])");
