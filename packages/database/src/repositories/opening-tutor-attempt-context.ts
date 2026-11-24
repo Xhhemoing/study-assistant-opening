@@ -119,12 +119,12 @@ export async function readTutorAttemptContext(db: Db, scope: OpeningScope, targe
     if (ai || server) effectiveGrading = { observationId: String(head.id), answerRevision: Number(head.answer_revision),
       outcome: String(head.outcome), verdictSource: String(head.verdict_source), aiEvaluation: ai, serverEvaluation: server };
   }
-  if (head && !String(head.answer ?? "").trim()
+  if (head && anchor.purpose !== "exam_help" && !String(head.answer ?? "").trim()
     && !(workSource && effectiveGrading?.aiEvaluation?.transcription?.trim())) {
     throw Object.assign(conflict(), { reasonCode: "ATTEMPT_ANSWER_TEXT_UNAVAILABLE" });
   }
   const answer = (row: Record<string, unknown> | undefined) => row ? { observationId: String(row.id),
-    answer: String(row.answer), answerRevision: Number(row.answer_revision) } : null;
+    answer: String(row.answer ?? ""), answerRevision: Number(row.answer_revision) } : null;
   const rawHeadRevision = head ? Number(head.workspace_history_revision) : 0;
   const headRevision = Number.isSafeInteger(rawHeadRevision) && rawHeadRevision >= 0 ? rawHeadRevision : undefined;
   return { privacyEpoch: Number(turn.privacy_epoch), anchor, originalQuestion: item.stem_snapshot,

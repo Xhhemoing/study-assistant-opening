@@ -228,14 +228,31 @@ export function createTutorService(deps: {
       const examHelp = request.contextAnchor?.purpose === "exam_help";
       const requestedPurpose = retryIntent ? retryIntent.purpose ?? undefined
         : request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
-      const purpose = examHelp && requestedPurpose !== "answer" && requestedPurpose !== "teach" ? undefined : requestedPurpose;
+      const purpose = examHelp && !retryIntent && requestedPurpose !== "answer" && requestedPurpose !== "teach" ? undefined : requestedPurpose;
       let input = { ...request, mode: resolved.mode, purpose };
-      if (!examHelp && resolved.querySystem) {
+      const queryIntent = resolved.querySystem ? {
+        text: composerMessageText(input.text), mode: input.mode,
+        sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
+        purpose: (requestedPurpose === "explain_state" ? "explain_state" : "query") as "explain_state" | "query",
+        currentPage: input.currentPage ?? null,
+      } : undefined;
+      const examHelpReplay = examHelp && !retryIntent ? {
+        requested: { purpose: request.purpose, querySystem: request.querySystem }, legacyPurpose: requestedPurpose,
+        legacyQuery: request.querySystem === false ? undefined : queryIntent,
+      } : undefined;
+      if (examHelpReplay && existing?.querySystem) {
+        const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId,
+          text: input.text, mode: input.mode, clientKey: input.clientKey, contextAnchor: input.contextAnchor,
+          sourceIds: input.sourceIds, learningSessionId: null, currentPage: input.currentPage ?? null, chunkId: null,
+          examHelpReplay: { ...examHelpReplay, replayOnly: true },
+        });
+        return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null, replayed: true };
+      }
+      if (!examHelp && queryIntent) {
         if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
-        const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: composerMessageText(input.text), mode: input.mode,
-          clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
-          contextAnchor: input.contextAnchor, purpose: input.purpose === "explain_state" ? "explain_state" : "query",
-          learningSessionId: null, attemptId: null, currentPage: input.currentPage ?? null, chunkId: null });
+        const saved = await deps.conversations.appendSavedTurn({ ...queryIntent, scope, conversationId: input.conversationId,
+          clientKey: input.clientKey, privacy: "saved", querySystem: true, contextAnchor: input.contextAnchor,
+          learningSessionId: null, attemptId: null, chunkId: null });
         return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null, replayed: Boolean(existing) };
       }
       if (request.mode === undefined && !existing?.mode && deps.studyContext) {
@@ -314,12 +331,14 @@ export function createTutorService(deps: {
         currentPage: input.currentPage ?? input.contextAnchor?.page ?? null,
         chunkId: input.chunkId ?? input.contextAnchor?.chunkId ?? null,
         strategyTemplateId: input.strategyTemplateId ?? null,
+        ...(examHelpReplay ? { examHelpReplay } : {}),
       });
 
       return {
         jobId: saved.jobId,
         turnId: saved.turnId,
-        learningSessionId, replayed: Boolean(existing),
+        learningSessionId: saved.learningSessionId === undefined ? learningSessionId : saved.learningSessionId,
+        replayed: saved.replayed ?? Boolean(existing),
       };
     },
   };

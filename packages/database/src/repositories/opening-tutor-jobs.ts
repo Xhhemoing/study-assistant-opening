@@ -131,6 +131,7 @@ async function assertBoundMisconceptions(
     if (!lineage || (lineage.courseId !== null && lineage.courseId !== courseId)) {
       throw Object.assign(new Error("history misconception course binding changed"), { code: "CONFLICT" });
     }
+    if (lineage.courseId === null && !lineage.revisionIds.length) return;
     if (!misconceptionSnapshot) await lockMisconceptionContext(tx, scope.workspaceId);
     if (!(await readActiveTutorMisconceptionLineages(tx, scope, [lineage])).has(0)) {
       throw Object.assign(new Error("history misconception context changed"), { code: "CONFLICT" });
@@ -236,6 +237,7 @@ async function assertStreamMaterialAdmission(
     globalMemoryIds?: readonly string[];
     historyCourseBindings?: readonly HistoryCourseBinding[];
     historicalUserTurnId?: string;
+    skipPriorMisconceptions?: boolean;
     attemptLockScope?: { sourceIds: string[]; courseIds: string[] };
   } = {},
 ): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[];
@@ -344,7 +346,8 @@ async function assertStreamMaterialAdmission(
   const collectSourceIds = new Set<string>();
   const historyConflict = () => Object.assign(new Error("stream history is no longer available"), { code: "CONFLICT" });
   if (historicalUserTurnId && !await readTutorHistoryAncestors(tx, scope, historicalUserTurnId, {
-    collectSourceIds, collectCourseIds: originCourseIds,
+    collectSourceIds, collectCourseIds: originCourseIds, checkCurrentMisconceptions: false,
+    skipPriorMisconceptions: admissionOptions.skipPriorMisconceptions,
   })) throw historyConflict();
   const memoryBindings = historyBindings.filter(binding => binding.memoryIds?.length || binding.memoryBackings?.length);
   const roots = { citation: new Set<string>(), practice: new Set<string>() };
@@ -400,6 +403,7 @@ async function assertStreamMaterialAdmission(
     const currentSources = new Set<string>(), currentCourses = new Set<string>();
     const status = await readTutorHistoryAncestorStatus(tx, scope, historicalUserTurnId, {
       lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
+      checkCurrentMisconceptions: false, skipPriorMisconceptions: admissionOptions.skipPriorMisconceptions,
       // A legacy caller supplied no record of which exchanges were selected. Treat
       // session and activity material in the saved prefix as potentially selected.
       requireDestinationSessionMaterials: admissionOptions.historyCourseBindings === undefined,
@@ -890,7 +894,8 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
   const collectSourceIds = new Set<string>();
   const turnExpiry = target.memory_temporary_expires_at;
   let earliestExpiresAtMs = turnExpiry == null ? Infinity : new Date(turnExpiry).getTime();
-  if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { collectCourseIds, collectSourceIds })) return;
+  const ancestorRules = { checkCurrentMisconceptions: false, skipPriorMisconceptions: misconception !== null };
+  if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { ...ancestorRules, collectCourseIds, collectSourceIds })) return;
   const readEvidence = async (lockedSourceIds?: string[]) => {
     if (!target.evidence) return true;
     const rows = await readCompletedCandidateEvidence(db, input, target.evidence);
@@ -947,7 +952,7 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
   if (checkAncestors) {
     const currentSources = new Set<string>(), currentCourses = new Set<string>();
     const history = await readTutorHistoryAncestorStatus(db, input.scope, target.user_turn_id, {
-      lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
+      ...ancestorRules, lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
     });
     if (!history.valid || [...currentSources].some(id => !locked.has(id)) || [...currentCourses].some(id => !collectCourseIds.has(id))) return;
     earliestExpiresAtMs = Math.min(earliestExpiresAtMs, history.earliestExpiresAtMs);
@@ -1656,6 +1661,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             globalMemoryIds: context.globalMemoryIds,
             historyCourseBindings: context.historyCourseBindings,
             historicalUserTurnId,
+            skipPriorMisconceptions: context.misconceptionSnapshot !== undefined || context.historyMisconceptionLineage !== undefined,
             attemptLockScope,
           });
         if (attemptFence) {
@@ -1927,7 +1933,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (snapshot || historyLineage) {
           await assertBoundMisconceptions(tx, input.scope, boundCourseId, { misconceptionSnapshot: snapshot, historyMisconceptionLineage: historyLineage });
         }
-        if (historyLineage || (snapshot && (snapshot.revisionIds.length || snapshot.renderedMarkdown.length))) {
+        if (historyLineage || snapshot) {
           const snapshotCourseId = snapshot?.effectiveCourseId === undefined
             ? (snapshot?.revisionIds.length ? snapshot.courseId : null) : snapshot.effectiveCourseId;
           const lineage = parseTutorMisconceptionLineage({ kind: "v3_misconception_lineage",

@@ -2,6 +2,9 @@ import type { Sql } from "postgres";
 import { expect, it, vi } from "vitest";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 import { loadTutorHistoryContext, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
+import { createOpeningMemoryRepository } from "./opening-memory";
+import { sqlSimulation, unexpected } from "./opening-resident-f11-sql-simulation";
+import { assertTutorAttemptContext, readTutorAttemptContext, tutorAttemptFence } from "./opening-tutor-attempt-context";
 import {
   assertTutorLearnerMisconceptionSnapshot, readTutorLearnerMisconceptionContext, type TutorMisconceptionSnapshot,
 } from "./v3-bitemporal-misconception-memory";
@@ -17,6 +20,10 @@ const candidate = { revisionId: "11111111-1111-4111-8111-111111111111", courseId
   status: "candidate", learnerDisposition: null as string | null, summary: "Check the domain [first]" };
 const correction = { ...candidate, revisionId: "22222222-2222-4222-8222-222222222222", status: "learner_reported",
   learnerDisposition: "disputed", summary: "原诊断有异议" };
+const cleanLineage = { kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [] };
+const usedLineage = { ...cleanLineage, revisionIds: [candidate.revisionId] };
+const lineageRow = { id: userTurnId, current_id: userTurnId, current_course_id: null, assistant_intent_hash: JSON.stringify(usedLineage),
+  assistant_source_refs: [], user_source_refs: [], assistant_direct_versioned: true, origin_allowed: true, current_allowed: true };
 
 function setup() {
   const state = {
@@ -86,6 +93,121 @@ function setup() {
   } } as unknown as Sql;
   return { sql, query, state, rowPagesRead };
 }
+
+it("checks a memory's first assistant origin on confirmation and model reuse", async () => {
+  const memoryId = "33333333-3333-4333-8333-333333333333";
+  const memory = { id: memoryId, workspace_id: scope.workspaceId, course_id: null, text: "Misconception derivative",
+    source_turn_ids: [assistantTurnId], version: 0, expires_at: null, status: "active", kind: "candidate", created_at: at, updated_at: at };
+  let active = true;
+  let confirmationCount = 0;
+  const { sql } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("WITH prior AS MATERIALIZED")) return text.includes("OR (u.id=current.id AND a.intent_hash IS NOT NULL)") ? [lineageRow] : [];
+    if (text.startsWith("WITH tick AS MATERIALIZED")) return active ? [{ position: 0 }] : [];
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.startsWith("INSERT INTO opening_workspace_history_revisions") || text.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [];
+    if (text.startsWith("SELECT t.id FROM opening_turns saved")) return [{ id: { turnId: assistantTurnId } }];
+    if (text.startsWith("SELECT t.id FROM opening_turns")) return [];
+    if (text.startsWith("SELECT m.id, course.id AS turn_course_id")) return [{ id: query.values.find(Array.isArray)?.[0], turn_course_id: null,
+      historical_user_turn_id: userTurnId, refs: [], backings: [], source_ids: [], material_use: null }];
+    if (text.startsWith("SELECT m.*,") && text.includes("AS bare_origins")) return confirmationCount ? [{ ...memory, bare_origins: false }] : [];
+    if (text.includes("WITH RECURSIVE eligible AS MATERIALIZED") && text.includes("AS evidence_turn_ids")) return [{ ...memory,
+      kind: "confirmed", evidence_turn_ids: memory.source_turn_ids, material_source_refs: [] }];
+    if (text.startsWith("SELECT m.id, chain.temporary_expires_at")) return [{ id: memoryId, origin_turn_ids: memory.source_turn_ids }];
+    if (text.startsWith("SELECT") && text.includes("FROM opening_memories") && text.includes("FOR UPDATE")) return [memory];
+    if (text.startsWith("UPDATE opening_memories")) { confirmationCount++; return [{ ...memory, kind: "confirmed" }]; }
+    return unexpected(query);
+  });
+  const memories = createOpeningMemoryRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+  await expect(memories.confirm(scope, memoryId, 0, "confirm-active")).resolves.toMatchObject({ kind: "confirmed" });
+  expect((await memories.listContext(scope, new Date(at).toISOString())).memories.map(row => row.id)).toEqual([memoryId]);
+  active = false;
+  await expect(memories.confirm(scope, memoryId, 0, "confirm-after-withdrawal")).rejects.toMatchObject({ code: "VALIDATION" });
+  expect(confirmationCount).toBe(1);
+  expect((await memories.listContext(scope, new Date(at).toISOString())).memories).toEqual([]);
+});
+
+it("ignores withdrawn prior misconceptions only when the current answer records its exact lineage", async () => {
+  const prior = { ...lineageRow, id: assistantTurnId };
+  const current = { ...lineageRow, assistant_intent_hash: JSON.stringify(cleanLineage) };
+  const { sql } = sqlSimulation(({ text, values }) => {
+    if (text.startsWith("WITH prior AS MATERIALIZED")) return [prior, current];
+    if (text.startsWith("WITH tick AS MATERIALIZED")) {
+      const bound = values[0] as Array<{ position: number; revision_ids: string[] }>;
+      return bound.filter(lineage => !lineage.revision_ids.length);
+    }
+    return [];
+  });
+  expect((await readTutorHistoryAncestorStatus(sql, scope, userTurnId)).valid).toBe(true);
+  current.assistant_intent_hash = JSON.stringify({ ...cleanLineage, courseId });
+  expect((await readTutorHistoryAncestorStatus(sql, scope, userTurnId)).valid).toBe(false);
+  current.assistant_intent_hash = JSON.stringify(usedLineage);
+  expect((await readTutorHistoryAncestorStatus(sql, scope, userTurnId)).valid).toBe(false);
+});
+
+it("delivers a clean explicit stream after prior revocation and rejects legacy or contaminated streams", async () => {
+  const prior = { ...lineageRow, id: assistantTurnId };
+  const { sql } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
+    if (text.startsWith("SELECT j.*,t.attempt_id")) return [{ id: jobId, workspace_id: scope.workspaceId, user_turn_id: userTurnId,
+      assistant_turn_id: assistantTurnId, status: "running", claim_token: null, timing_execution_id: null,
+      created_at: at, updated_at: at, source_ids: [], source_versions: {}, has_prior_exchanges: true }];
+    if (text.startsWith("WITH prior AS MATERIALIZED")) return [prior];
+    if (text.startsWith("WITH tick AS MATERIALIZED") || text.startsWith("SELECT pg_advisory_xact_lock")) return [];
+    if (text.startsWith("SELECT 1 WHERE COALESCE(jsonb_typeof(")) return [{ ok: true }];
+    return unexpected(query);
+  });
+  const jobs = createOpeningTutorJobsRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+  const send = vi.fn();
+  const context = { privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: null };
+  await expect(jobs.readStream(scope, jobId, { ...context, historyMisconceptionLineage: cleanLineage }, send)).resolves.toMatchObject({ status: "running" });
+  expect(send).toHaveBeenCalledOnce();
+  await expect(jobs.readStream(scope, jobId, context, send)).rejects.toThrow("stream history is no longer available");
+  await expect(jobs.readStream(scope, jobId, { ...context, historyMisconceptionLineage: usedLineage }, send)).rejects.toThrow("history misconception context changed");
+  prior.origin_allowed = false;
+  await expect(jobs.readStream(scope, jobId, { ...context, historyMisconceptionLineage: cleanLineage }, send)).rejects.toThrow("stream history is no longer available");
+  expect(send).toHaveBeenCalledOnce();
+});
+
+it("admits submitted photo-only exam guidance and revalidates provenance without requiring a transcription", async () => {
+  const attemptId = "33333333-3333-4333-8333-333333333333";
+  const itemVersionId = "44444444-4444-4444-8444-444444444444";
+  const photo = { id: "55555555-5555-4555-8555-555555555555", version: 1, physicalPage: 1 };
+  const attempt = { course_id: null, session_id: jobId, activity_id: courseId, item_version_id: itemVersionId, problem_id: jobId, create_intent: {} };
+  const observation = { id: assistantTurnId, answer: "", answer_revision: 1, attempt_id: attemptId,
+    item_version_id: itemVersionId, session_id: jobId, course_id: null, workspace_history_revision: 12,
+    revision_kind: "submit", grading_work_source: photo };
+  let purpose = "exam_help";
+  let available = true;
+  const { sql } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT t.attempt_id,t.context_anchor")) return [{ attempt_id: attemptId, context_anchor: { purpose, attemptId },
+      learning_session_id: jobId, course_id: null, privacy_epoch: 7 }];
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.startsWith("SELECT * FROM opening_learning_attempts")) return [attempt];
+    if (text.startsWith("SELECT * FROM opening_learning_sessions")) return [{ activity_id: courseId, course_id: null }];
+    if (text.startsWith("SELECT * FROM opening_teaching_activities")) return [{ id: courseId, course_id: null, client_key: "activity-1" }];
+    if (text.startsWith("SELECT * FROM opening_learning_item_versions")) return [{ id: itemVersionId, course_id: null, problem_id: jobId }];
+    if (text.startsWith("SELECT v.stem_snapshot")) return [{ ...attempt, stem_snapshot: "Question", observation_id: observation.id, submitted_at: at }];
+    if (text.startsWith("SELECT to_jsonb(root) AS original")) return [{ original: observation, current: observation, previous: null }];
+    if (text.startsWith("SELECT ref FROM jsonb_array_elements")) return [];
+    if (text.endsWith("AS included")) return [{ included: available }];
+    return unexpected(query);
+  });
+  const target = { userTurnId, jobId };
+  const context = await readTutorAttemptContext(sql, scope, target);
+  expect(context).toMatchObject({ currentAnswer: { answer: "", answerRevision: 1 }, workSource: photo,
+    sourceRefs: [{ sourceId: photo.id, sourceVersion: photo.version }] });
+  expect(tutorAttemptFence(context!)).toMatchObject({ headObservationId: observation.id, answerRevision: 1, headRevision: 12 });
+  await expect(assertTutorAttemptContext(sql, scope, target, context!)).resolves.toBeUndefined();
+  available = false;
+  await expect(assertTutorAttemptContext(sql, scope, target, context!)).rejects.toMatchObject({ code: "CONFLICT" });
+  available = true;
+  for (purpose of ["learning_help", "history_solution"]) {
+    await expect(readTutorAttemptContext(sql, scope, target)).rejects.toMatchObject({ reasonCode: "ATTEMPT_ANSWER_TEXT_UNAVAILABLE" });
+  }
+});
 
 it.each([
   { query_system: true, composer_purpose: "answer" },

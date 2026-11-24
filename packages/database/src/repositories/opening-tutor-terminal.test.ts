@@ -136,6 +136,82 @@ describe("opening conversation repository", () => {
     expect(sql.calls.slice(beforeReplay).filter(query => /^\s*(INSERT|UPDATE|DELETE)\b/.test(query)
       && !query.includes("INSERT INTO opening_workspace_history_revisions"))).toEqual([]);
   });
+
+  it.each(["plan", "query", "explain_state"] as const)("returns the legacy exam %s after an insert collision, rejecting changed intent", async purpose => {
+    const contextAnchor = { purpose: "exam_help" as const };
+    const querySystem = purpose !== "plan";
+    const request = { conversationId: "conversation-1", text: "exam request", mode: "explain" as const, privacy: "saved" as const,
+      sourceIds: [], sourceVersions: {}, currentPage: null, chunkId: null, learningSessionId: null };
+    const intentHash = createHash("sha256").update(JSON.stringify({ ...request,
+      ...(querySystem ? { querySystem: true } : {}), contextAnchor, purpose })).digest("hex");
+    const input = { ...request, scope, contextAnchor, clientKey: "legacy-exam-key", examHelpReplay: {
+      requested: { purpose, querySystem }, legacyPurpose: purpose,
+      ...(purpose !== "plan" ? { legacyQuery: { ...request, purpose } } : {}),
+    } };
+    let replayLookups = 0;
+    const sql = fakeSql(query => {
+      if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (query.includes("FROM opening_conversations")) return [{ id: input.conversationId, course_id: null }];
+      if (query.includes("SELECT t.id AS turn_id")) return ++replayLookups === 1 ? [] : [{
+        turn_id: "user-turn-1", job_id: "job-1", assistant_turn_id: "assistant-turn-1", intent_hash: intentHash, source_versions: {},
+      }];
+      if (query.includes("INSERT INTO opening_turns")) return [];
+      return [];
+    });
+    const repository = createOpeningConversationRepository(sql);
+    await expect(repository.appendSavedTurn(input)).resolves.toMatchObject({ turnId: "user-turn-1", replayed: true });
+    expect(replayLookups).toBe(2);
+    expect(sql.calls.filter(query => query.includes("INSERT INTO opening_turns"))).toHaveLength(1);
+    await expect(repository.appendSavedTurn({ ...input, text: "changed request", examHelpReplay: {
+      ...input.examHelpReplay, legacyQuery: undefined,
+    } })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("saves a new exam plan as fixed guidance and rejects changes to the original composer flags on replay", async () => {
+    const contextAnchor = { purpose: "exam_help" as const };
+    const input = { scope, conversationId: "conversation-1", text: "exam request", mode: "explain" as const,
+      clientKey: "new-exam-key", sourceIds: [], currentPage: null, chunkId: null, learningSessionId: null,
+      contextAnchor, examHelpReplay: { requested: { purpose: "plan" as const }, legacyPurpose: "plan" as const } };
+    let insertedHash: string | undefined;
+    const sql = fakeSql((query, values) => {
+      if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (query.includes("FROM opening_conversations")) return [{ id: input.conversationId, course_id: null }];
+      if (query.includes("SELECT t.id AS turn_id")) return insertedHash ? [{ turn_id: "user-turn-1", job_id: "job-1",
+        assistant_turn_id: "assistant-turn-1", intent_hash: insertedHash, source_versions: {} }] : [];
+      if (query.includes("INSERT INTO opening_turns") && query.includes("'user'")) {
+        insertedHash = values.find((value): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value));
+        expect(values.slice(-3)).toEqual([false, expect.objectContaining(contextAnchor), null]);
+        return [{ id: "user-turn-1" }];
+      }
+      return [];
+    });
+    const repository = createOpeningConversationRepository(sql);
+    await expect(repository.appendSavedTurn(input)).resolves.toMatchObject({ jobId: expect.any(String) });
+    expect(insertedHash).toBeDefined();
+    await expect(repository.appendSavedTurn(input)).resolves.toMatchObject({ jobId: "job-1", replayed: true });
+    await expect(repository.appendSavedTurn({ ...input, examHelpReplay: { requested: {} } })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("inserts a verified retry with the original legacy exam purpose", async () => {
+    const contextAnchor = { purpose: "exam_help" as const };
+    const original = { text: "exam request", mode: "explain" as const, sourceIds: [], sourceVersions: {},
+      currentPage: null, chunkId: null, learningSessionId: null, attemptId: null, contextAnchor,
+      strategyTemplateId: null, purpose: "plan" as const };
+    const sql = fakeSql((query, values) => {
+      if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (query.includes('u.source_versions AS "sourceVersions"')) return [original];
+      if (query.includes("FROM opening_conversations")) return [{ id: "conversation-1", course_id: null }];
+      if (query.includes("INSERT INTO opening_turns")) {
+        expect(values.slice(-3)).toEqual([false, expect.objectContaining(contextAnchor), "plan"]);
+        return [{ id: "retried-turn" }];
+      }
+      return [];
+    });
+    const repository = createOpeningConversationRepository(sql);
+    const input = { ...original, scope, conversationId: "conversation-1", clientKey: "retry-11111111-1111-4111-8111-111111111111" };
+    await expect(repository.appendSavedTurn(input)).resolves.toMatchObject({ jobId: expect.any(String) });
+    await expect(repository.appendSavedTurn({ ...input, purpose: "teach" })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
 });
 
 describe("opening tutor jobs repository", () => {

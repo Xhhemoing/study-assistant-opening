@@ -20,6 +20,7 @@ function createService(opts?: {
   tutorModelReady?: ReturnType<typeof vi.fn>;
   attempts?: Parameters<typeof createTutorService>[0]["attempts"];
   systemQueryEnabled?: () => boolean;
+  readFailedTurnRetry?: Parameters<typeof createTutorService>[0]["readFailedTurnRetry"];
 }) {
   const conversations = {
     getOwned: vi.fn(async () => ({
@@ -47,6 +48,7 @@ function createService(opts?: {
       sourceChunks,
       readSelection,
       systemQueryEnabled: opts?.systemQueryEnabled,
+      readFailedTurnRetry: opts?.readFailedTurnRetry,
       ...(listReadySourceIdsForCourse ? { listReadySourceIdsForCourse } : {}),
       ...(opts?.tutorModelReady ? { tutorModelReady: opts.tutorModelReady } : {}),
       attempts: opts?.attempts,
@@ -485,6 +487,40 @@ describe("exam-help admission", () => {
     await expect(f.service.submitTurn(scope, { ...request, ...changes, text: "高数进度怎么样" }))
       .rejects.toMatchObject({ code, status });
     expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
+
+  it("passes the original legacy plan intent for a replay while keeping new guidance on the exam lane", async () => {
+    const f = createService({ attempts: { assertAccess: vi.fn(async () => ({ id: attemptId, sessionId: S })) } });
+    await expect(f.service.submitTurn(scope, { ...request, purpose: "plan" })).resolves.toMatchObject({ replayed: false });
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ purpose: undefined,
+      examHelpReplay: expect.objectContaining({ requested: { purpose: "plan", querySystem: undefined }, legacyPurpose: "plan" }) }));
+  });
+
+  it.each([{ querySystem: true }, { purpose: "query" }, { purpose: "explain_state" }])("replays a historical exam record query %j without starting a new query", async intent => {
+    const assertAccess = vi.fn(async () => null);
+    const systemQueryEnabled = vi.fn(() => false);
+    const f = createService({ systemQueryEnabled, attempts: { assertAccess } });
+    Object.assign(f.conversations, { findTurnByClientKey: vi.fn(async () => ({ mode: "hint", querySystem: true,
+      purpose: intent.purpose ?? "query", learningSessionId: null })) });
+    await expect(f.service.submitTurn(scope, { ...request, ...intent })).resolves.toMatchObject({ replayed: true, learningSessionId: null });
+    expect(assertAccess).not.toHaveBeenCalled();
+    expect(systemQueryEnabled).not.toHaveBeenCalled();
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ examHelpReplay: expect.objectContaining({ replayOnly: true,
+      legacyQuery: { purpose: intent.purpose ?? "query", text: request.text, mode: "hint", sourceIds: [], currentPage: 4 } }) }));
+  });
+
+  it("preserves a verified failed exam plan and repeats source, page and attempt admission", async () => {
+    const readFailedTurnRetry = vi.fn(async () => ({ text: request.text, purpose: "plan" as const, mode: "hint" as const,
+      currentPage: 4, chunkId: C, sourceIds: [S], sourceVersions: { [S]: 1 }, learningSessionId: S,
+      attemptId, strategyTemplateId: null, contextAnchor: { purpose: "exam_help" as const, attemptId } }));
+    const assertAccess = vi.fn(async () => ({ id: attemptId, sessionId: S }));
+    const f = createService({ readFailedTurnRetry, attempts: { assertAccess } });
+    const clientKey = `retry-${C}`;
+    await expect(f.service.submitTurn(scope, { ...request, clientKey, purpose: "query" })).resolves.toMatchObject({ replayed: false, learningSessionId: S });
+    expect(readFailedTurnRetry).toHaveBeenCalledExactlyOnceWith(scope, CONVERSATION, C);
+    expect(f.sourceChunks.listForSources).toHaveBeenCalledWith(scope, [S]);
+    expect(assertAccess).toHaveBeenCalledWith(scope, attemptId);
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ clientKey, purpose: "plan", chunkId: C, currentPage: 4 }));
   });
 });
 

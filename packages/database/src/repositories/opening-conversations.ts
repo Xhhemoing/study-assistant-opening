@@ -6,6 +6,7 @@ import { readOpeningSavedTurnRetry, savedTurnRetryAssistantId, savedTurnRetryMat
 export { readOpeningSavedTurnRetry, savedTurnRetryAssistantId } from "./opening-conversation-retry";
 import type { Sql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
+import { turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
 import { systemQueryReceiptSchema } from "@aistudy/contracts";
 import { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
 import type {
@@ -46,6 +47,7 @@ export class OpeningConversationError extends Error {
  * surrogate pairs can still exceed Zod after SQL clip — always re-slice here.
  */
 export const LAST_TURN_PREVIEW_MAX = 280;
+const INACTIVE_MISCONCEPTION_MESSAGE = "关联学习记录已更新或撤回，此回答内容不再显示。";
 
 export function clipLastTurnPreview(value: string | null | undefined): string | null {
   if (value == null) return null;
@@ -69,6 +71,14 @@ type SavedTurnIntent = {
   learningSessionId: string | null;
   attemptId?: string | null;
   strategyTemplateId?: string | null;
+  examRequest?: { purpose?: ComposerPurpose; querySystem?: boolean };
+};
+
+type ExamHelpReplay = {
+  requested: NonNullable<SavedTurnIntent["examRequest"]>;
+  legacyPurpose?: ComposerPurpose;
+  legacyQuery?: Pick<SavedTurnIntent, "text" | "mode" | "sourceIds" | "purpose" | "currentPage">;
+  replayOnly?: boolean;
 };
 
 function hashSavedTurnIntent(intent: SavedTurnIntent): string {
@@ -119,6 +129,11 @@ export function createOpeningConversationRepository(sql: Sql) {
     });
     return receipts;
   }
+  const visibleTurnText = () => sql`CASE
+    WHEN display_authority.inactive_misconception THEN ${INACTIVE_MISCONCEPTION_MESSAGE}
+    WHEN t.role='assistant' AND display_authority.deleted_source THEN '关联材料已删除，此回答内容不再显示。'
+    ELSE t.text END`;
+  const hiddenTurnDetails = () => sql`display_authority.deleted_source OR display_authority.inactive_misconception`;
   return {
     async create(
       scope: OpeningConversationScope,
@@ -197,11 +212,14 @@ export function createOpeningConversationRepository(sql: Sql) {
           c.title,
           c.course_id,
           c.updated_at,
-          (SELECT t.id FROM opening_turns t WHERE t.conversation_id=c.id ORDER BY t.created_at DESC,t.id DESC LIMIT 1) AS preview_turn_id,
-          (
-            SELECT LEFT(
+          preview.turn_id AS preview_turn_id,
+          preview.text AS last_turn_preview
+        FROM opening_conversations c
+        LEFT JOIN LATERAL (
+            SELECT CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE t.id END AS turn_id, LEFT(
               CASE
-                WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)}
+                WHEN display_authority.inactive_misconception THEN ${INACTIVE_MISCONCEPTION_MESSAGE}
+                WHEN t.role='assistant' AND display_authority.deleted_source
                   THEN '关联材料已删除，此回答内容不再显示。'
                 WHEN t.role='assistant' AND (t.status='outcome_unknown' OR (t.status='pending' AND j.status='outcome_unknown')) THEN ${TUTOR_UNKNOWN_MESSAGE}
                 WHEN t.role='assistant' AND t.status='clarify' THEN ${PAGE_CITATION_CLARIFY_MESSAGE}
@@ -211,14 +229,16 @@ export function createOpeningConversationRepository(sql: Sql) {
                 ELSE coalesce(t.text, '')
               END,
               280
-            )
-            FROM opening_turns t
+            ) AS text
+            FROM (
+              SELECT * FROM opening_turns t
+              WHERE t.conversation_id = c.id AND t.workspace_id = c.workspace_id
+              ORDER BY t.created_at DESC,t.id DESC LIMIT 1
+            ) t
+            CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(sql)} AS deleted_source,
+              ${turnUsesInactiveMisconception(sql)} AS inactive_misconception OFFSET 0) display_authority
             LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id
-            WHERE t.conversation_id = c.id
-            ORDER BY t.created_at DESC,t.id DESC
-            LIMIT 1
-          ) AS last_turn_preview
-        FROM opening_conversations c
+        ) preview ON true
         WHERE c.workspace_id = ${scope.workspaceId}
           AND c.owner_user_id = ${scope.ownerUserId}
         ORDER BY c.updated_at DESC
@@ -245,10 +265,14 @@ export function createOpeningConversationRepository(sql: Sql) {
       await this.getOwned(scope, conversationId);
       const rows = await sql`
         SELECT t.id, t.conversation_id, t.role,
-          CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
-          t.mode, t.status, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt, CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE t.system_query END AS system_query,
-          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations
+          ${visibleTurnText()} AS text,
+          t.mode, t.status, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,
+          CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt,
+          CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE t.system_query END AS system_query,
+          CASE WHEN ${hiddenTurnDetails()} THEN '[]'::jsonb ELSE t.citations END AS citations
         FROM opening_turns t
+        CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(sql)} AS deleted_source,
+          ${turnUsesInactiveMisconception(sql)} AS inactive_misconception OFFSET 0) display_authority
         LEFT JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id
           AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
         LEFT JOIN opening_tutor_jobs j
@@ -287,7 +311,7 @@ export function createOpeningConversationRepository(sql: Sql) {
         JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
         JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
         WHERE t.workspace_id=${scope.workspaceId} AND t.conversation_id=${conversationId} AND t.id=ANY(${[...turnIds]}::uuid[])
-          AND t.status='complete' AND NOT (${turnUsesDeletedSource(sql)})`;
+          AND t.status='complete' AND NOT (${turnUsesDeletedSource(sql)}) AND NOT (${turnUsesInactiveMisconception(sql)})`;
       await releaseReturnedExposures(scope, rows);
     },
 
@@ -305,9 +329,12 @@ export function createOpeningConversationRepository(sql: Sql) {
             AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
       const rows = await sql`
         SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
-          CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
-          CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations, t.system_query
+          ${visibleTurnText()} AS text,
+          CASE WHEN ${hiddenTurnDetails()} THEN '[]'::jsonb ELSE t.citations END AS citations,
+          CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE t.system_query END AS system_query
         FROM opening_turns t
+        CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(sql)} AS deleted_source,
+          ${turnUsesInactiveMisconception(sql)} AS inactive_misconception OFFSET 0) display_authority
         LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id AND j.conversation_id=t.conversation_id
         WHERE t.conversation_id = ${conversationId}
           AND t.workspace_id = ${scope.workspaceId}
@@ -379,10 +406,11 @@ export function createOpeningConversationRepository(sql: Sql) {
       learningSessionId: string | null;
   attemptId?: string | null;
       strategyTemplateId?: string | null;
+      examHelpReplay?: ExamHelpReplay;
       currentPage: number | null;
       chunkId: string | null;
       privacy?: "saved";
-    }): Promise<{ turnId: string; jobId: string; assistantTurnId: string }> {
+    }): Promise<{ turnId: string; jobId: string; assistantTurnId: string; replayed?: true; learningSessionId?: string | null }> {
       const sourceIds = [...new Set(input.sourceIds)].sort();
       const turnId = randomUUID();
       const assistantTurnId = randomUUID();
@@ -423,6 +451,81 @@ export function createOpeningConversationRepository(sql: Sql) {
           throw new OpeningConversationError("CONFLICT", "原失败轮的提问意图无法核实；请重新读取，或另发一条新问题。");
         }
 
+        const examHelp = input.contextAnchor?.purpose === "exam_help";
+        const examReplay = examHelp && !retryIntent ? input.examHelpReplay : undefined;
+        const purpose = examHelp && !retryIntent && input.purpose !== "answer" && input.purpose !== "teach" ? undefined : input.purpose;
+        const querySystem = !examHelp && input.querySystem === true;
+        const intentFor = (sourceVersions: Record<string, number>,
+          kind: "current" | "legacy_exam" = "current"): SavedTurnIntent => {
+          const intentPurpose = kind === "current" ? purpose : examReplay?.legacyPurpose;
+          return {
+            conversationId: input.conversationId,
+            text: input.text,
+            mode: input.mode,
+            privacy: input.privacy ?? "saved",
+            sourceIds,
+            sourceVersions,
+            currentPage: input.currentPage,
+            chunkId: input.chunkId,
+            learningSessionId: input.learningSessionId,
+            ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+            ...(querySystem ? { querySystem: true as const } : {}),
+            ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}),
+            ...(intentPurpose ? { purpose: intentPurpose } : {}),
+            ...(kind === "current" && examReplay ? { strategyTemplateId: input.strategyTemplateId ?? null, examRequest: examReplay.requested } : {}),
+          };
+        };
+        const readReplay = async () => {
+          const [existing] = await tx`
+            SELECT t.id AS turn_id, t.intent_hash, t.source_versions,
+                   j.id AS job_id, j.assistant_turn_id
+            FROM opening_turns t
+            LEFT JOIN opening_tutor_jobs j ON j.user_turn_id = t.id
+            WHERE t.workspace_id = ${input.scope.workspaceId}
+              AND t.client_key = ${input.clientKey}
+              AND t.role = 'user'
+            FOR UPDATE OF t
+          `;
+          return existing;
+        };
+        const resolveReplay = (existing: Record<string, unknown>) => {
+          if (!existing.intent_hash || !existing.job_id) {
+            throw new OpeningConversationError(
+              "CONFLICT",
+              existing.intent_hash ? "client key replay is unavailable" : "legacy client key cannot be replayed safely",
+            );
+          }
+          const sourceVersions = existing.source_versions as Record<string, number>;
+          const savedHash = String(existing.intent_hash);
+          let matches = !examReplay?.replayOnly && savedHash === hashSavedTurnIntent(intentFor(sourceVersions));
+          if (!matches && examReplay && !examReplay.replayOnly && examReplay.requested.querySystem !== true) {
+            matches = savedHash === hashSavedTurnIntent(intentFor(sourceVersions, "legacy_exam"));
+          }
+          let legacyQueryMatched = false;
+          if (!matches && examReplay?.legacyQuery) {
+            // Older record queries used a different projection of the same submitted request.
+            const { text, mode, sourceIds: querySources, purpose: queryPurpose, currentPage } = examReplay.legacyQuery;
+            const legacyQuery: SavedTurnIntent = { conversationId: input.conversationId, text, mode,
+              privacy: input.privacy ?? "saved", sourceIds: [...new Set(querySources)].sort(), sourceVersions,
+              currentPage, chunkId: null, learningSessionId: null, querySystem: true,
+              contextAnchor: input.contextAnchor, purpose: queryPurpose };
+            legacyQueryMatched = savedHash === hashSavedTurnIntent(legacyQuery);
+          }
+          if (!matches && !legacyQueryMatched) throw new OpeningConversationError("CONFLICT", "client key intent differs from the saved turn");
+          return {
+            turnId: existing.turn_id as string,
+            jobId: existing.job_id as string,
+            assistantTurnId: existing.assistant_turn_id as string,
+            ...(examHelp ? { replayed: true as const, ...(legacyQueryMatched ? { learningSessionId: null } : {}) } : {}),
+          };
+        };
+        // An exam replay can predate the current material and attempt admission rules.
+        if (examHelp && !retryIntent) {
+          const replay = await readReplay();
+          if (replay) return resolveReplay(replay);
+          if (examReplay?.replayOnly) throw new OpeningConversationError("CONFLICT", "client key replay is unavailable");
+        }
+
         if (input.learningSessionId) {
           const sessions = await tx`SELECT course_id FROM opening_learning_sessions
             WHERE id=${input.learningSessionId} AND workspace_id=${input.scope.workspaceId}
@@ -450,54 +553,10 @@ export function createOpeningConversationRepository(sql: Sql) {
           || input.chunkId != null && contextAnchor.chunkId != null && input.chunkId !== contextAnchor.chunkId)) {
           throw new OpeningConversationError("CONFLICT", "page selection differs from study context");
         }
-        const existingRows = await tx`
-          SELECT t.id AS turn_id, t.intent_hash, t.source_versions,
-                 j.id AS job_id, j.assistant_turn_id
-          FROM opening_turns t
-          LEFT JOIN opening_tutor_jobs j ON j.user_turn_id = t.id
-          WHERE t.workspace_id = ${input.scope.workspaceId}
-            AND t.client_key = ${input.clientKey}
-            AND t.role = 'user'
-          FOR UPDATE OF t
-        `;
-        const replay = existingRows[0] as Record<string, unknown> | undefined;
-        const resolveReplay = (existing: Record<string, unknown>) => {
-          if (!existing.intent_hash || !existing.job_id) {
-            throw new OpeningConversationError(
-              "CONFLICT",
-              existing.intent_hash
-                ? "client key replay is unavailable"
-                : "legacy client key cannot be replayed safely",
-            );
-          }
-          const intentHash = hashSavedTurnIntent({
-            conversationId: input.conversationId,
-            text: input.text,
-            mode: input.mode,
-            privacy: input.privacy ?? "saved",
-            sourceIds,
-            sourceVersions: existing.source_versions as Record<string, number>,
-            currentPage: input.currentPage,
-            chunkId: input.chunkId,
-            learningSessionId: input.learningSessionId,
-            ...(input.attemptId ? { attemptId: input.attemptId } : {}),
-            ...(input.querySystem ? { querySystem: true as const } : {}),
-            ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}),
-            ...(input.purpose ? { purpose: input.purpose } : {}),
-          });
-          if (String(existing.intent_hash) !== intentHash) {
-            throw new OpeningConversationError(
-              "CONFLICT",
-              "client key intent differs from the saved turn",
-            );
-          }
-          return {
-            turnId: existing.turn_id as string,
-            jobId: existing.job_id as string,
-            assistantTurnId: existing.assistant_turn_id as string,
-          };
-        };
-        if (replay) return resolveReplay(replay);
+        if (!examHelp || retryIntent) {
+          const replay = await readReplay();
+          if (replay) return resolveReplay(replay);
+        }
 
         const sourceRows = sourceIds.length
           ? await tx`
@@ -532,22 +591,7 @@ export function createOpeningConversationRepository(sql: Sql) {
             if (sourceIds.includes(ref.sourceId) && ref.version != null && Number.isInteger(Number(ref.version))) sourceVersions[ref.sourceId] = Number(ref.version);
           }
         }
-        const intent: SavedTurnIntent = {
-          conversationId: input.conversationId,
-          text: input.text,
-          mode: input.mode,
-          privacy: input.privacy ?? "saved",
-          sourceIds,
-          sourceVersions,
-          currentPage: input.currentPage,
-          chunkId: input.chunkId,
-          learningSessionId: input.learningSessionId,
-          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
-          ...(input.querySystem ? { querySystem: true as const } : {}),
-          ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}),
-          ...(input.purpose ? { purpose: input.purpose } : {}),
-        };
-        const intentHash = hashSavedTurnIntent(intent);
+        const intentHash = hashSavedTurnIntent(intentFor(sourceVersions));
         const sourceVersionsJson = tx.json(sourceVersions as never);
 
         const inserted = await tx`
@@ -560,24 +604,14 @@ export function createOpeningConversationRepository(sql: Sql) {
             'user', ${input.text}, ${input.mode}, 'complete',
             ${input.clientKey}, ${input.learningSessionId}, ${input.currentPage},
             ${input.chunkId}, ${sourceIds}, ${intentHash}, ${sourceVersionsJson}, ${input.attemptId ?? null},
-            ${input.strategyTemplateId ?? null},${input.querySystem ?? false},${contextAnchor ? tx.json(contextAnchor) : null},${input.purpose ?? null}
+            ${input.strategyTemplateId ?? null},${querySystem},${contextAnchor ? tx.json(contextAnchor) : null},${purpose ?? null}
           )
           ON CONFLICT (workspace_id, client_key) WHERE client_key IS NOT NULL
           DO NOTHING
           RETURNING id
         `;
         if (!inserted.length) {
-          const replayRows = await tx`
-            SELECT t.id AS turn_id, t.intent_hash, t.source_versions,
-                   j.id AS job_id, j.assistant_turn_id
-            FROM opening_turns t
-            LEFT JOIN opening_tutor_jobs j ON j.user_turn_id = t.id
-            WHERE t.workspace_id = ${input.scope.workspaceId}
-              AND t.client_key = ${input.clientKey}
-              AND t.role = 'user'
-            FOR UPDATE OF t
-          `;
-          const existing = replayRows[0] as Record<string, unknown> | undefined;
+          const existing = await readReplay();
           if (!existing) {
             throw new OpeningConversationError("CONFLICT", "client key replay is unavailable");
           }
@@ -594,7 +628,7 @@ export function createOpeningConversationRepository(sql: Sql) {
             'assistant', '', ${input.mode}, 'pending',
             NULL, ${input.learningSessionId}, ${input.currentPage},
             ${input.chunkId}, ${sourceIds}, ${sourceVersionsJson}, ${input.attemptId ?? null},
-            ${input.strategyTemplateId ?? null},${input.querySystem ?? false},${contextAnchor ? tx.json(contextAnchor) : null},${input.purpose ?? null}
+            ${input.strategyTemplateId ?? null},${querySystem},${contextAnchor ? tx.json(contextAnchor) : null},${purpose ?? null}
           )
         `;
         await tx`

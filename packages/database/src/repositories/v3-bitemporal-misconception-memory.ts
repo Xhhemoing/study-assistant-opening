@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { LEARNER_CONTEXT_MAX_BYTES, type LearnerMisconceptionDisposition, type v3BitemporalMisconceptionEdges } from "../schema/v3-bitemporal-memory";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { isLineageUuid } from "./opening-context-provenance";
+import { isLineageUuid, lineageUuid } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 
 type Edge = typeof v3BitemporalMisconceptionEdges.$inferSelect;
@@ -35,6 +35,42 @@ export function parseTutorMisconceptionLineage(parsed: unknown): TutorMisconcept
   const ids = revisionIds.map(id => id.toLowerCase());
   if (new Set(ids).size !== ids.length) return null;
   return { kind, courseId: courseId?.toLowerCase() ?? null, revisionIds: ids };
+}
+
+/** Inline admission for assistant content returned directly from saved conversations. */
+export function turnUsesInactiveMisconception(db: Sql | TransactionSql, alias: "t" = "t") {
+  const col = (name: string) => db.unsafe(`${alias}.${name}`);
+  const encoded = col("intent_hash");
+  const course = () => lineageUuid(db, () => db`payload.value->>'courseId'`);
+  const revision = () => lineageUuid(db, () => db`entry.value #>> '{}'`);
+  return db`CASE WHEN ${col("role")} = 'assistant' AND ${encoded} IS NOT NULL THEN NOT EXISTS (
+    SELECT 1 FROM opening_conversations conversation
+    JOIN workspaces w ON w.id = conversation.workspace_id AND w.owner_user_id = conversation.owner_user_id
+    CROSS JOIN LATERAL (SELECT CASE WHEN ${encoded} IS JSON OBJECT WITH UNIQUE KEYS
+      AND pg_input_is_valid(${encoded}, 'jsonb') THEN ${encoded}::jsonb END AS value,
+      clock_timestamp() AS at OFFSET 0) payload
+    CROSS JOIN LATERAL (SELECT ${course()} AS course_id) lineage
+    WHERE conversation.id = ${col("conversation_id")} AND conversation.workspace_id = ${col("workspace_id")}
+      AND payload.value-ARRAY['kind','courseId','revisionIds'] = '{}'::jsonb
+      AND payload.value->'kind' = '"v3_misconception_lineage"'::jsonb
+      AND (payload.value->'courseId' = 'null'::jsonb OR (
+        jsonb_typeof(payload.value->'courseId') = 'string' AND lineage.course_id = conversation.course_id
+        AND EXISTS (SELECT 1 FROM courses c WHERE c.id = lineage.course_id AND c.workspace_id = w.id AND c.archived_at IS NULL)
+      ))
+      AND jsonb_typeof(payload.value->'revisionIds') = 'array'
+      AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(payload.value->'revisionIds') = 'array'
+          THEN payload.value->'revisionIds' ELSE '[]'::jsonb END) entry(value)
+        CROSS JOIN LATERAL (SELECT ${revision()} AS id) revision
+        LEFT JOIN v3_bitemporal_misconception_edges e ON e.revision_id = revision.id AND e.workspace_id = w.id
+          AND e.owner_user_id = w.owner_user_id AND e.privacy_epoch = w.privacy_epoch
+          AND (e.course_id IS NULL OR e.course_id = lineage.course_id)
+          AND e.valid_range @> payload.at AND e.tx_range @> payload.at
+          AND e.status IN ('candidate', 'verified', 'learner_reported')
+        GROUP BY revision.id
+        HAVING revision.id IS NULL OR count(*) <> 1 OR count(e.revision_id) <> 1
+      )
+  ) ELSE false END`;
 }
 
 /** Check saved authority against the current privacy epoch and both live time ranges. */

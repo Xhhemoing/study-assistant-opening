@@ -191,6 +191,19 @@ describe("Phase 2 pure exam tutor turns", () => {
     expect(f.provider.complete).not.toHaveBeenCalled();
   });
 
+  it("streams fixed guidance for a submitted photo with no transcription and marks its lineage as empty", async () => {
+    const f = setup({ exam: true, streaming: true, submitted: true, sources: false });
+    f.attempt.originalAnswer = { ...f.attempt.originalAnswer!, answer: "" };
+    f.attempt.currentAnswer = { ...f.attempt.currentAnswer!, answer: "" };
+    f.attempt.workSource = { id: attemptRef.sourceId, version: attemptRef.sourceVersion, physicalPage: 1 };
+    const lineage = { kind: "v3_misconception_lineage", courseId: null, revisionIds: [] };
+    await expect(createTutorTurnHandler(f.deps)(jobId)).resolves.toEqual({ skipped: false });
+    expect(f.stream.begin).toHaveBeenCalledWith(workspaceId, jobId, expect.objectContaining({ historyMisconceptionLineage: lineage }));
+    expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: PURE_ANSWER_PROBE_GUIDANCE }),
+      expect.objectContaining({ historyMisconceptionLineage: lineage, attemptContext: { target: expect.anything(), snapshot: f.attempt } }));
+    expect(f.provider.complete).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])("keeps an exam with bound=%s out of alternate provider routes", async bound => {
     const f = setup({ exam: true, sources: false, bound });
     const savedTurn = (await f.tutorJobs.getUserTurn(userTurnId, workspaceId, jobId))!;

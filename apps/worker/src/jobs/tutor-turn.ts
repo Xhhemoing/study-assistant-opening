@@ -493,7 +493,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         kind: helpKind, level: helpLevel, delivered: true as const, helpInputSnapshot, hintStage: null, initiatedBy: "user" as const,
       } : undefined;
       const misconceptionFence = { ...(misconceptionSnapshot ? { misconceptionSnapshot } : {}),
-        ...(historyMisconceptionLineage ? { historyMisconceptionLineage } : {}) };
+        historyMisconceptionLineage: historyMisconceptionLineage ?? {
+          kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [],
+        } };
       const completionOptions = { materialPurposePin: retrieved?.purposePin, ...misconceptionFence,
         ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),

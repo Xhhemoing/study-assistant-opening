@@ -54,7 +54,7 @@ export function historyMaterialsActive(sql: Db, workspaceId: string, ids: Fragme
 
 function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readonly string[],
   purpose: TutorHistoryPurpose | "ancestors", excludedSourceIds: string[] = [],
-  requireDestinationSessionMaterials = false,
+  requireDestinationSessionMaterials = false, includeCurrentLineage = false,
 ) {
   const recordReferents = purpose === "record_referents";
   const ancestors = purpose === "ancestors";
@@ -116,10 +116,13 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
       WHERE current.id=ANY(${currentTurnIds}::uuid[]) AND current.role='user'
         AND current.workspace_id=${scope.workspaceId} AND c.workspace_id=${scope.workspaceId}
         AND c.owner_user_id=${scope.ownerUserId}
-        AND (u.created_at, u.id) < (current.created_at, current.id) AND u.status='complete' AND a.status='complete'
+        AND ((u.created_at, u.id) < (current.created_at, current.id)
+          ${includeCurrentLineage ? sql`OR (u.id=current.id AND a.intent_hash IS NOT NULL)` : sql``})
+        AND u.status='complete' AND a.status='complete'
         -- Query snapshots are separate authority records, including legacy imported receipts.
         -- Never promote their text into a later ordinary model conversation.
-        AND (${recordReferents} OR (NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL))
+        AND (${recordReferents} OR (NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL)
+          ${includeCurrentLineage ? sql`OR u.id=current.id` : sql``})
         ${ancestors ? sql`` : sql`AND NOT (current.source_ids && ${excludedSourceIds}::uuid[])`}
     ), evaluated AS MATERIALIZED (
       SELECT prior.*,
@@ -244,6 +247,8 @@ export type HistoryAncestorAuthority = {
 type HistoryAncestorRules = {
   collectSourceIds?: Set<string>; collectCourseIds?: Set<string>; lockedSourceIds?: readonly string[];
   requireDestinationSessionMaterials?: boolean;
+  checkCurrentMisconceptions?: boolean;
+  skipPriorMisconceptions?: boolean;
 };
 
 /** Collect direct ancestor authority without resolving memory edges yet. */
@@ -251,17 +256,34 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
   const authority = new Map<string, HistoryAncestorAuthority[] | null>(userTurnIds.map(id => [id, []]));
   if (!userTurnIds.length) return authority;
   const locked = rules?.lockedSourceIds && new Set(rules.lockedSourceIds);
-  const rows = await readSavedExchanges(sql, scope, userTurnIds, "ancestors", [], rules?.requireDestinationSessionMaterials);
-  const misconceptions = await resolveExchangeMisconceptions(sql, scope, rows);
-  for (const [index, row] of rows.entries()) {
+  const rows = await readSavedExchanges(sql, scope, userTurnIds, "ancestors", [],
+    rules?.requireDestinationSessionMaterials, rules?.checkCurrentMisconceptions !== false);
+  // A completed answer records exactly the revisions it used, including any inherited revisions.
+  const currentRows = rows.filter(row => row.id === row.current_id && row.assistant_intent_hash != null);
+  const currentMisconceptions = await resolveExchangeMisconceptions(sql, scope, currentRows);
+  const explicitCurrentIds = new Set<string>();
+  for (const [index, row] of currentRows.entries()) {
+    const current = currentMisconceptions[index];
+    if (!current?.inScope) authority.set(row.current_id, null);
+    else {
+      explicitCurrentIds.add(row.current_id);
+      if (current.lineage?.courseId) rules?.collectCourseIds?.add(current.lineage.courseId);
+    }
+  }
+  const priors = rows.filter(row => row.id !== row.current_id);
+  const checkedRows = rules?.skipPriorMisconceptions ? [] : priors.filter(row =>
+    authority.get(row.current_id) !== null && !explicitCurrentIds.has(row.current_id));
+  const checkedLineages = await resolveExchangeMisconceptions(sql, scope, checkedRows);
+  const misconceptions = new Map(checkedRows.map((row, index) => [row, checkedLineages[index]]));
+  for (const row of priors) {
     const entries = authority.get(row.current_id);
     if (!entries) continue;
-    const misconception = misconceptions[index];
+    const misconception = misconceptions.get(row);
     const assistantRefs = parseContextSourceRefs(row.assistant_source_refs);
     const userRefs = parseContextSourceRefs(row.user_source_refs);
     const memoryAuthority = exchangeMemoryAuthority(row);
     if (row.invalid || !row.assistant_direct_versioned || !row.origin_allowed || row.current_allowed === false
-      || !misconception || !memoryAuthority || !assistantRefs || !userRefs
+      || misconception === null || !memoryAuthority || !assistantRefs || !userRefs
       || memoryAuthority.some(entry => !(entry.expiresAt > Date.now()))) {
       authority.set(row.current_id, null);
       continue;
@@ -275,7 +297,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
       continue;
     }
     for (const entry of memoryAuthority) if (entry.courseId !== null) rules?.collectCourseIds?.add(entry.courseId);
-    if (misconception.inScope && misconception.lineage?.courseId) rules?.collectCourseIds?.add(misconception.lineage.courseId);
+    if (misconception?.inScope && misconception.lineage?.courseId) rules?.collectCourseIds?.add(misconception.lineage.courseId);
     for (const id of sources) rules?.collectSourceIds?.add(id);
     entries.push(...memoryAuthority);
   }
