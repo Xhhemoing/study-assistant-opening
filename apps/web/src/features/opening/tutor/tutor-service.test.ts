@@ -30,7 +30,7 @@ function createService(opts?: {
       updatedAt: "2026-09-20T00:00:00.000Z",
     })),
     loadContinuityTurns: vi.fn(async () => []),
-    releaseReturnedTurnIds: vi.fn(async () => undefined),
+    releaseReturnedTurnIds: vi.fn<Parameters<typeof createTutorService>[0]["conversations"]["releaseReturnedTurnIds"]>(async () => undefined),
     appendSavedTurn: vi.fn(async () => ({ turnId: "77777777-7777-4777-8777-777777777777", jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999" })),
     findTurnByClientKey: vi.fn(async () => null),
   };
@@ -403,6 +403,18 @@ it("releases only resume messages that actually fit in the returned history", as
   const resumed = await service.resumeConversation(scope, CONVERSATION);
   expect(resumed.boundedHistory).toHaveLength(40);
   expect(conversations.releaseReturnedTurnIds).toHaveBeenCalledWith(scope, CONVERSATION, turns.slice(5).map(turn => turn.id));
+});
+
+it("returns the redacted version when a resume answer is withdrawn before receipt release", async () => {
+  const { service, conversations } = createService();
+  const turn = { id: "withdrawn-turn", role: "assistant" as const, text: "stale answer" };
+  const withdrawn = { ...turn, text: "关联学习记录已更新或撤回，此回答内容不再显示。", citations: [] };
+  conversations.loadContinuityTurns.mockResolvedValueOnce([{ ...turn, citations: [{ quote: "stale quote" }] }] as never);
+  conversations.releaseReturnedTurnIds.mockResolvedValueOnce([withdrawn]);
+  await expect(service.resumeConversation(scope, CONVERSATION)).resolves.toMatchObject({
+    boundedHistory: [{ role: "assistant", text: withdrawn.text, citations: [] }],
+  });
+  expect(conversations.releaseReturnedTurnIds).toHaveBeenCalledWith(scope, CONVERSATION, [turn.id]);
 });
 
 it("does not release resume help when sticky selection validation refuses the response", async () => {

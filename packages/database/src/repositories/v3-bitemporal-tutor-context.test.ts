@@ -7,7 +7,8 @@ import { admitTaskCandidate } from "./opening-task-candidate-admission";
 import { sqlSimulation, unexpected } from "./opening-resident-f11-sql-simulation";
 import { assertTutorAttemptContext, readTutorAttemptContext, tutorAttemptFence } from "./opening-tutor-attempt-context";
 import {
-  assertTutorLearnerMisconceptionSnapshot, readTutorLearnerMisconceptionContext, type TutorMisconceptionSnapshot,
+  assertTutorLearnerMisconceptionSnapshot, legacyTutorMisconceptionHashes, readMemoryMisconceptionLineages,
+  readTutorLearnerMisconceptionContext, sourceTurnsAllowMisconceptionMemory, turnUsesInactiveMisconception, type TutorMisconceptionSnapshot,
 } from "./v3-bitemporal-misconception-memory";
 
 const scope = { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerUserId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
@@ -291,6 +292,35 @@ it("persists exact restored memory revisions on completion and blocks stream del
   expect(deliver).not.toHaveBeenCalled();
 });
 
+it("checks omitted course A memory in its own course while sending selected course B history", async () => {
+  const memoryId = "33333333-3333-4333-8333-333333333333";
+  const originTurn = "44444444-4444-4444-8444-444444444444";
+  const lineage = JSON.stringify({ ...usedLineage, courseId });
+  const { sql } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
+    if (text.startsWith("SELECT j.user_turn_id")) return [{ user_turn_id: userTurnId, course_id: otherCourseId,
+      context_anchor: null, source_ids: [], source_versions: {} }];
+    if (text.startsWith("SELECT dep_m.id, dep_m.course_id")) return [{ id: memoryId, course_id: courseId,
+      source_turn_ids: [originTurn], expires_at: null }];
+    if (text.startsWith("SELECT m.id, course.id AS turn_course_id")) return [{ id: memoryId, turn_course_id: courseId,
+      refs: [], backings: [], source_ids: [], material_use: null }];
+    if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }, { id: otherCourseId }];
+    if (text.startsWith("SELECT 1 WHERE NOT EXISTS")) return [{}];
+    if (text.startsWith("SELECT id FROM opening_memories") && text.includes("lineage.hashes")) {
+      return query.values[2] === courseId ? [{ id: { memoryId, hashes: [lineage] } }] : [];
+    }
+    return unexpected(query);
+  });
+  const jobs = createOpeningTutorJobsRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+  const start = vi.fn(async () => "course B answer");
+  await expect(jobs.authorizeSend(scope, jobId, { contextSourceRefs: [], historyCourseBindings: [
+    { courseId, materialUse: "citation", sourceIds: [], sourceRefs: [], memoryIds: [memoryId] },
+    { courseId: otherCourseId, materialUse: "citation", sourceIds: [], sourceRefs: [] },
+  ] }, start)).resolves.toBe("course B answer");
+  expect(start).toHaveBeenCalledOnce();
+});
+
 it("ignores withdrawn prior misconceptions only when the current answer records its exact lineage", async () => {
   const prior = { ...lineageRow, id: assistantTurnId };
   const current = { ...lineageRow, assistant_intent_hash: JSON.stringify(cleanLineage) };
@@ -572,10 +602,11 @@ it("cuts off inactive or malformed misconception ancestry and selects course-bou
   const prior = { current_id: userTurnId, current_course_id: courseId, assistant_intent_hash: lineage(courseId),
     question: "prior question", answer: "course A misconception answer", user_source_refs: [], assistant_source_refs: [],
     user_direct_ids: [], assistant_direct_ids: [], assistant_direct_versioned: true, origin_allowed: true, current_allowed: true };
-  const recent = { ...prior, assistant_intent_hash: null, question: "more recent follow-up", answer: "derived follow-up" };
+  const recent = { ...prior, assistant_intent_hash: null, assistant_inherited_misconception_hashes: [lineage(courseId)],
+    question: "more recent follow-up", answer: "derived follow-up" };
   let priorRows: Array<typeof prior | typeof recent> = [recent, prior];
   let authorityActive = true;
-  const checkAuthority = vi.fn(() => authorityActive ? [{ position: 0 }] : []);
+  const checkAuthority = vi.fn((positions: { position: number }[]) => authorityActive ? positions : []);
   const sql = Object.assign((parts: TemplateStringsArray, ...values: unknown[]) => {
     const statement = parts.join("?");
     if (statement.includes("WITH prior AS MATERIALIZED")) return priorRows;
@@ -586,17 +617,17 @@ it("cuts off inactive or malformed misconception ancestry and selects course-bou
     expect(statement).toContain("e.valid_range @> tick.at AND e.tx_range @> tick.at");
     expect(statement).toContain("e.status IN ('candidate', 'verified', 'learner_reported')");
     expect(values.slice(1)).toEqual([scope.workspaceId, scope.ownerUserId]);
-    return checkAuthority();
+    return checkAuthority(values[0] as { position: number }[]);
   }, { json: (value: unknown) => value, unsafe: (value: string) => value }) as unknown as Sql;
   const load = () => loadTutorHistoryContext(sql, scope, userTurnId);
-  expect(await load()).toMatchObject({ history: expect.arrayContaining([{ role: "assistant", text: prior.answer }]),
+  expect(await load()).toMatchObject({ history: expect.arrayContaining([{ role: "assistant", text: prior.answer }, { role: "assistant", text: recent.answer }]),
     historyMisconceptionLineage: JSON.parse(lineage(courseId)),
     historyCourseBindings: expect.arrayContaining([expect.objectContaining({ courseId })]) });
   const collectCourseIds = new Set<string>();
   expect(await readTutorHistoryAncestorStatus(sql, scope, userTurnId, { collectCourseIds })).toMatchObject({ valid: true });
   expect(collectCourseIds).toEqual(new Set([courseId]));
   for (const currentCourse of [null, otherCourseId]) {
-    priorRows = [{ ...prior, current_course_id: currentCourse } as typeof prior];
+    priorRows = [{ ...recent, current_course_id: currentCourse }, { ...prior, current_course_id: currentCourse }] as typeof priorRows;
     expect(await load()).toEqual({ history: [], sourceRefs: [] });
     priorRows = [{ ...prior, current_course_id: currentCourse, assistant_intent_hash: lineage(null) } as typeof prior];
     expect(await load()).toMatchObject({ history: expect.arrayContaining([{ role: "assistant", text: prior.answer }]) });
@@ -607,7 +638,7 @@ it("cuts off inactive or malformed misconception ancestry and selects course-bou
     expect(await load()).toEqual({ history: [], sourceRefs: [] });
     expect(await readTutorHistoryAncestorStatus(sql, scope, userTurnId)).toMatchObject({ valid: false });
   }
-  priorRows = [recent];
+  priorRows = [{ ...recent, assistant_inherited_misconception_hashes: [] }];
   checkAuthority.mockClear();
   expect(await load()).toMatchObject({ history: expect.arrayContaining([{ role: "assistant", text: recent.answer }]) });
   expect(checkAuthority).not.toHaveBeenCalled();
@@ -660,3 +691,104 @@ it("rechecks temporary expiry after waiting for the misconception snapshot at ev
     clock.mockRestore();
   }
 });
+
+it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception lineage validation on PostgreSQL 16", async () => {
+  // PGlite is provisioned locally for this optional real-SQL test so the workspace lockfile stays unchanged.
+  const packageName = "@electric-sql/pglite";
+  const { PGlite } = await import(packageName) as {
+    PGlite: new () => {
+      exec(query: string): Promise<unknown>;
+      query<T>(query: string, params?: unknown[]): Promise<{ rows: T[] }>;
+      close(): Promise<void>;
+    };
+  };
+  const db = new PGlite();
+  try {
+    expect((await db.query<{ server_version_num: string }>("SHOW server_version_num")).rows[0]?.server_version_num)
+      .toMatch(/^16\d{4}$/);
+    await db.exec(`
+      CREATE TABLE workspaces (id uuid, owner_user_id uuid, privacy_epoch int);
+      CREATE TABLE courses (id uuid, workspace_id uuid, archived_at timestamptz);
+      CREATE TABLE opening_conversations (id uuid, workspace_id uuid, owner_user_id uuid, course_id uuid);
+      CREATE TABLE opening_turns (id uuid, workspace_id uuid, conversation_id uuid, role text, status text,
+        intent_hash text, context_source_refs jsonb, context_anchor jsonb, query_system bool, system_query jsonb,
+        created_at timestamptz, learning_session_id uuid);
+      CREATE TABLE opening_tutor_jobs (id uuid, workspace_id uuid, conversation_id uuid, user_turn_id uuid, assistant_turn_id uuid);
+      CREATE TABLE opening_learning_sessions (id uuid, workspace_id uuid, owner_user_id uuid, course_id uuid);
+      CREATE TABLE opening_memories (id uuid, workspace_id uuid, course_id uuid, source_turn_ids jsonb);
+      CREATE TABLE v3_bitemporal_misconception_edges (revision_id uuid, workspace_id uuid, owner_user_id uuid,
+        course_id uuid, privacy_epoch int, valid_range tstzrange, tx_range tstzrange, status text);
+    `);
+    await db.query("INSERT INTO workspaces VALUES ($1,$2,7)", [scope.workspaceId, scope.ownerUserId]);
+    await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)", [jobId, scope.workspaceId, scope.ownerUserId]);
+    await db.query("INSERT INTO v3_bitemporal_misconception_edges VALUES ($1,$2,$3,NULL,7,'(,)','(,)','candidate')",
+      [candidate.revisionId, scope.workspaceId, scope.ownerUserId]);
+    class SqlFragment {
+      constructor(readonly parts: readonly string[], readonly values: unknown[] = []) {}
+      render(params: unknown[]): string {
+        return this.parts.map((part, index) => {
+          if (index === this.values.length) return part;
+          const value = this.values[index];
+          return part + (value instanceof SqlFragment ? value.render(params) : "$" + params.push(value));
+        }).join("");
+      }
+      then(resolve: (rows: unknown[]) => void, reject: (error: unknown) => void) {
+        const params: unknown[] = [];
+        return db.query(this.render(params), params).then(result => resolve(result.rows), reject);
+      }
+    }
+    const sql = Object.assign(
+      (parts: TemplateStringsArray, ...values: unknown[]) => new SqlFragment(parts, values),
+      { unsafe: (text: string) => new SqlFragment([text]) },
+    ) as unknown as Sql;
+    const read = () => sql`SELECT ${turnUsesInactiveMisconception(sql)} AS hidden FROM opening_turns t
+      WHERE t.id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'`;
+    for (const [encoded, hidden] of [
+      [JSON.stringify(usedLineage), false], ["{", true], ["[]", true], ['"scalar"', true], ["null", true],
+      [JSON.stringify({ ...usedLineage, revisionIds: [candidate.revisionId, candidate.revisionId] }), true],
+      ['{"kind":"dup","kind":"v3_misconception_lineage","courseId":null,"revisionIds":[]}', true],
+      ['{"kind":"v3_misconception_lineage","kind":"dup","courseId":null,"revisionIds":[]}', true],
+    ] as const) {
+      await db.exec("TRUNCATE opening_turns");
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,
+        context_source_refs,query_system,created_at) VALUES ($1,$2,$3,'assistant','complete',$4,'[]',false,now())`,
+        [assistantTurnId, scope.workspaceId, jobId, encoded]);
+      await expect(read()).resolves.toEqual([{ hidden }]);
+    }
+
+    // A restored answer has no job, exact hash, or direct memory refs. Its earlier answer
+    // recorded only the memory ID, and that memory was itself derived from an exact lineage.
+    const originId = "33333333-3333-4333-8333-333333333333";
+    const originConversation = "44444444-4444-4444-8444-444444444444";
+    const memoryId = "55555555-5555-4555-8555-555555555555";
+    const derivedMemory = "66666666-6666-4666-8666-666666666666";
+    const exact = { ...usedLineage, courseId };
+    await db.exec("TRUNCATE opening_turns");
+    await db.query("INSERT INTO courses VALUES ($1,$2,NULL)", [courseId, scope.workspaceId]);
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=$1", [courseId]);
+    await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)", [originConversation, scope.workspaceId, scope.ownerUserId, courseId]);
+    await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+      context_anchor,query_system,created_at)
+      VALUES ($1,$4,$5,'assistant','complete',$6,'[]',NULL,false,now()-interval '3 minutes'),
+             ($2,$4,$7,'assistant','complete',NULL,$8,$9,false,now()-interval '2 minutes'),
+             ($3,$4,$7,'assistant','complete',NULL,'[]',$9,false,now()-interval '1 minute')`,
+      [originId, userTurnId, assistantTurnId, scope.workspaceId, originConversation, JSON.stringify(exact), jobId,
+        JSON.stringify([{ memoryDependencyIds: [memoryId] }]), JSON.stringify({ courseId })]);
+    await db.query("INSERT INTO opening_memories VALUES ($1,$3,$4,$5), ($2,$3,$4,$6)",
+      [memoryId, derivedMemory, scope.workspaceId, courseId, JSON.stringify([originId]), JSON.stringify([assistantTurnId])]);
+    await expect(read()).resolves.toEqual([{ hidden: false }]);
+    await expect(sql`SELECT ${legacyTutorMisconceptionHashes(sql)} AS hashes FROM opening_turns a WHERE a.id=${assistantTurnId}`)
+      .resolves.toEqual([{ hashes: [JSON.stringify(exact)] }]);
+    await expect(readMemoryMisconceptionLineages(sql, scope, [derivedMemory], courseId))
+      .resolves.toEqual(new Map([[derivedMemory, exact]]));
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], null)).resolves.toBe(false);
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], courseId)).resolves.toBe(true);
+
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted'");
+    await expect(read()).resolves.toEqual([{ hidden: true }]);
+    await expect(readMemoryMisconceptionLineages(sql, scope, [derivedMemory], courseId)).resolves.toEqual(new Map());
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], courseId)).resolves.toBe(false);
+  } finally {
+    await db.close();
+  }
+}, 20_000);

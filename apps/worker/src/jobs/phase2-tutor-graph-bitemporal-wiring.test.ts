@@ -267,6 +267,29 @@ describe("Phase 2 practice tutor turns", () => {
     expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.anything(), bound);
   });
 
+  it("refuses to send when an inherited revision was withdrawn after loading model history", async () => {
+    const f = setup({ streaming: true });
+    const historyRevision = id(30);
+    f.tutorJobs.loadHistoryContext.mockResolvedValue({
+      history: [{ role: "assistant", text: "Previously saved misconception" }], sourceRefs: [],
+      historyMisconceptionLineage: { kind: "v3_misconception_lineage", courseId, revisionIds: [historyRevision] },
+    });
+    const startSend = vi.fn();
+    f.tutorJobs.authorizeSend.mockImplementation(async (_scope, _job, context, start) => {
+      if (context.historyMisconceptionLineage?.revisionIds.includes(historyRevision)) {
+        throw Object.assign(new Error("history misconception context changed"), { code: "CONFLICT" });
+      }
+      startSend();
+      return start();
+    });
+    expect(snapshot.revisionIds).not.toContain(historyRevision);
+
+    await expect(createTutorTurnHandler(f.deps)(jobId)).rejects.toThrow("history misconception context changed");
+    expect(f.tutorJobs.authorizeSend).toHaveBeenCalledOnce();
+    expect(startSend).not.toHaveBeenCalled();
+    expect(f.provider.complete).not.toHaveBeenCalled();
+  });
+
   it.each(["unanswered", "matched", "unmatched"])("retains the sm95 provider path for %s practice", async state => {
     const f = setup({ submitted: state !== "unanswered", streaming: true });
     if (state !== "unanswered") f.attempt.effectiveGrading = {

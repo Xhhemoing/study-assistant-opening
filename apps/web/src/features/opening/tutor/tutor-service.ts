@@ -21,7 +21,7 @@ import type {
   OpeningSourceChunksRepository,
 } from "@aistudy/database";
 import {
-  buildConversationResume, revalidateSavedSelection,
+  buildBoundedHistory, buildConversationResume, revalidateSavedSelection,
   toConversationSummary,
 } from "./conversation-continuity";
 import {
@@ -152,8 +152,8 @@ export function createTutorService(deps: {
       }
       const returnedTurns = built.resume.boundedHistory.length ? turns.slice(-built.resume.boundedHistory.length) : [];
       const returnedIds = returnedTurns.flatMap(turn => turn.id ? [turn.id] : []);
-      if (deps.conversations.releaseReturnedTurnIds) await deps.conversations.releaseReturnedTurnIds(scope, conversationId, returnedIds);
-      return built.resume;
+      const current = await deps.conversations.releaseReturnedTurnIds?.(scope, conversationId, returnedIds);
+      return current ? { ...built.resume, boundedHistory: buildBoundedHistory(current).boundedHistory } : built.resume;
     },
 
     async listTurns(

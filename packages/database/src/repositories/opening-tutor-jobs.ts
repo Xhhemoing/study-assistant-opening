@@ -414,12 +414,14 @@ async function assertStreamMaterialAdmission(
       || [...currentSources].some(id => !lockedSourceIds.includes(id))) throw historyConflict();
     historyExpiresAt = status.earliestExpiresAtMs;
   }
-  const historyMemoryIds = new Set<string>();
+  const historyMemoryIdsByCourse = new Map<string | null, Set<string>>();
   for (const binding of memoryBindings) {
     const nodes = resolveMemoryDependencyStatus(graphs!.get(binding.materialUse)!,
       binding.memoryIds ?? [], binding.memoryBackings ?? [], binding.courseId);
     if (!nodes) throw Object.assign(new Error("history memory is no longer active"), { code: "CONFLICT" });
-    for (const node of nodes) historyMemoryIds.add(node.dep_id);
+    const ids = historyMemoryIdsByCourse.get(binding.courseId) ?? new Set<string>();
+    for (const node of nodes) ids.add(node.dep_id);
+    historyMemoryIdsByCourse.set(binding.courseId, ids);
     historyExpiresAt = Math.min(historyExpiresAt, memoryExpiry(nodes));
   }
   if (historyBindings.length) {
@@ -515,11 +517,16 @@ async function assertStreamMaterialAdmission(
     }
     return { sourceId, sourceVersion, memoryOnly: true };
   });
-  const misconceptionMemoryIds = [...new Set([...globalMemoryIdList, ...historyMemoryIds])];
+  for (const [bindingCourse, ids] of historyMemoryIdsByCourse) {
+    const active = await readMemoryMisconceptionLineages(tx, scope, [...ids], bindingCourse);
+    if (active.size !== ids.size) {
+      throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+    }
+  }
   let memoryMisconceptionLineage: TutorMisconceptionLineage | undefined;
-  if (misconceptionMemoryIds.length) {
-    const active = await readMemoryMisconceptionLineages(tx, scope, misconceptionMemoryIds, courseId);
-    if (active.size !== misconceptionMemoryIds.length) {
+  if (globalMemoryIdList.length) {
+    const active = await readMemoryMisconceptionLineages(tx, scope, globalMemoryIdList, courseId);
+    if (active.size !== globalMemoryIdList.length) {
       throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
     }
     memoryMisconceptionLineage = mergeTutorMisconceptionLineages(...active.values());

@@ -10,7 +10,7 @@ import {
   type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
-import { mergeTutorMisconceptionLineages, readMemoryMisconceptionLineages, readSavedTutorMisconceptionLineage,
+import { legacyTutorMisconceptionHashes, mergeTutorMisconceptionLineages, readMemoryMisconceptionLineages, readSavedTutorMisconceptionLineage,
   readActiveTutorMisconceptionLineages, turnUsesInactiveMisconception, type TutorMisconceptionLineage } from "./v3-bitemporal-misconception-memory";
 
 type HistoryTurn = { role: "user" | "assistant"; text: string };
@@ -81,6 +81,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
       SELECT current.id AS current_id, u.id, a.id AS assistant_id, u.created_at,
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch, a.intent_hash AS assistant_intent_hash,
         ${recordReferents ? sql`false` : turnUsesInactiveMisconception(sql, "a")} AS assistant_misconception_invalid,
+        ${recordReferents ? sql`'{}'::text[]` : legacyTutorMisconceptionHashes(sql)} AS assistant_inherited_misconception_hashes,
         refs.user_refs AS user_source_refs, refs.assistant_refs AS assistant_source_refs, a.citations AS assistant_citations,
         ${priorCourse()} AS prior_course_id, ${currentCourse()} AS current_course_id,
         ${currentUse()} AS material_use, ${priorUse()} AS prior_material_use,
@@ -156,18 +157,21 @@ type HistoryRows = readonly Awaited<ReturnType<typeof readSavedExchanges>>[numbe
 async function resolveExchangeMisconceptions(sql: Db, scope: OpeningScope, rows: HistoryRows) {
   const lineages: TutorMisconceptionLineage[] = [];
   const positions = rows.map(row => {
-    if (row.assistant_intent_hash == null) return undefined;
-    const lineage = readSavedTutorMisconceptionLineage(row.assistant_intent_hash);
-    if (!lineage) return null;
-    return lineages.push(lineage) - 1;
+    const hashes: readonly unknown[] = row.assistant_intent_hash == null
+      ? row.assistant_inherited_misconception_hashes ?? [] : [row.assistant_intent_hash];
+    return hashes.map(hash => {
+      const lineage = readSavedTutorMisconceptionLineage(hash);
+      return lineage ? lineages.push(lineage) - 1 : null;
+    });
   });
   const active = await readActiveTutorMisconceptionLineages(sql, scope, lineages);
-  return positions.map((position, index) => {
-    if (rows[index]!.assistant_misconception_invalid === true) return null;
-    if (position === undefined) return { lineage: null, inScope: true };
-    if (position === null || !active.has(position)) return null;
-    const lineage = lineages[position]!;
-    return { lineage, inScope: lineage.courseId === null || lineage.courseId === rows[index]!.current_course_id };
+  return positions.map((indices, index) => {
+    const row = rows[index]!;
+    if (row.assistant_misconception_invalid === true
+      || !indices.every(position => position !== null && active.has(position))) return null;
+    const inherited = indices.map(position => lineages[position!]!);
+    const inScope = inherited.every(lineage => lineage.courseId === null || lineage.courseId === row.current_course_id);
+    return { lineage: inScope ? mergeTutorMisconceptionLineages(...inherited) : undefined, inScope };
   });
 }
 

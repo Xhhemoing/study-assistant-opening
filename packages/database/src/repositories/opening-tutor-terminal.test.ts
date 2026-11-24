@@ -199,6 +199,31 @@ describe("opening conversation repository", () => {
     await expect(repository.appendSavedTurn(input)).resolves.toMatchObject({ jobId: "job-1", replayed: true });
   });
 
+  it("replays the Round 4 hash for an explicit exam answer with status-query text", async () => {
+    const contextAnchor = { purpose: "exam_help" as const };
+    const request = { conversationId: "conversation-1", text: "高数进度怎么样", mode: "explain" as const,
+      privacy: "saved" as const, sourceIds: [], sourceVersions: {}, currentPage: null, chunkId: null, learningSessionId: null };
+    const requested = { purpose: "answer" as const };
+    const intentHash = createHash("sha256").update(JSON.stringify({
+      ...request, contextAnchor, purpose: "answer", strategyTemplateId: null, examRequest: requested,
+    })).digest("hex");
+    const sql = fakeSql(query => {
+      if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (query.includes("FROM opening_conversations")) return [{ id: request.conversationId, course_id: null }];
+      if (query.includes("SELECT t.id AS turn_id")) return [{
+        turn_id: "user-turn-1", job_id: "job-1", assistant_turn_id: "assistant-turn-1", intent_hash: intentHash, source_versions: {},
+      }];
+      if (query.includes("opening_workspace_history_revisions")) return [];
+      throw new Error(query);
+    });
+
+    await expect(createOpeningConversationRepository(sql).appendSavedTurn({
+      ...request, scope, contextAnchor, clientKey: "round4-answer", purpose: "query",
+      examHelpReplay: { requested, legacyPurpose: "answer" },
+    })).resolves.toMatchObject({ jobId: "job-1", turnId: "user-turn-1", replayed: true });
+    expect(sql.calls.some(query => query.includes("INSERT INTO opening_turns"))).toBe(false);
+  });
+
   it("inserts a verified retry with the original legacy exam purpose", async () => {
     const contextAnchor = { purpose: "exam_help" as const };
     const original = { text: "exam request", mode: "explain" as const, sourceIds: [], sourceVersions: {},

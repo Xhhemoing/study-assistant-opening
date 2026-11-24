@@ -693,6 +693,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
               ...(historyCourseBindings?.length ? { historyCourseBindings } : {}),
               ...(attemptContext ? { attemptContext } : {}),
+              ...(inheritedMisconceptionLineage ? { historyMisconceptionLineage: inheritedMisconceptionLineage } : {}),
             };
             // Hold FOR SHARE locks across synchronous provider.complete / fetch initiation,
             // releasing the DB connection immediately on commit without awaiting network I/O.

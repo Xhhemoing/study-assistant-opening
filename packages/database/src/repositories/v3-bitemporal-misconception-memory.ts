@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { LEARNER_CONTEXT_MAX_BYTES, type LearnerMisconceptionDisposition, type v3BitemporalMisconceptionEdges } from "../schema/v3-bitemporal-memory";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import {
-  isLineageUuid, lineageUuid, memoryTransitiveDepsCte, turnLineageCourse, turnTransitiveDepsCte, type FragmentFactory,
+  dependencyOriginCourseAllows, isLineageUuid, lineageUuid, memoryDependencyRows, turnHasMemoryDependencies, turnLineageCourse, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 
@@ -57,12 +57,16 @@ function savedTurnUsesInactiveMisconception(db: Db, alias: TurnAlias, allowedCou
   return db`CASE WHEN (${turn()}).role = 'assistant' AND ${encoded()} IS NOT NULL THEN NOT EXISTS (
     SELECT 1 FROM opening_conversations conversation
     JOIN workspaces w ON w.id = conversation.workspace_id AND w.owner_user_id = conversation.owner_user_id
-    CROSS JOIN LATERAL (SELECT CASE WHEN ${encoded()} IS JSON OBJECT WITH UNIQUE KEYS
-      AND pg_input_is_valid(${encoded()}, 'jsonb') THEN ${encoded()}::jsonb END AS value,
+    CROSS JOIN LATERAL (SELECT pg_input_is_valid(${encoded()}, 'json')
+      AND pg_input_is_valid(${encoded()}, 'jsonb') AS valid OFFSET 0) input
+    CROSS JOIN LATERAL (SELECT CASE WHEN input.valid THEN ${encoded()}::json END AS raw_json,
+      CASE WHEN input.valid THEN ${encoded()}::jsonb END AS value,
       clock_timestamp() AS at OFFSET 0) payload
     CROSS JOIN LATERAL (SELECT ${course()} AS course_id) lineage
     WHERE conversation.id = (${turn()}).conversation_id AND conversation.workspace_id = (${turn()}).workspace_id
-      AND payload.value-ARRAY['kind','courseId','revisionIds'] = '{}'::jsonb
+      AND CASE WHEN json_typeof(payload.raw_json) = 'object' THEN (
+        SELECT count(*) = count(DISTINCT key) FROM json_each(payload.raw_json)
+      ) AND payload.value-ARRAY['kind','courseId','revisionIds'] = '{}'::jsonb ELSE false END
       AND payload.value->'kind' = '"v3_misconception_lineage"'::jsonb
       AND (payload.value->'courseId' = 'null'::jsonb OR (
         jsonb_typeof(payload.value->'courseId') = 'string'
@@ -96,7 +100,7 @@ function savedMisconceptionOrigins(db: Db, alias: TurnAlias) {
       AND NOT (${turn()}).query_system AND (${turn()}).system_query IS NULL
       AND prior_a.workspace_id = (${turn()}).workspace_id AND prior_a.conversation_id = (${turn()}).conversation_id
       AND prior_a.role = 'assistant' AND prior_a.status = 'complete' AND NOT prior_a.query_system
-      AND prior_a.system_query IS NULL AND prior_a.intent_hash IS NOT NULL
+      AND prior_a.system_query IS NULL
       AND (prior_a.created_at, prior_a.id) < ((${turn()}).created_at, (${turn()}).id)`;
 }
 
@@ -127,26 +131,65 @@ function memoryOriginsUseInactiveMisconception(
   ))`;
 }
 
-function turnMemoryUsesInactiveMisconception(
-  db: Db, alias: "a" | "t", targetCourse: FragmentFactory,
-) {
-  const turn = () => alias === "a" ? db`a` : db`t`;
-  return db`CASE WHEN (${turn()}).context_source_refs @? '$[*].memoryDependencyIds' THEN EXISTS (
-    ${turnTransitiveDepsCte(db, alias)}
-    SELECT 1 FROM mem_deps dep LEFT JOIN opening_memories dm
-      ON dm.id = ${lineageUuid(db, () => db`dep.dep_id`)} AND dm.workspace_id = (${turn()}).workspace_id
-    WHERE dm.id IS NULL
-      OR ${memoryOriginsUseInactiveMisconception(db, () => db`dm`, targetCourse)}
-  ) ELSE false END`;
+/** Use the same saved origins for the lineage and the memory IDs that produced it. */
+function misconceptionMemoryDepsCte(db: Db, seed: FragmentFactory, workspace: FragmentFactory) {
+  return db`WITH RECURSIVE mem_deps(dep_id) AS (
+    ${seed()}
+    UNION
+    SELECT CASE WHEN ${dependencyOriginCourseAllows(db, () => db`pm.course_id`, () => db`child.course_id`,
+      () => turnLineageCourse(db, "dt"))} THEN lower(dep.id) END
+    FROM mem_deps parent
+    JOIN opening_memories pm ON pm.id = ${lineageUuid(db, () => db`parent.dep_id`)} AND pm.workspace_id = ${workspace()}
+    CROSS JOIN LATERAL (
+      SELECT saved.* FROM (SELECT dt.* FROM ${memoryOriginTurns(db, () => db`pm`)}) dt
+      CROSS JOIN LATERAL (${savedMisconceptionOrigins(db, "dt")}) saved
+    ) dt
+    CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} dep
+    LEFT JOIN opening_memories child ON child.id = ${lineageUuid(db, () => db`dep.id`)} AND child.workspace_id = pm.workspace_id
+  )`;
 }
 
-/** Admission for saved displays and candidates, including answers saved before memory lineage was persisted. */
-export function turnUsesInactiveMisconception(db: Db, alias: TurnAlias = "t", includeLegacyPrefix = false) {
-  const own = includeLegacyPrefix ? sourceTurnUsesInactiveMisconception(db, alias, [])
-    : savedTurnUsesInactiveMisconception(db, alias, []);
-  if (alias === "dt") return own;
-  const course: FragmentFactory = () => turnLineageCourse(db, alias);
-  return db`(${own} OR ${turnMemoryUsesInactiveMisconception(db, alias, course)})`;
+export function turnHasMisconceptionMemoryDependencies(db: Db, alias: TurnAlias = "t") {
+  return db`EXISTS (SELECT 1 FROM LATERAL (${savedMisconceptionOrigins(db, alias)}) origin
+    WHERE ${turnHasMemoryDependencies(db, () => db`origin.context_source_refs`)})`;
+}
+
+function turnMemoryUsesInactiveMisconception(db: Db, alias: TurnAlias, ...targetCourses: FragmentFactory[]) {
+  return db`EXISTS (
+    SELECT 1 FROM LATERAL (${savedMisconceptionOrigins(db, alias)}) dt
+    CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "dt")} AS course_id) dependency_origin
+    WHERE CASE WHEN dt.context_source_refs @? '$[*].memoryDependencyIds[*]' THEN EXISTS (
+      ${misconceptionMemoryDepsCte(db, () => db`SELECT lower(dep.id)
+        FROM ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} dep`, () => db`dt.workspace_id`)}
+      SELECT 1 FROM mem_deps dep LEFT JOIN opening_memories dm
+        ON dm.id = ${lineageUuid(db, () => db`dep.dep_id`)} AND dm.workspace_id = dt.workspace_id
+      WHERE dm.id IS NULL
+        OR ${memoryOriginsUseInactiveMisconception(db, () => db`dm`, () => db`dependency_origin.course_id`, ...targetCourses)}
+    ) ELSE false END
+  )`;
+}
+
+/** Validate saved answers and pre-lineage answers that could have consumed earlier exchanges. */
+export function turnUsesInactiveMisconception(db: Db, alias: TurnAlias = "t", includeMemory = true) {
+  const source = sourceTurnUsesInactiveMisconception(db, alias, []);
+  return includeMemory ? db`(${source} OR ${turnMemoryUsesInactiveMisconception(db, alias)})` : source;
+}
+
+/** Model history needs the exact inherited revisions so send and delivery can recheck them. */
+export function legacyTutorMisconceptionHashes(db: Db) {
+  return db`CASE WHEN a.intent_hash IS NULL AND NOT a.query_system AND a.system_query IS NULL THEN ARRAY(
+    ${misconceptionMemoryDepsCte(db, () => db`SELECT lower(dep.id)
+      FROM LATERAL (${savedMisconceptionOrigins(db, "a")}) origin
+      CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`origin.context_source_refs`)} dep`, () => db`a.workspace_id`)}
+    SELECT origin.intent_hash FROM LATERAL (${savedMisconceptionOrigins(db, "a")}) origin
+    WHERE origin.role = 'assistant' AND NOT origin.query_system AND origin.system_query IS NULL AND origin.intent_hash IS NOT NULL
+    UNION
+    SELECT saved.intent_hash FROM mem_deps dep
+    JOIN opening_memories dm ON dm.id = ${lineageUuid(db, () => db`dep.dep_id`)} AND dm.workspace_id = a.workspace_id
+    CROSS JOIN LATERAL (SELECT dt.* FROM ${memoryOriginTurns(db, () => db`dm`)}) dt
+    CROSS JOIN LATERAL (${savedMisconceptionOrigins(db, "dt")}) saved
+    WHERE saved.role = 'assistant' AND NOT saved.query_system AND saved.system_query IS NULL AND saved.intent_hash IS NOT NULL
+  ) ELSE '{}'::text[] END`;
 }
 
 /** Validate source turns themselves, including restored answers without a job. */
@@ -197,7 +240,10 @@ export async function readMemoryMisconceptionLineages(
       ON m.workspace_id = request.workspace_id AND m.memory_id = ANY(request.ids)
     CROSS JOIN LATERAL (
       WITH related_ids AS MATERIALIZED (
-        ${memoryTransitiveDepsCte(db)}
+        ${misconceptionMemoryDepsCte(db, () => db`SELECT lower(dep.id)
+          FROM (SELECT dt.* FROM ${memoryOriginTurns(db, () => db`m`)}) dt
+          CROSS JOIN LATERAL (${savedMisconceptionOrigins(db, "dt")}) saved
+          CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`saved.context_source_refs`)} dep`, () => db`m.workspace_id`)}
         SELECT m.memory_id AS id
         UNION SELECT ${lineageUuid(db, () => db`dep.dep_id`)} FROM mem_deps dep
       ), origins AS MATERIALIZED (
@@ -212,7 +258,8 @@ export async function readMemoryMisconceptionLineages(
           FROM origins origin
           CROSS JOIN LATERAL (SELECT dt.* FROM ${memoryOriginTurns(db, () => db`origin.dm`)}) dt
           CROSS JOIN LATERAL (${savedMisconceptionOrigins(db, "dt")}) saved
-          WHERE saved.role = 'assistant' AND saved.intent_hash IS NOT NULL
+          WHERE saved.role = 'assistant' AND NOT saved.query_system AND saved.system_query IS NULL
+            AND saved.intent_hash IS NOT NULL
         ) AS hashes
       ) lineage
       WHERE NOT EXISTS (

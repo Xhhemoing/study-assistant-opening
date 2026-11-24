@@ -99,6 +99,14 @@ export function createOpeningMemoryRepository(
         }
         await lockOwnedWorkspace(tx, scope);
         if (input.sourceTurnIds.length && courseId && !await lockActiveMemoryCourses(tx, scope, [courseId])) {
+          const ids = [...new Set(input.sourceTurnIds.map(id => id.toLowerCase()))];
+          const owned = await tx`SELECT t.id FROM opening_turns t
+            JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+            WHERE t.id=ANY(${ids}::uuid[]) AND t.workspace_id=${scope.workspaceId}
+              AND c.owner_user_id=${scope.ownerUserId} AND t.status='complete'`;
+          if (owned.length !== ids.length) {
+            throw new OpeningMemoryError("VALIDATION", "source turns must belong to an owned conversation");
+          }
           throw new OpeningMemoryError("VALIDATION", "course is not in this workspace");
         }
         const assertOrigins = async () => {

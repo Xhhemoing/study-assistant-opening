@@ -118,6 +118,54 @@ function queryDisplay(row: Record<string, unknown>, scope: OpeningConversationSc
     citations: failure || invalid ? [] : (row.citations as Citation[] | null) ?? [], systemQuery: !failure && !invalid && parsed?.success ? parsed.data : null };
 }
 
+type ContinuityTurn = { id?: string; role: "user" | "assistant"; text: string; citations: Citation[] };
+type ContinuityQuestion = Pick<StudyContextAnchor, "attemptId" | "activityId" | "blockId" | "contentVersion">;
+
+function mapContinuityRows(rows: readonly Record<string, unknown>[], scope: OpeningConversationScope): ContinuityTurn[] {
+  return rows.map(row => {
+    const display = queryDisplay(row, scope);
+    return { id: row.id as string, role: row.role as ContinuityTurn["role"], text: display.text, citations: display.citations };
+  });
+}
+
+const visibleTurnText = (db: Sql | TransactionSql) => db`CASE
+  WHEN display_authority.inactive_misconception THEN ${INACTIVE_MISCONCEPTION_MESSAGE}
+  WHEN t.role='assistant' AND display_authority.deleted_source THEN '关联材料已删除，此回答内容不再显示。'
+  ELSE t.text END`;
+const hiddenTurnDetails = (db: Sql | TransactionSql) => db`display_authority.deleted_source OR display_authority.inactive_misconception`;
+
+function readContinuityRows(
+  db: Sql | TransactionSql, scope: OpeningConversationScope, conversationId: string, question?: ContinuityQuestion,
+  turnIds?: readonly string[],
+) {
+  const questionFilter = !question ? db`` : question.attemptId
+    ? db`AND t.status='complete' AND (t.attempt_id=${question.attemptId} OR t.context_anchor->>'attemptId'=${question.attemptId})`
+    : db`AND t.status='complete' AND t.context_anchor->>'activityId'=${question.activityId ?? null}
+        AND t.context_anchor->>'blockId'=${question.blockId ?? null}
+        AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
+  return db`
+    SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
+      ${visibleTurnText(db)} AS text,
+      CASE WHEN ${hiddenTurnDetails(db)} THEN '[]'::jsonb ELSE t.citations END AS citations,
+      CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE t.system_query END AS system_query
+      ${turnIds ? db`, CASE WHEN t.role='assistant' AND t.status='complete' AND NOT (${hiddenTurnDetails(db)})
+        THEN ARRAY(SELECT h.id FROM opening_help_exposures h WHERE h.turn_id=t.id AND h.workspace_id=t.workspace_id
+          AND h.owner_user_id=c.owner_user_id AND h.exposure_origin='assistant'
+          AND h.release_key IS NOT NULL AND h.released_at IS NULL ORDER BY h.id)
+        ELSE '{}'::uuid[] END AS pending_exposure_ids` : db``}
+    FROM opening_turns t
+    JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
+    CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(db)} AS deleted_source,
+      ${turnUsesInactiveMisconception(db)} AS inactive_misconception OFFSET 0) display_authority
+    LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id AND j.conversation_id=t.conversation_id
+    WHERE t.conversation_id=${conversationId} AND t.workspace_id=${scope.workspaceId}
+      AND t.status IN ('complete', 'pending')
+      ${questionFilter}
+      ${turnIds ? db`AND t.id=ANY(${[...turnIds]}::uuid[]) ORDER BY array_position(${[...turnIds]}::uuid[], t.id)`
+        : db`ORDER BY t.created_at ASC`}
+  `;
+}
+
 export function createOpeningConversationRepository(sql: Sql) {
   const pendingExposureIds = (rows: readonly Record<string, unknown>[]) => rows.flatMap(row =>
     row.role === "assistant" && row.status === "complete" && row.exposure_receipt
@@ -128,11 +176,6 @@ export function createOpeningConversationRepository(sql: Sql) {
     for (const id of new Set(ids)) receipts.set(id, await releaseOpeningStudyExposure(tx, scope, id));
     return receipts;
   }
-  const visibleTurnText = (db: Sql | TransactionSql) => db`CASE
-    WHEN display_authority.inactive_misconception THEN ${INACTIVE_MISCONCEPTION_MESSAGE}
-    WHEN t.role='assistant' AND display_authority.deleted_source THEN '关联材料已删除，此回答内容不再显示。'
-    ELSE t.text END`;
-  const hiddenTurnDetails = (db: Sql | TransactionSql) => db`display_authority.deleted_source OR display_authority.inactive_misconception`;
   return {
     async create(
       scope: OpeningConversationScope,
@@ -323,57 +366,24 @@ export function createOpeningConversationRepository(sql: Sql) {
       });
     },
 
-    async releaseReturnedTurnIds(scope: OpeningConversationScope, conversationId: string, turnIds: readonly string[]): Promise<void> {
-      if (!turnIds.length) return;
-      await sql.begin(async tx => {
+    async releaseReturnedTurnIds(scope: OpeningConversationScope, conversationId: string, turnIds: readonly string[]): Promise<ContinuityTurn[] | void> {
+      if (!turnIds.length) return [];
+      return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const rows = await tx`SELECT t.role,t.status,to_jsonb(h) AS exposure_receipt FROM opening_turns t
-        JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
-        JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
-        WHERE t.workspace_id=${scope.workspaceId} AND t.conversation_id=${conversationId} AND t.id=ANY(${[...turnIds]}::uuid[])
-          AND t.status='complete' AND h.released_at IS NULL
-          AND NOT (${turnUsesDeletedSource(tx)}) AND NOT (${turnUsesInactiveMisconception(tx)})`;
-        await releaseReturnedExposures(tx, scope, pendingExposureIds(rows));
+        const rows = await readContinuityRows(tx, scope, conversationId, undefined, turnIds);
+        await releaseReturnedExposures(tx, scope, rows.flatMap(row => (row.pending_exposure_ids as string[] | undefined) ?? []));
+        return mapContinuityRows(rows, scope);
       });
     },
 
     async loadContinuityTurns(
       scope: OpeningConversationScope,
       conversationId: string,
-      question?: Pick<StudyContextAnchor, "attemptId" | "activityId" | "blockId" | "contentVersion">,
-    ): Promise<Array<{ id?: string; role: "user" | "assistant"; text: string; citations: Citation[] }>> {
+      question?: ContinuityQuestion,
+    ): Promise<ContinuityTurn[]> {
       await this.getOwned(scope, conversationId);
       // Internal routing reads must never release generated answers as delivered help.
-      const questionFilter = !question ? sql`` : question.attemptId
-        ? sql`AND t.status='complete' AND (t.attempt_id=${question.attemptId} OR t.context_anchor->>'attemptId'=${question.attemptId})`
-        : sql`AND t.status='complete' AND t.context_anchor->>'activityId'=${question.activityId ?? null}
-            AND t.context_anchor->>'blockId'=${question.blockId ?? null}
-            AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
-      const rows = await sql`
-        SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
-          ${visibleTurnText(sql)} AS text,
-          CASE WHEN ${hiddenTurnDetails(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations,
-          CASE WHEN ${hiddenTurnDetails(sql)} THEN NULL ELSE t.system_query END AS system_query
-        FROM opening_turns t
-        CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(sql)} AS deleted_source,
-          ${turnUsesInactiveMisconception(sql)} AS inactive_misconception OFFSET 0) display_authority
-        LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id AND j.conversation_id=t.conversation_id
-        WHERE t.conversation_id = ${conversationId}
-          AND t.workspace_id = ${scope.workspaceId}
-          AND t.status IN ('complete', 'pending')
-          ${questionFilter}
-        ORDER BY t.created_at ASC
-      `;
-      return rows.map((row) => {
-        const r = row as Record<string, unknown>;
-        const display = queryDisplay(r, scope);
-        return {
-          id: r.id as string,
-          role: r.role as "user" | "assistant",
-          text: display.text,
-          citations: display.citations,
-        };
-      });
+      return mapContinuityRows(await readContinuityRows(sql, scope, conversationId, question), scope);
     },
 
     async findTurnByClientKey(
@@ -480,8 +490,10 @@ export function createOpeningConversationRepository(sql: Sql) {
         const querySystem = !examHelp && input.querySystem === true;
         const intentFor = (sourceVersions: Record<string, number>,
           kind: "current" | "legacy_exam" | "round4_exam" = "current"): SavedTurnIntent => {
+          const requestedPurpose = examReplay?.requested.purpose;
           const intentPurpose = kind === "legacy_exam" ? examReplay?.legacyPurpose
-            : kind === "round4_exam" && purpose !== "answer" && purpose !== "teach" ? undefined : purpose;
+            : kind === "round4_exam" ? requestedPurpose === "answer" || requestedPurpose === "teach" ? requestedPurpose : undefined
+              : purpose;
           return {
             conversationId: input.conversationId,
             text: input.text,

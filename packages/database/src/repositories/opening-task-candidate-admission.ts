@@ -9,7 +9,7 @@ import {
 } from "./opening-context-provenance";
 import { lockActiveMemoryCourses, lockMemoryMaterialSources, sourceMaterialsActive } from "./opening-memory-admission";
 import { readTutorHistoryAncestors, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
-import { turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
+import { turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
 
 function candidateListedMaterials(tx: TransactionSql): ReturnType<FragmentFactory> {
   // Candidate source_ids also includes inherited references. Every direct use
@@ -83,8 +83,8 @@ function taskTurnOriginActive(tx: TransactionSql, workspaceId: string, alias: "a
     })}`;
 }
 
-function pairedUserUsesInactiveMisconception(tx: TransactionSql) {
-  return tx`EXISTS (SELECT 1 FROM LATERAL (SELECT u.*) t WHERE ${turnUsesInactiveMisconception(tx)})`;
+function pairedUserUsesInactiveMisconception(tx: TransactionSql, includeMemory = true) {
+  return tx`EXISTS (SELECT 1 FROM LATERAL (SELECT u.*) t WHERE ${turnUsesInactiveMisconception(tx, "t", includeMemory)})`;
 }
 
 /** Share locks admit parallel accepts but serialize against owner/privacy deletion. */
@@ -98,7 +98,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     historical_user_turn_id: string | null; paired_user_turn_id: string | null;
     user_course_id: string | null; user_source_ids: string[] | null }[]>`
     SELECT c.payload, t.id AS source_turn_id,
-      (${turnHasMemoryDependencies(tx)} OR ${turnHasMemoryDependencies(tx, () => tx`u.context_source_refs`)}) AS has_memory_dependencies,
+      (${turnHasMisconceptionMemoryDependencies(tx)} OR ${turnHasMemoryDependencies(tx, () => tx`u.context_source_refs`)}) AS has_memory_dependencies,
       ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} AS course_id,
       ${turnMaterialUse(tx, "t")} AS material_use, t.role, t.context_source_refs,
       ${historicalUserTurnId(tx)} AS historical_user_turn_id,
@@ -115,7 +115,8 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
       AND t.workspace_id = c.workspace_id AND t.status = 'complete'
     LEFT JOIN opening_turns u ON t.role='assistant' AND u.id=(${pairedUserTurnId(tx, () => tx`t`)})
       AND u.workspace_id=t.workspace_id AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
-    WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}`;
+    WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}
+    FOR SHARE OF conv, t`;
   const payload = assistantCandidateSchema.safeParse(candidate?.payload);
   if (!candidate || !payload.success || payload.data.kind !== "task") {
     throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
@@ -159,7 +160,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     LEFT JOIN opening_turns u ON t.role='assistant' AND u.id=(${pairedUserTurnId(tx, () => tx`t`)})
       AND u.workspace_id=t.workspace_id AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
     WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}
-      AND NOT (${turnUsesInactiveMisconception(tx, "t", true)})
+      AND NOT (${turnUsesInactiveMisconception(tx, "t", Boolean(candidate.has_memory_dependencies))})
       AND jsonb_typeof(c.source_ids) = 'array'
       AND jsonb_typeof(t.source_versions) = 'object' AND jsonb_typeof(t.citations) = 'array'
       AND ${assistantCandidateSourcesVersioned(tx, scope.workspaceId)}
@@ -168,7 +169,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
         IS NOT DISTINCT FROM ${candidate.course_id ?? null}::uuid
       AND u.id IS NOT DISTINCT FROM ${candidate.paired_user_turn_id ?? null}::uuid
       AND (u.id IS NULL OR (
-        NOT (${pairedUserUsesInactiveMisconception(tx)})
+        NOT (${pairedUserUsesInactiveMisconception(tx, Boolean(candidate.has_memory_dependencies))})
         AND ${turnLineageCourse(tx, "u", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)}
           IS NOT DISTINCT FROM ${candidate.user_course_id ?? null}::uuid
         AND ${taskTurnOriginActive(tx, scope.workspaceId, "u", () => tx`conv.course_id`,
@@ -180,8 +181,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
         materialUse: candidate.material_use,
         directMaterialPolicy: true,
         authorizeMemoryOnlySeparately: true,
-      })}
-    FOR SHARE OF conv, t`;
+      })}`;
   const refs = candidate.context_source_refs ?? (candidate.role === "assistant" ? null : []);
   const validRefs = parseContextMemoryDependencyIds(refs) !== null;
   if (!admitted.length || !validRefs) throw invalidSource();
