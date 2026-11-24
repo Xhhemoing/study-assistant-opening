@@ -430,6 +430,15 @@ export async function readMemoryDependencyStatus(
   return graphFor(rules?.materialUse);
 }
 
+/** A persisted credential has already scoped consumption; recheck every root in its original policy. */
+export async function openingCredentialMemoriesAvailable(db: Db, scope: OpeningScope, ids: string[]) {
+  if (!ids.length) return true;
+  const graph = await readMemoryDependencyStatus(db, scope, ids, { materialUse: "origin" });
+  const [clock] = await db<{ checked_at: Date }[]>`SELECT clock_timestamp() AS checked_at`;
+  return ids.every(id => graph.get(id)?.every(node =>
+    node.usable && (node.expires_at === null || new Date(node.expires_at).getTime() > clock!.checked_at.getTime())));
+}
+
 async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: MemoryRoot[], rules?: MemoryMaterialRules) {
   type MemoryNode = MemoryOrigin & { expires_at: Date | null; bindings: OriginBinding[]; use: MemoryUse };
   const graphs = new Map<MemoryUse, MemoryGraph>();
@@ -680,7 +689,9 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
     let binding = initial;
     const user = binding.user;
     roots = bindingRoots([binding], "origin");
-    if (!roots.length && !binding.ancestors.length) return { sourceRefs: [], dependencyIds: [] };
+    if (!roots.length && !binding.backings.length && !user?.backings.length && !binding.ancestors.length) {
+      return { sourceRefs: [], dependencyIds: [] };
+    }
     for (const ancestor of binding.ancestors) for (const id of ancestor.sourceIds) sourceIds.add(id);
     origin.course_id = binding.turn_course_id;
     userRefs = user?.memoryOnlyRefs ?? [];
@@ -701,7 +712,7 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
         graphFor(entry.materialUse), entry.memoryIds, entry.backings, entry.courseId, undefined, entry.backingSourceIds,
       ) ?? []);
       const dependencies = [...resolved.dependencies, ...historyDependencies];
-      return { sourceIds: dependencies.flatMap(memory => memory.sourceIds ?? []), dependencies };
+      return { sourceIds: [...resolved.sourceIds, ...dependencies.flatMap(memory => memory.sourceIds ?? [])], dependencies };
     };
   } else {
     roots = input.dependencyIds.map(id => ({ id, use: "origin" }));
@@ -729,7 +740,9 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
       AND (kind='confirmed' OR (kind='temporary' AND expires_at > clock_timestamp()))
     ORDER BY id FOR SHARE`;
   if (active.length !== dependencyIds.length) return null;
-  return { dependencyIds, sourceRefs: [...userRefs, ...refs.map(ref => ({ ...ref, memoryOnly: true }))] };
+  const memorySourceIds = new Set(resolved.dependencies.flatMap(memory => memory.sourceIds ?? []));
+  return { dependencyIds, sourceRefs: [...userRefs, ...refs.map(ref =>
+    memorySourceIds.has(ref.sourceId) ? { ...ref, memoryOnly: true } : ref)] };
 }
 
 /** Discover material first, then repeat admission under sorted course and source locks. */

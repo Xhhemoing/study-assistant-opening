@@ -15,7 +15,7 @@ import {
   type TutorLearnerContext,
 } from "@aistudy/contracts";
 import { composerMessageText, inferComposerIntent, learningContinuationIntent, tutorLearnerContextInstruction, makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
-import type { SystemQueryService } from "@aistudy/ai";
+import type { EphemeralSystemQueryService } from "../../../../../worker/src/runtime/system-query";
 import { replyEphemeralSystemQuery } from "./ephemeral-system-query";
 import { EphemeralServiceError } from "./ephemeral-error";
 export { EphemeralServiceError } from "./ephemeral-error";
@@ -71,7 +71,7 @@ export type EphemeralTutorDeps = {
     assertCurrent(scope: EphemeralScope, context: TutorLearnerContext): Promise<void> };
   studyContext?: { resolve(scope: EphemeralScope, anchor: StudyContextAnchor, expected?: { courseId?: string | null; sourceIds?: readonly string[] }): Promise<StudyContextAnchor>; languageSupport?(scope: EphemeralScope, anchor: StudyContextAnchor): Promise<string | null>; sessionIntent?(scope: EphemeralScope, anchor: StudyContextAnchor): Promise<StudyIntentEvent | null> };
   exposures?: { deliver(scope: EphemeralScope, input: { releaseKey: string; contextAnchor: StudyContextAnchor; origin: "assistant"; kind: "hint" | "solution"; level: "hinted" | "revealed"; supportDomain: "unknown" | "language" }): Promise<StudyExposureReceipt> };
-  systemQuery?: SystemQueryService;
+  systemQuery?: EphemeralSystemQueryService;
   sources: { listOwnedIds(scope: EphemeralScope, sourceIds: string[]): Promise<string[]> };
   chunks: { listForSources(scope: EphemeralScope, sourceIds: string[]): Promise<SourceChunk[]>; listChunksAtVersion?(scope: EphemeralScope, sourceId: string, version: number): Promise<SourceChunk[]> };
   privacy: {
@@ -252,6 +252,12 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
       const historyDiscarded = epochChanged || historyRefs === null;
       const history = historyDiscarded ? [] : historyToResolve;
+      const hasMemoryHistory = historyRefs?.some(ref => "memoryDependencyIds" in ref);
+      const assertHistoryCurrent = async () => {
+        if (hasMemoryHistory && await deps.provenance!.resolveHistory(scope, history, privacy.epoch) === null) {
+          throw new EphemeralServiceError("PRIVACY_CHANGED", "关联学习记忆已不可用，请重新提问。", 409);
+        }
+      };
       // Discarded/unverified temporary history cannot turn a first request into a repeat.
       if (request.mode === undefined) input = { ...input, mode: inferComposerIntent({ ...request, history,
         practiceMode: Boolean(contextAnchor?.attemptId || contextAnchor?.activityId), studyIntent: sessionIntent,
@@ -279,6 +285,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         // A partial hint already shown to the learner must count even if the stream later fails.
         await deliverHelp();
         await assertMaterialsCurrent();
+        await assertHistoryCurrent();
         await onTextDelta(delta);
       } : undefined;
       let selected: ResolvedTaskModel | undefined;
@@ -357,6 +364,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
               throw new EphemeralServiceError("ABORTED", "ephemeral request aborted before sending", 499);
             }
             await assertMaterialsCurrent();
+            await assertHistoryCurrent();
           },
         }).catch((error: unknown) => {
           // Keep fallback semantics; only an acknowledged pre-send release may
@@ -414,6 +422,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         clientSourceIds.length === 0 && allowedSourceIds.length > 0;
       const exposureReceipt = await deliverHelp();
       await assertMaterialsCurrent();
+      await assertHistoryCurrent();
       return {
         ...(contextAnchor ? { contextAnchor } : {}),
         ...(exposureReceipt ? { exposureReceipt } : {}),

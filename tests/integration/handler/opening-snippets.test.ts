@@ -35,7 +35,7 @@ describe("explicit snippet save handler", () => {
     expect(document.blocks).toHaveLength(1);
     expect(document.blocks[0]!.content).toMatchObject({ blockNoteContent: [{ type: "text", text: "selected excerpt", styles: {} }] });
     expect(JSON.stringify(document)).not.toMatch(/FIRST-PRIVATE|SECOND-FULL|unselected|PRIVATE-SOURCE/);
-    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }]);
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }, { snippetLineageVersion: 1 }]);
     const after = await ephemeralCounts();
     expect(after).toEqual({ ...before, documents: before.documents+1, blocks: before.blocks+1, revisions: before.revisions+1, reservations: before.reservations+2 });
   });

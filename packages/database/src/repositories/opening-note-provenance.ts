@@ -129,7 +129,7 @@ export function createOpeningNoteRepository(sql: Sql) {
         const provenance = [
           ...refs,
           ...(memoryIds.length ? [{ memoryDependencyIds: memoryIds }] : []),
-          ...(!refs.length && !memoryIds.length && input.savedTurnId ? [{ originTurnIds: [input.savedTurnId.toLowerCase()] }] : []),
+          { snippetLineageVersion: 1 },
         ];
         await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
           VALUES(${documentId},${scope.workspaceId},${tx.json(provenance)})`;

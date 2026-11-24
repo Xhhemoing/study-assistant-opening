@@ -356,7 +356,7 @@ describe("saved tutor material provenance", () => {
         title: "Memory snippet", text: answer, savedTurnId: turn.assistantTurnId,
       });
       await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-        .resolves.toEqual([{ context_source_refs: [{ ...ref, memoryOnly: true }, { memoryDependencyIds: [memory.id] }] }]);
+        .resolves.toEqual([{ context_source_refs: [{ ...ref, memoryOnly: true }, { memoryDependencyIds: [memory.id] }, { snippetLineageVersion: 1 }] }]);
       const readable = async () => (await sql`SELECT
         ${openingNoteReadable(sql, scope.workspaceId, sql`${documentId}::uuid`)} AS readable`)[0]?.readable;
       const exported = async () => (await dumpWorkspaceSnapshot(sql, scope.workspaceId, scope.ownerUserId))
@@ -402,7 +402,7 @@ describe("saved tutor material provenance", () => {
     const save = () => notes.saveSnippet(scope, { title: "Historical snippet", text: "Saved answer", savedTurnId });
     const { documentId } = await save();
     await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-      .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1, memoryOnly: true }, ...memoryIds] }]);
+      .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1, memoryOnly: true }, ...memoryIds, { snippetLineageVersion: 1 }] }]);
     const library = createLibraryRepository(sql);
     const readNote = () => library.getDocument({ workspaceId: scope.workspaceId, documentId });
     const backups = createBackupRestoreRepository(sql);
@@ -515,7 +515,7 @@ describe("saved tutor material provenance", () => {
     const save = () => notes.saveSnippet(scope, { title: "Source-free snippet", text: "Saved answer", savedTurnId });
     const { documentId } = await save();
     await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: [memory.id] }] }]);
+      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: [memory.id] }, { snippetLineageVersion: 1 }] }]);
 
     const course = await createCourseMembershipRepository(sql).createCourse({
       workspaceId: scope.workspaceId, title: "Other memory course", slug: randomUUID(),
@@ -581,9 +581,9 @@ describe("saved tutor material provenance", () => {
     expect(projected.dialogueEvaluation.some(row => row.identity === `turn:${origin}`)).toBe(true);
     expect(after.tables.opening_note_provenance).toEqual(expect.arrayContaining([
       expect.objectContaining({ document_id: affected.documentId, context_source_refs: [
-        { sourceId: publicationSource, sourceVersion: 0, publication: true }, memoryRef,
+        { sourceId: publicationSource, sourceVersion: 0, publication: true }, memoryRef, { snippetLineageVersion: 1 },
       ] }),
-      expect.objectContaining({ document_id: unrelated.documentId, context_source_refs: [{ originTurnIds: [unrelated.savedTurnId] }] }),
+      expect.objectContaining({ document_id: unrelated.documentId, context_source_refs: [{ snippetLineageVersion: 1 }] }),
     ]));
   }, 30_000);
 
@@ -606,9 +606,54 @@ describe("saved tutor material provenance", () => {
     const save = () => createOpeningNoteRepository(sql).saveSnippet(scope, { title: "Ephemeral memory", text: "Saved answer", provenanceId: reservation.id });
     const { documentId } = await save();
     await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: ids }] }]);
+      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: ids }, { snippetLineageVersion: 1 }] }]);
     await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${first.id}`;
     await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+  });
+
+  it.each(["user", "assistant"] as const)("rejects an unbacked first-exchange %s memory-only ref when saving a snippet", async role => {
+    const { sql, scope } = f;
+    const sourceId = await source();
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Unbacked snippet", courseId: null });
+    const turn = await append(conversation.id);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const claim = (await jobs.claim(turn.jobId))!;
+    await jobs.completeTurn({ scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
+      claimToken: claim.claimToken, text: "Answer", citations: [], candidates: [], contextSourceRefs: [] });
+    const refs = [{ sourceId, sourceVersion: 0, memoryOnly: true }];
+    await sql`UPDATE opening_turns SET context_source_refs=${sql.json(refs)}
+      WHERE id=${role === "user" ? turn.turnId : turn.assistantTurnId}`;
+    await expect(createOpeningNoteRepository(sql).saveSnippet(scope, {
+      title: "Unbacked answer", text: "Answer", savedTurnId: turn.assistantTurnId,
+    })).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+  });
+
+  it("persists a locked direct history source on a snippet even without memory backing", async () => {
+    const { sql, scope } = f;
+    const sourceId = await source();
+    const sourceRef = { sourceId, sourceVersion: 0 };
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "History source", courseId: null });
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const complete = async () => {
+      const turn = await append(conversation.id);
+      const claim = (await jobs.claim(turn.jobId))!;
+      await jobs.completeTurn({ scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
+        claimToken: claim.claimToken, text: "Answer", citations: [], candidates: [], contextSourceRefs: [] });
+      return turn.assistantTurnId;
+    };
+    const prior = await complete();
+    const current = await complete();
+    await sql`UPDATE opening_turns SET context_source_refs=${sql.json([sourceRef])} WHERE id=${prior}`;
+    const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+      title: "Direct history source", text: "Answer", savedTurnId: current,
+    });
+    const [stored] = await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`;
+    expect(stored?.context_source_refs).toContainEqual(sourceRef);
+    await sql`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,deleted_at,asset_deleted_at)
+      VALUES(${randomUUID()},${scope.workspaceId},${sourceId},clock_timestamp(),clock_timestamp())`;
+    await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await readOpeningBackupRecords(sql, scope)).tables.library_documents.some(row => row.id === documentId)).toBe(false);
   });
 
   it("retains snippet memory IDs from an earlier conversation exchange with no direct memory refs", async () => {
@@ -635,7 +680,7 @@ describe("saved tutor material provenance", () => {
     });
     const { documentId } = await save();
     expect(await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-      .toEqual([{ context_source_refs: [{ memoryDependencyIds: [memory.id] }] }]);
+      .toEqual([{ context_source_refs: [{ memoryDependencyIds: [memory.id] }, { snippetLineageVersion: 1 }] }]);
     await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${memory.id}`;
     await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
   });
@@ -653,7 +698,7 @@ describe("saved tutor material provenance", () => {
     const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [descendant.id] }] });
     const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, { title: "Derived snippet", text: "Saved answer", savedTurnId });
     await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: [ancestor.id, descendant.id].sort() }] }]);
+      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: [ancestor.id, descendant.id].sort() }, { snippetLineageVersion: 1 }] }]);
     const readable = () => createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId });
     await expect(readable()).resolves.toMatchObject({ id: documentId });
     await sql`UPDATE opening_note_provenance SET context_source_refs='[{"memoryDependencyIds":[null]}]'::jsonb WHERE document_id=${documentId}`;

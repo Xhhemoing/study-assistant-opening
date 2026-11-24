@@ -2,6 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { OpeningScope } from "./opening-sources";
+import { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
 import { contextSourceRefsIncluded, mergeContextProvenanceRefs, parseContextProvenanceRefs, type ContextProvenanceRef } from "./opening-context-provenance";
 
 export type EphemeralProvenanceRepository = {
@@ -14,14 +15,10 @@ export class EphemeralProvenanceError extends Error {
   constructor(readonly code: "NOT_FOUND" | "PRIVACY_CHANGED", message: string) { super(message); }
 }
 
-async function memoriesAvailable(db: Sql | TransactionSql, workspaceId: string, refs: ContextProvenanceRef[]) {
+async function memoriesAvailable(db: Sql | TransactionSql, scope: OpeningScope, refs: ContextProvenanceRef[]) {
   const dependency = refs.find(ref => "memoryDependencyIds" in ref);
-  if (!dependency) return true;
-  const ids = dependency.memoryDependencyIds;
-  const available = await db`SELECT id FROM opening_memories
-    WHERE workspace_id=${workspaceId} AND id=ANY(${ids}::uuid[]) AND status='active'
-      AND (kind='confirmed' OR (kind='temporary' AND expires_at>clock_timestamp()))`;
-  return available.length === ids.length;
+  if (!dependency) return !refs.some(ref => "memoryOnly" in ref && ref.memoryOnly === true);
+  return openingCredentialMemoriesAvailable(db, scope, dependency.memoryDependencyIds);
 }
 
 export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralProvenanceRepository {
@@ -48,7 +45,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
       const groups = rows.map(row => parseContextProvenanceRefs(row.context_source_refs));
       if (groups.some(refs => refs === null)) return null;
       const refs = mergeContextProvenanceRefs(...groups as ContextProvenanceRef[][]);
-      return await memoriesAvailable(sql, scope.workspaceId, refs) ? refs : null;
+      return await memoriesAvailable(sql, scope, refs) ? refs : null;
     },
     async recordQuery(scope, input) {
       const refs = parseContextProvenanceRefs(input.contextSourceRefs);
@@ -58,7 +55,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         if (!owner) throw new EphemeralProvenanceError("NOT_FOUND", "workspace not found");
         if (Number(owner.privacy_epoch) !== input.privacyEpoch) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query privacy changed");
         const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`, true, true)} AS included`;
-        if (!admitted?.included || !await memoriesAvailable(tx, scope.workspaceId, refs)) {
+        if (!admitted?.included || !await memoriesAvailable(tx, scope, refs)) {
           throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query material unavailable");
         }
         const [created] = await tx`INSERT INTO opening_query_ephemeral_provenance(id,workspace_id,owner_user_id,request_id,privacy_epoch,context_source_refs)
@@ -83,7 +80,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         }
         if (refs !== null) {
           const admitted = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`)} AS included`;
-          if (!admitted[0]!.included || !await memoriesAvailable(tx, scope.workspaceId, refs)) {
+          if (!admitted[0]!.included || !await memoriesAvailable(tx, scope, refs)) {
             throw new EphemeralProvenanceError("PRIVACY_CHANGED", "material is no longer available");
           }
         }

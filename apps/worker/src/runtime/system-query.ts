@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { runSystemQuery, renderSystemQuery, type SystemQueryService, type SystemQueryPlanner } from "@aistudy/ai";
-import { createScopedOpeningSystemQueryReader, readOpeningSystemQueryAuthorization, mergeContextSourceRefs, parseContextSourceRefs } from "@aistudy/database";
+import { createScopedOpeningSystemQueryReader, readOpeningSystemQueryAuthorization, mergeContextSourceRefs,
+  openingCredentialMemoriesAvailable, parseContextSourceRefs, type ContextProvenanceRef } from "@aistudy/database";
 import { loadFeatureSwitches } from "@aistudy/config";
 
 type QueryModelOptions = { parentBudget: import("@aistudy/ai").ParentInteractionBudget; operationId: string; signal?: AbortSignal; beforeSend?: () => Promise<void> };
@@ -27,8 +28,21 @@ async function callDbQueryModel(sql: Sql, scope: import("@aistudy/contracts").Sc
     pricingConfigured: catalog.models.some(model => model.inputCentsPerMillion > 0 && model.outputCentsPerMillion > 0) });
   return createDbModelGateway(sql).call(scope, "tutor.listen", { ...options, input, budget: scopeBudget(budget, scope) });
 }
+type SystemQueryOptions = { callModel?: QueryModelCall; planner?: SystemQueryPlanner };
+type SystemQueryInput = Parameters<SystemQueryService["reply"]>[1] & {
+  assertPreviousQuestionCurrent?: () => Promise<void>;
+};
+type SystemQueryReply = Awaited<ReturnType<SystemQueryService["reply"]>>;
+export type EphemeralSystemQueryService = {
+  enabled: SystemQueryService["enabled"];
+  reply(scope: Parameters<SystemQueryService["reply"]>[0], input: SystemQueryInput, signal?: AbortSignal):
+    Promise<Omit<SystemQueryReply, "contextSourceRefs"> & { contextSourceRefs: ContextProvenanceRef[] }>;
+};
+
 /** Native planning is bounded; deterministic reads remain available when models cannot provide tools. */
-export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", options: { callModel?: QueryModelCall; planner?: SystemQueryPlanner } = {}): SystemQueryService {
+export function createDbSystemQueryService(sql: Sql, process: "worker", options?: SystemQueryOptions): SystemQueryService;
+export function createDbSystemQueryService(sql: Sql, process: "web", options?: SystemQueryOptions): EphemeralSystemQueryService;
+export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", options: SystemQueryOptions = {}): EphemeralSystemQueryService {
   const enabled = () => loadFeatureSwitches().systemQuery;
   return { enabled, async reply(scope, input, outerSignal) {
     if (!enabled()) throw new Error("系统记录查询暂未开启。");
@@ -38,6 +52,7 @@ export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", 
     const timer = setTimeout(abort, 12000);
     try {
       const frame = await readOpeningSystemQueryAuthorization(sql, scope, "system_record_lookup", controller.signal);
+      const memoryIds = new Set<string>();
       const assertCurrent = async () => {
         const current = await readOpeningSystemQueryAuthorization(sql, scope, "system_record_lookup", controller.signal);
         if (current.authorization.permissionRevision !== frame.authorization.permissionRevision) throw new Error("query permission changed");
@@ -47,20 +62,30 @@ export function createDbSystemQueryService(sql: Sql, process: "web" | "worker", 
               AND j.status='running' AND j.claim_token=${input.jobLease.claimToken}`;
           if (!lease) throw new Error("query job is no longer current");
         }
+        await input.assertPreviousQuestionCurrent?.();
+        if (memoryIds.size && !await openingCredentialMemoriesAvailable(sql, scope, [...memoryIds])) {
+          throw new Error("query memory changed");
+        }
       };
       const parentBudget = input.parentBudget ?? { id: `study-query:${scope.workspaceId}:${randomUUID()}` };
       const receipt = await runSystemQuery({ ...frame,
         callModel: options.planner ?? ((request, round, signal) => (options.callModel ?? ((owner, request, context) => callDbQueryModel(sql, owner, request, context)))(scope, request, {
           parentBudget, operationId: `system-query:${parentBudget.id}:round:${round}`, signal, beforeSend: assertCurrent,
         })), question: input.question, previousQuestion: input.resolvePreviousQuestion ? await queryContextBeforeDeadline(() => input.resolvePreviousQuestion!(frame.privacyEpoch), controller.signal) : input.previousQuestion, resolveObjects: !options.planner, focus: input.focus, signal: controller.signal, assertCurrent,
-        read: createScopedOpeningSystemQueryReader(sql, scope, { purpose: "system_record_lookup", publicSettings: () => {
-          const flags = loadFeatureSwitches(); return { process, adaptivePlanning: flags.adaptivePlanning, teachingLoop: flags.teachingLoop.api };
-        } }),
+        read: createScopedOpeningSystemQueryReader(sql, scope, {
+          purpose: "system_record_lookup",
+          // Saved query turns currently accept source-only lineage.
+          ...(process === "web" ? { collectMemoryDependencyIds: ids => { for (const id of ids) memoryIds.add(id); } } : {}),
+          publicSettings: () => {
+            const flags = loadFeatureSwitches(); return { process, adaptivePlanning: flags.adaptivePlanning, teachingLoop: flags.teachingLoop.api };
+          },
+        }),
       });
       await queryContextBeforeDeadline(assertCurrent, controller.signal);
       if (controller.signal.aborted) throw new Error("system query cancelled");
       return { text: renderSystemQuery(receipt), receipt, privacyEpoch: frame.privacyEpoch,
-        contextSourceRefs: mergeContextSourceRefs(...receipt.results.map(result => result.sourceRefs)) };
+        contextSourceRefs: [...mergeContextSourceRefs(...receipt.results.map(result => result.sourceRefs)),
+          ...(memoryIds.size ? [{ memoryDependencyIds: [...memoryIds].sort() }] : [])] };
     } finally { clearTimeout(timer); outerSignal?.removeEventListener("abort", abort); }
   } };
 }

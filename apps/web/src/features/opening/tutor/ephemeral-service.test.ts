@@ -1,7 +1,7 @@
 import { format } from "node:util";
 import type { EphemeralProvenanceRepository } from "@aistudy/database";
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderInput, ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
+import type { ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
 import { OpeningProviderError, selectContext, type BudgetedRepository } from "@aistudy/ai";
 import { createEphemeralTutorService, type EphemeralTutorDeps } from "./ephemeral-service";
 
@@ -34,7 +34,7 @@ const output: ProviderOutput = {
 };
 
 function deps(overrides?: {
-  complete?: (input: ProviderInput, signal?: AbortSignal) => Promise<ProviderOutput>;
+  complete?: NonNullable<EphemeralTutorDeps["provider"]>["complete"];
   chunks?: SourceChunk[];
   sources?: string[];
   provenance?: EphemeralProvenanceRepository;
@@ -328,6 +328,26 @@ describe("ephemeral content-free provenance", () => {
       reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 1 }, memoryRef],
     });
     expect(reply.provenanceId).toBe(chunkId);
+  });
+  it.each(["send", "stream"] as const)("stops %s after a history memory expires without an epoch change", async boundary => {
+    let expired = false;
+    const provenance = {
+      resolveHistory: vi.fn(async () => expired ? null : [{ memoryDependencyIds: [foreignSource] }]),
+      record: vi.fn(async () => chunkId),
+    };
+    const onText = vi.fn();
+    const f = deps({ sources: [], chunks: [], provenance, complete: async (_input, _signal, onDelta) => {
+      expired = true;
+      await onDelta?.("sensitive follow-up");
+      return output;
+    } });
+    if (boundary === "send") f.budget.reserve.mockImplementationOnce(async () => { expired = true; return { id: "res-1" }; });
+    await expect(f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", historyPrivacyEpoch: 0,
+      history: [{ role: "assistant", text: "prior answer", provenanceId: sourceId }],
+    }, undefined, onText)).rejects.toThrow();
+    expect(f.complete).toHaveBeenCalledTimes(boundary === "send" ? 0 : 1);
+    expect(onText).not.toHaveBeenCalled();
+    expect(provenance.record).not.toHaveBeenCalled();
   });
   it.each([
     { label: "missing", provenanceId: undefined },

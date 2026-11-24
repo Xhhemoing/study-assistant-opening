@@ -5,7 +5,7 @@ import type { ModelGateway } from "./model-gateway";
 import { aiGradingInputSchema, aiGradingProposalSchema, type AnswerInterpretationMetadata,type AiGradingInput, type AiGradingProposal, type LearningObservation, type ProviderInput, type Scope, type TeachingMisconception } from "@aistudy/contracts";
 import { parseModelJson } from "./latex-json";
 import { copyGradingDiagnostic, logGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic } from "./provider";
-import { resolveOpeningHandwritingForGrading, type OpeningMultimodalEvidenceHook } from "./multimodal-grading-bridge";
+import { resolveOpeningHandwritingForGrading, type OpeningHandwritingEvidence, type OpeningMultimodalEvidenceHook } from "./multimodal-grading-bridge";
 import {
   evaluateCalibratedSubjectiveGrading, type OpeningRubricCalibrationEvidence, type OpeningRubricCalibrationHook,
   type VerifiedRubricSubmissionText,
@@ -20,6 +20,7 @@ export type OpeningAiGradingServiceDeps = {
       observation: RubricContext["observation"]; existing: LearningObservation | null;
       stem: string; referenceText: string; misconceptions: TeachingMisconception[];
       workSource: RubricContext["workSource"];
+      multimodalEvidence?: OpeningHandwritingEvidence | null;
       /** Current owned visual evidence from the immutable question/reference binding. */
       referenceSources?: { sourceId: string; sourceVersion: number; physicalPage: number }[];
       answerRevision: number; operationId: string;
@@ -131,15 +132,14 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
           throw error;
         }
       }
-      let handwriting: ReturnType<typeof resolveOpeningHandwritingForGrading> | undefined;
-      if (deps.multimodalEvidence) {
-        try {
-          handwriting = resolveOpeningHandwritingForGrading(rubricContext, await deps.multimodalEvidence(rubricContext));
-        } catch (cause) {
-          const error = conflict("暂时无法读取作答照片的核对资料。原答案已保存，请稍后重试。");
-          copyGradingDiagnostic(cause, error);
-          throw error;
-        }
+      let handwriting: ReturnType<typeof resolveOpeningHandwritingForGrading>;
+      try {
+        const evidence = deps.multimodalEvidence ? await deps.multimodalEvidence(rubricContext) : context.multimodalEvidence;
+        handwriting = resolveOpeningHandwritingForGrading(rubricContext, evidence ?? null);
+      } catch (cause) {
+        const error = conflict("暂时无法读取作答照片的核对资料。原答案已保存，请稍后重试。");
+        copyGradingDiagnostic(cause, error);
+        throw error;
       }
       const rubricSubmission = calibration ? {
         ...calibration.submission, submissionId: context.observation.id,
@@ -200,7 +200,7 @@ export function createOpeningAiGradingService(deps: OpeningAiGradingServiceDeps)
                 calibration: calibration.calibration,
               }).proposal;
             }
-            if (handwriting?.verified === false) proposal = { ...proposal, outcome: "unverified" };
+            if (!handwriting.verified) proposal = { ...proposal, outcome: "unverified" };
             result = await deps.repository.apply(scope, input, unverifyUnpersistableProposal(proposal), modelLabel);
           },
         });

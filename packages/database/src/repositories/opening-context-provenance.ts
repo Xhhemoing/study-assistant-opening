@@ -2,6 +2,8 @@ import type { Sql, TransactionSql } from "postgres";
 import type { Citation } from "@aistudy/contracts";
 import { notePublicationMetadata } from "@aistudy/domain";
 import { readMemoryDependencyStatus } from "./opening-memory-admission";
+
+export { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
 import type { OpeningScope } from "./opening-sources";
 
 type Db = Sql | TransactionSql;
@@ -92,6 +94,10 @@ export function mergeContextProvenanceRefs(...groups: readonly ContextProvenance
   return [...mergeContextSourceRefs(...sources), ...(ids.size ? [{ memoryDependencyIds: [...ids].sort() }] : [])];
 }
 
+export function parseNoteContextProvenanceRefs(value: unknown): ContextProvenanceRef[] | null {
+  return parseContextProvenanceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
+}
+
 export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] | null {
   return parseContextSourceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
 }
@@ -100,7 +106,7 @@ export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] |
 export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
   return db`CASE WHEN jsonb_typeof(${refs()})='array' THEN (
     SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM jsonb_array_elements(${refs()}) ref
-    WHERE NOT EXISTS (
+    WHERE ref <> '{"snippetLineageVersion":1}'::jsonb AND NOT EXISTS (
       SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds'), ('originTurnIds')) AS metadata(key)
       WHERE ref=jsonb_build_object(metadata.key, ref->metadata.key)
         AND jsonb_typeof(ref->metadata.key)='array'

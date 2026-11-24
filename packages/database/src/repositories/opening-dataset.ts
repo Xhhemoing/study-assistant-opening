@@ -46,7 +46,7 @@ export function createOpeningDatasetRepository(sql: Sql) {
           AND policy_version=${OPENING_DATASET_POLICY_VERSION} AND privacy_epoch=${epoch} AND revoked_at IS NULL
           AND granted_at<=statement_timestamp() AND expires_at>statement_timestamp() LIMIT 1`;
         if (!consent) throw learningError("VALIDATION", "current dataset consent required");
-        const backup = await readOpeningBackupTableRows(tx, scope.workspaceId, scope.ownerUserId);
+        const backup = await readOpeningBackupTableRows(tx, scope.workspaceId, scope.ownerUserId, { asOf: consent.as_of });
         const workspace = scope.workspaceId;
         const memories = await tx`SELECT id, workspace_id, course_id, kind, status, source_turn_ids, expires_at, updated_at
           FROM opening_memories WHERE workspace_id=${workspace}`;

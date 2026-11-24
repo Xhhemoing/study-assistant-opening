@@ -82,6 +82,7 @@ function backupNoteLineageMetadata(value: unknown) {
   const ids = parseContextMemoryDependencyIds(value.filter(ref => !notePublicationMetadata(ref)));
   return ids && [
     ...(ids.length ? [{ memoryDependencyIds: ids }] : []),
+    ...(value.some(ref => notePublicationMetadata(ref)?.snippetLineageVersion === 1) ? [{ snippetLineageVersion: 1 }] : []),
     ...value.flatMap(ref => {
       const metadata = notePublicationMetadata(ref);
       return metadata?.originTurnIds ? [{ originTurnIds: metadata.originTurnIds }] : [];

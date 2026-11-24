@@ -23,6 +23,7 @@ export async function readOpeningBackupTableRows(
   tx: TransactionSql,
   id: string,
   userId: string,
+  options?: { asOf?: Date },
 ): Promise<Record<OpeningBackupTable, Rows>> {
   const tables = {} as Record<OpeningBackupTable, Rows>;
   tables.opening_sources = asRows(await tx`
@@ -274,7 +275,7 @@ export async function readOpeningBackupTableRows(
   const sourceIds = new Set(tables.opening_sources.map(row => typeof row.id === "string" ? row.id.toLowerCase() : row.id));
   const conversationsById = new Map(tables.opening_conversations.map(row => [row.id, row]));
   const initialUserTurnCourse = new Map<string, unknown>();
-  const memoryEvaluationTime = Date.now();
+  const memoryEvaluationTime = (options?.asOf ?? new Date()).getTime();
   const canonicalId = (value: unknown) => typeof value === "string" ? value.toLowerCase() : value;
   for (const turn of tables.opening_turns) {
     const conv = conversationsById.get(turn.conversation_id);

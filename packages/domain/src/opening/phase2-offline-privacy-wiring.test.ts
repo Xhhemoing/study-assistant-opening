@@ -423,6 +423,47 @@ describe("persisted dataset provenance", () => {
   };
   const publishedTurn = turn("published", { learning_session_id: "published-session" });
 
+  it("withholds an unattributed legacy memory-only turn and its derived records", () => {
+    const source = { sourceId: knownSourceId, sourceVersion: 0, memoryOnly: true };
+    const result = project({
+      ...published,
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_memories: [{ ...owner, id: memoryId, kind: "temporary", status: "active",
+        expires_at: time, source_turn_ids: [upstreamId] }],
+      opening_teaching_activities: [{ ...activity("published"), create_intent: { sourceTurnId: missingTurnId } }],
+      opening_turns: [turn(upstreamId, { role: "user", source_ids: [knownSourceId] }),
+        turn(missingTurnId, { context_source_refs: [source] }), publishedTurn],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual([`turn:${upstreamId}`]);
+    expect(result.coursePackageQuality).toEqual([]);
+    expect(result.answerSequences).toEqual([]);
+  });
+
+  it.each([true, null])("withholds source-only snippet derivatives when snippet origin is %s", snippet_origin => {
+    const result = project({
+      ...published,
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_note_provenance: [{ document_id: "document", snippet_origin,
+        context_source_refs: [{ sourceId: knownSourceId, sourceVersion: 0 }] }],
+      opening_turns: [publishedTurn],
+    });
+    expect(result.coursePackageQuality).toEqual([]);
+    expect(result.answerSequences).toEqual([]);
+    expect(result.dialogueEvaluation).toEqual([]);
+  });
+
+  it("exports an ordinary source-free teaching publication with only answer-key metadata", () => {
+    const result = project({
+      ...published,
+      opening_note_provenance: [{ document_id: "document", snippet_origin: false,
+        context_source_refs: [{ answerKeyBlockIds: [upstreamId] }] }],
+      opening_turns: [publishedTurn],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:published"]);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:published"]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:published"]);
+  });
+
   it.each([
     { label: "legacy empty lineage without an origin", originId: null, originRefs: [], visible: false },
     { label: "origin missing from the inventory", originId: missingTurnId, originRefs: [], visible: false },
@@ -496,7 +537,7 @@ describe("persisted dataset provenance", () => {
     const result = project({
       ...published,
       opening_memories: [{ ...owner, id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [upstreamId], ...fields }],
-      opening_note_provenance: [{ document_id: "document", context_source_refs: memoryRefs }],
+      opening_note_provenance: [{ document_id: "document", context_source_refs: [...memoryRefs, { snippetLineageVersion: 1 }] }],
       opening_turns: [turn(upstreamId, { role: "user" }), turn("consumer", { context_source_refs: memoryRefs }), publishedTurn],
     });
     expect(result.coursePackageQuality.map(row => row.identity)).toEqual(visible ? ["activity:published"] : []);
@@ -670,7 +711,7 @@ describe("persisted dataset provenance", () => {
     { reason: "a malformed memory list", refs: [{ memoryDependencyIds: memoryId }], visible: false },
     { reason: "a malformed memory ID", refs: [{ memoryDependencyIds: [null] }], visible: false },
     { reason: "a missing memory", refs: memoryRefs, visible: false },
-    { reason: "a versioned workspace source", refs: [{ sourceId: knownSourceId, sourceVersion: 0 }], visible: true },
+    { reason: "verified lineage with a versioned workspace source", refs: [{ sourceId: knownSourceId, sourceVersion: 0 }, { snippetLineageVersion: 1 }], visible: true },
     { reason: "an unattributed memory-only source", refs: [{ sourceId: knownSourceId, sourceVersion: 0, memoryOnly: true }], visible: false },
     { reason: "an empty context without an origin", refs: [], visible: false },
     { reason: "publication metadata without origin lineage", refs: [{ publicationCardIds: [knownSourceId] }], visible: false },
@@ -690,7 +731,7 @@ describe("persisted dataset provenance", () => {
   it("follows a deleted source turn through a documentless memory and a republished note's memory dependencies", () => {
     const result = project({
       opening_memories: [{ ...owner, id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [upstreamId.toUpperCase()] }],
-      opening_note_provenance: [{ document_id: "document", context_source_refs: memoryRefs }],
+      opening_note_provenance: [{ document_id: "document", context_source_refs: [...memoryRefs, { snippetLineageVersion: 1 }] }],
       opening_teaching_activity_specs: [{ ...owner, activity_id: "published", document_id: "document" }],
       opening_teaching_activities: [activity("published")],
       opening_turns: [turn(upstreamId, { role: "user" }), turn("memory-dependent", { context_source_refs: memoryRefs }), turn("keep")],
@@ -723,7 +764,7 @@ describe("persisted dataset provenance", () => {
     const result = project({
       ...published,
       opening_memories: [{ ...memory, source_turn_ids: ids }],
-      opening_note_provenance: [{ ...owner, document_id: "document", context_source_refs: memoryRefs }],
+      opening_note_provenance: [{ ...owner, document_id: "document", context_source_refs: [...memoryRefs, { snippetLineageVersion: 1 }] }],
       opening_turns: [turn(upstreamId, { role: "user" }), turn("keep"),
         turn("consumer", { context_source_refs: memoryRefs }), publishedTurn,
         turn(missingTurnId, { workspace_id: "foreign", role: "user" })],

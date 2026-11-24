@@ -257,7 +257,7 @@ export function projectPrivacyGuardedOpeningDataset(
       continue;
     }
     const declaredOrigins = new Set<unknown>(row.origin_turn_id == null ? [] : [canonicalId(row.origin_turn_id)]);
-    let explicitLineage = false;
+    let verifiedSnippet = false;
     let hasMemoryMetadata = false;
     let hasUnattributedMemory = false;
     for (const ref of row.context_source_refs) {
@@ -265,16 +265,15 @@ export function projectPrivacyGuardedOpeningDataset(
         const metadata = turnMemoryDependencyMetadata(ref);
         if (metadata) {
           linkMemories(metadata.memoryDependencyIds, document);
-          explicitLineage = true;
           hasMemoryMetadata = true;
         } else exclude(document);
       } else {
         const metadata = notePublicationMetadata(ref);
         if (metadata?.originTurnIds) declaredOrigins.add(metadata.originTurnIds[0]);
+        else if (metadata?.snippetLineageVersion === 1) verifiedSnippet = true;
         else if (!metadata) {
           if (!validSourceRef(ref)) exclude(document);
           else if (ref.memoryOnly === true) hasUnattributedMemory = true;
-          else if (ref.publication !== true || row.snippet_origin === false) explicitLineage = true;
         }
       }
     }
@@ -282,10 +281,11 @@ export function projectPrivacyGuardedOpeningDataset(
       const [origin] = declaredOrigins;
       if (declaredOrigins.size !== 1 || !isUuid(origin) || !originTurns.has(origin)) exclude(document);
       else link(lineageKey("turn", origin), document);
-    } else if (!explicitLineage || (hasUnattributedMemory && !hasMemoryMetadata)) {
-      // Publication-only refs cannot establish what an earlier snippet consumed.
+    } else if (row.snippet_origin !== false && !verifiedSnippet) {
+      // Source-only imports and older snippets may have lost source-free memory lineage.
       exclude(document);
     }
+    if (hasUnattributedMemory && !hasMemoryMetadata && !declaredOrigins.size) exclude(document);
   }
   for (const row of rows("library_documents")) {
     if (inWorkspaceOrUnscoped(row) && (row.deleted_at != null || referencesShreddedSource(row))) {
@@ -364,7 +364,8 @@ export function projectPrivacyGuardedOpeningDataset(
       linkMemories(memoryDependencies, turn);
       if (Array.isArray(refs)) {
         for (const ref of refs) {
-          if (!(isRecord(ref) && "memoryDependencyIds" in ref) && !validSourceRef(ref)) exclude(turn);
+          if (isRecord(ref) && "memoryDependencyIds" in ref) continue;
+          if (!validSourceRef(ref) || (ref.memoryOnly === true && !memoryDependencies.length)) exclude(turn);
         }
       }
     }
