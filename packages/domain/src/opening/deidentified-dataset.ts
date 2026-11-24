@@ -1,7 +1,7 @@
 import type { OpeningDeidentifiedDataset } from "@aistudy/contracts";
 import { resolveCohortSurfacePolicy, type CohortSurfacePolicy, type CohortSurfacePolicyInput } from "../commercial-resilience";
 import type { CryptoShredTombstoneReceipt } from "../resilience-canary-shredding";
-import { isRecord, isUuid, notePublicationMetadata, turnMemoryDependencyIds, turnMemoryDependencyMetadata } from "./backup-validation";
+import { canSupplyBackupMemory, isRecord, isUuid, notePublicationMetadata, turnMemoryDependencyIds, turnMemoryDependencyMetadata } from "./backup-validation";
 
 type Row = Record<string, unknown>;
 export type OpeningDatasetProjectionInput = {
@@ -85,6 +85,7 @@ export function projectOpeningDataset(input: OpeningDatasetProjectionInput, pseu
 }
 
 export type PrivacyGuardedOpeningDatasetInput = OpeningDatasetProjectionInput & CohortSurfacePolicyInput & {
+  readonly nowMs?: number;
   readonly shreddedSourceIds?: readonly string[];
   /** The persistence layer supplies the workspace epoch at which the receipt was applied. */
   readonly tombstoneReceipts?: readonly (CryptoShredTombstoneReceipt & { readonly privacyEpoch: number })[];
@@ -108,6 +109,7 @@ export function projectPrivacyGuardedOpeningDataset(
   pseudonym: (kind: string, id: string) => string,
 ): { dataset: OpeningDeidentifiedDataset; cohortPolicy: CohortSurfacePolicy } {
   const { scope, tables } = input;
+  const nowMs = input.nowMs ?? Date.now();
   const rows = (name: string) => tables[name] ?? [];
   const inWorkspace = (row: Row) => matchesId(row.workspace_id, scope.workspaceId);
   const inWorkspaceOrUnscoped = (row: Row) => row.workspace_id == null || inWorkspace(row);
@@ -181,15 +183,21 @@ export function projectPrivacyGuardedOpeningDataset(
     }
     if (referencesShreddedSource(row)) exclude(lineageKey("chunk", row.id));
   }
-  const linkChunk = (id: unknown, child: string | undefined) => {
-    if (id == null) return;
-    const chunk = lineageKey("chunk", id);
-    if (!chunk || (tables.opening_source_chunks !== undefined && !containsId(chunkInventory, id))) exclude(child);
-    else link(chunk, child);
+  const linkInventoryChunk = (id: string, child: string | undefined) => {
+    if (tables.opening_source_chunks !== undefined && !chunkInventory.has(id)) exclude(child);
+    else link(lineageKey("chunk", id), child);
   };
-  const linkCitationChunks = (ref: unknown, child: string | undefined) => {
-    linkChunk(field(ref, "chunkId"), child);
-    linkChunk(field(ref, "keyframeChunkId"), child);
+  const linkChunk = (value: unknown, child: string | undefined) => {
+    const id = canonicalId(value);
+    if (!isUuid(id)) exclude(child);
+    else linkInventoryChunk(id, child);
+  };
+  const linkKeyframe = (value: unknown, child: string | undefined) => {
+    if (value === undefined) return;
+    const id = canonicalId(value);
+    // Citation keyframes can use media locators as well as database UUIDs.
+    if (!id || id.length > 120) exclude(child);
+    else linkInventoryChunk(id, child);
   };
   const linkMemories = (ids: string[], child: string | undefined) => {
     for (const id of ids) {
@@ -198,19 +206,31 @@ export function projectPrivacyGuardedOpeningDataset(
       else link(memory, child);
     }
   };
-  const validSourceRef = (ref: unknown): boolean => isRecord(ref) && isUuid(ref.sourceId)
-    && typeof ref.sourceVersion === "number" && Number.isSafeInteger(ref.sourceVersion) && ref.sourceVersion >= 0
-    && (ref.memoryOnly === undefined || typeof ref.memoryOnly === "boolean")
-    && (tables.opening_sources === undefined || containsId(sourceInventory, ref.sourceId));
+  const validSourceId = (value: unknown) => isUuid(canonicalId(value))
+    && (tables.opening_sources === undefined || containsId(sourceInventory, value));
+  const validVersion = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  const validSourceRef = (ref: unknown): ref is Row => isRecord(ref) && validSourceId(ref.sourceId)
+    && validVersion(ref.sourceVersion) && (ref.memoryOnly === undefined || typeof ref.memoryOnly === "boolean");
+  const hasUnavailableSource = (row: Row) => {
+    const pins = row.source_versions;
+    return [row.source_id, row.reference_source_id, field(row.context_anchor, "sourceId")]
+      .some(id => id != null && !validSourceId(id))
+      || (row.reference_check != null && !validSourceId(field(row.reference_check, "referenceId")))
+      || (pins != null && (!isRecord(pins) || Object.entries(pins).some(([id, version]) => !validSourceId(id) || !validVersion(version))))
+      || (row.source_ids !== undefined && (!Array.isArray(row.source_ids) || row.source_ids.some(id =>
+        canonicalId(id) === undefined || (tables.opening_sources !== undefined && !containsId(sourceInventory, id)))));
+  };
 
   const index = (kind: LineageKind, table: string, links: (row: Row) => readonly LineageLink[], idField = "id") => {
     for (const row of rows(table)) {
       if (!inWorkspace(row)) continue;
       const key = lineageKey(kind, row[idField]);
       if (!key) continue;
-      if (referencesShreddedSource(row)) exclude(key);
+      if (referencesShreddedSource(row) || hasUnavailableSource(row)) exclude(key);
       for (const [parentKind, parentId] of links(row)) {
-        if (parentKind === "chunk") linkChunk(parentId, key);
+        if (parentKind === "chunk") {
+          if (parentId != null) linkChunk(parentId, key);
+        }
         else link(lineageKey(parentKind, parentId), key);
       }
     }
@@ -218,6 +238,7 @@ export function projectPrivacyGuardedOpeningDataset(
   const anchorLinks = (anchor: unknown): LineageLink[] => [
     ["session", field(anchor, "sessionId")], ["activity", field(anchor, "activityId")],
     ["item", field(anchor, "itemVersionId")], ["attempt", field(anchor, "attemptId")],
+    ["chunk", field(anchor, "chunkId")],
   ];
   for (const row of rows("opening_note_provenance")) {
     if (!inWorkspaceOrUnscoped(row)) continue;
@@ -247,13 +268,24 @@ export function projectPrivacyGuardedOpeningDataset(
     const cited = field(content, "citedChunkIds");
     if (cited !== undefined) {
       if (!Array.isArray(cited)) exclude(child);
-      else for (const id of cited) {
-        if (id == null) exclude(child);
-        else linkChunk(id, child);
+      else for (const id of cited) linkChunk(id, child);
+    }
+    const binding = field(content, "citationBinding");
+    if (binding === undefined) return;
+    if (!isRecord(binding) || (binding.sourceId !== undefined && !validSourceId(binding.sourceId))) {
+      exclude(child);
+      return;
+    }
+    if (binding.chunkId !== undefined) linkChunk(binding.chunkId, child);
+    if (binding.refs === undefined && binding.sourceId !== undefined) return;
+    if (!Array.isArray(binding.refs)) exclude(child);
+    else for (const ref of binding.refs) {
+      if (!validSourceRef(ref)) exclude(child);
+      else {
+        linkChunk(ref.chunkId, child);
+        linkKeyframe(ref.keyframeChunkId, child);
       }
     }
-    const refs = field(field(content, "citationBinding"), "refs");
-    if (Array.isArray(refs)) for (const ref of refs) linkCitationChunks(ref, child);
   };
   for (const row of rows("library_blocks")) {
     if (inWorkspaceOrUnscoped(row)) indexBlock(row, lineageKey("document", row.document_id));
@@ -277,7 +309,7 @@ export function projectPrivacyGuardedOpeningDataset(
   index("memory", "opening_memories", row => {
     const sourceTurnIds = row.source_turn_ids;
     const memory = lineageKey("memory", row.id);
-    if (row.status === "deleted" || !Array.isArray(sourceTurnIds) || sourceTurnIds.length === 0) {
+    if (!canSupplyBackupMemory(row, nowMs) || !Array.isArray(sourceTurnIds) || sourceTurnIds.length === 0) {
       exclude(memory);
       return [];
     }
@@ -294,8 +326,7 @@ export function projectPrivacyGuardedOpeningDataset(
 
   index("turn", "opening_turns", row => {
     const turn = lineageKey("turn", row.id);
-    if (tables.opening_sources !== undefined && (!Array.isArray(row.source_ids)
-      || row.source_ids.some(id => !containsId(sourceInventory, id)))) exclude(turn);
+    if (!Array.isArray(row.source_ids)) exclude(turn);
     const memoryDependencies = turnMemoryDependencyIds(row);
     const refs = row.context_source_refs;
     if (memoryDependencies === null || (!Array.isArray(refs) && row.role !== "user")) exclude(turn);
@@ -312,7 +343,10 @@ export function projectPrivacyGuardedOpeningDataset(
       if (!Array.isArray(citations)) exclude(turn);
       else for (const citation of citations) {
         if (!validSourceRef(citation)) exclude(turn);
-        else linkCitationChunks(citation, turn);
+        else {
+          linkChunk(citation.chunkId, turn);
+          linkKeyframe(citation.keyframeChunkId, turn);
+        }
       }
     }
     const snapshot = row.help_input_snapshot;
@@ -331,9 +365,25 @@ export function projectPrivacyGuardedOpeningDataset(
     ["problem", row.problem_id], ["revision", row.teaching_revision_id],
   ];
   index("unit", "opening_teaching_units", row => [["document", row.document_id]]);
-  index("activity", "opening_teaching_activity_specs", row => [
-    ["unit", row.teaching_unit_id], ["document", row.document_id],
-  ], "activity_id");
+  index("activity", "opening_teaching_activity_specs", row => {
+    const activity = lineageKey("activity", row.activity_id);
+    const refs = row.source_refs;
+    if (refs !== undefined) {
+      if (!Array.isArray(refs)) exclude(activity);
+      else for (const ref of refs) {
+        if (!isRecord(ref) || !validSourceId(ref.sourceId)
+          || (ref.version != null && !(validVersion(ref.version)
+            || typeof ref.version === "string" && /^(0|[1-9]\d*)$/.test(ref.version) && validVersion(Number(ref.version))))
+          || (ref.sourceVersion !== undefined && !validVersion(ref.sourceVersion))
+          || (ref.page != null && (!validVersion(ref.page) || ref.page === 0))) exclude(activity);
+        else {
+          if (ref.chunkId != null) linkChunk(ref.chunkId, activity);
+          linkKeyframe(ref.keyframeChunkId, activity);
+        }
+      }
+    }
+    return [["unit", row.teaching_unit_id], ["document", row.document_id]];
+  }, "activity_id");
   index("session", "opening_learning_sessions", row => [["activity", row.activity_id]]);
   index("activity", "opening_teaching_activities", row => [["turn", field(row.create_intent, "sourceTurnId")]]);
   index("problem", "opening_problem_refs", row => [

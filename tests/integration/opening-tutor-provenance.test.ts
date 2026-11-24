@@ -6,6 +6,7 @@ import {
   createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
 } from "@aistudy/database";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
+import { projectPrivacyGuardedOpeningDataset } from "@aistudy/domain/opening/deidentified-dataset";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
@@ -16,6 +17,7 @@ import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "../..
 import { insertOpeningTaskWithOutcome } from "../../packages/database/src/repositories/opening-retest-task";
 import { openingNoteReadable } from "../../packages/database/src/repositories/opening-note-provenance";
 import { dumpWorkspaceSnapshot } from "../../packages/database/src/repositories/backup-dump";
+import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
@@ -354,7 +356,7 @@ describe("saved tutor material provenance", () => {
         title: "Memory snippet", text: answer, savedTurnId: turn.assistantTurnId,
       });
       await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-        .resolves.toEqual([{ context_source_refs: [{ ...ref, memoryOnly: true }] }]);
+        .resolves.toEqual([{ context_source_refs: [{ ...ref, memoryOnly: true }, { memoryDependencyIds: [memory.id] }] }]);
       const readable = async () => (await sql`SELECT
         ${openingNoteReadable(sql, scope.workspaceId, sql`${documentId}::uuid`)} AS readable`)[0]?.readable;
       const exported = async () => (await dumpWorkspaceSnapshot(sql, scope.workspaceId, scope.ownerUserId))
@@ -400,7 +402,7 @@ describe("saved tutor material provenance", () => {
     const save = () => notes.saveSnippet(scope, { title: "Historical snippet", text: "Saved answer", savedTurnId });
     const { documentId } = await save();
     await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-      .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1, memoryOnly: true }] }]);
+      .resolves.toEqual([{ context_source_refs: [{ sourceId: material, sourceVersion: 1, memoryOnly: true }, ...memoryIds] }]);
     const library = createLibraryRepository(sql);
     const readNote = () => library.getDocument({ workspaceId: scope.workspaceId, documentId });
     const backups = createBackupRestoreRepository(sql);
@@ -513,7 +515,7 @@ describe("saved tutor material provenance", () => {
     const save = () => notes.saveSnippet(scope, { title: "Source-free snippet", text: "Saved answer", savedTurnId });
     const { documentId } = await save();
     await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
-      .resolves.toEqual([{ context_source_refs: [] }]);
+      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: [memory.id] }] }]);
 
     const course = await createCourseMembershipRepository(sql).createCourse({
       workspaceId: scope.workspaceId, title: "Other memory course", slug: randomUUID(),
@@ -524,6 +526,109 @@ describe("saved tutor material provenance", () => {
     await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
     await sql`DELETE FROM opening_memories WHERE id=${memory.id}`;
     await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+  });
+
+  it("retires a republished source-free memory snippet from the guarded dataset after deletion", async () => {
+    const { sql, scope } = f;
+    const memories = createOpeningMemoryRepository(sql);
+    const origin = await insertOwnedTurn(sql, scope);
+    const proposed = await memories.proposeMemory(scope, { text: "Source-free preference", sourceTurnIds: [origin], expiresAt: null });
+    const memory = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    const memoryRef = { memoryDependencyIds: [memory.id] };
+    const notes = createOpeningNoteRepository(sql);
+    const publish = async (title: string, refs: unknown[], sourceRefs: unknown[]) => {
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: refs });
+      const { documentId } = await notes.saveSnippet(scope, { title, text: "Saved answer", savedTurnId });
+      const unitId = randomUUID(), sessionId = randomUUID(), attemptId = randomUUID();
+      const activityId = await insertTestTeachingActivity(sql, scope);
+      await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number)
+        VALUES(${unitId},${scope.workspaceId},${scope.ownerUserId},${title},${documentId},1)`;
+      await sql`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
+        revision_number,source_refs,version)
+        VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${activityId},${unitId},${documentId},1,${sql.json(sourceRefs as never)},1)`;
+      await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,activity_id,skill_label)
+        VALUES(${sessionId},${scope.workspaceId},${scope.ownerUserId},${activityId},'Published snippet')`;
+      await sql`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,activity_id,skill_label,client_key,create_intent,history_revision)
+        VALUES(${attemptId},${scope.workspaceId},${scope.ownerUserId},${sessionId},${activityId},'Published snippet',${randomUUID()},'{}',0)`;
+      const turnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      await sql`UPDATE opening_turns SET learning_session_id=${sessionId} WHERE id=${turnId}`;
+      return { documentId, unitId, activityId, turnId, attemptId };
+    };
+    const publicationSource = await source();
+    const affected = await publish("Memory note", [memoryRef], [{ sourceId: publicationSource, version: 0 }]);
+    const unrelated = await publish("Source-free note", [], []);
+    const project = (snapshot: Awaited<ReturnType<typeof readOpeningBackupRecords>>) => projectPrivacyGuardedOpeningDataset({
+      scope, tables: snapshot.tables, privacyEpoch: snapshot.privacyEpoch, mode: "solo", role: "learner",
+    }, (kind, id) => `${kind}:${id}`).dataset;
+    const assertPublication = (dataset: ReturnType<typeof project>, ids: typeof affected, eligible: boolean) => {
+      expect(dataset.coursePackageQuality.some(row => row.identity === `activity:${ids.activityId}`)).toBe(eligible);
+      expect(dataset.dialogueEvaluation.some(row => row.identity === `turn:${ids.turnId}`)).toBe(eligible);
+      expect(dataset.answerSequences.some(row => row.identity === `attempt:${ids.attemptId}`)).toBe(eligible);
+    };
+    const before = await readOpeningBackupRecords(sql, scope);
+    assertPublication(project(before), affected, true);
+    assertPublication(project(before), unrelated, true);
+
+    await memories.deleteMemory(scope, { id: memory.id, expectedVersion: memory.version, deleteSourceText: false, clientKey: randomUUID() });
+    await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId: affected.documentId }))
+      .resolves.toMatchObject({ id: affected.documentId });
+    const after = await readOpeningBackupRecords(sql, scope);
+    expect(after.tables.opening_memories.some(row => row.id === memory.id)).toBe(false);
+    expect(after.tables.opening_teaching_units).toEqual(expect.arrayContaining([expect.objectContaining({ id: affected.unitId })]));
+    const projected = project(after);
+    assertPublication(projected, affected, false);
+    assertPublication(projected, unrelated, true);
+    expect(projected.dialogueEvaluation.some(row => row.identity === `turn:${origin}`)).toBe(true);
+    expect(after.tables.opening_note_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({ document_id: affected.documentId, context_source_refs: [
+        { sourceId: publicationSource, sourceVersion: 0, publication: true }, memoryRef,
+      ] }),
+      expect.objectContaining({ document_id: unrelated.documentId, context_source_refs: [] }),
+    ]));
+  }, 30_000);
+
+  it("verifies ephemeral memory receipts and persists canonical dependency IDs", async () => {
+    const { sql, scope } = f;
+    const memories = createOpeningMemoryRepository(sql);
+    const origin = await insertOwnedTurn(sql, scope);
+    const propose = (text: string) => memories.proposeMemory(scope, {
+      text, sourceTurnIds: [origin], expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const first = await propose("First preference"), second = await propose("Second preference");
+    const ids = [first.id, second.id].sort();
+    const requestId = randomUUID();
+    const reservation = await createOpeningBudgetRepository(sql, { envCapCents: 100_000 }).reserve(scope, {
+      purpose: "tutor", amountCents: 1, requestId,
+    });
+    await sql`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)
+      VALUES(${reservation.id},${scope.workspaceId},${scope.ownerUserId},0,
+        ${sql.json([{ memoryDependencyIds: [ids[1]!.toUpperCase(), ids[0]!, ids[1]!] }])})`;
+    const save = () => createOpeningNoteRepository(sql).saveSnippet(scope, { title: "Ephemeral memory", text: "Saved answer", provenanceId: reservation.id });
+    const { documentId } = await save();
+    await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: ids }] }]);
+    await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${first.id}`;
+    await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+  });
+
+  it("retains source-free ancestor memory IDs and rejects malformed note memory metadata on read", async () => {
+    const { sql, scope } = f;
+    const memories = createOpeningMemoryRepository(sql);
+    const confirm = async (sourceTurnId: string, text: string) => {
+      const proposed = await memories.proposeMemory(scope, { text, sourceTurnIds: [sourceTurnId], expiresAt: null });
+      return memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    };
+    const ancestor = await confirm(await insertOwnedTurn(sql, scope), "Base preference");
+    const middle = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [ancestor.id] }] });
+    const descendant = await confirm(middle, "Derived preference");
+    const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [descendant.id] }] });
+    const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, { title: "Derived snippet", text: "Saved answer", savedTurnId });
+    await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+      .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: [ancestor.id, descendant.id].sort() }] }]);
+    const readable = () => createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId });
+    await expect(readable()).resolves.toMatchObject({ id: documentId });
+    await sql`UPDATE opening_note_provenance SET context_source_refs='[{"memoryDependencyIds":[null]}]'::jsonb WHERE document_id=${documentId}`;
+    await expect(readable()).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
   it.each(["user", "assistant"] as const)("revalidates a chunk-only %s turn for history and metadata", async role => {

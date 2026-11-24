@@ -48,6 +48,16 @@ describe("context provenance at the backup boundary", () => {
     expect(noteProvenanceSourceReferences({ context_source_refs: [{ sourceId, answerKeyBlockIds: [turnId] }] })).toBeNull();
   });
 
+  it("accepts valid memory metadata on notes and rejects malformed entries", () => {
+    const source = { sourceId, sourceVersion: 1 };
+    const memory = { memoryDependencyIds: [turnId.toUpperCase()] };
+    expect(noteProvenanceSourceReferences({ context_source_refs: [source, memory] })).toEqual([sourceId]);
+    expect(noteProvenanceSourceReferences({ context_source_refs: [memory] })).toEqual([]);
+    for (const ref of [{ memoryDependencyIds: [] }, { memoryDependencyIds: [null] }, { ...source, ...memory }]) {
+      expect(noteProvenanceSourceReferences({ context_source_refs: [ref] })).toBeNull();
+    }
+  });
+
   it.each([{}, "[]", [null], [{}], [{ sourceId, sourceVersion: "1" }],
     [{ sourceId, sourceVersion: -1 }], [{ sourceId, sourceVersion: 1.5 }],
     [{ sourceId, sourceVersion: Number.MAX_SAFE_INTEGER + 1 }],
@@ -117,9 +127,9 @@ describe("context provenance at the backup boundary", () => {
     });
     expect(turnMemoryDependencyIds(mixedTurn)).toEqual([memoryId]);
     expect(turnSourceReferences(mixedTurn)).toEqual([sourceId]);
-    // Non-turn tables must still reject memoryDependencyIds strictly.
+    // Only the turn and note readers admit memory dependency metadata.
     expect(sourceReferences(documentlessTurn)).toBeNull();
-    expect(noteProvenanceSourceReferences(documentlessTurn)).toBeNull();
+    expect(noteProvenanceSourceReferences(documentlessTurn)).toEqual([]);
 
     const originTurn = turn({ id: originTurnId, role: "user", context_source_refs: null });
     const memoryRow = row({ id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [originTurnId] });
@@ -194,18 +204,18 @@ describe("context provenance at the backup boundary", () => {
     expect(preview.errors).toContain("table opening_turns has invalid source lineage");
   });
 
-  it("rejects memoryDependencyIds on non-turn tables and rejects dangling or deleted turn memory dependencies", () => {
+  it("preserves note dependencies as lineage markers and rejects unavailable turn dependencies", () => {
     const originTurnId = "77777777-7777-4777-8777-777777777777";
     const memoryId = "88888888-8888-4888-8888-888888888888";
 
-    // 1. Non-turn table (opening_note_provenance) carrying memoryDependencyIds fails closed.
+    // Opening archives retain the marker even when the personal note's memory is gone.
     const noteBackup = backup([]);
+    noteBackup.tables.library_documents = [row({ id: candidateId })];
     noteBackup.tables.opening_note_provenance = [row({
       document_id: candidateId,
       context_source_refs: [{ memoryDependencyIds: [memoryId] }],
     })];
-    expect(validateOpeningRestore(noteBackup, [], currentMemoryDeletions).errors)
-      .toContain("table opening_note_provenance has invalid source lineage");
+    expect(validateOpeningRestore(noteBackup, [], currentMemoryDeletions).allowed).toBe(true);
 
     // 2. Dangling memoryDependencyIds (missing from opening_memories) fails closed and requires live memory deletion facts.
     const danglingBackup = backup([turn({ context_source_refs: [{ memoryDependencyIds: [memoryId] }] })]);

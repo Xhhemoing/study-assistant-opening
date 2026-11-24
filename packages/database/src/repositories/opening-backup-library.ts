@@ -1,5 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
-import { contextSourceRefsIncluded, noteContextSourceRefs } from "./opening-context-provenance";
+import { notePublicationMetadata } from "@aistudy/domain";
+import { contextSourceRefsIncluded, isMemoryDependencyMetadata, noteContextSourceRefs, parseContextMemoryDependencyIds } from "./opening-context-provenance";
 import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 import { backupPrivateLibrary } from "./backup-private-library";
 import { asObject } from "./backup-map";
@@ -73,14 +74,24 @@ export function projectOpeningBackupCardSources(tables: LibraryTables, allProven
   });
 }
 
+function backupNoteMemoryMetadata(value: unknown) {
+  if (!Array.isArray(value) || value.some(ref => {
+    const record = asObject(ref);
+    return record && "memoryDependencyIds" in record && !isMemoryDependencyMetadata(record);
+  })) return null;
+  const ids = parseContextMemoryDependencyIds(value.filter(ref => !notePublicationMetadata(ref)));
+  return ids && (ids.length ? [{ memoryDependencyIds: ids }] : []);
+}
+
 export function projectOpeningBackupProvenance(rows: Record<string, unknown>[], cardIds: ReadonlySet<unknown>) {
   return rows.map(row => {
     const refs = parseBackupSourceRefs(row.context_source_refs);
-    if (!refs) return row;
+    const memories = backupNoteMemoryMetadata(row.context_source_refs);
+    if (!refs || !memories) return row;
     const answers = publicationMetadataIds(row.context_source_refs, "answerKeyBlockIds");
     const cards = publicationMetadataIds(row.context_source_refs, "publicationCardIds").filter(id => cardIds.has(id));
     return { ...row, context_source_refs: [
-      ...refs, ...publicationMetadata(answers, cards),
+      ...refs, ...memories, ...publicationMetadata(answers, cards),
     ] };
   });
 }
@@ -113,8 +124,9 @@ function withOpeningPublicationProvenance(tables: LibraryTables) {
     const row = provenance.get(id) ?? { document_id: document.id, workspace_id: document.workspace_id, context_source_refs: [] };
     if (!Array.isArray(row.context_source_refs)) continue;
     const combined = parseBackupSourceRefs([...row.context_source_refs, ...refs]);
-    if (combined) provenance.set(id, { ...row, context_source_refs: [
-      ...combined, ...publicationMetadata(answers, publicationMetadataIds(row.context_source_refs, "publicationCardIds")),
+    const memories = backupNoteMemoryMetadata(row.context_source_refs);
+    if (combined && memories) provenance.set(id, { ...row, context_source_refs: [
+      ...combined, ...memories, ...publicationMetadata(answers, publicationMetadataIds(row.context_source_refs, "publicationCardIds")),
     ] });
   }
   return [...provenance.values()];

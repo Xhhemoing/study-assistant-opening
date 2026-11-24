@@ -14,6 +14,10 @@ import type { CourseRouteObservation } from "./course-route";
 const issuedAtMs = 10_000;
 const time = new Date(issuedAtMs).toISOString();
 const scope = { workspaceId: "workspace", ownerUserId: "learner" };
+const shreddedSourceId = "abcdef12-3456-4789-abcd-ef1234567895";
+const existingChunkId = "abcdef12-3456-4789-abcd-ef1234567896";
+const absentChunkId = "abcdef12-3456-4789-abcd-ef1234567897";
+const foreignChunkId = "abcdef12-3456-4789-abcd-ef1234567898";
 const queueItem = (id: string, question = false): srs.ReviewQueueItem => ({
   card: {
     id, ownerUserId: scope.ownerUserId, front: "What is this concept?", back: question ? "old protected answer" : "A reusable explanation.",
@@ -157,12 +161,13 @@ it("does not count already shared, stale, duplicate or assisted observations tow
 
 const owner = { workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId };
 const tables = {
-  opening_sources: ["keep", "shred", "explicit"].map(id => ({ ...owner, id })),
+  opening_sources: ["keep", "shred", "explicit", shreddedSourceId].map(id => ({ ...owner, id })),
   opening_conversations: [{ ...owner, id: "conversation" }],
   opening_turns: [
     { ...owner, id: "turn-good", conversation_id: "conversation", source_ids: ["keep"], role: "user" },
     { ...owner, id: "turn-shred", conversation_id: "conversation", source_ids: ["shred"], role: "user" },
-    { ...owner, id: "turn-citation", conversation_id: "conversation", source_ids: [], role: "assistant", citations: [{ sourceId: "shred" }] },
+    { ...owner, id: "turn-citation", conversation_id: "conversation", source_ids: [], role: "assistant", context_source_refs: [],
+      citations: [{ sourceId: shreddedSourceId, sourceVersion: 2, chunkId: existingChunkId }] },
   ],
   opening_teaching_activities: [
     { ...owner, id: "activity-good", source_ids: ["keep"] },
@@ -177,13 +182,13 @@ const tables = {
     { ...owner, id: "attempt-direct", activity_id: "activity-good", source_ids: ["explicit"] },
     { ...owner, id: "attempt-activity", activity_id: "activity-direct", source_ids: [] },
     { ...owner, id: "attempt-observation", activity_id: "activity-good", source_ids: [], observation_id: "observation" },
-    { ...owner, id: "attempt-version", activity_id: "activity-good", source_ids: [], source_versions: { SHRED: 2 } },
+    { ...owner, id: "attempt-version", activity_id: "activity-good", source_ids: [], source_versions: { [shreddedSourceId.toUpperCase()]: 2 } },
   ],
 };
 const tombstone = {
   receiptId: "tombstone", workspaceId: scope.workspaceId, target: { kind: "source", sourceId: "shred" },
   issuedAtMs, appendOnlyCompliant: true, immutableAppendOnlyDeletes: [], preservedImmutableTables: [],
-  shreddedWorkspaceKeyId: null, shreddedSourceKeyIds: ["key"], shreddedSourceIds: ["shred"],
+  shreddedWorkspaceKeyId: null, shreddedSourceKeyIds: ["key"], shreddedSourceIds: ["shred", shreddedSourceId],
   preservedWorkspaceKeyId: "workspace-key", preservedSourceKeyIds: [], appliedSubmissionKeys: [], newlyApplied: true,
   privacyEpoch: 7,
 } satisfies CryptoShredTombstoneReceipt & { privacyEpoch: number };
@@ -272,14 +277,14 @@ it("starts lineage from scoped exclusions and follows chunk links with canonical
     tables: {
       opening_privacy_exclusions: [{ workspace_id: " WORKSPACE ", source_id: " SHRED " }, { workspace_id: "foreign", source_id: "keep" }],
       opening_sources: [{ ...owner, workspace_id: "WORKSPACE", id: "keep" }, { ...owner, id: "SHRED" }],
-      opening_source_chunks: [{ id: "chunk", source_id: "Shred" }],
+      opening_source_chunks: [{ id: existingChunkId, source_id: "Shred" }],
       opening_conversations: [{ workspace_id: " WORKSPACE ", owner_user_id: " LEARNER ", id: "conversation" }],
       opening_turns: [
         { ...owner, id: "turn-keep", conversation_id: "conversation", source_ids: [" KEEP "], role: "user" },
         { ...owner, id: "turn-shred", conversation_id: "conversation", source_ids: ["SHRED"], role: "user" },
-        { ...owner, id: "turn-chunk", conversation_id: "conversation", chunk_id: " CHUNK ", source_ids: [], role: "user" },
+        { ...owner, id: "turn-chunk", conversation_id: "conversation", chunk_id: ` ${existingChunkId.toUpperCase()} `, source_ids: [], role: "user" },
       ],
-      opening_learning_item_versions: [{ ...owner, workspace_id: " WORKSPACE ", id: "item", chunk_id: " CHUNK " }],
+      opening_learning_item_versions: [{ ...owner, workspace_id: " WORKSPACE ", id: "item", chunk_id: ` ${existingChunkId.toUpperCase()} ` }],
       opening_teaching_activities: [{ ...owner, id: "activity", source_ids: [" KEEP "] }],
       opening_learning_attempts: [
         { ...owner, id: "attempt-keep", activity_id: "activity", source_ids: ["KEEP"] },
@@ -354,7 +359,6 @@ describe("persisted dataset provenance", () => {
   const missingTurnId = "abcdef12-3456-4789-abcd-ef1234567892";
   const knownSourceId = "abcdef12-3456-4789-abcd-ef1234567893";
   const missingSourceId = "abcdef12-3456-4789-abcd-ef1234567894";
-  const shreddedSourceId = "abcdef12-3456-4789-abcd-ef1234567895";
   const memoryRefs = [{ memoryDependencyIds: [memoryId.toUpperCase()] }];
   const turn = (id: string, links: Record<string, unknown> = {}) => ({
     ...owner, id, conversation_id: "conversation", source_ids: [], role: "assistant", context_source_refs: [], ...links,
@@ -364,11 +368,11 @@ describe("persisted dataset provenance", () => {
     lineage: dataset.OpeningDatasetProjectionInput["tables"],
     privacy: Pick<dataset.PrivacyGuardedOpeningDatasetInput, "deletedTurnIds" | "tombstoneReceipts"> = {},
   ) => dataset.projectPrivacyGuardedOpeningDataset({
-    scope, privacyEpoch: 3, mode: "solo", role: "learner", ...privacy,
+    scope, privacyEpoch: 3, mode: "solo", role: "learner", nowMs: issuedAtMs, ...privacy,
     tables: { opening_conversations: tables.opening_conversations, ...lineage },
   }, pseudonym).dataset;
 
-  const boundBlock = { content: { citationBinding: { sourceId: " SHRED " } } };
+  const boundBlock = { content: { citationBinding: { sourceId: ` ${shreddedSourceId.toUpperCase()} ` } } };
   it.each([
     { origin: "republished note provenance", lineage: {
       opening_note_provenance: [{ ...owner, document_id: " DOCUMENT ", context_source_refs: [{ sourceId: shreddedSourceId, sourceVersion: 1 }] }],
@@ -381,7 +385,7 @@ describe("persisted dataset provenance", () => {
     } },
     { origin: "saved library block citation", lineage: {
       library_revisions: [{ ...owner, id: "revision", document_id: "document", blocks: [
-        { content: { citationBinding: { refs: [{ sourceId: "shred", sourceVersion: 1 }] } } },
+        { content: { citationBinding: { refs: [{ sourceId: shreddedSourceId, sourceVersion: 1, chunkId: existingChunkId }] } } },
       ] }],
     } },
     { origin: "legacy revision snapshot citation", lineage: {
@@ -404,9 +408,7 @@ describe("persisted dataset provenance", () => {
         opening_learning_sessions: ["through-unit", "through-spec"].map(id => ({ ...owner, id, activity_id: id })),
         opening_turns: [turn("through-unit", { learning_session_id: "through-unit" }),
           turn("through-spec", { learning_session_id: "through-spec" }), turn("keep")],
-      }, origin === "library document deletion" ? {} : {
-        tombstoneReceipts: [{ ...tombstone, shreddedSourceIds: ["shred", shreddedSourceId] }],
-      });
+      }, origin === "library document deletion" ? {} : { tombstoneReceipts: [tombstone] });
       expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
       expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
     },
@@ -421,14 +423,137 @@ describe("persisted dataset provenance", () => {
   };
   const publishedTurn = turn("published", { learning_session_id: "published-session" });
 
+  it.each([{ chunkId: absentChunkId }, { keyframeChunkId: absentChunkId }])(
+    "excludes publication, turn, and attempt selections of absent chunks ($chunkId $keyframeChunkId)", selection => {
+      const source = { sourceId: knownSourceId, version: 1 };
+      const anchor = { sourceId: knownSourceId, chunkId: absentChunkId };
+      const result = project({
+        ...published,
+        opening_sources: [{ ...owner, id: knownSourceId }],
+        opening_source_chunks: [{ id: existingChunkId, source_id: knownSourceId }],
+        opening_teaching_activity_specs: [{ ...published.opening_teaching_activity_specs[0], source_refs: [{ ...source, ...selection }] }],
+        opening_teaching_activities: [...published.opening_teaching_activities, activity("keep")],
+        opening_learning_attempts: [...published.opening_learning_attempts,
+          { ...owner, id: "anchored", activity_id: "keep", source_ids: [], context_anchor: anchor },
+          { ...owner, id: "keep", activity_id: "keep", source_ids: [], context_anchor: { ...anchor, chunkId: existingChunkId } }],
+        opening_turns: [publishedTurn, turn("anchored", { chunk_id: null, context_anchor: anchor }),
+          turn("keep", { context_anchor: { ...anchor, chunkId: existingChunkId } })],
+      });
+      expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
+      expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+      expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:keep"]);
+    },
+  );
+
+  it.each([
+    { reason: "superseded", fields: { status: "superseded" }, visible: false },
+    { reason: "rejected", fields: { status: "rejected" }, visible: false },
+    { reason: "course-scoped", fields: { course_id: "course" }, visible: false },
+    { reason: "expired", fields: { kind: "temporary", expires_at: time }, visible: false },
+    { reason: "unexpired", fields: { kind: "temporary", expires_at: new Date(issuedAtMs + 1) }, visible: true },
+  ])("checks a $reason memory without excluding its source turn", ({ fields, visible }) => {
+    const result = project({
+      ...published,
+      opening_memories: [{ ...owner, id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [upstreamId], ...fields }],
+      opening_note_provenance: [{ document_id: "document", context_source_refs: memoryRefs }],
+      opening_turns: [turn(upstreamId, { role: "user" }), turn("consumer", { context_source_refs: memoryRefs }), publishedTurn],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(visible ? ["activity:published"] : []);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(visible ? ["attempt:published"] : []);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(visible
+      ? [`turn:${upstreamId}`, "turn:consumer", "turn:published"] : [`turn:${upstreamId}`]);
+  });
+
+  it("excludes turn source pins outside the inventory and malformed version maps", () => {
+    const result = project({
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_turns: [
+        turn("missing-pin", { role: "user", source_versions: { [missingSourceId]: 1 } }),
+        turn("missing-anchor", { role: "user", context_anchor: { sourceId: missingSourceId } }),
+        turn("array-pin", { role: "user", source_versions: [] }),
+        turn("negative-pin", { role: "user", source_versions: { [knownSourceId]: -1 } }),
+        turn("malformed-key", { role: "user", source_versions: { "not-a-uuid": 1 } }),
+        turn("keep", { role: "user", source_versions: { [knownSourceId.toUpperCase()]: 0 }, context_anchor: { sourceId: knownSourceId } }),
+      ],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
+  it.each([
+    { label: "live block source", block: { citationBinding: { sourceId: missingSourceId } }, live: true },
+    { label: "revision binding source", block: { citationBinding: { refs: [{ sourceId: missingSourceId, sourceVersion: 0, chunkId: existingChunkId }] } }, live: false },
+    { label: "malformed block chunk", block: { citedChunkIds: ["not-a-uuid"] }, live: false },
+    { label: "missing bound chunk ID", block: { citationBinding: { refs: [{ sourceId: knownSourceId, sourceVersion: 0 }] } }, live: false },
+  ])("excludes a publication with $label when the chunk inventory is omitted", ({ block, live }) => {
+    const result = project({
+      ...published,
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      ...(live ? { library_blocks: [{ ...owner, document_id: "document", content: block }] }
+        : { library_revisions: [{ ...owner, id: "revision", document_id: "document", blocks_snapshot: [{ content: block }] }] }),
+      opening_turns: [publishedTurn, turn("keep")],
+    });
+    expect(result.coursePackageQuality).toEqual([]);
+    expect(result.answerSequences).toEqual([]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
+  it("excludes a spec with an unknown source, malformed source ref, or malformed chunk ID", () => {
+    const result = project({
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_teaching_activities: ["missing-source", "malformed-ref", "malformed-chunk", "keep"].map(activity),
+      opening_teaching_activity_specs: [
+        { ...owner, activity_id: "missing-source", source_refs: [{ sourceId: missingSourceId }] },
+        { ...owner, activity_id: "malformed-ref", source_refs: [null] },
+        { ...owner, activity_id: "malformed-chunk", source_refs: [{ sourceId: knownSourceId, chunkId: "not-a-uuid" }] },
+        { ...owner, activity_id: "keep", source_refs: [{ sourceId: knownSourceId, version: "0", chunkId: existingChunkId }] },
+      ],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
+  });
+
+  it("requires valid turn citation chunks and validates optional chunk selectors without an inventory", () => {
+    const citation = { sourceId: knownSourceId, sourceVersion: 0 };
+    const result = project({
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_turns: [
+        turn("missing", { citations: [citation] }),
+        turn("null", { citations: [{ ...citation, chunkId: null }] }),
+        turn("bad-citation", { citations: [{ ...citation, chunkId: "not-a-uuid" }] }),
+        turn("bad-keyframe", { citations: [{ ...citation, chunkId: existingChunkId, keyframeChunkId: " " }] }),
+        turn("bad-column", { chunk_id: "not-a-uuid" }),
+        turn("bad-anchor", { context_anchor: { sourceId: knownSourceId, chunkId: "not-a-uuid" } }),
+        turn("keep", { citations: [{ ...citation, chunkId: existingChunkId, keyframeChunkId: "frame-1" }] }),
+      ],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
+  it("excludes answers derived from missing problem, item, and observation sources", () => {
+    const result = project({
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_teaching_activities: [activity("keep")],
+      opening_problem_refs: [{ ...owner, problem_id: "problem", source_id: missingSourceId }],
+      opening_learning_item_versions: [{ ...owner, id: "item", source_id: missingSourceId }],
+      opening_learning_observations: [
+        { id: "listed", source_ids: [missingSourceId] }, { id: "version", source_versions: { [missingSourceId]: 1 } },
+        { id: "reference", reference_source_id: missingSourceId }, { id: "check", reference_check: { referenceId: missingSourceId } },
+      ].map(observation => ({ ...owner, source_turn_ids: [], ...observation })),
+      opening_learning_attempts: [
+        { id: "keep" }, { id: "problem", problem_id: "problem" }, { id: "item", item_version_id: "item" },
+        ...["listed", "version", "reference", "check"].map(id => ({ id, observation_id: id })),
+      ].map(attempt => ({ ...owner, activity_id: "keep", source_ids: [], ...attempt })),
+    });
+    expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:keep"]);
+  });
+
   it.each(["live", "blocks", "blocks_snapshot"] as const)("follows chunk-only citations from %s", storage => {
-    const block = { content: { citedChunkIds: ["keep-chunk", " SHRED-CHUNK "] } };
+    const block = { content: { citedChunkIds: [existingChunkId, ` ${absentChunkId.toUpperCase()} `] } };
     const storageRows = storage === "live"
       ? { library_blocks: [{ ...owner, document_id: "document", ...block }] }
       : { library_revisions: [{ ...owner, id: "revision", document_id: "document", [storage]: [block] }] };
     const result = project({
       ...published, ...storageRows,
-      opening_source_chunks: [{ id: "keep-chunk", source_id: "keep" }, { id: "shred-chunk", source_id: "shred" }],
+      opening_source_chunks: [{ id: existingChunkId, source_id: "keep" }, { id: absentChunkId, source_id: "shred" }],
       opening_turns: [publishedTurn, turn("keep")],
     }, { tombstoneReceipts: [tombstone] });
     expect(result.coursePackageQuality).toEqual([]);
@@ -437,18 +562,18 @@ describe("persisted dataset provenance", () => {
   });
 
   it.each([
-    { reason: "not an array", citedChunkIds: "keep-chunk", visible: false },
+    { reason: "not an array", citedChunkIds: existingChunkId, visible: false },
     { reason: "a null entry", citedChunkIds: [null], visible: false },
     { reason: "an empty entry", citedChunkIds: [" "], visible: false },
-    { reason: "a purged chunk", citedChunkIds: ["missing"], visible: false },
-    { reason: "a chunk in another workspace", citedChunkIds: ["foreign"], visible: false },
-    { reason: "a workspace chunk", citedChunkIds: [" KEEP-CHUNK "], visible: true },
+    { reason: "a purged chunk", citedChunkIds: [absentChunkId], visible: false },
+    { reason: "a chunk in another workspace", citedChunkIds: [foreignChunkId], visible: false },
+    { reason: "a workspace chunk", citedChunkIds: [` ${existingChunkId.toUpperCase()} `], visible: true },
     { reason: "an explicitly empty list", citedChunkIds: [], visible: true },
   ])("checks saved block chunk lineage for $reason", ({ citedChunkIds, visible }) => {
     const result = project({
       ...published,
       opening_sources: [{ ...owner, id: "keep" }, { ...owner, workspace_id: "foreign", id: "foreign-source" }],
-      opening_source_chunks: [{ id: "keep-chunk", source_id: "keep" }, { id: "foreign", source_id: "foreign-source" }],
+      opening_source_chunks: [{ id: existingChunkId, source_id: "keep" }, { id: foreignChunkId, source_id: "foreign-source" }],
       library_revisions: [{ id: "revision", document_id: "document", blocks: [{ content: { citedChunkIds } }] }],
       opening_learning_attempts: [...published.opening_learning_attempts,
         { ...owner, id: "revision", activity_id: "keep", teaching_revision_id: "revision", source_ids: [] }],
@@ -463,8 +588,8 @@ describe("persisted dataset provenance", () => {
   it("excludes problem and item dependents when their chunks are the only missing lineage", () => {
     const result = project({
       opening_source_chunks: [],
-      opening_problem_refs: [{ ...owner, problem_id: "problem", chunk_id: "missing" }],
-      opening_learning_item_versions: [{ ...owner, id: "item", chunk_id: "missing" }],
+      opening_problem_refs: [{ ...owner, problem_id: "problem", chunk_id: absentChunkId }],
+      opening_learning_item_versions: [{ ...owner, id: "item", chunk_id: absentChunkId }],
       opening_teaching_activities: [activity("keep")],
       opening_learning_attempts: [
         { id: "keep" }, { id: "problem", problem_id: "problem" }, { id: "item", item_version_id: "item" },
@@ -476,10 +601,10 @@ describe("persisted dataset provenance", () => {
   it("excludes turns with purged direct or citation chunk references in a supplied inventory", () => {
     const result = project({
       opening_sources: [{ ...owner, id: knownSourceId }],
-      opening_source_chunks: [{ id: "present", source_id: knownSourceId }],
-      opening_turns: [turn("direct", { chunk_id: "missing" }), turn("present", { chunk_id: "PRESENT" }),
-        turn("citation", { citations: [{ sourceId: knownSourceId, sourceVersion: 1, chunkId: "missing" }] }),
-        turn("media-citation", { citations: [{ sourceId: knownSourceId, sourceVersion: 1, chunkId: "present", keyframeChunkId: "missing" }] })],
+      opening_source_chunks: [{ id: existingChunkId, source_id: knownSourceId }],
+      opening_turns: [turn("direct", { chunk_id: absentChunkId }), turn("present", { chunk_id: existingChunkId.toUpperCase() }),
+        turn("citation", { citations: [{ sourceId: knownSourceId, sourceVersion: 1, chunkId: absentChunkId }] }),
+        turn("media-citation", { citations: [{ sourceId: knownSourceId, sourceVersion: 1, chunkId: existingChunkId, keyframeChunkId: absentChunkId }] })],
     });
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:present"]);
   });
@@ -509,7 +634,7 @@ describe("persisted dataset provenance", () => {
 
   it("follows a deleted source turn through a documentless memory and a republished note's memory dependencies", () => {
     const result = project({
-      opening_memories: [{ ...owner, id: memoryId, source_turn_ids: [upstreamId.toUpperCase()] }],
+      opening_memories: [{ ...owner, id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [upstreamId.toUpperCase()] }],
       opening_note_provenance: [{ document_id: "document", context_source_refs: memoryRefs }],
       opening_teaching_activity_specs: [{ ...owner, activity_id: "published", document_id: "document" }],
       opening_teaching_activities: [activity("published")],
@@ -522,14 +647,14 @@ describe("persisted dataset provenance", () => {
   it("excludes memory consumers when a user source turn loses its referenced source", () => {
     const result = project({
       opening_sources: [],
-      opening_memories: [{ ...owner, id: memoryId, source_turn_ids: [upstreamId] }],
+      opening_memories: [{ ...owner, id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [upstreamId] }],
       opening_turns: [turn(upstreamId, { role: "user", source_ids: [missingSourceId], context_source_refs: null }),
         turn("consumer", { context_source_refs: memoryRefs }), turn("keep")],
     });
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
   });
 
-  const memory = { ...owner, id: memoryId, status: "active", source_turn_ids: [upstreamId] };
+  const memory = { ...owner, id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [upstreamId] };
 
   it.each([
     { reason: "a hard-deleted turn", ids: [upstreamId, missingTurnId], visible: false },
@@ -599,7 +724,7 @@ describe("persisted dataset provenance", () => {
     const result = project({
       opening_sources: [{ ...owner, id: knownSourceId }, { ...owner, id: missingSourceId, workspace_id: "foreign" }],
       opening_turns: [turn("affected", data), turn("keep-assistant"), turn("keep-user", { role: "user", context_source_refs: null }),
-        turn("keep-citation", { citations: [{ sourceId: knownSourceId.toUpperCase(), sourceVersion: 0 }] })],
+        turn("keep-citation", { citations: [{ sourceId: knownSourceId.toUpperCase(), sourceVersion: 0, chunkId: existingChunkId }] })],
       opening_teaching_activities: [{ ...activity("derived"), create_intent: { sourceTurnId: "affected" } }],
       opening_learning_attempts: [{ ...owner, id: "derived", activity_id: "derived", source_ids: [] }],
     });
@@ -629,11 +754,11 @@ describe("persisted dataset provenance", () => {
     const result = project({
       opening_teaching_activities: [activity("keep")],
       opening_learning_sessions: [{ ...owner, id: "session", source_ids: ["shred"] }],
-      opening_source_chunks: [{ id: "chunk", source_id: "shred" }],
+      opening_source_chunks: [{ id: existingChunkId, source_id: "shred" }],
       library_documents: [{ id: "document", deleted_at: time }],
       library_revisions: [{ ...owner, id: "revision", document_id: "document" }],
       opening_problem_refs: [
-        { ...owner, problem_id: "chunk-problem", chunk_id: "chunk" },
+        { ...owner, problem_id: "chunk-problem", chunk_id: existingChunkId },
         { ...owner, problem_id: "revision-problem", teaching_revision_id: "revision" },
         { ...owner, problem_id: "session-problem", session_id: "session" },
       ],

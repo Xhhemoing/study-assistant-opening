@@ -328,7 +328,7 @@ export function turnMemoryDependencyIds(row: Record<string, unknown>): string[] 
 
 type BackupHistoryRow = Record<string, unknown>;
 
-function canSupplyBackupMemory(row: BackupHistoryRow, now: number): boolean {
+export function canSupplyBackupMemory(row: BackupHistoryRow, now: number): boolean {
   if (row.status !== "active" || row.course_id != null) return false;
   if (row.kind === "confirmed") return true;
   if (row.kind !== "temporary") return false;
@@ -491,7 +491,14 @@ export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQu
 
 export function noteProvenanceSourceReferences(row: Record<string, unknown>): string[] | null {
   if (!Array.isArray(row.context_source_refs)) return null;
-  return sourceReferences({ ...row, context_source_refs: row.context_source_refs.filter(ref => !notePublicationMetadata(ref)) });
+  const refs: unknown[] = [];
+  for (const ref of row.context_source_refs) {
+    if (notePublicationMetadata(ref)) continue;
+    if (isRecord(ref) && "memoryDependencyIds" in ref) {
+      if (!turnMemoryDependencyMetadata(ref)) return null;
+    } else refs.push(ref);
+  }
+  return sourceReferences({ ...row, context_source_refs: refs });
 }
 
 export function turnSourceReferences(row: Record<string, unknown>): string[] | null {

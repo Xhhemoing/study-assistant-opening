@@ -658,21 +658,42 @@ function lockedMemorySourceRefs(versions: ReadonlyMap<string, number>, sourceIds
   return refs;
 }
 
-/** After history and workspace locks, resolve memory evidence on both sides of the saved exchange. */
-export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: OpeningScope, turnId: string): Promise<ContextSourceRef[] | null> {
-  const origin: MemoryOrigin = { id: turnId, course_id: null, turn_ids: [turnId] };
-  // The note repository separately checks the assistant's recorded refs and citations.
-  const bindings = (await readOriginBindings(tx, scope, [origin], { materialUse: "origin" }, true)).get(turnId);
-  const binding = bindings?.[0];
-  const user = binding?.user;
-  if (!binding || binding.ids === null || user?.ids === null) return null;
-  const pairedMemory = user && (user.ids.length > 0 || user.backings.length > 0);
-  if (!binding.ids.length && !binding.backings.length && !pairedMemory) return [];
-  origin.course_id = binding.turn_course_id;
-  const roots = bindingRoots([binding], "origin");
+/** After history and workspace locks, resolve the snippet's exact memories and backing material. */
+export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: OpeningScope,
+  input: { turnId: string } | { dependencyIds: string[] },
+): Promise<{ sourceRefs: ContextSourceRef[]; dependencyIds: string[] } | null> {
   const courseIds = new Set<string>();
-  if (origin.course_id !== null) courseIds.add(origin.course_id);
-  if (pairedMemory && user.courseId !== null) courseIds.add(user.courseId);
+  let roots: MemoryRoot[];
+  let userRefs: ContextSourceRef[] = [];
+  let resolve: (graphFor: (use: MemoryUse) => MemoryGraph) => { dependencies: MemoryDependencyStatus[]; sourceIds: string[] } | null;
+  if ("turnId" in input) {
+    const origin: MemoryOrigin = { id: input.turnId, course_id: null, turn_ids: [input.turnId] };
+    // The note repository separately checks the assistant's recorded refs and citations.
+    const binding = (await readOriginBindings(tx, scope, [origin], { materialUse: "origin" }, true)).get(input.turnId)?.[0];
+    const user = binding?.user;
+    if (!binding || binding.ids === null || user?.ids === null) return null;
+    roots = bindingRoots([binding], "origin");
+    if (!roots.length && !binding.backings.length && !user?.backings.length) return { sourceRefs: [], dependencyIds: [] };
+    origin.course_id = binding.turn_course_id;
+    if (origin.course_id !== null) courseIds.add(origin.course_id);
+    if (user?.courseId && (user.ids.length || user.backings.length)) courseIds.add(user.courseId);
+    userRefs = user?.memoryOnlyRefs ?? [];
+    resolve = graphFor => {
+      const resolved = resolveOrigins(graphFor, origin, [binding], "origin");
+      if (!resolved) return null;
+      // resolveOrigins has already validated these historical exchanges and locked their material.
+      const historyDependencies = binding.ancestors.flatMap(entry => resolveMemoryDependencyStatus(
+        graphFor(entry.materialUse), entry.memoryIds, entry.backings, entry.courseId, undefined, entry.backingSourceIds,
+      ) ?? []);
+      return { sourceIds: resolved.sourceIds, dependencies: [...resolved.dependencies, ...historyDependencies] };
+    };
+  } else {
+    roots = input.dependencyIds.map(id => ({ id, use: "origin" }));
+    resolve = graphFor => {
+      const dependencies = resolveMemoryDependencyStatus(graphFor("origin"), input.dependencyIds, [], null);
+      return dependencies && { dependencies, sourceIds: dependencies.flatMap(memory => memory.sourceIds ?? []) };
+    };
+  }
   const sourceIds = new Set<string>();
   await readMemoryDependencyGraphs(tx, scope, roots, { collectCourseIds: courseIds, collectSourceIds: sourceIds });
   if (!await lockActiveMemoryCourses(tx, scope, [...courseIds])) return null;
@@ -681,18 +702,18 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
   const graphFor = await readMemoryDependencyGraphs(tx, scope, roots, {
     collectCourseIds: currentCourseIds, lockedSourceIds: [...versions.keys()],
   });
-  const resolved = resolveOrigins(graphFor, origin, [binding], "origin");
+  const resolved = resolve(graphFor);
   if (!resolved || [...currentCourseIds].some(id => !courseIds.has(id))) return null;
   const refs = lockedMemorySourceRefs(versions, resolved.sourceIds);
   if (!refs) return null;
 
-  const dependencyIds = [...new Set(resolved.dependencies.map(memory => memory.dep_id))].sort();
+  const dependencyIds = [...new Set(resolved.dependencies.map(memory => memory.dep_id.toLowerCase()))].sort();
   const active = await tx`SELECT id FROM opening_memories
     WHERE workspace_id=${scope.workspaceId} AND id=ANY(${dependencyIds}::uuid[]) AND status='active'
       AND (kind='confirmed' OR (kind='temporary' AND expires_at > clock_timestamp()))
     ORDER BY id FOR SHARE`;
   if (active.length !== dependencyIds.length) return null;
-  return [...(user?.memoryOnlyRefs ?? []), ...refs.map(ref => ({ ...ref, memoryOnly: true }))];
+  return { dependencyIds, sourceRefs: [...userRefs, ...refs.map(ref => ({ ...ref, memoryOnly: true }))] };
 }
 
 /** Discover material first, then repeat admission under sorted course and source locks. */
