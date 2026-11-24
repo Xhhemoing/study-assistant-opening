@@ -4,7 +4,7 @@ import { buildDecisionInput } from "./decision-input";
 import { nextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
 import type { NextLearningStep, NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 import {
-  adaptiveShadowTime, compareLearnerShadowV2, courseFeatureRevisions, matchesUntimestampedObservation,
+  adaptiveShadowTime, compareLearnerShadowV2, courseFeatureRevisions, explicitObservationRecording, matchesUntimestampedObservation,
   planAdaptiveBellmanShadow, predictLearnerShadowV2, sameObservationProjection, visibleObservationRevisions,
   type AdaptiveBellmanShadowInput, type AdaptiveEpistemicShadowInput,
 } from "./metacognitive-epistemic-bridge";
@@ -75,40 +75,34 @@ function historicalBktEvidence(
   observations: readonly SnapshotObservation[], features: readonly LearnerStateFeature[], courseId: string, cutoff: number,
 ) {
   const valid = courseFeatureRevisions(features, courseId);
-  const courseFeaturesById = groupById(features.filter(row => row.courseId === courseId), row => row.observationId);
   const featuresById = groupById(valid, row => row.feature.observationId);
   const latestRecordings = new Map<string, number>();
   const disputedSamples = new Set<string>();
   const heads = [...groupById(observations, row => row.id).entries()].flatMap(([id, rows]) => {
     const slots = featuresById.get(id) ?? [];
-    const visible = visibleObservationRevisions(rows, slots, cutoff);
-    const hasInvalidFeatures = (courseFeaturesById.get(id)?.length ?? 0) > slots.length;
+    const { revisions: visible, latest } = visibleObservationRevisions(rows, slots, cutoff);
     const unplaced = rows.filter(row => {
-      if (row.recordedAt !== undefined) return false;
+      if (row.recordedAt != null) return false;
       const attempted = adaptiveShadowTime(row.attemptedAt);
       return attempted < cutoff && !slots.some(slot =>
         slot.attempted === attempted && matchesUntimestampedObservation(row, slot.feature));
     });
-    const ruleOnly = hasInvalidFeatures ? [] : unplaced.filter(row => !rows.some(explicit =>
-      explicit.recordedAt !== undefined && sameObservationProjection(row, explicit)));
+    const ruleOnly = unplaced.filter(row => !rows.some(explicit =>
+      sameObservationProjection(row, explicit) && Number.isFinite(explicitObservationRecording(explicit))));
     if (ruleOnly.length) disputedSamples.add(id);
-    if (!visible.length) return ruleOnly;
+    if (!latest.length) return ruleOnly;
 
-    const latest = visible.reduce((time, row) => Math.max(time, row.recorded), -Infinity);
-    const current = visible.filter(row => row.recorded === latest);
-    // An older legacy projection cannot compete with a strictly newer head
-    // unless its possible recordings also include the latest recording.
-    const uncertainRecording = current.some(row => row.legacyCopies !== undefined && visible.some(older =>
-      older.recorded < latest && older.observation === row.observation));
-    if (ruleOnly.length || uncertainRecording) return [...visible.map(row => row.observation), ...ruleOnly];
-    if (current.length < visible.length) latestRecordings.set(id, latest);
+    const recorded = latest[0]!.recorded;
+    if (!ruleOnly.length && latest.length < visible.length && latest.every(row => row.recorded === recorded)) {
+      latestRecordings.set(id, recorded);
+    }
 
-    // Classical BKT requires a unique sample, even if replay can infer
-    // exposure from multiple copies of a legacy projection.
-    if (unplaced.length || current.some(({ observation, legacyCopies }) => (legacyCopies ?? 1) > 1
-      || visible.some(older => older.recorded < latest && older.legacyCopies !== undefined
+    // A duplicate projection can establish exposure without qualifying as a
+    // unique BKT sample. Older, substantively different revisions are superseded.
+    if (unplaced.length || latest.some(({ observation, recorded, legacyCopies }) => (legacyCopies ?? 1) > 1
+      || visible.some(older => older.recorded < recorded && (legacyCopies !== undefined || older.legacyCopies !== undefined)
         && sameObservationProjection(older.observation, observation)))) disputedSamples.add(id);
-    return current.map(row => row.observation);
+    return [...latest.map(row => row.observation), ...ruleOnly];
   });
   return {
     heads, disputedSamples,

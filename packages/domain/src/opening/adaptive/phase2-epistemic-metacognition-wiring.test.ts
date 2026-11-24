@@ -733,6 +733,86 @@ it("R20 retains a rule-only legacy error beside an incompatible future recording
   }
 });
 
+it.each([null, "bad", at(1)])("R21 retains a rule-only error when its feature recording is %s", recordedAt => {
+  const original = projectProducedAttempts(bktSamples(5), at(3));
+  const wrong = head("wrong", 2, { verifiedCorrect: "no" });
+  const features = [...original.features, feature(wrong, { recordedAt })];
+  const input = buildDecisionInput({ observations: [...original.observations, wrong], wantsFullExplanation: false });
+  const result = nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff: at(3) });
+  expect(result.comparison).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+});
+
+it("R21 treats a null observation recording as legacy in replay and BKT", () => {
+  const original = projectProducedAttempts(bktSamples(5), at(3));
+  const observations = original.observations.map(row => ({ ...row, recordedAt: null }));
+  const input = buildDecisionInput({ observations, wantsFullExplanation: false });
+  const result = nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [],
+    features: original.features, cutoff: at(3) });
+
+  expect.soft(result.comparison).toMatchObject({ status: "compared", sampleCount: 5 });
+  const replay = replayEvidence({ ...original, observations, targetFamilyKeys: [], propagatedFamilyKeys: [] });
+  expect(replay.holdout).toEqual(original.observations.map(row => row.id).sort());
+});
+
+it.each([null, "bad", at(1)])("R21 keeps a rule-only error alongside a sibling recording of %s", recordedAt => {
+  const original = projectProducedAttempts(bktSamples(5), at(3));
+  const wrong = head("wrong", 2, { verifiedCorrect: "no" });
+  const future = projectProducedAttempts([{ ...wrong, verifiedCorrect: "yes", recordedAt: at(6) }], at(7), { untimestamped: false });
+  const input = buildDecisionInput({ observations: [...original.observations, wrong, { ...wrong, recordedAt }, ...future.observations],
+    wantsFullExplanation: false });
+  const result = nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [],
+    features: [...original.features, ...future.features], cutoff: at(3) });
+
+  expect(result.comparison).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+});
+
+it("R21 uses a legacy correction recorded after identical explicit evidence", () => {
+  const wrong = head("revised", 2, { verifiedCorrect: "no" });
+  const original = projectProducedAttempts([...bktSamples(5), wrong], at(3), { untimestamped: false });
+  const corrected = projectProducedAttempts([{ ...wrong, verifiedCorrect: "yes", recordedAt: at(4) }], at(8), { untimestamped: false });
+  const reverted = projectProducedAttempts([{ ...wrong, recordedAt: at(6) }], at(8));
+  const input = buildDecisionInput({ observations: [...original.observations, ...corrected.observations, ...reverted.observations],
+    wantsFullExplanation: false });
+  const features = [...original.features, ...corrected.features, ...reverted.features];
+  const compare = (cutoff: string) =>
+    nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff }).comparison;
+
+  expect(compare(at(6))).toMatchObject({ status: "compared", sampleCount: 6 });
+  expect(compare(at(8))).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+});
+
+it("R21 keeps a future legacy copy from disqualifying its explicit BKT predecessor", () => {
+  const samples = bktSamples(5);
+  const original = projectProducedAttempts(samples, at(3), { untimestamped: false });
+  const future = projectProducedAttempts([{ ...samples[0]!, recordedAt: at(6) }], at(8));
+  const input = buildDecisionInput({ observations: [...original.observations, ...future.observations], wantsFullExplanation: false });
+  const features = [...original.features, ...future.features];
+  const compare = (cutoff: string) =>
+    nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff });
+
+  for (const cutoff of [at(3), at(6)]) {
+    expect.soft(compare(cutoff).comparison, cutoff).toMatchObject({ status: "compared", sampleCount: 5 });
+  }
+  expect(compare(at(8)).comparison).toMatchObject({ reason: "insufficient_samples", sampleCount: 4 });
+});
+
+it("R21 supersedes an explicit error only when all optimal assignments have a later correction", () => {
+  const right = head("revised", 2);
+  const samples = projectProducedAttempts(bktSamples(5), at(3));
+  const wrong = projectProducedAttempts([{ ...right, verifiedCorrect: "no", recordedAt: at(4) }], at(8), { untimestamped: false });
+  const early = projectProducedAttempts([right], at(8));
+  const late = projectProducedAttempts([{ ...right, recordedAt: at(6) }], at(8));
+  const compare = (copies: readonly SnapshotObservation[], slots: readonly LearnerStateFeature[]) => {
+    const input = buildDecisionInput({ observations: [...samples.observations, ...wrong.observations, ...copies], wantsFullExplanation: false });
+    return nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [], cutoff: at(8),
+      features: [...samples.features, ...wrong.features, ...slots] }).comparison;
+  };
+
+  const slots = [...early.features, ...late.features];
+  expect(compare(late.observations, slots)).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+  expect(compare([...early.observations, ...late.observations], slots)).toMatchObject({ status: "compared", sampleCount: 5 });
+});
+
 it("holds overlapping legacy revisions until their forced recording slot", () => {
   const first = head("first", 2);
   const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,
