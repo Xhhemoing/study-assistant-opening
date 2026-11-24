@@ -1387,6 +1387,129 @@ it("R30 excludes an unmatched or incompatible fifth BKT revision from comparable
   }
 });
 
+it("R31 retains exposure attemptId only when every pre-cutoff candidate matches a non-absent pre-cutoff slot", () => {
+  const cutoff = at(3);
+  const shared = { problemId: "shared-problem", familyKey: "shared-family" };
+  const skillALegacy = head("skill-a", 1, { ...shared, requirementKey: "A" });
+  const skillAExplicit = { ...skillALegacy, recordedAt: at(1) };
+  const skillB = { ...head("skill-b", 1, { ...shared, requirementKey: "B" }), recordedAt: at(1) };
+  const skillBFeature = feature(skillB, { attemptId: "shared", recordedAt: at(1) });
+  const scopeB = { ...scope, requirementKey: "B" };
+  const scopeC = { ...scope, requirementKey: "C" };
+  const fireEdges = new Map([[skillB.id, { sourceSkillVersion: 1, edgeWeight: 1, covered: true, stepPassed: true }]]);
+  const compatibleDay1 = feature(skillALegacy, { attemptId: "shared", recordedAt: at(1) });
+  const incompatibleDay1 = { ...compatibleDay1, skillLabel: "Differentiation" };
+  const compatibleDay5 = feature(skillALegacy, { attemptId: "shared", recordedAt: at(5) });
+  const excludedSibling = { weights: [[skillB.id, 0]], lastDirectRecallAtMs: null, holdout: [] };
+
+  const checkMatchesAbsentBaseline = (
+    aObservations: readonly SnapshotObservation[],
+    aFeatures: readonly LearnerStateFeature[],
+    evalCutoff = cutoff,
+  ) => {
+    const observations = [...aObservations, skillB];
+    const withoutAFeatures = {
+      scope: scopeB, cutoff: evalCutoff, observations, features: [skillBFeature],
+      targetFamilyKeys: [], propagatedFamilyKeys: [],
+    };
+    const withAFeatures = { ...withoutAFeatures, features: [...aFeatures, skillBFeature] };
+    expect(replayEvidence(withoutAFeatures)).toEqual(excludedSibling);
+    expect(replayEvidence(withAFeatures)).toEqual(excludedSibling);
+    expect(predictLearnerShadowV2(withAFeatures).evidenceObservationIds).toEqual([]);
+    expect(predictLearnerShadowV2({
+      ...withAFeatures, scope: scopeC, fireEdgesByObservationId: fireEdges,
+    }).belief.implicitLogCredit).toBe(0);
+  };
+
+  // 1. Incompatible pre-cutoff feature with NO matching post-cutoff slot (legacy: candidates.length === 0, unplaced.length > 0).
+  const unplacedResolved = visibleObservationRevisions(
+    [skillALegacy], courseFeatureRevisions([incompatibleDay1], scope.courseId), Date.parse(cutoff),
+  );
+  expect(unplacedResolved).toMatchObject({ revisions: [], unplaced: [skillALegacy], revisionsCanBeAbsent: true });
+  checkMatchesAbsentBaseline([skillALegacy], [incompatibleDay1]);
+
+  // 2. Timestamped A with incompatible pre-cutoff feature (candidates.length > 0 while only incompatible slot is < cutoff),
+  // both without and WITH a post-cutoff compatible feature slot, and across all incompatibility axes.
+  for (const extraPostCutoffSlots of [[], [compatibleDay5]]) {
+    const aFeatures = [incompatibleDay1, ...extraPostCutoffSlots];
+    const explicitResolved = visibleObservationRevisions(
+      [skillAExplicit], courseFeatureRevisions(aFeatures, scope.courseId), Date.parse(cutoff),
+    );
+    expect(explicitResolved.revisions).toHaveLength(1);
+    expect(explicitResolved.revisionsCanBeAbsent).toBe(true);
+    checkMatchesAbsentBaseline([skillAExplicit], aFeatures);
+    if (extraPostCutoffSlots.length) {
+      checkMatchesAbsentBaseline([skillAExplicit, { ...skillAExplicit, recordedAt: at(5) }], aFeatures, at(5));
+    }
+  }
+  for (const incompatibleAxis of [
+    { ...compatibleDay1, itemVersionId: "item-other" },
+    { ...compatibleDay1, outcome: "incorrect" as const, eligibility: { ...compatibleDay1.eligibility, verifiedCorrect: "no" as const } },
+    { ...compatibleDay1, eligibility: { ...compatibleDay1.eligibility, usableForCurrentVersion: "no" as const } },
+    { ...compatibleDay1, eligibility: { ...compatibleDay1.eligibility, reasonCodes: ["declared_help" as const] } },
+  ]) {
+    checkMatchesAbsentBaseline([skillAExplicit], [incompatibleAxis, compatibleDay5]);
+  }
+
+  // Distinct-problem shared-family check: without a matched pre-cutoff slot on A, A stays standalone exposure
+  // (attemptId: null) and consumes family freshness before B, matching !rows.length.
+  const separateProblemA = { ...skillAExplicit, problemId: "problem-a" };
+  const separateProblemB = { ...skillB, problemId: "problem-b" };
+  const separateAbsent = replayEvidence({
+    scope: scopeB, cutoff, observations: [separateProblemA, separateProblemB],
+    features: [{ ...skillBFeature, observationId: separateProblemB.id }], targetFamilyKeys: [], propagatedFamilyKeys: [],
+  });
+  expect(separateAbsent).toEqual({ weights: [[separateProblemB.id, 1]], lastDirectRecallAtMs: null, holdout: [separateProblemB.id] });
+  expect(replayEvidence({
+    scope: scopeB, cutoff, observations: [separateProblemA, separateProblemB],
+    features: [incompatibleDay1, compatibleDay5, { ...skillBFeature, observationId: separateProblemB.id }],
+    targetFamilyKeys: [], propagatedFamilyKeys: [],
+  })).toEqual(separateAbsent);
+
+  // 3. revisionsCanBeAbsent is true even though candidates match a pre-cutoff slot in rows
+  // (legacy copy that could belong to >= cutoff slot, or contradictory legacy conflict fallback).
+  for (const uncertainFeatures of [[compatibleDay1, compatibleDay5], [incompatibleDay1, { ...compatibleDay1, recordedAt: at(2) }, compatibleDay5]]) {
+    const uncertainResolved = visibleObservationRevisions(
+      [skillALegacy], courseFeatureRevisions(uncertainFeatures, scope.courseId), Date.parse(cutoff),
+    );
+    expect(uncertainResolved.revisions).toHaveLength(1);
+    expect(uncertainResolved.revisionsCanBeAbsent).toBe(true);
+    checkMatchesAbsentBaseline([skillALegacy], uncertainFeatures);
+  }
+  const conflictingLegacy = [skillALegacy, { ...skillALegacy, isMultiDraft: true }];
+  const fallbackResolved = visibleObservationRevisions(
+    conflictingLegacy, courseFeatureRevisions([compatibleDay1], scope.courseId), Date.parse(cutoff),
+  );
+  expect(fallbackResolved.revisions).toHaveLength(2);
+  expect(fallbackResolved.revisionsCanBeAbsent).toBe(true);
+  checkMatchesAbsentBaseline(conflictingLegacy, [compatibleDay1]);
+
+  // 4. !revisionsCanBeAbsent is true (Oct 1 slot matches), yet another pre-cutoff candidate lacks a matching pre-cutoff slot in rows.
+  const twoExplicit = [skillAExplicit, { ...skillAExplicit, isMultiDraft: true, recordedAt: at(2) }];
+  for (const partialFeatures of [
+    [compatibleDay1],
+    [compatibleDay1, { ...incompatibleDay1, recordedAt: at(2) }],
+    [compatibleDay1, { ...incompatibleDay1, recordedAt: at(2) }, compatibleDay5],
+  ]) {
+    const partialResolved = visibleObservationRevisions(
+      twoExplicit, courseFeatureRevisions(partialFeatures, scope.courseId), Date.parse(cutoff),
+    );
+    expect(partialResolved.revisions).toHaveLength(2);
+    expect(partialResolved.revisionsCanBeAbsent).toBe(false);
+    checkMatchesAbsentBaseline(twoExplicit, partialFeatures);
+  }
+
+  // Positive control: once every pre-cutoff candidate matches a pre-cutoff slot in rows and !revisionsCanBeAbsent,
+  // A retains attemptId on the shared submission and B qualifies.
+  const matchedTwoSlots = [compatibleDay1, { ...compatibleDay1, recordedAt: at(2) }];
+  expect(replayEvidence({
+    scope: scopeB, cutoff, observations: [...twoExplicit, skillB], features: [...matchedTwoSlots, skillBFeature],
+    targetFamilyKeys: [], propagatedFamilyKeys: [],
+  })).toEqual({
+    weights: [[skillB.id, 1]], lastDirectRecallAtMs: Date.parse(at(1)), holdout: [skillB.id],
+  });
+});
+
 it.each([
   { buckets: 2, copies: 10 }, { buckets: 2, copies: 12 }, { buckets: 3, copies: 12 }, { buckets: 3, copies: 15 },
 ])("R26 resolves $copies copies across $buckets overlapping buckets", ({ buckets, copies }) => {

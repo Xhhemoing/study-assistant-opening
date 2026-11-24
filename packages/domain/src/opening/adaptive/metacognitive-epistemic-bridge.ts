@@ -893,9 +893,12 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
     }
     if (!exposureCandidates.length) return [];
     const { observation } = exposureCandidates[0]!;
-    if (candidates.length && !revisionsCanBeAbsent && rows.length === 1 && requirementKey && sameSubmission
+    const matchedPreCutoffCandidates = candidates.length > 0 && !revisionsCanBeAbsent && sameSubmission
       && candidates.every(({ observation: head, recorded: at }) =>
-        at === recorded && sameObservationProjection(head, observation) && matchesUntimestampedObservation(head, feature))) {
+        rows.some(row => row.recorded === at && matchesUntimestampedObservation(head, row.feature)));
+    if (matchedPreCutoffCandidates && rows.length === 1 && requirementKey
+      && candidates.every(({ observation: head, recorded: at }) =>
+        at === recorded && sameObservationProjection(head, observation))) {
       return [{ feature, attempted, observation, claimedRequirementKeys }];
     }
 
@@ -911,7 +914,7 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
     const maxAttempted = exposureCandidates.reduce((latest, row) => Math.max(latest, row.attempted), latestFeatureAttempted);
     return [{
       exposureOnly: true, attempted: maxAttempted, claimedRequirementKeys,
-      feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: candidates.length && sameSubmission ? attemptId : null },
+      feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: matchedPreCutoffCandidates ? attemptId : null },
       observation: { id: observationId, problemId, familyKey },
     }];
   }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));
