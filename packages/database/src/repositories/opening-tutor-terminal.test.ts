@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { TUTOR_CANCELLED_MESSAGE, TUTOR_UNKNOWN_MESSAGE } from "@aistudy/domain";
+import { TUTOR_CANCELLED_MESSAGE, TUTOR_UNKNOWN_MESSAGE, turnSourceReferences } from "@aistudy/domain";
+import { parseContextSourceRefs } from "./opening-context-provenance";
 import { createOpeningConversationRepository, type StoredTurn } from "./opening-conversations";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 
@@ -12,15 +13,15 @@ function unclaimedTerminalJobUpdate(query: string) {
   return [{ id: "job-1", workspace_id: scope.workspaceId, assistant_turn_id: "assistant-turn-1", timing_execution_id: null }];
 }
 
-function fakeSql(handler: (query: string) => unknown[] = () => []) {
+function fakeSql(handler: (query: string, values: unknown[]) => unknown[] = () => []) {
   const calls: string[] = [];
   let terminal = false;
-  const sql = (async (strings: TemplateStringsArray) => {
+  const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
     const query = strings.join(" ");
     calls.push(query);
     if (query.includes("SELECT owner_user_id FROM workspaces")) terminal = true;
     if (terminal && query.includes("FROM workspaces")) return [{ id: scope.workspaceId, owner_user_id: scope.ownerUserId }];
-    return handler(query);
+    return handler(query, values);
   }) as unknown as Sql & { calls: string[] };
   sql.calls = calls;
   sql.json = ((value: unknown) => value) as Sql["json"];
@@ -295,6 +296,7 @@ describe("opening tutor jobs repository", () => {
   it("writes help exposure only after the assistant turn update succeeds", async () => {
     const sql = fakeSql((query) => {
       if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (query.includes("SELECT t.attempt_id,t.context_anchor")) return [{ assistant_turn_id: "assistant-turn-1", course_id: null }];
       if (query.includes("UPDATE opening_tutor_jobs SET status = 'succeeded'")) {
         return [{ id: "job-1" }];
       }
@@ -345,9 +347,63 @@ describe("opening tutor jobs repository", () => {
     expect(exposureInsert).toBeGreaterThan(assistantUpdate);
   });
 
+  it("stores destination history versions even for user-selected sources absent from assistant refs", async () => {
+    const courseId = "10000000-0000-4000-8000-000000000001";
+    const sessionSource = "20000000-0000-4000-8000-000000000001";
+    const activitySource = "20000000-0000-4000-8000-000000000002";
+    const sharedSource = "20000000-0000-4000-8000-00000000000a";
+    let savedRefs: unknown;
+    const sql = fakeSql((query, values) => {
+      if (query.includes("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (query.includes("SELECT t.attempt_id,t.context_anchor")) {
+        return [{ assistant_turn_id: "assistant-turn-1", course_id: courseId, source_ids: [sharedSource.toUpperCase()] }];
+      }
+      if (query.includes("SELECT id FROM courses")) return [{ id: courseId }];
+      if (query.includes("SELECT s.id,s.version FROM opening_sources")) {
+        expect(values[1]).toEqual([sessionSource, activitySource, sharedSource]);
+        return [{ id: sessionSource, version: 4 }, { id: activitySource, version: 2 }, { id: sharedSource, version: 3 }];
+      }
+      if (query.includes("FROM jsonb_to_recordset")) return [{ admitted: true }];
+      if (query.includes("UPDATE opening_tutor_jobs SET status = 'succeeded'")) return [{ id: "job-1" }];
+      if (query.includes("UPDATE opening_turns SET text")) {
+        savedRefs = values[3];
+        return [{ id: "assistant-turn-1" }];
+      }
+      return [];
+    });
+    await createOpeningTutorJobsRepository(sql).completeTurn({
+      scope, jobId: "job-1", assistantTurnId: "assistant-turn-1", text: "answer",
+      citations: [], candidates: [], contextSourceRefs: [],
+    }, { historyCourseBindings: [{ courseId, materialUse: "citation",
+      sourceIds: [activitySource, sharedSource, sessionSource], sourceRefs: [],
+      selectedDestinationSourceIds: [activitySource, sharedSource, sessionSource],
+    }] });
+
+    const [contextRefs, backupRefs] = [
+      parseContextSourceRefs(savedRefs),
+      turnSourceReferences({ context_source_refs: savedRefs, source_ids: [], citations: [] }),
+    ];
+    expect({ contextRefs, backupRefs }).toEqual({
+      contextRefs: [
+        { sourceId: sessionSource, sourceVersion: 4 },
+        { sourceId: activitySource, sourceVersion: 2 },
+        { sourceId: sharedSource, sourceVersion: 3 },
+      ],
+      backupRefs: [sessionSource, activitySource, sharedSource],
+    });
+    const locks = [
+      "FROM opening_workspace_history_revisions", "SELECT privacy_epoch FROM workspaces", "FROM courses",
+      "ORDER BY s.id FOR SHARE OF s", "ORDER BY asset_id,course_id FOR SHARE",
+    ].map(clause => sql.calls.findIndex(query => query.includes(clause)));
+    expect(locks[0]).toBeGreaterThanOrEqual(0);
+    for (const [index, lock] of locks.slice(1).entries()) expect(lock).toBeGreaterThan(locks[index]!);
+  });
+
   it("does not write help exposure when the assistant turn was not persisted", async () => {
     const sql = fakeSql((query) => {
       if (query.includes("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 0 }];
+      if (query.includes("SELECT t.attempt_id,t.context_anchor")) return [{ assistant_turn_id: "assistant-turn-1", course_id: null }];
       if (query.includes("SELECT id FROM workspaces") && !query.includes("privacy_epoch")) return [{ id: scope.workspaceId }];
       if (query.includes("INSERT INTO opening_workspace_history_revisions")) return [];
       if (query.includes("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 1 }];

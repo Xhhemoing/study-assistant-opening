@@ -1387,7 +1387,11 @@ describe("tutor turn handler", () => {
       chunkA.id],
       requestId: null, candidates: [{ kind: "memory", text: "mixed memory", temporary: false }], inputTokens: 1, outputTokens: 1 }) });
     tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 1 }] });
-    const memories = { listContext: vi.fn(async () => ({ sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 2 }], memories: [] })) };
+    const memories = { listContext: vi.fn(async () => ({ sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 2 }], memories: [{
+      id: "00000000-0000-4000-8000-0000000000a1", workspaceId: claimedJob.workspaceId, courseId: null,
+      kind: "confirmed" as const, text: "Retained study preference", sourceTurnIds: [claimedJob.userTurnId], version: 0,
+      expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+    }] })) };
     await createTutorTurnHandler({ ...deps, memories })(claimedJob.id);
     expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({
       contextSourceRefs: [
@@ -1775,16 +1779,79 @@ describe("tutor turn handler", () => {
     );
   });
 
+  it.each(["conversation", "anchor", "practice", "unbound"] as const)("fences only admitted memories for a %s course binding", async binding => {
+    const { deps, tutorJobs, provider } = setup();
+    const courseA = "00000000-0000-4000-8000-0000000000ca";
+    const courseB = "00000000-0000-4000-8000-0000000000cb";
+    const anchor = binding === "anchor" || binding === "practice" ? {
+      purpose: "learning_help" as const, courseId: courseA,
+      ...(binding === "practice" ? { itemVersionId: "00000000-0000-4000-8000-0000000000cc" } : {}),
+    } : null;
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceVersions: { [chunkA.sourceId]: 0 },
+      ...(binding === "conversation" ? { courseId: courseA } : {}), ...(anchor ? { contextAnchor: anchor } : {}) });
+    const memory = (id: string, courseId: string | null, text: string) => ({
+      id, workspaceId: claimedJob.workspaceId, courseId, text, kind: "confirmed" as const,
+      version: 0, status: "active" as const, sourceTurnIds: [claimedJob.userTurnId], expiresAt: null,
+      createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+    });
+    const global = memory("00000000-0000-4000-8000-0000000000a1", null, "Global memory text");
+    const matching = memory("00000000-0000-4000-8000-0000000000a2", courseA.toUpperCase(), "Matching course text");
+    const foreign = memory("00000000-0000-4000-8000-0000000000a3", courseB, "Foreign course text");
+    const sourceRefs = [{ sourceId: secondSourceId, sourceVersion: 0 },
+      ...(binding === "unbound" ? [] : [{ sourceId: "00000000-0000-4000-8000-000000000098", sourceVersion: 0 }])];
+    const listContext = vi.fn(async () => ({ memories: [global, matching, foreign], sourceRefs,
+      dependencyMemoryIds: [matching.id.toUpperCase(), foreign.id] }));
+    const assertGlobalMemoriesCurrent = vi.fn(async () => {});
+    const stream = { begin: vi.fn(async () => {}), seal: vi.fn(async () => {}), append: vi.fn(async () => 1) };
+    await createTutorTurnHandler({ ...deps, stream, memories: { listContext },
+      streamExposures: { generate: vi.fn(async () => ({ id: claimedJob.assistantTurnId })) },
+      tutorJobs: { ...tutorJobs, assertGlobalMemoriesCurrent } })(claimedJob.id);
+    const scope = { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId };
+    const expectedIds = binding === "unbound" ? [global.id] : [global.id, matching.id];
+    expect(listContext).toHaveBeenCalledWith(scope, expect.any(String), binding === "unbound" ? null : courseA,
+      binding === "practice" ? "practice" : "citation");
+    const instruction = provider.complete.mock.calls[0]?.[0].instruction;
+    expect(instruction).toContain(global.text);
+    expect(instruction).not.toContain(foreign.text);
+    if (binding === "unbound") expect(instruction).not.toContain(matching.text);
+    else expect(instruction).toContain(matching.text);
+    expect(tutorJobs.withStreamPublication).toHaveBeenCalledWith(scope, claimedJob.id,
+      expect.objectContaining({ globalMemoryIds: expectedIds }), expect.any(Function));
+    expect(assertGlobalMemoriesCurrent).toHaveBeenCalledWith(scope, expectedIds, claimedJob.id);
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
+      contextSourceRefs: expect.arrayContaining(sourceRefs.map(ref => ({ ...ref, memoryOnly: true }))),
+    }), expect.objectContaining({ globalMemoryIds: expectedIds }));
+  });
+
+  it("discards a memory snapshot's refs, dependency IDs and expiry when none of its memories are eligible", async () => {
+    const { deps, tutorJobs, provider } = setup();
+    const memoryId = "00000000-0000-4000-8000-0000000000b1";
+    const listContext = async () => ({
+      memories: [{ id: memoryId, workspaceId: claimedJob.workspaceId, courseId: claimedJob.conversationId,
+        kind: "confirmed" as const, text: "Foreign memory", sourceTurnIds: [claimedJob.userTurnId], version: 0,
+        expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt }],
+      sourceRefs: [{ sourceId: secondSourceId, sourceVersion: 0 }], dependencyMemoryIds: [memoryId],
+      temporaryMemoryExpiresAt: "2000-01-01T00:00:00.000Z",
+    });
+    await expect(createTutorTurnHandler({ ...deps, memories: { listContext } })(claimedJob.id)).resolves.toEqual({ skipped: false });
+    expect(provider.complete.mock.calls[0]?.[0].instruction).not.toContain("Foreign memory");
+    const [completion, options] = tutorJobs.completeTurn.mock.calls[0]!;
+    expect(completion.contextSourceRefs).toEqual([{ sourceId: chunkA.sourceId, sourceVersion: 0 }]);
+    expect(options).not.toHaveProperty("globalMemoryIds");
+  });
+
   it("blocks provider dispatch when an injected temporary memory expires before send or fails DB re-check", async () => {
     const tempMemoryId = "00000000-0000-4000-8000-0000000000bb";
+    const courseId = "00000000-0000-4000-8000-0000000000ca";
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
-      const { deps, provider, budget } = setup();
+      const { deps, provider, budget, tutorJobs } = setup();
+      tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
       const memories = {
         listContext: vi.fn(async () => ({
           memories: [{
-            id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+            id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId,
             kind: "temporary" as const, text: "Short-lived preference", sourceTurnIds: [claimedJob.userTurnId],
             version: 0, expiresAt: "2026-11-21T00:00:01.000Z", status: "active" as const,
             createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
@@ -1811,13 +1878,14 @@ describe("tutor turn handler", () => {
 
     // DB-authoritative assertGlobalMemoriesCurrent rejection also prevents provider dispatch.
     const { deps: dbDeps, provider: dbProvider, budget: dbBudget, tutorJobs: dbJobs } = setup();
+    dbJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
     const assertGlobalMemoriesCurrent = vi.fn(async () => {
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
     });
     const dbMemories = {
       listContext: vi.fn(async () => ({
         memories: [{
-          id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+          id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId,
           kind: "temporary" as const, text: "Short-lived preference", sourceTurnIds: [claimedJob.userTurnId],
           version: 0, expiresAt: "2099-01-01T00:00:00.000Z", status: "active" as const,
           createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
@@ -1832,10 +1900,39 @@ describe("tutor turn handler", () => {
     })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(assertGlobalMemoriesCurrent).toHaveBeenCalledWith(
       { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
-      [tempMemoryId],
+      [tempMemoryId], claimedJob.id,
     );
     expect(dbProvider.complete).not.toHaveBeenCalled();
     expect(dbBudget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+  });
+
+  it("seals the stream if a course memory expires between dispatch and the first delta", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+      const { deps, tutorJobs, provider } = setup({ claim: { ...claimedJob, executionId: claimedJob.assistantTurnId } });
+      const courseId = "00000000-0000-4000-8000-0000000000ca";
+      const memoryId = "00000000-0000-4000-8000-0000000000bb";
+      tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, courseId, sourceVersions: { [chunkA.sourceId]: 0 } });
+      const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => 1), seal: vi.fn(async () => {}) };
+      const memories = { listContext: async () => ({ sourceRefs: [], memories: [{
+        id: memoryId, workspaceId: claimedJob.workspaceId, courseId, kind: "temporary" as const, text: "Course note",
+        sourceTurnIds: [claimedJob.userTurnId], version: 0, expiresAt: "2026-11-21T00:00:01.000Z", status: "active" as const,
+        createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+      }] }) };
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        vi.setSystemTime(new Date("2026-11-21T00:00:02.000Z"));
+        await delta("Never publish this");
+        return { text: "Never publish this", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      await expect(createTutorTurnHandler({ ...deps, memories, stream })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+      expect(stream.begin).toHaveBeenCalledOnce();
+      expect(stream.append).not.toHaveBeenCalled();
+      expect(stream.seal).toHaveBeenCalledOnce();
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("preserves onFailedResponseUsage across stream delta batching so refused streams settle confirmed usage instead of outcome_unknown", async () => {

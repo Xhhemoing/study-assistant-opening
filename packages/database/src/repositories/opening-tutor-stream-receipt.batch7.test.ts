@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
+import { createOpeningMemoryRepository } from "./opening-memory";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
+import { loadTutorHistoryContext } from "./opening-tutor-history";
 import { hasAttemptedFallbackStreamSeal, UnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
-const hooks = vi.hoisted(() => ({ release: vi.fn(), lock: vi.fn(), readAttempt: vi.fn() }));
+const hooks = vi.hoisted(() => ({ release: vi.fn(), lock: vi.fn(), readAttempt: vi.fn(), assertAttempt: vi.fn() }));
 vi.mock("./opening-study-exposure", async original => ({ ...await original<typeof import("./opening-study-exposure")>(), releaseOpeningStudyExposure: hooks.release }));
 vi.mock("./opening-learning-facts", async original => ({ ...await original<typeof import("./opening-learning-facts")>(), lockWorkspaceLearningHistory: hooks.lock }));
-vi.mock("./opening-tutor-attempt-context", async original => ({ ...await original<typeof import("./opening-tutor-attempt-context")>(), readTutorAttemptContext: hooks.readAttempt }));
+vi.mock("./opening-tutor-attempt-context", async original => ({ ...await original<typeof import("./opening-tutor-attempt-context")>(), readTutorAttemptContext: hooks.readAttempt, assertTutorAttemptContext: hooks.assertAttempt }));
 vi.mock("./opening-context-provenance", async original => ({ ...await original<typeof import("./opening-context-provenance")>(), contextSourceRefsIncluded: () => "synthetic-admission-expression" }));
 const workspace = "12000000-0000-4000-8000-000000000001", owner = "12000000-0000-4000-8000-000000000002";
 const jobId = "12000000-0000-4000-8000-000000000003", assistant = "12000000-0000-4000-8000-000000000004";
@@ -14,6 +16,8 @@ const token = "12000000-0000-4000-8000-000000000007", execution = "12000000-0000
 const attempt = "12000000-0000-4000-8000-000000000009", item = "12000000-0000-4000-8000-000000000010";
 const courseId = "12000000-0000-4000-8000-000000000011", sourceId = "12000000-0000-4000-8000-000000000012";
 const membershipId = "12000000-0000-4000-8000-000000000013", purposeRevision = "2026-11-20T00:00:00.000000Z";
+const examCourse = "12000000-0000-4000-8000-000000000014";
+const attemptSourceId = "12000000-0000-4000-8000-000000000015";
 const fence = { attemptId: attempt, itemVersionId: item, rootObservationId: null, headObservationId: null, answerRevision: null };
 const pin = { courseId, materialUse: "citation" as const, sources: [{ sourceId, sourceVersion: 0, membershipId, purposeRevision, purpose: "teaching" as const }] };
 const scope = { workspaceId: workspace, ownerUserId: owner }, time = "2026-11-10T00:00:00.000Z";
@@ -23,9 +27,20 @@ const job = { id: jobId, workspace_id: workspace, conversation_id: "conversation
   attempt_id: null, context_anchor: null, source_ids: [] as string[], course_id: null as string | null };
 type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; phase2Status?: string; epoch?: number; token?: string; execution?: string | null;
   unavailableSource?: boolean; missingExposure?: boolean; failAt?: string; failCommitAtTx?: number; boundAttempt?: string; anchorAttempt?: string;
-  anchorSourceId?: string; courseId?: string | null; sourceIds?: string[]; sourceVersions?: Record<string, number>; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
+  anchorSourceId?: string; anchorCourseId?: string; courseId?: string | null; sourceIds?: string[]; sourceVersions?: Record<string, number>; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
   derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
-  activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string };
+  activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; courseOnlyMemorySourceIds?: string[];
+  classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string;
+  expiredOnFinalCheck?: string;
+  missingCompletionAssistant?: boolean;
+  metadataTarget?: boolean;
+  sessionCourseId?: string;
+  discoveredAttemptSourceIds?: string[];
+  teachingSpecSourceIds?: string[];
+  metadataVersionMaps?: Partial<Record<"u" | "t", unknown>>;
+  metadataDirectSource?: boolean;
+  storedMemoryOrigins?: Record<string, { refs: unknown[]; backings?: string[][]; sourceIds?: string[]; turnId?: string }>;
+};
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
@@ -37,33 +52,91 @@ function fixture(options: Options = {}) {
       txEvents.push("clear-execution-fence");
       return [];
     }
-    if (sql.startsWith("NOT EXISTS ( WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
-    if (!sql.startsWith("SELECT")) return "fragment";
+    if (sql.startsWith("WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
+    if (sql.startsWith("CASE WHEN (?) ~*")) return { fragmentSql: sql };
+    if (sql.startsWith("SELECT tj.user_turn_id FROM opening_tutor_jobs")) return { fragmentSql: sql };
+    if (sql.startsWith("EXISTS ( SELECT 1 FROM jsonb_array_elements_text(") && sql.includes("JOIN opening_turns mt")) {
+      return { fragmentSql: sql, values };
+    }
+    if (sql.startsWith("NOT EXISTS ( ? SELECT 1 FROM mem_deps")) return values[0];
+    if (sql.startsWith("WITH candidate_target AS MATERIALIZED")) {
+      calls.push({ sql, values });
+      for (const [alias, value] of Object.entries(options.metadataVersionMaps ?? {})) {
+        const kind = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+        if (kind !== "object" && sql.includes(`jsonb_typeof(${alias}.source_versions)='object'`)) return [];
+      }
+      return options.metadataTarget ? [{ course_id: options.courseId, context_source_refs: [],
+        ...(options.metadataDirectSource ? { evidence: [{ origin: 1, refs: [] }] } : {}),
+      }] : [];
+    }
+    if (sql.startsWith("WITH candidate_evidence AS MATERIALIZED")) {
+      return [{ origin: 1, refs: [], sources: [{ id: sourceId, memory_only: false }], scoped: [], backings: [],
+        course_id: options.courseId, material_use: "citation", memberships: [
+          { asset_id: sourceId, course_id: courseId, purpose: "practice" },
+          { asset_id: sourceId, course_id: examCourse, purpose: "mock_exam" },
+        ] }];
+    }
+    if (!sql.startsWith("SELECT") && !sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")
+      && !sql.startsWith("UPDATE opening_turns SET text =")) return "fragment";
     calls.push({ sql, values });
     if (options.failAt && sql.startsWith(options.failAt)) throw failure;
     if (sql.startsWith("SELECT privacy_epoch")) return options.missingWorkspace ? [] : [{ privacy_epoch: options.epoch ?? 2 }];
     if (sql.startsWith("SELECT j.*,t.attempt_id") || sql.startsWith("SELECT j.user_turn_id,t.attempt_id") || sql.startsWith("SELECT t.attempt_id,t.context_anchor")) {
       const execValue = options.execution === undefined ? execution : options.execution;
       const status = txNumber >= 2 && options.phase2Status ? options.phase2Status : (options.status ?? "running");
-      const anchor = options.anchorAttempt || options.anchorSourceId
-        ? { ...(options.anchorAttempt ? { attemptId: options.anchorAttempt } : {}), ...(options.anchorSourceId ? { sourceId: options.anchorSourceId } : {}) }
+      const anchor = options.anchorAttempt || options.anchorSourceId || options.anchorCourseId
+        ? { attemptId: options.anchorAttempt, sourceId: options.anchorSourceId, courseId: options.anchorCourseId }
         : null;
       return options.missingJob ? [] : [{ ...job, status, claim_token: options.token ?? token, timing_execution_id: execValue,
         attempt_id: options.boundAttempt ?? null, context_anchor: anchor,
-        source_ids: options.sourceIds ?? [], source_versions: options.sourceVersions ?? null, course_id: options.courseId ?? null }];
+        source_ids: options.sourceIds ?? [], source_versions: options.sourceVersions ?? null, course_id: options.courseId ?? null,
+        session_course_id: sql.includes("AS session_course_id") ? options.sessionCourseId : undefined }];
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
+    if (sql.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [{ revision: 1 }];
+    if (sql.startsWith("SELECT jsonb_build_array(")) {
+      const ids = options.discoveredAttemptSourceIds ?? [];
+      return [{ materials: [{ ids, versions: Object.fromEntries(ids.map(id => [id, 0])) }], work_source: null,
+        spec_refs: options.teachingSpecSourceIds?.map(id => ({ sourceId: id })) }];
+    }
+    if (sql === "SELECT ? AS included") return [{ included: true }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
+    if (sql.startsWith("SELECT id, version FROM opening_sources")) return [{ id: sourceId, version: 0 }];
+    if (sql.startsWith("SELECT j.id FROM opening_tutor_jobs j")) return [{ id: jobId }];
     if (sql.startsWith("SELECT s.id,s.version FROM opening_sources")) {
       if (options.unavailableSource) return [];
       const requested = Array.isArray(values[1]) ? values[1] as string[] : [sourceId];
       return requested.map(id => ({ id, version: 0 }));
     }
     if (sql.startsWith("SELECT id FROM opening_memories")) {
-      return (options.activeGlobalMemoryIds ?? []).map(id => ({ id }));
+      const requested = values[1] as string[];
+      return (options.activeGlobalMemoryIds ?? []).filter(id => requested.includes(id)
+        && (sql.endsWith("FOR SHARE") || id !== options.expiredOnFinalCheck)).map(id => ({ id }));
     }
-    if (sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id")) {
-      return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id }));
+    if (sql.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+      const requested = values.find(Array.isArray) as string[];
+      return (options.activeGlobalMemoryIds ?? []).filter(id => requested.includes(id))
+        .map(id => {
+          const origin = options.storedMemoryOrigins?.[id];
+          const sources = options.backedMemorySourceIds ?? options.courseOnlyMemorySourceIds ?? [];
+          return { id, course_id: options.courseOnlyMemorySourceIds?.length ? options.courseId : null, expires_at: null,
+            source_turn_ids: origin || sources.length ? [origin?.turnId ?? user] : [] };
+        });
+    }
+    if (sql.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
+    if (sql.startsWith("SELECT m.id, course.id AS turn_course_id")) {
+      const origins = values.find(Array.isArray) as string[];
+      return origins.flatMap(id => {
+        const origin = options.storedMemoryOrigins?.[id];
+        const sources = origin?.sourceIds ?? options.backedMemorySourceIds ?? options.courseOnlyMemorySourceIds ?? [];
+        return origin || sources.length ? [{ id,
+          turn_course_id: options.courseOnlyMemorySourceIds?.length ? options.courseId : null, refs: origin?.refs ?? [],
+          backings: origin?.backings ?? [], source_ids: sources }] : [];
+      });
+    }
+    if (sql.startsWith("SELECT asset_id,course_id,purpose FROM course_asset_memberships")) {
+      return options.classifiedMemoryCourseId ? [{ asset_id: sourceId, course_id: options.classifiedMemoryCourseId,
+        purpose: options.derivedMembershipPurpose === undefined ? "teaching" : options.derivedMembershipPurpose }] : [];
     }
     if (sql.startsWith("SELECT id FROM course_asset_memberships")) {
       if (sql.includes("purpose='mock_exam'")) {
@@ -78,10 +151,12 @@ function fixture(options: Options = {}) {
       return options.membershipRemoved ? [] : [{ id: membershipId, asset_id: sourceId, purpose: "teaching", purpose_revision: purposeRevision }];
     }
     if (sql.startsWith("SELECT source_id FROM opening_privacy_exclusions")) return [];
-    if (sql.startsWith("SELECT 1 WHERE")) return options.unavailableSource ? [] : [{ "?column?": 1 }];
+    if (sql.startsWith("SELECT 1 WHERE")) {
+      return options.unavailableSource || (options.archivedCourse && sql.includes("FROM courses")) ? [] : [{ "?column?": 1 }];
+    }
     if (sql.startsWith("SELECT id FROM opening_help_exposures")) return options.missingExposure ? [] : [{ id: receipt }];
     if (sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")) return [{ id: jobId }];
-    if (sql.startsWith("UPDATE opening_turns SET text =")) return [{ id: assistant }];
+    if (sql.startsWith("UPDATE opening_turns SET text =")) return options.missingCompletionAssistant ? [] : [{ id: assistant }];
     throw new Error(`Unsupported fixture query: ${sql}`);
   }), { json: (value: unknown) => value, unsafe: (value: string) => value });
   const outerCalls: string[] = [];
@@ -91,9 +166,6 @@ function fixture(options: Options = {}) {
     if (query.startsWith("UPDATE opening_tutor_jobs SET timing_execution_id = NULL")) {
       txEvents.push("outer-clear-execution-fence");
       return [];
-    }
-    if (query.startsWith("SELECT m.id FROM opening_memories m")) {
-      return (options.activeGlobalMemoryIds ?? []).map(id => ({ id }));
     }
     return [];
   }), {
@@ -119,7 +191,7 @@ function fixture(options: Options = {}) {
   };
 }
 beforeEach(() => { vi.resetAllMocks(); hooks.lock.mockResolvedValue(undefined); hooks.release.mockResolvedValue({ id: receipt });
-  hooks.readAttempt.mockResolvedValue({ anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null, currentAnswer: null }); });
+  hooks.readAttempt.mockResolvedValue({ anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null, currentAnswer: null, sourceRefs: [] }); });
 // SQL rows and material admission are preset; no database authorization is proven.
 describe("stream receipt release waits for current job authorization and assistant-turn binding", () => {
   it("releases the exact assistant receipt after admitted job and before returning running status", async () => {
@@ -132,7 +204,9 @@ describe("stream receipt release waits for current job authorization and assista
     // appended OR clauses. Equivalent SQL rewrites may require updating this test.
     expect(exposure.sql).toBe("SELECT id FROM opening_help_exposures WHERE id=? AND workspace_id=? AND owner_user_id=? AND turn_id=? AND exposure_origin='assistant'");
     expect(exposure.values).toEqual([receipt, workspace, owner, assistant]);
-    expect(f.calls.map(c => c.sql.split(" ").slice(0, 2).join(" "))).toEqual(["SELECT privacy_epoch", "SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id", "SELECT 1", "SELECT id"]);
+    expect(f.calls.map(c => c.sql.split(" ").slice(0, 2).join(" "))).toEqual([
+      "SELECT privacy_epoch", expect.stringMatching(/^SELECT j\.\*,/), "SELECT 1", "SELECT id",
+    ]);
   });
   it("waits for receipt release before resolving a running stream authorization", async () => {
     const f = fixture();
@@ -185,6 +259,47 @@ describe("stream receipt release waits for current job authorization and assista
       expect(hooks.readAttempt).toHaveBeenCalledExactlyOnceWith(f.tx, scope, { jobId, userTurnId: user, claimToken: token });
       expect(hooks.release).toHaveBeenCalledOnce();
     });
+  it("locks the history course and attempt sources before checking the attempt in both delivery phases", async () => {
+    const f = fixture({ boundAttempt: attempt });
+    const sourceRefs = [{ sourceId, sourceVersion: 0 }];
+    hooks.readAttempt.mockImplementation(async () => {
+      const locks = f.calls.filter(call => /FROM (courses|opening_sources|course_asset_memberships).*FOR SHARE/.test(call.sql));
+      expect(locks.slice(-3).map(call => call.sql.match(/FROM (\w+)/)?.[1])).toEqual([
+        "courses", "opening_sources", "course_asset_memberships",
+      ]);
+      return { anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null,
+        currentAnswer: null, sourceRefs };
+    });
+    const deliver = vi.fn();
+    await expect(f.repo.readStream(scope, jobId, { ...context, attemptFence: fence, attemptSourceRefs: sourceRefs,
+      historyCourseBindings: [{ courseId, materialUse: "citation", sourceIds: [sourceId], sourceRefs }],
+    }, deliver)).resolves.toMatchObject({ status: "running" });
+    expect(hooks.readAttempt).toHaveBeenCalledTimes(2);
+    expect(hooks.release).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+  it.each(["cached", "discovered"] as const)("locks both first-exchange sources before attempt membership verification with %s refs", async mode => {
+    const f = fixture({ boundAttempt: attempt, courseId, sourceIds: [sourceId], discoveredAttemptSourceIds: [attemptSourceId] });
+    const sourceRefs = [{ sourceId: attemptSourceId, sourceVersion: 0 }];
+    hooks.readAttempt.mockImplementation(async () => {
+      const lastWorkspace = f.calls.findLastIndex(call => call.sql.startsWith("SELECT privacy_epoch"));
+      const locks = f.calls.slice(lastWorkspace).filter(call =>
+        /FROM (courses|opening_sources|course_asset_memberships).*FOR SHARE/.test(call.sql));
+      const sourceLock = locks.findIndex(call => call.sql.includes("FROM opening_sources") && call.values.some(value =>
+        Array.isArray(value) && value.includes(sourceId) && value.includes(attemptSourceId)));
+      expect(sourceLock).toBeGreaterThanOrEqual(0);
+      expect(locks.findIndex(call => call.sql.includes("FROM course_asset_memberships"))).toBeGreaterThan(sourceLock);
+      return { anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null,
+        currentAnswer: null, sourceRefs };
+    });
+    const deliver = vi.fn();
+    await expect(f.repo.readStream(scope, jobId, { ...context, attemptFence: fence,
+      materialPurposePin: { ...pin, materialUse: "practice" },
+      ...(mode === "cached" ? { attemptSourceRefs: sourceRefs } : {}),
+    }, deliver)).resolves.toMatchObject({ status: "running" });
+    expect(hooks.readAttempt).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenCalledOnce();
+  });
   it.each([
     { label: "missing fence", value: undefined }, { label: "invalid fence", value: { ...fence, answerRevision: true } },
   ])("rejects $label before attempting provenance or release", async ({ value }) => {
@@ -403,9 +518,11 @@ describe("stream receipt release waits for current job authorization and assista
       contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
     }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).resolves.toBeUndefined();
     expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"))).toBe(true);
-    expect(admitted.calls.some(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+    expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM course_asset_memberships")
+      && c.sql.includes("purpose='mock_exam'") && c.values.some(value => Array.isArray(value) && value.includes(memorySourceId)))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, [memoryId])).resolves.toBeUndefined();
-    expect(admitted.outerCalls.some(sql => sql.startsWith("SELECT m.id FROM opening_memories m") && sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+    expect(admitted.calls.some(call => call.sql.startsWith("SELECT dep_m.id, dep_m.course_id")
+      && call.sql.includes("dep_m.expires_at > clock_timestamp()"))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, ["not-a-uuid"])).rejects.toMatchObject({ code: "CONFLICT" });
 
     // Missing globalMemoryIds for memoryLineageSourceIds is rejected fail-closed.
@@ -564,21 +681,21 @@ describe("stream receipt release waits for current job authorization and assista
     const sseLastMemIdx = sse.calls.findLastIndex(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"));
     expect(sseLastMemIdx).toBeGreaterThan(sseSourcesIdx);
     expect(sseLastMemIdx).toBe(sse.calls.length - 1);
-    await expect(f.calls[lastMemIdx]?.values.at(-1)).resolves.toMatchObject({
-      fragmentSql: expect.stringContaining("WITH RECURSIVE mem_deps(dep_id)"),
-    });
-    await expect(sse.calls[sseLastMemIdx]?.values.at(-1)).resolves.toMatchObject({
-      fragmentSql: expect.stringContaining("WITH RECURSIVE mem_deps(dep_id)"),
-    });
+    expect(f.calls[lastMemIdx]?.values).toContainEqual([memoryId]);
+    expect(sse.calls[sseLastMemIdx]?.values).toContainEqual([memoryId]);
+    for (const values of [f.calls[lastMemIdx]!.values, sse.calls[sseLastMemIdx]!.values]) {
+      expect(await Promise.all(values)).not.toContainEqual({ fragmentSql: expect.stringContaining("WITH RECURSIVE") });
+    }
   });
 
   it("matches restored uppercase opening_memories.source_turn_ids case-insensitively during memoryOnly admission", async () => {
     const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const originId = "12000000-0000-4000-8000-0000000000AB";
     const f = fixture({
       courseId,
       sourceIds: [],
       activeGlobalMemoryIds: [memoryId],
-      backedMemorySourceIds: [sourceId],
+      storedMemoryOrigins: { [memoryId]: { refs: [], sourceIds: [sourceId], turnId: originId } },
     });
     await expect(f.repo.assertSendAuthorized(scope, jobId, {
       expectedPrivacyEpoch: 2,
@@ -588,7 +705,287 @@ describe("stream receipt release waits for current job authorization and assista
       memoryLineageSourceIds: [sourceId],
       globalMemoryIds: [memoryId],
     })).resolves.toBeUndefined();
-    const backedCall = f.calls.find(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id"));
-    expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id::text = lower(ref.turn_id)");
+    expect(f.calls.find(c => c.sql.startsWith("SELECT m.id, course.id"))?.values).toContainEqual([originId]);
   });
+
+  it("starts eligible metadata under the course lock and commits before the provider responds", async () => {
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    const f = fixture({ courseId, metadataTarget: true });
+    let finish!: (response: string) => void;
+    const inFlight = new Promise<string>(resolve => { finish = resolve; });
+    const startSend = vi.fn(() => {
+      expect(f.txEvents).toEqual(["begin:1"]);
+      expect(f.calls.some(call => /^SELECT id FROM courses .*FOR SHARE/.test(call.sql))).toBe(true);
+      return inFlight;
+    });
+    const send = f.repo.authorizeMetadataSend(target, startSend);
+    try {
+      await vi.waitFor(() => expect(f.txEvents).toEqual(["begin:1", "commit:1"]));
+      expect(startSend).toHaveBeenCalledOnce();
+    } finally {
+      finish("provider response");
+    }
+    await expect(send).resolves.toBe("provider response");
+    const archived = fixture({ courseId, metadataTarget: true, archivedCourse: true });
+    await expect(archived.repo.authorizeMetadataSend(target, startSend)).rejects.toThrow("metadata authorization changed");
+    expect(startSend).toHaveBeenCalledOnce();
+  });
+
+  it("rejects metadata dispatch and append when the saved target fails admission", async () => {
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    const f = fixture();
+    const startSend = vi.fn(async () => "provider response");
+
+    await expect(f.repo.canAppendCompletedTurnCandidates(target)).resolves.toBe(false);
+    await expect(f.repo.authorizeMetadataSend(target, startSend)).rejects.toThrow("metadata authorization changed");
+    await expect(f.repo.appendCompletedTurnCandidates({ ...target,
+      candidates: [{ kind: "memory", text: "Candidate", temporary: false }],
+    })).resolves.toBe(false);
+    expect(startSend).not.toHaveBeenCalled();
+    expect(f.calls.some(call => call.sql.startsWith("INSERT INTO opening_assistant_candidates"))).toBe(false);
+  });
+
+  it.each<{ alias: "u" | "t"; value: [] | null }>([
+    { alias: "u", value: [] }, { alias: "u", value: null },
+    { alias: "t", value: [] }, { alias: "t", value: null },
+  ])("rejects legacy version map $value on saved turn $alias", async ({ alias, value }) => {
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    const f = fixture({ metadataTarget: true, metadataVersionMaps: { [alias]: value } });
+    const startSend = vi.fn(async () => "provider response");
+
+    await expect(f.repo.canAppendCompletedTurnCandidates(target)).resolves.toBe(false);
+    await expect(f.repo.authorizeMetadataSend(target, startSend)).rejects.toThrow("metadata authorization changed");
+    await expect(f.repo.appendCompletedTurnCandidates({ ...target, candidates: [] })).resolves.toBe(false);
+    expect(startSend).not.toHaveBeenCalled();
+  });
+
+  it.each([courseId, examCourse, null])("checks direct metadata purpose in the saved course %s", async savedCourse => {
+    const f = fixture({ courseId: savedCourse, metadataTarget: true, metadataDirectSource: true });
+    const target = { scope, jobId, assistantTurnId: assistant, claimToken: token };
+    await expect(f.repo.canAppendCompletedTurnCandidates(target)).resolves.toBe(savedCourse === courseId);
+  });
+
+  it("locks the owned session course before sending from an unscoped conversation", async () => {
+    const f = fixture({ sessionCourseId: courseId, archivedCourse: true });
+    const send = vi.fn(async () => "provider response");
+
+    await expect(f.repo.authorizeSend(scope, jobId, context, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.find(call => call.sql.startsWith("SELECT id FROM courses"))?.values).toContain(courseId);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("checks the legacy backing's expiry in the final gate before starting the provider", async () => {
+    const parent = "12000000-0000-4000-8000-0000000000ac";
+    const backing = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ activeGlobalMemoryIds: [parent, backing], expiredOnFinalCheck: backing,
+      storedMemoryOrigins: { [parent]: { refs: [{ sourceId, sourceVersion: 0, memoryOnly: true }], backings: [[backing]] } } });
+    const startProvider = vi.fn(async () => "provider reply");
+    await expect(f.repo.authorizeSend(scope, jobId, { ...context, globalMemoryIds: [parent] }, startProvider))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.at(-1)?.values[1]).toEqual([parent, backing]);
+    expect(startProvider).not.toHaveBeenCalled();
+  });
+
+  it("locks the saved anchor course before the source-less memory fence", async () => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const anchorCourseId = "12000000-0000-4000-8000-0000000000EA";
+    const f = fixture({ anchorCourseId, activeGlobalMemoryIds: [memoryId] });
+    const publish = vi.fn(async () => {});
+    await f.repo.withStreamPublication(scope, jobId, { ...context, globalMemoryIds: [memoryId] }, publish);
+    const jobIndex = f.calls.findIndex(call => call.sql.includes("FOR SHARE OF j"));
+    const courseIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT id FROM courses"));
+    const memoryIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT id FROM opening_memories") && call.sql.endsWith("FOR SHARE"));
+    expect(jobIndex).toBeGreaterThan(0);
+    expect(courseIndex).toBeGreaterThan(jobIndex);
+    expect(f.calls[courseIndex]?.values[0]).toBe(anchorCourseId.toLowerCase());
+    expect(memoryIndex).toBeGreaterThan(courseIndex);
+    expect(publish).toHaveBeenCalledOnce();
+    await expect(f.repo.assertGlobalMemoriesCurrent(scope, [memoryId], jobId)).resolves.toBeUndefined();
+
+    const archived = fixture({ anchorCourseId, archivedCourse: true, activeGlobalMemoryIds: [memoryId] });
+    const blocked = vi.fn(async () => {});
+    await expect(archived.repo.withStreamPublication(scope, jobId, { ...context, globalMemoryIds: [memoryId] }, blocked))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(archived.calls.some(call => call.sql.startsWith("SELECT id FROM opening_memories"))).toBe(false);
+    expect(blocked).not.toHaveBeenCalled();
+  });
+
+  it.each(["other course", "other course without a purpose", "practice", "mock exam"])("blocks course-only memory lineage classified for %s", async purpose => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ courseId, activeGlobalMemoryIds: [memoryId], courseOnlyMemorySourceIds: [sourceId],
+      classifiedMemoryCourseId: purpose.startsWith("other course") ? "12000000-0000-4000-8000-0000000000ea" : courseId,
+      derivedMembershipPurpose: purpose === "practice" ? "practice" : purpose === "other course without a purpose" ? null : "teaching",
+      mockExamSourceIds: purpose === "mock exam" ? [sourceId] : [] });
+    await expect(f.repo.assertSendAuthorized(scope, jobId, { ...context,
+      contextSourceRefs: [{ sourceId, sourceVersion: 0, memoryOnly: true }],
+      memoryLineageSourceIds: [sourceId], globalMemoryIds: [memoryId],
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(f.repo.assertSendAuthorized(scope, jobId, { ...context, contextSourceRefs: [], globalMemoryIds: [memoryId] }))
+      .rejects.toMatchObject({ code: "CONFLICT", message: "source purpose no longer permits this use" });
+  });
+
+  it.each(["send", "publication", "completion"] as const)("prelocks teaching-spec sources before attempt %s", async mode => {
+    const f = fixture({ boundAttempt: attempt, courseId, sourceIds: [sourceId], teachingSpecSourceIds: [attemptSourceId] });
+    const snapshot = { sourceRefs: [{ sourceId, sourceVersion: 0 }] } as never;
+    const materialPurposePin = { ...pin, materialUse: "practice" as const };
+    const publish = vi.fn(async () => {});
+    const publication = { ...context, materialPurposePin, attemptContext: snapshot };
+    if (mode === "send") await f.repo.authorizeSend(scope, jobId, publication, publish);
+    else if (mode === "publication") await f.repo.withStreamPublication(scope, jobId, publication, publish);
+    else await f.repo.completeTurn({ scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [],
+      claimToken: token, contextSourceRefs: [] },
+    { materialPurposePin, attemptContext: { target: { jobId, userTurnId: user, claimToken: token }, snapshot } });
+
+    const workspaceIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT privacy_epoch FROM workspaces"));
+    const historyIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT revision FROM opening_workspace_history_revisions")
+      && call.sql.endsWith("FOR SHARE"));
+    const sourceIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT s.id,s.version FROM opening_sources"));
+    const membershipIndex = f.calls.findIndex(call => call.sql.includes("FROM course_asset_memberships") && call.sql.includes("FOR SHARE"));
+    if (mode === "completion") {
+      expect(hooks.lock.mock.invocationCallOrder[0]).toBeLessThan(f.tx.mock.invocationCallOrder[workspaceIndex]!);
+    } else {
+      expect(historyIndex).toBeGreaterThanOrEqual(0);
+      expect(historyIndex).toBeLessThan(workspaceIndex);
+    }
+    expect(sourceIndex).toBeGreaterThan(workspaceIndex);
+    expect(f.calls[sourceIndex]?.values[1]).toEqual([sourceId, attemptSourceId]);
+    expect(membershipIndex).toBeGreaterThan(sourceIndex);
+    expect(hooks.assertAttempt).toHaveBeenCalledOnce();
+    expect(f.tx.mock.invocationCallOrder[membershipIndex]).toBeLessThan(hooks.assertAttempt.mock.invocationCallOrder[0]!);
+  });
+
+  it("checks the bound turn when a record receipt supplies context refs and no options", async () => {
+    const f = fixture();
+    await f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+      contextSourceRefs: [],
+      systemQuery: {
+        authorization: { purpose: "system_record_lookup", workspaceId: workspace,
+          principalId: owner, role: "workspace_owner", permissionRevision: "1" },
+        version: "study-query-v1", asOf: time, privacyEpoch: 2,
+        mode: "deterministic", status: "ok", reason: "read", results: [],
+      },
+    });
+    expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(true);
+  });
+
+  it("rejects an empty receipt on an archived course when context and options are omitted", async () => {
+    const f = fixture({ courseId, archivedCourse: true });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+      systemQuery: {
+        authorization: { purpose: "system_record_lookup", workspaceId: workspace,
+          principalId: owner, role: "workspace_owner", permissionRevision: "1" },
+        version: "study-query-v1", asOf: time, privacyEpoch: 2,
+        mode: "deterministic", status: "ok", reason: "read", results: [],
+      },
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.some(call => call.sql.startsWith("SELECT id FROM courses"))).toBe(true);
+  });
+
+  it("reports the receipt grant change before the completion privacy epoch error", async () => {
+    const f = fixture({ epoch: 3 });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+      expectedPrivacyEpoch: 2,
+      systemQuery: {
+        authorization: { purpose: "system_record_lookup", workspaceId: workspace,
+          principalId: owner, role: "workspace_owner", permissionRevision: "1" },
+        version: "study-query-v1", asOf: time, privacyEpoch: 2,
+        mode: "deterministic", status: "ok", reason: "read", results: [],
+      },
+    })).rejects.toThrow("query receipt grant changed");
+    expect(f.calls.some(call => call.sql.includes("FOR UPDATE OF j"))).toBe(false);
+  });
+
+  it("projects assistant citations as direct model refs without adding them to record referents", async () => {
+    const citation = { sourceId, sourceVersion: 0 };
+    const sql = Object.assign(async (parts: TemplateStringsArray) => parts.join("").includes("WITH prior AS MATERIALIZED")
+      ? [{ question: "prior question", answer: "prior answer", user_source_refs: [], assistant_source_refs: [],
+        assistant_citations: [{ ...citation, memoryOnly: true }] }]
+      : [], { unsafe: () => "fragment" }) as unknown as Sql;
+
+    await expect(loadTutorHistoryContext(sql, scope, user)).resolves.toMatchObject({ sourceRefs: [citation] });
+    await expect(loadTutorHistoryContext(sql, scope, user, "record_referents")).resolves.toMatchObject({
+      history: [{ role: "user", text: "prior question" }], sourceRefs: [],
+    });
+  });
+
+  it("locks the saved active course before a bare completion", async () => {
+    const f = fixture({ sessionCourseId: courseId, archivedCourse: true });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.find(call => call.sql.startsWith("SELECT t.attempt_id,t.context_anchor"))?.sql).toContain("FOR UPDATE OF j");
+    expect(f.calls.find(call => call.sql.startsWith("SELECT id FROM courses"))?.values).toContain(courseId);
+    expect(f.calls.some(call => call.sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'"))).toBe(false);
+  });
+
+  it("rejects a missing assistant after claiming a bare completion", async () => {
+    const f = fixture({ missingCompletionAssistant: true });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [], claimToken: token,
+    })).rejects.toThrow("assistant turn was not persisted");
+    const claim = f.calls.find(call => call.sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'"));
+    expect(claim?.sql).toContain("RETURNING id, assistant_turn_id");
+    expect(claim?.values).not.toContain(assistant);
+    expect(f.txEvents).not.toContain("commit:1");
+  });
+
+  it("rechecks an expanded explicit ancestor at the final provider send gate", async () => {
+    const parent = "12000000-0000-4000-8000-0000000000ac";
+    const ancestor = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ activeGlobalMemoryIds: [parent, ancestor], expiredOnFinalCheck: ancestor,
+      storedMemoryOrigins: { [parent]: { refs: [{ memoryDependencyIds: [ancestor] }] } } });
+    const start = vi.fn(async () => "sent");
+    await expect(f.repo.authorizeSend(scope, jobId, { ...context, expectedPrivacyEpoch: 2,
+      globalMemoryIds: [parent] }, start)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(f.calls.findLast(call => call.sql.startsWith("SELECT id FROM opening_memories"))?.values).toContainEqual([parent, ancestor]);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("blocks source-free receipt release when the bound course was archived", async () => {
+    const f = fixture({ courseId, archivedCourse: true });
+    await expect(f.repo.readStream(scope, jobId, context)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(hooks.release).not.toHaveBeenCalled();
+  });
+
+  it("checks stored memory source availability without a caller source reference", async () => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ activeGlobalMemoryIds: [memoryId], unavailableSource: true,
+      storedMemoryOrigins: { [memoryId]: { refs: [], sourceIds: [sourceId] } } });
+    await expect(f.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "answer", citations: [], candidates: [],
+      claimToken: token, contextSourceRefs: [],
+    }, { globalMemoryIds: [memoryId] })).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("material") });
+    expect(f.calls.some(call => call.sql.startsWith("SELECT s.id,s.version FROM opening_sources"))).toBe(true);
+  });
+});
+
+it("uses bare user probes for proposal and confirmation with no recursive admission", async () => {
+  const statements: string[] = [];
+  const memory = { id: receipt, workspace_id: workspace, course_id: null, kind: "candidate", text: "Ordinary evidence",
+    source_turn_ids: [user], version: 0, status: "active", created_at: time, updated_at: time };
+  const tx = Object.assign((parts: TemplateStringsArray, ...values: unknown[]) => {
+    const query = parts.reduce((text, part, index) => text + (index ? String(values[index - 1]) : "") + part, "")
+      .replace(/\s+/g, " ").trim();
+    return { toString: () => query, then: (resolve: (rows: unknown[]) => unknown) => {
+      statements.push(query);
+      if (query.startsWith("SELECT id FROM workspaces")) return resolve([{ id: workspace }]);
+      if (query.startsWith("SELECT t.id FROM opening_turns AS t")) return resolve([{ id: user }]);
+      if (query.startsWith("SELECT m.id,")) return resolve([{ id: receipt, ancestor_temporary_expires_at: null }]);
+      if (query.startsWith("INSERT INTO opening_memories") || query.startsWith("SELECT * FROM opening_memories")) return resolve([memory]);
+      if (query.startsWith("UPDATE opening_memories SET kind")) return resolve([{ ...memory, kind: "confirmed", version: 1 }]);
+      return resolve([]);
+    } };
+  }, { json: JSON.stringify });
+  const sql = Object.assign(tx, { begin: async (run: (tx: unknown) => Promise<unknown>) => run(tx) }) as unknown as Sql;
+  const repo = createOpeningMemoryRepository(sql);
+  const proposed = await repo.proposeMemory(scope, { text: memory.text, sourceTurnIds: [user], expiresAt: null });
+  await expect(repo.confirm(scope, proposed.id, proposed.version, "confirm-ordinary")).resolves.toMatchObject({ kind: "confirmed" });
+  const probes = statements.filter(query => query.startsWith("SELECT t.id FROM opening_turns AS t"));
+  expect(probes).toHaveLength(3);
+  expect(probes.every(query => !/\bWITH\s+RECURSIVE\b/i.test(query))).toBe(true);
+  expect(statements.filter(query => query.startsWith("SELECT m.id,")).map(query =>
+    query.match(/\bWITH\s+RECURSIVE\b/gi)?.length)).toEqual([]);
 });

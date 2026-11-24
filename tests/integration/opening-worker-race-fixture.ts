@@ -24,6 +24,7 @@ export async function seedWorkerRace(fixture: OpeningFixture): Promise<RaceSeed>
   const scope = fixture.scope;
   const sourceId = randomUUID();
   const sessionId = randomUUID();
+  const courseId = randomUUID();
   await fixture.sql`
     INSERT INTO opening_sources (id, workspace_id, name, mime, bytes, sha256, version, upload_state, parse_state)
     VALUES (${sourceId}, ${scope.workspaceId}, 'race.pdf', 'application/pdf', 64,
@@ -36,11 +37,16 @@ export async function seedWorkerRace(fixture: OpeningFixture): Promise<RaceSeed>
     SELECT id FROM opening_source_chunks WHERE source_id = ${sourceId} LIMIT 1`;
   const chunkId = chunk[0]?.id;
   if (!chunkId) throw new Error("race chunk missing");
-  const activityId = await insertTestTeachingActivity(fixture.sql, scope);
+  await fixture.sql`INSERT INTO courses (id, workspace_id, title, slug)
+    VALUES (${courseId}, ${scope.workspaceId}, 'Race course', ${courseId})`;
+  await fixture.sql`
+    INSERT INTO course_asset_memberships (workspace_id, course_id, asset_type, asset_id, role, visibility, purpose)
+    VALUES (${scope.workspaceId}, ${courseId}, 'source', ${sourceId}, 'core', 'course', NULL)`;
+  const activityId = await insertTestTeachingActivity(fixture.sql, scope, courseId);
   await fixture.sql`
     INSERT INTO opening_learning_sessions
       (id, workspace_id, owner_user_id, course_id, activity_id, skill_label, source_ids)
-    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${randomUUID()}, ${activityId}, 'race', ${[sourceId]}::uuid[])`;
+    VALUES (${sessionId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId}, ${activityId}, 'race', ${[sourceId]}::uuid[])`;
   const conversations = createOpeningConversationRepository(fixture.sql);
   const conversation = await conversations.create(scope, { title: "rp2", courseId: null });
   const saved = await conversations.appendSavedTurn({

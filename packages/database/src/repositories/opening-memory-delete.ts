@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { parseContextSourceRefs } from "./opening-context-provenance";
+import { readMemoryDeletionSourceIds } from "./opening-memory-admission";
 import { OpeningMemoryError } from "./opening-memory-types";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
@@ -66,15 +67,21 @@ export function deleteOwnedMemory(
     if (row.status === "deleted") throw new OpeningMemoryError("CONFLICT", "memory already deleted");
     const turnIds = (row.source_turn_ids as string[]) ?? [];
     const sourceIds: string[] = [];
+    const storedTurnIds: string[] = [];
     for (const turnId of turnIds) {
-      const turns = await tx`
-        SELECT source_ids, context_source_refs FROM opening_turns
+      const [turn] = await tx<{ id: string; source_ids: string[] | null; context_source_refs: unknown }[]>`
+        SELECT source_ids, context_source_refs, id FROM opening_turns
         WHERE workspace_id = ${scope.workspaceId} AND id = ${turnId}
         LIMIT 1`;
-      if (turns.length) {
-        sourceIds.push(...((turns[0] as { source_ids: string[] | null }).source_ids ?? []));
-        sourceIds.push(...(parseContextSourceRefs(turns[0]!.context_source_refs) ?? []).map((ref) => ref.sourceId));
+      if (turn) {
+        if (turn.id !== undefined) storedTurnIds.push(turn.id);
+        sourceIds.push(...(turn.source_ids ?? []));
+        sourceIds.push(...(parseContextSourceRefs(turn.context_source_refs) ?? []).map((ref) => ref.sourceId));
       }
+    }
+    if (storedTurnIds.length) {
+      // The history and workspace locks serialize lineage mutations during this read.
+      sourceIds.push(...await readMemoryDeletionSourceIds(tx, scope, storedTurnIds));
     }
     await tx`
       UPDATE opening_memories

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createCourseMembershipRepository,
@@ -18,6 +19,8 @@ import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { closeRace, openRaceSession, track } from "./opening-race-helpers";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
 import { applyAssistantProposal, proposalTransactionClient } from "../../packages/database/src/repositories/opening-assistant-proposal-effects";
+import { readTurnsWithActiveMemoryDependencies } from "../../packages/database/src/repositories/opening-context-provenance";
+import { insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
 
 let fixture: OpeningFixture;
 let memories: ReturnType<typeof createOpeningMemoryRepository>;
@@ -57,6 +60,179 @@ afterAll(async () => {
 });
 
 describe("opening memory owner and source admission", () => {
+  it("proposes, confirms and lists ordinary memories within the PostgreSQL latency budget", async () => {
+    const turnId = await insertTurn(fixture.scope.workspaceId, fixture.scope.ownerUserId);
+    const sql = postgres(process.env.OPENING_TEST_DATABASE_URL!, { max: 1 });
+    try {
+      await sql`SELECT 1`;
+      const repository = createOpeningMemoryRepository(sql);
+      let start = performance.now();
+      const sourceLess = await repository.proposeMemory(fixture.scope, { text: "Standalone note", sourceTurnIds: [], expiresAt: null });
+      await expect(repository.confirm(fixture.scope, sourceLess.id, sourceLess.version, randomUUID())).resolves.toMatchObject({ kind: "confirmed" });
+      await expect(repository.listForContext(fixture.scope, null)).resolves.toEqual([]);
+      expect(performance.now() - start).toBeLessThan(500);
+
+      start = performance.now();
+      const memory = await repository.proposeMemory(fixture.scope, { text: "Ordinary source", sourceTurnIds: [turnId], expiresAt: null });
+      await expect(repository.confirm(fixture.scope, memory.id, memory.version, randomUUID())).resolves.toMatchObject({ kind: "confirmed" });
+      await expect(repository.listForContext(fixture.scope, null)).resolves.toMatchObject([{ id: memory.id, kind: "confirmed" }]);
+      expect(performance.now() - start).toBeLessThan(500);
+    } finally {
+      await sql.end({ timeout: 5 });
+    }
+  });
+
+  it.each(["source_ids", "context_source_refs"] as const)(
+    "takes course, source and membership share locks for a same-course user origin with %s", async evidence => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory locks", slug: randomUUID() });
+    const sourceId = await insertSource(sql, scope);
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: course.id, assetType: "source",
+      assetId: sourceId, role: "core", visibility: "course", purpose: "teaching" });
+    const turnId = await insertOwnedTurn(sql, scope, evidence === "source_ids"
+      ? { sourceIds: [sourceId] } : { contextSourceRefs: [{ sourceId, sourceVersion: 0 }] });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: course.id })} WHERE id=${turnId}`;
+    const statements: string[] = [];
+    const observed = postgres(process.env.OPENING_TEST_DATABASE_URL!, {
+      max: 1, debug: (_connection, query) => statements.push(query.replace(/\s+/g, " ").trim()),
+    });
+    try {
+      await createOpeningMemoryRepository(observed).proposeMemory(scope, {
+        courseId: course.id, text: "Own course material", sourceTurnIds: [turnId], expiresAt: null,
+      });
+      const locks = statements.filter(query => query.endsWith("FOR SHARE"));
+      const courseLock = locks.findIndex(query => query.startsWith("SELECT id FROM courses"));
+      const sourceLock = locks.findIndex(query => query.startsWith("SELECT id, version FROM opening_sources"));
+      const membershipLock = locks.findIndex(query => query.startsWith("SELECT id FROM course_asset_memberships"));
+      expect(courseLock).toBeGreaterThanOrEqual(0);
+      expect(sourceLock).toBeGreaterThan(courseLock);
+      expect(membershipLock).toBeGreaterThan(sourceLock);
+      expect(statements.indexOf(locks[membershipLock]!)).toBeLessThan(
+        statements.findIndex(query => query.startsWith("INSERT INTO opening_memories")),
+      );
+    } finally {
+      await observed.end({ timeout: 5 });
+    }
+  });
+
+  it("admits same-course memory descendants and rejects laundering through global or other-course memory", async () => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const courseA = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage A", slug: "memory-lineage-a" });
+    const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage B", slug: "memory-lineage-b" });
+    const material = await insertSource(sql, scope);
+    await courses.addAssetMembership({ workspaceId: scope.workspaceId, courseId: courseA.id,
+      assetType: "source", assetId: material, role: "core", visibility: "course", purpose: null });
+    const evidence = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const unrelatedEvidence = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const ancestor = await memories.proposeMemory(scope, {
+      courseId: courseA.id, text: "Temporary course A ancestor", sourceTurnIds: [evidence], expiresAt,
+    });
+    const conversation = await conversations.create(scope, { title: "Anchored assistant lineage", courseId: null });
+    const turn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id,
+      text: "Follow the course preference", mode: "explain", sourceIds: [], clientKey: randomUUID(),
+      learningSessionId: null, currentPage: null, chunkId: null });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ purpose: "learning_help", courseId: courseA.id })} WHERE id=${turn.turnId}`;
+    const memoryRef = { sourceId: material, sourceVersion: 0, memoryOnly: true };
+    const saveRefs = async (refs: Array<typeof memoryRef | { memoryDependencyIds: string[] }>) => sql`UPDATE opening_turns
+      SET status='complete', context_source_refs=${sql.json(refs)} WHERE id=${turn.assistantTurnId}`;
+    await saveRefs([memoryRef, { memoryDependencyIds: [ancestor.id] }]);
+    const sourceTurnIds = [turn.assistantTurnId];
+    const proposal = { text: "Derived course preference", sourceTurnIds, expiresAt: null };
+    await expect(readTurnsWithActiveMemoryDependencies(sql, scope.workspaceId, sourceTurnIds)).resolves.toEqual(new Set(sourceTurnIds));
+    for (const courseId of [null, courseB.id]) {
+      await expect(memories.proposeMemory(scope, { ...proposal, courseId })).rejects.toMatchObject({ code: "VALIDATION" });
+    }
+    const scoped = await memories.proposeMemory(scope, { ...proposal, courseId: courseA.id });
+    await expect(memories.confirm(scope, scoped.id, scoped.version, randomUUID())).resolves.toMatchObject({ courseId: courseA.id });
+    const active = await memories.listContext(scope, new Date().toISOString(), courseA.id);
+    expect(active.memories.map(memory => memory.id)).toEqual([ancestor.id, scoped.id]);
+    expect(active).toMatchObject({ temporaryMemoryExpiresAt: expiresAt, dependencyMemoryIds: [ancestor.id] });
+
+    const global = await memories.proposeMemory(scope, { text: "Unrelated global", sourceTurnIds: [unrelatedEvidence], expiresAt: null });
+    const confirmedGlobal = await memories.confirm(scope, global.id, global.version, randomUUID());
+    const replace = { text: "Corrected from the derived turn", sourceTurnIds, clientKey: randomUUID() };
+    await expect(memories.replaceMemory(scope, { ...replace, id: global.id, expectedVersion: confirmedGlobal.version }))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.replaceMemory(scope, { ...replace, id: scoped.id, expectedVersion: scoped.version + 1 }))
+      .resolves.toMatchObject({ courseId: courseA.id });
+    // A course-anchored legacy source reference has no attributable memory authority.
+    await saveRefs([memoryRef]);
+    for (const courseId of [null, courseA.id, courseB.id]) {
+      await expect(memories.proposeMemory(scope, { ...proposal, courseId })).rejects.toMatchObject({ code: "VALIDATION" });
+    }
+    await expect(memories.replaceMemory(scope, { ...replace, id: global.id, expectedVersion: confirmedGlobal.version, clientKey: randomUUID() }))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("rejects a failed assistant as a new or existing memory origin", async () => {
+    const { sql, scope } = fixture;
+    const origin = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+    const input = { text: "Assistant evidence", sourceTurnIds: [origin], expiresAt: null };
+    const candidate = await memories.proposeMemory(scope, input);
+    const confirmed = await memories.proposeMemory(scope, { ...input, text: "Previously confirmed evidence" });
+    await memories.confirm(scope, confirmed.id, confirmed.version, randomUUID());
+    await sql`UPDATE opening_turns SET status='failed' WHERE id=${origin}`;
+    await expect(memories.proposeMemory(scope, { ...input, text: "New failed evidence" })).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.confirm(scope, candidate.id, candidate.version, randomUUID())).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.listContext(scope, new Date().toISOString())).resolves.toEqual({ memories: [], sourceRefs: [] });
+  });
+
+  it.each([false, true])("checks paired-user memory across courses with explicit backing refs = %s", async includeBacking => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const createCourse = (title: string) => courses.createCourse({ workspaceId: scope.workspaceId, title, slug: randomUUID() });
+    const userCourse = await createCourse("Paired user memory");
+    const assistantCourse = await createCourse("Assistant memory destination");
+    const material = await insertSource(sql, scope);
+    const scoped = await memories.proposeMemory(scope, {
+      courseId: userCourse.id, text: "Course-only preference", sourceTurnIds: [], expiresAt: null,
+    });
+    await memories.confirm(scope, scoped.id, scoped.version, randomUUID());
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const global = await memories.proposeMemory(scope, {
+      text: "Temporary global material", expiresAt, sourceTurnIds: [await insertOwnedTurn(sql, scope, { sourceIds: [material] })],
+    });
+    const conversation = await conversations.create(scope, { title: "Split-course exchange", courseId: null });
+    const turn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id,
+      text: "Use the saved preference", mode: "explain", sourceIds: [], clientKey: randomUUID(),
+      learningSessionId: null, currentPage: null, chunkId: null });
+    const claim = (await jobs.claim(turn.jobId))!;
+    await jobs.completeTurn({ scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId, claimToken: claim.claimToken,
+      text: "Answer from the saved preference", citations: [], candidates: [], contextSourceRefs: [] });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ courseId: assistantCourse.id })} WHERE id=${turn.assistantTurnId}`;
+    const setUserRefs = async (refs: unknown[]) => sql`UPDATE opening_turns
+      SET context_anchor=${sql.json({ courseId: userCourse.id })}, context_source_refs=${sql.json(refs as never)}
+      WHERE id=${turn.turnId}`;
+    const propose = (courseId: string | null) => memories.proposeMemory(scope, {
+      courseId, text: `Derived from paired user ${courseId ?? "global"}`, sourceTurnIds: [turn.assistantTurnId], expiresAt: null,
+    });
+    await setUserRefs([{ memoryDependencyIds: [scoped.id] }]);
+    await expect(propose(assistantCourse.id)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(propose(null)).rejects.toMatchObject({ code: "VALIDATION" });
+    await setUserRefs([{ memoryDependencyIds: [global.id] },
+      ...(includeBacking ? [{ sourceId: material, sourceVersion: 0, memoryOnly: true }] : []),
+    ]);
+    for (const courseId of [assistantCourse.id, null]) {
+      const derived = await propose(courseId);
+      await memories.confirm(scope, derived.id, derived.version, randomUUID());
+      const context = () => memories.listContext(scope, new Date().toISOString(), courseId);
+      await expect(context()).resolves.toMatchObject({
+        memories: expect.arrayContaining([expect.objectContaining({ id: derived.id })]),
+        dependencyMemoryIds: [global.id], temporaryMemoryExpiresAt: expiresAt,
+        sourceRefs: [{ sourceId: material, sourceVersion: 0 }],
+      });
+    }
+    await sql`UPDATE opening_memories SET expires_at=now()-interval '1 second' WHERE id=${global.id}`;
+    await expect(memories.listContext(scope, new Date().toISOString(), assistantCourse.id))
+      .resolves.toEqual({ memories: [], sourceRefs: [] });
+  });
+
   it("rejects a same-workspace impostor on list, get, propose, and reject", async () => {
     const turnId = await insertTurn(fixture.scope.workspaceId, fixture.scope.ownerUserId);
     const owned = await memories.proposeMemory(fixture.scope, {
@@ -399,7 +575,7 @@ it("never lets an active global memory exempt a detached course source shared wi
     purpose: "teaching",
   });
 
-  // Turn 1 inside the course conversation uses sharedSourceId and completes.
+  // Use a legacy assistant row to exercise the send fence after history loading.
   const courseConversation = await conversations.create(fixture.scope, { title: "Course history", courseId: course.id });
   const priorTurn = await conversations.appendSavedTurn({
     scope: fixture.scope,
@@ -413,14 +589,20 @@ it("never lets an active global memory exempt a detached course source shared wi
     chunkId: null,
   });
   await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 hour' WHERE id IN (${priorTurn.turnId}, ${priorTurn.assistantTurnId})`;
-  await fixture.sql`UPDATE opening_turns SET status = 'complete', text = 'Prior answer using shared material',
+  await fixture.sql`UPDATE opening_turns SET status = 'complete', text = 'Prior answer using shared material', source_ids = '{}',
     context_source_refs = ${fixture.sql.json([{ sourceId: sharedSourceId, sourceVersion: 0 }])} WHERE id = ${priorTurn.assistantTurnId}`;
   await fixture.sql`UPDATE opening_tutor_jobs SET status = 'succeeded' WHERE id = ${priorTurn.jobId}`;
 
-  // Active global memory also cites the same turn / source lineage.
+  // An independent standalone memory also cites the source.
+  const standalone = await conversations.create(fixture.scope, { title: "Standalone evidence", courseId: null });
+  const globalEvidence = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: standalone.id, text: "Use step-by-step summaries",
+    mode: "explain", clientKey: randomUUID(), sourceIds: [sharedSourceId], learningSessionId: null,
+    currentPage: null, chunkId: null,
+  });
   const proposed = await memories.proposeMemory(fixture.scope, {
     text: "Learner likes step-by-step summaries",
-    sourceTurnIds: [priorTurn.turnId],
+    sourceTurnIds: [globalEvidence.turnId],
     courseId: null,
     expiresAt: null,
   });
@@ -744,8 +926,9 @@ it("blocks confirming or injecting a derived permanent memory once its temporary
     courseId: null,
     expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
   });
+  const freshConv = await conversations.create(fixture.scope, { title: "Independent temporary memory chat", courseId: null });
   const turnFromTemp2 = await conversations.appendSavedTurn({
-    scope: fixture.scope, conversationId: derivedConv.id, text: "Ask with temp 2", mode: "explain",
+    scope: fixture.scope, conversationId: freshConv.id, text: "Ask with temp 2", mode: "explain",
     clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
   });
   await expect(createTutorTurnHandler({

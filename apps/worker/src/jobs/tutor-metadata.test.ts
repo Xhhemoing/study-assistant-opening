@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createModelGateway, OpeningProviderError, tutorModelTask, type BudgetedRepository } from "@aistudy/ai";
-import type { ProviderOutput } from "@aistudy/contracts";
-import { createTutorMetadataHandler } from "./tutor-metadata";
+import { createModelGateway, OpeningProviderError, type BudgetedRepository } from "@aistudy/ai";
+import type { OpeningTutorJobsRepository } from "@aistudy/database";
+import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
+import { callTutorMetadataModel, createTutorMetadataHandler } from "./tutor-metadata";
 
 const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() };
 const payload = { tutorJobId: randomUUID(), assistantTurnId: randomUUID(), tutorClaimToken: randomUUID() };
@@ -15,18 +16,18 @@ const output: ProviderOutput = { text: "", citedChunkIds: [], requestId: null, i
 function setup() {
   const tutorJobs = {
     loadCompletedTurnForMetadata: vi.fn(async () => completed),
-    canAppendCompletedTurnCandidates: vi.fn(async () => true),
+    authorizeMetadataSend: vi.fn<OpeningTutorJobsRepository["authorizeMetadataSend"]>(async (_target, startSend) => startSend()),
     appendCompletedTurnCandidates: vi.fn(async () => true),
   };
   const budget = { reserve: vi.fn(async () => ({ id: "reservation" })), claimExecution: vi.fn(async () => true),
     settle: vi.fn(async () => {}), release: vi.fn(async () => {}), markUnknown: vi.fn(async () => {}) } satisfies BudgetedRepository;
-  const complete = vi.fn(async () => output);
+  const complete = vi.fn(async (_input: ProviderInput) => output);
   const model = { provider: { complete }, modelSnapshot: { id: "m1", providerId: "p1", modelName: "model", inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
     inputCentsPerMillion: 100, outputCentsPerMillion: 200 };
   const fallback = vi.fn(async () => null);
   const gateway = createModelGateway({ resolve: async () => model, resolveFallback: fallback });
   const handler = createTutorMetadataHandler({ tutorJobs,
-    callModel: (owner, mode, options) => gateway.call(owner, tutorModelTask(mode), { ...options, budget }),
+    callModel: (owner, mode, options) => callTutorMetadataModel(gateway, owner, mode, options, budget),
   });
   return { handler, tutorJobs, budget, complete, fallback };
 }
@@ -58,9 +59,29 @@ describe("tutor metadata worker", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
+  it("starts the provider inside the model gateway's admission callback", async () => {
+    const { handler, tutorJobs, budget, complete } = setup();
+    let admitting = false;
+    tutorJobs.authorizeMetadataSend.mockImplementationOnce(async (_target, startSend) => {
+      expect(budget.reserve).toHaveBeenCalledOnce();
+      admitting = true;
+      try {
+        return startSend();
+      } finally {
+        admitting = false;
+      }
+    });
+    complete.mockImplementationOnce(async () => {
+      expect(admitting).toBe(true);
+      return output;
+    });
+    await expect(handler(job, payload)).resolves.toEqual({ skipped: false, appended: true });
+    expect(tutorJobs.authorizeMetadataSend).toHaveBeenCalledOnce();
+  });
+
   it("rechecks authorization after reservation and releases without sending", async () => {
     const { handler, tutorJobs, budget, complete } = setup();
-    tutorJobs.canAppendCompletedTurnCandidates.mockResolvedValueOnce(false);
+    tutorJobs.authorizeMetadataSend.mockRejectedValueOnce(new Error("tutor metadata authorization changed"));
     await expect(handler(job, payload)).rejects.toThrow("authorization changed");
     expect(budget.release).toHaveBeenCalledWith(`tutor:${payload.tutorJobId}:metadata`, "not_sent");
     expect(complete).not.toHaveBeenCalled();

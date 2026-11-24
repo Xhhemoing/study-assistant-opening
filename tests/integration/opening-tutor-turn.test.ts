@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
-import { openRaceSession } from "./opening-race-helpers";
+import { closeRace, deferred, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningProvider, OpeningProviderError } from "@aistudy/ai";
 import {
   createOpeningBudgetRepository,
   createOpeningCandidateRepository,
   createOpeningConversationRepository,
+  createOpeningCourseReadySourcesRepository,
   createOpeningSourceChunksRepository,
   createOpeningTutorJobsRepository,
+  tutorAttemptFence,
 } from "@aistudy/database";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
+import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 
@@ -99,6 +102,90 @@ beforeEach(async () => {
 afterAll(async () => {
   await fixture?.close();
 });
+
+it.each(["cached replay", "discovered replay", "send", "publication", "completion"] as const)(
+  "locks teaching-spec sources before memberships during attempt %s", async mode => {
+  const { sql, scope } = fixture;
+  const f = await learningAttemptFixture(fixture);
+  const attempt = await f.start();
+  // The second source sorts after the attempt source. Block it to observe the
+  // first source locked and its membership still writable in another session.
+  const specSourceId = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+  expect([f.sourceId, specSourceId].sort()).toEqual([f.sourceId, specSourceId]);
+  await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${specSourceId},${scope.workspaceId},'spec.pdf','application/pdf',10,${"e".repeat(64)},1,'uploaded','ready')`;
+  await sql`INSERT INTO opening_source_chunks (source_id,source_version,page,text) VALUES (${specSourceId},1,1,'Spec evidence')`;
+  await sql`INSERT INTO course_asset_memberships (id,workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+    VALUES (${randomUUID()},${scope.workspaceId},${f.courseId},'source',${specSourceId},'core','course','teaching')`;
+  const [session] = await sql`SELECT activity_id FROM opening_learning_sessions WHERE id=${f.sessionId}`;
+  const documentId = randomUUID(), teachingUnitId = randomUUID();
+  await sql`INSERT INTO library_documents (id,workspace_id,title,lifecycle)
+    VALUES (${documentId},${scope.workspaceId},'Versioned teaching spec','confirmed')`;
+  await sql`INSERT INTO opening_teaching_units (id,workspace_id,owner_user_id,title,document_id,current_revision_number)
+    VALUES (${teachingUnitId},${scope.workspaceId},${scope.ownerUserId},'Versioned teaching spec',${documentId},1)`;
+  await sql`UPDATE opening_teaching_activities SET content_version=1 WHERE id=${session!.activity_id}`;
+  await sql`INSERT INTO opening_teaching_activity_specs
+    (id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,revision_number,version,source_refs)
+    VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${session!.activity_id},${teachingUnitId},${documentId},1,1,
+      ${sql.json([{ sourceId: f.sourceId, version: 1 }, { sourceId: specSourceId, version: 1 }])})`;
+  const conversations = createOpeningConversationRepository(sql);
+  const conversation = await conversations.create(scope, { courseId: f.courseId, title: "Attempt replay" });
+  const turn = await conversations.appendSavedTurn({
+    ...savedTurnInput(conversation.id), sourceIds: [f.sourceId], learningSessionId: f.sessionId, attemptId: attempt.id,
+    contextAnchor: { purpose: "learning_help", attemptId: attempt.id, contentVersion: 1 },
+  });
+  const jobs = createOpeningTutorJobsRepository(sql);
+  const claim = (await jobs.claim(turn.jobId))!;
+  const snapshot = (await jobs.readAttemptContext(scope, { jobId: turn.jobId, userTurnId: turn.turnId, claimToken: claim.claimToken }))!;
+  expect(snapshot.sourceRefs).toEqual([{ sourceId: f.sourceId, sourceVersion: 1 }]);
+  const materialPurposePin = await createOpeningCourseReadySourcesRepository(sql).readMaterialPurposePin(scope, {
+    courseId: f.courseId, materialUse: "practice", sourceIds: [f.sourceId],
+  });
+  const context = { privacyEpoch: snapshot.privacyEpoch, claimToken: claim.claimToken, executionId: claim.executionId,
+    materialPurposePin, contextSourceRefs: snapshot.sourceRefs, exposureReceiptId: null, attemptFence: tutorAttemptFence(snapshot),
+    ...(mode === "cached replay" ? { attemptSourceRefs: snapshot.sourceRefs } : {}) };
+  const holder = openRaceSession(), reader = openRaceSession();
+  const acquired = deferred(), release = deferred(), deliver = vi.fn();
+  const hold = track(holder.ready.then(() => holder.sql.begin(async tx => {
+    await tx`SELECT id FROM opening_sources WHERE id=${specSourceId} FOR UPDATE`;
+    acquired.resolve();
+    await release.promise;
+  })));
+  let operation: Promise<unknown> | undefined;
+  try {
+    await Promise.race([acquired.promise, hold]);
+    await reader.ready;
+    const repo = createOpeningTutorJobsRepository(reader.sql);
+    const publication = { ...context, attemptContext: snapshot };
+    const run = async () => {
+      if (mode === "send") await repo.authorizeSend(scope, turn.jobId, publication, async () => { deliver(); });
+      else if (mode === "publication") await repo.withStreamPublication(scope, turn.jobId, publication, async () => { deliver(); });
+      else if (mode === "completion") await repo.completeTurn({
+        scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId, claimToken: claim.claimToken,
+        text: "Attempt answer", citations: [], candidates: [], contextSourceRefs: snapshot.sourceRefs,
+      }, { materialPurposePin, attemptContext: { target: { jobId: turn.jobId, userTurnId: turn.turnId,
+        claimToken: claim.claimToken }, snapshot } });
+      else expect(await repo.readStream(scope, turn.jobId, context, deliver)).toMatchObject({ status: "running" });
+    };
+    operation = track(run());
+    await waitUntilBlocked(sql, reader.pid, holder.pid, "Attempt source locks",
+      /SELECT s\.id,s\.version FROM opening_sources s[\s\S]+ORDER BY s\.id FOR SHARE OF s/);
+    await expect(sql`SELECT id FROM opening_sources WHERE id=${f.sourceId} FOR UPDATE NOWAIT`)
+      .rejects.toMatchObject({ code: "55P03" });
+    await expect(sql`SELECT id FROM course_asset_memberships
+      WHERE course_id=${f.courseId} AND asset_type='source' AND asset_id=${f.sourceId} FOR UPDATE NOWAIT`).resolves.toHaveLength(1);
+    release.resolve();
+    await operation;
+    if (mode === "completion") {
+      await expect(sql`SELECT text FROM opening_turns WHERE id=${turn.assistantTurnId}`)
+        .resolves.toEqual([{ text: "Attempt answer" }]);
+    } else expect(deliver).toHaveBeenCalledOnce();
+  } finally {
+    release.resolve();
+    await Promise.allSettled([hold, operation]);
+    await Promise.all([closeRace(holder.sql), closeRace(reader.sql)]);
+  }
+}, 15_000);
 
 function barrier() {
   let release!: () => void;
@@ -372,6 +459,9 @@ describe("opening tutor turn durable path (guarded)", () => {
     const seeded = await seedConversationAndSource();
     const sessionId = randomUUID(), courseId = randomUUID();
     await fixture.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES (${courseId},${fixture.scope.workspaceId},'Help course',${courseId})`;
+    await fixture.sql`
+      INSERT INTO course_asset_memberships (workspace_id, course_id, asset_type, asset_id, role, visibility, purpose)
+      VALUES (${fixture.scope.workspaceId}, ${courseId}, 'source', ${sourceId}, 'core', 'course', NULL)`;
     const activityId = await insertTestTeachingActivity(fixture.sql, fixture.scope, courseId);
     await fixture.sql`
       INSERT INTO opening_learning_sessions

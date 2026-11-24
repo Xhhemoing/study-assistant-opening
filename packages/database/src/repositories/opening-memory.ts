@@ -55,12 +55,13 @@ export function createOpeningMemoryRepository(
     async listForContext(
       scope: OpeningScope,
       activeCourseId: string | null = null,
+      materialUse: "citation" | "practice" = "citation",
     ): Promise<MemoryItem[]> {
-      return listMemoriesForContext(sql, scope, activeCourseId);
+      return listMemoriesForContext(sql, scope, activeCourseId, undefined, undefined, materialUse);
     },
 
-    async listContext(scope: OpeningScope, now: string, activeCourseId: string | null = null) {
-      return loadMemoryContext(sql, scope, activeCourseId, now);
+    async listContext(scope: OpeningScope, now: string, activeCourseId: string | null = null, materialUse: "citation" | "practice" = "citation") {
+      return loadMemoryContext(sql, scope, activeCourseId, now, materialUse);
     },
 
     async get(scope: OpeningScope, id: string): Promise<MemoryItem | null> {
@@ -78,6 +79,7 @@ export function createOpeningMemoryRepository(
         throw new OpeningMemoryError("VALIDATION", "expiresAt must be an ISO datetime");
       }
       const kind = input.expiresAt ? "temporary" : "candidate";
+      const courseId = input.courseId ?? null;
       return sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces
           WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
@@ -93,8 +95,8 @@ export function createOpeningMemoryRepository(
           throw error;
         }
         await lockOwnedWorkspace(tx, scope);
-        await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds);
-        await assertCourseInWorkspace(tx, scope, input.courseId);
+        if (input.sourceTurnIds.length) await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
+        await assertCourseInWorkspace(tx, scope, courseId, true);
         const rejected = await tx`
           SELECT source_turn_ids, text FROM opening_memories
           WHERE workspace_id = ${scope.workspaceId} AND status = 'rejected'`;
@@ -108,10 +110,10 @@ export function createOpeningMemoryRepository(
           INSERT INTO opening_memories (
             id, workspace_id, course_id, kind, text, source_turn_ids, version, expires_at, status
           ) VALUES (
-            ${randomUUID()}, ${scope.workspaceId}, ${input.courseId ?? null}, ${kind},
+            ${randomUUID()}, ${scope.workspaceId}, ${courseId}, ${kind},
             ${text}, ${tx.json(input.sourceTurnIds as never)}, 0, ${input.expiresAt}, 'active'
           ) RETURNING *`;
-        await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds);
+        if (input.sourceTurnIds.length) await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
         return mapMemoryRow(rows[0] as Record<string, unknown>);
       });
     },

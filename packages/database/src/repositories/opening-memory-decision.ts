@@ -1,8 +1,8 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { memoryDependencyRows } from "./opening-context-provenance";
-import { lockOwnedWorkspace, turnSourceMaterialsActive } from "./opening-memory-admission";
+import { isLineageUuid, lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
+import { lockAndReadMemoryOrigins, lockOwnedWorkspace, readBareUserOrigins } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
@@ -50,91 +50,43 @@ export function confirmOwnedMemory(
       throw new OpeningMemoryError("CONFLICT", "memory cannot be confirmed");
     }
     let expiryBeforeCommit: string | null = null;
-    if (current.kind === "temporary" || current.sourceTurnIds.length > 0) {
-      const admitted = await tx`
-        SELECT m.id, (
-          WITH RECURSIVE mem_deps(dep_id) AS (
-            SELECT lower(dep.id)
-            FROM jsonb_array_elements_text(
-              CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
-            ) AS st(turn_id)
-            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
-            UNION
-            SELECT lower(dep.id)
-            FROM mem_deps prev
-            JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = m.workspace_id
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-              CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-            ) AS st(turn_id)
-            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
-          )
-          SELECT min(dep_m.expires_at)
-          FROM mem_deps d
-          JOIN opening_memories dep_m ON dep_m.id::text = d.dep_id
-            AND dep_m.workspace_id = m.workspace_id
-            AND dep_m.status = 'active'
-            AND dep_m.course_id IS NULL
-            AND dep_m.kind = 'temporary'
-            AND dep_m.expires_at IS NOT NULL
-        ) AS ancestor_temporary_expires_at
+    const bareOrigins = current.courseId === null && current.kind !== "temporary"
+      && current.sourceTurnIds.length > 0 && current.sourceTurnIds.every(isLineageUuid)
+      && (await readBareUserOrigins(tx, scope, current.sourceTurnIds)).size
+        === new Set(current.sourceTurnIds.map(turnId => turnId.toLowerCase())).size;
+    if (!bareOrigins && (current.courseId !== null || current.kind === "temporary" || current.sourceTurnIds.length > 0)) {
+      const memoryCourse: FragmentFactory = () => tx`m.course_id`;
+      const workspace: FragmentFactory = () => tx`m.workspace_id`;
+      const [admitted] = await tx<{ id: string; ancestor_temporary_expires_at: Date | null; origin_turn_ids: string[] }[]>`
+        SELECT m.id, chain.temporary_expires_at AS ancestor_temporary_expires_at, m.source_turn_ids AS origin_turn_ids
         FROM opening_memories m
-        WHERE m.id = ${id}
-          AND m.workspace_id = ${scope.workspaceId}
-          AND m.status = 'active'
-          AND (m.kind <> 'temporary' OR (m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-          AND NOT EXISTS (
-            SELECT 1 FROM jsonb_array_elements_text(
-              CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
-            ) AS ref(turn_id)
-            WHERE NOT EXISTS (
-              SELECT 1 FROM opening_turns t
-              INNER JOIN opening_conversations c ON c.id = t.conversation_id
-              WHERE t.id::text = lower(ref.turn_id)
-                AND t.workspace_id = ${scope.workspaceId}
-                AND c.workspace_id = ${scope.workspaceId}
-                AND c.owner_user_id = ${scope.ownerUserId}
-                AND ${turnSourceMaterialsActive(tx, scope.workspaceId)}
-            )
-          )
-          AND NOT EXISTS (
-            WITH RECURSIVE mem_deps(dep_id) AS (
-              SELECT lower(dep.id)
-              FROM jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
-              ) AS st(turn_id)
-              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
-              UNION
-              SELECT lower(dep.id)
-              FROM mem_deps prev
-              JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-              ) AS st(turn_id)
-              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
-            )
-            SELECT 1
-            FROM mem_deps d
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM opening_memories dep_m
-              WHERE dep_m.id::text = d.dep_id
-                AND dep_m.workspace_id = m.workspace_id
-                AND dep_m.status = 'active'
-                AND dep_m.course_id IS NULL
-                AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
-            )
-          )`;
-      if (!admitted.length) {
+        CROSS JOIN LATERAL (
+          WITH RECURSIVE mem_deps(dep_id) AS (${memoryDependencyWalk(tx)})
+          SELECT min(dep_m.expires_at) FILTER (WHERE dep_m.kind = 'temporary') AS temporary_expires_at,
+            COALESCE(bool_and(
+              dep_m.id IS NOT NULL AND dep_m.id <> m.id AND dep_m.status = 'active'
+              AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp())) IS TRUE
+              AND ${memoryCourseAllows(tx, () => tx`dep_m.course_id`, memoryCourse, workspace)} IS TRUE
+            ), true) AS all_active
+          FROM mem_deps d
+          LEFT JOIN opening_memories dep_m ON dep_m.id = ${lineageUuid(tx, () => tx`d.dep_id`)}
+            AND dep_m.workspace_id = m.workspace_id
+        ) chain
+        WHERE m.id = ${id} AND m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
+          AND ${memoryCourseAllows(tx, memoryCourse, memoryCourse, workspace)}
+          AND (m.kind <> 'temporary' OR m.expires_at > clock_timestamp()) AND chain.all_active`;
+      if (!admitted) throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
+      const origin = admitted.origin_turn_ids?.length ? (await lockAndReadMemoryOrigins(tx, scope, [{
+        id: id.toLowerCase(), excludedId: id.toLowerCase(), course_id: current.courseId, turn_ids: admitted.origin_turn_ids,
+      }], { writeAdmission: true })).get(id.toLowerCase()) : undefined;
+      if (origin === null) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
-      const ancestorExpiry = admitted[0]?.ancestor_temporary_expires_at;
+      const ancestorExpiry = admitted.ancestor_temporary_expires_at;
       const expiry = Math.min(
         current.kind === "temporary" ? Date.parse(current.expiresAt ?? "") : Infinity,
-        ancestorExpiry == null ? Infinity : new Date(ancestorExpiry as string | Date).getTime(),
+        ancestorExpiry == null ? Infinity : new Date(ancestorExpiry).getTime(),
+        origin?.expiresAt ?? Infinity,
       );
       if (Number.isNaN(expiry) || expiry <= now().getTime()) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");

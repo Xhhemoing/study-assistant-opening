@@ -2,16 +2,15 @@ import type { Sql, TransactionSql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import { isMemoryEligible } from "@aistudy/domain";
 import {
-  contextSourceRefsIncluded, memoryTransitiveDependenciesActive, memoryTransitiveDepsCte,
-  mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs, type ContextSourceRef,
+  dependencyOriginCourseAllows, lineageUuid, memoryCourseAllows, memoryDependencyRows, turnLineageCourse,
+  mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs,
+  type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import { lockOwnedWorkspace } from "./opening-memory-admission";
-import { createOpeningPrivacyRepository } from "./opening-privacy";
+import { bareUserOrigin, lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
 import { mapMemoryRow } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type LoadedMemoryContext = {
   memories: MemoryItem[];
@@ -21,14 +20,13 @@ export type LoadedMemoryContext = {
 };
 
 /**
- * One scope query. A memory is excluded when any source turn is missing, foreign,
- * unowned, references a missing, revoked, excluded, or version-drifted source,
- * or transitively depends on an expired/revoked global memory.
+ * Read eligible memories as a batch before resolving their full backing lineage.
  */
-async function readMemoryContext(
+async function readMemoryContextInTx(
   db: Db,
   scope: OpeningScope,
   activeCourseId: string | null,
+  materialUse: "citation" | "practice" | "origin",
   excludedSourceIds?: readonly string[],
 ): Promise<Array<{
   memory: MemoryItem;
@@ -37,103 +35,127 @@ async function readMemoryContext(
   ancestorMemoryIds: string[];
 }>> {
   await lockOwnedWorkspace(db, scope);
-  const excluded = excludedSourceIds
-    ?? await createOpeningPrivacyRepository(db).listExcludedSourceIds(scope);
-  const rows = await db`
-    SELECT m.*, (
-      SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM opening_turns t
-      CROSS JOIN LATERAL jsonb_array_elements(COALESCE(${turnContextSourceRefs(db, "t")}, '[]'::jsonb)) ref
-      WHERE t.id::text IN (SELECT lower(elem) FROM jsonb_array_elements_text(m.source_turn_ids) AS elem)
-        AND t.workspace_id = ${scope.workspaceId}
-    ) AS material_source_refs,
-    (
-      ${memoryTransitiveDepsCte(db, "m")}
-      SELECT min(dep_m.expires_at)
-      FROM mem_deps d
-      JOIN opening_memories dep_m ON dep_m.id::text = d.dep_id
-        AND dep_m.workspace_id = m.workspace_id
-        AND dep_m.status = 'active'
-        AND dep_m.course_id IS NULL
-        AND dep_m.kind = 'temporary'
-        AND dep_m.expires_at IS NOT NULL
-    ) AS ancestor_temporary_expires_at,
-    (
-      ${memoryTransitiveDepsCte(db, "m")}
-      SELECT COALESCE(jsonb_agg(d.dep_id ORDER BY d.dep_id), '[]'::jsonb)
-      FROM mem_deps d
-    ) AS ancestor_memory_ids
-    FROM opening_memories m
-    WHERE m.workspace_id = ${scope.workspaceId}
-      AND m.status = 'active'
-      AND (m.course_id IS NULL OR m.course_id = ${activeCourseId})
-      AND jsonb_array_length(m.source_turn_ids) > 0
-      AND ${memoryTransitiveDependenciesActive(db, "m")}
-      AND NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
-        WHERE NOT EXISTS (
-          SELECT 1 FROM opening_turns t
-          INNER JOIN opening_conversations c ON c.id = t.conversation_id
-          WHERE t.id::text = lower(ref.turn_id)
-            AND t.workspace_id = ${scope.workspaceId}
-            AND c.workspace_id = ${scope.workspaceId}
-            AND c.owner_user_id = ${scope.ownerUserId}
-        )
-        OR EXISTS (
-          SELECT 1 FROM opening_turns t
-          WHERE t.id::text = lower(ref.turn_id) AND t.workspace_id = ${scope.workspaceId}
-            AND (
-              NOT (${contextSourceRefsIncluded(db, scope.workspaceId, () => turnContextSourceRefs(db, "t"))}) OR
-              EXISTS (
-                SELECT 1 FROM unnest(t.source_ids) AS sid(id)
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM opening_sources s
-                  WHERE s.id = sid.id AND s.workspace_id = ${scope.workspaceId}
-                    AND s.upload_state = 'uploaded'
-                )
-                OR sid.id = ANY(${excluded}::uuid[])
-              )
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(
-                  CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END
-                ) AS citation
-                WHERE NOT EXISTS (
-                  SELECT 1 FROM opening_sources s
-                  WHERE s.id::text = citation->>'sourceId'
-                    AND s.workspace_id = ${scope.workspaceId}
-                    AND s.upload_state = 'uploaded'
-                    AND s.version::text = citation->>'sourceVersion'
-                )
-                OR citation->>'sourceId' = ANY(${excluded}::text[])
-              )
-            )
-        )
+  const activeCourses = activeCourseId === null ? [] : await db`SELECT id FROM courses
+    WHERE id=${activeCourseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL`;
+  const eligibleCourseId = activeCourses.length ? activeCourseId : null;
+  const workspace: FragmentFactory = () => db`m.workspace_id`;
+  const course: FragmentFactory = () => db`m.course_id`;
+  const eligibleForScope: FragmentFactory = () => db`m.workspace_id = ${scope.workspaceId} AND m.status = 'active'
+    AND jsonb_array_length(m.source_turn_ids) > 0
+    AND ${memoryCourseAllows(db, course, () => db`${eligibleCourseId}::uuid`, workspace)}`;
+  // A batch of bare user origins has no material or dependencies to lock or resolve.
+  const eligibleRows = await db`SELECT m.*,
+    CASE WHEN ${eligibleCourseId}::uuid IS NULL AND m.course_id IS NULL THEN NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements_text(m.source_turn_ids) origin(turn_id)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM opening_turns t
+        JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+        WHERE t.id=${lineageUuid(db, () => db`origin.turn_id`)} AND t.workspace_id=m.workspace_id
+          AND c.owner_user_id=${scope.ownerUserId} AND t.status='complete' AND ${bareUserOrigin(db)}
       )
-    ORDER BY m.created_at ASC`;
-  return rows.flatMap((row) => {
-    let ancestorTemporaryExpiresAt: string | undefined;
-    if (row.ancestor_temporary_expires_at != null) {
-      const parsed = new Date(row.ancestor_temporary_expires_at as string | Date);
-      if (Number.isNaN(parsed.getTime())) return [];
-      ancestorTemporaryExpiresAt = parsed.toISOString();
-    }
-    const ancestorMemoryIds = Array.isArray(row.ancestor_memory_ids)
-      ? [...new Set((row.ancestor_memory_ids as unknown[])
-          .filter((id): id is string => typeof id === "string" && UUID.test(id))
-          .map(id => id.toLowerCase()))].sort()
-      : [];
-    return [{
-      memory: mapMemoryRow(row as Record<string, unknown>),
-      sourceRefs: parseContextSourceRefs(row.material_source_refs) ?? [],
-      ...(ancestorTemporaryExpiresAt ? { ancestorTemporaryExpiresAt } : {}),
-      ancestorMemoryIds,
-    }];
+    ) ELSE false END AS bare_origins
+    FROM opening_memories m WHERE ${eligibleForScope()} ORDER BY m.created_at ASC`;
+  if (eligibleRows.every(row => row.bare_origins === true)) {
+    return eligibleRows.map(row => ({ memory: mapMemoryRow(row), sourceRefs: [], ancestorMemoryIds: [] }));
+  }
+  // Keep the UUID probe correlated when the number of saved origins is unknown to the planner.
+  const savedOrigins = (ids: FragmentFactory, workspaceId: FragmentFactory): ReturnType<Db> => db`
+    unnest(ARRAY(
+      SELECT ${lineageUuid(db, () => db`lower(ref.turn_id)`)}
+      FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${ids()}) = 'array' THEN ${ids()} ELSE '[]'::jsonb END) ref(turn_id)
+    )) origin(turn_id)
+    JOIN LATERAL (
+      SELECT saved.* FROM opening_turns saved
+      WHERE saved.id = origin.turn_id AND saved.workspace_id = ${workspaceId()} AND saved.status = 'complete'
+      OFFSET 0
+    ) t ON true`;
+  // Bound the explicit ancestry query to all selected roots in one walk.
+  // The origin check also resolves unattributed backing and validates stored material.
+  const rows = await db`
+    /* Batch the original WITH RECURSIVE mem_deps(dep_id) traversal by root memory. */
+    WITH RECURSIVE eligible AS MATERIALIZED (
+      SELECT m.*, (
+        SELECT jsonb_build_object(
+          'turn_ids', COALESCE(jsonb_agg(t.id), '[]'::jsonb),
+          'refs', jsonb_path_query_array(COALESCE(jsonb_agg(${turnContextSourceRefs(db, "t")}
+            || CASE WHEN t.role = 'assistant' AND jsonb_typeof(t.citations) = 'array' THEN (
+              SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId', cite->'sourceId', 'sourceVersion', cite->'sourceVersion')), '[]'::jsonb)
+              FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END) cite
+            ) ELSE '[]'::jsonb END), '[]'::jsonb), '$[*][*]')
+        )
+        FROM ${savedOrigins(() => db`m.source_turn_ids`, workspace)}
+      ) AS source_evidence
+      FROM opening_memories m
+      WHERE ${eligibleForScope()}
+    ), mem_deps(dep_id, root_id) AS (
+      SELECT lower(dep.id), m.id AS root_id
+      FROM eligible m CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`m.source_evidence->'refs'`)} dep
+      UNION
+      SELECT CASE WHEN ${dependencyOriginCourseAllows(db, () => db`parent.course_id`, () => db`child.course_id`, () => db`course.id`)}
+        THEN lower(dep.id) END, prev.root_id
+      FROM mem_deps prev
+      JOIN opening_memories parent ON parent.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND parent.workspace_id = ${scope.workspaceId}
+      CROSS JOIN LATERAL ${savedOrigins(() => db`parent.source_turn_ids`, () => db`parent.workspace_id`)}
+      CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
+      CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", undefined, () => db`${scope.ownerUserId}::uuid`)} AS id) course
+      LEFT JOIN opening_memories child ON child.id = ${lineageUuid(db, () => db`dep.id`)} AND child.workspace_id = parent.workspace_id
+    ), ancestry AS MATERIALIZED (
+      SELECT d.root_id, jsonb_agg(DISTINCT d.dep_id) AS memory_ids,
+        min(dep_m.expires_at) FILTER (WHERE dep_m.kind = 'temporary') AS temporary_expires_at,
+        bool_and(COALESCE(dep_m.id <> d.root_id AND dep_m.status = 'active'
+          AND (dep_m.course_id IS NULL OR dep_course.id IS NOT NULL)
+          AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp())), false)) AS all_active
+      FROM mem_deps d
+      LEFT JOIN opening_memories dep_m ON dep_m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND dep_m.workspace_id = ${scope.workspaceId}
+      LEFT JOIN courses dep_course ON dep_course.id=dep_m.course_id AND dep_course.workspace_id=dep_m.workspace_id
+        AND dep_course.archived_at IS NULL
+      GROUP BY d.root_id
+    )
+    SELECT eligible.*, source_evidence->'refs' AS material_source_refs,
+      source_evidence->'turn_ids' AS evidence_turn_ids,
+      ancestry.temporary_expires_at AS ancestor_temporary_expires_at, ancestry.memory_ids AS ancestor_memory_ids
+    FROM eligible LEFT JOIN ancestry ON ancestry.root_id = eligible.id
+    WHERE COALESCE(ancestry.all_active, true)
+      AND jsonb_array_length(source_evidence->'turn_ids') = jsonb_array_length(source_turn_ids)
+    ORDER BY created_at ASC`;
+  const originRows = rows.flatMap(row => Array.isArray(row.evidence_turn_ids) ? [{
+    id: String(row.id), excludedId: String(row.id), course_id: row.course_id as string | null, turn_ids: row.evidence_turn_ids as string[],
+  }] : []);
+  // Suggestions validate the proposed origin under its own material policy.
+  // Previously saved global context remains usable across non-exam classifications.
+  const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin",
+    includeSourceRefs: true };
+  const origins = await lockAndReadMemoryOrigins(db, scope, originRows, materialRules, eligibleCourseId);
+  return rows.flatMap(row => {
+    const origin = origins.get(String(row.id));
+    const savedRefs = parseContextSourceRefs(row.material_source_refs);
+    if (origin === null || savedRefs === null) return [];
+    const savedSourceIds = new Set(savedRefs.map(ref => ref.sourceId));
+    const sourceRefs = mergeContextSourceRefs(savedRefs, (origin?.sourceRefs ?? []).filter(ref => !savedSourceIds.has(ref.sourceId)));
+    const expiry = Math.min(row.ancestor_temporary_expires_at == null
+      ? Infinity : new Date(row.ancestor_temporary_expires_at as string | Date).getTime(), origin?.expiresAt ?? Infinity);
+    if (Number.isNaN(expiry)) return [];
+    const ancestorTemporaryExpiresAt = Number.isFinite(expiry) ? new Date(expiry).toISOString() : undefined;
+    const ancestorMemoryIds = [...new Set([
+      ...(parseContextMemoryDependencyIds([{ memoryDependencyIds: row.ancestor_memory_ids }]) ?? []),
+      ...(origin?.ids ?? []),
+    ])].sort();
+    return [{ memory: mapMemoryRow(row as Record<string, unknown>), sourceRefs, ancestorTemporaryExpiresAt, ancestorMemoryIds }];
   });
+}
+
+function readMemoryContext(
+  db: Db, scope: OpeningScope, activeCourseId: string | null, materialUse: "citation" | "practice" | "origin", excludedSourceIds?: readonly string[],
+) {
+  const read = (tx: Db) => readMemoryContextInTx(tx, scope, activeCourseId, materialUse, excludedSourceIds);
+  return "begin" in db && typeof db.begin === "function" ? db.begin(read) : read(db);
 }
 
 export async function listMemoriesForContext(
   db: Db, scope: OpeningScope, activeCourseId: string | null, excludedSourceIds?: readonly string[], now?: string,
+  materialUse?: "citation" | "practice",
 ): Promise<MemoryItem[]> {
-  const rows = await readMemoryContext(db, scope, activeCourseId, excludedSourceIds);
+  const rows = await readMemoryContext(db, scope, activeCourseId, materialUse ?? "origin", excludedSourceIds);
   if (now === undefined) return rows.map((row) => row.memory);
   const nowMs = Date.parse(now);
   return rows
@@ -144,10 +166,10 @@ export async function listMemoriesForContext(
 
 /** The same instant selects both the injected text and its material lineage. */
 export async function loadMemoryContext(
-  db: Db, scope: OpeningScope, activeCourseId: string | null, now: string,
+  db: Db, scope: OpeningScope, activeCourseId: string | null, now: string, materialUse: "citation" | "practice" = "citation",
 ): Promise<LoadedMemoryContext> {
   const nowMs = Date.parse(now);
-  const eligible = (await readMemoryContext(db, scope, activeCourseId))
+  const eligible = (await readMemoryContext(db, scope, activeCourseId, materialUse))
     .filter((row) => isMemoryEligible(row.memory, now)
       && (row.ancestorTemporaryExpiresAt === undefined
         || (!Number.isNaN(nowMs) && Date.parse(row.ancestorTemporaryExpiresAt) > nowMs)));
