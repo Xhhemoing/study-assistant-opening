@@ -6,6 +6,7 @@ import { readTutorAttemptContext, assertTutorAttemptContext, tutorAttemptFence, 
 export { tutorAttemptFence, tutorAttemptFenceSchema } from "./opening-tutor-attempt-context";
 export type { TutorAttemptContext, TutorAttemptFence } from "./opening-tutor-attempt-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { assertTutorLearnerMisconceptionSnapshotInTx, type TutorMisconceptionSnapshot } from "./v3-bitemporal-misconception-memory";
 import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
@@ -69,6 +70,7 @@ export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJob
 type StreamPublicationContext = {
   privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; claimToken?: string; executionId?: string;
   materialPurposePin?: OpeningMaterialPurposePin;
+  misconceptionSnapshot?: TutorMisconceptionSnapshot;
   memoryLineageSourceIds?: readonly string[];
   globalMemoryIds?: readonly string[];
   historyCourseBindings?: readonly HistoryCourseBinding[];
@@ -107,6 +109,15 @@ function boundTurnCourseId(turn: StreamTurnBinding): string | null {
   return courseId.toLowerCase();
 }
 
+async function assertBoundMisconceptionSnapshot(
+  tx: TransactionSql, scope: OpeningScope, courseId: string | null, snapshot: TutorMisconceptionSnapshot,
+): Promise<void> {
+  if ((snapshot.courseId?.toLowerCase() ?? null) !== courseId) {
+    throw Object.assign(new Error("learner misconception course binding changed"), { code: "CONFLICT" });
+  }
+  await assertTutorLearnerMisconceptionSnapshotInTx(tx, scope, snapshot);
+}
+
 function boundTurnAttemptId(turn: StreamTurnBinding) {
   return turn.attempt_id ?? (turn.context_anchor as StudyContextAnchor | null)?.attemptId;
 }
@@ -138,6 +149,7 @@ type SendAuthorizationContext = {
   executionId?: string;
   contextSourceRefs: ContextSourceRef[];
   materialPurposePin?: OpeningMaterialPurposePin;
+  misconceptionSnapshot?: TutorMisconceptionSnapshot;
   memoryLineageSourceIds?: readonly string[];
   globalMemoryIds?: readonly string[];
   historyCourseBindings?: readonly HistoryCourseBinding[];
@@ -1237,6 +1249,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         );
       }
       await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
+      if (context.misconceptionSnapshot) {
+        await assertBoundMisconceptionSnapshot(tx, scope, courseId, context.misconceptionSnapshot);
+      }
       beforeStartSend?.();
       assertHistoryMemoryUnexpired(historyExpiresAt);
       inFlight = startSend();
@@ -1456,6 +1471,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             );
           }
           await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
+          if (context.misconceptionSnapshot) {
+            await assertBoundMisconceptionSnapshot(tx, scope, courseId, context.misconceptionSnapshot);
+          }
           try {
             publicationStarted = true;
             publishPromise = Promise.resolve().then(() => {
@@ -1757,6 +1775,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       enqueueMetadata?: boolean;
     }, options?: {
       materialPurposePin?: OpeningMaterialPurposePin;
+      misconceptionSnapshot?: TutorMisconceptionSnapshot;
       memoryLineageSourceIds?: readonly string[];
       globalMemoryIds?: readonly string[];
       historyCourseBindings?: readonly HistoryCourseBinding[];
@@ -1796,7 +1815,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (input.expectedPrivacyEpoch !== undefined) {
           const currentEpoch = Number(workspace[0]!.privacy_epoch);
           if (currentEpoch !== input.expectedPrivacyEpoch) {
-            throw new Error(`privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`);
+            const error = new Error(`privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`);
+            throw options?.misconceptionSnapshot ? Object.assign(error, { code: "PRIVACY_EPOCH_MISMATCH" }) : error;
           }
         }
         const attempt = options?.attemptContext;
@@ -1852,6 +1872,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           assertHistoryMemoryUnexpired(historyExpiresAt);
         } else if (boundCourseId !== null) {
           await lockStreamCourse(tx, input.scope, boundCourseId);
+        }
+        if (options?.misconceptionSnapshot) {
+          await assertBoundMisconceptionSnapshot(tx, input.scope, boundCourseId, options.misconceptionSnapshot);
         }
         const claimed = await tx`
           UPDATE opening_tutor_jobs SET status = 'succeeded', timing_execution_id = NULL, error = NULL, updated_at = now()

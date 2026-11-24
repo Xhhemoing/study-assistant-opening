@@ -15,6 +15,10 @@
       "types": "./src/opening/provider-network.ts",
       "default": "./src/opening/provider-network.ts"
     },
+    "./tutor-graph": {
+      "types": "./src/tutor-graph/index.ts",
+      "default": "./src/tutor-graph/index.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

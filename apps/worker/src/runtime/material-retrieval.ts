@@ -6,7 +6,7 @@ import type { CourseSourceUse } from "@aistudy/contracts";
 
 type CourseMaterialContext = { courseId: string | null; materialUse: CourseSourceUse };
 type ScopedMaterialRetriever = (scope: Parameters<MaterialRetriever>[0],
-  input: Parameters<MaterialRetriever>[1] & { courseContext?: CourseMaterialContext }) =>
+  input: Parameters<MaterialRetriever>[1] & { courseContext?: CourseMaterialContext; lexicalOnly?: boolean }) =>
     Promise<Awaited<ReturnType<MaterialRetriever>> & { assertCurrent(): Promise<void> }>;
 import { scopeBudget } from "./model-gateway";
 
@@ -44,7 +44,7 @@ export function createOpeningMaterialRetriever(
     try {
       const sourceIds = [...new Set(before.chunks.map(chunk => chunk.sourceId))];
       const route = { sourceIds, chunkIds: before.chunks.map(chunk => chunk.id), privacyEpoch: before.privacyEpoch };
-      if (config && input.query.trim() && sourceIds.length && await repository.hasIndex(scope, { ...config, ...route })) {
+      if (!input.lexicalOnly && config && input.query.trim() && sourceIds.length && await repository.hasIndex(scope, { ...config, ...route })) {
         const query = Array.from(input.query).reduce((state, character) => {
           if (state.full) return state;
           const bytes = new TextEncoder().encode(character).length;

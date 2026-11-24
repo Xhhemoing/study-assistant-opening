@@ -1,6 +1,72 @@
 import { describe, expect, it, vi } from "vitest";
-import { createControlledMinEntropyBudget, createMinEntropyBudget } from "./min-entropy-budget";
+import { createControlledMinEntropyBudget, createMinEntropyBudget, PURE_ANSWER_PROBE_GUIDANCE } from "./min-entropy-budget";
 import { runTutorGraph, runTutorGraphTurn } from "./graph";
+import * as graphModule from "./graph";
+import { runTutorGraphForTurn } from "./index";
+
+describe("TutorGraph runtime bridge", () => {
+  const currentAnswer = { observationId: "head", answerRevision: 2, answer: "Learner's private work\nsecond line" };
+  const effectiveGrading = { observationId: "head", answerRevision: 2, outcome: "incorrect", verdictSource: "deterministic",
+    feedback: "private feedback", answer_key: "reference answer", rawSql: {}, clientReleaseSink: vi.fn() };
+  const input = { originalQuestion: "Original saved question", currentAnswer, effectiveGrading,
+    anchorPurpose: "learning_help", tutorMode: "explain" };
+
+  it.each(["hint", "explain"])("keeps exam %s answer-independent before and after submission", tutorMode => {
+    const graph = vi.spyOn(graphModule, "runTutorGraph");
+    try {
+      const unsubmitted = runTutorGraphForTurn({ ...input, anchorPurpose: "exam_help", tutorMode, currentAnswer: null });
+      const submitted = runTutorGraphForTurn({ ...input, anchorPurpose: "exam_help", tutorMode });
+      expect(submitted).toEqual(unsubmitted);
+      expect(submitted).toEqual({ kind: "pure_short_circuit", text: PURE_ANSWER_PROBE_GUIDANCE, providerCalls: 0 });
+      expect(graph).toHaveBeenLastCalledWith(expect.objectContaining({
+        assessmentMode: "pure", attemptSubmitted: false, answerProbe: tutorMode === "explain", questionStem: "", submission: null,
+      }));
+    } finally {
+      graph.mockRestore();
+    }
+  });
+
+  it("leaves unanswered practice to the tutor without applying a stale grade", () => {
+    expect(runTutorGraphForTurn({ ...input, currentAnswer: null })).toEqual({
+      kind: "practice", instructionSuffix: "", providerCalls: 0,
+    });
+  });
+
+  it.each(["deterministic", "ai_graded"])("projects the matched %s outcome into isolated capabilities and a fixed cue", verdictSource => {
+    const graph = vi.spyOn(graphModule, "runTutorGraph");
+    try {
+      const result = runTutorGraphForTurn({ ...input, effectiveGrading: { ...effectiveGrading, verdictSource } });
+      expect(result).toEqual({ kind: "practice", providerCalls: 0,
+        instructionSuffix: "\n教学引导：请用一个相关概念引导学习者复核自己的作答。" });
+      const calls = graph.mock.lastCall![0];
+      expect(calls).toMatchObject({ questionStem: input.originalQuestion, attemptSubmitted: true, assessmentMode: "practice" });
+      expect(calls.submission).toBe(currentAnswer);
+      expect(Object.keys(calls.verifyCaps).sort()).toEqual(["assertCurrent", "verify"]);
+      expect(Object.keys(calls.releaseCaps).sort()).toEqual(["answerLeakageBlocker", "assertCurrent"]);
+      const verification = calls.verifyCaps.verify(calls.submission);
+      expect(verification).toMatchObject({ deterministic: verdictSource === "deterministic", steps: [{ status: "invalid" }] });
+      expect(JSON.stringify(verification)).not.toContain(effectiveGrading.feedback);
+      expect(calls.releaseCaps.answerLeakageBlocker?.(effectiveGrading.answer_key)).toBe(true);
+      expect(effectiveGrading.clientReleaseSink).not.toHaveBeenCalled();
+    } finally {
+      graph.mockRestore();
+    }
+  });
+
+  it.each([{ observationId: "previous" }, { answerRevision: 1 }, { verdictSource: "reference_checked" }])(
+    "treats a grade with %o as unknown", mismatch => {
+      const graph = vi.spyOn(graphModule, "runTutorGraph");
+      try {
+        expect(runTutorGraphForTurn({ ...input, effectiveGrading: { ...effectiveGrading, ...mismatch } }))
+          .toMatchObject({ instructionSuffix: "\n教学引导：请邀请学习者写出下一步并说明依据。" });
+        const calls = graph.mock.lastCall![0];
+        expect(calls.verifyCaps.verify(calls.submission)).toEqual({ steps: [{ id: "作答", text: currentAnswer.answer, status: "unknown" }] });
+      } finally {
+        graph.mockRestore();
+      }
+    },
+  );
+});
 
 describe("TutorGraph fast path", () => {
   it("fails closed when explicit MinEntropyBudget is omitted on pure/graded items", () => {

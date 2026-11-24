@@ -10,7 +10,8 @@ import { createOpeningExplicitRegradeRequestRepository, createOpeningAiGradingRe
 import { workerSmokeJobSchema } from "@aistudy/contracts";
 import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
-  createOpeningTutorLearnerContextRepository, createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext } from "@aistudy/database";
+  createOpeningTutorLearnerContextRepository, createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext,
+  readTutorLearnerMisconceptionContext, assertTutorLearnerMisconceptionSnapshot } from "@aistudy/database";
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
 import { createWorkerTutorStreamWriter } from "./runtime/tutor-stream";
 import { createSourcePageImages } from "./runtime/source-page-images";
@@ -207,6 +208,10 @@ function createTeachingHandlers(sql: WorkerSql, env: WorkerEnv, producer: Return
     onTimingUnavailable: reportError,
     retrieveContext: createOpeningMaterialRetriever(sql, budget, embeddingConfig),
     learnerContext: createOpeningTutorLearnerContextRepository(sql),
+    bitemporalMisconceptions: {
+      read: (scope, input) => readTutorLearnerMisconceptionContext(sql, scope, input),
+      assertCurrent: (scope, snapshot) => assertTutorLearnerMisconceptionSnapshot(sql, scope, snapshot),
+    },
     stream: tutorStream,
     streamExposures: createOpeningStudyExposureRepository(sql),
     onStreamUnavailable: reportError,

@@ -8,6 +8,12 @@ type Edge = typeof v3BitemporalMisconceptionEdges.$inferSelect;
 type ContextItem = Pick<Edge, "status" | "learnerDisposition" | "summary">;
 type RenderedContextBlock = { renderedMarkdown: string; byteLength: number };
 type ContextBlock = RenderedContextBlock & { revision: number };
+type ContextRevision = ContextItem & Pick<Edge, "revisionId">;
+export type TutorMisconceptionSnapshot = RenderedContextBlock & {
+  courseId: string | null;
+  privacyEpoch: number;
+  revisionIds: readonly string[];
+};
 type Revision = { edgeId: string; revisionId: string; txAt: string };
 type TryHandoffClock = { readonly nowMs: number; readonly issueSeq: number };
 type TryMisconceptionClaim = Pick<Edge, "conceptKey" | "misconceptionCode" | "summary"> & {
@@ -48,7 +54,9 @@ export function renderLearnerContextBlock(items: readonly ContextItem[]) {
 }
 
 /** Return false once the renderer has reached the byte limit. */
-function appendLearnerContextItems(block: RenderedContextBlock, items: readonly ContextItem[]): boolean {
+function appendLearnerContextItems<T extends ContextItem>(
+  block: RenderedContextBlock, items: readonly T[], onIncluded?: (item: T) => void,
+): boolean {
   for (const item of items) {
     if (item.status === "retracted" || item.status === "superseded") continue;
     const text = item.summary.replace(/[\s\p{Cc}]+/gu, " ").trim()
@@ -74,6 +82,7 @@ function appendLearnerContextItems(block: RenderedContextBlock, items: readonly 
     if (characters.length) {
       block.renderedMarkdown += prefix + characters.join("");
       block.byteLength += lineBytes;
+      onIncluded?.(item);
     }
     if (truncated || block.byteLength === LEARNER_CONTEXT_MAX_BYTES) return false;
   }
@@ -106,23 +115,27 @@ export async function refreshLearnerMisconceptionContextBlock(
   return writeLearnerMisconceptionContextBlock(tx, scope, privacyEpoch, at, restoreCutoffSeq);
 }
 
-async function writeLearnerMisconceptionContextBlock(
-  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoreCutoffSeq?: number,
-): Promise<ContextBlock> {
+function misconceptionContextPages(tx: TransactionSql, scope: OpeningScope, at: string, courseId?: string | null) {
   // Exclude ASCII blanks and controls in SQL. The renderer handles Unicode whitespace across pages.
   const blankSummary = "^[ \u0001-\u001f\u007f-\u009f]*$";
-  const pages = tx<ContextItem[]>`
-    SELECT e.status, e.learner_disposition AS "learnerDisposition", e.summary
+  return tx<ContextRevision[]>`
+    SELECT e.status, e.learner_disposition AS "learnerDisposition", e.summary, e.revision_id AS "revisionId"
     FROM v3_bitemporal_misconception_edges e
     JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
     WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
       AND e.privacy_epoch = w.privacy_epoch
+      AND (${courseId === undefined} OR e.course_id IS NULL OR e.course_id = ${courseId ?? null}::uuid)
       AND e.valid_range @> ${at}::text::timestamptz AND e.tx_range @> ${at}::text::timestamptz
       AND e.status IN ('candidate', 'verified', 'learner_reported')
       AND e.summary COLLATE "C" !~ ${blankSummary}
     ORDER BY (e.status = 'learner_reported') DESC, lower(e.tx_range) DESC, e.edge_id, e.revision_id`.cursor(64);
+}
+
+async function writeLearnerMisconceptionContextBlock(
+  tx: TransactionSql, scope: OpeningScope, privacyEpoch: number, at: string, restoreCutoffSeq?: number,
+): Promise<ContextBlock> {
   const rendered = { renderedMarkdown: "", byteLength: 0 };
-  for await (const items of pages) {
+  for await (const items of misconceptionContextPages(tx, scope, at)) {
     if (!appendLearnerContextItems(rendered, items)) break;
   }
   const { renderedMarkdown, byteLength } = rendered;
@@ -137,6 +150,54 @@ async function writeLearnerMisconceptionContextBlock(
       restore_cutoff_seq = GREATEST(EXCLUDED.restore_cutoff_seq, v3_learner_context_blocks.restore_cutoff_seq)
     RETURNING rendered_markdown AS "renderedMarkdown", byte_length AS "byteLength", revision`;
   return block!;
+}
+
+async function readTutorMisconceptionSnapshotInTx(
+  tx: TransactionSql, scope: OpeningScope, { courseId, expectedPrivacyEpoch }: {
+    courseId: string | null;
+    expectedPrivacyEpoch?: number;
+  },
+): Promise<TutorMisconceptionSnapshot | null> {
+  const [workspace] = await tx<{ privacy_epoch: number }[]>`
+    SELECT privacy_epoch FROM workspaces WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
+  if (!workspace) return null;
+  const privacyEpoch = workspace.privacy_epoch;
+  if (expectedPrivacyEpoch !== undefined && privacyEpoch !== expectedPrivacyEpoch) {
+    throw Object.assign(new Error("learner misconception privacy epoch changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
+  }
+  await lockMisconceptionContext(tx, scope.workspaceId);
+  const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
+  const rendered = { renderedMarkdown: "", byteLength: 0 };
+  const revisionIds: string[] = [];
+  for await (const items of misconceptionContextPages(tx, scope, clock!.at, courseId)) {
+    if (!appendLearnerContextItems(rendered, items, item => revisionIds.push(item.revisionId))) break;
+  }
+  return rendered.renderedMarkdown ? { courseId, privacyEpoch, revisionIds, ...rendered } : null;
+}
+
+export async function readTutorLearnerMisconceptionContext(
+  sql: Sql, scope: OpeningScope, input: { courseId: string | null; expectedPrivacyEpoch?: number },
+): Promise<TutorMisconceptionSnapshot | null> {
+  return sql.begin(tx => readTutorMisconceptionSnapshotInTx(tx, scope, input));
+}
+
+export async function assertTutorLearnerMisconceptionSnapshotInTx(
+  tx: TransactionSql, scope: OpeningScope, snapshot: TutorMisconceptionSnapshot,
+): Promise<void> {
+  const current = await readTutorMisconceptionSnapshotInTx(tx, scope, {
+    courseId: snapshot.courseId, expectedPrivacyEpoch: snapshot.privacyEpoch,
+  });
+  if (!current || current.renderedMarkdown !== snapshot.renderedMarkdown
+    || current.revisionIds.length !== snapshot.revisionIds.length
+    || current.revisionIds.some((id, index) => id !== snapshot.revisionIds[index])) {
+    throw learningError("CONFLICT", "learner misconception context changed");
+  }
+}
+
+export async function assertTutorLearnerMisconceptionSnapshot(
+  sql: Sql, scope: OpeningScope, snapshot: TutorMisconceptionSnapshot,
+): Promise<void> {
+  await sql.begin(tx => assertTutorLearnerMisconceptionSnapshotInTx(tx, scope, snapshot));
 }
 
 export async function readLearnerMisconceptionContextBlock(sql: Sql, scope: OpeningScope): Promise<ContextBlock | null> {
