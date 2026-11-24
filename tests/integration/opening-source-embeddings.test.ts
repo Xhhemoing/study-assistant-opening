@@ -465,6 +465,37 @@ describe("pgvector material repository", () => {
     ], [3], 2);
   });
 
+  it.each(["Answer: Yes.", "[图片描述]\nSolution:\nYes.", "Answer: x ="])(
+    "seals an auxiliary Vision proof after %j through its terminator", async answer => {
+      await expectArchivedPdfPages([
+        answer,
+        "[图片描述]\nProof.\nThe private proof begins.",
+        "The private derivation continues.",
+        "The private proof ends. ∎",
+        "Public prose after the proof.",
+      ], [5], 3);
+    },
+  );
+
+  it("seals an auxiliary Vision proof after a cross-page inline answer", async () => {
+    await expectArchivedPdfPages([
+      "Answer: x =",
+      "3 units.",
+      "[图片描述]\nProof.\nThe private derivation follows.",
+      "The private derivation continues.",
+      "The private proof ends. Q.E.D.",
+      "Public prose after the proof.",
+    ], [6], 4);
+  });
+
+  it("closes an auxiliary Vision proof at a terminator in its opening block", async () => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nSolution:\nYes.",
+      "[图片描述]\nProof.\nThe private derivation concludes. Q.E.D.",
+      "Public prose after the proof.",
+    ], [3], 2);
+  });
+
   it("keeps a same-chunk auxiliary note from closing a primary inline answer", async () => {
     await expectArchivedPdfPages([
       "Answer: x =\n[图片描述]\nAuxiliary observation.",
@@ -562,6 +593,23 @@ describe("pgvector material repository", () => {
       "## Solutions\nA homogeneous mixture.",
       "Solutions\nSolutes dissolve in solvents.",
     ], [1, 4, 5, 6], 3);
+  });
+
+  it.each(["Answer: x =", "Answer Key"])("keeps a standalone 解答： sealed after a numbered line under %s", async opener => {
+    await expectArchivedPdfPages([
+      opener + "\n1. First result.",
+      "解答：\nYes.",
+      "The private answer section continues.",
+      "Chapter 2: Geometry",
+    ], [4], 3);
+  });
+
+  it("allows a numbered question after an inline seal ends on the same page", async () => {
+    await expectArchivedPdfPages([
+      "Answer: x =\n3. ∎\n1. Decide whether every group is cyclic.",
+      "解答：\nYes.",
+      "Public prose after the inline solution.",
+    ], [3], 2);
   });
 
   it.each(["End of Answers.", "End of Solutions.", "答案完", "解答完"])(

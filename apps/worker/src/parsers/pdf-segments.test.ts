@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v40-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v41-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -242,7 +242,7 @@ describe("bounded resumable PDF parser", () => {
     onPages.mockClear();
     await expect(run()).resolves.toEqual({ pageCount: 2, failedRanges: [] });
     expect(d.ranges).toEqual([]);
-    expect(onPages.mock.calls[1]?.slice(4)).toEqual([true, false, true]);
+    expect(onPages.mock.calls[1]?.slice(4)).toEqual([true, false, true, false]);
   });
 
   it.each(["inline_sealed", "section_sealed"])("passes cached page 10's %s state to page 11 and separates differently seeded cache entries", async mode => {
@@ -2758,6 +2758,46 @@ describe("bounded resumable PDF parser", () => {
     const pages = [example, [stem, label, "Yes."].join("\n"), "Proof. Private continuation. ∎", prose];
     const result = await runPdfScenario({ segmentPages: 1, pages: pages.map((text, index) => ({ page: index + 1, text })) });
     expect(result.publishedChunks.map(({ page, text }) => [page, text])).toEqual([[1, example], [2, stem], [4, prose]]);
+  });
+
+  it.each([
+    ["The worked example continues.", "[转写]\n2. Decide whether every group is cyclic.", false, true],
+    ["The worked example continues.", "[转写]\nThe example continues in prose.", false, false],
+    ["The worked example continues.", "[转写]\nPage 2 of 3", false, false],
+    ["The worked example continues.", "[转写]", false, false],
+    ["The worked example continues.", "[图片描述]\n2. Decide whether every group is cyclic.", false, false],
+    ["Page 2 of 3", "[转写]\nThe example continues in prose.", true, false],
+    ["2. Decide whether every group is cyclic.", "[转写]\nThe example continues in prose.", true, true],
+  ])("reconciles native %j and primary Vision %j for the next numbered question", async (native, text, nativeQuestion, numberedQuestion) => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Example 1: Groups\n1. Decide whether the group is abelian.", inWorkedExampleAtEnd: true },
+      { page: 2, text: native, visualKinds: ["picture"], inWorkedExampleAtEnd: true, previousNumberedQuestionAtEnd: nativeQuestion },
+      { page: 3, text: "Public prose." },
+    ], recognizePage: async () => ({ text, imageObjectKey: "vision/numbered" }) });
+    expect(result.requests[1]).toEqual({ start: 2, workedExample: true, numberedQuestion: true });
+    expect(result.requests[2]).toEqual({ start: 3, workedExample: true, ...(numberedQuestion ? { numberedQuestion: true } : {}) });
+  });
+
+  it("re-extracts a multi-page segment when Vision adds a numbered question", async () => {
+    const publicProse = "Public prose after the inline solution.";
+    const result = await runPdfScenario({ segmentPages: 3, pageCount: 3,
+      extractRange(start) {
+        const pages = start === 1 ? [
+          { page: 1, text: "A diagram introduces the exercise.", visualKinds: ["picture"] },
+          { page: 2, text: "", visualKinds: [], hadSealedContent: true, sectionSealedAtEnd: true },
+          { page: 3, text: "", visualKinds: [], hadSealedContent: true, sectionSealedAtEnd: true },
+        ] : [
+          { page: 2, text: "", visualKinds: [], hadSealedContent: true, inlineSealedAtEnd: false,
+            inlineProofBoundaryPendingAtEnd: true, previousNumberedQuestionAtEnd: false },
+          { page: 3, text: publicProse, visualKinds: [] },
+        ];
+        return JSON.stringify({ pages: pages.map(page => ({ ...page, imagePath: null })) });
+      },
+      recognizePage: async () => ({ text: "[转写]\n1. Decide whether the group is abelian.", imageObjectKey: "vision/numbered" }),
+    });
+    expect(result.requests).toEqual([{ start: 1 }, { start: 2, numberedQuestion: true }]);
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual([1, 3]);
+    expect(result.publishedChunks.at(-1)?.text).toBe(publicProse);
   });
 
   it.each(["live", "saved"] as const)("only lets primary %s Vision text open worked examples and release seals", async origin => {

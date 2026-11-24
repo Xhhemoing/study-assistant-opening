@@ -100,7 +100,8 @@ export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
   runner: ParserRunner; segments?: Pick<OpeningPdfSegmentsRepository, "read" | "save">; signal: AbortSignal;
   onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean,
-    initialInWorkedExample?: boolean, cached?: boolean, initialInExercise?: boolean, initialInlineProofBoundary?: boolean) =>
+    initialInWorkedExample?: boolean, cached?: boolean, initialInExercise?: boolean, initialInlineProofBoundary?: boolean,
+    initialPreviousNumberedQuestion?: boolean) =>
     PdfSegmentContinuation | Promise<PdfSegmentContinuation>;
   onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
   shouldRevalidateSegment?: (pageStart: number, pageEnd: number) => Promise<boolean>;
@@ -179,7 +180,8 @@ export async function parsePdfSegments(input: {
     const lastPage = pages.at(-1)!;
     const pageEnd = lastPage.page;
     await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
-    const workerEnd = await input.onPages?.(pages, initialSealMode, afterFailedSegment, initialInWorkedExample, cached, initialInExercise, initialInlineProofBoundary);
+    const workerEnd = await input.onPages?.(pages, initialSealMode, afterFailedSegment, initialInWorkedExample, cached,
+      initialInExercise, initialInlineProofBoundary, initialPreviousNumberedQuestion);
     afterFailedSegment = false;
     const continuation = workerEnd && typeof workerEnd === "object" ? workerEnd : undefined;
     const resumeFromPage = continuation?.resumeFromPage;
