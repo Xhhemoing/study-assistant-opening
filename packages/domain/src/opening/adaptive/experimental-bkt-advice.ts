@@ -4,7 +4,8 @@ import { buildDecisionInput } from "./decision-input";
 import { nextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
 import type { NextLearningStep, NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 import {
-  adaptiveShadowTime, compareLearnerShadowV2, matchesUntimestampedObservation, planAdaptiveBellmanShadow, predictLearnerShadowV2,
+  adaptiveShadowTime, compareLearnerShadowV2, courseFeatureRevisions, matchesUntimestampedObservation,
+  planAdaptiveBellmanShadow, predictLearnerShadowV2, sameObservationProjection, visibleObservationRevisions,
   type AdaptiveBellmanShadowInput, type AdaptiveEpistemicShadowInput,
 } from "./metacognitive-epistemic-bridge";
 
@@ -73,41 +74,63 @@ function groupById<T>(rows: readonly T[], idOf: (row: T) => string) {
 function historicalBktEvidence(
   observations: readonly SnapshotObservation[], features: readonly LearnerStateFeature[], courseId: string, cutoff: number,
 ) {
-  const courseFeatures = features.filter(row => row.courseId === courseId);
-  const valid = courseFeatures.flatMap(feature => {
-    const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
-    return attempted <= recorded ? [{ feature, attempted, recorded }] : [];
-  });
-  const featureIds = new Set(courseFeatures.map(row => row.observationId));
+  const valid = courseFeatureRevisions(features, courseId);
+  const featureIds = new Set(features.filter(row => row.courseId === courseId).map(row => row.observationId));
   const featuresById = groupById(valid, row => row.feature.observationId);
-  const visible = observations.flatMap(head => {
-    const attempted = adaptiveShadowTime(head.attemptedAt);
-    if (head.recordedAt !== undefined) {
-      const recorded = adaptiveShadowTime(head.recordedAt);
-      return attempted <= recorded && recorded < cutoff ? [{ head, recorded }] : [];
-    }
-    if (!featureIds.has(head.id)) return [{ head, recorded: undefined }];
-    const candidates = featuresById.get(head.id) ?? [];
-    const compatible = candidates.filter(row => row.attempted === attempted && matchesUntimestampedObservation(head, row.feature));
-    const matching = compatible.length ? compatible : candidates;
-    if (!matching.some(row => row.recorded < cutoff)) return [];
-    const times = new Set(matching.map(row => row.recorded));
-    return [{ head, recorded: times.size === 1 ? matching[0]!.recorded : undefined }];
-  });
-
   const latestRecordings = new Map<string, number>();
-  const heads = [...groupById(visible, row => row.head.id).entries()].flatMap(([id, rows]) => {
-    if (rows.length === 1 || rows.some(row => row.recorded === undefined)) return rows.map(row => row.head);
-    const latest = rows.reduce((time, row) => Math.max(time, row.recorded!), -Infinity);
-    const current = rows.filter(row => row.recorded === latest);
-    if (current.length < rows.length) latestRecordings.set(id, latest);
-    return current.map(row => row.head);
+  const disputedSamples = new Set<string>();
+  const unplacedPriorityHeads: SnapshotObservation[] = [];
+  const heads = [...groupById(observations, row => row.id).entries()].flatMap(([id, rows]) => {
+    const slots = featuresById.get(id) ?? [];
+    const visible = visibleObservationRevisions(rows, slots, cutoff);
+    const ruleOnly = featureIds.has(id) ? [] : rows.filter(row =>
+      row.recordedAt === undefined && adaptiveShadowTime(row.attemptedAt) < cutoff);
+    const unplaced = rows.filter(row => {
+      if (row.recordedAt !== undefined) return false;
+      const attempted = adaptiveShadowTime(row.attemptedAt);
+      return attempted < cutoff && !slots.some(slot =>
+        slot.attempted === attempted && matchesUntimestampedObservation(row, slot.feature));
+    });
+    if (!visible.length) {
+      // Visible features with an unplaced priority claim cannot establish a
+      // historical head or justify overriding the ordinary rule with BKT.
+      unplacedPriorityHeads.push(...unplaced.filter(row => row.usableForCurrentVersion === "yes"
+        && (row.verifiedCorrect === "no" || (row.verifiedCorrect === "yes" && ["hinted", "revealed"].includes(row.assistance)))
+        && slots.some(slot => slot.recorded < cutoff && slot.attempted === adaptiveShadowTime(row.attemptedAt))));
+      return ruleOnly;
+    }
+
+    const legacyTimes = new Map<SnapshotObservation, number>();
+    let uncertainRecording = false;
+    for (const { observation, recorded, legacyCopies } of visible) {
+      if (legacyCopies === undefined) continue;
+      const previous = legacyTimes.get(observation);
+      if (previous !== undefined && previous !== recorded) uncertainRecording = true;
+      legacyTimes.set(observation, recorded);
+    }
+    if (ruleOnly.length || uncertainRecording) return [...visible.map(row => row.observation), ...ruleOnly];
+
+    const latest = visible.reduce((time, row) => Math.max(time, row.recorded), -Infinity);
+    const current = visible.filter(row => row.recorded === latest);
+    if (current.length < visible.length) latestRecordings.set(id, latest);
+
+    // Classical BKT requires a unique sample, even if replay can infer
+    // exposure from multiple copies of a legacy projection.
+    if (unplaced.length || current.some(({ observation, legacyCopies }) => (legacyCopies ?? 1) > 1
+      || visible.some(older => older.recorded < latest && older.legacyCopies !== undefined
+        && sameObservationProjection(older.observation, observation)))) disputedSamples.add(id);
+    return current.map(row => row.observation);
   });
   return {
-    heads,
+    heads, disputedSamples, unplacedPriorityHeads,
     features: valid.filter(({ feature, recorded }) => recorded < cutoff
       && recorded === (latestRecordings.get(feature.observationId) ?? recorded)).map(row => row.feature),
   };
+}
+
+function verifiedStepLabels(head: SnapshotObservation): string {
+  return JSON.stringify([...new Set((head.errors ?? []).filter(error => error.source === "verified_steps")
+    .map(error => error.label))].sort());
 }
 
 function historicalRuleInput(input: NextLearningStepInput, heads: readonly SnapshotObservation[]) {
@@ -120,6 +143,7 @@ function historicalRuleInput(input: NextLearningStepInput, heads: readonly Snaps
     || head.usableForCurrentVersion !== first!.usableForCurrentVersion
     || head.preAnswerConfidence !== first!.preAnswerConfidence || head.isMultiDraft !== first!.isMultiDraft
     || head.hasValidIntermediateSteps !== first!.hasValidIntermediateSteps
+    || verifiedStepLabels(head) !== verifiedStepLabels(first!)
     || ((input.drilldownSnapshot !== undefined || head.verifiedCorrect === "no") && head.problemId !== first!.problemId)));
   const effective = [...groups.values()].map(rows => rows[0]!);
   const unchanged = effective.length === input.observations.length && effective.every((row, index) => row === input.observations[index]);
@@ -151,11 +175,15 @@ export function nextLearningStepWithExperimentalBkt(
   // Require an explicit timezone, not server-local date interpretation.
   const cutoffTime = adaptiveShadowTime(cutoff);
   if (!Number.isFinite(cutoffTime)) return fallback("invalid_cutoff");
-  const { heads: visibleHeads, features: visibleFeatures } = historicalBktEvidence(input.observations, features, courseId!, cutoffTime);
+  const { heads: visibleHeads, features: visibleFeatures, disputedSamples, unplacedPriorityHeads } =
+    historicalBktEvidence(input.observations, features, courseId!, cutoffTime);
   const { ambiguousPriority, ruleInput } = historicalRuleInput(input, visibleHeads);
   const historicalDecision = ruleInput === input ? ruleDecision : nextLearningStep(ruleInput);
+  const latest = ruleInput.observations.find(row => row.usableForCurrentVersion === "yes");
+  const unplacedPriority = unplacedPriorityHeads.some(row => !latest || Date.parse(row.attemptedAt) > Date.parse(latest.attemptedAt)
+    || (Date.parse(row.attemptedAt) === Date.parse(latest.attemptedAt) && row.id.localeCompare(latest.id) < 0));
   if (input.dueRetest || input.learningPhase !== undefined || input.phaseSource === "explicit"
-    || input.wantsFullExplanation || ambiguousPriority || historicalDecision.metacognitiveRoute === "lucky_guess_verification_probe"
+    || input.wantsFullExplanation || ambiguousPriority || unplacedPriority || historicalDecision.metacognitiveRoute === "lucky_guess_verification_probe"
     || !["needs_check", "independent", "correct_needs_independent_check"].includes(historicalDecision.reasonCode)) {
     return fallback("priority_rule");
   }
@@ -187,7 +215,7 @@ export function nextLearningStepWithExperimentalBkt(
   const excluded = new Set(excludedProblemIds);
   const comparable = visibleFeatures.filter(row => {
     const head = heads.get(row.observationId);
-    return head && head.problemId && head.itemVersionId && head.requirementKey === requirementKey
+    return head && !disputedSamples.has(row.observationId) && head.problemId && head.itemVersionId && head.requirementKey === requirementKey
       && head.itemVersionId === row.itemVersionId && adaptiveShadowTime(head.attemptedAt) === adaptiveShadowTime(row.attemptedAt)
       && head.assistance === "independent" && head.independentAttempt === "yes"
       && head.usableForCurrentVersion === "yes" && head.verifiedCorrect === row.eligibility.verifiedCorrect
