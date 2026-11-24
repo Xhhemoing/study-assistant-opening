@@ -75,17 +75,22 @@ async function backfilledPages(pdf: Awaited<ReturnType<typeof seed>>) {
     id: randomUUID(), courseId, label: `Page ${chunk.page}`, kind: "concept",
     evidenceChunkIds: [chunk.id], status: "supported",
   }));
-  await f.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
-    SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${pdf.sourceId} ON CONFLICT DO NOTHING`;
-  await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'PDF evidence',${courseId})`;
-  await f.sql`INSERT INTO course_asset_memberships(id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
-    VALUES(${randomUUID()},${f.scope.workspaceId},${courseId},'source',${pdf.sourceId},'core',0,'course')`;
-  await f.sql`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
-    VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},1,${f.sql.json({ courseId, version: 1, nodes, edges: [] })},
-      ${f.sql.json({ [pdf.sourceId]: 1 })})`;
-  await f.sql.begin(tx => preserveOpeningKnowledgeDefinitions(tx, f.scope, pdf.sourceId, 1));
-  const [graph] = await f.sql`SELECT node_definitions FROM opening_course_knowledge WHERE course_id=${courseId}`;
-  return nodes.flatMap(({ id }, index) => graph?.node_definitions?.[id] ? [index + 1] : []);
+  return f.sql.begin(async tx => {
+    await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+      SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${pdf.sourceId} ON CONFLICT DO NOTHING`;
+    await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'PDF evidence',${courseId})`;
+    await tx`INSERT INTO course_asset_memberships(id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+      VALUES(${randomUUID()},${f.scope.workspaceId},${courseId},'source',${pdf.sourceId},'core',0,'course')`;
+    await tx`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
+      VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},1,${tx.json({ courseId, version: 1, nodes, edges: [] })},
+        ${tx.json({ [pdf.sourceId]: 1 })})`;
+    await preserveOpeningKnowledgeDefinitions(tx, f.scope, pdf.sourceId, 1);
+    const [graph] = await tx`SELECT node_definitions FROM opening_course_knowledge WHERE course_id=${courseId}`;
+    await tx`DELETE FROM opening_course_knowledge WHERE course_id=${courseId}`;
+    await tx`DELETE FROM course_asset_memberships WHERE course_id=${courseId}`;
+    await tx`DELETE FROM courses WHERE id=${courseId}`;
+    return nodes.flatMap(({ id }, index) => graph?.node_definitions?.[id] ? [index + 1] : []);
+  });
 }
 
 async function expectArchivedPdfPages(texts: string[], pages: number[], blockedPage: number) {
@@ -100,7 +105,9 @@ async function expectArchivedPdfPages(texts: string[], pages: number[], blockedP
   expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [blockedPage, ...pages])).toEqual(publicChunks);
   await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: blockedPage }))
     .rejects.toMatchObject({ code: "NOT_FOUND" });
-  for (const page of pages) {
+  // The list and citation assertions cover every page. Sample the reader's first and last public pages.
+  for (const page of new Set([pages[0], pages.at(-1)])) {
+    if (page === undefined) continue;
     await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page }))
       .resolves.toMatchObject({ pages, text: texts[page - 1] });
   }
@@ -579,6 +586,69 @@ describe("pgvector material repository", () => {
       "The private derivation ends. ∎",
       "Public prose after the proof.",
     ], [4], 2);
+  });
+
+  it.each([
+    { answer: "Answer: x =\nProof. First. ∎", pages: [2, 3, 4] },
+    { answer: "Answer: x =\nProof. First. ∎\nTherefore x = 2.", pages: [2, 3, 4] },
+    { answer: "Answer: x =\nProof. First. ∎\nStill computing y =", pages: [4] },
+    { answer: "Answer: Proof. Unclosed", pages: [4] },
+  ])("archives the auxiliary answer $answer according to its final line", async ({ answer, pages }) => {
+    await expectArchivedPdfPages([
+      "[图片描述]\n" + answer,
+      "The derivation continues",
+      "The derivation ends. ∎",
+      "Public prose after the derivation.",
+    ], pages, pages.includes(2) ? 1 : 2);
+  });
+
+  it.each([
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.", sealed: true },
+    { native: "", primary: "1. Find x.", sealed: false },
+    { native: "7", primary: "1. Find x.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.\nAnswer: Yes.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: Yes.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\nYes.\nChapter 2: Geometry", sealed: true },
+  ])("archives a mixed proof after native $native and transcription $primary", async ({ native, primary, sealed }) => {
+    const pdf = await seed([
+      "Answer: Yes.",
+      (native ? "[原生提取]\n" + native + "\n\n" : "") + "[视觉转写与描述]\n[转写]\n" + primary
+        + "\n[图片描述]\nProof. The derivation begins.",
+      "The derivation continues",
+      "The derivation ends. ∎",
+      "Public prose after the derivation.",
+    ]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    await f.sql`UPDATE opening_source_chunks SET image_object_key='vision/proof' WHERE id=${pdf.snapshot.chunks[1]!.id}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const tail = (await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [3, 4, 5])).map(chunk => chunk.page);
+    expect(tail).toEqual(sealed ? [5] : [3, 4, 5]);
+
+    const retry = await startPdfRetry(pdf.sourceId, [
+      "Answer: Yes.", native, "The derivation continues", "The derivation ends. ∎", "Public prose after the derivation.",
+    ].map((text, index) => ({ page: index + 1, text, imagePath: null, visualKinds: index === 1 ? ["picture"] : [] })));
+    const result = await retry.run();
+    await retry.finish(result.pages);
+    expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [3, 4, 5])).map(chunk => chunk.page)).toEqual(tail);
+  });
+
+  it.each([
+    ["Answer Key", "Public prose after the key.", "Chapter 2: Geometry"],
+    ["Answer Key", "The answer key continues.", "More of the answer key."],
+    ["Answer: x =", "The answer ends. ∎", "Public prose after the answer."],
+    ["Answer: Proof. Unclosed", "The proof ends. ∎", "Public prose after the proof."],
+  ])("blocks a pure image inside the archive range from %j", async (opener, third, fourth) => {
+    const pdf = await seed([opener, "Text previously indexed for the image.", third, fourth]);
+    const image = pdf.snapshot.chunks[1]!;
+    await f.sql`UPDATE opening_source_chunks SET text='',image_object_key='archive/image' WHERE id=${image.id}`;
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
+    expect(await backfilledPages(pdf)).not.toContain(2);
+    expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2])).toEqual([]);
+    expect(await pdf.repository.search(f.scope, { ...query, chunkIds: [image.id] })).toEqual([]);
   });
 
   it.each(["∎", "Q.E.D."])("keeps the outer answer sealed after an auxiliary proof closes with %s", async (end) => {

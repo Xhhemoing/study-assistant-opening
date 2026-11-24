@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v43-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v44-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2935,6 +2935,59 @@ describe("bounded resumable PDF parser", () => {
     }) });
     expect(result.requests[2]).toEqual({ start: 3, seed: "inline_proof_sealed" });
     expect(result.publishedChunks.map(({ page }) => page)).toEqual([5]);
+  });
+
+  it.each(["live", "saved"].flatMap(origin => [
+    { answer: "Answer: x =\nProof. First. ∎", seed: {} },
+    { answer: "Answer: x =\nProof. First. ∎\nTherefore x = 2.", seed: { proofBoundary: true } },
+    { answer: "Answer: x =\nProof. First. ∎\nStill computing y =", seed: { seed: "inline_sealed" } },
+    { answer: "Answer: x =\nProof. First. ∎\nProof. Second.", seed: { seed: "inline_proof_sealed" } },
+    { answer: "Answer: Proof. Unclosed", seed: { seed: "inline_proof_sealed" } },
+  ].map(scenario => ({ origin, ...scenario }))))("carries the $origin auxiliary answer $answer according to its final line", async ({ origin, answer, seed }) => {
+    const vision = "[图片描述]\n" + answer;
+    const publicPages = "seed" in seed ? [4] : [2, 3, 4];
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "", visualKinds: ["scan"] },
+      { page: 2, text: "The derivation continues" },
+      { page: 3, text: "The derivation ends. ∎" },
+      { page: 4, text: "Public prose after the derivation." },
+    ], ...(origin === "live" ? {
+      recognizePage: async () => ({ text: vision, imageObjectKey: "vision/answer" }),
+    } : {
+      savedChunks: [{ page: 1, text: "[视觉转写与描述]\n" + vision, imageObjectKey: "vision/answer",
+        slideLabel: null, startMs: null, endMs: null }],
+    }) });
+    expect(result.requests[1]).toEqual({ start: 2, ...seed });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual(publicPages);
+  });
+
+  it.each(["live", "saved"].flatMap(origin => [
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.", sealed: true },
+    { native: "", primary: "1. Find x.", sealed: false },
+    { native: "7", primary: "1. Find x.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.\nAnswer: Yes.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: Yes.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\nYes.\nChapter 2: Geometry", sealed: true },
+  ].map(scenario => ({ origin, ...scenario }))))("resolves the $origin proof boundary after native $native and transcription $primary", async ({ origin, native, primary, sealed }) => {
+    const vision = "[转写]\n" + primary + "\n[图片描述]\nProof. The derivation begins.";
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Answer: Yes." },
+      { page: 2, text: native, visualKinds: ["picture"] },
+      { page: 3, text: "The derivation continues" },
+      { page: 4, text: "The derivation ends. ∎" },
+      { page: 5, text: "Public prose after the derivation." },
+    ], ...(origin === "live" ? {
+      recognizePage: async () => ({ text: vision, imageObjectKey: "vision/proof" }),
+    } : {
+      savedChunks: [{ page: 2, text: (native ? "[原生提取]\n" + native + "\n\n" : "") + "[视觉转写与描述]\n" + vision,
+        imageObjectKey: "vision/proof", slideLabel: null, startMs: null, endMs: null }],
+    }) });
+    expect(result.requests[1]).toEqual({ start: 2, proofBoundary: true });
+    expect(result.requests[2]?.seed).toBe(sealed ? "inline_proof_sealed" : undefined);
+    expect(result.requests[2]?.proofBoundary).toBeUndefined();
+    expect(result.publishedChunks.filter(({ page }) => page! >= 3).map(({ page }) => page)).toEqual(sealed ? [5] : [3, 4, 5]);
   });
 
   it("reopens at a native chapter heading before an adjacent auxiliary proof", async () => {
