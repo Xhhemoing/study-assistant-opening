@@ -1,7 +1,7 @@
 import {
   ANTI_PADDING_COUNTERFACTUAL_TRIPLETS, SENTINEL_ANCHOR_ESSAYS, createModelGateway, createOpeningAiGradingService,
   evaluateCalibratedSubjectiveGrading, evaluateRubricCalibrationGate, getSentinelAnchorsForDimension,
-  type OpeningAiGradingServiceDeps, type OpeningRubricCalibrationHook, type PairwiseSwapComparison,
+  type OpeningAiGradingServiceDeps, type OpeningMultimodalEvidenceHook, type OpeningRubricCalibrationHook, type PairwiseSwapComparison,
   type RubricCalibrationPoint, type RubricSubmissionInput,
 } from "@aistudy/ai";
 import type { AiGradingProposal, LearningObservation, ProviderOutput, Scope } from "@aistudy/contracts";
@@ -91,6 +91,7 @@ const photoInput = { ...textInput, workSourceId: photo.id, workSourceVersion: ph
 
 function gradingFixture(options: {
   answer?: string; attachedPhoto?: boolean; photoStorageKey?: string; rubricCalibration?: OpeningRubricCalibrationHook;
+  multimodalEvidence?: OpeningMultimodalEvidenceHook;
 } = {}) {
   const original = {
     id: textInput.observationId, answer: options.answer ?? submission.text, outcome: "unverified",
@@ -120,6 +121,7 @@ function gradingFixture(options: {
     images: async () => [{ sourceId: photo.id, physicalPage: photo.physicalPage,
       mediaType: "image/png", data: "data:image/png;base64,AA==" }],
     ...(options.rubricCalibration ? { rubricCalibration: options.rubricCalibration } : {}),
+    multimodalEvidence: options.multimodalEvidence,
   });
   return { service, original, complete, apply, reserve, settle, savedResult: () => saved };
 }
@@ -144,7 +146,7 @@ it.each(gradingScenarios)("applies the rubric policy before persistence and reus
 });
 
 const photoScenarios = [
-  "photo-only", "photo-with-text", "storage-key", "stale-revision", "wrong-photo", "blank-transcript", "verified-photo", "verified-padded-photo",
+  "photo-only", "photo-with-text", "storage-key", "stale-revision", "wrong-photo", "blank-transcript", "verified-photo", "verified-padded-photo", "transcript-without-glyphs",
 ] as const;
 it.each(photoScenarios)(
   "requires a verified transcript for a subjective photo (%s)", async scenario => {
@@ -154,7 +156,7 @@ it.each(photoScenarios)(
       text: scenario === "blank-transcript" ? "  "
         : scenario === "verified-padded-photo" ? ANTI_PADDING_COUNTERFACTUAL_TRIPLETS[0]!.templatePaddedExpansion : submission.text,
     };
-    const hasReceipt = ["stale-revision", "wrong-photo", "blank-transcript", "verified-photo", "verified-padded-photo"].includes(scenario);
+    const hasReceipt = ["stale-revision", "wrong-photo", "blank-transcript", "verified-photo", "verified-padded-photo", "transcript-without-glyphs"].includes(scenario);
     const useStorageKey = scenario === "storage-key";
     const rubricCalibration = vi.fn(async () => ({ submission, calibration: gate,
       ...(hasReceipt ? { verifiedSubmissionText: receipt } : {}),
@@ -162,6 +164,13 @@ it.each(photoScenarios)(
     const fixture = gradingFixture({
       answer: scenario === "photo-with-text" || useStorageKey ? submission.text : "",
       attachedPhoto: !useStorageKey, photoStorageKey: useStorageKey ? "saved-photo" : undefined, rubricCalibration,
+      multimodalEvidence: scenario === "verified-photo" || scenario === "verified-padded-photo"
+        ? ({ observation, answerRevision, workSource }) => ({
+            observationId: observation.id, answerRevision, workSource,
+            steps: [{ stepId: "quantity", bbox: [0, 0, 1, 1],
+              ast: { kind: "expression", tokens: [{ tokenId: "one", kind: "digit", rawText: "1", confidence: .99 }] } }],
+          })
+        : undefined,
     });
     const input = useStorageKey ? textInput : photoInput;
     const outcome = scenario === "verified-photo" ? "correct" : "unverified";

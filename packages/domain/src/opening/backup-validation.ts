@@ -386,7 +386,7 @@ export function unavailableBackupMemoryLineage(
 export function notePublicationMetadata(value: unknown) {
   if (!isRecord(value) || Object.keys(value).length !== 1) return null;
   if (value.snippetLineageVersion === 1) return { snippetLineageVersion: 1 as const };
-  if (Array.isArray(value.originTurnIds) && value.originTurnIds.length === 1 && value.originTurnIds.every(isUuid)) {
+  if (Array.isArray(value.originTurnIds) && value.originTurnIds.length > 0 && value.originTurnIds.every(isUuid)) {
     return { originTurnIds: value.originTurnIds.map(id => id.toLowerCase()) };
   }
   if (Array.isArray(value.answerKeyBlockIds) && value.answerKeyBlockIds.every(isUuid)) {

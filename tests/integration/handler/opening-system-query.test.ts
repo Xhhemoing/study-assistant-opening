@@ -25,7 +25,7 @@ it.each(["0", "1"])("HTTP ephemeral query uses current records and stores no bod
   expect(await ephemeralCounts()).toEqual(before); expect(complete).not.toHaveBeenCalled();
   expect(await tablesContainingEphemeralMarker(marker)).toEqual([]);
   const [row] = await sql`SELECT context_source_refs FROM opening_query_ephemeral_provenance WHERE id=${body.provenanceId!}`;
-  expect(row!.context_source_refs).toEqual([]);
+  expect(row!.context_source_refs).toEqual([{ snippetLineageVersion: 1 }]);
 });
 
 it("delivers real recommendation reasons through HTTP, strict client parsing and the chat adapter", async () => {

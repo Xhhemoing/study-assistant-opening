@@ -249,12 +249,11 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const assertMaterialsCurrent = () => withLearnerContextError(async () => { await retrieved?.assertCurrent?.(); });
       const context = retrieved?.chunks ?? selectContext(retrievalInput);
       const historyToResolve = epochChanged ? [] : input.history;
-      const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
-      const historyDiscarded = epochChanged || historyRefs === null;
+      const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : null;
+      const historyDiscarded = epochChanged || (historyToResolve.length > 0 && historyRefs === null);
       const history = historyDiscarded ? [] : historyToResolve;
-      const hasMemoryHistory = historyRefs?.some(ref => "memoryDependencyIds" in ref);
       const assertHistoryCurrent = async () => {
-        if (hasMemoryHistory && await deps.provenance!.resolveHistory(scope, history, privacy.epoch) === null) {
+        if (history.length && await deps.provenance!.resolveHistory(scope, history, privacy.epoch) === null) {
           throw new EphemeralServiceError("PRIVACY_CHANGED", "关联学习记忆已不可用，请重新提问。", 409);
         }
       };
@@ -404,8 +403,11 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
       let provenanceId: string | null = null;
       try {
+        await assertHistoryCurrent();
         provenanceId = await deps.provenance?.record(scope, {
           reservationId: completed.reservation.id, requestId: completed.reservation.requestId, privacyEpoch: privacy.epoch, contextSourceRefs,
+          ...(history.length && !historyRefs?.verifiedLineage ? { verifiedLineage: false as const } : {}),
+          ...(historyRefs?.originTurnIds?.length ? { originTurnIds: historyRefs.originTurnIds } : {}),
         }) ?? null;
       } catch (error) {
         if (error instanceof EphemeralProvenanceError) {

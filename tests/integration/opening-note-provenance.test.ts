@@ -75,7 +75,7 @@ describe("Opening linked note persistence", () => {
     ]);
     expect((await library.getDocument({ workspaceId: scope.workspaceId, documentId })).blocks[0]).toMatchObject({ type: "heading", content: { blockNoteContent: "Edited excerpt" } });
     await sql`DELETE FROM opening_conversations WHERE id=${origin.conversationId}`;
-    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([...refs, { snippetLineageVersion: 1 }]);
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([...refs, { snippetLineageVersion: 1 }, { originTurnIds: [origin.savedTurnId] }]);
     await exclude(sourceId, true);
     await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
@@ -102,7 +102,8 @@ describe("Opening linked note persistence", () => {
     await expect(notes.saveSnippet(otherScope, { title: "Foreign source", text: "must not save", savedTurnId: contaminated.savedTurnId })).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
     const clean = await savedReply([]);
     const { documentId } = await notes.saveSnippet(scope, { title: "No sources", text: "own explanation", savedTurnId: clean.savedTurnId });
-    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ snippetLineageVersion: 1 }]);
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs)
+      .toEqual([{ snippetLineageVersion: 1 }, { originTurnIds: [clean.savedTurnId] }]);
   });
 
   it("does not treat a legacy unflagged assistant reply to a system query as an ordinary explanation", async () => {
@@ -132,7 +133,7 @@ describe("Opening linked note persistence", () => {
     const sourceId = await source(), { savedTurnId } = await savedReply([]);
     await sql`UPDATE opening_turns SET source_ids=ARRAY[${sourceId}]::uuid[],source_versions=${sql.json({ [sourceId]: 0 })} WHERE id=${savedTurnId}`;
     const { documentId } = await notes.saveSnippet(scope, { title: "Source-free answer", text: "general explanation", savedTurnId });
-    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ snippetLineageVersion: 1 }]);
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ snippetLineageVersion: 1 }, { originTurnIds: [savedTurnId] }]);
   });
 
   it.each(["changed", "excluded", "deleted", "unavailable"])("rejects %s sources captured by a saved answer", async state => {

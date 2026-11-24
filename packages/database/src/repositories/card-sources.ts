@@ -10,6 +10,17 @@ export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType
       AND s.workspace_id=${workspaceId} AND s.upload_state='uploaded'
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)))`;
 }
+/** Historical publication links survive reassignment of the card or its teaching spec. */
+export function cardLinkedToNotePublication(db: Db) {
+  return db`EXISTS (
+    SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array'
+      THEN np.context_source_refs ELSE '[]'::jsonb END) AS metadata(ref)
+    CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(metadata.ref->'publicationCardIds')='array'
+      THEN metadata.ref->'publicationCardIds' ELSE '[]'::jsonb END) AS linked(id)
+    WHERE lower(linked.id)=c.id::text
+  )`;
+}
+
 export function cardReadable(db: Db, workspaceId: string) {
   return db`${cardSourcesIncluded(db, workspaceId, db`c.source_ids`)}
     AND (c.source_document_id IS NULL OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=c.source_document_id AND d.workspace_id=${workspaceId}))
@@ -18,13 +29,7 @@ export function cardReadable(db: Db, workspaceId: string) {
     AND NOT EXISTS (
       SELECT 1 FROM opening_note_provenance np
       LEFT JOIN library_documents d ON d.id=np.document_id AND d.workspace_id=np.workspace_id
-      WHERE EXISTS (
-        SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array'
-          THEN np.context_source_refs ELSE '[]'::jsonb END) AS metadata(ref)
-        CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(metadata.ref->'publicationCardIds')='array'
-          THEN metadata.ref->'publicationCardIds' ELSE '[]'::jsonb END) AS linked(id)
-        WHERE lower(linked.id)=c.id::text
-      ) AND (np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
+      WHERE ${cardLinkedToNotePublication(db)} AND (np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
         OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)}))
     )`;
 }

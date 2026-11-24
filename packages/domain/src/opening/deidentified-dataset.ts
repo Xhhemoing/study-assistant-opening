@@ -179,9 +179,11 @@ export function projectPrivacyGuardedOpeningDataset(
   const turnInventory = workspaceIds("opening_turns");
   const ownedConversations = new Set(rows("opening_conversations")
     .filter(row => inWorkspace(row) && matchesId(row.owner_user_id, scope.ownerUserId)).map(row => row.id));
-  const originTurns = new Set(rows("opening_turns").filter(row => inWorkspace(row) && ownedConversations.has(row.conversation_id)
-    && row.role === "assistant" && (row.status === undefined || row.status === "complete")
-    && !row.query_system && row.system_query == null).map(row => canonicalId(row.id)));
+  const ownedOriginTurns = rows("opening_turns").filter(row => inWorkspace(row) && ownedConversations.has(row.conversation_id)
+    && (row.role === "user" || row.role === "assistant") && (row.status === undefined || row.status === "complete")
+    && !row.query_system && row.system_query == null);
+  const originTurns = new Set(ownedOriginTurns.map(row => canonicalId(row.id)));
+  const assistantOrigins = new Set(ownedOriginTurns.filter(row => row.role === "assistant").map(row => canonicalId(row.id)));
   const chunkInventory = new Set<string>();
   // Source chunks without a workspace column inherit their scope from the source.
   for (const row of rows("opening_source_chunks")) {
@@ -269,7 +271,7 @@ export function projectPrivacyGuardedOpeningDataset(
         } else exclude(document);
       } else {
         const metadata = notePublicationMetadata(ref);
-        if (metadata?.originTurnIds) declaredOrigins.add(metadata.originTurnIds[0]);
+        if (metadata?.originTurnIds) for (const id of metadata.originTurnIds) declaredOrigins.add(id);
         else if (metadata?.snippetLineageVersion === 1) verifiedSnippet = true;
         else if (!metadata) {
           if (!validSourceRef(ref)) exclude(document);
@@ -277,10 +279,12 @@ export function projectPrivacyGuardedOpeningDataset(
         }
       }
     }
+    if (row.snippet_origin !== false && !verifiedSnippet && row.origin_turn_id == null && declaredOrigins.size !== 1) exclude(document);
     if (declaredOrigins.size) {
-      const [origin] = declaredOrigins;
-      if (declaredOrigins.size !== 1 || !isUuid(origin) || !originTurns.has(origin)) exclude(document);
-      else link(lineageKey("turn", origin), document);
+      const origins = [...declaredOrigins];
+      if (!origins.every(id => isUuid(id) && originTurns.has(id)) || !origins.some(id => typeof id === "string" && assistantOrigins.has(id))) {
+        exclude(document);
+      } else for (const origin of origins) link(lineageKey("turn", origin), document);
     } else if (row.snippet_origin !== false && !verifiedSnippet) {
       // Source-only imports and older snippets may have lost source-free memory lineage.
       exclude(document);

@@ -94,6 +94,29 @@ export function mergeContextProvenanceRefs(...groups: readonly ContextProvenance
   return [...mergeContextSourceRefs(...sources), ...(ids.size ? [{ memoryDependencyIds: [...ids].sort() }] : [])];
 }
 
+export function isVerifiedSnippetLineage(value: unknown): boolean {
+  return notePublicationMetadata(value)?.snippetLineageVersion === 1;
+}
+
+export function noteOriginTurnIds(value: unknown): string[] {
+  return Array.isArray(value)
+    ? [...new Set(value.flatMap(ref => notePublicationMetadata(ref)?.originTurnIds ?? []))].sort() : [];
+}
+
+export async function openingSnippetOriginsAvailable(db: Db, scope: OpeningScope, origins: readonly string[]) {
+  if (!origins.length) return true;
+  if (!origins.every(isLineageUuid)) return false;
+  const turns = await db`SELECT t.id,t.role FROM opening_turns t JOIN opening_conversations c
+    ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+    WHERE t.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+      AND t.id=ANY(${[...origins]}::uuid[]) AND t.status='complete' AND NOT t.query_system AND t.system_query IS NULL
+      AND NOT EXISTS (SELECT 1 FROM opening_memories m
+        WHERE m.workspace_id=t.workspace_id AND m.status='deleted'
+          AND EXISTS(SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(m.source_turn_ids)='array'
+            THEN m.source_turn_ids ELSE '[]'::jsonb END) origin(id) WHERE lower(origin.id)=t.id::text))`;
+  return turns.length === origins.length && turns.some(turn => turn.role === "assistant");
+}
+
 export function parseNoteContextProvenanceRefs(value: unknown): ContextProvenanceRef[] | null {
   return parseContextProvenanceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
 }
@@ -110,7 +133,7 @@ export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
       SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds'), ('originTurnIds')) AS metadata(key)
       WHERE ref=jsonb_build_object(metadata.key, ref->metadata.key)
         AND jsonb_typeof(ref->metadata.key)='array'
-        AND (metadata.key<>'originTurnIds' OR ref->metadata.key=jsonb_build_array(ref->metadata.key->0))
+        AND (metadata.key<>'originTurnIds' OR ref->metadata.key<>'[]'::jsonb)
         AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(ref->metadata.key)='array'
           THEN ref->metadata.key ELSE '[]'::jsonb END) AS item(value)
           WHERE item.value IS NULL OR item.value !~* ${UUID.source})

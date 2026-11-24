@@ -1,33 +1,36 @@
 import type { TransactionSql } from "postgres";
 import { openingAdaptivePrefsSchema, type Scope, type SystemQueryRequest } from "@aistudy/contracts";
 import type { OpeningSystemQueryDraft } from "./opening-system-query";
-import { cardReadable } from "./card-sources";
-import { notePublicationMetadata } from "@aistudy/domain";
-import { contextSourceRefsIncluded, noteContextSourceRefs, parseNoteContextProvenanceRefs } from "./opening-context-provenance";
+import { cardLinkedToNotePublication, cardReadable } from "./card-sources";
+
+import { contextSourceRefsIncluded, isVerifiedSnippetLineage, memoryOnlyRefSourceIds, noteContextSourceRefs, noteOriginTurnIds, openingSnippetOriginsAvailable, parseNoteContextProvenanceRefs } from "./opening-context-provenance";
 import { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
 
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
+export type RecordNoteLineage = { memoryIds: string[]; originTurnIds: string[] };
+
 async function readRecordNoteSources(tx: TransactionSql, scope: Scope, row: Record<string, unknown>,
-  collectMemoryDependencyIds?: (ids: string[]) => void) {
+  collectLineage?: (lineage: RecordNoteLineage) => void) {
   if (!row.has_note_provenance && row.snippet_origin !== true) return [];
   if (!Array.isArray(row.context_source_refs)) return null;
-  if (row.snippet_origin !== false && !row.context_source_refs.some(ref => notePublicationMetadata(ref)?.snippetLineageVersion === 1)) return null;
+  if (row.snippet_origin !== false && !row.context_source_refs.some(isVerifiedSnippetLineage)) return null;
   const refs = parseNoteContextProvenanceRefs(row.context_source_refs);
   if (!refs) return null;
-  const ids = refs.find(ref => "memoryDependencyIds" in ref)?.memoryDependencyIds;
-  if (ids) {
-    if (!collectMemoryDependencyIds || !await openingCredentialMemoriesAvailable(tx, scope, ids)) return null;
-    collectMemoryDependencyIds(ids);
-  } else if (refs.some(ref => "memoryOnly" in ref && ref.memoryOnly)) return null;
+  const memoryIds = refs.find(ref => "memoryDependencyIds" in ref)?.memoryDependencyIds ?? [];
+  const originTurnIds = noteOriginTurnIds(row.context_source_refs);
+  if ((memoryIds.length || originTurnIds.length) && !collectLineage) return null;
+  if (!await openingSnippetOriginsAvailable(tx, scope, originTurnIds)
+    || !await openingCredentialMemoriesAvailable(tx, scope, memoryIds, memoryOnlyRefSourceIds(refs))) return null;
+  collectLineage?.({ memoryIds, originTurnIds });
   return refs.flatMap(ref => "sourceId" in ref ? [{ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion }] : []);
 }
 
 /** Metadata only: never releases note bodies, card answers or exam solutions. */
 export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
   request: Extract<SystemQueryRequest, { name: "notes" | "cards" | "exam_sprint" }>, out: OpeningSystemQueryDraft,
-  collectMemoryDependencyIds?: (ids: string[]) => void) {
+  collectLineage?: (lineage: RecordNoteLineage) => void) {
   if (request.name === "notes") {
     const a = request.arguments, pattern = `%${(a.query ?? "").replace(/[\\%_]/g, "\\$&")}%`;
     const rows = await tx`SELECT d.id,d.title,d.current_revision_number,d.updated_at,np.context_source_refs,
@@ -40,7 +43,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       ORDER BY d.updated_at DESC,d.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
     if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
     for (const row of rows.slice(0, a.limit)) {
-      const refs = await readRecordNoteSources(tx, scope, row, collectMemoryDependencyIds);
+      const refs = await readRecordNoteSources(tx, scope, row, collectLineage);
       if (!refs) continue;
       out.sourceRefs.push(...refs);
       out.evidence.push({ id: `note:${row.id}`, kind: "note", title: String(row.title).slice(0, 200), recordId: String(row.id),
@@ -50,20 +53,52 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
     }
   } else if (request.name === "cards") {
     const a = request.arguments;
-    const rows = await tx`SELECT c.id,c.content_version,c.course_id,c.source_ids,s.due_at,np.context_source_refs,
-        np.document_id IS NOT NULL AS has_note_provenance, origin.reason='save-opening-snippet' AS snippet_origin
+    const rows = await tx`SELECT c.id,c.content_version,c.course_id,c.source_ids,s.due_at
       FROM cards c LEFT JOIN card_review_states s ON s.card_id=c.id AND s.workspace_id=c.workspace_id AND s.owner_user_id=${scope.ownerUserId}
-      LEFT JOIN opening_note_provenance np ON np.document_id=c.source_document_id AND np.workspace_id=c.workspace_id
-      LEFT JOIN library_revisions origin ON origin.document_id=c.source_document_id AND origin.workspace_id=c.workspace_id AND origin.revision_number=1
       WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} AND NOT c.archived
         AND ${a.courseId ? tx`c.course_id=${a.courseId}` : tx`TRUE`} AND ${cardReadable(tx, scope.workspaceId)}
-        AND (np.document_id IS NULL OR ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})
       ORDER BY s.due_at NULLS LAST,c.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
     if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
     out.data = [];
     for (const row of rows.slice(0, a.limit)) {
-      const noteRefs = await readRecordNoteSources(tx, scope, row, collectMemoryDependencyIds);
-      if (!noteRefs) continue;
+      const documents = await tx`SELECT
+          d.id IS NOT NULL AND d.deleted_at IS NULL AND (np.document_id IS NULL OR
+            (np.workspace_id=c.workspace_id AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
+              () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})) AS admitted,
+          np.context_source_refs, np.document_id IS NOT NULL AS has_note_provenance,
+          origin.reason='save-opening-snippet' AS snippet_origin
+        FROM cards c
+        CROSS JOIN LATERAL (
+          SELECT c.source_document_id AS id WHERE c.source_document_id IS NOT NULL
+          UNION SELECT np.document_id FROM opening_note_provenance np
+            WHERE np.workspace_id=c.workspace_id AND ${cardLinkedToNotePublication(tx)}
+          UNION SELECT linked.id FROM opening_learning_observations o
+            LEFT JOIN opening_teaching_activity_specs spec ON spec.activity_id=o.activity_id AND spec.workspace_id=o.workspace_id
+            LEFT JOIN opening_teaching_units unit ON unit.id=spec.teaching_unit_id AND unit.workspace_id=o.workspace_id
+            LEFT JOIN opening_learning_item_versions item ON item.id=o.item_version_id AND item.workspace_id=o.workspace_id
+            LEFT JOIN library_revisions revision ON revision.id=item.teaching_revision_id AND revision.workspace_id=o.workspace_id
+            CROSS JOIN LATERAL unnest(ARRAY[spec.document_id,unit.document_id,revision.document_id]) linked(id)
+            WHERE o.id=c.origin_observation_root_id AND o.workspace_id=c.workspace_id AND o.owner_user_id=c.owner_user_id
+              AND linked.id IS NOT NULL
+        ) linked
+        LEFT JOIN library_documents d ON d.id=linked.id AND d.workspace_id=c.workspace_id
+        LEFT JOIN opening_note_provenance np ON np.document_id=linked.id
+        LEFT JOIN library_revisions origin ON origin.document_id=linked.id AND origin.workspace_id=c.workspace_id AND origin.revision_number=1
+        WHERE c.id=${String(row.id)} AND c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}`;
+      if (documents.some(document => !document.admitted)) continue;
+      const lineage: RecordNoteLineage = { memoryIds: [], originTurnIds: [] };
+      const groups = [];
+      for (const document of documents) {
+        const group = await readRecordNoteSources(tx, scope, document, collectLineage ? refs => {
+          lineage.memoryIds.push(...refs.memoryIds);
+          lineage.originTurnIds.push(...refs.originTurnIds);
+        } : undefined);
+        if (!group) break;
+        groups.push(group);
+      }
+      if (groups.length !== documents.length) continue;
+      collectLineage?.(lineage);
+      const noteRefs = groups.flat();
       // Cards retain source identities; capture each current source version as consumed metadata.
       const refs = (row.source_ids as string[]).length ? await tx`SELECT id AS "sourceId",version AS "sourceVersion" FROM opening_sources
         WHERE workspace_id=${scope.workspaceId} AND id=ANY(${row.source_ids as string[]}::uuid[])` : [];

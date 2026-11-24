@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { snippetCreateInputSchema, type SnippetCreateInput } from "@aistudy/contracts";
 import {
-  contextSourceRefsIncluded, isMemoryDependencyMetadata, mergeContextSourceRefs, noteContextSourceRefs,
-  parseContextMemoryDependencyIds, parseContextSourceRefs,
+  contextSourceRefsIncluded, isMemoryDependencyMetadata, isVerifiedSnippetLineage, mergeContextSourceRefs, noteContextSourceRefs,
+  noteOriginTurnIds, parseContextMemoryDependencyIds, parseContextSourceRefs, parseNoteContextProvenanceRefs,
 } from "./opening-context-provenance";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { lockAndReadSnippetMemoryRefs } from "./opening-memory-admission";
@@ -84,8 +84,12 @@ export function createOpeningNoteRepository(sql: Sql) {
         if (!origin) throw new OpeningNoteError("NOT_FOUND", input.savedTurnId
           ? "已保存回答不可用，请重新打开已完成的普通对话回答后保存。"
           : "临时片段来源凭据不可用，请重新提问后保存。");
-        const recordedRefs = parseContextSourceRefs(origin.context_source_refs);
-        const directMemoryIds = parseContextMemoryDependencyIds(origin.context_source_refs);
+        const storedRefs = origin.context_source_refs;
+        const savedOrigin = "turn_id" in origin;
+        const verified = savedOrigin || (Array.isArray(storedRefs) && storedRefs.some(isVerifiedSnippetLineage));
+        const lineageRefs = savedOrigin ? storedRefs : parseNoteContextProvenanceRefs(storedRefs);
+        const recordedRefs = parseContextSourceRefs(lineageRefs);
+        const directMemoryIds = parseContextMemoryDependencyIds(lineageRefs);
         const malformedMemoryRef = Array.isArray(origin.context_source_refs) && origin.context_source_refs.some(ref =>
           ref !== null && typeof ref === "object" && "memoryDependencyIds" in ref && !isMemoryDependencyMetadata(ref));
         if (recordedRefs === null || directMemoryIds === null || malformedMemoryRef) {
@@ -107,11 +111,13 @@ export function createOpeningNoteRepository(sql: Sql) {
           memoryOrigin = { dependencyIds: directMemoryIds };
         }
         let memoryIds = directMemoryIds;
+        let originTurnIds = input.savedTurnId ? [input.savedTurnId.toLowerCase()] : verified ? noteOriginTurnIds(storedRefs) : [];
         if (memoryOrigin) {
           const lineage = await lockAndReadSnippetMemoryRefs(tx, scope, memoryOrigin);
           if (!lineage) throw new OpeningNoteError("SOURCE_UNAVAILABLE", "关联学习记忆或材料已不可用，无法保存此片段。");
           refs = mergeContextSourceRefs(refs, lineage.sourceRefs);
           memoryIds = [...new Set([...directMemoryIds, ...lineage.dependencyIds])].sort();
+          if (lineage.originTurnIds.length) originTurnIds = lineage.originTurnIds;
         }
         const admission = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`)} AS included`;
         if (!admission[0]!.included) throw new OpeningNoteError("SOURCE_UNAVAILABLE", "关联材料已删除、停止供 AI 使用或版本已变化，无法保存此片段。");
@@ -129,7 +135,8 @@ export function createOpeningNoteRepository(sql: Sql) {
         const provenance = [
           ...refs,
           ...(memoryIds.length ? [{ memoryDependencyIds: memoryIds }] : []),
-          { snippetLineageVersion: 1 },
+          ...(verified ? [{ snippetLineageVersion: 1 }] : []),
+          ...(originTurnIds.length ? [{ originTurnIds }] : []),
         ];
         await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
           VALUES(${documentId},${scope.workspaceId},${tx.json(provenance)})`;

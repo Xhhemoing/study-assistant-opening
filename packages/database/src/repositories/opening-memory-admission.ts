@@ -245,7 +245,7 @@ type MemoryMaterialRules = {
 };
 type OriginBinding = {
   id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][]; material_use: MaterialUse | null;
-  ancestors: HistoryAncestorAuthority[]; source_ids?: string[]; backingSourceIds?: string[];
+  ancestors: HistoryAncestorAuthority[]; source_ids?: string[]; backingSourceIds?: string[]; origin_turn_ids?: string[];
   user?: {
     courseId: string | null; materialUse: MaterialUse; destinationUse: MaterialUse;
     ids: string[] | null; backings: string[][]; backingSourceIds?: string[];
@@ -288,6 +288,18 @@ async function readOriginBindings(
   })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
       ${historicalUserTurnId(db)} AS historical_user_turn_id,
+      ${savedSnippet ? db`ARRAY[t.id] || CASE WHEN u.id IS NULL THEN '{}'::uuid[] ELSE ARRAY[u.id] END || ARRAY(
+        SELECT prior.id FROM opening_tutor_jobs job
+        JOIN opening_turns prior_user ON prior_user.id=job.user_turn_id AND prior_user.workspace_id=t.workspace_id
+          AND prior_user.conversation_id=t.conversation_id AND prior_user.role='user'
+        JOIN opening_turns prior_assistant ON prior_assistant.id=job.assistant_turn_id AND prior_assistant.workspace_id=t.workspace_id
+          AND prior_assistant.conversation_id=t.conversation_id AND prior_assistant.role='assistant'
+        CROSS JOIN LATERAL unnest(ARRAY[prior_user.id,prior_assistant.id]) prior(id)
+        WHERE job.workspace_id=t.workspace_id AND job.conversation_id=t.conversation_id
+          AND (prior_user.created_at,prior_user.id)<(u.created_at,u.id)
+          AND prior_user.status='complete' AND prior_assistant.status='complete'
+          AND NOT prior_user.query_system AND NOT prior_assistant.query_system AND prior_assistant.system_query IS NULL
+      ) AS origin_turn_ids,` : db``}
       u.context_source_refs AS user_refs, CASE WHEN u.id IS NOT NULL THEN ${userCourse()} END AS user_course_id,
       CASE WHEN u.id IS NOT NULL THEN ${turnMaterialUse(db, "u")} END AS user_material_use,
       CASE WHEN u.id IS NOT NULL THEN ${originUse ? originUse() : turnMaterialUse(db, "t")} END AS paired_destination_use,
@@ -431,12 +443,14 @@ export async function readMemoryDependencyStatus(
 }
 
 /** A persisted credential has already scoped consumption; recheck every root in its original policy. */
-export async function openingCredentialMemoriesAvailable(db: Db, scope: OpeningScope, ids: string[]) {
-  if (!ids.length) return true;
+export async function openingCredentialMemoriesAvailable(db: Db, scope: OpeningScope, ids: string[], backingSourceIds: string[] = []) {
+  if (!ids.length) return !backingSourceIds.length;
   const graph = await readMemoryDependencyStatus(db, scope, ids, { materialUse: "origin" });
   const [clock] = await db<{ checked_at: Date }[]>`SELECT clock_timestamp() AS checked_at`;
-  return ids.every(id => graph.get(id)?.every(node =>
-    node.usable && (node.expires_at === null || new Date(node.expires_at).getTime() > clock!.checked_at.getTime())));
+  const nodes = ids.flatMap(id => graph.get(id) ?? []);
+  const coveredSources = new Set(nodes.flatMap(node => node.sourceIds ?? []));
+  return ids.every(id => graph.has(id)) && backingSourceIds.every(id => coveredSources.has(id))
+    && nodes.every(node => node.usable && (node.expires_at === null || new Date(node.expires_at).getTime() > clock!.checked_at.getTime()));
 }
 
 async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: MemoryRoot[], rules?: MemoryMaterialRules) {
@@ -670,10 +684,11 @@ function lockedMemorySourceRefs(versions: ReadonlyMap<string, number>, sourceIds
 /** After history and workspace locks, resolve the snippet's exact memories and backing material. */
 export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: OpeningScope,
   input: { turnId: string } | { dependencyIds: string[] },
-): Promise<{ sourceRefs: ContextSourceRef[]; dependencyIds: string[] } | null> {
+): Promise<{ sourceRefs: ContextSourceRef[]; dependencyIds: string[]; originTurnIds: string[] } | null> {
   const courseIds = new Set<string>();
   let roots: MemoryRoot[];
   let userRefs: ContextSourceRef[] = [];
+  let originTurnIds: string[] = [];
   const sourceIds = new Set<string>();
   let refreshBinding: ((versions: ReadonlyMap<string, number>) => Promise<boolean>) | undefined;
   let resolve: (graphFor: (use: MemoryUse) => MemoryGraph) => { dependencies: MemoryDependencyStatus[]; sourceIds: string[] } | null;
@@ -687,10 +702,11 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
     });
     if (!initial || initial.ids === null || initial.user?.ids === null) return null;
     let binding = initial;
+    originTurnIds = [...new Set(binding.origin_turn_ids ?? [input.turnId])].sort();
     const user = binding.user;
     roots = bindingRoots([binding], "origin");
     if (!roots.length && !binding.backings.length && !user?.backings.length && !binding.ancestors.length) {
-      return { sourceRefs: [], dependencyIds: [] };
+      return { sourceRefs: [], dependencyIds: [], originTurnIds };
     }
     for (const ancestor of binding.ancestors) for (const id of ancestor.sourceIds) sourceIds.add(id);
     origin.course_id = binding.turn_course_id;
@@ -702,6 +718,7 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
       });
       if (!current || [...currentCourses].some(id => !courseIds.has(id))) return false;
       binding = current;
+      originTurnIds = [...new Set(current.origin_turn_ids ?? [input.turnId])].sort();
       return true;
     };
     resolve = graphFor => {
@@ -717,8 +734,16 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
   } else {
     roots = input.dependencyIds.map(id => ({ id, use: "origin" }));
     resolve = graphFor => {
-      const dependencies = resolveMemoryDependencyStatus(graphFor("origin"), input.dependencyIds, [], null);
-      return dependencies && { dependencies, sourceIds: dependencies.flatMap(memory => memory.sourceIds ?? []) };
+      const graph = graphFor("origin");
+      const dependencies: MemoryDependencyStatus[] = [];
+      for (const id of input.dependencyIds) {
+        const root = graph.get(id)?.find(node => node.dep_id === id);
+        if (!root) return null;
+        const nodes = resolveMemoryDependencyStatus(graph, [id], [], root.course_id);
+        if (!nodes) return null;
+        dependencies.push(...nodes);
+      }
+      return { dependencies, sourceIds: dependencies.flatMap(memory => memory.sourceIds ?? []) };
     };
   }
   await readMemoryDependencyGraphs(tx, scope, roots, { collectCourseIds: courseIds, collectSourceIds: sourceIds });
@@ -741,7 +766,7 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
     ORDER BY id FOR SHARE`;
   if (active.length !== dependencyIds.length) return null;
   const memorySourceIds = new Set(resolved.dependencies.flatMap(memory => memory.sourceIds ?? []));
-  return { dependencyIds, sourceRefs: [...userRefs, ...refs.map(ref =>
+  return { dependencyIds, originTurnIds, sourceRefs: [...userRefs, ...refs.map(ref =>
     memorySourceIds.has(ref.sourceId) ? { ...ref, memoryOnly: true } : ref)] };
 }
 

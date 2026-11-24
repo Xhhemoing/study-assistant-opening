@@ -313,10 +313,21 @@ describe("ephemeral content-free provenance", () => {
     const history = [{ role: "assistant" as const, text: "prior answer", provenanceId: sourceId }];
     const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history, historyPrivacyEpoch: 0 });
     expect(provenance.resolveHistory).toHaveBeenCalledWith(scope, history, 0);
-    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: historyRefs });
+    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: historyRefs, verifiedLineage: false });
     expect(reply.provenanceId).toBe(chunkId);
     expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
   });
+  it("carries verified history lineage and origins into a follow-up credential", async () => {
+    const historyRefs = Object.assign([], { verifiedLineage: true as const, originTurnIds: [sourceId] });
+    const provenance = { resolveHistory: vi.fn(async () => historyRefs), record: vi.fn(async () => chunkId) };
+    const f = deps({ sources: [], chunks: [], provenance });
+    await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", historyPrivacyEpoch: 0,
+      history: [{ role: "assistant", text: "prior answer", provenanceId: chunkId }],
+    });
+    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0,
+      contextSourceRefs: [], originTurnIds: [sourceId] });
+  });
+
   it("carries the consumed history's memory dependency into the follow-up credential", async () => {
     const memoryRef = { memoryDependencyIds: [foreignSource] };
     const provenance = { resolveHistory: vi.fn(async () => [{ sourceId, sourceVersion: 1 }, memoryRef]), record: vi.fn(async () => chunkId) };
@@ -325,14 +336,16 @@ describe("ephemeral content-free provenance", () => {
     const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history, historyPrivacyEpoch: 0 });
     expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
     expect(provenance.record).toHaveBeenCalledWith(scope, {
-      reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 1 }, memoryRef],
+      reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 1 }, memoryRef], verifiedLineage: false,
     });
     expect(reply.provenanceId).toBe(chunkId);
   });
-  it.each(["send", "stream"] as const)("stops %s after a history memory expires without an epoch change", async boundary => {
+  it.each([
+    ["send", "memory"], ["stream", "memory"], ["send", "source-free"], ["stream", "source-free"],
+  ] as const)("stops %s after %s history expires without an epoch change", async (boundary, kind) => {
     let expired = false;
     const provenance = {
-      resolveHistory: vi.fn(async () => expired ? null : [{ memoryDependencyIds: [foreignSource] }]),
+      resolveHistory: vi.fn(async () => expired ? null : kind === "memory" ? [{ memoryDependencyIds: [foreignSource] }] : []),
       record: vi.fn(async () => chunkId),
     };
     const onText = vi.fn();

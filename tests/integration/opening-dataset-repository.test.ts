@@ -10,6 +10,7 @@ import { replyEphemeralSystemQuery } from "../../apps/web/src/features/opening/t
 import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import { insertMemory, insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
+import { backupRows } from "./opening-backup-records-fixture";
 
 let f: OpeningFixture;
 let repo: ReturnType<typeof createOpeningDatasetRepository>;
@@ -204,6 +205,105 @@ describe("synthetic deidentified dataset repository", () => {
     } finally { await fixture.close(); }
   });
 
+  it("withholds a snippet republished after its saved origin is deleted", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      const memories = createOpeningMemoryRepository(sql);
+      const memory = await memories.proposeMemory(scope, { text: "Origin", sourceTurnIds: [savedTurnId], expiresAt: null });
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Derived note", text: "Copied answer", savedTurnId,
+      });
+      await memories.deleteMemory(scope, { id: memory.id, expectedVersion: memory.version, deleteSourceText: false, clientKey: randomUUID() });
+      await publishSnippet(fixture, documentId);
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { consented: true, policyVersion: OPENING_DATASET_POLICY_VERSION,
+        expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      expect((await datasets.read(scope)).coursePackageQuality).toEqual([]);
+      await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+        .resolves.toMatchObject({ id: documentId });
+    } finally { await fixture.close(); }
+  });
+
+  it("does not certify legacy ephemeral provenance on save", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const requestId = randomUUID();
+      const reservation = await createOpeningBudgetRepository(sql, { envCapCents: 10_000 }).reserve(scope, { purpose: "tutor", amountCents: 1, requestId });
+      await sql`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)
+        VALUES(${reservation.id},${scope.workspaceId},${scope.ownerUserId},0,'[]')`;
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Legacy credential", text: "Personally readable", provenanceId: reservation.id,
+      });
+      expect(await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+        .toEqual([{ context_source_refs: [] }]);
+      await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+        .resolves.toMatchObject({ id: documentId });
+    } finally { await fixture.close(); }
+  });
+
+  it("rejects a legacy memory-only credential even beside an unrelated active dependency", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const sourceId = await insertSource(sql, scope);
+      const budget = createOpeningBudgetRepository(sql, { envCapCents: 10_000 });
+      const reservation = await budget.reserve(scope, { purpose: "tutor", amountCents: 1, requestId: randomUUID() });
+      await sql`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)
+        VALUES(${reservation.id},${scope.workspaceId},${scope.ownerUserId},0,${sql.json([{ sourceId, sourceVersion: 0, memoryOnly: true }])})`;
+      const id = await insertMemory(sql, scope, "Unrelated memory", [await insertOwnedTurn(sql, scope)]);
+      const provenance = createOpeningEphemeralProvenanceRepository(sql);
+      const provenanceId = await provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0,
+        contextSourceRefs: [{ memoryDependencyIds: [id] }] });
+      await expect(provenance.resolveHistory(scope, [{ provenanceId: reservation.id }, { provenanceId }], 0)).resolves.toBeNull();
+      await expect(provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0,
+        contextSourceRefs: [{ sourceId, sourceVersion: 0, memoryOnly: true }, { memoryDependencyIds: [id] }] }))
+        .rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+    } finally { await fixture.close(); }
+  });
+
+  it("rechecks source-free history when a query actually uses the previous question", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const provenance = createOpeningEphemeralProvenanceRepository(sql);
+      const provenanceId = await provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0, contextSourceRefs: [] });
+      const callModel = vi.fn(async (_owner: unknown, _request: unknown, context: { beforeSend?: () => Promise<void> }) => {
+        await sql`UPDATE opening_query_ephemeral_provenance SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${provenanceId}`;
+        await context.beforeSend?.();
+        throw new Error("A stale referent reached dispatch");
+      });
+      await expect(replyEphemeralSystemQuery({
+        systemQuery: createDbSystemQueryService(sql, "web", { callModel }), provenance,
+      }, scope, { text: "刷新", purpose: "query", querySystem: true, mode: "listen", sourceIds: [],
+        history: [{ role: "user", text: "有哪些笔记？", provenanceId }], historyPrivacyEpoch: 0 }))
+        .rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+      expect(callModel).toHaveBeenCalledTimes(1);
+      expect(await sql`SELECT id FROM opening_query_ephemeral_provenance WHERE workspace_id=${scope.workspaceId}`)
+        .toEqual([{ id: provenanceId }]);
+    } finally { await fixture.close(); }
+  });
+
+  it("saves an ephemeral snippet with a live course-scoped memory", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const course = await createCourseMembershipRepository(sql).createCourse({ workspaceId: scope.workspaceId, title: "Course", slug: randomUUID() });
+      const id = await insertMemory(sql, scope, "Course memory", [await insertOwnedTurn(sql, scope)]);
+      await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${id}`;
+      const requestId = randomUUID();
+      const reservation = await createOpeningBudgetRepository(sql, { envCapCents: 10_000 }).reserve(scope, { purpose: "tutor", amountCents: 1, requestId });
+      const provenanceId = await createOpeningEphemeralProvenanceRepository(sql).record(scope, {
+        reservationId: reservation.id, requestId, privacyEpoch: 0, contextSourceRefs: [{ memoryDependencyIds: [id] }],
+      });
+      await expect(createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Course snippet", text: "Answer", provenanceId: provenanceId!,
+      })).resolves.toMatchObject({ documentId: expect.any(String) });
+    } finally { await fixture.close(); }
+  });
+
   it("exports a verified material-free ephemeral snippet", async () => {
     const fixture = await createOpeningFixture();
     try {
@@ -248,7 +348,8 @@ describe("synthetic deidentified dataset repository", () => {
     } finally { await fixture.close(); }
   });
 
-  it.each(["notes", "cards"] as const)("carries %s memory lineage through the actual ephemeral query producer", async name => {
+  it.each(["notes", "cards", "historical cards", "automatic cards"] as const)("carries %s memory lineage through the actual ephemeral query producer", async kind => {
+    const name = kind === "notes" ? "notes" : "cards";
     const fixture = await createOpeningFixture();
     try {
       const { sql, scope } = fixture;
@@ -259,7 +360,21 @@ describe("synthetic deidentified dataset repository", () => {
       const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
         title: "Private preference note", text: "Do not deliver the note body", savedTurnId,
       });
-      await createCardRepository(sql).createCard({ ...scope, sourceDocumentId: documentId, front: "Question", back: "Answer" });
+      const card = await createCardRepository(sql).createCard({ ...scope,
+        ...(kind === "historical cards" || kind === "automatic cards" ? {} : { sourceDocumentId: documentId }), front: "Question", back: "Answer" });
+      if (kind === "historical cards") {
+        await sql`UPDATE opening_note_provenance
+          SET context_source_refs=context_source_refs || ${sql.json([{ publicationCardIds: [card.id] }])}::jsonb
+          WHERE document_id=${documentId}`;
+      }
+      if (kind === "automatic cards") {
+        const rows = backupRows(sql, scope);
+        const session = await rows.learning();
+        const observation = await rows.observation(session);
+        const [stored] = await sql`SELECT activity_id FROM opening_learning_observations WHERE id=${observation}`;
+        await publishSnippet(fixture, documentId, String(stored!.activity_id));
+        await sql`UPDATE cards SET origin_observation_root_id=${observation} WHERE id=${card.id}`;
+      }
       const provenance = createOpeningEphemeralProvenanceRepository(sql);
       const systemQuery = createDbSystemQueryService(sql, "web", {
         planner: async () => ({ text: "", inputTokens: null, outputTokens: null, requestId: null,
@@ -273,7 +388,18 @@ describe("synthetic deidentified dataset repository", () => {
         name, sourceRefs: [], data: expect.arrayContaining([expect.any(Object)]),
       })]));
       const history = [{ provenanceId: reply.provenanceId! }];
-      await expect(provenance.resolveHistory(scope, history, 0)).resolves.toEqual([{ memoryDependencyIds: [id] }]);
+      const admitted = await provenance.resolveHistory(scope, history, 0);
+      expect(admitted).toEqual([{ memoryDependencyIds: [id] }]);
+      expect(admitted?.originTurnIds).toEqual([savedTurnId]);
+      expect(admitted?.verifiedLineage).toBe(true);
+      if (kind === "notes") {
+        const independent = await replyEphemeralSystemQuery({
+          systemQuery: createDbSystemQueryService(sql, "web", { callModel: async () => { throw new Error("deterministic fixture"); } }), provenance,
+        }, scope, { text: "我有哪些课程？", purpose: "query", querySystem: true, mode: "listen", sourceIds: [],
+          history: [{ role: "user", text: "有哪些笔记？", provenanceId: reply.provenanceId! },
+            { role: "assistant", text: reply.text, provenanceId: reply.provenanceId! }], historyPrivacyEpoch: 0 });
+        await expect(provenance.resolveHistory(scope, [{ provenanceId: independent.provenanceId! }], 0)).resolves.toEqual([]);
+      }
       await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${id}`;
       await expect(provenance.resolveHistory(scope, history, 0)).resolves.toBeNull();
     } finally { await fixture.close(); }
@@ -318,8 +444,8 @@ describe("synthetic deidentified dataset repository", () => {
 });
 async function grantOther() { await repo.grantConsent(f.otherScope,{policyVersion:OPENING_DATASET_POLICY_VERSION,consented:true,expiresAt:new Date(Date.now() + 3600000).toISOString()}); }
 
-async function publishSnippet({ sql, scope }: OpeningFixture, documentId: string) {
-  const activity = await insertTestTeachingActivity(sql, scope);
+async function publishSnippet({ sql, scope }: OpeningFixture, documentId: string, activityId?: string) {
+  const activity = activityId ?? await insertTestTeachingActivity(sql, scope);
   const unit = randomUUID(), session = randomUUID();
   await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number)
     VALUES(${unit},${scope.workspaceId},${scope.ownerUserId},'Published snippet',${documentId},1)`;

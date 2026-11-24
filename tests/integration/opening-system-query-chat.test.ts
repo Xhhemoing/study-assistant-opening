@@ -96,7 +96,7 @@ describe("saved and ephemeral record-query chat with real PostgreSQL", () => {
     expect(response).toMatchObject({ requestId: null, inputTokens: null, outputTokens: null, candidates: [], citations: [], historyDiscarded: false });
     expect(response.provenanceId).toBeTruthy(); expect(await counts()).toEqual(before); expect(forbidden).not.toHaveBeenCalled();
     const [row] = await fixture.sql`SELECT * FROM opening_query_ephemeral_provenance WHERE id=${response.provenanceId!}`;
-    expect(row).toMatchObject({ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, context_source_refs: [] });
+    expect(row).toMatchObject({ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, context_source_refs: [{ snippetLineageVersion: 1 }] });
     expect(JSON.stringify(row)).not.toContain(marker);
     expect(new Date(row!.expires_at).getTime() - new Date(row!.created_at).getTime()).toBe(86400000);
     const [durable] = await fixture.sql`SELECT (SELECT count(*)::int FROM opening_turns WHERE workspace_id=${fixture.scope.workspaceId}) AS turns,
