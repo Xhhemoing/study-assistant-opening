@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v48-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v49-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -1070,6 +1070,16 @@ describe("bounded resumable PDF parser", () => {
       ]);
       if (segmentPages === 1) expect(result.requests[1]).toEqual({ start: 2, seed: "inline_proof_sealed", exercise: true });
     });
+
+    it.each(["wrapped_proof_opener", "wrapped_qed", "heading_qed", "underscored_qed"])(
+      "publishes public prose after %s from the Python CLI",
+      async name => {
+        const result = await runCliScenario(name, { segmentPages: 1 });
+        expect(result.requests).toEqual([{ start: 1 }, { start: 2 }]);
+        expect(result.publishedChunks.map(({ page, text }) => [page, text]))
+          .toEqual([[2, "Public prose after the proof."]]);
+      },
+    );
 
     it("re-extracts a speculative tail when Vision establishes exercise context", async () => {
       const result = await runCliScenario("vision_exercise", {
@@ -2997,6 +3007,7 @@ describe("bounded resumable PDF parser", () => {
     { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.", sealed: false },
     { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.\nAnswer: Yes.", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Yes.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer:\nChapter 2: Geometry\nSome public prose.", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: Yes.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\nProof. A different derivation. ∎\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
@@ -3066,6 +3077,29 @@ describe("bounded resumable PDF parser", () => {
       : { start: 2, seed: "inline_sealed" });
     expect(result.publishedChunks.map(({ page }) => page)).toEqual(publicPages);
   });
+
+  it("does not attach an auxiliary proof to a native answer that ended at a blank", async () => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Answer: x =\n\nAn ordinary observation.", visualKinds: ["picture"] },
+      { page: 2, text: "Public prose after the answer." },
+    ], recognizePage: async () => ({ text: "[图片描述]\nProof. An independent public derivation.", imageObjectKey: "vision/proof" }) });
+    expect(result.requests[1]).toEqual({ start: 2 });
+    expect(result.publishedChunks.map(({ page, text }) => [page, text]))
+      .toEqual([[1, "An ordinary observation."], [2, "Public prose after the answer."]]);
+  });
+
+  it.each(["**Proof. Done. ∎**", "Proof. Starts.\n**Q.E.D.**", "Proof. Starts.\n## Q.E.D. ###", "Proof. Starts.\n__Q.E.D.__"])(
+    "publishes later Worker text after the Markdown proof %j",
+    async proof => {
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: "Answer: No.\n" + proof },
+        { page: 2, text: "Public prose after the proof." },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 2 });
+      expect(result.publishedChunks.map(({ page, text }) => [page, text]))
+        .toEqual([[2, "Public prose after the proof."]]);
+    },
+  );
 
   it("keeps a Docling proof boundary with no answer digest when transcription reopens an answer", async () => {
     const result = await runPdfScenario({ segmentPages: 1, pages: [

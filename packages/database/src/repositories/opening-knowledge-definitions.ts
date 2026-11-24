@@ -439,7 +439,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       CASE WHEN inline_opener AND qualified_solution THEN btrim(regexp_replace(line,${qualifiedSolutionLabel},'','i'))
         WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
         WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
-         WHEN running_heading OR line ~* ${pdfLeadingTextWrappers} THEN '' ELSE btrim(line) END AS candidate_body,
+        WHEN running_heading OR line ~* ${pdfLeadingTextWrappers} THEN ''
+        WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END AS candidate_body,
       -- Carry each provisional section opener on its numbered predecessor so the
       -- seal windows can check the predecessor before the opener changes groups.
       CASE WHEN NOT auxiliary AND content_line
@@ -468,6 +469,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       SELECT *, auxiliary_proof AND position=first_auxiliary_position AS auxiliary_proof_head,
         auxiliary_proof AND position=first_page_auxiliary_position AS first_auxiliary_proof,
         native_answer_position>COALESCE(native_reopening,0) AND native_answer_position>COALESCE(native_proof,0)
+          AND native_answer_position>COALESCE(native_blank_exit,0)
           AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineContinues}) AS native_answer_boundary,
         (bool_or(transcription_answer_reopened AND position=last_transcription_answer) OVER chunk_lines
           AND bool_or(transcription_answer_reopened AND answer_lines=native_answer_lines) OVER chunk_lines)
@@ -500,18 +502,22 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             bool_or(NOT auxiliary AND (inline_opener OR section_answer OR opens_exercise OR opens_public
               OR content_line AND line ~ ${numberedQuestion}))
               OVER (PARTITION BY source_id,source_version,page) AS primary_ends_adjacency,
-            first_value(lane_body) OVER answer_body AS last_answer_body,
-            min(position) FILTER (WHERE candidate_terminator AND NOT auxiliary_answer_proof_close) OVER answer_body AS first_auxiliary_close,
-            COALESCE(max(position) FILTER (WHERE candidate_proof) OVER answer_body,0)
-              > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER answer_body,0) AS open_auxiliary_proof,
             max(position) FILTER (WHERE native_line AND inline_opener) OVER chunk_lines AS native_answer_position,
+            max(position) FILTER (WHERE NOT auxiliary AND NOT transcription AND consumes_answer_blank)
+              OVER chunk_lines AS native_blank_exit,
             max(position) FILTER (WHERE native_line AND (lane_reopening OR section_answer)) OVER chunk_lines AS native_reopening,
             max(position) FILTER (WHERE native_line AND candidate_proof) OVER chunk_lines AS native_proof,
             max(position) FILTER (WHERE transcription AND inline_opener) OVER chunk_lines AS last_transcription_answer,
             CASE WHEN transcription AND inline_opener THEN first_value(answer_lines) OVER native_answer END AS native_answer_lines,
-            first_value(lane_body) OVER (PARTITION BY id ORDER BY NOT native_line OR lane_body='',position DESC) AS native_tail
+            first_value(CASE WHEN native_line AND inline_opener THEN last_answer_body ELSE '' END)
+              OVER native_answer AS native_tail
           FROM (
-            SELECT *,
+            SELECT *, first_value(CASE WHEN lane_body<>'' AND (auxiliary OR answer_content)
+              THEN lane_body ELSE '' END) OVER answer_body AS last_answer_body,
+              min(position) FILTER (WHERE candidate_terminator AND NOT auxiliary_answer_proof_close)
+                OVER answer_body AS first_auxiliary_close,
+              COALESCE(max(position) FILTER (WHERE candidate_proof) OVER answer_body,0)
+                > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER answer_body,0) AS open_auxiliary_proof,
               CASE WHEN NOT auxiliary AND inline_opener THEN
                 string_agg(CASE WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END,chr(10))
                   FILTER (WHERE answer_content) OVER answer_sequence END AS answer_lines,
@@ -528,6 +534,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
              SELECT *, auxiliary AND auxiliary_opener>0 AND candidate_terminator
                AND COALESCE(max(position) FILTER (WHERE candidate_proof) OVER auxiliary_progress,0)
                  > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER auxiliary_prior,0) AS auxiliary_answer_proof_close,
+               -- A later provisional reopening cannot replace a boundary already reached in this lane.
                min(position) FILTER (WHERE NOT auxiliary AND lane_reopening) OVER answer_lanes AS lane_reopening_position,
                min(position) FILTER (WHERE NOT auxiliary AND (lane_reopening OR section_answer)) OVER answer_lanes AS lane_boundary_position,
                min(position) FILTER (WHERE NOT auxiliary AND candidate_terminator) OVER answer_lanes AS answer_terminator,
@@ -573,14 +580,14 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
               ) with_proof_closes
             ) with_answer_content
             WINDOW answer_sequence AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener
-              ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+              ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+              answer_body AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener
+                ORDER BY (lane_body='' OR NOT auxiliary AND NOT answer_content),position DESC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
           ) with_answer_text
           WINDOW auxiliary_block_lines AS (PARTITION BY id,auxiliary_block),
             chunk_lines AS (PARTITION BY id),
-            native_answer AS (PARTITION BY id ORDER BY NOT (native_line AND inline_opener),position DESC),
-            answer_body AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener
-              ORDER BY (lane_body='' OR NOT auxiliary AND NOT answer_content),position DESC
-              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+            native_answer AS (PARTITION BY id ORDER BY NOT (native_line AND inline_opener),position DESC)
         ) with_auxiliary_body
       ) with_sentence_end
       WINDOW chunk_lines AS (PARTITION BY id)

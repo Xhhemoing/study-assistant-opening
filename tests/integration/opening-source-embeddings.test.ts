@@ -10,7 +10,7 @@ import * as network from "../../packages/ai/src/opening/provider-network";
 import { createOpeningMaterialRetriever, retrievalBudgetId } from "../../apps/worker/src/runtime/material-retrieval";
 import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
 import { createSourceVisualRecognition } from "../../apps/worker/src/runtime/source-visual-recognition";
-import { preserveOpeningKnowledgeDefinitions } from "../../packages/database/src/repositories/opening-knowledge-definitions";
+import { preserveOpeningKnowledgeDefinitions, publicPdfSealBoundaries } from "../../packages/database/src/repositories/opening-knowledge-definitions";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
@@ -450,6 +450,49 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
         "2. y = 4.",
         "Chapter 2: Geometry",
       ], [3], 2);
+    },
+  );
+
+  it("keeps a proof sealed when the final transcription answer has no body", async () => {
+    const pdf = await seed([
+      "[原生提取]\nAnswer: No.\n[视觉转写与描述]\n[转写]\nAnswer: No.\n2. Find y.\nAnswer:\nChapter 2: Geometry\nSome public prose."
+        + "\n[图片描述]\nProof. Private derivation begins.",
+      "The private derivation continues.",
+      "The private derivation ends. ∎",
+      "Public prose after the proof.",
+    ]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const [answer] = await f.sql`
+      ${publicPdfSealBoundaries(f.sql, f.scope.workspaceId, { sourceIds: [pdf.sourceId], sourceVersion: 1 })}
+      SELECT last_answer_body, transcription_reopens_answer FROM pdf_archive_inline_starts WHERE position=last_transcription_answer`;
+    expect(answer).toEqual({ last_answer_body: "", transcription_reopens_answer: false });
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(({ page }) => page)).toEqual([4]);
+  });
+
+  it.each(["Answer: x =\n\nAn ordinary observation.", "Answer:\n"])(
+    "does not start an archived auxiliary proof from the native tail %j",
+    async native => {
+      const pdf = await seed([
+        "[原生提取]\n" + native + "\n[图片描述]\nProof. An independent derivation.",
+        "Public prose after the answer.",
+      ]);
+      await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+      const [proof] = await f.sql`
+        ${publicPdfSealBoundaries(f.sql, f.scope.workspaceId, { sourceIds: [pdf.sourceId], sourceVersion: 1 })}
+        SELECT native_answer_boundary, follows_completed_answer FROM pdf_archive_inline_starts WHERE first_auxiliary_proof`;
+      expect(proof).toEqual({ native_answer_boundary: false, follows_completed_answer: false });
+      if (native.includes("An ordinary observation.")) {
+        const chunks = createOpeningSourceChunksRepository(f.sql);
+        expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2])).map(({ page }) => page)).toEqual([2]);
+      }
+    },
+  );
+
+  it.each(["**Proof. Done. ∎**", "Proof. Starts.\n**Q.E.D.**", "Proof. Starts.\n## Q.E.D. ###", "Proof. Starts.\n__Q.E.D.__"])(
+    "publishes the next archived page after the Markdown proof %j",
+    async proof => {
+      await expectArchivedPdfPages(["Answer: No.\n" + proof, "Public prose after the proof."], [2], 1);
     },
   );
 

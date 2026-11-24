@@ -872,8 +872,7 @@ def _iter_page_units(fragments: list[tuple[str, str | None]]):
             offset += 1  # '\n' joiner
 
 
-def _inline_answer_body(line_text: str) -> str:
-    stripped = _strip_heading_markup(line_text)
+def _inline_answer_body(stripped: str) -> str:
     for label in (_NUMBERED_QUESTION_SOLUTION_RE, _INLINE_SEALED_ALWAYS_RE, _QUALIFIED_SOLUTION_LABEL_RE, _INLINE_SEALED_NON_EXAMPLE_RE,
                   _STANDALONE_SOLUTION_HEADING_RE):
         match = label.match(stripped)
@@ -1041,12 +1040,12 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             # Unmarked lines, tables and formulas continue the active block.
             current[2] = unit_end
         if current[0] == "proof":
-            current_proof_terminated = bool(_PROOF_TERMINATOR_RE.search(unit_text))
+            current_proof_terminated = bool(_PROOF_TERMINATOR_RE.search(stripped))
         active_seal = current[7]
         if is_content_line:
             previous_numbered_question = active_seal is None and bool(_NUMBERED_QUESTION_RE.match(stripped))
         if active_seal in _INLINE_SEAL_MODES:
-            last_inline_body = _inline_answer_body(unit_text) if explicit_opener else unit_text.strip()
+            last_inline_body = _inline_answer_body(stripped) if explicit_opener else stripped
             if inline_answer_lines is not None:
                 # Match the Worker's seal scanner without returning the sealed answer text.
                 answer_line = unit_text.strip()
@@ -1061,7 +1060,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                 page_seal_mode = active_seal
                 current[7] = active_seal
         if (
-            active_seal == "section_sealed" and _SECTION_SEALED_TERMINATOR_RE.search(unit_text)
+            active_seal == "section_sealed" and _SECTION_SEALED_TERMINATOR_RE.search(stripped)
         ) or (
             active_seal in _INLINE_SEAL_MODES and _INLINE_SEALED_TERMINATOR_RE.search(last_inline_body)
         ):
@@ -1099,11 +1098,14 @@ def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page,
             last_block.kind == "narrative" and last_block.text.endswith(("-", "\u00ad"))
         )
         mid_sentence = not _TERMINAL_PUNCTUATION_RE.search(last_block.text)
+        proof_end = last_block.kind == "proof" and bool(
+            _PROOF_TERMINATOR_RE.search(_strip_heading_markup(last_block.text.rstrip().rsplit("\n", 1)[-1]))
+        )
         has_next_adjacent = index + 1 < len(page_order) and page_order[index + 1] == page_number + 1
 
         if not has_next_adjacent:
             if explicit_next or (
-                last_block.kind == "proof" and not _PROOF_TERMINATOR_RE.search(last_block.text)
+                last_block.kind == "proof" and not proof_end
             ) or (
                 last_block.kind == "solution_sealed" and end_seals[page_number] is not None
             ) or (
@@ -1134,7 +1136,7 @@ def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page,
         inherit_kind = False
 
         if not continues:
-            if prev_block.kind == "proof" and not _PROOF_TERMINATOR_RE.search(prev_block.text):
+            if prev_block.kind == "proof" and not proof_end:
                 if not first_explicit or (first_block.kind == "proof" and first_block.continued_from_prev_page):
                     continues = True
                     inherit_kind = not first_explicit

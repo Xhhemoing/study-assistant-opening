@@ -511,7 +511,7 @@ function stripSealedSolutionLines(
       setMode("inline_proof_sealed");
       changed = true;
       closedAuxiliaryAnswerProof = false;
-      lastInlineBodyLine = trimmed;
+      lastInlineBodyLine = stripped;
       inlineAnswerLines?.push(stripped);
       if (INLINE_SEALED_TERMINATOR_RE.test(stripped)) endInline();
       continue;
@@ -552,7 +552,7 @@ function stripSealedSolutionLines(
         keep(line);
       } else {
         changed = true;
-        if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
+        if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(stripped)) setMode("none");
       }
       continue;
     }
@@ -570,7 +570,7 @@ function stripSealedSolutionLines(
         setMode("section_sealed");
         state.inWorkedExample = false;
         changed = true;
-        if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
+        if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(stripped)) setMode("none");
         continue;
       }
     }
@@ -584,7 +584,7 @@ function stripSealedSolutionLines(
       setMode("section_sealed", true);
       state.inWorkedExample = false;
       changed = true;
-      if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(trimmed)) setMode("none");
+      if (!auxiliary && SECTION_SEALED_TERMINATOR_RE.test(stripped)) setMode("none");
       continue;
     }
 
@@ -633,9 +633,9 @@ function stripSealedSolutionLines(
     if (isInlineSeal(state.mode)) {
       changed = true;
       closedAuxiliaryAnswerProof = false;
-      lastInlineBodyLine = trimmed;
+      lastInlineBodyLine = stripped;
       if (stripped) inlineAnswerLines?.push(stripped);
-      if (INLINE_SEALED_TERMINATOR_RE.test(trimmed)) endInline();
+      if (INLINE_SEALED_TERMINATOR_RE.test(stripped)) endInline();
       continue;
     }
 

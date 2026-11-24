@@ -165,6 +165,16 @@ def worker_pdf_cli_fixtures():
             4: "Public prose after the derivation.",
         }, (1,), [(1, 1, None), (2, 2, None), (2, 2, "inline_proof_sealed"),
                   (3, 3, None), (3, 3, "inline_proof_sealed"), (4, 4, None)])
+    for name, proof in (
+        ("wrapped_proof_opener", "**Proof. Done. ∎**"),
+        ("wrapped_qed", "Proof. Starts.\n**Q.E.D.**"),
+        ("heading_qed", "Proof. Starts.\n## Q.E.D. ###"),
+        ("underscored_qed", "Proof. Starts.\n__Q.E.D.__"),
+    ):
+        cases[name] = (2, {
+            1: "Answer: No.\n" + proof,
+            2: "Public prose after the proof.",
+        }, (), [(1, 2, None), (1, 1, None), (2, 2, None), (2, 2, "inline_proof_sealed")])
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
         pdf_path = Path(tmp) / "worker-fixture.pdf"
@@ -1375,6 +1385,34 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                         self.assertTrue(ext.inline_proof_sealed_by_page[12])
                         self.assertFalse(ext.inline_sealed_by_page[13])
                         self.assertIn("proof", [block.kind for block in ext.discourse_blocks_by_page[14]])
+
+    def test_closes_markdown_wrapped_answer_proofs(self):
+        for proof in (
+            "**Proof. Done. ∎**",
+            "Proof. Starts.\n**Q.E.D.**",
+            "Proof. Starts.\n## Q.E.D. ###",
+            "Proof. Starts.\n__Q.E.D.__",
+        ):
+            with self.subTest(proof=proof):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, "Answer: No.\n" + proof)],
+                    [text_element(12, "Public prose after the proof.")],
+                ))
+                self.assertEqual(ext.texts_by_page[11], [])
+                self.assertFalse(ext.inline_proof_sealed_by_page[11])
+                self.assertFalse(ext.inline_proof_boundary_by_page[11])
+                self.assertEqual(ext.texts_by_page[12], ["Public prose after the proof."])
+
+    def test_closes_markdown_wrapped_section_and_public_proof(self):
+        ext = physical_pages.extract_physical_pages(result_for(
+            [text_element(11, "Answer Key\nPrivate calculation\n**End of Answers.**")],
+            [text_element(12, "Public prose after the answer section.")],
+            [text_element(13, "Proof. The public derivation.\n__Q.E.D.__")],
+            [text_element(14, "Public prose after the proof.")],
+        ))
+        self.assertEqual(ext.texts_by_page[12], ["Public prose after the answer section."])
+        self.assertEqual([block.kind for block in ext.discourse_blocks_by_page[14]], ["narrative"])
+        self.assertFalse(ext.discourse_blocks_by_page[13][-1].continues_on_next_page)
 
     def test_same_line_answer_proof_and_terminal_boundary_are_sealed(self):
         ext = physical_pages.extract_physical_pages(result_for(
