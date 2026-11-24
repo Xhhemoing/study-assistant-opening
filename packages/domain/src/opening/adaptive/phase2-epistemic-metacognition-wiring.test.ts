@@ -457,6 +457,117 @@ it("R17 gates historical BKT on visible corrections and returns the live rule de
   })));
 });
 
+it("R18 keeps a claimed graded feature from splitting two earlier legacy projections", () => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const original = projectProducedAttempts([first, retry], at(3), { cartridgeEvidence: withheldFirstGrade });
+  const withdrawn = projectProducedAttempts([{ ...first, problemId: "corrected", familyKey: "corrected-family",
+    context: { referenceCheck: null }, recordedAt: at(4) }], at(7), { cartridgeEvidence: withheldFirstGrade });
+  const echo = projectProducedAttempts([{ ...first, recordedAt: at(6) }], at(7), { untimestamped: false });
+  const baseline = { ...original, observations: [...original.observations, ...withdrawn.observations],
+    features: [...original.features, ...withdrawn.features], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...baseline, observations: [...baseline.observations, ...echo.observations],
+    features: [...baseline.features, ...echo.features] };
+  const expected = { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] };
+
+  for (const cutoff of [at(3), at(4)]) {
+    expect(replayEvidence({ ...baseline, cutoff })).toEqual(expected);
+    expect(replayEvidence({ ...appended, cutoff })).toEqual(expected);
+  }
+});
+
+it.each([false, true])("R18 keeps a surplus duplicate from reordering producer identities (anchored: %s)", anchored => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const moved = { ...first, problemId: "corrected", familyKey: "corrected-family" };
+  const original = projectProducedAttempts([first, retry], at(3));
+  const revision = projectProducedAttempts([{ ...moved, recordedAt: at(4) }], at(7));
+  const echo = projectProducedAttempts([{ ...first, recordedAt: at(6) }], at(7), { untimestamped: false });
+  const base = { ...original, observations: [...original.observations, ...revision.observations],
+    features: [...original.features, ...revision.features], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const input = anchored ? { ...base, observations: [...base.observations, ...echo.observations],
+    features: [...base.features, ...echo.features] } : base;
+  const expected = { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] };
+  expect(replayEvidence(input)).toEqual(expected);
+  expect(replayEvidence({ ...input, observations: [...input.observations, original.observations[0]!] })).toEqual(expected);
+  expect(replayEvidence({ ...input, observations: [original.observations[0]!, ...input.observations] })).toEqual(expected);
+
+  const threeSlots = { ...base, observations: [...base.observations, original.observations[0]!],
+    features: [...base.features, ...echo.features] };
+  expect(replayEvidence({ ...threeSlots, cutoff: at(4) })).toEqual(expected);
+  expect(replayEvidence({ ...threeSlots, cutoff: at(7) }).holdout).toEqual([retry.id]);
+});
+
+it("R18 replays revisions by recording time regardless of feature input order", () => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const original = projectProducedAttempts([first, retry], at(3));
+  const moved = projectProducedAttempts([{ ...first, problemId: "corrected", familyKey: "corrected-family", recordedAt: at(4) }], at(6));
+  const input = { ...original, observations: [...original.observations, ...moved.observations],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const [originalSlot, retrySlot] = original.features;
+  const futureSlot = moved.features[0]!;
+  const expected = { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] };
+
+  const cutoff = at(4);
+  expect(replayEvidence({ ...input, cutoff, features: [originalSlot!, retrySlot!, futureSlot] })).toEqual(expected);
+  expect(replayEvidence({ ...input, cutoff, features: [futureSlot, retrySlot!, originalSlot!] })).toEqual(expected);
+  const tiedSlot = { ...futureSlot, recordedAt: at(1), views: [] as LearnerStateFeature["views"] };
+  const tied = { ...input, cutoff, features: [originalSlot!, retrySlot!, tiedSlot] };
+  expect(replayEvidence({ ...tied, features: [...tied.features].reverse() })).toEqual(replayEvidence(tied));
+});
+
+it("R18 keeps a legacy BKT correction invisible until its matching feature is recorded", () => {
+  const original = projectProducedAttempts([1, 2, 3, 4, 5].map(index => head(`sample-${index}`, 2)), at(3));
+  const correction = projectProducedAttempts([head("future", 3, { verifiedCorrect: "no", recordedAt: at(4) })], at(5));
+  const input = buildDecisionInput({ observations: [...original.observations, ...correction.observations], wantsFullExplanation: false });
+  const target = { courseId: scope.courseId, requirementKey: scope.requirementKey, problemId: "target", itemVersionId: "target-v1" };
+  const features = [...original.features, ...correction.features];
+  const compare = (cutoff: string) => nextLearningStepWithExperimentalBkt(input, { enabled: true, target, excludedProblemIds: [], features, cutoff });
+
+  expect(compare(at(5))).toMatchObject({ ruleDecision: { reasonCode: "verified_incorrect" }, comparison: { reason: "priority_rule" } });
+  expect([at(3), at(4)].map(compare).map(result => result.comparison)).toMatchObject([
+    { status: "compared", sampleCount: 5 }, { status: "compared", sampleCount: 5 },
+  ]);
+});
+
+it("R18 selects the latest visible BKT revision regardless of observation order", () => {
+  const first = head("latest", 2, { recordedAt: at(3) });
+  const others = projectProducedAttempts([1, 2, 3, 4].map(index => head(`sample-${index}`, 1)), at(3));
+  const correct = projectProducedAttempts([first], at(5), { untimestamped: false });
+  const wrong = projectProducedAttempts([{ ...first, verifiedCorrect: "no", recordedAt: at(4) }], at(5), { untimestamped: false });
+  const target = { courseId: scope.courseId, requirementKey: scope.requirementKey, problemId: "target", itemVersionId: "target-v1" };
+  const features = [...others.features, ...correct.features, ...wrong.features];
+  const orders = [[...correct.observations, ...wrong.observations], [...wrong.observations, ...correct.observations]];
+  const results = orders.map(revisions => {
+    const input = buildDecisionInput({ observations: [...others.observations, ...revisions], wantsFullExplanation: false });
+    return [at(3), at(4), at(5)].map(cutoff => {
+      const result = nextLearningStepWithExperimentalBkt(input, { enabled: true, target, excludedProblemIds: [], features, cutoff });
+      expect(result.ruleDecision).toEqual(nextLearningStep(input));
+      return result.comparison;
+    });
+  });
+  const expected = [{ reason: "insufficient_samples", sampleCount: 4 }, { status: "compared", sampleCount: 5 },
+    { reason: "priority_rule", sampleCount: 0 }];
+  expect(results).toMatchObject([expected, expected]);
+
+  const wrongEarlier = projectProducedAttempts([{ ...first, verifiedCorrect: "no" }], at(5), { untimestamped: false });
+  const correctLater = projectProducedAttempts([{ ...first, recordedAt: at(4) }], at(5), { untimestamped: false });
+  const experiment = { enabled: true, target, excludedProblemIds: [], cutoff: at(5),
+    features: [...others.features, ...wrongEarlier.features, ...correctLater.features] };
+  for (const revisions of [[...wrongEarlier.observations, ...correctLater.observations],
+    [...correctLater.observations, ...wrongEarlier.observations]]) {
+    const input = buildDecisionInput({ observations: [...others.observations, ...revisions], wantsFullExplanation: false });
+    expect(nextLearningStepWithExperimentalBkt(input, experiment).comparison).toMatchObject({ status: "compared", sampleCount: 5 });
+  }
+
+  const sameTime = { ...experiment, features: [...others.features, ...correctLater.features, ...wrong.features] };
+  for (const revisions of [[...correctLater.observations, ...wrong.observations], [...wrong.observations, ...correctLater.observations]]) {
+    const input = buildDecisionInput({ observations: [...others.observations, ...revisions], wantsFullExplanation: false });
+    expect(nextLearningStepWithExperimentalBkt(input, sameTime).comparison).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+  }
+});
+
 it("holds overlapping legacy revisions until their forced recording slot", () => {
   const first = head("first", 2);
   const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,

@@ -162,7 +162,7 @@ function matchesAssistance(assistance: SnapshotObservation["assistance"], eligib
     && (!reasonCodes.includes("help_before_submission") || reasonCodes.includes("attempt_timing_unknown"));
 }
 
-function matchesUntimestampedObservation(observation: SnapshotObservation, feature: LearnerStateFeature): boolean {
+export function matchesUntimestampedObservation(observation: SnapshotObservation, feature: LearnerStateFeature): boolean {
   const { eligibility } = feature;
   return (observation.requirementKey ?? null) === feature.requirementKey
     && normalizeSkillLabelKey(observation.skillLabel) === normalizeSkillLabelKey(feature.skillLabel)
@@ -177,9 +177,9 @@ function matchesUntimestampedObservation(observation: SnapshotObservation, featu
 type FeatureRevision = { feature: LearnerStateFeature; attempted: number; recorded: number };
 type ObservationProjection = { observation: SnapshotObservation; attempted: number };
 type ObservationRevision = ObservationProjection & { recorded: number };
-type LegacyProjection = ObservationProjection & { slots: ReadonlySet<number>; required: boolean; bit: bigint; lastOccurrence: number };
+type LegacyProjection = ObservationProjection & { slots: ReadonlySet<number>; required: boolean; bit: bigint };
 type LegacyBucket = { occurrences: LegacyProjection[]; slots: Set<number>; required: bigint };
-type LegacyProgress = { next: number; represented: bigint };
+type LegacyProgress = { next: number; represented: bigint; skipped: bigint };
 type LegacyAssignment = {
   progress: readonly LegacyProgress[];
   coverage: number;
@@ -225,13 +225,13 @@ function resolveLegacyComponent(
   }
 
   const first: LegacyAssignment = {
-    progress: buckets.map(() => ({ next: 0, represented: 0n })), coverage: 0, distinct: 0, edges: [],
+    progress: buckets.map(() => ({ next: 0, represented: 0n, skipped: 0n })), coverage: 0, distinct: 0, edges: [],
   };
   let assignments = [first];
   for (const slot of slots) {
     const next = new Map<string, LegacyAssignment>();
     function offer(candidate: LegacyAssignment) {
-      const key = candidate.progress.map(row => `${row.next}:${row.represented}`).join(",");
+      const key = candidate.progress.map(row => `${row.next}:${row.represented}:${row.skipped}`).join(",");
       const previous = next.get(key);
       const comparison = previous ? compareAssignments(candidate, previous) : 1;
       if (comparison > 0) next.set(key, candidate);
@@ -242,19 +242,22 @@ function resolveLegacyComponent(
       buckets.forEach(({ occurrences, slots: compatible }, bucketIndex) => {
         if (!compatible.has(slot)) return;
         const { next: start, represented } = assignment.progress[bucketIndex]!;
+        let { skipped } = assignment.progress[bucketIndex]!;
         const offered = new Set<LegacyProjection>();
         for (let index = start; index < occurrences.length; index++) {
           const row = occurrences[index]!;
           const missing = (represented & row.bit) === 0n;
-          if (row.slots.has(slot) && !offered.has(row)) {
+          if ((skipped & row.bit) === 0n && row.slots.has(slot) && !offered.has(row)) {
             offered.add(row);
             const progress = [...assignment.progress];
-            progress[bucketIndex] = { next: index + 1, represented: represented | row.bit };
+            progress[bucketIndex] = { next: index + 1, represented: represented | row.bit, skipped };
             offer({ progress, coverage: assignment.coverage + 1, distinct: assignment.distinct + Number(missing),
               edges: [{ previous: assignment, row, slot }] });
           }
-          // Later copies can stand in for this occurrence. The last required copy cannot be skipped.
-          if (missing && row.required && row.lastOccurrence === index) break;
+          // A first occurrence fixes the order of that content. An optional
+          // projection skipped here cannot re-enter through a later copy.
+          if (missing && row.required) break;
+          if (missing) skipped |= row.bit;
         }
       });
     }
@@ -325,26 +328,25 @@ function visibleObservationRevisions(
     visible.push({ observation: row.observation, attempted: row.attempted, recorded: features[slot]!.recorded });
   }
 
+  const unclaimed = legacy.map(row => ({ ...row, unclaimedSlots: row.matchingSlots.filter(slot => !claimedSlots.has(slot)) }));
   const buckets: LegacyBucket[] = [];
-  for (const rows of groupByKey(legacy, row => row.matchingSlots.join(",")).values()) {
+  // A matching feature already claimed by an explicit revision cannot change
+  // which legacy projections share producer ordering for the remaining slots.
+  for (const rows of groupByKey(unclaimed, row => row.unclaimedSlots.join(",")).values()) {
     const bucket: LegacyBucket = { occurrences: [], slots: new Set(), required: 0n };
     const distinct: LegacyProjection[] = [];
     for (const row of rows) {
       const identical = distinct.find(projection => sameHead(row.observation, projection.observation));
       if (identical) {
-        if (identical.slots.size) {
-          identical.lastOccurrence = bucket.occurrences.length;
-          bucket.occurrences.push(identical);
-        }
+        if (identical.slots.size) bucket.occurrences.push(identical);
         continue;
       }
       const matchingTimes = new Set(row.matchingSlots.map(slot => features[slot]!.recorded));
       const anchor = explicit.reduce((earliest, head) => matchingTimes.has(head.recorded) && sameHead(row.observation, head.observation)
         ? Math.min(earliest, head.recorded) : earliest, Infinity);
-      const slots = new Set(row.matchingSlots.filter(slot => !claimedSlots.has(slot) && features[slot]!.recorded < anchor));
+      const slots = new Set(row.unclaimedSlots.filter(slot => features[slot]!.recorded < anchor));
       const required = anchor === Infinity;
-      const projection = { observation: row.observation, attempted: row.attempted, required, slots,
-        bit: 1n << BigInt(distinct.length), lastOccurrence: bucket.occurrences.length };
+      const projection = { observation: row.observation, attempted: row.attempted, required, slots, bit: 1n << BigInt(distinct.length) };
       distinct.push(projection);
       if (!slots.size) {
         // A different legacy head on an explicitly claimed slot remains conflicting.
@@ -363,11 +365,23 @@ function visibleObservationRevisions(
   return visible;
 }
 
+function featureSlotKey(feature: LearnerStateFeature): string {
+  const { eligibility } = feature;
+  return JSON.stringify([feature.observationId, feature.attemptId, feature.itemVersionId, feature.requirementKey,
+    feature.skillLabel, feature.availability, feature.outcome, eligibility.verifiedCorrect, eligibility.independentAttempt,
+    eligibility.usableForCurrentVersion, [...eligibility.reasonCodes].sort(), [...feature.views].sort(), [...feature.gaps].sort()]);
+}
+
 function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
   const courseFeatures = input.features.flatMap(feature => {
     if (feature.courseId !== input.scope.courseId) return [];
     const attempted = adaptiveShadowTime(feature.attemptedAt), recorded = adaptiveShadowTime(feature.recordedAt);
     return attempted <= recorded ? [{ feature, attempted, recorded }] : [];
+  }).sort((left, right) => {
+    const chronology = left.recorded - right.recorded || left.attempted - right.attempted;
+    if (chronology) return chronology;
+    const leftKey = featureSlotKey(left.feature), rightKey = featureSlotKey(right.feature);
+    return leftKey < rightKey ? -1 : Number(leftKey > rightKey);
   });
   const featuresById = groupByKey(courseFeatures, row => row.feature.observationId);
   const observationsById = groupByKey(input.observations, row => row.id);
