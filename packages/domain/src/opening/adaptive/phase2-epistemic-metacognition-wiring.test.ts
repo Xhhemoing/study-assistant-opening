@@ -1103,6 +1103,35 @@ it.each([1, 2])("R27 keeps %i uncertain legacy copies out of direct replay and h
     .belief.implicitLogCredit).toBeGreaterThan(0);
 });
 
+it.each([1, 2])("R28 uses slot presence for direct replay with %i copies and a rule-only sibling", copies => {
+  const first = head("first", 1);
+  const ruleOnly = { ...first, problemId: "other", familyKey: "other-family", verifiedCorrect: "no" as const };
+  const cutoff = at(3);
+  const observations = [...Array.from({ length: copies }, () => first), ruleOnly];
+  const features = [feature(first), feature(first, { recordedAt: at(7) })];
+  const resolved = visibleObservationRevisions(observations, courseFeatureRevisions(features, scope.courseId), Date.parse(cutoff));
+  expect(resolved.unplaced).toEqual([ruleOnly]);
+  expect(resolved.canBeAbsent).toBe(false);
+  expect(resolved.revisionsCanBeAbsent).toBe(copies === 1);
+
+  const input = { scope, cutoff, observations, features, targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  expect(replayEvidence(input)).toEqual(copies === 1
+    ? { weights: [[first.id, 0]], lastDirectRecallAtMs: null, holdout: [] }
+    : { weights: [[first.id, 1]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] });
+});
+
+it.each([1, 2])("R28 uses slot presence for FIRE with %i copies and a rule-only sibling", copies => {
+  const own = head("own", 1, { attemptedAt: "2026-10-01T09:00:00.000Z" });
+  const source = head("source", 1, { requirementKey: "apply-integrals" });
+  const ruleOnly = { ...source, problemId: "other", familyKey: "other-family", verifiedCorrect: "no" as const };
+  const result = predictLearnerShadowV2({ scope, cutoff: at(3), targetFamilyKeys: [], propagatedFamilyKeys: [],
+    observations: [own, ...Array.from({ length: copies }, () => source), ruleOnly],
+    features: [feature(own), feature(source), feature(source, { recordedAt: at(7) })],
+    fireEdgesByObservationId: new Map([[source.id, { sourceSkillVersion: 1, edgeWeight: 1, covered: true, stepPassed: true }]]) });
+  if (copies === 1) expect(result.belief.implicitLogCredit).toBe(0);
+  else expect(result.belief.implicitLogCredit).toBeGreaterThan(0);
+});
+
 type SlotGrade = SnapshotObservation["verifiedCorrect"] | "withheld";
 
 function gradeSlot(row: SnapshotObservation, grade: SlotGrade, recordedAt: string) {
@@ -1205,6 +1234,7 @@ it.each([
     expect(summarize(actual.revisions)).toEqual(revisions);
     expect(summarize(actual.latest, true)).toEqual(latest);
     expect(actual.canBeAbsent).toBe(canBeAbsent);
+    expect(actual.revisionsCanBeAbsent).toBe(canBeAbsent);
     expect(actual.unplaced).toEqual([]);
   }
 });
@@ -1667,21 +1697,23 @@ it.each([
 
 it.each([
   ["independence", { independentAttempt: "no" }],
-  ["hint exposure", { assistance: "hinted" }],
-  ["solution exposure", { assistance: "revealed" }],
-  ["unknown assistance", { assistance: "unknown" }],
+  ["hint exposure", { assistance: "hinted", independentAttempt: "no" }, ["declared_help"]],
+  ["solution exposure", { assistance: "revealed", independentAttempt: "no" }, ["declared_help"]],
+  ["unknown assistance", { assistance: "unknown", independentAttempt: "unknown" }, ["assistance_unknown"]],
   ["version usability", { usableForCurrentVersion: "no" }],
   ["requirement", { requirementKey: "apply-integrals" }],
   ["skill label", { skillLabel: "Integral applications" }],
-] as const)("preserves the day-2 forecast when an untimestamped %s correction is recorded on day 3", (_label, correction) => {
+] as const)("preserves the day-2 forecast when an untimestamped %s correction is recorded on day 3", (_label, correction, reasons = []) => {
   const evidence = head("evidence", 1);
   const revision = { ...evidence, ...correction };
+  const revisionSlot = feature(revision, { recordedAt: at(3) });
+  revisionSlot.eligibility.reasonCodes = [...reasons];
   const input = { scope, cutoff: at(2), observations: [evidence], features: [feature(evidence)],
     targetFamilyKeys: [], propagatedFamilyKeys: [] };
   const forecast = predictLearnerShadowV2(input);
   expect(forecast.evidenceObservationIds).toEqual([evidence.id]);
   expect(predictLearnerShadowV2({ ...input, observations: [evidence, revision],
-    features: [...input.features, feature(revision, { recordedAt: at(3) })] })).toEqual(forecast);
+    features: [...input.features, revisionSlot] })).toEqual(forecast);
 });
 
 it("preserves verified day-1 evidence when a day-3 untimestamped head omits version usability", () => {

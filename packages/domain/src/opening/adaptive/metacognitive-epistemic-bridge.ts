@@ -250,23 +250,42 @@ function precedes(left: readonly LegacyOccurrence[], right: readonly LegacyOccur
 
 type EmitLegacyRevision = (row: LegacyProjection, slot: number, visibleCopies: number, canBeLatest: boolean) => void;
 
-type BucketSlotState = {
+type BucketCopyCounts = {
   used: readonly number[];
-  countsKey: string | number;
+  key: string | number;
+  earliestPrefix: number;
+  before: BucketCopyCounts[];
+};
+
+type BucketSlotState = {
+  counts: BucketCopyCounts;
   reach: bigint;
   earliestLatest: number;
   maxVisible: number[];
   prefix?: number[];
-  edges: { next: BucketSlotState; projectionIndex: number }[];
+  firstEdge: number;
+  lastEdge: number;
 };
 
 function emitBucketLegacyPath(
   buckets: readonly LegacyBucket[], allocations: readonly (readonly LegacyOccurrence[])[],
   slots: readonly number[], recordings: readonly number[], visibleSlots: ReadonlySet<number>, emit: EmitLegacyRevision,
 ): number {
-  const counts = groupByKey(allocations.flat(), row => row.projection);
-  const projections = [...counts.keys()];
-  const projectionIds = new Map(projections.map((row, index) => [row, index]));
+  const projections: LegacyProjection[] = [];
+  const projectionIds = new Map<LegacyProjection, number>();
+  const allocatedCopies: number[] = [];
+  for (const allocation of allocations) {
+    for (const { projection } of allocation) {
+      let index = projectionIds.get(projection);
+      if (index === undefined) {
+        index = projections.length;
+        projectionIds.set(projection, index);
+        projections.push(projection);
+        allocatedCopies.push(0);
+      }
+      allocatedCopies[index] = allocatedCopies[index]! + 1;
+    }
+  }
   const zeros = projections.map(() => 0);
   const rowShifts = buckets.map((_, index) => BigInt(index * buckets.length));
   const rowMask = (1n << BigInt(buckets.length)) - 1n;
@@ -274,14 +293,13 @@ function emitBucketLegacyPath(
   const diagonal = buckets.reduce((bits, _, index) => bits | edgeBits[index]![index]!, 0n);
   // Pack mixed-radix copy counts and reach bits only when the integer stays exact.
   const reachWidth = 2 ** (buckets.length ** 2);
-  const keySpace = allocations.reduce((width, rows) => width * (rows.length + 1), reachWidth);
+  const countStrides: number[] = [];
+  let keySpace = reachWidth;
+  for (let bucket = buckets.length - 1; bucket >= 0; bucket--) {
+    countStrides[bucket] = keySpace;
+    keySpace *= allocations[bucket]!.length + 1;
+  }
   const packedKey = Number.isSafeInteger(keySpace);
-  const countsKey = (used: readonly number[]) => {
-    if (!packedKey) return used.join(",");
-    let code = 0;
-    for (let bucket = 0; bucket < used.length; bucket++) code = code * (allocations[bucket]!.length + 1) + used[bucket]!;
-    return code * reachWidth;
-  };
   const key = (counts: string | number, reach: bigint) =>
     typeof counts === "number" ? counts + Number(reach) : `${counts}:${reach.toString(36)}`;
   let lastVisible = -1;
@@ -294,10 +312,6 @@ function emitBucketLegacyPath(
   // Only mixed visibility with multiple visible slots needs per-projection path counts.
   const countVisibleCopies = visibleCount > 1 && visibleCount < slots.length;
   const totalCopies = allocations.map(rows => rows.length);
-  const terminal: BucketSlotState = {
-    used: totalCopies, countsKey: countsKey(totalCopies), reach: diagonal, earliestLatest: -Infinity,
-    maxVisible: zeros, edges: [],
-  };
   type ReachExtension = { reach: bigint; predecessors: number[] };
   const slotTypes = new Map<string, { compatible: number[]; bucketSet: Set<number>; extensions: Map<bigint, ReachExtension[]> }>();
   const slotTypesByPosition = slots.map(slot => {
@@ -321,37 +335,68 @@ function emitBucketLegacyPath(
     prefixCapacities.push(capacitySubsets.map((subset, index) =>
       previous[index]! + Number(subset.some(bucket => bucketSet.has(bucket)))));
   }
-  const fitsPrefix = (used: readonly number[], capacities: readonly number[]) => capacitySubsets.every((subset, index) => {
-    let copies = 0;
-    for (const bucket of subset) copies += used[bucket]!;
-    return copies <= capacities[index]!;
-  });
+  function fitsPrefix(used: readonly number[], capacities: readonly number[]) {
+    for (let index = 0; index < capacitySubsets.length; index++) {
+      let copies = 0;
+      for (const bucket of capacitySubsets[index]!) copies += used[bucket]!;
+      if (copies > capacities[index]!) return false;
+    }
+    return true;
+  }
 
-  if (!fitsPrefix(terminal.used, prefixCapacities[slots.length]!)) return Infinity;
-  let suffixes = new Map([[key(terminal.countsKey, terminal.reach), terminal]]);
+  if (!fitsPrefix(totalCopies, prefixCapacities[slots.length]!)) return Infinity;
+  const countsByKey = new Map<string | number, BucketCopyCounts>();
+  function saveCounts(used: readonly number[], key: string | number, upper: number): BucketCopyCounts {
+    // Capacities can only increase as the prefix grows. All suffixes with
+    // these counts can reuse the first prefix that passes the same pruning.
+    let lower = used.reduce((sum, copies) => sum + copies, 0);
+    while (lower < upper) {
+      const middle = Math.floor((lower + upper) / 2);
+      if (fitsPrefix(used, prefixCapacities[middle]!)) upper = middle;
+      else lower = middle + 1;
+    }
+    const counts: BucketCopyCounts = { used, key, earliestPrefix: lower, before: [] };
+    countsByKey.set(key, counts);
+    return counts;
+  }
+  function removeCopy(counts: BucketCopyCounts, bucket: number): BucketCopyCounts {
+    const known = counts.before[bucket];
+    if (known) return known;
+    const used = counts.used.slice();
+    used[bucket] = used[bucket]! - 1;
+    const key = typeof counts.key === "number" ? counts.key - countStrides[bucket]! : used.join(",");
+    const before = countsByKey.get(key) ?? saveCounts(used, key, counts.earliestPrefix);
+    counts.before[bucket] = before;
+    return before;
+  }
+  const terminal: BucketSlotState = {
+    counts: saveCounts(totalCopies, packedKey ? keySpace - reachWidth : totalCopies.join(","), slots.length),
+    reach: diagonal, earliestLatest: -Infinity, maxVisible: zeros, firstEdge: -1, lastEdge: -1,
+  };
+  let suffixes = new Map([[key(terminal.counts.key, terminal.reach), terminal]]);
+  // Share flat edge storage across a slot layer. Each state links its edges in insertion order.
+  const edgesByPosition: { targets: BucketSlotState[]; projectionIndices: number[]; links: number[] }[] = [];
 
   for (let position = slots.length - 1; position >= 0; position--) {
     const slot = slots[position]!;
     const layer = new Map<string | number, BucketSlotState>();
     const { compatible: slotBuckets, bucketSet, extensions } = slotTypesByPosition[position]!;
-    const capacities = prefixCapacities[position]!;
     const visible = visibleSlots.has(slot);
     const hasVisibleSuffix = position <= lastVisible;
     const recording = recordings[slot]!;
-    // Prefix feasibility depends only on the counts, regardless of suffix reachability.
-    type Placement = {
-      bucket: number; before: number[]; beforeKey: string | number; producerIndex: number; projectionIndex: number;
-    };
-    const movesByCounts = new Map<string | number, { skip: boolean; placements: Placement[] }>();
-    function add(next: BucketSlotState, before: readonly number[], beforeKey: string | number, nextReach: bigint, index = -1) {
-      const id = key(beforeKey, nextReach);
+    const targets: BucketSlotState[] = [];
+    const projectionIndices: number[] = [];
+    const links: number[] = [];
+    if (hasVisibleSuffix) edgesByPosition[position] = { targets, projectionIndices, links };
+    function add(next: BucketSlotState, counts: BucketCopyCounts, nextReach: bigint, index = -1) {
+      const id = key(counts.key, nextReach);
       let state = layer.get(id);
       if (!state) {
         state = {
-          used: before, countsKey: beforeKey, reach: nextReach,
+          counts, reach: nextReach,
           earliestLatest: hasVisibleSuffix ? Infinity : -Infinity,
           maxVisible: hasVisibleSuffix && countVisibleCopies ? [...zeros] : zeros,
-          edges: [],
+          firstEdge: -1, lastEdge: -1,
         };
         layer.set(id, state);
       }
@@ -364,64 +409,61 @@ function emitBucketLegacyPath(
           state.maxVisible[i] = Math.max(state.maxVisible[i]!, next.maxVisible[i]! + Number(i === index));
         }
       }
-      state.edges.push({ next, projectionIndex: index });
+      const edge = targets.length;
+      if (state.lastEdge === -1) state.firstEdge = edge;
+      else links[state.lastEdge] = edge;
+      state.lastEdge = edge;
+      targets.push(next);
+      projectionIndices.push(index);
+      links.push(-1);
     }
 
     for (const next of suffixes.values()) {
-      const { used, reach } = next;
-      let moves = movesByCounts.get(next.countsKey);
-      if (!moves) {
-        const placements: Placement[] = [];
-        for (const bucket of slotBuckets) {
-          const occurrence = allocations[bucket]![used[bucket]! - 1];
-          if (!occurrence) continue;
-          const before = [...used];
-          before[bucket] = before[bucket]! - 1;
-          if (!fitsPrefix(before, capacities)) continue;
-          placements.push({ bucket, before, beforeKey: countsKey(before), producerIndex: occurrence.producerIndex,
-            projectionIndex: visible ? projectionIds.get(occurrence.projection)! : -1 });
-        }
-        moves = { skip: fitsPrefix(used, capacities), placements };
-        movesByCounts.set(next.countsKey, moves);
-      }
-      if (moves.skip) add(next, used, next.countsKey, reach);
-      if (!moves.placements.length) continue;
-      if (slotBuckets.length === 1) {
-        // A slot exclusive to one bucket adds no alternating path.
-        const { before, beforeKey, projectionIndex } = moves.placements[0]!;
-        add(next, before, beforeKey, reach, projectionIndex);
-        continue;
-      }
+      const { counts, reach } = next;
+      const { used } = counts;
+      if (counts.earliestPrefix <= position) add(next, counts, reach);
       let extended = extensions.get(reach);
-      if (!extended) {
-        // Adding edges out of a bucket connects every predecessor to the
-        // successors of all buckets compatible with this slot.
-        let outRow = 0n;
-        for (const other of slotBuckets) outRow |= (reach >> rowShifts[other]!) & rowMask;
-        extended = [];
-        for (const bucket of slotBuckets) {
-          const predecessors: number[] = [];
-          let nextReach = reach;
-          for (const [from, shift] of rowShifts.entries()) {
-            if ((reach & edgeBits[from]![bucket]!) === 0n) continue;
-            nextReach |= outRow << shift;
-            if (from !== bucket && bucketSet.has(from)) predecessors.push(from);
-          }
-          extended[bucket] = { reach: nextReach, predecessors };
+      for (const bucket of slotBuckets) {
+        const occurrence = allocations[bucket]![used[bucket]! - 1];
+        if (!occurrence) continue;
+        const before = removeCopy(counts, bucket);
+        if (before.earliestPrefix > position) continue;
+        const projectionIndex = visible ? projectionIds.get(occurrence.projection)! : -1;
+        if (slotBuckets.length === 1) {
+          // A slot exclusive to one bucket adds no alternating path.
+          add(next, before, reach, projectionIndex);
+          continue;
         }
-        extensions.set(reach, extended);
-      }
-      for (const { bucket, before, beforeKey, producerIndex, projectionIndex } of moves.placements) {
+        if (!extended) {
+          // Adding edges out of a bucket connects every predecessor to the
+          // successors of all buckets compatible with this slot.
+          let outRow = 0n;
+          for (const other of slotBuckets) outRow |= (reach >> rowShifts[other]!) & rowMask;
+          extended = [];
+          for (const to of slotBuckets) {
+            const predecessors: number[] = [];
+            let nextReach = reach;
+            for (const [from, shift] of rowShifts.entries()) {
+              if ((reach & edgeBits[from]![to]!) === 0n) continue;
+              nextReach |= outRow << shift;
+              if (from !== to && bucketSet.has(from)) predecessors.push(from);
+            }
+            extended[to] = { reach: nextReach, predecessors };
+          }
+          extensions.set(reach, extended);
+        }
         // An earlier producer can take this slot if its bucket can transfer a
         // suffix slot along an alternating path to cover the displaced bucket.
         const extension = extended[bucket]!;
-        const canPrecede = extension.predecessors.some(other => {
+        let canPrecede = false;
+        for (const other of extension.predecessors) {
           const alternative = allocations[other]![used[other]!];
-          return alternative !== undefined && alternative.producerIndex < producerIndex;
-        });
-        if (canPrecede) continue;
-
-        add(next, before, beforeKey, extension.reach, projectionIndex);
+          if (alternative && alternative.producerIndex < occurrence.producerIndex) {
+            canPrecede = true;
+            break;
+          }
+        }
+        if (!canPrecede) add(next, before, extension.reach, projectionIndex);
       }
     }
     suffixes = layer;
@@ -431,18 +473,22 @@ function emitBucketLegacyPath(
   let prefixes = [...suffixes.values()];
   const earliestLatest = prefixes.reduce((time, root) => Math.min(time, root.earliestLatest), Infinity);
   for (const root of prefixes) root.prefix = zeros;
-  for (const slot of slots.slice(0, lastVisible + 1)) {
-    if (!prefixes.length) break;
+  for (let position = 0; position <= lastVisible && prefixes.length; position++) {
+    const slot = slots[position]!;
+    const recording = recordings[slot]!;
+    const { targets, projectionIndices, links } = edgesByPosition[position]!;
     const layer: BucketSlotState[] = [];
     const maxAssigned = [...zeros];
     const canBeLatest = projections.map(() => false);
     for (const state of prefixes) {
       const prefix = state.prefix!;
-      for (const { next, projectionIndex: index } of state.edges) {
+      for (let edge = state.firstEdge; edge !== -1; edge = links[edge]!) {
+        const next = targets[edge]!;
+        const index = projectionIndices[edge]!;
         if (index >= 0) {
           const assigned = countVisibleCopies ? prefix[index]! + 1 + next.maxVisible[index]! : 1;
           maxAssigned[index] = Math.max(maxAssigned[index]!, assigned);
-          canBeLatest[index] ||= next.earliestLatest <= recordings[slot]!;
+          canBeLatest[index] ||= next.earliestLatest <= recording;
         }
         if (!next.prefix) {
           next.prefix = countVisibleCopies ? [...zeros] : zeros;
@@ -459,7 +505,7 @@ function emitBucketLegacyPath(
       if (maxAssigned[index] === 0) continue;
       // Each compatible slot at or after the cutoff can absorb one copy
       // from the untimestamped current snapshot for BKT sample uniqueness.
-      const invisibleCopies = visibleCount === slots.length ? 0 : counts.get(projection)!.length - maxAssigned[index]!;
+      const invisibleCopies = visibleCount === slots.length ? 0 : allocatedCopies[index]! - maxAssigned[index]!;
       emit(projection, slot, projection.copies - invisibleCopies, canBeLatest[index]!);
     }
     prefixes = layer;
@@ -646,7 +692,13 @@ function explicitObservationRecording(observation: SnapshotObservation, attempte
 /** Resolve heads for a single observation ID against its course-scoped recording slots. */
 export function visibleObservationRevisions(
   observations: readonly SnapshotObservation[], features: readonly FeatureRevision[], cutoff: number,
-): { revisions: ObservationRevision[]; latest: ObservationRevision[]; unplaced: SnapshotObservation[]; canBeAbsent: boolean } {
+): {
+  revisions: ObservationRevision[];
+  latest: ObservationRevision[];
+  unplaced: SnapshotObservation[];
+  canBeAbsent: boolean;
+  revisionsCanBeAbsent: boolean;
+} {
   const explicit: ObservationRevision[] = [];
   const claimedSlots = new Set<number>();
   const legacy: (ObservationProjection & { matchingSlots: number[]; producerIndex: number })[] = [];
@@ -740,8 +792,9 @@ export function visibleObservationRevisions(
     && !explicit.some(head => (head.recorded < cutoff || row.matchingTimes.has(head.recorded))
       && sameObservationProjection(head.observation, row.observation))).map(row => row.observation);
   // A visible fallback conflict is still evidence that the recording is present.
-  const canBeAbsent = earliestLatest === -Infinity && !unplaced.length && !hasVisibleConflict;
-  return { revisions, latest: possibleLatest.filter(row => row.recorded >= earliestLatest), unplaced, canBeAbsent };
+  const revisionsCanBeAbsent = earliestLatest === -Infinity && !hasVisibleConflict;
+  const canBeAbsent = revisionsCanBeAbsent && !unplaced.length;
+  return { revisions, latest: possibleLatest.filter(row => row.recorded >= earliestLatest), unplaced, canBeAbsent, revisionsCanBeAbsent };
 }
 
 function featureSlotKey(feature: LearnerStateFeature): string {
@@ -775,7 +828,8 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
     if (!rows.length) return [];
     const { feature, attempted, recorded } = rows[0]!;
     const { requirementKey, attemptId } = feature;
-    const { revisions: candidates, canBeAbsent } = visibleObservationRevisions(observationsById.get(observationId) ?? [], allRows, cutoff);
+    const { revisions: candidates, revisionsCanBeAbsent } = visibleObservationRevisions(
+      observationsById.get(observationId) ?? [], allRows, cutoff);
     const sameSubmission = rows.every(row => row.feature.attemptId === attemptId && row.attempted === attempted)
       && candidates.every(row => row.attempted === attempted);
     const claimedRequirementKeys = new Set([
@@ -794,7 +848,7 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
     }
     if (!candidates.length) return [];
     const { observation } = candidates[0]!;
-    if (!canBeAbsent && rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head, recorded: at }) =>
+    if (!revisionsCanBeAbsent && rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head, recorded: at }) =>
       at === recorded && sameObservationProjection(head, observation) && (head.requirementKey ?? null) === requirementKey)) {
       return [{ feature, attempted, observation, claimedRequirementKeys }];
     }
