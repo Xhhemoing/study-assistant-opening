@@ -3,8 +3,8 @@ import type { Sql, TransactionSql } from "postgres";
 import { LEARNER_CONTEXT_MAX_BYTES, type LearnerMisconceptionDisposition, type v3BitemporalMisconceptionEdges } from "../schema/v3-bitemporal-memory";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import {
-  isLineageUuid, lineageUuid, memoryOnlyRefSourceIds, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
-  turnHasMemoryDependencies, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds,
+  isLineageUuid, lineageUuid, memoryOnlyRefSourceIds, pairedUserTurnId, parseContextMemoryDependencyIds, resolveMemoryDependencyStatus,
+  turnHasMemoryDependencies, turnHasStandaloneSession, turnHasStandaloneSessions, turnLineageCourse, turnMaterialUse, turnMemoryOnlyBackingIds,
   type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus } from "./opening-memory-admission";
@@ -98,13 +98,32 @@ function savedMisconceptionOrigins(db: Db, alias: TurnAlias) {
   const turn = () => savedTurn(db, alias);
   return db`SELECT (${turn()}).*
     UNION ALL
-    SELECT prior_a.* FROM opening_turns prior_a
-    WHERE (${turn()}).role = 'assistant' AND (${turn()}).intent_hash IS NULL
+    SELECT prior_a.* FROM LATERAL (
+      SELECT COALESCE(own_u.created_at, (${turn()}).created_at) AS created_at,
+        COALESCE(own_u.id, (${turn()}).id) AS turn_id
+      FROM (SELECT 1) one
+      LEFT JOIN opening_tutor_jobs own_j ON (${turn()}).role = 'assistant'
+        AND own_j.assistant_turn_id = (${turn()}).id AND own_j.workspace_id = (${turn()}).workspace_id
+        AND own_j.conversation_id = (${turn()}).conversation_id
+      LEFT JOIN opening_turns own_u ON own_u.id = own_j.user_turn_id
+        AND own_u.workspace_id = (${turn()}).workspace_id AND own_u.conversation_id = (${turn()}).conversation_id
+        AND own_u.role = 'user' AND own_u.status = 'complete'
+      OFFSET 0
+    ) own_pos
+    JOIN opening_turns prior_a
+      ON (${turn()}).role = 'assistant' AND (${turn()}).intent_hash IS NULL
       AND NOT (${turn()}).query_system AND (${turn()}).system_query IS NULL
       AND prior_a.workspace_id = (${turn()}).workspace_id AND prior_a.conversation_id = (${turn()}).conversation_id
       AND prior_a.role = 'assistant' AND prior_a.status = 'complete' AND NOT prior_a.query_system
       AND prior_a.system_query IS NULL
-      AND (prior_a.created_at, prior_a.id) < ((${turn()}).created_at, (${turn()}).id)`;
+    LEFT JOIN opening_tutor_jobs prior_j ON prior_j.assistant_turn_id = prior_a.id
+      AND prior_j.workspace_id = prior_a.workspace_id AND prior_j.conversation_id = prior_a.conversation_id
+    LEFT JOIN opening_turns prior_u ON prior_u.id = prior_j.user_turn_id
+      AND prior_u.workspace_id = prior_a.workspace_id AND prior_u.conversation_id = prior_a.conversation_id
+      AND prior_u.role = 'user' AND prior_u.status = 'complete'
+    WHERE CASE WHEN prior_u.id IS NOT NULL
+      THEN (prior_u.created_at, prior_u.id) < (own_pos.created_at, own_pos.turn_id)
+      ELSE (prior_a.created_at, prior_a.id) < (own_pos.created_at, own_pos.turn_id) END`;
 }
 
 /** Every inherited origin must fit both its own course and the consuming turn's course. */
@@ -123,7 +142,12 @@ function hasSavedMemoryReferences(db: Db, refs: FragmentFactory) {
 
 export function turnHasMisconceptionMemoryDependencies(db: Db, alias: TurnAlias = "t") {
   return db`EXISTS (SELECT 1 FROM LATERAL (${savedMisconceptionOrigins(db, alias)}) origin
-    WHERE ${hasSavedMemoryReferences(db, () => db`origin.context_source_refs`)})`;
+    LEFT JOIN opening_turns tu ON origin.role = 'assistant'
+      AND tu.id = (${pairedUserTurnId(db, () => db`origin`)})
+      AND tu.workspace_id = origin.workspace_id AND tu.conversation_id = origin.conversation_id
+      AND tu.role = 'user' AND tu.status = 'complete'
+    WHERE ${hasSavedMemoryReferences(db, () => db`origin.context_source_refs`)}
+      OR (tu.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`tu.context_source_refs`)}))`;
 }
 
 export function savedTutorMisconceptionHashes(db: Db, alias: TurnAlias) {
@@ -135,24 +159,44 @@ export function savedTutorMisconceptionHashes(db: Db, alias: TurnAlias) {
 
 type MaterialUse = "citation" | "practice";
 type SavedMemoryOrigin = {
-  id: string; courseId: string | null; consumerCourseId: string | null; materialUse: MaterialUse;
-  refs: unknown; standalone: boolean;
+  id: string; assistantTurnId?: string; courseId: string | null; consumerCourseId: string | null; materialUse: MaterialUse;
+  refs: unknown; standalone: boolean; historical?: boolean; jobBacked?: boolean; isPairedUser?: boolean;
 };
 type TurnMemoryOrigin = SavedMemoryOrigin & { ids: string[]; backings: string[][] };
 
 function memoryOriginEvidence(db: Db, alias: "t" | "dt", course: FragmentFactory, owner: FragmentFactory) {
-  return db`SELECT jsonb_build_object('id', origin.id, 'courseId', origin_course.id,
-    'consumerCourseId', ${course()}, 'materialUse', ${turnMaterialUse(db, "t")},
-    'refs', origin.context_source_refs, 'standalone', CASE
-      WHEN origin.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-      THEN ${turnHasStandaloneSessions(db, owner, () => db`origin`)} ELSE false END)
+  const root = () => savedTurn(db, alias);
+  return db`SELECT side.payload
     FROM LATERAL (${savedMisconceptionOrigins(db, alias)}) origin
+    LEFT JOIN opening_turns tu ON origin.role = 'assistant'
+      AND tu.id = (${pairedUserTurnId(db, () => db`origin`)})
+      AND tu.workspace_id = origin.workspace_id AND tu.conversation_id = origin.conversation_id
+      AND tu.role = 'user' AND tu.status = 'complete'
     CROSS JOIN LATERAL (
-      SELECT ${turnLineageCourse(db, "dt", undefined, owner)} AS id
-      FROM (SELECT origin.*) dt OFFSET 0
-    ) origin_course
-    CROSS JOIN LATERAL (SELECT origin.* OFFSET 0) t
-    WHERE ${hasSavedMemoryReferences(db, () => db`origin.context_source_refs`)}`;
+      SELECT jsonb_build_object('id', origin.id, 'assistantTurnId', origin.id,
+        'courseId', (SELECT ${turnLineageCourse(db, "dt", undefined, owner)} FROM (SELECT origin.*) dt OFFSET 0),
+        'consumerCourseId', ${course()},
+        'materialUse', (SELECT ${turnMaterialUse(db, "t")} FROM (SELECT origin.*) t OFFSET 0),
+        'refs', origin.context_source_refs, 'standalone', CASE
+          WHEN origin.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+          THEN ${turnHasStandaloneSessions(db, owner, () => db`origin`)} ELSE false END,
+        'historical', origin.id <> (${root()}).id,
+        'jobBacked', tu.id IS NOT NULL,
+        'isPairedUser', false) AS payload
+      WHERE ${hasSavedMemoryReferences(db, () => db`origin.context_source_refs`)}
+      UNION ALL
+      SELECT jsonb_build_object('id', tu.id, 'assistantTurnId', origin.id,
+        'courseId', (SELECT ${turnLineageCourse(db, "u", undefined, owner)} FROM (SELECT tu.*) u OFFSET 0),
+        'consumerCourseId', ${course()},
+        'materialUse', (SELECT ${turnMaterialUse(db, "u")} FROM (SELECT tu.*) u OFFSET 0),
+        'refs', tu.context_source_refs, 'standalone', CASE
+          WHEN tu.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+          THEN ${turnHasStandaloneSession(db, () => db`tu`, owner)} ELSE false END,
+        'historical', origin.id <> (${root()}).id,
+        'jobBacked', true,
+        'isPairedUser', true) AS payload
+      WHERE tu.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`tu.context_source_refs`)}
+    ) side`;
 }
 
 async function resolveMemoryOriginRefs(db: Db, scope: OpeningScope, rows: SavedMemoryOrigin[]) {
@@ -222,25 +266,44 @@ export function mergeTutorMisconceptionLineages(
 }
 
 type MemoryEvidence = {
-  memoryId: string; hashes: string[]; courseId: string | null; active: boolean; origins: SavedMemoryOrigin[];
+  memoryId: string; hashes: string[]; courseId?: string | null; expiresAt?: string | Date | null;
+  statusActive?: boolean; active?: boolean; origins?: SavedMemoryOrigin[];
 };
 type MemoryLineageNode = {
-  courseId: string | null; active: boolean; lineage: TutorMisconceptionLineage | undefined;
-  origins: (TurnMemoryOrigin | null)[];
+  memoryCourseId: string | null; courseId: string | null; statusActive: boolean; active: boolean;
+  expiresAtMs: number; lineage: TutorMisconceptionLineage | undefined; origins: (TurnMemoryOrigin | null)[];
+};
+export type MemoryMisconceptionBinding = {
+  courseId: string | null;
+  materialUse: MaterialUse;
+  memoryIds: string[];
+};
+export type MemoryMisconceptionAuthority = {
+  courseId: string | null;
+  lineage: TutorMisconceptionLineage | undefined;
+  dependencyIds: string[];
+  dependencies: Array<{ id: string; courseId: string | null }>;
+  bindings: MemoryMisconceptionBinding[];
+  earliestExpiresAtMs: number;
 };
 
-const courseAllows = (course: string | null, ...targets: (string | null)[]) =>
-  course === null || targets.every(target => target === course);
+const normalizeCourse = (course: string | null | undefined) => course == null ? null : course.toLowerCase();
+const courseAllows = (course: string | null, ...targets: (string | null)[]) => {
+  const own = normalizeCourse(course);
+  return own === null || targets.every(target => normalizeCourse(target) === own);
+};
 
-async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[]) {
+async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[], asOf?: string) {
   const owner: FragmentFactory = () => db`request.owner_user_id`;
+  const at = () => asOf === undefined ? db`clock_timestamp()` : db`${asOf}::timestamptz`;
   return db<{ id: string | MemoryEvidence }[]>`
     SELECT id FROM opening_memories AS m(memory_id)
     JOIN (SELECT ${scope.workspaceId}::uuid AS workspace_id, ${ids}::uuid[] AS ids, ${scope.ownerUserId}::uuid AS owner_user_id) request
       ON m.workspace_id=request.workspace_id AND m.memory_id=ANY(request.ids)
     CROSS JOIN LATERAL (
       WITH origins AS MATERIALIZED (
-        SELECT dt, ARRAY(${memoryOriginEvidence(db, "dt", () => db`own_course.id`, owner)}) AS memory_origins
+        SELECT ${savedTutorMisconceptionHashes(db, "dt")} AS origin_hashes,
+          ARRAY(${memoryOriginEvidence(db, "dt", () => db`own_course.id`, owner)}) AS memory_origins
         FROM ${memoryOriginTurns(db)}
         CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "dt", undefined, owner)} AS id OFFSET 0) own_course
         WHERE dt.id IS NOT NULL AND NOT ${turnUsesInactiveMisconception(db, "dt", () => db`m.course_id`)}
@@ -248,16 +311,15 @@ async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[]
             AND c.workspace_id=dt.workspace_id AND c.owner_user_id=${owner()})
       )
       SELECT CASE WHEN m.course_id IS NULL AND cardinality(lineage.hashes)=0
-          AND cardinality(lineage.memory_origins)=0 AND m.status='active'
-          AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at > clock_timestamp()))
+          AND cardinality(lineage.memory_origins)=0 AND m.status='active' AND m.kind='confirmed'
         THEN to_jsonb(m.memory_id)
         ELSE jsonb_build_object('memoryId', m.memory_id, 'hashes', lineage.hashes, 'courseId', m.course_id,
-          'active', m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at > clock_timestamp())),
+          'expiresAt', CASE WHEN m.kind='temporary' THEN m.expires_at END,
+          'statusActive', m.status='active',
+          'active', m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at IS NOT NULL AND m.expires_at > ${at()})),
           'origins', lineage.memory_origins) END AS id
       FROM LATERAL (SELECT ARRAY(
-        SELECT DISTINCT hash FROM origins
-        CROSS JOIN LATERAL (SELECT (origins.dt).* OFFSET 0) dt
-        CROSS JOIN LATERAL unnest(${savedTutorMisconceptionHashes(db, "dt")}) hash
+        SELECT DISTINCT hash FROM origins CROSS JOIN LATERAL unnest(origin_hashes) hash
       ) AS hashes, ARRAY(SELECT ref FROM origins CROSS JOIN LATERAL unnest(memory_origins) ref) AS memory_origins) lineage
       WHERE CASE WHEN jsonb_typeof(m.source_turn_ids)='array'
         THEN (SELECT count(*) FROM origins) = jsonb_array_length(m.source_turn_ids)
@@ -265,22 +327,35 @@ async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[]
     ) admitted`;
 }
 
-/** Resolve exact IDs and legacy alternative backings in batches, rejecting cycles without independent authority. */
-export async function readMemoryMisconceptionLineages(
-  db: Db, scope: OpeningScope, memoryIds: readonly string[], targetCourseId: string | null, display = false,
-): Promise<Map<string, TutorMisconceptionLineage | undefined>> {
+export type MemoryMisconceptionAuthorityOptions = boolean | {
+  display?: boolean;
+  asOf?: string;
+  allowCandidateRoots?: boolean;
+};
+
+/** Resolve exact IDs, transitive authority, bindings, and earliest temporary expiry in batches. */
+export async function readMemoryMisconceptionAuthorities(
+  db: Db, scope: OpeningScope, memoryIds: readonly string[], targetCourseId: string | null,
+  options: MemoryMisconceptionAuthorityOptions = false,
+): Promise<Map<string, MemoryMisconceptionAuthority>> {
+  const display = typeof options === "boolean" ? options : options.display === true;
+  const asOf = typeof options === "boolean" ? undefined : options.asOf;
+  const allowCandidateRoots = typeof options === "boolean" ? false : options.allowCandidateRoots === true;
   const nodes = new Map<string, MemoryLineageNode>();
   const visited = new Set<string>();
-  let frontier = [...new Set(memoryIds)];
+  let frontier = [...new Set(memoryIds.map(id => id.toLowerCase()))];
   while (frontier.length) {
     for (const id of frontier) visited.add(id);
-    const rows = await readMemoryLineageBatch(db, scope, frontier);
+    const rows = await readMemoryLineageBatch(db, scope, frontier, asOf);
     const origins = await resolveMemoryOriginRefs(db, scope, rows.flatMap(({ id }) => typeof id === "string" ? [] : id.origins ?? []));
     let offset = 0;
     const next = new Set<string>();
     for (const { id } of rows) {
       if (typeof id === "string") {
-        nodes.set(id, { courseId: null, active: true, lineage: undefined, origins: [] });
+        nodes.set(id.toLowerCase(), {
+          memoryCourseId: null, courseId: null, statusActive: true, active: true,
+          expiresAtMs: Infinity, lineage: undefined, origins: [],
+        });
         continue;
       }
       const end = offset + (id.origins?.length ?? 0);
@@ -288,17 +363,35 @@ export async function readMemoryMisconceptionLineages(
       offset = end;
       const hashes = id.hashes.map(readSavedTutorMisconceptionLineage);
       if (hashes.some(hash => !hash)) continue;
+      const expiresAtMs = id.expiresAt == null ? Infinity : new Date(id.expiresAt).getTime();
+      if (Number.isNaN(expiresAtMs)) continue;
       const lineage = mergeTutorMisconceptionLineages(...hashes.map(hash => hash ?? undefined));
-      nodes.set(id.memoryId, { courseId: id.courseId ?? lineage?.courseId ?? null, active: id.active ?? true, lineage, origins: current });
+      const memoryCourseId = normalizeCourse(id.courseId);
+      const active = id.active ?? true;
+      nodes.set(id.memoryId.toLowerCase(), {
+        memoryCourseId, courseId: memoryCourseId ?? lineage?.courseId ?? null,
+        statusActive: id.statusActive ?? active, active, expiresAtMs, lineage, origins: current,
+      });
       for (const origin of current) {
         for (const dep of [...(origin?.ids ?? []), ...(origin?.backings.flat() ?? [])]) {
-          if (!visited.has(dep)) next.add(dep);
+          const normalized = dep.toLowerCase();
+          if (!visited.has(normalized)) next.add(normalized);
         }
       }
     }
     frontier = [...next];
   }
-  const resolved = new Map<string, TutorMisconceptionLineage | undefined>();
+  const backingGraphs = new Map<MaterialUse, Map<string, MemoryDependencyStatus[]>>();
+  if (!display) {
+    for (const use of ["citation", "practice"] as const) {
+      const legacyIds = [...new Set([...nodes.values()].flatMap(node => node.origins.flatMap(origin =>
+        origin?.materialUse === use ? origin.backings.flat().map(dep => dep.toLowerCase()) : [])))];
+      if (legacyIds.length) {
+        backingGraphs.set(use, await readMemoryDependencyStatus(db, scope, legacyIds, { materialUse: use, includeSourceRefs: true }));
+      }
+    }
+  }
+  const resolved = new Map<string, MemoryMisconceptionAuthority>();
   const orderedNodes = [...nodes].sort(([a], [b]) => a.localeCompare(b));
   let progress = true;
   while (progress) {
@@ -306,76 +399,179 @@ export async function readMemoryMisconceptionLineages(
     for (const [id, node] of orderedNodes) {
       if (resolved.has(id)) continue;
       const lineages = [node.lineage];
+      const depMap = new Map<string, string | null>();
+      const bindingMap = new Map<string, { courseId: string | null; materialUse: MaterialUse; ids: Set<string> }>();
+      let earliestExpiresAtMs = node.expiresAtMs;
+      const addBinding = (courseId: string | null, materialUse: MaterialUse, ids: readonly string[]) => {
+        if (!ids.length) return;
+        const normalizedCourse = normalizeCourse(courseId);
+        const key = `${normalizedCourse}|${materialUse}`;
+        const existing = bindingMap.get(key) ?? { courseId: normalizedCourse, materialUse, ids: new Set<string>() };
+        for (const item of ids) existing.ids.add(item.toLowerCase());
+        bindingMap.set(key, existing);
+      };
+      const backingSourceIdsFor = (origin: TurnMemoryOrigin) => origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined;
       const valid = node.origins.every(origin => {
-        if (!origin || !courseAllows(node.courseId, origin.courseId, origin.consumerCourseId)) return false;
-        const admits = (dep: string, legacy: boolean) => {
+        if (!origin) return false;
+        const sourceIds = backingSourceIdsFor(origin);
+        const admits = (rawDep: string, legacy: boolean, backingIndex?: number) => {
+          const dep = rawDep.toLowerCase();
           const child = nodes.get(dep);
-          return child && resolved.has(dep) && ((display && !legacy) || child.active)
-            && courseAllows(child.courseId, node.courseId, origin.courseId, origin.consumerCourseId)
-            && courseAllows(resolved.get(dep)?.courseId ?? null, node.courseId, origin.courseId, origin.consumerCourseId);
+          const childAuth = resolved.get(dep);
+          if (!child || !childAuth || !((display && !legacy) || child.active)) return false;
+          if (legacy && backingGraphs.has(origin.materialUse)) {
+            const requiredSource = sourceIds && backingIndex !== undefined ? [sourceIds[backingIndex]!] : undefined;
+            if (!resolveMemoryDependencyStatus(backingGraphs.get(origin.materialUse)!, [], [[dep]],
+              normalizeCourse(origin.courseId), id, requiredSource)) return false;
+          }
+          const memoryTargets = origin.historical
+            ? [origin.courseId]
+            : [node.memoryCourseId, origin.courseId, origin.isPairedUser ? origin.courseId : origin.consumerCourseId];
+          return courseAllows(child.memoryCourseId, ...memoryTargets)
+            && courseAllows(childAuth.lineage?.courseId ?? null, node.courseId, origin.courseId, origin.consumerCourseId);
         };
-        const backings = (display && origin.ids.length ? [] : origin.backings).map(options => options.find(dep => admits(dep, true) && !resolved.get(dep))
-          ?? options.find(dep => admits(dep, true)));
+        const backings = (display && origin.ids.length ? [] : origin.backings).map((options, backingIndex) =>
+          options.find(dep => admits(dep, true, backingIndex) && !resolved.get(dep.toLowerCase())?.lineage
+            && resolved.get(dep.toLowerCase())!.earliestExpiresAtMs === Infinity)
+          ?? options.find(dep => admits(dep, true, backingIndex) && !resolved.get(dep.toLowerCase())?.lineage)
+          ?? options.find(dep => admits(dep, true, backingIndex)));
         if (!origin.ids.every(dep => admits(dep, false)) || backings.some(dep => dep === undefined)) return false;
-        for (const dep of [...origin.ids, ...backings]) lineages.push(resolved.get(dep!));
+        const chosen = [...origin.ids, ...(backings as string[])].map(dep => dep.toLowerCase());
+        const joblessHistorical = Boolean(origin.historical && !origin.jobBacked);
+        if (joblessHistorical) addBinding(origin.courseId, origin.materialUse, chosen);
+        for (const dep of chosen) {
+          const child = nodes.get(dep)!;
+          const childAuth = resolved.get(dep)!;
+          lineages.push(childAuth.lineage);
+          if (joblessHistorical && dep !== id) depMap.set(dep, child.memoryCourseId);
+          for (const sub of childAuth.dependencies) if (sub.id !== id) depMap.set(sub.id, sub.courseId);
+          for (const binding of childAuth.bindings) addBinding(binding.courseId, binding.materialUse, binding.memoryIds);
+          earliestExpiresAtMs = Math.min(earliestExpiresAtMs, childAuth.earliestExpiresAtMs);
+        }
         return true;
       });
       if (!valid) continue;
-      resolved.set(id, mergeTutorMisconceptionLineages(...lineages));
+      const mergedLineage = mergeTutorMisconceptionLineages(...lineages);
+      const dependencies = [...depMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([depId, depCourseId]) => ({
+        id: depId, courseId: depCourseId,
+      }));
+      resolved.set(id, {
+        courseId: node.memoryCourseId ?? mergedLineage?.courseId ?? null,
+        lineage: mergedLineage,
+        dependencyIds: dependencies.map(dep => dep.id),
+        dependencies,
+        bindings: [...bindingMap.values()].map(b => ({
+          courseId: b.courseId, materialUse: b.materialUse, memoryIds: [...b.ids].sort(),
+        })),
+        earliestExpiresAtMs,
+      });
       progress = true;
     }
   }
-  return new Map(memoryIds.flatMap(id => {
+  return new Map(memoryIds.flatMap(rawId => {
+    const id = rawId.toLowerCase();
     const node = nodes.get(id);
-    const lineage = resolved.get(id);
-    return node && (display || node.active) && resolved.has(id) && courseAllows(node.courseId, targetCourseId)
-      && courseAllows(lineage?.courseId ?? null, targetCourseId) ? [[id, lineage] as const] : [];
+    const auth = resolved.get(id);
+    const rootActive = display || node?.active || (allowCandidateRoots && node?.statusActive);
+    return node && rootActive && auth && courseAllows(node.memoryCourseId, targetCourseId)
+      && courseAllows(auth.lineage?.courseId ?? null, targetCourseId) ? [[rawId, auth] as const] : [];
   }));
 }
 
+/** Resolve exact IDs and legacy alternative backings in batches, rejecting cycles without independent authority. */
+export async function readMemoryMisconceptionLineages(
+  db: Db, scope: OpeningScope, memoryIds: readonly string[], targetCourseId: string | null, display = false,
+): Promise<Map<string, TutorMisconceptionLineage | undefined>> {
+  const authorities = await readMemoryMisconceptionAuthorities(db, scope, memoryIds, targetCourseId, display);
+  return new Map([...authorities].map(([id, auth]) => [id, auth.lineage]));
+}
+
 /** Validate memory authority in the original turn, the consuming turn, and the requested destination. */
-export async function readTurnsWithInvalidMisconceptionMemories(
+export async function readTurnMisconceptionMemoryStatus(
   db: Db, scope: OpeningScope, turnIds: readonly string[], options: { display?: boolean; targetCourseId?: string | null } = {},
-) {
+): Promise<{ invalid: Set<string>; earliestExpiresAtMs: number }> {
   const originsByTurn = await readTurnMisconceptionMemoryOrigins(db, scope, turnIds);
   const byCourse = new Map<string | null, Set<string>>();
+  const memoryCoursesFor = (origin: TurnMemoryOrigin) => {
+    const courses: (string | null)[] = [normalizeCourse(origin.courseId)];
+    if (!origin.historical && !origin.isPairedUser) courses.push(normalizeCourse(origin.consumerCourseId));
+    if (!origin.historical && options.targetCourseId !== undefined) courses.push(normalizeCourse(options.targetCourseId));
+    return [...new Set(courses)];
+  };
   for (const origins of originsByTurn.values()) for (const origin of origins) {
     if (!origin) continue;
-    for (const course of new Set([origin.courseId, origin.consumerCourseId, options.targetCourseId === undefined ? origin.consumerCourseId : options.targetCourseId])) {
+    for (const course of memoryCoursesFor(origin)) {
       const ids = byCourse.get(course) ?? new Set<string>();
-      for (const id of [...origin.ids, ...origin.backings.flat()]) ids.add(id);
+      for (const id of [...origin.ids, ...origin.backings.flat()]) ids.add(id.toLowerCase());
       byCourse.set(course, ids);
     }
   }
-  const lineages = new Map<string | null, Map<string, TutorMisconceptionLineage | undefined>>();
+  const authorities = new Map<string | null, Map<string, MemoryMisconceptionAuthority>>();
   for (const [course, ids] of byCourse) {
-    lineages.set(course, await readMemoryMisconceptionLineages(db, scope, [...ids], course, options.display));
+    authorities.set(course, await readMemoryMisconceptionAuthorities(db, scope, [...ids], course, options.display));
   }
   const graphs = new Map<MaterialUse, Map<string, MemoryDependencyStatus[]>>();
   if (!options.display) for (const use of ["citation", "practice"] as const) {
     const ids = [...originsByTurn.values()].flatMap(origins => origins.flatMap(origin => origin?.materialUse === use
-      ? [...origin.ids, ...origin.backings.flat()].filter(id => lineages.get(origin.courseId)?.has(id)) : []));
+      ? [...origin.ids, ...origin.backings.flat()].map(id => id.toLowerCase())
+          .filter(id => authorities.get(normalizeCourse(origin.courseId))?.has(id)) : []));
     graphs.set(use, await readMemoryDependencyStatus(db, scope, ids, { materialUse: use }));
   }
   const invalid = new Set<string>();
+  let earliestExpiresAtMs = Infinity;
+  const nowMs = Date.now();
   for (const turnId of turnIds) {
     const origins = originsByTurn.get(turnId);
+    let turnEarliest = Infinity;
     if (!origins || origins.some(origin => {
       if (!origin) return true;
-      const courses = [origin.courseId, origin.consumerCourseId,
-        options.targetCourseId === undefined ? origin.consumerCourseId : options.targetCourseId];
-      const active = (id: string) => courses.every(course => lineages.get(course)?.has(id));
+      const memoryCourses = memoryCoursesFor(origin);
+      const misconceptionCourses = [
+        origin.courseId, origin.consumerCourseId,
+        options.targetCourseId === undefined ? origin.consumerCourseId : options.targetCourseId,
+      ];
+      const active = (rawId: string) => {
+        const id = rawId.toLowerCase();
+        if (!memoryCourses.every(course => authorities.get(course)?.has(id))) return false;
+        const auth = authorities.get(normalizeCourse(origin.courseId))?.get(id);
+        return Boolean(auth && courseAllows(auth.lineage?.courseId ?? null, ...misconceptionCourses)
+          && (options.display || auth.earliestExpiresAtMs > nowMs));
+      };
       const backings = (options.display && origin.ids.length ? [] : origin.backings).map(ids => ids.filter(active));
       if (!origin.ids.every(active) || backings.some(ids => !ids.length)) return true;
       if (options.display) return false;
-      return courses.some(course => {
+      for (const rawId of origin.ids) {
+        const auth = authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase());
+        if (auth) turnEarliest = Math.min(turnEarliest, auth.earliestExpiresAtMs);
+      }
+      for (const group of backings) {
+        const groupExpiry = Math.max(-Infinity, ...group.map(rawId =>
+          authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase())?.earliestExpiresAtMs ?? -Infinity));
+        turnEarliest = Math.min(turnEarliest, groupExpiry);
+      }
+      return memoryCourses.some(course => {
         const nodes = resolveMemoryDependencyStatus(graphs.get(origin.materialUse)!, origin.ids, backings, course,
           undefined, origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined);
-        return !nodes || nodes.some(node => node.expires_at !== null && !(new Date(node.expires_at).getTime() > Date.now()));
+        if (!nodes) return true;
+        for (const node of nodes) {
+          if (node.expires_at !== null) {
+            const exp = new Date(node.expires_at).getTime();
+            if (!(exp > nowMs)) return true;
+            turnEarliest = Math.min(turnEarliest, exp);
+          }
+        }
+        return false;
       });
     })) invalid.add(turnId);
+    else earliestExpiresAtMs = Math.min(earliestExpiresAtMs, turnEarliest);
   }
-  return invalid;
+  return { invalid, earliestExpiresAtMs };
+}
+
+export async function readTurnsWithInvalidMisconceptionMemories(
+  db: Db, scope: OpeningScope, turnIds: readonly string[], options: { display?: boolean; targetCourseId?: string | null } = {},
+) {
+  return (await readTurnMisconceptionMemoryStatus(db, scope, turnIds, options)).invalid;
 }
 
 /** Validate source turns themselves, including restored answers without a job. */
@@ -387,21 +583,29 @@ export async function readMemoryBearingMisconceptionTurns(db: Db, scope: Opening
   return rows.filter(row => row.bearing === true).map(row => row.id);
 }
 
-export async function sourceTurnsAllowMisconceptionMemory(
+export async function sourceTurnsMisconceptionMemoryStatus(
   db: Db, scope: OpeningScope, turnIds: readonly string[], memoryCourseId: string | null,
-): Promise<boolean> {
+): Promise<{ allowed: boolean; earliestExpiresAtMs: number }> {
   const ids = [...new Set(turnIds.map(id => id.toLowerCase()))];
-  if (!ids.length) return true;
-  if (!ids.every(isLineageUuid)) return false;
+  if (!ids.length) return { allowed: true, earliestExpiresAtMs: Infinity };
+  if (!ids.every(isLineageUuid)) return { allowed: false, earliestExpiresAtMs: -Infinity };
   const rows = await db<{ id: string }[]>`
     SELECT t.id FROM opening_turns t
     JOIN opening_conversations c ON c.id = t.conversation_id AND c.workspace_id = t.workspace_id
     WHERE t.id = ANY(${ids}::uuid[]) AND t.workspace_id = ${scope.workspaceId}
       AND c.owner_user_id = ${scope.ownerUserId} AND t.status = 'complete'
       AND NOT ${turnUsesInactiveMisconception(db, "t", () => db`${memoryCourseId}::uuid`)}`;
-  if (rows.length !== ids.length) return false;
+  if (rows.length !== ids.length) return { allowed: false, earliestExpiresAtMs: -Infinity };
   const bearing = await readMemoryBearingMisconceptionTurns(db, scope, ids);
-  return !(await readTurnsWithInvalidMisconceptionMemories(db, scope, bearing, { targetCourseId: memoryCourseId })).size;
+  if (!bearing.length) return { allowed: true, earliestExpiresAtMs: Infinity };
+  const status = await readTurnMisconceptionMemoryStatus(db, scope, bearing, { targetCourseId: memoryCourseId });
+  return { allowed: status.invalid.size === 0, earliestExpiresAtMs: status.invalid.size === 0 ? status.earliestExpiresAtMs : -Infinity };
+}
+
+export async function sourceTurnsAllowMisconceptionMemory(
+  db: Db, scope: OpeningScope, turnIds: readonly string[], memoryCourseId: string | null,
+): Promise<boolean> {
+  return (await sourceTurnsMisconceptionMemoryStatus(db, scope, turnIds, memoryCourseId)).allowed;
 }
 
 /** Check saved authority against the current privacy epoch and both live time ranges. */

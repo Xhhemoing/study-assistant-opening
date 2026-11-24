@@ -7,7 +7,7 @@ export { tutorAttemptFence, tutorAttemptFenceSchema } from "./opening-tutor-atte
 export type { TutorAttemptContext, TutorAttemptFence } from "./opening-tutor-attempt-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { assertTutorLearnerMisconceptionSnapshotInTx, lockMisconceptionContext, mergeTutorMisconceptionLineages, parseTutorMisconceptionLineage,
-  readActiveTutorMisconceptionLineages, readMemoryMisconceptionLineages, readSavedTutorMisconceptionLineage, readTurnsWithInvalidMisconceptionMemories,
+  readActiveTutorMisconceptionLineages, readMemoryMisconceptionAuthorities, readSavedTutorMisconceptionLineage, readTurnMisconceptionMemoryStatus,
   turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception,
   type TutorMisconceptionLineage, type TutorMisconceptionSnapshot } from "./v3-bitemporal-misconception-memory";
 import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
@@ -224,6 +224,32 @@ function assertTemporaryMemoryUnexpired(expiresAt: string | undefined) {
   }
 }
 
+async function assertConsumedMisconceptionMemoriesCurrentInTx(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  courseId: string | null,
+  resolvedMemoryIds: readonly string[],
+  historyMemoryIdsByCourse: ReadonlyMap<string | null, ReadonlySet<string>>,
+): Promise<number> {
+  let earliestExpiresAt = Infinity;
+  for (const [bindingCourse, ids] of historyMemoryIdsByCourse) {
+    if (!ids.size) continue;
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, [...ids], bindingCourse);
+    if (active.size !== ids.size) {
+      throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+    }
+    for (const auth of active.values()) earliestExpiresAt = Math.min(earliestExpiresAt, auth.earliestExpiresAtMs);
+  }
+  if (resolvedMemoryIds.length) {
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, resolvedMemoryIds, courseId);
+    if (active.size !== resolvedMemoryIds.length) {
+      throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+    }
+    for (const auth of active.values()) earliestExpiresAt = Math.min(earliestExpiresAt, auth.earliestExpiresAtMs);
+  }
+  return earliestExpiresAt;
+}
+
 async function assertStreamMaterialAdmission(
   sql: Sql,
   tx: TransactionSql,
@@ -243,6 +269,7 @@ async function assertStreamMaterialAdmission(
     attemptLockScope?: { sourceIds: string[]; courseIds: string[] };
   } = {},
 ): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[];
+  historyMemoryIdsByCourse: Map<string | null, Set<string>>;
   historyExpiresAt: number; lockedSourceVersions: ReadonlyMap<string, number>; memorySourceRefs: ContextSourceRef[];
   memoryMisconceptionLineage?: TutorMisconceptionLineage }> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
@@ -519,20 +546,29 @@ async function assertStreamMaterialAdmission(
     return { sourceId, sourceVersion, memoryOnly: true };
   });
   for (const [bindingCourse, ids] of historyMemoryIdsByCourse) {
-    const active = await readMemoryMisconceptionLineages(tx, scope, [...ids], bindingCourse);
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, [...ids], bindingCourse);
     if (active.size !== ids.size) {
       throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
     }
+    for (const auth of active.values()) historyExpiresAt = Math.min(historyExpiresAt, auth.earliestExpiresAtMs);
   }
   let memoryMisconceptionLineage: TutorMisconceptionLineage | undefined;
   if (globalMemoryIdList.length) {
-    const active = await readMemoryMisconceptionLineages(tx, scope, globalMemoryIdList, courseId);
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, globalMemoryIdList, courseId);
     if (active.size !== globalMemoryIdList.length) {
       throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
     }
-    memoryMisconceptionLineage = mergeTutorMisconceptionLineages(...active.values());
+    const transitiveIds = new Set(globalMemoryIdList);
+    for (const auth of active.values()) {
+      historyExpiresAt = Math.min(historyExpiresAt, auth.earliestExpiresAtMs);
+      for (const dep of auth.dependencies) {
+        if (dep.courseId === null || dep.courseId === (courseId?.toLowerCase() ?? null)) transitiveIds.add(dep.id);
+      }
+    }
+    globalMemoryIdList = [...transitiveIds].sort();
+    memoryMisconceptionLineage = mergeTutorMisconceptionLineages(...[...active.values()].map(auth => auth.lineage));
   }
-  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList, historyExpiresAt,
+  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList, historyMemoryIdsByCourse, historyExpiresAt,
     lockedSourceVersions, memorySourceRefs, memoryMisconceptionLineage };
 }
 
@@ -908,8 +944,13 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
     ) AND ${savedMemoryRootsActive("user")} AND ${savedMemoryRootsActive("assistant")}`;
   const [target] = await readTarget();
   if (!target) return;
-  const checkSavedMemories = async () => !target.has_misconception_memories
-    || !(await readTurnsWithInvalidMisconceptionMemories(db, input.scope, [input.assistantTurnId])).size;
+  let savedMisconceptionExpiry = Infinity;
+  const checkSavedMemories = async () => {
+    if (!target.has_misconception_memories) return true;
+    const status = await readTurnMisconceptionMemoryStatus(db, input.scope, [input.assistantTurnId]);
+    savedMisconceptionExpiry = status.earliestExpiresAtMs;
+    return status.invalid.size === 0;
+  };
   if (!await checkSavedMemories()) return;
   const checkAncestors = target.query_system === false;
   const collectCourseIds = new Set<string>([target.course_id, target.assistant_course_id].filter(id => typeof id === "string"));
@@ -921,7 +962,7 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
   }
   const collectSourceIds = new Set<string>();
   const turnExpiry = target.memory_temporary_expires_at;
-  let earliestExpiresAtMs = turnExpiry == null ? Infinity : new Date(turnExpiry).getTime();
+  let earliestExpiresAtMs = Math.min(turnExpiry == null ? Infinity : new Date(turnExpiry).getTime(), savedMisconceptionExpiry);
   const ancestorRules = { checkCurrentMisconceptions: false, skipPriorMisconceptions: misconception !== null };
   if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { ...ancestorRules, collectCourseIds, collectSourceIds })) return;
   const readEvidence = async (lockedSourceIds?: string[]) => {
@@ -939,10 +980,12 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
       const nodesById = new Map([...new Set([...exactIds, ...row.backings.map(backing => backing.id)])]
         .map(id => [id, resolveMemoryDependencyStatus(graph, [id], [], row.course_id)]));
       const resolvedIds = [...new Set([...nodesById.values()].flatMap(nodes => nodes?.map(node => node.dep_id) ?? []))];
-      const activeLineages = await readMemoryMisconceptionLineages(db, input.scope, resolvedIds, row.course_id);
+      const activeAuthorities = await readMemoryMisconceptionAuthorities(db, input.scope, resolvedIds, row.course_id);
       const expiryFor = (id: string) => {
         const nodes = nodesById.get(id);
-        return nodes?.every(node => activeLineages.has(node.dep_id)) ? memoryExpiry(nodes) : -Infinity;
+        return nodes?.every(node => activeAuthorities.has(node.dep_id))
+          ? Math.min(memoryExpiry(nodes), ...nodes.map(node => activeAuthorities.get(node.dep_id)!.earliestExpiresAtMs))
+          : -Infinity;
       };
       for (const id of exactIds) {
         const expiry = expiryFor(id);
@@ -1310,7 +1353,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
       }
       const attemptLockScope = context.attemptContext ? await discoverBoundAttemptMaterials(tx, scope, job) : undefined;
-      const { courseId, resolvedMemoryIds, historyExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+      const { courseId, resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt: admittedHistoryExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
         context.contextSourceRefs, context.attemptContext?.sourceRefs, {
           memoryLineageSourceIds: context.memoryLineageSourceIds,
           globalMemoryIds: context.globalMemoryIds,
@@ -1330,6 +1373,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
         await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
       }
+      const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
+        tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+      );
+      const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
       await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
       assertHistoryMemoryUnexpired(historyExpiresAt);
       assertTemporaryMemoryUnexpired(context.temporaryMemoryExpiresAt);
@@ -1533,7 +1580,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
           }
           const attemptLockScope = context.attemptContext ? await discoverBoundAttemptMaterials(tx, scope, job) : undefined;
-          const { courseId, resolvedMemoryIds, historyExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+          const { courseId, resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt: admittedHistoryExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
             context.contextSourceRefs, context.attemptContext?.sourceRefs, {
               memoryLineageSourceIds: context.memoryLineageSourceIds,
               globalMemoryIds: context.globalMemoryIds,
@@ -1553,6 +1600,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
             await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
           }
+          const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
+            tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+          );
+          const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
           await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
           try {
             publicationStarted = true;
@@ -1687,7 +1738,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           attemptRefs = context.attemptSourceRefs ?? attemptLockScope.refs;
         }
         const historicalUserTurnId = row.has_prior_exchanges ? String(row.user_turn_id) : undefined;
-        const { courseId, deferredCourseId, resolvedMemoryIds, historyExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
+        const { courseId, deferredCourseId, resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt: admittedHistoryExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
           context.contextSourceRefs, attemptRefs, {
             streamReplay: true,
             memoryLineageSourceIds: context.memoryLineageSourceIds,
@@ -1711,6 +1762,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
           await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
         }
+        const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
+          tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+        );
+        const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
         await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
         assertHistoryMemoryUnexpired(historyExpiresAt);
         assertTemporaryMemoryUnexpired(context.temporaryMemoryExpiresAt);
@@ -1811,11 +1866,19 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         }
         const resolved = resolveMemoryDependencyStatus(graph, ids, [], courseId);
         if (!resolved) throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
-        const resolvedMemoryIds = [...new Set(resolved.map(memory => memory.dep_id))].sort();
-        const active = await readMemoryMisconceptionLineages(tx, scope, resolvedMemoryIds, courseId);
+        let resolvedMemoryIds = [...new Set(resolved.map(memory => memory.dep_id))].sort();
+        const active = await readMemoryMisconceptionAuthorities(tx, scope, resolvedMemoryIds, courseId);
         if (active.size !== resolvedMemoryIds.length) {
           throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
         }
+        const transitiveIds = new Set(resolvedMemoryIds);
+        for (const auth of active.values()) {
+          assertHistoryMemoryUnexpired(auth.earliestExpiresAtMs);
+          for (const dep of auth.dependencies) {
+            if (dep.courseId === null || dep.courseId === (courseId?.toLowerCase() ?? null)) transitiveIds.add(dep.id);
+          }
+        }
+        resolvedMemoryIds = [...transitiveIds].sort();
         await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
       });
     },
@@ -1931,6 +1994,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         let memorySourceRefs: ContextSourceRef[] = [];
         let memoryMisconceptionLineage: TutorMisconceptionLineage | undefined;
         let resolvedMemoryIds: readonly string[] = [];
+        let historyMemoryIdsByCourse = new Map<string | null, Set<string>>();
         let historyExpiresAt = Infinity;
         if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
           || options?.memoryLineageSourceIds !== undefined || options?.historyCourseBindings !== undefined
@@ -1951,7 +2015,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               attemptLockScope,
             },
           );
-          ({ resolvedMemoryIds, historyExpiresAt, memoryMisconceptionLineage } = admission);
+          ({ resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt, memoryMisconceptionLineage } = admission);
           lockedSourceVersions = admission.lockedSourceVersions;
           memorySourceRefs = admission.memorySourceRefs;
           if (attempt) {
@@ -1972,6 +2036,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           await assertBoundMisconceptions(tx, input.scope, boundCourseId,
             { misconceptionSnapshot: snapshot, historyMisconceptionLineage: suppliedLineage }, memoryMisconceptionLineage);
         }
+        const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
+          tx, input.scope, boundCourseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+        );
+        historyExpiresAt = Math.min(historyExpiresAt, recheckedExpiry);
         const historyLineage = mergeTutorMisconceptionLineages(suppliedLineage, memoryMisconceptionLineage);
         if (suppliedLineage !== undefined || historyLineage || snapshot || resolvedMemoryIds.length) {
           const snapshotCourseId = snapshot?.effectiveCourseId === undefined

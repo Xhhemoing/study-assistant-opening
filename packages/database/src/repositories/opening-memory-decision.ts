@@ -4,7 +4,7 @@ import type { OpeningScope } from "./opening-sources";
 import { isLineageUuid, lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
 import { lockAndReadMemoryOrigins, lockOwnedWorkspace, readBareUserOrigins } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { readMemoryMisconceptionLineages, sourceTurnsAllowMisconceptionMemory } from "./v3-bitemporal-misconception-memory";
+import { readMemoryMisconceptionAuthorities, sourceTurnsMisconceptionMemoryStatus } from "./v3-bitemporal-misconception-memory";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
@@ -63,12 +63,13 @@ export function confirmOwnedMemory(
     let originTurnIds: string[] = [];
     let ancestorMemoryIds: string[] = [];
     const assertMisconceptionOrigins = async () => {
-      if (bareOrigins) return;
-      const active = await readMemoryMisconceptionLineages(tx, scope, ancestorMemoryIds, current.courseId);
-      if (active.size !== ancestorMemoryIds.length
-        || !await sourceTurnsAllowMisconceptionMemory(tx, scope, originTurnIds, current.courseId)) {
+      if (bareOrigins) return Infinity;
+      const active = await readMemoryMisconceptionAuthorities(tx, scope, ancestorMemoryIds, current.courseId);
+      const sourceStatus = await sourceTurnsMisconceptionMemoryStatus(tx, scope, originTurnIds, current.courseId);
+      if (active.size !== ancestorMemoryIds.length || !sourceStatus.allowed) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency misconception is unavailable");
       }
+      return Math.min(sourceStatus.earliestExpiresAtMs, ...[...active.values()].map(auth => auth.earliestExpiresAtMs));
     };
     if (!bareOrigins && (current.courseId !== null || current.kind === "temporary" || current.sourceTurnIds.length > 0)) {
       const memoryCourse: FragmentFactory = () => tx`m.course_id`;
@@ -100,17 +101,18 @@ export function confirmOwnedMemory(
       if (origin === null) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
+      const misconceptionExpiry = await assertMisconceptionOrigins();
       const ancestorExpiry = admitted.ancestor_temporary_expires_at;
       const expiry = Math.min(
         current.kind === "temporary" ? Date.parse(current.expiresAt ?? "") : Infinity,
         ancestorExpiry == null ? Infinity : new Date(ancestorExpiry).getTime(),
         origin?.expiresAt ?? Infinity,
+        misconceptionExpiry,
       );
       if (Number.isNaN(expiry) || expiry <= now().getTime()) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
       if (Number.isFinite(expiry)) expiryBeforeCommit = new Date(expiry).toISOString();
-      await assertMisconceptionOrigins();
     }
     const updated = await tx`
       UPDATE opening_memories
@@ -120,13 +122,16 @@ export function confirmOwnedMemory(
         AND version = ${expectedVersion} AND status = 'active'
       RETURNING *`;
     if (!updated.length) throw new OpeningMemoryError("CONFLICT", "confirm raced");
+    const postUpdateExpiry = await assertMisconceptionOrigins();
+    if (Number.isFinite(postUpdateExpiry) && (expiryBeforeCommit === null || postUpdateExpiry < Date.parse(expiryBeforeCommit))) {
+      expiryBeforeCommit = new Date(postUpdateExpiry).toISOString();
+    }
     if (expiryBeforeCommit !== null) {
       const [expiry] = await tx`SELECT ${expiryBeforeCommit}::timestamptz > clock_timestamp() AS still_active`;
       if (!expiry?.still_active) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
     }
-    await assertMisconceptionOrigins();
     return mapMemoryRow(updated[0] as Record<string, unknown>);
   });
 }

@@ -748,7 +748,8 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         source_turn_id uuid, source_ids jsonb, payload jsonb);
       CREATE TABLE opening_workspace_history_revisions (workspace_id uuid PRIMARY KEY, owner_user_id uuid, revision bigint DEFAULT 0);
       CREATE TABLE opening_memories (id uuid PRIMARY KEY, workspace_id uuid, course_id uuid, source_turn_ids jsonb,
-        status text DEFAULT 'active', kind text DEFAULT 'confirmed', expires_at timestamptz);
+        text text DEFAULT 'Memory', version int DEFAULT 1, status text DEFAULT 'active', kind text DEFAULT 'confirmed',
+        expires_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
       CREATE TABLE v3_bitemporal_misconception_edges (revision_id uuid PRIMARY KEY, workspace_id uuid, owner_user_id uuid,
         course_id uuid, privacy_epoch int, valid_range tstzrange, tx_range tstzrange, status text);
     `);
@@ -931,8 +932,8 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       principalId: scope.ownerUserId, role: "workspace_owner", permissionRevision: "owner-fixture" },
     version: "study-query-v1", asOf: "2026-11-23T12:00:00Z", privacyEpoch: 7, mode: "deterministic", status: "ok",
     reason: "read", results: [] };
-    await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs='[]' WHERE id=$2",
-      [JSON.stringify(exact), assistantTurnId]);
+    await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs=$2 WHERE id=$3",
+      [JSON.stringify(exact), JSON.stringify([{ memoryDependencyIds: [memoryId] }]), assistantTurnId]);
     await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,context_source_refs,
         query_system,system_query,created_at,text)
       VALUES ($1,$4,$5,'user','complete','[]',true,NULL,now()-interval '20 seconds','Find the newer result'),
@@ -941,6 +942,11 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       [recordQuestion,recordAnswer,recordTarget,scope.workspaceId,jobId,receipt]);
     await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5)",
       [recordAnswer,scope.workspaceId,jobId,recordQuestion,recordAnswer]);
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET status='candidate'");
+    const recordBeforeWithdrawal = await loadTutorHistoryContext(sql, scope, recordTarget, "record_referents");
+    expect(recordBeforeWithdrawal.history).toContainEqual({ role: "user", text: "Find the newer result" });
+    expect(recordBeforeWithdrawal.history.every(turn => turn.role === "user")).toBe(true);
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted'");
     const recordHistory = await loadTutorHistoryContext(sql, scope, recordTarget, "record_referents");
     expect(recordHistory.history).toContainEqual({ role: "user", text: "Find the newer result" });
     expect(recordHistory.history.every(turn => turn.role === "user")).toBe(true);
@@ -991,8 +997,152 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
     await expect(repo.listTurns(scope, legacyConversation)).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: legacyAssistant, text: unavailable }),
     ]));
+
+    // Round-8 P1 #1: Paired user turn memory references (exact IDs and legacy memoryOnly) on an assistant origin
+    // whose own context_source_refs is empty, while keeping user-turn SHA-256 intent_hash untouched.
+    const pairedConversation = "ac000000-0000-4000-8000-000000000001";
+    const pairedUser = "ac000000-0000-4000-8000-000000000002";
+    const pairedAssistant = "ac000000-0000-4000-8000-000000000003";
+    const pairedDerivedMemory = "ac000000-0000-4000-8000-000000000004";
+    const pairedCandidateId = "ac000000-0000-4000-8000-000000000005";
+    await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)",
+      [pairedConversation, scope.workspaceId, scope.ownerUserId, courseId]);
+    await db.query("UPDATE opening_conversations SET course_id=$1 WHERE id=$2", [courseId, originConversation]);
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=$1,status='candidate'", [courseId]);
+    await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs='[]',source_ids='{}' WHERE id=$2",
+      [JSON.stringify(exact), originId]);
+    await db.query("UPDATE opening_memories SET course_id=$1,kind='confirmed',expires_at=NULL WHERE id=$2", [courseId, memoryId]);
+    await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+        context_anchor,query_system,created_at,text)
+      VALUES ($1,$3,$4,'user','complete','sha256:user-request-intent-hash',$5,$6,false,now()-interval '2 seconds','Paired user question'),
+        ($2,$3,$4,'assistant','complete',NULL,'[]',$6,false,now()-interval '1 second','Paired assistant answer')`,
+      [pairedUser, pairedAssistant, scope.workspaceId, pairedConversation,
+        JSON.stringify([{ memoryDependencyIds: [memoryId] }]), JSON.stringify({ courseId })]);
+    await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5)",
+      [pairedAssistant, scope.workspaceId, pairedConversation, pairedUser, pairedAssistant]);
+    await db.query("INSERT INTO opening_memories(id,workspace_id,course_id,source_turn_ids) VALUES ($1,$2,$3,$4)",
+      [pairedDerivedMemory, scope.workspaceId, courseId, JSON.stringify([pairedAssistant])]);
+    await db.query("INSERT INTO opening_assistant_candidates VALUES ($1,$2,$3,$4,'[]',$5)",
+      [pairedCandidateId, scope.workspaceId, pairedConversation, pairedAssistant,
+        { kind: "task", title: "Paired follow-up", minutes: 15, dueText: null }]);
+    await db.exec("ANALYZE");
+    await expect(readMemoryMisconceptionLineages(sql, scope, [pairedDerivedMemory], courseId))
+      .resolves.toEqual(new Map([[pairedDerivedMemory, exact]]));
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [pairedAssistant], courseId)).resolves.toBe(true);
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [pairedAssistant], null)).resolves.toBe(false);
+    await expect(admitTaskCandidate(sql as never, scope, pairedCandidateId)).resolves.toBe(pairedAssistant);
+    await expect(repo.releaseReturnedTurnIds(scope, pairedConversation, [pairedAssistant])).resolves.toEqual([
+      { id: pairedAssistant, role: "assistant", text: "Paired assistant answer", citations: [] },
+    ]);
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted'");
+    await expect(readMemoryMisconceptionLineages(sql, scope, [pairedDerivedMemory], courseId)).resolves.toEqual(new Map());
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [pairedAssistant], courseId)).resolves.toBe(false);
+    await expect(admitTaskCandidate(sql as never, scope, pairedCandidateId)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(repo.releaseReturnedTurnIds(scope, pairedConversation, [pairedAssistant])).resolves.toEqual([
+      { id: pairedAssistant, role: "assistant", text: unavailable, citations: [] },
+    ]);
+    await expect(repo.listTurns(scope, pairedConversation)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: pairedAssistant, text: unavailable }),
+    ]));
+    await expect(repo.listSummaries(scope)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: pairedConversation, lastTurnPreview: unavailable }),
+    ]));
+    // Legacy memoryOnly: true on pairedUser also propagates and redacts after withdrawal.
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=NULL,status='candidate'");
+    await db.query("UPDATE opening_conversations SET course_id=NULL WHERE id=ANY($1::uuid[])", [[originConversation, pairedConversation]]);
+    await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs=$2,source_ids=ARRAY[$3]::uuid[] WHERE id=$4",
+      [JSON.stringify(usedLineage), JSON.stringify([{ sourceId, sourceVersion: 1 }]), sourceId, originId]);
+    await db.query("UPDATE opening_memories SET course_id=NULL WHERE id=ANY($1::uuid[])", [[memoryId, pairedDerivedMemory]]);
+    await db.query("UPDATE opening_turns SET context_anchor=NULL,context_source_refs=$1 WHERE id=$2",
+      [JSON.stringify([{ sourceId, sourceVersion: 1, memoryOnly: true }]), pairedUser]);
+    await db.query("UPDATE opening_turns SET context_anchor=NULL WHERE id=$1", [pairedAssistant]);
+    await expect(readMemoryMisconceptionLineages(sql, scope, [pairedDerivedMemory], null))
+      .resolves.toEqual(new Map([[pairedDerivedMemory, usedLineage]]));
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted'");
+    await expect(readMemoryMisconceptionLineages(sql, scope, [pairedDerivedMemory], null)).resolves.toEqual(new Map());
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [pairedAssistant], null)).resolves.toBe(false);
+    await expect(admitTaskCandidate(sql as never, scope, pairedCandidateId)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(repo.releaseReturnedTurnIds(scope, pairedConversation, [pairedAssistant])).resolves.toEqual([
+      { id: pairedAssistant, role: "assistant", text: unavailable, citations: [] },
+    ]);
+
+    // Round-8 P1 #2: Confirmed memory M_conf derived from hashless follow-up a1 whose jobless predecessor prior_a
+    // used temporary memory M_temp (expires_at = T). Both loadTutorHistoryContext and loadMemoryContext propagate
+    // M_temp, its course binding, and T, and delaying authorizeSend across T rejects before startSend().
+    const chainConversation = "ad000000-0000-4000-8000-000000000001";
+    const chainBareOrigin = "ad000000-0000-4000-8000-000000000002";
+    const chainJoblessPrior = "ad000000-0000-4000-8000-000000000003";
+    const chainFollowUpUser = "ad000000-0000-4000-8000-000000000004";
+    const chainFollowUpAssistant = "ad000000-0000-4000-8000-000000000005";
+    const chainConsumerConv = "ad000000-0000-4000-8000-000000000006";
+    const chainConsumerUser = "ad000000-0000-4000-8000-000000000007";
+    const chainConsumerAssistant = "ad000000-0000-4000-8000-000000000008";
+    const chainNextUser = "ad000000-0000-4000-8000-000000000009";
+    const chainSendJob = "ad000000-0000-4000-8000-000000000010";
+    const mTemp = "ad000000-0000-4000-8000-000000000011";
+    const mConf = "ad000000-0000-4000-8000-000000000012";
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=$1,status='candidate'", [courseId]);
+    await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4), ($5,$2,$3,$4)",
+      [chainConversation, scope.workspaceId, scope.ownerUserId, courseId, chainConsumerConv]);
+    const shortExpiry = new Date(Date.now() + 2_500).toISOString();
+    await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+        context_anchor,query_system,created_at,text)
+      VALUES ($1,$7,$8,'assistant','complete',$10,'[]',$12,false,now()-interval '4 minutes','Temp origin'),
+        ($2,$7,$8,'assistant','complete',NULL,$11,$12,false,now()-interval '3 minutes','Jobless prior using M_temp'),
+        ($3,$7,$8,'user','complete',NULL,'[]',$12,false,now()-interval '2 minutes','Follow-up question'),
+        ($4,$7,$8,'assistant','complete',NULL,'[]',$12,false,now()-interval '90 seconds','Hashless a1'),
+        ($5,$7,$9,'user','complete',NULL,'[]',$12,false,now()-interval '60 seconds','Consumer question'),
+        ($6,$7,$9,'assistant','complete',NULL,$13,$12,false,now()-interval '30 seconds','Answer using M_conf')`,
+      [chainBareOrigin, chainJoblessPrior, chainFollowUpUser, chainFollowUpAssistant, chainConsumerUser, chainConsumerAssistant,
+        scope.workspaceId, chainConversation, chainConsumerConv, JSON.stringify(exact),
+        JSON.stringify([{ memoryDependencyIds: [mTemp] }]), JSON.stringify({ courseId }),
+        JSON.stringify([{ memoryDependencyIds: [mConf] }])]);
+    await db.query("INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,context_source_refs,context_anchor,query_system,created_at,text) VALUES ($1,$2,$3,'user','complete','[]',$4,false,now(),'Delayed send question')",
+      [chainNextUser, scope.workspaceId, chainConsumerConv, JSON.stringify({ courseId })]);
+    await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5), ($6,$2,$7,$8,$9)",
+      [chainFollowUpAssistant, scope.workspaceId, chainConversation, chainFollowUpUser, chainFollowUpAssistant,
+        chainConsumerAssistant, chainConsumerConv, chainConsumerUser, chainConsumerAssistant]);
+    await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,status) VALUES ($1,$2,$3,$4,'running')",
+      [chainSendJob, scope.workspaceId, chainConsumerConv, chainNextUser]);
+    await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at,text) VALUES ($1,$3,$4,$5,'temporary',$7,'Temporary predecessor'), ($2,$3,$4,$6,'confirmed',NULL,'Confirmed derivative')",
+      [mTemp, mConf, scope.workspaceId, courseId, JSON.stringify([chainBareOrigin]), JSON.stringify([chainFollowUpAssistant]), shortExpiry]);
+    await db.exec("ANALYZE");
+    const chainHistory = await loadTutorHistoryContext(sql, scope, chainNextUser);
+    expect(chainHistory.history.map(t => t.text)).toEqual(["Consumer question", "Answer using M_conf"]);
+    expect(chainHistory.memoryIds).toEqual(expect.arrayContaining([mConf, mTemp]));
+    expect(chainHistory.temporaryMemoryExpiresAt).toBe(shortExpiry);
+    expect(chainHistory.historyCourseBindings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ courseId, memoryIds: expect.arrayContaining([mConf, mTemp]) }),
+    ]));
+    const loadedMemoryCtx = await createOpeningMemoryRepository(sql).listContext(scope, new Date().toISOString(), courseId);
+    expect(loadedMemoryCtx.memories.map(m => m.id)).toContain(mConf);
+    expect(loadedMemoryCtx.dependencyMemoryIds).toContain(mTemp);
+    expect(loadedMemoryCtx.temporaryMemoryExpiresAt).toBe(shortExpiry);
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(shortExpiry) - Date.now()) + 120));
+    const delayedStartSend = vi.fn(async () => "should-never-send");
+    await expect(jobs.authorizeSend(scope, chainSendJob, {
+      contextSourceRefs: chainHistory.sourceRefs,
+      globalMemoryIds: chainHistory.memoryIds,
+      historyCourseBindings: chainHistory.historyCourseBindings,
+      historyMisconceptionLineage: chainHistory.historyMisconceptionLineage,
+      temporaryMemoryExpiresAt: chainHistory.temporaryMemoryExpiresAt,
+    }, delayedStartSend)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.authorizeSend(scope, chainSendJob, {
+      contextSourceRefs: loadedMemoryCtx.sourceRefs,
+      globalMemoryIds: [mConf, ...(loadedMemoryCtx.dependencyMemoryIds ?? [])],
+      misconceptionSnapshot: undefined,
+      historyMisconceptionLineage: loadedMemoryCtx.misconceptionLineage,
+      temporaryMemoryExpiresAt: loadedMemoryCtx.temporaryMemoryExpiresAt,
+    }, delayedStartSend)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.authorizeSend(scope, chainSendJob, {
+      contextSourceRefs: [],
+      globalMemoryIds: [mConf],
+      historyMisconceptionLineage: loadedMemoryCtx.misconceptionLineage,
+    }, delayedStartSend)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(delayedStartSend).not.toHaveBeenCalled();
+
     expect(plans.length).toBeGreaterThan(0);
   } finally {
     await db.close();
   }
-}, 20_000);
+}, 30_000);

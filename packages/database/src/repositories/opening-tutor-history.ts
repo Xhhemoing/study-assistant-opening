@@ -10,8 +10,8 @@ import {
   type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
-import { readTurnMisconceptionMemoryOrigins, savedTutorMisconceptionHashes, turnHasMisconceptionMemoryDependencies, mergeTutorMisconceptionLineages, readMemoryMisconceptionLineages, readSavedTutorMisconceptionLineage,
-  readActiveTutorMisconceptionLineages, turnUsesInactiveMisconception, type TutorMisconceptionLineage } from "./v3-bitemporal-misconception-memory";
+import { readTurnMisconceptionMemoryOrigins, savedTutorMisconceptionHashes, turnHasMisconceptionMemoryDependencies, mergeTutorMisconceptionLineages, readMemoryMisconceptionAuthorities, readSavedTutorMisconceptionLineage,
+  readActiveTutorMisconceptionLineages, turnUsesInactiveMisconception, type MemoryMisconceptionAuthority, type TutorMisconceptionLineage } from "./v3-bitemporal-misconception-memory";
 
 type HistoryTurn = { role: "user" | "assistant"; text: string };
 type Db = Sql | TransactionSql;
@@ -183,9 +183,10 @@ async function readInheritedExchangeMemories(sql: Db, scope: OpeningScope, rows:
 
 function exchangeMemoryAuthority(
   row: HistoryRows[number], inherited: Awaited<ReturnType<typeof readInheritedExchangeMemories>>,
+  exchangeAssistantIds: ReadonlySet<string>, recordReferents = false,
 ): HistoryAncestorAuthority[] | null {
-  const origins = inherited.get(row.assistant_id);
-  if ((row.inherits_memory === true && !origins) || origins?.some(origin => !origin)) return null;
+  const origins = recordReferents ? undefined : inherited.get(row.assistant_id);
+  if (!recordReferents && ((row.inherits_memory === true && !origins) || origins?.some(origin => !origin))) return null;
   const userIds = row.user_source_refs === undefined ? [] : parseContextMemoryDependencyIds(row.user_source_refs);
   const assistantIds = row.assistant_source_refs === undefined ? [] : parseContextMemoryDependencyIds(row.assistant_source_refs);
   if (!userIds || !assistantIds) return null;
@@ -196,20 +197,25 @@ function exchangeMemoryAuthority(
         ? memoryOnlyRefSourceIds(row.user_source_refs) : undefined,
       sourceIds: [], expiresAt: Infinity },
     { courseId: row.assistant_course_id ?? null, materialUse: row.assistant_material_use ?? "citation",
-      memoryIds: row.memory_backing_ids === undefined ? [] : assistantIds, backings: row.memory_backing_ids ?? [],
-      backingSourceIds: assistantIds.length && row.memory_backing_ids !== undefined
+      memoryIds: recordReferents || row.memory_backing_ids === undefined ? [] : assistantIds,
+      backings: recordReferents ? [] : (row.memory_backing_ids ?? []),
+      backingSourceIds: !recordReferents && assistantIds.length && row.memory_backing_ids !== undefined
         ? memoryOnlyRefSourceIds(row.assistant_source_refs) : undefined,
       sourceIds: [],
-      expiresAt: row.memory_temporary_expires_at == null ? Infinity : new Date(row.memory_temporary_expires_at).getTime() },
-    ...(origins ?? []).flatMap(origin => origin && origin.id !== row.assistant_id ? [{
+      expiresAt: recordReferents || row.memory_temporary_expires_at == null ? Infinity : new Date(row.memory_temporary_expires_at).getTime() },
+    ...(origins ?? []).flatMap(origin => origin && origin.historical
+      && !exchangeAssistantIds.has(String(origin.assistantTurnId ?? origin.id)) ? [{
       courseId: origin.courseId, consumerCourseId: origin.consumerCourseId, materialUse: origin.materialUse,
       memoryIds: origin.ids, backings: origin.backings, backingSourceIds: origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined,
-      sourceIds: [], expiresAt: Infinity,
+      sourceIds: [], expiresAt: Infinity, historical: true,
     }] : []),
   ];
 }
 
-function historyCourseBindings(row: HistoryRows[number], authority: HistoryAncestorAuthority[]): HistoryCourseBinding[] {
+function historyCourseBindings(
+  row: HistoryRows[number], authority: HistoryAncestorAuthority[],
+  extraBindings: Array<{ courseId: string | null; materialUse: MaterialUse; memoryIds: string[] }> = [],
+): HistoryCourseBinding[] {
   if (!row.user_direct_ids || !row.assistant_direct_ids) return [];
   const bindings: HistoryCourseBinding[] = [
     { courseId: row.prior_course_id, materialUse: row.prior_material_use, sourceIds: [...new Set<string>(row.user_direct_ids)].sort(),
@@ -224,15 +230,32 @@ function historyCourseBindings(row: HistoryRows[number], authority: HistoryAnces
     if (entry.memoryIds.length) binding.memoryIds = entry.memoryIds;
     if (entry.backings.length) binding.memoryBackings = entry.backings;
   }
+  for (const extra of extraBindings) {
+    if (!extra.memoryIds.length) continue;
+    const match = bindings.find(b => (b.courseId?.toLowerCase() ?? null) === (extra.courseId?.toLowerCase() ?? null)
+      && b.materialUse === extra.materialUse);
+    if (match) {
+      match.memoryIds = [...new Set([...(match.memoryIds ?? []), ...extra.memoryIds])].sort();
+    } else {
+      bindings.push({ courseId: extra.courseId, materialUse: extra.materialUse, sourceIds: [], sourceRefs: [], memoryIds: [...extra.memoryIds].sort() });
+    }
+  }
   return bindings.filter(binding => binding.courseId !== null || binding.sourceIds.length > 0
     || binding.memoryIds?.length || binding.memoryBackings?.length);
 }
 
+const normalizeHistoryCourse = (course: string | null | undefined) => course == null ? null : course.toLowerCase();
+const historyCourseAllows = (course: string | null, ...targets: (string | null)[]) => {
+  const own = normalizeHistoryCourse(course);
+  return own === null || targets.every(target => normalizeHistoryCourse(target) === own);
+};
+
 async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: HistoryRows,
-  excluded: string[],
+  excluded: string[], recordReferents = false,
 ) {
-  const inherited = await readInheritedExchangeMemories(sql, scope, rows);
-  const lineage = rows.map(row => exchangeMemoryAuthority(row, inherited));
+  const exchangeAssistantIds = new Set(rows.flatMap(row => row.assistant_id ? [String(row.assistant_id)] : []));
+  const inherited = recordReferents ? new Map() : await readInheritedExchangeMemories(sql, scope, rows);
+  const lineage = rows.map(row => exchangeMemoryAuthority(row, inherited, exchangeAssistantIds, recordReferents));
   const materialUse = rows[0]?.material_use === "practice" ? "practice" : "citation";
   const graphs = await Promise.all((["citation", "practice"] as const).map(async use => {
     const roots = [...new Set(lineage.flatMap(entries => (entries ?? [])
@@ -242,61 +265,100 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
   const graphFor = (use: MaterialUse) => graphs[use === "practice" ? 1 : 0]!;
   const byCourse = new Map<string | null, Set<string>>();
   for (const [index, entries] of lineage.entries()) for (const entry of entries ?? []) {
-    for (const course of new Set([entry.courseId, rows[index]!.current_course_id ?? null,
-      entry.consumerCourseId === undefined ? entry.courseId : entry.consumerCourseId])) {
+    const courses = entry.historical
+      ? [normalizeHistoryCourse(entry.courseId)]
+      : [normalizeHistoryCourse(entry.courseId), normalizeHistoryCourse(rows[index]!.current_course_id ?? null),
+          normalizeHistoryCourse(entry.consumerCourseId === undefined ? entry.courseId : entry.consumerCourseId)];
+    for (const course of new Set(courses)) {
       const ids = byCourse.get(course) ?? new Set<string>();
-      for (const id of historyAncestorMemoryIds(entry)) ids.add(id);
+      for (const id of historyAncestorMemoryIds(entry)) ids.add(id.toLowerCase());
       byCourse.set(course, ids);
     }
   }
   const active = new Map(await Promise.all([...byCourse].map(async ([course, ids]) => {
     const expanded = [...new Set([...ids, ...[...ids].flatMap(id =>
-      graphs.flatMap(graph => graph.get(id)?.map(node => node.dep_id) ?? []))])];
-    return [course, await readMemoryMisconceptionLineages(sql, scope, expanded, course)] as const;
+      graphs.flatMap(graph => graph.get(id)?.map(node => node.dep_id.toLowerCase()) ?? []))])];
+    return [course, await readMemoryMisconceptionAuthorities(sql, scope, expanded, course)] as const;
   })));
+  const getActive = (course: string | null | undefined) => active.get(normalizeHistoryCourse(course));
   const pending = lineage.map((entries, index) => {
     if (!entries) return null;
     const courseId = rows[index]!.current_course_id ?? null;
-    const own = entries.map(entry => resolveExchangeMemoryEntry(entry, graphFor(entry.materialUse), active, entry.courseId));
+    const own = entries.map(entry => resolveExchangeMemoryEntry(entry, graphFor(entry.materialUse), active, entry.courseId, false));
     if (own.some(nodes => nodes === null)) return null;
-    const current = entries.map(entry => resolveExchangeMemoryEntry(entry, graphFor(materialUse), active, courseId));
-    const expires = (nodes: (MemoryDependencyStatus[] | null)[]) =>
-      nodes.flatMap(group => group?.flatMap(node => node.expires_at === null ? [] : [node.expires_at]) ?? []);
-    const currentLineages = active.get(courseId);
+    const current = entries.map(entry => resolveExchangeMemoryEntry(entry, graphFor(materialUse), active, courseId, true));
+    const authorityFor = (entry: HistoryAncestorAuthority, depId: string, target: string | null) =>
+      getActive(entry.historical ? entry.courseId : target)?.get(depId.toLowerCase());
+    const expires = (groups: (MemoryDependencyStatus[] | null)[], target: string | null | undefined) =>
+      groups.flatMap((group, i) => (group ?? []).flatMap(node => {
+        const list: string[] = [];
+        if (node.expires_at !== null) list.push(node.expires_at instanceof Date ? node.expires_at.toISOString() : String(node.expires_at));
+        const auth = authorityFor(entries[i]!, node.dep_id, target === undefined ? entries[i]!.courseId : target);
+        if (auth && Number.isFinite(auth.earliestExpiresAtMs)) list.push(new Date(auth.earliestExpiresAtMs).toISOString());
+        return list;
+      }));
     const inScope = current.every(nodes => nodes !== null);
-    return { ids: [...(parseContextMemoryDependencyIds(rows[index]!.assistant_source_refs) ?? []),
-      ...current.flatMap(nodes => nodes?.map(node => node.dep_id) ?? [])],
-      inScope, ownExpirations: expires(own), expirations: expires(current),
+    const extraBindings = entries.flatMap((entry, i) => (own[i] ?? []).flatMap(node =>
+      authorityFor(entry, node.dep_id, entry.courseId)?.bindings ?? []));
+    const transitiveCurrentIds = current.flatMap((nodes, i) => (nodes ?? []).flatMap(node => {
+      const auth = authorityFor(entries[i]!, node.dep_id, courseId);
+      const selfAllowed = historyCourseAllows(node.course_id, courseId);
+      const depsAllowed = (auth?.dependencies ?? []).filter(dep => historyCourseAllows(dep.courseId, courseId)).map(dep => dep.id);
+      return [...(selfAllowed ? [node.dep_id] : []), ...depsAllowed];
+    }));
+    return {
+      ids: [...new Set([
+        ...(recordReferents ? [] : (parseContextMemoryDependencyIds(rows[index]!.assistant_source_refs) ?? [])),
+        ...transitiveCurrentIds,
+      ])],
+      inScope,
+      ownExpirations: expires(own, undefined),
+      expirations: expires(current, courseId),
       bindings: historyCourseBindings(rows[index]!, entries.map((entry, i) => ({
         ...entry, backings: entry.backings.map(ids => ids.filter(id => own[i]!.some(node => node.dep_id === id))),
-      }))),
+      })), extraBindings),
       misconceptionLineage: inScope ? mergeTutorMisconceptionLineages(
-        ...current.flatMap(nodes => (nodes ?? []).map(node => currentLineages?.get(node.dep_id))),
-      ) : undefined };
+        ...current.flatMap((nodes, i) => (nodes ?? []).map(node => authorityFor(entries[i]!, node.dep_id, courseId)?.lineage)),
+      ) : undefined,
+    };
   });
   return pending;
 }
 
 function resolveExchangeMemoryEntry(
   entry: HistoryAncestorAuthority, graph: ReadonlyMap<string, MemoryDependencyStatus[]>,
-  active: ReadonlyMap<string | null, Map<string, TutorMisconceptionLineage | undefined>>, target: string | null,
+  active: ReadonlyMap<string | null, Map<string, MemoryMisconceptionAuthority>>, target: string | null,
+  checkTargetScope = true,
 ) {
-  const courses = [entry.courseId, target, entry.consumerCourseId === undefined ? entry.courseId : entry.consumerCourseId];
-  const allowed = (id: string) => courses.every(course => active.get(course)?.has(id));
+  const getActive = (course: string | null | undefined) => active.get(normalizeHistoryCourse(course));
+  const courses = entry.historical
+    ? [entry.courseId]
+    : [entry.courseId, target, entry.consumerCourseId === undefined ? entry.courseId : entry.consumerCourseId];
+  const misconceptionTargets = entry.historical
+    ? [entry.courseId, ...(entry.consumerCourseId === undefined ? [] : [entry.consumerCourseId]), ...(checkTargetScope ? [target] : [])]
+    : courses;
+  const allowed = (rawId: string) => {
+    const id = rawId.toLowerCase();
+    if (!courses.every(course => getActive(course)?.has(id))) return false;
+    const auth = getActive(entry.courseId)?.get(id);
+    return Boolean(auth && historyCourseAllows(auth.lineage?.courseId ?? null, ...misconceptionTargets));
+  };
   const usable = new Map<string, MemoryDependencyStatus[]>();
   for (const id of historyAncestorMemoryIds(entry)) {
     const nodes = graph.get(id);
     if (nodes?.every(node => allowed(node.dep_id)) && allowed(id)) usable.set(id, nodes);
   }
-  const targetLineages = active.get(target);
+  const targetAuthorities = getActive(entry.historical ? entry.courseId : target);
   const backings = entry.backings.map(ids => ids.filter(id => usable.has(id)).sort((a, b) =>
-    Number(!!targetLineages?.get(a)) - Number(!!targetLineages?.get(b)) || a.localeCompare(b)));
-  return resolveMemoryDependencyStatus(usable, entry.memoryIds, backings, target, undefined, entry.backingSourceIds);
+    Number(Boolean(targetAuthorities?.get(a.toLowerCase())?.lineage))
+      - Number(Boolean(targetAuthorities?.get(b.toLowerCase())?.lineage)) || a.localeCompare(b)));
+  return resolveMemoryDependencyStatus(usable, entry.memoryIds, backings,
+    entry.historical ? entry.courseId : target, undefined, entry.backingSourceIds);
 }
 
 export type HistoryAncestorAuthority = {
   courseId: string | null; consumerCourseId?: string | null; materialUse: MaterialUse; memoryIds: string[]; backings: string[][]; expiresAt: number;
-  sourceIds: string[]; backingSourceIds?: string[];
+  sourceIds: string[]; backingSourceIds?: string[]; historical?: boolean;
 };
 
 type HistoryAncestorRules = {
@@ -326,6 +388,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     }
   }
   const priors = rows.filter(row => row.id !== row.current_id);
+  const exchangeAssistantIds = new Set(priors.flatMap(row => row.assistant_id ? [String(row.assistant_id)] : []));
   const inherited = await readInheritedExchangeMemories(sql, scope, priors);
   const checkedRows = rules?.skipPriorMisconceptions ? [] : priors.filter(row =>
     authority.get(row.current_id) !== null && !explicitCurrentIds.has(row.current_id));
@@ -337,7 +400,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     const misconception = misconceptions.get(row);
     const assistantRefs = parseContextSourceRefs(row.assistant_source_refs);
     const userRefs = parseContextSourceRefs(row.user_source_refs);
-    const memoryAuthority = exchangeMemoryAuthority(row, inherited);
+    const memoryAuthority = exchangeMemoryAuthority(row, inherited, exchangeAssistantIds);
     if (row.invalid || !row.assistant_direct_versioned || !row.origin_allowed || row.current_allowed === false
       || (misconception !== undefined && (!misconception || !misconception.inScope)) || !memoryAuthority || !assistantRefs || !userRefs
       || memoryAuthority.some(entry => !(entry.expiresAt > Date.now()))) {
@@ -394,25 +457,40 @@ export async function readTutorHistoryAncestorStatus(sql: Db, scope: OpeningScop
   for (const entry of authority) {
     const roots = historyAncestorMemoryIds(entry);
     if (!roots.length) continue;
-    for (const course of new Set([entry.courseId, entry.consumerCourseId === undefined ? entry.courseId : entry.consumerCourseId])) {
+    const courses = entry.historical
+      ? [normalizeHistoryCourse(entry.courseId)]
+      : [normalizeHistoryCourse(entry.courseId), normalizeHistoryCourse(entry.consumerCourseId === undefined ? entry.courseId : entry.consumerCourseId)];
+    for (const course of new Set(courses)) {
       const ids = byCourse.get(course) ?? new Set<string>();
       for (const id of roots) {
-        ids.add(id);
-        for (const node of graph.get(entry.materialUse)?.get(id) ?? []) ids.add(node.dep_id);
+        ids.add(id.toLowerCase());
+        for (const node of graph.get(entry.materialUse)?.get(id) ?? []) ids.add(node.dep_id.toLowerCase());
       }
       byCourse.set(course, ids);
     }
   }
-  const active = new Map<string | null, Map<string, TutorMisconceptionLineage | undefined>>();
+  const active = new Map<string | null, Map<string, MemoryMisconceptionAuthority>>();
   for (const [course, ids] of byCourse) {
-    active.set(course, await readMemoryMisconceptionLineages(sql, scope, [...ids], course));
+    active.set(course, await readMemoryMisconceptionAuthorities(sql, scope, [...ids], course));
   }
   let earliestExpiresAtMs = Infinity;
   for (const entry of authority) {
-    const nodes = resolveExchangeMemoryEntry(entry, graph.get(entry.materialUse)!, active, entry.courseId);
+    const nodes = resolveExchangeMemoryEntry(entry, graph.get(entry.materialUse)!, active, entry.courseId, false);
     if (!nodes) return { valid: false, hasAncestors: true, earliestExpiresAtMs: -Infinity };
-    earliestExpiresAtMs = Math.min(earliestExpiresAtMs, entry.expiresAt, ...nodes.map(node =>
-      node.expires_at === null ? Infinity : new Date(node.expires_at).getTime()));
+    const authMap = active.get(normalizeHistoryCourse(entry.courseId));
+    for (const node of nodes) {
+      const auth = authMap?.get(node.dep_id.toLowerCase());
+      for (const binding of auth?.bindings ?? []) {
+        if (binding.courseId !== null) rules?.collectCourseIds?.add(binding.courseId);
+      }
+    }
+    earliestExpiresAtMs = Math.min(
+      earliestExpiresAtMs, entry.expiresAt,
+      ...nodes.map(node => Math.min(
+        node.expires_at === null ? Infinity : new Date(node.expires_at).getTime(),
+        authMap?.get(node.dep_id.toLowerCase())?.earliestExpiresAtMs ?? Infinity,
+      )),
+    );
   }
   return { valid: earliestExpiresAtMs > Date.now(), hasAncestors: authority.length > 0, earliestExpiresAtMs };
 }
@@ -429,7 +507,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   const revokedDirectSourceIds = [...new Set<string>(exchanges.flatMap(row => row.origin_allowed === false
     ? [...row.user_direct_ids, ...row.assistant_direct_ids].filter(isLineageUuid) : []))].sort();
   const rows = exchanges.filter(row => row.origin_allowed !== false);
-  const resolved = await resolveExchangeMemories(sql, scope, rows, excluded);
+  const resolved = await resolveExchangeMemories(sql, scope, rows, excluded, recordReferents);
   const misconceptions = recordReferents ? [] : await resolveExchangeMisconceptions(sql, scope, rows);
   const nowMs = Date.now();
   let firstValid = 0;
