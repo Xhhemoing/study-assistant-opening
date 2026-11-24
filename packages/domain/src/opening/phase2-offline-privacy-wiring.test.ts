@@ -439,6 +439,17 @@ describe("persisted dataset provenance", () => {
     expect(result.answerSequences).toEqual([]);
   });
 
+  it("withholds derivatives when the first revision identifies a snippet with missing provenance", () => {
+    const result = project({
+      ...published,
+      library_revisions: [{ ...owner, id: "revision", document_id: "document", revision_number: 1, reason: "save-opening-snippet" }],
+      opening_turns: [publishedTurn, turn("keep")],
+    });
+    expect(result.coursePackageQuality).toEqual([]);
+    expect(result.answerSequences).toEqual([]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
   it.each([true, null])("withholds source-only snippet derivatives when snippet origin is %s", snippet_origin => {
     const result = project({
       ...published,

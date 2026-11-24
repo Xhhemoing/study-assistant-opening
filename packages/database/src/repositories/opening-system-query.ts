@@ -54,7 +54,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       if (request.name === "learner_state" || request.name === "explain_decision") {
         await readSystemStateQuery(tx, scope, request, out);
       } else if (request.name === "notes" || request.name === "cards" || request.name === "exam_sprint") {
-        await readSystemRecordQuery(tx, scope, request, out,
+        await readSystemRecordQuery(tx, scope, request, out, signal,
           options.collectLineage ? lineage => {
             for (const id of lineage.memoryIds) memoryIds.add(id);
             for (const id of lineage.originTurnIds) originTurnIds.add(id);

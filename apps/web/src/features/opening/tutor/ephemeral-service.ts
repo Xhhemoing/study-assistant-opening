@@ -263,9 +263,6 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       }).mode };
       const learnerContext = deps.learnerContext ? await withLearnerContextError(() => deps.learnerContext!.read(scope, {
         courseId: input.courseId ?? contextAnchor?.courseId, sourceIds: allowedSourceIds })) : null;
-      const contextSourceRefs = mergeContextProvenanceRefs(
-        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [], learnerContext?.sourceRefs ?? [],
-      );
       let streamedExposure: StudyExposureReceipt | undefined;
       const deliverHelp = async () => {
         if (!streamedExposure && contextAnchor && deps.exposures) streamedExposure = await deps.exposures.deliver(scope, {
@@ -281,6 +278,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         if (await deps.privacy.currentEpoch(scope) !== privacy.epoch) {
           throw new EphemeralServiceError("PRIVACY_CHANGED", "隐私设置已变化，本次回答已停止。", 409);
         }
+        await assertHistoryCurrent();
         // A partial hint already shown to the learner must count even if the stream later fails.
         await deliverHelp();
         await assertMaterialsCurrent();
@@ -304,8 +302,23 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw new EphemeralServiceError("VISION_REQUIRED", VISION_REQUIRED_MESSAGE, 422);
       }
       const pageForImages = selectedPage ?? (imageOnlySources ? 1 : null);
+      const imageSourceVersions = new Map(chunks.filter(chunk => allowedSourceIds.includes(chunk.sourceId))
+        .map(chunk => [chunk.sourceId, chunk.sourceVersion]));
+      const sourceVersions = Object.fromEntries(imageSourceVersions);
       const imageParts = selected?.supportsVision && pageForImages != null && deps.pageImages
-        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: pageForImages }) : [];
+        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions, physicalPage: pageForImages }) : [];
+      const imageSourceRefs = imageParts.map(image => {
+        const sourceId = image.sourceId;
+        const sourceVersion = sourceId === undefined ? undefined : imageSourceVersions.get(sourceId);
+        if (sourceId === undefined || sourceVersion === undefined) {
+          throw new EphemeralServiceError("SOURCE_UNAVAILABLE", "图片来源不可用，请重新选择材料后重试。", 422);
+        }
+        return { sourceId, sourceVersion };
+      });
+      const contextSourceRefs = mergeContextProvenanceRefs(
+        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), imageSourceRefs,
+        historyRefs ?? [], learnerContext?.sourceRefs ?? [],
+      );
       const providerInput: ProviderInput = {
         instruction: instructionFor(input.mode, { text: input.text })+tutorLearnerContextInstruction(learnerContext)+studyIntentInstruction(studyIntentForMessage(sessionIntent, composerMessageText(input.text))),
         text: input.text,

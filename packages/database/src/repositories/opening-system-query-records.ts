@@ -11,41 +11,83 @@ import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridg
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
 export type RecordNoteLineage = { memoryIds: string[]; originTurnIds: string[] };
 
+type RecordSources = RecordNoteLineage & { refs: OpeningSystemQueryDraft["sourceRefs"] };
+
 async function readRecordNoteSources(tx: TransactionSql, scope: Scope, row: Record<string, unknown>,
-  collectLineage?: (lineage: RecordNoteLineage) => void) {
-  if (!row.has_note_provenance && row.snippet_origin !== true) return [];
+  canCollectLineage: boolean): Promise<RecordSources | null> {
+  if (!row.has_note_provenance && row.snippet_origin !== true) return { refs: [], memoryIds: [], originTurnIds: [] };
   if (!Array.isArray(row.context_source_refs)) return null;
   if (row.snippet_origin !== false && !row.context_source_refs.some(isVerifiedSnippetLineage)) return null;
   const refs = parseNoteContextProvenanceRefs(row.context_source_refs);
   if (!refs) return null;
   const memoryIds = refs.find(ref => "memoryDependencyIds" in ref)?.memoryDependencyIds ?? [];
   const originTurnIds = noteOriginTurnIds(row.context_source_refs);
-  if ((memoryIds.length || originTurnIds.length) && !collectLineage) return null;
+  if ((memoryIds.length || originTurnIds.length) && !canCollectLineage) return null;
   if (!await openingSnippetOriginsAvailable(tx, scope, originTurnIds)
     || !await openingCredentialMemoriesAvailable(tx, scope, memoryIds, memoryOnlyRefSourceIds(refs))) return null;
-  collectLineage?.({ memoryIds, originTurnIds });
-  return refs.flatMap(ref => "sourceId" in ref ? [{ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion }] : []);
+  return { memoryIds, originTurnIds,
+    refs: refs.flatMap(ref => "sourceId" in ref ? [{ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion }] : []) };
+}
+
+const candidateBatchSize = 32;
+
+async function readAdmittedPage<Row>(
+  out: OpeningSystemQueryDraft, { offset, limit }: { offset: number; limit: number }, signal: AbortSignal,
+  readBatch: (after: Row | undefined) => PromiseLike<readonly Row[]>,
+  admit: (row: Row) => Promise<RecordSources | null>,
+) {
+  let after: Row | undefined;
+  let admitted = 0;
+  const page: { row: Row; sources: RecordSources }[] = [];
+  for (;;) {
+    if (signal.aborted) throw new Error("system query cancelled");
+    const batch = await readBatch(after);
+    for (const row of batch) {
+      if (signal.aborted) throw new Error("system query cancelled");
+      const sources = await admit(row);
+      if (!sources) continue;
+      admitted += 1;
+      if (admitted <= offset) continue;
+      if (page.length === limit) {
+        out.status = "partial";
+        out.reason = "truncated";
+        out.nextOffset = offset + limit;
+        return page;
+      }
+      page.push({ row, sources });
+    }
+    if (batch.length < candidateBatchSize) return page;
+    after = batch[batch.length - 1];
+  }
+}
+
+function collectRecordSources(out: OpeningSystemQueryDraft, sources: RecordSources,
+  collectLineage?: (lineage: RecordNoteLineage) => void) {
+  const { refs, memoryIds, originTurnIds } = sources;
+  out.sourceRefs.push(...refs);
+  if (memoryIds.length || originTurnIds.length) collectLineage?.({ memoryIds, originTurnIds });
 }
 
 /** Metadata only: never releases note bodies, card answers or exam solutions. */
 export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
-  request: Extract<SystemQueryRequest, { name: "notes" | "cards" | "exam_sprint" }>, out: OpeningSystemQueryDraft,
+  request: Extract<SystemQueryRequest, { name: "notes" | "cards" | "exam_sprint" }>, out: OpeningSystemQueryDraft, signal: AbortSignal,
   collectLineage?: (lineage: RecordNoteLineage) => void) {
   if (request.name === "notes") {
     const a = request.arguments, pattern = `%${(a.query ?? "").replace(/[\\%_]/g, "\\$&")}%`;
-    const rows = await tx`SELECT d.id,d.title,d.current_revision_number,d.updated_at,np.context_source_refs,
+    const page = await readAdmittedPage(out, a, signal, (after: Record<string, unknown> | undefined) => tx`SELECT
+        d.id,d.title,d.current_revision_number,d.updated_at,d.updated_at::text AS cursor_updated_at,np.context_source_refs,
         np.document_id IS NOT NULL AS has_note_provenance, origin.reason='save-opening-snippet' AS snippet_origin
       FROM library_documents d LEFT JOIN opening_note_provenance np ON np.document_id=d.id
       LEFT JOIN library_revisions origin ON origin.document_id=d.id AND origin.workspace_id=d.workspace_id AND origin.revision_number=1
       WHERE d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND d.title ILIKE ${pattern}
         AND (np.document_id IS NULL OR (np.workspace_id=${scope.workspaceId}
           AND ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)}))
-      ORDER BY d.updated_at DESC,d.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
-    if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
-    for (const row of rows.slice(0, a.limit)) {
-      const refs = await readRecordNoteSources(tx, scope, row, collectLineage);
-      if (!refs) continue;
-      out.sourceRefs.push(...refs);
+        ${after ? tx`AND (d.updated_at < ${String(after.cursor_updated_at)}::timestamptz
+          OR (d.updated_at = ${String(after.cursor_updated_at)}::timestamptz AND d.id > ${String(after.id)}::uuid))` : tx``}
+      ORDER BY d.updated_at DESC,d.id LIMIT ${candidateBatchSize}`,
+    row => readRecordNoteSources(tx, scope, row, Boolean(collectLineage)));
+    for (const { row, sources } of page) {
+      collectRecordSources(out, sources, collectLineage);
       out.evidence.push({ id: `note:${row.id}`, kind: "note", title: String(row.title).slice(0, 200), recordId: String(row.id),
         href: `/opening/library/${row.id}`, revision: String(row.current_revision_number) });
       out.data.push({ id: row.id, title: String(row.title).slice(0, 240), revision: Number(row.current_revision_number), updatedAt: iso(row.updated_at), contentWithheld: true,
@@ -53,14 +95,14 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
     }
   } else if (request.name === "cards") {
     const a = request.arguments;
-    const rows = await tx`SELECT c.id,c.content_version,c.course_id,c.source_ids,s.due_at
+    const page = await readAdmittedPage(out, a, signal, (after: Record<string, unknown> | undefined) => tx`SELECT
+        c.id,c.content_version,c.course_id,c.source_ids,s.due_at,s.due_at::text AS cursor_due_at
       FROM cards c LEFT JOIN card_review_states s ON s.card_id=c.id AND s.workspace_id=c.workspace_id AND s.owner_user_id=${scope.ownerUserId}
       WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} AND NOT c.archived
         AND ${a.courseId ? tx`c.course_id=${a.courseId}` : tx`TRUE`} AND ${cardReadable(tx, scope.workspaceId)}
-      ORDER BY s.due_at NULLS LAST,c.id LIMIT ${a.limit + 1} OFFSET ${a.offset}`;
-    if (rows.length > a.limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = a.offset + a.limit; }
-    out.data = [];
-    for (const row of rows.slice(0, a.limit)) {
+        ${!after ? tx`` : after.cursor_due_at == null ? tx`AND s.due_at IS NULL AND c.id > ${String(after.id)}::uuid`
+          : tx`AND (s.due_at IS NULL OR (s.due_at,c.id) > (${String(after.cursor_due_at)}::timestamptz,${String(after.id)}::uuid))`}
+      ORDER BY s.due_at NULLS LAST,c.id LIMIT ${candidateBatchSize}`, async row => {
       const documents = await tx`SELECT
           d.id IS NOT NULL AND d.deleted_at IS NULL AND (np.document_id IS NULL OR
             (np.workspace_id=c.workspace_id AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
@@ -85,24 +127,23 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
         LEFT JOIN opening_note_provenance np ON np.document_id=linked.id
         LEFT JOIN library_revisions origin ON origin.document_id=linked.id AND origin.workspace_id=c.workspace_id AND origin.revision_number=1
         WHERE c.id=${String(row.id)} AND c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}`;
-      if (documents.some(document => !document.admitted)) continue;
-      const lineage: RecordNoteLineage = { memoryIds: [], originTurnIds: [] };
-      const groups = [];
+      const sources: RecordSources = { refs: [], memoryIds: [], originTurnIds: [] };
       for (const document of documents) {
-        const group = await readRecordNoteSources(tx, scope, document, collectLineage ? refs => {
-          lineage.memoryIds.push(...refs.memoryIds);
-          lineage.originTurnIds.push(...refs.originTurnIds);
-        } : undefined);
-        if (!group) break;
-        groups.push(group);
+        if (!document.admitted) return null;
+        const group = await readRecordNoteSources(tx, scope, document, Boolean(collectLineage));
+        if (!group) return null;
+        sources.refs.push(...group.refs);
+        sources.memoryIds.push(...group.memoryIds);
+        sources.originTurnIds.push(...group.originTurnIds);
       }
-      if (groups.length !== documents.length) continue;
-      collectLineage?.(lineage);
-      const noteRefs = groups.flat();
+      return sources;
+    });
+    for (const { row, sources } of page) {
       // Cards retain source identities; capture each current source version as consumed metadata.
       const refs = (row.source_ids as string[]).length ? await tx`SELECT id AS "sourceId",version AS "sourceVersion" FROM opening_sources
         WHERE workspace_id=${scope.workspaceId} AND id=ANY(${row.source_ids as string[]}::uuid[])` : [];
-      out.sourceRefs.push(...refs.map(ref => ({ sourceId: String(ref.sourceId), sourceVersion: Number(ref.sourceVersion) })), ...noteRefs);
+      out.sourceRefs.push(...refs.map(ref => ({ sourceId: String(ref.sourceId), sourceVersion: Number(ref.sourceVersion) })));
+      collectRecordSources(out, sources, collectLineage);
       out.evidence.push({ id: `card:${row.id}`, kind: "card", title: "复习卡片", recordId: String(row.id), href: "/opening/cards", revision: String(row.content_version) });
       out.data.push({ id: row.id, contentVersion: Number(row.content_version), courseId: row.course_id, dueAt: row.due_at ? iso(row.due_at) : null, answerWithheld: true,
         summary: `卡片 ${row.id}；内容版本 ${row.content_version}；复习到期 ${row.due_at ? iso(row.due_at) : "未知"}；复习安排不是掌握证明，答案未释放` });

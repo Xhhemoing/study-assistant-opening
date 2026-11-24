@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createScopedOpeningSystemQueryReader } from "../../packages/database/src/repositories/opening-system-query";
 import { createOpeningDatasetRepository } from "../../packages/database/src/repositories/opening-dataset";
 import { OPENING_DATASET_POLICY_VERSION } from "@aistudy/contracts";
 import { createCardRepository, createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository,
@@ -152,7 +153,7 @@ describe("synthetic deidentified dataset repository", () => {
     }, 30_000,
   );
 
-  it("keeps a pre-upgrade empty snippet readable while excluding it from republished exports", async () => {
+  it.each(["empty legacy", "missing restored"])("keeps a %s snippet readable while excluding it from republished exports", async kind => {
     const fixture = await createOpeningFixture();
     try {
       const { sql, scope } = fixture;
@@ -161,7 +162,12 @@ describe("synthetic deidentified dataset repository", () => {
       const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
         title: "Old snippet", text: "Old answer", savedTurnId,
       });
-      await sql`UPDATE opening_note_provenance SET context_source_refs='[]'::jsonb WHERE document_id=${documentId}`;
+      if (kind === "missing restored") {
+        // NativeBackup can retain the first revision while omitting its Opening provenance.
+        await sql`DELETE FROM opening_note_provenance WHERE document_id=${documentId}`;
+      } else {
+        await sql`UPDATE opening_note_provenance SET context_source_refs='[]'::jsonb WHERE document_id=${documentId}`;
+      }
       await publishSnippet(fixture, documentId);
       await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
         expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
@@ -345,6 +351,52 @@ describe("synthetic deidentified dataset repository", () => {
       try {
         expect((await datasets.read(scope)).dialogueEvaluation.map(row => row.role).sort()).toEqual(["assistant", "user"]);
       } finally { clock.mockRestore(); }
+    } finally { await fixture.close(); }
+  });
+
+  it.each(["notes", "cards"] as const)("paginates only admitted %s and collects only the returned page's lineage", async name => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const addRow = async (index: number, verified: boolean) => {
+        const sourceId = await insertSource(sql, scope);
+        await backupRows(sql, scope).chunk(sourceId, 0);
+        const memoryId = await insertMemory(sql, scope, "Preference", [await insertOwnedTurn(sql, scope)]);
+        const turnId = await insertOwnedTurn(sql, scope, { role: "assistant",
+          contextSourceRefs: [{ sourceId, sourceVersion: 0 }, { memoryDependencyIds: [memoryId] }] });
+        const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+          title: "Paginated note", text: "Answer", savedTurnId: turnId,
+        });
+        if (!verified) await sql`UPDATE opening_note_provenance SET context_source_refs='[]' WHERE document_id=${documentId}`;
+        const card = await createCardRepository(sql).createCard({ ...scope, sourceDocumentId: documentId, front: "Prompt", back: "Answer" });
+        await sql`UPDATE library_documents SET updated_at='2025-01-01'::timestamptz - ${index}::int * interval '1 day' WHERE id=${documentId}`;
+        await sql`UPDATE card_review_states SET due_at='2025-01-01'::timestamptz + ${index}::int * interval '1 day' WHERE card_id=${card.id}`;
+        return { id: name === "notes" ? documentId : card.id, sourceId, memoryId, turnId };
+      };
+      await addRow(0, false);
+      await addRow(1, false);
+      const collectLineage = vi.fn();
+      const read = createScopedOpeningSystemQueryReader(sql, scope, { collectLineage });
+      const page = (offset: number) => read({ name, arguments: { limit: 1, offset } }, new AbortController().signal);
+
+      expect(await page(0)).toMatchObject({ status: "unknown", reason: "no_data", nextOffset: null, data: [], evidence: [], sourceRefs: [] });
+      expect(collectLineage).not.toHaveBeenCalled();
+
+      const admitted = await addRow(2, true);
+      const second = await addRow(3, true);
+      const third = await addRow(4, true);
+      const checkPage = async (offset: number, row: typeof admitted, nextOffset: number | null) => {
+        collectLineage.mockClear();
+        const result = await page(offset);
+        expect(result).toMatchObject({ status: nextOffset === null ? "ok" : "partial",
+          reason: nextOffset === null ? "read" : "truncated", nextOffset,
+          data: [{ id: row.id }], evidence: [{ recordId: row.id }], sourceRefs: [{ sourceId: row.sourceId, sourceVersion: 0 }] });
+        expect(collectLineage).toHaveBeenCalledExactlyOnceWith({ memoryIds: [row.memoryId], originTurnIds: [row.turnId] });
+      };
+      await checkPage(0, admitted, 1);
+      await checkPage(1, second, 2);
+      await checkPage(2, third, null);
+      expect(await page(3)).toMatchObject({ status: "unknown", reason: "no_data", nextOffset: null, data: [], evidence: [], sourceRefs: [] });
     } finally { await fixture.close(); }
   });
 

@@ -39,6 +39,7 @@ function deps(overrides?: {
   sources?: string[];
   provenance?: EphemeralProvenanceRepository;
   resolveModel?: EphemeralTutorDeps["resolveModel"];
+  pageImages?: EphemeralTutorDeps["pageImages"];
   listReadySourceIdsForCourse?: EphemeralTutorDeps["listReadySourceIdsForCourse"];
   studyContext?: EphemeralTutorDeps["studyContext"];
   exposures?: EphemeralTutorDeps["exposures"];
@@ -78,6 +79,7 @@ function deps(overrides?: {
     exposures: overrides?.exposures,
     provider: { complete },
     resolveModel: overrides?.resolveModel,
+    pageImages: overrides?.pageImages,
     listReadySourceIdsForCourse: overrides?.listReadySourceIdsForCourse,
     config: {
       maxContextCharacters: 12_000,
@@ -152,6 +154,37 @@ describe("ephemeral tutor service", () => {
     await service.replyEphemeral(scope, { text: "read page", sourceIds: [sourceId], currentPage: 2, mode: "explain", history: [] });
     expect(complete.mock.calls[0]?.[0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: images });
   });
+  it.each([true, false])("requires verified provenance for every dispatched page image (known=%s)", async known => {
+    const second = { ...chunk, id: "10000000-0000-4000-8000-000000000005", sourceId: foreignSource, sourceVersion: 2 };
+    const images = [sourceId, known ? foreignSource : chunkId].map(id => ({
+      mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId: id, physicalPage: 2,
+    }));
+    const complete = vi.fn<NonNullable<EphemeralTutorDeps["provider"]>["complete"]>(async () => output);
+    const record = vi.fn(async () => chunkId);
+    const pageImages = vi.fn(async () => images);
+    const f = deps({
+      chunks: [chunk, second], pageImages, provenance: { record, resolveHistory: async () => [] },
+      retrieveContext: async () => ({ chunks: [chunk], mode: "lexical", assertCurrent: async () => {} }),
+      resolveModel: async () => ({ provider: { complete }, supportsVision: true,
+        modelSnapshot: { id: "v", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576,
+          mediaInputCentsPerMillion: 100, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+        inputCentsPerMillion: 1, outputCentsPerMillion: 1 }),
+    });
+    const pending = f.service.replyEphemeral(scope, { text: "read page", sourceIds: [sourceId, foreignSource], currentPage: 2, mode: "explain", history: [] });
+    if (!known) {
+      await expect(pending).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+      expect(complete).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+      return;
+    }
+    await pending;
+    expect(pageImages).toHaveBeenCalledWith(scope, { sourceIds: [sourceId, foreignSource], sourceVersions: { [sourceId]: 1, [foreignSource]: 2 }, physicalPage: 2 });
+    expect(complete.mock.calls[0]?.[0]).toMatchObject({ chunks: [chunk], imageParts: images });
+    expect(record).toHaveBeenCalledWith(scope, expect.objectContaining({
+      contextSourceRefs: [{ sourceId, sourceVersion: 1 }, { sourceId: foreignSource, sourceVersion: 2 }],
+    }));
+  });
+
   it("blocks an unavailable temporary route without a fallback provider or charge", async () => {
     const f = deps({ resolveModel: async () => { throw new Error("route unavailable"); } });
     await expect(f.service.replyEphemeral(scope, { text: "hello", sourceIds: [], mode: "listen", history: [] })).rejects.toThrow("route unavailable");
@@ -362,6 +395,33 @@ describe("ephemeral content-free provenance", () => {
     expect(onText).not.toHaveBeenCalled();
     expect(provenance.record).not.toHaveBeenCalled();
   });
+  it.each(["before delivery", "during delivery"])("withholds streamed text when admitted history expires %s", async boundary => {
+    let expired = false;
+    const contextAnchor = { purpose: "learning_help" as const, attemptId: chunkId };
+    const deliver = vi.fn(async () => {
+      expired = true;
+      const at = "2026-10-19T00:00:00.000Z";
+      return { id: chunkId, releaseKey: "ephemeral:eph-key", contextAnchor, origin: "assistant" as const,
+        supportDomain: "unknown" as const, generatedAt: at, releasedAt: at, acknowledgedAt: null, historyRevision: 1 };
+    });
+    const provenance = { resolveHistory: vi.fn(async () => expired ? null : []), record: vi.fn(async () => chunkId) };
+    const onText = vi.fn();
+    const f = deps({ provenance, studyContext: { resolve: async () => contextAnchor }, exposures: { deliver },
+      complete: async (_input, _signal, onDelta) => {
+        expired = boundary === "before delivery";
+        await onDelta?.("solution");
+        return output;
+      },
+    });
+    await expect(f.service.replyEphemeral(scope, { text: "Explain", sourceIds: [], mode: "explain", contextAnchor,
+      historyPrivacyEpoch: 0, history: [{ role: "assistant", text: "Previous answer", provenanceId: sourceId }],
+    }, undefined, onText)).rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+    expect(f.complete).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledTimes(boundary === "before delivery" ? 0 : 1);
+    expect(onText).not.toHaveBeenCalled();
+    expect(provenance.record).not.toHaveBeenCalled();
+  });
+
   it.each([
     { label: "missing", provenanceId: undefined },
     { label: "unavailable or revoked", provenanceId: foreignSource },

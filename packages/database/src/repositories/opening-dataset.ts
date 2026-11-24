@@ -54,12 +54,15 @@ export function createOpeningDatasetRepository(sql: Sql) {
         const chunks = await tx`SELECT c.id, c.source_id FROM opening_source_chunks c
           JOIN opening_sources s ON s.id=c.source_id WHERE s.workspace_id=${workspace}`;
         const exclusions = await tx`SELECT workspace_id, source_id, memory_id FROM opening_privacy_exclusions WHERE workspace_id=${workspace}`;
-        const noteProvenance = await tx`SELECT p.document_id, p.workspace_id, p.context_source_refs,
+        const noteProvenance = await tx`SELECT d.id AS document_id, d.workspace_id,
+            CASE WHEN p.workspace_id=d.workspace_id THEN p.context_source_refs END AS context_source_refs,
             origin.reason='save-opening-snippet' AS snippet_origin
-          FROM opening_note_provenance p
-          LEFT JOIN library_revisions origin ON origin.workspace_id=p.workspace_id
-            AND origin.document_id=p.document_id AND origin.revision_number=1
-          WHERE p.workspace_id=${workspace}`;
+          FROM library_documents d
+          LEFT JOIN opening_note_provenance p ON p.document_id=d.id
+          LEFT JOIN library_revisions origin ON origin.workspace_id=d.workspace_id
+            AND origin.document_id=d.id AND origin.revision_number=1
+          WHERE d.workspace_id=${workspace}
+            AND (p.document_id IS NOT NULL OR origin.reason='save-opening-snippet')`;
         const tutorJobs = await tx`SELECT j.workspace_id, j.conversation_id, j.user_turn_id, j.assistant_turn_id,
             row_number() OVER (PARTITION BY j.conversation_id ORDER BY u.created_at, u.id)::int AS history_position,
             u.status='complete' AND a.status='complete' AND NOT u.query_system AND NOT a.query_system

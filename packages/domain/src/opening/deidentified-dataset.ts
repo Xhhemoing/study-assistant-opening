@@ -251,9 +251,15 @@ export function projectPrivacyGuardedOpeningDataset(
     ["item", field(anchor, "itemVersionId")], ["attempt", field(anchor, "attemptId")],
     ["chunk", field(anchor, "chunkId")],
   ];
+  const snippetDocuments = new Set(rows("library_revisions")
+    .filter(row => inWorkspaceOrUnscoped(row) && row.revision_number === 1 && row.reason === "save-opening-snippet")
+    .map(row => lineageKey("document", row.document_id)));
+  const snippetsWithoutProvenance = new Set(snippetDocuments);
   for (const row of rows("opening_note_provenance")) {
     if (!inWorkspaceOrUnscoped(row)) continue;
     const document = lineageKey("document", row.document_id);
+    snippetsWithoutProvenance.delete(document);
+    const isSnippetOrUnknown = row.snippet_origin !== false || snippetDocuments.has(document);
     if (referencesShreddedSource(row) || !Array.isArray(row.context_source_refs)) {
       exclude(document);
       continue;
@@ -279,18 +285,19 @@ export function projectPrivacyGuardedOpeningDataset(
         }
       }
     }
-    if (row.snippet_origin !== false && !verifiedSnippet && row.origin_turn_id == null && declaredOrigins.size !== 1) exclude(document);
+    if (isSnippetOrUnknown && !verifiedSnippet && row.origin_turn_id == null && declaredOrigins.size !== 1) exclude(document);
     if (declaredOrigins.size) {
       const origins = [...declaredOrigins];
       if (!origins.every(id => isUuid(id) && originTurns.has(id)) || !origins.some(id => typeof id === "string" && assistantOrigins.has(id))) {
         exclude(document);
       } else for (const origin of origins) link(lineageKey("turn", origin), document);
-    } else if (row.snippet_origin !== false && !verifiedSnippet) {
+    } else if (isSnippetOrUnknown && !verifiedSnippet) {
       // Source-only imports and older snippets may have lost source-free memory lineage.
       exclude(document);
     }
     if (hasUnattributedMemory && !hasMemoryMetadata && !declaredOrigins.size) exclude(document);
   }
+  for (const document of snippetsWithoutProvenance) exclude(document);
   for (const row of rows("library_documents")) {
     if (inWorkspaceOrUnscoped(row) && (row.deleted_at != null || referencesShreddedSource(row))) {
       exclude(lineageKey("document", row.id));
