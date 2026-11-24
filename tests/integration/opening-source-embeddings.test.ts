@@ -614,6 +614,13 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.\nAnswer: Yes.", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Yes.\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: Yes.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\nProof. A different derivation. ∎\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nPage 12\n2. Find y.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nAn ordinary observation.\n2. Find y.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nProof. A different derivation. ∎\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: No. ∎", primary: "Answer: No. ∎\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer: No. ∎", primary: "Answer: No. ∎\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\nYes.\nChapter 2: Geometry", sealed: true },
@@ -707,6 +714,21 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
       "The private calculation continues.",
       "Public prose after the answer.",
     ], [3], 2);
+  });
+
+  it.each(["1.", "## 1.", "- 3 -"])("keeps an archived auxiliary answer open past a non-exercise counter (%s)", async counter => {
+    await expectArchivedPdfPages([
+      "[图片描述]\nAnswer: x =\n" + counter,
+      "The private calculation continues.",
+      "Public prose after the answer.",
+    ], [3], 2);
+  });
+
+  it("allows an unmarked decimal number to close an auxiliary answer in an exercise", async () => {
+    await expectArchivedPdfPages([
+      "Exercise 1: Find x.\n[图片描述]\nAnswer: x =\n1.",
+      "Public prose after the answer.",
+    ], [2], 1);
   });
 
   it("completes an archived inline answer at a standalone decimal number in an exercise", async () => {

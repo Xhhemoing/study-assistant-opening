@@ -482,6 +482,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             AND last_answer_body !~* ${inlineContinues} AS auxiliary_sentence_ends,
           transcription AND inline_opener
             AND lane_reopening_position=lane_boundary_position AND lane_reopening_position>answer_end_position
+            AND (blank_exit_position IS NULL OR lane_reopening_position<=blank_exit_position)
             AND (answer_terminator IS NULL OR answer_terminator>=lane_reopening_position
               OR lane_reopening_position=first_content_after_terminator)
             AND (last_answer_body ~* ${inlineTerminator}
@@ -521,6 +522,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             FROM (
               SELECT *, NOT auxiliary AND (content_line OR line ~* ${bareAnswerCounter}) AND auxiliary_opener>0
                 AND (lane_boundary_position IS NULL OR position<lane_boundary_position)
+                AND (blank_exit_position IS NULL OR position<blank_exit_position)
                 AND (answer_terminator IS NULL OR position<=answer_terminator) AS answer_content
               FROM (
              SELECT *, auxiliary AND auxiliary_opener>0 AND candidate_terminator
@@ -528,15 +530,23 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                  > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER auxiliary_prior,0) AS auxiliary_answer_proof_close,
                min(position) FILTER (WHERE NOT auxiliary AND lane_reopening) OVER answer_lanes AS lane_reopening_position,
                min(position) FILTER (WHERE NOT auxiliary AND (lane_reopening OR section_answer)) OVER answer_lanes AS lane_boundary_position,
-               min(position) FILTER (WHERE NOT auxiliary AND candidate_terminator) OVER answer_lanes AS answer_terminator
+               min(position) FILTER (WHERE NOT auxiliary AND candidate_terminator) OVER answer_lanes AS answer_terminator,
+               min(position) FILTER (WHERE consumes_answer_blank) OVER answer_lanes AS blank_exit_position
              FROM (
-               SELECT *, opens_exercise OR opens_public
+               SELECT *,
+               -- Furniture leaves the blank pending. A proof heading upgrades the seal before a blank can end it.
+               NOT auxiliary AND auxiliary_opener>0 AND (lane_body<>'' OR section_answer)
+                 AND NOT candidate_proof AND NOT prior_answer_proof_open
+                 AND prior_blank_position>prior_body_position AS consumes_answer_blank,
+               opens_exercise OR opens_public
                  OR (NOT auxiliary AND NOT inline_opener AND auxiliary_opener>0 AND line ~ ${numberedExerciseInstruction}
                    AND NOT prior_answer_proof_open
                    AND (prior_answer_body ~* ${inlineTerminator}
                      OR prior_answer_body ~* ${inlineTerminal} AND prior_answer_body !~* ${inlineContinues})) AS lane_reopening
                FROM (
                  SELECT *, lag(lane_body) OVER prior_answer AS prior_answer_body,
+                 max(position) FILTER (WHERE btrim(line)='') OVER lane_prior AS prior_blank_position,
+                 max(position) FILTER (WHERE lane_body<>'') OVER lane_prior AS prior_body_position,
                    COALESCE(max(position) FILTER (WHERE candidate_proof) OVER prior_answer,0)
                      > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER prior_answer,0) AS prior_answer_proof_open
                  FROM (
@@ -545,14 +555,16 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                      candidate_body ~* ${inlineTerminator} AS candidate_terminator,
                      NOT auxiliary AND NOT transcription AND content_line AS native_line,
                      -- Keep ambiguous counters in identity without treating them as a same-page close.
-                     CASE WHEN NOT auxiliary AND NOT inline_opener AND line ~* ${bareAnswerCounter}
+                     CASE WHEN NOT inline_opener AND line ~* ${bareAnswerCounter}
                        AND NOT (in_exercise AND NOT atx AND line ~ ${String.raw`^ *\d+[.。] *$`}) THEN '' ELSE candidate_body END AS lane_body,
                      count(*) FILTER (WHERE inline_opener)
                      OVER (PARTITION BY id,auxiliary_block,transcription ORDER BY position ROWS UNBOUNDED PRECEDING) AS auxiliary_opener
                    FROM pdf_archive_inline_bodies
                  ) with_openers
                  WINDOW prior_answer AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener,lane_body<>''
-                   ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+                   ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                  lane_prior AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener ORDER BY position
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
                ) with_prior_answer
              ) with_reopenings
              WINDOW auxiliary_progress AS (PARTITION BY id,auxiliary_block,auxiliary_opener ORDER BY position ROWS UNBOUNDED PRECEDING),

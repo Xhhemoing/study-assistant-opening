@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v47-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v48-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -2969,6 +2969,7 @@ describe("bounded resumable PDF parser", () => {
     { answer: "Answer: x =\nProof. First. ∎\nTherefore x = 2.", seed: { proofBoundary: true } },
     { answer: "Answer: x =\nProof. First. ∎\nStill computing y =", seed: { seed: "inline_sealed" } },
     { answer: "Answer: x =\nProof. First. ∎\nProof. Second.", seed: { seed: "inline_proof_sealed" } },
+    { answer: "Answer: x =\n1.", seed: { seed: "inline_sealed" } },
     { answer: "Answer: Proof. Unclosed", seed: { seed: "inline_proof_sealed" } },
   ].map(scenario => ({ origin, ...scenario }))))("carries the $origin auxiliary answer $answer according to its final line", async ({ origin, answer, seed }) => {
     const vision = "[图片描述]\n" + answer;
@@ -2997,6 +2998,13 @@ describe("bounded resumable PDF parser", () => {
     { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.\nAnswer: Yes.", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Yes.\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: Yes.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\nProof. A different derivation. ∎\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nPage 12\n2. Find y.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nAn ordinary observation.\n2. Find y.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n\nProof. A different derivation. ∎\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: No. ∎", primary: "Answer: No. ∎\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer: No. ∎", primary: "Answer: No. ∎\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\nYes.\nChapter 2: Geometry", sealed: true },

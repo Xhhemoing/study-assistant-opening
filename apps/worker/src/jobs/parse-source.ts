@@ -510,6 +510,9 @@ function stripSealedSolutionLines(
       inlineBreakPending = false;
       setMode("inline_proof_sealed");
       changed = true;
+      closedAuxiliaryAnswerProof = false;
+      lastInlineBodyLine = trimmed;
+      inlineAnswerLines?.push(stripped);
       if (INLINE_SEALED_TERMINATOR_RE.test(stripped)) endInline();
       continue;
     }
