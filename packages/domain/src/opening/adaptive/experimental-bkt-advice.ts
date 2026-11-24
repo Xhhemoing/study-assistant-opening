@@ -132,6 +132,77 @@ function hasPriority(decision: NextLearningStep): boolean {
     || !["needs_check", "independent", "correct_needs_independent_check"].includes(decision.reasonCode);
 }
 
+function isAssisted(head: SnapshotObservation): boolean {
+  return head.assistance === "hinted" || head.assistance === "revealed";
+}
+
+function canRepeatAssistedError(rows: readonly SnapshotObservation[], possiblyAbsentIds: ReadonlySet<string>): boolean {
+  const earlierLabels = new Set<string>();
+  let sawGuaranteedError = false;
+  for (const row of rows) {
+    const optional = possiblyAbsentIds.has(row.id);
+    if (!optional && row.verifiedCorrect === "yes") break;
+    if (row.verifiedCorrect !== "no" || !isAssisted(row)) continue;
+    const labels = (row.errors ?? []).filter(error => error.source === "verified_steps").map(error => error.label);
+    if (!labels.length) continue;
+    if (labels.some(label => earlierLabels.has(label))) return true;
+
+    // Every guaranteed error in the unresolved segment must appear in the pair
+    // before any later selected error can participate.
+    if (!optional) {
+      if (sawGuaranteedError) break;
+      earlierLabels.clear();
+      sawGuaranteedError = true;
+    }
+    if (!sawGuaranteedError || !optional) for (const label of labels) earlierLabels.add(label);
+  }
+  return false;
+}
+
+function optionalHeadsTriggerPriority(
+  input: NextLearningStepInput, effectiveHeads: readonly SnapshotObservation[], possiblyAbsentIds: ReadonlySet<string>,
+  historicalDecision: NextLearningStep,
+): boolean {
+  const guaranteed = effectiveHeads.filter(row => !possiblyAbsentIds.has(row.id));
+  const triggersPriority = (rows: readonly SnapshotObservation[]) => {
+    const decision = nextLearningStep(buildDecisionInput({ ...input, observations: rows }));
+    return hasPriority(decision) || decision.activityKind !== historicalDecision.activityKind;
+  };
+  if (triggersPriority(guaranteed)) return true;
+
+  // These histories maximize, respectively, ungraded evidence, recent
+  // assistance, and unresolved drilldown errors.
+  for (const keep of [
+    (row: SnapshotObservation) => row.verifiedCorrect === "unknown",
+    isAssisted,
+    (row: SnapshotObservation) => row.verifiedCorrect === "no",
+  ]) {
+    if (triggersPriority(effectiveHeads.filter(row => !possiblyAbsentIds.has(row.id) || keep(row)))) return true;
+  }
+
+  // With an optional exact attempt ID absent, drilldown can fall back to
+  // an unresolved error on the original item.
+  const originalAttemptId = input.drilldownSnapshot?.restoreContext?.originalAttemptId;
+  if (originalAttemptId && possiblyAbsentIds.has(originalAttemptId)
+    && triggersPriority(effectiveHeads.filter(row => !possiblyAbsentIds.has(row.id)
+      || (row.verifiedCorrect === "no" && row.id !== originalAttemptId)))) return true;
+
+  const current = effectiveHeads.filter(row => row.usableForCurrentVersion === "yes");
+  if (canRepeatAssistedError(current, possiblyAbsentIds)) return true;
+  const latestFacts = new Set<string>();
+  for (const row of current) {
+    if (!possiblyAbsentIds.has(row.id)) break;
+    const metadata = { ...input.metacognitiveConfidence?.byObservationId.get(row.id), ...row };
+    const key = `${row.verifiedCorrect}:${row.independentAttempt}:${row.assistance}:${metadata.preAnswerConfidence === "guessing"}:${metadata.isMultiDraft === true}`;
+    // Rules for the newest head depend on these facts. One witness per
+    // combination keeps the number of rule evaluations bounded.
+    if (latestFacts.has(key)) continue;
+    latestFacts.add(key);
+    if (triggersPriority([...guaranteed, row])) return true;
+  }
+  return false;
+}
+
 /**
  * Explicit opt-in consumption, separate from rules and decision receipts. No status,
  * mastery, exam admission or phase is changed. Even high probability cannot bypass
@@ -165,18 +236,8 @@ export function nextLearningStepWithExperimentalBkt(
     || input.wantsFullExplanation || ambiguousPriority || hasPriority(historicalDecision)) {
     return fallback("priority_rule");
   }
-  if (possiblyAbsentIds.size) {
-    const guaranteed = visibleHeads.filter(row => !possiblyAbsentIds.has(row.id));
-    const withoutOptionalSuccess = visibleHeads.filter(row => {
-      if (!possiblyAbsentIds.has(row.id) || row.verifiedCorrect !== "yes") return true;
-      const confidence = "preAnswerConfidence" in row ? row.preAnswerConfidence
-        : input.metacognitiveConfidence?.byObservationId.get(row.id)?.preAnswerConfidence;
-      return confidence === "guessing";
-    });
-    if ([guaranteed, withoutOptionalSuccess].some(rows => {
-      const historical = historicalRuleInput(input, rows);
-      return historical.ambiguousPriority || hasPriority(nextLearningStep(historical.ruleInput));
-    })) return fallback("priority_rule");
+  if (possiblyAbsentIds.size && optionalHeadsTriggerPriority(input, ruleInput.observations, possiblyAbsentIds, historicalDecision)) {
+    return fallback("priority_rule");
   }
   const epistemic = experiment.epistemic;
   const shadow: Pick<ExperimentalBktAdviceResult, "epistemicShadowComparison"> = {};

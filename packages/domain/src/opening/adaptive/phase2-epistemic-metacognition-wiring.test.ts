@@ -931,6 +931,86 @@ it("R23 resolves 20 alternating legacy projections within 50 ms", () => {
   expect(elapsedMs).toBeLessThan(50);
 });
 
+it.each([
+  ["ungraded masks error", 3, "no", "independent", "unknown", false],
+  ["independent success masks assisted success", 3, "yes", "hinted", "yes", false],
+  ["independent success masks assisted majority", 3, "yes", "revealed", "yes", true],
+] as const)("R24 checks optional BKT priority when %s", (_, day, verifiedCorrect, assistance, laterGrade, majority) => {
+  const samples = projectProducedAttempts(bktSamples(5), at(3));
+  const first = head("optional-priority", day, { verifiedCorrect, assistance, independentAttempt: assistance === "independent" ? "yes" : "no" });
+  const later = head("optional-later", 4, { verifiedCorrect: laterGrade });
+  const optional = majority ? [first, later, head("optional-second-assisted", 2, {
+    assistance: "hinted", independentAttempt: "no",
+  })] : [first, later];
+  const guaranteed = majority ? [head("guaranteed-ungraded", 5, { verifiedCorrect: "unknown" })] : [];
+  const observations = [...samples.observations, ...optional, ...guaranteed];
+  const features = [...samples.features, ...optional.flatMap(row => [feature(row), feature(row, { recordedAt: at(8) })])];
+  const input = buildDecisionInput({ observations, wantsFullExplanation: false });
+  const result = nextLearningStepWithExperimentalBkt(input,
+    { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff: at(majority ? 6 : 5) });
+
+  expect(result.ruleDecision).toEqual(nextLearningStep(input));
+  expect(result.comparison).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+});
+
+it.each([false, true])("R24 checks repeated assisted errors across an intervening error (guaranteed: %s)", guaranteedMiddle => {
+  const samples = projectProducedAttempts(bktSamples(5), at(3));
+  const errors = [6, 5, 4].map(day => head(`error-${day}`, day, {
+    assistance: "hinted", independentAttempt: "no", verifiedCorrect: "no",
+    errors: [{ observationId: `error-${day}`, label: day === 5 ? "sign" : "substitution", feedback: "incorrect", source: "verified_steps" }],
+  }));
+  const ungraded = [8, 7].map(day => head(`ungraded-${day}`, day, { verifiedCorrect: "unknown" }));
+  const features = [...samples.features, ...errors.filter((_, index) => !guaranteedMiddle || index !== 1)
+    .flatMap(row => [feature(row), feature(row, { recordedAt: at(10) })])];
+  const input = buildDecisionInput({ observations: [...samples.observations, ...errors, ...ungraded], wantsFullExplanation: false });
+  const result = nextLearningStepWithExperimentalBkt(input,
+    { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff: at(9) });
+
+  expect(result.comparison).toMatchObject(guaranteedMiddle
+    ? { status: "compared", sampleCount: 5 } : { reason: "priority_rule", sampleCount: 0 });
+});
+
+it("R24 checks drilldown when an optional attempt ID can leave an item-level error unresolved", () => {
+  const samples = projectProducedAttempts(bktSamples(5), at(3));
+  const revised = head("original-attempt", 4, { problemId: "revised-item", verifiedCorrect: "no" });
+  const itemError = head("item-error", 3, { problemId: "original-item", verifiedCorrect: "no" });
+  const solved = head("solved", 5, { problemId: "revised-item" });
+  const input = buildDecisionInput({ observations: [...samples.observations, revised, itemError, solved], wantsFullExplanation: false,
+    drilldownSnapshot: { status: "restore_original_attempt", rootCause: "integration_step_coordination",
+      targetSkillId: "integrate", maxTotalProbes: 3, probesAdministered: 2, confirmedDeficitSkillIds: [],
+      posteriors: [], repairPlan: [], restoreContext: { originalAttemptId: revised.id, originalItemId: "original-item",
+        frozenDraftText: "", frozenCursorOffset: 0, startedAtMs: Date.parse(itemError.attemptedAt) } } });
+  const features = [...samples.features, ...[revised, itemError].flatMap(row => [feature(row), feature(row, { recordedAt: at(8) })])];
+
+  expect(nextLearningStep(input).reasonCode).toBe("independent");
+  const result = nextLearningStepWithExperimentalBkt(input,
+    { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff: at(6) });
+  expect(result.comparison).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+});
+
+it.each([
+  [9, false], [9, true], [12, false], [12, true],
+] as const)("R24 resolves %i alternating projections with twice as many slots (graded first: %s)", (copies, gradedFirst) => {
+  const first = head("first", 1);
+  const moved = { ...first, problemId: "moved", familyKey: "moved-family", verifiedCorrect: gradedFirst ? "no" as const : "yes" as const };
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey, attemptedAt: "2026-10-01T22:00:00.000Z" });
+  const observations = [...Array.from({ length: copies }, (_, index) => index % 2 ? moved : first), retry];
+  const graded = feature(first);
+  const features = [...Array.from({ length: copies * 2 }, (_, index) => index === 0 && gradedFirst ? graded : {
+    ...graded, recordedAt: at(index + 1), eligibility: { ...graded.eligibility, verifiedCorrect: "unknown" as const },
+    gaps: ["cartridge_evidence_not_qualified" as const],
+  }), feature(retry)];
+  const input = { scope, cutoff: at(2), observations, features, targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const start = performance.now();
+  const result = replayEvidence(input);
+  const elapsedMs = performance.now() - start;
+
+  expect(result).toEqual(gradedFirst
+    ? { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] }
+    : { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] });
+  expect(elapsedMs).toBeLessThan(50);
+});
+
 it("holds overlapping legacy revisions until their forced recording slot", () => {
   const first = head("first", 2);
   const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,
