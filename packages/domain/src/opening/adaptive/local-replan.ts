@@ -60,6 +60,7 @@ export function localReplanFixedBlocks(input: {
   tasks: readonly TaskItem[];
   now: Date;
   preserveAll?: boolean;
+  wheelSpinningCarryOverTaskId?: string;
   localDate?: string;
   timeZone?: string;
   inactiveRetestTaskIds?: ReadonlySet<string>;
@@ -74,20 +75,24 @@ export function localReplanFixedBlocks(input: {
       releasedTaskVersions.push({ id: task.id, version: task.version, status: task.status });
     }
   };
+  const nowMs = input.now.getTime();
   const fixedBlocks = input.acceptedBlocks.filter(block => {
-    if (Date.parse(block.start) <= input.now.getTime()) return true;
+    const startMs = Date.parse(block.start);
+    if (startMs <= nowMs) return true;
     const task = byId.get(block.taskId);
     if (inactiveRetestIds?.has(block.taskId.toLowerCase())) {
       recordReleased(task);
       return false;
     }
-    if (input.preserveAll) {
+    const preserveReservation = input.wheelSpinningCarryOverTaskId !== undefined
+      && block.taskId !== input.wheelSpinningCarryOverTaskId && task?.status === "pending";
+    if (input.preserveAll && !preserveReservation) {
       if (
         !task?.retest
         || task.status !== "pending"
         || (
           blockFitsRetestWindow(block, task, input.localDate, input.timeZone)
-          && (!task.notBefore || Date.parse(task.notBefore) <= Date.parse(block.start))
+          && (!task.notBefore || Date.parse(task.notBefore) <= startMs)
         )
       ) {
         return true;
@@ -100,7 +105,9 @@ export function localReplanFixedBlocks(input: {
       !task
       || (
         task.status === "pending"
-        && (!task.notBefore || Date.parse(task.notBefore) <= input.now.getTime())
+        && (!task.notBefore || Date.parse(task.notBefore) <= (preserveReservation ? startMs : nowMs))
+        && (!preserveReservation || (startMs > nowMs
+          && (task.dueAt === null || Date.parse(block.end) <= Date.parse(task.dueAt))))
         && blockFitsRetestWindow(block, task, input.localDate, input.timeZone)
       )
     ) {
@@ -128,6 +135,7 @@ export function buildLocalReplan(input: {
   const carryOver = wheelSpinningGuard?.triggered ? spinningTask : undefined;
   const { fixedBlocks: accepted, releasedTaskVersions } = localReplanFixedBlocks({
     ...input,
+    wheelSpinningCarryOverTaskId: carryOver?.id,
     localDate: input.options.localDate,
     timeZone: input.options.timeZone,
   });
@@ -154,7 +162,8 @@ export function buildLocalReplan(input: {
     && !fixedFutureIds.has(task.id)
     && !input.excludedTaskIds?.has(task.id)
     && !inactiveRetestIds?.has(task.id.toLowerCase())
-    && (!task.notBefore || Date.parse(task.notBefore) <= input.now.getTime())
+    // Wheel-spinning replans let planDay place deferred work at its earliest valid start.
+    && (carryOver !== undefined || !task.notBefore || Date.parse(task.notBefore) <= nowMs)
     && matchesScheduledDay(task, input.options.localDate, input.options.timeZone));
   const locked: TimeBlock[] = fixedBlocks.map(block => ({ start: block.start, end: block.end, kind: "locked" }));
   const planningNow = carryOver && !(Date.parse(input.options.planningNow ?? "") >= nowMs) ? input.now.toISOString() : input.options.planningNow;

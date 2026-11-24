@@ -1018,9 +1018,7 @@ it.each([
   const result = replayEvidence(input);
   const elapsedMs = performance.now() - start;
 
-  expect(result).toEqual(gradedFirst
-    ? { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] }
-    : { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] });
+  expect(result).toEqual({ weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] });
   expect(elapsedMs).toBeLessThan(50);
 });
 
@@ -1071,9 +1069,38 @@ it.each([8, 12])("R25 resolves %i projections across alternating graded and with
     expectFastVisibleRevisions(observations.slice(0, -1), features.slice(0, -1), cutoff);
     const result = replayEvidence({ scope, cutoff, observations, features, targetFamilyKeys: [], propagatedFamilyKeys: [] });
     expect(result).toEqual(cutoff === at(2)
-      ? { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] }
+      ? { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] }
       : { weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id] });
   }
+});
+
+it.each([1, 2])("R27 keeps %i uncertain legacy copies out of direct replay and holdout", copies => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const otherComponent = { ...first, verifiedCorrect: "no" as const };
+  const legacyCopies = Array.from({ length: copies }, () => first);
+  const features = [feature(first), feature(retry), feature(first, { recordedAt: at(7) })];
+  if (copies > 1) features.push(feature(first, { recordedAt: at(8) }));
+  // This future component shares the ID but none of the compatible slots.
+  features.push(feature(otherComponent, { recordedAt: at(9) }));
+  const input = { scope, cutoff: at(3), observations: [...legacyCopies, retry, otherComponent], features,
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const resolved = visibleObservationRevisions([...legacyCopies, otherComponent],
+    courseFeatureRevisions(features.filter(row => row.observationId === first.id), scope.courseId), Date.parse(input.cutoff));
+  expect(resolved.canBeAbsent).toBe(true);
+  expect(resolved.revisions.map(row => row.recorded)).toEqual([Date.parse(at(1))]);
+  expect(replayEvidence(input)).toEqual({
+    weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+  });
+
+  const own = head("own", 1);
+  const source = head("source", 2, { requirementKey: "apply-integrals" });
+  const fireInput = { scope, cutoff: at(3), observations: [own, source], targetFamilyKeys: [], propagatedFamilyKeys: [],
+    features: [feature(own), feature(source), feature(source, { recordedAt: at(7) })],
+    fireEdgesByObservationId: new Map([[source.id, { sourceSkillVersion: 1, edgeWeight: 1, covered: true, stepPassed: true }]]) };
+  expect(predictLearnerShadowV2(fireInput).belief.implicitLogCredit).toBe(0);
+  expect(predictLearnerShadowV2({ ...fireInput, observations: [own, { ...source, recordedAt: at(2) }] })
+    .belief.implicitLogCredit).toBeGreaterThan(0);
 });
 
 type SlotGrade = SnapshotObservation["verifiedCorrect"] | "withheld";
@@ -1085,7 +1112,7 @@ function gradeSlot(row: SnapshotObservation, grade: SlotGrade, recordedAt: strin
 }
 
 it.each([
-  { buckets: 2, copies: 10 }, { buckets: 2, copies: 12 }, { buckets: 3, copies: 12 },
+  { buckets: 2, copies: 10 }, { buckets: 2, copies: 12 }, { buckets: 3, copies: 12 }, { buckets: 3, copies: 15 },
 ])("R26 resolves $copies copies across $buckets overlapping buckets", ({ buckets, copies }) => {
   const first = head("first", 1);
   const wrong = { ...first, problemId: "wrong", familyKey: "wrong-family", verifiedCorrect: "no" as const };
@@ -1101,7 +1128,7 @@ it.each([
     expectFastVisibleRevisions(observations, features, cutoff);
     expect(replayEvidence({ scope, cutoff, observations: [...observations, retry], features: [...features, feature(retry)],
       targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual(cutoff === at(2)
-      ? { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] }
+      ? { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] }
       : { weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id] });
   }
 });
@@ -1494,7 +1521,8 @@ it("deduplicates records only once they are visible at a forecast cutoff", () =>
     feature(replacement), feature(featureOnly, { recordedAt: at(4) }), feature(backdated, { recordedAt: at(4) })] };
 
   expect(predictLearnerShadowV2(input).evidenceObservationIds).toEqual(["feature-only", "original", "problem"]);
-  expect(predictLearnerShadowV2(appended)).toEqual(predictLearnerShadowV2(input));
+  // The extra feature slot makes the untimestamped projection's visible presence uncertain.
+  expect(predictLearnerShadowV2(appended).evidenceObservationIds).toEqual(["original", "problem"]);
   expect(predictLearnerShadowV2({ ...appended, cutoff: at(5) }).evidenceObservationIds).toEqual(["backdated"]);
 });
 
@@ -1907,6 +1935,39 @@ it("releases an active reservation that starts exactly now and preserves other t
     wheelSpinningGuard: { taskId: taskId(1), events: stalledEvents(["09:50", "09:55", "10:00"]) } });
   expect(result).toMatchObject({ fixedBlocks: [past, other],
     releasedTaskVersions: [{ id: taskId(1), version: 1, status: "pending" }], wheelSpinningCarryOverTaskIds: [taskId(1)] });
+});
+
+it.each([
+  { scenario: "valid reservation", reservation: block(2, "10:30", "10:50"), availableUntil: "11:00", dueAt: null,
+    kept: true, expectedStart: "10:30", unscheduled: false },
+  { scenario: "reservation before the task opens", reservation: block(2, "10:10", "10:30"), availableUntil: "11:00", dueAt: null,
+    kept: false, expectedStart: "10:20", unscheduled: false },
+  { scenario: "reservation after the deadline", reservation: block(2, "10:30", "10:50"), availableUntil: "11:00", dueAt: time("10:45"),
+    kept: false, expectedStart: "10:20", unscheduled: false },
+  { scenario: "unreserved task", reservation: undefined, availableUntil: "11:00", dueAt: null,
+    kept: false, expectedStart: "10:20", unscheduled: false },
+  { scenario: "released task with no fitting slot", reservation: block(2, "10:10", "10:30"), availableUntil: "10:30", dueAt: null,
+    kept: false, expectedStart: undefined, unscheduled: true },
+])("R27 checks a deferred task's $scenario during wheel-spinning carryover", ({
+  reservation, availableUntil, dueAt, kept, expectedStart, unscheduled,
+}) => {
+  const now = new Date(time("10:00"));
+  const active = block(1, "09:45", "10:30");
+  const input = { acceptedBlocks: reservation ? [active, reservation] : [active],
+    tasks: [task(1), { ...task(2), notBefore: time("10:20"), dueAt }], now,
+    constraints: [{ kind: "free" as const, start: time("09:00"), end: time(availableUntil) }],
+    options: { localDate: "2026-10-16", timeZone: "UTC" } };
+  const replanned = buildLocalReplan({ ...input,
+    wheelSpinningGuard: { taskId: taskId(1), events: stalledEvents(["09:50", "09:55", "10:00"]) } });
+
+  expect(replanned.fixedBlocks).toEqual([{ ...active, end: time("10:00") }, ...(kept ? [reservation] : [])]);
+  expect(replanned.blocks.find(row => row.taskId === taskId(2))?.start).toBe(expectedStart ? time(expectedStart) : undefined);
+  expect(replanned.releasedTaskVersions.map(row => row.id).sort()).toEqual(reservation && !kept
+    ? [taskId(1), taskId(2)] : [taskId(1)]);
+  expect(replanned.unscheduledTaskIds).toEqual(unscheduled ? [taskId(2)] : []);
+  if (reservation) {
+    expect(buildLocalReplan(input).releasedTaskVersions).toEqual([{ id: taskId(2), version: 1, status: "pending" }]);
+  }
 });
 
 it("wraps a spinning task, preserves history and other tasks' blocks, and reuses freed future time", () => {
