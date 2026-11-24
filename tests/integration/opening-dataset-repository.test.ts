@@ -2,8 +2,11 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createOpeningDatasetRepository } from "../../packages/database/src/repositories/opening-dataset";
 import { OPENING_DATASET_POLICY_VERSION } from "@aistudy/contracts";
-import { createOpeningPrivacyRepository, createOpeningMemoryRepository } from "@aistudy/database";
+import { createLibraryRepository, createOpeningBudgetRepository, createOpeningEphemeralProvenanceRepository,
+  createOpeningPrivacyRepository, createOpeningMemoryRepository, createOpeningNoteRepository } from "@aistudy/database";
+import { createEphemeralTutorService } from "../../apps/web/src/features/opening/tutor/ephemeral-service";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
+import { insertOwnedTurn } from "./opening-memory-context-fixture";
 
 let f: OpeningFixture;
 let repo: ReturnType<typeof createOpeningDatasetRepository>;
@@ -70,5 +73,118 @@ describe("synthetic deidentified dataset repository", () => {
     await grantOther();
     expect((await repo.read(f.otherScope)).dialogueEvaluation).toEqual([]);
   });
+
+  it.each(["saved", "ephemeral"] as const)(
+    "keeps the source turn and retires a republished %s snippet once its memory expires",
+    async kind => {
+      const fixture = await createOpeningFixture();
+      try {
+        const { sql, scope } = fixture;
+        const datasets = createOpeningDatasetRepository(sql);
+        const notes = createOpeningNoteRepository(sql);
+        const sourceTurnId = await insertOwnedTurn(sql, scope);
+        const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+          text: "Source-free preference", sourceTurnIds: [sourceTurnId],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+        const memoryRefs = [{ memoryDependencyIds: [memory.id] }];
+        const snippet = { title: "Derived snippet", text: "Derived answer" };
+        const provenance = createOpeningEphemeralProvenanceRepository(sql);
+        let initialReceipt: string | undefined;
+        let documentId: string;
+        if (kind === "saved") {
+          const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: memoryRefs });
+          ({ documentId } = await notes.saveSnippet(scope, { ...snippet, savedTurnId }));
+        } else {
+          initialReceipt = await provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0, contextSourceRefs: memoryRefs });
+          const privacy = createOpeningPrivacyRepository(sql);
+          const budget = createOpeningBudgetRepository(sql, { envCapCents: 10_000 });
+          const service = createEphemeralTutorService({
+            sources: { listOwnedIds: async () => [] }, chunks: { listForSources: async () => [] },
+            privacy: { currentEpoch: privacy.getWorkspaceEpoch, snapshot: async current => ({
+              epoch: await privacy.getWorkspaceEpoch(current), excludedSourceIds: await privacy.listExcludedSourceIds(current),
+            }) },
+            budget: {
+              reserve: entry => budget.reserve(scope, entry),
+              release: (requestId, reason) => budget.release(scope, requestId, reason),
+              claimExecution: reservationId => budget.claimExecution(scope, reservationId),
+              settle: (...args) => budget.settle(scope, ...args),
+              markUnknown: reservationId => budget.markUnknown(scope, reservationId),
+            },
+            provenance,
+            provider: { complete: async input => ({
+              text: input.history[0]?.text ?? "History absent", citedChunkIds: [],
+              requestId: null, inputTokens: 1, outputTokens: 1, candidates: [],
+            }) },
+            config: { maxContextCharacters: 200, reservedCents: 5, maxOutputTokens: 64,
+              inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+          });
+          const reply = await service.replyEphemeral(scope, { text: "Follow up", mode: "listen", sourceIds: [], historyPrivacyEpoch: 0,
+            history: [{ role: "assistant", text: snippet.text, provenanceId: initialReceipt }] });
+          expect(reply).toMatchObject({ text: snippet.text, historyDiscarded: false, provenanceId: expect.any(String) });
+          ({ documentId } = await notes.saveSnippet(scope, { ...snippet, provenanceId: reply.provenanceId! }));
+          expect(await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+            .toEqual([{ context_source_refs: memoryRefs }]);
+        }
+        await publishSnippet(fixture, documentId);
+        await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+        const before = await datasets.read(scope);
+        expect(before.coursePackageQuality).toHaveLength(1);
+        expect(before.answerSequences).toHaveLength(1);
+        expect(before.dialogueEvaluation).toHaveLength(kind === "saved" ? 3 : 2);
+
+        await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${memory.id}`;
+        const after = await datasets.read(scope);
+        expect(after.coursePackageQuality).toEqual([]);
+        expect(after.answerSequences).toEqual([]);
+        expect(after.dialogueEvaluation.map(row => row.role)).toEqual(["user"]);
+        await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+          .resolves.toMatchObject({ id: documentId });
+        if (initialReceipt) await expect(provenance.resolveHistory(scope, [{ provenanceId: initialReceipt }], 0)).resolves.toBeNull();
+      } finally {
+        await fixture.close();
+      }
+    }, 30_000,
+  );
+
+  it("keeps a pre-upgrade empty snippet readable while excluding it from republished exports", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const datasets = createOpeningDatasetRepository(sql);
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Old snippet", text: "Old answer", savedTurnId,
+      });
+      await sql`UPDATE opening_note_provenance SET context_source_refs='[]'::jsonb WHERE document_id=${documentId}`;
+      await publishSnippet(fixture, documentId);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const dataset = await datasets.read(scope);
+      expect(dataset.coursePackageQuality).toEqual([]);
+      expect(dataset.answerSequences).toEqual([]);
+      expect(dataset.dialogueEvaluation.map(row => row.role)).toEqual(["assistant"]);
+      await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+        .resolves.toMatchObject({ id: documentId });
+    } finally {
+      await fixture.close();
+    }
+  }, 30_000);
 });
 async function grantOther() { await repo.grantConsent(f.otherScope,{policyVersion:OPENING_DATASET_POLICY_VERSION,consented:true,expiresAt:new Date(Date.now() + 3600000).toISOString()}); }
+
+async function publishSnippet({ sql, scope }: OpeningFixture, documentId: string) {
+  const activity = await insertTestTeachingActivity(sql, scope);
+  const unit = randomUUID(), session = randomUUID();
+  await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number)
+    VALUES(${unit},${scope.workspaceId},${scope.ownerUserId},'Published snippet',${documentId},1)`;
+  await sql`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
+    revision_number,source_refs,version) VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${activity},${unit},${documentId},1,'[]',1)`;
+  await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,activity_id,skill_label)
+    VALUES(${session},${scope.workspaceId},${scope.ownerUserId},${activity},'Published snippet')`;
+  await sql`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,activity_id,skill_label,client_key,create_intent,history_revision)
+    VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${session},${activity},'Published snippet',${randomUUID()},'{}',0)`;
+  const turn = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+  await sql`UPDATE opening_turns SET learning_session_id=${session} WHERE id=${turn}`;
+}

@@ -317,6 +317,18 @@ describe("ephemeral content-free provenance", () => {
     expect(reply.provenanceId).toBe(chunkId);
     expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
   });
+  it("carries the consumed history's memory dependency into the follow-up credential", async () => {
+    const memoryRef = { memoryDependencyIds: [foreignSource] };
+    const provenance = { resolveHistory: vi.fn(async () => [{ sourceId, sourceVersion: 1 }, memoryRef]), record: vi.fn(async () => chunkId) };
+    const f = deps({ sources: [], chunks: [], provenance });
+    const history = [{ role: "assistant" as const, text: "prior answer", provenanceId: sourceId }];
+    const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history, historyPrivacyEpoch: 0 });
+    expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
+    expect(provenance.record).toHaveBeenCalledWith(scope, {
+      reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 1 }, memoryRef],
+    });
+    expect(reply.provenanceId).toBe(chunkId);
+  });
   it.each([
     { label: "missing", provenanceId: undefined },
     { label: "unavailable or revoked", provenanceId: foreignSource },

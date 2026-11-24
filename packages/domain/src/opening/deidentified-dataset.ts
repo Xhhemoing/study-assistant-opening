@@ -96,7 +96,7 @@ const containsSourceRef = (ids: ReadonlySet<string>, refs: unknown) =>
     || containsId(ids, field(ref, "sourceId")) || containsId(ids, field(ref, "source_id")));
 
 type LineageKind = "session" | "activity" | "unit" | "chunk" | "item" | "observation" | "attempt" | "turn"
-  | "document" | "revision" | "problem" | "memory";
+  | "document" | "revision" | "problem" | "memory" | "history";
 type LineageLink = readonly [LineageKind, unknown];
 
 function lineageKey(kind: LineageKind, id: unknown): string | undefined {
@@ -171,9 +171,17 @@ export function projectPrivacyGuardedOpeningDataset(
     if (children) children.push(child);
     else dependents.set(parent, [child]);
   };
-  const sourceInventory = workspaceIds("opening_sources");
+  const sourceInventory = new Set<string>();
+  for (const row of rows("opening_sources")) {
+    if (inWorkspace(row) && (row.upload_state === undefined || row.upload_state === "uploaded")) addId(sourceInventory, row.id);
+  }
   const memoryInventory = workspaceIds("opening_memories");
   const turnInventory = workspaceIds("opening_turns");
+  const ownedConversations = new Set(rows("opening_conversations")
+    .filter(row => inWorkspace(row) && matchesId(row.owner_user_id, scope.ownerUserId)).map(row => row.id));
+  const originTurns = new Set(rows("opening_turns").filter(row => inWorkspace(row) && ownedConversations.has(row.conversation_id)
+    && row.role === "assistant" && (row.status === undefined || row.status === "complete")
+    && !row.query_system && row.system_query == null).map(row => canonicalId(row.id)));
   const chunkInventory = new Set<string>();
   // Source chunks without a workspace column inherit their scope from the source.
   for (const row of rows("opening_source_chunks")) {
@@ -197,7 +205,7 @@ export function projectPrivacyGuardedOpeningDataset(
     const id = canonicalId(value);
     // Citation keyframes can use media locators as well as database UUIDs.
     if (!id || id.length > 120) exclude(child);
-    else linkInventoryChunk(id, child);
+    else if (isUuid(id)) linkInventoryChunk(id, child);
   };
   const linkMemories = (ids: string[], child: string | undefined) => {
     for (const id of ids) {
@@ -216,6 +224,7 @@ export function projectPrivacyGuardedOpeningDataset(
     return [row.source_id, row.reference_source_id, field(row.context_anchor, "sourceId")]
       .some(id => id != null && !validSourceId(id))
       || (row.reference_check != null && !validSourceId(field(row.reference_check, "referenceId")))
+      || (row.grading_work_source != null && !validSourceId(field(row.grading_work_source, "id")))
       || (pins != null && (!isRecord(pins) || Object.entries(pins).some(([id, version]) => !validSourceId(id) || !validVersion(version))))
       || (row.source_ids !== undefined && (!Array.isArray(row.source_ids) || row.source_ids.some(id =>
         canonicalId(id) === undefined || (tables.opening_sources !== undefined && !containsId(sourceInventory, id)))));
@@ -247,14 +256,35 @@ export function projectPrivacyGuardedOpeningDataset(
       exclude(document);
       continue;
     }
+    const declaredOrigins = new Set<unknown>(row.origin_turn_id == null ? [] : [canonicalId(row.origin_turn_id)]);
+    let explicitLineage = false;
+    let hasMemoryMetadata = false;
+    let hasUnattributedMemory = false;
     for (const ref of row.context_source_refs) {
       if (isRecord(ref) && "memoryDependencyIds" in ref) {
         const metadata = turnMemoryDependencyMetadata(ref);
-        if (metadata) linkMemories(metadata.memoryDependencyIds, document);
-        else exclude(document);
-      } else if (!notePublicationMetadata(ref) && !validSourceRef(ref)) {
-        exclude(document);
+        if (metadata) {
+          linkMemories(metadata.memoryDependencyIds, document);
+          explicitLineage = true;
+          hasMemoryMetadata = true;
+        } else exclude(document);
+      } else {
+        const metadata = notePublicationMetadata(ref);
+        if (metadata?.originTurnIds) declaredOrigins.add(metadata.originTurnIds[0]);
+        else if (!metadata) {
+          if (!validSourceRef(ref)) exclude(document);
+          else if (ref.memoryOnly === true) hasUnattributedMemory = true;
+          else if (ref.publication !== true || row.snippet_origin === false) explicitLineage = true;
+        }
       }
+    }
+    if (declaredOrigins.size) {
+      const [origin] = declaredOrigins;
+      if (declaredOrigins.size !== 1 || !isUuid(origin) || !originTurns.has(origin)) exclude(document);
+      else link(lineageKey("turn", origin), document);
+    } else if (!explicitLineage || (hasUnattributedMemory && !hasMemoryMetadata)) {
+      // Publication-only refs cannot establish what an earlier snippet consumed.
+      exclude(document);
     }
   }
   for (const row of rows("library_documents")) {
@@ -352,6 +382,7 @@ export function projectPrivacyGuardedOpeningDataset(
     const snapshot = row.help_input_snapshot;
     const userTurnId = field(snapshot, "userTurnId");
     const assistantTurnId = field(snapshot, "assistantTurnId") ?? field(snapshot, "assistant_turn_id");
+    if (row.role === "assistant" && userTurnId != null && !containsId(turnInventory, userTurnId)) exclude(turn);
     link(lineageKey("turn", userTurnId ?? row.id), lineageKey("turn", assistantTurnId));
     return [
       ["session", row.learning_session_id], ["activity", row.teaching_activity_id], ["attempt", row.attempt_id],
@@ -378,14 +409,18 @@ export function projectPrivacyGuardedOpeningDataset(
           || (ref.page != null && (!validVersion(ref.page) || ref.page === 0))) exclude(activity);
         else {
           if (ref.chunkId != null) linkChunk(ref.chunkId, activity);
-          linkKeyframe(ref.keyframeChunkId, activity);
+          if (ref.keyframeChunkId != null) linkChunk(ref.keyframeChunkId, activity);
         }
       }
     }
     return [["unit", row.teaching_unit_id], ["document", row.document_id]];
   }, "activity_id");
   index("session", "opening_learning_sessions", row => [["activity", row.activity_id]]);
-  index("activity", "opening_teaching_activities", row => [["turn", field(row.create_intent, "sourceTurnId")]]);
+  index("activity", "opening_teaching_activities", row => {
+    const turnId = field(row.create_intent, "sourceTurnId");
+    if (turnId != null && !containsId(turnInventory, turnId)) exclude(lineageKey("activity", row.id));
+    return [["turn", turnId]];
+  });
   index("problem", "opening_problem_refs", row => [
     ["session", row.session_id], ["chunk", row.chunk_id], ["revision", row.teaching_revision_id],
   ], "problem_id");
@@ -402,8 +437,32 @@ export function projectPrivacyGuardedOpeningDataset(
     ...problemLinks(row),
     ...anchorLinks(row.context_anchor),
   ]);
+  const historyByConversation = new Map<unknown, { position: number; assistantTurnId: unknown }[]>();
   for (const row of rows("opening_tutor_jobs")) {
-    if (inWorkspaceOrUnscoped(row)) link(lineageKey("turn", row.user_turn_id), lineageKey("turn", row.assistant_turn_id));
+    if (!inWorkspaceOrUnscoped(row)) continue;
+    const assistant = lineageKey("turn", row.assistant_turn_id);
+    if (!containsId(turnInventory, row.user_turn_id)) exclude(assistant);
+    else link(lineageKey("turn", row.user_turn_id), assistant);
+    if (typeof row.history_position !== "number" || !ownedConversations.has(row.conversation_id) || row.consumable_history !== true) continue;
+    const entry = { position: row.history_position, assistantTurnId: row.assistant_turn_id };
+    const exchanges = historyByConversation.get(row.conversation_id);
+    if (exchanges) exchanges.push(entry);
+    else historyByConversation.set(row.conversation_id, [entry]);
+  }
+  for (const exchanges of historyByConversation.values()) {
+    // The recorded tutor job pairs each reply with its user turn. Build a
+    // linear prefix so earlier exchanges can taint later replies without
+    // tainting the user turns that follow them.
+    exchanges.sort((a, b) => a.position - b.position);
+    let prefix: string | undefined;
+    for (const { assistantTurnId } of exchanges) {
+      const assistant = lineageKey("turn", assistantTurnId);
+      link(prefix, assistant);
+      const current = lineageKey("history", assistantTurnId);
+      link(assistant, current);
+      if (!containsId(turnInventory, assistantTurnId)) exclude(current);
+      prefix = current;
+    }
   }
   if (!shredded.size && !excluded.size) {
     return { dataset: projectOpeningDataset({ ...input, privacyEpoch }, pseudonym), cohortPolicy };

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { EphemeralProvenanceError, mergeContextSourceRefs, type EphemeralProvenanceRepository } from "@aistudy/database";
+import { EphemeralProvenanceError, mergeContextProvenanceRefs, type EphemeralProvenanceRepository } from "@aistudy/database";
 import {
   providerOutputSchema,
   type StudyContextAnchor,
@@ -258,7 +258,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       }).mode };
       const learnerContext = deps.learnerContext ? await withLearnerContextError(() => deps.learnerContext!.read(scope, {
         courseId: input.courseId ?? contextAnchor?.courseId, sourceIds: allowedSourceIds })) : null;
-      const contextSourceRefs = mergeContextSourceRefs(
+      const contextSourceRefs = mergeContextProvenanceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [], learnerContext?.sourceRefs ?? [],
       );
       let streamedExposure: StudyExposureReceipt | undefined;

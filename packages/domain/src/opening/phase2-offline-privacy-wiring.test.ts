@@ -423,6 +423,47 @@ describe("persisted dataset provenance", () => {
   };
   const publishedTurn = turn("published", { learning_session_id: "published-session" });
 
+  it.each([
+    { label: "legacy empty lineage without an origin", originId: null, originRefs: [], visible: false },
+    { label: "origin missing from the inventory", originId: missingTurnId, originRefs: [], visible: false },
+    { label: "origin using an expired memory", originId: upstreamId, originRefs: memoryRefs, visible: false },
+    { label: "origin with explicit empty lineage", originId: upstreamId, originRefs: [], visible: true },
+  ])("checks a republished note with $label", ({ originId, originRefs, visible }) => {
+    const result = project({
+      ...published,
+      opening_memories: [{ ...owner, id: memoryId, kind: "temporary", status: "active", expires_at: time, source_turn_ids: [missingSourceId] }],
+      opening_note_provenance: [{ document_id: "document", origin_turn_id: originId, context_source_refs: [] }],
+      opening_turns: [turn(upstreamId, { context_source_refs: originRefs }), turn(missingSourceId, { role: "user" }), publishedTurn],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(visible ? ["activity:published"] : []);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(visible ? ["attempt:published"] : []);
+    expect(result.dialogueEvaluation.some(row => row.identity === "turn:published")).toBe(visible);
+    expect(result.dialogueEvaluation.some(row => row.identity === `turn:${missingSourceId}`)).toBe(true);
+  });
+
+  it("checks the origin's paired user and earlier exchanges for legacy note lineage", () => {
+    const user = "abcdef12-3456-4789-abcd-ef1234567895";
+    const prior = "abcdef12-3456-4789-abcd-ef1234567896";
+    const result = project({
+      ...published,
+      opening_memories: [{ ...owner, id: memoryId, kind: "temporary", status: "active", expires_at: time, source_turn_ids: [missingSourceId] }],
+      opening_note_provenance: [{ document_id: "document", origin_turn_id: upstreamId, context_source_refs: [] }],
+      opening_turns: [
+        turn(missingSourceId, { role: "user", context_source_refs: memoryRefs }), turn(prior),
+        turn(user, { role: "user" }), turn(upstreamId), publishedTurn,
+      ],
+      opening_tutor_jobs: [
+        { ...owner, conversation_id: "conversation", user_turn_id: user, assistant_turn_id: upstreamId,
+          history_position: 2, consumable_history: true },
+        { ...owner, conversation_id: "conversation", user_turn_id: missingSourceId, assistant_turn_id: prior,
+          history_position: 1, consumable_history: true },
+      ],
+    });
+    expect(result.coursePackageQuality).toEqual([]);
+    expect(result.answerSequences).toEqual([]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual([`turn:${user}`]);
+  });
+
   it.each([{ chunkId: absentChunkId }, { keyframeChunkId: absentChunkId }])(
     "excludes publication, turn, and attempt selections of absent chunks ($chunkId $keyframeChunkId)", selection => {
       const source = { sourceId: knownSourceId, version: 1 };
@@ -500,11 +541,12 @@ describe("persisted dataset provenance", () => {
   it("excludes a spec with an unknown source, malformed source ref, or malformed chunk ID", () => {
     const result = project({
       opening_sources: [{ ...owner, id: knownSourceId }],
-      opening_teaching_activities: ["missing-source", "malformed-ref", "malformed-chunk", "keep"].map(activity),
+      opening_teaching_activities: ["missing-source", "malformed-ref", "malformed-chunk", "malformed-keyframe", "keep"].map(activity),
       opening_teaching_activity_specs: [
         { ...owner, activity_id: "missing-source", source_refs: [{ sourceId: missingSourceId }] },
         { ...owner, activity_id: "malformed-ref", source_refs: [null] },
         { ...owner, activity_id: "malformed-chunk", source_refs: [{ sourceId: knownSourceId, chunkId: "not-a-uuid" }] },
+        { ...owner, activity_id: "malformed-keyframe", source_refs: [{ sourceId: knownSourceId, keyframeChunkId: "not-a-uuid" }] },
         { ...owner, activity_id: "keep", source_refs: [{ sourceId: knownSourceId, version: "0", chunkId: existingChunkId }] },
       ],
     });
@@ -528,6 +570,17 @@ describe("persisted dataset provenance", () => {
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
   });
 
+  it("keeps a media locator with a known source and primary chunk", () => {
+    const result = project({
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      opening_source_chunks: [{ id: existingChunkId, source_id: knownSourceId }],
+      opening_turns: [turn("media", { citations: [{
+        sourceId: knownSourceId, sourceVersion: 0, chunkId: existingChunkId, keyframeChunkId: "frame-1",
+      }] })],
+    });
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:media"]);
+  });
+
   it("excludes answers derived from missing problem, item, and observation sources", () => {
     const result = project({
       opening_sources: [{ ...owner, id: knownSourceId }],
@@ -537,10 +590,11 @@ describe("persisted dataset provenance", () => {
       opening_learning_observations: [
         { id: "listed", source_ids: [missingSourceId] }, { id: "version", source_versions: { [missingSourceId]: 1 } },
         { id: "reference", reference_source_id: missingSourceId }, { id: "check", reference_check: { referenceId: missingSourceId } },
+        { id: "photo", grading_work_source: { id: missingSourceId } },
       ].map(observation => ({ ...owner, source_turn_ids: [], ...observation })),
       opening_learning_attempts: [
         { id: "keep" }, { id: "problem", problem_id: "problem" }, { id: "item", item_version_id: "item" },
-        ...["listed", "version", "reference", "check"].map(id => ({ id, observation_id: id })),
+        ...["listed", "version", "reference", "check", "photo"].map(id => ({ id, observation_id: id })),
       ].map(attempt => ({ ...owner, activity_id: "keep", source_ids: [], ...attempt })),
     });
     expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:keep"]);
@@ -617,8 +671,9 @@ describe("persisted dataset provenance", () => {
     { reason: "a malformed memory ID", refs: [{ memoryDependencyIds: [null] }], visible: false },
     { reason: "a missing memory", refs: memoryRefs, visible: false },
     { reason: "a versioned workspace source", refs: [{ sourceId: knownSourceId, sourceVersion: 0 }], visible: true },
-    { reason: "an empty context", refs: [], visible: true },
-    { reason: "valid publication metadata", refs: [{ publicationCardIds: [knownSourceId] }], visible: true },
+    { reason: "an unattributed memory-only source", refs: [{ sourceId: knownSourceId, sourceVersion: 0, memoryOnly: true }], visible: false },
+    { reason: "an empty context without an origin", refs: [], visible: false },
+    { reason: "publication metadata without origin lineage", refs: [{ publicationCardIds: [knownSourceId] }], visible: false },
   ])("checks republished note lineage for $reason", ({ refs, visible }) => {
     const result = project({
       ...published,

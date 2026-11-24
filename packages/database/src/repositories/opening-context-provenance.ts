@@ -11,6 +11,7 @@ type MemoryAlias = "" | "m";
 export type ContextSourceRef = Pick<Citation, "sourceId" | "sourceVersion"> & {
   memoryOnly?: boolean;
 };
+export type ContextProvenanceRef = ContextSourceRef | { memoryDependencyIds: string[] };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isMemoryDependencyMetadata(value: unknown): value is { memoryDependencyIds: string[] } {
@@ -73,6 +74,24 @@ export function mergeContextSourceRefs(...groups: readonly ContextSourceRef[][])
   );
 }
 
+export function parseContextProvenanceRefs(value: unknown): ContextProvenanceRef[] | null {
+  if (!Array.isArray(value) || value.some(ref => ref && typeof ref === "object"
+    && "memoryDependencyIds" in ref && !isMemoryDependencyMetadata(ref))) return null;
+  const refs = parseContextSourceRefs(value);
+  const ids = parseContextMemoryDependencyIds(value);
+  return refs && ids ? [...refs, ...(ids.length ? [{ memoryDependencyIds: ids }] : [])] : null;
+}
+
+export function mergeContextProvenanceRefs(...groups: readonly ContextProvenanceRef[][]): ContextProvenanceRef[] {
+  const ids = new Set<string>();
+  const sources = groups.map(group => group.filter((ref): ref is ContextSourceRef => {
+    if (!("memoryDependencyIds" in ref)) return true;
+    for (const id of ref.memoryDependencyIds) ids.add(id.toLowerCase());
+    return false;
+  }));
+  return [...mergeContextSourceRefs(...sources), ...(ids.size ? [{ memoryDependencyIds: [...ids].sort() }] : [])];
+}
+
 export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] | null {
   return parseContextSourceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
 }
@@ -82,9 +101,10 @@ export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
   return db`CASE WHEN jsonb_typeof(${refs()})='array' THEN (
     SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM jsonb_array_elements(${refs()}) ref
     WHERE NOT EXISTS (
-      SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds')) AS metadata(key)
+      SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds'), ('originTurnIds')) AS metadata(key)
       WHERE ref=jsonb_build_object(metadata.key, ref->metadata.key)
         AND jsonb_typeof(ref->metadata.key)='array'
+        AND (metadata.key<>'originTurnIds' OR ref->metadata.key=jsonb_build_array(ref->metadata.key->0))
         AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(ref->metadata.key)='array'
           THEN ref->metadata.key ELSE '[]'::jsonb END) AS item(value)
           WHERE item.value IS NULL OR item.value !~* ${UUID.source})

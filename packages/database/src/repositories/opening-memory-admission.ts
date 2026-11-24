@@ -287,7 +287,7 @@ async function readOriginBindings(
     user_refs: unknown; user_backings?: string[][]; user_material_use?: MaterialUse | null; paired_destination_use?: MaterialUse;
   })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
-      ${savedSnippet ? db`` : db`${historicalUserTurnId(db)} AS historical_user_turn_id,`}
+      ${historicalUserTurnId(db)} AS historical_user_turn_id,
       u.context_source_refs AS user_refs, CASE WHEN u.id IS NOT NULL THEN ${userCourse()} END AS user_course_id,
       CASE WHEN u.id IS NOT NULL THEN ${turnMaterialUse(db, "u")} END AS user_material_use,
       CASE WHEN u.id IS NOT NULL THEN ${originUse ? originUse() : turnMaterialUse(db, "t")} END AS paired_destination_use,
@@ -665,19 +665,34 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
   const courseIds = new Set<string>();
   let roots: MemoryRoot[];
   let userRefs: ContextSourceRef[] = [];
+  const sourceIds = new Set<string>();
+  let refreshBinding: ((versions: ReadonlyMap<string, number>) => Promise<boolean>) | undefined;
   let resolve: (graphFor: (use: MemoryUse) => MemoryGraph) => { dependencies: MemoryDependencyStatus[]; sourceIds: string[] } | null;
   if ("turnId" in input) {
     const origin: MemoryOrigin = { id: input.turnId, course_id: null, turn_ids: [input.turnId] };
     // The note repository separately checks the assistant's recorded refs and citations.
-    const binding = (await readOriginBindings(tx, scope, [origin], { materialUse: "origin" }, true)).get(input.turnId)?.[0];
-    const user = binding?.user;
-    if (!binding || binding.ids === null || user?.ids === null) return null;
+    const readBinding = async (rules: MemoryMaterialRules) => (await readOriginBindings(tx, scope, [origin], rules, true))
+      .get(input.turnId)?.[0];
+    const initial = await readBinding({
+      materialUse: "origin", collectCourseIds: courseIds,
+    });
+    if (!initial || initial.ids === null || initial.user?.ids === null) return null;
+    let binding = initial;
+    const user = binding.user;
     roots = bindingRoots([binding], "origin");
-    if (!roots.length && !binding.backings.length && !user?.backings.length) return { sourceRefs: [], dependencyIds: [] };
+    if (!roots.length && !binding.ancestors.length) return { sourceRefs: [], dependencyIds: [] };
+    for (const ancestor of binding.ancestors) for (const id of ancestor.sourceIds) sourceIds.add(id);
     origin.course_id = binding.turn_course_id;
-    if (origin.course_id !== null) courseIds.add(origin.course_id);
-    if (user?.courseId && (user.ids.length || user.backings.length)) courseIds.add(user.courseId);
     userRefs = user?.memoryOnlyRefs ?? [];
+    if (binding.ancestors.length) refreshBinding = async versions => {
+      const currentCourses = new Set<string>();
+      const current = await readBinding({
+        materialUse: "origin", collectCourseIds: currentCourses, lockedSourceIds: [...versions.keys()],
+      });
+      if (!current || [...currentCourses].some(id => !courseIds.has(id))) return false;
+      binding = current;
+      return true;
+    };
     resolve = graphFor => {
       const resolved = resolveOrigins(graphFor, origin, [binding], "origin");
       if (!resolved) return null;
@@ -685,7 +700,8 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
       const historyDependencies = binding.ancestors.flatMap(entry => resolveMemoryDependencyStatus(
         graphFor(entry.materialUse), entry.memoryIds, entry.backings, entry.courseId, undefined, entry.backingSourceIds,
       ) ?? []);
-      return { sourceIds: resolved.sourceIds, dependencies: [...resolved.dependencies, ...historyDependencies] };
+      const dependencies = [...resolved.dependencies, ...historyDependencies];
+      return { sourceIds: dependencies.flatMap(memory => memory.sourceIds ?? []), dependencies };
     };
   } else {
     roots = input.dependencyIds.map(id => ({ id, use: "origin" }));
@@ -694,10 +710,10 @@ export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: Op
       return dependencies && { dependencies, sourceIds: dependencies.flatMap(memory => memory.sourceIds ?? []) };
     };
   }
-  const sourceIds = new Set<string>();
   await readMemoryDependencyGraphs(tx, scope, roots, { collectCourseIds: courseIds, collectSourceIds: sourceIds });
   if (!await lockActiveMemoryCourses(tx, scope, [...courseIds])) return null;
   const versions = await lockMemoryMaterialSources(tx, scope, sourceIds);
+  if (refreshBinding && !await refreshBinding(versions)) return null;
   const currentCourseIds = new Set<string>();
   const graphFor = await readMemoryDependencyGraphs(tx, scope, roots, {
     collectCourseIds: currentCourseIds, lockedSourceIds: [...versions.keys()],

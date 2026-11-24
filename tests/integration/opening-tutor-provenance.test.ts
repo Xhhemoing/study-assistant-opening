@@ -552,7 +552,7 @@ describe("saved tutor material provenance", () => {
         VALUES(${attemptId},${scope.workspaceId},${scope.ownerUserId},${sessionId},${activityId},'Published snippet',${randomUUID()},'{}',0)`;
       const turnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
       await sql`UPDATE opening_turns SET learning_session_id=${sessionId} WHERE id=${turnId}`;
-      return { documentId, unitId, activityId, turnId, attemptId };
+      return { documentId, unitId, activityId, turnId, attemptId, savedTurnId };
     };
     const publicationSource = await source();
     const affected = await publish("Memory note", [memoryRef], [{ sourceId: publicationSource, version: 0 }]);
@@ -583,7 +583,7 @@ describe("saved tutor material provenance", () => {
       expect.objectContaining({ document_id: affected.documentId, context_source_refs: [
         { sourceId: publicationSource, sourceVersion: 0, publication: true }, memoryRef,
       ] }),
-      expect.objectContaining({ document_id: unrelated.documentId, context_source_refs: [] }),
+      expect.objectContaining({ document_id: unrelated.documentId, context_source_refs: [{ originTurnIds: [unrelated.savedTurnId] }] }),
     ]));
   }, 30_000);
 
@@ -608,6 +608,35 @@ describe("saved tutor material provenance", () => {
     await expect(sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
       .resolves.toEqual([{ context_source_refs: [{ memoryDependencyIds: ids }] }]);
     await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${first.id}`;
+    await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+  });
+
+  it("retains snippet memory IDs from an earlier conversation exchange with no direct memory refs", async () => {
+    const { sql, scope } = f;
+    const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+      text: "Prior exchange preference", sourceTurnIds: [await insertOwnedTurn(sql, scope)],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const conversation = await createOpeningConversationRepository(sql).create(scope, { title: "Snippet from history", courseId: null });
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const complete = async () => {
+      const turn = await append(conversation.id);
+      const claim = (await jobs.claim(turn.jobId))!;
+      await jobs.completeTurn({ scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
+        claimToken: claim.claimToken, text: "Answer", citations: [], candidates: [], contextSourceRefs: [] });
+      return turn;
+    };
+    const prior = await complete();
+    const current = await complete();
+    await sql`UPDATE opening_turns SET context_source_refs=${sql.json([{ memoryDependencyIds: [memory.id] }])}
+      WHERE id=${prior.assistantTurnId}`;
+    const save = () => createOpeningNoteRepository(sql).saveSnippet(scope, {
+      title: "Snippet from history", text: "Answer", savedTurnId: current.assistantTurnId,
+    });
+    const { documentId } = await save();
+    expect(await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+      .toEqual([{ context_source_refs: [{ memoryDependencyIds: [memory.id] }] }]);
+    await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${memory.id}`;
     await expect(save()).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
   });
 

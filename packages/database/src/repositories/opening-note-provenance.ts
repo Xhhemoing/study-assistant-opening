@@ -126,8 +126,13 @@ export function createOpeningNoteRepository(sql: Sql) {
         }
         await tx`INSERT INTO library_revisions(id,workspace_id,document_id,revision_number,parent_revision_number,title,lifecycle,reason,blocks)
           VALUES(${randomUUID()},${scope.workspaceId},${documentId},1,NULL,${input.title},'scratch','save-opening-snippet',${tx.json(blocks as never)})`;
+        const provenance = [
+          ...refs,
+          ...(memoryIds.length ? [{ memoryDependencyIds: memoryIds }] : []),
+          ...(!refs.length && !memoryIds.length && input.savedTurnId ? [{ originTurnIds: [input.savedTurnId.toLowerCase()] }] : []),
+        ];
         await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
-          VALUES(${documentId},${scope.workspaceId},${tx.json(memoryIds.length ? [...refs, { memoryDependencyIds: memoryIds }] : refs)})`;
+          VALUES(${documentId},${scope.workspaceId},${tx.json(provenance)})`;
         return { documentId };
       });
     },

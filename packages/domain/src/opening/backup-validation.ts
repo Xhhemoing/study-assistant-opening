@@ -385,6 +385,9 @@ export function unavailableBackupMemoryLineage(
 /** Note provenance can carry publication metadata alongside its versioned source refs. */
 export function notePublicationMetadata(value: unknown) {
   if (!isRecord(value) || Object.keys(value).length !== 1) return null;
+  if (Array.isArray(value.originTurnIds) && value.originTurnIds.length === 1 && value.originTurnIds.every(isUuid)) {
+    return { originTurnIds: value.originTurnIds.map(id => id.toLowerCase()) };
+  }
   if (Array.isArray(value.answerKeyBlockIds) && value.answerKeyBlockIds.every(isUuid)) {
     return { answerKeyBlockIds: value.answerKeyBlockIds.map(id => id.toLowerCase()) };
   }
