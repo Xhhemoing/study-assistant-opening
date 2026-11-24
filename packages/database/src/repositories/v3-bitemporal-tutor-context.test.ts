@@ -1,13 +1,15 @@
 import type { Sql } from "postgres";
 import { expect, it, vi } from "vitest";
+import { createTutorMetadataHandler } from "../../../../apps/worker/src/jobs/tutor-metadata";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 import { loadTutorHistoryContext, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
+import { createOpeningConversationRepository } from "./opening-conversations";
 import { createOpeningMemoryRepository } from "./opening-memory";
-import { admitTaskCandidate } from "./opening-task-candidate-admission";
+import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "./opening-task-candidate-admission";
 import { sqlSimulation, unexpected } from "./opening-resident-f11-sql-simulation";
 import { assertTutorAttemptContext, readTutorAttemptContext, tutorAttemptFence } from "./opening-tutor-attempt-context";
 import {
-  assertTutorLearnerMisconceptionSnapshot, legacyTutorMisconceptionHashes, readMemoryMisconceptionLineages,
+  assertTutorLearnerMisconceptionSnapshot, readMemoryMisconceptionLineages, readTurnsWithInvalidMisconceptionMemories,
   readTutorLearnerMisconceptionContext, sourceTurnsAllowMisconceptionMemory, turnUsesInactiveMisconception, type TutorMisconceptionSnapshot,
 } from "./v3-bitemporal-misconception-memory";
 
@@ -111,6 +113,7 @@ it("checks a restored memory's assistant origin without a tutor job on confirmat
     if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
     if (text.startsWith("INSERT INTO opening_workspace_history_revisions") || text.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [];
     if (text.startsWith("SELECT t.id FROM opening_turns saved")) return [{ id: { turnId: assistantTurnId } }];
+    if (text.startsWith("SELECT t.id,") && text.includes(" AS bearing FROM opening_turns")) return [];
     if (text.startsWith("SELECT t.id FROM opening_turns t")) return active ? [{ id: assistantTurnId }] : [];
     if (text.startsWith("SELECT t.id FROM opening_turns")) return [];
     if (text.startsWith("SELECT id FROM opening_memories") && text.includes("lineage.hashes")) {
@@ -150,6 +153,7 @@ it.each([null, otherCourseId, courseId])("admits a course misconception source o
     }
     if (text.startsWith("SELECT t.id FROM opening_turns saved")) return [{ id: assistantTurnId }];
     if (text.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
+    if (text.startsWith("SELECT t.id,") && text.includes(" AS bearing FROM opening_turns")) return [];
     if (text.startsWith("SELECT t.id FROM opening_turns t")) {
       expect(text).toContain("prior_a.status = 'complete' AND NOT prior_a.query_system");
       expect(text).toContain("prior_a.created_at, prior_a.id");
@@ -195,6 +199,7 @@ it("rolls back replacement if a restored source's misconception becomes inactive
     if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
     if (text.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
     if (text.startsWith("SELECT t.id FROM opening_turns saved")) return [{ id: assistantTurnId }];
+    if (text.startsWith("SELECT t.id,") && text.includes(" AS bearing FROM opening_turns")) return [];
     if (text.startsWith("SELECT t.id FROM opening_turns t JOIN")) {
       checks.push(epoch);
       return epoch === 7 ? [{ id: assistantTurnId }] : [];
@@ -226,7 +231,7 @@ it("checks a restored task candidate's transitive misconception authority after 
     const { text } = query;
     if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
     if (text.startsWith("SELECT c.payload")) return [{ payload: { kind: "task", title: "Practice", minutes: 15, dueText: null },
-      source_turn_id: assistantTurnId, has_memory_dependencies: true, historical_user_turn_id: null,
+      source_turn_id: assistantTurnId, has_memory_dependencies: true, assistant_has_memory_dependencies: true, historical_user_turn_id: null,
       source_ids: [], course_id: courseId, role: "assistant", context_source_refs: [{ memoryDependencyIds: [dependencyId] }] }];
     if (text.startsWith("SELECT id FROM courses") && text.endsWith("FOR SHARE")) {
       courseLocked = true;
@@ -235,11 +240,18 @@ it("checks a restored task candidate's transitive misconception authority after 
     if (text.startsWith("SELECT t.id FROM opening_turns a")) return [{ id: assistantTurnId }];
     if (text.startsWith("SELECT c.id FROM opening_assistant_candidates")) {
       expect(courseLocked).toBe(true);
-      expect(text).toContain("WITH RECURSIVE mem_deps(dep_id)");
-      expect(text).toContain("lineage.course_id = (dm).course_id");
-      expect(text).toContain("v3_bitemporal_misconception_edges");
-      return active ? [{ id: candidateId }] : [];
+      expect(text).not.toContain("WITH RECURSIVE");
+      return [{ id: candidateId }];
     }
+    if (text.startsWith("SELECT t.id, ARRAY(")) {
+      expect(courseLocked).toBe(true);
+      return [{ id: assistantTurnId, origins: [{ id: assistantTurnId, courseId, consumerCourseId: courseId,
+        materialUse: "citation", refs: [{ memoryDependencyIds: [dependencyId] }], standalone: false }] }];
+    }
+    if (text.startsWith("SELECT id FROM opening_memories")) {
+      return active ? [{ id: { memoryId: dependencyId, courseId, active: true, hashes: [], origins: [] } }] : [];
+    }
+    if (text.startsWith("SELECT dep_m.id")) return [{ id: dependencyId, course_id: courseId, expires_at: null, source_turn_ids: [] }];
     return unexpected(query);
   });
   await expect(admitTaskCandidate(sql, scope, candidateId)).resolves.toBe(assistantTurnId);
@@ -270,7 +282,7 @@ it("persists exact restored memory revisions on completion and blocks stream del
     if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
     if (text.startsWith("SELECT id FROM opening_memories")) {
       if (!text.includes("lineage.hashes")) return [{ id: root }];
-      expect(query.values.slice(0, 3)).toEqual([scope.workspaceId, [root], courseId]);
+      expect(query.values.slice(0, 3)).toEqual([scope.workspaceId, [root], scope.ownerUserId]);
       return active ? [{ id: { memoryId: root, hashes: [JSON.stringify(lineage)] } }] : [];
     }
     if (text.startsWith("WITH tick AS MATERIALIZED")) return active ? [{ position: 0 }] : [];
@@ -308,7 +320,7 @@ it("checks omitted course A memory in its own course while sending selected cour
     if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }, { id: otherCourseId }];
     if (text.startsWith("SELECT 1 WHERE NOT EXISTS")) return [{}];
     if (text.startsWith("SELECT id FROM opening_memories") && text.includes("lineage.hashes")) {
-      return query.values[2] === courseId ? [{ id: { memoryId, hashes: [lineage] } }] : [];
+      return [{ id: { memoryId, hashes: [lineage], courseId, active: true, origins: [] } }];
     }
     return unexpected(query);
   });
@@ -707,22 +719,45 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
     expect((await db.query<{ server_version_num: string }>("SHOW server_version_num")).rows[0]?.server_version_num)
       .toMatch(/^16\d{4}$/);
     await db.exec(`
-      CREATE TABLE workspaces (id uuid, owner_user_id uuid, privacy_epoch int);
-      CREATE TABLE courses (id uuid, workspace_id uuid, archived_at timestamptz);
-      CREATE TABLE opening_conversations (id uuid, workspace_id uuid, owner_user_id uuid, course_id uuid);
-      CREATE TABLE opening_turns (id uuid, workspace_id uuid, conversation_id uuid, role text, status text,
+      SET enable_seqscan = on;
+      CREATE TABLE workspaces (id uuid PRIMARY KEY, owner_user_id uuid, privacy_epoch int);
+      CREATE TABLE courses (id uuid PRIMARY KEY, workspace_id uuid, archived_at timestamptz);
+      CREATE TABLE opening_conversations (id uuid PRIMARY KEY, workspace_id uuid, owner_user_id uuid, course_id uuid,
+        title text DEFAULT 'Tutor', updated_at timestamptz DEFAULT now());
+      CREATE TABLE opening_turns (id uuid PRIMARY KEY, workspace_id uuid, conversation_id uuid, role text, status text,
+        attempt_id uuid, source_ids uuid[] DEFAULT '{}', source_versions jsonb DEFAULT '{}', citations jsonb DEFAULT '[]',
+        chunk_id uuid, text text DEFAULT 'Answer', mode text DEFAULT 'listen',
         intent_hash text, context_source_refs jsonb, context_anchor jsonb, query_system bool, system_query jsonb,
         created_at timestamptz, learning_session_id uuid);
-      CREATE TABLE opening_tutor_jobs (id uuid, workspace_id uuid, conversation_id uuid, user_turn_id uuid, assistant_turn_id uuid);
-      CREATE TABLE opening_learning_sessions (id uuid, workspace_id uuid, owner_user_id uuid, course_id uuid);
-      CREATE TABLE opening_memories (id uuid, workspace_id uuid, course_id uuid, source_turn_ids jsonb);
-      CREATE TABLE v3_bitemporal_misconception_edges (revision_id uuid, workspace_id uuid, owner_user_id uuid,
+      CREATE TABLE opening_tutor_jobs (id uuid PRIMARY KEY, workspace_id uuid, conversation_id uuid, user_turn_id uuid,
+        assistant_turn_id uuid UNIQUE, status text DEFAULT 'succeeded', error jsonb, claim_token uuid, timing_execution_id uuid,
+        mode text DEFAULT 'listen');
+      CREATE TABLE opening_learning_sessions (id uuid PRIMARY KEY, workspace_id uuid, owner_user_id uuid, course_id uuid,
+        activity_id uuid, source_ids uuid[]);
+      CREATE TABLE opening_teaching_activities (id uuid PRIMARY KEY, workspace_id uuid, owner_user_id uuid, source_ids uuid[]);
+      CREATE TABLE opening_source_chunks (id uuid PRIMARY KEY, source_id uuid, source_version int);
+      CREATE TABLE opening_sources (id uuid PRIMARY KEY, workspace_id uuid, version int, upload_state text);
+      CREATE TABLE opening_source_versions (workspace_id uuid, source_id uuid, version int, availability text);
+      CREATE TABLE opening_privacy_exclusions (workspace_id uuid, source_id uuid, asset_deleted_at timestamptz);
+      CREATE TABLE course_asset_memberships (id uuid PRIMARY KEY, workspace_id uuid, course_id uuid, asset_id uuid, asset_type text, purpose text);
+      CREATE TABLE opening_help_exposures (id uuid PRIMARY KEY, workspace_id uuid, owner_user_id uuid, turn_id uuid,
+        exposure_origin text, release_key text, released_at timestamptz);
+      CREATE TABLE opening_jobs (id uuid PRIMARY KEY, workspace_id uuid, owner_user_id uuid, kind text, state text,
+        claim_token uuid, privacy_epoch int, payload jsonb);
+      CREATE TABLE opening_assistant_candidates (id uuid PRIMARY KEY, workspace_id uuid, conversation_id uuid,
+        source_turn_id uuid, source_ids jsonb, payload jsonb);
+      CREATE TABLE opening_workspace_history_revisions (workspace_id uuid PRIMARY KEY, owner_user_id uuid, revision bigint DEFAULT 0);
+      CREATE TABLE opening_memories (id uuid PRIMARY KEY, workspace_id uuid, course_id uuid, source_turn_ids jsonb,
+        status text DEFAULT 'active', kind text DEFAULT 'confirmed', expires_at timestamptz);
+      CREATE TABLE v3_bitemporal_misconception_edges (revision_id uuid PRIMARY KEY, workspace_id uuid, owner_user_id uuid,
         course_id uuid, privacy_epoch int, valid_range tstzrange, tx_range tstzrange, status text);
     `);
     await db.query("INSERT INTO workspaces VALUES ($1,$2,7)", [scope.workspaceId, scope.ownerUserId]);
     await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)", [jobId, scope.workspaceId, scope.ownerUserId]);
     await db.query("INSERT INTO v3_bitemporal_misconception_edges VALUES ($1,$2,$3,NULL,7,'(,)','(,)','candidate')",
       [candidate.revisionId, scope.workspaceId, scope.ownerUserId]);
+    const plans: { query: string; cost: number }[] = [];
+    let explain = false;
     class SqlFragment {
       constructor(readonly parts: readonly string[], readonly values: unknown[] = []) {}
       render(params: unknown[]): string {
@@ -733,16 +768,31 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         }).join("");
       }
       then(resolve: (rows: unknown[]) => void, reject: (error: unknown) => void) {
+        return this.execute().then(resolve, reject);
+      }
+      async execute() {
         const params: unknown[] = [];
-        return db.query(this.render(params), params).then(result => resolve(result.rows), reject);
+        const query = this.render(params).trim();
+        if (explain && /^(SELECT|WITH)\b/.test(query)) {
+          const result = await db.query<{ "QUERY PLAN": { Plan: { "Total Cost": number } }[] }>(
+            "EXPLAIN (FORMAT JSON) " + query, params);
+          const cost = result.rows[0]!["QUERY PLAN"][0]!.Plan["Total Cost"];
+          plans.push({ query, cost });
+          expect(cost, query.slice(0, 110)).toBeLessThan(20_000);
+        }
+        return (await db.query(query, params)).rows;
       }
     }
     const sql = Object.assign(
       (parts: TemplateStringsArray, ...values: unknown[]) => new SqlFragment(parts, values),
-      { unsafe: (text: string) => new SqlFragment([text]) },
+      { unsafe: (text: string) => new SqlFragment([text]), json: JSON.stringify,
+        begin: (run: (tx: Sql) => Promise<unknown>) => run(sql) },
     ) as unknown as Sql;
-    const read = () => sql`SELECT ${turnUsesInactiveMisconception(sql)} AS hidden FROM opening_turns t
-      WHERE t.id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'`;
+    const read = async () => {
+      const [row] = await sql`SELECT ${turnUsesInactiveMisconception(sql)} AS hidden FROM opening_turns t WHERE t.id=${assistantTurnId}`;
+      const invalid = await readTurnsWithInvalidMisconceptionMemories(sql, scope, [assistantTurnId], { display: true });
+      return [{ hidden: row?.hidden || invalid.has(assistantTurnId) }];
+    };
     for (const [encoded, hidden] of [
       [JSON.stringify(usedLineage), false], ["{", true], ["[]", true], ['"scalar"', true], ["null", true],
       [JSON.stringify({ ...usedLineage, revisionIds: [candidate.revisionId, candidate.revisionId] }), true],
@@ -774,20 +824,174 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
              ($3,$4,$7,'assistant','complete',NULL,'[]',$9,false,now()-interval '1 minute')`,
       [originId, userTurnId, assistantTurnId, scope.workspaceId, originConversation, JSON.stringify(exact), jobId,
         JSON.stringify([{ memoryDependencyIds: [memoryId] }]), JSON.stringify({ courseId })]);
-    await db.query("INSERT INTO opening_memories VALUES ($1,$3,$4,$5), ($2,$3,$4,$6)",
+    await db.query("INSERT INTO opening_memories(id,workspace_id,course_id,source_turn_ids) VALUES ($1,$3,$4,$5), ($2,$3,$4,$6)",
       [memoryId, derivedMemory, scope.workspaceId, courseId, JSON.stringify([originId]), JSON.stringify([assistantTurnId])]);
+    await db.exec('ANALYZE');
+    explain = true;
     await expect(read()).resolves.toEqual([{ hidden: false }]);
-    await expect(sql`SELECT ${legacyTutorMisconceptionHashes(sql)} AS hashes FROM opening_turns a WHERE a.id=${assistantTurnId}`)
-      .resolves.toEqual([{ hashes: [JSON.stringify(exact)] }]);
     await expect(readMemoryMisconceptionLineages(sql, scope, [derivedMemory], courseId))
       .resolves.toEqual(new Map([[derivedMemory, exact]]));
     await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], null)).resolves.toBe(false);
     await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], courseId)).resolves.toBe(true);
 
+    const repo = createOpeningConversationRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const candidateId = "77777777-7777-4777-8777-777777777777";
+    const historyUser = "88888888-8888-4888-8888-888888888888";
+    const currentUser = "99999999-9999-4999-8999-999999999999";
+    const restoredAnswer = "Saved follow-up";
+    const unavailable = "关联学习记录已更新或撤回，此回答内容不再显示。";
+    const expiry = new Date(Date.now() + 120_000).toISOString();
+    await db.query("INSERT INTO courses VALUES ($1,$2,NULL)", [otherCourseId, scope.workspaceId]);
+    await db.query("UPDATE opening_turns SET text=$1,intent_hash=$2,context_source_refs='[]' WHERE id=$3",
+      [restoredAnswer, JSON.stringify(exact), userTurnId]);
+    await db.query("UPDATE opening_turns SET text=$1 WHERE id=$2", [restoredAnswer, assistantTurnId]);
+    await db.query("INSERT INTO opening_assistant_candidates VALUES ($1,$2,$3,$4,'[]',$5)",
+      [candidateId,scope.workspaceId,jobId,assistantTurnId,{kind:"task",title:"Practice",minutes:15,dueText:null}]);
+    for (const destination of [otherCourseId, null]) {
+      await db.query("UPDATE opening_turns SET context_anchor=$1 WHERE id=$2",
+        [destination === null ? null : { courseId: destination }, assistantTurnId]);
+      await expect(repo.listTurns(scope, jobId)).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: assistantTurnId, text: unavailable }),
+      ]));
+      await expect(repo.listSummaries(scope)).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: jobId, lastTurnPreview: unavailable }),
+      ]));
+      await expect(repo.releaseReturnedTurnIds(scope, jobId, [assistantTurnId])).resolves.toEqual([
+        { id: assistantTurnId, role: "assistant", text: unavailable, citations: [] },
+      ]);
+      await expect(admitTaskCandidate(sql as never, scope, candidateId)).rejects.toMatchObject({ code: "VALIDATION" });
+      await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], destination)).resolves.toBe(false);
+    }
+    await db.query("UPDATE opening_turns SET intent_hash=NULL,context_source_refs=$1 WHERE id=$2",
+      [JSON.stringify([{ memoryDependencyIds: [memoryId] }]), userTurnId]);
+    await db.query("UPDATE opening_turns SET context_anchor=$1 WHERE id=$2", [{ courseId }, assistantTurnId]);
+    await db.query("UPDATE opening_memories SET kind='temporary',expires_at=$1 WHERE id=$2", [expiry,memoryId]);
+    await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,context_source_refs,
+        context_anchor,query_system,created_at,text)
+      VALUES ($1,$3,$4,'user','complete','[]',$5,false,now()-interval '90 seconds','Saved question'),
+        ($2,$3,$4,'user','complete','[]',$5,false,now(),'New question')`,
+      [historyUser,currentUser,scope.workspaceId,jobId,{ courseId }]);
+    await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$1,$3,$4)",
+      [jobId,scope.workspaceId,historyUser,assistantTurnId]);
+    await db.exec('ANALYZE');
+    const history = await loadTutorHistoryContext(sql, scope, currentUser);
+    expect(history.history.map(turn => turn.text)).toEqual(["Saved question", restoredAnswer]);
+    expect(history.memoryIds).toContain(memoryId);
+    expect(history.temporaryMemoryExpiresAt).toBe(expiry);
+    expect(history.historyCourseBindings).toEqual(expect.arrayContaining([expect.objectContaining({ courseId, memoryIds: [memoryId] })]));
+    await db.query("UPDATE opening_assistant_candidates SET source_turn_id=$1 WHERE id=$2", [userTurnId,candidateId]);
+    await expect(jobs.loadCompletedTurnForMetadata({ scope, jobId, assistantTurnId })).resolves.toMatchObject({ answer: restoredAnswer });
+    const leaseId = "ab000000-0000-4000-8000-000000000009";
+    const leaseToken = "ab000000-0000-4000-8000-000000000010";
+    const metadataPayload = { tutorJobId: jobId, assistantTurnId, tutorClaimToken: null };
+    await db.query("INSERT INTO opening_jobs VALUES ($1,$2,$3,'tutor-metadata','running',$4,7,$5)",
+      [leaseId,scope.workspaceId,scope.ownerUserId,leaseToken,metadataPayload]);
+    const provider = vi.fn(async () => ({ text: "metadata", requestId: null, citedChunkIds: [], candidates: [],
+      inputTokens: 1, outputTokens: 1 }));
+    const metadata = createTutorMetadataHandler({ tutorJobs: jobs, async callModel(_scope, _mode, options) {
+      const output = await options.authorizeAndStartSend!(provider);
+      await options.persistResult!(output, { reservationId: leaseId, settledCents: null });
+      return output;
+    } });
+    const runMetadata = () => metadata({ ...scope, id: leaseId, claimToken: leaseToken, privacyEpoch: 7 } as never, metadataPayload);
+    await expect(runMetadata()).resolves.toEqual({ skipped: false, appended: true });
+    expect(provider).toHaveBeenCalledOnce();
+    const sendJob = "ab000000-0000-4000-8000-000000000001";
+    await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,status) VALUES ($1,$2,$3,$4,'running')",
+      [sendJob,scope.workspaceId,jobId,currentUser]);
+    const send = vi.fn(async () => "sent");
+    const authorization = { contextSourceRefs: history.sourceRefs, globalMemoryIds: history.memoryIds,
+      historyCourseBindings: history.historyCourseBindings, historyMisconceptionLineage: history.historyMisconceptionLineage,
+      temporaryMemoryExpiresAt: history.temporaryMemoryExpiresAt };
+    await expect(jobs.authorizeSend(scope, sendJob, authorization, send)).resolves.toBe("sent");
+    await db.query("UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [memoryId]);
+    await expect(loadTutorHistoryContext(sql, scope, currentUser)).resolves.toMatchObject({ history: [] });
+    await expect(jobs.authorizeSend(scope, sendJob, authorization, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(send).toHaveBeenCalledOnce();
+    await expect(runMetadata()).resolves.toEqual({ skipped: true });
+    expect(provider).toHaveBeenCalledOnce();
+    await db.query("UPDATE opening_assistant_candidates SET source_turn_id=$1 WHERE id=$2", [assistantTurnId,candidateId]);
+    await expect(admitTaskCandidate(sql as never, scope, candidateId)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(assertTaskCandidateMemoryDependencies(sql as never, scope.workspaceId, assistantTurnId))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], courseId)).resolves.toBe(false);
+    await expect(repo.listTurns(scope, jobId)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: assistantTurnId, text: restoredAnswer }),
+    ]));
+    await db.query("UPDATE opening_memories SET expires_at=$1 WHERE id=$2", [expiry,memoryId]);
     await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted'");
     await expect(read()).resolves.toEqual([{ hidden: true }]);
     await expect(readMemoryMisconceptionLineages(sql, scope, [derivedMemory], courseId)).resolves.toEqual(new Map());
     await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [assistantTurnId], courseId)).resolves.toBe(false);
+    const recordAnswer = "ab000000-0000-4000-8000-000000000002";
+    const recordQuestion = "ab000000-0000-4000-8000-000000000003";
+    const recordTarget = "ab000000-0000-4000-8000-000000000004";
+    const receipt = { authorization: { purpose: "system_record_lookup", workspaceId: scope.workspaceId,
+      principalId: scope.ownerUserId, role: "workspace_owner", permissionRevision: "owner-fixture" },
+    version: "study-query-v1", asOf: "2026-11-23T12:00:00Z", privacyEpoch: 7, mode: "deterministic", status: "ok",
+    reason: "read", results: [] };
+    await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs='[]' WHERE id=$2",
+      [JSON.stringify(exact), assistantTurnId]);
+    await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,context_source_refs,
+        query_system,system_query,created_at,text)
+      VALUES ($1,$4,$5,'user','complete','[]',true,NULL,now()-interval '20 seconds','Find the newer result'),
+        ($2,$4,$5,'assistant','complete','[]',true,$6,now()-interval '10 seconds','Record answer'),
+        ($3,$4,$5,'user','complete','[]',true,NULL,now()+interval '1 second','What about that result?')`,
+      [recordQuestion,recordAnswer,recordTarget,scope.workspaceId,jobId,receipt]);
+    await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5)",
+      [recordAnswer,scope.workspaceId,jobId,recordQuestion,recordAnswer]);
+    const recordHistory = await loadTutorHistoryContext(sql, scope, recordTarget, "record_referents");
+    expect(recordHistory.history).toContainEqual({ role: "user", text: "Find the newer result" });
+    expect(recordHistory.history.every(turn => turn.role === "user")).toBe(true);
+
+    const sourceId = "ab000000-0000-4000-8000-000000000005";
+    const legacyConversation = "ab000000-0000-4000-8000-000000000006";
+    const legacyQuestion = "ab000000-0000-4000-8000-000000000011";
+    const legacyTarget = "ab000000-0000-4000-8000-000000000012";
+    const legacyAssistant = "ab000000-0000-4000-8000-000000000007";
+    const legacyId = "ab000000-0000-4000-8000-000000000008";
+    await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)", [legacyConversation,scope.workspaceId,scope.ownerUserId]);
+    await db.query("INSERT INTO opening_sources (id,workspace_id,version,upload_state) VALUES ($1,$2,1,'uploaded')", [sourceId,scope.workspaceId]);
+    await db.query("UPDATE opening_conversations SET course_id=NULL WHERE id=$1", [originConversation]);
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=NULL,status='candidate'");
+    await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs=$2,source_ids=ARRAY[$3]::uuid[] WHERE id=$4",
+      [JSON.stringify(usedLineage), [{sourceId,sourceVersion:1}], sourceId, originId]);
+    await db.query("UPDATE opening_memories SET course_id=NULL,kind='confirmed',expires_at=NULL WHERE id=ANY($1::uuid[])",
+      [[memoryId,derivedMemory]]);
+    await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,context_source_refs,query_system,created_at,text)
+      VALUES ($1,$3,$4,'assistant','complete',$5,false,now()-interval '2 seconds','Legacy origin'),
+        ($2,$3,$4,'assistant','complete','[]',false,now()-interval '1 second','Legacy follow-up')`,
+      [legacyId,legacyAssistant,scope.workspaceId,legacyConversation,[{sourceId,sourceVersion:1,memoryOnly:true}]]);
+    await db.query("UPDATE opening_memories SET source_turn_ids=$1 WHERE id=$2", [[legacyAssistant],derivedMemory]);
+    await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,context_source_refs,query_system,created_at,text)
+      VALUES ($1,$3,$4,'user','complete','[]',false,now()-interval '1500 milliseconds','Question with legacy context'),
+        ($2,$3,$4,'user','complete','[]',false,now(),'Next legacy question')`,
+      [legacyQuestion,legacyTarget,scope.workspaceId,legacyConversation]);
+    await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$1)",
+      [legacyAssistant,scope.workspaceId,legacyConversation,legacyQuestion]);
+    await expect(loadTutorHistoryContext(sql, scope, legacyTarget)).resolves.toMatchObject({
+      history: [{ role: "user", text: "Question with legacy context" }, { role: "assistant", text: "Legacy follow-up" }],
+      memoryIds: [memoryId], historyMisconceptionLineage: usedLineage,
+    });
+    await expect(readMemoryMisconceptionLineages(sql, scope, [derivedMemory], null)).resolves.toEqual(new Map([[derivedMemory,usedLineage]]));
+    await expect(repo.releaseReturnedTurnIds(scope, legacyConversation, [legacyAssistant])).resolves.toEqual([
+      {id:legacyAssistant,role:"assistant",text:"Legacy follow-up",citations:[]},
+    ]);
+    await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted'");
+    await expect(repo.releaseReturnedTurnIds(scope, legacyConversation, [legacyAssistant])).resolves.toEqual([
+      {id:legacyAssistant,role:"assistant",text:unavailable,citations:[]},
+    ]);
+    await expect(readMemoryMisconceptionLineages(sql, scope, [derivedMemory], null)).resolves.toEqual(new Map());
+    await expect(sourceTurnsAllowMisconceptionMemory(sql, scope, [legacyAssistant], null)).resolves.toBe(false);
+    await expect(loadTutorHistoryContext(sql, scope, legacyTarget)).resolves.toMatchObject({ history: [] });
+    await db.query("UPDATE opening_assistant_candidates SET source_turn_id=$1,conversation_id=$2 WHERE id=$3",
+      [legacyAssistant,legacyConversation,candidateId]);
+    await expect(admitTaskCandidate(sql as never, scope, candidateId)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(repo.listTurns(scope, legacyConversation)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: legacyAssistant, text: unavailable }),
+    ]));
+    expect(plans.length).toBeGreaterThan(0);
   } finally {
     await db.close();
   }

@@ -7,7 +7,8 @@ export { tutorAttemptFence, tutorAttemptFenceSchema } from "./opening-tutor-atte
 export type { TutorAttemptContext, TutorAttemptFence } from "./opening-tutor-attempt-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { assertTutorLearnerMisconceptionSnapshotInTx, lockMisconceptionContext, mergeTutorMisconceptionLineages, parseTutorMisconceptionLineage,
-  readActiveTutorMisconceptionLineages, readMemoryMisconceptionLineages, readSavedTutorMisconceptionLineage, turnUsesInactiveMisconception,
+  readActiveTutorMisconceptionLineages, readMemoryMisconceptionLineages, readSavedTutorMisconceptionLineage, readTurnsWithInvalidMisconceptionMemories,
+  turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception,
   type TutorMisconceptionLineage, type TutorMisconceptionSnapshot } from "./v3-bitemporal-misconception-memory";
 import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
@@ -841,6 +842,7 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
       SELECT j.conversation_id, j.user_turn_id, j.mode, t.text AS answer, u.text AS question,
         (COALESCE(u.query_system, false) OR COALESCE(t.query_system, false) OR t.system_query IS NOT NULL) AS query_system,
         t.context_source_refs, t.intent_hash AS assistant_intent_hash, u.context_source_refs AS user_context_source_refs,
+        ${turnHasMisconceptionMemoryDependencies(db)} AS has_misconception_memories,
         w.privacy_epoch, c.course_id AS conversation_course_id,
         u.source_ids || user_pins.source_ids
           || ${turnSessionMaterialIds(db, () => db`u`, () => db`c.owner_user_id`)} AS user_material_ids,
@@ -888,6 +890,7 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
     )
     SELECT t.conversation_id, t.user_turn_id, t.mode, t.answer, t.question, t.context_source_refs,
       t.privacy_epoch, t.course_id, t.assistant_course_id, t.query_system, t.assistant_intent_hash, t.conversation_course_id,
+      t.has_misconception_memories,
       (SELECT jsonb_agg(to_jsonb(evidence_row) ORDER BY evidence_row.origin) FROM (VALUES
         (1, t.context_source_refs, t.assistant_material_ids, t.assistant_version_refs,
           t.assistant_course_id, t.assistant_material_use, t.standalone_sessions, t.assistant_source_ids),
@@ -905,6 +908,9 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
     ) AND ${savedMemoryRootsActive("user")} AND ${savedMemoryRootsActive("assistant")}`;
   const [target] = await readTarget();
   if (!target) return;
+  const checkSavedMemories = async () => !target.has_misconception_memories
+    || !(await readTurnsWithInvalidMisconceptionMemories(db, input.scope, [input.assistantTurnId])).size;
+  if (!await checkSavedMemories()) return;
   const checkAncestors = target.query_system === false;
   const collectCourseIds = new Set<string>([target.course_id, target.assistant_course_id].filter(id => typeof id === "string"));
   const misconception = readSavedTutorMisconceptionLineage(target.assistant_intent_hash);
@@ -985,7 +991,7 @@ async function findCompletedCandidateTarget(db: TransactionSql, input: Completed
   }
   // Compare both saved origins again while their courses and materials are locked.
   const [currentTarget] = await readTarget();
-  if (!isDeepStrictEqual(target, currentTarget) || !await readEvidence(lockedSourceIds)) return;
+  if (!isDeepStrictEqual(target, currentTarget) || !await readEvidence(lockedSourceIds) || !await checkSavedMemories()) return;
   if (misconception) {
     await lockMisconceptionContext(db, input.scope.workspaceId);
     if (!(await readActiveTutorMisconceptionLineages(db, input.scope, [misconception])).has(0)) return;

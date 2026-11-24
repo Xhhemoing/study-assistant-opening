@@ -9,7 +9,8 @@ import {
 } from "./opening-context-provenance";
 import { lockActiveMemoryCourses, lockMemoryMaterialSources, sourceMaterialsActive } from "./opening-memory-admission";
 import { readTutorHistoryAncestors, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
-import { turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
+import { readTurnsWithInvalidMisconceptionMemories,
+  turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
 
 function candidateListedMaterials(tx: TransactionSql): ReturnType<FragmentFactory> {
   // Candidate source_ids also includes inherited references. Every direct use
@@ -83,10 +84,6 @@ function taskTurnOriginActive(tx: TransactionSql, workspaceId: string, alias: "a
     })}`;
 }
 
-function pairedUserUsesInactiveMisconception(tx: TransactionSql, includeMemory = true) {
-  return tx`EXISTS (SELECT 1 FROM LATERAL (SELECT u.*) t WHERE ${turnUsesInactiveMisconception(tx, "t", includeMemory)})`;
-}
-
 /** Share locks admit parallel accepts but serialize against owner/privacy deletion. */
 export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope, id: string): Promise<string | null> {
   const owners = await tx`
@@ -94,10 +91,11 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     FOR SHARE`;
   if (!owners.length) throw new OpeningPlanError("CONFLICT", "task candidate unavailable");
   const [candidate] = await tx<{ payload: unknown; source_turn_id: string; has_memory_dependencies: boolean | null;
-    course_id: string | null; material_use: "citation" | "practice"; source_ids: string[]; role: string; context_source_refs: unknown;
+    assistant_has_memory_dependencies: boolean; course_id: string | null; material_use: "citation" | "practice"; source_ids: string[]; role: string; context_source_refs: unknown;
     historical_user_turn_id: string | null; paired_user_turn_id: string | null;
     user_course_id: string | null; user_source_ids: string[] | null }[]>`
     SELECT c.payload, t.id AS source_turn_id,
+      ${turnHasMisconceptionMemoryDependencies(tx)} AS assistant_has_memory_dependencies,
       (${turnHasMisconceptionMemoryDependencies(tx)} OR ${turnHasMemoryDependencies(tx, () => tx`u.context_source_refs`)}) AS has_memory_dependencies,
       ${turnLineageCourse(tx, "t", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)} AS course_id,
       ${turnMaterialUse(tx, "t")} AS material_use, t.role, t.context_source_refs,
@@ -160,7 +158,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
     LEFT JOIN opening_turns u ON t.role='assistant' AND u.id=(${pairedUserTurnId(tx, () => tx`t`)})
       AND u.workspace_id=t.workspace_id AND u.conversation_id=t.conversation_id AND u.role='user' AND u.status='complete'
     WHERE c.id = ${id} AND c.workspace_id = ${scope.workspaceId}
-      AND NOT (${turnUsesInactiveMisconception(tx, "t", Boolean(candidate.has_memory_dependencies))})
+      AND NOT (${turnUsesInactiveMisconception(tx)})
       AND jsonb_typeof(c.source_ids) = 'array'
       AND jsonb_typeof(t.source_versions) = 'object' AND jsonb_typeof(t.citations) = 'array'
       AND ${assistantCandidateSourcesVersioned(tx, scope.workspaceId)}
@@ -169,8 +167,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
         IS NOT DISTINCT FROM ${candidate.course_id ?? null}::uuid
       AND u.id IS NOT DISTINCT FROM ${candidate.paired_user_turn_id ?? null}::uuid
       AND (u.id IS NULL OR (
-        NOT (${pairedUserUsesInactiveMisconception(tx, Boolean(candidate.has_memory_dependencies))})
-        AND ${turnLineageCourse(tx, "u", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)}
+        ${turnLineageCourse(tx, "u", () => tx`conv.course_id`, () => tx`conv.owner_user_id`)}
           IS NOT DISTINCT FROM ${candidate.user_course_id ?? null}::uuid
         AND ${taskTurnOriginActive(tx, scope.workspaceId, "u", () => tx`conv.course_id`,
           () => tx`conv.owner_user_id`, lockedSourceIds)}
@@ -188,6 +185,11 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
   if (!(Math.min(directDeadline, historyDeadline) > Date.now())) {
     throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
   }
+  const memoryTurns = [
+    ...(candidate.assistant_has_memory_dependencies ? [candidate.source_turn_id] : []),
+    ...(candidate.paired_user_turn_id && candidate.has_memory_dependencies ? [candidate.paired_user_turn_id] : []),
+  ];
+  if ((await readTurnsWithInvalidMisconceptionMemories(tx, scope, memoryTurns)).size) throw invalidSource();
   return candidate.has_memory_dependencies || hasAncestors || candidate.user_course_id || candidate.user_source_ids?.length
     ? candidate.source_turn_id : null;
 }
@@ -199,10 +201,33 @@ export async function assertTaskCandidateMemoryDependencies(
   if (dependencyTurnId === null) return;
   const deadlines = await readTurnMemoryDependencyDeadlines(tx, workspaceId, [dependencyTurnId], undefined,
     (scope, userTurnId) => readTutorHistoryAncestorStatus(tx, scope, userTurnId),
-    () => tx`NOT (${turnUsesInactiveMisconception(tx, "a", true)})
+    () => tx`NOT (${turnUsesInactiveMisconception(tx, "a")})
       AND ${taskTurnOriginActive(tx, workspaceId, "a", () => tx`c.course_id`, () => tx`c.owner_user_id`)}
-      AND (u.id IS NULL OR (NOT (${pairedUserUsesInactiveMisconception(tx)})
-        AND ${taskTurnOriginActive(tx, workspaceId, "u", () => tx`c.course_id`, () => tx`c.owner_user_id`)}))`);
+      AND (u.id IS NULL OR (${taskTurnOriginActive(tx, workspaceId, "u", () => tx`c.course_id`, () => tx`c.owner_user_id`)}))`);
+  if ((deadlines.get(dependencyTurnId) ?? -Infinity) > Date.now()) {
+    const [authority] = await tx<{ id: string | { ownerUserId: string; turnIds: string[] } }[]>`
+      SELECT id FROM workspaces w(workspace_id)
+      CROSS JOIN LATERAL (
+        SELECT ARRAY(
+          SELECT t.id FROM opening_turns t
+          WHERE t.workspace_id=w.workspace_id AND t.status='complete'
+            AND (t.id=${dependencyTurnId} OR t.id=(
+              SELECT j.user_turn_id FROM opening_tutor_jobs j
+              WHERE j.workspace_id=w.workspace_id AND j.assistant_turn_id=${dependencyTurnId}
+            ))
+            AND ${turnHasMisconceptionMemoryDependencies(tx)}
+        ) AS turn_ids
+      ) authority
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN cardinality(authority.turn_ids)=0 THEN to_jsonb(w.workspace_id)
+          ELSE jsonb_build_object('ownerUserId',w.owner_user_id,'turnIds',authority.turn_ids) END AS id
+      ) evidence
+      WHERE w.workspace_id=${workspaceId}`;
+    if (authority && typeof authority.id !== "string") {
+      const { ownerUserId, turnIds } = authority.id;
+      if ((await readTurnsWithInvalidMisconceptionMemories(tx, { workspaceId, ownerUserId }, turnIds)).size) deadlines.delete(dependencyTurnId);
+    }
+  }
   if (!((deadlines.get(dependencyTurnId) ?? -Infinity) > Date.now())) {
     throw new OpeningPlanError("VALIDATION", "task candidate memory dependency is no longer active");
   }

@@ -38,7 +38,7 @@ it("consumes each material admission SQL fragment with or without a course polic
   }
 });
 
-function stub(ancestor: "none" | "active" | "expired" | "revoked" | "superseded") {
+function stub(ancestor: "none" | "active" | "expired" | "revoked" | "superseded", pairedUser?: string) {
   const queries: string[] = [];
   const tx = ((parts: TemplateStringsArray, ...values: unknown[]) => {
     const query = parts.reduce((text, part, i) => text + part + (i < values.length ? String(values[i]) : ""), "")
@@ -49,8 +49,14 @@ function stub(ancestor: "none" | "active" | "expired" | "revoked" | "superseded"
         queries.push(query);
         if (query.startsWith("SELECT c.payload")) return resolve([{
           payload: { kind: "task", title: "Do the exercise", minutes: 15, dueText: null },
-          source_turn_id: turnId, has_memory_dependencies: ancestor !== "none",
+          source_turn_id: turnId, has_memory_dependencies: ancestor !== "none", historical_user_turn_id: pairedUser,
+          paired_user_turn_id: pairedUser,
         }]);
+        if (query.startsWith("WITH prior AS MATERIALIZED") && pairedUser) return resolve([{
+          id: "55555555-5555-4555-8555-555555555555", current_id: pairedUser, assistant_id: turnId,
+          assistant_source_refs: [], user_source_refs: [], assistant_direct_versioned: true, origin_allowed: true, current_allowed: true,
+        }]);
+        if (query.startsWith("SELECT t.id, ARRAY")) return resolve([{ id: turnId, origins: [] }]);
         if (query.startsWith("SELECT t.id FROM opening_turns")) {
           return resolve(ancestor === "active" ? [{ id: turnId }] : []);
         }
@@ -63,8 +69,9 @@ function stub(ancestor: "none" | "active" | "expired" | "revoked" | "superseded"
 
 describe("admitTaskCandidate", () => {
   it("keeps ordinary candidates on the non-recursive path", async () => {
-    const { tx, queries } = stub("none");
-    await expect(admitTaskCandidate(tx, scope, candidateId)).resolves.toBeNull();
+    const { tx, queries } = stub("none", "66666666-6666-4666-8666-666666666666");
+    await expect(admitTaskCandidate(tx, scope, candidateId)).resolves.toBe(turnId);
+    expect(queries.some(q => q.startsWith("WITH prior AS MATERIALIZED"))).toBe(true);
     expect(queries.some(q => q.includes("WITH RECURSIVE"))).toBe(false);
   });
 

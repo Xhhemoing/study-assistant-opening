@@ -6,7 +6,7 @@ import { readOpeningSavedTurnRetry, savedTurnRetryAssistantId, savedTurnRetryMat
 export { readOpeningSavedTurnRetry, savedTurnRetryAssistantId } from "./opening-conversation-retry";
 import type { Sql, TransactionSql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
-import { turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
+import { readTurnsWithInvalidMisconceptionMemories, turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
 import { systemQueryReceiptSchema } from "@aistudy/contracts";
 import { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
 import type {
@@ -134,7 +134,21 @@ const visibleTurnText = (db: Sql | TransactionSql) => db`CASE
   ELSE t.text END`;
 const hiddenTurnDetails = (db: Sql | TransactionSql) => db`display_authority.deleted_source OR display_authority.inactive_misconception`;
 
-function readContinuityRows(
+async function redactMemoryMisconceptions<T extends Record<string, unknown>>(
+  db: Sql | TransactionSql, scope: OpeningConversationScope, rows: readonly T[],
+): Promise<T[]> {
+  const ids = rows.flatMap(row => row.misconception_memory_turn_id ? [String(row.misconception_memory_turn_id)] : []);
+  const invalid = await readTurnsWithInvalidMisconceptionMemories(db, scope, ids, { display: true });
+  return rows.map(row => invalid.has(String(row.misconception_memory_turn_id)) ? {
+    ...row, text: INACTIVE_MISCONCEPTION_MESSAGE, last_turn_preview: INACTIVE_MISCONCEPTION_MESSAGE,
+    citations: [], system_query: null, exposure_receipt: null, pending_exposure_ids: [],
+  } : row);
+}
+
+const memoryDisplayTurnId = (db: Sql | TransactionSql) => db`CASE WHEN t.role='assistant'
+  AND NOT display_authority.inactive_misconception AND ${turnHasMisconceptionMemoryDependencies(db)} THEN t.id END`;
+
+async function readContinuityRows(
   db: Sql | TransactionSql, scope: OpeningConversationScope, conversationId: string, question?: ContinuityQuestion,
   turnIds?: readonly string[],
 ) {
@@ -143,8 +157,9 @@ function readContinuityRows(
     : db`AND t.status='complete' AND t.context_anchor->>'activityId'=${question.activityId ?? null}
         AND t.context_anchor->>'blockId'=${question.blockId ?? null}
         AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
-  return db`
+  const rows = await db`
     SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
+      ${memoryDisplayTurnId(db)} AS misconception_memory_turn_id,
       ${visibleTurnText(db)} AS text,
       CASE WHEN ${hiddenTurnDetails(db)} THEN '[]'::jsonb ELSE t.citations END AS citations,
       CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE t.system_query END AS system_query
@@ -164,6 +179,7 @@ function readContinuityRows(
       ${turnIds ? db`AND t.id=ANY(${[...turnIds]}::uuid[]) ORDER BY array_position(${[...turnIds]}::uuid[], t.id)`
         : db`ORDER BY t.created_at ASC`}
   `;
+  return redactMemoryMisconceptions(db, scope, rows);
 }
 
 export function createOpeningConversationRepository(sql: Sql) {
@@ -254,11 +270,12 @@ export function createOpeningConversationRepository(sql: Sql) {
           c.title,
           c.course_id,
           c.updated_at,
-          preview.pending_exposure_ids,
+          preview.pending_exposure_ids, preview.misconception_memory_turn_id,
           preview.text AS last_turn_preview
         FROM opening_conversations c
         LEFT JOIN LATERAL (
-            SELECT CASE WHEN t.role='assistant' AND t.status='complete' AND NOT (${hiddenTurnDetails(db)})
+            SELECT ${memoryDisplayTurnId(db)} AS misconception_memory_turn_id,
+              CASE WHEN t.role='assistant' AND t.status='complete' AND NOT (${hiddenTurnDetails(db)})
               THEN ARRAY(
                 SELECT h.id FROM opening_help_exposures h WHERE h.turn_id=t.id AND h.workspace_id=t.workspace_id
                   AND h.owner_user_id=c.owner_user_id
@@ -294,10 +311,10 @@ export function createOpeningConversationRepository(sql: Sql) {
       `;
       const pending = (rows: readonly Record<string, unknown>[]) =>
         rows.flatMap(row => (row.pending_exposure_ids as string[] | null | undefined) ?? []);
-      const initial = await readSummaries(sql);
+      const initial = await redactMemoryMisconceptions(sql, scope, await readSummaries(sql));
       const rows = pending(initial).length ? await sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const current = await readSummaries(tx);
+        const current = await redactMemoryMisconceptions(tx, scope, await readSummaries(tx));
         await releaseReturnedExposures(tx, scope, pending(current));
         return [...current];
       }) : initial;
@@ -320,6 +337,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       await this.getOwned(scope, conversationId);
       const readTurns = (db: Sql | TransactionSql) => db`
         SELECT t.id, t.conversation_id, t.role,
+          ${memoryDisplayTurnId(db)} AS misconception_memory_turn_id,
           ${visibleTurnText(db)} AS text,
           t.mode, t.status, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,
           CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt,
@@ -340,7 +358,7 @@ export function createOpeningConversationRepository(sql: Sql) {
         ORDER BY t.created_at ASC, COALESCE(j.id, t.id) ASC,
           CASE WHEN t.id = j.user_turn_id THEN 0 ELSE 1 END ASC, t.id ASC
       `;
-      const initial = await readTurns(sql);
+      const initial = await redactMemoryMisconceptions(sql, scope, await readTurns(sql));
       const mapTurns = (rows: readonly Record<string, unknown>[], released: ReadonlyMap<string, StudyExposureReceipt>) => rows.map((row): TurnRecord => {
         const r = row as Record<string, unknown>;
         const display = queryDisplay(r, scope);
@@ -361,7 +379,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       if (!pendingExposureIds(initial).length) return mapTurns(initial, new Map());
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const rows = await readTurns(tx);
+        const rows = await redactMemoryMisconceptions(tx, scope, await readTurns(tx));
         return mapTurns(rows, await releaseReturnedExposures(tx, scope, pendingExposureIds(rows)));
       });
     },

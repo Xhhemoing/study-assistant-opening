@@ -112,10 +112,10 @@ export function createOpeningMemoryRepository(
         const assertOrigins = async () => {
           const bareOrigins = courseId === null ? await readBareUserOrigins(tx, scope, input.sourceTurnIds) : new Set<string>();
           const nonBareOrigins = input.sourceTurnIds.filter(id => !bareOrigins.has(id.toLowerCase()));
+          await assertSourceTurnsOwned(tx, scope, nonBareOrigins, null, courseId);
           if (!await sourceTurnsAllowMisconceptionMemory(tx, scope, nonBareOrigins, courseId)) {
             throw new OpeningMemoryError("VALIDATION", "memory source or dependency misconception is unavailable");
           }
-          await assertSourceTurnsOwned(tx, scope, nonBareOrigins, null, courseId);
         };
         await assertOrigins();
         await assertCourseInWorkspace(tx, scope, courseId, true);

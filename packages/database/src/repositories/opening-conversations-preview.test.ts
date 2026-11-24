@@ -124,18 +124,21 @@ it.each(["turns", "summaries", "resume"] as const)("rechecks %s after waiting fo
       withdrew = true;
       return [];
     }
+    if (statement.startsWith("SELECT t.id, ARRAY(")) return [{ id: summaryBase.id, origins: [{
+      id: summaryBase.id, courseId: null, consumerCourseId: null, materialUse: "citation", standalone: true,
+      refs: [{ memoryDependencyIds: [summaryBase.id] }],
+    }] }];
+    if (statement.startsWith("SELECT id FROM opening_memories")) return withdrew ? [] : [{ id: summaryBase.id }];
     const prefix = lane === "turns" ? "SELECT t.id, t.conversation_id" : lane === "resume" ? "SELECT t.id,t.role" : "SELECT c.id,";
     if (!statement.startsWith(prefix)) return unexpected(query);
     reads.push(withdrew);
-    const guarded = statement.includes("WITH RECURSIVE mem_deps(dep_id)")
-      && statement.includes("(dm).course_id") && statement.includes("(dt).intent_hash")
-      && statement.includes("display_authority.inactive_misconception");
-    const visible = !withdrew || !guarded;
-    const text = visible ? "answer based on a memory" : hiddenText;
+    expect(statement).toContain("misconception_memory_turn_id");
+    expect(statement).not.toContain("WITH RECURSIVE");
+    const text = "answer based on a memory";
     return [{ id: summaryBase.id, conversation_id: summaryBase.id, role: "assistant", mode: "hint",
       status: "complete", title: "t", created_at: summaryBase.updatedAt, updated_at: summaryBase.updatedAt,
-      text, last_turn_preview: text, citations: [], pending_exposure_ids: visible ? [summaryBase.id] : [],
-      exposure_receipt: visible ? { id: summaryBase.id, released_at: null } : null }];
+      text, last_turn_preview: text, citations: [], misconception_memory_turn_id: summaryBase.id,
+      pending_exposure_ids: [summaryBase.id], exposure_receipt: { id: summaryBase.id, released_at: null } }];
   });
   const repo = createOpeningConversationRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
 
