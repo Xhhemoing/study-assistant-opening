@@ -1,6 +1,7 @@
 import type { LocalReplanMetadata, PlannedBlock, TaskItem, TimeBlock } from "@aistudy/contracts";
 import { planDay, type PlanDayOptions } from "../day-planner";
 import { isInstantOnLocalDay, resolveLocalDayBounds } from "../local-day-bounds";
+import { evaluateWheelSpinningGuard, type AdaptiveWheelSpinningInput } from "./metacognitive-epistemic-bridge";
 
 export function samePlannedBlocks(left: readonly PlannedBlock[], right: readonly PlannedBlock[]): boolean {
   const key = (block: PlannedBlock) => JSON.stringify([block.taskId, block.start, block.end, block.reason]);
@@ -59,6 +60,7 @@ export function localReplanFixedBlocks(input: {
   tasks: readonly TaskItem[];
   now: Date;
   preserveAll?: boolean;
+  wheelSpinningCarryOverTaskId?: string;
   localDate?: string;
   timeZone?: string;
   inactiveRetestTaskIds?: ReadonlySet<string>;
@@ -73,20 +75,24 @@ export function localReplanFixedBlocks(input: {
       releasedTaskVersions.push({ id: task.id, version: task.version, status: task.status });
     }
   };
+  const nowMs = input.now.getTime();
   const fixedBlocks = input.acceptedBlocks.filter(block => {
-    if (Date.parse(block.start) <= input.now.getTime()) return true;
+    const startMs = Date.parse(block.start);
+    if (startMs <= nowMs) return true;
     const task = byId.get(block.taskId);
     if (inactiveRetestIds?.has(block.taskId.toLowerCase())) {
       recordReleased(task);
       return false;
     }
-    if (input.preserveAll) {
+    const preserveReservation = input.wheelSpinningCarryOverTaskId !== undefined
+      && block.taskId !== input.wheelSpinningCarryOverTaskId && task?.status === "pending";
+    if (input.preserveAll && !preserveReservation) {
       if (
         !task?.retest
         || task.status !== "pending"
         || (
           blockFitsRetestWindow(block, task, input.localDate, input.timeZone)
-          && (!task.notBefore || Date.parse(task.notBefore) <= Date.parse(block.start))
+          && (!task.notBefore || Date.parse(task.notBefore) <= startMs)
         )
       ) {
         return true;
@@ -99,7 +105,9 @@ export function localReplanFixedBlocks(input: {
       !task
       || (
         task.status === "pending"
-        && (!task.notBefore || Date.parse(task.notBefore) <= input.now.getTime())
+        && (!task.notBefore || Date.parse(task.notBefore) <= (preserveReservation ? startMs : nowMs))
+        && (!preserveReservation || (startMs > nowMs
+          && (task.dueAt === null || Date.parse(block.end) <= Date.parse(task.dueAt))))
         && blockFitsRetestWindow(block, task, input.localDate, input.timeZone)
       )
     ) {
@@ -116,26 +124,53 @@ export function buildLocalReplan(input: {
   acceptedBlocks: readonly PlannedBlock[]; tasks: readonly TaskItem[];
   constraints: readonly TimeBlock[]; now: Date; options: PlanDayOptions; preserveAll?: boolean;
   excludedTaskIds?: ReadonlySet<string>; inactiveRetestTaskIds?: ReadonlySet<string>; candidateTaskIds?: ReadonlySet<string>;
+  wheelSpinningGuard?: AdaptiveWheelSpinningInput & { activeSession?: boolean };
 }) {
-  const { fixedBlocks, releasedTaskVersions } = localReplanFixedBlocks({
+  const guard = input.wheelSpinningGuard;
+  const nowMs = input.now.getTime();
+  const spinningTask = guard && input.tasks.find(task => task.id === guard.taskId && task.status === "pending");
+  const wheelSpinningGuard = spinningTask && guard && (guard.activeSession === true || input.acceptedBlocks.some(block =>
+    block.taskId === spinningTask.id && Date.parse(block.start) <= nowMs && Date.parse(block.end) > nowMs))
+    ? evaluateWheelSpinningGuard(guard, input.now) : undefined;
+  const carryOver = wheelSpinningGuard?.triggered ? spinningTask : undefined;
+  const { fixedBlocks: accepted, releasedTaskVersions } = localReplanFixedBlocks({
     ...input,
+    wheelSpinningCarryOverTaskId: carryOver?.id,
     localDate: input.options.localDate,
     timeZone: input.options.timeZone,
   });
+  const fixedBlocks = carryOver ? accepted.flatMap(block => {
+    if (block.taskId === carryOver.id && Date.parse(block.end) > nowMs) {
+      const startMs = Date.parse(block.start);
+      if (startMs >= nowMs) return [];
+      // Keep the delivered part of the active block under the original task and reason.
+      if (startMs < nowMs) return [{ ...block, end: input.now.toISOString() }];
+    }
+    return [block];
+  }) : accepted;
+  if (carryOver?.version && !samePlannedBlocks(fixedBlocks, accepted)
+    && !releasedTaskVersions.some(row => row.id === carryOver.id)) {
+    releasedTaskVersions.push({ id: carryOver.id, version: carryOver.version, status: carryOver.status });
+  }
   const fixedFutureIds = new Set(fixedBlocks.filter(block => Date.parse(block.end) > input.now.getTime()).map(block => block.taskId));
   const inactiveRetestIds = input.inactiveRetestTaskIds?.size
     ? new Set([...input.inactiveRetestTaskIds].map(id => id.toLowerCase()))
     : undefined;
   const candidates = input.tasks.filter(task => task.status === "pending"
+    && task.id !== carryOver?.id
     && (!input.candidateTaskIds || input.candidateTaskIds.has(task.id))
     && !fixedFutureIds.has(task.id)
     && !input.excludedTaskIds?.has(task.id)
     && !inactiveRetestIds?.has(task.id.toLowerCase())
-    && (!task.notBefore || Date.parse(task.notBefore) <= input.now.getTime())
+    // Wheel-spinning replans let planDay place deferred work at its earliest valid start.
+    && (carryOver !== undefined || !task.notBefore || Date.parse(task.notBefore) <= nowMs)
     && matchesScheduledDay(task, input.options.localDate, input.options.timeZone));
   const locked: TimeBlock[] = fixedBlocks.map(block => ({ start: block.start, end: block.end, kind: "locked" }));
-  const planned = planDay(candidates, [...input.constraints, ...locked], input.options);
+  const planningNow = carryOver && !(Date.parse(input.options.planningNow ?? "") >= nowMs) ? input.now.toISOString() : input.options.planningNow;
+  const planned = planDay(candidates, [...input.constraints, ...locked], carryOver ? { ...input.options, planningNow } : input.options);
   const blocks = [...fixedBlocks, ...planned.blocks].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
   return { blocks, unscheduledTaskIds: planned.unscheduledTaskIds, fixedBlocks, releasedTaskVersions,
-    changed: !samePlannedBlocks(blocks, input.acceptedBlocks) };
+    changed: !samePlannedBlocks(blocks, input.acceptedBlocks), ...(carryOver && wheelSpinningGuard ? {
+      wheelSpinningCarryOverTaskIds: [carryOver.id], microConsolidationPlan: wheelSpinningGuard.microConsolidationPlan,
+    } : {}) };
 }

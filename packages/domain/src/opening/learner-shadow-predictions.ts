@@ -1,6 +1,10 @@
 import type { LearnerStateFeature } from "./learner-state";
 import { predictClassicalBkt, predictSmoothedFrequency, CLASSICAL_BKT_PARAMETERS } from "./measurement/models";
 import { isAiGradedEvidence } from "./ai-evaluation";
+import { computeCardRetrievability, createInitialState, scheduleReview } from "../srs/scheduler";
+import { effectiveRetrievability, retrievability, type SkillBeliefV1 } from "../epistemic/belief";
+import { conditionalSuccessProbability, GAUSS_HERMITE_3, type SkillItemModel } from "../epistemic/gauss-hermite";
+import type { ShadowV2Row } from "../epistemic/shadow-v2";
 
 /** Predeclared experiment threshold, not fitted or calibrated for a learner. */
 export const LEARNER_SHADOW_ADVANCE_THRESHOLD = 0.8;
@@ -57,4 +61,42 @@ export function compareLearnerShadow(rows: readonly { predictions: LearnerShadow
       brier: paired.length ? paired.reduce((sum, row) => sum + (row.predictions.find(p => p.modelId === modelId)!.probability - Number(row.correct)) ** 2, 0) / paired.length : null,
       logLoss: paired.length ? paired.reduce((sum, row) => { const p = Math.max(1e-15, Math.min(1 - 1e-15, row.predictions.find(p => p.modelId === modelId)!.probability));
         return sum - (row.correct ? Math.log(p) : Math.log1p(-p)); }, 0) / paired.length : null }; }) };
+}
+
+function epistemicSuccess(belief: SkillBeliefV1, item: SkillItemModel, recall: number): number {
+  const deltas = new Map(item.misconceptions?.map(({ id, delta }) => [id, delta]));
+  const scale = Math.sqrt(3 * belief.abilityVariance);
+  const probability = GAUSS_HERMITE_3.reduce((sum, { weight, offset }) => {
+    const theta = belief.abilityMean + scale * offset;
+    const success = belief.misconceptionMass.reduce((total, [id, mass]) =>
+      total + mass * conditionalSuccessProbability(item, theta, deltas.get(id) ?? 0),
+    belief.otherMass * conditionalSuccessProbability(item, theta));
+    return sum + weight * success;
+  }, 0);
+  // Match the outcome model used by updateBeliefWithEvidence on a no-recall branch.
+  return recall * probability + (1 - recall) * 0.25;
+}
+
+/** Scores a forecast from a replay that has already enforced the v2 evidence boundary. */
+export function scoreLearnerShadowV2(input: {
+  features: readonly LearnerStateFeature[]; courseId: string; requirementKey: string; cutoff: string;
+  belief: SkillBeliefV1; noDcmBelief: SkillBeliefV1; item: SkillItemModel;
+}): ShadowV2Row["predictions"] {
+  const { belief, noDcmBelief, item, cutoff } = input;
+  const at = new Date(cutoff);
+  const { predictions } = predictLearnerShadow({ ...input, excludedProblemIds: [] });
+  // Binary verified attempts map to Good/Again on a shadow skill card, using the existing FSRS engine.
+  const first = input.features[0];
+  const card = first ? input.features.reduce((state, row) => scheduleReview(state,
+    row.eligibility.verifiedCorrect === "yes" ? "good" : "again", new Date(row.attemptedAt)),
+  createInitialState(input.requirementKey, new Date(first.attemptedAt))) : null;
+  return {
+    "classical-bkt": predictions[0]!.probability,
+    pfa: predictions[1]!.probability,
+    "smoothed-frequency": predictions[2]!.probability,
+    "ts-fsrs": (card && computeCardRetrievability(card, at).retrievability) ?? 0.5,
+    "hsrs-fire-dcm-v1": epistemicSuccess(belief, item, effectiveRetrievability(belief, at.getTime())),
+    "no-fire": epistemicSuccess(belief, item, retrievability(belief, at.getTime())),
+    "no-dcm": epistemicSuccess(noDcmBelief, { ...item, misconceptions: undefined }, effectiveRetrievability(noDcmBelief, at.getTime())),
+  };
 }

@@ -50,6 +50,7 @@ export type {
   SnapshotTaskRow,
   LearningPhase,
   LearningPhaseSource,
+  MetacognitiveConfidenceContext,
 } from "./snapshot-sources";
 export { assembleLearnerSnapshot } from "./assemble-snapshot";
 export { nextLearningStep, captureNextLearningStep, learningPhaseForInput, withLearningPhase, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
@@ -68,3 +69,10 @@ export * from "./loop-metrics";
 export * from "./local-replan";
 
 export * from "./suggestion-feedback";
+export {
+  buildSkillBeliefTrajectory, compareLearnerShadowV2, evaluateWheelSpinningGuard,
+  planAdaptiveBellmanShadow, predictLearnerShadowV2,
+  type AdaptiveEpistemicShadowInput, type AdaptiveWheelSpinningInput, type AdaptiveBellmanShadowInput,
+  type SkillBeliefTrajectoryInput,
+} from "./metacognitive-epistemic-bridge";
+export * from "./experimental-bkt-advice";

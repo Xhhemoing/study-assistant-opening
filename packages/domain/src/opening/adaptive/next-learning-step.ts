@@ -1,6 +1,7 @@
 import type { FrozenOriginalContext } from "../../diagnostic-placement";
 import type { LearningDecisionCandidate } from "../learning-decision";
 import { remediationLimitEvidence } from "../remediation-cycle";
+import { metacognitiveStepMetadata } from "./metacognitive-epistemic-bridge";
 import type { LearningPhase, NextLearningStep, NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 
 // Restored D5 assisted-success policy plus evidenced D4 remediation cycles.
@@ -48,10 +49,11 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
     return eligible;
   };
   const placement = input.placementRoute;
+  const metacognition = metacognitiveStepMetadata(input);
   const result = (activityKind: NextLearningStep["activityKind"], reasonCode: NextLearningStep["reasonCode"], focusObservationId: string | null = null) =>
     ({ decision: withLearningPhase({ activityKind, focusObservationId, reasonCode, ...(placement !== undefined
       ? { placementRoute: placement.route, holdoutVerificationRequired: placement.holdoutVerificationRequired }
-      : {}) }, input), candidates });
+      : {}), ...metacognition }, input), candidates });
   const phase = learningPhaseForInput(input);
   if (input.learningPhase === "new_learning") {
     check("full_explain", true, "explicit_new_learning", "explicit_new_learning");
@@ -108,6 +110,10 @@ export function captureNextLearningStep(input: NextLearningStepInput): {
     && (latest.assistance === "hinted" || latest.assistance === "revealed");
   if (check("reduced_help_practice", assistedSuccess, "assisted_success", "not_assisted_success", latest ? [`observation:${latest.id}`] : refs))
     return result("reduced_help_practice", "assisted_success");
+  if (latest && metacognition?.metacognitiveRoute === "lucky_guess_verification_probe") {
+    check("transfer_check", true, "correct_needs_independent_check", "no_lucky_guess", [`observation:${latest.id}`]);
+    return result("transfer_check", "correct_needs_independent_check");
+  }
   const recent = observations.slice(0, 3);
   const assistedCount = recent.filter(row => row.assistance === "hinted" || row.assistance === "revealed").length;
   if (check("reduced_help_practice", assistedCount > recent.length / 2, "assistance_dependent", "no_assisted_majority", recent.map(row => `observation:${row.id}`)))

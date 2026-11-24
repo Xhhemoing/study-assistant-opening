@@ -90,6 +90,18 @@ it("keeps assisted success separate and honors an explicit full explanation", ()
   expect(teachingLearnerFocus(read("no"), courseId, "Linear Algebra", true)).toMatchObject({ activityKind: "full_explain", focusObservationId: null });
 });
 
+it("uses the selected observation's optional pre-answer confidence and returns a valid teaching focus", () => {
+  const value = read("yes");
+  const { id } = value.sources.courses[0]!.observations[0]!;
+  const legacy = teachingLearnerFocus(value, courseId, "Linear Algebra", false);
+  const focused = teachingLearnerFocus(value, courseId, "Linear Algebra", false, undefined, new Date("2026-10-16T10:00:00Z"), {
+    metacognition: { byObservationId: new Map([[id, { preAnswerConfidence: "guessing" }]]) },
+  });
+  expect(legacy?.reasonCode).toBe("independent");
+  expect(focused).toEqual({ ...legacy, reasonCode: "correct_needs_independent_check" });
+  expect(teachingLearnerFocusSchema.safeParse(focused).success).toBe(true);
+});
+
 it("selects the precise requirement and leaves ambiguous label-only tasks in diagnosis", () => {
   const value = read("yes");
   const source = value.sources.courses[0]!;

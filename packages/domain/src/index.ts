@@ -490,6 +490,10 @@ export {
 } from "./opening/teaching-math-model";
 
 export * from "./opening/adaptive";
+export * from "./epistemic";
+export type { EvidenceObservation as EpistemicEvidenceObservation } from "./epistemic";
+export type { EvidenceObservation } from "./opening/evidence-eligibility";
+export * from "./metacognition";
 export * from "./diagnostic-placement";
 export * from "./remedy-clinic";
 export { buildDecisionInput } from "./opening/adaptive/decision-input";
@@ -529,7 +533,8 @@ export * from "./opening/learner-state";
 
 export * from "./opening/learning-decision";
 
-export * from "./opening/learner-shadow-predictions";
+export { compareLearnerShadow, predictLearnerShadow, LEARNER_PFA_PARAMETERS, LEARNER_SHADOW_ADVANCE_THRESHOLD,
+  type LearnerShadowPrediction } from "./opening/learner-shadow-predictions";
 
 export * from "./opening/evidence-transfer-eligibility";
 

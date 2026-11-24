@@ -44,6 +44,7 @@ export function toSnapshotEvidence(
       requirementKey: input?.observation.requirementKey ?? null,
       itemVersionId: input?.observation.itemVersionId ?? null,
       attemptedAt: new Date(attemptedAt).toISOString(),
+      ...(typeof row.recordedAt === "string" ? { recordedAt: row.recordedAt } : {}),
       assistance: resolveEvidenceAssistance(captured, context),
       verifiedCorrect: eligibility.verifiedCorrect,
       independentAttempt: eligibility.independentAttempt,
