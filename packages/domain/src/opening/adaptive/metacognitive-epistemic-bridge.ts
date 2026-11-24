@@ -167,7 +167,7 @@ function matchesAssistance(assistance: SnapshotObservation["assistance"], eligib
     && (!reasonCodes.includes("help_before_submission") || reasonCodes.includes("attempt_timing_unknown"));
 }
 
-function matchesUntimestampedObservation(observation: SnapshotObservation, feature: LearnerStateFeature): boolean {
+export function matchesUntimestampedObservation(observation: SnapshotObservation, feature: LearnerStateFeature): boolean {
   const { eligibility } = feature;
   return (observation.requirementKey ?? null) === feature.requirementKey
     && normalizeSkillLabelKey(observation.skillLabel) === normalizeSkillLabelKey(feature.skillLabel)
@@ -832,20 +832,53 @@ export function courseFeatureRevisions(features: readonly LearnerStateFeature[],
 function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
   const courseFeatures = courseFeatureRevisions(input.features, input.scope.courseId);
   const featuresById = groupByKey(courseFeatures, row => row.feature.observationId);
+  const sameCourseObservationIds = new Set(input.features
+    .filter(row => row.courseId === input.scope.courseId)
+    .map(row => row.observationId));
+  const foreignObservationIds = new Set(input.features
+    .filter(row => row.courseId !== input.scope.courseId && !sameCourseObservationIds.has(row.observationId))
+    .map(row => row.observationId));
   const observationsById = groupByKey(input.observations, row => row.id);
   const disputedAttemptIds = new Set<string>();
   const claimsByAttemptId = new Map<string, Map<string, number>>();
-  const heads = [...featuresById.entries()].flatMap(([observationId, allRows]): JoinedHead[] => {
+  const observationIds = new Set([...featuresById.keys(), ...observationsById.keys()]);
+  const heads = [...observationIds].flatMap((observationId): JoinedHead[] => {
+    if (foreignObservationIds.has(observationId)) return [];
+    const allRows = featuresById.get(observationId) ?? [];
     const rows = allRows.filter(row => row.recorded < cutoff);
-    if (!rows.length) return [];
+    const { revisions: candidates, unplaced, revisionsCanBeAbsent } = visibleObservationRevisions(
+      observationsById.get(observationId) ?? [], allRows, cutoff);
+    const exposureCandidates = candidates.length ? candidates : unplaced.flatMap(observation => {
+      const attempted = adaptiveShadowTime(observation.attemptedAt);
+      return Number.isFinite(attempted) ? [{ observation, attempted }] : [];
+    });
+    if (!rows.length) {
+      if (!exposureCandidates.length) return [];
+      const { observation } = exposureCandidates[0]!;
+      const claimedRequirementKeys = new Set(exposureCandidates
+        .map(row => row.observation.requirementKey)
+        .filter(key => key != null));
+      const requirementKey = observation.requirementKey ?? null;
+      const unanimousRequirementKey = exposureCandidates.every(({ observation: head }) =>
+        (head.requirementKey ?? null) === requirementKey) ? requirementKey : null;
+      const problemId = exposureCandidates.every(({ observation: head }) => head.problemId === observation.problemId)
+        ? observation.problemId : null;
+      const familyKey = exposureCandidates.every(({ observation: head }) => head.familyKey === observation.familyKey)
+        ? observation.familyKey : undefined;
+      if (problemId === null && !familyKey?.trim()) return [];
+      const maxAttempted = exposureCandidates.reduce((latest, row) => Math.max(latest, row.attempted), -Infinity);
+      return [{
+        exposureOnly: true, attempted: maxAttempted, claimedRequirementKeys,
+        feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: null },
+        observation: { id: observationId, problemId, familyKey },
+      }];
+    }
     const { feature, attempted, recorded } = rows[0]!;
     const { requirementKey, attemptId } = feature;
-    const { revisions: candidates, revisionsCanBeAbsent } = visibleObservationRevisions(
-      observationsById.get(observationId) ?? [], allRows, cutoff);
     const sameSubmission = rows.every(row => row.feature.attemptId === attemptId && row.attempted === attempted)
-      && candidates.every(row => row.attempted === attempted);
+      && exposureCandidates.every(row => row.attempted === attempted);
     const claimedRequirementKeys = new Set([
-      ...rows.map(row => row.feature.requirementKey), ...candidates.map(row => row.observation.requirementKey),
+      ...rows.map(row => row.feature.requirementKey), ...exposureCandidates.map(row => row.observation.requirementKey),
     ].filter(key => key != null));
     if (!sameSubmission) {
       // Retain membership even when the collision loses its problem, family, or attempt identity.
@@ -858,24 +891,27 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
       for (const key of claimedRequirementKeys) counts.set(key, (counts.get(key) ?? 0) + 1);
       claimsByAttemptId.set(attemptId, counts);
     }
-    if (!candidates.length) return [];
-    const { observation } = candidates[0]!;
-    if (!revisionsCanBeAbsent && rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head, recorded: at }) =>
-      at === recorded && sameObservationProjection(head, observation) && matchesUntimestampedObservation(head, feature))) {
+    if (!exposureCandidates.length) return [];
+    const { observation } = exposureCandidates[0]!;
+    if (candidates.length && !revisionsCanBeAbsent && rows.length === 1 && requirementKey && sameSubmission
+      && candidates.every(({ observation: head, recorded: at }) =>
+        at === recorded && sameObservationProjection(head, observation) && matchesUntimestampedObservation(head, feature))) {
       return [{ feature, attempted, observation, claimedRequirementKeys }];
     }
 
     // A collision can establish prior exposure only for identities shared by every candidate.
     const unanimousRequirementKey = rows.every(row => (row.feature.requirementKey ?? null) === requirementKey)
-      && candidates.every(({ observation: head }) => (head.requirementKey ?? null) === requirementKey) ? requirementKey : null;
-    const problemId = candidates.every(({ observation: head }) => head.problemId === observation.problemId) ? observation.problemId : null;
-    const familyKey = candidates.every(({ observation: head }) => head.familyKey === observation.familyKey) ? observation.familyKey : undefined;
+      && exposureCandidates.every(({ observation: head }) => (head.requirementKey ?? null) === requirementKey) ? requirementKey : null;
+    const problemId = exposureCandidates.every(({ observation: head }) => head.problemId === observation.problemId)
+      ? observation.problemId : null;
+    const familyKey = exposureCandidates.every(({ observation: head }) => head.familyKey === observation.familyKey)
+      ? observation.familyKey : undefined;
     if (problemId === null && !familyKey?.trim()) return [];
     const latestFeatureAttempted = rows.reduce((latest, row) => Math.max(latest, row.attempted), attempted);
-    const maxAttempted = candidates.reduce((latest, row) => Math.max(latest, row.attempted), latestFeatureAttempted);
+    const maxAttempted = exposureCandidates.reduce((latest, row) => Math.max(latest, row.attempted), latestFeatureAttempted);
     return [{
       exposureOnly: true, attempted: maxAttempted, claimedRequirementKeys,
-      feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: sameSubmission ? attemptId : null },
+      feature: { observationId, requirementKey: unanimousRequirementKey, attemptId: candidates.length && sameSubmission ? attemptId : null },
       observation: { id: observationId, problemId, familyKey },
     }];
   }).sort((a, b) => a.attempted - b.attempted || a.feature.observationId.localeCompare(b.feature.observationId));

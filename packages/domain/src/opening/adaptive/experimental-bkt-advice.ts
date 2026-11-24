@@ -4,7 +4,7 @@ import { buildDecisionInput } from "./decision-input";
 import { nextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
 import type { NextLearningStep, NextLearningStepInput, SnapshotObservation } from "./snapshot-sources";
 import {
-  adaptiveShadowTime, compareLearnerShadowV2, courseFeatureRevisions,
+  adaptiveShadowTime, compareLearnerShadowV2, courseFeatureRevisions, matchesUntimestampedObservation,
   planAdaptiveBellmanShadow, predictLearnerShadowV2, sameObservationProjection, visibleObservationRevisions,
   type AdaptiveBellmanShadowInput, type AdaptiveEpistemicShadowInput,
 } from "./metacognitive-epistemic-bridge";
@@ -87,13 +87,16 @@ function historicalBktEvidence(
     if (!latest.length) return ruleOnly;
 
     const recorded = latest[0]!.recorded;
-    if (!ruleOnly.length && latest.length < visible.length && latest.every(row => row.recorded === recorded)) {
+    if (!ruleOnly.length && latest.every(row => row.recorded === recorded)) {
       latestRecordings.set(id, recorded);
     }
 
     // A duplicate projection can establish exposure without qualifying as a
     // unique BKT sample. Older, substantively different revisions are superseded.
-    if (latest.some(({ observation, recorded, legacyCopies }) => (legacyCopies ?? 1) > 1
+    if (latest.some(({ observation, attempted, recorded, legacyCopies }) =>
+      !slots.some(slot => slot.recorded === recorded && slot.attempted === attempted
+        && matchesUntimestampedObservation(observation, slot.feature))
+      || (legacyCopies ?? 1) > 1
       || visible.some(older => older.recorded < recorded && (legacyCopies !== undefined || older.legacyCopies !== undefined)
         && sameObservationProjection(older.observation, observation)))) disputedSamples.add(id);
     return [...latest.map(row => row.observation), ...ruleOnly];
@@ -269,6 +272,7 @@ export function nextLearningStepWithExperimentalBkt(
     const head = heads.get(row.observationId);
     return head && !disputedSamples.has(row.observationId) && head.problemId && head.itemVersionId && head.requirementKey === requirementKey
       && head.itemVersionId === row.itemVersionId && adaptiveShadowTime(head.attemptedAt) === adaptiveShadowTime(row.attemptedAt)
+      && matchesUntimestampedObservation(head, row)
       && head.assistance === "independent" && head.independentAttempt === "yes"
       && head.usableForCurrentVersion === "yes" && head.verifiedCorrect === row.eligibility.verifiedCorrect
       && row.availability === "available" && !row.views.includes("help")

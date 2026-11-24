@@ -383,7 +383,8 @@ it("R16 excludes future explicit heads before counting experimental BKT samples"
   const lateHead = { ...fifth!, recordedAt: at(4) };
   const lateDuplicate = { ...earlier[0]!, recordedAt: at(4) };
   const target = { courseId: scope.courseId, requirementKey: scope.requirementKey, problemId: "target", itemVersionId: "target-v1" };
-  const experiment = { enabled: true, features: produced.features, target, excludedProblemIds: [] };
+  const features = produced.features.map(row => row.observationId === fifth!.id ? { ...row, recordedAt: at(4) } : row);
+  const experiment = { enabled: true, features, target, excludedProblemIds: [] };
   const compare = (observations: SnapshotObservation[], cutoff: string) =>
     nextLearningStepWithExperimentalBkt(decision(observations), { ...experiment, cutoff }).comparison;
   const insufficient = { status: "fallback", reason: "insufficient_samples", sampleCount: 4 };
@@ -430,7 +431,8 @@ it.each(legacyMatrix)("R17 preserves replay with $legacyCopies legacy copies, $e
         ...future.map(recordedAt => ({ ...legacyFeature!, recordedAt }))] };
 
     for (const cutoff of [at(5), at(6), at(9)]) {
-      const hasExposure = legacyCopies > 0 && earlierSlots > 0 || cutoff === at(9) && explicitFutureCopies > 0;
+      const hasExposure = legacyCopies > 0 && (earlierSlots > 0 || explicitFutureCopies === 0)
+        || cutoff === at(9) && explicitFutureCopies > 0;
       expect(replayEvidence({ ...input, cutoff }), cutoff).toEqual(hasExposure
         ? { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] }
         : { weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id] });
@@ -1268,6 +1270,123 @@ it("R29 gates explicitSlotLatest on slot-matched revisions while preserving BKT 
   expect(superseded.latest.map(row => row.observation)).toEqual([laterExplicit]);
 });
 
+it("R30 retains prior problem and family exposure when the first attempt's feature is at/after cutoff, missing, or incompatible", () => {
+  const firstExplicit = { ...head("first", 1), recordedAt: at(1) };
+  const firstLegacy = head("first", 1);
+  const retry = head("retry", 2, { problemId: firstExplicit.problemId, familyKey: firstExplicit.familyKey });
+  const sameFamily = head("same-family", 2, { familyKey: firstExplicit.familyKey });
+  const cutoff = at(5);
+
+  for (const firstFeatures of [
+    [feature(firstExplicit, { recordedAt: at(5) })],
+    [feature(firstExplicit, { recordedAt: at(6) })],
+    [],
+    [feature(firstExplicit, { recordedAt: null })],
+    [feature(firstExplicit, { recordedAt: at(1), skillLabel: "Differentiation" })],
+  ]) {
+    expect(replayEvidence({ scope, cutoff, observations: [firstExplicit, retry],
+      features: [...firstFeatures, feature(retry)], targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual({
+      weights: [[firstExplicit.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+    });
+    const familyReplay = buildSkillBeliefTrajectory({ scope, cutoff, observations: [firstExplicit, sameFamily],
+      features: [...firstFeatures, feature(sameFamily)] });
+    expect(familyReplay.steps.map(step => [step.observationId, step.omega])).toEqual([
+      [firstExplicit.id, 0], [sameFamily.id, 1],
+    ]);
+    expect(familyReplay.belief.lastDirectRecallAtMs).toBeNull();
+  }
+
+  // Feature-less or invalid/incompatible-feature untimestamped attempts stay in exposure history,
+  // while an untimestamped observation paired with a post-cutoff slot stays invisible before cutoff.
+  for (const legacyFeatures of [
+    [],
+    [feature(firstLegacy, { recordedAt: null })],
+    [feature(firstLegacy, { recordedAt: at(1), skillLabel: "Differentiation" })],
+  ]) {
+    expect(replayEvidence({ scope, cutoff, observations: [firstLegacy, retry],
+      features: [...legacyFeatures, feature(retry)], targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual({
+      weights: [[firstLegacy.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+    });
+  }
+  expect(replayEvidence({ scope, cutoff, observations: [firstLegacy, retry],
+    features: [feature(firstLegacy, { recordedAt: at(5) }), feature(retry)], targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual({
+    weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id],
+  });
+
+  // Observations belonging strictly to a foreign course never leak into scope.courseId exposure.
+  const foreignFirst = { ...firstExplicit, id: "foreign-first" };
+  expect(replayEvidence({ scope, cutoff, observations: [foreignFirst, retry],
+    features: [feature(foreignFirst, { courseId: "physics", recordedAt: at(5) }), feature(retry)],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual({
+    weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id],
+  });
+  expect(replayEvidence({ scope, cutoff, observations: [foreignFirst, retry],
+    features: [
+      feature(foreignFirst, { courseId: "physics", recordedAt: at(1) }),
+      feature(foreignFirst, { courseId: scope.courseId, recordedAt: null }),
+      feature(retry),
+    ],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual({
+    weights: [[foreignFirst.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+  });
+});
+
+it("R30 excludes an unmatched or incompatible fifth BKT revision from comparable samples while preserving rule evaluation", () => {
+  const cutoff = at(5);
+  const fourSamples = projectProducedAttempts(bktSamples(4), cutoff);
+  const oldFifth = head("sample-5", 1, { problemId: "old-problem", familyKey: "old-family" });
+  const staleFifthProduced = projectProducedAttempts([oldFifth], cutoff, { untimestamped: false });
+  const revisedFifth = { ...oldFifth, problemId: "sample-5", familyKey: "sample-5", recordedAt: at(2) };
+  const baseObservations = [...fourSamples.observations, revisedFifth];
+  const baseFeatures = [...fourSamples.features, ...staleFifthProduced.features];
+  const experiment = { enabled: true, target: bktTarget, excludedProblemIds: [], cutoff, features: baseFeatures };
+
+  const unmatched = nextLearningStepWithExperimentalBkt(
+    buildDecisionInput({ observations: baseObservations, wantsFullExplanation: false }), experiment);
+  expect(unmatched).toMatchObject({
+    experimentalAdvice: null,
+    comparison: { status: "fallback", reason: "insufficient_samples", sampleCount: 4 },
+  });
+  expect(replayEvidence({ scope, cutoff, observations: baseObservations, features: baseFeatures,
+    targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual({
+    weights: [...fourSamples.observations.map(row => [row.id, 1] as const), [revisedFifth.id, 0]],
+    lastDirectRecallAtMs: Date.parse(at(1)),
+    holdout: fourSamples.observations.map(row => row.id).sort(),
+  });
+
+  // Rule evaluation still consumes the explicit Oct 2 revision even without a matching Oct 2 feature slot.
+  for (const priorityOverride of [
+    { verifiedCorrect: "no" as const },
+    { assistance: "hinted" as const, independentAttempt: "no" as const },
+    { preAnswerConfidence: "guessing" as const },
+  ]) {
+    const priorityInput = buildDecisionInput({
+      observations: [{ ...revisedFifth, attemptedAt: at(3), recordedAt: at(3), ...priorityOverride }, ...fourSamples.observations],
+      wantsFullExplanation: false,
+    });
+    const priorityResult = nextLearningStepWithExperimentalBkt(priorityInput, experiment);
+    expect(priorityResult.ruleDecision).toEqual(nextLearningStep(priorityInput));
+    expect(priorityResult.comparison).toMatchObject({ status: "fallback", reason: "priority_rule", sampleCount: 0 });
+  }
+
+  // Same-timestamp feature slots still require full untimestamped observation compatibility on comparable BKT samples.
+  const matchingFifthFeature = feature(revisedFifth, { recordedAt: at(2) });
+  expect(nextLearningStepWithExperimentalBkt(
+    buildDecisionInput({ observations: baseObservations, wantsFullExplanation: false }),
+    { ...experiment, features: [...fourSamples.features, { ...matchingFifthFeature, skillLabel: " integration " }] },
+  ).comparison).toMatchObject({ status: "compared", reason: "retain_rule", sampleCount: 5 });
+
+  for (const incompatibleFifthFeature of [
+    { ...matchingFifthFeature, skillLabel: "Differentiation" },
+    { ...matchingFifthFeature, eligibility: { ...matchingFifthFeature.eligibility, reasonCodes: ["declared_help" as const] } },
+  ]) {
+    expect(nextLearningStepWithExperimentalBkt(
+      buildDecisionInput({ observations: baseObservations, wantsFullExplanation: false }),
+      { ...experiment, features: [...fourSamples.features, incompatibleFifthFeature] },
+    ).comparison).toMatchObject({ status: "fallback", reason: "insufficient_samples", sampleCount: 4 });
+  }
+});
+
 it.each([
   { buckets: 2, copies: 10 }, { buckets: 2, copies: 12 }, { buckets: 3, copies: 12 }, { buckets: 3, copies: 15 },
 ])("R26 resolves $copies copies across $buckets overlapping buckets", ({ buckets, copies }) => {
@@ -1986,7 +2105,7 @@ it("replays only comparable evidence known before the cutoff and leaves non-inde
     feature(late, { recordedAt: at(9) }), feature(impossible, { recordedAt: at(6) }), feature(missing, { recordedAt: null })];
   const result = buildSkillBeliefTrajectory({ scope, cutoff: at(9), observations, features });
   expect(result.steps.map(step => [step.observationId, step.omega])).toEqual([
-    ["first", 1], ["hinted", 0], ["repeated", 0], ["revealed", 0], ["ai", 0],
+    ["first", 1], ["hinted", 0], ["repeated", 0], ["revealed", 0], ["ai", 0], ["reversed", 0], ["missing", 0],
   ]);
   expect(result.belief).toEqual(result.steps[0]?.belief);
   expect(result.belief.lastDirectRecallAtMs).toBe(Date.parse(at(1)));
