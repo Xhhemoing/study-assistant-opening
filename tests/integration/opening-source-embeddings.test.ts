@@ -480,19 +480,37 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
       await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
       const [proof] = await f.sql`
         ${publicPdfSealBoundaries(f.sql, f.scope.workspaceId, { sourceIds: [pdf.sourceId], sourceVersion: 1 })}
-        SELECT native_answer_boundary, follows_completed_answer FROM pdf_archive_inline_starts WHERE first_auxiliary_proof`;
-      expect(proof).toEqual({ native_answer_boundary: false, follows_completed_answer: false });
-      if (native.includes("An ordinary observation.")) {
-        const chunks = createOpeningSourceChunksRepository(f.sql);
-        expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2])).map(({ page }) => page)).toEqual([2]);
-      }
+        SELECT native_answer_boundary, follows_completed_answer, upgrades_inline
+        FROM pdf_archive_inline_groups WHERE first_auxiliary_proof`;
+      expect(proof).toEqual({ native_answer_boundary: false, follows_completed_answer: false, upgrades_inline: false });
+      const chunks = createOpeningSourceChunksRepository(f.sql);
+      expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2])).map(({ page }) => page)).toEqual([2]);
     },
   );
 
-  it.each(["**Proof. Done. ∎**", "Proof. Starts.\n**Q.E.D.**", "Proof. Starts.\n## Q.E.D. ###", "Proof. Starts.\n__Q.E.D.__"])(
+  it.each([
+    "**Proof. Done. ∎**",
+    "Proof. Starts.\n**Q.E.D.**",
+    "Proof. Starts.\n## Q.E.D. ###",
+    "Proof. Starts.\n__Q.E.D.__",
+    "*Proof. Done. ∎*",
+    "_Proof. Done. ∎_",
+    "Proof. Starts.\n*Q.E.D.*",
+    "Proof. Starts.\n_Q.E.D._",
+    "Proof. Done. *∎*",
+    "Proof. Done. _Q.E.D._",
+  ])(
     "publishes the next archived page after the Markdown proof %j",
     async proof => {
       await expectArchivedPdfPages(["Answer: No.\n" + proof, "Public prose after the proof."], [2], 1);
+    },
+  );
+
+  it.each(["*End of Answers.*", "_End of Solutions._"])(
+    "closes an archived answer section at single-emphasis terminator %j while preserving arithmetic *",
+    async terminator => {
+      await expectArchivedPdfPages(["Answer Key\nPrivate calculation\n" + terminator, "Public prose."], [2], 1);
+      await expectArchivedPdfPages(["Answer: 2 * 3 * 4", "Still sealed calculation.", "Public prose."], [3], 2);
     },
   );
 
@@ -690,6 +708,18 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\nChapter 2: Geometry", sealed: true },
     { native: "Answer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVII\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "Answer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVIII\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "Answer: 23.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "**Answer:** 2**3.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "**Answer**: 2**3.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "**Answer: 2**3.**\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3 + 4**5.", primary: "Answer: 23 + 45.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: (x)**(y) + (z)**(w).", primary: "Answer: (x)(y) + (z)(w).\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: 2 ** 3 + 4 ** 5.", primary: "Answer: 2 3 + 4 5.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: 2 ** 3 + 4 ** 5.", primary: "Answer: 2 ** 3 + 4 ** 5.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: x__1 + y__2.", primary: "Answer: x1 + y2.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: x__1 + y__2.", primary: "__Answer:__ x__1 + y__2.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\n## **Answer:** No. ##", primary: "Answer: **No.**\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\n__Answer:__ No.", primary: "Answer: No.\nChapter 2: Geometry", sealed: false },
   ])("archives a mixed proof after native $native and transcription $primary", async ({ native, primary, sealed }) => {
     const pdf = await seed([
       "Answer: Yes.",

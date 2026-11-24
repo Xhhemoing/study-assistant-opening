@@ -44,6 +44,24 @@ export type SealState = {
   unknownAfterFailure?: boolean;
 };
 
+const EMPHASIS_CLOSE_BOUNDARY = String.raw`(?:$|[\s:：.,;!?。，；：！？)\]】）])`;
+const BOLD_EMPHASIS_ATOM = String.raw`(?:[^\s*]|\*(?!\*)|\*\*(?!${EMPHASIS_CLOSE_BOUNDARY})|\*\*+(?=[^\S\r\n]))`;
+const UNDER_EMPHASIS_ATOM = String.raw`(?:[^\s_]|_(?!_)|__(?!${EMPHASIS_CLOSE_BOUNDARY})|__+(?=[^\S\r\n]))`;
+const PAIRED_BOLD_EMPHASIS_RE = new RegExp(
+  String.raw`(^|[(\[【（:：\s])\*\*(?=\S)((?:${BOLD_EMPHASIS_ATOM}|[^\S\r\n]+${BOLD_EMPHASIS_ATOM})+)\*\*(?=${EMPHASIS_CLOSE_BOUNDARY})`,
+  "gu",
+);
+const PAIRED_UNDER_EMPHASIS_RE = new RegExp(
+  String.raw`(^|[(\[【（:：\s])__(?=\S)((?:${UNDER_EMPHASIS_ATOM}|[^\S\r\n]+${UNDER_EMPHASIS_ATOM})+)__(?=${EMPHASIS_CLOSE_BOUNDARY})`,
+  "gu",
+);
+
+function stripMarkdownEmphasis(line: string): string {
+  return line.replace(PAIRED_BOLD_EMPHASIS_RE, "$1$2")
+    .replace(PAIRED_UNDER_EMPHASIS_RE, "$1$2")
+    .replace(PAIRED_BOLD_EMPHASIS_RE, "$1$2");
+}
+
 function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading: boolean } {
   const trimmed = line.trim();
   const isMarkdownHeading = /^#{1,6}\s+\S/u.test(trimmed);
@@ -53,7 +71,7 @@ function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading
     if (/^#{1,6}$/u.test(s)) return { stripped: "", isMarkdownHeading };
     s = s.replace(/^(?:#{1,6}\s+)+/u, "").trim();
   }
-  return { stripped: s.replace(/\*\*|__/gu, "").trim(), isMarkdownHeading };
+  return { stripped: stripMarkdownEmphasis(s).trim(), isMarkdownHeading };
 }
 
 const SEALED_SECTION_CONTAINER = String.raw`(?:Appendix\b(?:\s+[A-Z0-9]+)?|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*|(?:Lecture|Part|Unit)\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*[A-Z0-9一二三四五六七八九十]+)?)`;
@@ -153,8 +171,18 @@ const REFERENCE_BODY_RE = /^[A-Za-z0-9\u4e00-\u9fff【「『〈《]/u;
 const ENGLISH_REFERENCE_CLAUSE_RE = /,\s*(?:which|where|applied|used|shown|given|as)\b/u;
 const ENGLISH_REFERENCE_SUBJECT_RE = /^(?:[a-z]+|This|That|It|They|We)\b/u;
 const CHINESE_REFERENCE_CLAUSE_RE = /[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)/u;
-const ANSWER_PROOF_HEADING_RE = /^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。])/iu;
-const BARE_ANSWER_PROOF_HEADING_RE = /^(?:Proof|Sketch\s+of\s+Proof|(?:【\s*)?(?:证明|证|略证|续证)(?:\s*】)?)\s*[:：.．。]?$/iu;
+const SINGLE_EMPHASIS_AFTER = String.raw`(?=$|[\s:：.,;!?。，；：！？—–)\]】）-])`;
+const ANSWER_PROOF_STAR = String.raw`\*(?=[^\s*])(?:(?:Proof|Sketch\s+of\s+Proof)(?=\*|\b)|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s*\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:[^*\r\n]*[^\s*])?\*${SINGLE_EMPHASIS_AFTER}`;
+const ANSWER_PROOF_UNDER = String.raw`_(?=[^\s_])(?:(?:Proof|Sketch\s+of\s+Proof)(?=_|\b)|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s_\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:[^_\r\n]*[^\s_])?_${SINGLE_EMPHASIS_AFTER}`;
+const ANSWER_PROOF_HEADING_RE = new RegExp(
+  String.raw`^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。]|${ANSWER_PROOF_STAR}|${ANSWER_PROOF_UNDER})`,
+  "iu",
+);
+const BARE_PROOF_CORE = String.raw`(?:Proof|Sketch\s+of\s+Proof|(?:【\s*)?(?:证明|证|略证|续证)(?:\s*】)?)`;
+const BARE_ANSWER_PROOF_HEADING_RE = new RegExp(
+  String.raw`^(?:${BARE_PROOF_CORE}\s*[:：.．。]?|\*${BARE_PROOF_CORE}[:：.．。]?\*[.。]?|_${BARE_PROOF_CORE}[:：.．。]?_[.。]?)$`,
+  "iu",
+);
 const ENGLISH_CONTAINER_PREFIX_RE = /^(?:(?:Chapter|Section|Part|Unit|Lecture|Lesson|Module)\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)|Appendix(?:\s+(?:[A-Z](?![a-z\d])|\d+))?)(?=[\s|:：.．—–(（-]|$)/iu;
 const CHINESE_CONTAINER_PREFIX_RE = /^(?:第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?:\s*(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)/u;
 const BLOCK_IDENTIFIER_RE = /^\s+(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)\b(?=[\s:：.．、—–(（-]|$)/iu;
@@ -210,8 +238,25 @@ const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+
 const ANSWER_OR_REVIEW_TITLE_RE = /\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?|Review|Practice|Quiz|Drills?|Self-Check|Homework|Assignments?|Problem\s*Sets?|Worksheets?|Tutorials?|Recitations?|Labs?)\b|答案|解答|习题|练习|思考题|复习题|自测题|作业|课后题|单元测试/iu;
 const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Units?|Lectures?|Lessons?|Modules?|Appendix)\b|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录|\d+(?:\.\d+)+\s+)/iu;
 const PAGE_METADATA_HEADING_RE = /^(?:[[【(]\s*)?(?:(?:(?:cached|raw|readable|verified|automatic)\s+)*(?:transcription|ocr)\b|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)/iu;
-const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
-const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
+function buildSingleEmphasisTerminator(boundCore: string, plainCore: string): RegExp {
+  return new RegExp([
+    String.raw`${boundCore}\s*[.。]?\s*$`,
+    String.raw`^\s*\*(?=[^\s*])(?:[^*\r\n]*${boundCore}|${plainCore})[.。]?\*\s*[.。]?\s*$`,
+    String.raw`^\s*_(?=[^\s_])(?:[^_\r\n]*${boundCore}|${plainCore})[.。]?_\s*[.。]?\s*$`,
+    String.raw`(?:^|[\s(\[【（:：—–-])\*${plainCore}[.。]?\*\s*[.。]?\s*$`,
+    String.raw`(?:^|[\s(\[【（:：—–-])_${plainCore}[.。]?_\s*[.。]?\s*$`,
+  ].join("|"), "iu");
+}
+
+const SECTION_END_CORE = String.raw`(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)`;
+const BOUND_SECTION_END = String.raw`(?:\bEnd\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)`;
+const PROOF_END_CORE = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|Q\.?E\.?D\.?|证毕|证完)`;
+const BOUND_PROOF_END = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完)`;
+const SECTION_SEALED_TERMINATOR_RE = buildSingleEmphasisTerminator(BOUND_SECTION_END, SECTION_END_CORE);
+const INLINE_SEALED_TERMINATOR_RE = buildSingleEmphasisTerminator(
+  String.raw`(?:${BOUND_PROOF_END}|${BOUND_SECTION_END})`,
+  String.raw`(?:${PROOF_END_CORE}|${SECTION_END_CORE})`,
+);
 const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
 const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/u;
 const SAVED_NATIVE_HEADER_RE = /^\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n/u;

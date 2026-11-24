@@ -157,7 +157,9 @@ def worker_pdf_cli_fixtures():
         }, (), [(1, 6, None)]),
     }
     for name, answer in (("native_answer_boundary", "Answer: No."),
-                         ("numeric_native_answer_boundary", "Answer:\n1\nDone.")):
+                         ("numeric_native_answer_boundary", "Answer:\n1\nDone."),
+                         ("operator_native_answer_boundary", "Answer: 2**3."),
+                         ("underscore_native_answer_boundary", "Answer: x__1 + y__2.")):
         cases[name] = (4, {
             1: "1. Find x.\n" + answer,
             2: "The derivation continues",
@@ -170,6 +172,10 @@ def worker_pdf_cli_fixtures():
         ("wrapped_qed", "Proof. Starts.\n**Q.E.D.**"),
         ("heading_qed", "Proof. Starts.\n## Q.E.D. ###"),
         ("underscored_qed", "Proof. Starts.\n__Q.E.D.__"),
+        ("italic_proof_opener", "*Proof. Done. ∎*"),
+        ("italic_qed", "Proof. Starts.\n*Q.E.D.*"),
+        ("single_underscored_qed", "Proof. Starts.\n_Q.E.D._"),
+        ("trailing_italic_qed", "Proof. Done. *∎*"),
     ):
         cases[name] = (2, {
             1: "Answer: No.\n" + proof,
@@ -1392,6 +1398,12 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             "Proof. Starts.\n**Q.E.D.**",
             "Proof. Starts.\n## Q.E.D. ###",
             "Proof. Starts.\n__Q.E.D.__",
+            "*Proof. Done. ∎*",
+            "_Proof. Done. ∎_",
+            "Proof. Starts.\n*Q.E.D.*",
+            "Proof. Starts.\n_Q.E.D._",
+            "Proof. Done. *∎*",
+            "Proof. Done. _Q.E.D._",
         ):
             with self.subTest(proof=proof):
                 ext = physical_pages.extract_physical_pages(result_for(
@@ -1403,16 +1415,52 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertFalse(ext.inline_proof_boundary_by_page[11])
                 self.assertEqual(ext.texts_by_page[12], ["Public prose after the proof."])
 
+        for unfinished in ("Answer: 2 * 3 * 4", "Answer: No.\nProof. Done. ∎*", "Answer: No.\nProof. Done. foo_Q.E.D._"):
+            with self.subTest(unfinished=unfinished):
+                ext = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, unfinished)],
+                    [text_element(12, "Still private continuation.")],
+                ))
+                self.assertTrue(ext.inline_sealed_by_page[11])
+                self.assertEqual(ext.texts_by_page[12], [])
+
+    def test_preserves_interior_operators_in_answer_digests(self):
+        def digest_for(answer_line: str) -> str:
+            ext = physical_pages.extract_physical_pages(result_for([text_element(11, "1. Find x.\n" + answer_line)]))
+            self.assertTrue(ext.inline_proof_boundary_by_page[11])
+            return ext.completed_inline_answer_digest_by_page[11]
+
+        self.assertNotEqual(digest_for("Answer: 2**3."), digest_for("Answer: 23."))
+        self.assertNotEqual(digest_for("Answer: 2**3 + 4**5."), digest_for("Answer: 23 + 45."))
+        self.assertNotEqual(digest_for("Answer: (x)**(y) + (z)**(w)."), digest_for("Answer: (x)(y) + (z)(w)."))
+        self.assertNotEqual(digest_for("Answer: 2 ** 3 + 4 ** 5."), digest_for("Answer: 2 3 + 4 5."))
+        self.assertNotEqual(digest_for("Answer: x__1 + y__2."), digest_for("Answer: x1 + y2."))
+        expected_exp = sha256(b"Answer: 2**3.").hexdigest()
+        for wrapped in ("Answer: 2**3.", "**Answer:** 2**3.", "**Answer**: 2**3.", "**Answer: 2**3.**"):
+            with self.subTest(wrapped=wrapped):
+                self.assertEqual(digest_for(wrapped), expected_exp)
+        expected_no = sha256(b"Answer: No.").hexdigest()
+        for wrapped in ("## **Answer:** No. ##", "__Answer:__ No.", "Answer: **No.**"):
+            with self.subTest(wrapped=wrapped):
+                self.assertEqual(digest_for(wrapped), expected_no)
+
     def test_closes_markdown_wrapped_section_and_public_proof(self):
         ext = physical_pages.extract_physical_pages(result_for(
             [text_element(11, "Answer Key\nPrivate calculation\n**End of Answers.**")],
             [text_element(12, "Public prose after the answer section.")],
             [text_element(13, "Proof. The public derivation.\n__Q.E.D.__")],
             [text_element(14, "Public prose after the proof.")],
+            [text_element(15, "Answer Key\nPrivate calculation\n*End of Answers.*")],
+            [text_element(16, "Public prose after italic end.")],
+            [text_element(17, "*Proof. The public derivation. ∎*")],
+            [text_element(18, "Public prose after italic proof.")],
         ))
         self.assertEqual(ext.texts_by_page[12], ["Public prose after the answer section."])
         self.assertEqual([block.kind for block in ext.discourse_blocks_by_page[14]], ["narrative"])
         self.assertFalse(ext.discourse_blocks_by_page[13][-1].continues_on_next_page)
+        self.assertEqual(ext.texts_by_page[16], ["Public prose after italic end."])
+        self.assertEqual([block.kind for block in ext.discourse_blocks_by_page[18]], ["narrative"])
+        self.assertFalse(ext.discourse_blocks_by_page[17][-1].continues_on_next_page)
 
     def test_same_line_answer_proof_and_terminal_boundary_are_sealed(self):
         ext = physical_pages.extract_physical_pages(result_for(

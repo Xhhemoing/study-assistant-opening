@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v49-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v50-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -1071,7 +1071,10 @@ describe("bounded resumable PDF parser", () => {
       if (segmentPages === 1) expect(result.requests[1]).toEqual({ start: 2, seed: "inline_proof_sealed", exercise: true });
     });
 
-    it.each(["wrapped_proof_opener", "wrapped_qed", "heading_qed", "underscored_qed"])(
+    it.each([
+      "wrapped_proof_opener", "wrapped_qed", "heading_qed", "underscored_qed",
+      "italic_proof_opener", "italic_qed", "single_underscored_qed", "trailing_italic_qed",
+    ])(
       "publishes public prose after %s from the Python CLI",
       async name => {
         const result = await runCliScenario(name, { segmentPages: 1 });
@@ -1099,13 +1102,21 @@ describe("bounded resumable PDF parser", () => {
     });
 
     it.each([
-      { native: "Answer: No.", transcription: "Answer: Yes.", sealed: true },
-      { native: "Answer: No.", transcription: "Answer: No.", sealed: false },
-      { native: "Answer: No.", transcription: "**Answer:**  No.", sealed: false },
-      { native: "Answer:\n1\nDone.", transcription: "Answer:\n2\nDone.", sealed: true },
-      { native: "Answer:\n1\nDone.", transcription: "Answer:\n1\nDone.", sealed: false },
-    ])("reconciles the Docling proof boundary against transcription $transcription", async ({ native, transcription, sealed }) => {
-      const name = native.includes("\n") ? "numeric_native_answer_boundary" : "native_answer_boundary";
+      { name: "native_answer_boundary", native: "Answer: No.", transcription: "Answer: Yes.", sealed: true },
+      { name: "native_answer_boundary", native: "Answer: No.", transcription: "Answer: No.", sealed: false },
+      { name: "native_answer_boundary", native: "Answer: No.", transcription: "**Answer:**  No.", sealed: false },
+      { name: "native_answer_boundary", native: "Answer: No.", transcription: "## **Answer:** No. ##", sealed: false },
+      { name: "native_answer_boundary", native: "Answer: No.", transcription: "__Answer:__ No.", sealed: false },
+      { name: "native_answer_boundary", native: "Answer: No.", transcription: "Answer: **No.**", sealed: false },
+      { name: "numeric_native_answer_boundary", native: "Answer:\n1\nDone.", transcription: "Answer:\n2\nDone.", sealed: true },
+      { name: "numeric_native_answer_boundary", native: "Answer:\n1\nDone.", transcription: "Answer:\n1\nDone.", sealed: false },
+      { name: "operator_native_answer_boundary", native: "Answer: 2**3.", transcription: "Answer: 23.", sealed: true },
+      { name: "operator_native_answer_boundary", native: "Answer: 2**3.", transcription: "**Answer:** 2**3.", sealed: false },
+      { name: "operator_native_answer_boundary", native: "Answer: 2**3.", transcription: "**Answer**: 2**3.", sealed: false },
+      { name: "operator_native_answer_boundary", native: "Answer: 2**3.", transcription: "**Answer: 2**3.**", sealed: false },
+      { name: "underscore_native_answer_boundary", native: "Answer: x__1 + y__2.", transcription: "Answer: x1 + y2.", sealed: true },
+      { name: "underscore_native_answer_boundary", native: "Answer: x__1 + y__2.", transcription: "__Answer:__ x__1 + y__2.", sealed: false },
+    ])("reconciles the Docling proof boundary ($name) against transcription $transcription", async ({ name, native, transcription, sealed }) => {
       const parsed = fixtures[name]!.ranges["1-1/"]!.pages[0];
       expect(parsed).toMatchObject({
         text: "1. Find x.", hadSealedContent: true, inlineProofBoundaryPendingAtEnd: true,
@@ -3042,6 +3053,19 @@ describe("bounded resumable PDF parser", () => {
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVII\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVIII\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "Answer: 23.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "**Answer:** 2**3.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "**Answer**: 2**3.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3.", primary: "**Answer: 2**3.**\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: 2**3 + 4**5.", primary: "Answer: 23 + 45.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: 2**3 + 4**5.", primary: "**Answer:** 2**3 + 4**5.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: (x)**(y) + (z)**(w).", primary: "Answer: (x)(y) + (z)(w).\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: 2 ** 3 + 4 ** 5.", primary: "Answer: 2 3 + 4 5.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: 2 ** 3 + 4 ** 5.", primary: "Answer: 2 ** 3 + 4 ** 5.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: x__1 + y__2.", primary: "Answer: x1 + y2.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: x__1 + y__2.", primary: "__Answer:__ x__1 + y__2.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\n## **Answer:** No. ##", primary: "Answer: **No.**\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\n__Answer:__ No.", primary: "Answer: No.\nChapter 2: Geometry", sealed: false },
   ].map(scenario => ({ origin, ...scenario }))))("resolves the $origin proof boundary after native $native and transcription $primary", async ({ origin, native, primary, sealed }) => {
     const vision = "[转写]\n" + primary + "\n[图片描述]\nProof. The derivation begins.";
     const result = await runPdfScenario({ segmentPages: 1, pages: [
@@ -3088,7 +3112,18 @@ describe("bounded resumable PDF parser", () => {
       .toEqual([[1, "An ordinary observation."], [2, "Public prose after the answer."]]);
   });
 
-  it.each(["**Proof. Done. ∎**", "Proof. Starts.\n**Q.E.D.**", "Proof. Starts.\n## Q.E.D. ###", "Proof. Starts.\n__Q.E.D.__"])(
+  it.each([
+    "**Proof. Done. ∎**",
+    "Proof. Starts.\n**Q.E.D.**",
+    "Proof. Starts.\n## Q.E.D. ###",
+    "Proof. Starts.\n__Q.E.D.__",
+    "*Proof. Done. ∎*",
+    "_Proof. Done. ∎_",
+    "Proof. Starts.\n*Q.E.D.*",
+    "Proof. Starts.\n_Q.E.D._",
+    "Proof. Done. *∎*",
+    "Proof. Done. _Q.E.D._",
+  ])(
     "publishes later Worker text after the Markdown proof %j",
     async proof => {
       const result = await runPdfScenario({ segmentPages: 1, pages: [
@@ -3100,6 +3135,23 @@ describe("bounded resumable PDF parser", () => {
         .toEqual([[2, "Public prose after the proof."]]);
     },
   );
+
+  it("keeps arithmetic * unfinished in Worker while closing balanced single-emphasis section terminators", async () => {
+    const arithmetic = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Answer: 2 * 3 * 4" },
+      { page: 2, text: "Still private." },
+      { page: 3, text: "Public prose." },
+    ] });
+    expect(arithmetic.requests[1]).toEqual({ start: 2, seed: "inline_sealed" });
+    expect(arithmetic.publishedChunks.map(({ page }) => page)).toEqual([3]);
+
+    const section = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text: "Answer Key\nPrivate calculation\n*End of Answers.*" },
+      { page: 2, text: "Public prose after the section." },
+    ] });
+    expect(section.requests[1]).toEqual({ start: 2 });
+    expect(section.publishedChunks.map(({ page }) => page)).toEqual([2]);
+  });
 
   it("keeps a Docling proof boundary with no answer digest when transcription reopens an answer", async () => {
     const result = await runPdfScenario({ segmentPages: 1, pages: [

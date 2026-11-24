@@ -37,8 +37,15 @@ _HEADING_LABELS = frozenset({"section_header", "title"})
 _CONTINUABLE_KINDS = frozenset({"definition", "theorem", "proof", "worked_example", "exercise", "solution_sealed"})
 
 _MD_HASH_PREFIX_RE = re.compile(r"^(?:#{1,6}\s+)+")
-_MD_WRAPPED_EMPHASIS_RE = re.compile(r"^(\*\*|__)(.+?)\1(.*)$")
-_MD_EDGE_EMPHASIS_RE = re.compile(r"^(?:\*\*|__)+|(?:\*\*|__)+$")
+_EMPHASIS_CLOSE_BOUNDARY = r"(?:$|[\s:：.,;!?。，；：！？)\]】）])"
+_BOLD_EMPHASIS_ATOM = rf"(?:[^\s*]|\*(?!\*)|\*\*(?!{_EMPHASIS_CLOSE_BOUNDARY})|\*\*+(?=[^\S\r\n]))"
+_UNDER_EMPHASIS_ATOM = rf"(?:[^\s_]|_(?!_)|__(?!{_EMPHASIS_CLOSE_BOUNDARY})|__+(?=[^\S\r\n]))"
+_PAIRED_BOLD_EMPHASIS_RE = re.compile(
+    rf"(^|[(\[【（:：\s])\*\*(?=\S)((?:{_BOLD_EMPHASIS_ATOM}|[^\S\r\n]+{_BOLD_EMPHASIS_ATOM})+)\*\*(?={_EMPHASIS_CLOSE_BOUNDARY})"
+)
+_PAIRED_UNDER_EMPHASIS_RE = re.compile(
+    rf"(^|[(\[【（:：\s])__(?=\S)((?:{_UNDER_EMPHASIS_ATOM}|[^\S\r\n]+{_UNDER_EMPHASIS_ATOM})+)__(?={_EMPHASIS_CLOSE_BOUNDARY})"
+)
 _MD_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
 _CAPTION_NAME = r"(?:Figure|Fig\.?|Table|Tab\.?|Chart|Diagram|Scheme|Algorithm|Listing)"
 _CAPTION_NAME_RE = re.compile(rf"^{_CAPTION_NAME}(?=\s|[:：]|$)", re.IGNORECASE)
@@ -66,9 +73,21 @@ _REFERENCE_BODY_RE = re.compile(r"^[A-Za-z0-9\u4e00-\u9fff【「『〈《]")
 _ENGLISH_REFERENCE_CLAUSE_RE = re.compile(r",\s*(?:which|where|applied|used|shown|given|as)\b")
 _ENGLISH_REFERENCE_SUBJECT_RE = re.compile(r"^(?:[a-z]+|This|That|It|They|We)\b")
 _CHINESE_REFERENCE_CLAUSE_RE = re.compile(r"[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)")
+_SINGLE_EMPHASIS_AFTER = r"(?=$|[\s:：.,;!?。，；：！？—–)\]】）-])"
+_ANSWER_PROOF_STAR = (
+    r"\*(?=[^\s*])(?:(?:Proof|Sketch\s+of\s+Proof)(?=\*|\b)|【\s*(?:证明|证|略证|续证)\s*】"
+    r"|(?:证明|略证|续证)(?=[\s*\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:[^*\r\n]*[^\s*])?\*"
+    + _SINGLE_EMPHASIS_AFTER
+)
+_ANSWER_PROOF_UNDER = (
+    r"_(?=[^\s_])(?:(?:Proof|Sketch\s+of\s+Proof)(?=_|\b)|【\s*(?:证明|证|略证|续证)\s*】"
+    r"|(?:证明|略证|续证)(?=[\s_\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:[^_\r\n]*[^\s_])?_"
+    + _SINGLE_EMPHASIS_AFTER
+)
 _ANSWER_PROOF_HEADING_RE = re.compile(
     r"^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】"
-    r"|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。])", re.IGNORECASE,
+    r"|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。]"
+    rf"|{_ANSWER_PROOF_STAR}|{_ANSWER_PROOF_UNDER})", re.IGNORECASE,
 )
 _ENGLISH_BLOCK_PREFIX_RE = re.compile(
     r"^(?:Definition|Notation|Terminology|Convention|Axiom|Theorem|Lemma|Proposition|Corollary|Conjecture|Claim"
@@ -183,12 +202,26 @@ _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE = re.compile(
     rf"|【\s*(?:解答|证明|证|解|详解|解析|分析){_CHINESE_ANSWER_CONTINUATION}\s*】"
     r")"
 )
+def _single_emphasis_proof_branch(delim: str, not_delim: str, word_end: str) -> str:
+    esc = re.escape(delim)
+    return (
+        rf"{esc}(?=[^\s{not_delim}])(?:"
+        rf"(?:Proof|PROOF|Sketch\s+of\s+Proof|Proof\s+Sketch)(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary)\s*[\d.]*)?(?:\s*\(\s*(?:continued|cont\.?)\s*\))?\s*(?:[:：.\-—]|(?={esc})|{word_end})"
+        r"|【\s*(?:证明|证|略证|续证)\s*】"
+        rf"|(?:证明|略证|续证)\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*(?:[:：.．\-—]|(?={esc})|$)"
+        r"|证\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：.．]"
+        rf")(?:[^{not_delim}\r\n]*[^\s{not_delim}])?{esc}{_SINGLE_EMPHASIS_AFTER}"
+    )
+
+
 _PROOF_RE = re.compile(
     r"^(?:"
     r"(?:Proof|PROOF|Sketch\s+of\s+Proof|Proof\s+Sketch)(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary)\s*[\d.]*)?(?:\s*\(\s*(?:continued|cont\.?)\s*\))?\s*(?:[:：.\-—]|$)"
     r"|【\s*(?:证明|证|略证|续证)\s*】"
     r"|(?:证明|略证|续证)\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*(?:[:：.．\-—]|$)"
     r"|证\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：.．]"
+    rf"|{_single_emphasis_proof_branch('*', '*', r'$')}"
+    rf"|{_single_emphasis_proof_branch('_', '_', r'$')}"
     r")"
 )
 _THEOREM_RE = re.compile(
@@ -328,10 +361,26 @@ _NEXT_CONTINUATION_RE = re.compile(
     r"(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|（\s*(?:下接下页|转下页|未完待续)\s*）|\(\s*(?:下接下页|转下页|未完待续)\s*\)|接下页|转下页)\s*$",
     re.IGNORECASE,
 )
+def _single_emphasis_terminator(bound_core: str, plain_core: str) -> str:
+    return (
+        rf"(?:{bound_core}\s*[.。]?\s*$"
+        rf"|^\s*\*(?=[^\s*])(?:[^*\r\n]*{bound_core}|{plain_core})[.。]?\*\s*[.。]?\s*$"
+        rf"|^\s*_(?=[^\s_])(?:[^_\r\n]*{bound_core}|{plain_core})[.。]?_\s*[.。]?\s*$"
+        rf"|(?:^|[\s(\[【（:：—–-])\*{plain_core}[.。]?\*\s*[.。]?\s*$"
+        rf"|(?:^|[\s(\[【（:：—–-])_{plain_core}[.。]?_\s*[.。]?\s*$)"
+    )
+
+
+_PROOF_END_CORE = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|Q\.?E\.?D\.?|证毕|证完)"
 _PROOF_END = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完)"
-_PROOF_TERMINATOR_RE = re.compile(rf"{_PROOF_END}\s*[.。]?\s*$", re.IGNORECASE)
-_SECTION_SEALED_TERMINATOR_RE = re.compile(r"(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
-_INLINE_SEALED_TERMINATOR_RE = re.compile(rf"(?:{_PROOF_END}|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
+_SECTION_END_CORE = r"(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)"
+_SECTION_END = r"(?:\bEnd\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)"
+_PROOF_TERMINATOR_RE = re.compile(_single_emphasis_terminator(_PROOF_END, _PROOF_END_CORE), re.IGNORECASE)
+_SECTION_SEALED_TERMINATOR_RE = re.compile(_single_emphasis_terminator(_SECTION_END, _SECTION_END_CORE), re.IGNORECASE)
+_INLINE_SEALED_TERMINATOR_RE = re.compile(
+    _single_emphasis_terminator(rf"(?:{_PROOF_END}|{_SECTION_END})", rf"(?:{_PROOF_END_CORE}|{_SECTION_END_CORE})"),
+    re.IGNORECASE,
+)
 _INLINE_SEAL_MODES = ("inline_sealed", "inline_proof_sealed")
 _BARE_ANSWER_LABEL_RE = re.compile(r"^(?:答案|解答)\s*[:：]$")
 _MODEL_ANSWER_LABEL_RE = re.compile(
@@ -571,17 +620,20 @@ def _collect_page_fragments(conversion):
     return numbers, fragments, visual_sets
 
 
+def _strip_markdown_emphasis(text: str) -> str:
+    text = _PAIRED_BOLD_EMPHASIS_RE.sub(r"\1\2", text)
+    text = _PAIRED_UNDER_EMPHASIS_RE.sub(r"\1\2", text)
+    return _PAIRED_BOLD_EMPHASIS_RE.sub(r"\1\2", text)
+
+
 def _strip_heading_markup(line_text: str) -> str:
     s = line_text.strip()
     if _MD_HEADING_LINE_RE.match(s):
         s = re.sub(r"\s+#+$", "", s)
         if re.fullmatch(r"#{1,6}", s):
             return ""
-        s = _MD_HASH_PREFIX_RE.sub("", s)
-    m = _MD_WRAPPED_EMPHASIS_RE.match(s)
-    if m:
-        s = f"{m.group(2)}{m.group(3)}"
-    return _MD_EDGE_EMPHASIS_RE.sub("", s).strip()
+        s = _MD_HASH_PREFIX_RE.sub("", s).strip()
+    return _strip_markdown_emphasis(s).strip()
 
 
 def _is_numbered_section_heading(stripped: str) -> bool:
@@ -1046,15 +1098,9 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             previous_numbered_question = active_seal is None and bool(_NUMBERED_QUESTION_RE.match(stripped))
         if active_seal in _INLINE_SEAL_MODES:
             last_inline_body = _inline_answer_body(stripped) if explicit_opener else stripped
-            if inline_answer_lines is not None:
+            if inline_answer_lines is not None and stripped:
                 # Match the Worker's seal scanner without returning the sealed answer text.
-                answer_line = unit_text.strip()
-                if re.match(r"^#{1,6}\s+\S", answer_line):
-                    answer_line = re.sub(r"\s+#+$", "", answer_line)
-                    answer_line = re.sub(r"^(?:#{1,6}\s+)+", "", answer_line)
-                answer_line = re.sub(r"\*\*|__", "", answer_line).strip()
-                if answer_line:
-                    inline_answer_lines.append(re.sub(r"[^\S\n]+", " ", answer_line))
+                inline_answer_lines.append(re.sub(r"[^\S\n]+", " ", stripped))
             if explicit_opener and _ANSWER_PROOF_HEADING_RE.match(last_inline_body):
                 active_seal = "inline_proof_sealed"
                 page_seal_mode = active_seal
