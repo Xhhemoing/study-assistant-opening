@@ -95,6 +95,13 @@ const containsSourceRef = (ids: ReadonlySet<string>, refs: unknown) =>
   Array.isArray(refs) && refs.some(ref => containsId(ids, ref)
     || containsId(ids, field(ref, "sourceId")) || containsId(ids, field(ref, "source_id")));
 
+function extractPublicationCardIds(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(extractPublicationCardIds);
+  if (!isRecord(value)) return [];
+  return [value.id, value.cardId].filter((id): id is string => typeof id === "string");
+}
+
 type LineageKind = "session" | "activity" | "unit" | "chunk" | "item" | "observation" | "attempt" | "turn"
   | "document" | "revision" | "problem" | "memory" | "history" | "card";
 type LineageLink = readonly [LineageKind, unknown];
@@ -113,9 +120,10 @@ export function projectPrivacyGuardedOpeningDataset(
   const rows = (name: string) => tables[name] ?? [];
   const inWorkspace = (row: Row) => matchesId(row.workspace_id, scope.workspaceId);
   const inWorkspaceOrUnscoped = (row: Row) => row.workspace_id == null || inWorkspace(row);
-  const workspaceIds = (name: string) => {
+  const owned = (row: Row) => inWorkspace(row) && matchesId(row.owner_user_id, scope.ownerUserId);
+  const inventory = (name: string, admits = inWorkspace, idField = "id") => {
     const ids = new Set<string>();
-    for (const row of rows(name)) if (inWorkspace(row)) addId(ids, row.id);
+    for (const row of rows(name)) if (admits(row)) addId(ids, row[idField]);
     return ids;
   };
   const shredded = new Set<string>();
@@ -175,13 +183,15 @@ export function projectPrivacyGuardedOpeningDataset(
   for (const row of rows("opening_sources")) {
     if (inWorkspace(row) && (row.upload_state === undefined || row.upload_state === "uploaded")) addId(sourceInventory, row.id);
   }
-  const memoryInventory = workspaceIds("opening_memories");
-  const turnInventory = workspaceIds("opening_turns");
-  const documentInventory = workspaceIds("library_documents");
-  const observationInventory = workspaceIds("opening_learning_observations");
+  const ownedConversationIds = inventory("opening_conversations", owned);
+  const memoryInventory = inventory("opening_memories");
+  const turnInventory = inventory("opening_turns", row => inWorkspace(row)
+    && (tables.opening_conversations === undefined || containsId(ownedConversationIds, row.conversation_id)));
+  const admittedDocuments = inventory("library_documents", row => inWorkspace(row) && row.deleted_at == null
+    && (row.owner_user_id == null || matchesId(row.owner_user_id, scope.ownerUserId)) && !referencesShreddedSource(row));
+  const ownedObservations = inventory("opening_learning_observations", owned);
   const ownedCards = new Set<string>();
-  const ownedConversations = new Set(rows("opening_conversations")
-    .filter(row => inWorkspace(row) && matchesId(row.owner_user_id, scope.ownerUserId)).map(row => row.id));
+  const ownedConversations = new Set(rows("opening_conversations").filter(owned).map(row => row.id));
   const ownedOriginTurns = rows("opening_turns").filter(row => inWorkspace(row) && ownedConversations.has(row.conversation_id)
     && (row.role === "user" || row.role === "assistant") && (row.status === undefined || row.status === "complete")
     && !row.query_system && row.system_query == null);
@@ -253,7 +263,7 @@ export function projectPrivacyGuardedOpeningDataset(
   };
   index("card", "cards", row => {
     const card = lineageKey("card", row.id);
-    if (row.owner_user_id != null && !matchesId(row.owner_user_id, scope.ownerUserId)) {
+    if (!matchesId(row.owner_user_id, scope.ownerUserId)) {
       exclude(card);
       return [];
     }
@@ -261,9 +271,9 @@ export function projectPrivacyGuardedOpeningDataset(
     const documentId = row.source_document_id;
     const observationId = row.origin_observation_root_id;
     if (documentId != null && (!isUuid(canonicalId(documentId))
-      || !containsId(documentInventory, documentId))) exclude(card);
+      || !containsId(admittedDocuments, documentId))) exclude(card);
     if (observationId != null && (!isUuid(canonicalId(observationId))
-      || !containsId(observationInventory, observationId))) exclude(card);
+      || !containsId(ownedObservations, observationId))) exclude(card);
     return [["document", documentId], ["observation", observationId]];
   });
   const anchorLinks = (anchor: unknown): LineageLink[] => [
@@ -276,22 +286,34 @@ export function projectPrivacyGuardedOpeningDataset(
     .map(row => lineageKey("document", row.document_id)));
   const snippetsWithoutProvenance = new Set(snippetDocuments);
   for (const row of rows("opening_note_provenance")) {
-    if (!inWorkspaceOrUnscoped(row)) continue;
+    if (!inWorkspaceOrUnscoped(row)) {
+      const foreignRefs = row.context_source_refs;
+      for (const ref of Array.isArray(foreignRefs) ? foreignRefs : [foreignRefs]) {
+        for (const cardId of extractPublicationCardIds(field(ref, "publicationCardIds"))) {
+          exclude(lineageKey("card", cardId));
+        }
+      }
+      continue;
+    }
     const document = lineageKey("document", row.document_id);
     snippetsWithoutProvenance.delete(document);
     const isSnippetOrUnknown = row.snippet_origin !== false || snippetDocuments.has(document);
-    if (!Array.isArray(row.context_source_refs)) {
-      exclude(document);
-      continue;
-    }
-    if (referencesShreddedSource(row)) exclude(document);
+    const documentAdmitted = containsId(admittedDocuments, row.document_id);
+    if (tables.library_documents !== undefined && !documentAdmitted) exclude(document);
+    const refs = row.context_source_refs;
+    if (!Array.isArray(refs) || referencesShreddedSource(row)) exclude(document);
     const declaredOrigins = new Set<unknown>(row.origin_turn_id == null ? [] : [canonicalId(row.origin_turn_id)]);
     let verifiedSnippet = false;
     let hasMemoryMetadata = false;
     let hasUnattributedMemory = false;
-    for (const ref of row.context_source_refs) {
-      if (isRecord(ref) && Array.isArray(ref.publicationCardIds)) {
-        for (const cardId of ref.publicationCardIds) link(document, lineageKey("card", cardId));
+    // Keep identifiable card links even when the publication itself cannot be admitted.
+    for (const ref of Array.isArray(refs) ? refs : [refs]) {
+      const cardIds = extractPublicationCardIds(field(ref, "publicationCardIds"));
+      if (cardIds.length && !documentAdmitted) exclude(document);
+      for (const cardId of cardIds) {
+        const card = lineageKey("card", cardId);
+        if (!document || !documentAdmitted) exclude(card);
+        else link(document, card);
       }
       if (isRecord(ref) && "memoryDependencyIds" in ref) {
         const metadata = turnMemoryDependencyMetadata(ref);
@@ -323,7 +345,8 @@ export function projectPrivacyGuardedOpeningDataset(
   }
   for (const document of snippetsWithoutProvenance) exclude(document);
   for (const row of rows("library_documents")) {
-    if (inWorkspaceOrUnscoped(row) && (row.deleted_at != null || referencesShreddedSource(row))) {
+    if (inWorkspaceOrUnscoped(row) && (row.deleted_at != null || referencesShreddedSource(row)
+      || (row.owner_user_id != null && !matchesId(row.owner_user_id, scope.ownerUserId)))) {
       exclude(lineageKey("document", row.id));
     }
   }
@@ -464,18 +487,55 @@ export function projectPrivacyGuardedOpeningDataset(
     ["session", row.session_id], ["chunk", row.chunk_id], ["revision", row.teaching_revision_id],
   ], "problem_id");
   index("item", "opening_learning_item_versions", row => [["activity", row.activity_id], ["chunk", row.chunk_id], ...problemLinks(row)]);
-  index("observation", "opening_learning_observations", row => [
-    ["session", row.session_id], ["activity", row.activity_id], ["item", row.item_version_id], ["attempt", row.attempt_id],
-    ["observation", row.root_observation_id], ["observation", row.revises_observation_id], ["observation", row.effective_head_id],
-    ...problemLinks(row),
-    ...(Array.isArray(row.source_turn_ids) ? row.source_turn_ids.map((id): LineageLink => ["turn", id]) : []),
-  ]);
-  index("attempt", "opening_learning_attempts", row => [
-    ["session", row.session_id], ["activity", row.activity_id], ["item", row.item_version_id], ["observation", row.observation_id],
-    ["turn", field(row.create_intent, "sourceTurnId")],
-    ...problemLinks(row),
-    ...anchorLinks(row.context_anchor),
-  ]);
+  const observationParents: readonly [LineageKind, string, string, (row: Row) => boolean, string?][] = [
+    ["session", "session_id", "opening_learning_sessions", owned],
+    ["activity", "activity_id", "opening_teaching_activities", owned],
+    ["item", "item_version_id", "opening_learning_item_versions", owned],
+    ["attempt", "attempt_id", "opening_learning_attempts", owned],
+    ["problem", "problem_id", "opening_problem_refs", inWorkspace, "problem_id"],
+    ["revision", "teaching_revision_id", "library_revisions", inWorkspace],
+  ];
+  const observationInventories = observationParents.map(([kind, field, table, admits, idField]) => ({
+    kind, field, ids: tables[table] === undefined ? undefined : inventory(table, admits, idField),
+  }));
+  index("observation", "opening_learning_observations", row => {
+    const observation = lineageKey("observation", row.id);
+    if (!matchesId(row.owner_user_id, scope.ownerUserId)) {
+      exclude(observation);
+      return [];
+    }
+    const links: LineageLink[] = [];
+    for (const { kind, field, ids } of observationInventories) {
+      const id = row[field];
+      if (id == null) continue;
+      if (!isUuid(canonicalId(id)) || (ids !== undefined && !containsId(ids, id))) exclude(observation);
+      links.push([kind, id]);
+    }
+    for (const id of [row.root_observation_id, row.revises_observation_id, row.effective_head_id]) {
+      if (id == null) continue;
+      if (!isUuid(canonicalId(id)) || !containsId(ownedObservations, id)) exclude(observation);
+      else link(observation, lineageKey("observation", id));
+      links.push(["observation", id]);
+    }
+    const turnIds = row.source_turn_ids;
+    if (turnIds !== undefined) {
+      if (!Array.isArray(turnIds) || !turnIds.every(id => isUuid(canonicalId(id)) && containsId(turnInventory, id))) {
+        exclude(observation);
+      } else for (const id of turnIds) links.push(["turn", id]);
+    }
+    return links;
+  });
+  index("attempt", "opening_learning_attempts", row => {
+    if (row.observation_id != null && !containsId(ownedObservations, row.observation_id)) {
+      exclude(lineageKey("attempt", row.id));
+    }
+    return [
+      ["session", row.session_id], ["activity", row.activity_id], ["item", row.item_version_id], ["observation", row.observation_id],
+      ["turn", field(row.create_intent, "sourceTurnId")],
+      ...problemLinks(row),
+      ...anchorLinks(row.context_anchor),
+    ];
+  });
   const historyByConversation = new Map<unknown, { position: number; assistantTurnId: unknown }[]>();
   for (const row of rows("opening_tutor_jobs")) {
     if (!inWorkspaceOrUnscoped(row)) continue;

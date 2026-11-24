@@ -1,6 +1,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { notePublicationMetadata } from "@aistudy/domain";
 import type { OpeningScope } from "./opening-sources";
 import { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
 import { contextSourceRefsIncluded, isVerifiedSnippetLineage, memoryOnlyRefSourceIds, mergeContextProvenanceRefs,
@@ -12,6 +13,18 @@ const lineageMarker = { snippetLineageVersion: 1 };
 function storedCredentialRefs(refs: ContextProvenanceRef[], input: CredentialInput, origins: string[]) {
   return [...refs, ...(input.verifiedLineage === false ? [] : [lineageMarker]),
     ...(origins.length ? [{ originTurnIds: origins }] : [])];
+}
+
+function canonicalOriginTurnIds(ids: readonly string[]) {
+  return [...new Set(ids.map(id => id.toLowerCase()))].sort();
+}
+
+function normalizeStoredQueryOrigins(value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  return value.map(ref => {
+    const origins = notePublicationMetadata(ref)?.originTurnIds;
+    return origins ? { originTurnIds: canonicalOriginTurnIds(origins) } : ref;
+  });
 }
 
 export type EphemeralProvenanceRepository = {
@@ -70,20 +83,20 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
     async recordQuery(scope, input) {
       const refs = parseContextProvenanceRefs(input.contextSourceRefs);
       if (refs === null) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query lineage unavailable");
-      const origins = [...new Set((input.originTurnIds ?? []).map(id => id.toLowerCase()))].sort();
+      const origins = canonicalOriginTurnIds(input.originTurnIds ?? []);
       const stored = storedCredentialRefs(refs, input, origins);
       if (stored.length > 256) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query lineage unavailable");
       return sql.begin(async tx => {
         const [owner] = await tx`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner) throw new EphemeralProvenanceError("NOT_FOUND", "workspace not found");
         if (Number(owner.privacy_epoch) !== input.privacyEpoch) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query privacy changed");
+        const [size] = await tx`SELECT octet_length((${tx.json(stored)}::jsonb)::text) <= 65536 AS fits`;
+        if (!size?.fits) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query lineage unavailable");
         const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(refs)}::jsonb`, true, true)} AS included`;
         if (!admitted?.included || !await memoriesAvailable(tx, scope, refs)) {
           throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query material unavailable");
         }
         if (!await openingSnippetOriginsAvailable(tx, scope, origins)) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query origin unavailable");
-        const [size] = await tx`SELECT octet_length((${tx.json(stored)}::jsonb)::text) <= 65536 AS fits`;
-        if (!size?.fits) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query lineage unavailable");
         const [created] = await tx`INSERT INTO opening_query_ephemeral_provenance(id,workspace_id,owner_user_id,request_id,privacy_epoch,context_source_refs)
           VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${input.requestId},${input.privacyEpoch},${tx.json(stored)})
           ON CONFLICT(workspace_id,owner_user_id,request_id) DO NOTHING RETURNING id`;
@@ -91,7 +104,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         const [existing] = await tx`SELECT id,privacy_epoch,context_source_refs,expires_at FROM opening_query_ephemeral_provenance
           WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND request_id=${input.requestId}`;
         if (!existing || Number(existing.privacy_epoch) !== input.privacyEpoch || new Date(existing.expires_at).getTime()<=Date.now()
-          || !isDeepStrictEqual(existing.context_source_refs, stored)) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query provenance replay differs");
+          || !isDeepStrictEqual(normalizeStoredQueryOrigins(existing.context_source_refs), stored)) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "query provenance replay differs");
         return String(existing.id);
       });
     },
@@ -110,7 +123,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
             throw new EphemeralProvenanceError("PRIVACY_CHANGED", "material is no longer available");
           }
         }
-        const origins = [...new Set((input.originTurnIds ?? []).map(id => id.toLowerCase()))].sort();
+        const origins = canonicalOriginTurnIds(input.originTurnIds ?? []);
         if (!await openingSnippetOriginsAvailable(tx, scope, origins)) throw new EphemeralProvenanceError("PRIVACY_CHANGED", "reply origin unavailable");
         const stored = refs === null ? null : storedCredentialRefs(refs, input, origins);
         const rows = await tx`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)

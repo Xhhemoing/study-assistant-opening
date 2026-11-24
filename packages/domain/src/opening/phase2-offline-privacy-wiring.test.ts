@@ -328,7 +328,7 @@ it("follows source lineage from source-free turns through derived activities, ob
       opening_turns: [
         ...tables.opening_turns, sourceFreeTurn("turn-source-free"),
         sourceFreeTurn("turn-session", { learning_session_id: "SESSION-SHRED" }),
-        sourceFreeTurn("turn-session-anchor", { context_anchor: { sessionId: "session-shred" } }),
+        sourceFreeTurn("abcdef12-3456-4789-abcd-ef1234567918", { context_anchor: { sessionId: "session-shred" } }),
         sourceFreeTurn("turn-activity", { teaching_activity_id: "activity-direct" }),
         sourceFreeTurn("turn-activity-anchor", { context_anchor: { activityId: "activity-direct" } }),
         sourceFreeTurn("turn-source-anchor", { context_anchor: { sourceId: "shred" } }),
@@ -340,7 +340,7 @@ it("follows source lineage from source-free turns through derived activities, ob
       opening_teaching_activities: [...tables.opening_teaching_activities,
         { ...owner, id: "activity-derived", source_ids: [], create_intent: { sourceTurnId: "turn-session" } }],
       opening_learning_observations: [...tables.opening_learning_observations,
-        { ...owner, id: "observation-derived", source_turn_ids: ["turn-session-anchor"], outcome: "correct" }],
+        { ...owner, id: "observation-derived", source_turn_ids: ["abcdef12-3456-4789-abcd-ef1234567918"], outcome: "correct" }],
       opening_learning_attempts: [...tables.opening_learning_attempts,
         { ...owner, id: "attempt-item", activity_id: "activity-good", item_version_id: "item-shred", source_ids: [] },
         { ...owner, id: "attempt-derived-activity", activity_id: "activity-derived", source_ids: [] },
@@ -475,6 +475,131 @@ describe("persisted dataset provenance", () => {
     expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
     expect(result.answerSequences).toEqual([]);
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
+  const variantCardId = "abcdef12-3456-4789-abcd-ef1234567916";
+  const publishedDocumentId = "abcdef12-3456-4789-abcd-ef1234567917";
+  const variantRows = {
+    cards: [{ ...owner, id: variantCardId }],
+    opening_teaching_activities: [
+      { ...activity("variant"), create_intent: { kind: "card_review_variant", cardId: variantCardId } }, activity("keep"),
+    ],
+    opening_learning_attempts: [{ ...owner, id: "variant", activity_id: "variant", source_ids: [] }],
+    opening_turns: [turn("anchored", { context_anchor: { cardId: variantCardId } }), turn("keep")],
+  };
+  const expectVariantExcluded = (result: ReturnType<typeof project>) => {
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
+    expect(result.answerSequences).toEqual([]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  };
+
+  it.each([
+    { kind: "omitted", docs: undefined },
+    { kind: "empty", docs: [] },
+    { kind: "deleted", docs: [{ ...owner, id: publishedDocumentId, deleted_at: time }] },
+    { kind: "foreign", docs: [{ ...owner, id: publishedDocumentId, owner_user_id: "foreign" }] },
+    { kind: "shredded", docs: [{ ...owner, id: publishedDocumentId, source_ids: [shreddedSourceId] }] },
+  ])("withholds historical card publications when the document inventory is $kind", ({ docs }) => {
+    const lineage = {
+      ...variantRows,
+      opening_note_provenance: [{ ...owner, document_id: publishedDocumentId, snippet_origin: false,
+        context_source_refs: [{ publicationCardIds: [variantCardId] }] }],
+    };
+    const eligible = project({ ...lineage, library_documents: [{ ...owner, id: publishedDocumentId }] });
+    expect(eligible.coursePackageQuality.map(row => row.identity)).toEqual(["activity:variant", "activity:keep"]);
+    expect(eligible.answerSequences.map(row => row.identity)).toEqual(["attempt:variant"]);
+    expect(eligible.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:anchored", "turn:keep"]);
+    expectVariantExcluded(project({ ...lineage, ...(docs && { library_documents: docs }) }, { tombstoneReceipts: [tombstone] }));
+  });
+
+  it.each([
+    { kind: "scalar", refs: [{ publicationCardIds: variantCardId }] },
+    { kind: "mixed array", refs: [{ publicationCardIds: ["bad", { id: variantCardId }] }] },
+    { kind: "nested array", refs: [{ publicationCardIds: [[variantCardId]] }] },
+    { kind: "non-array provenance", refs: { publicationCardIds: [variantCardId] } },
+  ])("withholds cards identified in malformed $kind publication metadata", ({ refs }) => {
+    expectVariantExcluded(project({
+      ...variantRows,
+      library_documents: [{ ...owner, id: publishedDocumentId }],
+      opening_note_provenance: [{ ...owner, document_id: publishedDocumentId, snippet_origin: false, context_source_refs: refs }],
+    }));
+  });
+
+  it.each([undefined, null])("withholds a card whose owner is %s", owner_user_id => {
+    expectVariantExcluded(project({ ...variantRows, cards: [{ ...variantRows.cards[0], owner_user_id }] }));
+  });
+
+  const observationVariant: dataset.OpeningDatasetProjectionInput["tables"] = {
+    ...variantRows,
+    cards: [{ ...variantRows.cards[0], origin_observation_root_id: upstreamId }],
+  };
+  const ownedOrigin = { ...owner, id: upstreamId, source_turn_ids: [] };
+
+  it("withholds a card and all observation dependents when the origin belongs to another owner", () => {
+    expectVariantExcluded(project({
+      ...observationVariant,
+      opening_learning_observations: [{ ...ownedOrigin, owner_user_id: "foreign" }],
+      opening_learning_attempts: [...observationVariant.opening_learning_attempts,
+        { ...owner, id: "foreign-origin", activity_id: "keep", observation_id: upstreamId, source_ids: [] }],
+      opening_turns: [...observationVariant.opening_turns, turn("foreign-origin", { attempt_id: "foreign-origin" })],
+    }));
+  });
+
+  it.each([
+    { field: "root_observation_id", value: missingTurnId },
+    { field: "revises_observation_id", value: missingTurnId },
+    { field: "effective_head_id", value: missingTurnId },
+    { field: "effective_head_id", value: "malformed" },
+    { field: "source_turn_ids", value: [missingTurnId] },
+    { field: "source_turn_ids", value: [false] },
+    { field: "source_turn_ids", value: missingTurnId },
+    { field: "source_turn_ids", value: null },
+  ])("withholds a card when its origin declares unavailable $field at $value", ({ field, value }) => {
+    expectVariantExcluded(project({
+      ...observationVariant,
+      opening_learning_observations: [{ ...ownedOrigin, [field]: value }],
+    }));
+  });
+
+  it.each([
+    { field: "session_id", table: "opening_learning_sessions" },
+    { field: "activity_id", table: "opening_teaching_activities" },
+    { field: "item_version_id", table: "opening_learning_item_versions" },
+    { field: "attempt_id", table: "opening_learning_attempts" },
+    { field: "problem_id", table: "opening_problem_refs" },
+    { field: "teaching_revision_id", table: "library_revisions" },
+  ])("withholds a card when its origin's $field is missing from the supplied table", ({ field, table }) => {
+    expectVariantExcluded(project({
+      ...observationVariant,
+      [table]: observationVariant[table] ?? [],
+      opening_learning_observations: [{ ...ownedOrigin, [field]: missingTurnId }],
+    }));
+  });
+
+  it("keeps a card backed by a complete owned observation chain", () => {
+    const result = project({
+      ...observationVariant,
+      opening_learning_observations: [
+        { ...ownedOrigin, effective_head_id: missingSourceId.toUpperCase() },
+        { ...ownedOrigin, id: missingSourceId, root_observation_id: upstreamId, revises_observation_id: upstreamId,
+          source_turn_ids: [knownSourceId.toUpperCase()] },
+      ],
+      opening_turns: [...observationVariant.opening_turns, turn(knownSourceId)],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:variant", "activity:keep"]);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:variant"]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toContain("turn:anchored");
+  });
+
+  it("withholds a root observation and linked card when a revision in the chain loses its turn", () => {
+    expectVariantExcluded(project({
+      ...observationVariant,
+      opening_learning_observations: [
+        ownedOrigin,
+        { ...ownedOrigin, id: missingSourceId, root_observation_id: upstreamId, revises_observation_id: upstreamId,
+          source_turn_ids: [missingTurnId] },
+      ],
+    }));
   });
 
   it("withholds an unattributed legacy memory-only turn and its derived records", () => {
@@ -909,6 +1034,8 @@ describe("persisted dataset provenance", () => {
   });
 
   it("follows problem and library revision links and closes the observation revision chain", () => {
+    const rootId = upstreamId, middleId = missingTurnId, headId = knownSourceId, effectiveId = missingSourceId;
+    const problemId = "abcdef12-3456-4789-abcd-ef1234567919", revisionId = "abcdef12-3456-4789-abcd-ef1234567920";
     const observation = (id: string, lineage: Record<string, unknown>) => ({
       ...owner, id, source_turn_ids: [], outcome: "correct", ...lineage,
     });
@@ -917,32 +1044,32 @@ describe("persisted dataset provenance", () => {
       opening_learning_sessions: [{ ...owner, id: "session", source_ids: ["shred"] }],
       opening_source_chunks: [{ id: existingChunkId, source_id: "shred" }],
       library_documents: [{ id: "document", deleted_at: time }],
-      library_revisions: [{ ...owner, id: "revision", document_id: "document" }],
+      library_revisions: [{ ...owner, id: revisionId, document_id: "document" }],
       opening_problem_refs: [
-        { ...owner, problem_id: "chunk-problem", chunk_id: existingChunkId },
-        { ...owner, problem_id: "revision-problem", teaching_revision_id: "revision" },
+        { ...owner, problem_id: problemId, chunk_id: existingChunkId },
+        { ...owner, problem_id: "revision-problem", teaching_revision_id: revisionId },
         { ...owner, problem_id: "session-problem", session_id: "session" },
       ],
       opening_learning_item_versions: [
-        { ...owner, id: "problem-item", problem_id: "chunk-problem" },
-        { ...owner, id: "revision-item", teaching_revision_id: "revision" },
+        { ...owner, id: "problem-item", problem_id: problemId },
+        { ...owner, id: "revision-item", teaching_revision_id: revisionId },
       ],
       opening_learning_observations: [
-        observation("root", { reference_check: { referenceId: " SHRED " } }),
-        observation("middle", { revises_observation_id: "root" }),
-        observation("head", { root_observation_id: "root" }),
-        observation("points-at-head", { effective_head_id: "head" }),
-        observation("problem", { problem_id: "chunk-problem" }),
-        observation("revision", { teaching_revision_id: "revision" }),
+        observation(rootId, { reference_check: { referenceId: shreddedSourceId } }),
+        observation(middleId, { revises_observation_id: rootId }),
+        observation(headId, { root_observation_id: rootId }),
+        observation(effectiveId, { effective_head_id: headId }),
+        observation("problem", { problem_id: problemId }),
+        observation("revision", { teaching_revision_id: revisionId }),
       ],
       opening_learning_attempts: [
-        { id: "keep" }, { id: "chunk-problem", problem_id: "chunk-problem" },
-        { id: "revision-problem", problem_id: "revision-problem" }, { id: "revision", teaching_revision_id: "revision" },
+        { id: "keep" }, { id: "chunk-problem", problem_id: problemId },
+        { id: "revision-problem", problem_id: "revision-problem" }, { id: "revision", teaching_revision_id: revisionId },
         { id: "session-problem", problem_id: "session-problem" },
         ...["problem-item", "revision-item"].map(id => ({ id, item_version_id: id })),
-        ...["middle", "head", "points-at-head", "problem", "revision"].map(id => ({ id: `observation-${id}`, observation_id: id })),
+        ...[middleId, headId, effectiveId, "problem", "revision"].map(id => ({ id: `observation-${id}`, observation_id: id })),
       ].map(attempt => ({ ...owner, activity_id: "keep", source_ids: [], ...attempt })),
-      opening_turns: [turn("downstream", { attempt_id: "observation-points-at-head" }), turn("keep")],
+      opening_turns: [turn("downstream", { attempt_id: `observation-${effectiveId}` }), turn("keep")],
     }, { tombstoneReceipts: [tombstone] });
     expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:keep"]);
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);

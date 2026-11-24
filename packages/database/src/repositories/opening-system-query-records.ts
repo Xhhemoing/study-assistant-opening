@@ -29,7 +29,7 @@ async function readRecordNoteSources(tx: TransactionSql, scope: Scope, row: Reco
     refs: refs.flatMap(ref => "sourceId" in ref ? [{ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion }] : []) };
 }
 
-const candidateBatchSize = 32;
+const candidateBatchSize = (offset: number, limit: number) => Math.min(256, Math.max(32, offset + limit + 1));
 
 export function publicSystemQueryOffset(offset: number): number | null {
   return offset <= 1000 ? offset : null;
@@ -37,15 +37,18 @@ export function publicSystemQueryOffset(offset: number): number | null {
 
 async function readAdmittedPage<Row>(
   out: OpeningSystemQueryDraft, { offset, limit }: { offset: number; limit: number }, signal: AbortSignal,
-  readBatch: (after: Row | undefined) => PromiseLike<readonly Row[]>,
-  admit: (row: Row) => Promise<RecordSources | null>,
+  readBatch: (after: Row | undefined, batchSize: number) => PromiseLike<readonly Row[]>,
+  prepareBatch: (batch: readonly Row[]) => Promise<(row: Row) => Promise<RecordSources | null>>,
 ) {
+  const batchSize = candidateBatchSize(offset, limit);
   let after: Row | undefined;
   let admitted = 0;
   const page: { row: Row; sources: RecordSources }[] = [];
   for (;;) {
     if (signal.aborted) throw new Error("system query cancelled");
-    const batch = await readBatch(after);
+    const batch = await readBatch(after, batchSize);
+    if (!batch.length) return page;
+    const admit = await prepareBatch(batch);
     for (const row of batch) {
       if (signal.aborted) throw new Error("system query cancelled");
       const sources = await admit(row);
@@ -60,7 +63,7 @@ async function readAdmittedPage<Row>(
       }
       page.push({ row, sources });
     }
-    if (batch.length < candidateBatchSize) return page;
+    if (batch.length < batchSize) return page;
     after = batch[batch.length - 1];
   }
 }
@@ -78,7 +81,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
   collectLineage?: (lineage: RecordNoteLineage) => void) {
   if (request.name === "notes") {
     const a = request.arguments, pattern = `%${(a.query ?? "").replace(/[\\%_]/g, "\\$&")}%`;
-    const page = await readAdmittedPage(out, a, signal, (after: Record<string, unknown> | undefined) => tx`SELECT
+    const page = await readAdmittedPage(out, a, signal, (after: Record<string, unknown> | undefined, batchSize) => tx`SELECT
         d.id,d.title,d.current_revision_number,d.updated_at,d.updated_at::text AS cursor_updated_at,np.context_source_refs,
         np.document_id IS NOT NULL AS has_note_provenance, origin.reason='save-opening-snippet' AS snippet_origin
       FROM library_documents d LEFT JOIN opening_note_provenance np ON np.document_id=d.id
@@ -88,8 +91,8 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
           AND ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)}))
         ${after ? tx`AND (d.updated_at < ${String(after.cursor_updated_at)}::timestamptz
           OR (d.updated_at = ${String(after.cursor_updated_at)}::timestamptz AND d.id > ${String(after.id)}::uuid))` : tx``}
-      ORDER BY d.updated_at DESC,d.id LIMIT ${candidateBatchSize}`,
-    row => readRecordNoteSources(tx, scope, row, Boolean(collectLineage)));
+      ORDER BY d.updated_at DESC,d.id LIMIT ${batchSize}`,
+    async () => row => readRecordNoteSources(tx, scope, row, Boolean(collectLineage)));
     for (const { row, sources } of page) {
       collectRecordSources(out, sources, collectLineage);
       out.evidence.push({ id: `note:${row.id}`, kind: "note", title: String(row.title).slice(0, 200), recordId: String(row.id),
@@ -99,15 +102,17 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
     }
   } else if (request.name === "cards") {
     const a = request.arguments;
-    const page = await readAdmittedPage(out, a, signal, (after: Record<string, unknown> | undefined) => tx`SELECT
+    const page = await readAdmittedPage(out, a, signal, (after: Record<string, unknown> | undefined, batchSize) => tx`SELECT
         c.id,c.content_version,c.course_id,c.source_ids,s.due_at,s.due_at::text AS cursor_due_at
       FROM cards c LEFT JOIN card_review_states s ON s.card_id=c.id AND s.workspace_id=c.workspace_id AND s.owner_user_id=${scope.ownerUserId}
       WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} AND NOT c.archived
         AND ${a.courseId ? tx`c.course_id=${a.courseId}` : tx`TRUE`} AND ${cardReadable(tx, scope.workspaceId)}
         ${!after ? tx`` : after.cursor_due_at == null ? tx`AND s.due_at IS NULL AND c.id > ${String(after.id)}::uuid`
           : tx`AND (s.due_at IS NULL OR (s.due_at,c.id) > (${String(after.cursor_due_at)}::timestamptz,${String(after.id)}::uuid))`}
-      ORDER BY s.due_at NULLS LAST,c.id LIMIT ${candidateBatchSize}`, async row => {
+      ORDER BY s.due_at NULLS LAST,c.id LIMIT ${batchSize}`, async batch => {
+      const batchIds = batch.map(row => String(row.id));
       const documents = await tx`SELECT
+          c.id AS card_id, linked.id AS document_id,
           d.id IS NOT NULL AND d.deleted_at IS NULL AND (np.document_id IS NULL OR
             (np.workspace_id=c.workspace_id AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
               () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})) AS admitted,
@@ -130,23 +135,44 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
         LEFT JOIN library_documents d ON d.id=linked.id AND d.workspace_id=c.workspace_id
         LEFT JOIN opening_note_provenance np ON np.document_id=linked.id
         LEFT JOIN library_revisions origin ON origin.document_id=linked.id AND origin.workspace_id=c.workspace_id AND origin.revision_number=1
-        WHERE c.id=${String(row.id)} AND c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}`;
-      const sources: RecordSources = { refs: [], memoryIds: [], originTurnIds: [] };
+        WHERE c.id=ANY(${batchIds}::uuid[]) AND c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+        ORDER BY c.id, linked.id`;
+      const byCardId = new Map<string, Record<string, unknown>[]>();
       for (const document of documents) {
-        if (!document.admitted) return null;
-        const group = await readRecordNoteSources(tx, scope, document, Boolean(collectLineage));
-        if (!group) return null;
-        sources.refs.push(...group.refs);
-        sources.memoryIds.push(...group.memoryIds);
-        sources.originTurnIds.push(...group.originTurnIds);
+        const cardId = String(document.card_id);
+        const group = byCardId.get(cardId);
+        if (group) group.push(document);
+        else byCardId.set(cardId, [document]);
       }
-      return sources;
+      const documentCache = new Map<string, RecordSources | null>();
+      return async row => {
+        const sources: RecordSources = { refs: [], memoryIds: [], originTurnIds: [] };
+        for (const document of byCardId.get(String(row.id)) ?? []) {
+          if (!document.admitted) return null;
+          const docKey = String(document.document_id);
+          let group = documentCache.get(docKey);
+          if (group === undefined && !documentCache.has(docKey)) {
+            group = await readRecordNoteSources(tx, scope, document, Boolean(collectLineage));
+            documentCache.set(docKey, group);
+          }
+          if (!group) return null;
+          sources.refs.push(...group.refs);
+          sources.memoryIds.push(...group.memoryIds);
+          sources.originTurnIds.push(...group.originTurnIds);
+        }
+        return sources;
+      };
     });
+    const allSourceIds = [...new Set(page.flatMap(({ row }) => row.source_ids as string[]))];
+    const sourceVersions = new Map((allSourceIds.length ? await tx`SELECT id AS "sourceId",version AS "sourceVersion" FROM opening_sources
+      WHERE workspace_id=${scope.workspaceId} AND id=ANY(${allSourceIds}::uuid[])` : [])
+      .map(ref => [String(ref.sourceId), Number(ref.sourceVersion)]));
     for (const { row, sources } of page) {
       // Cards retain source identities; capture each current source version as consumed metadata.
-      const refs = (row.source_ids as string[]).length ? await tx`SELECT id AS "sourceId",version AS "sourceVersion" FROM opening_sources
-        WHERE workspace_id=${scope.workspaceId} AND id=ANY(${row.source_ids as string[]}::uuid[])` : [];
-      out.sourceRefs.push(...refs.map(ref => ({ sourceId: String(ref.sourceId), sourceVersion: Number(ref.sourceVersion) })));
+      for (const sourceId of row.source_ids as string[]) {
+        const sourceVersion = sourceVersions.get(sourceId);
+        if (sourceVersion !== undefined) out.sourceRefs.push({ sourceId, sourceVersion });
+      }
       collectRecordSources(out, sources, collectLineage);
       out.evidence.push({ id: `card:${row.id}`, kind: "card", title: "复习卡片", recordId: String(row.id), href: "/opening/cards", revision: String(row.content_version) });
       out.data.push({ id: row.id, contentVersion: Number(row.content_version), courseId: row.course_id, dueAt: row.due_at ? iso(row.due_at) : null, answerWithheld: true,

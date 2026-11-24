@@ -229,6 +229,47 @@ describe("synthetic deidentified dataset repository", () => {
     } finally { await fixture.close(); }
   }, 30_000);
 
+  it.each(["private exam", "malformed publication"] as const)("withholds a historical card variant from a %s", async kind => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const datasets = createOpeningDatasetRepository(sql);
+      const documentId = randomUUID();
+      await createLibraryRepository(sql).createDocument({
+        workspaceId: scope.workspaceId, documentId, title: "Teaching publication", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Teaching passage" } }],
+      });
+      const card = await createCardRepository(sql).createCard({ ...scope, front: "Prompt", back: "Answer" });
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${documentId},${scope.workspaceId},${sql.json([{ publicationCardIds: [card.id] }])})`;
+      const activity = await insertTestTeachingActivity(sql, scope);
+      await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+        create_intent=${sql.json({ kind: "card_review_variant", cardId: card.id })} WHERE id=${activity}`;
+      const session = randomUUID();
+      await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,activity_id,skill_label)
+        VALUES(${session},${scope.workspaceId},${scope.ownerUserId},${activity},'Variant')`;
+      await sql`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,activity_id,skill_label,client_key,create_intent,history_revision)
+        VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${session},${activity},'Variant',${randomUUID()},'{}',0)`;
+      const turn = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      await sql`UPDATE opening_turns SET learning_session_id=${session} WHERE id=${turn}`;
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const before = await datasets.read(scope);
+      expect(before.coursePackageQuality).toHaveLength(1);
+      expect(before.answerSequences).toHaveLength(1);
+      expect(before.dialogueEvaluation).toHaveLength(1);
+
+      if (kind === "private exam") {
+        await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,generation_config)
+          VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},'Private exam',${documentId},1,'{"extras":{"kind":"course_exam"}}')`;
+      } else {
+        await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([{ publicationCardIds: card.id }])}
+          WHERE document_id=${documentId}`;
+      }
+      expect(await datasets.read(scope)).toMatchObject({ coursePackageQuality: [], answerSequences: [], dialogueEvaluation: [] });
+    } finally { await fixture.close(); }
+  }, 30_000);
+
   it("withholds a source-backed legacy snippet whose original memory expired", async () => {
     const fixture = await createOpeningFixture();
     try {
@@ -445,7 +486,7 @@ describe("synthetic deidentified dataset repository", () => {
       await checkPage(2, third, null);
       expect(await page(3)).toMatchObject({ status: "unknown", reason: "no_data", nextOffset: null, data: [], evidence: [], sourceRefs: [] });
     } finally { await fixture.close(); }
-  });
+  }, 30_000);
 
   it.each(["notes", "cards", "courses"] as const)("keeps %s pagination inside the request offset limit", async name => {
     const fixture = await createOpeningFixture();
@@ -526,7 +567,7 @@ describe("synthetic deidentified dataset repository", () => {
       await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${id}`;
       await expect(provenance.resolveHistory(scope, history, 0)).resolves.toBeNull();
     } finally { await fixture.close(); }
-  });
+  }, 30_000);
 
   it.each(["transitive expiry", "archived course", "excluded backing source"] as const)(
     "rejects ephemeral credentials with %s", async reason => {
@@ -562,7 +603,7 @@ describe("synthetic deidentified dataset repository", () => {
         await expect(provenance.record(scope, { reservationId: reservation.id, requestId, privacyEpoch: 0, contextSourceRefs: refs }))
           .rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
       } finally { await fixture.close(); }
-    },
+    }, 30_000,
   );
 });
 async function grantOther() { await repo.grantConsent(f.otherScope,{policyVersion:OPENING_DATASET_POLICY_VERSION,consented:true,expiresAt:new Date(Date.now() + 3600000).toISOString()}); }

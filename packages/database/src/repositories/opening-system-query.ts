@@ -77,7 +77,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         if (owner.adaptive_planning != null && !prefs.success) { out.status = "partial"; out.reason = "unavailable"; }
       } else if (request.name === "learning" || request.name === "recommendation") {
         await readSystemLearningQuery(tx, scope, request, out, limit, offset);
-        if (out.nextOffset !== null) out.nextOffset = publicSystemQueryOffset(out.nextOffset);
+        out.nextOffset = request.name === "learning" && out.nextOffset !== null ? publicSystemQueryOffset(out.nextOffset) : null;
       } else if (request.name === "materials") {
         if (!request.arguments.sourceId && !request.arguments.courseId && !request.arguments.query?.trim()) return { ...out, status: "unknown" as const, reason: "invalid_arguments" as const };
         const a = request.arguments;
