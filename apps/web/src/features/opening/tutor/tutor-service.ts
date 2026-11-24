@@ -294,8 +294,8 @@ export function createTutorService(deps: {
         learningSessionId = null;
       }
 
-      // Replays keep their original job; only a new turn is refused before it is queued.
-      if (!existing && deps.tutorModelReady && !await deps.tutorModelReady(scope, input.mode)) {
+      // Replays keep their original job, and exam guidance does not need a model.
+      if (!existing && input.contextAnchor?.purpose !== "exam_help" && deps.tutorModelReady && !await deps.tutorModelReady(scope, input.mode)) {
         throw new TutorServiceError("AI_MODEL_UNAVAILABLE", TUTOR_MODEL_SETUP_MESSAGE, 409);
       }
       const saved = await deps.conversations.appendSavedTurn({

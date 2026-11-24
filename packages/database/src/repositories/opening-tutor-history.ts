@@ -10,6 +10,8 @@ import {
   type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
+import { readSavedTutorMisconceptionLineage, readActiveTutorMisconceptionLineages,
+  type TutorMisconceptionLineage } from "./v3-bitemporal-misconception-memory";
 
 type HistoryTurn = { role: "user" | "assistant"; text: string };
 type Db = Sql | TransactionSql;
@@ -26,6 +28,7 @@ export type TutorHistoryContext = {
   sourceRefs: ContextSourceRef[];
   memoryIds?: string[];
   historyCourseBindings?: HistoryCourseBinding[];
+  historyMisconceptionLineage?: TutorMisconceptionLineage;
   revokedDirectSourceIds?: string[];
   temporaryMemoryExpiresAt?: string;
 };
@@ -76,7 +79,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
   return sql`
     WITH prior AS MATERIALIZED (
       SELECT current.id AS current_id, u.id, a.id AS assistant_id, u.created_at,
-        a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch,
+        a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch, a.intent_hash AS assistant_intent_hash,
         refs.user_refs AS user_source_refs, refs.assistant_refs AS assistant_source_refs, a.citations AS assistant_citations,
         ${priorCourse()} AS prior_course_id, ${currentCourse()} AS current_course_id,
         ${currentUse()} AS material_use, ${priorUse()} AS prior_material_use,
@@ -145,6 +148,23 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
 }
 
 type HistoryRows = readonly Awaited<ReturnType<typeof readSavedExchanges>>[number][];
+
+async function resolveExchangeMisconceptions(sql: Db, scope: OpeningScope, rows: HistoryRows) {
+  const lineages: TutorMisconceptionLineage[] = [];
+  const positions = rows.map(row => {
+    if (row.assistant_intent_hash == null) return undefined;
+    const lineage = readSavedTutorMisconceptionLineage(row.assistant_intent_hash);
+    if (!lineage) return null;
+    return lineages.push(lineage) - 1;
+  });
+  const active = await readActiveTutorMisconceptionLineages(sql, scope, lineages);
+  return positions.map((position, index) => {
+    if (position === undefined) return { lineage: null, inScope: true };
+    if (position === null || !active.has(position)) return null;
+    const lineage = lineages[position]!;
+    return { lineage, inScope: lineage.courseId === null || lineage.courseId === rows[index]!.current_course_id };
+  });
+}
 
 function exchangeMemoryAuthority(row: HistoryRows[number]): HistoryAncestorAuthority[] | null {
   const userIds = row.user_source_refs === undefined ? [] : parseContextMemoryDependencyIds(row.user_source_refs);
@@ -232,14 +252,16 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
   if (!userTurnIds.length) return authority;
   const locked = rules?.lockedSourceIds && new Set(rules.lockedSourceIds);
   const rows = await readSavedExchanges(sql, scope, userTurnIds, "ancestors", [], rules?.requireDestinationSessionMaterials);
-  for (const row of rows) {
+  const misconceptions = await resolveExchangeMisconceptions(sql, scope, rows);
+  for (const [index, row] of rows.entries()) {
     const entries = authority.get(row.current_id);
     if (!entries) continue;
+    const misconception = misconceptions[index];
     const assistantRefs = parseContextSourceRefs(row.assistant_source_refs);
     const userRefs = parseContextSourceRefs(row.user_source_refs);
     const memoryAuthority = exchangeMemoryAuthority(row);
     if (row.invalid || !row.assistant_direct_versioned || !row.origin_allowed || row.current_allowed === false
-      || !memoryAuthority || !assistantRefs || !userRefs
+      || !misconception || !memoryAuthority || !assistantRefs || !userRefs
       || memoryAuthority.some(entry => !(entry.expiresAt > Date.now()))) {
       authority.set(row.current_id, null);
       continue;
@@ -253,6 +275,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
       continue;
     }
     for (const entry of memoryAuthority) if (entry.courseId !== null) rules?.collectCourseIds?.add(entry.courseId);
+    if (misconception.inScope && misconception.lineage?.courseId) rules?.collectCourseIds?.add(misconception.lineage.courseId);
     for (const id of sources) rules?.collectSourceIds?.add(id);
     entries.push(...memoryAuthority);
   }
@@ -306,17 +329,19 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     ? [...row.user_direct_ids, ...row.assistant_direct_ids].filter(isLineageUuid) : []))].sort();
   const rows = exchanges.filter(row => row.origin_allowed !== false);
   const resolved = await resolveExchangeMemories(sql, scope, rows, excluded);
+  const misconceptions = await resolveExchangeMisconceptions(sql, scope, rows);
   const nowMs = Date.now();
   let firstValid = 0;
   const expirations = rows.map((row, index) => {
     const ownExpirations = resolved[index]?.ownExpirations ?? [];
     const own = row.memory_temporary_expires_at == null ? ownExpirations : [...ownExpirations, row.memory_temporary_expires_at];
     const times = own.map(expiry => new Date(expiry).getTime());
-    if (resolved[index] === null || times.some(time => !(time > nowMs))
+    if (resolved[index] === null || misconceptions[index] === null || times.some(time => !(time > nowMs))
       || (recordReferents && !recordReceiptValid(row, scope))) firstValid = index + 1;
     return times;
   });
-  const selected = rows.flatMap((row, index) => index >= firstValid && row.current_allowed !== false && resolved[index]?.inScope
+  const selected = rows.flatMap((row, index) => index >= firstValid && row.current_allowed !== false
+    && resolved[index]?.inScope && misconceptions[index]?.inScope
     ? [{ row, index, dependencies: resolved[index]! }] : []).slice(0, 20);
   const textIds = selected.flatMap(({ row }) => typeof row.id === "string"
     ? (recordReferents ? [row.id] : [row.id, String(row.assistant_id)]) : []);
@@ -342,6 +367,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     if (binding.memoryBackings?.length) previous.memoryBackings = [...(previous.memoryBackings ?? []), ...binding.memoryBackings];
   };
   const memoryIdSet = new Set<string>();
+  let misconceptionCourseId: string | null = null;
+  const misconceptionRevisionIds = new Set<string>();
   let newestRetained = rows.length;
   let earliestExpiry = Infinity;
   for (const { row, index, dependencies } of selected) {
@@ -362,6 +389,14 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []),
       ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
     if (!recordReferents) {
+      const lineage = misconceptions[index]?.lineage;
+      if (lineage) {
+        for (const id of lineage.revisionIds) misconceptionRevisionIds.add(id);
+        if (lineage.courseId) {
+          misconceptionCourseId = lineage.courseId;
+          mergeBinding({ courseId: lineage.courseId, materialUse: row.material_use ?? "citation", sourceIds: [], sourceRefs: [] });
+        }
+      }
       const sourceIds = [...new Set<string>([...(row.user_direct_ids ?? []), ...(row.assistant_direct_ids ?? [])].filter(isLineageUuid))].sort();
       for (const id of sourceIds) selectedDestinationSourceIds.add(id);
       if (sourceIds.length) mergeBinding({ courseId: row.current_course_id ?? null, materialUse: row.material_use ?? "citation",
@@ -389,10 +424,13 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     }
   }
   const memoryIds = [...memoryIdSet].sort();
+  const historyMisconceptionLineage: TutorMisconceptionLineage | undefined = misconceptionCourseId || misconceptionRevisionIds.size
+    ? { kind: "v3_misconception_lineage", courseId: misconceptionCourseId, revisionIds: [...misconceptionRevisionIds] } : undefined;
   return {
     history,
     sourceRefs: mergedRefs,
     ...(courseBindings.size ? { historyCourseBindings: [...courseBindings.values()] } : {}),
+    ...(historyMisconceptionLineage ? { historyMisconceptionLineage } : {}),
     ...(revokedDirectSourceIds.length ? { revokedDirectSourceIds } : {}),
     ...(memoryIds.length ? { memoryIds } : {}),
     ...(Number.isFinite(earliestExpiry) ? { temporaryMemoryExpiresAt: new Date(earliestExpiry).toISOString() } : {}),

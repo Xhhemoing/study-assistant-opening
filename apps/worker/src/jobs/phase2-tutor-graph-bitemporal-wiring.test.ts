@@ -41,7 +41,7 @@ const learnerContext: TutorLearnerContext = {
 };
 const savedAnswer = { observationId, answerRevision: 2, answer: "my saved work" };
 
-function setup({ exam = false, submitted = false, streaming = false, session = false, sources = true } = {}) {
+function setup({ exam = false, submitted = false, streaming = false, session = false, sources = true, bound = true } = {}) {
   const anchor = { purpose: exam ? "exam_help" as const : "learning_help" as const, attemptId, itemVersionId, courseId };
   const attempt: TutorAttemptContext = { privacyEpoch, anchor, originalQuestion: "Original saved question",
     originalAnswer: submitted ? { ...savedAnswer, observationId: id(21), answerRevision: 1 } : null,
@@ -53,7 +53,8 @@ function setup({ exam = false, submitted = false, streaming = false, session = f
     getUserTurn: vi.fn<OpeningTutorJobsRepository["getUserTurn"]>(async () => ({
       text: "Help me understand the limit", mode: "explain", sourceIds: sources ? [sourceId] : [],
       sourceVersions: sources ? { [sourceId]: chunk.sourceVersion } : {}, currentPage: 1, chunkId: null,
-      contextAnchor: anchor, attemptId, learningSessionId: session ? sessionId : null, strategyTemplateId: null, courseId,
+      contextAnchor: bound ? anchor : { purpose: anchor.purpose, courseId }, attemptId: bound ? attemptId : null,
+      learningSessionId: session ? sessionId : null, strategyTemplateId: null, courseId,
     })),
     freezeHelpInputSnapshot: vi.fn<OpeningTutorJobsRepository["freezeHelpInputSnapshot"]>(async () => helpInputSnapshot),
     readAttemptContext: vi.fn<OpeningTutorJobsRepository["readAttemptContext"]>(async () => attempt),
@@ -145,15 +146,16 @@ describe("Phase 2 pure exam tutor turns", () => {
     expect(f.pageImages).not.toHaveBeenCalled();
     expect(f.budget.reserve).not.toHaveBeenCalled();
     expect(f.provider.complete).not.toHaveBeenCalled();
-    expect(f.readMisconceptions).toHaveBeenCalledWith(scope, { courseId, expectedPrivacyEpoch: privacyEpoch });
-    expect(f.assertMisconceptions).toHaveBeenCalledWith(scope, snapshot);
-    expect(f.assertLearner).toHaveBeenCalledWith(scope, learnerContext);
+    expect(f.readMisconceptions).not.toHaveBeenCalled();
+    expect(f.readLearner).not.toHaveBeenCalled();
+    expect(f.tutorJobs.loadHistoryContext).not.toHaveBeenCalled();
     const [completed, optionsArg] = f.tutorJobs.completeTurn.mock.lastCall!;
     expect(completed).toMatchObject({
       text: PURE_ANSWER_PROBE_GUIDANCE, citations: [], candidates: [], expectedPrivacyEpoch: privacyEpoch, claimToken,
       enqueueMetadata: false, contextSourceRefs: expect.arrayContaining([materialRef, attemptRef]),
     });
-    expect(optionsArg).toMatchObject({ materialPurposePin: purposePin, misconceptionSnapshot: snapshot, attemptContext: { snapshot: f.attempt } });
+    expect(optionsArg).toMatchObject({ materialPurposePin: purposePin, attemptContext: { snapshot: f.attempt } });
+    expect(optionsArg?.misconceptionSnapshot).toBeUndefined();
     const exposure = { kind: "hint", level: "hinted", helpInputSnapshot };
     if (!options.streaming && options.session) {
       expect(completed.helpExposure).toMatchObject({ ...exposure, delivered: true, sessionId, attemptId });
@@ -167,7 +169,7 @@ describe("Phase 2 pure exam tutor turns", () => {
       expect(f.tutorJobs.withStreamPublication).toHaveBeenCalledTimes(2);
       for (const args of f.tutorJobs.withStreamPublication.mock.calls) {
         expect(args[2]).toMatchObject({ executionId, claimToken, privacyEpoch, materialPurposePin: purposePin,
-          attemptContext: f.attempt, misconceptionSnapshot: snapshot, contextSourceRefs: completed.contextSourceRefs });
+          attemptContext: f.attempt, contextSourceRefs: completed.contextSourceRefs });
       }
       expect(f.stream.begin).toHaveBeenCalledExactlyOnceWith(workspaceId, jobId, expect.objectContaining({
         executionId, claimToken, exposureReceiptId: receiptId, privacyEpoch, materialPurposePin: purposePin,
@@ -182,21 +184,40 @@ describe("Phase 2 pure exam tutor turns", () => {
 
   it("skips retrieval for a source-free exam and refuses stale context before completing", async () => {
     const f = setup({ exam: true, sources: false });
-    f.assertMisconceptions.mockRejectedValueOnce(Object.assign(new Error("corrected"), { code: "CONFLICT" }));
+    f.tutorJobs.assertAttemptContext.mockRejectedValueOnce(Object.assign(new Error("corrected"), { code: "CONFLICT" }));
     await expect(createTutorTurnHandler(f.deps)(jobId)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(f.retrieveContext).not.toHaveBeenCalled();
     expect(f.tutorJobs.completeTurn).not.toHaveBeenCalled();
     expect(f.provider.complete).not.toHaveBeenCalled();
   });
 
-  it("keeps a bound exam out of alternate provider routes", async () => {
-    const f = setup({ exam: true, sources: false });
+  it.each([true, false])("keeps an exam with bound=%s out of alternate provider routes", async bound => {
+    const f = setup({ exam: true, sources: false, bound });
     const savedTurn = (await f.tutorJobs.getUserTurn(userTurnId, workspaceId, jobId))!;
     f.tutorJobs.getUserTurn.mockResolvedValue({ ...savedTurn, purpose: "plan", querySystem: true });
     await expect(createTutorTurnHandler(f.deps)(jobId)).resolves.toEqual({ skipped: false });
     expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
       text: PURE_ANSWER_PROBE_GUIDANCE, enqueueMetadata: false,
     }), expect.anything());
+    expect(f.readLearner).not.toHaveBeenCalled();
+    expect(f.readMisconceptions).not.toHaveBeenCalled();
+    expect(f.budget.reserve).not.toHaveBeenCalled();
+    expect(f.provider.complete).not.toHaveBeenCalled();
+  });
+
+  it("uses lexical material admission and streams fixed guidance for an exam without an attempt", async () => {
+    const f = setup({ exam: true, bound: false, streaming: true });
+    const citationPin = { ...purposePin, materialUse: "citation" as const };
+    materials.readMaterialPurposePin.mockResolvedValue(citationPin);
+    await expect(createTutorTurnHandler(f.deps)(jobId)).resolves.toEqual({ skipped: false });
+    expect(f.tutorJobs.readAttemptContext).not.toHaveBeenCalled();
+    expect(f.retrieveContext).toHaveBeenCalledWith(scope, expect.objectContaining({ lexicalOnly: true, sourceIds: [sourceId] }));
+    expect(materials.embed).not.toHaveBeenCalled();
+    expect(f.stream.begin).toHaveBeenCalledWith(workspaceId, jobId, expect.objectContaining({ materialPurposePin: citationPin }));
+    expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ text: PURE_ANSWER_PROBE_GUIDANCE,
+      enqueueMetadata: false, generatedExposure: expect.objectContaining({ contextAnchor: { purpose: "exam_help", courseId } }) }),
+    expect.objectContaining({ materialPurposePin: citationPin }));
+    expect(f.budget.reserve).not.toHaveBeenCalled();
     expect(f.provider.complete).not.toHaveBeenCalled();
   });
 
@@ -238,7 +259,21 @@ describe("Phase 2 practice tutor turns", () => {
     if (state === "unmatched") expect(input.instruction).toContain("请邀请学习者写出下一步并说明依据");
     expect(f.tutorJobs.authorizeSend).toHaveBeenCalledWith(scope, jobId, expect.objectContaining({ misconceptionSnapshot: snapshot }), expect.any(Function), expect.any(Function));
     expect(f.tutorJobs.withStreamPublication).toHaveBeenCalledWith(scope, jobId, expect.objectContaining({ misconceptionSnapshot: snapshot }), expect.any(Function));
+    expect(f.stream.begin).toHaveBeenCalledWith(workspaceId, jobId, expect.objectContaining({ misconceptionSnapshot: snapshot }));
     expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({ enqueueMetadata: true }), expect.objectContaining({ misconceptionSnapshot: snapshot }));
+  });
+
+  it("carries an empty snapshot through send, cache, publication and completion", async () => {
+    const f = setup({ streaming: true });
+    const empty = { courseId, effectiveCourseId: null, privacyEpoch, renderedMarkdown: "", byteLength: 0, revisionIds: [] };
+    f.readMisconceptions.mockResolvedValue(empty);
+    await expect(createTutorTurnHandler(f.deps)(jobId)).resolves.toEqual({ skipped: false });
+    expect(f.provider.complete.mock.lastCall?.[0].instruction).not.toContain("学习者误解记录");
+    const fence = expect.objectContaining({ misconceptionSnapshot: empty });
+    expect(f.tutorJobs.authorizeSend).toHaveBeenCalledWith(scope, jobId, fence, expect.any(Function), expect.any(Function));
+    expect(f.stream.begin).toHaveBeenCalledWith(workspaceId, jobId, fence);
+    expect(f.tutorJobs.withStreamPublication.mock.calls.every(([, , context]) => context.misconceptionSnapshot === empty)).toBe(true);
+    expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.anything(), fence);
   });
 
   it("rejects an instruction over 50,000 characters before paid retrieval or tutor reservation", async () => {

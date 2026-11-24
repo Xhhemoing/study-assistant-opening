@@ -18,6 +18,7 @@ function createService(opts?: {
   courseId?: string | null;
   listReadySourceIdsForCourse?: ReturnType<typeof vi.fn>;
   tutorModelReady?: ReturnType<typeof vi.fn>;
+  attempts?: Parameters<typeof createTutorService>[0]["attempts"];
 }) {
   const conversations = {
     getOwned: vi.fn(async () => ({
@@ -46,6 +47,7 @@ function createService(opts?: {
       readSelection,
       ...(listReadySourceIdsForCourse ? { listReadySourceIdsForCourse } : {}),
       ...(opts?.tutorModelReady ? { tutorModelReady: opts.tutorModelReady } : {}),
+      attempts: opts?.attempts,
     }),
     conversations,
     sourceChunks,
@@ -449,10 +451,29 @@ describe("tutor model readiness at send time", () => {
   it("refuses a new turn with AI_MODEL_UNAVAILABLE before queueing a job when no model can serve it", async () => {
     const tutorModelReady = vi.fn(async () => false);
     const f = createService({ tutorModelReady });
-    await expect(f.service.submitTurn(scope, { ...send, clientKey: "no-model-key-1" })).rejects.toMatchObject({
+    await expect(f.service.submitTurn(scope, { ...send, clientKey: "no-model-key-1", contextAnchor: { purpose: "learning_help" } })).rejects.toMatchObject({
       code: "AI_MODEL_UNAVAILABLE", status: 409, message: "还没有配置可用的 AI 模型，去设置里配置。",
     });
     expect(tutorModelReady).toHaveBeenCalledWith(scope, "hint");
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
+  it.each([null, C])("queues exam guidance with attempt %s even when no model is configured", async attemptId => {
+    const tutorModelReady = vi.fn(async () => false);
+    const assertAccess = vi.fn(async () => ({ sessionId: S }));
+    const f = createService({ tutorModelReady, attempts: { assertAccess } });
+    const contextAnchor = { purpose: "exam_help", ...(attemptId ? { attemptId } : {}) };
+    await expect(f.service.submitTurn(scope, { ...send, sourceSelection: undefined, contextAnchor, clientKey: "exam-without-model" }))
+      .resolves.toMatchObject({ replayed: false, learningSessionId: attemptId ? S : null });
+    expect(assertAccess).toHaveBeenCalledTimes(attemptId ? 1 : 0);
+    expect(tutorModelReady).not.toHaveBeenCalled();
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ contextAnchor, attemptId }));
+  });
+  it("rejects an inaccessible exam attempt before enqueueing", async () => {
+    const tutorModelReady = vi.fn(async () => false);
+    const f = createService({ tutorModelReady, attempts: { assertAccess: vi.fn(async () => null) } });
+    await expect(f.service.submitTurn(scope, { ...send, sourceSelection: undefined, clientKey: "exam-bad-attempt",
+      contextAnchor: { purpose: "exam_help", attemptId: C } })).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
+    expect(tutorModelReady).not.toHaveBeenCalled();
     expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
   });
   it("never blocks a replay of an already-queued turn, and queues normally when a model is usable", async () => {

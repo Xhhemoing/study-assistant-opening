@@ -2,18 +2,70 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { LEARNER_CONTEXT_MAX_BYTES, type LearnerMisconceptionDisposition, type v3BitemporalMisconceptionEdges } from "../schema/v3-bitemporal-memory";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { isLineageUuid } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 
 type Edge = typeof v3BitemporalMisconceptionEdges.$inferSelect;
 type ContextItem = Pick<Edge, "status" | "learnerDisposition" | "summary">;
 type RenderedContextBlock = { renderedMarkdown: string; byteLength: number };
 type ContextBlock = RenderedContextBlock & { revision: number };
-type ContextRevision = ContextItem & Pick<Edge, "revisionId">;
+type ContextRevision = ContextItem & Pick<Edge, "revisionId" | "courseId">;
 export type TutorMisconceptionSnapshot = RenderedContextBlock & {
   courseId: string | null;
+  effectiveCourseId?: string | null;
   privacyEpoch: number;
   revisionIds: readonly string[];
 };
+export type TutorMisconceptionLineage = {
+  kind: "v3_misconception_lineage";
+  courseId: string | null;
+  revisionIds: readonly string[];
+};
+
+export function readSavedTutorMisconceptionLineage(encoded: unknown): TutorMisconceptionLineage | null {
+  if (typeof encoded !== "string") return null;
+  try { return parseTutorMisconceptionLineage(JSON.parse(encoded)); } catch { return null; }
+}
+
+export function parseTutorMisconceptionLineage(parsed: unknown): TutorMisconceptionLineage | null {
+  if (!parsed || typeof parsed !== "object" || Object.keys(parsed).length !== 3) return null;
+  const { kind, courseId, revisionIds } = parsed as Record<string, unknown>;
+  if (kind !== "v3_misconception_lineage" || !(courseId === null || isLineageUuid(courseId))
+    || !Array.isArray(revisionIds) || !revisionIds.every(isLineageUuid)) return null;
+  const ids = revisionIds.map(id => id.toLowerCase());
+  if (new Set(ids).size !== ids.length) return null;
+  return { kind, courseId: courseId?.toLowerCase() ?? null, revisionIds: ids };
+}
+
+/** Check saved authority against the current privacy epoch and both live time ranges. */
+export async function readActiveTutorMisconceptionLineages(
+  db: Sql | TransactionSql, scope: OpeningScope, lineages: readonly TutorMisconceptionLineage[],
+): Promise<Set<number>> {
+  if (!lineages.length) return new Set();
+  const rows = await db<{ position: number }[]>`
+    WITH tick AS MATERIALIZED (SELECT clock_timestamp() AS at)
+    SELECT lineage.position
+    FROM workspaces w CROSS JOIN tick
+    CROSS JOIN jsonb_to_recordset(${db.json(lineages.map(({ courseId, revisionIds }, position) =>
+      ({ position, course_id: courseId, revision_ids: [...revisionIds] })))}::jsonb)
+      AS lineage(position integer, course_id uuid, revision_ids uuid[])
+    WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
+      AND (lineage.course_id IS NULL OR EXISTS (
+        SELECT 1 FROM courses c WHERE c.id = lineage.course_id AND c.workspace_id = w.id AND c.archived_at IS NULL
+      ))
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest(lineage.revision_ids) AS revision(id)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM v3_bitemporal_misconception_edges e
+          WHERE e.revision_id = revision.id AND e.workspace_id = w.id AND e.owner_user_id = w.owner_user_id
+            AND e.privacy_epoch = w.privacy_epoch AND (e.course_id IS NULL OR e.course_id = lineage.course_id)
+            AND e.valid_range @> tick.at AND e.tx_range @> tick.at
+            AND e.status IN ('candidate', 'verified', 'learner_reported')
+        )
+      )`;
+  return new Set(rows.map(row => row.position));
+}
+
 type Revision = { edgeId: string; revisionId: string; txAt: string };
 type TryHandoffClock = { readonly nowMs: number; readonly issueSeq: number };
 type TryMisconceptionClaim = Pick<Edge, "conceptKey" | "misconceptionCode" | "summary"> & {
@@ -100,7 +152,7 @@ export async function lockMisconceptionWorkspaceForWrite(tx: TransactionSql, sco
   return workspace.privacy_epoch;
 }
 
-async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
+export async function lockMisconceptionContext(tx: TransactionSql, workspaceId: string) {
   // The migration's revision trigger holds this same lock when invalidating the cache.
   await tx`SELECT pg_advisory_xact_lock(hashtextextended('v3:learner-context:' || ${workspaceId}::uuid::text, 0))`;
 }
@@ -119,7 +171,7 @@ function misconceptionContextPages(tx: TransactionSql, scope: OpeningScope, at: 
   // Exclude ASCII blanks and controls in SQL. The renderer handles Unicode whitespace across pages.
   const blankSummary = "^[ \u0001-\u001f\u007f-\u009f]*$";
   return tx<ContextRevision[]>`
-    SELECT e.status, e.learner_disposition AS "learnerDisposition", e.summary, e.revision_id AS "revisionId"
+    SELECT e.status, e.learner_disposition AS "learnerDisposition", e.summary, e.revision_id AS "revisionId", e.course_id AS "courseId"
     FROM v3_bitemporal_misconception_edges e
     JOIN workspaces w ON w.id = e.workspace_id AND w.owner_user_id = e.owner_user_id
     WHERE e.workspace_id = ${scope.workspaceId} AND e.owner_user_id = ${scope.ownerUserId}
@@ -169,10 +221,14 @@ async function readTutorMisconceptionSnapshotInTx(
   const [clock] = await tx<{ at: string }[]>`SELECT clock_timestamp()::text AS at`;
   const rendered = { renderedMarkdown: "", byteLength: 0 };
   const revisionIds: string[] = [];
+  let effectiveCourseId: string | null = null;
   for await (const items of misconceptionContextPages(tx, scope, clock!.at, courseId)) {
-    if (!appendLearnerContextItems(rendered, items, item => revisionIds.push(item.revisionId))) break;
+    if (!appendLearnerContextItems(rendered, items, item => {
+      revisionIds.push(item.revisionId);
+      if (item.courseId != null) effectiveCourseId = item.courseId.toLowerCase();
+    })) break;
   }
-  return rendered.renderedMarkdown ? { courseId, privacyEpoch, revisionIds, ...rendered } : null;
+  return { courseId: courseId?.toLowerCase() ?? null, effectiveCourseId, privacyEpoch, revisionIds, ...rendered };
 }
 
 export async function readTutorLearnerMisconceptionContext(
@@ -188,6 +244,7 @@ export async function assertTutorLearnerMisconceptionSnapshotInTx(
     courseId: snapshot.courseId, expectedPrivacyEpoch: snapshot.privacyEpoch,
   });
   if (!current || current.renderedMarkdown !== snapshot.renderedMarkdown
+    || (snapshot.effectiveCourseId !== undefined && (snapshot.effectiveCourseId?.toLowerCase() ?? null) !== current.effectiveCourseId)
     || current.revisionIds.length !== snapshot.revisionIds.length
     || current.revisionIds.some((id, index) => id !== snapshot.revisionIds[index])) {
     throw learningError("CONFLICT", "learner misconception context changed");

@@ -225,12 +225,12 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const jobEpoch = deps.privacy
         ? await deps.privacy.getWorkspaceEpoch(scope)
         : null;
-      const examAttemptRequested = turn.contextAnchor?.purpose === "exam_help" && Boolean(turn.attemptId || turn.contextAnchor.attemptId);
+      const examHelpRequested = turn.contextAnchor?.purpose === "exam_help";
       const nextActionCourseId = turn.courseId ?? turn.contextAnchor?.courseId;
-      const entryRequest = !examAttemptRequested && !turn.querySystem && (turn.purpose === "answer" || turn.purpose === "teach")
+      const entryRequest = !examHelpRequested && !turn.querySystem && (turn.purpose === "answer" || turn.purpose === "teach")
         && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support"
         && learningContinuationIntent(turn.text) !== null;
-      if (!examAttemptRequested && deps.nextAction && nextActionCourseId && (entryRequest || turn.purpose === "teach") && !turn.querySystem
+      if (!examHelpRequested && deps.nextAction && nextActionCourseId && (entryRequest || turn.purpose === "teach") && !turn.querySystem
         && !requestsCourseCreation(turn.text)
         && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support") {
         const prepared = await prepareTutorNextAction(deps.nextAction, scope, {
@@ -253,7 +253,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           return { skipped: false };
         }
       }
-      const unboundTeaching = !examAttemptRequested && !nextActionCourseId && (turn.purpose === "teach" || turn.purpose === "plan")
+      const unboundTeaching = !examHelpRequested && !nextActionCourseId && (turn.purpose === "teach" || turn.purpose === "plan")
         && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support";
       // Preserve authorized learning entry above; otherwise an existing answer can be continued.
       const continuationHistory = entryRequest && learningContinuationIntent(turn.text) === "continue"
@@ -268,7 +268,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           citations: [], candidates: [], contextSourceRefs: [], expectedPrivacyEpoch: jobEpoch ?? undefined, claimToken: claimed.claimToken });
         return { skipped: false };
       }
-      if (!examAttemptRequested && !continueAnswer && (turn.purpose === "plan" || turn.purpose === "teach" && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support")) {
+      if (!examHelpRequested && !continueAnswer && (turn.purpose === "plan" || turn.purpose === "teach" && !turn.attemptId && !turn.contextAnchor?.activityId && turn.contextAnchor?.purpose !== "language_support")) {
         if (!deps.proposals) throw new Error("proposal service unavailable");
         const reply = await deps.proposals.reply(scope, { sourceTurnId: claimed.userTurnId, purpose: turn.purpose, question: turn.text,
           courseId: turn.courseId, parentBudget, ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}) });
@@ -278,7 +278,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           expectedPrivacyEpoch: reply.privacyEpoch, claimToken: claimed.claimToken });
         return { skipped: false };
       }
-      if (!examAttemptRequested && (turn.querySystem || turn.purpose === "query" || turn.purpose === "explain_state")) {
+      if (!examHelpRequested && (turn.querySystem || turn.purpose === "query" || turn.purpose === "explain_state")) {
         if (!deps.systemQuery?.enabled()) throw new Error("系统记录查询暂未开启，请保留问题后重试。");
         const sourceId = turn.sourceIds.length === 1 ? turn.sourceIds[0] : undefined;
         const reply = await deps.systemQuery.reply(scope, { question: turn.text, resolvePreviousQuestion: async () => previousRecordQuestion((await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId, "record_referents")).history), parentBudget, ...(claimed.claimToken ? { jobLease: { jobId: claimed.id, claimToken: claimed.claimToken } } : {}), focus: {
@@ -308,9 +308,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const attemptContext = turn.attemptId || turn.contextAnchor?.attemptId
         ? await deps.tutorJobs.readAttemptContext(scope, attemptTarget) : null;
       if ((turn.attemptId || turn.contextAnchor?.attemptId) && !attemptContext) throw new Error("bound attempt context missing");
-      const graph = attemptContext && runTutorGraphForTurn({
-        originalQuestion: attemptContext.originalQuestion, currentAnswer: attemptContext.currentAnswer,
-        effectiveGrading: attemptContext.effectiveGrading, anchorPurpose: attemptContext.anchor.purpose, tutorMode: mode,
+      const anchorPurpose = examHelpRequested ? "exam_help" : attemptContext?.anchor.purpose;
+      const graph = anchorPurpose && runTutorGraphForTurn({
+        originalQuestion: attemptContext?.originalQuestion ?? turn.text, currentAnswer: attemptContext?.currentAnswer ?? null,
+        effectiveGrading: attemptContext?.effectiveGrading ?? null,
+        anchorPurpose, tutorMode: mode,
       });
       const pureExam = graph?.kind === "pure_short_circuit" ? graph : null;
       // Deduplicate identical answer text without dropping either observation/revision identity.
@@ -358,7 +360,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       };
       const loadedHistory: Awaited<ReturnType<OpeningTutorJobsRepository["loadHistoryContext"]>> = pureExam ? { history: [], sourceRefs: [] }
         : continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
-      const { history, sourceRefs: historySourceRefs, historyCourseBindings } = loadedHistory;
+      const { history, sourceRefs: historySourceRefs, historyCourseBindings, historyMisconceptionLineage } = loadedHistory;
       const historyMemoryIds = loadedHistory.memoryIds ?? [];
       const historyTempExpiresAt = loadedHistory.temporaryMemoryExpiresAt;
       const contextNow = new Date().toISOString();
@@ -372,9 +374,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const memorySourceRefs = eligibleMemories.length ? memoryContext.sourceRefs : [];
       const memoryDependencyIds = eligibleMemories.length ? (memoryContext.dependencyMemoryIds ?? [])
         .map(id => id.toLowerCase()).filter(id => !ineligibleCourseMemoryIds.has(id)) : [];
-      const learnerContext = await deps.learnerContext?.read(scope, { courseId: resolvedCourseId,
+      const learnerContext = pureExam ? null : await deps.learnerContext?.read(scope, { courseId: resolvedCourseId,
         sourceIds: allowedSourceIds }) ?? null;
-      const misconceptionSnapshot = await deps.bitemporalMisconceptions?.read(scope, {
+      const misconceptionSnapshot = pureExam ? null : await deps.bitemporalMisconceptions?.read(scope, {
         courseId: resolvedCourseId, expectedPrivacyEpoch: jobEpoch ?? attemptContext?.privacyEpoch,
       }) ?? null;
       const expectedPrivacyEpoch = jobEpoch ?? misconceptionSnapshot?.privacyEpoch ?? (pureExam ? attemptContext?.privacyEpoch : undefined);
@@ -470,7 +472,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
         historySourceRefs, memoryTaggedSourceRefs, learnerContext?.sourceRefs ?? [], attemptContext?.sourceRefs ?? [],
       );
-      const exposureAnchor = pureExam ? attemptContext!.anchor : turn.contextAnchor;
+      const exposureAnchor = pureExam ? attemptContext?.anchor ?? turn.contextAnchor : turn.contextAnchor;
       const hasHelpExposure = Boolean(exposureAnchor || turn.attemptId || mode === "hint" || mode === "explain");
       const helpKind = pureExam ? "hint" : turn.learningSessionId
         ? turn.attemptId && mode !== "explain" ? "hint" : classifyTutorHelpKind({ mode, attemptId: turn.attemptId ?? null, problemId: null })
@@ -490,14 +492,17 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         problemId: null, attemptId: turn.attemptId ?? null, turnId: claimed.assistantTurnId,
         kind: helpKind, level: helpLevel, delivered: true as const, helpInputSnapshot, hintStage: null, initiatedBy: "user" as const,
       } : undefined;
-      const misconceptionFence = misconceptionSnapshot ? { misconceptionSnapshot } : {};
+      const misconceptionFence = { ...(misconceptionSnapshot ? { misconceptionSnapshot } : {}),
+        ...(historyMisconceptionLineage ? { historyMisconceptionLineage } : {}) };
       const completionOptions = { materialPurposePin: retrieved?.purposePin, ...misconceptionFence,
+        ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
         ...(historyCourseBindings?.length ? { historyCourseBindings } : {}),
         ...(attemptContext ? { attemptContext: { target: attemptTarget, snapshot: attemptContext } } : {}) };
       const streamContext = { privacyEpoch: expectedPrivacyEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
         executionId: claimed.executionId,
+        ...misconceptionFence,
         ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
@@ -505,7 +510,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           ...binding, memoryIds: binding.memoryIds ?? [], memoryBackings: binding.memoryBackings ?? [],
         })),
         ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}) };
-      const publicationContext = { ...streamContext, ...misconceptionFence, attemptContext: attemptContext ?? undefined };
+      const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
       const beginStream = async () => {
@@ -679,6 +684,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               contextSourceRefs,
               ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
               ...misconceptionFence,
+              ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}),
               ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
               ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
               ...(historyCourseBindings?.length ? { historyCourseBindings } : {}),
