@@ -498,6 +498,8 @@ function stripSealedSolutionLines(
     if (!sectionHeader && (state.mode !== "none" || state.unknownAfterFailure || state.afterAllSealedPage)
       && isRunningPageHeading(stripped, !isInlineSeal(state.mode) || !allowBareInlineContainer)
       && !(state.inExercise && !isMarkdownHeading && /^\d+[.。]$/u.test(stripped))) {
+      // Unlabeled counters may be answers. Include them in identity without closing the seal.
+      if (RUNNING_COUNTER_RE.test(stripped)) inlineAnswerLines?.push(stripped);
       changed = true;
       continue;
     }

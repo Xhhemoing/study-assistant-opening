@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v45-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v46-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -1089,16 +1089,19 @@ describe("bounded resumable PDF parser", () => {
     });
 
     it.each([
-      ["Answer: Yes.", true],
-      ["Answer: No.", false],
-      ["**Answer:**  No.", false],
-    ])("reconciles the Docling proof boundary against transcription %j", async (transcription, sealed) => {
-      const parsed = fixtures.native_answer_boundary!.ranges["1-1/"]!.pages[0];
+      { native: "Answer: No.", transcription: "Answer: Yes.", sealed: true },
+      { native: "Answer: No.", transcription: "Answer: No.", sealed: false },
+      { native: "Answer: No.", transcription: "**Answer:**  No.", sealed: false },
+      { native: "Answer:\n1\nDone.", transcription: "Answer:\n2\nDone.", sealed: true },
+      { native: "Answer:\n1\nDone.", transcription: "Answer:\n1\nDone.", sealed: false },
+    ])("reconciles the Docling proof boundary against transcription $transcription", async ({ native, transcription, sealed }) => {
+      const name = native.includes("\n") ? "numeric_native_answer_boundary" : "native_answer_boundary";
+      const parsed = fixtures[name]!.ranges["1-1/"]!.pages[0];
       expect(parsed).toMatchObject({
         text: "1. Find x.", hadSealedContent: true, inlineProofBoundaryPendingAtEnd: true,
-        completedInlineAnswerDigest: createHash("sha256").update("Answer: No.").digest("hex"),
+        completedInlineAnswerDigest: createHash("sha256").update(native).digest("hex"),
       });
-      const result = await runCliScenario("native_answer_boundary", {
+      const result = await runCliScenario(name, {
         segmentPages: 1,
         recognizePage: async () => ({
           text: "[转写]\n" + transcription + "\nChapter 2: Geometry\n[图片描述]\nProof. The derivation begins.",
@@ -2999,6 +3002,20 @@ describe("bounded resumable PDF parser", () => {
     { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\nYes.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nx = 1\nDone.", primary: "Answer:\ny = 2\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nx = 1\nDone.", primary: "Answer:\nx =  1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\n1\nDone.", primary: "Answer:\n2\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\n1\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\n(1)\nDone.", primary: "Answer:\n(2)\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\n1/2\nDone.", primary: "Answer:\n3/4\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nDone.\n- 3 -", primary: "Answer:\nDone.\n- 4 -\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Yes.\n3. Find z.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Unclosed.\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Closed. ∎\n3. Find z.", sealed: false },
+    { native: "1. Find x.\nAnswer:\n1\nPage 12\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: x =\n3. Find z.", primary: "Answer: x =\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\n## Answer:  No. ###", primary: "Answer: No.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\n#1\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n1.\n3. Find z.", sealed: true },
   ].map(scenario => ({ origin, ...scenario }))))("resolves the $origin proof boundary after native $native and transcription $primary", async ({ origin, native, primary, sealed }) => {
     const vision = "[转写]\n" + primary + "\n[图片描述]\nProof. The derivation begins.";
     const result = await runPdfScenario({ segmentPages: 1, pages: [

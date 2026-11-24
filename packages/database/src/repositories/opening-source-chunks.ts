@@ -34,7 +34,7 @@ async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, vers
   options?: { unpublishedPdfForRecovery: true }): Promise<SourceChunk[]> {
   const recovery = options?.unpublishedPdfForRecovery === true;
   const rows = await sql`
-    ${recovery ? sql`` : publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds: [sourceId] })}
+    ${recovery ? sql`` : publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds: [sourceId], sourceVersion: version })}
     SELECT c.*, s.mime FROM opening_source_chunks c
     JOIN opening_sources s ON s.id=c.source_id
     WHERE c.source_id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'

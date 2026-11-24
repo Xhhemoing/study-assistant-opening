@@ -147,14 +147,24 @@ def worker_pdf_cli_fixtures():
             4: "Problem 2. Find the root.",
         }, (), [(1, 4, None), (1, 1, None), (2, 2, None, False, True, True),
                  (3, 3, "inline_proof_sealed", False, True), (4, 4, None, False, True)]),
-        "native_answer_boundary": (4, {
-            1: "1. Find x.\nAnswer: No.",
+        "ambiguous_answer_counters": (6, {
+            1: "Answer:\n1\nDone.",
+            2: "Answer:\n2\nDone.",
+            3: [("Answer:\n1\nDone.\nPage 3", "text"), ("23", "page_footer")],
+            4: "Answer:\n(1)\nDone.\n[Readable OCR]",
+            5: "Answer:\n1/2\nDone.",
+            6: "Answer:\nDone.\n- 3 -",
+        }, (), [(1, 6, None)]),
+    }
+    for name, answer in (("native_answer_boundary", "Answer: No."),
+                         ("numeric_native_answer_boundary", "Answer:\n1\nDone.")):
+        cases[name] = (4, {
+            1: "1. Find x.\n" + answer,
             2: "The derivation continues",
             3: "The derivation ends. ∎",
             4: "Public prose after the derivation.",
         }, (1,), [(1, 1, None), (2, 2, None), (2, 2, "inline_proof_sealed"),
-                  (3, 3, None), (3, 3, "inline_proof_sealed"), (4, 4, None)]),
-    }
+                  (3, 3, None), (3, 3, "inline_proof_sealed"), (4, 4, None)])
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
         pdf_path = Path(tmp) / "worker-fixture.pdf"
@@ -214,6 +224,15 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         ext = physical_pages.extract_physical_pages(conversion)
         self.assertTrue(ext.inline_proof_boundary_by_page[12])
         self.assertEqual(ext.completed_inline_answer_digest_by_page, {})
+
+    def test_cli_digests_distinguish_answer_counters_and_ignore_explicit_furniture(self):
+        output = worker_pdf_cli_fixtures()["ambiguous_answer_counters"]["ranges"]["1-6/"]
+        answers = ("Answer:\n1\nDone.", "Answer:\n2\nDone.", "Answer:\n1\nDone.",
+                   "Answer:\n(1)\nDone.", "Answer:\n1/2\nDone.", "Answer:\nDone.\n- 3 -")
+        for page, answer in zip(output["pages"], answers, strict=True):
+            with self.subTest(page=page["page"]):
+                self.assertTrue(page["inlineProofBoundaryPendingAtEnd"])
+                self.assertEqual(page["completedInlineAnswerDigest"], sha256(answer.encode("utf-8")).hexdigest())
 
     def test_worker_pdf_cli_fixtures_keep_raw_scan_and_report_seal_metadata(self):
         fixtures = worker_pdf_cli_fixtures()

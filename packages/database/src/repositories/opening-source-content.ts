@@ -33,7 +33,7 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
     }
     const pdf = source.mime === "application/pdf";
     const permittedIds = new Map<number | null, string[]>();
-    const pdfBoundary = pdf ? publicPdfSealBoundaries(tx, scope.workspaceId, { sourceIds: [id] }) : tx``;
+    const pdfBoundary = pdf ? publicPdfSealBoundaries(tx, scope.workspaceId, { sourceIds: [id], sourceVersion: version }) : tx``;
     const fromPdf = pdf ? tx`FROM opening_source_chunks c JOIN opening_sources s ON s.id=c.source_id
       WHERE c.source_id=${id} AND c.source_version=${version} AND s.workspace_id=${scope.workspaceId}
         AND ${publicPdfChunkPredicate(tx)}` : tx``;

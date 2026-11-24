@@ -619,6 +619,20 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\nYes.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nx = 1\nDone.", primary: "Answer:\ny = 2\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nx = 1\nDone.", primary: "Answer:\nx =  1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\n1\nDone.", primary: "Answer:\n2\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\n1\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\n(1)\nDone.", primary: "Answer:\n(2)\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\n1/2\nDone.", primary: "Answer:\n3/4\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nDone.\n- 3 -", primary: "Answer:\nDone.\n- 4 -\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Yes.\n3. Find z.", sealed: false },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Unclosed.\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Closed. ∎\n3. Find z.", sealed: false },
+    { native: "1. Find x.\nAnswer:\n1\nPage 12\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: x =\n3. Find z.", primary: "Answer: x =\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\n## Answer:  No. ###", primary: "Answer: No.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\n#1\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n1.\n3. Find z.", sealed: true },
   ])("archives a mixed proof after native $native and transcription $primary", async ({ native, primary, sealed }) => {
     const pdf = await seed([
       "Answer: Yes.",
@@ -631,15 +645,36 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
     await f.sql`UPDATE opening_source_chunks SET image_object_key='vision/proof' WHERE id=${pdf.snapshot.chunks[1]!.id}`;
     const chunks = createOpeningSourceChunksRepository(f.sql);
-    const tail = (await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [3, 4, 5])).map(chunk => chunk.page);
-    expect(tail).toEqual(sealed ? [5] : [3, 4, 5]);
+    const tail = sealed ? [5] : [3, 4, 5];
+    const proofContinuationPages = [3, 4, 5];
+    const verifyArchive = async (snapshot: typeof pdf.snapshot) => {
+      const continuation = snapshot.chunks.filter(chunk => proofContinuationPages.includes(chunk.page!));
+      const chunkIds = continuation.map(chunk => chunk.id);
+      expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, proofContinuationPages))
+        .map(chunk => chunk.page)).toEqual(tail);
+      expect((await pdf.repository.search(f.scope, { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0], chunkIds }))
+        .map(({ chunk }) => chunk.page).sort((a, b) => a! - b!)).toEqual(tail);
+      expect((await pdf.repository.authorizeChunks(f.scope, continuation)).chunks.map(chunk => chunk.page)).toEqual(tail);
+      for (const page of proofContinuationPages) {
+        const content = readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page });
+        if (tail.includes(page)) {
+          await expect(content).resolves.toMatchObject({ pages: expect.arrayContaining(tail) });
+        } else {
+          await expect(content).rejects.toMatchObject({ code: "NOT_FOUND" });
+        }
+      }
+    };
+    await verifyArchive(pdf.snapshot);
 
     const retry = await startPdfRetry(pdf.sourceId, [
       "Answer: Yes.", native, "The derivation continues", "The derivation ends. ∎", "Public prose after the derivation.",
     ].map((text, index) => ({ page: index + 1, text, imagePath: null, visualKinds: index === 1 ? ["picture"] : [] })));
     const result = await retry.run();
     await retry.finish(result.pages);
-    expect((await retry.chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [3, 4, 5])).map(chunk => chunk.page)).toEqual(tail);
+    const snapshot = (await pdf.repository.snapshot(f.scope, pdf.sourceId))!;
+    await pdf.repository.store(f.scope, snapshot, model,
+      segmentMaterialChunks(snapshot.chunks).map(segment => ({ ...segment, vector: [1, 0, 0] })));
+    await verifyArchive(snapshot);
   });
 
   it.each([

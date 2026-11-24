@@ -977,7 +977,9 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                                        and re.fullmatch(r"\d+[.。]", stripped))
             if (is_running_heading
                     and assessment_context < 0 and not _is_section_sealed_opener(stripped) and not numeric_exercise_answer):
-                # A running header is neither a new section nor part of the answer body.
+                # Unlabeled counters contribute to identity without closing the seal.
+                if inline_answer_lines is not None and not is_furniture and _RUNNING_COUNTER_RE.match(stripped):
+                    inline_answer_lines.append(re.sub(r"[^\S\n]+", " ", stripped))
                 if current is None:
                     current = ["solution_sealed", unit_start, unit_end, None, None, False, False, active_seal, False]
                 else:
