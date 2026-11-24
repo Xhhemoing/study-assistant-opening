@@ -248,7 +248,9 @@ function precedes(left: readonly LegacyOccurrence[], right: readonly LegacyOccur
   return first >= 0 && left[first]!.producerIndex < right[first]!.producerIndex;
 }
 
-type EmitLegacyRevision = (row: LegacyProjection, slot: number, visibleCopies: number, canBeLatest: boolean) => void;
+type EmitLegacyRevision = (
+  row: LegacyProjection, slot: number, visibleCopies: number, canBeLatest: boolean, conflictFallback?: boolean,
+) => void;
 
 type BucketCopyCounts = {
   used: readonly number[];
@@ -672,7 +674,7 @@ function resolveLegacyComponent(
     // possible contents at visible slots so qualification fails closed.
     for (const bucket of buckets) {
       for (const projection of new Set(bucket.occurrences.map(row => row.projection))) {
-        for (const slot of bucket.slots) emit(projection, slot, projection.copies, true);
+        for (const slot of bucket.slots) emit(projection, slot, projection.copies, true, true);
       }
     }
     return null;
@@ -701,6 +703,7 @@ export function visibleObservationRevisions(
 } {
   const explicit: ObservationRevision[] = [];
   const claimedSlots = new Set<number>();
+  let explicitSlotLatest = -Infinity;
   const legacy: (ObservationProjection & { matchingSlots: number[]; producerIndex: number })[] = [];
   for (const [producerIndex, observation] of observations.entries()) {
     const attempted = adaptiveShadowTime(observation.attemptedAt);
@@ -714,7 +717,14 @@ export function visibleObservationRevisions(
     const recorded = explicitObservationRecording(observation, attempted);
     if (!Number.isFinite(recorded)) continue;
     explicit.push({ observation, attempted, recorded });
-    for (const slot of matchingSlots) if (features[slot]!.recorded === recorded) claimedSlots.add(slot);
+    let matchedSlot = false;
+    for (const slot of matchingSlots) {
+      if (features[slot]!.recorded === recorded) {
+        claimedSlots.add(slot);
+        matchedSlot = true;
+      }
+    }
+    if (matchedSlot && recorded < cutoff) explicitSlotLatest = Math.max(explicitSlotLatest, recorded);
   }
 
   // The historical window ends strictly before the cutoff for both rows and slots.
@@ -723,9 +733,12 @@ export function visibleObservationRevisions(
   const visibleSlots = new Set(recordings.flatMap((recorded, slot) => recorded < cutoff ? [slot] : []));
   const possibleLatest = [...revisions];
   let earliestLatest = revisions.reduce((time, row) => Math.max(time, row.recorded), -Infinity);
+  let earliestSlotLatest = explicitSlotLatest;
+  let hasVisibleConflictFallback = false;
   const emitted = new Map<LegacyProjection, Map<number, { copies: number; canBeLatest: boolean }>>();
-  function emit(row: LegacyProjection, slot: number, visibleCopies: number, canBeLatest: boolean) {
+  function emit(row: LegacyProjection, slot: number, visibleCopies: number, canBeLatest: boolean, conflictFallback = false) {
     if (!visibleSlots.has(slot)) return;
+    if (conflictFallback) hasVisibleConflictFallback = true;
     const slots = emitted.get(row) ?? new Map();
     const existing = slots.get(slot);
     slots.set(slot, { copies: Math.max(existing?.copies ?? 0, visibleCopies), canBeLatest: canBeLatest || existing?.canBeLatest === true });
@@ -740,7 +753,6 @@ export function visibleObservationRevisions(
   });
   const buckets: LegacyBucket[] = [];
   const unresolved = new Set<LegacyProjection>();
-  let hasVisibleConflict = false;
   // Producer order applies to projections competing for the same eligible slots.
   for (const rows of groupByKey(eligible, row => row.slots.join(",")).values()) {
     const bucket: LegacyBucket = { occurrences: [], slots: new Set(rows[0]!.slots), required: 0n };
@@ -754,8 +766,7 @@ export function visibleObservationRevisions(
         // A different legacy head on an explicitly claimed slot remains conflicting.
         unresolved.add(projection);
         if (required) {
-          hasVisibleConflict ||= matchingSlots.some(slot => visibleSlots.has(slot));
-          for (const slot of matchingSlots) emit(projection, slot, projection.copies, true);
+          for (const slot of matchingSlots) emit(projection, slot, projection.copies, true, true);
         }
         continue;
       }
@@ -770,11 +781,11 @@ export function visibleObservationRevisions(
     const earliest = resolveLegacyComponent(component.buckets, component.slots, recordings, visibleSlots, emit);
     if (earliest === null) {
       for (const bucket of component.buckets) {
-        hasVisibleConflict ||= [...bucket.slots].some(slot => visibleSlots.has(slot));
         for (const { projection } of bucket.occurrences) unresolved.add(projection);
       }
     } else {
       earliestLatest = Math.max(earliestLatest, earliest);
+      earliestSlotLatest = Math.max(earliestSlotLatest, earliest);
     }
   }
   // Components share no slots. A possible latest revision also has to be at
@@ -791,9 +802,10 @@ export function visibleObservationRevisions(
   const unplaced = [...unresolved].filter(row => row.attempted < cutoff && !emitted.has(row)
     && !explicit.some(head => (head.recorded < cutoff || row.matchingTimes.has(head.recorded))
       && sameObservationProjection(head.observation, row.observation))).map(row => row.observation);
-  // A visible fallback conflict is still evidence that the recording is present.
-  const revisionsCanBeAbsent = earliestLatest === -Infinity && !hasVisibleConflict;
-  const canBeAbsent = revisionsCanBeAbsent && !unplaced.length;
+  // A visible fallback conflict still indicates rule-level presence, while direct replay
+  // requires a feasible slot-matched placement before the cutoff without conflict fallback.
+  const revisionsCanBeAbsent = earliestSlotLatest === -Infinity || hasVisibleConflictFallback;
+  const canBeAbsent = earliestLatest === -Infinity && !unplaced.length && !hasVisibleConflictFallback;
   return { revisions, latest: possibleLatest.filter(row => row.recorded >= earliestLatest), unplaced, canBeAbsent, revisionsCanBeAbsent };
 }
 
@@ -849,7 +861,7 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
     if (!candidates.length) return [];
     const { observation } = candidates[0]!;
     if (!revisionsCanBeAbsent && rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head, recorded: at }) =>
-      at === recorded && sameObservationProjection(head, observation) && (head.requirementKey ?? null) === requirementKey)) {
+      at === recorded && sameObservationProjection(head, observation) && matchesUntimestampedObservation(head, feature))) {
       return [{ feature, attempted, observation, claimedRequirementKeys }];
     }
 

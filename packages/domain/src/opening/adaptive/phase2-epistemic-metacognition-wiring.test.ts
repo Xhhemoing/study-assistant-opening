@@ -1140,6 +1140,134 @@ function gradeSlot(row: SnapshotObservation, grade: SlotGrade, recordedAt: strin
   return slot;
 }
 
+it.each([1, 2])("R29 keeps an uncertain legacy head out of direct replay, holdout, and FIRE when %i future corrections conflict", corrections => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const futureCorrections = [1, 2].slice(0, corrections).map(index => ({
+    ...first, problemId: `wrong-${index}`, familyKey: `wrong-family-${index}`, verifiedCorrect: "no" as const,
+  }));
+  const cutoff = at(3);
+  const slots = [gradeSlot(first, "yes", at(1)), gradeSlot(first, "yes", at(5)), gradeSlot(first, "withheld", at(7))];
+  const resolved = visibleObservationRevisions([first, ...futureCorrections],
+    courseFeatureRevisions(slots, scope.courseId), Date.parse(cutoff));
+  expect(resolved.revisions.map(row => [row.observation, row.recorded])).toEqual([[first, Date.parse(at(1))]]);
+  expect(resolved.unplaced).toEqual(corrections === 1 ? [] : futureCorrections);
+  expect(resolved.canBeAbsent).toBe(corrections === 1);
+  expect(resolved.revisionsCanBeAbsent).toBe(true);
+
+  const input = { scope, cutoff, observations: [first, ...futureCorrections, retry],
+    features: [...slots, feature(retry)], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  expect(replayEvidence(input)).toEqual({
+    weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+  });
+  expect(predictLearnerShadowV2(input).evidenceObservationIds).toEqual([]);
+
+  const own = head("own", 1, { attemptedAt: "2026-10-01T09:00:00.000Z" });
+  const source = head("source", 1, { requirementKey: "apply-integrals" });
+  const sourceCorrections = [1, 2].slice(0, corrections).map(index => ({
+    ...source, problemId: `wrong-${index}`, familyKey: `wrong-family-${index}`, verifiedCorrect: "no" as const,
+  }));
+  const sourceSlots = [gradeSlot(source, "yes", at(1)), gradeSlot(source, "yes", at(5)), gradeSlot(source, "withheld", at(7))];
+  expect(predictLearnerShadowV2({ scope, cutoff, observations: [own, source, ...sourceCorrections],
+    features: [feature(own), ...sourceSlots], targetFamilyKeys: [], propagatedFamilyKeys: [],
+    fireEdgesByObservationId: new Map([[source.id, { sourceSkillVersion: 1, edgeWeight: 1, covered: true, stepPassed: true }]]) })
+    .belief.implicitLogCredit).toBe(0);
+
+  const samples = projectProducedAttempts(bktSamples(5), cutoff);
+  const bktInput = buildDecisionInput({ observations: [...samples.observations, first, ...futureCorrections], wantsFullExplanation: false });
+  expect(nextLearningStepWithExperimentalBkt(bktInput, {
+    enabled: true, target: bktTarget, excludedProblemIds: [], features: [...samples.features, ...slots], cutoff,
+  }).comparison).toMatchObject(corrections === 1
+    ? { status: "compared", sampleCount: 5 } : { reason: "priority_rule", sampleCount: 0 });
+  if (corrections === 2) {
+    const withheldSlots = [gradeSlot(first, "withheld", at(1)), gradeSlot(first, "withheld", at(5))];
+    const visibleConflict = visibleObservationRevisions([first, ...futureCorrections],
+      courseFeatureRevisions(withheldSlots, scope.courseId), Date.parse(cutoff));
+    expect(visibleConflict.unplaced).toEqual([]);
+    expect(visibleConflict.canBeAbsent).toBe(false);
+    expect(visibleConflict.revisionsCanBeAbsent).toBe(true);
+    expect(visibleConflict.latest.map(row => row.observation)).toEqual([first, ...futureCorrections]);
+    expect(nextLearningStepWithExperimentalBkt(bktInput, {
+      enabled: true, target: bktTarget, excludedProblemIds: [], features: [...samples.features, ...withheldSlots], cutoff,
+    }).comparison).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+  }
+});
+
+it("R29 rejects timestamped observations against incompatible visible feature revisions across replay, holdout, and FIRE", () => {
+  const first = head("first", 1, { skillLabel: "Differentiation" });
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const cutoff = at(3);
+  const day1Incompatible = projectProducedAttempts([first, retry], cutoff, { untimestamped: false });
+  const day1Explicit = projectProducedAttempts([{ ...first, skillLabel: "Integration", recordedAt: at(1) }], cutoff, { untimestamped: false });
+  const day7Matching = projectProducedAttempts([{ ...first, skillLabel: "Integration", recordedAt: at(7) }], at(8), { untimestamped: false });
+  expect(day1Explicit.observations[0]).toMatchObject({ recordedAt: at(1), skillLabel: "Integration" });
+  expect(day1Incompatible.features[0]).toMatchObject({ recordedAt: at(1), skillLabel: "Differentiation" });
+  expect(day7Matching.features[0]).toMatchObject({ recordedAt: at(7), skillLabel: "Integration" });
+
+  const firstFeatures = [day1Incompatible.features[0]!, day7Matching.features[0]!];
+  const resolved = visibleObservationRevisions(day1Explicit.observations,
+    courseFeatureRevisions(firstFeatures, scope.courseId), Date.parse(cutoff));
+  expect(resolved.revisionsCanBeAbsent).toBe(true);
+  expect(resolved.canBeAbsent).toBe(false);
+  expect(resolved.latest.map(row => row.observation)).toEqual(day1Explicit.observations);
+
+  const input = { scope, cutoff, observations: [...day1Explicit.observations, day1Incompatible.observations[1]!],
+    features: [...firstFeatures, day1Incompatible.features[1]!], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  expect(replayEvidence(input)).toEqual({
+    weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+  });
+  expect(predictLearnerShadowV2(input).evidenceObservationIds).toEqual([]);
+
+  const compatibleFeature = day1Explicit.features[0]!;
+  for (const incompatible of [
+    { ...compatibleFeature, itemVersionId: "item-other" },
+    { ...compatibleFeature, outcome: "incorrect" as const, eligibility: { ...compatibleFeature.eligibility, verifiedCorrect: "no" as const } },
+    { ...compatibleFeature, eligibility: { ...compatibleFeature.eligibility, usableForCurrentVersion: "no" as const } },
+    { ...compatibleFeature, eligibility: { ...compatibleFeature.eligibility, reasonCodes: ["declared_help" as const] } },
+  ]) {
+    expect(replayEvidence({ ...input, features: [incompatible, day1Incompatible.features[1]!] })).toEqual({
+      weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+    });
+  }
+
+  const own = head("own", 1, { attemptedAt: "2026-10-01T09:00:00.000Z" });
+  const sourceDiff = head("source", 1, { requirementKey: "apply-integrals", skillLabel: "Differentiation" });
+  const producedOwnAndDiff = projectProducedAttempts([own, sourceDiff], cutoff, { untimestamped: false });
+  const producedSourceExplicit = projectProducedAttempts([{ ...sourceDiff, skillLabel: "Integration", recordedAt: at(1) }],
+    cutoff, { untimestamped: false });
+  const producedSourceDay7 = projectProducedAttempts([{ ...sourceDiff, skillLabel: "Integration", recordedAt: at(7) }],
+    at(8), { untimestamped: false });
+  const fireInput = { scope, cutoff, observations: [producedOwnAndDiff.observations[0]!, ...producedSourceExplicit.observations],
+    features: [...producedOwnAndDiff.features, producedSourceDay7.features[0]!], targetFamilyKeys: [], propagatedFamilyKeys: [],
+    fireEdgesByObservationId: new Map([[sourceDiff.id, { sourceSkillVersion: 1, edgeWeight: 1, covered: true, stepPassed: true }]]) };
+  expect(predictLearnerShadowV2(fireInput).belief.implicitLogCredit).toBe(0);
+  expect(predictLearnerShadowV2({
+    ...fireInput, features: [producedOwnAndDiff.features[0]!, producedSourceExplicit.features[0]!],
+  }).belief.implicitLogCredit).toBeGreaterThan(0);
+});
+
+it("R29 gates explicitSlotLatest on slot-matched revisions while preserving BKT latest filtering", () => {
+  const legacyDiff = head("first", 1, { skillLabel: "Differentiation" });
+  const explicitIntegration = { ...head("first", 1, { skillLabel: "Integration" }), recordedAt: at(1) };
+  const slots = courseFeatureRevisions([
+    feature(legacyDiff, { recordedAt: at(2) }), feature(legacyDiff, { recordedAt: at(7) }),
+    feature(explicitIntegration, { recordedAt: at(8) }),
+  ], scope.courseId);
+  const resolved = visibleObservationRevisions([explicitIntegration, legacyDiff], slots, Date.parse(at(3)));
+  expect(resolved.revisionsCanBeAbsent).toBe(true);
+  expect(resolved.canBeAbsent).toBe(false);
+  expect(resolved.latest.map(row => row.observation)).toEqual([explicitIntegration, legacyDiff]);
+
+  const laterExplicit = { ...explicitIntegration, recordedAt: at(2) };
+  const earlierSlots = courseFeatureRevisions([
+    feature(legacyDiff, { recordedAt: at(1) }), feature(legacyDiff, { recordedAt: at(7) }),
+  ], scope.courseId);
+  const superseded = visibleObservationRevisions([laterExplicit, legacyDiff], earlierSlots, Date.parse(at(3)));
+  expect(superseded.revisionsCanBeAbsent).toBe(true);
+  expect(superseded.canBeAbsent).toBe(false);
+  expect(superseded.latest.map(row => row.observation)).toEqual([laterExplicit]);
+});
+
 it.each([
   { buckets: 2, copies: 10 }, { buckets: 2, copies: 12 }, { buckets: 3, copies: 12 }, { buckets: 3, copies: 15 },
 ])("R26 resolves $copies copies across $buckets overlapping buckets", ({ buckets, copies }) => {
