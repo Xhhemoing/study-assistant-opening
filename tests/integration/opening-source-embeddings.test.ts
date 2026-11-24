@@ -629,10 +629,17 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Unclosed.\n3. Find z.", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Closed. ∎\n3. Find z.", sealed: false },
     { native: "1. Find x.\nAnswer:\n1\nPage 12\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\n[unreadable]\nNo.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\nVIII\nDone.", primary: "Answer:\nVII\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: x =\n3. Find z.", primary: "Answer: x =\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\n## Answer:  No. ###", primary: "Answer: No.\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer:\n#1\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n1.\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n[unreadable]\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\nChapter 2: Geometry", sealed: true },
+    { native: "Answer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVII\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "Answer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVIII\nDone.\nChapter 2: Geometry", sealed: false },
   ])("archives a mixed proof after native $native and transcription $primary", async ({ native, primary, sealed }) => {
     const pdf = await seed([
       "Answer: Yes.",
@@ -692,6 +699,21 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     expect(await backfilledPages(pdf)).not.toContain(2);
     expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2])).toEqual([]);
     expect(await pdf.repository.search(f.scope, { ...query, chunkIds: [image.id] })).toEqual([]);
+  });
+
+  it.each(["1.", "- 3 -"])("keeps an archived unfinished answer open past a non-exercise counter (%s)", async counter => {
+    await expectArchivedPdfPages([
+      "Answer: x =\n" + counter,
+      "The private calculation continues.",
+      "Public prose after the answer.",
+    ], [3], 2);
+  });
+
+  it("completes an archived inline answer at a standalone decimal number in an exercise", async () => {
+    await expectArchivedPdfPages([
+      "Exercise 1: Find x.\nAnswer: x =\n1.",
+      "Public prose after the answer.",
+    ], [2], 1);
   });
 
   it.each(["Answer: x =", "Answer: Proof. Unclosed"])("blocks a final image-only page after %j", async opener => {

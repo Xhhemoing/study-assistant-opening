@@ -205,7 +205,7 @@ def worker_pdf_cli_fixtures():
 
 class PhysicalPagesDoclingTests(unittest.TestCase):
     def test_completed_inline_answer_digest_contains_every_answer_line(self):
-        for body in ("x  = 1", "y  = 2"):
+        for body in ("x  = 1", "y  = 2", "MMMDCCCLXXXVIII", "MMMDCCCLXXXVII"):
             with self.subTest(body=body):
                 conversion = result_for(
                     [text_element(11, f"1. Find x.\n**Answer:**\n{body}\nDone.")],

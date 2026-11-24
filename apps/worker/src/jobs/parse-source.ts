@@ -455,7 +455,7 @@ function stripSealedSolutionLines(
       return;
     }
     const canContinueWithProof = state.mode === "inline_sealed";
-    pendingAnswerDigest = canContinueWithProof && (onCompletedInlineAnswer || onReopenedInlineAnswer) ? answerDigest() : undefined;
+    pendingAnswerDigest = (onReopenedInlineAnswer || (canContinueWithProof && onCompletedInlineAnswer)) ? answerDigest() : undefined;
     setMode("none");
     state.inlineProofBoundaryPending = canContinueWithProof;
   };
@@ -477,8 +477,11 @@ function stripSealedSolutionLines(
     const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
     const followsNumberedQuestion = state.previousNumberedQuestion;
     const contentLine = stripped && !isRunningPageHeading(stripped, false);
-    const adjacentAnswerDigest = contentLine && state.inlineProofBoundaryPending ? pendingAnswerDigest : undefined;
-    if (contentLine) state.previousNumberedQuestion = false;
+    const adjacentAnswerDigest = contentLine ? pendingAnswerDigest : undefined;
+    if (contentLine) {
+      pendingAnswerDigest = undefined;
+      state.previousNumberedQuestion = false;
+    }
     if ((incomingProofBoundary || state.inlineProofBoundaryPending) && contentLine) {
       if (incomingProofBoundary && state.mode === "none" && !state.unknownAfterFailure && ANSWER_PROOF_HEADING_RE.test(stripped)) {
         state.afterAllSealedPage = false;
@@ -867,6 +870,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let detectedOnPage = false;
         let explicitBoundary = false;
         const reopenedInlineAnswers = new Set<string>();
+        let lastInlineAnswerReopened = false;
         const enteredUnknown = sealState.unknownAfterFailure;
         const incomingMode = sealState.mode;
         const enteredSealed = incomingMode === "section_sealed" || sealState.afterAllSealedPage;
@@ -879,18 +883,23 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             if (nextMode === "section_sealed" && sawSectionExit) reenteredSectionSealed = true;
             // The scanner also notifies when an explicit inline opener replaces an existing one.
             openedInlineAtEnd = isInlineSeal(nextMode);
+            // A blank can exit an unfinished answer without reopening it.
+            if (explicitOpener && openedInlineAtEnd) lastInlineAnswerReopened = false;
             detectedOnPage ||= nextMode !== "none";
           },
           requirePublicHeading,
           false,
           auxiliary,
           undefined,
-          answer => reopenedInlineAnswers.add(answer),
+          answer => {
+            reopenedInlineAnswers.add(answer);
+            lastInlineAnswerReopened = true;
+          },
         );
         const confirmedSeal = incomingMode !== "none" || sealState.mode !== "none" || detectedOnPage;
         const visionDetectedSeal = Boolean(enteredUnknown || enteredSealed || confirmedSeal || sealed !== rawBody);
         return { sealed, visionDetectedSeal, confirmedSeal, detectedOnPage, explicitBoundary, reenteredSectionSealed,
-          openedInlineAtEnd, reopenedInlineAnswers };
+          openedInlineAtEnd, reopenedInlineAnswers, lastInlineAnswerReopened };
       };
       const reconcileEndSealState = (
         target: SealState,
@@ -1041,7 +1050,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const nativeProofBoundary = nativeScan?.hadSeal
           && nativeEndSeal?.mode === "none" && !nativeEndSeal.unknownAfterFailure && nativeEndSeal.inlineProofBoundaryPending
           && (!primary?.detectedOnPage || sealState.inlineProofBoundaryPending
-            || nativeScan.completedAnswer === undefined || !primary.reopenedInlineAnswers.has(nativeScan.completedAnswer));
+            || !primary.lastInlineAnswerReopened || nativeScan.completedAnswer === undefined
+            || !primary.reopenedInlineAnswers.has(nativeScan.completedAnswer));
         sealState.inlineProofBoundaryPending = sealState.mode === "none" && !sealState.unknownAfterFailure
           && Boolean(inheritedProofBoundary || nativeProofBoundary || primary?.detectedOnPage && sealState.inlineProofBoundaryPending);
         // Vision may supply only the heading for proof prose extracted natively.

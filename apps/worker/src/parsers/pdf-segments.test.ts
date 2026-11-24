@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v46-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v47-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -3012,10 +3012,17 @@ describe("bounded resumable PDF parser", () => {
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Unclosed.\n3. Find z.", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Proof. Closed. ∎\n3. Find z.", sealed: false },
     { native: "1. Find x.\nAnswer:\n1\nPage 12\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\n[unreadable]\nNo.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer:\nVIII\nDone.", primary: "Answer:\nVII\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: x =\n3. Find z.", primary: "Answer: x =\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\n## Answer:  No. ###", primary: "Answer: No.\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer:\n#1\nDone.", primary: "Answer:\n1\nDone.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n1.\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\n[unreadable]\n3. Find z.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: x =\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVII\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nMMMDCCCLXXXVIII\nDone.", primary: "Answer:\nMMMDCCCLXXXVIII\nDone.\nChapter 2: Geometry", sealed: false },
   ].map(scenario => ({ origin, ...scenario }))))("resolves the $origin proof boundary after native $native and transcription $primary", async ({ origin, native, primary, sealed }) => {
     const vision = "[转写]\n" + primary + "\n[图片描述]\nProof. The derivation begins.";
     const result = await runPdfScenario({ segmentPages: 1, pages: [
@@ -3034,6 +3041,22 @@ describe("bounded resumable PDF parser", () => {
     expect(result.requests[2]?.seed).toBe(sealed ? "inline_proof_sealed" : undefined);
     expect(result.requests[2]?.proofBoundary).toBeUndefined();
     expect(result.publishedChunks.filter(({ page }) => page! >= 3).map(({ page }) => page)).toEqual(sealed ? [5] : [3, 4, 5]);
+  });
+
+  it.each([
+    { text: "Answer: x =\n1.", exercise: false, publicPages: [3] },
+    { text: "Answer: x =\n- 3 -", exercise: false, publicPages: [3] },
+    { text: "练习\n（1）计算 x。\n解答：\n1.", exercise: true, publicPages: [1, 2, 3] },
+  ])("uses exercise context to close a Worker answer at a trailing counter ($text)", async ({ text, exercise, publicPages }) => {
+    const result = await runPdfScenario({ segmentPages: 1, pages: [
+      { page: 1, text },
+      { page: 2, text: "The calculation is complete." },
+      { page: 3, text: "Public prose after the answer." },
+    ] });
+    expect(result.requests[1]).toEqual(exercise
+      ? { start: 2, exercise: true, proofBoundary: true }
+      : { start: 2, seed: "inline_sealed" });
+    expect(result.publishedChunks.map(({ page }) => page)).toEqual(publicPages);
   });
 
   it("keeps a Docling proof boundary with no answer digest when transcription reopens an answer", async () => {

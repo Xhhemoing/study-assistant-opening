@@ -240,7 +240,8 @@ const chinesePageNumber = String.raw`[\d一二三四五六七八九十百千零�
 const chinesePage = String.raw`(?:第 *)?${chinesePageNumber} *[页頁]`;
 const chinesePageTotal = String.raw`共 *${chinesePageNumber} *[页頁]`;
 const chineseCounter = String.raw`(?:${chinesePage}(?: *[（(] *${chinesePageTotal} *[）)]| *[/／,，] *${chinesePageTotal})?|${chinesePageTotal} +${chinesePage}|(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *${chinesePage})`;
-const counter = String.raw`(?:\d+(?:\.\d+)*|[ivxlcdm]+)`;
+const romanCounter = "[ivxlcdm]{1,8}";
+const counter = String.raw`(?:\d+(?:\.\d+)*|${romanCounter})`;
 const shortFurniturePrefix = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)|第 *${chinesePageNumber} *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])) *[|:：—–-] *`;
 const furnitureSeparator = String.raw`(?: *[|｜—–] *| +- +)`;
 const furnitureTitleProse = String.raw`\m(?:on|see|at|pages?) +(?:page +)?\d+\M|[。！；!]|(?:见|参见)第 *\d+ *页`;
@@ -248,9 +249,10 @@ const pageCounter = String.raw`(?:[(（\[【]? *(?:(?:(?:scanned|physical|printe
 const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix}).*${furnitureSeparator}|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
 const titledPageCounter = String.raw`${lineStart}([^|｜—–]{1,96}?)(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
 const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M`;
+const ocrPlaceholder = String.raw`${lineStart}[\[【(（] *(?:illegible|unreadable|blank|unclear|ocr|no +(?:readable +)?text|无法识别|无法辨认|空白页|图片描述|图像描述|图示与版面描述|不确定处)(?=[ \]】)）：:]|$)`;
 const continuedContainer = String.raw`(?:${englishContainerPrefix}|${chineseContainerPrefix}).*(?:[(（\[【] *(?:(?:to +be +)?${englishContinuationWord}|续|续上页|接上页) *[)）\]】]|\m${englishContinuationWord}(?: +(?:from|on) +.+)?|续上页|接上页| +续)[ .:：]*$`;
-const bareAnswerCounter = String.raw`${lineStart}(?:[(（\[【]? *(?:\d+(?:\.\d+)*|[ivxlcdm]{1,8}|${pageNumberRatio}) *[)）\]】]?|[-–—] *(?:\d+|[ivxlcdm]{1,8}) *[-–—]) *[.。．、]? *$`;
-const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|[ivxlcdm]+ *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}`;
+const bareAnswerCounter = String.raw`${lineStart}(?:[(（\[【]? *(?:${counter}|${pageNumberRatio}) *[)）\]】]?|[-–—] *(?:\d+|${romanCounter}) *[-–—]) *[.。．、]? *$`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|${romanCounter} *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}|${ocrPlaceholder}`;
 const jsInlineRunningHeading = new RegExp(asJsPattern(inlineRunningHeading), "iu");
 const jsTitledPageCounter = new RegExp(titledPageCounter, "iu");
 const jsFurnitureTitleProse = new RegExp(asJsPattern(furnitureTitleProse), "iu");
@@ -467,16 +469,9 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         auxiliary_proof AND position=first_page_auxiliary_position AS first_auxiliary_proof,
         native_answer_position>COALESCE(native_reopening,0) AND native_answer_position>COALESCE(native_proof,0)
           AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineContinues}) AS native_answer_boundary,
-        (bool_or(transcription AND inline_opener AND position=last_transcription_answer
-            AND lane_reopening_position=lane_boundary_position AND lane_reopening_position>position)
-          OVER chunk_lines
-          AND bool_or(transcription AND inline_opener AND answer_lines=native_answer_lines
-            AND lane_reopening_position=lane_boundary_position AND lane_reopening_position>answer_end_position
-            AND (answer_terminator IS NULL OR answer_terminator>=lane_reopening_position
-              OR lane_reopening_position=first_content_after_terminator)
-            AND (last_answer_body ~* ${inlineTerminator}
-              OR last_answer_body ~* ${inlineTerminal} AND last_answer_body !~* ${inlineContinues}))
-            OVER chunk_lines) IS TRUE AS transcription_reopens_answer,
+        (bool_or(transcription_answer_reopened AND position=last_transcription_answer) OVER chunk_lines
+          AND bool_or(transcription_answer_reopened AND answer_lines=native_answer_lines) OVER chunk_lines)
+          IS TRUE AS transcription_reopens_answer,
         auxiliary AND (last_answer_body ~* ${inlineTerminator}
           OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends)) AS auxiliary_complete,
         auxiliary AND content_line AND position=last_auxiliary_position AND auxiliary_opener>0 AND NOT open_auxiliary_proof
@@ -484,7 +479,14 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             ELSE first_auxiliary_close=position END AS auxiliary_answer_boundary
       FROM (
         SELECT *, NOT open_auxiliary_proof AND last_answer_body !~* ${inlineTerminator} AND last_answer_body ~* ${inlineTerminal}
-            AND last_answer_body !~* ${inlineContinues} AS auxiliary_sentence_ends
+            AND last_answer_body !~* ${inlineContinues} AS auxiliary_sentence_ends,
+          transcription AND inline_opener
+            AND lane_reopening_position=lane_boundary_position AND lane_reopening_position>answer_end_position
+            AND (answer_terminator IS NULL OR answer_terminator>=lane_reopening_position
+              OR lane_reopening_position=first_content_after_terminator)
+            AND (last_answer_body ~* ${inlineTerminator}
+              OR NOT answer_has_proof AND last_answer_body ~* ${inlineTerminal}
+                AND last_answer_body !~* ${inlineContinues}) AS transcription_answer_reopened
         FROM (
           SELECT *, min(position) FILTER (WHERE NOT auxiliary AND content_line)
             OVER (PARTITION BY source_id,source_version,page) AS first_primary_position,
@@ -513,6 +515,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                 string_agg(CASE WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END,chr(10))
                   FILTER (WHERE answer_content) OVER answer_sequence END AS answer_lines,
               max(position) FILTER (WHERE answer_content) OVER answer_sequence AS answer_end_position,
+              bool_or(answer_content AND candidate_proof) OVER answer_sequence AS answer_has_proof,
               min(position) FILTER (WHERE content_line AND position>answer_terminator)
                 OVER answer_sequence AS first_content_after_terminator
             FROM (
@@ -543,7 +546,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                      NOT auxiliary AND NOT transcription AND content_line AS native_line,
                      -- Keep ambiguous counters in identity without treating them as a same-page close.
                      CASE WHEN NOT auxiliary AND NOT inline_opener AND line ~* ${bareAnswerCounter}
-                       AND NOT (in_exercise AND NOT atx AND line ~ '^ *\d+[.。] *$') THEN '' ELSE candidate_body END AS lane_body,
+                       AND NOT (in_exercise AND NOT atx AND line ~ ${String.raw`^ *\d+[.。] *$`}) THEN '' ELSE candidate_body END AS lane_body,
                      count(*) FILTER (WHERE inline_opener)
                      OVER (PARTITION BY id,auxiliary_block,transcription ORDER BY position ROWS UNBOUNDED PRECEDING) AS auxiliary_opener
                    FROM pdf_archive_inline_bodies
@@ -578,7 +581,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT *, CASE WHEN NOT auxiliary OR first_value(starts_inline) OVER inline_origin
         AND id=first_value(id) OVER inline_origin
         AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
-      THEN candidate_body ELSE '' END AS body_line,
+      THEN lane_body ELSE '' END AS body_line,
       -- An auxiliary proof that closes in its own block leaves the outer answer active.
       (auxiliary_proof AND NOT (first_auxiliary_proof AND native_answer_boundary AND transcription_reopens_answer)
         OR auxiliary AND inline_opener AND candidate_proof AND NOT candidate_terminator)
