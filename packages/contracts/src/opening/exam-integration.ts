@@ -75,9 +75,11 @@ export type ExamTopicForecast = {
   skillId: string; examinedPapers: number; totalPapers: number; probability: number | null;
   lower: number | null; upper: number | null; meanPoints: number | null;
 };
+export const examShortMockReadinessSchema = z.enum(["needs_personal_independent_evidence", "needs_external_calibration"]);
 export type ExamForecastOverview = {
   teacher: string | null; papers: ExamPaper[]; topics: ExamTopicForecast[];
   status: "no_history" | "limited_history" | "history_based"; message: string;
+  shortMockReadiness?: z.infer<typeof examShortMockReadinessSchema>;
 };
 export const examSourceMappingInputSchema = z.object({
   clientKey: z.string().min(8).max(200), sourceItemId: z.string().min(1).max(100),

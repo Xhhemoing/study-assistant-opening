@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
-import { examPaperInputSchema, type ExamForecastOverview, type ExamPack, type ExamPaper, type ExamPaperInput, type Scope } from "@aistudy/contracts";
-import { forecastExamTopics } from "@aistudy/domain";
+import { examPaperInputSchema, type ExamForecastOverview, type ExamPack, type ExamPaper, type ExamPaperInput, type ExamSprintState, type Scope } from "@aistudy/contracts";
+import { buildExamSprintForecastBlueprint, forecastExamTopics, toExamSprintForecastEvidence } from "@aistudy/domain";
+import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
 import { learningError, lockLearningOwner, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { assertExamMaterialAvailable } from "./opening-exam-integration-binding";
-import { readCommittedExamReceipt, lockBoundExamCourse, parseExamBinding } from "./opening-exam-integration-facts";
+import { readCommittedExamReceipt, lockBoundExamCourse, parseExamBinding, readExamEvidenceState } from "./opening-exam-integration-facts";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 
 const conflict = (message: string) => learningError("CONFLICT", message);
@@ -18,15 +19,55 @@ function paperView(row: Record<string, unknown>): ExamPaper {
   return { ...paper, id: String(row.id), courseId: String(row.course_id), recordedAt: new Date(row.recorded_at as Date).toISOString() };
 }
 
+async function readShortMockReadiness(
+  tx: TransactionSql, scope: Scope, pack: ExamPack, snapshot: { id: string; state: ExamSprintState } | null,
+): Promise<ExamForecastOverview["shortMockReadiness"]> {
+  if (pack.id !== EXAM_SPRINT_PACK.id) return undefined;
+  const mockPools = (["mock-a", "mock-b"] as const).filter(pool => pack.questions.some(question => question.pool === pool));
+  if (!mockPools.length) return undefined;
+  if (!snapshot) return "needs_personal_independent_evidence";
+  // Formal evidence can outlive course access or known availability of the pack source.
+  const [activeBinding] = await tx`SELECT 1 FROM opening_exam_sprints s
+    JOIN opening_exam_bindings b ON b.sprint_id=s.id
+    JOIN courses c ON c.id=b.course_id AND c.workspace_id=s.workspace_id AND c.archived_at IS NULL
+      AND c.id::text=b.binding->>'courseId'
+    JOIN course_asset_memberships m ON m.course_id=c.id AND m.workspace_id=s.workspace_id
+      AND m.asset_type='source' AND m.asset_id::text=b.binding->>'packSourceId'
+    JOIN opening_sources pack_source ON pack_source.id=m.asset_id AND pack_source.workspace_id=m.workspace_id
+      AND pack_source.upload_state='uploaded' AND pack_source.parse_state='ready'
+    JOIN opening_source_versions pack_version ON pack_version.workspace_id=pack_source.workspace_id
+      AND pack_version.source_id=pack_source.id AND pack_version.version=pack_source.version
+      AND pack_version.availability='available'
+    WHERE s.id=${snapshot.id} AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}`;
+  if (!activeBinding) return "needs_personal_independent_evidence";
+  const context = await readExamEvidenceState(tx, scope, snapshot.id, snapshot.state);
+  const eligible = new Set(context.bktEligibleAttemptIds);
+  if (!eligible.size) return "needs_personal_independent_evidence";
+  const [clock] = await tx`SELECT clock_timestamp() AS now`;
+  const examAtMs = new Date(clock!.now as string | Date).getTime();
+  // Each form covers different skills. Keep earlier presentations in the state for the first-family check.
+  const hasQualifiedEvidence = mockPools.some(pool => toExamSprintForecastEvidence({
+    state: snapshot.state, pack, learnerId: scope.ownerUserId, examAtMs, context,
+    blueprint: buildExamSprintForecastBlueprint(pack, pool),
+  }).some(({ evidenceId, correct }) => {
+    const current = context.ruleEvidence[evidenceId];
+    return eligible.has(evidenceId) && current?.usable && current.independent && !current.assisted && current.correct === correct;
+  }));
+  return hasQualifiedEvidence ? "needs_external_calibration" : "needs_personal_independent_evidence";
+}
+
 /** Paper annotations describe source material, never learner mastery or official grades. */
 export function createOpeningExamForecastRepository(sql: Sql, initialPack: ExamPack) {
   async function overview(tx: TransactionSql, scope: Scope, teacher: string | null): Promise<ExamForecastOverview> {
     await lockLearningOwner(tx, scope);
     const [sprint] = await tx`SELECT id,pack_snapshot,state FROM opening_exam_sprints
       WHERE course_id IS NULL AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-    const pack = sprint ? parseExamSprintSnapshot(sprint.pack_snapshot, sprint.state).pack : initialPack;
+    const snapshot = sprint ? { id: String(sprint.id), ...parseExamSprintSnapshot(sprint.pack_snapshot, sprint.state) } : null;
+    const pack = snapshot?.pack ?? initialPack;
     const skillIds = [...new Set(pack.questions.map(question => question.skillId))];
-    if (!sprint) return forecastExamTopics([], skillIds, teacher);
+    const shortMockReadiness = await readShortMockReadiness(tx, scope, pack, snapshot);
+    const readiness = shortMockReadiness ? { shortMockReadiness } : {};
+    if (!snapshot) return { ...forecastExamTopics([], skillIds, teacher), ...readiness };
     // Live membership, current version and privacy checks also apply after registration.
     const rows = await tx`SELECT p.* FROM opening_exam_papers p
       JOIN opening_exam_bindings b ON b.sprint_id=p.sprint_id AND b.course_id=p.course_id
@@ -35,7 +76,7 @@ export function createOpeningExamForecastRepository(sql: Sql, initialPack: ExamP
         AND m.asset_type='source' AND m.asset_id=p.source_id
       JOIN opening_sources s ON s.id=p.source_id AND s.workspace_id=p.workspace_id AND s.version=p.source_version
       JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=p.source_version
-      WHERE p.sprint_id=${String(sprint.id)} AND p.workspace_id=${scope.workspaceId} AND p.owner_user_id=${scope.ownerUserId}
+      WHERE p.sprint_id=${snapshot.id} AND p.workspace_id=${scope.workspaceId} AND p.owner_user_id=${scope.ownerUserId}
         AND s.upload_state='uploaded' AND s.parse_state='ready' AND v.availability='available'
         AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
         AND EXISTS (SELECT 1 FROM opening_source_chunks c WHERE c.source_id=s.id AND c.source_version=p.source_version
@@ -43,7 +84,7 @@ export function createOpeningExamForecastRepository(sql: Sql, initialPack: ExamP
       ORDER BY p.recorded_at,p.id`;
     const papers = rows.map(paperView);
     if (papers.some(paper => paper.skills.some(skill => !skillIds.includes(skill.skillId)))) throw conflict("试卷技能与当前题包不匹配");
-    return forecastExamTopics(papers, skillIds, teacher);
+    return { ...forecastExamTopics(papers, skillIds, teacher), ...readiness };
   }
 
   return {

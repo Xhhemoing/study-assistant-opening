@@ -683,8 +683,28 @@ describe("exam integration shares mutation recovery", () => {
     const client = createExamSprintClient({ fetcher, keyFactory: () => key });
     await client.loadForecast(" A & B ");
     expect(fetcher.mock.calls[0]![0]).toBe("/api/opening/exam-sprint/forecast?teacher=A%20%26%20B");
+    expect(client.getSnapshot().forecast).toEqual(forecast);
     await client.sendIntegration({ action: "paper", input: { sourceId: reviewInput.referenceSourceId, sourceVersion: 2, teacher: "A & B", year: 2025, label: "期末", kind: "past_exam", skills: [{ skillId: "skill-1", points: 10 }] } });
     expect(client.getSnapshot()).toMatchObject({ uncertain: true, forecast });
+  });
+
+  it("reads and updates short-mock readiness from forecast GET and paper registration POST", async () => {
+    const forecast = { teacher: "A & B", papers: [], topics: [], status: "no_history", message: "无真卷" };
+    const fetcher = vi.fn<Fetcher>()
+      .mockResolvedValueOnce(Response.json({ ...forecast, shortMockReadiness: "needs_personal_independent_evidence" }))
+      .mockResolvedValueOnce(Response.json({ ...forecast, shortMockReadiness: "needs_external_calibration" }))
+      .mockResolvedValueOnce(Response.json({ ...forecast, shortMockReadiness: "ready_to_score" }));
+    const client = createExamSprintClient({ fetcher, keyFactory: () => key });
+
+    await client.loadForecast("A & B");
+    expect(client.getSnapshot().forecast).toEqual({ ...forecast, shortMockReadiness: "needs_personal_independent_evidence" });
+    await client.sendIntegration({ action: "paper", input: { sourceId: reviewInput.referenceSourceId, sourceVersion: 2, teacher: "A & B", year: 2025, label: "期末", kind: "past_exam", skills: [{ skillId: "skill-1", points: 10 }] } });
+    expect(client.getSnapshot().forecast).toEqual({ ...forecast, shortMockReadiness: "needs_external_calibration" });
+    expect(client.getSnapshot().uncertain).toBe(false);
+
+    await client.loadForecast("A & B");
+    expect(client.getSnapshot().forecast?.shortMockReadiness).toBe("needs_external_calibration");
+    expect(client.getSnapshot().error).toContain("不完整");
   });
 
   it("preserves photo version and human verification fields when reading saved source work", async () => {

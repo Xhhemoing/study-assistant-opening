@@ -8,10 +8,18 @@ import type { ExamResources } from "./use-exam-resources";
 
 const kindLabels: Record<ExamPaperKind, string> = { past_exam: "历年真卷", sample: "样卷", exercise: "参考习题" };
 const percent = (value: number) => `${Math.round(value * 100)}%`;
+const readinessReasons: Record<NonNullable<ExamForecastOverview["shortMockReadiness"]>, string> = {
+  needs_personal_independent_evidence: "目前缺少可核验的独立作答记录，暂不提供短模拟估分。",
+  needs_external_calibration: "已有可核验的独立作答记录，目前仍缺少独立的校准样本，暂不提供短模拟估分。",
+};
 
 export function ForecastResults({ forecast, overview }: { forecast: ExamForecastOverview; overview: ExamSprintOverview }) {
   const hasExams = forecast.status !== "no_history" && forecast.papers.some(paper => paper.kind === "past_exam");
   return <section className={`${ui.panel} space-y-4 p-5`}><h2 className="font-semibold">有来源的考点分布</h2><p className="text-xs leading-6 text-text-3">{forecast.teacher ? `老师：${forecast.teacher}` : "尚未限定老师，可在上方筛选"}。只用已登记的历年真卷估计出现率；样卷和习题单独保留。</p><p className="rounded-lg bg-warn-soft p-3 text-sm leading-7 text-warn">{forecast.message}</p>{!hasExams ? <p className="text-sm text-text-2">没有可用真卷，暂不显示考点百分比。继续做基础覆盖与薄弱点练习。</p> : <div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead><tr className="border-b border-line"><th className="py-2 pr-3 font-medium">考点</th><th className="py-2 pr-3 font-medium">出现卷数 / 样本</th><th className="py-2 pr-3 font-medium">历史区间</th><th className="py-2 font-medium">平均分值</th></tr></thead><tbody>{forecast.topics.map(topic => <tr className="border-b border-line" key={topic.skillId}><td className="py-3 pr-3">{overview.skills.find(skill => skill.skillId === topic.skillId)?.title ?? topic.skillId}</td><td className="py-3 pr-3">{topic.examinedPapers} / {topic.totalPapers}</td><td className="py-3 pr-3">{topic.lower === null || topic.upper === null ? "样本不足" : `${percent(topic.lower)}–${percent(topic.upper)}`}</td><td className="py-3">{topic.meanPoints === null ? "未记录" : topic.meanPoints.toFixed(1)}</td></tr>)}</tbody></table><p className="mt-3 text-xs leading-6 text-text-3">区间来自已录入历史样本，不能保证下一次考试。样本少或老师更换时，保留全章基础覆盖。</p></div>}
+    {forecast.shortMockReadiness && <div className="space-y-1 border-t border-line pt-3">
+      <h3 className="text-sm font-medium">短模拟估分条件</h3>
+      <p className="text-sm leading-6 text-text-2">{readinessReasons[forecast.shortMockReadiness]}</p>
+    </div>}
     <details className="border-t border-line pt-3"><summary className="min-h-11 cursor-pointer text-xs py-2">查看已登记资料 · {forecast.papers.length} 份</summary><ul className="mt-3 space-y-2">{forecast.papers.map(paper => <li key={paper.id} className="rounded-lg bg-surface-2 p-3 text-xs leading-6"><p className="font-medium">{paper.label} · {kindLabels[paper.kind]}</p><p>{paper.teacher} · {paper.year} 年 · v{paper.sourceVersion}</p><a className="inline-flex min-h-11 items-center text-accent underline" href={`/api/opening/sources/${encodeURIComponent(paper.sourceId)}/download?version=${paper.sourceVersion}`} target="_blank" rel="noreferrer">核对原资料</a></li>)}</ul></details>
   </section>;
 }
