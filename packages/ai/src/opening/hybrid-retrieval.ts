@@ -45,21 +45,15 @@ const CURRENCY_PROSE_OR_NON_MATH_RE = /\b(?:and|to|or|per|for|in|of|at|from|with
 const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 const PUNCTUATED_CURRENCY_RE = /^\d[\d,]*(?:\.\d+)?[.,]$/;
 
-function endOfLatexComment(text: string, start: number, end: number): number {
-  let index = start + 1;
-  while (index < end && text[index] !== "\n" && text[index] !== "\r") index++;
-  return index;
-}
-
-function hasAdjacentInlineFormula(text: string, opener: number, commentEnd?: (start: number) => number): boolean {
+function hasAdjacentInlineFormula(text: string, opener: number, blankLineAt: Uint8Array, commentEnds?: Int32Array): boolean {
   const startsInline = (index: number) => Boolean(text[index + 1] && !/[\s$]/u.test(text[index + 1]!));
   if (!startsInline(opener)) return false;
   const limit = Math.min(text.length, opener + EMBEDDING_SEGMENT_HARD_LIMIT);
   for (let index = opener + 1; index < limit;) {
     const char = text[index];
     if (char === "\\") { index += 2; continue; }
-    if (char === "%" && commentEnd) { index = commentEnd(index); continue; }
-    if (char === "\n" && isBlankLineBreakAt(text, index)) return false;
+    if (char === "%" && commentEnds) { index = commentEnds[index]!; continue; }
+    if (blankLineAt[index]) return false;
     if (char === "$") {
       const next = text[index + 1] ?? "";
       return !/\s/u.test(text[index - 1]!) && !/[0-9]/u.test(next)
@@ -70,20 +64,9 @@ function hasAdjacentInlineFormula(text: string, opener: number, commentEnd?: (st
   return false;
 }
 
-function hasClosingDisplayDollar(text: string, opener: number): boolean {
-  // Traverse to the next unescaped dollar pair, as the display scan does.
-  for (let index = opener + 2; index < text.length - 1;) {
-    const char = text[index];
-    const next = text[index + 1];
-    if (char === "\\" && (next === "\\" || next === "$" || next === "%")) { index += 2; continue; }
-    if (char === "%") { index = endOfLatexComment(text, index, text.length); continue; }
-    if (char === "$" && next === "$") return true;
-    index++;
-  }
-  return false;
-}
-
-function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (start: number) => number): boolean {
+function isBareCurrencyStart(
+  text: string, dollarIndex: number, displayCloseFrom: Uint8Array, blankLineAt: Uint8Array, commentEnds?: Int32Array,
+): boolean {
   const first = text[dollarIndex + 1];
   if (!first || first < "0" || first > "9") return false;
   let closeIdx = -1;
@@ -96,13 +79,13 @@ function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (st
       j += 2;
       continue;
     }
-    if (ch === "%" && commentEnd) {
+    if (ch === "%" && commentEnds) {
       bodyParts.push(text.slice(bodyStart, j));
-      j = commentEnd(j);
+      j = commentEnds[j]!;
       bodyStart = j;
       continue;
     }
-    if (ch === "\n" && isBlankLineBreakAt(text, j)) break;
+    if (blankLineAt[j]) break;
     if (ch === "$") {
       closeIdx = j;
       break;
@@ -116,23 +99,14 @@ function isBareCurrencyStart(text: string, dollarIndex: number, commentEnd?: (st
     const inner = bodyParts.join("") + text.slice(bodyStart, closeIdx);
     if ((MATH_COMMAND_OR_OP_RE.test(inner) || !CURRENCY_PROSE_OR_NON_MATH_RE.test(inner))
       && (next !== "$" || (!PUNCTUATED_CURRENCY_RE.test(inner) && (
-        text[closeIdx + 2] === "$" ? hasClosingDisplayDollar(text, closeIdx + 1)
-          : hasAdjacentInlineFormula(text, closeIdx + 1, commentEnd)
+        text[closeIdx + 2] === "$" ? displayCloseFrom[closeIdx + 3]
+          : hasAdjacentInlineFormula(text, closeIdx + 1, blankLineAt, commentEnds)
       )))) {
       return false;
     }
   }
   // If the candidate was not math, retry with literal percentages for prose.
-  return bodyParts.length ? isBareCurrencyStart(text, dollarIndex) : true;
-}
-
-function isBlankLineBreakAt(text: string, newlineIndex: number): boolean {
-  for (let j = newlineIndex + 1; j < text.length; j++) {
-    const ch = text[j]!;
-    if (ch === "\n") return true;
-    if (ch !== " " && ch !== "\t" && ch !== "\r") return false;
-  }
-  return false;
+  return bodyParts.length ? isBareCurrencyStart(text, dollarIndex, displayCloseFrom, blankLineAt) : true;
 }
 
 function scanMathSpans(text: string): MathSpan[] {
@@ -143,17 +117,31 @@ function scanMathSpans(text: string): MathSpan[] {
   const envCounts = new Map<string, number>();
   let displayDollarStart: number | null = null;
   let inlineDollarStart: number | null = null;
-  let commentStart = -1;
-  let commentStop = -1;
-  const endOfInlineComment = (start: number) => {
-    // Multiple ambiguous dollar amounts on the same line share the scan to its end.
-    if (start < commentStart || start >= commentStop) {
-      commentStart = start;
-      commentStop = endOfLatexComment(text, start, text.length);
+  const commentEnds = new Int32Array(text.length);
+  const displayCloseFrom = new Uint8Array(text.length + 1);
+  const blankLineAt = new Uint8Array(text.length);
+  let nextLineEnd = text.length;
+  let nextNonIndentIsNewline = false;
+  // A display scan from any offset follows the same escape and comment rules.
+  // Compute each suffix once, including suffixes that start inside prose comments.
+  for (let i = text.length - 1; i >= 0; i--) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === "%") commentEnds[i] = nextLineEnd;
+    if (ch === "\n" || ch === "\r") nextLineEnd = i;
+    if (ch === "\n" && nextNonIndentIsNewline) blankLineAt[i] = 1;
+    if (ch !== " " && ch !== "\t" && ch !== "\r") nextNonIndentIsNewline = ch === "\n";
+    if (ch === "\\" && (next === "\\" || next === "$" || next === "%")) {
+      displayCloseFrom[i] = displayCloseFrom[i + 2]!;
+    } else if (ch === "%") {
+      displayCloseFrom[i] = displayCloseFrom[nextLineEnd]!;
+    } else {
+      displayCloseFrom[i] = ch === "$" && next === "$" ? 1 : displayCloseFrom[i + 1]!;
     }
-    return commentStop;
-  };
-  const opensInlineMath = (index: number) => !isBareCurrencyStart(text, index, endOfInlineComment);
+  }
+  // Both inline probes stop at the hard limit; comment and blank-line checks
+  // remain constant-time even when whitespace or a comment crosses that limit.
+  const opensInlineMath = (index: number) => !isBareCurrencyStart(text, index, displayCloseFrom, blankLineAt, commentEnds);
 
   const scanRange = (from: number, to: number) => {
     for (let i = from; i < to; ) {
@@ -217,7 +205,7 @@ function scanMathSpans(text: string): MathSpan[] {
 
       if (ch === "%" && (displayDollarStart !== null || inlineDollarStart !== null
         || bracketStack.length > 0 || parenStack.length > 0 || envStack.length > 0)) {
-        i = endOfLatexComment(text, i, to);
+        i = Math.min(commentEnds[i]!, to);
         continue;
       }
 
@@ -232,7 +220,7 @@ function scanMathSpans(text: string): MathSpan[] {
         continue;
       }
 
-      if (ch === "\n" && inlineDollarStart !== null && isBlankLineBreakAt(text, i)) {
+      if (inlineDollarStart !== null && blankLineAt[i]) {
         inlineDollarStart = null;
       }
 
@@ -308,17 +296,6 @@ function buildCodePointIndex(text: string): { cpStarts: number[]; prefixBytes: I
   return { cpStarts, prefixBytes };
 }
 
-function findCodePointForOffset(cpStarts: number[], offset: number): number {
-  let lo = 0;
-  let hi = cpStarts.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (cpStarts[mid]! < offset) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
 function selectSafeMathSpans(text: string, prefixBytes: Int32Array, maxBytes: number): MathSpan[] {
   const spans = scanMathSpans(text);
   if (spans.length === 0) return [];
@@ -363,17 +340,13 @@ function splitChunkOffsets(
   const cuts: number[] = [];
   let spanIdx = 0;
   let cpStart = 0;
+  let cpLimit = 0;
 
   while (cpStart < cpTotal) {
     const baseBytes = prefixBytes[cpStarts[cpStart]!]!;
-    let lo = cpStart + 1;
-    let hi = cpTotal;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >>> 1;
-      if (prefixBytes[cpStarts[mid]!]! - baseBytes <= maxBytes) lo = mid;
-      else hi = mid - 1;
-    }
-    let cpSplit = lo;
+    cpLimit = Math.max(cpLimit, cpStart + 1);
+    while (cpLimit < cpTotal && prefixBytes[cpStarts[cpLimit + 1]!]! - baseBytes <= maxBytes) cpLimit++;
+    let cpSplit = cpLimit;
 
     if (mathSpans && cpSplit < cpTotal) {
       const cutOffset = cpStarts[cpSplit]!;
@@ -382,7 +355,10 @@ function splitChunkOffsets(
       const activeSpan = mathSpans[spanIdx];
       if (activeSpan && activeSpan.start < cutOffset && cutOffset < activeSpan.end) {
         // Isolate a formula larger than the target so only that formula exceeds it.
-        cpSplit = findCodePointForOffset(cpStarts, activeSpan.start > segmentStartOffset ? activeSpan.start : activeSpan.end);
+        const boundary = activeSpan.start > segmentStartOffset ? activeSpan.start : activeSpan.end;
+        // This walk covers only the code points emitted by the current cut.
+        cpSplit = cpStart;
+        while (cpStarts[cpSplit]! < boundary) cpSplit++;
       }
     }
 

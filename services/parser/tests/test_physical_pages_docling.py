@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from hashlib import sha256
 from importlib.util import find_spec
 from pathlib import Path
 from time import perf_counter
@@ -146,6 +147,13 @@ def worker_pdf_cli_fixtures():
             4: "Problem 2. Find the root.",
         }, (), [(1, 4, None), (1, 1, None), (2, 2, None, False, True, True),
                  (3, 3, "inline_proof_sealed", False, True), (4, 4, None, False, True)]),
+        "native_answer_boundary": (4, {
+            1: "1. Find x.\nAnswer: No.",
+            2: "The derivation continues",
+            3: "The derivation ends. ∎",
+            4: "Public prose after the derivation.",
+        }, (1,), [(1, 1, None), (2, 2, None), (2, 2, "inline_proof_sealed"),
+                  (3, 3, None), (3, 3, "inline_proof_sealed"), (4, 4, None)]),
     }
     fixtures = {}
     with tempfile.TemporaryDirectory() as tmp:
@@ -186,6 +194,27 @@ def worker_pdf_cli_fixtures():
 
 
 class PhysicalPagesDoclingTests(unittest.TestCase):
+    def test_completed_inline_answer_digest_contains_every_answer_line(self):
+        for body in ("x  = 1", "y  = 2"):
+            with self.subTest(body=body):
+                conversion = result_for(
+                    [text_element(11, f"1. Find x.\n**Answer:**\n{body}\nDone.")],
+                    [text_element(12, "Proof. The private derivation. ∎")],
+                )
+                ext = physical_pages.extract_physical_pages(conversion)
+                self.assertEqual(ext.texts_by_page, {11: ["1. Find x."], 12: []})
+                self.assertTrue(ext.inline_proof_boundary_by_page[11])
+                expected = sha256(f"Answer:\n{' '.join(body.split())}\nDone.".encode("utf-8")).hexdigest()
+                self.assertEqual(ext.completed_inline_answer_digest_by_page, {11: expected})
+
+        conversion = result_for(
+            [text_element(11, "1. Find x.\nAnswer: x =")],
+            [text_element(12, "The answer is two.")],
+        )
+        ext = physical_pages.extract_physical_pages(conversion)
+        self.assertTrue(ext.inline_proof_boundary_by_page[12])
+        self.assertEqual(ext.completed_inline_answer_digest_by_page, {})
+
     def test_worker_pdf_cli_fixtures_keep_raw_scan_and_report_seal_metadata(self):
         fixtures = worker_pdf_cli_fixtures()
         previous = fixtures["previous_answer_key"]["ranges"]

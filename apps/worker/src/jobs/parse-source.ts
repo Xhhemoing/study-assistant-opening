@@ -401,6 +401,7 @@ function stripSealedSolutionLines(
   allowBareInlineContainer = true,
   auxiliary = false,
   onCompletedInlineAnswer?: (answer: string) => void,
+  onReopenedInlineAnswer?: (answer: string) => void,
 ): string {
   const lines = text.trimEnd().split(/\r?\n/u);
   const kept: string[] = [];
@@ -411,7 +412,8 @@ function stripSealedSolutionLines(
   let incomingProofBoundary = state.inlineProofBoundaryPending;
   state.inlineProofBoundaryPending = false;
   let lastInlineBodyLine = "";
-  let inlineAnswerOpener: string | undefined;
+  let inlineAnswerLines: string[] | undefined;
+  let pendingAnswerDigest: string | undefined;
   let closedAuxiliaryAnswerProof = false;
   let inlineBreakPending = false;
   let assessmentContextLine = -1;
@@ -430,30 +432,30 @@ function stripSealedSolutionLines(
   const setMode = (nextMode: SealState["mode"], explicitOpener = false) => {
     if (requirePublicVisionHeading && nextMode !== "none") publish = false;
     const prevMode = state.mode;
-    if (prevMode === "inline_sealed" && (nextMode === "none" || explicitOpener) && inlineAnswerOpener !== undefined
-      && (INLINE_SEALED_TERMINATOR_RE.test(lastInlineBodyLine) || TERMINAL_PUNCTUATION_RE.test(lastInlineBodyLine)
-        && !NEXT_CONTINUATION_RE.test(lastInlineBodyLine))) {
-      onCompletedInlineAnswer?.(`${inlineAnswerOpener}\n${lastInlineBodyLine}`.replace(/[^\S\n]+/gu, " "));
-    }
     state.mode = nextMode;
     if (nextMode !== "none") state.previousNumberedQuestion = false;
     state.inlineProofBoundaryPending = false;
     if (nextMode === "section_sealed") state.inExercise = false;
     if (prevMode !== nextMode || explicitOpener) onModeTransition?.(prevMode, nextMode, explicitOpener);
     if (!isInlineSeal(nextMode)) {
-      inlineAnswerOpener = undefined;
+      inlineAnswerLines = undefined;
       lastInlineBodyLine = "";
     }
   };
 
+  const answerDigest = () => inlineAnswerLines && createHash("sha256")
+    .update(inlineAnswerLines.join("\n").replace(/[^\S\n]+/gu, " ")).digest("hex");
+  const finishedInlineBody = () => TERMINAL_PUNCTUATION_RE.test(lastInlineBodyLine)
+    && !NEXT_CONTINUATION_RE.test(lastInlineBodyLine);
   const endInline = () => {
-    if (enclosingInlineSeal || auxiliary && inlineAnswerOpener !== undefined && state.mode === "inline_proof_sealed") {
+    if (enclosingInlineSeal || auxiliary && inlineAnswerLines && state.mode === "inline_proof_sealed") {
       closedAuxiliaryAnswerProof = state.mode === "inline_proof_sealed";
       setMode("inline_sealed");
       lastInlineBodyLine = "";
       return;
     }
     const canContinueWithProof = state.mode === "inline_sealed";
+    pendingAnswerDigest = canContinueWithProof && (onCompletedInlineAnswer || onReopenedInlineAnswer) ? answerDigest() : undefined;
     setMode("none");
     state.inlineProofBoundaryPending = canContinueWithProof;
   };
@@ -475,6 +477,7 @@ function stripSealedSolutionLines(
     const { stripped, isMarkdownHeading } = stripHeadingMarkup(line);
     const followsNumberedQuestion = state.previousNumberedQuestion;
     const contentLine = stripped && !isRunningPageHeading(stripped, false);
+    const adjacentAnswerDigest = contentLine && state.inlineProofBoundaryPending ? pendingAnswerDigest : undefined;
     if (contentLine) state.previousNumberedQuestion = false;
     if ((incomingProofBoundary || state.inlineProofBoundaryPending) && contentLine) {
       if (incomingProofBoundary && state.mode === "none" && !state.unknownAfterFailure && ANSWER_PROOF_HEADING_RE.test(stripped)) {
@@ -505,6 +508,8 @@ function stripSealedSolutionLines(
       if (INLINE_SEALED_TERMINATOR_RE.test(stripped)) endInline();
       continue;
     }
+    const finishedBeforeBlank = inlineBreakPending && !auxiliary && finishedInlineBody()
+      && onReopenedInlineAnswer ? answerDigest() : undefined;
     if (inlineBreakPending && !auxiliary) {
       setMode("none");
       inlineBreakPending = false;
@@ -584,7 +589,7 @@ function stripSealedSolutionLines(
       if (auxiliary && state.mode === "inline_proof_sealed") continue;
       setMode("inline_sealed", true);
       state.inWorkedExample = false;
-      inlineAnswerOpener = stripped;
+      inlineAnswerLines = [stripped];
       closedAuxiliaryAnswerProof = false;
       lastInlineBodyLine = stripped.slice(inlineOpener[0].length).replace(/^\s*[:：]?\s*/u, "");
       if (ANSWER_PROOF_HEADING_RE.test(lastInlineBodyLine)) setMode("inline_proof_sealed");
@@ -594,13 +599,18 @@ function stripSealedSolutionLines(
 
     const workedExample = isWorkedExampleHeading(stripped);
     const exerciseOpener = EXERCISE_OPENER_RE.test(stripped);
-    const numberedExerciseAfterAnswer = state.mode === "inline_sealed" && inlineAnswerOpener !== undefined
-      && TERMINAL_PUNCTUATION_RE.test(lastInlineBodyLine) && !NEXT_CONTINUATION_RE.test(lastInlineBodyLine)
+    const numberedExerciseAfterAnswer = (adjacentAnswerDigest || finishedBeforeBlank
+      || state.mode === "inline_sealed" && inlineAnswerLines && finishedInlineBody())
       && NUMBERED_QUESTION_RE.test(stripped) && EXERCISE_INSTRUCTION_RE.test(stripped);
     if (workedExample || exerciseOpener || structuralHeading || captionHeading || isNumberedSectionHeading(stripped)
       || majorPublicHeading || titledPublicContainer || numberedExerciseAfterAnswer
       || (isMarkdownHeading && isGenericPublicMarkdownHeading(stripped))) {
       if (!auxiliary) {
+        if (onReopenedInlineAnswer && contentLine) {
+          const reopened = adjacentAnswerDigest ?? finishedBeforeBlank
+            ?? (state.mode === "inline_sealed" && finishedInlineBody() ? answerDigest() : undefined);
+          if (reopened) onReopenedInlineAnswer(reopened);
+        }
         setMode("none");
         state.inWorkedExample = workedExample;
         state.inExercise = !workedExample && exerciseOpener;
@@ -616,6 +626,7 @@ function stripSealedSolutionLines(
       changed = true;
       closedAuxiliaryAnswerProof = false;
       lastInlineBodyLine = trimmed;
+      if (stripped) inlineAnswerLines?.push(stripped);
       if (INLINE_SEALED_TERMINATOR_RE.test(trimmed)) endInline();
       continue;
     }
@@ -626,8 +637,9 @@ function stripSealedSolutionLines(
 
   if (!enclosingInlineSeal && state.mode === "inline_sealed") {
     if (closedAuxiliaryAnswerProof) setMode("none");
-    else if (TERMINAL_PUNCTUATION_RE.test(lastInlineBodyLine) && !NEXT_CONTINUATION_RE.test(lastInlineBodyLine)) endInline();
+    else if (finishedInlineBody()) endInline();
   }
+  if (state.inlineProofBoundaryPending && pendingAnswerDigest) onCompletedInlineAnswer?.(pendingAnswerDigest);
 
   if (!changed) return text;
   while (kept.length && !kept[kept.length - 1]!.trim()) kept.pop();
@@ -852,7 +864,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let openedInlineAtEnd = false;
         let detectedOnPage = false;
         let explicitBoundary = false;
-        const completedInlineAnswers = new Set<string>();
+        const reopenedInlineAnswers = new Set<string>();
         const enteredUnknown = sealState.unknownAfterFailure;
         const incomingMode = sealState.mode;
         const enteredSealed = incomingMode === "section_sealed" || sealState.afterAllSealedPage;
@@ -870,12 +882,13 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           requirePublicHeading,
           false,
           auxiliary,
-          answer => completedInlineAnswers.add(answer),
+          undefined,
+          answer => reopenedInlineAnswers.add(answer),
         );
         const confirmedSeal = incomingMode !== "none" || sealState.mode !== "none" || detectedOnPage;
         const visionDetectedSeal = Boolean(enteredUnknown || enteredSealed || confirmedSeal || sealed !== rawBody);
         return { sealed, visionDetectedSeal, confirmedSeal, detectedOnPage, explicitBoundary, reenteredSectionSealed,
-          openedInlineAtEnd, completedInlineAnswers };
+          openedInlineAtEnd, reopenedInlineAnswers };
       };
       const reconcileEndSealState = (
         target: SealState,
@@ -1023,10 +1036,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const inheritedProofBoundary = transcriptionSeed.inlineProofBoundaryPending
           && (!nativeScan?.hasText || nativeEndSeal?.inlineProofBoundaryPending)
           && (!transcriptionHasContent || sealState.inlineProofBoundaryPending) && !primary?.detectedOnPage;
-        const nativeProofBoundary = nativeScan?.hasText && nativeScan.hadSeal
+        const nativeProofBoundary = nativeScan?.hadSeal
           && nativeEndSeal?.mode === "none" && !nativeEndSeal.unknownAfterFailure && nativeEndSeal.inlineProofBoundaryPending
           && (!primary?.detectedOnPage || sealState.inlineProofBoundaryPending
-            || nativeScan.completedAnswer !== undefined && !primary.completedInlineAnswers.has(nativeScan.completedAnswer));
+            || nativeScan.completedAnswer === undefined || !primary.reopenedInlineAnswers.has(nativeScan.completedAnswer));
         sealState.inlineProofBoundaryPending = sealState.mode === "none" && !sealState.unknownAfterFailure
           && Boolean(inheritedProofBoundary || nativeProofBoundary || primary?.detectedOnPage && sealState.inlineProofBoundaryPending);
         // Vision may supply only the heading for proof prose extracted natively.
@@ -1144,7 +1157,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const visionSealed = visionBody.trim()
           ? sealVisionText(visionBody, visionSeal, pageContaminated, hadNativeSeal || savedNativeChanged ? page.text : undefined,
             { endSeal: nativeEndSeal, hasText: Boolean(hadRawText || nativeBody.trim()), publicText: page.text || sealedNativeBody,
-              hadSeal: hadNativeSeal || savedNativeChanged, completedAnswer: nativeCompletedAnswer ?? savedCompletedAnswer })
+              hadSeal: hadNativeSeal || savedNativeChanged,
+              completedAnswer: nativeEndSeal === nativeOutSeal ? nativeCompletedAnswer : savedCompletedAnswer })
           : { text: "", hasPublicTranscription: false, hasPrimaryActivity: false, primaryNumberedQuestion: false,
             hadSealedContent: false, confirmedSeal: false, detectedOnPage: false, reenteredSectionSealed: false, openedInlineAtEnd: false,
             consumedAuxiliaryProofBoundary: false };
@@ -1244,7 +1258,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           ? pdfPageEndSeal(rawPage)
           : undefined;
         if (doclingEndSeal === "inline_sealed" && nativeOutSeal.mode === "none") nativeOutSeal.mode = doclingEndSeal;
-        if (isPdf && rawPage.inlineProofBoundaryPendingAtEnd) nativeOutSeal.inlineProofBoundaryPending = true;
+        if (isPdf && rawPage.inlineProofBoundaryPendingAtEnd) {
+          nativeOutSeal.inlineProofBoundaryPending = true;
+          nativeCompletedAnswer = rawPage.completedInlineAnswerDigest;
+        }
         if (isPdf && rawPage.previousNumberedQuestionAtEnd !== undefined) {
           nativeOutSeal.previousNumberedQuestion = rawPage.previousNumberedQuestionAtEnd;
         }
@@ -1622,7 +1639,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           }
           if (endSeal.mode === "none" && marker?.inlineProofBoundaryPendingAtEnd) {
             const visionSeal = { ...incoming };
-            const vision = lanes?.marker && incoming.inlineProofBoundaryPending
+            const vision = lanes?.marker && (incoming.inlineProofBoundaryPending || endSeal.inlineProofBoundaryPending)
               ? sealVisionText(lanes.vision, visionSeal, changed, undefined, {
                 endSeal, hasText: Boolean(native.trim()), publicText: publicNative, hadSeal: changed, completedAnswer,
               })

@@ -304,6 +304,7 @@ export function publicPdfSealBoundaries(sql: Sql, workspaceId: string,
 function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   return sql`pdf_archive_text AS (
     SELECT c.id,c.source_id,c.source_version,c.page,c.created_at,
+      max(c.page) OVER (PARTITION BY c.source_id,c.source_version) AS max_source_page,
       string_to_array(regexp_replace(
         regexp_replace(replace(c.text,chr(13),''),${horizontalWhitespace},' ','g'),
         ${"(?n)" + closingAtxHashes},${String.raw`\1`},'g'),chr(10)) AS lines
@@ -346,14 +347,14 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         (regexp_match(line,${titledPageCounter},'i'))[1] AS furniture_title,
         NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
-        SELECT id,source_id,source_version,page,created_at,raw_line,line_number,
+        SELECT id,source_id,source_version,page,max_source_page,created_at,raw_line,line_number,
           regexp_replace(line,${visionAuxiliary},'') AS line,
           max(line_number) FILTER (WHERE line ~ ${visionAuxiliary}) OVER vision_block AS last_auxiliary,
           max(line_number) FILTER (WHERE line ~ ${visionTranscription}) OVER vision_block AS last_transcription
         FROM (
           SELECT *,replace(replace(raw_line,'**',''),'__','') AS line
           FROM (
-            SELECT id,source_id,source_version,page,created_at,unnest(lines) AS raw_line,
+            SELECT id,source_id,source_version,page,max_source_page,created_at,unnest(lines) AS raw_line,
               generate_subscripts(lines,1) AS line_number
             FROM pdf_archive_text
           ) raw_lines
@@ -362,7 +363,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       ) normalized_lines
     ) heading_suffixes
   ), pdf_archive_lines AS (
-    SELECT id,source_id,source_version,page,line,running_heading,auxiliary,last_transcription IS NOT NULL AND NOT auxiliary AS transcription,
+    SELECT id,source_id,source_version,page,max_source_page,line,running_heading,auxiliary,last_transcription IS NOT NULL AND NOT auxiliary AS transcription,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
       NOT wrapper AND line ~* ${exerciseHeading} AS opens_exercise,
       NOT wrapper AND public_example AND NOT running_heading AS opens_worked_example,
@@ -459,9 +460,14 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         auxiliary_proof AND position=first_page_auxiliary_position AS first_auxiliary_proof,
         native_answer_position>COALESCE(native_reopening,0) AND native_answer_position>COALESCE(native_proof,0)
           AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineContinues}) AS native_answer_boundary,
-        (max(position) FILTER (WHERE transcription AND inline_opener
-          AND line=native_answer_line AND last_answer_body=native_tail AND transcription_reopening>last_transcription_answer)
-          OVER chunk_lines IS NOT NULL) AS transcription_reopens_answer,
+        (last_transcription_reopening>last_transcription_answer
+          AND bool_or(transcription AND inline_opener AND answer_lines=native_answer_lines
+            AND lane_reopening_position>answer_end_position
+            AND (answer_terminator IS NULL OR answer_terminator>=lane_reopening_position
+              OR lane_reopening_position=first_content_after_terminator)
+            AND (last_answer_body ~* ${inlineTerminator}
+              OR last_answer_body ~* ${inlineTerminal} AND last_answer_body !~* ${inlineContinues}))
+            OVER chunk_lines) IS TRUE AS transcription_reopens_answer,
         auxiliary AND (last_answer_body ~* ${inlineTerminator}
           OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends)) AS auxiliary_complete,
         auxiliary AND content_line AND position=last_auxiliary_position AND auxiliary_opener>0 AND NOT open_auxiliary_proof
@@ -490,13 +496,26 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             max(position) FILTER (WHERE native_line AND lane_reopening) OVER chunk_lines AS native_reopening,
             max(position) FILTER (WHERE native_line AND candidate_proof) OVER chunk_lines AS native_proof,
             max(position) FILTER (WHERE transcription AND inline_opener) OVER chunk_lines AS last_transcription_answer,
-            first_value(line) OVER (PARTITION BY id ORDER BY NOT (native_line AND inline_opener),position DESC) AS native_answer_line,
+            max(position) FILTER (WHERE transcription AND lane_reopening) OVER chunk_lines AS last_transcription_reopening,
+            CASE WHEN transcription AND inline_opener THEN first_value(answer_lines) OVER native_answer END AS native_answer_lines,
             first_value(candidate_body) OVER (PARTITION BY id ORDER BY NOT native_line OR candidate_body='',position DESC) AS native_tail
           FROM (
+            SELECT *,
+              CASE WHEN NOT auxiliary AND inline_opener THEN
+                string_agg(btrim(line),chr(10)) FILTER (WHERE answer_content) OVER answer_sequence END AS answer_lines,
+              max(position) FILTER (WHERE answer_content) OVER answer_sequence AS answer_end_position,
+              min(position) FILTER (WHERE content_line AND position>answer_terminator)
+                OVER answer_sequence AS first_content_after_terminator
+            FROM (
+              SELECT *, NOT auxiliary AND content_line AND auxiliary_opener>0
+                AND (lane_reopening_position IS NULL OR position<lane_reopening_position)
+                AND (answer_terminator IS NULL OR position<=answer_terminator) AS answer_content
+              FROM (
              SELECT *, auxiliary AND auxiliary_opener>0 AND candidate_terminator
                AND COALESCE(max(position) FILTER (WHERE candidate_proof) OVER auxiliary_progress,0)
                  > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER auxiliary_prior,0) AS auxiliary_answer_proof_close,
-               min(position) FILTER (WHERE transcription AND lane_reopening) OVER answer_lanes AS transcription_reopening
+               min(position) FILTER (WHERE NOT auxiliary AND lane_reopening) OVER answer_lanes AS lane_reopening_position,
+               min(position) FILTER (WHERE NOT auxiliary AND candidate_terminator) OVER answer_lanes AS answer_terminator
              FROM (
                SELECT *, auxiliary AND content_line AND NOT inline_opener AND candidate_body ~* ${answerProofHeading} AS auxiliary_proof,
                  candidate_body ~* ${answerProofHeading} AS candidate_proof,
@@ -510,11 +529,16 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
              WINDOW auxiliary_progress AS (PARTITION BY id,auxiliary_block,auxiliary_opener ORDER BY position ROWS UNBOUNDED PRECEDING),
                auxiliary_prior AS (PARTITION BY id,auxiliary_block,auxiliary_opener ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
                answer_lanes AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener)
-           ) with_proof_closes
+              ) with_proof_closes
+            ) with_answer_content
+            WINDOW answer_sequence AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener
+              ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+          ) with_answer_text
           WINDOW auxiliary_block_lines AS (PARTITION BY id,auxiliary_block),
             chunk_lines AS (PARTITION BY id),
+            native_answer AS (PARTITION BY id ORDER BY NOT (native_line AND inline_opener),position DESC),
             answer_body AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener
-              ORDER BY (candidate_body='' OR COALESCE(position>=transcription_reopening,false)),position DESC
+              ORDER BY (candidate_body='' OR NOT auxiliary AND NOT answer_content),position DESC
               ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
         ) with_auxiliary_body
       ) with_sentence_end
@@ -559,7 +583,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       FROM pdf_archive_inline_body
     ) close_events
   ), pdf_archive_inline_pages AS (
-    SELECT source_id,source_version,inline_group,page,bool_or(starts_inline) AS starts_inline,
+    SELECT source_id,source_version,inline_group,page,max(max_source_page) AS max_source_page,bool_or(starts_inline) AS starts_inline,
       min(position) AS first_position,
       bool_or(NOT auxiliary AND (starts_inline OR section_answer OR opens_exercise OR opens_public)) AS primary_boundary,
       min(position) FILTER (WHERE position=first_proof) AS proof_position,
@@ -600,11 +624,16 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         OR (terminator_position IS NOT NULL AND (in_sealed_proof IS TRUE
           OR terminator_position<last_body_position OR continues_into_proof IS NOT TRUE))
         OR (in_sealed_proof IS NOT TRUE AND continues_into_proof IS NOT TRUE
-          AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})) OVER answer,max(page) OVER answer) AS last_page
+          AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})) OVER answer,
+        GREATEST(max(page) OVER answer,COALESCE(
+          min(next_group_page) OVER answer-1,max_source_page))) AS last_page
     FROM (
-      SELECT *, lead(page) OVER next_page=page+1 AND lead(starts_proof) OVER next_page AS continues_into_proof
+      SELECT *, lead(page) OVER next_page=page+1 AND lead(starts_proof) OVER next_page AS continues_into_proof,
+        CASE WHEN lead(inline_group) OVER document_order<>inline_group
+          THEN lead(page) OVER document_order END AS next_group_page
       FROM pdf_archive_inline_pages
-      WINDOW next_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page)
+      WINDOW next_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page),
+        document_order AS (PARTITION BY source_id,source_version ORDER BY first_position)
     ) with_next_page
     WINDOW answer AS (PARTITION BY source_id,source_version,inline_group)
   ), pdf_archive_proof_ranges AS (
@@ -615,7 +644,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       numbered_predecessor,numbered_withheld,numbered_in_inline,
       CASE WHEN unclosed_proof_start IS NULL THEN page
         ELSE COALESCE(min(page) FILTER (WHERE primary_terminator>=COALESCE(unclosed_proof_start,first_position))
-          OVER remaining,max(page) OVER remaining) END AS proof_end
+          OVER remaining,GREATEST(max(page) OVER remaining,COALESCE(next_primary_page-1,max_source_page))) END AS proof_end
     FROM (
       SELECT *, LEAST(auxiliary_proof_position,
         CASE WHEN follows_finished_inline THEN adjacent_auxiliary_position END,
@@ -624,7 +653,9 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
           CASE WHEN follows_finished_inline THEN unclosed_adjacent_auxiliary_proof END,
           CASE WHEN primary_proof_close IS NULL THEN active_inline_proof END) AS unclosed_proof_start,
         count(*) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position
-          ROWS UNBOUNDED PRECEDING) AS primary_group
+          ROWS UNBOUNDED PRECEDING) AS primary_group,
+        min(page) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position DESC
+          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_primary_page
       FROM (
         SELECT *, CASE WHEN first_page IS NOT NULL AND page<=last_page AND closed_after_blank IS NOT TRUE
             THEN proof_position END AS active_inline_proof,

@@ -6,6 +6,7 @@ by those spans. ConversionResult.pages still holds the original page elements.
 """
 
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from inspect import signature
 import re
 
@@ -384,6 +385,7 @@ class PhysicalPagesExtraction:
     inline_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     inline_proof_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     inline_proof_boundary_by_page: dict[int, bool] = field(default_factory=dict)
+    completed_inline_answer_digest_by_page: dict[int, str] = field(default_factory=dict)
     had_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     in_worked_example_by_page: dict[int, bool] = field(default_factory=dict)
     previous_numbered_question_by_page: dict[int, bool] = field(default_factory=dict)
@@ -906,6 +908,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
     in_worked_example = initial_in_worked_example
     in_exercise = initial_in_exercise and initial_seal_mode != "section_sealed"
     last_inline_body = ""
+    inline_answer_lines = None
     inline_break_pending = False
     current_proof_terminated = False
     inline_proof_boundary_pending = False
@@ -990,6 +993,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             flush()
             if page_seal_mode == "inline_sealed":
                 page_seal_mode = None
+                inline_answer_lines = None
             inline_break_pending = False
         active_seal = current[7] if current is not None else page_seal_mode
         kind, seal_kind, explicit_opener, section_break, major_non_answer, cap_ref, assoc_visual = _classify_segment(
@@ -1021,6 +1025,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             if seal_kind not in _INLINE_SEAL_MODES:
                 in_exercise = kind == "exercise"
             page_seal_mode = seal_kind
+            inline_answer_lines = [] if explicit_opener and seal_kind == "inline_sealed" else None
 
         if current is None or explicit_opener or section_break:
             flush()
@@ -1040,6 +1045,15 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             previous_numbered_question = active_seal is None and bool(_NUMBERED_QUESTION_RE.match(stripped))
         if active_seal in _INLINE_SEAL_MODES:
             last_inline_body = _inline_answer_body(unit_text) if explicit_opener else unit_text.strip()
+            if inline_answer_lines is not None:
+                # Match the Worker's seal scanner without returning the sealed answer text.
+                answer_line = unit_text.strip()
+                if re.match(r"^#{1,6}\s+\S", answer_line):
+                    answer_line = re.sub(r"\s+#+$", "", answer_line)
+                    answer_line = re.sub(r"^(?:#{1,6}\s+)+", "", answer_line)
+                answer_line = re.sub(r"\*\*|__", "", answer_line).strip()
+                if answer_line:
+                    inline_answer_lines.append(re.sub(r"[^\S\n]+", " ", answer_line))
             if explicit_opener and _ANSWER_PROOF_HEADING_RE.match(last_inline_body):
                 active_seal = "inline_proof_sealed"
                 page_seal_mode = active_seal
@@ -1065,8 +1079,10 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                 and not _NEXT_CONTINUATION_RE.search(last_inline_body)):
             inline_proof_boundary_pending = True
             page_seal_mode = None
+    completed_answer_digest = (sha256("\n".join(inline_answer_lines).encode("utf-8")).hexdigest()
+                               if inline_proof_boundary_pending and inline_answer_lines else None)
     return (blocks, entries, in_worked_example, in_exercise, page_seal_mode,
-            inline_proof_boundary_pending, previous_numbered_question)
+            inline_proof_boundary_pending, previous_numbered_question, completed_answer_digest)
 
 def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals):
     for index, page_number in enumerate(page_order):
@@ -1272,6 +1288,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
     entries_by_page = {}
     end_seals: dict[int, str | None] = {}
     proof_boundaries: dict[int, bool] = {}
+    completed_answer_digests: dict[int, str] = {}
     worked_examples: dict[int, bool] = {}
     exercises: dict[int, bool] = {}
     numbered_questions: dict[int, bool] = {}
@@ -1289,7 +1306,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
             inline_proof_boundary = False
             previous_numbered_question = False
         (blocks, entries, in_worked_example, in_exercise, seal_mode,
-         next_inline_proof_boundary, previous_numbered_question) = _build_page_blocks(
+         next_inline_proof_boundary, previous_numbered_question, completed_answer_digest) = _build_page_blocks(
             page_number,
             raw_fragments[page_number],
             visual_sets.get(page_number, set()),
@@ -1303,6 +1320,8 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         entries_by_page[page_number] = entries
         end_seals[page_number] = seal_mode
         proof_boundaries[page_number] = next_inline_proof_boundary
+        if completed_answer_digest is not None:
+            completed_answer_digests[page_number] = completed_answer_digest
         inline_proof_boundary = next_inline_proof_boundary
         worked_examples[page_number] = in_worked_example
         exercises[page_number] = in_exercise
@@ -1342,6 +1361,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         inline_sealed_by_page={page: mode in _INLINE_SEAL_MODES for page, mode in end_seals.items()},
         inline_proof_sealed_by_page={page: mode == "inline_proof_sealed" for page, mode in end_seals.items()},
         inline_proof_boundary_by_page=proof_boundaries,
+        completed_inline_answer_digest_by_page=completed_answer_digests,
         had_sealed_by_page=had_sealed_by_page,
         in_worked_example_by_page=worked_examples,
         previous_numbered_question_by_page=numbered_questions,

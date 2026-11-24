@@ -182,6 +182,9 @@ def main(argv=None):
                 entry["inlineProofSealedAtEnd"] = True
             if extraction.inline_proof_boundary_by_page.get(page_number):
                 entry["inlineProofBoundaryPendingAtEnd"] = True
+                completed_answer_digest = extraction.completed_inline_answer_digest_by_page.get(page_number)
+                if completed_answer_digest is not None:
+                    entry["completedInlineAnswerDigest"] = completed_answer_digest
             if had_sealed_by_page.get(page_number):
                 entry["hadSealedContent"] = True
             if args.mime == PDF and extraction.in_worked_example_by_page.get(page_number):

@@ -65,10 +65,10 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
     const page = input.page ?? pages[0]!;
     if (!pages.includes(page)) throw new OpeningSourceError("NOT_FOUND", "该页没有解析记录");
     // Limit each database value before sending; a physical page may contain multiple chunks.
-    // Repeatable read pins the chunk IDs checked for full-text labels in the inventory.
-    const bodies = pdf ? await tx`${pdfBoundary}
-      SELECT left(c.text,20001) AS text ${fromPdf}
-      AND c.page IS NOT DISTINCT FROM ${page} AND c.id=ANY(${permittedIds.get(page) ?? []}::uuid[])
+    // Repeatable read pins the same publisher state and exact chunk rows cleared above.
+    const bodies = pdf ? await tx`SELECT left(c.text,20001) AS text FROM opening_source_chunks c
+      WHERE c.source_id=${id} AND c.source_version=${version}
+        AND c.page IS NOT DISTINCT FROM ${page} AND c.id=ANY(${permittedIds.get(page) ?? []}::uuid[])
       ORDER BY c.created_at,c.id`
       : await tx`SELECT left(text,20001) AS text FROM opening_source_chunks
         WHERE source_id=${id} AND source_version=${version} AND page IS NOT DISTINCT FROM ${page} ORDER BY created_at,id`;

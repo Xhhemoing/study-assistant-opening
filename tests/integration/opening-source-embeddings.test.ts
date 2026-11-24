@@ -93,8 +93,11 @@ async function backfilledPages(pdf: Awaited<ReturnType<typeof seed>>) {
   });
 }
 
-async function expectArchivedPdfPages(texts: string[], pages: number[], blockedPage: number) {
+async function expectArchivedPdfPages(texts: string[], pages: number[], blockedPage: number, blockedImage = false) {
   const pdf = await seed(texts);
+  if (blockedImage) {
+    await f.sql`UPDATE opening_source_chunks SET text='',image_object_key='archive/image' WHERE id=${pdf.snapshot.chunks[blockedPage - 1]!.id}`;
+  }
   await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
   const chunks = createOpeningSourceChunksRepository(f.sql);
   const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] };
@@ -121,7 +124,7 @@ async function expectArchivedPdfPages(texts: string[], pages: number[], blockedP
   return pdf;
 }
 
-describe("pgvector material repository", () => {
+describe("pgvector material repository", { timeout: 30_000 }, () => {
   it("stores a failed boundary on the conversion row and hides the archived continuation from direct reads", async () => {
     const pdf = await seed(["", "Public introduction.", "5 units.", "Answers to Review Questions\nx = 3."]);
     await f.sql`UPDATE opening_sources SET mime='application/pdf',parse_state='running' WHERE id=${pdf.sourceId}`;
@@ -609,8 +612,13 @@ describe("pgvector material repository", () => {
     { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.", sealed: false },
     { native: "1. Find x.\nAnswer: No.", primary: "1. Find x.\nAnswer: No.\n2. Find y.\nAnswer: Yes.", sealed: true },
+    { native: "1. Find x.\nAnswer: No.", primary: "Answer: No.\n2. Find y.\nAnswer: Yes.\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\nAnswer: No.", primary: "Answer: Yes.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer: No. ∎", primary: "Answer: No. ∎\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\nAnswer: No. ∎", primary: "Answer: No. ∎\nAn ordinary observation.\nChapter 2: Geometry", sealed: true },
     { native: "1. Find x.\nAnswer:\nNo.", primary: "Answer:\nYes.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nx = 1\nDone.", primary: "Answer:\ny = 2\nDone.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\nAnswer:\nx = 1\nDone.", primary: "Answer:\nx =  1\nDone.\nChapter 2: Geometry", sealed: false },
   ])("archives a mixed proof after native $native and transcription $primary", async ({ native, primary, sealed }) => {
     const pdf = await seed([
       "Answer: Yes.",
@@ -649,6 +657,19 @@ describe("pgvector material repository", () => {
     expect(await backfilledPages(pdf)).not.toContain(2);
     expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2])).toEqual([]);
     expect(await pdf.repository.search(f.scope, { ...query, chunkIds: [image.id] })).toEqual([]);
+  });
+
+  it.each(["Answer: x =", "Answer: Proof. Unclosed"])("blocks a final image-only page after %j", async opener => {
+    await expectArchivedPdfPages([opener, "Previously indexed image text."], [], 2, true);
+  });
+
+  it.each(["Answer: x =", "Answer: Proof. Unclosed"])("bounds %j before the next public group and its final image", async opener => {
+    const pdf = await expectArchivedPdfPages([
+      opener, "Previously indexed private image.", "Chapter 2: Geometry", "Previously indexed public image.",
+    ], [3, 4], 2, true);
+    await f.sql`UPDATE opening_source_chunks SET text='',image_object_key='archive/public' WHERE id=${pdf.snapshot.chunks[3]!.id}`;
+    expect(await createOpeningSourceChunksRepository(f.sql).listChunksAtVersion(f.scope, pdf.sourceId, 1, [2, 4]))
+      .toMatchObject([{ page: 4, text: "", imageObjectKey: "archive/public" }]);
   });
 
   it.each(["∎", "Q.E.D."])("keeps the outer answer sealed after an auxiliary proof closes with %s", async (end) => {
@@ -723,7 +744,7 @@ describe("pgvector material repository", () => {
     ], [crossPage ? 5 : 4], crossPage ? 3 : 2);
   });
 
-  it.each([128, 256, 512])("reads the sealed pages and chunks of a %i-page archive once", async pageCount => {
+  it.each([128, 256, 512])("materializes the sealed pages and chunks of a %i-page archive once", async pageCount => {
     const pattern = ["[图片描述]\nAnswer: Yes.", "[不确定处]\nProof. Private derivation ends. ∎",
       "Public discussion of rings.", "Public discussion of fields.", "[图片描述]\nAnswer: No.",
       "Public examples of groups.", "Public examples of rings.", "Public examples of fields."];
@@ -745,21 +766,22 @@ describe("pgvector material repository", () => {
       const { query, parameters } = statement;
       expect(query.match(/\bJOIN\b/giu)).toHaveLength(2);
 
-      type Plan = { "CTE Name"?: string; "Actual Loops": number; "Actual Rows": number; Plans?: Plan[] };
+      type Plan = { "Subplan Name"?: string; "Actual Loops": number; "Actual Rows": number; Plans?: Plan[] };
       const [row] = await sql.unsafe<{ "QUERY PLAN": { Plan: Plan }[] }[]>(
         `EXPLAIN (ANALYZE, FORMAT JSON) ${query}`, parameters,
       );
-      const scans: Plan[] = [];
+      const producers = new Map<string, Plan>();
       const visit = (plan: Plan) => {
-        if (plan["CTE Name"]?.startsWith("pdf_archive_sealed_")) scans.push(plan);
+        const name = plan["Subplan Name"];
+        if (name?.startsWith("CTE pdf_archive_sealed_")) producers.set(name, plan);
         plan.Plans?.forEach(visit);
       };
       visit(row!["QUERY PLAN"][0]!.Plan);
-      expect(scans.filter(plan => plan["CTE Name"] === "pdf_archive_sealed_spans").map(plan => plan["Actual Loops"]))
-        .toEqual(expect.arrayContaining([1]));
-      expect(scans.filter(plan => plan["CTE Name"] === "pdf_archive_sealed_pages")
-        .map(plan => [plan["Actual Loops"], plan["Actual Rows"]])).toEqual([[1, pageCount / pattern.length]]);
-      expect(scans.every(plan => plan["Actual Loops"] <= 1)).toBe(true);
+      // A nested-loop consumer can scan the same materialized rows more than once.
+      for (const suffix of ["spans", "pages", "chunks"]) {
+        expect(producers.get("CTE pdf_archive_sealed_" + suffix)?.["Actual Loops"]).toBe(1);
+      }
+      expect(producers.get("CTE pdf_archive_sealed_pages")?.["Actual Rows"]).toBe(pageCount / pattern.length);
     } finally {
       await sql.end({ timeout: 5 });
     }

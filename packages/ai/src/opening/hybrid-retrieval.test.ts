@@ -302,6 +302,26 @@ describe("material hybrid retrieval", () => {
     expect(elapsedMs).toBeLessThan(1000);
   });
 
+  it("bounds display lookahead across repeated numeric delimiters and long line comments", () => {
+    const text = "$1$$$$%".repeat(24_000) + "comment ".repeat(24_000) + "\r\nA real formula: $x^2 + y^2$";
+    const start = performance.now();
+    const segments = segmentMaterialChunks([chunk("display-comment", text)], 4096);
+    expect(performance.now() - start).toBeLessThan(1500);
+    expect(segments.map(segment => segment.chunk.text).join("")).toBe(text);
+    expect(segments.some(segment => segment.chunk.text.includes("$x^2 + y^2$"))).toBe(true);
+  });
+
+  it("advances by code point with a four-byte segment budget", () => {
+    const formula = "$\\frac{1}{2}$";
+    const text = "🙂".repeat(60_000) + formula + "界".repeat(60_000);
+    const start = performance.now();
+    const segments = segmentMaterialChunks([chunk("small-budget", text)], 4);
+    expect(performance.now() - start).toBeLessThan(1500);
+    expect(segments).toHaveLength(120_001);
+    expect(segments[60_000]?.chunk.text).toBe(formula);
+    expect(segments.map(segment => segment.chunk.text).join("")).toBe(text);
+  });
+
   it("keeps >2048-char numeric-leading inline math unbroken across segments", () => {
     const mathBody = "$1+" + "x+".repeat(1100) + "x$";
     const text = "a".repeat(3000) + mathBody + " tail";

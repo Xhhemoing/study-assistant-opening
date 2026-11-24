@@ -26,6 +26,10 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (page.sectionSealedAtEnd !== undefined && typeof page.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid sectionSealedAtEnd metadata");
     if (page.inlineSealedAtEnd !== undefined && typeof page.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid inlineSealedAtEnd metadata");
     if (page.inlineProofBoundaryPendingAtEnd !== undefined && typeof page.inlineProofBoundaryPendingAtEnd !== "boolean") throw new TypeError("invalid inlineProofBoundaryPendingAtEnd metadata");
+    if (page.completedInlineAnswerDigest !== undefined && (page.inlineProofBoundaryPendingAtEnd !== true
+      || typeof page.completedInlineAnswerDigest !== "string" || !/^[a-f0-9]{64}$/u.test(page.completedInlineAnswerDigest))) {
+      throw new TypeError("invalid completedInlineAnswerDigest metadata");
+    }
     if (page.inlineProofSealedAtEnd !== undefined && typeof page.inlineProofSealedAtEnd !== "boolean") throw new TypeError("invalid inlineProofSealedAtEnd metadata");
     if (page.sectionSealedAtEnd && page.inlineSealedAtEnd || page.inlineProofSealedAtEnd && !page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
     if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
@@ -38,6 +42,7 @@ export function decodeParserOutput(text: string): ParsedPage[] {
       ...(page.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: page.inlineSealedAtEnd }),
       ...(page.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: page.inlineProofSealedAtEnd }),
       ...(page.inlineProofBoundaryPendingAtEnd === undefined ? {} : { inlineProofBoundaryPendingAtEnd: page.inlineProofBoundaryPendingAtEnd }),
+      ...(page.completedInlineAnswerDigest === undefined ? {} : { completedInlineAnswerDigest: page.completedInlineAnswerDigest }),
       ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }),
       ...(page.previousNumberedQuestionAtEnd === undefined ? {} : { previousNumberedQuestionAtEnd: page.previousNumberedQuestionAtEnd }),
       ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }),

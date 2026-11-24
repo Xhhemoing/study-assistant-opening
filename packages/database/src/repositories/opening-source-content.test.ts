@@ -106,7 +106,7 @@ describe("source content self-read versus additional PDF retry access", () => {
     }
   });
 
-  it("uses the same publication scope for inventory and bodies and excludes whole answer chunks", async () => {
+  it("reads only the authorized IDs from the same PDF inventory snapshot", async () => {
     const reads: string[] = [];
     const answer = "[原生提取]\nChapter 2: Geometry\n\n[视觉转写与描述]\n"
       + "【原图忠实转写，尚需核对】\n**Ans**wers to Review Questions\n5 units.";
@@ -120,16 +120,15 @@ describe("source content self-read versus additional PDF retry access", () => {
       pages: [1, 2], readablePages: 1, characters: 7, text: "",
     });
     expect(reads).toHaveLength(2);
-    for (const query of reads) {
-      expect(query).toContain("pdf_pending_seals AS MATERIALIZED");
-      expect(query).toContain("boundary.first_page<=c.page");
-      expect(query).toContain("seal.page_start=c.page AND seal.page_end=c.page");
-      expect(query).toContain("pdf_archive_sealed_spans AS MATERIALIZED");
-      expect(query).toContain("archived_page.source_id=c.source_id AND archived_page.source_version=c.source_version AND archived_page.page=c.page");
-      expect(query).toContain("archived_chunk.chunk_id=c.id");
-      expect(query.match(/\b(?:FROM|JOIN) opening_\w+/gu)).toHaveLength(6);
-    }
-    expect(reads[1]).toContain("c.id=ANY(?::uuid[])");
+    const [inventory, body] = reads;
+    expect(inventory).toContain("pdf_pending_seals AS MATERIALIZED");
+    expect(inventory).toContain("boundary.first_page<=c.page");
+    expect(inventory).toContain("seal.page_start=c.page AND seal.page_end=c.page");
+    expect(inventory).toContain("pdf_archive_sealed_spans AS MATERIALIZED");
+    expect(inventory).toContain("archived_page.source_id=c.source_id AND archived_page.source_version=c.source_version AND archived_page.page=c.page");
+    expect(inventory).toContain("archived_chunk.chunk_id=c.id");
+    expect(body).toContain("c.source_id=? AND c.source_version=? AND c.page IS NOT DISTINCT FROM ? AND c.id=ANY(?::uuid[])");
+    expect(body).not.toContain("pdf_archive_sealed_spans");
     await expect(readOpeningSourceContent(sql, scope, "source", { page: 3 })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
