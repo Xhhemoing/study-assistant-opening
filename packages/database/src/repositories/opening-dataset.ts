@@ -48,6 +48,8 @@ export function createOpeningDatasetRepository(sql: Sql) {
         if (!consent) throw learningError("VALIDATION", "current dataset consent required");
         const backup = await readOpeningBackupTableRows(tx, scope.workspaceId, scope.ownerUserId, { asOf: consent.as_of });
         const workspace = scope.workspaceId;
+        const cards = await tx`SELECT id, workspace_id, owner_user_id, source_ids, source_document_id, origin_observation_root_id
+          FROM cards WHERE workspace_id=${workspace} AND owner_user_id=${scope.ownerUserId}`;
         const memories = await tx`SELECT id, workspace_id, course_id, kind, status, source_turn_ids, expires_at, updated_at
           FROM opening_memories WHERE workspace_id=${workspace}`;
         const sources = await tx`SELECT id, workspace_id, upload_state FROM opening_sources WHERE workspace_id=${workspace}`;
@@ -74,6 +76,7 @@ export function createOpeningDatasetRepository(sql: Sql) {
           WHERE j.workspace_id=${workspace} AND c.owner_user_id=${scope.ownerUserId}`;
         const tables = {
           ...backup,
+          cards,
           opening_memories: memories,
           opening_sources: sources,
           opening_source_chunks: chunks,

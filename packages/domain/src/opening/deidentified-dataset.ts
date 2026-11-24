@@ -96,7 +96,7 @@ const containsSourceRef = (ids: ReadonlySet<string>, refs: unknown) =>
     || containsId(ids, field(ref, "sourceId")) || containsId(ids, field(ref, "source_id")));
 
 type LineageKind = "session" | "activity" | "unit" | "chunk" | "item" | "observation" | "attempt" | "turn"
-  | "document" | "revision" | "problem" | "memory" | "history";
+  | "document" | "revision" | "problem" | "memory" | "history" | "card";
 type LineageLink = readonly [LineageKind, unknown];
 
 function lineageKey(kind: LineageKind, id: unknown): string | undefined {
@@ -177,6 +177,9 @@ export function projectPrivacyGuardedOpeningDataset(
   }
   const memoryInventory = workspaceIds("opening_memories");
   const turnInventory = workspaceIds("opening_turns");
+  const documentInventory = workspaceIds("library_documents");
+  const observationInventory = workspaceIds("opening_learning_observations");
+  const ownedCards = new Set<string>();
   const ownedConversations = new Set(rows("opening_conversations")
     .filter(row => inWorkspace(row) && matchesId(row.owner_user_id, scope.ownerUserId)).map(row => row.id));
   const ownedOriginTurns = rows("opening_turns").filter(row => inWorkspace(row) && ownedConversations.has(row.conversation_id)
@@ -241,15 +244,32 @@ export function projectPrivacyGuardedOpeningDataset(
       for (const [parentKind, parentId] of links(row)) {
         if (parentKind === "chunk") {
           if (parentId != null) linkChunk(parentId, key);
-        }
-        else link(lineageKey(parentKind, parentId), key);
+        } else if (parentKind === "card" && parentId != null
+          && (!isUuid(canonicalId(parentId)) || !containsId(ownedCards, parentId))) {
+          exclude(key);
+        } else link(lineageKey(parentKind, parentId), key);
       }
     }
   };
+  index("card", "cards", row => {
+    const card = lineageKey("card", row.id);
+    if (row.owner_user_id != null && !matchesId(row.owner_user_id, scope.ownerUserId)) {
+      exclude(card);
+      return [];
+    }
+    addId(ownedCards, row.id);
+    const documentId = row.source_document_id;
+    const observationId = row.origin_observation_root_id;
+    if (documentId != null && (!isUuid(canonicalId(documentId))
+      || !containsId(documentInventory, documentId))) exclude(card);
+    if (observationId != null && (!isUuid(canonicalId(observationId))
+      || !containsId(observationInventory, observationId))) exclude(card);
+    return [["document", documentId], ["observation", observationId]];
+  });
   const anchorLinks = (anchor: unknown): LineageLink[] => [
     ["session", field(anchor, "sessionId")], ["activity", field(anchor, "activityId")],
     ["item", field(anchor, "itemVersionId")], ["attempt", field(anchor, "attemptId")],
-    ["chunk", field(anchor, "chunkId")],
+    ["chunk", field(anchor, "chunkId")], ["card", field(anchor, "cardId")],
   ];
   const snippetDocuments = new Set(rows("library_revisions")
     .filter(row => inWorkspaceOrUnscoped(row) && row.revision_number === 1 && row.reason === "save-opening-snippet")
@@ -260,15 +280,19 @@ export function projectPrivacyGuardedOpeningDataset(
     const document = lineageKey("document", row.document_id);
     snippetsWithoutProvenance.delete(document);
     const isSnippetOrUnknown = row.snippet_origin !== false || snippetDocuments.has(document);
-    if (referencesShreddedSource(row) || !Array.isArray(row.context_source_refs)) {
+    if (!Array.isArray(row.context_source_refs)) {
       exclude(document);
       continue;
     }
+    if (referencesShreddedSource(row)) exclude(document);
     const declaredOrigins = new Set<unknown>(row.origin_turn_id == null ? [] : [canonicalId(row.origin_turn_id)]);
     let verifiedSnippet = false;
     let hasMemoryMetadata = false;
     let hasUnattributedMemory = false;
     for (const ref of row.context_source_refs) {
+      if (isRecord(ref) && Array.isArray(ref.publicationCardIds)) {
+        for (const cardId of ref.publicationCardIds) link(document, lineageKey("card", cardId));
+      }
       if (isRecord(ref) && "memoryDependencyIds" in ref) {
         const metadata = turnMemoryDependencyMetadata(ref);
         if (metadata) {
@@ -280,7 +304,7 @@ export function projectPrivacyGuardedOpeningDataset(
         if (metadata?.originTurnIds) for (const id of metadata.originTurnIds) declaredOrigins.add(id);
         else if (metadata?.snippetLineageVersion === 1) verifiedSnippet = true;
         else if (!metadata) {
-          if (!validSourceRef(ref)) exclude(document);
+          if (!validSourceRef(ref) || "publicationCardIds" in ref) exclude(document);
           else if (ref.memoryOnly === true) hasUnattributedMemory = true;
         }
       }
@@ -429,9 +453,12 @@ export function projectPrivacyGuardedOpeningDataset(
   }, "activity_id");
   index("session", "opening_learning_sessions", row => [["activity", row.activity_id]]);
   index("activity", "opening_teaching_activities", row => {
+    const activity = lineageKey("activity", row.id);
     const turnId = field(row.create_intent, "sourceTurnId");
-    if (turnId != null && !containsId(turnInventory, turnId)) exclude(lineageKey("activity", row.id));
-    return [["turn", turnId]];
+    const cardId = field(row.create_intent, "cardId");
+    if (turnId != null && !containsId(turnInventory, turnId)) exclude(activity);
+    if (field(row.create_intent, "kind") === "card_review_variant" && cardId == null) exclude(activity);
+    return [["turn", turnId], ["card", cardId]];
   });
   index("problem", "opening_problem_refs", row => [
     ["session", row.session_id], ["chunk", row.chunk_id], ["revision", row.teaching_revision_id],

@@ -182,6 +182,53 @@ describe("synthetic deidentified dataset repository", () => {
     }
   }, 30_000);
 
+  it("withholds variants of restored, historically published, and deleted cards from both dataset views", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const datasets = createOpeningDatasetRepository(sql);
+      const notes = createOpeningNoteRepository(sql);
+      const cards = createCardRepository(sql);
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      const restored = await notes.saveSnippet(scope, { title: "Restored snippet", text: "Answer", savedTurnId });
+      const historical = await notes.saveSnippet(scope, { title: "Historical snippet", text: "Answer", savedTurnId });
+      const directCard = await cards.createCard({ ...scope, sourceDocumentId: restored.documentId, front: "Prompt", back: "Answer" });
+      const historicalCard = await cards.createCard({ ...scope, sourceDocumentId: historical.documentId, front: "Prompt", back: "Answer" });
+      const deletedCard = await cards.createCard({ ...scope, front: "Prompt", back: "Answer" });
+      const sourceId = await insertSource(sql, scope);
+      const cleanCard = await cards.createCard({ ...scope, front: "Prompt", back: "Answer" });
+      await sql`UPDATE cards SET source_ids=${[sourceId]}::uuid[] WHERE id=${cleanCard.id}`;
+
+      for (const card of [directCard, historicalCard, deletedCard, cleanCard]) {
+        const activity = await insertTestTeachingActivity(sql, scope);
+        const session = randomUUID();
+        await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+          create_intent=${sql.json({ kind: "card_review_variant", cardId: card.id })},
+          source_ids=${card === cleanCard ? [sourceId] : []}::uuid[] WHERE id=${activity}`;
+        await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,activity_id,skill_label)
+          VALUES(${session},${scope.workspaceId},${scope.ownerUserId},${activity},'Variant')`;
+        await sql`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,activity_id,skill_label,client_key,create_intent,history_revision)
+          VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${session},${activity},'Variant',${randomUUID()},'{}',0)`;
+      }
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const before = await datasets.read(scope);
+      expect(before.coursePackageQuality).toHaveLength(4);
+      expect(before.answerSequences).toHaveLength(4);
+
+      await sql`DELETE FROM opening_note_provenance WHERE document_id=${restored.documentId}`;
+      await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([{ publicationCardIds: [historicalCard.id] }])}
+        WHERE document_id=${historical.documentId}`;
+      await sql`UPDATE cards SET source_document_id=NULL WHERE id=${historicalCard.id}`;
+      await sql`DELETE FROM cards WHERE id=${deletedCard.id}`;
+
+      const after = await datasets.read(scope);
+      expect(after.coursePackageQuality).toHaveLength(1);
+      expect(after.coursePackageQuality[0]?.sources).toEqual([expect.any(String)]);
+      expect(after.answerSequences).toEqual([expect.objectContaining({ sequence: after.coursePackageQuality[0]?.identity })]);
+    } finally { await fixture.close(); }
+  }, 30_000);
+
   it("withholds a source-backed legacy snippet whose original memory expired", async () => {
     const fixture = await createOpeningFixture();
     try {
@@ -399,6 +446,30 @@ describe("synthetic deidentified dataset repository", () => {
       expect(await page(3)).toMatchObject({ status: "unknown", reason: "no_data", nextOffset: null, data: [], evidence: [], sourceRefs: [] });
     } finally { await fixture.close(); }
   });
+
+  it.each(["notes", "cards", "courses"] as const)("keeps %s pagination inside the request offset limit", async name => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      if (name === "notes") {
+        await sql`INSERT INTO library_documents(workspace_id,title,lifecycle)
+          SELECT ${scope.workspaceId}, 'Note ' || n, 'confirmed' FROM generate_series(1,1002) n`;
+      } else if (name === "cards") {
+        await sql`INSERT INTO cards(workspace_id,owner_user_id,front,back)
+          SELECT ${scope.workspaceId}, ${scope.ownerUserId}, 'Prompt ' || n, 'Answer' FROM generate_series(1,1002) n`;
+      } else {
+        await sql`INSERT INTO courses(workspace_id,title,slug)
+          SELECT ${scope.workspaceId}, 'Course ' || n, 'course-' || n FROM generate_series(1,1002) n`;
+      }
+      const read = createScopedOpeningSystemQueryReader(sql, scope);
+      const page = (offset: number) => read({ name, arguments: { offset, limit: 1 } }, new AbortController().signal);
+      const next = await page(999);
+      expect(next).toMatchObject({ status: "partial", reason: "truncated", nextOffset: 1000, data: [expect.any(Object)] });
+      const final = await page(next.nextOffset!);
+      expect(final).toMatchObject({ status: "partial", reason: "truncated", nextOffset: null, data: [expect.any(Object)] });
+      expect(final.data).not.toEqual(next.data);
+    } finally { await fixture.close(); }
+  }, 30_000);
 
   it.each(["notes", "cards", "historical cards", "automatic cards"] as const)("carries %s memory lineage through the actual ephemeral query producer", async kind => {
     const name = kind === "notes" ? "notes" : "cards";

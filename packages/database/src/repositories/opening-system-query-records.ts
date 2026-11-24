@@ -31,6 +31,10 @@ async function readRecordNoteSources(tx: TransactionSql, scope: Scope, row: Reco
 
 const candidateBatchSize = 32;
 
+export function publicSystemQueryOffset(offset: number): number | null {
+  return offset <= 1000 ? offset : null;
+}
+
 async function readAdmittedPage<Row>(
   out: OpeningSystemQueryDraft, { offset, limit }: { offset: number; limit: number }, signal: AbortSignal,
   readBatch: (after: Row | undefined) => PromiseLike<readonly Row[]>,
@@ -51,7 +55,7 @@ async function readAdmittedPage<Row>(
       if (page.length === limit) {
         out.status = "partial";
         out.reason = "truncated";
-        out.nextOffset = offset + limit;
+        out.nextOffset = publicSystemQueryOffset(offset + limit);
         return page;
       }
       page.push({ row, sources });

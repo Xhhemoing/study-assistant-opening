@@ -423,6 +423,60 @@ describe("persisted dataset provenance", () => {
   };
   const publishedTurn = turn("published", { learning_session_id: "published-session" });
 
+  it.each([false, true])("excludes card-review variants through unavailable lineage (malformed publication: %s)", malformed => {
+    const restoredId = "abcdef12-3456-4789-abcd-ef1234567895";
+    const historicalId = "abcdef12-3456-4789-abcd-ef1234567896";
+    const observationId = "abcdef12-3456-4789-abcd-ef1234567897";
+    const card = (suffix: number, links: Record<string, unknown> = {}) => ({
+      ...owner, id: "abcdef12-3456-4789-abcd-ef12345679" + suffix, source_ids: [knownSourceId], ...links,
+    });
+    const restored = card(10, { source_document_id: restoredId });
+    const historical = card(11);
+    const deleted = card(12);
+    const clean = card(13);
+    const automatic = card(14, { origin_observation_root_id: observationId });
+    const names = ["restored", "historical", "deleted", "clean", "automatic", "no-card"];
+    const cardIds = [restored.id.toUpperCase(), historical.id, deleted.id, clean.id, automatic.id, undefined];
+    const result = project({
+      cards: [restored, historical, clean, automatic],
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      library_documents: [{ ...owner, id: restoredId }, { ...owner, id: historicalId }],
+      library_revisions: [{ ...owner, document_id: restoredId, revision_number: 1, reason: "save-opening-snippet" }],
+      opening_note_provenance: [{ ...owner, document_id: historicalId, context_source_refs: [{
+        publicationCardIds: malformed ? [historical.id, "bad"] : [historical.id],
+      }] }],
+      opening_learning_observations: [{ ...owner, id: observationId, source_ids: [missingSourceId] }],
+      opening_teaching_activities: names.map((id, index) => ({
+        ...activity(id), create_intent: { kind: "card_review_variant", cardId: cardIds[index] },
+      })),
+      opening_learning_sessions: names.map(id => ({ ...owner, id, activity_id: id })),
+      opening_learning_attempts: names.map(id => ({ ...owner, id, activity_id: id, session_id: id, source_ids: [] })),
+      opening_turns: names.map(id => turn(id, { learning_session_id: id })),
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:clean"]);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:clean"]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:clean"]);
+  });
+
+  it.each([
+    { inventory: "cards", cardLineage: null },
+    { inventory: "documents", cardLineage: { source_document_id: upstreamId } },
+    { inventory: "observations", cardLineage: { origin_observation_root_id: upstreamId } },
+  ])("withholds a card variant and anchored turn when the $inventory inventory is omitted", ({ cardLineage }) => {
+    const cardId = "abcdef12-3456-4789-abcd-ef1234567915";
+    const result = project({
+      ...(cardLineage && { cards: [{ ...owner, id: cardId, ...cardLineage }] }),
+      opening_teaching_activities: [
+        { ...activity("variant"), create_intent: { kind: "card_review_variant", cardId } }, activity("keep"),
+      ],
+      opening_learning_attempts: [{ ...owner, id: "variant", activity_id: "variant", source_ids: [] }],
+      opening_turns: [turn("anchored", { context_anchor: { cardId } }), turn("keep")],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:keep"]);
+    expect(result.answerSequences).toEqual([]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:keep"]);
+  });
+
   it("withholds an unattributed legacy memory-only turn and its derived records", () => {
     const source = { sourceId: knownSourceId, sourceVersion: 0, memoryOnly: true };
     const result = project({

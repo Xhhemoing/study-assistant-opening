@@ -8,7 +8,7 @@ import {
 } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { readSystemStateQuery } from "./opening-system-query-state";
-import { readSystemRecordQuery, type RecordNoteLineage } from "./opening-system-query-records";
+import { publicSystemQueryOffset, readSystemRecordQuery, type RecordNoteLineage } from "./opening-system-query-records";
 import { readSystemLearningQuery } from "./opening-system-query-learning";
 import { withSystemQueryReadDeadline } from "./opening-system-query-deadline";
 import { systemQueryOwnerGrant } from "./opening-system-query-admission";
@@ -45,7 +45,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       const args = request.arguments;
       const limit = "limit" in args ? args.limit : 10, offset = "offset" in args ? args.offset : 0;
       const page = (rows: Row[]) => {
-        if (rows.length > limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = offset + limit; }
+        if (rows.length > limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = publicSystemQueryOffset(offset + limit); }
         return rows.slice(0, limit);
       };
       const evidence = (row: Row, kind: string, title: string, href: string, revision: string) => {
@@ -77,6 +77,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         if (owner.adaptive_planning != null && !prefs.success) { out.status = "partial"; out.reason = "unavailable"; }
       } else if (request.name === "learning" || request.name === "recommendation") {
         await readSystemLearningQuery(tx, scope, request, out, limit, offset);
+        if (out.nextOffset !== null) out.nextOffset = publicSystemQueryOffset(out.nextOffset);
       } else if (request.name === "materials") {
         if (!request.arguments.sourceId && !request.arguments.courseId && !request.arguments.query?.trim()) return { ...out, status: "unknown" as const, reason: "invalid_arguments" as const };
         const a = request.arguments;
