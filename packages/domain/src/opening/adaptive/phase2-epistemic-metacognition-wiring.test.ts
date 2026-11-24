@@ -1011,6 +1011,60 @@ it.each([
   expect(elapsedMs).toBeLessThan(50);
 });
 
+it("R25 keeps an unassigned historical BKT duplicate when a different projection gains a future slot", () => {
+  const samples = projectProducedAttempts(bktSamples(4), at(3));
+  const first = head("revision", 2);
+  const moved = { ...first, problemId: "moved", familyKey: "moved-family" };
+  const rows = [first, first, moved];
+  const slots = [feature(first), feature(moved, { recordedAt: at(3) })];
+  const compare = (observations: readonly SnapshotObservation[], features: readonly LearnerStateFeature[]) =>
+    nextLearningStepWithExperimentalBkt(buildDecisionInput({ observations: [...samples.observations, ...observations],
+      wantsFullExplanation: false }), { enabled: true, target: bktTarget, excludedProblemIds: [], cutoff: at(3),
+      features: [...samples.features, ...features] }).comparison;
+  const expected = { reason: "insufficient_samples", sampleCount: 4 };
+
+  expect(compare(rows, slots)).toMatchObject(expected);
+  expect(compare([...rows, moved], [...slots, feature(moved, { recordedAt: at(14) })])).toMatchObject(expected);
+});
+
+it("R25 retains a historical rule-only error beside a future explicit echo without a slot", () => {
+  const samples = projectProducedAttempts(bktSamples(5), at(3));
+  const wrong = head("wrong", 2, { verifiedCorrect: "no" });
+  const echo = { ...wrong, recordedAt: at(7) };
+  const compare = (rows: readonly SnapshotObservation[], features: readonly LearnerStateFeature[] = []) =>
+    nextLearningStepWithExperimentalBkt(buildDecisionInput({ observations: [...samples.observations, ...rows],
+      wantsFullExplanation: false }), { enabled: true, target: bktTarget, excludedProblemIds: [], cutoff: at(4),
+      features: [...samples.features, ...features] }).comparison;
+  const expected = { reason: "priority_rule", sampleCount: 0 };
+
+  expect(compare([wrong])).toMatchObject(expected);
+  expect.soft(compare([wrong, echo])).toMatchObject(expected);
+  expect(compare([wrong, { ...echo, recordedAt: at(3) }])).toMatchObject(expected);
+  expect(compare([wrong, echo], [feature(echo, { recordedAt: at(7) })])).toMatchObject({ status: "compared", sampleCount: 5 });
+});
+
+it.each([8, 12])("R25 resolves %i projections across alternating graded and withheld slots", copies => {
+  const first = head("first", 1);
+  const moved = { ...first, problemId: "moved", familyKey: "moved-family", verifiedCorrect: "no" as const };
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey, attemptedAt: "2026-10-01T22:00:00.000Z" });
+  const graded = feature(first);
+  const observations = [...Array.from({ length: copies }, (_, index) => index % 2 ? moved : first), retry];
+  const features = [...Array.from({ length: 2 * copies }, (_, index) => index % 2 ? {
+    ...graded, recordedAt: at(index + 1), eligibility: { ...graded.eligibility, verifiedCorrect: "unknown" as const },
+    gaps: ["cartridge_evidence_not_qualified" as const],
+  } : { ...graded, recordedAt: at(index + 1) }), feature(retry)];
+
+  for (const cutoff of [at(2), at(2 * copies + 1)]) {
+    const start = performance.now();
+    const result = replayEvidence({ scope, cutoff, observations, features, targetFamilyKeys: [], propagatedFamilyKeys: [] });
+    const elapsedMs = performance.now() - start;
+    expect(result).toEqual(cutoff === at(2)
+      ? { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] }
+      : { weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id] });
+    expect.soft(elapsedMs, cutoff).toBeLessThan(50);
+  }
+});
+
 it("holds overlapping legacy revisions until their forced recording slot", () => {
   const first = head("first", 2);
   const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,

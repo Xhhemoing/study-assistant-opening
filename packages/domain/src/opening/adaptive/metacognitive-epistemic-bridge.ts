@@ -182,7 +182,7 @@ function matchesUntimestampedObservation(observation: SnapshotObservation, featu
 type FeatureRevision = { feature: LearnerStateFeature; attempted: number; recorded: number };
 type ObservationProjection = { observation: SnapshotObservation; attempted: number };
 type ObservationRevision = ObservationProjection & { recorded: number; legacyCopies?: number };
-type LegacyProjection = ObservationProjection & { required: boolean; bit: bigint; copies: number };
+type LegacyProjection = ObservationProjection & { required: boolean; bit: bigint; copies: number; matchingTimes: ReadonlySet<number> };
 type LegacyOccurrence = { projection: LegacyProjection; producerIndex: number };
 type LegacyBucket = { occurrences: LegacyOccurrence[]; slots: Set<number>; required: bigint };
 type LegacyProgress = { next: number; represented: bigint; skipped: bigint };
@@ -216,15 +216,27 @@ function legacyComponents(buckets: readonly LegacyBucket[]) {
   return components;
 }
 
-function compatibleSlotRuns(buckets: readonly LegacyBucket[], slots: readonly number[]): LegacyRun[] {
+function compatibleSlotRuns(
+  buckets: readonly LegacyBucket[], slots: readonly number[], visibleSlots: ReadonlySet<number>,
+): LegacyRun[] {
   const runs: LegacyRun[] = [];
+  const future = new Map<string, LegacyRun>();
   for (const slot of slots) {
     const compatible = buckets.map(bucket => bucket.slots.has(slot));
-    const previous = runs.at(-1);
-    if (previous && compatible.every((accepts, index) => accepts === previous.compatible[index])) previous.slots.push(slot);
-    else runs.push({ slots: [slot], compatible });
+    const run = { slots: [slot], compatible };
+    if (visibleSlots.has(slot)) {
+      const previous = runs.at(-1);
+      if (previous && compatible.every((accepts, index) => accepts === previous.compatible[index])) previous.slots.push(slot);
+      else runs.push(run);
+    } else {
+      // Future slots only constrain the number of copies each bucket can place.
+      const signature = compatible.join(",");
+      const previous = future.get(signature);
+      if (previous) previous.slots.push(slot);
+      else future.set(signature, run);
+    }
   }
-  return runs;
+  return [...runs, ...future.values()];
 }
 
 function compareAssignments(left: LegacyAssignment, right: LegacyAssignment) {
@@ -238,7 +250,7 @@ type ProducerPath = {
   placements: readonly LegacyPlacement[];
 };
 
-function precedes(left: readonly LegacyPlacement[], right: readonly LegacyPlacement[]): boolean {
+function precedes(left: readonly LegacyOccurrence[], right: readonly LegacyOccurrence[]): boolean {
   const first = left.findIndex((placement, index) => placement.producerIndex !== right[index]!.producerIndex);
   return first >= 0 && left[first]!.producerIndex < right[first]!.producerIndex;
 }
@@ -295,16 +307,102 @@ function emitLegacyPath(
   return earliestLatest;
 }
 
-function emitOptimalLegacyPaths(
-  buckets: readonly LegacyBucket[], optimal: ReadonlySet<LegacyAssignment>, runs: readonly LegacyRun[], recordings: readonly number[],
-  visibleSlots: ReadonlySet<number>, emit: EmitLegacyRevision,
+type NestedSlotState = {
+  largeUsed: number;
+  smallUsed: number;
+  largeUsesSharedSlot: boolean;
+  earliestLatest: number;
+  maxVisible: number[];
+  edges: { next: NestedSlotState; slot: number; projection: LegacyProjection | undefined }[];
+};
+
+function emitNestedLegacyPath(
+  large: readonly LegacyOccurrence[], small: readonly LegacyOccurrence[], sharedSlots: ReadonlySet<number>,
+  slots: readonly number[], recordings: readonly number[], visibleSlots: ReadonlySet<number>, emit: EmitLegacyRevision,
 ): number {
+  const counts = groupByKey([...large, ...small], row => row.projection);
+  const projections = [...counts.keys()];
+  const projectionIds = new Map(projections.map((row, index) => [row, index]));
+  const zeros = projections.map(() => 0);
+  const key = (largeUsed: number, smallUsed: number, largeUsesSharedSlot: boolean) =>
+    2 * (largeUsed * (small.length + 1) + smallUsed) + Number(largeUsesSharedSlot);
+  const terminal = { largeUsed: large.length, smallUsed: small.length, largeUsesSharedSlot: false,
+    earliestLatest: -Infinity, maxVisible: zeros, edges: [] };
+  let suffixes = new Map<number, NestedSlotState>([[key(large.length, small.length, false), terminal]]);
+
+  // For a fixed occupied subset, admit only its earliest producer sequence.
+  // A small-bucket copy can yield to an earlier large-bucket copy on a shared
+  // slot only when the suffix already uses another shared slot for the large bucket.
+  for (const slot of [...slots].reverse()) {
+    const layer = new Map<number, NestedSlotState>();
+    const shared = sharedSlots.has(slot);
+    for (const next of suffixes.values()) {
+      const { largeUsed, smallUsed, largeUsesSharedSlot } = next;
+      function add(largeBefore: number, smallBefore: number, usesShared: boolean, occurrence?: LegacyOccurrence) {
+        const id = key(largeBefore, smallBefore, usesShared);
+        const projection = visibleSlots.has(slot) ? occurrence?.projection : undefined;
+        const index = projection === undefined ? -1 : projectionIds.get(projection)!;
+        const latest = Math.max(next.earliestLatest, projection === undefined ? -Infinity : recordings[slot]!);
+        const state: NestedSlotState = layer.get(id) ?? { largeUsed: largeBefore, smallUsed: smallBefore, largeUsesSharedSlot: usesShared,
+          earliestLatest: Infinity, maxVisible: [...zeros], edges: [] };
+        state.earliestLatest = Math.min(state.earliestLatest, latest);
+        next.maxVisible.forEach((count, projectionIndex) => {
+          state.maxVisible[projectionIndex] = Math.max(state.maxVisible[projectionIndex]!, count + Number(projectionIndex === index));
+        });
+        state.edges.push({ next, slot, projection });
+        layer.set(id, state);
+      }
+      add(largeUsed, smallUsed, largeUsesSharedSlot);
+      const largeCopy = large[largeUsed - 1];
+      const smallCopy = small[smallUsed - 1];
+      if (largeCopy && (!shared || smallUsed === small.length || largeCopy.producerIndex < small[smallUsed]!.producerIndex)) {
+        add(largeUsed - 1, smallUsed, largeUsesSharedSlot || shared, largeCopy);
+      }
+      if (shared && smallCopy
+        && (largeUsed === large.length || smallCopy.producerIndex < large[largeUsed]!.producerIndex || !largeUsesSharedSlot)) {
+        add(largeUsed, smallUsed - 1, largeUsesSharedSlot, smallCopy);
+      }
+    }
+    suffixes = layer;
+  }
+
+  const roots = [suffixes.get(key(0, 0, false)), suffixes.get(key(0, 0, true))].filter(root => root !== undefined);
+  const earliestLatest = roots.reduce((time, root) => Math.min(time, root.earliestLatest), Infinity);
+  const prefixes = new Map(roots.map(root => [root, zeros]));
+  for (const [state, prefix] of prefixes) {
+    for (const { next, slot, projection } of state.edges) {
+      const index = projection === undefined ? -1 : projectionIds.get(projection)!;
+      if (projection) {
+        const assigned = prefix[index]! + 1 + next.maxVisible[index]!;
+        const copies = projection.copies - counts.get(projection)!.length + assigned;
+        emit(projection, slot, copies, next.earliestLatest <= recordings[slot]!);
+      }
+      const previous = prefixes.get(next) ?? [...zeros];
+      prefix.forEach((count, projectionIndex) => {
+        previous[projectionIndex] = Math.max(previous[projectionIndex]!, count + Number(projectionIndex === index));
+      });
+      prefixes.set(next, previous);
+    }
+    prefixes.delete(state);
+  }
+  return earliestLatest;
+}
+
+function emitOptimalLegacyPaths(
+  buckets: readonly LegacyBucket[], optimal: ReadonlySet<LegacyAssignment>, runs: readonly LegacyRun[], slots: readonly number[],
+  recordings: readonly number[], visibleSlots: ReadonlySet<number>, emit: EmitLegacyRevision,
+): number {
+  const smallIndex = buckets.length === 2 && buckets[0]!.slots.size <= buckets[1]!.slots.size ? 0 : 1;
+  const largeIndex = 1 - smallIndex;
+  const nested = buckets.length === 2 && [...buckets[smallIndex]!.slots].every(slot => buckets[largeIndex]!.slots.has(slot));
   const projections = [...new Set(buckets.flatMap(bucket => bucket.occurrences.map(row => row.projection)))];
   const projectionIds = new Map(projections.map((projection, index) => [projection, index]));
   const empty: ProducerPath = {
     slots: 0n, copies: projections.map(() => 0), placements: [],
   };
-  const signature = (path: ProducerPath) => `${path.slots}:${path.copies.join(",")}`;
+  // For nested buckets, the forward DAG only needs to supply copy counts.
+  // The nested solver below recovers the placements for each count profile.
+  const signature = (path: ProducerPath) => nested ? path.copies.join(",") : `${path.slots}:${path.copies.join(",")}`;
   const pending = new Map([...optimal].map(assignment => [assignment, new Map([[signature(empty), empty]])]));
   const complete = new Map<string, ProducerPath>();
   // Walk the optimal assignment graph backwards. At a shared state, suffixes
@@ -324,7 +422,8 @@ function emitOptimalLegacyPaths(
         const projectionId = projectionIds.get(projection)!;
         const copies = [...path.copies];
         copies[projectionId] = copies[projectionId]! + 1;
-        const extended = { slots: path.slots | (1n << BigInt(slot)), copies, placements: [placement, ...path.placements] };
+        const occupied = nested ? 0n : path.slots | (1n << BigInt(slot));
+        const extended = { slots: occupied, copies, placements: [placement, ...path.placements] };
         offerProducerPath(next, signature(extended), extended);
       }
       pending.set(previous, next);
@@ -332,14 +431,16 @@ function emitOptimalLegacyPaths(
     pending.delete(assignment);
   }
 
-  // Every slot in a bucket accepts the same projections. Its preferred
-  // sequence depends on the number of placements and distinct projections.
+  // Prefer earlier occurrences only when the distinct count and the
+  // identities of projections using extra copies agree.
   const preferredByBucket = buckets.map(() => new Map<string, LegacyPlacement[]>());
   const paths = [...complete.values()].map(path => {
     const placements = groupByKey(path.placements, row => row.bucketIndex);
     const allocations = [...placements].map(([index, rows]) => {
-      const distinct = new Set(rows.map(row => row.projection)).size;
-      const key = `${rows.length}:${distinct}`;
+      const counts = groupByKey(rows, row => row.projection);
+      const extraCopies = [...counts].flatMap(([projection, copies]) =>
+        copies.length > 1 ? [`${projection.bit}=${copies.length - 1}`] : []).sort().join(",");
+      const key = `${rows.length}:${counts.size}:${extraCopies}`;
       const preferred = preferredByBucket[index]!;
       const previous = preferred.get(key);
       if (!previous || precedes(rows, previous)) preferred.set(key, rows);
@@ -351,7 +452,12 @@ function emitOptimalLegacyPaths(
   let earliestLatest = Infinity;
   for (const { path: { placements }, allocations } of paths) {
     if (allocations.some(({ index, key, rows }) => precedes(preferredByBucket[index]!.get(key)!, rows))) continue;
-    earliestLatest = Math.min(earliestLatest, emitLegacyPath(placements, runBySlot, recordings, visibleSlots, emit));
+    const earliest = nested ? emitNestedLegacyPath(
+      allocations.find(({ index }) => index === largeIndex)?.rows ?? [],
+      allocations.find(({ index }) => index === smallIndex)?.rows ?? [],
+      buckets[smallIndex]!.slots, slots, recordings, visibleSlots, emit,
+    ) : emitLegacyPath(placements, runBySlot, recordings, visibleSlots, emit);
+    earliestLatest = Math.min(earliestLatest, earliest);
   }
   return earliestLatest;
 }
@@ -383,7 +489,7 @@ function resolveLegacyComponent(
     progress: buckets.map(() => ({ next: 0, represented: 0n, skipped: 0n })),
     coverage: 0, distinct: 0, skipRun: false, edges: [],
   };
-  const runs = compatibleSlotRuns(buckets, slots);
+  const runs = compatibleSlotRuns(buckets, slots, visibleSlots);
   let assignments = [first];
   for (const { slot, compatible, startsRun } of runs.flatMap(run => run.slots.map((slot, index) => ({
     slot, compatible: run.compatible, startsRun: index === 0,
@@ -451,7 +557,7 @@ function resolveLegacyComponent(
 
   // Future-only components still need a feasibility check for rule-only evidence.
   return slots.some(slot => visibleSlots.has(slot))
-    ? emitOptimalLegacyPaths(buckets, optimal, runs, recordings, visibleSlots, emit)
+    ? emitOptimalLegacyPaths(buckets, optimal, runs, slots, recordings, visibleSlots, emit)
     : -Infinity;
 }
 
@@ -500,7 +606,7 @@ export function visibleObservationRevisions(
     const matchingTimes = new Set(row.matchingSlots.map(slot => features[slot]!.recorded));
     const required = !explicit.some(head => matchingTimes.has(head.recorded) && sameObservationProjection(row.observation, head.observation));
     const slots = row.matchingSlots.filter(slot => !claimedSlots.has(slot));
-    return { ...row, slots, required };
+    return { ...row, slots, required, matchingTimes };
   });
   const buckets: LegacyBucket[] = [];
   const unresolved = new Set<LegacyProjection>();
@@ -509,9 +615,9 @@ export function visibleObservationRevisions(
   for (const rows of groupByKey(eligible, row => row.slots.join(",")).values()) {
     const bucket: LegacyBucket = { occurrences: [], slots: new Set(rows[0]!.slots), required: 0n };
     const distinct: LegacyProjection[] = [];
-    for (const { observation, attempted, required, matchingSlots, producerIndex } of rows) {
+    for (const { observation, attempted, required, matchingSlots, matchingTimes, producerIndex } of rows) {
       const identical = distinct.find(projection => sameObservationProjection(observation, projection.observation));
-      const projection = identical ?? { observation, attempted, required, bit: 1n << BigInt(distinct.length), copies: 0 };
+      const projection = identical ?? { observation, attempted, required, bit: 1n << BigInt(distinct.length), copies: 0, matchingTimes };
       if (!identical) distinct.push(projection);
       projection.copies++;
       if (!bucket.slots.size) {
@@ -553,7 +659,8 @@ export function visibleObservationRevisions(
   // A legacy projection without a feasible slot can inform the ordinary rule,
   // provided it is old enough, has no visible slot conflict, and is no explicit echo.
   const unplaced = [...unresolved].filter(row => row.attempted < cutoff && !emitted.has(row)
-    && !explicit.some(head => sameObservationProjection(head.observation, row.observation))).map(row => row.observation);
+    && !explicit.some(head => (head.recorded < cutoff || row.matchingTimes.has(head.recorded))
+      && sameObservationProjection(head.observation, row.observation))).map(row => row.observation);
   // A visible fallback conflict is still evidence that the recording is present.
   const canBeAbsent = earliestLatest === -Infinity && !unplaced.length && !hasVisibleConflict;
   return { revisions, latest: possibleLatest.filter(row => row.recorded >= earliestLatest), unplaced, canBeAbsent };
