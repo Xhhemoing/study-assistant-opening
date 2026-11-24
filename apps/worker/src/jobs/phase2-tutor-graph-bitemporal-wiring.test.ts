@@ -248,6 +248,25 @@ describe("Phase 2 pure exam tutor turns", () => {
 });
 
 describe("Phase 2 practice tutor turns", () => {
+  it("carries the consumed memory and history revisions through streaming and completion", async () => {
+    const f = setup({ streaming: true });
+    const kind = "v3_misconception_lineage" as const;
+    const historyId = id(30), memoryRevisionId = id(31), memoryId = id(32);
+    f.tutorJobs.loadHistoryContext.mockResolvedValue({ history: [], sourceRefs: [],
+      historyMisconceptionLineage: { kind, courseId: null, revisionIds: [historyId] } });
+    const memory = { id: memoryId, workspaceId, courseId, text: "Check the domain",
+      kind: "confirmed", status: "active", expiresAt: null, sourceTurnIds: [userTurnId],
+      createdAt: at, updatedAt: at } satisfies MemoryItem;
+    f.deps.memories = { listContext: async () => ({ memories: [memory], sourceRefs: [],
+      misconceptionLineage: { kind, courseId, revisionIds: [memoryRevisionId, historyId] } }) };
+
+    await expect(createTutorTurnHandler(f.deps)(jobId)).resolves.toEqual({ skipped: false });
+    const bound = expect.objectContaining({ globalMemoryIds: [memoryId],
+      historyMisconceptionLineage: { kind, courseId, revisionIds: [historyId, memoryRevisionId] } });
+    expect(f.stream.begin).toHaveBeenCalledWith(workspaceId, jobId, bound);
+    expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.anything(), bound);
+  });
+
   it.each(["unanswered", "matched", "unmatched"])("retains the sm95 provider path for %s practice", async state => {
     const f = setup({ submitted: state !== "unanswered", streaming: true });
     if (state !== "unanswered") f.attempt.effectiveGrading = {

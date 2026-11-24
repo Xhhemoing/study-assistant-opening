@@ -137,7 +137,8 @@ describe("opening conversation repository", () => {
       && !query.includes("INSERT INTO opening_workspace_history_revisions"))).toEqual([]);
   });
 
-  it.each(["plan", "query", "explain_state"] as const)("returns the legacy exam %s after an insert collision, rejecting changed intent", async purpose => {
+  it.each([["plan", false], ["query", true], ["explain_state", true], ["query", false], ["explain_state", false]] as const)(
+    "returns the legacy exam %s with querySystem=%s after an insert collision", async (purpose, requestedQuerySystem) => {
     const contextAnchor = { purpose: "exam_help" as const };
     const querySystem = purpose !== "plan";
     const request = { conversationId: "conversation-1", text: "exam request", mode: "explain" as const, privacy: "saved" as const,
@@ -145,7 +146,7 @@ describe("opening conversation repository", () => {
     const intentHash = createHash("sha256").update(JSON.stringify({ ...request,
       ...(querySystem ? { querySystem: true } : {}), contextAnchor, purpose })).digest("hex");
     const input = { ...request, scope, contextAnchor, clientKey: "legacy-exam-key", examHelpReplay: {
-      requested: { purpose, querySystem }, legacyPurpose: purpose,
+      requested: { purpose, querySystem: requestedQuerySystem }, legacyPurpose: purpose,
       ...(purpose !== "plan" ? { legacyQuery: { ...request, purpose } } : {}),
     } };
     let replayLookups = 0;
@@ -169,7 +170,7 @@ describe("opening conversation repository", () => {
 
   it("saves a new exam plan as fixed guidance and rejects changes to the original composer flags on replay", async () => {
     const contextAnchor = { purpose: "exam_help" as const };
-    const input = { scope, conversationId: "conversation-1", text: "exam request", mode: "explain" as const,
+    const input = { scope, conversationId: "conversation-1", text: "我是猜的", mode: "explain" as const, purpose: "plan" as const,
       clientKey: "new-exam-key", sourceIds: [], currentPage: null, chunkId: null, learningSessionId: null,
       contextAnchor, examHelpReplay: { requested: { purpose: "plan" as const }, legacyPurpose: "plan" as const } };
     let insertedHash: string | undefined;
@@ -180,7 +181,7 @@ describe("opening conversation repository", () => {
         assistant_turn_id: "assistant-turn-1", intent_hash: insertedHash, source_versions: {} }] : [];
       if (query.includes("INSERT INTO opening_turns") && query.includes("'user'")) {
         insertedHash = values.find((value): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value));
-        expect(values.slice(-3)).toEqual([false, expect.objectContaining(contextAnchor), null]);
+        expect(values.slice(-3)).toEqual([false, expect.objectContaining(contextAnchor), "plan"]);
         return [{ id: "user-turn-1" }];
       }
       return [];
@@ -190,6 +191,12 @@ describe("opening conversation repository", () => {
     expect(insertedHash).toBeDefined();
     await expect(repository.appendSavedTurn(input)).resolves.toMatchObject({ jobId: "job-1", replayed: true });
     await expect(repository.appendSavedTurn({ ...input, examHelpReplay: { requested: {} } })).rejects.toMatchObject({ code: "CONFLICT" });
+    insertedHash = createHash("sha256").update(JSON.stringify({
+      conversationId: input.conversationId, text: input.text, mode: input.mode, privacy: "saved",
+      sourceIds: [], sourceVersions: {}, currentPage: null, chunkId: null, learningSessionId: null,
+      contextAnchor, strategyTemplateId: null, examRequest: { purpose: "plan" },
+    })).digest("hex");
+    await expect(repository.appendSavedTurn(input)).resolves.toMatchObject({ jobId: "job-1", replayed: true });
   });
 
   it("inserts a verified retry with the original legacy exam purpose", async () => {

@@ -3,7 +3,6 @@ export { makeTutorInstruction } from "@aistudy/domain";
 import {
   providerOutputSchema,
   providerInputSchema,
-  type MemoryItem,
   type ProviderOutput,
   type ProviderInput,
   type SourceChunk,
@@ -37,6 +36,7 @@ import {
 import type {
   ContextSourceRef,
   OpeningBudgetRepository,
+  OpeningMemoryRepository,
   OpeningTutorJobsRepository,
   OpeningStudyExposureInput,
   OpeningTutorTimingInput,
@@ -115,14 +115,7 @@ export type TutorTurnDeps = {
     listExcludedSourceIds(scope: Scope): Promise<string[]>;
   };
   /** M01: confirmed/unexpired temporary memories only. Optional. */
-  memories?: {
-    listContext(scope: Scope, now: string, activeCourseId?: string | null, materialUse?: "citation" | "practice"): Promise<{
-      memories: MemoryItem[];
-      sourceRefs: ContextSourceRef[];
-      temporaryMemoryExpiresAt?: string;
-      dependencyMemoryIds?: string[];
-    }>;
-  };
+  memories?: Pick<OpeningMemoryRepository, "listContext">;
   /** Optional, feature-gated, read-only summary; failure leaves ordinary conversation available. */
   planningContext?: { read(scope: Scope, now: Date): Promise<ConversationPlanningContext> };
   /** L01: record delivered help in the tutor completion transaction. */
@@ -492,11 +485,19 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         problemId: null, attemptId: turn.attemptId ?? null, turnId: claimed.assistantTurnId,
         kind: helpKind, level: helpLevel, delivered: true as const, helpInputSnapshot, hintStage: null, initiatedBy: "user" as const,
       } : undefined;
-      const misconceptionFence = { ...(misconceptionSnapshot ? { misconceptionSnapshot } : {}),
-        historyMisconceptionLineage: historyMisconceptionLineage ?? {
-          kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [],
-        } };
+      const memoryMisconceptionLineage = eligibleMemories.length ? memoryContext.misconceptionLineage : undefined;
+      const inheritedMisconceptionLineage = {
+        kind: "v3_misconception_lineage" as const,
+        courseId: historyMisconceptionLineage?.courseId ?? memoryMisconceptionLineage?.courseId ?? null,
+        revisionIds: [...new Set([
+          ...(historyMisconceptionLineage?.revisionIds ?? []), ...(memoryMisconceptionLineage?.revisionIds ?? []),
+        ])],
+      };
+      const misconceptionFence = misconceptionSnapshot ? { misconceptionSnapshot } : {};
       const completionOptions = { materialPurposePin: retrieved?.purposePin, ...misconceptionFence,
+        ...(historyMisconceptionLineage !== undefined || memoryMisconceptionLineage !== undefined
+          || pureExam || deps.bitemporalMisconceptions !== undefined || globalMemoryIds.length
+          ? { historyMisconceptionLineage: inheritedMisconceptionLineage } : {}),
         ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
@@ -505,6 +506,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const streamContext = { privacyEpoch: expectedPrivacyEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
         executionId: claimed.executionId,
         ...misconceptionFence,
+        historyMisconceptionLineage: inheritedMisconceptionLineage,
         ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(globalMemoryIds.length ? { globalMemoryIds } : {}),

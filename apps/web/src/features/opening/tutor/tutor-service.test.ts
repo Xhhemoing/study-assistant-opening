@@ -456,11 +456,11 @@ describe("exam-help admission", () => {
     clientKey: "exam-help-admission", currentPage: 4, chunkId: C, contextAnchor: { purpose: "exam_help", attemptId } };
 
   it.each([
-    [{ text: "高数进度怎么样" }, undefined],
-    [{ querySystem: true }, undefined],
-    [{ purpose: "plan" }, undefined],
-    [{ purpose: "query" }, undefined],
-    [{ purpose: "explain_state" }, undefined],
+    [{ text: "高数进度怎么样" }, "query"],
+    [{ querySystem: true }, "query"],
+    [{ purpose: "plan" }, "plan"],
+    [{ purpose: "query" }, "query"],
+    [{ purpose: "explain_state" }, "explain_state"],
     [{ purpose: "answer" }, "answer"],
     [{ purpose: "teach" }, "teach"],
   ])("applies material and attempt admission to %j", async (intent, purpose) => {
@@ -489,14 +489,16 @@ describe("exam-help admission", () => {
     expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
   });
 
-  it("passes the original legacy plan intent for a replay while keeping new guidance on the exam lane", async () => {
+  it("preserves the read-only plan purpose for new guidance and legacy replay", async () => {
     const f = createService({ attempts: { assertAccess: vi.fn(async () => ({ id: attemptId, sessionId: S })) } });
     await expect(f.service.submitTurn(scope, { ...request, purpose: "plan" })).resolves.toMatchObject({ replayed: false });
-    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ purpose: undefined,
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ purpose: "plan",
       examHelpReplay: expect.objectContaining({ requested: { purpose: "plan", querySystem: undefined }, legacyPurpose: "plan" }) }));
   });
 
-  it.each([{ querySystem: true }, { purpose: "query" }, { purpose: "explain_state" }])("replays a historical exam record query %j without starting a new query", async intent => {
+  it.each([{ querySystem: true }, { purpose: "query" }, { purpose: "explain_state" },
+    { purpose: "query", querySystem: false }, { purpose: "explain_state", querySystem: false },
+  ])("replays a historical exam record query %j without starting a new query", async intent => {
     const assertAccess = vi.fn(async () => null);
     const systemQueryEnabled = vi.fn(() => false);
     const f = createService({ systemQueryEnabled, attempts: { assertAccess } });

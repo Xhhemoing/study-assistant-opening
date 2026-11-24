@@ -71,7 +71,9 @@ it("redacts a revoked answer in turns, previews and resume history without relea
     const guarded = statement.includes("FROM v3_bitemporal_misconception_edges") || statement.includes("JOIN v3_bitemporal_misconception_edges");
     if (guarded) {
       expect(statement).toContain("IS JSON OBJECT WITH UNIQUE KEYS");
-      expect(statement).toContain("lineage.course_id = conversation.course_id");
+      expect(statement).toMatch(/lineage\.course_id\s*=\s*\(\s*COALESCE\(conversation\.course_id/);
+      expect(statement).toContain("t.context_anchor->>'courseId'");
+      expect(statement).toContain("FROM opening_learning_sessions ls");
       expect(statement).toContain("e.privacy_epoch = w.privacy_epoch");
       expect(statement).toContain("e.valid_range @> payload.at AND e.tx_range @> payload.at");
       expect(statement).toContain("c.archived_at IS NULL");
@@ -79,6 +81,8 @@ it("redacts a revoked answer in turns, previews and resume history without relea
     if (statement.startsWith("SELECT c.id,")) return [{ id: summaryBase.id, title: "t", course_id: null, updated_at: summaryBase.updatedAt,
       preview_turn_id: guarded && statement.includes("THEN NULL ELSE t.id") ? null : id,
       last_turn_preview: guarded && query.values.includes(hiddenText) ? hiddenText : original.text }];
+    if (statement.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (statement.includes("opening_workspace_history_revisions")) return [];
     if (statement.startsWith("SELECT t.role,t.status")) return guarded ? [] : [original];
     if (statement.startsWith("SELECT t.id, t.conversation_id") || statement.startsWith("SELECT t.id,t.role")) {
       const redacted = guarded && statement.includes("display_authority.inactive_misconception");
@@ -89,12 +93,67 @@ it("redacts a revoked answer in turns, previews and resume history without relea
     }
     return unexpected(query);
   });
-  const begin = vi.fn();
+  const begin = vi.fn(async (run: (tx: typeof sql) => Promise<void>) => run(sql));
   const repo = createOpeningConversationRepository(Object.assign(sql, { begin }));
   expect(await repo.listTurns(scope, summaryBase.id)).toMatchObject([{ text: hiddenText, citations: [], systemQuery: null }]);
   expect((await repo.listSummaries(scope))[0]?.lastTurnPreview).toBe(hiddenText);
   expect(await repo.loadContinuityTurns(scope, summaryBase.id)).toEqual([{ id, role: "assistant", text: hiddenText, citations: [] }]);
   expect(queries.filter(query => query.text.startsWith("SELECT t.role,t.status"))).toHaveLength(0);
-  await repo.releaseReturnedTurnIds(scope, summaryBase.id, [id]);
   expect(begin).not.toHaveBeenCalled();
+  await repo.releaseReturnedTurnIds(scope, summaryBase.id, [id]);
+  expect(begin).toHaveBeenCalledOnce();
+  expect(queries.findIndex(query => query.text.includes("SELECT revision FROM opening_workspace_history_revisions")))
+    .toBeLessThan(queries.findIndex(query => query.text.startsWith("SELECT t.role,t.status")));
+});
+
+it.each(["turns", "summaries"] as const)("rechecks %s after waiting for a pending exposure's history lock", async lane => {
+  const scope = { workspaceId: summaryBase.id, ownerUserId: summaryBase.id };
+  const hiddenText = "关联学习记录已更新或撤回，此回答内容不再显示。";
+  const reads: boolean[] = [];
+  let withdrew = false;
+  const { sql, queries } = sqlSimulation(query => {
+    const statement = query.text;
+    if (statement.startsWith("SELECT id, title, course_id")) {
+      return [{ id: summaryBase.id, title: "t", course_id: null, updated_at: summaryBase.updatedAt }];
+    }
+    if (statement.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (statement.startsWith("INSERT INTO opening_workspace_history_revisions")) return [];
+    if (statement.startsWith("SELECT revision FROM opening_workspace_history_revisions")) {
+      withdrew = true;
+      return [];
+    }
+    const prefix = lane === "turns" ? "SELECT t.id, t.conversation_id" : "SELECT c.id,";
+    if (!statement.startsWith(prefix)) return unexpected(query);
+    reads.push(withdrew);
+    const guarded = statement.includes("WITH RECURSIVE mem_deps(dep_id)")
+      && statement.includes("(dm).course_id") && statement.includes("(dt).intent_hash")
+      && statement.includes("display_authority.inactive_misconception");
+    const visible = !withdrew || !guarded;
+    const text = visible ? "answer based on a memory" : hiddenText;
+    return [{ id: summaryBase.id, conversation_id: summaryBase.id, role: "assistant", mode: "hint",
+      status: "complete", title: "t", created_at: summaryBase.updatedAt, updated_at: summaryBase.updatedAt,
+      text, last_turn_preview: text, citations: [], pending_exposure_ids: visible ? [summaryBase.id] : [],
+      exposure_receipt: visible ? { id: summaryBase.id, released_at: null } : null }];
+  });
+  const repo = createOpeningConversationRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+
+  if (lane === "turns") await expect(repo.listTurns(scope, summaryBase.id)).resolves.toMatchObject([{ text: hiddenText }]);
+  else await expect(repo.listSummaries(scope)).resolves.toMatchObject([{ lastTurnPreview: hiddenText }]);
+  expect(reads).toEqual([false, true]);
+  expect(queries.some(query => query.text.startsWith("UPDATE opening_help_exposures"))).toBe(false);
+});
+
+it.each(["anchor", "learning session"] as const)("keeps a standalone answer scoped to its %s visible", async binding => {
+  const scope = { workspaceId: summaryBase.id, ownerUserId: summaryBase.id };
+  const { sql } = sqlSimulation(query => {
+    const statement = query.text;
+    if (!statement.startsWith("SELECT c.id,")) return unexpected(query);
+    const effectiveCourse = statement.includes("COALESCE(conversation.course_id")
+      && (binding === "anchor" ? statement.includes("t.context_anchor->>'courseId'")
+        : statement.includes("ls.id = t.learning_session_id") && statement.includes("ls.owner_user_id = conversation.owner_user_id"));
+    return [{ id: summaryBase.id, title: "t", course_id: null, updated_at: summaryBase.updatedAt,
+      last_turn_preview: effectiveCourse ? "course-bound answer" : "answer hidden" }];
+  });
+  await expect(createOpeningConversationRepository(sql).listSummaries(scope))
+    .resolves.toMatchObject([{ lastTurnPreview: "course-bound answer" }]);
 });

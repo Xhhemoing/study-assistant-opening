@@ -4,6 +4,7 @@ import type { OpeningScope } from "./opening-sources";
 import { isLineageUuid, lineageUuid, memoryCourseAllows, memoryDependencyWalk, type FragmentFactory } from "./opening-context-provenance";
 import { lockAndReadMemoryOrigins, lockOwnedWorkspace, readBareUserOrigins } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { readMemoryMisconceptionLineages, sourceTurnsAllowMisconceptionMemory } from "./v3-bitemporal-misconception-memory";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
@@ -32,7 +33,12 @@ export function confirmOwnedMemory(
     await lockOwnedWorkspace(tx, scope);
     const rows = await tx`
       SELECT * FROM opening_memories
-      WHERE id = ${id} AND workspace_id = ${scope.workspaceId} FOR UPDATE`;
+      WHERE id = ${id} AND workspace_id = ${scope.workspaceId}
+        AND (course_id IS NULL OR EXISTS (
+          SELECT 1 FROM courses c WHERE c.id = opening_memories.course_id
+            AND c.workspace_id = opening_memories.workspace_id AND c.archived_at IS NULL FOR SHARE
+        ))
+      FOR UPDATE`;
     if (!rows.length) throw new OpeningMemoryError("NOT_FOUND", "memory not found");
     const row = rows[0] as Record<string, unknown>;
     const current = mapMemoryRow(row);
@@ -54,6 +60,16 @@ export function confirmOwnedMemory(
       && current.sourceTurnIds.length > 0 && current.sourceTurnIds.every(isLineageUuid)
       && (await readBareUserOrigins(tx, scope, current.sourceTurnIds)).size
         === new Set(current.sourceTurnIds.map(turnId => turnId.toLowerCase())).size;
+    let originTurnIds: string[] = [];
+    let ancestorMemoryIds: string[] = [];
+    const assertMisconceptionOrigins = async () => {
+      if (bareOrigins) return;
+      const active = await readMemoryMisconceptionLineages(tx, scope, ancestorMemoryIds, current.courseId);
+      if (active.size !== ancestorMemoryIds.length
+        || !await sourceTurnsAllowMisconceptionMemory(tx, scope, originTurnIds, current.courseId)) {
+        throw new OpeningMemoryError("VALIDATION", "memory source or dependency misconception is unavailable");
+      }
+    };
     if (!bareOrigins && (current.courseId !== null || current.kind === "temporary" || current.sourceTurnIds.length > 0)) {
       const memoryCourse: FragmentFactory = () => tx`m.course_id`;
       const workspace: FragmentFactory = () => tx`m.workspace_id`;
@@ -76,9 +92,11 @@ export function confirmOwnedMemory(
           AND ${memoryCourseAllows(tx, memoryCourse, memoryCourse, workspace)}
           AND (m.kind <> 'temporary' OR m.expires_at > clock_timestamp()) AND chain.all_active`;
       if (!admitted) throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
-      const origin = admitted.origin_turn_ids?.length ? (await lockAndReadMemoryOrigins(tx, scope, [{
-        id: id.toLowerCase(), excludedId: id.toLowerCase(), course_id: current.courseId, turn_ids: admitted.origin_turn_ids,
+      originTurnIds = admitted.origin_turn_ids ?? [];
+      const origin = originTurnIds.length ? (await lockAndReadMemoryOrigins(tx, scope, [{
+        id: id.toLowerCase(), excludedId: id.toLowerCase(), course_id: current.courseId, turn_ids: originTurnIds,
       }], { writeAdmission: true })).get(id.toLowerCase()) : undefined;
+      ancestorMemoryIds = [...(origin?.ids ?? [])];
       if (origin === null) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
@@ -92,6 +110,7 @@ export function confirmOwnedMemory(
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
       if (Number.isFinite(expiry)) expiryBeforeCommit = new Date(expiry).toISOString();
+      await assertMisconceptionOrigins();
     }
     const updated = await tx`
       UPDATE opening_memories
@@ -107,6 +126,7 @@ export function confirmOwnedMemory(
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }
     }
+    await assertMisconceptionOrigins();
     return mapMemoryRow(updated[0] as Record<string, unknown>);
   });
 }

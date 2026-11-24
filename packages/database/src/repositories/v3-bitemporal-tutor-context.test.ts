@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 import { loadTutorHistoryContext, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
 import { createOpeningMemoryRepository } from "./opening-memory";
+import { admitTaskCandidate } from "./opening-task-candidate-admission";
 import { sqlSimulation, unexpected } from "./opening-resident-f11-sql-simulation";
 import { assertTutorAttemptContext, readTutorAttemptContext, tutorAttemptFence } from "./opening-tutor-attempt-context";
 import {
@@ -70,7 +71,9 @@ function setup() {
     if (sql.startsWith("SELECT tj.user_turn_id FROM opening_tutor_jobs")) return {};
     if (sql.startsWith("SELECT source_id, source_version, true AS version_required")
       || sql.startsWith("SELECT k.source_id::text AS source_id")
-      || sql.startsWith("SELECT COALESCE(array_agg(") || sql.startsWith("SELECT dep.id")) return {};
+      || sql.startsWith("SELECT COALESCE(array_agg(") || sql.startsWith("SELECT dep.id")
+      || sql.startsWith("SELECT CASE WHEN (child.course_id") || sql.startsWith("SELECT lower(dep.id)")
+      || sql.startsWith("SELECT (")) return {};
     if (sql.startsWith("WITH candidate_target AS MATERIALIZED")) return state.candidateTarget ? [state.candidateTarget] : [];
     if (sql.startsWith("WITH tick AS MATERIALIZED")) return state.activeLineage ? [{ position: 0 }] : [];
     if (/^(INSERT INTO|SELECT revision FROM) opening_workspace_history_revisions/.test(sql)) return [];
@@ -94,7 +97,7 @@ function setup() {
   return { sql, query, state, rowPagesRead };
 }
 
-it("checks a memory's first assistant origin on confirmation and model reuse", async () => {
+it("checks a restored memory's assistant origin without a tutor job on confirmation and model reuse", async () => {
   const memoryId = "33333333-3333-4333-8333-333333333333";
   const memory = { id: memoryId, workspace_id: scope.workspaceId, course_id: null, text: "Misconception derivative",
     source_turn_ids: [assistantTurnId], version: 0, expires_at: null, status: "active", kind: "candidate", created_at: at, updated_at: at };
@@ -107,24 +110,185 @@ it("checks a memory's first assistant origin on confirmation and model reuse", a
     if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
     if (text.startsWith("INSERT INTO opening_workspace_history_revisions") || text.startsWith("SELECT revision FROM opening_workspace_history_revisions")) return [];
     if (text.startsWith("SELECT t.id FROM opening_turns saved")) return [{ id: { turnId: assistantTurnId } }];
+    if (text.startsWith("SELECT t.id FROM opening_turns t")) return active ? [{ id: assistantTurnId }] : [];
     if (text.startsWith("SELECT t.id FROM opening_turns")) return [];
+    if (text.startsWith("SELECT id FROM opening_memories") && text.includes("lineage.hashes")) {
+      return active ? [{ id: { memoryId, hashes: [JSON.stringify(usedLineage)] } }] : [];
+    }
     if (text.startsWith("SELECT m.id, course.id AS turn_course_id")) return [{ id: query.values.find(Array.isArray)?.[0], turn_course_id: null,
-      historical_user_turn_id: userTurnId, refs: [], backings: [], source_ids: [], material_use: null }];
+      historical_user_turn_id: null, refs: [], backings: [], source_ids: [], material_use: null }];
     if (text.startsWith("SELECT m.*,") && text.includes("AS bare_origins")) return confirmationCount ? [{ ...memory, bare_origins: false }] : [];
     if (text.includes("WITH RECURSIVE eligible AS MATERIALIZED") && text.includes("AS evidence_turn_ids")) return [{ ...memory,
       kind: "confirmed", evidence_turn_ids: memory.source_turn_ids, material_source_refs: [] }];
     if (text.startsWith("SELECT m.id, chain.temporary_expires_at")) return [{ id: memoryId, origin_turn_ids: memory.source_turn_ids }];
-    if (text.startsWith("SELECT") && text.includes("FROM opening_memories") && text.includes("FOR UPDATE")) return [memory];
+    if (text.startsWith("SELECT * FROM opening_memories WHERE id")) return [memory];
     if (text.startsWith("UPDATE opening_memories")) { confirmationCount++; return [{ ...memory, kind: "confirmed" }]; }
     return unexpected(query);
   });
   const memories = createOpeningMemoryRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
   await expect(memories.confirm(scope, memoryId, 0, "confirm-active")).resolves.toMatchObject({ kind: "confirmed" });
-  expect((await memories.listContext(scope, new Date(at).toISOString())).memories.map(row => row.id)).toEqual([memoryId]);
+  const context = await memories.listContext(scope, new Date(at).toISOString());
+  expect(context.memories.map(row => row.id)).toEqual([memoryId]);
+  expect(context.misconceptionLineage).toEqual(usedLineage);
   active = false;
   await expect(memories.confirm(scope, memoryId, 0, "confirm-after-withdrawal")).rejects.toMatchObject({ code: "VALIDATION" });
   expect(confirmationCount).toBe(1);
   expect((await memories.listContext(scope, new Date(at).toISOString())).memories).toEqual([]);
+});
+
+it.each([null, otherCourseId, courseId])("admits a course misconception source only in its own course (%s)", async target => {
+  const memoryId = "33333333-3333-4333-8333-333333333333";
+  const courseLocked: string[] = [];
+  const { sql, queries } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.includes("opening_workspace_history_revisions")) return [];
+    if (text.startsWith("SELECT id FROM courses")) {
+      if (text.endsWith("FOR SHARE")) courseLocked.push(target!);
+      return [{ id: target }];
+    }
+    if (text.startsWith("SELECT t.id FROM opening_turns saved")) return [{ id: assistantTurnId }];
+    if (text.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
+    if (text.startsWith("SELECT t.id FROM opening_turns t")) {
+      expect(text).toContain("prior_a.status = 'complete' AND NOT prior_a.query_system");
+      expect(text).toContain("prior_a.created_at, prior_a.id");
+      expect(text).toContain("lineage.course_id = ?::uuid");
+      expect(query.values).toContain(target);
+      if (target !== null) expect(courseLocked).toContain(target);
+      return target === courseId ? [{ id: assistantTurnId }] : [];
+    }
+    if (text.startsWith("SELECT source_turn_ids, text")) return [];
+    if (text.startsWith("INSERT INTO opening_memories")) return [{ id: memoryId, workspace_id: scope.workspaceId, course_id: target,
+      source_turn_ids: [assistantTurnId], kind: "candidate", status: "active", version: 0, created_at: at, updated_at: at }];
+    return unexpected(query);
+  });
+  const repo = createOpeningMemoryRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+  const propose = repo.proposeMemory(scope, { text: "Derived from a restored exam answer", sourceTurnIds: [assistantTurnId],
+    courseId: target, expiresAt: null });
+  if (target === courseId) {
+    await expect(propose).resolves.toMatchObject({ courseId });
+    const insert = queries.findIndex(query => query.text.startsWith("INSERT INTO opening_memories"));
+    const checks = queries.flatMap((query, index) => query.text.startsWith("SELECT t.id FROM opening_turns t JOIN") ? [index] : []);
+    expect(checks).toHaveLength(2);
+    expect(checks[0]).toBeLessThan(insert);
+    expect(checks[1]).toBeGreaterThan(insert);
+  } else {
+    await expect(propose).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(queries.some(query => query.text.startsWith("INSERT INTO opening_memories"))).toBe(false);
+  }
+});
+
+it("rolls back replacement if a restored source's misconception becomes inactive at the privacy fence", async () => {
+  const memoryId = "33333333-3333-4333-8333-333333333333";
+  const memory = { id: memoryId, workspace_id: scope.workspaceId, course_id: courseId, source_turn_ids: [assistantTurnId],
+    kind: "confirmed", status: "active", expires_at: null, text: "Before", version: 1, created_at: at, updated_at: at };
+  const checks: number[] = [];
+  let epoch = 7;
+  let replaced = false;
+  const { sql } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.includes("opening_workspace_history_revisions") || text.startsWith("UPDATE opening_tutor_jobs")) return [];
+    if (text.startsWith("SELECT * FROM opening_memories WHERE id")) return [memory];
+    if (text.startsWith("SELECT * FROM opening_memories WHERE workspace_id")) return [];
+    if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
+    if (text.startsWith("SELECT t.id FROM opening_turns AS t")) return [];
+    if (text.startsWith("SELECT t.id FROM opening_turns saved")) return [{ id: assistantTurnId }];
+    if (text.startsWith("SELECT t.id FROM opening_turns t JOIN")) {
+      checks.push(epoch);
+      return epoch === 7 ? [{ id: assistantTurnId }] : [];
+    }
+    if (text.startsWith("UPDATE opening_memories")) return [{ id: memoryId }];
+    if (text.startsWith("INSERT INTO opening_memories")) {
+      replaced = true;
+      return [{ ...memory, text: "After", version: 2 }];
+    }
+    if (text.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: scope.workspaceId, privacy_epoch: ++epoch }];
+    return unexpected(query);
+  });
+  const repo = createOpeningMemoryRepository(Object.assign(sql, { async begin(run: (tx: typeof sql) => Promise<unknown>) {
+    try { return await run(sql); }
+    catch (error) { epoch = 7; replaced = false; throw error; }
+  } }));
+  await expect(repo.replaceMemory(scope, { id: memoryId, expectedVersion: 1, text: "After", sourceTurnIds: [assistantTurnId],
+    clientKey: "replace-restored-origin" })).rejects.toMatchObject({ code: "VALIDATION" });
+  expect(checks).toEqual([7, 8]);
+  expect({ epoch, replaced }).toEqual({ epoch: 7, replaced: false });
+});
+
+it("checks a restored task candidate's transitive misconception authority after taking course locks", async () => {
+  const candidateId = "33333333-3333-4333-8333-333333333333";
+  const dependencyId = "44444444-4444-4444-8444-444444444444";
+  let active = true;
+  let courseLocked = false;
+  const { sql } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.startsWith("SELECT c.payload")) return [{ payload: { kind: "task", title: "Practice", minutes: 15, dueText: null },
+      source_turn_id: assistantTurnId, has_memory_dependencies: true, historical_user_turn_id: null,
+      source_ids: [], course_id: courseId, role: "assistant", context_source_refs: [{ memoryDependencyIds: [dependencyId] }] }];
+    if (text.startsWith("SELECT id FROM courses") && text.endsWith("FOR SHARE")) {
+      courseLocked = true;
+      return [{ id: courseId }];
+    }
+    if (text.startsWith("SELECT t.id FROM opening_turns a")) return [{ id: assistantTurnId }];
+    if (text.startsWith("SELECT c.id FROM opening_assistant_candidates")) {
+      expect(courseLocked).toBe(true);
+      expect(text).toContain("WITH RECURSIVE mem_deps(dep_id)");
+      expect(text).toContain("lineage.course_id = (dm).course_id");
+      expect(text).toContain("v3_bitemporal_misconception_edges");
+      return active ? [{ id: candidateId }] : [];
+    }
+    return unexpected(query);
+  });
+  await expect(admitTaskCandidate(sql, scope, candidateId)).resolves.toBe(assistantTurnId);
+  active = false;
+  courseLocked = false;
+  await expect(admitTaskCandidate(sql, scope, candidateId)).rejects.toMatchObject({ code: "VALIDATION" });
+});
+
+it("persists exact restored memory revisions on completion and blocks stream delivery after withdrawal", async () => {
+  const root = "33333333-3333-4333-8333-333333333333";
+  const originTurn = "44444444-4444-4444-8444-444444444444";
+  const jobRow = { id: jobId, workspace_id: scope.workspaceId, user_turn_id: userTurnId, assistant_turn_id: assistantTurnId,
+    status: "running", claim_token: null, timing_execution_id: null, created_at: at, updated_at: at,
+    source_ids: [], source_versions: {}, course_id: courseId };
+  const lineage = { ...usedLineage, courseId };
+  let active = true;
+  const { sql, queries } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (text.includes("opening_workspace_history_revisions") || text.startsWith("SELECT pg_advisory_xact_lock")) return [];
+    if (text.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
+    if (text.startsWith("SELECT t.attempt_id,t.context_anchor") || text.startsWith("SELECT j.*,t.attempt_id")
+      || text.startsWith("SELECT j.user_turn_id")) return [jobRow];
+    if (text.startsWith("SELECT dep_m.id, dep_m.course_id")) return [{ id: root, course_id: courseId,
+      source_turn_ids: [originTurn], expires_at: null }];
+    if (text.startsWith("SELECT m.id, course.id AS turn_course_id")) return [{ id: root, turn_course_id: courseId,
+      historical_user_turn_id: null, refs: [], backings: [], source_ids: [], material_use: null }];
+    if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
+    if (text.startsWith("SELECT id FROM opening_memories")) {
+      if (!text.includes("lineage.hashes")) return [{ id: root }];
+      expect(query.values.slice(0, 3)).toEqual([scope.workspaceId, [root], courseId]);
+      return active ? [{ id: { memoryId: root, hashes: [JSON.stringify(lineage)] } }] : [];
+    }
+    if (text.startsWith("WITH tick AS MATERIALIZED")) return active ? [{ position: 0 }] : [];
+    if (text.startsWith("UPDATE opening_tutor_jobs") || text.startsWith("UPDATE opening_turns")) return [{ id: assistantTurnId }];
+    return unexpected(query);
+  });
+  const jobs = createOpeningTutorJobsRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+  const binding = { globalMemoryIds: [root] };
+  await jobs.completeTurn({ scope, jobId, assistantTurnId, text: "answer", contextSourceRefs: [], citations: [], candidates: [] }, binding);
+  const saved = queries.find(query => query.text.startsWith("UPDATE opening_turns SET text"));
+  expect(saved?.values).toContain(JSON.stringify(lineage));
+  expect(saved?.values).toContainEqual([{ memoryDependencyIds: [root] }]);
+
+  active = false;
+  const deliver = vi.fn(async () => {});
+  const stream = { ...binding, privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: null };
+  await expect(jobs.readStream(scope, jobId, stream, deliver)).rejects.toMatchObject({ code: "CONFLICT" });
+  await expect(jobs.withStreamPublication(scope, jobId, stream, deliver)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(deliver).not.toHaveBeenCalled();
 });
 
 it("ignores withdrawn prior misconceptions only when the current answer records its exact lineage", async () => {
@@ -168,6 +332,33 @@ it("delivers a clean explicit stream after prior revocation and rejects legacy o
   prior.origin_allowed = false;
   await expect(jobs.readStream(scope, jobId, { ...context, historyMisconceptionLineage: cleanLineage }, send)).rejects.toThrow("stream history is no longer available");
   expect(send).toHaveBeenCalledOnce();
+});
+
+it("checks withdrawn prior exchanges only for exam streams without explicit lineage", async () => {
+  const prior = { ...lineageRow, id: assistantTurnId };
+  const { sql } = sqlSimulation(query => {
+    const { text } = query;
+    if (text.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
+    if (text.startsWith("SELECT j.*,t.attempt_id")) {
+      expect(text).toContain("(NOT ? OR t.context_anchor->>'purpose' IS DISTINCT FROM 'exam_help') AND EXISTS (");
+      return [{ id: jobId, workspace_id: scope.workspaceId, user_turn_id: userTurnId, assistant_turn_id: assistantTurnId,
+        status: "running", claim_token: null, timing_execution_id: null, created_at: at, updated_at: at,
+        context_anchor: { purpose: "exam_help" }, source_ids: [], source_versions: {}, has_prior_exchanges: query.values[0] !== true }];
+    }
+    if (text.startsWith("WITH prior AS MATERIALIZED")) return [prior];
+    if (text.startsWith("WITH tick AS MATERIALIZED") || text.startsWith("SELECT pg_advisory_xact_lock")) return [];
+    if (text.startsWith("SELECT 1 WHERE COALESCE(jsonb_typeof(")) return [{ ok: true }];
+    return unexpected(query);
+  });
+  const jobs = createOpeningTutorJobsRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+  const deliver = vi.fn();
+  const context = { privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: null };
+
+  await expect(jobs.readStream(scope, jobId, context, deliver)).rejects.toThrow("stream history is no longer available");
+  expect(deliver).not.toHaveBeenCalled();
+  await expect(jobs.readStream(scope, jobId, { ...context, historyMisconceptionLineage: cleanLineage }, deliver))
+    .resolves.toMatchObject({ status: "running" });
+  expect(deliver).toHaveBeenCalledOnce();
 });
 
 it("admits submitted photo-only exam guidance and revalidates provenance without requiring a transcription", async () => {
@@ -218,7 +409,8 @@ it.each([
   const claimToken = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
   const row = { ...flags, assistant_turn_id: assistantTurnId, mode: "hint",
     context_anchor: { purpose: "exam_help" }, help_input_snapshot: null as unknown,
-    text: "只给我提示", learning_session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2" };
+    text: "我是猜的", attempt_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
+    learning_session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2" };
   const query = vi.fn((parts: TemplateStringsArray, ...values: unknown[]) => {
     const statement = parts.join("?").replace(/\s+/g, " ").trim();
     if (statement.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];

@@ -9,6 +9,8 @@ import {
 import type { OpeningScope } from "./opening-sources";
 import { bareUserOrigin, lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
 import { mapMemoryRow } from "./opening-memory-types";
+import { mergeTutorMisconceptionLineages, readMemoryMisconceptionLineages,
+  type TutorMisconceptionLineage } from "./v3-bitemporal-misconception-memory";
 
 type Db = Sql | TransactionSql;
 
@@ -17,6 +19,7 @@ export type LoadedMemoryContext = {
   sourceRefs: ContextSourceRef[];
   temporaryMemoryExpiresAt?: string;
   dependencyMemoryIds?: string[];
+  misconceptionLineage?: TutorMisconceptionLineage;
 };
 
 /**
@@ -33,6 +36,7 @@ async function readMemoryContextInTx(
   sourceRefs: ContextSourceRef[];
   ancestorTemporaryExpiresAt?: string;
   ancestorMemoryIds: string[];
+  misconceptionLineage?: TutorMisconceptionLineage;
 }>> {
   await lockOwnedWorkspace(db, scope);
   const activeCourses = activeCourseId === null ? [] : await db`SELECT id FROM courses
@@ -126,6 +130,11 @@ async function readMemoryContextInTx(
   const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin",
     includeSourceRefs: true };
   const origins = await lockAndReadMemoryOrigins(db, scope, originRows, materialRules, eligibleCourseId);
+  const authorityIds = [...new Set(originRows.flatMap(({ id }) => {
+    const origin = origins.get(id);
+    return origin === null ? [] : [id, ...(origin?.ids ?? [])];
+  }))];
+  const misconceptionLineages = await readMemoryMisconceptionLineages(db, scope, authorityIds, eligibleCourseId);
   return rows.flatMap(row => {
     const origin = origins.get(String(row.id));
     const savedRefs = parseContextSourceRefs(row.material_source_refs);
@@ -140,7 +149,14 @@ async function readMemoryContextInTx(
       ...(parseContextMemoryDependencyIds([{ memoryDependencyIds: row.ancestor_memory_ids }]) ?? []),
       ...(origin?.ids ?? []),
     ])].sort();
-    return [{ memory: mapMemoryRow(row as Record<string, unknown>), sourceRefs, ancestorTemporaryExpiresAt, ancestorMemoryIds }];
+    const id = String(row.id);
+    if (origins.has(id) && (!misconceptionLineages.has(id)
+      || ancestorMemoryIds.some(ancestor => !misconceptionLineages.has(ancestor)))) return [];
+    const misconceptionLineage = mergeTutorMisconceptionLineages(
+      misconceptionLineages.get(id), ...ancestorMemoryIds.map(ancestor => misconceptionLineages.get(ancestor)),
+    );
+    return [{ memory: mapMemoryRow(row as Record<string, unknown>), sourceRefs,
+      ancestorTemporaryExpiresAt, ancestorMemoryIds, misconceptionLineage }];
   });
 }
 
@@ -191,10 +207,12 @@ export async function loadMemoryContext(
     for (const id of row.ancestorMemoryIds) dependencyIds.add(id);
   }
   const dependencyMemoryIds = [...dependencyIds].sort();
+  const misconceptionLineage = mergeTutorMisconceptionLineages(...eligible.map(row => row.misconceptionLineage));
   return {
     memories: eligible.map((row) => row.memory),
     sourceRefs: mergeContextSourceRefs(...eligible.map((row) => row.sourceRefs)),
     ...(earliestTempExpiresAtIso ? { temporaryMemoryExpiresAt: earliestTempExpiresAtIso } : {}),
     ...(dependencyMemoryIds.length ? { dependencyMemoryIds } : {}),
+    ...(misconceptionLineage ? { misconceptionLineage } : {}),
   };
 }

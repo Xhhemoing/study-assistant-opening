@@ -4,7 +4,7 @@ import { resolveOpeningStudyContext } from "./opening-study-context";
 import { createHash, randomUUID } from "node:crypto";
 import { readOpeningSavedTurnRetry, savedTurnRetryAssistantId, savedTurnRetryMatches } from "./opening-conversation-retry";
 export { readOpeningSavedTurnRetry, savedTurnRetryAssistantId } from "./opening-conversation-retry";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
 import { turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
 import { systemQueryReceiptSchema } from "@aistudy/contracts";
@@ -119,21 +119,20 @@ function queryDisplay(row: Record<string, unknown>, scope: OpeningConversationSc
 }
 
 export function createOpeningConversationRepository(sql: Sql) {
-  async function releaseReturnedExposures(scope: OpeningConversationScope, rows: readonly Record<string, unknown>[]) {
-    const pending = rows.flatMap(row => row.role === "assistant" && row.status === "complete" && row.exposure_receipt && (row.exposure_receipt as Record<string, unknown>).released_at == null
+  const pendingExposureIds = (rows: readonly Record<string, unknown>[]) => rows.flatMap(row =>
+    row.role === "assistant" && row.status === "complete" && row.exposure_receipt
+      && (row.exposure_receipt as Record<string, unknown>).released_at == null
       ? [String((row.exposure_receipt as Record<string, unknown>).id)] : []);
+  async function releaseReturnedExposures(tx: TransactionSql, scope: OpeningConversationScope, ids: string[]) {
     const receipts = new Map<string, StudyExposureReceipt>();
-    if (pending.length) await sql.begin(async tx => {
-      await lockWorkspaceLearningHistory(tx, scope);
-      for (const id of pending) receipts.set(id, await releaseOpeningStudyExposure(tx, scope, id));
-    });
+    for (const id of new Set(ids)) receipts.set(id, await releaseOpeningStudyExposure(tx, scope, id));
     return receipts;
   }
-  const visibleTurnText = () => sql`CASE
+  const visibleTurnText = (db: Sql | TransactionSql) => db`CASE
     WHEN display_authority.inactive_misconception THEN ${INACTIVE_MISCONCEPTION_MESSAGE}
     WHEN t.role='assistant' AND display_authority.deleted_source THEN '关联材料已删除，此回答内容不再显示。'
     ELSE t.text END`;
-  const hiddenTurnDetails = () => sql`display_authority.deleted_source OR display_authority.inactive_misconception`;
+  const hiddenTurnDetails = (db: Sql | TransactionSql) => db`display_authority.deleted_source OR display_authority.inactive_misconception`;
   return {
     async create(
       scope: OpeningConversationScope,
@@ -206,17 +205,24 @@ export function createOpeningConversationRepository(sql: Sql) {
     async listSummaries(
       scope: OpeningConversationScope,
     ): Promise<ConversationSummary[]> {
-      const rows = await sql`
+      const readSummaries = (db: Sql | TransactionSql) => db`
         SELECT
           c.id,
           c.title,
           c.course_id,
           c.updated_at,
-          preview.turn_id AS preview_turn_id,
+          preview.pending_exposure_ids,
           preview.text AS last_turn_preview
         FROM opening_conversations c
         LEFT JOIN LATERAL (
-            SELECT CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE t.id END AS turn_id, LEFT(
+            SELECT CASE WHEN t.role='assistant' AND t.status='complete' AND NOT (${hiddenTurnDetails(db)})
+              THEN ARRAY(
+                SELECT h.id FROM opening_help_exposures h WHERE h.turn_id=t.id AND h.workspace_id=t.workspace_id
+                  AND h.owner_user_id=c.owner_user_id
+                  AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL AND h.released_at IS NULL
+                ORDER BY h.id
+              ) ELSE '{}'::uuid[] END AS pending_exposure_ids,
+              LEFT(
               CASE
                 WHEN display_authority.inactive_misconception THEN ${INACTIVE_MISCONCEPTION_MESSAGE}
                 WHEN t.role='assistant' AND display_authority.deleted_source
@@ -235,17 +241,23 @@ export function createOpeningConversationRepository(sql: Sql) {
               WHERE t.conversation_id = c.id AND t.workspace_id = c.workspace_id
               ORDER BY t.created_at DESC,t.id DESC LIMIT 1
             ) t
-            CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(sql)} AS deleted_source,
-              ${turnUsesInactiveMisconception(sql)} AS inactive_misconception OFFSET 0) display_authority
+            CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(db)} AS deleted_source,
+              ${turnUsesInactiveMisconception(db)} AS inactive_misconception OFFSET 0) display_authority
             LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id
         ) preview ON true
         WHERE c.workspace_id = ${scope.workspaceId}
           AND c.owner_user_id = ${scope.ownerUserId}
         ORDER BY c.updated_at DESC
       `;
-      for (const row of rows) {
-        if (row.preview_turn_id && row.last_turn_preview) await this.releaseReturnedTurnIds(scope, String(row.id), [String(row.preview_turn_id)]);
-      }
+      const pending = (rows: readonly Record<string, unknown>[]) =>
+        rows.flatMap(row => (row.pending_exposure_ids as string[] | null | undefined) ?? []);
+      const initial = await readSummaries(sql);
+      const rows = pending(initial).length ? await sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const current = await readSummaries(tx);
+        await releaseReturnedExposures(tx, scope, pending(current));
+        return [...current];
+      }) : initial;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;
         return {
@@ -263,16 +275,16 @@ export function createOpeningConversationRepository(sql: Sql) {
       conversationId: string,
     ): Promise<TurnRecord[]> {
       await this.getOwned(scope, conversationId);
-      const rows = await sql`
+      const readTurns = (db: Sql | TransactionSql) => db`
         SELECT t.id, t.conversation_id, t.role,
-          ${visibleTurnText()} AS text,
+          ${visibleTurnText(db)} AS text,
           t.mode, t.status, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,
-          CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt,
-          CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE t.system_query END AS system_query,
-          CASE WHEN ${hiddenTurnDetails()} THEN '[]'::jsonb ELSE t.citations END AS citations
+          CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt,
+          CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE t.system_query END AS system_query,
+          CASE WHEN ${hiddenTurnDetails(db)} THEN '[]'::jsonb ELSE t.citations END AS citations
         FROM opening_turns t
-        CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(sql)} AS deleted_source,
-          ${turnUsesInactiveMisconception(sql)} AS inactive_misconception OFFSET 0) display_authority
+        CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(db)} AS deleted_source,
+          ${turnUsesInactiveMisconception(db)} AS inactive_misconception OFFSET 0) display_authority
         LEFT JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id
           AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
         LEFT JOIN opening_tutor_jobs j
@@ -285,8 +297,8 @@ export function createOpeningConversationRepository(sql: Sql) {
         ORDER BY t.created_at ASC, COALESCE(j.id, t.id) ASC,
           CASE WHEN t.id = j.user_turn_id THEN 0 ELSE 1 END ASC, t.id ASC
       `;
-      const released = await releaseReturnedExposures(scope, rows);
-      return rows.map((row) => {
+      const initial = await readTurns(sql);
+      const mapTurns = (rows: readonly Record<string, unknown>[], released: ReadonlyMap<string, StudyExposureReceipt>) => rows.map((row): TurnRecord => {
         const r = row as Record<string, unknown>;
         const display = queryDisplay(r, scope);
         return {
@@ -303,16 +315,26 @@ export function createOpeningConversationRepository(sql: Sql) {
           systemQuery: display.systemQuery,
         };
       });
+      if (!pendingExposureIds(initial).length) return mapTurns(initial, new Map());
+      return sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const rows = await readTurns(tx);
+        return mapTurns(rows, await releaseReturnedExposures(tx, scope, pendingExposureIds(rows)));
+      });
     },
 
     async releaseReturnedTurnIds(scope: OpeningConversationScope, conversationId: string, turnIds: readonly string[]): Promise<void> {
       if (!turnIds.length) return;
-      const rows = await sql`SELECT t.role,t.status,to_jsonb(h) AS exposure_receipt FROM opening_turns t
+      await sql.begin(async tx => {
+        await lockWorkspaceLearningHistory(tx, scope);
+        const rows = await tx`SELECT t.role,t.status,to_jsonb(h) AS exposure_receipt FROM opening_turns t
         JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
         JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
         WHERE t.workspace_id=${scope.workspaceId} AND t.conversation_id=${conversationId} AND t.id=ANY(${[...turnIds]}::uuid[])
-          AND t.status='complete' AND NOT (${turnUsesDeletedSource(sql)}) AND NOT (${turnUsesInactiveMisconception(sql)})`;
-      await releaseReturnedExposures(scope, rows);
+          AND t.status='complete' AND h.released_at IS NULL
+          AND NOT (${turnUsesDeletedSource(tx)}) AND NOT (${turnUsesInactiveMisconception(tx)})`;
+        await releaseReturnedExposures(tx, scope, pendingExposureIds(rows));
+      });
     },
 
     async loadContinuityTurns(
@@ -329,9 +351,9 @@ export function createOpeningConversationRepository(sql: Sql) {
             AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
       const rows = await sql`
         SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
-          ${visibleTurnText()} AS text,
-          CASE WHEN ${hiddenTurnDetails()} THEN '[]'::jsonb ELSE t.citations END AS citations,
-          CASE WHEN ${hiddenTurnDetails()} THEN NULL ELSE t.system_query END AS system_query
+          ${visibleTurnText(sql)} AS text,
+          CASE WHEN ${hiddenTurnDetails(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations,
+          CASE WHEN ${hiddenTurnDetails(sql)} THEN NULL ELSE t.system_query END AS system_query
         FROM opening_turns t
         CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(sql)} AS deleted_source,
           ${turnUsesInactiveMisconception(sql)} AS inactive_misconception OFFSET 0) display_authority
@@ -453,11 +475,13 @@ export function createOpeningConversationRepository(sql: Sql) {
 
         const examHelp = input.contextAnchor?.purpose === "exam_help";
         const examReplay = examHelp && !retryIntent ? input.examHelpReplay : undefined;
-        const purpose = examHelp && !retryIntent && input.purpose !== "answer" && input.purpose !== "teach" ? undefined : input.purpose;
+        const purpose = examHelp && !retryIntent && input.querySystem === true && input.purpose !== "explain_state"
+          ? "query" : input.purpose;
         const querySystem = !examHelp && input.querySystem === true;
         const intentFor = (sourceVersions: Record<string, number>,
-          kind: "current" | "legacy_exam" = "current"): SavedTurnIntent => {
-          const intentPurpose = kind === "current" ? purpose : examReplay?.legacyPurpose;
+          kind: "current" | "legacy_exam" | "round4_exam" = "current"): SavedTurnIntent => {
+          const intentPurpose = kind === "legacy_exam" ? examReplay?.legacyPurpose
+            : kind === "round4_exam" && purpose !== "answer" && purpose !== "teach" ? undefined : purpose;
           return {
             conversationId: input.conversationId,
             text: input.text,
@@ -472,7 +496,7 @@ export function createOpeningConversationRepository(sql: Sql) {
             ...(querySystem ? { querySystem: true as const } : {}),
             ...(input.contextAnchor ? { contextAnchor: input.contextAnchor } : {}),
             ...(intentPurpose ? { purpose: intentPurpose } : {}),
-            ...(kind === "current" && examReplay ? { strategyTemplateId: input.strategyTemplateId ?? null, examRequest: examReplay.requested } : {}),
+            ...(kind !== "legacy_exam" && examReplay ? { strategyTemplateId: input.strategyTemplateId ?? null, examRequest: examReplay.requested } : {}),
           };
         };
         const readReplay = async () => {
@@ -500,6 +524,9 @@ export function createOpeningConversationRepository(sql: Sql) {
           let matches = !examReplay?.replayOnly && savedHash === hashSavedTurnIntent(intentFor(sourceVersions));
           if (!matches && examReplay && !examReplay.replayOnly && examReplay.requested.querySystem !== true) {
             matches = savedHash === hashSavedTurnIntent(intentFor(sourceVersions, "legacy_exam"));
+          }
+          if (!matches && examReplay && !examReplay.replayOnly) {
+            matches = savedHash === hashSavedTurnIntent(intentFor(sourceVersions, "round4_exam"));
           }
           let legacyQueryMatched = false;
           if (!matches && examReplay?.legacyQuery) {

@@ -228,7 +228,8 @@ export function createTutorService(deps: {
       const examHelp = request.contextAnchor?.purpose === "exam_help";
       const requestedPurpose = retryIntent ? retryIntent.purpose ?? undefined
         : request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
-      const purpose = examHelp && !retryIntent && requestedPurpose !== "answer" && requestedPurpose !== "teach" ? undefined : requestedPurpose;
+      const purpose = examHelp && !retryIntent && resolved.querySystem && requestedPurpose !== "explain_state"
+        ? "query" : requestedPurpose;
       let input = { ...request, mode: resolved.mode, purpose };
       const queryIntent = resolved.querySystem ? {
         text: composerMessageText(input.text), mode: input.mode,
@@ -238,7 +239,7 @@ export function createTutorService(deps: {
       } : undefined;
       const examHelpReplay = examHelp && !retryIntent ? {
         requested: { purpose: request.purpose, querySystem: request.querySystem }, legacyPurpose: requestedPurpose,
-        legacyQuery: request.querySystem === false ? undefined : queryIntent,
+        legacyQuery: queryIntent,
       } : undefined;
       if (examHelpReplay && existing?.querySystem) {
         const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId,
