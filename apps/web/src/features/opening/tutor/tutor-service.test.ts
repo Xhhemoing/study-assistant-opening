@@ -19,6 +19,7 @@ function createService(opts?: {
   listReadySourceIdsForCourse?: ReturnType<typeof vi.fn>;
   tutorModelReady?: ReturnType<typeof vi.fn>;
   attempts?: Parameters<typeof createTutorService>[0]["attempts"];
+  systemQueryEnabled?: () => boolean;
 }) {
   const conversations = {
     getOwned: vi.fn(async () => ({
@@ -45,6 +46,7 @@ function createService(opts?: {
       conversations,
       sourceChunks,
       readSelection,
+      systemQueryEnabled: opts?.systemQueryEnabled,
       ...(listReadySourceIdsForCourse ? { listReadySourceIdsForCourse } : {}),
       ...(opts?.tutorModelReady ? { tutorModelReady: opts.tutorModelReady } : {}),
       attempts: opts?.attempts,
@@ -444,6 +446,46 @@ it("routes a continued saved query from prior user intent rather than assistant 
   const service = createTutorService({ conversations: f.conversations, sourceChunks: f.sourceChunks, readSelection: f.readSelection, systemQueryEnabled: () => true });
   await service.submitTurn(scope, { conversationId: CONVERSATION, text: "那练习情况呢", sourceIds: [], mode: "listen", privacy: "saved", clientKey: "followup-status" });
   expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ querySystem: true }));
+});
+
+describe("exam-help admission", () => {
+  const attemptId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const request = { conversationId: CONVERSATION, text: "Help with this exam", sourceIds: [S], privacy: "saved",
+    clientKey: "exam-help-admission", currentPage: 4, chunkId: C, contextAnchor: { purpose: "exam_help", attemptId } };
+
+  it.each([
+    [{ text: "高数进度怎么样" }, undefined],
+    [{ querySystem: true }, undefined],
+    [{ purpose: "plan" }, undefined],
+    [{ purpose: "query" }, undefined],
+    [{ purpose: "explain_state" }, undefined],
+    [{ purpose: "answer" }, "answer"],
+    [{ purpose: "teach" }, "teach"],
+  ])("applies material and attempt admission to %j", async (intent, purpose) => {
+    const assertAccess = vi.fn(async () => ({ id: attemptId, sessionId: S }));
+    const f = createService({ attempts: { assertAccess }, systemQueryEnabled: () => true });
+
+    await expect(f.service.submitTurn(scope, { ...request, ...intent })).resolves.toMatchObject({ learningSessionId: S });
+    expect(f.sourceChunks.listForSources).toHaveBeenCalledWith(scope, [S]);
+    expect(assertAccess).toHaveBeenCalledWith(scope, attemptId);
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId, learningSessionId: S, sourceIds: [S], currentPage: 4, chunkId: C, purpose,
+    }));
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalledWith(expect.objectContaining({ querySystem: true }));
+  });
+
+  it.each([
+    ["SOURCE_UNAVAILABLE", 422, { sourceIds: [COURSE] }],
+    ["page_not_in_sources", 422, { currentPage: 9 }],
+    ["NOT_FOUND", 404, {}],
+  ])("rejects a record-style exam request when admission fails with %s", async (code, status, changes) => {
+    const assertAccess = vi.fn(async () => null);
+    const f = createService({ attempts: { assertAccess }, systemQueryEnabled: () => true });
+
+    await expect(f.service.submitTurn(scope, { ...request, ...changes, text: "高数进度怎么样" }))
+      .rejects.toMatchObject({ code, status });
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
 });
 
 describe("tutor model readiness at send time", () => {

@@ -87,6 +87,44 @@ function setup() {
   return { sql, query, state, rowPagesRead };
 }
 
+it.each([
+  { query_system: true, composer_purpose: "answer" },
+  { query_system: false, composer_purpose: "plan" },
+  { query_system: false, composer_purpose: "query" },
+  { query_system: false, composer_purpose: "explain_state" },
+])("freezes a read-only exam snapshot for %j without applying study intent", async flags => {
+  const claimToken = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+  const row = { ...flags, assistant_turn_id: assistantTurnId, mode: "hint",
+    context_anchor: { purpose: "exam_help" }, help_input_snapshot: null as unknown,
+    text: "只给我提示", learning_session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2" };
+  const query = vi.fn((parts: TemplateStringsArray, ...values: unknown[]) => {
+    const statement = parts.join("?").replace(/\s+/g, " ").trim();
+    if (statement.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+    if (/^(INSERT INTO|SELECT revision FROM) opening_workspace_history_revisions/.test(statement)) return [];
+    if (statement.startsWith("SELECT t.*,j.assistant_turn_id")) {
+      expect(values).toEqual([jobId, userTurnId, scope.workspaceId, scope.ownerUserId, claimToken]);
+      return [row];
+    }
+    if (statement.startsWith("UPDATE opening_turns SET help_input_snapshot")) {
+      row.help_input_snapshot = values[0];
+      return [];
+    }
+    throw new Error("Unexpected query: " + statement);
+  });
+  const tx = Object.assign(query, { json: (value: unknown) => value });
+  const jobs = createOpeningTutorJobsRepository({ begin: (run: (tx: typeof query) => unknown) => run(tx) } as unknown as Sql);
+  const input = { userTurnId, jobId, claimToken };
+  const expected = { userTurnId, assistantTurnId, tutorMode: "hint", studyIntent: null };
+
+  await expect(jobs.freezeHelpInputSnapshot(scope, input)).resolves.toEqual(expected);
+  await expect(jobs.freezeHelpInputSnapshot(scope, input)).resolves.toEqual(expected);
+  expect(query.mock.calls.filter(([parts]) => parts[0]!.trim().startsWith("UPDATE opening_turns"))).toHaveLength(1);
+  await expect(jobs.applyUserTurnIntent(scope, input)).rejects.toThrow("read-only or proposal composer purpose cannot change study intent");
+  row.context_anchor.purpose = "learning_help";
+  await expect(jobs.freezeHelpInputSnapshot(scope, input)).rejects.toThrow("read-only or proposal composer purpose cannot change study intent");
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("opening_study_intent_events"))).toBe(false);
+});
+
 it.each([courseId, null])("reads owner-scoped active rows using the course filter %s and a locked database clock", async selectedCourse => {
   const { sql, query, state } = setup();
   state.pages = [[{ ...correction, courseId: selectedCourse?.toUpperCase() ?? null }, candidate]];

@@ -196,6 +196,7 @@ describe("Phase 2 pure exam tutor turns", () => {
     const savedTurn = (await f.tutorJobs.getUserTurn(userTurnId, workspaceId, jobId))!;
     f.tutorJobs.getUserTurn.mockResolvedValue({ ...savedTurn, purpose: "plan", querySystem: true });
     await expect(createTutorTurnHandler(f.deps)(jobId)).resolves.toEqual({ skipped: false });
+    expect(f.tutorJobs.freezeHelpInputSnapshot).toHaveBeenCalledExactlyOnceWith(scope, { userTurnId, jobId, claimToken });
     expect(f.tutorJobs.completeTurn).toHaveBeenCalledWith(expect.objectContaining({
       text: PURE_ANSWER_PROBE_GUIDANCE, enqueueMetadata: false,
     }), expect.anything());

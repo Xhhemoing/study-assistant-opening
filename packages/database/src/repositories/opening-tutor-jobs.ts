@@ -651,7 +651,7 @@ async function assertStreamSources(
 }
 
 type UserTurnIntentInput = { userTurnId: string; jobId: string; claimToken?: string };
-async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput) {
+async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput, { allowReadOnlyExam = false } = {}) {
   await lockWorkspaceLearningHistory(tx, scope);
   const [row] = await tx`SELECT t.*,j.assistant_turn_id FROM opening_tutor_jobs j
     JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
@@ -662,16 +662,18 @@ async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input
       AND c.owner_user_id=${scope.ownerUserId} AND j.status='running'
       AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR SHARE OF j FOR UPDATE OF t`;
   if (!row) throw new Error("study intent job lease is no longer current");
-  if (row.query_system === true || row.composer_purpose && row.composer_purpose !== "answer" && row.composer_purpose !== "teach"
-    || (row.context_anchor as StudyContextAnchor | null)?.purpose === "language_support") {
+  const anchorPurpose = (row.context_anchor as StudyContextAnchor | null)?.purpose;
+  const purpose = row.composer_purpose;
+  const readOnly = row.query_system === true || Boolean(purpose && purpose !== "answer" && purpose !== "teach") || anchorPurpose === "language_support";
+  if (readOnly && !(allowReadOnlyExam && anchorPurpose === "exam_help")) {
     throw new Error("read-only or proposal composer purpose cannot change study intent");
   }
-  return row;
+  return { row, readOnly };
 }
 
 async function applyUserTurnIntentInTx(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput,
   saved?: Record<string, unknown>): Promise<Pick<StudyIntentEvent, "intent" | "action"> | null> {
-  const row = saved ?? await lockIntentUserTurn(tx, scope, input);
+  const row = saved ?? (await lockIntentUserTurn(tx, scope, input)).row;
   const attemptId = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId ?? null;
   const [attempt] = attemptId ? await tx`SELECT id,session_id FROM opening_learning_attempts WHERE id=${String(attemptId)}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}` : [];
@@ -1980,8 +1982,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         const persistedContextSourceRefs = input.contextSourceRefs === undefined && !persistedRefs.length ? null : persistedRefs;
         const assistant = await tx`
           UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)},
-            system_query=${receipt ? tx.json(receipt as never) : null}, intent_hash = ${assistantIntentHash},
-            context_source_refs = ${persistedContextSourceRefs === null ? null : tx.json(persistedContextSourceRefs as never)}, status = 'complete'
+            system_query=${receipt ? tx.json(receipt as never) : null},
+            context_source_refs = ${persistedContextSourceRefs === null ? null : tx.json(persistedContextSourceRefs as never)},
+            intent_hash = ${assistantIntentHash}, status = 'complete'
           WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId} AND role = 'assistant' AND (${receipt === null} OR query_system)
             AND id = (SELECT j.assistant_turn_id FROM opening_tutor_jobs j WHERE j.id = ${input.jobId})
           RETURNING id
@@ -2069,13 +2072,13 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     /** Freeze before external calls; first intent application and snapshot commit are atomic. */
     async freezeHelpInputSnapshot(scope: OpeningScope, input: UserTurnIntentInput): Promise<HelpInputSnapshot> {
       return sql.begin(async tx => {
-        const row = await lockIntentUserTurn(tx, scope, input);
+        const { row, readOnly } = await lockIntentUserTurn(tx, scope, input, { allowReadOnlyExam: true });
         if (row.help_input_snapshot != null) {
           const frozen = helpInputSnapshotSchema.parse(row.help_input_snapshot);
           if (frozen.userTurnId !== input.userTurnId || frozen.assistantTurnId !== row.assistant_turn_id) throw new Error("help input snapshot job pair mismatch");
           return frozen;
         }
-        const applied = await applyUserTurnIntentInTx(tx, scope, input, row);
+        const applied = readOnly ? null : await applyUserTurnIntentInTx(tx, scope, input, row);
         const snapshot = helpInputSnapshotSchema.parse({ userTurnId: input.userTurnId, assistantTurnId: row.assistant_turn_id, tutorMode: row.mode,
           studyIntent: applied ? { intent: applied.intent, action: applied.action } : null });
         await tx`UPDATE opening_turns SET help_input_snapshot=${tx.json(snapshot)} WHERE id=${input.userTurnId} AND workspace_id=${scope.workspaceId}`;

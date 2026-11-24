@@ -225,10 +225,12 @@ export function createTutorService(deps: {
         resolved.purpose = existing.purpose ?? "answer";
         resolved.querySystem = existing.querySystem === true || ["query", "explain_state"].includes(resolved.purpose);
       }
-      const purpose = retryIntent ? retryIntent.purpose ?? undefined
+      const examHelp = request.contextAnchor?.purpose === "exam_help";
+      const requestedPurpose = retryIntent ? retryIntent.purpose ?? undefined
         : request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
+      const purpose = examHelp && requestedPurpose !== "answer" && requestedPurpose !== "teach" ? undefined : requestedPurpose;
       let input = { ...request, mode: resolved.mode, purpose };
-      if (resolved.querySystem) {
+      if (!examHelp && resolved.querySystem) {
         if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
         const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: composerMessageText(input.text), mode: input.mode,
           clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
@@ -295,7 +297,7 @@ export function createTutorService(deps: {
       }
 
       // Replays keep their original job, and exam guidance does not need a model.
-      if (!existing && input.contextAnchor?.purpose !== "exam_help" && deps.tutorModelReady && !await deps.tutorModelReady(scope, input.mode)) {
+      if (!existing && !examHelp && deps.tutorModelReady && !await deps.tutorModelReady(scope, input.mode)) {
         throw new TutorServiceError("AI_MODEL_UNAVAILABLE", TUTOR_MODEL_SETUP_MESSAGE, 409);
       }
       const saved = await deps.conversations.appendSavedTurn({
