@@ -59,7 +59,7 @@ describe("exam integration evidence presentation", () => {
   });
 
   it.each([
-    ["needs_personal_independent_evidence", "缺少可核验的独立作答记录"],
+    ["needs_personal_independent_evidence", "缺少已核对的独立作答记录"],
     ["needs_external_calibration", "缺少独立的校准样本"],
   ] as const)("shows the remaining short-mock condition for %s", (shortMockReadiness, reason) => {
     const result = { ...forecast, shortMockReadiness };

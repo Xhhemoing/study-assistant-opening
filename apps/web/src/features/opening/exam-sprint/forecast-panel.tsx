@@ -9,8 +9,8 @@ import type { ExamResources } from "./use-exam-resources";
 const kindLabels: Record<ExamPaperKind, string> = { past_exam: "历年真卷", sample: "样卷", exercise: "参考习题" };
 const percent = (value: number) => `${Math.round(value * 100)}%`;
 const readinessReasons: Record<NonNullable<ExamForecastOverview["shortMockReadiness"]>, string> = {
-  needs_personal_independent_evidence: "目前缺少可核验的独立作答记录，暂不提供短模拟估分。",
-  needs_external_calibration: "已有可核验的独立作答记录，目前仍缺少独立的校准样本，暂不提供短模拟估分。",
+  needs_personal_independent_evidence: "目前缺少已核对的独立作答记录，暂不提供短模拟估分。",
+  needs_external_calibration: "已有已核对的独立作答记录，目前仍缺少独立的校准样本，暂不提供短模拟估分。",
 };
 
 export function ForecastResults({ forecast, overview }: { forecast: ExamForecastOverview; overview: ExamSprintOverview }) {
