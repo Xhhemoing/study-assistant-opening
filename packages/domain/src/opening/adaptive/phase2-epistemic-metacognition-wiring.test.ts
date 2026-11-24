@@ -208,6 +208,140 @@ it("keeps a cartridge-withheld grade and the later retry out of the holdout", ()
   expect(compareLearnerShadowV2(input).rows).toEqual([]);
 });
 
+it.each([false, true])("preserves a cartridge-withheld exposure before an overlapping legacy revision (revision first: %s)", revisionFirst => {
+  const first = head("first", 2);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,
+    attemptedAt: "2026-10-02T12:00:00.000Z" });
+  const input = { ...projectProducedAttempts([first, retry], at(3), {
+    cartridgeEvidence: { registry: createCartridgeRegistry(), emissions: {
+      first: { cartridgeId: "unregistered", cartridgeVersion: "1", probeId: "probe", response: "correct" },
+    } },
+  }), targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const revision = projectProducedAttempts([{ ...first, problemId: "other-problem", familyKey: "other-family",
+    recordedAt: at(4), context: { referenceCheck: null } }], at(5));
+  expect(input.observations[0]).toMatchObject({ id: first.id, verifiedCorrect: "yes" });
+  expect(input.features[0]).toMatchObject({ recordedAt: at(2), eligibility: { verifiedCorrect: "unknown" },
+    gaps: expect.arrayContaining(["cartridge_evidence_not_qualified"]) });
+  expect(revision.observations[0]).toMatchObject({ id: first.id, problemId: "other-problem", verifiedCorrect: "unknown" });
+  expect(revision.features[0]).toMatchObject({ recordedAt: at(4), eligibility: { verifiedCorrect: "unknown" } });
+  expect(revision.features[0]?.gaps).not.toContain("cartridge_evidence_not_qualified");
+  const appended = { ...input, observations: revisionFirst ? [...revision.observations, ...input.observations]
+    : [...input.observations, ...revision.observations], features: [...input.features, ...revision.features] };
+
+  const before = buildSkillBeliefTrajectory(input);
+  const holdout = compareLearnerShadowV2(input);
+  expect(before.steps.map(step => [step.observationId, step.omega])).toEqual([[first.id, 0], [retry.id, 0]]);
+  expect(before.belief.lastDirectRecallAtMs).toBeNull();
+  expect(holdout.rows).toEqual([]);
+  for (const cutoff of [at(3), at(4)]) {
+    const baseline = { ...input, cutoff };
+    expect(buildSkillBeliefTrajectory({ ...appended, cutoff })).toEqual(buildSkillBeliefTrajectory(baseline));
+    expect(compareLearnerShadowV2({ ...appended, cutoff })).toEqual(compareLearnerShadowV2(baseline));
+  }
+
+  const afterRevision = { ...appended, cutoff: "2026-10-04T22:00:00.000Z" };
+  const after = buildSkillBeliefTrajectory(afterRevision);
+  expect(after.steps).toMatchObject([{ observationId: retry.id, omega: 1 }]);
+  expect(after.belief.lastDirectRecallAtMs).toBe(Date.parse(retry.attemptedAt));
+  expect(compareLearnerShadowV2(afterRevision).rows.map(row => row.observationId)).toEqual([retry.id]);
+});
+
+const withheldFirstGrade: CartridgeEvidenceInput = {
+  registry: createCartridgeRegistry(),
+  emissions: { first: { cartridgeId: "unregistered", cartridgeVersion: "1", probeId: "probe", response: "correct" } },
+};
+
+function replayEvidence(input: Parameters<typeof compareLearnerShadowV2>[0]) {
+  const { steps, belief } = buildSkillBeliefTrajectory(input);
+  return {
+    weights: steps.map(step => [step.observationId, step.omega]),
+    lastDirectRecallAtMs: belief.lastDirectRecallAtMs,
+    holdout: compareLearnerShadowV2(input).rows.map(row => row.observationId),
+  };
+}
+
+it("keeps a legacy copy at the explicit revision's recording time", () => {
+  const first = head("first", 2);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,
+    attemptedAt: "2026-10-02T12:00:00.000Z" });
+  const original = projectProducedAttempts([first, retry], at(3));
+  const moved = { ...first, problemId: "corrected-problem", familyKey: "corrected-family" };
+  const correction = projectProducedAttempts([{ ...moved, recordedAt: at(4) }], at(6), { untimestamped: false });
+  const withheld = projectProducedAttempts([{ ...moved, recordedAt: at(5), context: { referenceCheck: null } }], at(6),
+    { cartridgeEvidence: withheldFirstGrade });
+  const { recordedAt, ...legacyCopy } = correction.observations[0]!;
+  expect(recordedAt).toBe(at(4));
+  expect(withheld.features[0]).toMatchObject({ recordedAt: at(5), eligibility: { verifiedCorrect: "unknown" },
+    gaps: expect.arrayContaining(["cartridge_evidence_not_qualified"]) });
+  const input = { ...original, observations: [...original.observations, ...correction.observations, ...withheld.observations],
+    features: [...original.features, ...correction.features, ...withheld.features], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const withCopy = { ...input, observations: [...input.observations, legacyCopy] };
+  const historical = { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] };
+
+  const cutoffs = [at(3), at(4), "2026-10-04T22:00:00.000Z"];
+  const originalReplay = cutoffs.map(cutoff => replayEvidence({ ...input, cutoff }));
+  expect(originalReplay.slice(0, 2)).toEqual([historical, historical]);
+  expect(cutoffs.map(cutoff => replayEvidence({ ...withCopy, cutoff }))).toEqual(originalReplay);
+});
+
+it("retains a matching legacy head when it alone can establish the earlier recording", () => {
+  const first = head("first", 2);
+  const original = projectProducedAttempts([first], at(3));
+  const correction = projectProducedAttempts([{ ...first, recordedAt: at(4) }], at(5), { untimestamped: false });
+  const input = { ...original, targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...input, features: [...original.features, ...correction.features],
+    observations: [...correction.observations, ...original.observations] };
+  const historical = { weights: [[first.id, 1]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] };
+
+  expect(replayEvidence(appended)).toEqual(historical);
+  expect(replayEvidence({ ...appended, cutoff: at(4) })).toEqual(historical);
+  expect(replayEvidence({ ...appended, cutoff: at(5) })).toEqual({
+    weights: [[first.id, 0]], lastDirectRecallAtMs: null, holdout: [],
+  });
+});
+
+it("holds overlapping legacy revisions until their forced recording slot", () => {
+  const first = head("first", 2);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,
+    attemptedAt: "2026-10-02T12:00:00.000Z" });
+  const original = projectProducedAttempts([first, retry], at(3), { cartridgeEvidence: withheldFirstGrade });
+  const moved = { ...first, problemId: "corrected-problem", familyKey: "corrected-family" };
+  const unverified = projectProducedAttempts([{ ...moved, recordedAt: at(4), context: { referenceCheck: null } }], at(6));
+  const verified = projectProducedAttempts([{ ...moved, recordedAt: at(5) }], at(6));
+  const features = [...original.features, ...unverified.features, ...verified.features];
+  expect(features.filter(row => row.observationId === first.id).map(row => [
+    row.recordedAt, row.eligibility.verifiedCorrect, row.gaps.includes("cartridge_evidence_not_qualified"),
+  ])).toEqual([[at(2), "unknown", true], [at(4), "unknown", false], [at(5), "yes", false]]);
+  const input = { ...original, features, targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const orders = [
+    [...original.observations, ...unverified.observations, ...verified.observations],
+    [...unverified.observations, ...original.observations, ...verified.observations],
+  ];
+  const historical = { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] };
+  const afterRevision = { weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id] };
+  const cutoffs = [at(3), "2026-10-04T22:00:00.000Z"];
+
+  expect(orders.map(observations => cutoffs.map(cutoff => replayEvidence({ ...input, observations, cutoff }))))
+    .toEqual([[historical, afterRevision], [historical, afterRevision]]);
+});
+
+it("keeps overlapping full legacy buckets disputed in either order", () => {
+  const first = head("first", 2);
+  const original = projectProducedAttempts([first], at(3), { cartridgeEvidence: withheldFirstGrade });
+  const verified = projectProducedAttempts([{ ...first, recordedAt: at(5) }], at(6));
+  const unverified = projectProducedAttempts([{ ...first, problemId: "corrected-problem", familyKey: "corrected-family",
+    recordedAt: at(4), context: { referenceCheck: null } }], at(6));
+  const yes = [...original.observations, ...verified.observations];
+  const unknown = [...unverified.observations, ...unverified.observations];
+  const input = { ...original, features: [...original.features, ...unverified.features, ...verified.features],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+
+  // Neither full bucket can exclusively claim the shared October 2 slot.
+  for (const observations of [[...yes, ...unknown], [...unknown, ...yes]]) {
+    expect(replayEvidence({ ...input, observations })).toEqual({ weights: [], lastDirectRecallAtMs: null, holdout: [] });
+  }
+});
+
 it.each(["independent", "hinted"] as const)("blocks a cross-requirement retry after a cartridge-withheld %s attempt", assistance => {
   const first = head("first", 1, { requirementKey: "A", assistance });
   const retry = head("retry", 2, { requirementKey: "B", problemId: first.problemId, familyKey: first.familyKey });
@@ -502,6 +636,34 @@ it("binds untimestamped heads to matching visible versions and outcomes before r
       features: [...input.features, feature(revision, { recordedAt: at(3) })] };
     expect(predictLearnerShadowV2(appended)).toEqual(forecast);
     expect(compareLearnerShadowV2({ ...appended, cutoff: at(4) }).rows).toEqual([holdoutForecast]);
+  }
+});
+
+it("treats explicit and legacy projections of the same recording as one piece of evidence", () => {
+  const input = { ...projectProducedAttempts([head("evidence", 2)], at(3), { untimestamped: false }),
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const [explicit] = input.observations;
+  const { recordedAt, ...legacy } = explicit!;
+  expect(recordedAt).toBe(at(2));
+  expect(input.features).toHaveLength(1);
+
+  const before = buildSkillBeliefTrajectory(input);
+  const holdout = compareLearnerShadowV2(input);
+  expect(before.steps).toMatchObject([{ observationId: legacy.id, omega: 1 }]);
+  expect(before.belief.lastDirectRecallAtMs).toBe(Date.parse(at(2)));
+  expect(holdout.rows.map(row => row.observationId)).toEqual([legacy.id]);
+  for (const observations of [[legacy], [explicit!, legacy], [legacy, explicit!]]) {
+    expect(buildSkillBeliefTrajectory({ ...input, observations })).toEqual(before);
+    expect(compareLearnerShadowV2({ ...input, observations })).toEqual(holdout);
+  }
+
+  for (const conflict of [{ ...legacy, isMultiDraft: true }, { ...legacy, isFirstSubmission: false },
+    { ...legacy, recordedAt: at(4) }]) {
+    const disputed = { ...input, cutoff: at(5), observations: [explicit!, conflict] };
+    const after = buildSkillBeliefTrajectory(disputed);
+    expect(after.steps).toMatchObject([{ observationId: legacy.id, omega: 0 }]);
+    expect(after.belief.lastDirectRecallAtMs).toBeNull();
+    expect(compareLearnerShadowV2(disputed).rows).toEqual([]);
   }
 });
 

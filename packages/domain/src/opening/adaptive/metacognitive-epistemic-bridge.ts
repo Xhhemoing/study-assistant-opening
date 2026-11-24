@@ -127,8 +127,8 @@ function sameFields<T extends object>(left: T, right: T): boolean {
 
 function sameHead(left: SnapshotObservation, right: SnapshotObservation): boolean {
   if (left === right) return true;
-  const { errors: leftErrors = [], ...leftFields } = left;
-  const { errors: rightErrors = [], ...rightFields } = right;
+  const { recordedAt: _leftRecordedAt, errors: leftErrors = [], ...leftFields } = left;
+  const { recordedAt: _rightRecordedAt, errors: rightErrors = [], ...rightFields } = right;
   return sameFields(leftFields, rightFields) && leftErrors.length === rightErrors.length
     && leftErrors.every((error, index) => sameFields(error, rightErrors[index]!));
 }
@@ -175,14 +175,16 @@ function matchesUntimestampedObservation(observation: SnapshotObservation, featu
 }
 
 type FeatureRevision = { feature: LearnerStateFeature; attempted: number; recorded: number };
-type ObservationRevision = { observation: SnapshotObservation; attempted: number };
+type ObservationProjection = { observation: SnapshotObservation; attempted: number };
+type ObservationRevision = ObservationProjection & { recorded: number };
 
 function visibleObservationRevisions(
   observations: readonly SnapshotObservation[], features: readonly FeatureRevision[], cutoff: number,
 ): ObservationRevision[] {
   const visible: ObservationRevision[] = [];
   const claimedSlots = new Set<number>();
-  const untimestamped: (ObservationRevision & { matchingSlots: number[] })[] = [];
+  const explicit: ObservationRevision[] = [];
+  const untimestamped: (ObservationProjection & { matchingSlots: number[] })[] = [];
   for (const observation of observations) {
     const attempted = adaptiveShadowTime(observation.attemptedAt);
     if (observation.recordedAt === undefined) {
@@ -194,44 +196,73 @@ function visibleObservationRevisions(
 
     const recorded = adaptiveShadowTime(observation.recordedAt);
     if (!(attempted <= recorded)) continue;
-    if (recorded < cutoff) visible.push({ observation, attempted });
+    explicit.push({ observation, attempted, recorded });
     features.forEach((row, slot) => {
       if (row.recorded === recorded && row.attempted === attempted
         && matchesUntimestampedObservation(observation, row.feature)) claimedSlots.add(slot);
     });
   }
 
-  // Each bucket shares the same matching feature slots, including the attempted time.
-  for (const bucket of groupByKey(untimestamped, row => row.matchingSlots.join(",")).values()) {
-    const { matchingSlots } = bucket[0]!;
-    const unclaimedSlots = matchingSlots.filter(slot => !claimedSlots.has(slot));
-    const slots = unclaimedSlots.length ? unclaimedSlots : matchingSlots;
-    const isVisible = (slot: number) => features[slot]!.recorded < cutoff;
-    if (bucket.length === unclaimedSlots.length) {
-      // Match each legacy projection to its recording slot before grouping identical copies.
-      bucket.forEach((row, index) => {
-        if (isVisible(unclaimedSlots[index]!)) visible.push(row);
-      });
-      continue;
-    }
+  visible.push(...explicit.filter(row => row.recorded < cutoff));
+  const echoes: { row: ObservationProjection; earlierSlots: number[] }[] = [];
+  const legacy = untimestamped.filter(row => {
+    const matchingTimes = explicit.flatMap(head => sameHead(head.observation, row.observation)
+      && row.matchingSlots.some(slot => features[slot]!.recorded === head.recorded) ? [head.recorded] : []);
+    if (!matchingTimes.length) return true;
+    // The explicit head already represents the copy. Only a separate earlier recording can need it.
+    const earliestExplicit = Math.min(...matchingTimes);
+    echoes.push({ row, earlierSlots: row.matchingSlots.filter(slot => features[slot]!.recorded < earliestExplicit) });
+    return false;
+  });
 
-    const distinctGroups: Array<typeof bucket> = [];
-    for (const row of bucket) {
+  const addVisible = (rows: readonly ObservationProjection[], slot: number) => {
+    const { recorded } = features[slot]!;
+    if (recorded >= cutoff) return;
+    for (const { observation, attempted } of rows) visible.push({ observation, attempted, recorded });
+  };
+  let pending = [...groupByKey(legacy, row => row.matchingSlots.join(",")).values()].map(rows => {
+    const distinctGroups: (typeof rows)[] = [];
+    for (const row of rows) {
       const group = distinctGroups.find(group => sameHead(group[0]!.observation, row.observation));
       if (group) group.push(row);
       else distinctGroups.push([row]);
     }
-    if (distinctGroups.length === 1) {
-      if (slots.some(isVisible)) visible.push(...bucket);
-    } else if (distinctGroups.length === unclaimedSlots.length) {
-      // Pair distinct legacy revisions with their feature slots in input order.
-      distinctGroups.forEach((group, index) => {
-        if (isVisible(unclaimedSlots[index]!)) visible.push(...group);
+    return { rows, distinctGroups, matchingSlots: rows[0]!.matchingSlots };
+  });
+  const unclaimed = (slots: readonly number[]) => slots.filter(slot => !claimedSlots.has(slot));
+  while (pending.length) {
+    // Compute all full pairings from the same claims. A contested pairing stays pending.
+    const full = pending.flatMap(bucket => {
+      const slots = unclaimed(bucket.matchingSlots);
+      const groups = bucket.rows.length === slots.length ? bucket.rows.map(row => [row]) : bucket.distinctGroups;
+      return groups.length === slots.length ? [{ bucket, slots, groups }] : [];
+    });
+    const slotClaims = groupByKey(full.flatMap(({ slots }) => slots), slot => slot);
+    const resolved = new Set<typeof pending[number]>();
+    for (const { bucket, slots, groups } of full) {
+      if (slots.some(slot => slotClaims.get(slot)!.length > 1)) continue;
+      resolved.add(bucket);
+      groups.forEach((group, index) => {
+        const slot = slots[index]!;
+        claimedSlots.add(slot);
+        addVisible(group, slot);
       });
-    } else if (slots.some(isVisible)) {
-      // Ambiguous revisions collide once a possible slot is visible.
-      visible.push(...bucket);
     }
+    if (!resolved.size) break;
+    pending = pending.filter(bucket => !resolved.has(bucket));
+  }
+
+  const pendingSlots = new Set(pending.flatMap(bucket => bucket.matchingSlots));
+  for (const { row, earlierSlots } of echoes) {
+    const available = unclaimed(earlierSlots).filter(slot => !pendingSlots.has(slot));
+    if (available.length === 1) addVisible([row], available[0]!);
+  }
+  for (const { rows, matchingSlots } of pending) {
+    // Preserve conflicts when there is no unique pairing, including on a claimed slot.
+    const unclaimedSlots = unclaimed(matchingSlots);
+    const slots = unclaimedSlots.length ? unclaimedSlots : matchingSlots;
+    const visibleSlot = slots.find(slot => features[slot]!.recorded < cutoff);
+    if (visibleSlot !== undefined) addVisible(rows, visibleSlot);
   }
   return visible;
 }
@@ -269,9 +300,9 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
       claimsByAttemptId.set(attemptId, counts);
     }
     if (!candidates.length) return [];
-    const { observation } = candidates[0]!;
-    if (rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head }) =>
-      sameHead(head, observation) && (head.requirementKey ?? null) === requirementKey)) {
+    const { observation, recorded } = candidates[0]!;
+    if (rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head, recorded: at }) =>
+      at === recorded && sameHead(head, observation) && (head.requirementKey ?? null) === requirementKey)) {
       return [{ feature, attempted, observation, claimedRequirementKeys }];
     }
 
