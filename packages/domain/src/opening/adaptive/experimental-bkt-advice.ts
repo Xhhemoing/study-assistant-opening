@@ -1,5 +1,6 @@
 import type { LearnerStateFeature } from "../learner-state";
 import { predictLearnerShadow } from "../learner-shadow-predictions";
+import { buildDecisionInput } from "./decision-input";
 import { nextLearningStep, NEXT_LEARNING_STEP_VERSION } from "./next-learning-step";
 import type { NextLearningStep, NextLearningStepInput } from "./snapshot-sources";
 import {
@@ -83,9 +84,18 @@ export function nextLearningStepWithExperimentalBkt(
   // Require an explicit timezone, not server-local date interpretation.
   const cutoffTime = adaptiveShadowTime(cutoff);
   if (!Number.isFinite(cutoffTime)) return fallback("invalid_cutoff");
+  const isRecordedBeforeCutoff = (row: { attemptedAt: string; recordedAt: string | null }) => {
+    const recorded = adaptiveShadowTime(row.recordedAt);
+    return adaptiveShadowTime(row.attemptedAt) <= recorded && recorded < cutoffTime;
+  };
+  const visibleHeads = input.observations.filter(row => row.recordedAt === undefined || isRecordedBeforeCutoff({
+    attemptedAt: row.attemptedAt, recordedAt: row.recordedAt,
+  }));
+  const historicalDecision = visibleHeads.length === input.observations.length ? ruleDecision
+    : nextLearningStep(buildDecisionInput({ ...input, observations: visibleHeads }));
   if (input.dueRetest || input.learningPhase !== undefined || input.phaseSource === "explicit"
-    || input.wantsFullExplanation || ruleDecision.metacognitiveRoute === "lucky_guess_verification_probe"
-    || !["needs_check", "independent", "correct_needs_independent_check"].includes(ruleDecision.reasonCode)) {
+    || input.wantsFullExplanation || historicalDecision.metacognitiveRoute === "lucky_guess_verification_probe"
+    || !["needs_check", "independent", "correct_needs_independent_check"].includes(historicalDecision.reasonCode)) {
     return fallback("priority_rule");
   }
   const epistemic = experiment.epistemic;
@@ -103,11 +113,6 @@ export function nextLearningStepWithExperimentalBkt(
   // Exclude every repeated head ID before joining: Map last-write-wins would
   // otherwise let a conflicting problem/skill qualify depending on row order.
   // Identical duplicates are also excluded conservatively, never extra samples.
-  const visibleHeads = input.observations.filter(row => {
-    if (row.recordedAt === undefined) return true;
-    const recorded = adaptiveShadowTime(row.recordedAt);
-    return adaptiveShadowTime(row.attemptedAt) <= recorded && recorded < cutoffTime;
-  });
   const headCounts = new Map<string, number>();
   for (const row of visibleHeads) headCounts.set(row.id, (headCounts.get(row.id) ?? 0) + 1);
   const heads = new Map(visibleHeads.filter(row => headCounts.get(row.id) === 1).map(row => [row.id, row]));
@@ -117,17 +122,16 @@ export function nextLearningStepWithExperimentalBkt(
   for (const row of visibleHeads) if (row.problemId) {
     problemCounts.set(row.problemId, (problemCounts.get(row.problemId) ?? 0) + 1);
   }
-  for (const row of features) observationCounts.set(row.observationId, (observationCounts.get(row.observationId) ?? 0) + 1);
+  const visibleFeatures = features.filter(isRecordedBeforeCutoff);
+  for (const row of visibleFeatures) observationCounts.set(row.observationId, (observationCounts.get(row.observationId) ?? 0) + 1);
   const excluded = new Set(excludedProblemIds);
-  const comparable = features.filter(row => {
+  const comparable = visibleFeatures.filter(row => {
     const head = heads.get(row.observationId);
-    const attempted = adaptiveShadowTime(row.attemptedAt), recorded = adaptiveShadowTime(row.recordedAt);
     return head && head.problemId && head.itemVersionId && head.requirementKey === requirementKey
-      && head.itemVersionId === row.itemVersionId && adaptiveShadowTime(head.attemptedAt) === attempted
+      && head.itemVersionId === row.itemVersionId && adaptiveShadowTime(head.attemptedAt) === adaptiveShadowTime(row.attemptedAt)
       && head.assistance === "independent" && head.independentAttempt === "yes"
       && head.usableForCurrentVersion === "yes" && head.verifiedCorrect === row.eligibility.verifiedCorrect
       && row.availability === "available" && !row.views.includes("help")
-      && Number.isFinite(attempted) && Number.isFinite(recorded) && attempted <= recorded && recorded < cutoffTime
       && head.problemId !== problemId && problemCounts.get(head.problemId) === 1
       && observationCounts.get(row.observationId) === 1 && !excluded.has(head.problemId) && !excluded.has(row.observationId);
   });
@@ -137,7 +141,7 @@ export function nextLearningStepWithExperimentalBkt(
   if (sampleCount < EXPERIMENTAL_BKT_ADVICE_POLICY.minimumDistinctProblems) return fallback("insufficient_samples", sampleCount, shadow);
   const bkt = prediction.predictions.find(row => row.modelId === "classical-bkt")!;
   const additionalSupport = bkt.probability < EXPERIMENTAL_BKT_ADVICE_POLICY.supportBelowProbability;
-  const activityKind = additionalSupport ? "reduced_help_practice" : ruleDecision.activityKind;
+  const activityKind = additionalSupport ? "reduced_help_practice" : historicalDecision.activityKind;
   return {
     ruleDecision, calibrated: false,
     experimentalAdvice: { kind: additionalSupport ? "supported_practice" : "continue_rule", activityKind,
@@ -145,7 +149,7 @@ export function nextLearningStepWithExperimentalBkt(
       evidenceObservationIds: prediction.evidenceObservationIds, success: prediction.success, failure: prediction.failure,
       cutoff, target: { courseId, requirementKey, problemId, itemVersionId } },
     comparison: { ...comparison, status: "compared", reason: additionalSupport ? "additional_support" : "retain_rule",
-      sampleCount, differsFromRule: activityKind !== ruleDecision.activityKind },
+      sampleCount, differsFromRule: activityKind !== historicalDecision.activityKind },
     ...shadow,
   };
 }
