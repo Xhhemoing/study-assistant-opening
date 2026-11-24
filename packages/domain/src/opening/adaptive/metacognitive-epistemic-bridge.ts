@@ -177,6 +177,61 @@ function matchesUntimestampedObservation(observation: SnapshotObservation, featu
 type FeatureRevision = { feature: LearnerStateFeature; attempted: number; recorded: number };
 type ObservationProjection = { observation: SnapshotObservation; attempted: number };
 type ObservationRevision = ObservationProjection & { recorded: number };
+type LegacyBucket = { rows: ObservationProjection[]; matchingSlots: number[] };
+type LegacySlotCandidates = { bucket: LegacyBucket; slots: number[] };
+
+function canPairAllLegacyRows(component: readonly LegacySlotCandidates[]): boolean {
+  const assignments = new Map<number, number[]>();
+  function assign(slots: number[], visited: Set<number>): boolean {
+    for (const slot of slots) {
+      if (visited.has(slot)) continue;
+      visited.add(slot);
+      const assigned = assignments.get(slot);
+      if (!assigned || assign(assigned, visited)) {
+        assignments.set(slot, slots);
+        return true;
+      }
+    }
+    return false;
+  }
+  return component.every(({ bucket, slots }) => bucket.rows.every(() => assign(slots, new Set())));
+}
+
+function forcedLegacySlots(candidates: readonly LegacySlotCandidates[]) {
+  const bySlot = groupByKey(candidates.flatMap(candidate => candidate.slots.map(slot => ({ slot, candidate }))), row => row.slot);
+  const unseen = new Set(candidates);
+  const bindings: { bucket: LegacyBucket; slot: number; index: number }[] = [];
+  for (const start of unseen) {
+    unseen.delete(start);
+    const component = [start];
+    const componentSlots = new Set<number>();
+    for (const { slots } of component) {
+      for (const slot of slots) {
+        if (componentSlots.has(slot)) continue;
+        componentSlots.add(slot);
+        for (const { candidate } of bySlot.get(slot)!) {
+          if (unseen.delete(candidate)) component.push(candidate);
+        }
+      }
+    }
+    const rowCount = component.reduce((total, { bucket }) => total + bucket.rows.length, 0);
+    // An unmatched feature can be missing its projection. A balanced, feasible
+    // component is the only case where every remaining feature must be used.
+    if (rowCount !== componentSlots.size) continue;
+    const exclusive = component.flatMap(({ bucket, slots }) => {
+      const lastRow = bucket.rows.length - 1;
+      for (const [position, slot] of slots.entries()) {
+        if (bySlot.get(slot)!.length !== 1) continue;
+        const minimumRank = Math.max(0, lastRow - (slots.length - position - 1));
+        const maximumRank = Math.min(lastRow, position);
+        if (minimumRank === maximumRank) return [{ bucket, slot, index: minimumRank }];
+      }
+      return [];
+    });
+    if (exclusive.length && canPairAllLegacyRows(component)) bindings.push(...exclusive);
+  }
+  return bindings;
+}
 
 function visibleObservationRevisions(
   observations: readonly SnapshotObservation[], features: readonly FeatureRevision[], cutoff: number,
@@ -204,14 +259,16 @@ function visibleObservationRevisions(
   }
 
   visible.push(...explicit.filter(row => row.recorded < cutoff));
-  const echoes: { row: ObservationProjection; earlierSlots: number[] }[] = [];
+  const echoes: { rows: ObservationProjection[]; earlierSlots: number[] }[] = [];
   const legacy = untimestamped.filter(row => {
     const matchingTimes = explicit.flatMap(head => sameHead(head.observation, row.observation)
       && row.matchingSlots.some(slot => features[slot]!.recorded === head.recorded) ? [head.recorded] : []);
     if (!matchingTimes.length) return true;
     // The explicit head already represents the copy. Only a separate earlier recording can need it.
     const earliestExplicit = Math.min(...matchingTimes);
-    echoes.push({ row, earlierSlots: row.matchingSlots.filter(slot => features[slot]!.recorded < earliestExplicit) });
+    const existing = echoes.find(({ rows }) => sameHead(rows[0]!.observation, row.observation));
+    if (existing) existing.rows.push(row);
+    else echoes.push({ rows: [row], earlierSlots: row.matchingSlots.filter(slot => features[slot]!.recorded < earliestExplicit) });
     return false;
   });
 
@@ -220,21 +277,20 @@ function visibleObservationRevisions(
     if (recorded >= cutoff) return;
     for (const { observation, attempted } of rows) visible.push({ observation, attempted, recorded });
   };
-  let pending = [...groupByKey(legacy, row => row.matchingSlots.join(",")).values()].map(rows => {
-    const distinctGroups: (typeof rows)[] = [];
-    for (const row of rows) {
-      const group = distinctGroups.find(group => sameHead(group[0]!.observation, row.observation));
-      if (group) group.push(row);
-      else distinctGroups.push([row]);
-    }
-    return { rows, distinctGroups, matchingSlots: rows[0]!.matchingSlots };
-  });
+  let pending: LegacyBucket[] = [...groupByKey(legacy, row => row.matchingSlots.join(",")).values()]
+    .map(rows => ({ rows, matchingSlots: rows[0]!.matchingSlots }));
   const unclaimed = (slots: readonly number[]) => slots.filter(slot => !claimedSlots.has(slot));
   while (pending.length) {
     // Compute all full pairings from the same claims. A contested pairing stays pending.
-    const full = pending.flatMap(bucket => {
-      const slots = unclaimed(bucket.matchingSlots);
-      const groups = bucket.rows.length === slots.length ? bucket.rows.map(row => [row]) : bucket.distinctGroups;
+    const candidates = pending.map(bucket => ({ bucket, slots: unclaimed(bucket.matchingSlots) }));
+    const full = candidates.flatMap(({ bucket, slots }) => {
+      if (bucket.rows.length === slots.length) return [{ bucket, slots, groups: bucket.rows.map(row => [row]) }];
+      const groups: ObservationProjection[][] = [];
+      for (const row of bucket.rows) {
+        const group = groups.find(group => sameHead(group[0]!.observation, row.observation));
+        if (group) group.push(row);
+        else groups.push([row]);
+      }
       return groups.length === slots.length ? [{ bucket, slots, groups }] : [];
     });
     const slotClaims = groupByKey(full.flatMap(({ slots }) => slots), slot => slot);
@@ -248,14 +304,24 @@ function visibleObservationRevisions(
         addVisible(group, slot);
       });
     }
-    if (!resolved.size) break;
-    pending = pending.filter(bucket => !resolved.has(bucket));
+    if (resolved.size) {
+      pending = pending.filter(bucket => !resolved.has(bucket));
+      continue;
+    }
+    const forced = forcedLegacySlots(candidates);
+    if (!forced.length) break;
+    for (const { bucket, slot, index } of forced) {
+      claimedSlots.add(slot);
+      addVisible(bucket.rows.splice(index, 1), slot);
+    }
+    pending = pending.filter(bucket => bucket.rows.length > 0);
   }
 
   const pendingSlots = new Set(pending.flatMap(bucket => bucket.matchingSlots));
-  for (const { row, earlierSlots } of echoes) {
+  for (const { rows, earlierSlots } of echoes) {
     const available = unclaimed(earlierSlots).filter(slot => !pendingSlots.has(slot));
-    if (available.length === 1) addVisible([row], available[0]!);
+    if (available.length === 1) addVisible(rows, available[0]!);
+    else if (available.length === rows.length) rows.forEach((row, index) => addVisible([row], available[index]!));
   }
   for (const { rows, matchingSlots } of pending) {
     // Preserve conflicts when there is no unique pairing, including on a claimed slot.
@@ -280,7 +346,7 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
   const heads = [...featuresById.entries()].flatMap(([observationId, allRows]): JoinedHead[] => {
     const rows = allRows.filter(row => row.recorded < cutoff);
     if (!rows.length) return [];
-    const { feature, attempted } = rows[0]!;
+    const { feature, attempted, recorded } = rows[0]!;
     const { requirementKey, attemptId } = feature;
     const candidates = visibleObservationRevisions(observationsById.get(observationId) ?? [], allRows, cutoff);
     const sameSubmission = rows.every(row => row.feature.attemptId === attemptId && row.attempted === attempted)
@@ -300,7 +366,7 @@ function prepareHeads(input: SkillBeliefTrajectoryInput, cutoff: number) {
       claimsByAttemptId.set(attemptId, counts);
     }
     if (!candidates.length) return [];
-    const { observation, recorded } = candidates[0]!;
+    const { observation } = candidates[0]!;
     if (rows.length === 1 && requirementKey && sameSubmission && candidates.every(({ observation: head, recorded: at }) =>
       at === recorded && sameHead(head, observation) && (head.requirementKey ?? null) === requirementKey)) {
       return [{ feature, attempted, observation, claimedRequirementKeys }];

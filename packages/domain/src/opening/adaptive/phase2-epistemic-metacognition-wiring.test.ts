@@ -118,13 +118,14 @@ function projectProducedAttempts(rows: readonly ProducedAttempt[], cutoff: strin
     const attemptId = `attempt-${id}`, problemId = row.problemId!, itemVersionId = row.itemVersionId ?? null;
     const submittedAt = Date.parse(attemptedAt);
     const { startedAt = submittedAt - 60_000 } = row;
-    evidence.observations.push({ ...learningObservation, id, courseId: scope.courseId, skillLabel, attemptId, problemId,
+    const outcome = row.verifiedCorrect === "no" ? "incorrect" : "correct";
+    evidence.observations.push({ ...learningObservation, id, courseId: scope.courseId, skillLabel, attemptId, problemId, outcome,
       itemVersionId, assistance, occurredAt: attemptedAt, recordedAt: row.recordedAt ?? attemptedAt });
     evidence.evidenceContexts[id] = {
       observation: { ...qualifiedInput.observation, observationId: id, courseId: scope.courseId, requirementKey: row.requirementKey ?? null,
-        attemptId, problemId, itemVersionId, assistance, submittedAt, startedAt },
+        attemptId, problemId, itemVersionId, assistance, submittedAt, startedAt, outcome },
       context: { helpHistory: { complete: true, exposures: [] }, referenceCheckAuthority: context.referenceCheckAuthority,
-        referenceCheck: { ...context.referenceCheck!, attemptId, problemId, itemVersionId },
+        referenceCheck: { ...context.referenceCheck!, attemptId, problemId, itemVersionId, outcome },
         version: { applicability: "exact", currentItemVersionId: itemVersionId }, ...row.context },
     };
   }
@@ -298,6 +299,82 @@ it("retains a matching legacy head when it alone can establish the earlier recor
   expect(replayEvidence({ ...appended, cutoff: at(5) })).toEqual({
     weights: [[first.id, 0]], lastDirectRecallAtMs: null, holdout: [],
   });
+});
+
+it("R16 preserves multiple identical legacy recordings beside a later explicit copy", () => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const producer = { cartridgeEvidence: withheldFirstGrade };
+  const original = projectProducedAttempts([first, retry], at(3), producer);
+  const duplicate = projectProducedAttempts([{ ...first, recordedAt: at(2) }], at(3), producer);
+  const explicit = projectProducedAttempts([{ ...first, recordedAt: at(6) }], at(7), { ...producer, untimestamped: false });
+  const historical = { ...original, observations: [...original.observations, ...duplicate.observations],
+    features: [...original.features, ...duplicate.features], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...historical, observations: [...historical.observations, ...explicit.observations],
+    features: [...historical.features, ...explicit.features] };
+  const expected = { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] };
+
+  expect(replayEvidence(historical)).toEqual(expected);
+  expect([at(3), at(6), at(7)].map(cutoff => replayEvidence({ ...appended, cutoff }))).toEqual([expected, expected, expected]);
+});
+
+it("R16 assigns the first yes projection to the slot only yes can satisfy", () => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const original = projectProducedAttempts([first, retry], at(3));
+  const moved = { ...first, problemId: "corrected-problem", familyKey: "corrected-family" };
+  const producer = { cartridgeEvidence: withheldFirstGrade };
+  const yes = projectProducedAttempts([{ ...moved, recordedAt: at(4) }], at(7), producer);
+  const unknown = projectProducedAttempts([{ ...moved, recordedAt: at(5), context: { referenceCheck: null } }], at(7), producer);
+  const no = projectProducedAttempts([{ ...moved, recordedAt: at(6), verifiedCorrect: "no" }], at(7), producer);
+  expect([yes, unknown, no].map(rows => rows.observations[0]?.verifiedCorrect)).toEqual(["yes", "unknown", "no"]);
+  expect([yes, unknown, no].map(rows => rows.features[0]?.eligibility.verifiedCorrect)).toEqual(["unknown", "unknown", "unknown"]);
+  const input = { ...original, features: [...original.features, ...yes.features, ...unknown.features, ...no.features],
+    targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const buckets = [[...original.observations, ...yes.observations], unknown.observations, no.observations];
+  const permutations = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  const expected = { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] };
+
+  expect(replayEvidence({ ...input, features: original.features })).toEqual(expected);
+  const results = permutations.map(order => [at(3), at(4)].map(cutoff =>
+    replayEvidence({ ...input, cutoff, observations: order.flatMap(index => buckets[index]!) })));
+  expect(results).toEqual(permutations.map(() => [expected, expected]));
+});
+
+it("R16 grants explicit evidence weight only when its feature records the same revision", () => {
+  const first = head("first", 1);
+  const original = projectProducedAttempts([first], at(3));
+  const corrected = { ...first, problemId: "corrected-problem", familyKey: "corrected-family", recordedAt: at(4) };
+  const retry = head("retry", 4, { problemId: corrected.problemId, familyKey: corrected.familyKey,
+    attemptedAt: "2026-10-04T12:00:00.000Z" });
+  const revision = projectProducedAttempts([corrected, retry], at(5), { untimestamped: false });
+  const input = { ...revision, targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const mismatched = { ...input, features: [...original.features, revision.features[1]!] };
+
+  expect(replayEvidence(input)).toEqual({
+    weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id],
+  });
+  expect(replayEvidence(mismatched)).toEqual({ weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] });
+});
+
+it("R16 excludes future explicit heads before counting experimental BKT samples", () => {
+  const evidence = [1, 2, 3, 4, 5].map(index => head(`sample-${index}`, 2));
+  const produced = projectProducedAttempts(evidence, at(3));
+  const [fifth, ...earlier] = produced.observations;
+  const lateHead = { ...fifth!, recordedAt: at(4) };
+  const lateDuplicate = { ...earlier[0]!, recordedAt: at(4) };
+  const target = { courseId: scope.courseId, requirementKey: scope.requirementKey, problemId: "target", itemVersionId: "target-v1" };
+  const experiment = { enabled: true, features: produced.features, target, excludedProblemIds: [] };
+  const compare = (observations: SnapshotObservation[], cutoff: string) =>
+    nextLearningStepWithExperimentalBkt(decision(observations), { ...experiment, cutoff }).comparison;
+  const insufficient = { status: "fallback", reason: "insufficient_samples", sampleCount: 4 };
+
+  expect(compare(earlier, at(3))).toMatchObject(insufficient);
+  expect(compare([...earlier, lateHead], at(5))).toMatchObject({ status: "compared", sampleCount: 5 });
+  const beforeRecording = [at(3), at(4)].flatMap(cutoff => [
+    compare([...earlier, lateHead], cutoff), compare([...earlier, lateHead, lateDuplicate], cutoff),
+  ]);
+  expect(beforeRecording).toMatchObject([insufficient, insufficient, insufficient, insufficient]);
 });
 
 it("holds overlapping legacy revisions until their forced recording slot", () => {

@@ -103,13 +103,18 @@ export function nextLearningStepWithExperimentalBkt(
   // Exclude every repeated head ID before joining: Map last-write-wins would
   // otherwise let a conflicting problem/skill qualify depending on row order.
   // Identical duplicates are also excluded conservatively, never extra samples.
+  const visibleHeads = input.observations.filter(row => {
+    if (row.recordedAt === undefined) return true;
+    const recorded = adaptiveShadowTime(row.recordedAt);
+    return adaptiveShadowTime(row.attemptedAt) <= recorded && recorded < cutoffTime;
+  });
   const headCounts = new Map<string, number>();
-  for (const row of input.observations) headCounts.set(row.id, (headCounts.get(row.id) ?? 0) + 1);
-  const heads = new Map(input.observations.filter(row => headCounts.get(row.id) === 1).map(row => [row.id, row]));
+  for (const row of visibleHeads) headCounts.set(row.id, (headCounts.get(row.id) ?? 0) + 1);
+  const heads = new Map(visibleHeads.filter(row => headCounts.get(row.id) === 1).map(row => [row.id, row]));
   // Ambiguous/repeated problems are excluded entirely, not counted as new samples.
   const problemCounts = new Map<string, number>();
   const observationCounts = new Map<string, number>();
-  for (const row of input.observations) if (row.problemId) {
+  for (const row of visibleHeads) if (row.problemId) {
     problemCounts.set(row.problemId, (problemCounts.get(row.problemId) ?? 0) + 1);
   }
   for (const row of features) observationCounts.set(row.observationId, (observationCounts.get(row.observationId) ?? 0) + 1);
