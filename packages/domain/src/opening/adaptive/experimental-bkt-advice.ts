@@ -78,10 +78,12 @@ function historicalBktEvidence(
   const featuresById = groupById(valid, row => row.feature.observationId);
   const latestRecordings = new Map<string, number>();
   const disputedSamples = new Set<string>();
+  const possiblyAbsentIds = new Set<string>();
   const heads = [...groupById(observations, row => row.id).entries()].flatMap(([id, rows]) => {
     const slots = featuresById.get(id) ?? [];
-    const { revisions: visible, latest, unplaced: ruleOnly } = visibleObservationRevisions(rows, slots, cutoff);
-    if (ruleOnly.length) disputedSamples.add(id);
+    const { revisions: visible, latest, unplaced: ruleOnly, canBeAbsent } = visibleObservationRevisions(rows, slots, cutoff);
+    if (canBeAbsent && latest.length) possiblyAbsentIds.add(id);
+    if (ruleOnly.length || canBeAbsent) disputedSamples.add(id);
     if (!latest.length) return ruleOnly;
 
     const recorded = latest[0]!.recorded;
@@ -97,7 +99,7 @@ function historicalBktEvidence(
     return [...latest.map(row => row.observation), ...ruleOnly];
   });
   return {
-    heads, disputedSamples,
+    heads, disputedSamples, possiblyAbsentIds,
     features: valid.filter(({ feature, recorded }) => recorded < cutoff
       && recorded === (latestRecordings.get(feature.observationId) ?? recorded)).map(row => row.feature),
   };
@@ -125,6 +127,11 @@ function historicalRuleInput(input: NextLearningStepInput, heads: readonly Snaps
   return { ambiguousPriority, ruleInput: unchanged ? input : buildDecisionInput({ ...input, observations: effective }) };
 }
 
+function hasPriority(decision: NextLearningStep): boolean {
+  return decision.metacognitiveRoute === "lucky_guess_verification_probe"
+    || !["needs_check", "independent", "correct_needs_independent_check"].includes(decision.reasonCode);
+}
+
 /**
  * Explicit opt-in consumption, separate from rules and decision receipts. No status,
  * mastery, exam admission or phase is changed. Even high probability cannot bypass
@@ -150,14 +157,26 @@ export function nextLearningStepWithExperimentalBkt(
   // Require an explicit timezone, not server-local date interpretation.
   const cutoffTime = adaptiveShadowTime(cutoff);
   if (!Number.isFinite(cutoffTime)) return fallback("invalid_cutoff");
-  const { heads: visibleHeads, features: visibleFeatures, disputedSamples } =
+  const { heads: visibleHeads, features: visibleFeatures, disputedSamples, possiblyAbsentIds } =
     historicalBktEvidence(input.observations, features, courseId!, cutoffTime);
   const { ambiguousPriority, ruleInput } = historicalRuleInput(input, visibleHeads);
   const historicalDecision = ruleInput === input ? ruleDecision : nextLearningStep(ruleInput);
   if (input.dueRetest || input.learningPhase !== undefined || input.phaseSource === "explicit"
-    || input.wantsFullExplanation || ambiguousPriority || historicalDecision.metacognitiveRoute === "lucky_guess_verification_probe"
-    || !["needs_check", "independent", "correct_needs_independent_check"].includes(historicalDecision.reasonCode)) {
+    || input.wantsFullExplanation || ambiguousPriority || hasPriority(historicalDecision)) {
     return fallback("priority_rule");
+  }
+  if (possiblyAbsentIds.size) {
+    const guaranteed = visibleHeads.filter(row => !possiblyAbsentIds.has(row.id));
+    const withoutOptionalSuccess = visibleHeads.filter(row => {
+      if (!possiblyAbsentIds.has(row.id) || row.verifiedCorrect !== "yes") return true;
+      const confidence = "preAnswerConfidence" in row ? row.preAnswerConfidence
+        : input.metacognitiveConfidence?.byObservationId.get(row.id)?.preAnswerConfidence;
+      return confidence === "guessing";
+    });
+    if ([guaranteed, withoutOptionalSuccess].some(rows => {
+      const historical = historicalRuleInput(input, rows);
+      return historical.ambiguousPriority || hasPriority(nextLearningStep(historical.ruleInput));
+    })) return fallback("priority_rule");
   }
   const epistemic = experiment.epistemic;
   const shadow: Pick<ExperimentalBktAdviceResult, "epistemicShadowComparison"> = {};

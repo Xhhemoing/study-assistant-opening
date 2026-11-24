@@ -877,6 +877,60 @@ it("R22 does not use a feasible future legacy revision as a rule-only error befo
   expect(compare(at(7))).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
 });
 
+it("R23 preserves earlier producer exposure when a legacy copy follows its explicit anchor", () => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const moved = { ...first, problemId: "moved", familyKey: "moved-family" };
+  const wrong = { ...moved, verifiedCorrect: "no" as const };
+  const initial = projectProducedAttempts([first, retry], at(3), { cartridgeEvidence: withheldFirstGrade });
+  const graded = projectProducedAttempts([{ ...moved, recordedAt: at(3) }], at(8));
+  const explicit = projectProducedAttempts([{ ...wrong, recordedAt: at(5) }], at(8), { untimestamped: false });
+  const future = projectProducedAttempts([{ ...wrong, recordedAt: at(7) }], at(8), { cartridgeEvidence: withheldFirstGrade });
+  const input = { ...initial, observations: [...initial.observations, ...graded.observations, ...explicit.observations],
+    features: [...initial.features, ...graded.features, ...explicit.features], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const expected = { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] };
+
+  expect(replayEvidence(input)).toEqual(expected);
+  expect(replayEvidence({ ...input, observations: [...input.observations, ...future.observations],
+    features: [...input.features, ...future.features] })).toEqual(expected);
+});
+
+it.each(["rule-only error", "possibly absent error", "possibly absent guess", "no error"] as const)(
+  "R23 checks historical BKT when an optional success accompanies %s", scenario => {
+    const samples = projectProducedAttempts(bktSamples(5), at(3));
+    const success = head("success", 4);
+    const wrong = head("wrong", 3, { verifiedCorrect: "no" });
+    const optional = (row: SnapshotObservation) => [feature(row), feature(row, { recordedAt: at(7) })];
+    const additional = scenario === "possibly absent guess" ? [head("guess", 3, { preAnswerConfidence: "guessing" })]
+      : scenario === "no error" ? [] : [wrong];
+    const features = [...samples.features, ...optional(success),
+      ...(scenario.startsWith("possibly absent") ? optional(additional[0]!) : [])];
+    const input = buildDecisionInput({ observations: [...samples.observations, success, ...additional], wantsFullExplanation: false });
+    const result = nextLearningStepWithExperimentalBkt(input,
+      { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff: at(5) });
+
+    expect(result.ruleDecision).toEqual(nextLearningStep(input));
+    expect(result.comparison).toMatchObject(scenario === "no error"
+      ? { status: "compared", sampleCount: 5 } : { reason: "priority_rule", sampleCount: 0 });
+  },
+);
+
+it("R23 resolves 20 alternating legacy projections within 50 ms", () => {
+  const first = head("first", 1);
+  const wrong = { ...first, problemId: "moved", familyKey: "moved-family", verifiedCorrect: "no" as const };
+  const observations = Array.from({ length: 20 }, (_, index) => index % 2 ? wrong : first);
+  const features = observations.map((_, index) => index === 0 ? feature(first) : feature(first, {
+    recordedAt: at(index + 1), eligibility: { ...feature(first).eligibility, verifiedCorrect: "unknown" },
+    gaps: ["cartridge_evidence_not_qualified"],
+  }));
+  const start = performance.now();
+  const result = buildSkillBeliefTrajectory({ scope, cutoff: at(2), observations, features });
+  const elapsedMs = performance.now() - start;
+
+  expect(result.steps).toMatchObject([{ observationId: first.id }]);
+  expect(elapsedMs).toBeLessThan(50);
+});
+
 it("holds overlapping legacy revisions until their forced recording slot", () => {
   const first = head("first", 2);
   const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,
