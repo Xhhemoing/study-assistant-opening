@@ -231,9 +231,11 @@ function offerProducerPath(paths: Map<string, ProducerPath>, path: ProducerPath)
   paths.set(key, path);
 }
 
+type EmitLegacyRevision = (row: LegacyProjection, slot: number, visibleCopies: number) => void;
+
 function emitOptimalLegacyPaths(
-  buckets: readonly LegacyBucket[], optimal: ReadonlySet<LegacyAssignment>,
-  emit: (row: LegacyProjection, slot: number) => void,
+  buckets: readonly LegacyBucket[], optimal: ReadonlySet<LegacyAssignment>, visibleSlots: ReadonlySet<number>,
+  emit: EmitLegacyRevision,
 ) {
   // Project the optimal assignment graph onto one bucket at a time. A producer
   // preference can replace another path only for the same slots and distinct count.
@@ -252,7 +254,13 @@ function emitOptimalLegacyPaths(
     for (const [assignment, paths] of pending) {
       if (!assignment.edges.length) {
         for (const { placements } of paths.values()) {
-          for (const { slot, occurrence } of placements) emit(occurrences[occurrence]!, slot);
+          const byProjection = groupByKey(placements, ({ occurrence }) => occurrences[occurrence]!);
+          for (const [row, assigned] of byProjection) {
+            const visible = assigned.filter(({ slot }) => visibleSlots.has(slot));
+            const future = assigned.length - visible.length;
+            const visibleCopies = Math.max(visible.length, row.copies - future);
+            for (const { slot } of visible) emit(row, slot, visibleCopies);
+          }
         }
       }
       for (const { previous, placement } of assignment.edges) {
@@ -271,13 +279,18 @@ function emitOptimalLegacyPaths(
 
 function resolveLegacyComponent(
   buckets: readonly LegacyBucket[], slots: readonly number[], visibleSlots: ReadonlySet<number>,
-  emit: (row: LegacyProjection, slot: number) => void,
+  emit: EmitLegacyRevision,
 ) {
   if (!slots.some(slot => visibleSlots.has(slot))) return;
   const only = buckets[0]!.occurrences[0]!;
   if (buckets.length === 1 && buckets[0]!.occurrences.every(row => row === only)) {
-    // No other content can explain these slots; extra copies do not change exposure.
-    for (const slot of slots) emit(only, slot);
+    // The sole projection can explain any of these slots. Only copies that
+    // must occupy future slots in a maximum-coverage assignment are subtracted.
+    const visible = slots.filter(slot => visibleSlots.has(slot));
+    const assigned = Math.min(only.copies, slots.length);
+    const minFuture = Math.max(0, assigned - visible.length);
+    const visibleCopies = Math.max(visible.length, only.copies - minFuture);
+    for (const slot of visible) emit(only, slot, visibleCopies);
     return;
   }
 
@@ -336,12 +349,12 @@ function resolveLegacyComponent(
     // Contradictory recordings cannot all be represented. Retain the distinct
     // possible contents at visible slots so qualification fails closed.
     for (const bucket of buckets) {
-      for (const row of new Set(bucket.occurrences)) for (const slot of row.slots) emit(row, slot);
+      for (const row of new Set(bucket.occurrences)) for (const slot of row.slots) emit(row, slot, row.copies);
     }
     return;
   }
 
-  emitOptimalLegacyPaths(buckets, optimal, emit);
+  emitOptimalLegacyPaths(buckets, optimal, visibleSlots, emit);
 }
 
 /** Resolve heads for a single observation ID against its course-scoped recording slots. */
@@ -368,44 +381,38 @@ export function visibleObservationRevisions(
 
   const visible = explicit.filter(row => row.recorded < cutoff);
   const visibleSlots = new Set(features.flatMap((row, slot) => row.recorded < cutoff ? [slot] : []));
-  const emitted = new Map<LegacyProjection, Set<number>>();
-  function emit(row: LegacyProjection, slot: number) {
+  const emitted = new Map<LegacyProjection, Map<number, number>>();
+  function emit(row: LegacyProjection, slot: number, visibleCopies: number) {
     if (!visibleSlots.has(slot)) return;
-    const slots = emitted.get(row) ?? new Set<number>();
-    if (slots.has(slot)) return;
-    slots.add(slot);
+    const slots = emitted.get(row) ?? new Map<number, number>();
+    slots.set(slot, Math.max(slots.get(slot) ?? 0, visibleCopies));
     emitted.set(row, slots);
-    visible.push({ observation: row.observation, attempted: row.attempted, recorded: features[slot]!.recorded, legacyCopies: row.copies });
   }
 
-  const unclaimed = legacy.map(row => ({ ...row, unclaimedSlots: row.matchingSlots.filter(slot => !claimedSlots.has(slot)) }));
+  const eligible = legacy.map(row => {
+    const matchingTimes = new Set(row.matchingSlots.map(slot => features[slot]!.recorded));
+    const anchor = explicit.reduce((earliest, head) => matchingTimes.has(head.recorded) && sameObservationProjection(row.observation, head.observation)
+      ? Math.min(earliest, head.recorded) : earliest, Infinity);
+    const slots = row.matchingSlots.filter(slot => !claimedSlots.has(slot) && features[slot]!.recorded < anchor);
+    return { ...row, slots, required: anchor === Infinity };
+  });
   const buckets: LegacyBucket[] = [];
-  // A matching feature already claimed by an explicit revision cannot change
-  // which legacy projections share producer ordering for the remaining slots.
-  for (const rows of groupByKey(unclaimed, row => row.unclaimedSlots.join(",")).values()) {
-    const bucket: LegacyBucket = { occurrences: [], slots: new Set(), required: 0n };
+  // Producer order applies to projections competing for the same eligible slots.
+  for (const rows of groupByKey(eligible, row => row.slots.join(",")).values()) {
+    const bucket: LegacyBucket = { occurrences: [], slots: new Set(rows[0]!.slots), required: 0n };
     const distinct: LegacyProjection[] = [];
-    for (const row of rows) {
-      const identical = distinct.find(projection => sameObservationProjection(row.observation, projection.observation));
-      if (identical) {
-        identical.copies++;
-        if (identical.slots.size) bucket.occurrences.push(identical);
-        continue;
-      }
-      const matchingTimes = new Set(row.matchingSlots.map(slot => features[slot]!.recorded));
-      const anchor = explicit.reduce((earliest, head) => matchingTimes.has(head.recorded) && sameObservationProjection(row.observation, head.observation)
-        ? Math.min(earliest, head.recorded) : earliest, Infinity);
-      const slots = new Set(row.unclaimedSlots.filter(slot => features[slot]!.recorded < anchor));
-      const required = anchor === Infinity;
-      const projection = { observation: row.observation, attempted: row.attempted, required, slots, bit: 1n << BigInt(distinct.length), copies: 1 };
-      distinct.push(projection);
-      if (!slots.size) {
+    for (const { observation, attempted, required, matchingSlots } of rows) {
+      const identical = distinct.find(projection => sameObservationProjection(observation, projection.observation));
+      const projection = identical ?? { observation, attempted, required, slots: bucket.slots,
+        bit: 1n << BigInt(distinct.length), copies: 0 };
+      if (!identical) distinct.push(projection);
+      projection.copies++;
+      if (!bucket.slots.size) {
         // A different legacy head on an explicitly claimed slot remains conflicting.
-        if (required) for (const slot of row.matchingSlots) emit(projection, slot);
+        if (required) for (const slot of matchingSlots) emit(projection, slot, projection.copies);
         continue;
       }
       if (required) bucket.required |= projection.bit;
-      for (const slot of slots) bucket.slots.add(slot);
       // Each occurrence adds capacity for the same content while retaining producer order.
       bucket.occurrences.push(projection);
     }
@@ -413,6 +420,9 @@ export function visibleObservationRevisions(
   }
 
   for (const component of legacyComponents(buckets)) resolveLegacyComponent(component.buckets, component.slots, visibleSlots, emit);
+  for (const [{ observation, attempted }, slots] of emitted) {
+    for (const [slot, legacyCopies] of slots) visible.push({ observation, attempted, recorded: features[slot]!.recorded, legacyCopies });
+  }
   return visible;
 }
 

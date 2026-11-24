@@ -75,43 +75,32 @@ function historicalBktEvidence(
   observations: readonly SnapshotObservation[], features: readonly LearnerStateFeature[], courseId: string, cutoff: number,
 ) {
   const valid = courseFeatureRevisions(features, courseId);
-  const featureIds = new Set(features.filter(row => row.courseId === courseId).map(row => row.observationId));
+  const courseFeaturesById = groupById(features.filter(row => row.courseId === courseId), row => row.observationId);
   const featuresById = groupById(valid, row => row.feature.observationId);
   const latestRecordings = new Map<string, number>();
   const disputedSamples = new Set<string>();
-  const unplacedPriorityHeads: SnapshotObservation[] = [];
   const heads = [...groupById(observations, row => row.id).entries()].flatMap(([id, rows]) => {
     const slots = featuresById.get(id) ?? [];
     const visible = visibleObservationRevisions(rows, slots, cutoff);
-    const ruleOnly = featureIds.has(id) ? [] : rows.filter(row =>
-      row.recordedAt === undefined && adaptiveShadowTime(row.attemptedAt) < cutoff);
+    const hasInvalidFeatures = (courseFeaturesById.get(id)?.length ?? 0) > slots.length;
     const unplaced = rows.filter(row => {
       if (row.recordedAt !== undefined) return false;
       const attempted = adaptiveShadowTime(row.attemptedAt);
       return attempted < cutoff && !slots.some(slot =>
         slot.attempted === attempted && matchesUntimestampedObservation(row, slot.feature));
     });
-    if (!visible.length) {
-      // Visible features with an unplaced priority claim cannot establish a
-      // historical head or justify overriding the ordinary rule with BKT.
-      unplacedPriorityHeads.push(...unplaced.filter(row => row.usableForCurrentVersion === "yes"
-        && (row.verifiedCorrect === "no" || (row.verifiedCorrect === "yes" && ["hinted", "revealed"].includes(row.assistance)))
-        && slots.some(slot => slot.recorded < cutoff && slot.attempted === adaptiveShadowTime(row.attemptedAt))));
-      return ruleOnly;
-    }
-
-    const legacyTimes = new Map<SnapshotObservation, number>();
-    let uncertainRecording = false;
-    for (const { observation, recorded, legacyCopies } of visible) {
-      if (legacyCopies === undefined) continue;
-      const previous = legacyTimes.get(observation);
-      if (previous !== undefined && previous !== recorded) uncertainRecording = true;
-      legacyTimes.set(observation, recorded);
-    }
-    if (ruleOnly.length || uncertainRecording) return [...visible.map(row => row.observation), ...ruleOnly];
+    const ruleOnly = hasInvalidFeatures ? [] : unplaced.filter(row => !rows.some(explicit =>
+      explicit.recordedAt !== undefined && sameObservationProjection(row, explicit)));
+    if (ruleOnly.length) disputedSamples.add(id);
+    if (!visible.length) return ruleOnly;
 
     const latest = visible.reduce((time, row) => Math.max(time, row.recorded), -Infinity);
     const current = visible.filter(row => row.recorded === latest);
+    // An older legacy projection cannot compete with a strictly newer head
+    // unless its possible recordings also include the latest recording.
+    const uncertainRecording = current.some(row => row.legacyCopies !== undefined && visible.some(older =>
+      older.recorded < latest && older.observation === row.observation));
+    if (ruleOnly.length || uncertainRecording) return [...visible.map(row => row.observation), ...ruleOnly];
     if (current.length < visible.length) latestRecordings.set(id, latest);
 
     // Classical BKT requires a unique sample, even if replay can infer
@@ -122,7 +111,7 @@ function historicalBktEvidence(
     return current.map(row => row.observation);
   });
   return {
-    heads, disputedSamples, unplacedPriorityHeads,
+    heads, disputedSamples,
     features: valid.filter(({ feature, recorded }) => recorded < cutoff
       && recorded === (latestRecordings.get(feature.observationId) ?? recorded)).map(row => row.feature),
   };
@@ -175,15 +164,12 @@ export function nextLearningStepWithExperimentalBkt(
   // Require an explicit timezone, not server-local date interpretation.
   const cutoffTime = adaptiveShadowTime(cutoff);
   if (!Number.isFinite(cutoffTime)) return fallback("invalid_cutoff");
-  const { heads: visibleHeads, features: visibleFeatures, disputedSamples, unplacedPriorityHeads } =
+  const { heads: visibleHeads, features: visibleFeatures, disputedSamples } =
     historicalBktEvidence(input.observations, features, courseId!, cutoffTime);
   const { ambiguousPriority, ruleInput } = historicalRuleInput(input, visibleHeads);
   const historicalDecision = ruleInput === input ? ruleDecision : nextLearningStep(ruleInput);
-  const latest = ruleInput.observations.find(row => row.usableForCurrentVersion === "yes");
-  const unplacedPriority = unplacedPriorityHeads.some(row => !latest || Date.parse(row.attemptedAt) > Date.parse(latest.attemptedAt)
-    || (Date.parse(row.attemptedAt) === Date.parse(latest.attemptedAt) && row.id.localeCompare(latest.id) < 0));
   if (input.dueRetest || input.learningPhase !== undefined || input.phaseSource === "explicit"
-    || input.wantsFullExplanation || ambiguousPriority || unplacedPriority || historicalDecision.metacognitiveRoute === "lucky_guess_verification_probe"
+    || input.wantsFullExplanation || ambiguousPriority || historicalDecision.metacognitiveRoute === "lucky_guess_verification_probe"
     || !["needs_check", "independent", "correct_needs_independent_check"].includes(historicalDecision.reasonCode)) {
     return fallback("priority_rule");
   }

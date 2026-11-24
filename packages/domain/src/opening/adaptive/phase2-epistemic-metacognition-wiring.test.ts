@@ -663,6 +663,76 @@ it("R19 handles conflicting verified-step labels on tied BKT revisions in either
   }
 });
 
+it("R20 keeps producer precedence when an anchor removes a later compatible slot", () => {
+  const first = head("first", 1);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey });
+  const original = projectProducedAttempts([first, retry], at(3), { cartridgeEvidence: withheldFirstGrade });
+  const corrected = { ...first, problemId: "corrected", familyKey: "corrected-family", context: { referenceCheck: null } };
+  const correction = projectProducedAttempts([{ ...corrected, recordedAt: at(4) }], at(7), { untimestamped: false });
+  const laterLegacy = projectProducedAttempts([{ ...corrected, recordedAt: at(5) }], at(7));
+  const echo = projectProducedAttempts([{ ...first, recordedAt: at(6) }], at(7), { untimestamped: false });
+  const historical = { ...original, observations: [...original.observations, ...correction.observations, ...laterLegacy.observations],
+    features: [...original.features, ...correction.features, ...laterLegacy.features], targetFamilyKeys: [], propagatedFamilyKeys: [] };
+  const appended = { ...historical, observations: [...historical.observations, ...echo.observations],
+    features: [...historical.features, ...echo.features] };
+  const withheld = { weights: [[first.id, 0], [retry.id, 0]], lastDirectRecallAtMs: null, holdout: [] };
+
+  for (const cutoff of [at(3), at(4), at(5), at(6), at(7)]) {
+    const before = replayEvidence({ ...historical, cutoff });
+    if (cutoff === at(3) || cutoff === at(4)) expect(before).toEqual(withheld);
+    expect.soft(replayEvidence({ ...appended, cutoff }), cutoff).toEqual(before);
+  }
+});
+
+it("R20 counts only legacy BKT copies attributable to the historical cutoff", () => {
+  const samples = bktSamples(5);
+  const original = projectProducedAttempts(samples, at(3));
+  const future = projectProducedAttempts([{ ...samples[0]!, recordedAt: at(6) }], at(7));
+  const input = buildDecisionInput({ observations: [...original.observations, ...future.observations], wantsFullExplanation: false });
+  const compare = (cutoff: string, features: readonly LearnerStateFeature[]) =>
+    nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff }).comparison;
+  const features = [...original.features, ...future.features];
+  const duplicate = { reason: "insufficient_samples", sampleCount: 4 };
+
+  expect(compare(at(3), original.features)).toMatchObject(duplicate);
+  expect(compare(at(7), features)).toMatchObject(duplicate);
+  for (const cutoff of [at(3), at(6)]) {
+    expect.soft(compare(cutoff, features), cutoff).toMatchObject({ status: "compared", sampleCount: 5 });
+  }
+});
+
+it("R20 supersedes two older legacy BKT error recordings with a newer explicit correction", () => {
+  const wrong = head("revised", 2, { verifiedCorrect: "no" });
+  const original = projectProducedAttempts([...bktSamples(4), wrong], at(3));
+  const repeat = projectProducedAttempts([{ ...wrong, recordedAt: at(3) }], at(5));
+  const correction = projectProducedAttempts([{ ...wrong, verifiedCorrect: "yes", recordedAt: at(4) }], at(5), { untimestamped: false });
+  const input = buildDecisionInput({ observations: [...original.observations, ...repeat.observations, ...correction.observations],
+    wantsFullExplanation: false });
+  const features = [...original.features, ...repeat.features, ...correction.features];
+  const compare = (cutoff: string) =>
+    nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [], features, cutoff });
+
+  expect(compare(at(4)).comparison).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+  expect(compare(at(5))).toMatchObject({ ruleDecision: nextLearningStep(input), comparison: { status: "compared", sampleCount: 5 } });
+});
+
+it("R20 retains a rule-only legacy error beside an incompatible future recording for the same ID", () => {
+  const original = projectProducedAttempts(bktSamples(5), at(3));
+  const wrong = head("rule-only", 2, { verifiedCorrect: "no" });
+  const correction = projectProducedAttempts([{ ...wrong, verifiedCorrect: "yes", recordedAt: at(6) }], at(7), { untimestamped: false });
+  const compare = (cutoff: string, withCorrection: boolean) => {
+    const input = buildDecisionInput({ observations: [...original.observations, wrong, ...(withCorrection ? correction.observations : [])],
+      wantsFullExplanation: false });
+    return nextLearningStepWithExperimentalBkt(input, { enabled: true, target: bktTarget, excludedProblemIds: [], cutoff,
+      features: [...original.features, ...(withCorrection ? correction.features : [])] }).comparison;
+  };
+
+  for (const cutoff of [at(3), at(6)]) {
+    expect(compare(cutoff, false)).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+    expect.soft(compare(cutoff, true), cutoff).toMatchObject({ reason: "priority_rule", sampleCount: 0 });
+  }
+});
+
 it("holds overlapping legacy revisions until their forced recording slot", () => {
   const first = head("first", 2);
   const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey,
