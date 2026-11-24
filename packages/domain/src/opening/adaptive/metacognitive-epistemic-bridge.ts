@@ -167,7 +167,7 @@ function matchesAssistance(assistance: SnapshotObservation["assistance"], eligib
     && (!reasonCodes.includes("help_before_submission") || reasonCodes.includes("attempt_timing_unknown"));
 }
 
-export function matchesUntimestampedObservation(observation: SnapshotObservation, feature: LearnerStateFeature): boolean {
+function matchesUntimestampedObservation(observation: SnapshotObservation, feature: LearnerStateFeature): boolean {
   const { eligibility } = feature;
   return (observation.requirementKey ?? null) === feature.requirementKey
     && normalizeSkillLabelKey(observation.skillLabel) === normalizeSkillLabelKey(feature.skillLabel)
@@ -183,9 +183,10 @@ type FeatureRevision = { feature: LearnerStateFeature; attempted: number; record
 type ObservationProjection = { observation: SnapshotObservation; attempted: number };
 type ObservationRevision = ObservationProjection & { recorded: number; legacyCopies?: number };
 type LegacyProjection = ObservationProjection & { anchor: number; bit: bigint; copies: number };
-type LegacyBucket = { occurrences: LegacyProjection[]; slots: Set<number>; required: bigint };
+type LegacyOccurrence = { projection: LegacyProjection; producerIndex: number };
+type LegacyBucket = { occurrences: LegacyOccurrence[]; slots: Set<number>; required: bigint };
 type LegacyProgress = { next: number; represented: bigint; skipped: bigint };
-type LegacyPlacement = { bucketIndex: number; occurrence: number; slot: number };
+type LegacyPlacement = LegacyOccurrence & { bucketIndex: number; slot: number };
 type LegacyAssignment = {
   progress: readonly LegacyProgress[];
   coverage: number;
@@ -221,24 +222,20 @@ function compareAssignments(left: LegacyAssignment, right: LegacyAssignment) {
 
 type ProducerPath = {
   slots: bigint;
-  distinct: number;
-  preAnchor: number;
+  bucketSlots: readonly bigint[];
+  copies: readonly number[];
+  preAnchor: readonly number[];
   placements: readonly LegacyPlacement[];
-  earliestPeerLatest: number;
 };
 
-function offerProducerPath(paths: Map<string, ProducerPath>, path: ProducerPath) {
-  const key = `${path.slots}:${path.distinct}:${path.preAnchor}`;
+function precedes(left: readonly LegacyPlacement[], right: readonly LegacyPlacement[]): boolean {
+  const first = left.findIndex((placement, index) => placement.producerIndex !== right[index]!.producerIndex);
+  return first >= 0 && left[first]!.producerIndex < right[first]!.producerIndex;
+}
+
+function offerProducerPath(paths: Map<string, ProducerPath>, key: string, path: ProducerPath) {
   const previous = paths.get(key);
-  if (!previous) {
-    paths.set(key, path);
-    return;
-  }
-  // Equal slot allocations can pair their best producer order with either peer path.
-  const difference = path.placements.findIndex((entry, index) => entry.occurrence !== previous.placements[index]!.occurrence);
-  const preferred = difference >= 0 && path.placements[difference]!.occurrence < previous.placements[difference]!.occurrence
-    ? path : previous;
-  paths.set(key, { ...preferred, earliestPeerLatest: Math.min(path.earliestPeerLatest, previous.earliestPeerLatest) });
+  if (!previous || precedes(path.placements, previous.placements)) paths.set(key, path);
 }
 
 type EmitLegacyRevision = (row: LegacyProjection, slot: number, visibleCopies: number, canBeLatest: boolean) => void;
@@ -247,59 +244,75 @@ function emitOptimalLegacyPaths(
   buckets: readonly LegacyBucket[], optimal: ReadonlySet<LegacyAssignment>, recordings: readonly number[],
   visibleSlots: ReadonlySet<number>, emit: EmitLegacyRevision,
 ): number {
-  let earliestLatest = Infinity;
-  // Project the optimal assignment graph onto one bucket at a time. A producer
-  // preference can replace another path only for the same slots and distinct count.
-  // The assignment of every other bucket remains feasible for that replacement.
-  buckets.forEach(({ occurrences }, bucketIndex) => {
-    const pending = new Map<LegacyAssignment, Map<string, ProducerPath>>();
-    for (const assignment of optimal) {
-      const { represented } = assignment.progress[bucketIndex]!;
-      const distinct = new Set(occurrences.filter(row => (row.bit & represented) !== 0n)).size;
-      const paths = new Map<string, ProducerPath>();
-      offerProducerPath(paths, { slots: 0n, distinct, preAnchor: 0, placements: [], earliestPeerLatest: -Infinity });
-      pending.set(assignment, paths);
+  const projections = [...new Set(buckets.flatMap(bucket => bucket.occurrences.map(row => row.projection)))];
+  const projectionIds = new Map(projections.map((projection, index) => [projection, index]));
+  const empty: ProducerPath = {
+    slots: 0n, bucketSlots: buckets.map(() => 0n), copies: projections.map(() => 0),
+    preAnchor: buckets.map(() => 0), placements: [],
+  };
+  const signature = (path: ProducerPath) => `${path.bucketSlots.join(",")}:${path.copies.join(",")}:${path.preAnchor.join(",")}`;
+  const pending = new Map([...optimal].map(assignment => [assignment, new Map([[signature(empty), empty]])]));
+  const complete = new Map<string, ProducerPath>();
+  // Walk the optimal assignment graph backwards. At a shared state, suffixes
+  // with the same bucket allocations, copy counts and scores can use any common prefix.
+  for (const [assignment, paths] of pending) {
+    if (!assignment.edges.length) {
+      for (const [key, path] of paths) offerProducerPath(complete, key, path);
     }
-    // All terminal nodes are at the same depth. Visiting in insertion order
-    // accumulates paths from every successor before visiting its predecessor.
-    for (const [assignment, paths] of pending) {
-      if (!assignment.edges.length) {
-        for (const { placements, earliestPeerLatest } of paths.values()) {
-          const latest = placements.reduce((time, { slot }) => visibleSlots.has(slot)
-            ? Math.max(time, recordings[slot]!) : time, -Infinity);
-          earliestLatest = Math.min(earliestLatest, Math.max(latest, earliestPeerLatest));
-          const byProjection = groupByKey(placements, ({ occurrence }) => occurrences[occurrence]!);
-          for (const [row, assigned] of byProjection) {
-            const visible = assigned.filter(({ slot }) => visibleSlots.has(slot));
-            const future = assigned.length - visible.length;
-            const visibleCopies = Math.max(visible.length, row.copies - future);
-            for (const { slot } of visible) emit(row, slot, visibleCopies, recordings[slot] === latest && latest >= earliestPeerLatest);
-          }
+    for (const { previous, placement } of assignment.edges) {
+      const next = pending.get(previous) ?? new Map<string, ProducerPath>();
+      for (const [key, path] of paths) {
+        if (!placement) {
+          offerProducerPath(next, key, path);
+          continue;
         }
+        const { slot, bucketIndex, projection } = placement;
+        const mask = 1n << BigInt(slot), projectionId = projectionIds.get(projection)!;
+        const bucketSlots = [...path.bucketSlots], copies = [...path.copies], preAnchor = [...path.preAnchor];
+        bucketSlots[bucketIndex] = bucketSlots[bucketIndex]! | mask;
+        copies[projectionId] = copies[projectionId]! + 1;
+        preAnchor[bucketIndex] = preAnchor[bucketIndex]! + Number(recordings[slot]! < projection.anchor);
+        const extended = { slots: path.slots | mask, bucketSlots, copies, preAnchor, placements: [placement, ...path.placements] };
+        offerProducerPath(next, signature(extended), extended);
       }
-      for (const { previous, placement } of assignment.edges) {
-        const next = pending.get(previous) ?? new Map<string, ProducerPath>();
-        for (const path of paths.values()) {
-          if (!placement) {
-            offerProducerPath(next, path);
-            continue;
-          }
-          const { slot, occurrence } = placement;
-          const recorded = recordings[slot]!;
-          if (placement.bucketIndex === bucketIndex) {
-            offerProducerPath(next, { ...path, slots: path.slots | (1n << BigInt(slot)),
-              preAnchor: path.preAnchor + Number(recorded < occurrences[occurrence]!.anchor),
-              placements: [placement, ...path.placements] });
-          } else {
-            offerProducerPath(next, { ...path, earliestPeerLatest: visibleSlots.has(slot)
-              ? Math.max(path.earliestPeerLatest, recorded) : path.earliestPeerLatest });
-          }
-        }
-        pending.set(previous, next);
-      }
-      pending.delete(assignment);
+      pending.set(previous, next);
     }
+    pending.delete(assignment);
+  }
+
+  const preferredByBucket = buckets.map(() => new Map<string, LegacyPlacement[]>());
+  const paths = [...complete.values()].map(path => {
+    const placements = groupByKey(path.placements, row => row.bucketIndex);
+    const allocations = [...placements].map(([index, rows]) => {
+      const distinct = new Set(rows.map(row => row.projection)).size;
+      const key = `${path.bucketSlots[index]}:${distinct}:${path.preAnchor[index]}`;
+      const preferred = preferredByBucket[index]!;
+      const previous = preferred.get(key);
+      if (!previous || precedes(rows, previous)) preferred.set(key, rows);
+      return { index, key, rows };
+    });
+    return { path, allocations };
   });
+  const selected = new Map<string, ProducerPath>();
+  for (const { path, allocations } of paths) {
+    if (allocations.some(({ index, key, rows }) => precedes(preferredByBucket[index]!.get(key)!, rows))) continue;
+    // The global producer order resolves permutations of the same copies.
+    // Different occupied slots or projection counts remain distinct alternatives.
+    // All paths reaching this point already have the same optimal pre-anchor score.
+    offerProducerPath(selected, `${path.slots}:${path.copies.join(",")}`, path);
+  }
+
+  let earliestLatest = Infinity;
+  for (const { placements } of selected.values()) {
+    const visible = placements.filter(({ slot }) => visibleSlots.has(slot));
+    const latest = visible.length ? recordings[visible.at(-1)!.slot]! : -Infinity;
+    earliestLatest = Math.min(earliestLatest, latest);
+    for (const [row, assigned] of groupByKey(placements, placement => placement.projection)) {
+      const visibleAssignments = assigned.filter(({ slot }) => visibleSlots.has(slot));
+      const copies = Math.max(visibleAssignments.length, row.copies - (assigned.length - visibleAssignments.length));
+      for (const { slot } of visibleAssignments) emit(row, slot, copies, recordings[slot] === latest);
+    }
+  }
   return earliestLatest;
 }
 
@@ -332,10 +345,9 @@ function resolveSingleLegacyProjection(
 function resolveLegacyComponent(
   buckets: readonly LegacyBucket[], slots: readonly number[], recordings: readonly number[],
   visibleSlots: ReadonlySet<number>, emit: EmitLegacyRevision,
-): number {
-  if (!slots.some(slot => visibleSlots.has(slot))) return -Infinity;
-  const only = buckets[0]!.occurrences[0]!;
-  if (buckets.length === 1 && buckets[0]!.occurrences.every(row => row === only)) {
+): number | null {
+  const only = buckets[0]!.occurrences[0]!.projection;
+  if (buckets.length === 1 && buckets[0]!.occurrences.every(row => row.projection === only)) {
     return resolveSingleLegacyProjection(only, slots, recordings, visibleSlots, emit);
   }
 
@@ -361,7 +373,8 @@ function resolveLegacyComponent(
         let { skipped } = assignment.progress[bucketIndex]!;
         const offered = new Set<LegacyProjection>();
         for (let index = start; index < occurrences.length; index++) {
-          const row = occurrences[index]!;
+          const occurrence = occurrences[index]!;
+          const row = occurrence.projection;
           const missing = (represented & row.bit) === 0n;
           if ((skipped & row.bit) === 0n && !offered.has(row)) {
             offered.add(row);
@@ -369,7 +382,7 @@ function resolveLegacyComponent(
             progress[bucketIndex] = { next: index + 1, represented: represented | row.bit, skipped };
             offer({ progress, coverage: assignment.coverage + 1, distinct: assignment.distinct + Number(missing),
               preAnchor: assignment.preAnchor + Number(recordings[slot]! < row.anchor),
-              edges: [{ previous: assignment, placement: { bucketIndex, occurrence: index, slot } }] });
+              edges: [{ previous: assignment, placement: { ...occurrence, bucketIndex, slot } }] });
           }
           // A first occurrence fixes the order of that content. An optional
           // projection skipped here cannot re-enter through a later copy.
@@ -396,15 +409,20 @@ function resolveLegacyComponent(
     // Contradictory recordings cannot all be represented. Retain the distinct
     // possible contents at visible slots so qualification fails closed.
     for (const bucket of buckets) {
-      for (const row of new Set(bucket.occurrences)) for (const slot of bucket.slots) emit(row, slot, row.copies, true);
+      for (const projection of new Set(bucket.occurrences.map(row => row.projection))) {
+        for (const slot of bucket.slots) emit(projection, slot, projection.copies, true);
+      }
     }
-    return -Infinity;
+    return null;
   }
 
-  return emitOptimalLegacyPaths(buckets, optimal, recordings, visibleSlots, emit);
+  // Future-only components still need a feasibility check for rule-only evidence.
+  return slots.some(slot => visibleSlots.has(slot))
+    ? emitOptimalLegacyPaths(buckets, optimal, recordings, visibleSlots, emit)
+    : -Infinity;
 }
 
-export function explicitObservationRecording(observation: SnapshotObservation, attempted = adaptiveShadowTime(observation.attemptedAt)): number {
+function explicitObservationRecording(observation: SnapshotObservation, attempted = adaptiveShadowTime(observation.attemptedAt)): number {
   const recorded = adaptiveShadowTime(observation.recordedAt ?? null);
   return attempted <= recorded ? recorded : NaN;
 }
@@ -412,16 +430,16 @@ export function explicitObservationRecording(observation: SnapshotObservation, a
 /** Resolve heads for a single observation ID against its course-scoped recording slots. */
 export function visibleObservationRevisions(
   observations: readonly SnapshotObservation[], features: readonly FeatureRevision[], cutoff: number,
-): { revisions: ObservationRevision[]; latest: ObservationRevision[] } {
+): { revisions: ObservationRevision[]; latest: ObservationRevision[]; unplaced: SnapshotObservation[] } {
   const explicit: ObservationRevision[] = [];
   const claimedSlots = new Set<number>();
-  const legacy: (ObservationProjection & { matchingSlots: number[] })[] = [];
-  for (const observation of observations) {
+  const legacy: (ObservationProjection & { matchingSlots: number[]; producerIndex: number })[] = [];
+  for (const [producerIndex, observation] of observations.entries()) {
     const attempted = adaptiveShadowTime(observation.attemptedAt);
     const matchingSlots = features.flatMap((row, slot) =>
       row.attempted === attempted && matchesUntimestampedObservation(observation, row.feature) ? [slot] : []);
     if (observation.recordedAt == null) {
-      if (matchingSlots.length) legacy.push({ observation, attempted, matchingSlots });
+      if (Number.isFinite(attempted)) legacy.push({ observation, attempted, matchingSlots, producerIndex });
       continue;
     }
 
@@ -453,30 +471,38 @@ export function visibleObservationRevisions(
     return { ...row, slots, anchor };
   });
   const buckets: LegacyBucket[] = [];
+  const unresolved = new Set<LegacyProjection>();
   // Producer order applies to projections competing for the same eligible slots.
   for (const rows of groupByKey(eligible, row => row.slots.join(",")).values()) {
     const bucket: LegacyBucket = { occurrences: [], slots: new Set(rows[0]!.slots), required: 0n };
     const distinct: LegacyProjection[] = [];
-    for (const { observation, attempted, anchor, matchingSlots } of rows) {
+    for (const { observation, attempted, anchor, matchingSlots, producerIndex } of rows) {
       const identical = distinct.find(projection => sameObservationProjection(observation, projection.observation));
       const projection = identical ?? { observation, attempted, anchor, bit: 1n << BigInt(distinct.length), copies: 0 };
       if (!identical) distinct.push(projection);
       projection.copies++;
       if (!bucket.slots.size) {
         // A different legacy head on an explicitly claimed slot remains conflicting.
+        unresolved.add(projection);
         if (anchor === Infinity) for (const slot of matchingSlots) emit(projection, slot, projection.copies, true);
         continue;
       }
       if (anchor === Infinity) bucket.required |= projection.bit;
       // Each occurrence adds capacity for the same content while retaining producer order.
-      bucket.occurrences.push(projection);
+      bucket.occurrences.push({ projection, producerIndex });
     }
     if (bucket.occurrences.length) buckets.push(bucket);
   }
 
   for (const component of legacyComponents(buckets)) {
     const earliest = resolveLegacyComponent(component.buckets, component.slots, recordings, visibleSlots, emit);
-    earliestLatest = Math.max(earliestLatest, earliest);
+    if (earliest === null) {
+      for (const bucket of component.buckets) {
+        for (const { projection } of bucket.occurrences) unresolved.add(projection);
+      }
+    } else {
+      earliestLatest = Math.max(earliestLatest, earliest);
+    }
   }
   // Components share no slots. A possible latest revision also has to be at
   // least as new as the earliest latest recording of every other component.
@@ -487,7 +513,11 @@ export function visibleObservationRevisions(
       if (canBeLatest) possibleLatest.push(revision);
     }
   }
-  return { revisions, latest: possibleLatest.filter(row => row.recorded >= earliestLatest) };
+  // A legacy projection without a feasible slot can inform the ordinary rule,
+  // provided it is old enough, has no visible slot conflict, and is no explicit echo.
+  const unplaced = [...unresolved].filter(row => row.attempted < cutoff && !emitted.has(row)
+    && !explicit.some(head => sameObservationProjection(head.observation, row.observation))).map(row => row.observation);
+  return { revisions, latest: possibleLatest.filter(row => row.recorded >= earliestLatest), unplaced };
 }
 
 function featureSlotKey(feature: LearnerStateFeature): string {
