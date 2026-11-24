@@ -10,6 +10,7 @@ import type { CartridgeEvidenceInput } from "../evidence-eligibility";
 import type { CourseEvidence, ObservationEligibilityInput } from "../learning-summary";
 import { learningObservation, qualifiedInput } from "../learning-summary-fixtures";
 import { buildDecisionInput } from "./decision-input";
+import { courseFeatureRevisions, visibleObservationRevisions } from "./metacognitive-epistemic-bridge";
 import { toSnapshotEvidence } from "./snapshot-evidence";
 
 const at = (day: number) => `2026-10-${String(day).padStart(2, "0")}T10:00:00.000Z`;
@@ -252,6 +253,18 @@ const withheldFirstGrade: CartridgeEvidenceInput = {
   registry: createCartridgeRegistry(),
   emissions: { first: { cartridgeId: "unregistered", cartridgeVersion: "1", probeId: "probe", response: "correct" } },
 };
+
+function expectFastVisibleRevisions(
+  observations: readonly SnapshotObservation[], features: readonly LearnerStateFeature[], cutoff: string,
+) {
+  const slots = courseFeatureRevisions(features, scope.courseId);
+  const cutoffMs = Date.parse(cutoff);
+  visibleObservationRevisions(observations, slots, cutoffMs);
+  const start = performance.now();
+  visibleObservationRevisions(observations, slots, cutoffMs);
+  const elapsedMs = performance.now() - start;
+  expect.soft(elapsedMs, cutoff).toBeLessThan(50);
+}
 
 function replayEvidence(input: Parameters<typeof compareLearnerShadowV2>[0]) {
   const { steps, belief } = buildSkillBeliefTrajectory(input);
@@ -1055,13 +1068,117 @@ it.each([8, 12])("R25 resolves %i projections across alternating graded and with
   } : { ...graded, recordedAt: at(index + 1) }), feature(retry)];
 
   for (const cutoff of [at(2), at(2 * copies + 1)]) {
-    const start = performance.now();
+    expectFastVisibleRevisions(observations.slice(0, -1), features.slice(0, -1), cutoff);
     const result = replayEvidence({ scope, cutoff, observations, features, targetFamilyKeys: [], propagatedFamilyKeys: [] });
-    const elapsedMs = performance.now() - start;
     expect(result).toEqual(cutoff === at(2)
       ? { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] }
       : { weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id] });
-    expect.soft(elapsedMs, cutoff).toBeLessThan(50);
+  }
+});
+
+type SlotGrade = SnapshotObservation["verifiedCorrect"] | "withheld";
+
+function gradeSlot(row: SnapshotObservation, grade: SlotGrade, recordedAt: string) {
+  const slot = feature({ ...row, verifiedCorrect: grade === "withheld" ? "unknown" : grade }, { recordedAt });
+  if (grade === "withheld") slot.gaps = ["cartridge_evidence_not_qualified"];
+  return slot;
+}
+
+it.each([
+  { buckets: 2, copies: 10 }, { buckets: 2, copies: 12 }, { buckets: 3, copies: 12 },
+])("R26 resolves $copies copies across $buckets overlapping buckets", ({ buckets, copies }) => {
+  const first = head("first", 1);
+  const wrong = { ...first, problemId: "wrong", familyKey: "wrong-family", verifiedCorrect: "no" as const };
+  const unknown = { ...first, problemId: "unknown", familyKey: "unknown-family", verifiedCorrect: "unknown" as const };
+  const projections = [first, wrong, unknown].slice(0, buckets);
+  const retry = head("retry", 2, { problemId: first.problemId, familyKey: first.familyKey, attemptedAt: "2026-10-01T22:00:00.000Z" });
+  const observations = Array.from({ length: copies }, (_, index) => projections[index % buckets]!);
+  const grades: SlotGrade[] = ["yes", "withheld", "no"];
+  if (buckets === 3) grades.push("unknown");
+  const features = Array.from({ length: 2 * copies }, (_, index) => gradeSlot(first, grades[index % grades.length]!, at(index + 1)));
+
+  for (const cutoff of [at(2), at(2 * copies + 1)]) {
+    expectFastVisibleRevisions(observations, features, cutoff);
+    expect(replayEvidence({ scope, cutoff, observations: [...observations, retry], features: [...features, feature(retry)],
+      targetFamilyKeys: [], propagatedFamilyKeys: [] })).toEqual(cutoff === at(2)
+      ? { weights: [[first.id, 1], [retry.id, 0]], lastDirectRecallAtMs: Date.parse(first.attemptedAt), holdout: [first.id] }
+      : { weights: [[retry.id, 1]], lastDirectRecallAtMs: Date.parse(retry.attemptedAt), holdout: [retry.id] });
+  }
+});
+
+it.each([
+  { grades: ["withheld", "yes", "no", "withheld", "yes", "no"] as const, includeUnknown: false },
+  { grades: ["withheld", "yes", "unknown", "no", "withheld", "yes", "unknown", "no"] as const, includeUnknown: true },
+])("R26 agrees with exhaustive assignments for slots $grades", ({ grades, includeUnknown }) => {
+  const first = head("first", 1);
+  const wrong = { ...first, problemId: "wrong", verifiedCorrect: "no" as const };
+  const unknown = { ...first, problemId: "unknown", verifiedCorrect: "unknown" as const };
+  const corrected = { ...first, problemId: "corrected" };
+  const observations = includeUnknown ? [wrong, first, unknown, corrected, unknown] : [wrong, first, corrected, wrong];
+  const recordings = grades.map((_, slot) => Date.parse(at(2 + Math.floor(slot / 2))));
+  const slots = courseFeatureRevisions(grades.map((grade, index) =>
+    gradeSlot(first, grade, new Date(recordings[index]!).toISOString())), scope.courseId);
+  const gradeAtSlot = slots.map(({ feature: row }) => row.gaps.length ? "withheld" : row.eligibility.verifiedCorrect);
+  const occupiedSubsets = new Map<string, { slot: number; producer: number }[]>();
+  const placement: { slot: number; producer: number }[] = [];
+  const placed = new Set<number>();
+  function enumerate(slot: number) {
+    if (slot === slots.length) {
+      // The fixture has enough slots for every copy. For each occupied subset,
+      // retain the lexicographically earliest valid sequence of producer indices.
+      if (placement.length !== observations.length) return;
+      const key = placement.map(row => row.slot).join(",");
+      const previous = occupiedSubsets.get(key);
+      const firstDifference = previous?.findIndex((row, index) => row.producer !== placement[index]!.producer);
+      if (!previous || (firstDifference !== undefined && firstDifference >= 0
+        && placement[firstDifference]!.producer < previous[firstDifference]!.producer)) occupiedSubsets.set(key, [...placement]);
+      return;
+    }
+    enumerate(slot + 1);
+    const gradesSeen = new Set<SlotGrade>();
+    observations.forEach((row, producer) => {
+      if (placed.has(producer) || gradesSeen.has(row.verifiedCorrect)) return;
+      gradesSeen.add(row.verifiedCorrect);
+      if (gradeAtSlot[slot] !== "withheld" && gradeAtSlot[slot] !== row.verifiedCorrect) return;
+      placed.add(producer);
+      placement.push({ slot, producer });
+      enumerate(slot + 1);
+      placement.pop();
+      placed.delete(producer);
+    });
+  }
+  enumerate(0);
+  expect(occupiedSubsets.size).toBeGreaterThan(1);
+
+  for (const cutoff of [...new Set(recordings), recordings.at(-1)! + 1]) {
+    const revisions = new Map<string, number>();
+    const latest = new Map<string, number>();
+    let canBeAbsent = false;
+    for (const assignment of occupiedSubsets.values()) {
+      const visible = assignment.filter(({ slot }) => slots[slot]!.recorded < cutoff);
+      canBeAbsent ||= visible.length === 0;
+      visible.forEach(({ slot, producer }) => {
+        const row = observations[producer]!;
+        const recorded = slots[slot]!.recorded;
+        const key = JSON.stringify([row.problemId, recorded]);
+        const copies = visible.filter(other => observations[other.producer] === row).length;
+        revisions.set(key, Math.max(revisions.get(key) ?? 0, copies));
+        if (recorded === slots[visible.at(-1)!.slot]!.recorded) latest.set(key, 0);
+      });
+    }
+    const actual = visibleObservationRevisions(observations, slots, cutoff);
+    const summarize = (rows: typeof actual.revisions, latestOnly = false) => {
+      const result = new Map<string, number>();
+      for (const { observation, recorded, legacyCopies } of rows) {
+        const key = JSON.stringify([observation.problemId, recorded]);
+        result.set(key, latestOnly ? 0 : Math.max(result.get(key) ?? 0, legacyCopies!));
+      }
+      return result;
+    };
+    expect(summarize(actual.revisions)).toEqual(revisions);
+    expect(summarize(actual.latest, true)).toEqual(latest);
+    expect(actual.canBeAbsent).toBe(canBeAbsent);
+    expect(actual.unplaced).toEqual([]);
   }
 });
 
