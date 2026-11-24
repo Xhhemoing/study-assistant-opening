@@ -3,6 +3,7 @@ import type { EphemeralProvenanceRepository } from "@aistudy/database";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
 import { OpeningProviderError, selectContext, type BudgetedRepository } from "@aistudy/ai";
+import { projectOpeningBackupCardSources, projectOpeningBackupProvenance } from "../../../../../../packages/database/src/repositories/opening-backup-library";
 import { createEphemeralTutorService, type EphemeralTutorDeps } from "./ephemeral-service";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
@@ -657,4 +658,61 @@ it("uses the same course context and provenance for temporary tutoring and reche
   await expect(blocked.service.replyEphemeral(scope, { text: "讲讲这道题", courseId: chunkId, sourceIds: [sourceId], history: [] })).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
   expect(blocked.complete).not.toHaveBeenCalled();
   expect(blocked.budget.release).toHaveBeenCalled();
+});
+
+describe("backup card publication provenance projection", () => {
+  const docId = "20000000-0000-4000-8000-000000000001";
+  const cardId = "20000000-0000-4000-8000-000000000002";
+  const keepCardId = "20000000-0000-4000-8000-000000000003";
+
+  it("excludes root-null cards linked via publicationCardIds when their document is omitted or deleted, and propagates publication sources when admitted", () => {
+    const rootNullCard = { id: cardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    const cleanCard = { id: keepCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    const provenance = [{ document_id: docId, workspace_id: workspaceId,
+      context_source_refs: [{ sourceId, sourceVersion: 1, publication: true }, { publicationCardIds: [cardId.toUpperCase()] }] }];
+
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, cleanCard],
+      library_documents: [],
+      opening_sources: [{ id: sourceId }],
+    }, provenance)).toEqual([cleanCard]);
+
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, cleanCard],
+      library_documents: [{ id: docId, deleted_at: "2026-11-24T00:00:00Z" }],
+      opening_sources: [{ id: sourceId }],
+    }, provenance)).toEqual([cleanCard]);
+
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard],
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+    }, provenance)).toEqual([{ ...rootNullCard, source_ids: [sourceId] }]);
+  });
+
+  it.each([
+    { kind: "scalar string", refs: [{ publicationCardIds: cardId }] },
+    { kind: "nested array", refs: [{ publicationCardIds: [[cardId.toUpperCase()]] }] },
+    { kind: "mixed array", refs: [{ publicationCardIds: [cardId, { bad: 1 }] }] },
+    { kind: "id object", refs: [{ publicationCardIds: [{ id: cardId }] }] },
+    { kind: "cardId object", refs: [{ publicationCardIds: [{ cardId }] }] },
+    { kind: "top-level object", refs: { publicationCardIds: cardId } },
+  ])("excludes root-null cards referenced by malformed $kind publicationCardIds in backup provenance", ({ refs }) => {
+    const rootNullCard = { id: cardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    const cleanCard = { id: keepCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, cleanCard],
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+    }, [{ document_id: docId, workspace_id: workspaceId, context_source_refs: refs }])).toEqual([cleanCard]);
+  });
+
+  it("matches publicationCardIds case-insensitively in projectOpeningBackupProvenance", () => {
+    const projected = projectOpeningBackupProvenance([
+      { document_id: docId, context_source_refs: [{ sourceId, sourceVersion: 1 }, { publicationCardIds: [cardId, keepCardId] }] },
+    ], new Set([` ${cardId.toUpperCase()} `]));
+    expect(projected).toEqual([
+      { document_id: docId, context_source_refs: [{ sourceId, sourceVersion: 1 }, { publicationCardIds: [cardId] }] },
+    ]);
+  });
 });

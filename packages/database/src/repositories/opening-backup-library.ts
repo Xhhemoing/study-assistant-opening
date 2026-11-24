@@ -5,10 +5,39 @@ import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 import { backupPrivateLibrary } from "./backup-private-library";
 import { asObject } from "./backup-map";
 import { withPublicationCardSourceIds } from "./card-sources";
-import { historicalTeachingDocumentsByCard, parseBackupSourceRefs, publicationAnswerKeysByDocument, publicationMetadata, publicationMetadataIds, publicationSourceCandidates, publicationSourceRefsByDocument } from "./backup-publication-provenance";
+import { parseBackupSourceRefs, publicationAnswerKeysByDocument, publicationMetadata, publicationMetadataIds, publicationSourceCandidates, publicationSourceRefsByDocument } from "./backup-publication-provenance";
 
 type Tables = OpeningBackupRecordSnapshot["tables"];
 type LibraryTables = Partial<Record<string, Record<string, unknown>[]>>;
+
+function collectPublicationCardIds(node: unknown, inPub: boolean, out: Set<string>) {
+  if (Array.isArray(node)) {
+    for (const item of node) collectPublicationCardIds(item, inPub, out);
+    return;
+  }
+  if (inPub && typeof node === "string") {
+    const id = node.trim().toLowerCase();
+    if (id) out.add(id);
+    return;
+  }
+  const record = asObject(node);
+  if (!record) return;
+  if (!inPub && "publicationCardIds" in record) {
+    collectPublicationCardIds(record.publicationCardIds, true, out);
+    return;
+  }
+  if (inPub) {
+    for (const candidate of [record.id, record.cardId]) {
+      if (typeof candidate === "string" && candidate.trim()) out.add(candidate.trim().toLowerCase());
+    }
+  }
+}
+
+function extractNotePublicationCardIds(refs: unknown): string[] {
+  const ids = new Set<string>();
+  collectPublicationCardIds(refs, false, ids);
+  return [...ids];
+}
 
 function privateTeachingBlockIds(tables: LibraryTables) {
   return [...publicationAnswerKeysByDocument(tables.opening_teaching_activity_specs ?? [], tables.opening_note_provenance ?? []).values()].flat();
@@ -58,12 +87,43 @@ export function projectOpeningBackupCardSources(tables: LibraryTables, allProven
   }
   for (const row of specs) addSources(row.document_id, publicationSourceCandidates(row), false);
   for (const row of allProvenance) addSources(row.document_id, row.context_source_refs, true);
-  const historicalDocuments = historicalTeachingDocumentsByCard(allProvenance);
   const includedDocuments = tables.library_documents && new Set(tables.library_documents.filter(row => row.deleted_at == null)
     .map(row => String(row.id).toLowerCase()));
   const includedSources = new Set((tables.opening_sources ?? []).map(row => String(row.id).toLowerCase()));
+  const historicalDocuments = new Map<string, string[]>();
+  const invalidPublicationCards = new Set<string>();
+  const provenanceWorkspacesByCard = new Map<string, Set<string>>();
+  for (const row of allProvenance) {
+    const cardIds = extractNotePublicationCardIds(row.context_source_refs);
+    if (!cardIds.length) continue;
+    const parsedRefs = parseBackupSourceRefs(row.context_source_refs);
+    const docId = typeof row.document_id === "string" ? row.document_id.toLowerCase() : null;
+    const validLineage = docId !== null && parsedRefs !== null
+      && backupNoteLineageMetadata(row.context_source_refs) !== null
+      && (tables.opening_sources === undefined || parsedRefs.every(ref => includedSources.has(ref.sourceId.toLowerCase())));
+    const rowWorkspace = typeof row.workspace_id === "string" ? row.workspace_id.toLowerCase() : undefined;
+    for (const cardId of cardIds) {
+      if (!validLineage || docId === null) {
+        invalidPublicationCards.add(cardId);
+        continue;
+      }
+      if (rowWorkspace !== undefined) {
+        const workspaces = provenanceWorkspacesByCard.get(cardId) ?? new Set<string>();
+        workspaces.add(rowWorkspace);
+        provenanceWorkspacesByCard.set(cardId, workspaces);
+      }
+      const existing = historicalDocuments.get(cardId);
+      if (existing) existing.push(docId);
+      else historicalDocuments.set(cardId, [docId]);
+    }
+  }
   return (tables.cards ?? []).flatMap(card => {
-    const historical = card.origin_observation_root_id == null ? [] : historicalDocuments.get(String(card.id).toLowerCase()) ?? [];
+    const cardKey = String(card.id).trim().toLowerCase();
+    if (invalidPublicationCards.has(cardKey)) return [];
+    const cardWorkspace = typeof card.workspace_id === "string" ? card.workspace_id.toLowerCase() : undefined;
+    const linkedWorkspaces = provenanceWorkspacesByCard.get(cardKey);
+    if (cardWorkspace !== undefined && linkedWorkspaces && [...linkedWorkspaces].some(ws => ws !== cardWorkspace)) return [];
+    const historical = historicalDocuments.get(cardKey) ?? [];
     const documents = [...historical,
       documentByActivity.get(observations.get(card.origin_observation_root_id)), card.source_document_id]
       .filter((id): id is string => typeof id === "string").map(id => id.toLowerCase());
@@ -91,12 +151,13 @@ function backupNoteLineageMetadata(value: unknown) {
 }
 
 export function projectOpeningBackupProvenance(rows: Record<string, unknown>[], cardIds: ReadonlySet<unknown>) {
+  const includedCardIds = new Set([...cardIds].flatMap(id => typeof id === "string" ? [id.trim().toLowerCase()] : []));
   return rows.map(row => {
     const refs = parseBackupSourceRefs(row.context_source_refs);
     const lineage = backupNoteLineageMetadata(row.context_source_refs);
     if (!refs || !lineage) return row;
     const answers = publicationMetadataIds(row.context_source_refs, "answerKeyBlockIds");
-    const cards = publicationMetadataIds(row.context_source_refs, "publicationCardIds").filter(id => cardIds.has(id));
+    const cards = publicationMetadataIds(row.context_source_refs, "publicationCardIds").filter(id => includedCardIds.has(id));
     return { ...row, context_source_refs: [
       ...refs, ...lineage, ...publicationMetadata(answers, cards),
     ] };

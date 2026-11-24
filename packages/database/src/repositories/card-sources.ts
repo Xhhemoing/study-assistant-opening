@@ -13,11 +13,30 @@ export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType
 /** Historical publication links survive reassignment of the card or its teaching spec. */
 export function cardLinkedToNotePublication(db: Db) {
   return db`EXISTS (
-    SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array'
-      THEN np.context_source_refs ELSE '[]'::jsonb END) AS metadata(ref)
-    CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(metadata.ref->'publicationCardIds')='array'
-      THEN metadata.ref->'publicationCardIds' ELSE '[]'::jsonb END) AS linked(id)
-    WHERE lower(linked.id)=c.id::text
+    WITH RECURSIVE pub_walk(node, in_pub) AS (
+      SELECT np.context_source_refs, false
+      WHERE np.context_source_refs IS NOT NULL
+      UNION ALL
+      SELECT child.val, child.next_in_pub
+      FROM pub_walk pw
+      CROSS JOIN LATERAL (
+        SELECT elem AS val, pw.in_pub AS next_in_pub
+        FROM jsonb_array_elements(
+          CASE WHEN jsonb_typeof(pw.node)='array' THEN pw.node ELSE '[]'::jsonb END
+        ) AS elem
+        UNION ALL
+        SELECT pw.node->'publicationCardIds', true
+        WHERE NOT pw.in_pub AND jsonb_typeof(pw.node)='object' AND pw.node ? 'publicationCardIds'
+      ) AS child
+    )
+    SELECT 1 FROM pub_walk pw
+    CROSS JOIN LATERAL (
+      VALUES
+        (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='string' THEN pw.node #>> '{}' END),
+        (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'id')='string' THEN pw.node->>'id' END),
+        (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'cardId')='string' THEN pw.node->>'cardId' END)
+    ) AS linked(id)
+    WHERE lower(btrim(linked.id))=c.id::text
   )`;
 }
 

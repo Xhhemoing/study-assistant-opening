@@ -95,11 +95,31 @@ const containsSourceRef = (ids: ReadonlySet<string>, refs: unknown) =>
   Array.isArray(refs) && refs.some(ref => containsId(ids, ref)
     || containsId(ids, field(ref, "sourceId")) || containsId(ids, field(ref, "source_id")));
 
-function extractPublicationCardIds(value: unknown): string[] {
-  if (typeof value === "string") return [value];
-  if (Array.isArray(value)) return value.flatMap(extractPublicationCardIds);
-  if (!isRecord(value)) return [];
-  return [value.id, value.cardId].filter((id): id is string => typeof id === "string");
+function collectPublicationCardIds(node: unknown, inPub: boolean, out: Set<string>) {
+  if (Array.isArray(node)) {
+    for (const item of node) collectPublicationCardIds(item, inPub, out);
+    return;
+  }
+  if (inPub && typeof node === "string") {
+    out.add(node);
+    return;
+  }
+  if (!isRecord(node)) return;
+  if (!inPub && "publicationCardIds" in node) {
+    collectPublicationCardIds(node.publicationCardIds, true, out);
+    return;
+  }
+  if (inPub) {
+    for (const id of [node.id, node.cardId]) {
+      if (typeof id === "string") out.add(id);
+    }
+  }
+}
+
+function extractNotePublicationCardIds(refs: unknown): string[] {
+  const ids = new Set<string>();
+  collectPublicationCardIds(refs, false, ids);
+  return [...ids];
 }
 
 type LineageKind = "session" | "activity" | "unit" | "chunk" | "item" | "observation" | "attempt" | "turn"
@@ -287,11 +307,8 @@ export function projectPrivacyGuardedOpeningDataset(
   const snippetsWithoutProvenance = new Set(snippetDocuments);
   for (const row of rows("opening_note_provenance")) {
     if (!inWorkspaceOrUnscoped(row)) {
-      const foreignRefs = row.context_source_refs;
-      for (const ref of Array.isArray(foreignRefs) ? foreignRefs : [foreignRefs]) {
-        for (const cardId of extractPublicationCardIds(field(ref, "publicationCardIds"))) {
-          exclude(lineageKey("card", cardId));
-        }
+      for (const cardId of extractNotePublicationCardIds(row.context_source_refs)) {
+        exclude(lineageKey("card", cardId));
       }
       continue;
     }
@@ -307,14 +324,14 @@ export function projectPrivacyGuardedOpeningDataset(
     let hasMemoryMetadata = false;
     let hasUnattributedMemory = false;
     // Keep identifiable card links even when the publication itself cannot be admitted.
+    const publicationCardIds = extractNotePublicationCardIds(refs);
+    if (publicationCardIds.length && !documentAdmitted) exclude(document);
+    for (const cardId of publicationCardIds) {
+      const card = lineageKey("card", cardId);
+      if (!document || !documentAdmitted) exclude(card);
+      else link(document, card);
+    }
     for (const ref of Array.isArray(refs) ? refs : [refs]) {
-      const cardIds = extractPublicationCardIds(field(ref, "publicationCardIds"));
-      if (cardIds.length && !documentAdmitted) exclude(document);
-      for (const cardId of cardIds) {
-        const card = lineageKey("card", cardId);
-        if (!document || !documentAdmitted) exclude(card);
-        else link(document, card);
-      }
       if (isRecord(ref) && "memoryDependencyIds" in ref) {
         const metadata = turnMemoryDependencyMetadata(ref);
         if (metadata) {

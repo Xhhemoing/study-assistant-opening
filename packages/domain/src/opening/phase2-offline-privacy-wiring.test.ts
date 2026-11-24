@@ -515,7 +515,9 @@ describe("persisted dataset provenance", () => {
   it.each([
     { kind: "scalar", refs: [{ publicationCardIds: variantCardId }] },
     { kind: "mixed array", refs: [{ publicationCardIds: ["bad", { id: variantCardId }] }] },
+    { kind: "cardId object", refs: [{ publicationCardIds: [{ cardId: variantCardId.toUpperCase() }] }] },
     { kind: "nested array", refs: [{ publicationCardIds: [[variantCardId]] }] },
+    { kind: "nested outer array", refs: [[{ publicationCardIds: [variantCardId] }]] },
     { kind: "non-array provenance", refs: { publicationCardIds: [variantCardId] } },
   ])("withholds cards identified in malformed $kind publication metadata", ({ refs }) => {
     expectVariantExcluded(project({

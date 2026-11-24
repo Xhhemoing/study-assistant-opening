@@ -15,7 +15,7 @@ type RecordSources = RecordNoteLineage & { refs: OpeningSystemQueryDraft["source
 
 async function readRecordNoteSources(tx: TransactionSql, scope: Scope, row: Record<string, unknown>,
   canCollectLineage: boolean): Promise<RecordSources | null> {
-  if (!row.has_note_provenance && row.snippet_origin !== true) return { refs: [], memoryIds: [], originTurnIds: [] };
+  if (!row.has_note_provenance && row.snippet_origin === false) return { refs: [], memoryIds: [], originTurnIds: [] };
   if (!Array.isArray(row.context_source_refs)) return null;
   if (row.snippet_origin !== false && !row.context_source_refs.some(isVerifiedSnippetLineage)) return null;
   const refs = parseNoteContextProvenanceRefs(row.context_source_refs);
@@ -83,7 +83,8 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
     const a = request.arguments, pattern = `%${(a.query ?? "").replace(/[\\%_]/g, "\\$&")}%`;
     const page = await readAdmittedPage(out, a, signal, (after: Record<string, unknown> | undefined, batchSize) => tx`SELECT
         d.id,d.title,d.current_revision_number,d.updated_at,d.updated_at::text AS cursor_updated_at,np.context_source_refs,
-        np.document_id IS NOT NULL AS has_note_provenance, origin.reason='save-opening-snippet' AS snippet_origin
+        np.document_id IS NOT NULL AS has_note_provenance,
+        CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END AS snippet_origin
       FROM library_documents d LEFT JOIN opening_note_provenance np ON np.document_id=d.id
       LEFT JOIN library_revisions origin ON origin.document_id=d.id AND origin.workspace_id=d.workspace_id AND origin.revision_number=1
       WHERE d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND d.title ILIKE ${pattern}
@@ -117,7 +118,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
             (np.workspace_id=c.workspace_id AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
               () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})) AS admitted,
           np.context_source_refs, np.document_id IS NOT NULL AS has_note_provenance,
-          origin.reason='save-opening-snippet' AS snippet_origin
+          CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END AS snippet_origin
         FROM cards c
         CROSS JOIN LATERAL (
           SELECT c.source_document_id AS id WHERE c.source_document_id IS NOT NULL
