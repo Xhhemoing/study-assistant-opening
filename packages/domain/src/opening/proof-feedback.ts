@@ -1,7 +1,7 @@
 import type { AiGradingProposal, ProofFeedback } from "@aistudy/contracts";
 import {
   assertiveProseSentences, counterfactualProofSteps, feedbackDeniesProvenEquality, proofStepUsesRealScalar,
-  verifyStandaloneProofEquationClaim,
+  STEP_ANCHOR, verifyStandaloneProofEquationClaim,
 } from "./symbolic-answer-bridge";
 
 type ProofContext = Partial<Pick<AiGradingProposal, "feedback" | "criteria" | "transcription">>;
@@ -38,16 +38,49 @@ const INFERENCE_CRITIQUE = [
 ];
 const VARIABLE_DIVISION = /\bdivid(?:e[sd]?|ing)\s+by\s+\$?(?:x|a\s+variable)\b/iu;
 const DIVISION_DEFECT = /\b(?:without|before)\s+(?:first\s+)?(?:prov|show|establish|justify|check|verify|ensur)\w*\b|\bfails?\s+(?:when|if|for|at|outside)\b/iu;
+const NONASSERTED_INFERENCE = /\b(?:whether|(?:wonder|ask|check|verify|test|see|question|consider|determine|examine|inspect)\w*\s+(?:if|whether|for)|what\s+if|if|unless|in\s+case)\b|是否|能否|有无|有没有|如果|若|倘若|除非/iu;
+const INFERENCE_DEFECT_REFERENCE = /(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result)|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result)|(?:missing|omitted|skipped)\s+(?:justification|reasoning|proof|derivation|steps?)|(?:divid(?:e[sd]?|ing)|division)\s+by\s+\$?(?:0|zero|x|a\s+variable))/u.source;
+const INFERENCE_DEFECT_DENIAL = /(?:absent|none|nonexistent|lacking|missing|avoided|eliminated|ruled\s+out|unfounded|not\s+(?:present|found|used|detected|seen|observed|an?\s+issue|occurring)|(?:does|do|did)\s+not\s+(?:occur|appear|apply|exist|arise|happen))/u.source;
 const NEGATED_INFERENCE_CRITIQUE = [
+  new RegExp(String.raw`\b${INFERENCE_DEFECT_REFERENCE}\b\$?(?:[^\S\r\n]+[\w'’-]+){0,4}[^\S\r\n]+${INFERENCE_DEFECT_DENIAL}\b`, "giu"),
+  /(?:循环论证|未证先用|直接假设|重述结论|跳步|除以(?:零|0))[^，。！？；：,.!?;:\r\n]{0,8}(?:不存在|没有|未出现|未见|已避免|不成立)/gu,
   /\b(?:no|not|never|neither|nor|without|free\s+of|avoid\w*|[a-z]+n['’]t)\b(?:\s+[\w'’-]+){0,4}\s+(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result|what\b)|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result)|(?:miss(?:ing|es)?|lack(?:s|ing)?|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|explicit|necessary|required|intermediate)\s+)*(?:justification|proof|derivation|reasoning|steps?)|(?:disallowed|forbidden|unauthori[sz]ed)\s+(?:the\s+)?(?:theorem|method|rule)|(?:divid(?:e[sd]?|ing)|division)\s+by)\b/giu,
   /(?:无|没有|并未|并非|不存在|未见|避免(?:了)?|不曾)[^，。！？；：,.!?;:]{0,12}(?:循环论证|未证先用|直接假设|重述结论|缺少(?:证明|推导|理由|依据)|未经证明|跳步|除以)/gu,
 ];
 
 function positiveInferenceClauses(text: string): string[] {
   return assertiveProseSentences(text).flatMap(sentence =>
-    sentence.split(/[;；\r\n]|\b(?:and|but|yet|while|whereas|though|although|also|moreover|furthermore)\b|而且|并且|同时|此外|另外|但(?:是)?|不过/iu)
-      .map(clause => NEGATED_INFERENCE_CRITIQUE.reduce((value, pattern) => value.replace(pattern, " "), clause)),
+    sentence.split(/[;；\r\n]/u).flatMap(segment => {
+      const nonasserted = NONASSERTED_INFERENCE.exec(segment);
+      const assertion = nonasserted ? segment.slice(0, nonasserted.index) : segment;
+      return assertion.split(/\b(?:and|but|yet|while|whereas|though|although|also|moreover|furthermore)\b|而且|并且|同时|此外|另外|但(?:是)?|不过/iu)
+        .map(clause => NEGATED_INFERENCE_CRITIQUE.reduce((value, pattern) => value.replace(pattern, " "), clause));
+    }),
   );
+}
+
+const STEP_PREFIX_END = /(?:[,;:—–，；：](?:\s*(?:in|for|at|see))?|\b(?:and|but|yet|whereas|also|moreover|furthermore)\b|而且|并且|此外)\s*$/iu;
+const STEP_LABEL_PUNCTUATION = /^\s*[:：,，—–-]+/u;
+
+function scopeFeedbackToStep(text: string | undefined, stepIndex: number): string | undefined {
+  if (!text || !text.matchAll(STEP_ANCHOR).next().value) return text;
+  const applicable: string[] = [];
+  for (const sentence of assertiveProseSentences(text)) {
+    let start = 0;
+    let target: number | undefined;
+    for (const anchor of sentence.matchAll(STEP_ANCHOR)) {
+      const segment = sentence.slice(start, anchor.index);
+      if (target === stepIndex || (target === undefined && STEP_PREFIX_END.test(segment))) {
+        applicable.push(segment.replace(STEP_PREFIX_END, "").replace(STEP_LABEL_PUNCTUATION, ""));
+      }
+      target = Number(anchor[1] ?? anchor[2]);
+      start = anchor.index + anchor[0].length;
+    }
+    if (target === undefined || target === stepIndex) {
+      applicable.push(sentence.slice(start).replace(STEP_LABEL_PUNCTUATION, ""));
+    }
+  }
+  return applicable.join("\n").trim() || undefined;
 }
 
 function disputesEquality(text: string | undefined, claim: string): boolean {
@@ -102,11 +135,19 @@ export function proofFeedbackAllowsOutcome(
   return incorrectRequired.some(step => {
     const { claim, feedback, repairPrompt } = step;
     if (!stepUsesRealScalar.get(step) || !verifyStandaloneProofEquationClaim(claim).unconditional) return true;
-    if ([feedback, repairPrompt, context?.feedback, ...incorrectCriteria.map(criterion => criterion.feedback)]
+    const proposalFeedback = scopeFeedbackToStep(context?.feedback, step.stepIndex);
+    const criteriaFeedback = incorrectCriteria.flatMap(criterion => {
+      const otherStep = [...criterion.label.matchAll(STEP_ANCHOR)]
+        .some(anchor => Number(anchor[1] ?? anchor[2]) !== step.stepIndex);
+      if (otherStep) return [];
+      const scoped = scopeFeedbackToStep(criterion.feedback, step.stepIndex);
+      return scoped ? [scoped] : [];
+    });
+    if ([feedback, repairPrompt, proposalFeedback, ...criteriaFeedback]
       .some(text => hasIndependentInferenceCritique(text, claim))) return true;
     if (disputesEquality(feedback, claim) || disputesEquality(repairPrompt, claim)) return false;
-    const criterionDisputes = incorrectCriteria.map(criterion => disputesEquality(criterion.feedback, claim));
-    const proposalDisputes = disputesEquality(context?.feedback, claim);
+    const criterionDisputes = criteriaFeedback.map(text => disputesEquality(text, claim));
+    const proposalDisputes = disputesEquality(proposalFeedback, claim);
     return incorrectRequired.length > 1 && criterionDisputes.length > 0
       ? !criterionDisputes.every(Boolean)
       : !proposalDisputes && !criterionDisputes.some(Boolean);

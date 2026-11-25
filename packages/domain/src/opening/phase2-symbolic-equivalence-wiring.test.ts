@@ -431,39 +431,39 @@ function incorrectEquality(claim: string, feedback = "The equality is incorrect.
   return result;
 }
 
+function sequence(...claims: string[]): ProofFeedback {
+  const result = proof(claims[0]!, "correct");
+  const first = result.steps[0]!;
+  result.steps.push(...claims.slice(1).map((claim, index) => ({ ...first, stepIndex: index + 2, claim })));
+  return result;
+}
+
+function expectOutcome(
+  outcome: "correct" | "incorrect", feedback: ProofFeedback, expected: typeof outcome | "unverified",
+  context?: ProposalContext,
+) {
+  const proposal = gradingProposal(outcome, feedback, context);
+  const observed = { ...observation, observationId: "observation-1", outcome };
+  const evaluation: AiEvaluation = {
+    ...proposal, observationId: observed.observationId, attemptId: observed.attemptId!,
+    problemId: observed.problemId!, itemVersionId: observed.itemVersionId!,
+    requirementKey: observed.requirementKey!, evaluatorVersion: "ai-rubric-v1", modelLabel: null,
+    evaluatedAt: "2026-10-21T08:00:00Z",
+  };
+  const reasons = new Set<EvidenceEligibilityReasonCode>();
+  expect(evaluateAiCorrectness(observed, evaluation, reasons)).toBe("unknown");
+  expect({
+    allowed: proofFeedbackAllowsOutcome(outcome, feedback, proposal),
+    accepted: acceptedAiGradingOutcome(proposal),
+    reasons: [...reasons],
+  }).toEqual(expected === "unverified"
+    ? { allowed: false, accepted: expected, reasons: ["ai_evaluation_criteria_inconsistent"] }
+    : { allowed: true, accepted: expected, reasons: [
+      expected === "correct" ? "ai_graded_correct" : "ai_graded_incorrect", "ai_evaluation_uncalibrated",
+    ] });
+}
+
 describe("symbolic proof feedback Round 11", () => {
-  function sequence(...claims: string[]): ProofFeedback {
-    const result = proof(claims[0]!, "correct");
-    const first = result.steps[0]!;
-    result.steps.push(...claims.slice(1).map((claim, index) => ({ ...first, stepIndex: index + 2, claim })));
-    return result;
-  }
-
-  function expectOutcome(
-    outcome: "correct" | "incorrect", feedback: ProofFeedback, expected: typeof outcome | "unverified",
-    context?: ProposalContext,
-  ) {
-    const proposal = gradingProposal(outcome, feedback, context);
-    const observed = { ...observation, observationId: "observation-1", outcome };
-    const evaluation: AiEvaluation = {
-      ...proposal, observationId: observed.observationId, attemptId: observed.attemptId!,
-      problemId: observed.problemId!, itemVersionId: observed.itemVersionId!,
-      requirementKey: observed.requirementKey!, evaluatorVersion: "ai-rubric-v1", modelLabel: null,
-      evaluatedAt: "2026-10-21T08:00:00Z",
-    };
-    const reasons = new Set<EvidenceEligibilityReasonCode>();
-    expect(evaluateAiCorrectness(observed, evaluation, reasons)).toBe("unknown");
-    expect({
-      allowed: proofFeedbackAllowsOutcome(outcome, feedback, proposal),
-      accepted: acceptedAiGradingOutcome(proposal),
-      reasons: [...reasons],
-    }).toEqual(expected === "unverified"
-      ? { allowed: false, accepted: expected, reasons: ["ai_evaluation_criteria_inconsistent"] }
-      : { allowed: true, accepted: expected, reasons: [
-        expected === "correct" ? "ai_graded_correct" : "ai_graded_incorrect", "ai_evaluation_uncalibrated",
-      ] });
-  }
-
   const identity = "(x+1)^2=x^2+2x+1";
 
   it.each(["1+1=0", "Step 1: $1+1=0$.", "x+1=x+2"])(
@@ -623,6 +623,144 @@ describe("symbolic proof feedback Round 11", () => {
     });
     expectOutcome("incorrect", incorrectEquality(identity), "unverified", {
       feedback: "等式仅在".repeat(1_500),
+    });
+  });
+});
+
+describe("symbolic proof feedback Round 12", () => {
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each(["1+1=0", "Step 1: $1+1=0$.", "2+2=0"])(
+    "1. keeps a later switch out of the spaced or unmatched step %s", claim => {
+      expect(verifyStandaloneProofEquationClaim(claim).status).toBe("inequivalent");
+      expectOutcome("correct", sequence(claim, "Continue."), "unverified", {
+        transcription: "Work over ℝ. $1 + 1 = 0$. Now switch to F₂. Continue.",
+      });
+    },
+  );
+
+  it("1. keeps a leading domain preamble for an unmatched step", () => {
+    expectOutcome("correct", sequence("2+2=0", "Continue."), "correct", {
+      transcription: "Work over F₂. 1+1=0. Now switch to ℝ. Continue.",
+    });
+  });
+
+  it.each([
+    "Work over ℝ. The result would change if we switched to F₂.",
+    "Work over ℝ, whereas if we switched to F₂, the result would change.",
+    "Work over ℝ. We could work over F₂ instead.",
+    "在实数域中计算。如果切换到 F₂，结果就会改变。",
+  ])("2. keeps a hypothetical field from replacing the asserted field in %s", feedback => {
+    expectOutcome("correct", proof("1+1=0", "correct"), "unverified", { feedback });
+  });
+
+  it.each([
+    "The claimed contradiction is invalid.",
+    "This is a spurious contradiction.",
+    "If we obtain a contradiction, stop.",
+    "Stop when we obtain a contradiction.",
+    "如果得出矛盾，就停止。",
+    "这个矛盾不成立。",
+  ])("3. keeps a supposition open when feedback says %s", feedback => {
+    const steps = sequence("Assume x is positive.", "1=0");
+    steps.steps[1]!.feedback = feedback;
+    expectOutcome("correct", steps, "unverified");
+  });
+
+  it("3. does not exempt a standalone equation through a conditional contradiction", () => {
+    const steps = sequence("1=0");
+    steps.steps[0]!.feedback = "If this gives a contradiction, stop.";
+    expectOutcome("correct", steps, "unverified");
+  });
+
+  it("3. recognizes an asserted rejection after opening with a conditional", () => {
+    const steps = sequence("If x+1=x, subtract x.", "1=0");
+    steps.steps[1]!.feedback = "The assumption is false.";
+    expectOutcome("correct", steps, "correct");
+  });
+
+  it.each([
+    "Check whether you used circular reasoning.",
+    "Verify if you assumed the conclusion.",
+    "Circular reasoning is absent.",
+    "Division by $0$ did not occur.",
+    "Missing justification was not found.",
+    "循环论证并不存在。",
+    "请检查是否使用了循环论证。",
+  ])("4. ignores a non-asserted inference defect in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", { feedback });
+  });
+
+  it.each<ProposalContext>([
+    { feedback: "Step 2 uses circular reasoning." },
+    { feedback: "The equality is wrong because Step 2 uses circular reasoning." },
+    { feedback: "第 2 步使用了循环论证。" },
+    { criteria: [{ label: "Step 2", verdict: "incorrect", feedback: "Circular reasoning." }] },
+    { criteria: [{ label: "Inference", verdict: "incorrect", feedback: "Step 2 uses circular reasoning." }] },
+  ])("5. keeps critique of an optional step from authorizing a required grade in %o", context => {
+    const steps = incorrectEquality(identity);
+    steps.steps.push({ ...steps.steps[0]!, stepIndex: 2, claim: "P implies P.", required: false });
+    expectOutcome("incorrect", steps, "unverified", context);
+  });
+
+  it.each<ProposalContext>([
+    { feedback: "Step 2 uses circular reasoning, but Step 1 skips the proof." },
+    { feedback: "Circular reasoning is present; Step 2 has a typo." },
+    { criteria: [{ label: "Step 1", verdict: "incorrect", feedback: "Circular reasoning." }] },
+  ])("5. keeps critique applicable to the required step in %o", context => {
+    const steps = incorrectEquality(identity);
+    steps.steps.push({ ...steps.steps[0]!, stepIndex: 2, claim: "P implies P.", required: false });
+    expectOutcome("incorrect", steps, "incorrect", context);
+  });
+
+  it.each<ProposalContext>([
+    { feedback: "Step 2: the equality is incorrect." },
+    { criteria: [{ label: "Step 2", verdict: "incorrect", feedback: "The equality is incorrect." }] },
+  ])("5. does not dispute a different step's identity in %o", context => {
+    const steps = incorrectEquality(identity, "Review the inference.");
+    steps.steps.push({ ...steps.steps[0]!, stepIndex: 2, claim: "P implies P.", required: false });
+    expectOutcome("incorrect", steps, "incorrect", context);
+  });
+
+  it("6. finds the asserted occurrence after the same equation in a question", () => {
+    expectOutcome("correct", proof("1+1=0", "correct"), "correct", {
+      transcription: "Work over ℝ. Is 1+1=0? Work over F₂. We then obtain 1+1=0.",
+    });
+  });
+
+  it.each(["1+1=0 in F₂.", "1 + 1 = 0 in F₂. Work over ℝ. Continue."])(
+    "7. includes a field qualifier after the equation in %s", transcription => {
+      expectOutcome("correct", sequence("1+1=0", "Continue."), "correct", { transcription });
+    },
+  );
+
+  it("7. stops at the next matched step that shares a sentence", () => {
+    expectOutcome("correct", sequence("1+1=0", "Work over F₂"), "unverified", {
+      transcription: "Work over ℝ. 1+1=0; Work over F₂.",
+    });
+  });
+
+  it("7. does not locate an alphabetic step inside another word", () => {
+    expectOutcome("correct", sequence("x", "1+1=0"), "correct", {
+      transcription: "Work over ℝ. Next, 1+1=0. Work over F₂. x.",
+    });
+  });
+
+  it.each([String.raw`\frac{d}{dx}(x^3) = 3x^2`, String.raw`\int 2x\,dx = x^2 + C`])(
+    "8. recognizes a reverse-order denial of %s", claim => {
+      expectOutcome("incorrect", incorrectEquality(claim, "The right side ≠ the left side."), "unverified");
+    },
+  );
+
+  it("handles 6,000 characters of questions and unsuccessful near matches before an assertion", () => {
+    const asserted = "Work over F₂. 1 + 1 = 0 in F₂.";
+    const prefix = "Is 1+1=0? 1+1=2. ".repeat(400).slice(0, 6_000 - asserted.length - 1);
+    expectOutcome("correct", proof("1+1=0", "correct"), "correct", {
+      transcription: prefix + "\n" + asserted,
+    });
+    const defect = "circular reasoning.";
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", {
+      feedback: "Check whether ".repeat(420).padEnd(6_000 - defect.length) + defect,
     });
   });
 });

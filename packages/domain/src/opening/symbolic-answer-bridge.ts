@@ -916,7 +916,8 @@ export function feedbackDeniesProvenEquality(text: string, claim: string): boole
       const equality = sides && sides.length >= 2 ? operands.map(operand =>
         operand.replaceAll("\uE000", () => sides[0]!).replaceAll("\uE001", () => sides.at(-1)!),
       ) : operands;
-      return verifyStandaloneProofEquationClaim(equality.join("=")).unconditional;
+      return verifyStandaloneProofEquationClaim(equality.join("=")).unconditional ||
+        verifyStandaloneProofEquationClaim([equality[1]!, equality[0]!].join("=")).unconditional;
     });
 }
 
@@ -967,10 +968,20 @@ const OUTER_REJECTION = new RegExp(String.raw`^(?:${OUTER_REJECTION_QUALIFIER}|�
 const INNER_REJECTION = new RegExp(String.raw`^(?:${INNER_REJECTION_QUALIFIER}|内层)$`, "iu");
 const DERIVED_CONTRADICTION = /\b(?:contradict\w*|absurd\w*|reductio|which\s+is\s+impossible)\b|矛盾|归谬|荒谬/iu;
 const INDIRECT_QUESTION = /\b(?:whether|(?:wonder|ask|check|test|see|question|consider)\w*\s+(?:if|whether|what)|what\s+if)\b|是否|能否/iu;
-const HYPOTHETICAL_DOMAIN = /\b(?:what\s+would\s+(?:change|happen)|would\s+(?:this|that|it|anything)\s+(?:hold|change|work|differ)|suppose\s+instead|if\s+we\s+(?:instead\s+)?(?:worked|were\s+working))\b/iu;
+const CONDITIONAL_DOMAIN = /\b(?:if|whether|suppose|supposing|assuming|unless|imagine|in\s+case)\b|(?:如果|假若|若是?|倘若|要是|一旦)\s*(?=在|改在|换成|切换到)/iu;
+const DOMAIN_MODAL = /\b(?:would|could|might)\b/iu;
+const DOMAIN_MODAL_ACTION = /\b(?:instead|switch\w*|work\w*|chang\w*|differ\w*|hold\w*|fail\w*)\b/iu;
+const CHINESE_DOMAIN_HYPOTHETICAL = /(?:本会|就会|将会)(?:改变|不同|成立)/u;
+const CONDITIONAL_DISCHARGE = /\b(?:if|unless|in\s+case|whenever|provided(?:\s+that)?|once|when)\b|如果|若|倘若|要是|一旦|除非/iu;
+const DISCHARGE_CLAUSE_END = /[;:；：\r\n]/u;
+const CONTRADICTION_ROLE = /(?:contradict\w*|absurd\w*|reductio)/u.source;
+const CONTRADICTION_ERROR = /(?:invalid|false|wrong|incorrect|mistaken|bogus|spurious|erroneous|flawed|unjustified|unsound|failed)/u.source;
 const MODAL = /(?:might|may|could|would|should|possibly|perhaps|potentially|hopefully)/u.source;
 const MODAL_PROOF_ROLE = /(?:contradict\w*|absurd\w*|reductio|assumption|supposition|hypothesis|reject\w*|refut\w*|discharg\w*|which\s+is\s+impossible)/u.source;
 const NEGATED_PROOF_ROLE = [
+  new RegExp(String.raw`\b${CONTRADICTION_ERROR}\b[^\S\r\n]+(?:(?:purported|alleged|claimed|supposed)[^\S\r\n]+)?${CONTRADICTION_ROLE}\b`, "giu"),
+  new RegExp(String.raw`\b${CONTRADICTION_ROLE}\b(?:[^\S\r\n]+(?!(?:assumption|supposition|hypothesis)\b)[a-z'’-]+){0,5}[^\S\r\n]+(?:${CONTRADICTION_ERROR}|fails?|collapses?|breaks?\s+down)\b`, "giu"),
+  /(?:矛盾|归谬|荒谬)[^，。！？；：,.!?;:\r\n]{0,6}(?:不成立|无效|错误|有误|失败|站不住脚)|(?:无效|错误|虚假)的?(?:矛盾|归谬)/gu,
   new RegExp(String.raw`\b${MODAL}\b(?:[^\S\r\n]+[a-z'’-]+){0,6}[^\S\r\n]+${MODAL_PROOF_ROLE}\b|\b${MODAL_PROOF_ROLE}\b(?:[^\S\r\n]+[a-z'’-]+){0,6}[^\S\r\n]+${MODAL}\b`, "giu"),
   /(?:可能|也许|或许|未必|不一定)[^，。！？；：]{0,8}(?:矛盾|归谬|荒谬|(?:否定|推翻)(?:原|上述|该|内层|外层)?假设)|(?:矛盾|归谬|荒谬|(?:否定|推翻)(?:原|上述|该|内层|外层)?假设)[^，。！？；：]{0,8}(?:可能|也许|或许|未必|不一定)/gu,
   /\b(?:contradict\w*|assumption|supposition|hypothesis)[^\S\r\n]+(?:[a-z'’-]+[^\S\r\n]+){0,5}(?:yet\s+to\s+be(?:\s+[a-z'’-]+)?|far\s+from|short\s+of|unestablished|unproven|unreached|unresolved|pending|open|missing|absent|lacking)\b/giu,
@@ -1036,10 +1047,15 @@ function advanceProofDomain(domain: ScalarDomain, texts: readonly (string | unde
     // Keep characteristic and field notation intact when splitting clauses.
     const clauses = assertiveProseSentences(text).flatMap(sentence => {
       const question = INDIRECT_QUESTION.exec(sentence);
-      const hypothetical = HYPOTHETICAL_DOMAIN.exec(sentence);
-      const end = Math.min(question?.index ?? sentence.length, hypothetical?.index ?? sentence.length);
-      return sentence.slice(0, end)
+      const conditional = CONDITIONAL_DOMAIN.exec(sentence);
+      const end = Math.min(question?.index ?? sentence.length, conditional?.index ?? sentence.length);
+      const clauses = sentence.slice(0, end)
         .replace(DOMAIN_CLAUSE_TOKEN, (token, boundary) => boundary ? "\n" : token).split("\n");
+      return clauses.filter((clause, index) => {
+        const leadsIntoCondition = conditional?.index === end && index === clauses.length - 1;
+        return !CHINESE_DOMAIN_HYPOTHETICAL.test(clause) &&
+          !(DOMAIN_MODAL.test(clause) && (leadsIntoCondition || DOMAIN_MODAL_ACTION.test(clause)));
+      });
     });
     for (const clause of clauses) {
       const mentions = new Map<number, { end: number; domain: ScalarDomain }>();
@@ -1067,24 +1083,97 @@ function advanceProofDomain(domain: ScalarDomain, texts: readonly (string | unde
   return domain;
 }
 
-const STEP_ANCHOR = /\bStep\s+(\d{1,3})\b|第\s*(\d{1,3})\s*步/giu;
+export const STEP_ANCHOR = /\bStep\s+(\d{1,3})\b|第\s*(\d{1,3})\s*步/giu;
 
-function locateTranscribedSteps(steps: readonly ProofStep[], transcription: string) {
-  const locations = new Map<ProofStep, { start: number; end: number }>();
+type TextSpan = { start: number; end: number };
+
+const SPACE = /\s/u;
+const WORD_CHARACTER = /[\p{L}\p{N}\p{M}_]/u;
+const ALPHABETIC_PROSE = /^[\p{L}\p{M}\s]+[.!?。？！]*$/u;
+const CALCULATION = /[=≠<>≤≥≈]|\\(?:ne|neq|le|leq|ge|geq|approx|equiv)\b|\d\s*[+×÷−-]/u;
+const LATER_DOMAIN_TRANSITION = /\b(?:now|then|next|switch\w*|shift\w*|afterwards?)\b|随后|然后|接下来|切换|改用|改在/iu;
+
+function prepareTranscription(transcription: string) {
+  const sentenceEnds: number[] = [];
+  const masked: string[] = [];
+  const chars: (string | null)[] = [];
+  const originalIndex: number[] = [];
+  let offset = 0;
+  let preambleEnd = 0;
+  let inPreamble = true;
+  for (const sentence of splitProseSentences(transcription)) {
+    const end = offset + sentence.length;
+    sentenceEnds.push(end);
+    if (endsInQuestion(sentence)) {
+      masked.push(" ".repeat(sentence.length));
+      // Keep an ignored question from stitching together the two surrounding assertions.
+      chars.push(null);
+      originalIndex.push(offset);
+    } else {
+      masked.push(sentence);
+      for (let index = 0; index < sentence.length; index++) {
+        const char = sentence[index]!;
+        if (SPACE.test(char)) continue;
+        chars.push(char);
+        originalIndex.push(offset + index);
+      }
+      if (inPreamble) {
+        inPreamble = !CALCULATION.test(sentence) && !LATER_DOMAIN_TRANSITION.test(sentence);
+        if (inPreamble) preambleEnd = end;
+      }
+    }
+    offset = end;
+  }
+  return { context: masked.join(""), sentenceEnds, preambleEnd, chars, originalIndex };
+}
+
+type Transcription = ReturnType<typeof prepareTranscription>;
+
+function firstTranscribedMatch(transcription: Transcription, candidate: string, cursor: number): TextSpan | undefined {
+  const pattern = candidate.replace(/\s/gu, "");
+  const { chars, context, originalIndex } = transcription;
+  if (!pattern || pattern.length > chars.length - cursor) return undefined;
+  const prose = ALPHABETIC_PROSE.test(candidate);
+  const wordEnding = WORD_CHARACTER.test(pattern.at(-1)!);
+
+  // A prefix table bounds the search even for long, almost-identical runs.
+  const prefix = [0];
+  for (let index = 1, length = 0; index < pattern.length; index++) {
+    while (length && pattern[index] !== pattern[length]) length = prefix[length - 1]!;
+    if (pattern[index] === pattern[length]) length++;
+    prefix.push(length);
+  }
+  for (let index = cursor, length = 0; index < chars.length; index++) {
+    while (length && chars[index] !== pattern[length]) length = prefix[length - 1]!;
+    if (chars[index] === pattern[length]) length++;
+    if (length !== pattern.length) continue;
+    const start = originalIndex[index - length + 1]!;
+    const end = originalIndex[index]! + 1;
+    if (!prose || (!WORD_CHARACTER.test(context[start - 1] ?? "") &&
+        (!wordEnding || !WORD_CHARACTER.test(context[end] ?? "")))) return { start, end };
+    length = prefix[length - 1]!;
+  }
+  return undefined;
+}
+
+function locateTranscribedSteps(steps: readonly ProofStep[], transcription: Transcription) {
+  const locations = new Map<ProofStep, TextSpan>();
+  const { context, originalIndex } = transcription;
   let cursor = 0;
+  let previousEnd = 0;
   for (const step of steps) {
     const body = standaloneProofEquationBody(step.claim);
     const candidates = new Set([step.claim.trim(), body, unwrapMath(body)]);
-    let location: { start: number; end: number } | undefined;
+    let location: TextSpan | undefined;
     for (const candidate of candidates) {
       if (!candidate) continue;
-      let start = transcription.indexOf(candidate, cursor);
-      if (start < 0) continue;
-      let end = start + candidate.length;
+      const match = firstTranscribedMatch(transcription, candidate, cursor);
+      if (!match) continue;
+      let { start, end } = match;
       // An unwrapped match can be inside a fence in the transcription.
-      const fence = transcription[start - 1] === "$" && transcription[end] === "$"
-        ? (transcription[start - 2] === "$" && transcription[end + 1] === "$" ? 2 : 1) : 0;
-      if (start - fence >= cursor) {
+      const fence = context[start - 1] === "$" && context[end] === "$"
+        ? (context[start - 2] === "$" && context[end + 1] === "$" ? 2 : 1) : 0;
+      if (start - fence >= previousEnd) {
         start -= fence;
         end += fence;
       }
@@ -1094,7 +1183,8 @@ function locateTranscribedSteps(steps: readonly ProofStep[], transcription: stri
     }
     if (location) {
       locations.set(step, location);
-      cursor = location.end;
+      previousEnd = location.end;
+      while (cursor < originalIndex.length && originalIndex[cursor]! < previousEnd) cursor++;
     }
   }
   return locations;
@@ -1119,13 +1209,8 @@ export function proofStepUsesRealScalar(
   steps: readonly ProofStep[], transcription: string | undefined, proposalContext: readonly (string | undefined)[],
 ): ReadonlyMap<ProofStep, boolean> {
   const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
-  const locations = locateTranscribedSteps(ordered, transcription ?? "");
-  // Preserve offsets while removing questions before a step boundary can cut off their punctuation.
-  const transcriptionContext = transcription && locations.size
-    ? splitProseSentences(transcription).map(sentence =>
-      endsInQuestion(sentence) ? " ".repeat(sentence.length) : sentence,
-    ).join("")
-    : undefined;
+  const transcribed = prepareTranscription(transcription ?? "");
+  const locations = locateTranscribedSteps(ordered, transcribed);
   const global: string[] = [];
   const anchored = new Map<number, string[]>();
   for (const text of [locations.size ? undefined : transcription, ...proposalContext]) {
@@ -1135,17 +1220,24 @@ export function proofStepUsesRealScalar(
   let cursor = 0;
   const matches = locations.values();
   let next = matches.next();
+  let sentenceIndex = 0;
   const result = new Map<ProofStep, boolean>();
   for (const step of ordered) {
     const location = locations.get(step);
-    const end = location?.end ?? next.value?.start ?? cursor;
-    if (transcriptionContext && end > cursor) {
+    let end = cursor;
+    if (location) {
+      next = matches.next();
+      while (transcribed.sentenceEnds[sentenceIndex]! < location.end) sentenceIndex++;
+      end = Math.min(transcribed.sentenceEnds[sentenceIndex]!, next.value?.start ?? transcribed.context.length);
+    } else if (cursor === 0 && locations.size) {
+      end = Math.min(transcribed.preambleEnd, next.value?.start ?? 0);
+    }
+    if (end > cursor) {
       const immediate: string[] = [];
-      collectDomainContext(transcriptionContext.slice(cursor, end), immediate, anchored);
+      collectDomainContext(transcribed.context.slice(cursor, end), immediate, anchored);
       domain = advanceProofDomain(domain, immediate);
       cursor = end;
     }
-    if (location) next = matches.next();
     for (let stepNumber = 0; stepNumber <= step.stepIndex; stepNumber++) {
       const deferred = anchored.get(stepNumber);
       if (!deferred) continue;
@@ -1167,6 +1259,13 @@ function proofRoleText(text: string): string {
   return NEGATED_PROOF_ROLE.reduce((value, pattern) => value.replace(pattern, " "), assertions);
 }
 
+function assertedDischargeText(text: string): string {
+  return text.split(DISCHARGE_CLAUSE_END).map(clause => {
+    const conditional = CONDITIONAL_DISCHARGE.exec(clause);
+    return conditional ? clause.slice(0, conditional.index) : clause;
+  }).join("\n");
+}
+
 /** Only a discharged supposition scopes other steps. An explicitly counterfactual step can stand on its own. */
 export function counterfactualProofSteps(steps: readonly ProofStep[]): ReadonlySet<ProofStep> {
   const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
@@ -1184,12 +1283,13 @@ export function counterfactualProofSteps(steps: readonly ProofStep[]): ReadonlyS
       pendingRejectionFromContradiction = false;
     }
 
+    const assertedDischarge = withoutIntent.map(assertedDischargeText);
     if (ordered.length === 1 && ((explicitSupposition && hasIntent) ||
-        withoutIntent.some(text => EXPLICIT_COUNTERFACTUAL.test(text)))) {
+        assertedDischarge.some(text => EXPLICIT_COUNTERFACTUAL.test(text)))) {
       exempt.add(step);
     }
     const canDischargeFromFeedback = !opensSupposition || pos === ordered.length - 1;
-    const dischargeTexts = canDischargeFromFeedback ? withoutIntent : withoutIntent.slice(0, 1);
+    const dischargeTexts = canDischargeFromFeedback ? assertedDischarge : assertedDischarge.slice(0, 1);
     const rejection = dischargeTexts.map(text => EXPLICIT_REJECTION.exec(text)).find(match => match !== null);
     const qualifier = rejection?.slice(1).find(Boolean) ?? "";
     const outer = OUTER_REJECTION.test(qualifier);
