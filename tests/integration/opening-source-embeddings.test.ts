@@ -474,6 +474,8 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     "[原生提取]\nAnswer: x =\n\nAn ordinary observation.\n[图片描述]\nProof. An independent derivation.",
     "[原生提取]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
     "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[图片描述]\nProof. An independent derivation.",
+    "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
+    "[视觉转写与描述]\n[转写]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
   ])(
     "does not start an archived auxiliary proof from %j",
     async pageOne => {
@@ -493,6 +495,20 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
   );
 
   it.each([
+    "[原生提取]\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
+    "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1\n\n[图片描述]\nProof. An independent derivation.",
+  ])(
+    "seals the next archived page when native or transcription has an inline answer body (%j)",
+    async pageOne => {
+      await expectArchivedPdfPages([
+        pageOne,
+        "Still private proof continuation.",
+        "Chapter 2: Geometry\nPublic prose.",
+      ], [3], 2);
+    },
+  );
+
+  it.each([
     "Proof. Starts.\nQ.E.D.",
     "**Proof. Done. ∎**",
     "Proof. Starts.\n**Q.E.D.**",
@@ -508,6 +524,9 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     "*Proof. Since 2 * 3 = 6, done. ∎*",
     "*Proof. Since 2 * 3 = 6. Q.E.D.*",
     "_Proof. Since a_1 + a_2 = 3. Q.E.D._",
+    "*Proof. Since 2 * 3 = 6, continue. Q.E.D.*",
+    "_Proof. Since a_1 + a_2 = 3, continue. Q.E.D._",
+    "*Proof.* Calculation continues. *Q.E.D.*",
   ])(
     "publishes the next archived page after the Markdown proof %j",
     async proof => {
@@ -516,7 +535,11 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
   );
 
   it("withholds multi-page italic proofs with interior * or _ and rejects unmatched proof terminators in Archive SQL", async () => {
-    for (const heading of ["*Proof. Since 2 * 3 = 6, continue.*", "_Proof. Since a_1 + a_2 = 3, continue._"]) {
+    for (const heading of [
+      "*Proof. Since 2 * 3 = 6, continue.*",
+      "_Proof. Since a_1 + a_2 = 3, continue._",
+      "*Proof. Since 2 * 3 = 6.* Calculation continues.",
+    ]) {
       await expectArchivedPdfPages([
         "Answer: No.",
         heading,
@@ -528,6 +551,11 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     for (const unmatched of [
       "*Q.E.D.", "Q.E.D.*", "_Q.E.D.", "Q.E.D._", "*∎", "∎*",
       "Proof. Done. *Q.E.D.", "Proof. Done. Q.E.D.*", "**Q.E.D.*", "*Q.E.D.**",
+      "*Proof.* Calculation continues. Q.E.D.*",
+      "_Proof._ Calculation continues. Q.E.D._",
+      "*Proof.* Calculation continues. *Q.E.D.",
+      "*Note.* Calculation continues. Q.E.D.*",
+      "This is not the end of answers.",
     ]) {
       await expectArchivedPdfPages([
         "Answer: No.\nProof. Starts.\n" + unmatched,
@@ -535,15 +563,30 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
         "Chapter 2: Geometry\nPublic prose.",
       ], [3], 2);
     }
+    for (const inlineUnmatched of [
+      "*∎", "_∎", "**∎*", "*□", "*Q.E.D.", "_Q.E.D.", "**Q.E.D.", "**Q.E.D.*",
+      "*Q.E.D.**", "Q.E.D.*.", "*证毕。", "*End of Answers.", "*Note.* Calculation continues. Q.E.D.*.",
+    ]) {
+      await expectArchivedPdfPages([
+        "Answer: x =\n" + inlineUnmatched,
+        "Still private continuation.",
+        "Chapter 2: Geometry\nPublic prose.",
+      ], [3], 2);
+    }
   });
 
   it.each([
+    "End of Answers.",
     "*End of Answers.*",
     "_End of Solutions._",
+    "答案完。",
+    "[End of Answers]",
+    "（答案完）",
     "Calculation complete. End of Answers.",
     "Calculation complete. *End of Answers.*",
     "Calculation complete. _End of Answers._",
     "Calculation complete. **End of Answers.**",
+    "*Calculation complete. End of Answers.*",
   ])(
     "closes an archived answer section at terminator %j while rejecting unmatched wrappers and arithmetic *",
     async terminator => {
@@ -553,7 +596,16 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
 
   it("keeps archived sections and inline answers sealed on unmatched section terminators and arithmetic *", async () => {
     await expectArchivedPdfPages(["Answer: 2 * 3 * 4", "Still sealed calculation.", "Public prose."], [3], 2);
-    for (const unmatched of ["Calculation complete. *End of Answers.", "Calculation complete. End of Answers.*"]) {
+    for (const unmatched of [
+      "Calculation complete. *End of Answers.",
+      "Calculation complete. End of Answers.*",
+      "*Note.* Calculation continues. End of Answers.*",
+      "This is not the end of answers.",
+      "We have not reached the end of solutions.",
+      "See the end of solutions.",
+      "*This is not the end of answers.*",
+      "这里不是答案完。",
+    ]) {
       await expectArchivedPdfPages([
         "Answer Key\n" + unmatched,
         "Still private calculation.",

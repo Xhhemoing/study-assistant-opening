@@ -69,15 +69,21 @@ _ENGLISH_REFERENCE_CLAUSE_RE = re.compile(r",\s*(?:which|where|applied|used|show
 _ENGLISH_REFERENCE_SUBJECT_RE = re.compile(r"^(?:[a-z]+|This|That|It|They|We)\b")
 _CHINESE_REFERENCE_CLAUSE_RE = re.compile(r"[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)")
 _SINGLE_EMPHASIS_AFTER = r"(?=$|[\s:：.,;!?。，；：！？—–)\]】）-])"
+_STAR_EMPHASIS_INTERIOR = (
+    rf"(?:[^\S\r\n](?:\*+(?!\*)|(?=[^*\r\n]|$))|[^*\s\r\n](?:\*+(?!\*)(?!{_SINGLE_EMPHASIS_AFTER})|(?=[^*\r\n]|$)))"
+)
+_UNDER_EMPHASIS_INTERIOR = (
+    rf"(?:[^\S\r\n](?:_+(?!_)|(?=[^_\r\n]|$))|[^_\s\r\n](?:_+(?!_)(?!{_SINGLE_EMPHASIS_AFTER})|(?=[^_\r\n]|$)))"
+)
 _ANSWER_PROOF_STAR = (
     r"\*(?=[^\s*])(?:(?:Proof|Sketch\s+of\s+Proof)(?=\*|\b)|【\s*(?:证明|证|略证|续证)\s*】"
     r"|(?:证明|略证|续证)(?=[\s*\d:：.．。—–(（-]|$)|证\s*[:：.．。])"
-    rf"(?:(?:[^*\r\n]*[^\s*])?\*{_SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s*]\*(?!\*)[.。]?$)"
+    rf"(?:(?:{_STAR_EMPHASIS_INTERIOR})*[^\s*\r\n])?\*(?!\*){_SINGLE_EMPHASIS_AFTER}"
 )
 _ANSWER_PROOF_UNDER = (
     r"_(?=[^\s_])(?:(?:Proof|Sketch\s+of\s+Proof)(?=_|\b)|【\s*(?:证明|证|略证|续证)\s*】"
     r"|(?:证明|略证|续证)(?=[\s_\d:：.．。—–(（-]|$)|证\s*[:：.．。])"
-    rf"(?:(?:[^_\r\n]*[^\s_])?_{_SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s_]_(?!_)[.。]?$)"
+    rf"(?:(?:{_UNDER_EMPHASIS_INTERIOR})*[^\s_\r\n])?_(?!_){_SINGLE_EMPHASIS_AFTER}"
 )
 _ANSWER_PROOF_HEADING_RE = re.compile(
     r"^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】"
@@ -199,13 +205,14 @@ _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE = re.compile(
 )
 def _single_emphasis_proof_branch(delim: str, not_delim: str, word_end: str) -> str:
     esc = re.escape(delim)
+    interior = _STAR_EMPHASIS_INTERIOR if delim == "*" else _UNDER_EMPHASIS_INTERIOR
     return (
         rf"{esc}(?=[^\s{not_delim}])(?:"
-        rf"(?:Proof|PROOF|Sketch\s+of\s+Proof|Proof\s+Sketch)(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary)\s*[\d.]*)?(?:\s*\(\s*(?:continued|cont\.?)\s*\))?\s*(?:[:：.\-—]|(?={esc})|{word_end})"
+        rf"(?:Proof|PROOF|Sketch\s+of\s+Proof|Proof\s+Sketch)(?:\s+of\s+(?:Theorem|Lemma|Proposition|Corollary)\s*[\d.]*)?(?:\s*\(\s*(?:continued|cont\.?)\s*\))?(?:\s*[:：.\-—]|(?={esc})|{word_end})"
         r"|【\s*(?:证明|证|略证|续证)\s*】"
-        rf"|(?:证明|略证|续证)\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*(?:[:：.．\-—]|(?={esc})|$)"
+        rf"|(?:证明|略证|续证)\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?(?:\s*[:：.．\-—]|(?={esc})|$)"
         r"|证\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：.．]"
-        rf")(?:(?:[^{not_delim}\r\n]*[^\s{not_delim}])?{esc}{_SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s{not_delim}]{esc}(?!{esc})[.。]?$)"
+        rf")(?:(?:{interior})*[^\s{not_delim}\r\n])?{esc}(?!{esc}){_SINGLE_EMPHASIS_AFTER}"
     )
 
 
@@ -356,24 +363,39 @@ _NEXT_CONTINUATION_RE = re.compile(
     r"(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|（\s*(?:下接下页|转下页|未完待续)\s*）|\(\s*(?:下接下页|转下页|未完待续)\s*\)|接下页|转下页)\s*$",
     re.IGNORECASE,
 )
-def _single_emphasis_terminator(bound_core: str, plain_core: str) -> str:
-    return (
-        rf"(?:(?:^|[^*_]){bound_core}\s*[.。]?\s*$"
-        rf"|^\s*\*(?=[^\s*])(?:[^\r\n]*[^*_]{bound_core}|{plain_core})[.。]?\*(?!\*)\s*[.。]?\s*$"
-        rf"|^\s*_(?=[^\s_])(?:[^\r\n]*[^*_]{bound_core}|{plain_core})[.。]?_(?!_)\s*[.。]?\s*$"
-        rf"|(?:^|[\s(\[【（:：—–-])\*{plain_core}[.。]?\*(?!\*)\s*[.。]?\s*$"
-        rf"|(?:^|[\s(\[【（:：—–-])_{plain_core}[.。]?_(?!_)\s*[.。]?\s*$)"
-    )
-
-
 _PROOF_END_CORE = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|Q\.?E\.?D\.?|证毕|证完)"
 _PROOF_END = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完)"
 _SECTION_END_CORE = r"(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)"
-_SECTION_END = r"(?:\bEnd\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)"
-_PROOF_TERMINATOR_RE = re.compile(_single_emphasis_terminator(_PROOF_END, _PROOF_END_CORE), re.IGNORECASE)
-_SECTION_SEALED_TERMINATOR_RE = re.compile(_single_emphasis_terminator(_SECTION_END, _SECTION_END_CORE), re.IGNORECASE)
+_SECTION_END_AFTER_PUNCT = r"[.。!?！？;；—–](?:\s+End\s+of\s+(?:Answers?|Solutions?)|\s*(?:答案完|解答完))"
+_SECTION_END_BRACKETED = (
+    rf"(?:\[\s*{_SECTION_END_CORE}\s*[.。]?\s*\]|【\s*{_SECTION_END_CORE}\s*[.。]?\s*】"
+    rf"|\(\s*{_SECTION_END_CORE}\s*[.。]?\s*\)|（\s*{_SECTION_END_CORE}\s*[.。]?\s*）)"
+)
+_PROOF_TERMINATOR_PATTERN = (
+    rf"(?:(?:^|[^*_]){_PROOF_END}\s*[.。]?\s*$"
+    rf"|^\s*\*(?=[^\s*])(?:(?:{_STAR_EMPHASIS_INTERIOR})*[^*_]{_PROOF_END}|{_PROOF_END_CORE})[.。]?\*(?!\*)\s*[.。]?\s*$"
+    rf"|^\s*_(?=[^\s_])(?:(?:{_UNDER_EMPHASIS_INTERIOR})*[^*_]{_PROOF_END}|{_PROOF_END_CORE})[.。]?_(?!_)\s*[.。]?\s*$"
+    rf"|(?:^|[\s(\[【（:：—–-])\*{_PROOF_END_CORE}[.。]?\*(?!\*)\s*[.。]?\s*$"
+    rf"|(?:^|[\s(\[【（:：—–-])_{_PROOF_END_CORE}[.。]?_(?!_)\s*[.。]?\s*$)"
+)
+_SECTION_SEALED_TERMINATOR_PATTERN = (
+    rf"(?:^\s*{_SECTION_END_CORE}\s*[.。]?\s*$"
+    rf"|{_SECTION_END_AFTER_PUNCT}\s*[.。]?\s*$"
+    rf"|(?:^\s*|[.。!?！？;；—–]\s*){_SECTION_END_BRACKETED}\s*[.。]?\s*$"
+    rf"|^\s*\*(?=[^\s*])(?:(?:{_STAR_EMPHASIS_INTERIOR})*{_SECTION_END_AFTER_PUNCT}|{_SECTION_END_CORE})[.。]?\*(?!\*)\s*[.。]?\s*$"
+    rf"|^\s*_(?=[^\s_])(?:(?:{_UNDER_EMPHASIS_INTERIOR})*{_SECTION_END_AFTER_PUNCT}|{_SECTION_END_CORE})[.。]?_(?!_)\s*[.。]?\s*$"
+    rf"|(?:^\s*|[.。!?！？;；—–]\s*)\*{_SECTION_END_CORE}[.。]?\*(?!\*)\s*[.。]?\s*$"
+    rf"|(?:^\s*|[.。!?！？;；—–]\s*)_{_SECTION_END_CORE}[.。]?_(?!_)\s*[.。]?\s*$)"
+)
+_PROOF_TERMINATOR_RE = re.compile(_PROOF_TERMINATOR_PATTERN, re.IGNORECASE)
+_SECTION_SEALED_TERMINATOR_RE = re.compile(_SECTION_SEALED_TERMINATOR_PATTERN, re.IGNORECASE)
 _INLINE_SEALED_TERMINATOR_RE = re.compile(
-    _single_emphasis_terminator(rf"(?:{_PROOF_END}|{_SECTION_END})", rf"(?:{_PROOF_END_CORE}|{_SECTION_END_CORE})"),
+    rf"(?:{_PROOF_TERMINATOR_PATTERN}|{_SECTION_SEALED_TERMINATOR_PATTERN})",
+    re.IGNORECASE,
+)
+_TERMINATOR_TOKEN_CORE = rf"(?:{_PROOF_END_CORE}|{_SECTION_END_CORE})"
+_ADJACENT_EMPHASIS_TERMINATOR_RE = re.compile(
+    rf"(?:[*_]{_TERMINATOR_TOKEN_CORE}|{_TERMINATOR_TOKEN_CORE}[.。]?[*_])[.。*_!?！？;；)）\]】\s]*$",
     re.IGNORECASE,
 )
 _INLINE_SEAL_MODES = ("inline_sealed", "inline_proof_sealed")
@@ -1181,7 +1203,8 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
         ):
             blocks[first_idx] = replace(blocks[first_idx], continued_from_prev_page=True)
         if (page_seal_mode == "inline_sealed" and _TERMINAL_PUNCTUATION_RE.search(last_inline_body)
-                and not _NEXT_CONTINUATION_RE.search(last_inline_body)):
+                and not _NEXT_CONTINUATION_RE.search(last_inline_body)
+                and not _ADJACENT_EMPHASIS_TERMINATOR_RE.search(last_inline_body)):
             inline_proof_boundary_pending = True
             page_seal_mode = None
             has_inline_body = False

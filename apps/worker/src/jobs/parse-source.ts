@@ -218,8 +218,10 @@ const ENGLISH_REFERENCE_CLAUSE_RE = /,\s*(?:which|where|applied|used|shown|given
 const ENGLISH_REFERENCE_SUBJECT_RE = /^(?:[a-z]+|This|That|It|They|We)\b/u;
 const CHINESE_REFERENCE_CLAUSE_RE = /[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)/u;
 const SINGLE_EMPHASIS_AFTER = String.raw`(?=$|[\s:：.,;!?。，；：！？—–)\]】）-])`;
-const ANSWER_PROOF_STAR = String.raw`\*(?=[^\s*])(?:(?:Proof|Sketch\s+of\s+Proof)(?=\*|\b)|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s*\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:(?:[^*\r\n]*[^\s*])?\*${SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s*]\*(?!\*)[.。]?$)`;
-const ANSWER_PROOF_UNDER = String.raw`_(?=[^\s_])(?:(?:Proof|Sketch\s+of\s+Proof)(?=_|\b)|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s_\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:(?:[^_\r\n]*[^\s_])?_${SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s_]_(?!_)[.。]?$)`;
+const STAR_EMPHASIS_INTERIOR = String.raw`(?:[^\S\r\n](?:\*+(?!\*)|(?=[^*\r\n]|$))|[^*\s\r\n](?:\*+(?!\*)(?!${SINGLE_EMPHASIS_AFTER})|(?=[^*\r\n]|$)))`;
+const UNDER_EMPHASIS_INTERIOR = String.raw`(?:[^\S\r\n](?:_+(?!_)|(?=[^_\r\n]|$))|[^_\s\r\n](?:_+(?!_)(?!${SINGLE_EMPHASIS_AFTER})|(?=[^_\r\n]|$)))`;
+const ANSWER_PROOF_STAR = String.raw`\*(?=[^\s*])(?:(?:Proof|Sketch\s+of\s+Proof)(?=\*|\b)|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s*\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:(?:${STAR_EMPHASIS_INTERIOR})*[^\s*\r\n])?\*(?!\*)${SINGLE_EMPHASIS_AFTER}`;
+const ANSWER_PROOF_UNDER = String.raw`_(?=[^\s_])(?:(?:Proof|Sketch\s+of\s+Proof)(?=_|\b)|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s_\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:(?:${UNDER_EMPHASIS_INTERIOR})*[^\s_\r\n])?_(?!_)${SINGLE_EMPHASIS_AFTER}`;
 const ANSWER_PROOF_HEADING_RE = new RegExp(
   String.raw`^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】|(?:证明|略证|续证)(?=[\s\d:：.．。—–(（-]|$)|证\s*[:：.．。]|${ANSWER_PROOF_STAR}|${ANSWER_PROOF_UNDER})`,
   "iu",
@@ -284,24 +286,36 @@ const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+
 const ANSWER_OR_REVIEW_TITLE_RE = /\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?|Review|Practice|Quiz|Drills?|Self-Check|Homework|Assignments?|Problem\s*Sets?|Worksheets?|Tutorials?|Recitations?|Labs?)\b|答案|解答|习题|练习|思考题|复习题|自测题|作业|课后题|单元测试/iu;
 const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Units?|Lectures?|Lessons?|Modules?|Appendix)\b|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录|\d+(?:\.\d+)+\s+)/iu;
 const PAGE_METADATA_HEADING_RE = /^(?:[[【(]\s*)?(?:(?:(?:cached|raw|readable|verified|automatic)\s+)*(?:transcription|ocr)\b|原图忠实转写|视觉转写与描述|原生提取|本地提取|图表观察描述|识别不确定)/iu;
-function buildSingleEmphasisTerminator(boundCore: string, plainCore: string): RegExp {
-  return new RegExp([
-    String.raw`(?:^|[^*_])${boundCore}\s*[.。]?\s*$`,
-    String.raw`^\s*\*(?=[^\s*])(?:[^\r\n]*[^*_]${boundCore}|${plainCore})[.。]?\*(?!\*)\s*[.。]?\s*$`,
-    String.raw`^\s*_(?=[^\s_])(?:[^\r\n]*[^*_]${boundCore}|${plainCore})[.。]?_(?!_)\s*[.。]?\s*$`,
-    String.raw`(?:^|[\s(\[【（:：—–-])\*${plainCore}[.。]?\*(?!\*)\s*[.。]?\s*$`,
-    String.raw`(?:^|[\s(\[【（:：—–-])_${plainCore}[.。]?_(?!_)\s*[.。]?\s*$`,
-  ].join("|"), "iu");
-}
-
 const SECTION_END_CORE = String.raw`(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)`;
-const BOUND_SECTION_END = String.raw`(?:\bEnd\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)`;
+const SECTION_END_AFTER_PUNCT = String.raw`[.。!?！？;；—–](?:\s+End\s+of\s+(?:Answers?|Solutions?)|\s*(?:答案完|解答完))`;
+const SECTION_END_BRACKETED = String.raw`(?:\[\s*${SECTION_END_CORE}\s*[.。]?\s*\]|【\s*${SECTION_END_CORE}\s*[.。]?\s*】|\(\s*${SECTION_END_CORE}\s*[.。]?\s*\)|（\s*${SECTION_END_CORE}\s*[.。]?\s*）)`;
 const PROOF_END_CORE = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|Q\.?E\.?D\.?|证毕|证完)`;
 const BOUND_PROOF_END = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完)`;
-const SECTION_SEALED_TERMINATOR_RE = buildSingleEmphasisTerminator(BOUND_SECTION_END, SECTION_END_CORE);
-const INLINE_SEALED_TERMINATOR_RE = buildSingleEmphasisTerminator(
-  String.raw`(?:${BOUND_PROOF_END}|${BOUND_SECTION_END})`,
-  String.raw`(?:${PROOF_END_CORE}|${SECTION_END_CORE})`,
+const PROOF_TERMINATOR_PATTERN = [
+  String.raw`(?:^|[^*_])${BOUND_PROOF_END}\s*[.。]?\s*$`,
+  String.raw`^\s*\*(?=[^\s*])(?:(?:${STAR_EMPHASIS_INTERIOR})*[^*_]${BOUND_PROOF_END}|${PROOF_END_CORE})[.。]?\*(?!\*)\s*[.。]?\s*$`,
+  String.raw`^\s*_(?=[^\s_])(?:(?:${UNDER_EMPHASIS_INTERIOR})*[^*_]${BOUND_PROOF_END}|${PROOF_END_CORE})[.。]?_(?!_)\s*[.。]?\s*$`,
+  String.raw`(?:^|[\s(\[【（:：—–-])\*${PROOF_END_CORE}[.。]?\*(?!\*)\s*[.。]?\s*$`,
+  String.raw`(?:^|[\s(\[【（:：—–-])_${PROOF_END_CORE}[.。]?_(?!_)\s*[.。]?\s*$`,
+].join("|");
+const SECTION_SEALED_TERMINATOR_PATTERN = [
+  String.raw`^\s*${SECTION_END_CORE}\s*[.。]?\s*$`,
+  String.raw`${SECTION_END_AFTER_PUNCT}\s*[.。]?\s*$`,
+  String.raw`(?:^\s*|[.。!?！？;；—–]\s*)${SECTION_END_BRACKETED}\s*[.。]?\s*$`,
+  String.raw`^\s*\*(?=[^\s*])(?:(?:${STAR_EMPHASIS_INTERIOR})*${SECTION_END_AFTER_PUNCT}|${SECTION_END_CORE})[.。]?\*(?!\*)\s*[.。]?\s*$`,
+  String.raw`^\s*_(?=[^\s_])(?:(?:${UNDER_EMPHASIS_INTERIOR})*${SECTION_END_AFTER_PUNCT}|${SECTION_END_CORE})[.。]?_(?!_)\s*[.。]?\s*$`,
+  String.raw`(?:^\s*|[.。!?！？;；—–]\s*)\*${SECTION_END_CORE}[.。]?\*(?!\*)\s*[.。]?\s*$`,
+  String.raw`(?:^\s*|[.。!?！？;；—–]\s*)_${SECTION_END_CORE}[.。]?_(?!_)\s*[.。]?\s*$`,
+].join("|");
+const SECTION_SEALED_TERMINATOR_RE = new RegExp(SECTION_SEALED_TERMINATOR_PATTERN, "iu");
+const INLINE_SEALED_TERMINATOR_RE = new RegExp(
+  String.raw`(?:${PROOF_TERMINATOR_PATTERN}|${SECTION_SEALED_TERMINATOR_PATTERN})`,
+  "iu",
+);
+const TERMINATOR_TOKEN_CORE = String.raw`(?:${PROOF_END_CORE}|${SECTION_END_CORE})`;
+const ADJACENT_EMPHASIS_TERMINATOR_RE = new RegExp(
+  String.raw`(?:[*_]${TERMINATOR_TOKEN_CORE}|${TERMINATOR_TOKEN_CORE}[.。]?[*_])[.。*_!?！？;；)）\]】\s]*$`,
+  "iu",
 );
 const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
 const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/u;
@@ -548,7 +562,8 @@ function stripSealedSolutionLines(
   const answerDigest = () => inlineAnswerLines && createHash("sha256")
     .update(inlineAnswerLines.join("\n").replace(/[^\S\n]+/gu, " ")).digest("hex");
   const finishedInlineBody = () => TERMINAL_PUNCTUATION_RE.test(lastInlineBodyLine)
-    && !NEXT_CONTINUATION_RE.test(lastInlineBodyLine);
+    && !NEXT_CONTINUATION_RE.test(lastInlineBodyLine)
+    && (INLINE_SEALED_TERMINATOR_RE.test(lastInlineBodyLine) || !ADJACENT_EMPHASIS_TERMINATOR_RE.test(lastInlineBodyLine));
   const endInline = () => {
     if (enclosingInlineSeal || auxiliary && inlineAnswerLines && state.mode === "inline_proof_sealed") {
       closedAuxiliaryAnswerProof = state.mode === "inline_proof_sealed";
@@ -1010,6 +1025,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         return { sealed, visionDetectedSeal, confirmedSeal, detectedOnPage, explicitBoundary, reenteredSectionSealed,
           openedInlineAtEnd, reopenedInlineAnswers, lastInlineAnswerReopened };
       };
+      const closedEmptyInlineWithAuxiliaryProof = (nativeEnd: SealState, visionEnd: SealState, sawAuxiliaryProof: boolean) =>
+        sawAuxiliaryProof && !nativeEnd.unknownAfterFailure && !visionEnd.unknownAfterFailure
+        && (nativeEnd.mode === "inline_sealed" || visionEnd.mode === "inline_sealed")
+        && (nativeEnd.mode === "none" || nativeEnd.mode === "inline_sealed" && !nativeEnd.hasInlineAnswerBody)
+        && (visionEnd.mode === "none" || visionEnd.mode === "inline_sealed" && !visionEnd.hasInlineAnswerBody);
       const reconcileEndSealState = (
         target: SealState,
         options: {
@@ -1051,6 +1071,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           && (!isInlineSeal(options.incomingSeal.mode) || options.visionOpenedInlineAtEnd)
           && (target.mode !== "inline_proof_sealed" || vision.mode === "inline_proof_sealed")) {
           target.mode = vision.mode;
+          if (vision.hasInlineAnswerBody) target.hasInlineAnswerBody = true;
           target.inWorkedExample = false;
           target.afterAllSealedPage = false;
         }
@@ -1205,10 +1226,12 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         for (const body of auxiliaryBodies) {
           sawAuxiliaryProof ||= hasAuxiliaryProofHeading(body);
           const proofBoundary: boolean = Boolean(sealState.inlineProofBoundaryPending);
-          const followsNativeInline = nativeScan?.hasText && nativeEndSeal?.mode === "inline_sealed"
-            && Boolean(nativeEndSeal.hasInlineAnswerBody)
-            && !nativeEndSeal.unknownAfterFailure && sealState.mode === "none" && !sealState.unknownAfterFailure;
-          const auxiliarySeal: SealState = { ...sealState, mode: followsNativeInline ? "inline_sealed" : sealState.mode,
+          const emptyTranscriptionInline = sealState.mode === "inline_sealed" && !sealState.hasInlineAnswerBody;
+          const followsNativeInline = Boolean(nativeScan?.hasText && nativeEndSeal?.mode === "inline_sealed"
+            && nativeEndSeal.hasInlineAnswerBody && !nativeEndSeal.unknownAfterFailure
+            && (sealState.mode === "none" || emptyTranscriptionInline) && !sealState.unknownAfterFailure);
+          const auxiliaryMode = followsNativeInline ? "inline_sealed" : emptyTranscriptionInline ? "none" : sealState.mode;
+          const auxiliarySeal: SealState = { ...sealState, mode: auxiliaryMode,
             previousNumberedQuestion: false };
           const check = sealVisionBodyWithTransitions(body, auxiliarySeal, false, true);
           hadSealedContent ||= check.visionDetectedSeal;
@@ -1220,6 +1243,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             reenteredSectionSealed ||= incomingMode === "section_sealed" && sealState.mode !== "section_sealed"
               && auxiliarySeal.mode === "section_sealed";
             sealState.mode = auxiliarySeal.mode;
+            sealState.hasInlineAnswerBody = auxiliarySeal.hasInlineAnswerBody;
             sealState.inWorkedExample = false;
             sealState.afterAllSealedPage = false;
             sealState.inlineProofBoundaryPending = false;
@@ -1260,9 +1284,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       const sanitizeSavedChunk = (
         saved: NewSourceChunk,
         page: ParsedPage,
-          { incomingSeal, nativeOutSeal, nativeCompletedAnswer, doclingEndSeal, nativeContaminatedOnPage, nativeHasPrimaryContent, hadNativeSeal, hadRawText, hasVisualInput }: {
+          { incomingSeal, nativeOutSeal, nativeCompletedAnswer, doclingEndSeal, nativeContaminatedOnPage, nativeHasPrimaryContent, hadNativeSeal, hadRawText, nativeBodyKnown, hasVisualInput }: {
             incomingSeal: SealState; nativeOutSeal: SealState; nativeCompletedAnswer?: string; doclingEndSeal?: PdfSealMode;
-          nativeContaminatedOnPage: boolean; nativeHasPrimaryContent: boolean; hadNativeSeal: boolean; hadRawText: boolean; hasVisualInput: boolean;
+          nativeContaminatedOnPage: boolean; nativeHasPrimaryContent: boolean; hadNativeSeal: boolean; hadRawText: boolean; nativeBodyKnown: boolean; hasVisualInput: boolean;
         },
       ): { sanitized: NewSourceChunk | undefined; savedSeal: SealState; hasVisionMarker: boolean;
         hasPublicTranscription?: boolean; visionWasSealed: boolean; visionDetectedOnPage?: boolean;
@@ -1294,7 +1318,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const pageHadAnySeal = anyNativeOrIncomingSeal || savedNativeChanged;
         const pickedNativeEndSeal = nativeContaminatedOnPage || incomingSeal.mode !== "none" || hadRawText && savedNativeChanged
           ? nativeOutSeal : cachedNativeOutSeal;
-        const nativeEndSeal: SealState = pickedNativeEndSeal === nativeOutSeal && nativeOutSeal.mode === "inline_sealed"
+        const nativeEndSeal: SealState = pickedNativeEndSeal === nativeOutSeal && !nativeBodyKnown
+          && nativeOutSeal.mode === "inline_sealed" && nativeOutSeal.hasInlineAnswerBody !== true
           && savedNativeChanged && cachedNativeOutSeal.mode === "inline_sealed" && cachedNativeOutSeal.hasInlineAnswerBody === false
           ? { ...nativeOutSeal, hasInlineAnswerBody: false }
           : pickedNativeEndSeal;
@@ -1307,8 +1332,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           : { text: "", hasPublicTranscription: false, hasPrimaryActivity: false, primaryNumberedQuestion: false,
             hadSealedContent: false, confirmedSeal: false, detectedOnPage: false, reenteredSectionSealed: false, openedInlineAtEnd: false,
             consumedAuxiliaryProofBoundary: false, sawAuxiliaryProof: false };
-        const closedEmptyNativeInline = nativeEndSeal.mode === "inline_sealed" && !nativeEndSeal.hasInlineAnswerBody
-          && visionSealed.sawAuxiliaryProof && visionSeal.mode === "none" && !visionSeal.unknownAfterFailure;
+        const closedEmptyNativeInline = closedEmptyInlineWithAuxiliaryProof(nativeEndSeal, visionSeal, visionSealed.sawAuxiliaryProof);
         const sealedVisionBody = visionSealed.text;
         const pageHadSealed = pageHadAnySeal || visionSealed.hadSealedContent;
         const native = pageHadAnySeal ? page.text : sealedNativeBody;
@@ -1452,7 +1476,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         if (saved && !isImage) {
           const cleaned = sanitizeSavedChunk(saved, page, {
             incomingSeal, nativeOutSeal, nativeCompletedAnswer, doclingEndSeal, nativeContaminatedOnPage, nativeHasPrimaryContent,
-            hadNativeSeal, hadRawText, hasVisualInput: Boolean(visual),
+            hadNativeSeal, hadRawText, nativeBodyKnown: hadRawText || rawPage.inlineEmptyAtEnd !== undefined, hasVisualInput: Boolean(visual),
           });
           sanitizedSaved = sealedAllText || incomingSeal.unknownAfterFailure || archived?.nativeWithheld
             ? undefined : cleaned.sanitized;
@@ -1572,8 +1596,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 hasPrimaryActivity: false, primaryNumberedQuestion: false, hadSealedContent: false, confirmedSeal: false,
                 detectedOnPage: false, reenteredSectionSealed: false, openedInlineAtEnd: false,
                 consumedAuxiliaryProofBoundary: false, sawAuxiliaryProof: false };
-            const closedEmptyNativeInline = !isImage && nativeOutSeal.mode === "inline_sealed" && !nativeOutSeal.hasInlineAnswerBody
-              && visionSealed.sawAuxiliaryProof && visionSeal.mode === "none" && !visionSeal.unknownAfterFailure;
+            const closedEmptyNativeInline = !isImage
+              && closedEmptyInlineWithAuxiliaryProof(nativeOutSeal, visionSeal, visionSealed.sawAuxiliaryProof);
             const sealedVisionText = visionSealed.text;
             const visionRecovered = visionSealed.hasPublicTranscription && !visionSealed.detectedOnPage
               && visionSeal.mode === "none" && isStandaloneRecoverySection(visionSealed.transcription);
@@ -1736,8 +1760,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           const visionCheck = visionText.trim() ? sealVisionText(visionText, visionOutSeal, nativeChanged, undefined,
             { endSeal: nativeOutSeal, hasText: Boolean(native.trim()), publicText: publicNative,
               hadSeal: nativeChanged, completedAnswer: nativeCompletedAnswer }) : undefined;
-          const closedEmptyNativeInline = Boolean(nativeOutSeal.mode === "inline_sealed" && !nativeOutSeal.hasInlineAnswerBody
-            && visionCheck?.sawAuxiliaryProof && visionOutSeal.mode === "none" && !visionOutSeal.unknownAfterFailure);
+          const closedEmptyNativeInline = Boolean(visionCheck
+            && closedEmptyInlineWithAuxiliaryProof(nativeOutSeal, visionOutSeal, visionCheck.sawAuxiliaryProof));
           const endSeal = { ...incomingSeal };
           reconcileEndSealState(endSeal, {
             hasNativeText: Boolean(native.trim()), incomingSeal, nativeOutSeal,
@@ -1799,8 +1823,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             const vision = sealVisionText(lanes.vision, visionSeal, changed, undefined, {
               endSeal, hasText: Boolean(native.trim()), publicText: publicNative, hadSeal: changed, completedAnswer,
             });
-            if (!endSeal.hasInlineAnswerBody && vision.sawAuxiliaryProof
-              && visionSeal.mode === "none" && !visionSeal.unknownAfterFailure) {
+            if (closedEmptyInlineWithAuxiliaryProof(endSeal, visionSeal, vision.sawAuxiliaryProof)) {
               endSeal.mode = "none";
               endSeal.hasInlineAnswerBody = false;
             } else if (visionSeal.mode === "inline_proof_sealed" || visionSeal.mode === "section_sealed") {

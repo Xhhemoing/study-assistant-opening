@@ -1101,7 +1101,7 @@ describe("parse source handler", () => {
       expect(completedDigest).toBe(createHash("sha256").update(expectedAnswer).digest("hex"));
     }
 
-    for (const pathological of ["**a ".repeat(10_000), "__a ".repeat(10_000)]) {
+    for (const pathological of ["**a ".repeat(10_000), "__a ".repeat(10_000), `*Proof ${" *".repeat(5_000)}`]) {
       const state: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
       const started = performance.now();
       const output = sealTextWithState(pathological, state);
@@ -1109,5 +1109,99 @@ describe("parse source handler", () => {
       expect(output).toBe(pathological);
       expect(elapsedMs).toBeLessThan(50);
     }
+  });
+
+  it("preserves affirmative current hasInlineAnswerBody against stale empty saved Answer: and closes empty repeated Vision Answer:", async () => {
+    const staleEmptySaved: SourceChunk = {
+      id: "00000000-0000-4000-8000-000000000091",
+      sourceId,
+      sourceVersion: 7,
+      page: 1,
+      slideLabel: null,
+      startMs: null,
+      endMs: null,
+      text: "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[图片描述]\nProof. An unfinished derivation.",
+      imageObjectKey: "vision/p1-stale-empty",
+    };
+    const makeSegments = (): OpeningPdfSegmentsRepository => {
+      const map = new Map<string, { state: "ready" | "failed"; pages: PdfSegmentPage[] }>();
+      return {
+        read: async (_s, id) => map.get(`${id.parserProfile}/${id.pageStart}-${id.pageEnd}`) ?? null,
+        readPageSeals: async () => [],
+        save: async (_s, id, val) => { map.set(`${id.parserProfile}/${id.pageStart}-${id.pageEnd}`, val); },
+      };
+    };
+
+    const withCurrentBody = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      published: [staleEmptySaved],
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 3 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Answer: x = 1", imagePath: null, visualKinds: ["picture"] }
+          : start === 2
+            ? { page: 2, text: "Still private proof continuation.", imagePath: null, visualKinds: [] }
+            : { page: 3, text: "Chapter 2: Rings\nPublic theorem.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+    });
+    await expect(withCurrentBody.handler({ ...job, claimToken: "claim-p1-3" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 3 });
+    expect(withCurrentBody.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+    ]);
+    expect((withCurrentBody.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[3, "Chapter 2: Rings\nPublic theorem."]]);
+
+    const withEmptyRepeatedVision = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 2 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Theorem 1.1: Groups.\nAnswer:\n", imagePath: null, visualKinds: ["picture"] }
+          : { page: 2, text: "Public prose after the answer.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+      recognizePage: async () => ({
+        text: "[转写]\nAnswer:\n[图片描述]\nProof. An independent derivation.",
+        imageObjectKey: "vision/p1-empty-repeat",
+      }),
+    });
+    await expect(withEmptyRepeatedVision.handler({ ...job, claimToken: "claim-p2-5" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 2 });
+    expect((withEmptyRepeatedVision.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[1, "Theorem 1.1: Groups."], [2, "Public prose after the answer."]]);
+
+    const withPopulatedTranscription = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 3 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Answer:\n", imagePath: null, visualKinds: ["picture"] }
+          : start === 2
+            ? { page: 2, text: "Still private proof continuation.", imagePath: null, visualKinds: [] }
+            : { page: 3, text: "Chapter 2: Rings\nPublic theorem.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+      recognizePage: async () => ({
+        text: "[转写]\nAnswer: x = 1\n[图片描述]\nProof. An unfinished derivation.",
+        imageObjectKey: "vision/p1-populated-repeat",
+      }),
+    });
+    await expect(withPopulatedTranscription.handler({ ...job, claimToken: "claim-p2-5b" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 3 });
+    expect((withPopulatedTranscription.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[3, "Chapter 2: Rings\nPublic theorem."]]);
   });
 });

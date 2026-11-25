@@ -139,9 +139,11 @@ const pairedBoldEmphasis = String.raw`(^|[(\[【（:： ])\*\*(?=[^ *\r\n])(${bo
 const pairedUnderEmphasis = String.raw`(^|[(\[【（:： ])__(?=[^ _\r\n])(${underEmphasisAtom}(?:${underEmphasisAtom}| +(?:__(?!_)|${underEmphasisAtom}))*)__(?=${emphasisCloseBoundary})`;
 const emphasisReplacement = String.raw`\1\2`;
 const singleEmphasisAfter = String.raw`(?=$|[ :：.,;!?。，；：！？—–)\]】）-])`;
+const starEmphasisInterior = String.raw`(?: (?:\*+(?!\*)|(?=[^*\r\n]|$))|[^ *\r\n](?:\*+(?!\*)(?!${singleEmphasisAfter})|(?=[^*\r\n]|$)))`;
+const underEmphasisInterior = String.raw`(?: (?:_+(?!_)|(?=[^_\r\n]|$))|[^ _\r\n](?:_+(?!_)(?!${singleEmphasisAfter})|(?=[^_\r\n]|$)))`;
 const answerProofCore = String.raw`(?:(?:Proof|Sketch +of +Proof)\M|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ \d:：.．。—–(（-]|$)|证 *[:：.．。])`;
-const answerProofStar = String.raw`\*(?=[^ *\r\n])(?:(?:Proof|Sketch +of +Proof)(?=\*|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ *\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:[^*\r\n]*[^ *\r\n])?\*${singleEmphasisAfter}|[^\r\n]*[^ *\r\n]\*(?!\*) *[.。]? *$)`;
-const answerProofUnder = String.raw`_(?=[^ _\r\n])(?:(?:Proof|Sketch +of +Proof)(?=_|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ _\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:[^_\r\n]*[^ _\r\n])?_${singleEmphasisAfter}|[^\r\n]*[^ _\r\n]_(?!_) *[.。]? *$)`;
+const answerProofStar = String.raw`\*(?=[^ *\r\n])(?:(?:Proof|Sketch +of +Proof)(?=\*|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ *\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:${starEmphasisInterior})*[^ *\r\n])?\*(?!\*)${singleEmphasisAfter}`;
+const answerProofUnder = String.raw`_(?=[^ _\r\n])(?:(?:Proof|Sketch +of +Proof)(?=_|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ _\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:${underEmphasisInterior})*[^ _\r\n])?_(?!_)${singleEmphasisAfter}`;
 const answerProofHeading = String.raw`${lineStart}(?:${answerProofCore}|${answerProofStar}|${answerProofUnder})`;
 const explicitHeadingMarkup = String.raw`^ *#{1,6} +[^ ]`;
 
@@ -276,20 +278,30 @@ function isArchiveRunningHeading(line: string): boolean {
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
 const sectionEndCore = String.raw`(?:end +of +(?:answers?|solutions?)|答案完|解答完)`;
-const boundSectionEnd = String.raw`(?:\mend +of +(?:answers?|solutions?)|答案完|解答完)`;
-function buildSqlSingleEmphasisTerminator(boundCore: string, plainCore: string): string {
-  return [
-    String.raw`(?:^|[^*_])${boundCore} *[.。]? *$`,
-    String.raw`${lineStart}\*(?=[^ *\r\n])(?:[^\r\n]*[^*_]${boundCore}|${plainCore})[.。]?\*(?!\*) *[.。]? *$`,
-    String.raw`${lineStart}_(?=[^ _\r\n])(?:[^\r\n]*[^*_]${boundCore}|${plainCore})[.。]?_(?!_) *[.。]? *$`,
-    String.raw`(?:^|[ (\[【（:：—–-])\*${plainCore}[.。]?\*(?!\*) *[.。]? *$`,
-    String.raw`(?:^|[ (\[【（:：—–-])_${plainCore}[.。]?_(?!_) *[.。]? *$`,
-  ].join("|");
-}
-const answerSectionEnd = buildSqlSingleEmphasisTerminator(boundSectionEnd, sectionEndCore);
-const proofEndCore = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|Q\.?E\.?D\.?|证毕|证完|${sectionEndCore})`;
-const boundProofEnd = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|\mQ\.?E\.?D\.?|证毕|证完|${boundSectionEnd})`;
-const inlineTerminator = buildSqlSingleEmphasisTerminator(boundProofEnd, proofEndCore);
+const sectionEndAfterPunct = String.raw`[.。!?！？;；—–](?: +end +of +(?:answers?|solutions?)| *(?:答案完|解答完))`;
+const sectionEndBracketed = String.raw`(?:\[ *${sectionEndCore} *[.。]? *\]|【 *${sectionEndCore} *[.。]? *】|\( *${sectionEndCore} *[.。]? *\)|（ *${sectionEndCore} *[.。]? *）)`;
+const proofEndCore = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|Q\.?E\.?D\.?|证毕|证完)`;
+const boundProofEnd = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|\mQ\.?E\.?D\.?|证毕|证完)`;
+const proofTerminatorPattern = [
+  String.raw`(?:^|[^*_])${boundProofEnd} *[.。]? *$`,
+  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?\*(?!\*) *[.。]? *$`,
+  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?_(?!_) *[.。]? *$`,
+  String.raw`(?:^|[ (\[【（:：—–-])\*${proofEndCore}[.。]?\*(?!\*) *[.。]? *$`,
+  String.raw`(?:^|[ (\[【（:：—–-])_${proofEndCore}[.。]?_(?!_) *[.。]? *$`,
+].join("|");
+const answerSectionEnd = [
+  String.raw`${lineStart}${sectionEndCore} *[.。]? *$`,
+  String.raw`${sectionEndAfterPunct} *[.。]? *$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)${sectionEndBracketed} *[.。]? *$`,
+  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?\*(?!\*) *[.。]? *$`,
+  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?_(?!_) *[.。]? *$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)\*${sectionEndCore}[.。]?\*(?!\*) *[.。]? *$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)_${sectionEndCore}[.。]?_(?!_) *[.。]? *$`,
+].join("|");
+const inlineTerminator = String.raw`(?:${proofTerminatorPattern}|${answerSectionEnd})`;
+const terminatorTokenCore = String.raw`(?:${proofEndCore}|${sectionEndCore})`;
+const adjacentEmphasisTerminator = String.raw`(?:[*_]${terminatorTokenCore}|${terminatorTokenCore}[.。]?[*_])[.。*_!?！？;；)）\]】 ]*$`;
+const inlineFallbackBlocked = String.raw`(?:${inlineContinues}|${adjacentEmphasisTerminator})`;
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -502,7 +514,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         auxiliary_proof AND position=first_page_auxiliary_position AS first_auxiliary_proof,
         native_answer_position>COALESCE(native_reopening,0) AND native_answer_position>COALESCE(native_proof,0)
           AND native_answer_position>COALESCE(native_blank_exit,0)
-          AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineContinues}) AS native_answer_boundary,
+          AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineFallbackBlocked}) AS native_answer_boundary,
         (bool_or(transcription_answer_reopened AND position=last_transcription_answer) OVER chunk_lines
           AND bool_or(transcription_answer_reopened AND answer_lines=native_answer_lines) OVER chunk_lines)
           IS TRUE AS transcription_reopens_answer,
@@ -513,7 +525,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             ELSE first_auxiliary_close=position END AS auxiliary_answer_boundary
       FROM (
         SELECT *, NOT open_auxiliary_proof AND last_answer_body !~* ${inlineTerminator} AND last_answer_body ~* ${inlineTerminal}
-            AND last_answer_body !~* ${inlineContinues} AS auxiliary_sentence_ends,
+            AND last_answer_body !~* ${inlineFallbackBlocked} AS auxiliary_sentence_ends,
           transcription AND inline_opener
             AND lane_reopening_position=lane_boundary_position AND lane_reopening_position>answer_end_position
             AND (blank_exit_position IS NULL OR lane_reopening_position<=blank_exit_position)
@@ -521,7 +533,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
               OR lane_reopening_position=first_content_after_terminator)
             AND (last_answer_body ~* ${inlineTerminator}
               OR NOT answer_has_proof AND last_answer_body ~* ${inlineTerminal}
-                AND last_answer_body !~* ${inlineContinues}) AS transcription_answer_reopened
+                AND last_answer_body !~* ${inlineFallbackBlocked}) AS transcription_answer_reopened
         FROM (
           SELECT *, min(position) FILTER (WHERE NOT auxiliary AND content_line)
             OVER (PARTITION BY source_id,source_version,page) AS first_primary_position,
@@ -583,7 +595,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                  OR (NOT auxiliary AND NOT inline_opener AND auxiliary_opener>0 AND line ~ ${numberedExerciseInstruction}
                    AND NOT prior_answer_proof_open
                    AND (prior_answer_body ~* ${inlineTerminator}
-                     OR prior_answer_body ~* ${inlineTerminal} AND prior_answer_body !~* ${inlineContinues})) AS lane_reopening
+                     OR prior_answer_body ~* ${inlineTerminal} AND prior_answer_body !~* ${inlineFallbackBlocked})) AS lane_reopening
                FROM (
                  SELECT *, lag(lane_body) OVER prior_answer AS prior_answer_body,
                  max(position) FILTER (WHERE btrim(line)='') OVER lane_prior AS prior_blank_position,
@@ -640,7 +652,9 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         AND (id=first_value(id) OVER inline_origin
           AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
           OR first_value(last_answer_body) OVER inline_origin<>''
-            AND first_value(blank_exit_position) OVER inline_origin IS NULL)
+            AND first_value(blank_exit_position) OVER inline_origin IS NULL
+          OR NOT native_answer_boundary AND native_answer_position>COALESCE(native_reopening,0)
+            AND native_answer_position>COALESCE(native_blank_exit,0) AND native_tail<>'')
         OR auxiliary AND inline_opener AND candidate_proof AND NOT candidate_terminator)
         AND first_value(starts_inline) OVER inline_origin
         AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position) AS upgrades_inline
@@ -716,7 +730,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         OR (terminator_position IS NOT NULL AND (in_sealed_proof IS TRUE
           OR terminator_position<last_body_position OR continues_into_proof IS NOT TRUE))
         OR (in_sealed_proof IS NOT TRUE AND continues_into_proof IS NOT TRUE
-          AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues})) OVER answer,
+          AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked})) OVER answer,
         GREATEST(max(page) OVER answer,COALESCE(
           min(next_group_page) OVER answer-1,max_source_page))) AS last_page
     FROM (
@@ -753,7 +767,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             THEN proof_position END AS active_inline_proof,
           lag(page) OVER previous_page=page-1 AND lag(page=last_page AND first_page IS NOT NULL
           AND in_sealed_proof IS NOT TRUE AND NOT closed_after_blank
-          AND (terminator_position=last_body_position OR last_body ~* ${inlineTerminal} AND last_body !~* ${inlineContinues}))
+          AND (terminator_position=last_body_position OR last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked}))
           OVER previous_page AS follows_finished_inline
         FROM pdf_archive_inline_ranges
         WINDOW previous_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page)

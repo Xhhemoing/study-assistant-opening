@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v51-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v52-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -3141,17 +3141,23 @@ describe("bounded resumable PDF parser", () => {
     expect(result.publishedChunks.map(({ page, text }) => [page, text]))
       .toEqual([[1, "An ordinary observation."], [2, "Public prose after the answer."]]);
 
-    const liveEmpty = await runPdfScenario({ segmentPages: 1, pages: [
-      { page: 1, text: "Theorem 1.1: Rings.\nAnswer:\n", visualKinds: ["picture"] },
-      { page: 2, text: "Public prose after the answer." },
-    ], recognizePage: async () => ({ text: "[图片描述]\nProof. An independent derivation.", imageObjectKey: "vision/proof" }) });
-    expect(liveEmpty.requests[1]).toEqual({ start: 2 });
-    expect(liveEmpty.publishedChunks.map(({ page, text }) => [page, text]))
-      .toEqual([[1, "Theorem 1.1: Rings."], [2, "Public prose after the answer."]]);
+    for (const visionText of [
+      "[图片描述]\nProof. An independent derivation.",
+      "[转写]\nAnswer:\n[图片描述]\nProof. An independent derivation.",
+    ]) {
+      const liveEmpty = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: "Theorem 1.1: Rings.\nAnswer:\n", visualKinds: ["picture"] },
+        { page: 2, text: "Public prose after the answer." },
+      ], recognizePage: async () => ({ text: visionText, imageObjectKey: "vision/proof" }) });
+      expect(liveEmpty.requests[1]).toEqual({ start: 2 });
+      expect(liveEmpty.publishedChunks.map(({ page, text }) => [page, text]))
+        .toEqual([[1, "Theorem 1.1: Rings."], [2, "Public prose after the answer."]]);
+    }
 
     for (const savedText of [
       "[原生提取]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
       "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[图片描述]\nProof. An independent derivation.",
+      "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
     ]) {
       const recovered = await runPdfScenario({
         segmentPages: 1,
@@ -3201,6 +3207,9 @@ describe("bounded resumable PDF parser", () => {
     "*Proof. Since 2 * 3 = 6, done. ∎*",
     "*Proof. Since 2 * 3 = 6. Q.E.D.*",
     "_Proof. Since a_1 + a_2 = 3. Q.E.D._",
+    "*Proof. Since 2 * 3 = 6, continue. Q.E.D.*",
+    "_Proof. Since a_1 + a_2 = 3, continue. Q.E.D._",
+    "*Proof.* Calculation continues. *Q.E.D.*",
   ])(
     "publishes later Worker text after the Markdown proof %j",
     async proof => {
@@ -3215,7 +3224,11 @@ describe("bounded resumable PDF parser", () => {
   );
 
   it("seals multi-page italic proof headings with interior * or _ and rejects unmatched terminators in Worker", async () => {
-    for (const heading of ["*Proof. Since 2 * 3 = 6, continue.*", "_Proof. Since a_1 + a_2 = 3, continue._"]) {
+    for (const heading of [
+      "*Proof. Since 2 * 3 = 6, continue.*",
+      "_Proof. Since a_1 + a_2 = 3, continue._",
+      "*Proof. Since 2 * 3 = 6.* Calculation continues.",
+    ]) {
       const proof = await runPdfScenario({ segmentPages: 1, pages: [
         { page: 1, text: "Answer: No." },
         { page: 2, text: heading },
@@ -3230,6 +3243,11 @@ describe("bounded resumable PDF parser", () => {
     for (const unmatched of [
       "*Q.E.D.", "Q.E.D.*", "_Q.E.D.", "Q.E.D._", "*∎", "∎*",
       "Proof. Done. *Q.E.D.", "Proof. Done. Q.E.D.*", "**Q.E.D.*", "*Q.E.D.**",
+      "*Proof.* Calculation continues. Q.E.D.*",
+      "_Proof._ Calculation continues. Q.E.D._",
+      "*Proof.* Calculation continues. *Q.E.D.",
+      "*Note.* Calculation continues. Q.E.D.*",
+      "This is not the end of answers.",
     ]) {
       const result = await runPdfScenario({ segmentPages: 1, pages: [
         { page: 1, text: "Answer: No.\nProof. Starts.\n" + unmatched },
@@ -3237,6 +3255,19 @@ describe("bounded resumable PDF parser", () => {
         { page: 3, text: "Chapter 2: Vectors\nPublic prose." },
       ] });
       expect(result.requests[1]).toEqual({ start: 2, seed: "inline_proof_sealed" });
+      expect(result.publishedChunks.map(({ page }) => page)).toEqual([3]);
+    }
+
+    for (const inlineUnmatched of [
+      "*∎", "_∎", "**∎*", "*□", "*Q.E.D.", "_Q.E.D.", "**Q.E.D.", "**Q.E.D.*",
+      "*Q.E.D.**", "Q.E.D.*.", "*证毕。", "*End of Answers.", "*Note.* Calculation continues. Q.E.D.*.",
+    ]) {
+      const result = await runPdfScenario({ segmentPages: 1, pages: [
+        { page: 1, text: "Answer: x =\n" + inlineUnmatched },
+        { page: 2, text: "Still private continuation." },
+        { page: 3, text: "Chapter 2: Vectors\nPublic prose." },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 2, seed: "inline_sealed" });
       expect(result.publishedChunks.map(({ page }) => page)).toEqual([3]);
     }
   });
@@ -3250,7 +3281,18 @@ describe("bounded resumable PDF parser", () => {
     expect(arithmetic.requests[1]).toEqual({ start: 2, seed: "inline_sealed" });
     expect(arithmetic.publishedChunks.map(({ page }) => page)).toEqual([3]);
 
-    for (const terminator of ["*End of Answers.*", "Calculation complete. *End of Answers.*"]) {
+    for (const terminator of [
+      "End of Answers.",
+      "*End of Answers.*",
+      "答案完。",
+      "[End of Answers]",
+      "（答案完）",
+      "Calculation complete. End of Answers.",
+      "Calculation complete. *End of Answers.*",
+      "Calculation complete. _End of Answers._",
+      "Calculation complete. **End of Answers.**",
+      "*Calculation complete. End of Answers.*",
+    ]) {
       const section = await runPdfScenario({ segmentPages: 1, pages: [
         { page: 1, text: "Answer Key\nPrivate calculation\n" + terminator },
         { page: 2, text: "Public prose after the section." },
@@ -3259,7 +3301,16 @@ describe("bounded resumable PDF parser", () => {
       expect(section.publishedChunks.map(({ page }) => page)).toEqual([2]);
     }
 
-    for (const unmatched of ["Calculation complete. *End of Answers.", "Calculation complete. End of Answers.*"]) {
+    for (const unmatched of [
+      "Calculation complete. *End of Answers.",
+      "Calculation complete. End of Answers.*",
+      "*Note.* Calculation continues. End of Answers.*",
+      "This is not the end of answers.",
+      "We have not reached the end of solutions.",
+      "See the end of solutions.",
+      "*This is not the end of answers.*",
+      "这里不是答案完。",
+    ]) {
       const unclosed = await runPdfScenario({ segmentPages: 1, pages: [
         { page: 1, text: "Answer Key\n" + unmatched },
         { page: 2, text: "Still private." },

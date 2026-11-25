@@ -1424,6 +1424,9 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             "*Proof. Since 2 * 3 = 6, done. ∎*",
             "*Proof. Since 2 * 3 = 6. Q.E.D.*",
             "_Proof. Since a_1 + a_2 = 3. Q.E.D._",
+            "*Proof. Since 2 * 3 = 6, continue. Q.E.D.*",
+            "_Proof. Since a_1 + a_2 = 3, continue. Q.E.D._",
+            "*Proof.* Calculation continues. *Q.E.D.*",
         ):
             with self.subTest(proof=proof):
                 ext = physical_pages.extract_physical_pages(result_for(
@@ -1435,7 +1438,11 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertFalse(ext.inline_proof_boundary_by_page[11])
                 self.assertEqual(ext.texts_by_page[12], ["Public prose after the proof."])
 
-        for proof_heading in ("*Proof. Since 2 * 3 = 6, continue.*", "_Proof. Since a_1 + a_2 = 3, continue._"):
+        for proof_heading in (
+            "*Proof. Since 2 * 3 = 6, continue.*",
+            "_Proof. Since a_1 + a_2 = 3, continue._",
+            "*Proof. Since 2 * 3 = 6.* Calculation continues.",
+        ):
             with self.subTest(proof_heading=proof_heading):
                 ext = physical_pages.extract_physical_pages(result_for(
                     [text_element(11, "Answer: No.")],
@@ -1452,6 +1459,11 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                 self.assertTrue(ext.inline_proof_sealed_by_page[12])
                 self.assertTrue(ext.inline_proof_sealed_by_page[13])
 
+        for malformed_heading in ("*Proof** Calculation continues.*", "*Proof.** Calculation continues.*"):
+            with self.subTest(malformed_heading=malformed_heading):
+                self.assertIsNone(physical_pages._ANSWER_PROOF_HEADING_RE.match(malformed_heading))
+                self.assertIsNone(physical_pages._PROOF_RE.match(malformed_heading))
+
         for unfinished in (
             "Answer: 2 * 3 * 4",
             "Answer: No.\nProof. Starts.\n*Q.E.D.",
@@ -1466,6 +1478,24 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             "Answer: No.\nProof. Starts.\n*Q.E.D.**",
             "Answer: No.\nProof. Done. ∎*",
             "Answer: No.\nProof. Done. foo_Q.E.D._",
+            "Answer: No.\n*Proof.* Calculation continues. Q.E.D.*",
+            "Answer: No.\n_Proof._ Calculation continues. Q.E.D._",
+            "Answer: No.\n*Proof.* Calculation continues. *Q.E.D.",
+            "Answer: No.\nProof. Starts.\n*Note.* Calculation continues. Q.E.D.*",
+            "Answer: No.\nProof. This is not the end of answers.",
+            "Answer: x =\n*∎",
+            "Answer: x =\n_∎",
+            "Answer: x =\n**∎*",
+            "Answer: x =\n*□",
+            "Answer: x =\n*Q.E.D.",
+            "Answer: x =\n_Q.E.D.",
+            "Answer: x =\n**Q.E.D.",
+            "Answer: x =\n**Q.E.D.*",
+            "Answer: x =\n*Q.E.D.**",
+            "Answer: x =\nQ.E.D.*.",
+            "Answer: x =\n*证毕。",
+            "Answer: x =\n*End of Answers.",
+            "Answer: x =\n*Note.* Calculation continues. Q.E.D.*.",
         ):
             with self.subTest(unfinished=unfinished):
                 ext = physical_pages.extract_physical_pages(result_for(
@@ -1525,7 +1555,36 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertFalse(ext.discourse_blocks_by_page[17][-1].continues_on_next_page)
         self.assertEqual(ext.texts_by_page[20], ["Public prose after inline italic end."])
 
-        for unmatched_end in ("Calculation complete. *End of Answers.", "Calculation complete. End of Answers.*"):
+        for valid_end in (
+            "End of Answers.",
+            "*End of Answers.*",
+            "答案完。",
+            "[End of Answers]",
+            "（答案完）",
+            "Calculation complete. End of Answers.",
+            "Calculation complete. *End of Answers.*",
+            "Calculation complete. _End of Answers._",
+            "Calculation complete. **End of Answers.**",
+            "*Calculation complete. End of Answers.*",
+        ):
+            with self.subTest(valid_end=valid_end):
+                closed = physical_pages.extract_physical_pages(result_for(
+                    [text_element(11, "Answer Key\n" + valid_end)],
+                    [text_element(12, "Public prose after valid section end.")],
+                ))
+                self.assertFalse(closed.section_sealed_by_page[11])
+                self.assertEqual(closed.texts_by_page[12], ["Public prose after valid section end."])
+
+        for unmatched_end in (
+            "Calculation complete. *End of Answers.",
+            "Calculation complete. End of Answers.*",
+            "*Note.* Calculation continues. End of Answers.*",
+            "This is not the end of answers.",
+            "We have not reached the end of solutions.",
+            "See the end of solutions.",
+            "*This is not the end of answers.*",
+            "这里不是答案完。",
+        ):
             with self.subTest(unmatched_end=unmatched_end):
                 unclosed = physical_pages.extract_physical_pages(result_for(
                     [text_element(11, "Answer Key\n" + unmatched_end)],
